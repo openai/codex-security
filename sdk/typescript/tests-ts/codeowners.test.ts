@@ -90,6 +90,55 @@ test("uses the last matching rule and preserves all owners and ownerless overrid
   expect(codeownersForPath(rules, "apps/generated/api.ts")?.owners).toEqual([]);
 });
 
+test.each([" ", "\t"])(
+  "preserves escaped trailing whitespace %j in ownerless rules",
+  (whitespace) => {
+    const pattern = `/file\\${whitespace}`;
+    const rule = `  ${pattern}`;
+    const rules = parseCodeowners(`* @default\n${rule}\n`);
+    expect(codeownersForPath(rules, `file${whitespace}`)).toMatchObject({
+      pattern,
+      line: 2,
+      rule,
+      owners: [],
+    });
+    for (const path of ["file", "file\\"]) {
+      expect(codeownersForPath(rules, path)?.owners).toEqual([
+        { kind: "person", provider: "github", handle: "default" },
+      ]);
+    }
+  },
+);
+
+test("rejects Unicode case-fold aliases in GitHub handles under Node", async () => {
+  const module = new URL("../src/codeowners.ts", import.meta.url).href;
+  const { stdout } = await promisify(execFile)("node", [
+    "--experimental-strip-types",
+    "--input-type=module",
+    "--eval",
+    `
+      import { parseCodeowners, codeownersForPath } from ${JSON.stringify(module)};
+      const owners = [
+        "@ſam", "@Kai", "@alſ", "@alK", "@org/ſquad", "@org/Kit",
+        "@Sam", "@Kai", "@alex_corp", "@Org/Team_1.test-x", "é@example.test",
+      ];
+      console.log(JSON.stringify(owners.map(owner =>
+        codeownersForPath(parseCodeowners("* @default\\n/é.ts " + owner), "é.ts")?.owners
+      )));
+    `,
+  ]);
+  expect(JSON.parse(stdout)).toEqual([
+    ...Array.from({ length: 6 }, () => [
+      { kind: "person", provider: "github", handle: "default" },
+    ]),
+    [{ kind: "person", provider: "github", handle: "Sam" }],
+    [{ kind: "person", provider: "github", handle: "Kai" }],
+    [{ kind: "person", provider: "github", handle: "alex_corp" }],
+    [{ kind: "group", provider: "github", handle: "Org/Team_1.test-x" }],
+    [{ kind: "person", email: "é@example.test" }],
+  ]);
+});
+
 test.each(["@alex_corp", "@example/app-team @alex_corp"])(
   "preserves a rule containing the managed user: %s",
   (owners) => {

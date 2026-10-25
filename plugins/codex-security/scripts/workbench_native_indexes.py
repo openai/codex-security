@@ -203,15 +203,18 @@ def list_repositories(
     connection: sqlite3.Connection,
     args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
-    scans = scan_history.list_scans(connection)["scans"]
-    scans_by_id = {scan["scanId"]: scan for scan in scans}
-    scan_count_by_target = dict(Counter(scan["targetId"] for scan in scans))
-
+    scan_count_by_target = Counter()
     latest_scan_by_target: dict[str, dict[str, Any]] = {}
-    for row in connection.execute(
-        "SELECT id, target_id FROM scans ORDER BY julianday(upper(started_at)) DESC, id DESC"
+    for scan in (
+        scan_history.scan_summary(row)
+        for row in connection.execute(
+            f"""{scan_history.SCAN_SUMMARY_QUERY}
+            ORDER BY julianday(upper(scans.started_at)) DESC, scans.id DESC
+            """
+        ).fetchall()
     ):
-        latest_scan_by_target.setdefault(row["target_id"], scans_by_id[row["id"]])
+        scan_count_by_target[scan["targetId"]] += 1
+        latest_scan_by_target.setdefault(scan["targetId"], scan)
 
     open_findings_by_target = Counter(
         row["target_id"] for row in _indexed_findings(connection) if row["status"] == "open"

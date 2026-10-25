@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { Ajv2020 } from "ajv/dist/2020.js";
+import * as z from "zod/v4";
 import { importSource } from "./import-module.ts";
 
-const { bundleArtifactSchema, loadArtifactZodSchema } = await importSource(
+const { projectArtifactToolSchema } = await importSource(
   join(import.meta.dirname, "../src/artifact-schema-loader.ts"),
 );
 
@@ -47,10 +48,10 @@ const document = {
       ],
     },
   },
-};
+} satisfies z.core.JSONSchema.JSONSchema;
 
-const original = bundleArtifactSchema([document], document.$id, "input");
-const validator = loadArtifactZodSchema([document], document.$id, "input");
+const original = structuredClone(document.$defs.input);
+const validator = projectArtifactToolSchema(z.fromJSONSchema(original));
 const advertised = validator.toJSONSchema({ io: "input" });
 assert.equal(original.properties.scope.properties.includePaths, false);
 assert.equal(
@@ -100,3 +101,23 @@ for (const [input, expected] of [
     `runtime: ${label}`,
   );
 }
+
+// Keep examples in the native JSON-schema input that the projector visits.
+const nativeFixture = z
+  .object({
+    findings: z.array(z.looseObject({ title: z.string() })),
+  })
+  .meta({ examples: structuredClone(document.$defs.input.examples) });
+const nativeInputBefore = structuredClone(
+  z.toJSONSchema(nativeFixture, { io: "input" }),
+);
+assert.deepEqual(nativeInputBefore.examples, document.$defs.input.examples);
+const nativeProjected = projectArtifactToolSchema(nativeFixture);
+assert.deepEqual(
+  nativeProjected.toJSONSchema({ io: "input" }).examples,
+  document.$defs.input.examples,
+);
+assert.deepEqual(
+  z.toJSONSchema(nativeFixture, { io: "input" }),
+  nativeInputBefore,
+);

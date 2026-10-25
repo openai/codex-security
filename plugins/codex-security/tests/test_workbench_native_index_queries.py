@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import ntpath
+import sqlite3
 from argparse import Namespace
+from contextlib import closing
 from types import SimpleNamespace
 
 import pytest
@@ -480,3 +482,80 @@ def test_scan_start_chronology_keeps_latest_and_first_seen_queries_consistent(
     ]
     assert [scan["scanId"] for scan in history] == (SCAN_IDS[:2] if equal else SCAN_IDS[1::-1])
     assert list(connection.iterdump()) == before
+
+
+@pytest.mark.parametrize("in_transaction", [False, True])
+def test_repository_index_keeps_one_scan_cohort(
+    workbench_api, indexed_collections, tmp_path, in_transaction
+):
+    source, _ = indexed_collections
+    indexes = workbench_api["native_indexes"]
+    database = tmp_path / "history.sqlite"
+    new_id = "00000000-0000-4000-8000-999999999999"
+    with closing(sqlite3.connect(database)) as reader, closing(sqlite3.connect(database)) as writer:
+        source.backup(reader)
+        reader.row_factory = sqlite3.Row
+        assert reader.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        before = indexes.list_repositories(reader)
+        if in_transaction:
+            reader.execute("BEGIN")
+
+        def execute(sql, parameters=()):
+            cursor = reader.execute(sql, parameters)
+            if "JOIN scan_progress AS progress" not in sql:
+                return cursor
+            rows = cursor.fetchall()
+            with writer:
+                writer.execute(
+                    "INSERT INTO scans (id, workspace_id, target_id, target_path, target_revision, "
+                    "scope, mode, scan_dir, status, phase, started_at, created_at, updated_at) "
+                    "SELECT ?, workspace_id, target_id, target_path, target_revision, scope, mode, "
+                    "scan_dir || '/next', 'complete', 'reporting', ?, created_at, updated_at "
+                    "FROM scans WHERE id = ?",
+                    (new_id, "2030-01-01T00:00:00Z", SCAN_IDS[0]),
+                )
+                writer.execute(
+                    "INSERT INTO scan_progress (scan_id, updated_at) "
+                    "SELECT ?, updated_at FROM scan_progress WHERE scan_id = ?",
+                    (new_id, SCAN_IDS[0]),
+                )
+            return SimpleNamespace(fetchall=lambda: rows)
+
+        proxy = SimpleNamespace(execute=execute, create_function=reader.create_function)
+        assert indexes.list_repositories(proxy) == before
+        assert reader.in_transaction is in_transaction
+        reader.commit()
+        after = indexes.list_repositories(reader)["repositories"]
+        assert after[0]["latestScan"]["scanId"] == new_id
+        assert after[0]["scanCount"] == 2
+
+
+def test_repository_latest_keeps_sqlite_millisecond_ties(workbench_api, indexed_collections):
+    connection, targets = indexed_collections
+    target_id = stable_target_id(targets[0])
+    for scan_id, fraction in zip(SCAN_IDS[:2], ("123200", "123100")):
+        connection.execute(
+            "UPDATE scans SET target_id = ?, started_at = ? WHERE id = ?",
+            (target_id, f"2026-10-08T01:00:00.{fraction}Z", scan_id),
+        )
+    query = workbench_api["native_indexes"].list_repositories
+    repositories = query(connection)["repositories"]
+    assert repositories[0]["latestScan"]["scanId"] == SCAN_IDS[1]
+    assert repositories[0]["scanCount"] == 2
+
+    connection.execute("UPDATE scans SET cost_json = '{' WHERE id = ?", (SCAN_IDS[0],))
+    with pytest.raises(ValueError, match="Expecting property name"):
+        query(connection)
+
+
+def test_repository_summary_excludes_scans_without_progress(workbench_api, indexed_collections):
+    connection, targets = indexed_collections
+    target_id = stable_target_id(targets[0])
+    connection.execute("UPDATE scans SET target_id = ? WHERE id = ?", (target_id, SCAN_IDS[1]))
+    connection.execute("DELETE FROM scan_progress WHERE scan_id = ?", (SCAN_IDS[1],))
+    repositories = workbench_api["native_indexes"].list_repositories(
+        connection, query_args(target_id=target_id)
+    )["repositories"]
+    assert len(repositories) == 1
+    assert repositories[0]["latestScan"]["scanId"] == SCAN_IDS[0]
+    assert repositories[0]["scanCount"] == 1

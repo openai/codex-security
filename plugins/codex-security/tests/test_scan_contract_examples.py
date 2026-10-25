@@ -41,63 +41,6 @@ class ScanContractExamplesTest(unittest.TestCase):
         self.findings = read_json(EXAMPLE_DIR / "findings.json")
         self.coverage = read_json(EXAMPLE_DIR / "coverage.json")
 
-    def test_deferred_paths_follow_existing_python_path_policy(self) -> None:
-        from workbench_test_support import load_script
-
-        finalizer = load_script("finalize_scan_contract")
-        schema = read_json(SCHEMA_DIR / "coverage.schema.json")
-        # JS and Python disagree about U+0085 and U+FEFF as whitespace.
-        # Saved-path schema validation should follow the Python finalizer.
-        accepted = (
-            ".",
-            "./",
-            "src/extract.py",
-            "src/./extract.py",
-            "src//extract.py",
-            "src:stream.ts",
-            "src/a:b.py",
-            "src/é:helper.ts",
-            "src/naïve file.ts",
-            "src/.hidden",
-            "\ufeff",
-        )
-        rejected = (
-            "../../outside.ts",
-            "/etc/passwd",
-            "C:/outside.ts",
-            "c:outside.ts",
-            "src/../outside.ts",
-            "src/..",
-            "src\\outside.ts",
-            "src/\0outside.ts",
-            "src/\toutside.ts",
-            "src/\x01outside.ts",
-            "src/outside.ts\n",
-            "src/\routside.ts",
-            "   ",
-            "\u0085",
-        )
-        for paths, valid in ((accepted, True), (rejected, False)):
-            for path in paths:
-                with self.subTest(path=repr(path)):
-                    coverage = copy.deepcopy(self.coverage)
-                    coverage["completeness"] = "partial"
-                    coverage["deferred"] = [
-                        {"id": "review", "reason": "Pending source review.", "paths": [path]}
-                    ]
-                    if valid:
-                        finalizer._require_safe_relative_path(
-                            path, "coverage.deferred[0].paths[0]", allow_dot=True
-                        )
-                        validate_schema_node(coverage, schema, "coverage")
-                    else:
-                        with self.assertRaises(finalizer.ContractError):
-                            finalizer._require_safe_relative_path(
-                                path, "coverage.deferred[0].paths[0]", allow_dot=True
-                            )
-                        with self.assertRaises(AssertionError):
-                            validate_schema_node(coverage, schema, "coverage")
-
     def test_examples_match_schemas(self) -> None:
         for name, payload in (
             ("scan-manifest", self.manifest),

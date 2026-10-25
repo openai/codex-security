@@ -66,6 +66,7 @@ async function executeWorkbench(
     "complete-scan",
     "export-findings",
     "finish-deep-scan",
+    "finding-issues",
     "get-scan",
     "get-deep-scan",
     "get-workspace",

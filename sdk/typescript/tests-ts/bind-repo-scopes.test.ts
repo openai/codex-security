@@ -287,6 +287,7 @@ test.skipIf(process.platform === "win32")(
     const f = fixture();
     const target = join(f.root, "coverage-target.json");
     writeFileSync(target, "{}", { mode: 0o640 });
+    chmodSync(target, 0o640);
     rmSync(f.coverage);
     symlinkSync(target, f.coverage);
     expect(run(f).status).toBe(0);

@@ -101,6 +101,7 @@ def parse_args(description: str) -> argparse.Namespace:
 
     get_scan = add_command("get-scan", "--scan-id")
     get_scan.add_argument("--occurrence-id")
+    get_scan.add_argument("--check-target", action="store_true")
 
     add_command("rename-scan", "--scan-id", "--name")
 
@@ -189,9 +190,6 @@ def parse_args(description: str) -> argparse.Namespace:
     update_progress.add_argument("--phase-items-total", type=deep_scan.non_negative_int)
     update_progress.add_argument("--phase-items-completed", type=deep_scan.non_negative_int)
     update_progress.add_argument("--phase-progress-unit", choices=PHASE_PROGRESS_UNITS)
-    preflight_issues = update_progress.add_mutually_exclusive_group()
-    preflight_issues.add_argument("--preflight-issues-json")
-    preflight_issues.add_argument("--preflight-issues-json-stdin", action="store_true")
     update_progress.add_argument("--review-items-total", type=deep_scan.non_negative_int)
     update_progress.add_argument("--review-items-completed", type=deep_scan.non_negative_int)
     update_progress.add_argument("--reportable-findings-count", type=deep_scan.non_negative_int)
@@ -208,6 +206,14 @@ def parse_args(description: str) -> argparse.Namespace:
     complete_scan.add_argument("--claim-token")
     complete_scan.add_argument("--cost-json")
     complete_scan.add_argument("--thread-id")
+    complete_scan.add_argument("--turn-id")
+
+    finalize_scan_usage = add_command(
+        "finalize-scan-usage", "--scan-id", "--thread-id", "--turn-id"
+    )
+    finalize_scan_usage.add_argument(
+        "--turn-status", choices=("completed", "interrupted", "failed"), default="completed"
+    )
 
     complete_budget_exhausted_scan = add_command(
         "complete-budget-exhausted-scan", "--scan-id", "--cost-json"
@@ -299,23 +305,16 @@ def parse_args(description: str) -> argparse.Namespace:
     export_findings.add_argument("--format", choices=(*EXPORT_FORMATS, "md"))
     export_findings.add_argument("--validate-only", action="store_true")
 
-    for command in (
-        "inspect-linear-publication",
-        "prepare-linear-publication",
-        "record-linear-publications",
-    ):
-        add_command(command, "--input-file")
+    subparsers.add_parser("finding-issues")
 
     subparsers.add_parser("database-info")
     subparsers.add_parser("finding-workflow")
     subparsers.add_parser("local-dedupe")
-    arguments = sys.argv[1:]
-    if "--user-context-stdin" in arguments:
-        if arguments.count("--user-context-stdin") != 1 or "--user-context" in arguments:
-            parser.error("pass exactly one user-context transport")
-        index = arguments.index("--user-context-stdin")
-        arguments[index] = "--user-context=" + sys.stdin.buffer.read().decode("utf-8")
-    return parser.parse_args(arguments)
+    args = parser.parse_args()
+    if getattr(args, "user_context_stdin", False):
+        args.user_context = sys.stdin.buffer.read().decode("utf-8")
+        args.user_context_stdin = False
+    return args
 
 
 if __name__ == "__main__":

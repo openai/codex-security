@@ -81,7 +81,13 @@ function packageTar({
     "package/docs/cli.md",
     "package/docs/findings-service.md",
     "package/docs/dedupe-records.md",
+    "package/docs/classify-severity-records.md",
+    "package/docs/hosted-scans.md",
+    "package/docs/validate-records.md",
+    "package/docs/hosted-remediation.md",
+    "package/schemas/hosted-scan-v2.fixture.json",
     "package/schemas/project-config.schema.json",
+    "package/schemas/external-findings.schema.json",
     "package/LICENSE",
     ...executablePaths,
     ...packageDistFiles,
@@ -192,7 +198,7 @@ function commandPath(command: string): string {
   return path;
 }
 
-function installPackage(
+async function installPackage(
   root: string,
   archivePath: string,
   environment: NodeJS.ProcessEnv,
@@ -203,7 +209,7 @@ function installPackage(
     join(consumer, "package.json"),
     JSON.stringify({ name: "synthetic-consumer", private: true }),
   );
-  const resolved = spawnSync(
+  const resolved = await execFileAsync(
     commandPath("node"),
     [
       "--input-type=module",
@@ -212,19 +218,18 @@ function installPackage(
     ],
     { encoding: "utf8", env: environment, windowsHide: true },
   );
-  expect({ status: resolved.status, stderr: resolved.stderr }).toEqual({
-    status: 0,
-    stderr: "",
-  });
+  expect(resolved.stderr).toBe("");
   const npm = JSON.parse(resolved.stdout) as {
     command: string;
     args: string[];
   };
-  return spawnSync(
+  return runPackageCommand(
+    consumer,
     npm.command,
     [
       ...npm.args,
       "install",
+      "--timing",
       "--global=false",
       "--prefix",
       consumer,
@@ -235,14 +240,60 @@ function installPackage(
       "--no-fund",
       archivePath,
     ],
-    {
-      cwd: consumer,
-      env: environment,
-      encoding: "utf8",
-      timeout: 30_000,
-      windowsHide: true,
-    },
+    environment,
   );
+}
+
+function checkPackage(
+  root: string,
+  archivePath: string,
+  contractPath: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<{ status: number; stderr: string }> {
+  return runPackageCommand(
+    root,
+    commandPath("node"),
+    [
+      fileURLToPath(new URL("../scripts/check-package.mjs", import.meta.url)),
+      archivePath,
+      contractPath,
+    ],
+    environment,
+  );
+}
+
+function runPackageCommand(
+  root: string,
+  command: string,
+  args: string[],
+  environment: NodeJS.ProcessEnv,
+): Promise<{ status: number; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      command,
+      args,
+      {
+        cwd: root,
+        env: environment,
+        encoding: "utf8",
+        timeout: 30_000,
+        windowsHide: true,
+      },
+      (error, _stdout, stderr) => {
+        if (error === null) {
+          resolve({ status: 0, stderr });
+        } else if (
+          typeof error.code === "number" &&
+          !error.killed &&
+          !error.signal
+        ) {
+          resolve({ status: error.code, stderr });
+        } else {
+          reject(error);
+        }
+      },
+    );
+  });
 }
 
 describe("npm package tar listings", () => {
@@ -297,7 +348,7 @@ describe("npm package tar listings", () => {
 
   test.each([false, true])(
     "rejects invalid package paths before Brotli expansion, complete=%p",
-    (complete) => {
+    async (complete) => {
       const root = mkdtempSync(join(tmpdir(), "codex-package-path-order-"));
       try {
         const archivePath = join(root, "unexpected-brotli.tgz");
@@ -314,17 +365,7 @@ describe("npm package tar listings", () => {
         );
         const contractPath = join(root, "plugin contract.json");
         writeFileSync(contractPath, JSON.stringify(pluginContract));
-        const result = spawnSync(
-          commandPath("node"),
-          [
-            fileURLToPath(
-              new URL("../scripts/check-package.mjs", import.meta.url),
-            ),
-            archivePath,
-            contractPath,
-          ],
-          { cwd: root, encoding: "utf8", timeout: 30_000, windowsHide: true },
-        );
+        const result = await checkPackage(root, archivePath, contractPath);
         expect(result.status).toBe(1);
         expect(result.stderr).toContain(
           complete
@@ -337,7 +378,7 @@ describe("npm package tar listings", () => {
     },
   );
 
-  test("escapes terminal controls in unexpected archive path diagnostics", () => {
+  test("escapes terminal controls in unexpected archive path diagnostics", async () => {
     const root = mkdtempSync(join(tmpdir(), "codex-package-terminal-path-"));
     try {
       const archivePath = join(root, "unexpected-path.tgz");
@@ -354,17 +395,7 @@ describe("npm package tar listings", () => {
       );
       const contractPath = join(root, "plugin contract.json");
       writeFileSync(contractPath, JSON.stringify(pluginContract));
-      const result = spawnSync(
-        commandPath("node"),
-        [
-          fileURLToPath(
-            new URL("../scripts/check-package.mjs", import.meta.url),
-          ),
-          archivePath,
-          contractPath,
-        ],
-        { cwd: root, encoding: "utf8", timeout: 30_000, windowsHide: true },
-      );
+      const result = await checkPackage(root, archivePath, contractPath);
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("unexpected file: package/unexpected");
       expect(result.stderr).not.toMatch(/[\u001b\u0007\u009b]/u);
@@ -374,7 +405,7 @@ describe("npm package tar listings", () => {
     }
   });
 
-  test("accepts equivalent bounded gzip representations", () => {
+  test("accepts equivalent bounded gzip representations", async () => {
     const root = mkdtempSync(join(tmpdir(), "codex-package-gzip-test-"));
     try {
       const tarBytes = packageTar({ trailingZeroBytes: 31 * 1024 * 1024 });
@@ -421,22 +452,11 @@ describe("npm package tar listings", () => {
       for (const [representation, contents] of archives) {
         const archivePath = join(root, `${representation}.tgz`);
         writeFileSync(archivePath, contents);
-        const result = spawnSync(
-          commandPath("node"),
-          [
-            fileURLToPath(
-              new URL("../scripts/check-package.mjs", import.meta.url),
-            ),
-            archivePath,
-            contractPath,
-          ],
-          {
-            cwd: root,
-            encoding: "utf8",
-            env: environment,
-            timeout: 30_000,
-            windowsHide: true,
-          },
+        const result = await checkPackage(
+          root,
+          archivePath,
+          contractPath,
+          environment,
         );
         expect({
           representation,
@@ -451,7 +471,7 @@ describe("npm package tar listings", () => {
 
   test.each(["environment", "user-config"])(
     "keeps npm fixture installs local with global %s settings",
-    (configuration) => {
+    async (configuration) => {
       const root = mkdtempSync(join(tmpdir(), "codex-package-npm-local-"));
       try {
         const archivePath = join(root, "package.tgz");
@@ -475,7 +495,7 @@ describe("npm package tar listings", () => {
             ? { npm_config_global: "true" }
             : {}),
         });
-        const installed = installPackage(root, archivePath, environment);
+        const installed = await installPackage(root, archivePath, environment);
         expect({
           status: installed.status,
           stderr: installed.status === 0 ? "" : installed.stderr,
@@ -646,7 +666,7 @@ describe("npm package tar listings", () => {
         npm_config_cache: join(root, "npm-cache"),
       };
       delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
-      const installed = installPackage(root, archivePath, environment);
+      const installed = await installPackage(root, archivePath, environment);
       const consumer = join(root, "consumer");
       expect({
         status: installed.status,
@@ -686,22 +706,11 @@ describe("npm package tar listings", () => {
       ).toBe(compatible);
       if (overwrite)
         expect(readFileSync(installedLogo).equals(stored)).toBe(true);
-      const checked = spawnSync(
-        commandPath("node"),
-        [
-          fileURLToPath(
-            new URL("../scripts/check-package.mjs", import.meta.url),
-          ),
-          archivePath,
-          contractPath,
-        ],
-        {
-          cwd: root,
-          env: environment,
-          encoding: "utf8",
-          timeout: 30_000,
-          windowsHide: true,
-        },
+      const checked = await checkPackage(
+        root,
+        archivePath,
+        contractPath,
+        environment,
       );
       expect({
         status: checked.status,
@@ -812,13 +821,12 @@ describe("npm package tar listings", () => {
         npm_config_cache: join(root, "npm-cache"),
         CODEX_SECURITY_EXPECTED_GIT_HEAD: gitHead,
       };
-      const installed = installPackage(root, archivePath, environment);
+      const installed = await installPackage(root, archivePath, environment);
       const invalidJson = [
         "oldgnu-manifest",
         "pax-map-prefix",
         "overwrite-json",
       ].includes(representation);
-      expect(installed.error).toBeUndefined();
       if (invalidJson) expect(installed.status).not.toBe(0);
       else {
         expect({
@@ -850,22 +858,11 @@ describe("npm package tar listings", () => {
       );
       const contractPath = join(root, "contract.json");
       writeFileSync(contractPath, JSON.stringify(pluginContract));
-      const checked = spawnSync(
-        commandPath("node"),
-        [
-          fileURLToPath(
-            new URL("../scripts/check-package.mjs", import.meta.url),
-          ),
-          archivePath,
-          contractPath,
-        ],
-        {
-          cwd: root,
-          env: environment,
-          encoding: "utf8",
-          timeout: 30_000,
-          windowsHide: true,
-        },
+      const checked = await checkPackage(
+        root,
+        archivePath,
+        contractPath,
+        environment,
       );
       expect({
         status: checked.status,
@@ -880,7 +877,7 @@ describe("npm package tar listings", () => {
     }
   });
 
-  test("checks reconstructed sparse binary assets and their discarded metadata", () => {
+  test("checks reconstructed sparse binary assets and their discarded metadata", async () => {
     const root = mkdtempSync(join(tmpdir(), "codex-package-sparse-assets-"));
     try {
       const logo = readFileSync(
@@ -1235,22 +1232,11 @@ describe("npm package tar listings", () => {
         );
         const environment = { ...process.env };
         delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
-        const result = spawnSync(
-          commandPath("node"),
-          [
-            fileURLToPath(
-              new URL("../scripts/check-package.mjs", import.meta.url),
-            ),
-            archivePath,
-            contractPath,
-          ],
-          {
-            cwd: root,
-            env: environment,
-            encoding: "utf8",
-            timeout: 30_000,
-            windowsHide: true,
-          },
+        const result = await checkPackage(
+          root,
+          archivePath,
+          contractPath,
+          environment,
         );
         if (scenario.error) {
           expect({ scenario: scenario.name, status: result.status }).toEqual({
@@ -1275,7 +1261,7 @@ describe("npm package tar listings", () => {
 
   test.each([0x78, 0x67])(
     "preserves inherited character locale for Unicode pax owners, type=%i",
-    (type) => {
+    async (type) => {
       const root = mkdtempSync(join(tmpdir(), "codex-package-owner-test-"));
       try {
         const archivePath = join(root, "unicode owner.tgz");
@@ -1301,22 +1287,11 @@ describe("npm package tar listings", () => {
         if (process.platform !== "win32")
           environment["LC_ALL"] =
             process.platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8";
-        const result = spawnSync(
-          commandPath("node"),
-          [
-            fileURLToPath(
-              new URL("../scripts/check-package.mjs", import.meta.url),
-            ),
-            archivePath,
-            contractPath,
-          ],
-          {
-            cwd: root,
-            env: environment,
-            encoding: "utf8",
-            timeout: 30_000,
-            windowsHide: true,
-          },
+        const result = await checkPackage(
+          root,
+          archivePath,
+          contractPath,
+          environment,
         );
         expect({ status: result.status, stderr: result.stderr }).toEqual({
           status: 0,
@@ -1328,7 +1303,7 @@ describe("npm package tar listings", () => {
     },
   );
 
-  test("streams each archive without resolving tar from its directory", () => {
+  test("streams each archive without resolving tar from its directory", async () => {
     const root = mkdtempSync(join(tmpdir(), "codex-package-tar-test-"));
     try {
       const archiveDirectory = join(
@@ -1354,7 +1329,6 @@ describe("npm package tar listings", () => {
       writeFileSync(archivePath, archiveContents);
       writeFileSync(contractPath, JSON.stringify(pluginContract));
 
-      const nodePath = commandPath("node");
       const environment: NodeJS.ProcessEnv = { ...process.env };
       delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
       environment["PATH"] = `.${delimiter}${process.env["PATH"] ?? ""}`;
@@ -1413,22 +1387,11 @@ process.exit(result.status ?? 1);
         environment["TAR_PROXY_LOG"] = logPath;
       }
 
-      const result = spawnSync(
-        nodePath,
-        [
-          fileURLToPath(
-            new URL("../scripts/check-package.mjs", import.meta.url),
-          ),
-          archivePath,
-          contractPath,
-        ],
-        {
-          cwd: root,
-          encoding: "utf8",
-          env: environment,
-          timeout: 30_000,
-          windowsHide: true,
-        },
+      const result = await checkPackage(
+        root,
+        archivePath,
+        contractPath,
+        environment,
       );
       expect(existsSync(adjacentTarMarker)).toBe(false);
       expect({ status: result.status, stderr: result.stderr }).toEqual({
@@ -1482,22 +1445,11 @@ process.exit(result.status ?? 1);
       ]);
 
       environment["TAR_PROXY_FAIL_EXTRACT"] = "true";
-      const failed = spawnSync(
-        nodePath,
-        [
-          fileURLToPath(
-            new URL("../scripts/check-package.mjs", import.meta.url),
-          ),
-          archivePath,
-          contractPath,
-        ],
-        {
-          cwd: root,
-          encoding: "utf8",
-          env: environment,
-          timeout: 30_000,
-          windowsHide: true,
-        },
+      const failed = await checkPackage(
+        root,
+        archivePath,
+        contractPath,
+        environment,
       );
       expect(failed.status).not.toBe(0);
       expect(failed.stderr).toContain("synthetic extraction failure");

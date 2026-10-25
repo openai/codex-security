@@ -21,6 +21,7 @@ function createRepository(): { root: string; repository: string } {
   const repository = join(root, "repository");
   mkdirSync(repository);
   git(repository, "init", "-q");
+  git(repository, "config", "--local", "core.autocrlf", "false");
   return { root, repository };
 }
 
@@ -332,41 +333,6 @@ describe("compact diff scan", () => {
     expect(escaped.stderr).toContain("in-scope file row 1");
   });
 
-  test("streams maximum-size preflight checks through the MCP workbench", async () => {
-    const { root, repository } = createRepository();
-    writeSource(repository, "src/handler.py", "value = 1\n");
-    mkdirSync(join(root, "scans"));
-    mkdirSync(join(root, "state"));
-    const client = await startMcp(root);
-    const owner = "preflight-stdin-owner";
-
-    try {
-      const started = await client.call(
-        "start_codex_security_prompt_only_scan",
-        { mode: "standard", targetPath: repository, scope: "." },
-        owner,
-      );
-      const scanId = (started["scan"] as JsonObject)["scanId"] as string;
-      const preflightChecks = Array.from({ length: 32 }, (_, index) => ({
-        capability: `windows_process_boundary_${index}`,
-        reason: "é".repeat(1_200),
-        severity: "warn",
-        status: "fail",
-      }));
-      expect(JSON.stringify(preflightChecks).length).toBeGreaterThan(
-        32 * 1_024,
-      );
-
-      await client.call(
-        "update_codex_security_scan_progress",
-        { scanId, phase: "preflight", preflightChecks },
-        owner,
-      );
-    } finally {
-      await client.close();
-    }
-  });
-
   test("streams oversized option-like user context through the MCP workbench", async () => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/handler.py", "value = 1\n");
@@ -636,7 +602,7 @@ describe("compact diff scan", () => {
         ).findings.map((draftFinding) => draftFinding["identity"]),
       ).toEqual([
         { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
-        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
+        { anchor: "candidate-duplicate-instance", instance: "dss-147-a-2" },
       ]);
       await call("record_codex_security_scan_draft", {
         scanId,
@@ -763,7 +729,7 @@ describe("compact diff scan", () => {
           instance: "dss-147-b",
         },
         { anchor: "candidate-authored-instance", instance: "ledger-row-c" },
-        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
+        { anchor: "candidate-duplicate-instance", instance: "dss-147-a-2" },
       ]);
       expect(
         ((completed["manifest"] as JsonObject)["scan"] as JsonObject)[

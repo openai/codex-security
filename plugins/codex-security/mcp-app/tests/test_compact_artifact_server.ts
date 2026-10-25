@@ -78,6 +78,9 @@ try {
     await testParentToolList(bundle);
     await testClaimedParentArtifactOperations(bundle, runtimeLabel);
     await testSemanticScanDraftCompletion(bundle, runtimeLabel);
+    for (const artifactWriter of [false, true]) {
+      await testLargeScanDraftCheckpoints(bundle, runtimeLabel, artifactWriter);
+    }
     await testCompactDiffScanCompletion(bundle, runtimeLabel);
     await testDiscoveryWorkerToolList(bundle);
     await testReducerWorkerToolList(bundle);
@@ -95,6 +98,104 @@ async function createScanFixture(label: string) {
   };
   await mkdir(path.join(repoRoot, "src"), { recursive: true });
   return { repoRoot, environment };
+}
+
+async function testLargeScanDraftCheckpoints(
+  bundle: string,
+  runtimeLabel: string,
+  artifactWriter: boolean,
+) {
+  const label = `large-draft-${runtimeLabel}-${artifactWriter ? "worker" : "parent"}`;
+  const { repoRoot, environment } = await createScanFixture(label);
+  await writeFile(path.join(repoRoot, "src", "fixture.py"), "value = 1\n");
+  let scanId: string = randomUUID();
+  let scanDir = path.join(temporaryRoot, label, "output");
+  let handoffClaimToken: string | undefined;
+  if (artifactWriter) await mkdir(scanDir);
+  const client = await startClient(bundle, {
+    ...environment,
+    ...(artifactWriter
+      ? {
+          CODEX_SECURITY_ARTIFACT_ROOT: scanDir,
+          CODEX_SECURITY_REPO_ROOT: repoRoot,
+          CODEX_SECURITY_ARTIFACT_LAYOUT: "worker",
+          CODEX_SECURITY_SCAN_ID: scanId,
+          CODEX_SECURITY_PLUGIN_ROOT: bundledPluginRoot,
+        }
+      : {}),
+  });
+  const ownerThread = `${label}-owner`;
+  const call = toolCaller(client, ownerThread);
+
+  try {
+    if (!artifactWriter) {
+      ({ scanId, scanDir, handoffClaimToken } = await startScan(
+        call,
+        ownerThread,
+        { targetPath: repoRoot, scope: ".", mode: "standard" },
+        {
+          workspace: `${label}: open workspace`,
+          setup: `${label}: submit setup`,
+          scan: `${label}: start scan`,
+          claim: `${label}: claim scan`,
+          owner: `${label}: attach owner`,
+        },
+      ));
+    }
+
+    const mib = 1024 * 1024;
+    // Exercise both one large excerpt and a request with smaller excerpts
+    // that together exceed the SDK's default 10 MiB stdio buffer.
+    for (const [step, sizes] of [
+      [9 * mib],
+      [11 * mib],
+      [6 * mib, 6 * mib],
+      [32],
+    ].entries()) {
+      const findings = sizes.map((size, index) => ({
+        ...finding(`checkpoint-${step}-${index}`, "src/fixture.py"),
+        evidenceExcerpt: `checkpoint-${step}-${index}:`.padEnd(size, "e"),
+      }));
+      const result = requireSuccessfulTool(
+        await call("record_codex_security_scan_draft", {
+          ...workerDraft(findings),
+          scanId,
+          ...(handoffClaimToken === undefined ? {} : { handoffClaimToken }),
+          complete: false,
+        }),
+        `${label}: save checkpoint ${step}`,
+      );
+      assert.equal(result.status, "draft_written");
+      const saved = await readJson(
+        scanDir,
+        artifactWriter ? "result.json" : "findings.json",
+      );
+      assert.equal(result.findingCount, saved.findings.length);
+      const head = await readJson(scanDir, "checkpoint-head.json");
+      const checkpoint = await readJson(
+        scanDir,
+        "checkpoints",
+        head.checkpoint,
+      );
+      assert.equal(checkpoint.complete, false);
+      for (const document of [saved, checkpoint]) {
+        assert.equal(document.scanId, scanId);
+        for (const expected of findings) {
+          const actual = document.findings.find(
+            (entry: { ruleId: string }) => entry.ruleId === expected.ruleId,
+          );
+          assert.equal(
+            actual?.evidenceExcerpt,
+            expected.evidenceExcerpt,
+            `${label}: checkpoint ${step} must retain every evidence byte`,
+          );
+        }
+      }
+      assert.deepEqual(await client.ping(), {});
+    }
+  } finally {
+    await client.close();
+  }
 }
 
 async function testCompactDiffScanCompletion(
@@ -1199,6 +1300,8 @@ async function testParentToolList(bundle: string) {
       "record_candidate_attack_paths",
       "record_codex_security_scan_draft",
       "get_codex_security_completed_scan",
+      "get_codex_security_finding_issues",
+      "record_codex_security_finding_issues",
       "complete_codex_security_scan",
     ]) {
       assert.equal(names.has(name), true, `Missing parent MCP tool ${name}.`);

@@ -11,6 +11,9 @@ security plugin, and TypeScript declarations. It uses ES modules.
 - Review saved findings, identify duplicates, classify severity, and suggest owners.
 - Import GitHub code scanning alerts, export SARIF, JSON, or CSV, and publish
   findings to Linear or a findings service.
+- Import [Snyk Open Source findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md) from
+  official plugin JSON or native CLI JSON locally or into Cloud; Open Source
+  SARIF is also supported. License findings and other Snyk products are excluded.
 - Automate scans across repositories and project components.
 
 See the [CLI reference](docs/cli.md),
@@ -32,10 +35,6 @@ within 22.x, or Node.js 24.x or 26.x. On Node.js 22.13–22.14, compressed sessi
 are unavailable when reading saved activity or attaching scan logs to feedback, and
 scans whose original session is compressed cannot resume. Plain `.jsonl` logs
 work on all supported runtimes.
-
-`LocalPluginBootstrapError` identifies local plugin setup failures and extends
-`PluginBootstrapError`, so existing catches keep working. Knowledge-base
-preparation errors use `ConfigurationError`; wrapped diagnostics remain in `cause`.
 
 ### Install the CLI
 
@@ -190,9 +189,18 @@ directory must be private to you (`chmod 700`).
 | `threatModel` / `threatModelPath` | Saved threat model and document path; either can be `null`.      |
 | `cost`                            | Estimated model usage cost, or `null` when unavailable.          |
 
+Review the requested paths and exclusions alongside the execution outcome.
+`coverage.deferred` records unfinished requested work, while
+`coverage.openQuestions` records optional follow-up separately.
+
 Review coverage alongside findings. A report with no findings does not establish
 that the repository is secure. Reports and logs can contain source code,
 vulnerability details, and credentials; review them before sharing.
+
+Saved-history excerpts use scanned Git objects without fetching missing data.
+Working-tree diff scans omit excerpts, as do historical scans whose source or
+scope cannot be established. Unambiguous older scans remain readable. An omitted
+excerpt does not remove the finding.
 
 The SDK does not set your process's exit status. Use `hasFindingsAtOrAbove()`
 as in the example to enforce a severity threshold.
@@ -220,6 +228,7 @@ const result = await security.run("/path/to/repository", {
 | `scanPrompt` / `scanPromptFile`             | Additional scan instructions. Inline text takes precedence.                    |
 | `validationPrompt` / `validationPromptFile` | Custom validation instructions for standard scans.                             |
 | `postScanPrompt` / `postScanPromptFile`     | Follow-up instructions after the scan.                                         |
+| `ownerSuggestions`                          | Write optional owner suggestions after a committed scan (default: `false`).    |
 | `outputDir`                                 | Results directory; omit to use the state directory.                            |
 | `archiveExisting`                           | Move previous results aside before reusing `outputDir`.                        |
 | `maxCostUsd`                                | Stop at an estimated model cost; see [cost limits](#progress-and-cost).        |
@@ -227,6 +236,19 @@ const result = await security.run("/path/to/repository", {
 
 The exported `ScanOptions` type describes all options and callbacks. For full
 CLI behavior, see [scan options and output](docs/cli.md#scan-options-and-output).
+
+Set `ownerSuggestions: true` or run `codex-security scan --owner-suggestions`
+to write `owner-suggestions.json` beside a completed committed Git scan. Project
+files can set `scan.owner_suggestions: true`. The report uses the scan's finding
+IDs and frozen revision; it does not change the sealed findings or assign users.
+Owner failures leave the base scan completed and appear as
+`result.ownerSuggestionsError`; successful reports set `result.ownerSuggestionsPath`.
+The scan records optional owner hints within its existing session and budget.
+Report finalization applies CODEOWNERS and validates Git evidence without another
+model call, including when `maxCostUsd` is set. Missing hints abstain and invalid
+hints produce per-finding errors. Working-tree and directory snapshots are
+unsupported. Explicit owner-only analysis remains available through `suggestOwners`
+and `suggest-owners`, sharing the same evidence validation and report code.
 
 ### Scan a diff
 
@@ -259,22 +281,17 @@ const security = new CodexSecurity({
 Constructor options are `codexOverrides`, `pythonPath`, and `pluginPath`.
 The bundled runtime and plugin are used by default. `pythonPath` overrides the
 `PYTHON` environment variable. To choose a model, set `codexOverrides.model`.
+For a custom `pluginPath`, check [custom plugin compatibility](#custom-plugins).
 
-New and resumed Deep Scans require a current plugin with
-`directDeepScanEngine: 1`, `workerProviderSnapshot: 4`, and isolated worker
-configuration support. Older custom plugins fail before scan execution; update
-the plugin or omit `pluginPath` to use the bundled version. Discovery, reducer,
-and resumed workers inherit per-scan provider, authentication, environment, and
-executable settings, with their existing read-only permissions. Reading saved
-reports does not require these execution capabilities.
+To enable Daybreak on Codex 0.163.0 or later, set `codexOverrides.daybreak: true`.
+The toggle defaults off; an explicit `false` keeps it off. The setting reaches
+Deep Scan discovery and reducer workers, including resumed workers. Scans use
+isolated configuration, so a desktop toggle or personal Codex configuration does
+not configure an SDK scan. See [Daybreak opt-in](docs/cli.md#daybreak-opt-in) for
+CLI, project-file, and direct plugin configuration.
 
-The SDK no longer adapts the older `node ./mcp/server.mjs` MCP entrypoint; use
-the current shell or Windows launcher for runtime-root routing.
-
-Custom plugins must support the current workbench protocol for scan comparison
-and archival. Update an older custom plugin or omit `pluginPath` to use the
-bundled version. The SDK no longer adapts payloads or archives scan directories
-on behalf of older workbench implementations.
+Deep Scan discovery, reducer, and resumed workers inherit per-scan provider,
+authentication, environment, and executable settings with read-only permissions.
 
 Scans use an isolated Codex configuration. See
 [runtime configuration](docs/cli.md#runtime-configuration-and-worker-limits)
@@ -331,6 +348,19 @@ console.log(plan);
 It does not verify credentials, model access, Python, or the plugin. The CLI
 equivalent is `scan --dry-run`.
 
+### Set investigation time
+
+```ts
+await security.run("/path/to/repository", { maxTimeMinutes: 15 });
+```
+
+`maxTimeMinutes` accepts positive fractional minutes. Standard scans use an
+advisory allowance, unset by default; Deep scans retain their enforced discovery
+limit. Scans may finish early and reporting may run longer. The CLI equivalent is
+`scan --max-time 15`; project files use `scan.max_time_minutes`. See
+[investigation time](docs/cli.md#set-investigation-time) for lifecycle and limit
+semantics. `maxCostUsd` and `signal` keep their existing behavior.
+
 ### Configure deep scans
 
 ```ts
@@ -341,7 +371,7 @@ const result = await security.run("/path/to/repository", {
   stopAfterNoNew: 3,
   stopAfterConsecutiveErrors: 3,
   maxDiscoveryRuns: 10,
-  maxTimeHours: 1.5,
+  maxTimeMinutes: 90,
 });
 ```
 
@@ -349,10 +379,16 @@ const result = await security.run("/path/to/repository", {
 within each worker. Time and run limits apply to discovery. After discovery
 stops, the scan combines and returns completed findings. See
 [deep scan settings](docs/cli.md#configure-deep-scans) for defaults and saved settings.
+Deep discovery retains its enforced deadline, with a default and maximum of
+5760 minutes. `maxTimeHours` remains a deprecated Deep-only alias in hours.
 
 ### Progress and cost
 
 Use `onProgress` for scan progress and `onCost` for cost updates.
+Use `onUsageObservation` for the last reported token measurement time
+(`tokensUpdatedAt`) and account-wide allowance readings (`accountRateLimits`).
+Each reading includes its own `observedAt` timestamp and the percentage used in
+each reported window. A limit-only update can arrive before any token measurement.
 
 Follow scans with `onWorkerEvent` and `onReconnect`. `onWorkerEvent` reports
 persisted worker sessions discovered by the SDK's existing session tracker,
@@ -381,14 +417,16 @@ or planned counts, and cannot act as a pre-dispatch gate. Use `maxCostUsd` or
 `signal` for cancellation. Observer failures go to `onObserverError` without
 stopping the scan.
 
-`onWorkerStatus` remains available for tool-derived preflight status and
-**best-effort** phase dispatch counts from model-emitted text markers. A missing
-dispatch status does not mean delegation was skipped. `onSessionEvent` receives
-saved events with thread IDs and worker numbers and can contain source code or
-credentials. Deep scans additionally expose durable independent-review counts
-through `onDeepProgress`: `completed`, `active`, and `maximum`. The maximum is a
-configured cap, not a percentage denominator. The optional `consolidating` flag
-reports when results are being combined or the coordinator has finished.
+`onWorkerStatus` reports **best-effort** phase dispatch counts from model-emitted
+text markers. A missing dispatch status does not mean delegation was skipped.
+For retired progress hooks, see [older progress integrations](#older-progress-integrations).
+
+`onSessionEvent` receives saved events with thread IDs and worker numbers and can
+contain source code or credentials. Deep scans additionally expose durable
+independent-review counts through `onDeepProgress`: `completed`, `active`, and
+`maximum`. The maximum is a configured cap, not a percentage denominator. The
+optional `consolidating` flag reports when results are being combined or the
+coordinator has finished.
 `ScanOptions` lists all callbacks.
 
 Costs estimate API-equivalent model usage, not your bill or ChatGPT subscription
@@ -431,6 +469,9 @@ and `signal` are also supported.
 To validate GitHub code scanning alerts, first import them with
 `importGitHubCodeScanningAlerts()`. See the
 [import guide](docs/cli.md#import-alerts-from-the-cli) for CLI and SDK examples.
+
+For host-managed model execution, use `validateRecords()` or `validate --records`.
+See [host-provided standalone validation](docs/validate-records.md).
 
 ### Generate and verify a patch
 
@@ -557,16 +598,18 @@ policy locations and reporting instructions, headless use, and saved artifacts.
 
 ### Exports and CI
 
-Export saved findings or a threat model without starting another analysis:
+Export a completed scan's findings to a SARIF file:
 
 ```bash
-cs export --scan SCAN_ID --export-format sarif --output results.sarif
-cs export --scan SCAN_ID --artifact threat-model --output threatmodel.md
+cs export /path/to/scan-results --output results.sarif
 ```
 
-The SDK provides `exportArtifact()` for the same offline operations. See
-[exports and CI](docs/cli.md#exports-and-ci) for details. For repository or pull
-request scans in GitHub Actions, use the
+Replace `/path/to/scan-results` with the results directory printed by `scan`.
+Export reads saved results, so you don't need to rerun the scan or sign in.
+
+See [exports and CI](docs/cli.md#exports-and-ci) for source fingerprints, other
+formats, threat models, and the `exportArtifact()` SDK method. For repository or
+pull request scans in GitHub Actions, use the
 [GitHub Action guide](https://github.com/openai/codex-security/blob/main/github-action/README.md).
 Separate examples cover
 [GitHub Actions with Bedrock](https://github.com/openai/codex-security/blob/main/examples/github-actions/README.md)
@@ -574,11 +617,17 @@ and [Azure Pipelines](https://github.com/openai/codex-security/blob/main/example
 
 ### Classify finding severity
 
-Use `classify-severity` with your own rubric to assess saved findings without
-changing their original severity or evidence. The SDK exposes `classifySeverity()`,
+Use `classify-severity` to assess saved findings with the built-in severity rubric
+or an explicit custom rubric, without changing their original severity or evidence.
+Each finding receives three independent reviews by default; the most common severity wins,
+with the highest severity breaking ties among the top vote counts.
+Use `--runs N` to request 1–10 reviews (default: 3). The SDK exposes `classifySeverity()`,
 `classifyScanSeverity()`, and `classifyScanDirectorySeverity()`. See
 [severity classification](docs/cli.md#classify-finding-severity) for selection,
 checkpointing, and publication behavior.
+
+For canonical records without a saved scan, use `classify-severity --records`
+or `classifySeverityRecords()` with [host-provided execution](docs/classify-severity-records.md).
 
 ### Suggest finding owners
 
@@ -595,6 +644,73 @@ grant Cloud access. See [Cloud publication](docs/cli.md#publish-findings-to-clou
 for setup and review steps, or [Linear publication](docs/cli.md#publish-completed-scans-to-linear)
 for issue creation.
 
+The SDK also exposes `prepareExternalPublication(file, options)` for supported
+vendor exports and `prepareNormalizedExternalPublication(findings, options)` for
+normalized external evidence from any provider in the Cloud import contract.
+The normalized API accepts `NormalizedExternalPublicationOptions`; file readers
+use `ExternalPublicationOptions` for their supported formats. Both resolve the Cloud repository and return a
+`preview` plus a separate `publish()` operation. Inspect the preview before
+calling `publish()`. Imported evidence remains not assessed by Codex, and saved
+requests and receipts support retries after interruption.
+
+Prefer each provider's supported native JSON for local and Cloud imports. Keep
+the same acquisition format for repeat imports: SARIF and CSV are compatibility
+options where supported, and changing formats can change record identities or
+replace richer evidence with less detail. See the
+[import guide](docs/cli.md#import-vendor-findings-locally) for format selection.
+
+For Wiz, prefer supported native JSON acquired through an authorized MCP or API
+connection. The [CSV compatibility reader](docs/cli.md#import-wiz-findings) covers
+repository package vulnerabilities (SCA) only; it does not add SAST, CSPM or
+complete code-to-cloud coverage. Both formats support gzip. The acquisition path
+still needs validation with an authorized Wiz tenant.
+
+For GitHub, save complete JSON from `import github` or `import github-advisories`;
+the configured GitHub plugin can help select alerts before collection. The
+[separate readers and mappings](docs/cli.md#import-github-findings-locally-or-to-cloud)
+retain code-scanning evidence or GHSA disclosures. **GHSA import does not
+establish an installed dependency or applicability to the repository.** This
+integration does not import Dependabot or secret-scanning alerts or write back
+to GitHub.
+
+Use `publish findings FILE --to local --repository PATH --provider wiz
+--source-key KEY` to store the same vendor evidence in the local workbench SQLite
+database. Preview with `--dry-run --format json`, then confirm interactively or
+use `--yes`. Read it with `findings imported [REPOSITORY] --format json`; the
+repository defaults to the current directory. No Cloud login or model call is
+needed. Use `--provider snyk` for native CLI JSON, a Snyk plugin SCA bundle or
+Open Source SARIF. Prefer JSON, and keep one format and stable source key per scan
+target; switching formats creates separate source identities. See
+[local imports](docs/cli.md#import-vendor-findings-locally).
+
+Use `--provider endor` with native Endor Finding JSON; existing endorctl SARIF is
+accepted as a lossy compatibility format. See
+[Endor imports](docs/cli.md#import-endor-labs-findings).
+
+For saved GitHub code-scanning alerts or GHSA advisories, use
+`--provider github` with a separate stable source key for each finding family.
+See [local imports](docs/cli.md#import-vendor-findings-locally).
+
+The SDK's `prepareLocalExternalImport(file, options)` returns a `preview` and a
+separate `import()` operation. `prepareNormalizedLocalImport(findings,
+options)` accepts already normalized evidence, and
+`listLocalExternalFindings({ repository })` reads the stored records. Imports
+remain unassessed source evidence, separate from native scan findings. Repeated
+imports update the same repository/provider/source-key/source-ID record; omitted
+records remain stored, and unknown evidence fields are not inferred.
+
+File imports forward repository references from the reader automatically. Direct
+normalized callers should provide additional known references in the third
+argument's `sourceRepositories` when they are absent from
+`evidence.details.repository.url`. For a known GitHub custom host, include
+`platform: "github"`, for example `{ sourceRepositories: [{ url:
+"https://git.example.test/example/project", platform: "github" }] }`. Named Wiz
+reports carry this platform in their repository inventory. If you export only the
+normalized finding rows to JSONL, supply that metadata separately; the original
+finding evidence does not include the surrounding inventory.
+
+See [Semgrep Code imports](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md) for native CLI/CI JSON, SARIF compatibility, and local or Cloud imports. Platform API and Guardian/MCP responses need a separate mapping.
+
 ## Findings storage and deduplication
 
 Saved-scan deduplication uses local SQLite directly:
@@ -605,8 +721,7 @@ cs dedupe --scan SCAN_ID --json
 
 The [findings guide](docs/findings-service.md) covers local storage, embedding
 credentials, deduplication, backups, and independently operated HTTP endpoints.
-The local `serve` command and browser dashboard have been removed. Existing
-scans, findings, and duplicate groups remain in the workbench database.
+For an older service deployment, see [migration guidance](docs/findings-service.md#local-service-removal).
 For records stored in your own system, see
 [SDK records deduplication](docs/dedupe-records.md).
 
@@ -628,11 +743,46 @@ The scan profile allows reads across the local filesystem and writes to workspac
 roots. Execution approvals are reviewed automatically and may grant extra
 permissions for an operation. Set `codexOverrides.approval_policy: "never"`
 (or CLI `--codex 'approval_policy="never"'`) to deny permission requests.
+If you select a Codex profile, its explicit `approval_policy` takes precedence
+over the root setting.
 Host and network restrictions still apply.
 
 Repository contents, model output, and imported artifacts do not authorize
 access to other targets, disclosure of credentials, or writes outside approved
 paths. Keep state and scan artifacts private and outside the repository.
+
+## Compatibility
+
+### Custom plugins
+
+New and resumed Deep Scans require a plugin with `directDeepScanEngine: 1`,
+`workerProviderSnapshot: 4`, and isolated worker configuration support. Older
+custom plugins fail before scan execution; update the plugin or omit `pluginPath`
+to use the bundled version. Reading saved reports does not require these
+execution capabilities.
+
+Use the current shell or Windows launcher for runtime-root routing. The SDK does
+not adapt the older `node ./mcp/server.mjs` MCP entrypoint.
+
+Custom plugins must support the current workbench protocol for scan comparison
+and archival. The SDK does not adapt older payloads or archive scan directories
+on behalf of older workbench implementations.
+
+### Older progress integrations
+
+The helper-derived `kind: "preflight"` event, `config_preflight.py` helper, and
+custom capability registries are retired. This includes the `preflightChecks`
+progress-tool input and workbench `--preflight-issues-json` /
+`--preflight-issues-json-stdin` arguments. Scans use available runtime tools and
+parent fallback without a capability registry. Saved preflight history remains
+readable. Local `preflight()` input checks, authentication, sandbox enforcement,
+and Deep worker configuration still apply.
+
+### Error types
+
+`LocalPluginBootstrapError` identifies local plugin setup failures and extends
+`PluginBootstrapError`, so existing catches keep working. Knowledge-base
+preparation errors use `ConfigurationError`; wrapped diagnostics remain in `cause`.
 
 ## Documentation and security
 

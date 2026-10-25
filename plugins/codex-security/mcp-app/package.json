@@ -11,15 +11,15 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
-    "@openai/codex-sdk": "0.162.1",
+    "@openai/codex-sdk": "0.164.0",
     "ajv": "8.20.0",
-    "smol-toml": "1.9.0",
-    "zod": "^4.6.5"
+    "smol-toml": "1.9.1",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@types/node": "^26.6.4",
+    "@types/node": "^26.6.5",
     "esbuild": "^0.28.2",
-    "prettier": "3.9.9",
+    "prettier": "3.9.10",
     "typescript": "^7.0.2"
   }
 }

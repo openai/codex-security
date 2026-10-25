@@ -160,7 +160,7 @@ export async function deduplicateRecords(
                     ? screeningFindingFormatInstructions
                     : pairFindingFormatInstructions,
                 ].join("\n\n"),
-                findingSchema: findingSchema(),
+                findingSchema: structuredClone(findingSchema()),
               },
               { signal: options.signal },
             ),

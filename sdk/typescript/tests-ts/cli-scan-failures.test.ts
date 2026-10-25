@@ -37,6 +37,9 @@ function failingScan(message: string, onRun?: () => void) {
       onRun?.();
       throw new CodexSecurityError(message);
     },
+    validate: async () => {
+      throw new CodexSecurityError(message);
+    },
     preflight: async () => fakePreflight(),
     close: async () => {},
   });
@@ -445,3 +448,42 @@ test.each(commands.slice(1))(
     expectFailure(failure.text(), true, "SCAN_FAILED", message);
   },
 );
+
+for (const command of ["rerun", "resume"]) {
+  test.each([true, false, undefined])(
+    `${command} restores owner suggestions from its saved recipe (%p)`,
+    async (ownerSuggestions) => {
+      let observed: boolean | undefined;
+      let called = false;
+      const deps = dependencies({
+        onWorkbench: () => ({
+          scanId: "saved-scan",
+          scanDir: "/tmp/saved-scan",
+          recipe: {
+            repository: "/original/repository",
+            target: { kind: "repository", paths: [] },
+            mode: "deep",
+            config: {},
+            ...(ownerSuggestions === undefined ? {} : { ownerSuggestions }),
+          },
+        }),
+        onTurn: (_repository, options) => {
+          called = true;
+          observed = options.ownerSuggestions;
+        },
+      });
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          ["scans", command, "saved-scan", "--json"],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(called).toBe(true);
+      expect(observed).toBe(ownerSuggestions);
+    },
+  );
+}

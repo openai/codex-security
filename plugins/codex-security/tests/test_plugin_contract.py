@@ -68,7 +68,7 @@ def test_plugin_manifest_references_existing_assets_and_skills() -> None:
         "screenshots",
     }
     assert required_interface_fields <= interface.keys()
-    assert interface["displayName"] == "Codex Security Local"
+    assert interface["displayName"] == "Codex Security"
     for field in (
         "shortDescription",
         "longDescription",

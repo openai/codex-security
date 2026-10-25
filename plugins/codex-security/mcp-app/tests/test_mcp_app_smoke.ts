@@ -66,6 +66,7 @@ assert.deepEqual(
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
     "FIREWORKS_API_KEY",
+    "CHEAPER_INFERENCE_API_KEY",
     "AWS_BEARER_TOKEN_BEDROCK",
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
@@ -539,7 +540,9 @@ async function assertWorkspaceWorksWithoutUiCapability(scope: string) {
   }
 }
 
-async function assertHeadlessStandardScanWorksWithoutUiCapability() {
+async function assertHeadlessStandardScanWorksWithoutUiCapability(
+  threadSource?: string,
+) {
   const headlessStateDir = path.join(tmpdir(), randomUUID());
   const headlessScanRoot = path.join(tmpdir(), randomUUID());
   const headlessServer = startTestServer({
@@ -610,6 +613,16 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     assertNoError(joined);
     assert.equal(joined.result.structuredContent.startDisposition, "joined");
     assert.equal(joined.result.structuredContent.scanId, result.scanId);
+    for (const response of [started, joined]) {
+      assert.match(
+        response.result.content[0].text,
+        /references\/scan-runtime\.md/,
+      );
+      assert.doesNotMatch(
+        response.result.content[0].text,
+        /security_scan preflight/,
+      );
+    }
     assert.equal(
       joined.result.structuredContent.handoffClaimToken,
       result.handoffClaimToken,
@@ -639,17 +652,6 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       standardInventory.result.content[0].text,
       /only available for Deep or diff scans/,
     );
-
-    const progressed = await headlessServer.callTool(8, {
-      name: "update_codex_security_scan_progress",
-      arguments: {
-        scanId: result.scanId,
-        handoffClaimToken: result.handoffClaimToken,
-        preflightChecks: [],
-      },
-      _meta: { "openai/threadId": ownerThread },
-    });
-    assertNoError(progressed);
 
     const advanced = await headlessServer.callTool(81, {
       name: "update_codex_security_scan_progress",
@@ -690,13 +692,48 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
         scanId: result.scanId,
         handoffClaimToken: result.handoffClaimToken,
       },
-      _meta: { "openai/threadId": ownerThread },
+      _meta: {
+        "x-codex-turn-metadata": {
+          thread_id: ownerThread,
+          turn_id: "fixture-completion-turn",
+          thread_source: threadSource,
+        },
+      },
     });
     assertNoError(completed);
     assert.equal(
       completed.result.structuredContent.scan.progress.status,
       "complete",
     );
+    if (threadSource === "security_scan") {
+      assert.deepEqual(
+        completed.result.structuredContent.scan.usage.completion,
+        {
+          threadId: ownerThread,
+          turnId: "fixture-completion-turn",
+          finalized: false,
+        },
+      );
+      const finalizedUsage = await headlessServer.callTool(10, {
+        name: "finalize_codex_security_scan_usage",
+        arguments: {
+          scanId: result.scanId,
+          threadId: ownerThread,
+          turnId: "fixture-completion-turn",
+          turnStatus: "completed",
+        },
+      });
+      assertNoError(finalizedUsage);
+      assert.deepEqual(
+        finalizedUsage.result.structuredContent.scan.usage,
+        completed.result.structuredContent.scan.usage,
+      );
+    } else {
+      assert.equal(
+        completed.result.structuredContent.scan.usage.completion,
+        undefined,
+      );
+    }
   } finally {
     await headlessServer.stop();
     await rm(headlessStateDir, { recursive: true, force: true });
@@ -1056,7 +1093,11 @@ try {
   });
   assertNoError(initialized);
   assert.equal(initialized.result.serverInfo.name, "codex-security");
-  assert.equal(initialized.result.serverInfo.title, "Codex Security Local");
+  assert.equal(initialized.result.serverInfo.title, "Codex Security");
+  assert.equal(
+    initialized.result.serverInfo.version,
+    (await readJson(mcpAppRoot, "package.json")).version,
+  );
   assert.equal(initialized.result.capabilities.resources, undefined);
   assert.deepEqual(
     initialized.result.capabilities.experimental["codex/sandbox-state-meta"],
@@ -1452,6 +1493,7 @@ try {
   ])
     await assertWorkspaceWorksWithoutUiCapability(scope);
   await assertHeadlessStandardScanWorksWithoutUiCapability();
+  await assertHeadlessStandardScanWorksWithoutUiCapability("security_scan");
   await assertDeepScanPersistsRetryableWorkerStartupError();
   await assertUserInputFailureLogging();
   if (process.platform !== "win32") {
@@ -1714,6 +1756,7 @@ try {
   );
   const progress = findTool("update_codex_security_scan_progress");
   const complete = findTool("complete_codex_security_scan");
+  const finalizeUsage = findTool("finalize_codex_security_scan_usage");
   const fail = findTool("fail_codex_security_scan");
   const setFindingTriage = findTool("set_codex_security_finding_triage");
   const requestFindingRemediation = findTool(
@@ -1774,16 +1817,6 @@ try {
   assert.equal(
     progress.inputSchema.properties.phaseItemsTotal.description,
     "Expected authoritative coverage, receipts, or artifacts for the current phase. Increase it before newly discovered work begins.",
-  );
-  assert.deepEqual(
-    progress.inputSchema.properties.preflightChecks.items.properties.severity
-      .enum,
-    ["block", "warn", "suggest"],
-  );
-  assert.deepEqual(
-    progress.inputSchema.properties.preflightChecks.items.properties.status
-      .enum,
-    ["pass", "fail", "unknown"],
   );
   assert.equal(
     progress.inputSchema.properties.deepReviewPass.description,
@@ -1846,8 +1879,8 @@ try {
     "open",
     "closed",
   ]);
-  assert.equal(launcher.title, "Open Codex Security Local");
-  assert.equal(start.title, "Start Codex Security Local Scan");
+  assert.equal(launcher.title, "Open Codex Security");
+  assert.equal(start.title, "Start Codex Security Scan");
   assert.deepEqual(launcher.inputSchema.properties.mode.enum, [
     "diff",
     "standard",
@@ -1912,6 +1945,7 @@ try {
   assert.deepEqual(attachHandoff._meta.ui.visibility, ["app"]);
   assert.deepEqual(progress._meta.ui.visibility, ["model"]);
   assert.deepEqual(complete._meta.ui.visibility, ["model"]);
+  assert.deepEqual(finalizeUsage._meta.ui.visibility, ["app"]);
   assert.deepEqual(fail._meta.ui.visibility, ["model"]);
   for (const tool of [
     launcher,
@@ -2611,104 +2645,6 @@ try {
     urlContextUpdate,
   );
 
-  const conflictingPreflightCounts = await testServer.callTool(90161, {
-    name: "update_codex_security_scan_progress",
-    arguments: {
-      scanId,
-      handoffClaimToken,
-      phaseItemsTotal: 1,
-      preflightChecks: [
-        {
-          capability: "delegated_workers",
-          reason: "Delegated workers are available.",
-          severity: "warn",
-          status: "pass",
-        },
-      ],
-    },
-  });
-  assert.equal(conflictingPreflightCounts.result.isError, true);
-  assert.match(
-    conflictingPreflightCounts.result.content[0].text,
-    /preflightChecks derives/,
-  );
-
-  const successfulPreflightChecks = [
-    {
-      capability: "delegated_workers",
-      reason: "Delegated workers are available.",
-      severity: "warn",
-      status: "pass",
-    },
-    {
-      capability: "goal_tools",
-      reason: "Goal tools help long scans preserve completion criteria.",
-      severity: "suggest",
-      status: "pass",
-    },
-    {
-      capability: "goals_enabled",
-      reason: "Goals are enabled.",
-      severity: "suggest",
-      status: "pass",
-    },
-  ];
-  const incompletePreflightProgress = await testServer.callTool(90162, {
-    name: "update_codex_security_scan_progress",
-    arguments: {
-      scanId,
-      handoffClaimToken,
-      preflightChecks: [
-        {
-          capability: "usable_worker_slots_6",
-          reason: "The runtime did not report worker capacity.",
-          severity: "block",
-          status: "unknown",
-        },
-        ...successfulPreflightChecks,
-      ],
-    },
-  });
-  assertNoError(incompletePreflightProgress);
-  assert.equal(
-    incompletePreflightProgress.result.structuredContent.scan.progress
-      .preflightIssues[0].status,
-    "unknown",
-  );
-  assert.deepEqual(
-    incompletePreflightProgress.result.structuredContent.scan.progress
-      .preflightProgress,
-    { completed: 3, total: 4 },
-  );
-
-  const blockedPreflightProgress = await testServer.callTool(90163, {
-    name: "update_codex_security_scan_progress",
-    arguments: {
-      scanId,
-      handoffClaimToken,
-      preflightChecks: [
-        {
-          capability: "usable_worker_slots_6",
-          reason: "Only three usable worker slots are available.",
-          severity: "block",
-          status: "fail",
-        },
-        ...successfulPreflightChecks,
-      ],
-    },
-  });
-  assertNoError(blockedPreflightProgress);
-  assert.equal(
-    blockedPreflightProgress.result.structuredContent.scan.progress
-      .preflightIssues[0].capability,
-    "usable_worker_slots_6",
-  );
-  assert.deepEqual(
-    blockedPreflightProgress.result.structuredContent.scan.progress
-      .preflightProgress,
-    { completed: 4, total: 4 },
-  );
-
   const readyPreflightProgress = await testServer.callTool(90164, {
     name: "update_codex_security_scan_progress",
     _meta: {
@@ -2721,15 +2657,9 @@ try {
     arguments: {
       scanId,
       handoffClaimToken,
-      preflightChecks: [
-        {
-          capability: "usable_worker_slots_6",
-          reason: "The scan will continue with reduced parallelism.",
-          severity: "warn",
-          status: "fail",
-        },
-        ...successfulPreflightChecks,
-      ],
+      phaseItemsTotal: 4,
+      phaseItemsCompleted: 4,
+      phaseProgressUnit: "checks",
     },
   });
   assertNoError(readyPreflightProgress);
@@ -2740,11 +2670,6 @@ try {
   assert.equal(
     readyPreflightProgress.result.structuredContent.scan.reasoningEffort,
     "low",
-  );
-  assert.equal(
-    readyPreflightProgress.result.structuredContent.scan.progress
-      .preflightIssues[0].severity,
-    "warn",
   );
   assert.deepEqual(
     readyPreflightProgress.result.structuredContent.scan.progress
@@ -2799,11 +2724,6 @@ try {
       total: 4,
       unit: "candidate_findings",
     },
-  );
-  assert.equal(
-    updated.result.structuredContent.scan.progress.preflightIssues[0]
-      .capability,
-    "usable_worker_slots_6",
   );
   assert.deepEqual(
     updated.result.structuredContent.scan.progress.preflightProgress,
@@ -3573,7 +3493,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
     },
   });
   assertNoError(rotatedProgress);
-  const failureMessage = "--failure\nline";
+  const failureMessage = `--failure\n${"diagnostic ".repeat(500)}final cause`;
   const rotatedFailure = await testServer.callTool(2039, {
     name: "fail_codex_security_scan",
     arguments: {

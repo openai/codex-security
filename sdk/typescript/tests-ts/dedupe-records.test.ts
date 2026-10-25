@@ -1,4 +1,5 @@
-import { expect, test, mock } from "bun:test";
+import { expect, test, mock, onTestFinished, spyOn } from "bun:test";
+import * as records from "../src/deduplication/records.js";
 import Ajv2020 from "ajv/dist/2020.js";
 import { DeduplicationReviewError } from "../src/errors.js";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
@@ -666,6 +667,12 @@ test("disconnect before run and a broken output pipe terminate cleanly", async (
   input.destroy();
 });
 
+const emptyRecords = {
+  version: 1,
+  observations: [],
+  candidateRelationships: [],
+};
+
 test("a disconnect while flushing the final result does not send a second response", async () => {
   const inputStream = new PassThrough();
   const messages: Message[] = [];
@@ -677,16 +684,7 @@ test("a disconnect while flushing the final result does not send a second respon
     },
   });
   const done = runRecordsProtocol(inputStream, output);
-  inputStream.write(
-    `${JSON.stringify({
-      ...run,
-      params: {
-        version: 1,
-        observations: [],
-        candidateRelationships: [],
-      },
-    })}\n`,
-  );
+  inputStream.write(`${JSON.stringify({ ...run, params: emptyRecords })}\n`);
   expect(await done).toBe(0);
   expect(messages).toMatchObject([
     { id: "run-1", result: { status: "completed" } },
@@ -694,56 +692,77 @@ test("a disconnect while flushing the final result does not send a second respon
   expect(messages).toHaveLength(1);
 });
 
-test.each(["result", "error"] as const)(
-  "cancellation stops a blocked terminal %s without sending another response",
-  async (terminal) => {
-    for (const notification of [false, true]) {
+const completed = { result: { status: "completed" } };
+for (const trigger of ["signal", "notification"]) {
+  test.serial.each([
+    ["review request", run.params, { method: "review.run" }],
+    ["terminal result", emptyRecords, completed],
+    ["terminal result flushed after cancel", emptyRecords, completed],
+    ["terminal error", {}, { error: expect.anything() }],
+  ] as const)(
+    `${trigger} stops a blocked %s`,
+    async (stage, params, expected) => {
       const inputStream = new PassThrough();
-      const messages: Message[] = [];
-      let release!: () => void;
-      const writing = Promise.withResolvers<void>();
+      const writing = Promise.withResolvers<() => void>();
       const output = new Writable({
-        write(chunk, _encoding, callback) {
-          messages.push(JSON.parse(chunk.toString()));
-          release = callback;
-          writing.resolve();
-        },
+        write: (_chunk, _encoding, flush) => writing.resolve(flush),
       });
-      const controller = new AbortController();
-      const done = runRecordsProtocol(inputStream, output, controller.signal);
-      try {
-        inputStream.write(
-          `${JSON.stringify({
-            ...run,
-            params:
-              terminal === "error"
-                ? {}
-                : {
-                    version: 1,
-                    observations: [],
-                    candidateRelationships: [],
+      const writes = spyOn(output, "write");
+      let pendingReview: Promise<unknown> | undefined;
+      const dedupe = records.deduplicateRecords;
+      const operation =
+        stage === "review request"
+          ? spyOn(records, "deduplicateRecords").mockImplementationOnce(
+              (input, options) =>
+                dedupe(input, {
+                  ...options,
+                  reviewRunner: {
+                    run: (...args) =>
+                      (pendingReview = options.reviewRunner.run(...args)),
                   },
-          })}\n`,
-        );
-        await writing.promise;
-        if (notification)
-          inputStream.write(
-            `${JSON.stringify({ jsonrpc: "2.0", method: "cancel", params: { id: run.id } })}\n`,
-          );
-        else controller.abort("SIGTERM");
-        expect(output.destroyed).toBe(true);
-        expect(await done).toBe(2);
-        expect(messages).toHaveLength(1);
-        expect(messages[0]).toHaveProperty(terminal);
-      } finally {
-        release();
-        await done;
-        inputStream.destroy();
+                }),
+            )
+          : undefined;
+      const controller = new AbortController();
+      let finished = false;
+      onTestFinished(() => {
+        finished = true;
+        operation?.mockRestore();
+        writes.mockRestore();
         output.destroy();
+        inputStream.destroy();
+      });
+      const done = runRecordsProtocol(inputStream, output, controller.signal);
+      inputStream.write(`${JSON.stringify({ ...run, params })}\n`);
+      const flush = await writing.promise;
+      const signal = operation?.mock.calls[0]?.[1].signal;
+      const recordsResult = operation?.mock.results[0]?.value;
+      if (trigger === "signal") controller.abort("SIGTERM");
+      else
+        inputStream.write(
+          `${JSON.stringify({ jsonrpc: "2.0", method: "cancel", params: { id: run.id } })}\n`,
+        );
+      if (stage === "terminal result flushed after cancel") flush();
+      const code = await done;
+      const settled = signal?.aborted
+        ? await Promise.allSettled([pendingReview, recordsResult])
+        : [];
+      // Destroying the blocked stream can resume a test after it timed out.
+      if (finished) return;
+      expect(code).toBe(2);
+      expect(output.destroyed).toBe(true);
+      expect(writes).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(writes.mock.calls[0]![0])).toMatchObject(expected);
+      if (operation) expect(signal?.aborted).toBe(true);
+      for (const result of settled) {
+        expect(result).toEqual({
+          status: "rejected",
+          reason: new Error("Deduplication canceled."),
+        });
       }
-    }
-  },
-);
+    },
+  );
+}
 
 test.each(["screening", "pair-review"] as const)(
   "%s refusal stops further reviews and leaves all records unresolved",
@@ -780,3 +799,59 @@ test.each(["screening", "pair-review"] as const)(
     ).toBe(true);
   },
 );
+
+test("records isolates each host review's finding schema", async () => {
+  const data: DeduplicateRecordsInput = {
+    version: 1,
+    observations: [record("a", "same"), record("b", "same")],
+    candidateRelationships: [
+      { observationId: "a", candidateObservationIds: ["b"] },
+    ],
+  };
+  const requests: DeduplicationReviewRequest[] = [];
+  type FindingSchema = {
+    properties: { title: Record<string, unknown> };
+  };
+  let pristine: FindingSchema | undefined;
+  let annotated: Record<string, unknown> | undefined;
+  let previous: PropertyDescriptor | undefined;
+  try {
+    for (let invocation = 0; invocation < 2; invocation++) {
+      const result = await deduplicateRecords(data, {
+        reviewRunner: {
+          async run(review) {
+            const schema = review.findingSchema as FindingSchema;
+            pristine ??= structuredClone(schema);
+            expect(schema).toEqual(pristine);
+            requests.push(review);
+            if (annotated === undefined) {
+              annotated = schema.properties.title;
+              previous = Object.getOwnPropertyDescriptor(
+                annotated,
+                "description",
+              );
+              annotated["description"] = "Host-local adapter annotation.";
+            }
+            return answer(review);
+          },
+        },
+      });
+      expect(result.status).toBe("completed");
+      expect(
+        result.groups.map(({ observationIds }) => [...observationIds].sort()),
+      ).toEqual([["a", "b"]]);
+      expect(result.unresolved).toEqual([]);
+    }
+    expect(requests.map(({ stage }) => stage)).toEqual([
+      "screening",
+      "pair-review",
+      "screening",
+      "pair-review",
+    ]);
+  } finally {
+    if (annotated !== undefined) {
+      if (previous) Object.defineProperty(annotated, "description", previous);
+      else delete annotated["description"];
+    }
+  }
+});

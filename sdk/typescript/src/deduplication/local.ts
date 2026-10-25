@@ -1,5 +1,5 @@
 import { environmentEntry } from "../auth.js";
-import { gitProtectionRoots } from "../targets.js";
+import { abortable, gitProtectionRoots } from "../targets.js";
 import type { Finding } from "../models.js";
 import type {
   FindingNeighborhood,
@@ -101,7 +101,10 @@ export class LocalDeduplication {
         offset,
         offset + EMBEDDING_BATCH_SIZE,
       );
-      const embeddings = await this.embedding.embedder.embed(batch);
+      const embeddings = await abortable(() => {
+        this.signal?.throwIfAborted();
+        return this.embedding.embedder.embed(batch);
+      }, this.signal);
       this.signal?.throwIfAborted();
       if (embeddings.length !== batch.length)
         throw new CodexSecurityError(

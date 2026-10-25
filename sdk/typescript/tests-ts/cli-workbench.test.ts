@@ -6,6 +6,7 @@ import { describe, expect, test, mock, spyOn } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
 import { DiffTarget, type ScanOptions } from "../src/index.js";
 import { main } from "../src/cli.js";
+import { normalizeTarget } from "../src/targets.js";
 import {
   matchScanFindings,
   type ScanComparisonInput,
@@ -1565,6 +1566,7 @@ describe("CLI workbench", () => {
 
   test("reruns the latest completed scan by default", async () => {
     let parentScanId: unknown;
+    let maxTimeMinutes: unknown;
 
     expect(
       await runCapturedCli(
@@ -1573,6 +1575,7 @@ describe("CLI workbench", () => {
         dependencies({
           onTurn: (_repository, options) => {
             parentScanId = options.parentScanId;
+            maxTimeMinutes = options.maxTimeMinutes;
           },
           onWorkbench: (args): JsonObject =>
             args[0] === "list-scans"
@@ -1583,6 +1586,7 @@ describe("CLI workbench", () => {
                     repository: "/current/repository",
                     target: { kind: "repository", paths: [] },
                     mode: "standard",
+                    maxTimeMinutes: 15,
                     config: {},
                   },
                 },
@@ -1590,6 +1594,7 @@ describe("CLI workbench", () => {
       ),
     ).toBe(0);
     expect(parentScanId).toBe("latest-scan");
+    expect(maxTimeMinutes).toBe(15);
   });
 
   test("reruns a scan prefix with its resolved parent UUID", async () => {
@@ -1633,6 +1638,116 @@ describe("CLI workbench", () => {
       expect(onRun).not.toHaveBeenCalled();
     },
   );
+
+  test.each([
+    ["standard", "rerun"],
+    ["deep", "rerun"],
+    ["deep", "resume"],
+  ] as const)(
+    "%s %s preserves literal paths from a saved scope",
+    async (mode, command) => {
+      const root = await temporaryDirectory("saved-literal-paths-");
+      try {
+        const repository = join(root, "repository");
+        const outside = join(root, "outside");
+        await mkdir(join(repository, "~"), { recursive: true });
+        await mkdir(join(repository, "nested"));
+        await mkdir(outside);
+        const files = ["~/source.ts", "~name", "nested/~", "with space"];
+        for (const file of files)
+          await writeFile(join(repository, file), "synthetic source\n");
+        const paths = ["~", ...files, "."];
+        const target = await normalizeTarget(
+          repository,
+          paths.map((path) => `./${path}`),
+        );
+        expect(target).toEqual({ kind: "paths", paths });
+        const recipe = {
+          repository,
+          target: { ...target, paths: [...target.paths] },
+          mode,
+          config: {},
+        };
+        const originalRecipe = JSON.stringify(recipe);
+        const onTurn =
+          mock<(repository: string, options: ScanOptions) => void>();
+        const { runCli, stderr } = createCliTest(main);
+        expect(
+          await runCli(
+            ["scans", command, "saved-literal", "--json"],
+            dependencies({
+              currentDirectory: outside,
+              onTurn,
+              onWorkbench: () => ({
+                scanId: "saved-literal",
+                scanDir: join(root, "scan"),
+                recipe,
+              }),
+            }),
+          ),
+          stderr.text(),
+        ).toBe(0);
+        expect(onTurn).toHaveBeenCalledTimes(1);
+        expect(onTurn.mock.lastCall![0]).toBe(repository);
+        const replayTarget = onTurn.mock.lastCall![1].target!;
+        // Check the arguments before normalization can consult the real home.
+        expect(replayTarget).toEqual([
+          "./~",
+          "./~/source.ts",
+          "~name",
+          "nested/~",
+          "with space",
+          ".",
+        ]);
+        expect(await normalizeTarget(repository, replayTarget)).toEqual(target);
+        expect(JSON.stringify(recipe)).toBe(originalRecipe);
+
+        await rm(join(repository, "~", "source.ts"));
+        await expect(normalizeTarget(repository, replayTarget)).rejects.toThrow(
+          "Path target does not exist: ./~/source.ts",
+        );
+        await rm(join(repository, "~"), { recursive: true });
+        await symlink(
+          outside,
+          join(repository, "~"),
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        await expect(normalizeTarget(repository, replayTarget)).rejects.toThrow(
+          "Path target is outside the repository: ./~",
+        );
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("replays saved backslash names without home expansion", async () => {
+    const onTurn = mock<(repository: string, options: ScanOptions) => void>();
+    expect(
+      await runCapturedCli(
+        main,
+        ["scans", "rerun", "scan-original"],
+        dependencies({
+          onTurn,
+          onWorkbench: () =>
+            savedRecipe({}, { kind: "paths", paths: ["~\\source.ts"] }),
+        }),
+      ),
+    ).toBe(0);
+    expect(onTurn.mock.lastCall![1].target).toEqual(["./~\\source.ts"]);
+  });
+
+  test("preserves home syntax for fresh scan path arguments", async () => {
+    const onTurn = mock<(repository: string, options: ScanOptions) => void>();
+    expect(
+      await runCapturedCli(
+        main,
+        ["scan", "/current/repository", "--path", "~", "--path", "~/source.ts"],
+        dependencies({ onTurn }),
+      ),
+    ).toBe(0);
+    expect(onTurn.mock.lastCall![1].target).toEqual(["~", "~/source.ts"]);
+  });
 
   test("reruns canonical recipes with exact config, policy, plugin, and lineage", async () => {
     const onConfig = mock<(config: CodexSecurityConfig) => void>();

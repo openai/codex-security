@@ -1,4 +1,4 @@
-import { z } from "incur";
+import { z } from "zod";
 import { requireFinding } from "./finding-schema.js";
 import type { Finding } from "../models.js";
 import type { CodexReviewRunner } from "./codex-review.js";

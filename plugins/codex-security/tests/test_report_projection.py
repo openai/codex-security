@@ -62,6 +62,19 @@ def test_projection_normalizes_structured_fields() -> None:
     assert "Text: ## Injected remediation - unsafe instruction" in markdown
 
 
+def test_projection_normalizes_tilde_fences_and_parenthesized_lists() -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    finding["summary"] = "~~~\ncode fence\n~~~"
+    finding["remediation"] = "1) Validate the record length."
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert "\n~~~" not in markdown
+    assert "Text: ~~~ code fence ~~~" in markdown
+    assert "Text: 1) Validate the record length." in markdown
+
+
 @pytest.mark.parametrize("linked_writeup", [False, True], ids=["inline", "linked"])
 def test_projection_retains_distinct_source_fixes(linked_writeup: bool) -> None:
     manifest, findings, coverage = canonical_documents()
@@ -678,7 +691,7 @@ def test_projection_escapes_markdown_link_syntax_in_finding_title() -> None:
     assert "[Parser ](https://example.com) [boundary](" not in markdown
 
 
-def test_projection_normalizes_target_and_scope_paths() -> None:
+def test_projection_normalizes_target_and_quotes_scope_control_characters() -> None:
     manifest, findings, coverage = canonical_documents()
     manifest["scan"]["target"]["displayName"] = "repo\n## Injected target heading"
     manifest["scan"]["scope"]["includePaths"] = ["src\n## Injected path heading"]
@@ -689,7 +702,55 @@ def test_projection_normalizes_target_and_scope_paths() -> None:
     assert "\n## Injected target heading" not in markdown
     assert "\n## Injected path heading" not in markdown
     assert "# Security Review: repo ## Injected target heading" in markdown
-    assert "- Included paths: src ## Injected path heading" in markdown
+    assert '- Included paths: `"src\\n## Injected path heading"`' in markdown
+
+
+@pytest.mark.parametrize(
+    ("path", "marker"),
+    [
+        (" ", "`"),
+        ("  ", "`"),
+        (" service ", "`"),
+        ("a,b.ts", "`"),
+        ("a  b", "`"),
+        (" a`b ", "``"),
+        ("a``b,c", "```"),
+    ],
+)
+def test_projection_preserves_ambiguous_literal_paths(path: str, marker: str) -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["includePaths"] = [path]
+    coverage["excludePaths"] = [path]
+    findings["findings"][0]["locations"] = [{"path": path, "startLine": 1}]
+    findings["findings"][0]["codeEvidence"] = [
+        {"id": "source", "label": "Source", "path": path, "startLine": 1, "code": "source()"}
+    ]
+    findings["findings"][0]["rootCause"] = {"evidenceRefs": ["source"]}
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert f'- Included paths: {marker}"{path}"{marker}' in markdown
+    assert f'- Excluded paths: {marker}"{path}"{marker}' in markdown
+    assert f'| Affected lines | {marker}"{path}"{marker}:1 |' in markdown
+    assert f'{marker}"{path}":1{marker}' in markdown
+
+
+def test_projection_distinguishes_repeated_spaces_from_ordinary_path_spacing() -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["includePaths"] = ["a  b", "a b", " ", "  "]
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert '- Included paths: `"a  b"`, a b, `" "`, `"  "`' in markdown
+
+
+def test_projection_keeps_printable_non_ascii_in_quoted_paths() -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["includePaths"] = ["docs/Résumé, final.md", "docs/a\u202eb, c.md"]
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert '- Included paths: `"docs/Résumé, final.md"`, `"docs/a\\u202eb, c.md"`' in markdown
 
 
 def test_projection_includes_exact_target_identity() -> None:
@@ -742,6 +803,90 @@ def test_projection_escapes_raw_html_in_markdown() -> None:
     assert r'\<img src="x" onerror="alert(1)"\>' in markdown_text
 
 
+def test_projection_keeps_html_entities_literal_in_markdown() -> None:
+    manifest, findings, coverage = canonical_documents()
+    findings["findings"][0]["summary"] = "Sanitizer decodes &#x3C;script&#x3E; and &amp;lt;"
+    coverage["includePaths"] = ["docs/&lt;b&gt;.md"]
+
+    markdown_text = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert r"Sanitizer decodes \&#x3C;script\&#x3E; and \&amp;lt;" in markdown_text
+    assert "- Included paths: `docs/&lt;b&gt;.md`" in markdown_text
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/?first=1&second=2",
+        "http://example.com/?payload=&#x3C;tag&#x3E;&mode=1",
+        "www.example.com/?payload=&lt;tag&gt;&mode=1",
+        "WWW.example.com/?first=1&second=2",
+        "WwW.example.com/?first=1&second=2",
+        "ftp://example.com/?first=1&second=2",
+        "https://example.com/`a`?first=1&second=2",
+        "www.example.com/`a`?first=1&second=2",
+        "example.com/?first=1&second=2",
+        "//example.com/?first=1&second=2",
+        '"example.com/?first=1&second=2"',
+        "éxample.com/?first=1&second=2",
+        "例子.com/?first=1&second=2",
+        "example.com/?payload=&lt;tag&gt;&mode=1",
+        "example.com/?first=1&word;=2",
+        "//example.com/?first=1&word;=2",
+        "user&tag@example.com",
+        "mailto:user&tag@example.com",
+        "//localhost:8080/?first=1&word;=2",
+        "{//example.com/?first=1&word;=2}",
+        "?example.com/?first=1&word;=2",
+        "mailto:user&tag@localhost",
+    ],
+)
+def test_projection_preserves_bare_url_ampersands_in_prose_and_tables(url: str) -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    finding["summary"] = f"R&D decoded &#60;tag&#62;. Reproduce with {url} then compare &amp;."
+    finding["confidence"]["rationale"] = f"Request: {url}"
+
+    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert f"Reproduce with {url} then compare \\&amp;." in markdown
+    assert f"| Confidence rationale | Request: {url} |" in markdown
+    assert r"R&D decoded \&#60;tag\&#62;." in markdown
+
+
+def test_projection_preserves_inline_code_and_existing_url_escapes() -> None:
+    manifest, findings, coverage = canonical_documents()
+    findings["findings"][0]["summary"] = (
+        "Compare `&amp;` and `https://example.com/?a=1&b=2 &amp;` with "
+        "https://example.com/a_b?first=1&second=2 and &amp;. "
+        "Keep https://example.com/`a _b_` as written."
+    )
+    coverage["includePaths"] = [
+        "docs/www.example.com/&lt;tag&gt;.md",
+        "docs/`&lt;tag&gt;`.md",
+        "dir&lt;tag&gt;.example/file.md",
+        "dir.example/file&lt;tag&gt;.md",
+        "www.example.com/file&amp;.md",
+        "`&amp;`",
+        "`&amp;.md",
+        "file&amp;`",
+    ]
+
+    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert "Compare `&amp;` and `https://example.com/?a=1&b=2 &amp;`" in markdown
+    assert r"https://example.com/a\_b?first=1&second=2 and \&amp;." in markdown
+    assert "Keep https://example.com/`a _b_` as written." in markdown
+    assert "- Included paths: `docs/www.example.com/&lt;tag&gt;.md`" in markdown
+    assert "``docs/`&lt;tag&gt;`.md``" in markdown
+    assert "`dir&lt;tag&gt;.example/file.md`" in markdown
+    assert "`dir.example/file&lt;tag&gt;.md`" in markdown
+    assert "`www.example.com/file&amp;.md`" in markdown
+    assert "`` `&amp;` ``" in markdown
+    assert "`` `&amp;.md ``" in markdown
+    assert "`` file&amp;` ``" in markdown
+
+
 def test_projection_omits_informational_findings() -> None:
     manifest, findings, coverage = canonical_documents()
     findings["findings"][0]["severity"]["level"] = "informational"
@@ -790,7 +935,8 @@ def test_projection_preserves_follow_up_without_classifying_its_reason(reason: s
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
     assert "No findings were reported." in markdown
-    assert "## Open Questions And Follow Up" in markdown
+    assert "## Deferred Requested Work" in markdown
+    assert "## Open Questions And Follow Up" not in markdown
     assert reason in markdown
     assert "Review deferred unit candidate-parser" in markdown
     assert "Paths: src/parser.py." in markdown
@@ -805,7 +951,7 @@ def test_finding_summary_link_uses_stable_markdown_anchor() -> None:
     assert '<a id="finding-1"></a>' in markdown
 
 
-def test_projection_keeps_deferred_follow_up_with_open_questions() -> None:
+def test_projection_separates_deferred_work_from_open_questions() -> None:
     manifest, findings, coverage = canonical_documents()
 
     coverage["openQuestions"] = [{"question": "Is production authentication enabled?"}]
@@ -825,6 +971,12 @@ def test_projection_keeps_deferred_follow_up_with_open_questions() -> None:
     assert "Review deferred unit parser-review" in markdown
     assert "Paths: src/parser.py." in markdown
     assert "Surfaces: parser-surface." in markdown
+    deferred_section, optional_section = markdown.split("## Open Questions And Follow Up")
+    assert "## Deferred Requested Work" in deferred_section
+    assert "Parser review incomplete." in deferred_section
+    assert "Is production authentication enabled?" not in deferred_section
+    assert "Is production authentication enabled?" in optional_section
+    assert "Parser review incomplete." not in optional_section
 
 
 def test_projection_includes_surface_evidence_receipts() -> None:
@@ -871,4 +1023,35 @@ def test_projection_preserves_identifier_text_and_code_path_spelling(
     ]
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
     assert "\\_\\_proto\\_\\_ pollution" in markdown
+    assert rendered_location in markdown
+
+
+@pytest.mark.parametrize(
+    ("bounds", "rendered_location"),
+    [
+        ({"startLine": 37, "endLine": None}, "`src/evidence.py:37`"),
+        ({"startLine": 48, "endLine": 47}, "`src/evidence.py:48`"),
+        ({"startLine": 59, "endLine": "60"}, "`src/evidence.py:59`"),
+        ({"startLine": 37, "endLine": True}, "`src/evidence.py:37`"),
+        ({"startLine": True, "endLine": 4}, "`src/evidence.py`"),
+        ({"startLine": 0}, "`src/evidence.py`"),
+        ({"startLine": -1}, "`src/evidence.py`"),
+    ],
+)
+def test_projection_normalizes_invalid_legacy_code_evidence_bounds(
+    bounds: dict[str, object], rendered_location: str
+) -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    finding["validation"] = {"evidenceRefs": ["source"]}
+    finding["code_evidence"] = [
+        {
+            "id": "source",
+            "label": "Source control",
+            "path": "src/evidence.py",
+            **bounds,
+            "code": "handle(request)",
+        }
+    ]
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
     assert rendered_location in markdown

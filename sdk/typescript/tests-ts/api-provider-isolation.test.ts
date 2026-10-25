@@ -1,6 +1,5 @@
-import { codexFactory } from "./support/api-events.js";
+import { codexFactory, completedEvents } from "./support/api-events.js";
 import { afterEach, expect, mock, test } from "bun:test";
-import { build } from "esbuild";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import type { JsonObject } from "../src/config.js";
 import { spawn } from "node:child_process";
@@ -9,13 +8,24 @@ import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
-import { fileURLToPath, pathToFileURL } from "node:url";
 import { executablePathForSpawn, resolveCodexCommand } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { profileConfigOverrides } from "../../../plugins/codex-security/scripts/codex_profile.mjs";
 import { TestClient } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+
+const workerExecutorUrl = new URL(
+  "../../../plugins/codex-security/mcp-app/src/deep-scan/executor.ts",
+  import.meta.url,
+).href;
+const { workerRuntimeSettings } = (await import(workerExecutorUrl)) as {
+  workerRuntimeSettings: (environment: Record<string, string>) => Promise<{
+    config: JsonObject;
+    nativeProfile?: string;
+    environment?: Record<string, string>;
+  }>;
+};
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
@@ -141,46 +151,107 @@ test("native worker override tables retain inherited features and MCP servers", 
   expect(await readFile(join(home, "config.toml"), "utf8")).toBe(original);
 });
 
-async function bundleWorkerSettings(root: string) {
-  const executor = fileURLToPath(
-    new URL(
-      "../../../plugins/codex-security/mcp-app/src/deep-scan/executor.ts",
-      import.meta.url,
-    ),
-  );
-  const bundled = await build({
-    bundle: true,
-    format: "esm",
-    platform: "node",
-    write: false,
-    define: { "import.meta.url": JSON.stringify(pathToFileURL(executor).href) },
-    stdin: {
-      contents:
-        (await readFile(executor, "utf8")) +
-        "\nexport { workerRuntimeSettings };",
-      loader: "ts",
-      resolveDir: dirname(executor),
-      sourcefile: executor,
+test("native patch overrides disable repository MCP while preserving host MCP", async () => {
+  const root = await temporaryDirectory();
+  const home = join(root, "home");
+  const markerRoot = join(root, "Repository.V1 With Spaces Ü");
+  const repository = join(markerRoot, "packages", "app");
+  const projectTrustKey =
+    process.platform === "win32"
+      ? repository.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
+      : repository;
+  await mkdir(home, { mode: 0o700 });
+  await mkdir(join(repository, ".codex"), { recursive: true });
+  await writeFile(join(markerRoot, "package.json"), "{}\n");
+  const hostConfig = stringifyToml({
+    project_root_markers: ["package.json"],
+    projects: {
+      [markerRoot]: { trust_level: "trusted" },
+      [projectTrustKey]: { trust_level: "trusted" },
+    },
+    mcp_servers: { host: { command: "node", args: ["host-server.js"] } },
+  });
+  const repositoryConfig = stringifyToml({
+    mcp_servers: {
+      repository: { command: "node", args: ["repository-server.js"] },
     },
   });
-  const bundledPath = join(root, "worker-settings.mjs");
-  await writeFile(bundledPath, bundled.outputFiles[0]!.contents);
-  return bundledPath;
-}
+  await writeFile(join(home, "config.toml"), hostConfig);
+  await writeFile(join(repository, ".codex", "config.toml"), repositoryConfig);
+  const environment = { CODEX_HOME: home };
+  const { config: trusted } = await nativeRequest(
+    environment,
+    repository,
+    ["--cd", repository],
+    "config/read",
+    { cwd: repository, includeLayers: false },
+  );
+  expect(trusted.mcp_servers).toHaveProperty("repository");
 
-async function loadWorkerSettings(root: string) {
-  const { workerRuntimeSettings } = (await import(
-    pathToFileURL(await bundleWorkerSettings(root)).href
-  )) as {
-    workerRuntimeSettings: (environment: Record<string, string>) => Promise<{
-      config: JsonObject;
-      nativeProfile?: string;
-      environment?: Record<string, string>;
-    }>;
-  };
-
-  return workerRuntimeSettings;
-}
+  await using client = new TestClient(
+    {},
+    {
+      prepareRuntime: async () => preparedRuntime(home),
+      resolvePluginPython: async () => "/managed/python",
+      createCodex: async (options) => {
+        // Exercise CLI parsing: parsing these arguments as a TOML document
+        // incorrectly treats quoted path components as literal keys.
+        const { config } = await nativeRequest(
+          environment,
+          repository,
+          [
+            "--cd",
+            repository,
+            ...[
+              ...profileConfigOverrides(options.config ?? {}),
+              ...(options.configOverrides ?? []),
+            ].flatMap((value) => ["--config", value]),
+          ],
+          "config/read",
+          { cwd: repository, includeLayers: false },
+        );
+        expect(config.mcp_servers).not.toHaveProperty("repository");
+        expect(config.projects[projectTrustKey]).toEqual({
+          trust_level: "untrusted",
+        });
+        expect(config.project_root_markers).toEqual([]);
+        expect(config.mcp_servers.host).toMatchObject({
+          command: "node",
+          args: ["host-server.js"],
+          enabled: true,
+        });
+        return codexFactory(async () => ({
+          events: completedEvents(
+            "patch-thread",
+            (async function* () {
+              yield {
+                type: "item.completed" as const,
+                item: {
+                  id: "result",
+                  type: "agent_message" as const,
+                  text: JSON.stringify({
+                    status: "no_change",
+                    changedFiles: [],
+                    verificationReport: "Synthetic patch result",
+                    reason: null,
+                  }),
+                },
+              };
+            })(),
+          ),
+        }))();
+      },
+    },
+  );
+  await client.patch({
+    repositoryPath: repository,
+    finding: "Synthetic finding",
+  });
+  expect(await readFile(join(home, "config.toml"), "utf8")).toBe(hostConfig);
+  expect(
+    await readFile(join(repository, ".codex", "config.toml"), "utf8"),
+  ).toBe(repositoryConfig);
+});
 
 test.each([
   "root",
@@ -199,7 +270,6 @@ test.each([
     await mkdir(repository);
     await mkdir(sourceHome, { mode: 0o700 });
     await mkdir(sharedHome, { recursive: true, mode: 0o700 });
-    const workerRuntimeSettings = await loadWorkerSettings(root);
 
     const ready = [
       Promise.withResolvers<void>(),
@@ -455,7 +525,6 @@ test.each([
     }
     expect(existsSync(sharedHome)).toBe(true);
   },
-  30_000,
 );
 
 test("workers preserve native provider inheritance without an explicit selection", async () => {
@@ -481,7 +550,6 @@ test("workers preserve native provider inheritance without an explicit selection
     CODEX_SECURITY_CONFIG_PATH: snapshot,
     CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: workerSnapshot,
   };
-  const workerRuntimeSettings = await loadWorkerSettings(root);
   for (const providers of [
     undefined,
     {
@@ -681,13 +749,12 @@ test.each(["root", "profile"])(
 async function createPluginProbe(root: string, report: string) {
   const plugin = join(root, "plugin");
   await cp(PLUGIN_ROOT, plugin, { recursive: true });
-  await bundleWorkerSettings(plugin);
   const probe = join(plugin, "environment-probe.mjs");
   await writeFile(
     probe,
     `import { writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import { workerRuntimeSettings } from "./worker-settings.mjs";
+import { workerRuntimeSettings } from ${JSON.stringify(workerExecutorUrl)};
 for await (const line of createInterface({ input: process.stdin })) {
   const request = JSON.parse(line);
   if (request.id === undefined) continue;
@@ -869,5 +936,4 @@ test.each([
       await client.close();
     }
   },
-  30_000,
 );

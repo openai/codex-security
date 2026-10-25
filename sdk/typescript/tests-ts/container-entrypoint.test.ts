@@ -17,19 +17,19 @@ const versionVerifier = dockerScript("verify-container-release-version.sh");
 async function runEntrypoint(
   args: readonly string[],
   overrides: Record<string, string> = {},
+  command = "printf '%s\\n' \"$@\"",
 ): Promise<SpawnSyncReturns<string>> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-container-entrypoint-")),
   );
 
   try {
-    await writeFile(
-      join(root, "codex-security"),
-      "#!/bin/sh\nprintf '%s\\n' \"$@\"\n",
-      { mode: 0o755 },
-    );
+    await writeFile(join(root, "codex-security"), `#!/bin/sh\n${command}\n`, {
+      mode: 0o755,
+    });
 
     return spawnSync("sh", [entrypoint, ...args], {
+      cwd: root,
       encoding: "utf8",
       env: {
         ...process.env,
@@ -232,6 +232,125 @@ describe("customer container entrypoint", () => {
     expect(result.stderr).toBe("");
     expect(result.stdout).toBe("--version\n");
   });
+
+  testPosix(
+    "appends authentication settings after existing Git configuration",
+    async () => {
+      for (const count of [0, 128, 129, 256]) {
+        const entries = Array.from({ length: count }, (_, index) => [
+          `fixture.setting${index}`,
+          `synthetic-value-${index}`,
+        ]);
+        const configuration = Object.fromEntries(
+          entries.flatMap(([key, value], index) => [
+            [`GIT_CONFIG_KEY_${index}`, key],
+            [`GIT_CONFIG_VALUE_${index}`, value],
+          ]),
+        );
+        const result = await runEntrypoint(
+          ["--version"],
+          {
+            GH_TOKEN: "synthetic-token",
+            CODEX_SECURITY_GIT_HOST: "git.example.test",
+            GIT_CONFIG_COUNT: String(count),
+            GIT_CONFIG_NOSYSTEM: "1",
+            GIT_CONFIG_GLOBAL: "/dev/null",
+            GIT_CONFIG_PARAMETERS: "",
+            ...configuration,
+          },
+          "printf '%s\\n' \"$GIT_CONFIG_COUNT\"\nexec git config --get-regexp '^(fixture|credential|url)\\.'",
+        );
+
+        expect(result.status).toBe(0);
+        expect(result.stderr).toBe("");
+        expect(result.stdout).toBe(
+          [
+            String(count + 2),
+            ...entries.map(([key, value]) => `${key} ${value}`),
+            "credential.https://git.example.test.helper /usr/local/bin/codex-security-git-credential",
+            "url.https://git.example.test/.insteadof git@git.example.test:",
+            "",
+          ].join("\n"),
+        );
+      }
+    },
+  );
+
+  testPosix(
+    "appends within Git's integer limit without wrapping existing indices",
+    async () => {
+      const result = await runEntrypoint(
+        [],
+        {
+          GITHUB_TOKEN: "synthetic-token",
+          CODEX_SECURITY_GIT_HOST: "git.example.test",
+          GIT_CONFIG_COUNT: "2147483645",
+          GIT_CONFIG_KEY_0: "fixture.original",
+          GIT_CONFIG_VALUE_0: "original-value",
+        },
+        'printf \'%s\\n\' "$GIT_CONFIG_COUNT" "$GIT_CONFIG_KEY_0" "$GIT_CONFIG_VALUE_0" "$GIT_CONFIG_KEY_2147483645" "$GIT_CONFIG_VALUE_2147483645" "$GIT_CONFIG_KEY_2147483646" "$GIT_CONFIG_VALUE_2147483646"',
+      );
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toBe(
+        [
+          "2147483647",
+          "fixture.original",
+          "original-value",
+          "credential.https://git.example.test.helper",
+          "/usr/local/bin/codex-security-git-credential",
+          "url.https://git.example.test/.insteadOf",
+          "git@git.example.test:",
+          "",
+        ].join("\n"),
+      );
+    },
+  );
+
+  testPosix(
+    "rejects invalid or overflowing Git counts before starting the CLI",
+    async () => {
+      for (const count of [
+        "-1",
+        "+1",
+        "01",
+        "08",
+        "1.5",
+        "1+1",
+        " 1",
+        "1 ",
+        "2147483646",
+        "2147483647",
+        "2147483648",
+        "18446744073709551616",
+      ]) {
+        const result = await runEntrypoint(["--version"], {
+          GH_TOKEN: "synthetic-token",
+          GIT_CONFIG_COUNT: count,
+        });
+
+        expect(result.status).toBe(2);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toContain("GIT_CONFIG_COUNT");
+      }
+    },
+  );
+
+  testPosix(
+    "rejects invalid credential hosts with a large Git count",
+    async () => {
+      const result = await runEntrypoint(["--version"], {
+        GH_TOKEN: "synthetic-token",
+        CODEX_SECURITY_GIT_HOST: "git.example.test/path",
+        GIT_CONFIG_COUNT: "129",
+      });
+
+      expect(result.status).toBe(2);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("must be a valid hostname");
+    },
+  );
 });
 
 describe("immutable customer container releases", () => {

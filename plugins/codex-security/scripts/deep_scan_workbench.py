@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import shutil
 import sqlite3
 import sys
 import uuid
-from contextlib import nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -20,6 +18,7 @@ import workbench_saved_results as saved_results
 from deep_scan_config import resolve_deep_scan_config
 from workbench.handoff import require_current_continuation
 from workbench.storage import create_private_directory
+from workbench_source_scopes import capture_source_scopes
 from workbench_target import directory_snapshot_regular_file_count
 from workbench_validation import optional_text, require_uuid, user_context_argument
 
@@ -34,7 +33,6 @@ DEEP_SCAN_TERMINAL_REASONS = ("saturated", "capped")
 DEEP_SCAN_WORKFLOW_VERSION = "deep-security-scan/v1"
 DEEP_SCAN_COORDINATOR_LEASE_SECONDS = 30
 DEEP_SCAN_LEGACY_COORDINATOR_GRACE_SECONDS = 120
-DEEP_SCAN_MAX_ERROR_LENGTH = 2400
 DEEP_SCAN_PUBLICATION_ERROR_SEPARATOR = "\nOriginal Deep Scan failure:\n"
 
 
@@ -144,16 +142,6 @@ def dependencies() -> Any:
     return _dependencies
 
 
-def _bounded_error_text(message: str, maximum: int) -> str:
-    if len(message) <= maximum:
-        return message
-    digest = hashlib.sha256(message.encode()).hexdigest()
-    suffix = f"\n...[truncated; sha256:{digest}]"
-    if len(suffix) >= maximum:
-        return message[:maximum]
-    return f"{message[: maximum - len(suffix)]}{suffix}"
-
-
 def deep_scan_error(run: sqlite3.Row) -> str | None:
     original = run["error_message"]
     publication = run["publication_error_message"]
@@ -161,15 +149,7 @@ def deep_scan_error(run: sqlite3.Row) -> str | None:
         return original if isinstance(original, str) else None
     if not isinstance(original, str):
         return publication
-    available = DEEP_SCAN_MAX_ERROR_LENGTH - len(DEEP_SCAN_PUBLICATION_ERROR_SEPARATOR)
-    publication_budget = min(len(publication), available // 2)
-    original_budget = min(len(original), available - publication_budget)
-    publication_budget = min(len(publication), available - original_budget)
-    return (
-        _bounded_error_text(publication, publication_budget)
-        + DEEP_SCAN_PUBLICATION_ERROR_SEPARATOR
-        + _bounded_error_text(original, original_budget)
-    )
+    return publication + DEEP_SCAN_PUBLICATION_ERROR_SEPARATOR + original
 
 
 def _parse_timestamp(value: str) -> datetime:
@@ -830,6 +810,11 @@ def begin_deep_scan_for_target(
                 terminal["id"],
                 start_disposition="joined",
             )
+        source_scopes = capture_source_scopes(
+            target,
+            (revision, target_snapshot_digest, target_device, target_inode),
+            [scope],
+        )
         config = effective_deep_scan_config(args)
         workflow_version = optional_text(args.workflow_version, maximum=256)
         if workflow_version is None:
@@ -875,6 +860,7 @@ def begin_deep_scan_for_target(
             scope=scope,
             diff_target=None,
             target_identity=target_identity,
+            source_scopes=source_scopes,
             target_root=target_root,
             target_summary=None,
             scope_file_count=scope_file_count,
@@ -1174,7 +1160,7 @@ def upsert_deep_scan_worker(
             or args.status != "canceled"
             or existing is None
             or existing["status"] not in {"running", "canceled"}
-            or optional_text(args.error_message, maximum=2400) is None
+            or optional_text(args.error_message) is None
         ):
             raise SystemExit(
                 "A replaceable Deep Scan failure requires a running discovery worker, "
@@ -1255,7 +1241,7 @@ def upsert_deep_scan_worker(
                     artifact_dir,
                     attempt,
                     optional_text(args.sdk_thread_id, maximum=512),
-                    optional_text(args.error_message, maximum=2400),
+                    optional_text(args.error_message),
                     timestamp,
                     timestamp if args.status == "running" else None,
                     timestamp,
@@ -1272,7 +1258,7 @@ def upsert_deep_scan_worker(
         if terminal_repeat:
             repeated_attempt = args.attempt if args.attempt is not None else existing["attempt"]
             repeated_thread_id = optional_text(args.sdk_thread_id, maximum=512)
-            repeated_error = optional_text(args.error_message, maximum=2400)
+            repeated_error = optional_text(args.error_message)
             repeated_result_path = result_manifest_path or existing["result_manifest_path"]
             if (
                 repeated_attempt != existing["attempt"]
@@ -1354,7 +1340,7 @@ def upsert_deep_scan_worker(
             if args.status in {"succeeded", "failed", "canceled"}
             else existing["completed_at"]
         )
-        error_message = optional_text(args.error_message, maximum=2400)
+        error_message = optional_text(args.error_message)
         if error_message is None and args.status != "succeeded":
             error_message = existing["error_message"]
         started_at = existing["started_at"] or (timestamp if args.status == "running" else None)
@@ -1669,6 +1655,9 @@ def finish_deep_scan_locked(
     if len(set(omitted_worker_ids)) != len(omitted_worker_ids):
         raise SystemExit("Omitted Deep Scan worker IDs must be unique.")
     promotion: tuple[Path, Path, Path | None] | None = None
+    deadline_publication: (
+        tuple[Path, dict[str, tuple[bytes, os.stat_result] | None], set[str]] | None
+    ) = None
     connection.execute("BEGIN IMMEDIATE")
     try:
         run = require_deep_scan_run(connection, scan_id)
@@ -1758,9 +1747,9 @@ def finish_deep_scan_locked(
             """,
             (scan_id,),
         ).fetchone()
+        discovery_deadline = args.terminal_reason == "capped" and deep_scan_deadline_reached(run)
         zero_discovery_deadline = (
-            args.terminal_reason == "capped"
-            and deep_scan_deadline_reached(run)
+            discovery_deadline
             and run["completion_sequence"] == 0
             and (
                 standard_scan_manifest
@@ -1792,25 +1781,37 @@ def finish_deep_scan_locked(
                 kind="file",
             )
             promotion = promote_staged_file(staged_manifest_path, manifest_path)
-        with (
-            saved_results.preserve_deep_deadline_draft(dependencies(), connection, scan)
-            if zero_discovery_deadline and standard_scan_manifest
-            else nullcontext()
-        ):
-            timestamp = dependencies().now()
-            connection.execute(
-                """
-                UPDATE deep_scan_runs
-                SET status = 'succeeded', phase = 'terminal', terminal_reason = ?,
-                    manifest_path = ?, completed_at = ?, updated_at = ?
-                WHERE scan_id = ?
-                """,
-                (args.terminal_reason, manifest_path, timestamp, timestamp, scan_id),
+        if zero_discovery_deadline or (discovery_deadline and standard_scan_manifest):
+            deadline_publication = saved_results.preserve_deep_deadline_draft(
+                dependencies(),
+                connection,
+                scan,
+                preserve_reduction=not zero_discovery_deadline,
+                allow_empty=not standard_scan_manifest,
             )
-            cancel_active_workers(connection, scan_id, timestamp)
-            connection.commit()
+        timestamp = dependencies().now()
+        connection.execute(
+            """
+            UPDATE deep_scan_runs
+            SET status = 'succeeded', phase = 'terminal', terminal_reason = ?,
+                manifest_path = ?, completed_at = ?, updated_at = ?
+            WHERE scan_id = ?
+            """,
+            (args.terminal_reason, manifest_path, timestamp, timestamp, scan_id),
+        )
+        cancel_active_workers(connection, scan_id, timestamp)
+        connection.commit()
     except BaseException:
         connection.rollback()
+        if deadline_publication is not None or promotion is not None:
+            # A signal can arrive after SQLite commits but before commit returns.
+            # The completion lock makes persisted success authoritative here.
+            if require_deep_scan_run(connection, scan_id)["status"] == "succeeded":
+                if promotion is not None:
+                    finish_staged_file(promotion)
+                raise
+        if deadline_publication is not None:
+            saved_results._restore_published_outputs(*deadline_publication)
         if promotion is not None:
             rollback_staged_file(promotion)
         raise
@@ -1828,7 +1829,7 @@ def fail_deep_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> 
 def fail_deep_scan_locked(
     connection: sqlite3.Connection, args: argparse.Namespace, scan_id: str
 ) -> dict[str, Any]:
-    message = optional_text(args.message, maximum=2400)
+    message = optional_text(args.message)
     if message is None:
         raise SystemExit("message is required.")
     promotion: tuple[Path, Path, Path | None] | None = None
@@ -1926,7 +1927,7 @@ def record_deep_scan_publication_failure(
     connection: sqlite3.Connection, args: argparse.Namespace
 ) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
-    message = optional_text(args.message, maximum=2400)
+    message = optional_text(args.message)
     if message is None:
         raise SystemExit("message is required.")
     with dependencies().scan_completion_lock(scan_id):

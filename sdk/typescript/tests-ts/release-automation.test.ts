@@ -67,6 +67,11 @@ function runPublisher({
   existingLookup = "existing",
   existingNotes = "Generated release notes",
   generatedNotes = "Generated release notes\n",
+  generateNotesResult = {
+    status: 0,
+    stdout: JSON.stringify({ body: generatedNotes }),
+    stderr: "",
+  },
 
   latestTag = "npm-v0.1.3",
   makeLatest = false,
@@ -151,12 +156,9 @@ function runPublisher({
               expect(
                 args.includes("configuration_file_path=.github/release.yml"),
               ).toBe(releaseConfiguration);
-              return {
-                status: 0,
-                stdout: JSON.stringify({
-                  body: generatedNotes,
-                }),
-              };
+              if (generateNotesResult.stderr)
+                console.error(generateNotesResult.stderr);
+              return generateNotesResult;
           }
         }
         if (program === "git" && args[0] === "cat-file")
@@ -491,6 +493,32 @@ function verifySignatureFixture(options: SignatureAuditFixture = {}) {
   );
 }
 
+type WorkflowContract = {
+  concurrency?: Record<string, unknown>;
+  jobs: Record<
+    string,
+    {
+      permissions?: Record<string, string>;
+      env?: Record<string, string>;
+      needs?: string | string[];
+      environment?: string;
+      if?: string;
+      strategy?: { matrix: Record<string, unknown>; "fail-fast"?: boolean };
+      concurrency?: Record<string, unknown>;
+      "continue-on-error"?: boolean;
+      steps?: {
+        name?: string;
+        uses?: string;
+        run?: string;
+        if?: string;
+        "continue-on-error"?: boolean;
+        with?: Record<string, unknown>;
+        env?: Record<string, string>;
+      }[];
+    }
+  >;
+};
+
 function workflowStepShell(workflow: string, stepName: string): string {
   const parsed = Bun.YAML.parse(workflow) as {
     jobs: Record<string, { steps?: { name?: string; run?: string }[] }>;
@@ -727,12 +755,24 @@ describe("reviewed release note helpers", () => {
   });
 
   test("composes reviewed and generated notes deterministically", () => {
-    expect(composeReleaseNotes("Generated notes", "Reviewed summary")).toBe(
-      "<!-- codex-security-release-summary:start -->\n" +
-        "Reviewed summary\n" +
-        "<!-- codex-security-release-summary:end -->\n\n" +
-        "Generated notes",
-    );
+    const summary = "## Highlights\n\nReviewed summary";
+    const generated = [
+      "## What's Changed",
+      "",
+      "- A change ([#1](https://github.com/example/project/pull/1))",
+      "",
+      "## New Contributors",
+      "",
+      "- @contributor",
+    ].join("\n");
+    const notes = composeReleaseNotes(generated, summary);
+    expect(extractHistoricalReleaseSummary(notes)).toBe(summary);
+    expect(notes.indexOf(summary)).toBeLessThan(notes.indexOf("<details>"));
+    expect(notes).toContain(`</summary>\n\n${generated}\n\n</details>`);
+    expect(notes.match(/<details>/gu)).toHaveLength(1);
+    expect(
+      composeReleaseNotes(generated, extractHistoricalReleaseSummary(notes)),
+    ).toBe(notes);
     expect(composeReleaseNotes("Generated notes", null)).toBe(
       "Generated notes",
     );
@@ -2506,6 +2546,89 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
+  test("requires every release test shard before protected publication", () => {
+    const { jobs } = Bun.YAML.parse(
+      protectedReleaseWorkflow,
+    ) as WorkflowContract;
+    expect(jobs["test"]?.strategy?.matrix["suite"]).toEqual([1, 2, 3, "mcp"]);
+    expect(jobs["test"]?.strategy?.["fail-fast"]).toBe(false);
+    expect(jobs["test"]?.permissions).toEqual({ contents: "read" });
+    expect(jobs["test"]?.env).toEqual(jobs["verify"]?.env);
+    expect(jobs["publish"]?.needs).toEqual(["verify", "test"]);
+    expect(jobs["publish"]?.environment).toBe("npm");
+    expect(jobs["publish"]?.permissions).toEqual({
+      contents: "read",
+      "id-token": "write",
+    });
+    expect(
+      jobs["publish"]?.steps?.find(
+        (step) => step.name === "Download verified package",
+      )?.with,
+    ).toMatchObject({
+      "artifact-ids": "${{ needs.verify.outputs.artifact-id }}",
+      "digest-mismatch": "error",
+    });
+    expect(
+      jobs["test"]?.steps?.find((step) => step.name === "Test TypeScript shard")
+        ?.run,
+    ).toContain("scripts/run-ci-tests.mts ${{ matrix.suite }}/3");
+    expect(
+      jobs["test"]?.steps?.find((step) => step.name === "Test MCP app")?.run,
+    ).toContain("run test:mcp");
+  });
+
+  test("isolates optional release comments from verification and publishing", () => {
+    const { jobs } = Bun.YAML.parse(
+      protectedReleaseWorkflow,
+    ) as WorkflowContract;
+    const progress = Bun.YAML.parse(
+      readFileSync(
+        new URL(
+          "../../../.github/workflows/release-progress.yml",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ) as WorkflowContract;
+    expect(jobs["verify"]?.permissions).toEqual({ contents: "read" });
+    expect(progress.jobs["report"]?.["continue-on-error"]).toBe(true);
+    expect(progress.jobs["report"]?.permissions).toEqual({
+      actions: "read",
+      contents: "read",
+      "pull-requests": "write",
+    });
+    const checkout = progress.jobs["report"]?.steps?.find(
+      (step: { uses?: string }) => step.uses?.startsWith("actions/checkout@"),
+    );
+    expect(checkout?.with).toMatchObject({
+      ref: "refs/heads/main",
+      "persist-credentials": false,
+    });
+    expect(progress.concurrency?.["cancel-in-progress"]).toBe(false);
+    expect(progress.jobs["report"]?.concurrency?.["queue"]).toBe("max");
+    expect(progress.jobs["report"]?.needs).toBe("identify");
+    expect(progress.jobs["watch"]?.permissions).toEqual({
+      actions: "write",
+      contents: "read",
+    });
+    expect(progress.jobs["watch"]?.["continue-on-error"]).toBe(true);
+    expect(progress.jobs["watch"]?.if).toContain(
+      "github.event.action == 'in_progress'",
+    );
+    expect(progress.jobs["watch"]?.if).toContain("inputs.watch");
+    expect(progress.jobs["watch"]?.steps?.[0]?.with).toEqual({
+      ref: "refs/heads/main",
+      "persist-credentials": false,
+    });
+    expect(
+      progress.jobs["watch"]?.steps?.at(-1)?.env?.["RELEASE_PROGRESS_WATCH"],
+    ).toBe("true");
+    const publication = (
+      Bun.YAML.parse(githubReleaseWorkflow) as WorkflowContract
+    ).jobs;
+    expect(publication["installed"]?.needs).toBe("release");
+  });
+
   test("dispatches GitHub releases after publishing with isolated permissions", () => {
     expect(protectedReleaseWorkflow).toContain(
       [
@@ -2605,33 +2728,71 @@ describe("GitHub release workflow safeguards", () => {
     },
   );
 
-  test("dispatches the exact protected run and release tag from trusted main", async () => {
-    const script = workflowStepShell(
-      protectedReleaseWorkflow,
-      "Dispatch the verified GitHub release",
-    );
-    const mock = "gh() { printf '%s\\n' \"$@\"; }";
-    const result = await runShell(`${mock}\n${script}`, {
-      GITHUB_REPOSITORY: releaseRepository,
-      RELEASE_RUN_ID: releaseRun,
-      RELEASE_TAG: "npm-v0.1.2",
-    });
-
-    expect(result.status).toBe(0);
-    expect(result.stdout.trim().split("\n")).toEqual([
-      "workflow",
-      "run",
-      "node-github-release.yml",
-      "--repo",
-      releaseRepository,
-      "--ref",
-      "main",
-      "-f",
-      "tag=npm-v0.1.2",
-      "-f",
-      `run_id=${releaseRun}`,
-    ]);
-  });
+  test.each([
+    {
+      workflow: releaseCutWorkflow,
+      step: "Dispatch the protected npm release",
+      target: "node-release.yml",
+      fields: ["-f", "ref=npm-v0.1.2"],
+    },
+    {
+      workflow: protectedReleaseWorkflow,
+      step: "Dispatch the verified GitHub release",
+      target: "node-github-release.yml",
+      fields: [
+        "-f",
+        "ref=main",
+        "-f",
+        "inputs[tag]=npm-v0.1.2",
+        "-f",
+        `inputs[run_id]=${releaseRun}`,
+      ],
+    },
+  ])(
+    "dispatches $target with exact release inputs and records its run",
+    async ({ workflow, step, target, fields }) => {
+      const script = workflowStepShell(workflow, step);
+      const output = join(directories.create("release-dispatch-"), "output");
+      writeFileSync(output, "");
+      const mock = "gh() { printf '%s\\n' \"$@\" >&2; printf '12345\\n'; }";
+      const env = {
+        GITHUB_REPOSITORY: releaseRepository,
+        RELEASE_RUN_ID: releaseRun,
+        RELEASE_TAG: "npm-v0.1.2",
+        GITHUB_OUTPUT: output,
+      };
+      const result = await runShell(`${mock}\n${script}`, env);
+      expect(result.status).toBe(0);
+      expect(result.stderr.trim().split("\n")).toEqual([
+        "api",
+        "--method",
+        "POST",
+        "-H",
+        "X-GitHub-Api-Version: 2026-03-10",
+        `repos/${releaseRepository}/actions/workflows/${target}/dispatches`,
+        ...fields,
+        "--jq",
+        ".workflow_run_id",
+      ]);
+      expect(readFileSync(output, "utf8")).toBe("run-id=12345\n");
+      writeFileSync(output, "");
+      const failed = await runShell(`gh() { return 1; }\n${script}`, env);
+      expect(failed.status).toBe(1);
+      expect(readFileSync(output, "utf8")).toBe("");
+      const parsed = Bun.YAML.parse(workflow) as WorkflowContract;
+      const notification = Object.values(parsed.jobs)
+        .flatMap((job) => job.steps ?? [])
+        .find((step) => step.name === "Start release progress observer");
+      expect(notification?.["continue-on-error"]).toBe(true);
+      expect(notification?.if).toBe("steps.dispatch.outputs.run-id != ''");
+      expect(notification?.run).toContain(
+        "timeout --kill-after=5s 10s gh workflow run release-progress.yml",
+      );
+      expect(notification?.run).toContain(
+        '-f "run-id=$RELEASE_RUN_ID" -f watch=true',
+      );
+    },
+  );
 
   test("serializes every GitHub release and historical backfill", () => {
     expect(githubReleaseWorkflow).toMatch(
@@ -2642,11 +2803,11 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
-  test("runs manually dispatched GitHub releases from trusted main", () => {
+  test("runs manually dispatched GitHub releases from the main commit selected for the run", () => {
     expect(githubReleaseWorkflow).toContain("workflow_dispatch:");
     expect(githubReleaseWorkflow).toContain("github.ref == 'refs/heads/main'");
     expect(githubReleaseWorkflow).toMatch(
-      /- name: Checkout release automation\n(?:[^\n]*\n)*?\s+ref: refs\/heads\/main/u,
+      /- name: Checkout release automation\n(?:[^\n]*\n)*?\s+ref: \$\{\{ github\.sha \}\}/u,
     );
   });
 
@@ -3061,6 +3222,25 @@ describe("GitHub release workflow safeguards", () => {
     expect(result.calls.at(-1)).toContain("--latest=false");
     expect(githubReleaseWorkflow).toContain("release-history");
   });
+
+  test.each(["", "not-json"])(
+    "preserves note-generation failure before parsing %j output",
+    (stdout) => {
+      const result = runPublisher({
+        existingLookup: "missing",
+        generateNotesResult: {
+          status: 17,
+          stdout,
+          stderr: "Release notes are unavailable.",
+        },
+      });
+      expect(result.status).toBe(17);
+      expect(result.stderr).toBe("Release notes are unavailable.\n");
+      expect(result.calls.at(-1)).toContain(
+        "repos/test/codex-security/releases/generate-notes",
+      );
+    },
+  );
 
   test("generates notes only from a previously published release", () => {
     expect(githubReleaseWorkflow).toContain(
@@ -3627,15 +3807,15 @@ describe("GitHub release workflow safeguards", () => {
     )?.[1];
 
     expect(releasePattern).toBeDefined();
-    expect(ciPattern).toBe(releasePattern);
+    expect(ciPattern).toBeUndefined();
     expect(titlePattern).toBe(releasePattern);
     expect(nodeCiWorkflow).toContain(
       "types: [opened, edited, reopened, synchronize]",
     );
-    expect(nodeCiWorkflow).toContain("needs: validate-title");
+    expect(nodeCiWorkflow).toContain("needs: classify-changes");
   });
 
-  test("keeps required contexts stable for every change", async () => {
+  test("preserves source validation dependencies and forwards the centralized gate result", async () => {
     const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
       concurrency: {
         group: string;
@@ -3646,159 +3826,107 @@ describe("GitHub release workflow safeguards", () => {
         {
           name: string;
           if?: string;
-          "timeout-minutes"?: number;
-          strategy?: { matrix: Record<string, string[]> };
+          needs?: string | string[];
+          uses?: string;
+          outputs?: Record<string, string>;
+          "timeout-minutes"?: number | string;
           steps: Array<{
             if?: string;
             name?: string;
             run?: string;
+            env?: Record<string, string>;
+            with?: Record<string, unknown>;
           }>;
         }
       >;
     };
 
-    expect(workflow.concurrency.group).toBe(
-      "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}",
-    );
+    const sourceGroup =
+      "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}";
+    expect(workflow.concurrency.group).toStartWith(sourceGroup);
     expect(workflow.concurrency["cancel-in-progress"]).toBe(
       "${{ github.event_name == 'pull_request' }}",
     );
-    expect(workflow.jobs["validate-title"]?.["timeout-minutes"]).toBe(10);
-    expect(
-      workflow.jobs["validate-title"]?.steps.find(
-        ({ name }) =>
-          name === "Checkout pull request for change classification",
-      )?.if,
-    ).toContain("github.event.changes.base == null");
+    const classifier = workflow.jobs["classify-changes"]!;
+    expect(classifier["timeout-minutes"]).toEqual(
+      expect.stringContaining("40 || 10"),
+    );
+    expect(classifier.if).toBeUndefined();
+    const checkout = classifier.steps.find(
+      ({ name }) => name === "Checkout repository for change classification",
+    );
+    expect(checkout?.with).toMatchObject({
+      "fetch-depth": 2,
+      "persist-credentials": false,
+    });
+    expect(checkout).not.toHaveProperty("if");
 
-    for (const job of [
-      "static-checks",
-      "package",
-      "test",
-      "compatibility",
-      "mcp",
-      "plugin-host",
-      "plugin-source",
-      "windows-test",
-      "windows-verify",
-    ]) {
-      expect(workflow.jobs[job]?.if).toBeUndefined();
+    expect(workflow.jobs["static-checks"]?.if).toBe(
+      "needs.classify-changes.outputs.source-run == ''",
+    );
+    const aggregates = ["ci", "required-test"];
+    const checks = Object.entries(workflow.jobs).filter(
+      ([name]) => name !== "classify-changes" && !aggregates.includes(name),
+    );
+    expect(new Set([workflow.jobs["ci"]!.needs].flat())).toEqual(
+      new Set(["classify-changes", ...checks.map(([name]) => name)]),
+    );
+    for (const job of aggregates) {
+      expect(workflow.jobs[job]?.if).toContain("always()");
     }
-    const requiredJobCondition = "always()";
-    expect(workflow.jobs["required-test"]?.if).toBe(requiredJobCondition);
-    expect(workflow.jobs["windows"]?.if).toBe(requiredJobCondition);
-    const coverageGate = (job: string) =>
-      workflow.jobs[job]?.steps.find(
-        ({ name }) =>
-          name ===
-          `Require every ${job === "windows" ? "Windows" : "Unix"} coverage job`,
+    expect(workflow.jobs["action-ci"]).toMatchObject({
+      uses: "./.github/workflows/action-ci.yml",
+      with: {
+        "sdk-contracts":
+          "${{ needs.classify-changes.outputs.source-required == 'false' }}",
+      },
+    });
+    for (const [name, job] of checks) {
+      expect(job.if ?? "", name).not.toMatch(/\b(always|failure|cancelled)\(/u);
+    }
+
+    // With no job results, the gate must report exactly the jobs enabled in YAML.
+    const { failedChecks } = (await import(
+      new URL("../../../.github/scripts/check-ci-results.mjs", import.meta.url)
+        .href
+    )) as { failedChecks(needs: unknown): string[] };
+    const classifierOutputs = classifier.outputs!;
+    expect(classifierOutputs["source-run"]).toBe(
+      "${{ steps.proof.outputs.source-run }}",
+    );
+    const flags = Object.keys(classifierOutputs).filter(
+      (key) =>
+        !["source-run", "edit-attempt"].includes(key) &&
+        !key.endsWith("-matrix"),
+    );
+    for (const enabled of flags) {
+      expect(classifierOutputs[enabled]).toBe(
+        `\${{ steps.scope.outputs.${enabled} }}`,
       );
-    const conditionCases: Array<{
-      condition: string;
-      values: Record<string, string>;
-      expected: boolean;
-      message: string;
-    }> = [];
-    for (const [validation, upstream, gateFailure] of [
-      ["success", "success", false],
-      ["success", "skipped", true],
-      ["failure", "skipped", true],
-    ] as const) {
-      const values = {
-        "needs.static-checks.result": upstream,
-        "needs.plugin-host.result": upstream,
-        "needs.plugin-source.result": upstream,
-        "needs.package.result": upstream,
-        "needs.compatibility.result": upstream,
-        "needs.mcp.result": upstream,
-        "needs.test.result": upstream,
-        "needs.validate-title.result": validation,
-        "needs.windows-test.result": upstream,
-        "needs.windows-verify.result": upstream,
-      };
-      for (const job of ["required-test", "windows"]) {
-        conditionCases.push({
-          condition: coverageGate(job)?.if ?? "",
-          values,
-          expected: gateFailure,
-          message: `${job}: ${validation}/${upstream}`,
-        });
-      }
-    }
-
-    for (const [gate, dependencies] of Object.entries({
-      "required-test": [
-        "static-checks",
-        "package",
-        "test",
-        "compatibility",
-        "mcp",
-        "plugin-host",
-        "plugin-source",
-      ],
-      windows: [
-        "static-checks",
-        "plugin-host",
-        "plugin-source",
-        "windows-test",
-        "windows-verify",
-      ],
-    })) {
-      for (const dependency of dependencies) {
-        for (const result of ["failure", "cancelled", "skipped"]) {
-          conditionCases.push({
-            condition: coverageGate(gate)?.if ?? "",
-            values: {
-              "needs.validate-title.result": "success",
-              ...Object.fromEntries(
-                dependencies.map((job) => [
-                  `needs.${job}.result`,
-                  job === dependency ? result : "success",
-                ]),
-              ),
-            },
-            expected: true,
-            message: `${gate}: ${dependency}/${result}`,
-          });
-        }
-      }
-      expect(coverageGate(gate)?.run).toBe("exit 1");
-    }
-
-    const conditions = await evaluateWorkflowConditions(conditionCases);
-    for (const [index, item] of conditionCases.entries()) {
-      expect(conditions[index], item.message).toBe(item.expected);
-    }
-
-    const renderName = (template: string, values: Record<string, string>) => {
-      let name = template;
-      for (const [key, value] of Object.entries(values)) {
-        name = name.replaceAll("${{ matrix." + key + " }}", value);
-      }
-      return name.replace(
-        "${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
-        values["node"] === "22.13.0" ? "22" : (values["node"] ?? ""),
+      const outputs = Object.fromEntries(
+        flags.map((key) => [key, String(key === enabled)]),
       );
-    };
-    const unixJob = workflow.jobs["required-test"];
-    const windowsJob = workflow.jobs["windows"];
-    const fullNames = [
-      ...(unixJob?.strategy?.matrix["os"] ?? []).map((os) =>
-        renderName(unixJob?.name ?? "", { os }),
-      ),
-      ...(windowsJob?.strategy?.matrix["node"] ?? []).map((node) =>
-        renderName(windowsJob?.name ?? "", { node }),
-      ),
-    ];
-    const requiredContexts = new Set([
-      "ubuntu-latest / node-22",
-      "macos-latest / node-22",
-      "windows-latest / node-22",
-    ]);
-
+      const scheduled = checks.filter(
+        ([name, job]) =>
+          name === "static-checks" ||
+          !job.if ||
+          job.if === `needs.classify-changes.outputs.${enabled} == 'true'`,
+      );
+      expect(
+        new Set(
+          failedChecks({ "classify-changes": { result: "success", outputs } }),
+        ),
+        enabled,
+      ).toEqual(new Set(scheduled.map(([name]) => name)));
+    }
     expect(
-      fullNames.filter((name) => requiredContexts.has(name)).sort(),
-    ).toEqual([...requiredContexts].sort());
+      workflow.jobs["ci"]?.steps.find(
+        ({ name }) => name === "Require selected checks",
+      ),
+    ).toMatchObject({
+      run: "node .github/scripts/check-ci-results.mjs",
+      env: { CI_RESULTS: "${{ toJSON(needs) }}" },
+    });
   });
 
   test("documents a canonical historical-summary prefix block", () => {
@@ -3827,7 +3955,6 @@ describe("GitHub release workflow safeguards", () => {
     "fix: preserve a trailing carriage return\r",
   ])("active title gates reject %s", (title) => {
     for (const [workflow, step] of [
-      [nodeCiWorkflow, "Require a Conventional Commit pull request title"],
       [titleWorkflow, "Check conventional title"],
     ] as const) {
       expect(
@@ -3844,7 +3971,6 @@ describe("GitHub release workflow safeguards", () => {
     "dependency-update2: refresh release tooling",
   ])("active title gates accept previously valid title %s", (title) => {
     for (const [workflow, step] of [
-      [nodeCiWorkflow, "Require a Conventional Commit pull request title"],
       [titleWorkflow, "Check conventional title"],
     ] as const) {
       expect(
@@ -3887,7 +4013,10 @@ describe("GitHub release workflow safeguards", () => {
 
   test.each([
     { title: "fix: retitle an internal change", expectedLabel: "bug" },
-    { title: "feat: retitle an internal change", expectedLabel: "enhancement" },
+    {
+      title: "feat: retitle an internal change",
+      expectedLabel: "enhancement",
+    },
     {
       title: "docs: retitle an internal change",
       expectedLabel: "documentation",

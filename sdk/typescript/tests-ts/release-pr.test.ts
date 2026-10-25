@@ -1,6 +1,6 @@
 import { gitText } from "./support/shell.js";
-import { readFileSync } from "node:fs";
-import { afterEach, describe, expect, test } from "bun:test";
+import { cpSync, readFileSync } from "node:fs";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { check } from "prettier";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 
@@ -26,11 +26,12 @@ type History = {
   packageText: string;
   actionPackageText?: string | null;
   actionLockText?: string | null;
+  exampleWorkflowText?: string | null;
   changes: Change[];
 };
 type Plan = Omit<
   History,
-  "packageText" | "actionPackageText" | "actionLockText"
+  "packageText" | "actionPackageText" | "actionLockText" | "exampleWorkflowText"
 > & {
   version: string;
   branch: string;
@@ -71,6 +72,7 @@ const {
   packagePath,
   actionPackagePath,
   actionLockPath,
+  exampleWorkflowPath,
   notesPath,
   statePath,
   isBreakingChange,
@@ -84,6 +86,7 @@ const {
   packagePath: string;
   actionPackagePath: string;
   actionLockPath: string;
+  exampleWorkflowPath: string;
   notesPath: string;
   statePath: string;
   isBreakingChange: (change: Change) => boolean;
@@ -102,6 +105,7 @@ const {
     repository: string,
     token: string,
     fetcher?: Fetcher,
+    sleep?: (milliseconds: number) => Promise<void>,
   ) => GitHubClient;
   readReleaseHistory: (
     repo: GitRepository,
@@ -135,6 +139,9 @@ const workflow = readFileSync(
 );
 const directories = createTemporaryDirectoriesSync();
 afterEach(directories.cleanup);
+const templates = createTemporaryDirectoriesSync();
+afterAll(templates.cleanup);
+let baseRepository: string | undefined;
 
 function packageText(version = "0.1.23", dependencies = {}) {
   return `${JSON.stringify({ name: "@openai/codex-security", version, dependencies }, null, 2)}\n`;
@@ -164,6 +171,20 @@ function actionFiles(dependencyVersion = "1.2.3") {
     [actionPackagePath]: `${JSON.stringify(manifest, null, 2)}\n`,
     [actionLockPath]: `${JSON.stringify(lock, null, 2)}\n`,
   };
+}
+
+function exampleWorkflowText(version = "0.1.23") {
+  return [
+    "name: Code scan",
+    "jobs:",
+    "  scan:",
+    "    env:",
+    `      CODEX_SECURITY_VERSION: "${version}"  # Exact CLI release`,
+    '      OTHER_VERSION: "0.1.23"',
+    "    steps:",
+    '      - run: echo "$CODEX_SECURITY_VERSION"',
+    "",
+  ].join("\n");
 }
 
 function change(
@@ -207,10 +228,33 @@ function apiError(status: number) {
 }
 
 class Fixture {
-  static async withInitialPull() {
+  private static initialPull?: ReturnType<typeof Fixture.createInitialPull>;
+
+  private static async createInitialPull() {
     const fixture = new Fixture();
     fixture.merge("feat: initial feature");
     const first = await fixture.run();
+    const directory = templates.create("initial release proposal ");
+    cpSync(fixture.directory, directory, { recursive: true });
+    const { pulls, commitPulls, comments, writes } = fixture.github;
+    return {
+      directory,
+      first,
+      state: { pulls, commitPulls, comments, writes },
+    };
+  }
+
+  static async withInitialPull() {
+    Fixture.initialPull ??= Fixture.createInitialPull().catch((error) => {
+      Fixture.initialPull = undefined;
+      throw error;
+    });
+    // Clone the GitHub state together: commitPulls and pulls refer to the same objects.
+    const { directory, first, state } = structuredClone(
+      await Fixture.initialPull,
+    );
+    const fixture = new Fixture(directory);
+    Object.assign(fixture.github, state);
     const pull = fixture.github.pulls.find(
       (candidate) => candidate.number === first.pull,
     )!;
@@ -222,7 +266,11 @@ class Fixture {
   readonly github = new FakeGitHub(this);
   readonly git = this.repo.git;
 
-  constructor() {
+  constructor(repositoryTemplate = baseRepository) {
+    if (repositoryTemplate !== undefined) {
+      cpSync(repositoryTemplate, this.directory, { recursive: true });
+      return;
+    }
     this.git("init", "-b", "main");
     this.git("config", "user.name", "Release Test");
     this.git("config", "user.email", "release-test@example.invalid");
@@ -238,6 +286,8 @@ class Fixture {
       },
       "release: bump to 0.1.23",
     );
+    baseRepository = templates.create("release pr template ");
+    cpSync(this.directory, baseRepository, { recursive: true });
   }
 
   head(branch = "main") {
@@ -469,6 +519,19 @@ class FakeGitHub {
 }
 
 describe("GitHub request transport", () => {
+  function retryClient(fetcher: Fetcher) {
+    const delays: number[] = [];
+    const github = createGitHubClient(
+      "example/release-fixture",
+      "synthetic-release-token",
+      fetcher,
+      async (milliseconds) => {
+        delays.push(milliseconds);
+      },
+    );
+    return { github, delays };
+  }
+
   const interruptedJsonResponse = (error: Error) =>
     new Response(
       new ReadableStream({
@@ -490,6 +553,8 @@ describe("GitHub request transport", () => {
     "recovers from %s without duplicating paginated results",
     async (failure) => {
       const pages: number[] = [];
+      const waiting = Promise.withResolvers<number>();
+      const resume = Promise.withResolvers<void>();
       const github = createGitHubClient(
         "example/release-fixture",
         "synthetic-release-token",
@@ -524,31 +589,33 @@ describe("GitHub request transport", () => {
                 : {},
           });
         },
+        (milliseconds) => {
+          waiting.resolve(milliseconds);
+          return resume.promise;
+        },
       );
-      expect(await github.list("pulls?per_page=1")).toEqual([
-        { number: 1 },
-        { number: 2 },
-      ]);
+      const result = github.list("pulls?per_page=1");
+      expect(await Promise.race([waiting.promise, result])).toBe(1000);
+      expect(pages).toEqual([1, 2]);
+      resume.resolve();
+      expect(await result).toEqual([{ number: 1 }, { number: 2 }]);
       expect(pages).toEqual([1, 2, 2]);
     },
   );
 
   test("recovers an interrupted successful request body", async () => {
     let requests = 0;
-    const github = createGitHubClient(
-      "example/release-fixture",
-      "synthetic-release-token",
-      async () => {
-        requests++;
-        return requests === 1
-          ? interruptedJsonResponse(new TypeError("terminated"))
-          : Response.json({ sha: "synthetic-main-sha" });
-      },
-    );
+    const { github, delays } = retryClient(async () => {
+      requests++;
+      return requests === 1
+        ? interruptedJsonResponse(new TypeError("terminated"))
+        : Response.json({ sha: "synthetic-main-sha" });
+    });
     expect(await github.request("GET", "git/ref/heads/main")).toEqual({
       sha: "synthetic-main-sha",
     });
     expect(requests).toBe(2);
+    expect(delays).toEqual([1000]);
   });
 
   test.each([false, true])(
@@ -560,21 +627,18 @@ describe("GitHub request transport", () => {
           code: "UND_ERR_SOCKET",
         }),
       });
-      const github = createGitHubClient(
-        "example/release-fixture",
-        "synthetic-release-token",
-        async () => {
-          requests++;
-          if (initialHttpError && requests === 1) {
-            return Response.json({ message: "Unavailable" }, { status: 503 });
-          }
-          throw error;
-        },
-      );
+      const { github, delays } = retryClient(async () => {
+        requests++;
+        if (initialHttpError && requests === 1) {
+          return Response.json({ message: "Unavailable" }, { status: 503 });
+        }
+        throw error;
+      });
       await expect(github.request("GET", "git/ref/heads/main")).rejects.toBe(
         error,
       );
       expect(requests).toBe(3);
+      expect(delays).toEqual([1000, 2000]);
     },
   );
 
@@ -587,22 +651,19 @@ describe("GitHub request transport", () => {
           code: "UND_ERR_SOCKET",
         }),
       });
-      const github = createGitHubClient(
-        "example/release-fixture",
-        "synthetic-release-token",
-        async () => {
-          requests++;
-          if (mixedFailures && requests === 1) {
-            return Response.json({ message: "Unavailable" }, { status: 503 });
-          }
-          if (mixedFailures && requests === 2) throw error;
-          return interruptedJsonResponse(error);
-        },
-      );
+      const { github, delays } = retryClient(async () => {
+        requests++;
+        if (mixedFailures && requests === 1) {
+          return Response.json({ message: "Unavailable" }, { status: 503 });
+        }
+        if (mixedFailures && requests === 2) throw error;
+        return interruptedJsonResponse(error);
+      });
       await expect(github.request("GET", "git/ref/heads/main")).rejects.toBe(
         error,
       );
       expect(requests).toBe(3);
+      expect(delays).toEqual([1000, 2000]);
     },
   );
 
@@ -618,17 +679,14 @@ describe("GitHub request transport", () => {
     async (method, failure) => {
       let requests = 0;
       const error = new TypeError("fetch failed");
-      const github = createGitHubClient(
-        "example/release-fixture",
-        "synthetic-release-token",
-        async () => {
-          requests++;
-          if (failure === "body") return interruptedJsonResponse(error);
-          throw error;
-        },
-      );
+      const { github, delays } = retryClient(async () => {
+        requests++;
+        if (failure === "body") return interruptedJsonResponse(error);
+        throw error;
+      });
       await expect(github.request(method, "pulls")).rejects.toBe(error);
       expect(requests).toBe(1);
+      expect(delays).toEqual([]);
     },
   );
 
@@ -636,33 +694,26 @@ describe("GitHub request transport", () => {
     "does not retry malformed JSON in a successful %s response",
     async (operation) => {
       let requests = 0;
-      const github = createGitHubClient(
-        "example/release-fixture",
-        "synthetic-release-token",
-        async () => {
-          requests++;
-          return new Response("{", { status: 200 });
-        },
-      );
+      const { github, delays } = retryClient(async () => {
+        requests++;
+        return new Response("{", { status: 200 });
+      });
       await expect(
         operation === "request"
           ? github.request("GET", "pulls")
           : github.list("pulls"),
       ).rejects.toBeInstanceOf(SyntaxError);
       expect(requests).toBe(1);
+      expect(delays).toEqual([]);
     },
   );
 
   test("reports a persistent server error after bounded read retries", async () => {
     let requests = 0;
-    const github = createGitHubClient(
-      "example/release-fixture",
-      "synthetic-release-token",
-      async () => {
-        requests++;
-        return Response.json({ message: "Unavailable" }, { status: 503 });
-      },
-    );
+    const { github, delays } = retryClient(async () => {
+      requests++;
+      return Response.json({ message: "Unavailable" }, { status: 503 });
+    });
     await expect(
       github.request("GET", "git/ref/heads/main"),
     ).rejects.toMatchObject({
@@ -670,6 +721,7 @@ describe("GitHub request transport", () => {
       message: "GitHub GET git/ref/heads/main failed with HTTP 503.",
     });
     expect(requests).toBe(3);
+    expect(delays).toEqual([1000, 2000]);
   });
 
   test.each([
@@ -682,18 +734,15 @@ describe("GitHub request transport", () => {
     "does not replay a %s request that fails with HTTP %i",
     async (method, status) => {
       let requests = 0;
-      const github = createGitHubClient(
-        "example/release-fixture",
-        "synthetic-release-token",
-        async () => {
-          requests++;
-          return Response.json({ message: "Failed request" }, { status });
-        },
-      );
+      const { github, delays } = retryClient(async () => {
+        requests++;
+        return Response.json({ message: "Failed request" }, { status });
+      });
       await expect(github.request(method, "pulls")).rejects.toMatchObject({
         status,
       });
       expect(requests).toBe(1);
+      expect(delays).toEqual([]);
     },
   );
 
@@ -816,18 +865,49 @@ describe("GitHub request transport", () => {
 });
 
 describe("release workflow controls", () => {
-  const { permissions, jobs } = Bun.YAML.parse(workflow) as {
+  const { permissions, jobs, concurrency } = Bun.YAML.parse(workflow) as {
     permissions: Record<string, string>;
+    concurrency: { group: string; "cancel-in-progress": boolean };
     jobs: Record<
       string,
       {
         if: string;
         permissions?: Record<string, string>;
+        concurrency?: { group: string; queue: string };
         env: { RELEASE_PR_DRY_RUN: string };
         steps: { id?: string; if?: string }[];
       }
     >;
   };
+
+  test("manual release runs keep their place during a burst of main pushes", () => {
+    const slot = (event_name: string, run_id: number) =>
+      concurrency.group.replace(/\$\{\{(.*?)\}\}/gu, (_, expression) =>
+        String(
+          new Function("github", `return (${expression})`)({
+            event_name,
+            run_id,
+          }),
+        ),
+      );
+    const push = slot("push", 10);
+    expect(slot("push", 11)).toBe(push);
+    const slots = [
+      push,
+      slot("workflow_dispatch", 12),
+      slot("workflow_dispatch", 13),
+    ];
+    expect(new Set(slots).size).toBe(slots.length);
+    expect(concurrency["cancel-in-progress"]).toBe(false);
+    expect(slots).not.toContain(jobs["reconcile"]?.concurrency?.group);
+    expect(jobs["reconcile"]?.concurrency).toEqual({
+      group: "node-release-pr",
+      queue: "max",
+    });
+    expect(jobs["preview"]?.concurrency).toEqual(
+      jobs["reconcile"]?.concurrency,
+    );
+  });
 
   test.each([
     { dryRun: "false", clientId: "", createsAppToken: false },
@@ -1028,6 +1108,51 @@ describe("pre-1.0 release policy", () => {
       expect(empty.files[packagePath]).toBe(text);
     },
   );
+
+  test("updates the checked-in example pin without changing the rest of the workflow", () => {
+    const source = readFileSync(
+      new URL(`../../../${exampleWorkflowPath}`, import.meta.url),
+      "utf8",
+    );
+    const plan = createReleasePlan({
+      ...history([change("fix: repair output")]),
+      exampleWorkflowText: source,
+    });
+    expect(plan.files[exampleWorkflowPath]).toBe(
+      source.replace(
+        /CODEX_SECURITY_VERSION: "[^"]+"/u,
+        'CODEX_SECURITY_VERSION: "0.1.24"',
+      ),
+    );
+    expect(plan.files[exampleWorkflowPath]).toContain(
+      'CODEX_SECURITY_VERSION: "0.1.24"',
+    );
+  });
+
+  test("preserves example quotes, CRLF, comments, and unrelated version literals", () => {
+    const source = (version: string) =>
+      exampleWorkflowText(version)
+        .replaceAll('"', "'")
+        .replaceAll("\n", "\r\n");
+    const plan = createReleasePlan({
+      ...history([change("fix: repair output")]),
+      exampleWorkflowText: source("0.1.23"),
+    });
+    expect(plan.files[exampleWorkflowPath]).toBe(source("0.1.24"));
+  });
+
+  test.each([
+    "name: No CLI pin\n",
+    'env:\n  CODEX_SECURITY_VERSION: "latest"\n',
+    exampleWorkflowText() + exampleWorkflowText(),
+  ])("rejects an example without one exact CLI pin (%#)", (source) => {
+    expect(() =>
+      createReleasePlan({
+        ...history([change("fix: repair output")]),
+        exampleWorkflowText: source,
+      }),
+    ).toThrow("Unable to update only the GitHub Actions example CLI version");
+  });
 });
 
 describe("human note ownership", () => {
@@ -1167,6 +1292,47 @@ describe("human note ownership", () => {
 });
 
 describe("rolling release reconciliation", () => {
+  test("adds and refreshes the example pin from current main without introducing it into earlier history", async () => {
+    const fixture = new Fixture();
+    fixture.merge("fix: initial fix");
+    const beforeExample = await fixture.run();
+    expect(beforeExample.plan.files[exampleWorkflowPath]).toBeUndefined();
+    expect(
+      fixture.repo.readFile(beforeExample.headSha!, exampleWorkflowPath),
+    ).toBeNull();
+
+    for (const [title, name, version] of [
+      ["docs: add workflow example", "Code scan", "0.1.24"],
+      ["docs: clarify workflow name", "Weekly code scan", "0.1.24"],
+      ["feat!: change behavior", "Weekly code scan", "0.2.0"],
+    ] as const) {
+      const source = (pin: string) =>
+        exampleWorkflowText(pin).replace("Code scan", name);
+      fixture.merge(title, { [exampleWorkflowPath]: source("0.1.23") });
+      const result = await fixture.run();
+      expect(result.action).toBe("updated");
+      expect(result.pull).toBe(beforeExample.pull);
+      expect(result.plan.version).toBe(version);
+      expect(result.plan.files[exampleWorkflowPath]).toBe(source(version));
+      expect(fixture.repo.readFile(result.headSha!, exampleWorkflowPath)).toBe(
+        source(version),
+      );
+    }
+    const writes = fixture.github.writes.length;
+    expect((await fixture.run()).action).toBe("unchanged");
+    expect(fixture.github.writes).toHaveLength(writes);
+
+    fixture.merge("docs: remove workflow example", {
+      [exampleWorkflowPath]: null,
+    });
+    const removed = await fixture.run();
+    expect(removed.action).toBe("updated");
+    expect(removed.plan.files[exampleWorkflowPath]).toBeUndefined();
+    expect(
+      fixture.repo.readFile(removed.headSha!, exampleWorkflowPath),
+    ).toBeNull();
+  });
+
   test("aligns Action metadata when introduced and refreshed without advancing the published runtime pin", async () => {
     const fixture = new Fixture();
     fixture.merge("fix: initial fix");
@@ -1679,6 +1845,37 @@ describe("rolling release reconciliation", () => {
 });
 
 describe("release proposal pauses", () => {
+  test.each(["comment", "formatting", "deletion"] as const)(
+    "preserves example workflow %s edits on the release branch",
+    async (change) => {
+      const fixture = new Fixture();
+      fixture.merge("docs: add workflow example", {
+        [exampleWorkflowPath]: exampleWorkflowText(),
+      });
+      const first = await fixture.run();
+      const generated = first.plan.files[exampleWorkflowPath]!;
+      const edited =
+        change === "deletion"
+          ? null
+          : change === "comment"
+            ? generated.replace("Exact CLI release", "Reviewed CLI release")
+            : generated.replace('"0.1.24"', "'0.1.24'");
+      const humanSha = fixture.commit(
+        first.plan.branch,
+        { [exampleWorkflowPath]: edited },
+        "docs: adjust workflow example",
+      );
+      fixture.merge("fix: another fix");
+      const writes = fixture.github.writes.length;
+      const result = await fixture.run();
+      expect(result.action).toBe("held");
+      expect(result.reason).toContain("example edits beyond its CLI version");
+      expect(fixture.head(first.plan.branch)).toBe(humanSha);
+      expect(fixture.repo.readFile(humanSha, exampleWorkflowPath)).toBe(edited);
+      expect(fixture.github.writes).toHaveLength(writes);
+    },
+  );
+
   test.each([
     { path: actionPackagePath, change: "dependencies" },
     { path: actionLockPath, change: "dependencies" },

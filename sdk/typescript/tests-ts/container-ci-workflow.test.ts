@@ -1,9 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { expect, test } from "bun:test";
-import { bashCommand } from "./support/shell.js";
 
 type Step = { name?: string; uses?: string; run?: string; if?: string };
 type Job = {
@@ -24,7 +22,14 @@ function workflow(name: string) {
 }
 
 const ci = workflow("node-ci");
-const bash = bashCommand();
+const { selectChecks } = (await import(
+  new URL("../../../.github/scripts/select-ci-checks.mjs", import.meta.url).href
+)) as {
+  selectChecks(
+    paths: string[],
+    options: { event: string; baseChanged: boolean },
+  ): Record<string, string>;
+};
 
 test("shares one native build and container matrix in automatic CI", () => {
   const container = workflow("container-ci");
@@ -41,7 +46,7 @@ test("shares one native build and container matrix in automatic CI", () => {
     ),
   ).toEqual([ci.jobs["container-validate"]!]);
   expect(ci.jobs["container-validate"]).toMatchObject({
-    needs: ["validate-title", "native"],
+    needs: ["classify-changes", "native", "static-checks"],
     uses: "./.github/workflows/container-validate.yml",
   });
   expect(container.jobs["container"]).toMatchObject({
@@ -71,11 +76,14 @@ test("keeps container validation available to forks and publication upstream-onl
   expect(container.jobs["native"]).not.toHaveProperty("if");
   expect(container.jobs["container"]).not.toHaveProperty("if");
   expect(validation.jobs["validate"]).not.toHaveProperty("if");
-  for (const name of ["native", "validate", "authorize"]) {
+  for (const name of ["source", "validate", "authorize"]) {
     expect(release.jobs[name]?.if).toBe(
       "github.repository == 'openai/codex-security'",
     );
   }
+  expect(release.jobs["native"]?.if).toBe(
+    "github.repository == 'openai/codex-security' && needs.source.outputs.existing-digest == ''",
+  );
   expect(release.jobs["publish-platform"]?.needs).toBe("authorize");
 });
 
@@ -91,6 +99,7 @@ test.each([
   ["pull_request", false, ".github/workflows/node-ci.yml", true],
   ["pull_request", false, ".github/actions/setup-tools/action.yml", true],
   ["pull_request", false, "sdk/typescript/src/index.ts", true],
+  ["pull_request", false, "sdk/typescript/scripts/run-ci-tests.mts", true],
   [
     "pull_request",
     false,
@@ -100,62 +109,53 @@ test.each([
 ] as const)(
   "selects container validation for %s / retarget=%p / %s",
   (eventName, baseChanged, path, selected) => {
-    const directory = mkdtempSync(join(tmpdir(), "container-ci-scope-"));
-    const output = join(directory, "outputs");
-    const script = ci.jobs["validate-title"]!.steps!.find(
-      (step) => step.name === "Select additional checks",
-    )!.run!;
-    try {
-      const result = spawnSync(
-        bash,
-        ["-c", `git() { printf '%s\\0' "$CHANGED_PATH"; }\n${script}`],
-        {
-          env: {
-            ...process.env,
-            EVENT_NAME: eventName,
-            BASE_CHANGED: String(baseChanged),
-            CHANGED_PATH: path,
-            GITHUB_OUTPUT: output,
-          },
-        },
-      );
-      expect(result.status).toBe(0);
-      const outputs = Object.fromEntries(
-        readFileSync(output, "utf8")
-          .trim()
-          .split("\n")
-          .map((line) => line.split("=")),
-      );
-      expect(outputs["container-validate"]).toBe(String(selected));
-      if (path === ".github/actions/setup-tools/action.yml") {
-        expect(outputs["test-quality"]).toBe("true");
-      }
-    } finally {
-      rmSync(directory, { recursive: true, force: true });
-    }
+    const outputs = selectChecks([path], { event: eventName, baseChanged });
+    expect(outputs["container-validate"]).toBe(String(selected));
   },
 );
 
-test("required CI rejects failed, cancelled, or skipped selected container checks", () => {
-  const gate = ci.jobs["required-test"]!;
+test("the final CI gate executes selected container failures and permits unselected checks", () => {
+  const gate = ci.jobs["ci"]!;
   expect(gate.needs).toContain("container-validate");
-  expect(gate.if).toBe("always()");
+  expect(gate.if).toContain("always()");
   const step = gate.steps!.find(
-    (step) => step.name === "Require selected container coverage",
+    (step) => step.name === "Require selected checks",
   )!;
-  expect(step.run).toBe("exit 1");
-  for (const selected of ["true", "false"]) {
+  const [command, script] = step.run!.split(" ");
+  expect(command).toBe("node");
+  for (const selected of [true, false]) {
+    const outputs = selectChecks([selected ? "Dockerfile" : "README.md"], {
+      event: "pull_request",
+      baseChanged: false,
+    });
+    const needs = Object.fromEntries(
+      (gate.needs as string[]).map((name) => [name, { result: "success" }]),
+    );
+    const classified = {
+      ...needs,
+      "classify-changes": { result: "success", outputs },
+      "action-ci": { result: "success", outputs: { passed: "true" } },
+    };
     for (const result of ["success", "failure", "cancelled", "skipped"]) {
-      const condition = step
-        .if!.replaceAll(
-          "needs.validate-title.outputs.container-validate",
-          `'${selected}'`,
-        )
-        .replaceAll("needs.container-validate.result", `'${result}'`);
-      const evaluation = spawnSync(bash, ["-c", `[[ ${condition} ]]`]);
-      expect(evaluation.status, `${selected}/${result}`).toBe(
-        selected === "true" && result !== "success" ? 0 : 1,
+      const execution = spawnSync(
+        command!,
+        [fileURLToPath(new URL(`../../../${script}`, import.meta.url))],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CI_RESULTS: JSON.stringify({
+              ...classified,
+              "container-validate": { result },
+            }),
+          },
+        },
       );
+      expect(execution.status, execution.stderr).toBe(
+        selected && result !== "success" ? 1 : 0,
+      );
+      if (selected && result !== "success")
+        expect(execution.stderr).toContain("container-validate");
     }
   }
 });

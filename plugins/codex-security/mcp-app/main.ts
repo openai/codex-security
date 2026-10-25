@@ -1,7 +1,7 @@
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createCodexSecurityArtifactWriterServer } from "./artifact-writer-main.js";
 import { createCodexSecurityServer } from "./server.js";
 import { runCliDeepScan } from "./deep-scan-main.js";
+import { CodexSecurityStdioTransport } from "./src/stdio-transport.js";
 
 async function main(): Promise<void> {
   if (process.argv.includes("--deep-scan-engine")) {
@@ -12,7 +12,12 @@ async function main(): Promise<void> {
   const server = artifactWriter
     ? await createCodexSecurityArtifactWriterServer()
     : createCodexSecurityServer();
-  await server.connect(new StdioServerTransport());
+  await server.connect(
+    new CodexSecurityStdioTransport(process.stdin, process.stdout, {
+      // Local scan checkpoints can exceed the SDK's default 10 MiB buffer.
+      maxBufferSize: Infinity,
+    }),
+  );
   let closing = false;
   const close = async (exitCode?: number): Promise<void> => {
     if (closing) return;

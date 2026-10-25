@@ -57,7 +57,9 @@ export type ConfigurationSource = "default" | "legacy" | "project" | "cli";
 const PROJECT_SETTING_KEYS = {
   auth: "auth",
   mode: "scan.mode",
+  maxTimeMinutes: "scan.max_time_minutes",
   cyberAccessProgram: "scan.cyber_access_program",
+  ownerSuggestions: "scan.owner_suggestions",
   target: "scan.scope",
   knowledgeBasePaths: "scan.knowledge_base",
   scanPromptFile: "scan.instructions_file",
@@ -186,9 +188,9 @@ export function projectConfigStarter(
   );
   const schema = isAbsolute(relativeSchema)
     ? pathToFileURL(schemaPath).href
-    : `${relativeSchema.startsWith(".") ? "" : "./"}${relativeSchema
-        .split(sep)
-        .join("/")}`;
+    : `${relativeSchema.startsWith(".") ? "" : "./"}${encodeURI(
+        relativeSchema.split(sep).join("/"),
+      ).replace(/[#?]/gu, encodeURIComponent)}`;
   if (projectConfigExtension(path) === ".json")
     return `${JSON.stringify({ $schema: schema }, null, 2)}\n`;
   return [
@@ -204,8 +206,9 @@ export function projectConfigStarter(
     "#   knowledge_base: [] # Paths relative to this file.",
     "#   instructions_file: instructions.md",
     "#   validation_file: validation.md # Standard mode only.",
+    "#   max_time_minutes: 15 # Advisory in Standard; enforced discovery limit in Deep.",
     "#   deep: # Used when mode is deep.",
-    ...DEEP_SCAN_SETTINGS.map(
+    ...DEEP_SCAN_SETTINGS.filter(([name]) => name !== "maxTimeHours").map(
       ([name, , key]) => `#     ${key}: ${DEFAULT_DEEP_SCAN_SETTINGS[name]}`,
     ),
     "# codex:",
@@ -274,7 +277,11 @@ export function resolveScanSettings(
 
   const mode =
     choose("scan.mode", file?.scan?.mode, overrides.mode) ?? DEFAULT_SCAN_MODE;
-  const explicitDeep = deepScanOptions({ ...overrides, mode });
+  const explicitDeep = deepScanOptions({
+    ...overrides,
+    maxTimeMinutes: undefined,
+    mode,
+  });
   const target =
     choose(
       "scan.scope",
@@ -282,12 +289,22 @@ export function resolveScanSettings(
       overrides.target,
     ) ?? "repository";
   const configuredDeep = file?.scan?.deep;
+  const explicitTime =
+    overrides.maxTimeMinutes !== undefined ||
+    overrides.maxTimeHours !== undefined;
+  const maxTimeMinutes = choose(
+    "scan.max_time_minutes",
+    explicitTime ? undefined : file?.scan?.max_time_minutes,
+    overrides.maxTimeMinutes,
+  );
   const deep: DeepScanOptions = {};
   if (mode === "deep") {
     for (const [name, , field] of DEEP_SCAN_SETTINGS) {
       const value = choose(
         `scan.deep.${field}`,
-        configuredDeep?.[field],
+        name === "maxTimeHours" && explicitTime
+          ? undefined
+          : configuredDeep?.[field],
         explicitDeep[name],
       );
       if (value !== undefined) deep[name] = value;
@@ -298,6 +315,18 @@ export function resolveScanSettings(
     file?.codex ?? {},
     overrides.codexOverrides ?? {},
   );
+  const nativeSourceTree = (
+    value: JsonObject,
+    source: ConfigurationSource,
+  ): JsonObject =>
+    Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        item !== null && typeof item === "object" && !Array.isArray(item)
+          ? nativeSourceTree(item, source)
+          : source,
+      ]),
+    );
   const recordNativeSources = (
     value: JsonObject,
     source: ConfigurationSource,
@@ -306,19 +335,24 @@ export function resolveScanSettings(
     for (const [key, item] of Object.entries(value)) {
       const path: `codex.${string}` = `${prefix}.${key}`;
       if (item !== null && typeof item === "object" && !Array.isArray(item)) {
-        delete sources[path];
         recordNativeSources(item, source, path);
-      } else {
-        for (const existing of Object.keys(sources) as ProvenanceKey[]) {
-          if (existing.startsWith(`${path}.`)) delete sources[existing];
-        }
+      } else if (item === source) {
         sources[path] = source;
       }
     }
   };
-  recordNativeSources(DEFAULT_CODEX_CONFIG, "default");
-  recordNativeSources(file?.codex ?? {}, "project");
-  recordNativeSources(overrides.codexOverrides ?? {}, "cli");
+  // Match the value merge: defaults beneath the combined project/CLI overrides.
+  const nativeSources = mergeCodexOverrides(
+    nativeSourceTree(DEFAULT_CODEX_CONFIG, "default"),
+    mergeCodexOverrides(
+      nativeSourceTree(file?.codex ?? {}, "project"),
+      nativeSourceTree(overrides.codexOverrides ?? {}, "cli"),
+    ),
+  );
+  // Literal dotted keys can share a flattened name; retain layer precedence.
+  for (const source of ["default", "project", "cli"] as const) {
+    recordNativeSources(nativeSources, source);
+  }
   const knowledgeBasePaths =
     choose(
       "scan.knowledge_base",
@@ -338,7 +372,13 @@ export function resolveScanSettings(
       overrides.cyberAccessProgram,
     ),
     mode,
+    maxTimeMinutes,
     target,
+    ownerSuggestions: choose(
+      "scan.owner_suggestions",
+      file?.scan?.owner_suggestions,
+      overrides.ownerSuggestions,
+    ),
     knowledgeBasePaths,
     scanPromptFile: choose(
       "scan.instructions_file",

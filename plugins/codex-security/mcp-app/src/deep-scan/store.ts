@@ -3,8 +3,11 @@ import { availableParallelism } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { writeJsonAtomic } from "./artifacts.js";
+import { parseDeepScan, parseWorker } from "./response.js";
+
+export { parseDeepScan };
 import {
-  boundedDeepScanErrorMessage,
+  deepScanErrorMessage,
   DeepScanNonRetryableError,
   DeepScanOwnershipChangedError,
   isStaleCoordinatorGenerationError,
@@ -13,15 +16,9 @@ import type {
   DedupCommit,
   DeepScanCoordinatorClaim,
   DeepScanCoordinatorLeaseInput,
-  DeepScanConfig,
-  DeepScanMergeState,
   DeepScanRunState,
-  DeepScanRunStatus,
   DeepScanTerminalReason,
-  DeepScanWorkerKind,
   DeepScanWorkerMutation,
-  DeepScanWorkerStatus,
-  PersistedDeepScanDedupInput,
   PersistedDeepScanWorker,
 } from "./types.js";
 
@@ -69,7 +66,7 @@ class DeepScanPersistenceError extends Error {
     const operation = args[0] ?? "unknown";
     const scanId = argumentValue(args, "--scan-id");
     const workerId = argumentValue(args, "--worker-id");
-    const diagnostic = boundedDeepScanErrorMessage(error);
+    const diagnostic = deepScanErrorMessage(error);
     super(
       `Deep Scan persistence operation ${operation} failed after ${attempts} attempts` +
         `${scanId ? ` for scan ${scanId}` : ""}` +
@@ -111,6 +108,14 @@ class DeepScanPersistenceError extends Error {
   }
 }
 
+const RETRYABLE_PERSISTENCE_COMMANDS = new Set([
+  "upsert-deep-scan-worker",
+  "claim-deep-scan-dedup",
+  "commit-deep-scan-dedup",
+  "finish-deep-scan",
+  "record-deep-scan-publication-failure",
+]);
+
 export class WorkbenchDeepScanStore {
   private writeTail: Promise<void> = Promise.resolve();
   private readonly coordinatorLeases = new Map<
@@ -149,7 +154,6 @@ export class WorkbenchDeepScanStore {
         availableParallelism: availableParallelism(),
         workflowVersion: WORKFLOW_VERSION,
       }),
-      false,
       userContext,
     );
     const run = parseDeepScan(result);
@@ -248,38 +252,25 @@ export class WorkbenchDeepScanStore {
   async updateWorker(
     update: DeepScanWorkerMutation,
   ): Promise<PersistedDeepScanWorker> {
-    const result = await this.enqueueWrite(
-      [
-        ...workbenchArgs("upsert-deep-scan-worker", {
-          scanId: update.scanId,
-          workerId: update.id,
-          kind: update.kind,
-          status: update.status,
-          promptPath: update.promptPath,
-          artifactDir: update.artifactDir,
-          attempt: update.attempt,
-          coordinatorGeneration: this.coordinatorGeneration(update.scanId),
-          resultManifestPath: update.resultManifestPath || undefined,
-          sdkThreadId: update.threadId || undefined,
-        }),
-        ...(update.error ? [`--error-message=${update.error}`] : []),
-        ...(update.replaceableFailureKind
-          ? ["--replaceable-failure-kind", update.replaceableFailureKind]
-          : []),
-      ],
-      true,
-    );
-    const worker = parseWorker(result, update.id);
-    const state = objectValue(result.deepScan, "deepScan");
-    return state.consecutiveErrors === undefined
-      ? worker
-      : {
-          ...worker,
-          consecutiveErrors: nonNegativeInteger(
-            state.consecutiveErrors,
-            "deepScan.consecutiveErrors",
-          ),
-        };
+    const result = await this.enqueueWrite([
+      ...workbenchArgs("upsert-deep-scan-worker", {
+        scanId: update.scanId,
+        workerId: update.id,
+        kind: update.kind,
+        status: update.status,
+        promptPath: update.promptPath,
+        artifactDir: update.artifactDir,
+        attempt: update.attempt,
+        coordinatorGeneration: this.coordinatorGeneration(update.scanId),
+        resultManifestPath: update.resultManifestPath || undefined,
+        sdkThreadId: update.threadId || undefined,
+      }),
+      ...(update.error ? [`--error-message=${update.error}`] : []),
+      ...(update.replaceableFailureKind
+        ? ["--replaceable-failure-kind", update.replaceableFailureKind]
+        : []),
+    ]);
+    return parseWorker(result, update.id);
   }
 
   async claimDedup(input: {
@@ -298,7 +289,6 @@ export class WorkbenchDeepScanStore {
         coordinatorGeneration: this.coordinatorGeneration(input.scanId),
         inputWorkerId: input.workerIds,
       }),
-      true,
     );
   }
 
@@ -313,7 +303,6 @@ export class WorkbenchDeepScanStore {
           candidateLedgerPath: commit.candidateLedgerPath || undefined,
           newFindingsCount: commit.newFindings,
         }),
-        true,
       ),
     );
   }
@@ -335,7 +324,6 @@ export class WorkbenchDeepScanStore {
           stagedManifestPath: input.stagedManifestPath || undefined,
           omittedWorkerId: input.omittedWorkerIds,
         }),
-        true,
       ),
     );
   }
@@ -369,19 +357,16 @@ export class WorkbenchDeepScanStore {
     coordinatorGeneration?: number,
   ): Promise<DeepScanRunState> {
     return parseDeepScan(
-      await this.enqueueWrite(
-        [
-          ...workbenchArgs("record-deep-scan-publication-failure", {
-            scanId,
-            coordinatorGeneration:
-              coordinatorGeneration === undefined
-                ? this.coordinatorGeneration(scanId)
-                : coordinatorGeneration,
-          }),
-          `--message=${message}`,
-        ],
-        true,
-      ),
+      await this.enqueueWrite([
+        ...workbenchArgs("record-deep-scan-publication-failure", {
+          scanId,
+          coordinatorGeneration:
+            coordinatorGeneration === undefined
+              ? this.coordinatorGeneration(scanId)
+              : coordinatorGeneration,
+        }),
+        `--message=${message}`,
+      ]),
     );
   }
 
@@ -426,14 +411,10 @@ export class WorkbenchDeepScanStore {
       : ["--coordinator-generation", String(generation)];
   }
 
-  private enqueueWrite(
-    args: string[],
-    retryTransientFailure = false,
-    input?: string,
-  ): Promise<JsonObject> {
+  private enqueueWrite(args: string[], input?: string): Promise<JsonObject> {
     const operation = this.writeTail.then(async () => {
       try {
-        return retryTransientFailure
+        return RETRYABLE_PERSISTENCE_COMMANDS.has(args[0])
           ? await this.runIdempotentPersistence(args)
           : await this.runWorkbench(args, input);
       } catch (error) {
@@ -497,7 +478,7 @@ export class WorkbenchDeepScanStore {
               signal: failure.signal,
               killed: failure.killed,
               timeoutMs: failure.timeoutMs,
-              error: boundedDeepScanErrorMessage(error),
+              error: deepScanErrorMessage(error),
             }),
           );
           throw failure;
@@ -599,264 +580,4 @@ function persistenceErrorRecords(error: unknown): PersistenceErrorRecord[] {
 function argumentValue(args: string[], flag: string): string | undefined {
   const index = args.indexOf(flag);
   return index < 0 ? undefined : args[index + 1];
-}
-
-export function parseDeepScan(result: JsonObject): DeepScanRunState {
-  const value = objectValue(result.deepScan, "deepScan");
-  const configValue = objectValue(value.config, "deepScan.config");
-  const status = requiredString(
-    value.status,
-    "deepScan.status",
-  ) as DeepScanRunStatus;
-  if (
-    !["running", "succeeded", "canceled", "failed", "interrupted"].includes(
-      status,
-    )
-  ) {
-    throw new Error(`Unsupported Deep Scan status: ${status}`);
-  }
-  const stopAfterNoNew = positiveInteger(
-    configValue.stopAfterNoNew,
-    "deepScan.config.stopAfterNoNew",
-  );
-  const config: DeepScanConfig = {
-    workers: positiveInteger(configValue.workers, "deepScan.config.workers"),
-    subagents: nonNegativeInteger(
-      configValue.subagents,
-      "deepScan.config.subagents",
-    ),
-    stopAfterNoNew,
-    stopAfterConsecutiveErrors: positiveInteger(
-      configValue.stopAfterConsecutiveErrors ?? stopAfterNoNew,
-      "deepScan.config.stopAfterConsecutiveErrors",
-    ),
-    maxDiscoveryRuns: positiveInteger(
-      configValue.maxDiscoveryRuns,
-      "deepScan.config.maxDiscoveryRuns",
-    ),
-    ...(configValue.maxTimeHours === undefined
-      ? {}
-      : {
-          maxTimeHours: boundedPositiveNumber(
-            configValue.maxTimeHours,
-            "deepScan.config.maxTimeHours",
-            96,
-          ),
-        }),
-  };
-  for (const field of ["includePaths", "filePaths"] as const) {
-    const paths = value[field];
-    if (
-      paths !== undefined &&
-      (!Array.isArray(paths) || paths.some((path) => typeof path !== "string"))
-    ) {
-      throw new Error(`deepScan.${field} must be an array of paths.`);
-    }
-  }
-  return {
-    scanId: requiredString(value.scanId, "deepScan.scanId"),
-    status,
-    coordinatorGeneration: optionalPositiveInteger(value.coordinatorGeneration),
-    createdAt: optionalString(value.createdAt),
-    updatedAt: optionalString(value.updatedAt),
-    targetPath: requiredString(value.targetPath, "deepScan.targetPath"),
-    scope: requiredString(value.scope, "deepScan.scope"),
-    includePaths: value.includePaths as string[] | undefined,
-    filePaths: value.filePaths as string[] | undefined,
-    userContext: optionalString(value.userContext),
-    scanDir: requiredString(value.scanDir, "deepScan.scanDir"),
-    config,
-    dispatchedCount: nonNegativeInteger(
-      value.dispatchedCount,
-      "deepScan.dispatchedCount",
-    ),
-    noNewStreak: nonNegativeInteger(value.noNewStreak, "deepScan.noNewStreak"),
-    consecutiveErrors: nonNegativeInteger(
-      value.consecutiveErrors ?? 0,
-      "deepScan.consecutiveErrors",
-    ),
-    manifestPath: optionalString(value.manifestPath),
-    terminalReason:
-      value.terminalReason === "saturated" || value.terminalReason === "capped"
-        ? value.terminalReason
-        : undefined,
-    error: optionalString(value.error),
-    persistedWorkers: parsePersistedWorkers(value.workers),
-    persistedDedupInputs: parsePersistedDedupInputs(value.dedupInputs),
-  };
-}
-
-function parsePersistedDedupInputs(
-  value: unknown,
-): PersistedDeepScanDedupInput[] {
-  if (value === undefined || value === null) return [];
-  if (!Array.isArray(value)) {
-    throw new Error(
-      "Codex Security workbench returned invalid deepScan.dedupInputs.",
-    );
-  }
-  return value.map((candidate) => {
-    const input = objectValue(candidate, "deepScan.dedupInput");
-    return {
-      dedupWorkerId: requiredString(
-        input.dedupWorkerId,
-        "deepScan.dedupInput.dedupWorkerId",
-      ),
-      discoveryWorkerId: requiredString(
-        input.discoveryWorkerId,
-        "deepScan.dedupInput.discoveryWorkerId",
-      ),
-      inputOrder: nonNegativeInteger(
-        input.inputOrder,
-        "deepScan.dedupInput.inputOrder",
-      ),
-    };
-  });
-}
-
-function parsePersistedWorkers(value: unknown): PersistedDeepScanWorker[] {
-  if (value === undefined || value === null) return [];
-  if (!Array.isArray(value)) {
-    throw new Error(
-      "Codex Security workbench returned invalid deepScan.workers.",
-    );
-  }
-  return value.map((candidate) =>
-    parsePersistedWorker(objectValue(candidate, "deepScan.worker")),
-  );
-}
-
-function parseWorker(
-  result: JsonObject,
-  workerId: string,
-): PersistedDeepScanWorker {
-  const deepScan = objectValue(result.deepScan, "deepScan");
-  if (!Array.isArray(deepScan.workers)) {
-    throw new Error(
-      "Codex Security workbench did not return deepScan.workers.",
-    );
-  }
-  const value = deepScan.workers.find(
-    (candidate) =>
-      candidate &&
-      typeof candidate === "object" &&
-      !Array.isArray(candidate) &&
-      (candidate as JsonObject).id === workerId,
-  ) as JsonObject | undefined;
-  if (!value) {
-    throw new Error(
-      `Codex Security workbench did not return Deep Scan worker ${workerId}.`,
-    );
-  }
-  return parsePersistedWorker(value);
-}
-
-function parsePersistedWorker(value: JsonObject): PersistedDeepScanWorker {
-  return {
-    id: requiredString(value.id, "deepScan.worker.id"),
-    kind: workerKind(value.kind),
-    status: workerStatus(value.status),
-    mergeState: mergeState(value.mergeState),
-    promptPath: requiredString(value.promptPath, "deepScan.worker.promptPath"),
-    artifactDir: requiredString(
-      value.artifactDir,
-      "deepScan.worker.artifactDir",
-    ),
-    attempt: nonNegativeInteger(value.attempt, "deepScan.worker.attempt"),
-    threadId: optionalString(value.sdkThreadId),
-    resultManifestPath: optionalString(value.resultManifestPath),
-    completionSequence: optionalPositiveInteger(value.completionSequence),
-    error: optionalString(value.error),
-  };
-}
-
-function mergeState(value: unknown): DeepScanMergeState {
-  if (
-    value === "none" ||
-    value === "buffered" ||
-    value === "merging" ||
-    value === "merged"
-  ) {
-    return value;
-  }
-  throw new Error(
-    "Codex Security workbench returned invalid deepScan.worker.mergeState.",
-  );
-}
-
-function workerKind(value: unknown): DeepScanWorkerKind {
-  if (value === "setup" || value === "discovery" || value === "dedup")
-    return value;
-  throw new Error(
-    "Codex Security workbench returned invalid deepScan.worker.kind.",
-  );
-}
-
-function workerStatus(value: unknown): DeepScanWorkerStatus {
-  if (
-    value === "queued" ||
-    value === "running" ||
-    value === "succeeded" ||
-    value === "failed" ||
-    value === "canceled"
-  ) {
-    return value;
-  }
-  throw new Error(
-    "Codex Security workbench returned invalid deepScan.worker.status.",
-  );
-}
-
-function objectValue(value: unknown, field: string): JsonObject {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`Codex Security workbench did not return ${field}.`);
-  }
-  return value as JsonObject;
-}
-
-function requiredString(value: unknown, field: string): string {
-  if (typeof value !== "string" || !value) {
-    throw new Error(`Codex Security workbench returned invalid ${field}.`);
-  }
-  return value;
-}
-
-function optionalString(value: unknown): string | undefined {
-  return typeof value === "string" && value ? value : undefined;
-}
-
-function positiveInteger(value: unknown, field: string): number {
-  if (!Number.isInteger(value) || Number(value) < 1) {
-    throw new Error(`Codex Security workbench returned invalid ${field}.`);
-  }
-  return Number(value);
-}
-
-function boundedPositiveNumber(
-  value: unknown,
-  field: string,
-  maximum: number,
-): number {
-  if (
-    typeof value !== "number" ||
-    !Number.isFinite(value) ||
-    value <= 0 ||
-    value > maximum
-  ) {
-    throw new Error(`Codex Security workbench returned invalid ${field}.`);
-  }
-  return value;
-}
-
-function optionalPositiveInteger(value: unknown): number | undefined {
-  return Number.isInteger(value) && Number(value) >= 1
-    ? Number(value)
-    : undefined;
-}
-
-function nonNegativeInteger(value: unknown, field: string): number {
-  if (!Number.isInteger(value) || Number(value) < 0) {
-    throw new Error(`Codex Security workbench returned invalid ${field}.`);
-  }
-  return Number(value);
 }

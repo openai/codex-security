@@ -82,11 +82,31 @@ and [package access settings](https://docs.github.com/en/packages/learn-github-p
 
 ## Publishing
 
-After merging to `main`, push `container-v<version>` matching the SDK package
-version or run `container-release` manually on `main`. Releases require a commit
-on protected `main`; pull requests only build and test.
+Starting with 0.5.0, the coordinated `node-github-release` workflow calls
+`container-release` after verifying the published npm package and its installation. It supplies the npm
+release version and exact source commit; native binaries and Docker images are
+built from that source even when `main` has advanced. Approve the `container`
+environment deployment after validation. The coordinated release cannot finish
+successfully until the container has been published and verified.
 
-If a release fails, fix the cause and rerun only failed jobs. Promotion retries
+To backfill a missing image, dispatch `node-github-release` on `main` with the
+existing `npm-v<version>` tag for version 0.5.0 or later. Earlier release recovery
+skips the new container pipeline because those source trees use older build
+contracts. Standalone publication also supports pushing
+`container-v<version>` matching the SDK package version, or running
+`container-release` manually on `main`. Releases require a commit on protected
+`main`; pull requests only build and test.
+
+BuildKit provenance and OCI revision labels identify the source checkout. The
+GitHub attestation identifies the workflow run that built and promoted the image;
+for a coordinated backfill, that automation can be newer than the release source.
+
+If the version already exists, the workflow verifies its source revision,
+architectures, GitHub attestation, anonymous pull, and immutable tags, then reuses
+it without approval or publication. A mismatched image fails recovery.
+
+If a release fails, fix the cause and rerun failed jobs, or dispatch recovery on
+`main` to use updated automation. Promotion retries
 require the existing stable version to reference the verified digest. If a newer
 stable version exists, promotion leaves `latest` untouched; otherwise a retry
 also requires `latest` to reference that digest. `bootstrap` and
@@ -98,15 +118,16 @@ also requires `latest` to reference that digest. `bootstrap` and
 not start a findings service or implement another workflow engine. It passes
 commands, output, and exit codes through the existing scanner entrypoint.
 
-Run these commands from the repository root. After the selected scanner release
-is available, prepare private directories and choose the host user's UID/GID so
-the runner can write its bind mounts:
+Run these commands from the repository root after
+[verifying an image](#image-metadata-and-verification). Keep the verified
+`reference` in the same shell. Prepare private directories and choose the host
+user's UID/GID so the runner can write its bind mounts:
 
 ```bash
 mkdir -p results state
 chmod 700 results state
 export CODEX_SECURITY_USER="$(id -u):$(id -g)"
-export CODEX_SECURITY_IMAGE=ghcr.io/openai/codex-security:latest
+export CODEX_SECURITY_IMAGE="$reference"
 docker compose -f compose.runner.yaml pull
 docker compose -f compose.runner.yaml run --rm codex-security login --device-auth
 ```
