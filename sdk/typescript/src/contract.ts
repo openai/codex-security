@@ -18,6 +18,7 @@ import {
   errorMessage,
 } from "./errors.js";
 import { isRecord } from "./record.js";
+import { coverageCandidateKey } from "./candidates.js";
 import type {
   CoverageDocument,
   Finding,
@@ -538,8 +539,21 @@ async function validateSeal(
       );
     }
   };
-  for (const surface of coverage.surfaces) {
-    for (const receipt of surface.receiptRefs) {
+  for (const surface of [
+    ...coverage.surfaces,
+    ...(coverage.receiptSealVersion === 1
+      ? coverage.explicitExclusions.filter(
+          (item) => coverageCandidateKey(item) !== undefined,
+        )
+      : []),
+  ]) {
+    const refs =
+      surface["receiptRefs"] === undefined ? [] : surface["receiptRefs"];
+    if (!Array.isArray(refs))
+      throw new ContractValidationError(
+        "Coverage receipt references must be an array.",
+      );
+    for (const receipt of refs) {
       requireSealedReference(receipt, "Coverage receipt");
     }
   }

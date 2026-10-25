@@ -89,6 +89,7 @@ export async function buildMcpApp({ output, native = "universal" }) {
   async function writeRuntime(name, entryPoint) {
     const bundle = join(mcpDir, name + ".bundle.cjs");
     const result = await build({
+      absWorkingDir: root,
       bundle: true,
       define: { "import.meta.url": "__filename" },
       entryPoints: [join(root, entryPoint)],

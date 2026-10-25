@@ -1,4 +1,5 @@
 import { dirname, join, posix, relative, sep } from "node:path";
+import { recoverWorkerCandidateReceipts } from "./artifact-worker-receipts.js";
 import type { ArtifactContext } from "./artifact-context.js";
 import {
   parsePersistedScanDraft,
@@ -14,6 +15,7 @@ import {
   writeJsonAtomic,
 } from "./deep-scan/artifacts.js";
 import {
+  discoveryReductionInput,
   deepReductionForPersistence,
   parseDeepReduction,
   projectDiscoveryCoverage,
@@ -70,11 +72,16 @@ export async function readDeepReductionSources(
           throw new Error(
             "An assigned Standard worker wrote only a checkpoint, not a complete result.",
           );
+        await recoverWorkerCandidateReceipts(result.coverage, {
+          root: dirname(worker.resultPath),
+          repoRoot: context.repoRoot,
+          layout: "worker",
+        });
         for (const [index, finding] of result.findings.entries()) {
           const provenance = finding.provenance as Record<string, unknown>;
           provenance.sourceFindingIds = [`${worker.id}:${index}`];
         }
-        const { coverage, ...reduction } = result;
+        const { coverage } = result;
         const scanReceiptRefs = new Map<number, ReadonlySet<string>>();
         for (const [index, surface] of (
           coverage.surfaces as Record<string, unknown>[]
@@ -126,7 +133,7 @@ export async function readDeepReductionSources(
               .join("/"),
             scanReceiptRefs,
           ),
-          result: reduction,
+          result: discoveryReductionInput(result, worker.id),
         };
       }),
     );
@@ -244,7 +251,7 @@ async function readPreviousReduction(
     await readJsonObject(previousReducerResultPath),
     "The previous accepted Deep reduction",
     bound.scanId,
-    parseDeepReduction,
+    (value) => parseDeepReduction(value, true),
     " has an invalid Standard scan result: ",
     " belongs to a different scan.",
   );

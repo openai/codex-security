@@ -18,6 +18,7 @@ import secrets
 import stat
 import struct
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple, TextIO
@@ -27,6 +28,13 @@ from urllib.parse import quote, urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import report_projection
 import threat_model_projection
+from candidate_identity import (
+    candidate_receipt_sections,
+    coverage_candidate_key,
+    finding_candidate_id,
+    recover_candidate_receipt_rows,
+    retain_recovered_candidate_gaps,
+)
 
 SCHEMA_VERSION = "1.0"
 PRODUCER_NAME = "codex-security-plugin"
@@ -1259,6 +1267,105 @@ def _recover_unsealed_findings(
     return discarded
 
 
+def resolved_deferred_rows(draft: dict[str, Any], schema: dict[str, Any]) -> list[dict[str, Any]]:
+    if draft.get("complete") is False:
+        return []
+    coverage = draft["coverage"]
+    rows = coverage.get("resolvedDeferred", [])
+    deferred = coverage.get("deferred", [])
+    try:
+        # Invalid closure metadata cannot discard the evidence it names.
+        _validate_schema_node(rows, schema, "coverage.resolvedDeferred")
+        _validate_resolved_deferred(
+            {**coverage, "deferred": deferred if isinstance(deferred, list) else []}
+        )
+    except ContractError:
+        return []
+    return rows
+
+
+def _recover_candidate_receipts(
+    parent: dict[str, Any],
+    scan_dir: Path,
+    warnings: list[str],
+    source: str | None = None,
+    *,
+    owner: str | None = None,
+    reopened: set[tuple[str | None, str]],
+    sections: tuple[str, ...] = ("surfaces", "explicitExclusions"),
+    receipt_resolver: Callable[[dict[str, Any]], Any] | None = None,
+) -> dict[str, Any] | None:
+    surfaces = parent["coverage"].get("surfaces")
+    fields = candidate_receipt_sections(parent["coverage"], sections, owner)
+    if not fields:
+        return parent
+    # Receipt recovery must precede resolution of the candidate's saved proof gaps.
+    directory = Path(".")
+    if source is not None and receipt_resolver is None:
+        directory = Path(source).parent
+        if directory.name == "checkpoints":
+            directory = directory.parent
+        scan_dir = scan_dir / directory
+    parent = copy.deepcopy(parent)
+    if source is not None or "explicitExclusions" in fields:
+        coverage = parent["coverage"]
+        closures = []
+        if coverage.get("resolvedDeferred"):
+            schema = _read_json(
+                Path(__file__).resolve().parent.parent / "schemas" / "coverage.schema.json"
+            )["properties"]["resolvedDeferred"]
+            closures = resolved_deferred_rows(parent, schema)
+
+        def validate_receipt(ref: Any, context: str) -> str:
+            return (directory / _coverage_receipt_ref(scan_dir, ref, context)).as_posix()
+
+        recover_candidate_receipt_rows(
+            coverage,
+            fields,
+            closures,
+            warnings,
+            reopened,
+            owner=owner,
+            worker=source is not None,
+            validate_receipt=validate_receipt,
+            receipt_refs=receipt_resolver or (lambda row: row.get("receiptRefs", [])),
+        )
+        if source is not None:
+            return parent
+    if "surfaces" not in fields:
+        return parent
+    terminal = {
+        coverage_candidate_key(row)
+        for row in surfaces
+        if isinstance(row, dict) and row.get("disposition") in ("rejected", "not_applicable")
+    }
+    _recover_unsealed_coverage(
+        parent["coverage"],
+        Path(__file__).resolve().parent.parent / "schemas",
+        scan_dir,
+        warnings,
+        [],
+    )
+    reopened.update(
+        key
+        for row in parent["coverage"]["surfaces"]
+        if row.get("disposition") == "needs_follow_up"
+        and (key := coverage_candidate_key(row)) is not None
+        and key in terminal
+    )
+    return parent
+
+
+def _coverage_receipt_ref(scan_dir: Path, ref: Any, context: str) -> str:
+    if not isinstance(ref, str):
+        raise ContractError(f"{context}: expected a string")
+    normalized = _require_portable_relative_path(ref, context)
+    if not normalized.startswith("artifacts/"):
+        raise ContractError(f"{context}: expected a file under artifacts/")
+    _require_scan_local_file(scan_dir, normalized, context)
+    return normalized
+
+
 def _recover_unsealed_coverage(
     coverage: dict[str, Any],
     schema_dir: Path,
@@ -1279,6 +1386,7 @@ def _recover_unsealed_coverage(
         warnings.append("Recovered malformed Deep Scan inventory strategy.")
 
     surface_ids: set[str] = set()
+    recovered_candidates: list[tuple[dict[str, Any], str]] = []
     receipt_paths: dict[str, str] = {}
     fields = [
         ("surfaces", "coverage surface"),
@@ -1315,6 +1423,7 @@ def _recover_unsealed_coverage(
                     if surface_id in surface_ids and not worker_draft:
                         raise ContractError(f"{context}.id: duplicate surface id")
                     disposition = item.get("disposition")
+                    warning_start = len(warnings)
                     surface_recovered = False
                     if not isinstance(disposition, str) or disposition not in DISPOSITIONS:
                         warnings.append(
@@ -1337,14 +1446,7 @@ def _recover_unsealed_coverage(
                     for ref_index, ref in enumerate(receipt_refs):
                         ref_context = f"{context}.receiptRefs[{ref_index}]"
                         try:
-                            if not isinstance(ref, str):
-                                raise ContractError(f"{ref_context}: expected a string")
-                            normalized_ref = _require_portable_relative_path(ref, ref_context)
-                            if not normalized_ref.startswith("artifacts/"):
-                                raise ContractError(
-                                    f"{ref_context}: expected a file under artifacts/"
-                                )
-                            _require_scan_local_file(scan_dir, normalized_ref, ref_context)
+                            normalized_ref = _coverage_receipt_ref(scan_dir, ref, ref_context)
                             key = normalized_ref.lower()
                             previous = surface_receipt_paths.get(key)
                             if previous is not None and previous != normalized_ref:
@@ -1378,10 +1480,18 @@ def _recover_unsealed_coverage(
 
             if field == "surfaces":
                 surface_ids.add(surface_id)
+                if (
+                    surface_recovered
+                    and disposition not in ("reported", "no_issue_found", "needs_follow_up")
+                    and isinstance(item.get("candidateId"), str)
+                ):
+                    recovered_candidates.append((item, "\n".join(warnings[warning_start:])))
                 receipt_paths = surface_receipt_paths
             recovered.append(item)
 
         coverage[field] = recovered
+
+    retain_recovered_candidate_gaps(coverage, recovered_candidates)
 
     if discarded_findings:
         for surface in coverage["surfaces"]:
@@ -1757,11 +1867,9 @@ def _validate_resolved_deferred(coverage: dict[str, Any]) -> None:
     if "resolvedDeferred" not in coverage:
         return
     active = {
-        identity
+        row["id"]
         for row in coverage.get("deferred", [])
-        if isinstance(row, dict)
-        for identity in (row.get("id"), row.get("candidateId"))
-        if isinstance(identity, str)
+        if isinstance(row, dict) and isinstance(row.get("id"), str)
     }
     resolved: set[str] = set()
     for index, closure in enumerate(_require_list(coverage, "resolvedDeferred", "coverage")):
@@ -1831,6 +1939,25 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
     for field in ("explicitExclusions", "deferred"):
         if not isinstance(coverage.get(field, []), list):
             raise ContractError(f"coverage.{field}: expected an array")
+    receipt_fields = (
+        ("surfaces", "explicitExclusions")
+        if coverage.get("receiptSealVersion") == 1
+        else ("surfaces",)
+    )
+    for field in receipt_fields:
+        for index, item in enumerate(coverage.get(field, [])):
+            if not isinstance(item, dict):
+                continue
+            if field == "explicitExclusions" and coverage_candidate_key(item) is None:
+                continue
+            context = f"coverage.{field}[{index}]"
+            receipt_refs = item.get("receiptRefs", [])
+            if not isinstance(receipt_refs, list):
+                raise ContractError(f"{context}.receiptRefs: expected an array")
+            for ref_index, ref in enumerate(receipt_refs):
+                receipt_refs[ref_index] = _coverage_receipt_ref(
+                    scan_dir, ref, f"{context}.receiptRefs[{ref_index}]"
+                )
     for index, deferred in enumerate(coverage.get("deferred", [])):
         if isinstance(deferred, dict):
             _validate_deferred_paths(deferred, f"coverage.deferred[{index}]")
@@ -2707,8 +2834,14 @@ def _artifact_record(
 def _supplementary_artifact_refs(scan: dict[str, Any], coverage: dict[str, Any]) -> dict[str, str]:
     refs = {
         ref: "coverage receipt"
-        for surface in coverage["surfaces"]
-        for ref in surface.get("receiptRefs", [])
+        for field in (
+            ("surfaces", "explicitExclusions")
+            if coverage.get("receiptSealVersion") == 1
+            else ("surfaces",)
+        )
+        for row in coverage.get(field, [])
+        if field != "explicitExclusions" or coverage_candidate_key(row) is not None
+        for ref in row.get("receiptRefs", [])
     }
     extensions = scan.get("extensions")
     imported = extensions.get("import") if isinstance(extensions, dict) else None
@@ -2861,34 +2994,6 @@ def csv_cell(value: Any) -> Any:
     ):
         return f"'{value}"
     return value
-
-
-def _has_identity_text(value: Any) -> bool:
-    # Match JavaScript String.trim when selecting optional identity metadata.
-    return isinstance(value, str) and bool(
-        value.strip(
-            "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680"
-            "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
-            "\u2028\u2029\u202f\u205f\u3000\ufeff"
-        )
-    )
-
-
-def finding_candidate_id(finding: dict[str, Any]) -> str | None:
-    provenance = finding.get("provenance")
-    if isinstance(provenance, dict) and _has_identity_text(value := provenance.get("candidateId")):
-        return value
-    extensions = finding.get("extensions")
-    if not isinstance(extensions, dict):
-        return None
-    return next(
-        (
-            value
-            for field in ("candidateId", "reportId", "ledgerRowId")
-            if _has_identity_text(value := extensions.get(field))
-        ),
-        None,
-    )
 
 
 def _csv_candidate_id(finding: dict[str, Any]) -> str | None:
@@ -3186,6 +3291,20 @@ def _prepare_scan_finalization(
     if not was_sealed and recover_unsealed:
         _recover_unsealed_coverage(coverage, schema_dir, scan_dir, warnings, discarded_findings)
         _recover_unsealed_hardening(manifest, scan_dir, warnings)
+    if not was_sealed:
+        # Standalone finalization shares exclusion proof recovery with the workbench;
+        # its existing strict surface and finding validation remains unchanged.
+        recovered = _recover_candidate_receipts(
+            {"coverage": coverage},
+            scan_dir,
+            warnings,
+            reopened=set(),
+            sections=("explicitExclusions",),
+        )
+        assert recovered is not None
+        coverage = recovered["coverage"]
+        # Coverage is hash-bound; older seals treated exclusion receipts as opaque metadata.
+        coverage["receiptSealVersion"] = 1
     if was_sealed or scan["status"] != "completed":
         _validate_findings(manifest, findings_for_validation)
     if was_sealed:

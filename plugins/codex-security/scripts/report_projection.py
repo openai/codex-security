@@ -6,8 +6,20 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from collections import Counter
+from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from candidate_identity import (
+    CandidateKey,
+    coverage_candidate_key,
+    coverage_owner,
+    finding_candidate_key,
+    unresolved_candidate_rows,
+    unresolved_candidates,
+)
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "informational": 4}
 CONFIDENCE_ORDER = {"high": 0, "medium": 1, "low": 2}
@@ -110,16 +122,10 @@ def _deep_report_id(finding: dict[str, Any]) -> str:
     )
 
 
-def _deep_candidate_id(finding: dict[str, Any]) -> str:
-    extensions = finding.get("extensions")
-    if isinstance(extensions, dict):
-        candidate_id = extensions.get("candidateId")
-        if isinstance(candidate_id, str) and candidate_id.strip():
-            return candidate_id
-    return _deep_report_id(finding)
-
-
 def _has_deep_child_metadata(finding: dict[str, Any]) -> bool:
+    candidate = finding_candidate_key(finding)
+    if candidate is not None and candidate[0] is not None:
+        return True
     extensions = finding.get("extensions")
     if not isinstance(extensions, dict):
         return False
@@ -134,8 +140,8 @@ def uses_deep_presentation(coverage: dict[str, Any], findings: list[dict[str, An
         return True
     if coverage.get("mode") != "scoped_path":
         return False
-    # Scoped deep scans can arrive as scoped_path artifacts. The child ids are
-    # the stable deep-scan signal; ordinary scoped scans do not emit them.
+    # Standard scans also use candidate IDs. Deep children add worker ownership
+    # or the legacy extension identifiers to scoped_path artifacts.
     return any(_has_deep_child_metadata(finding) for finding in findings)
 
 
@@ -165,9 +171,10 @@ def _deep_title_parts(finding: dict[str, Any]) -> tuple[str, str | None]:
 def _deep_finding_groups(
     findings: list[dict[str, Any]], writeup_paths: list[str | None]
 ) -> list[list[tuple[int, dict[str, Any], str | None]]]:
-    groups: dict[str, list[tuple[int, dict[str, Any], str | None]]] = {}
+    groups: dict[CandidateKey, list[tuple[int, dict[str, Any], str | None]]] = {}
     for number, (finding, report_path) in enumerate(zip(findings, writeup_paths, strict=True), 1):
-        groups.setdefault(_deep_candidate_id(finding), []).append((number, finding, report_path))
+        key = finding_candidate_key(finding) or (None, _deep_report_id(finding))
+        groups.setdefault(key, []).append((number, finding, report_path))
     return list(groups.values())
 
 
@@ -430,8 +437,8 @@ def _code_evidence_location(item: dict[str, Any]) -> str:
     if isinstance(location, dict):
         item = location
     path = item.get("path")
-    start = item.get("startLine")
-    end = item.get("endLine")
+    start = item.get("startLine", item.get("start_line"))
+    end = item.get("endLine", item.get("end_line", start))
     if not isinstance(path, str) or not path:
         return ""
     path = _path_label(path)
@@ -482,6 +489,41 @@ def _locations(finding: dict[str, Any]) -> str:
         suffix = f":{start}" if end == start else f":{start}-{end}"
         rendered.append(f"{_path_text(location['path'])}{suffix}")
     return ", ".join(rendered)
+
+
+def _candidate_details(candidate: dict[str, Any], saved: dict[str, Any]) -> tuple[str, str]:
+    """Render the evidence shapes saved by discovery and finding validation."""
+    locations = []
+    evidence = []
+    validation = candidate.get("validation")
+    for value in (
+        candidate.get("evidence"),
+        validation.get("evidence") if isinstance(validation, dict) else None,
+    ):
+        evidence.extend(
+            item
+            for item in (value if isinstance(value, list) else [value])
+            if isinstance(item, str) and item.strip()
+        )
+    for field in ("locations", "sourceEvidence", "codeEvidence", "code_evidence", "evidence"):
+        items = candidate.get(field, [])
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            if location := _code_evidence_location(item):
+                locations.append(location)
+            if field != "locations":
+                evidence.extend(
+                    value
+                    for key in ("explanation", "code")
+                    if isinstance(value := item.get(key), str) and value.strip()
+                )
+    paths = saved.get("paths", [])
+    return (
+        ", ".join(dict.fromkeys(locations))
+        or ", ".join(path for path in paths if isinstance(path, str)),
+        "; ".join(dict.fromkeys(evidence)) or candidate.get("summary", ""),
+    )
 
 
 def _finding_sort_key(finding: dict[str, Any]) -> tuple[int, str, str]:
@@ -810,6 +852,11 @@ def build_report_markdown(
             + ", ".join(duplicate_writeup_paths)
         )
     deep_presentation = uses_deep_presentation(coverage, findings)
+    sealed = scan.get("sealedAt") is not None
+    pending_candidates = unresolved_candidates(
+        coverage, findings_document["findings"], sealed=sealed
+    )
+    pending_rows = unresolved_candidate_rows(coverage, findings_document["findings"], sealed=sealed)
     deep_finding_groups = _deep_finding_groups(findings, writeup_paths) if deep_presentation else []
     hardening_portfolio_path = _hardening_portfolio_path(scan)
     include_paths = [
@@ -872,6 +919,7 @@ def build_report_markdown(
             "| --- | --- |",
             f"| Scan outcome | {scan.get('status', 'completed')} |",
             *summary_count_lines,
+            f"| Unresolved candidates | {len(pending_candidates)} |",
             f"| Validation mode | {_cell(scope.get('validationMode', 'not recorded'))} |",
             "",
             "Canonical artifacts: `scan-manifest.json`, `findings.json`, and `coverage.json`. This report is a deterministic projection of those files.",
@@ -981,6 +1029,32 @@ def build_report_markdown(
                 f"[Open the structural hardening portfolio]({hardening_portfolio_path})",
             ]
         )
+    if pending_candidates:
+        lines.extend(
+            [
+                "",
+                "## Unresolved candidates",
+                "",
+                "These saved candidates have not resolved into a saved finding or a terminal disposition.",
+                "",
+                "| Candidate | Source worker | Title | Remaining review | Locations | Evidence |",
+                "| --- | --- | --- | --- | --- | --- |",
+            ]
+        )
+        for candidate in pending_rows:
+            candidate_id = coverage_candidate_key(candidate)[1]
+            original = candidate.get("candidate", candidate.get("finding", {}))
+            original = original if isinstance(original, dict) else {}
+            title = original.get("title", original.get("summary"))
+            locations, evidence = _candidate_details(original, candidate)
+            lines.append(
+                f"| {_cell(candidate_id)} "
+                f"| {_cell(coverage_owner(candidate))} "
+                f"| {_cell(title or candidate.get('title', candidate_id))} "
+                f"| {_cell(candidate.get('reason'))} "
+                f"| {_cell(locations)} "
+                f"| {_cell(evidence)} |"
+            )
     surfaces = coverage.get("surfaces", [])
     if surfaces:
         lines.extend(
@@ -1012,27 +1086,34 @@ def build_report_markdown(
                 + " |"
             )
     open_questions = coverage.get("openQuestions", [])
-    deferred_questions = []
     deferred = coverage.get("deferred", [])
-    if isinstance(deferred, list):
-        deferred_questions = [
-            {
-                "question": item.get("reason", "Deferred review requires follow-up."),
-                "followUpPrompt": " ".join(
-                    (
-                        f"Review deferred unit {item.get('id', 'unknown')} and close its stated proof gap.",
-                        f"Paths: {', '.join(item.get('paths', []))}." if item.get("paths") else "",
-                        (
-                            f"Surfaces: {', '.join(item.get('surfaceIds', []))}."
-                            if item.get("surfaceIds")
-                            else ""
-                        ),
-                    )
-                ).strip(),
-            }
+    follow_ups = (
+        [
+            item
             for item in deferred
-            if isinstance(item, dict)
+            if isinstance(item, dict) and coverage_candidate_key(item) is None
         ]
+        if isinstance(deferred, list)
+        else []
+    )
+    follow_ups.extend(pending_rows)
+    deferred_questions = [
+        {
+            "question": item.get("reason", "Deferred review requires follow-up."),
+            "followUpPrompt": " ".join(
+                (
+                    f"Review deferred unit {item.get('id', 'unknown')} and close its stated proof gap.",
+                    f"Paths: {', '.join(item.get('paths', []))}." if item.get("paths") else "",
+                    (
+                        f"Surfaces: {', '.join(item.get('surfaceIds', []))}."
+                        if item.get("surfaceIds")
+                        else ""
+                    ),
+                )
+            ).strip(),
+        }
+        for item in follow_ups
+    ]
     for heading, questions in (
         ("Deferred Requested Work", deferred_questions),
         ("Open Questions And Follow Up", open_questions),

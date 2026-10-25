@@ -9,6 +9,7 @@ import {
 import type {
   DeepReductionInput,
   ReducerArtifactValidation,
+  UnresolvedCandidate,
 } from "./artifact-validation.js";
 import { archiveDirectory, writePrivateFile } from "./artifacts.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
@@ -72,6 +73,7 @@ export interface ReducerRequest {
   label: string;
   consumed: AcceptedDiscovery[];
   previousReducerResultPath?: string;
+  previousUnresolvedCandidates?: UnresolvedCandidate[];
   previousSourceCoverage?: DeepReductionInput["sourceCoverage"];
 }
 
@@ -239,6 +241,7 @@ export class DeepScanWorkerRunner {
       label: reducerLabel,
       consumed,
       previousReducerResultPath,
+      previousUnresolvedCandidates,
       previousSourceCoverage,
     } = request;
     const { artifacts, run } = this.options;
@@ -288,6 +291,12 @@ export class DeepScanWorkerRunner {
     const sources = await readDeepReductionSources(artifactContext);
     if (sources.previous && previousSourceCoverage !== undefined) {
       sources.previous.sourceCoverage = structuredClone(previousSourceCoverage);
+    }
+    if (sources.previous && previousUnresolvedCandidates !== undefined) {
+      // Recovered candidate state stays in memory; historical files are immutable.
+      sources.previous.unresolvedCandidates = structuredClone(
+        previousUnresolvedCandidates,
+      );
     }
     let reducerValidation!: ReducerArtifactValidation;
     let outcome = await this.runWorkerWithRetries({

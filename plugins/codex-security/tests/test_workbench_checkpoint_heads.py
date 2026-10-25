@@ -836,6 +836,7 @@ def test_legacy_live_head_sources_keep_their_recorded_digest(
         )
 
 
+@pytest.mark.parametrize("decision_owner", ["same", "unowned", "other"])
 @pytest.mark.parametrize("evidence", ["deferred", "reported"])
 @pytest.mark.parametrize(
     ("destination", "head_time"),
@@ -853,6 +854,7 @@ def test_parent_head_selection_matches_frozen_publication_retry(
     evidence: str,
     head_time: int,
     destination: str,
+    decision_owner: str,
 ) -> None:
     from test_workbench_saved_source_order import call_workbench
 
@@ -932,6 +934,10 @@ def test_parent_head_selection_matches_frozen_publication_retry(
                 "finding": initial["findings"]["findings"][0],
             }
         ]
+    if evidence == "reported" and decision_owner != "unowned":
+        terminal["coverage"]["surfaces"][0]["sourceWorkerId"] = (
+            worker_id if decision_owner == "same" else "independent-worker"
+        )
     staged.write_text(json.dumps(terminal))
     write_bytes = saved.write_scan_local_bytes
 
@@ -984,8 +990,9 @@ def test_parent_head_selection_matches_frozen_publication_retry(
         if evidence == "deferred":
             assert (parent_work in coverage["deferred"]) is (head_time <= 100)
         else:
-            assert len(findings["findings"]) == (1 if head_time <= 100 else 0)
-            if head_time <= 100:
+            retained = head_time <= 100 or decision_owner != "same"
+            assert len(findings["findings"]) == int(retained)
+            if retained:
                 for field in (
                     "findingId",
                     "occurrenceId",
@@ -1175,6 +1182,75 @@ def test_older_attempt_selected_head_cannot_supersede_current_result(tmp_path):
     replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, workers)
     for result in (first, replay):
         assert result[2]["surfaces"] == [current]
+
+
+@pytest.mark.parametrize("label", [None, "", " ", False])
+def test_worker_label_recovery_retains_candidate_without_prior_gap(
+    tmp_path: Path, checkpoint_scan, label
+):
+    scan_id, _, _, binding = checkpoint_scan
+    output = tmp_path / "worker" / "output"
+    output.mkdir(parents=True)
+    decision = {
+        "id": "decision",
+        "candidateId": "review",
+        "disposition": "rejected",
+        "receiptRefs": [],
+        "candidate": {"evidence": "Saved candidate evidence."},
+    }
+    if label is not None:
+        decision["label"] = label
+    write_checkpoint(
+        output / "checkpoints", saved_draft(scan_id, surfaces=[decision], complete=True)
+    )
+    workers = [saved_discovery_worker(output)]
+    result = saved.merge_saved_results(
+        tmp_path, scan_id, binding, workers, [], stopped=True, reason="interrupted"
+    )
+    coverage = result[2]
+    warnings = []
+    finalize_scan_contract._recover_unsealed_coverage(
+        coverage, Path(saved.__file__).resolve().parent.parent / "schemas", tmp_path, warnings, []
+    )
+    pending = [row for row in coverage["deferred"] if row.get("candidateId") == "review"]
+    assert len(pending) == 1
+    assert pending[0]["reason"]
+    assert pending[0]["candidate"] == decision["candidate"]
+
+
+@pytest.mark.parametrize("observed", [100, 300])
+def test_parent_candidate_decision_does_not_consume_worker_generic_task(
+    tmp_path: Path, checkpoint_scan, observed: int
+):
+    scan_id, _, _, binding = checkpoint_scan
+    output = tmp_path / "worker" / "output"
+    output.mkdir(parents=True)
+    generic = {"id": "review", "reason": "Independent generic review remains."}
+    checkpoint = write_checkpoint(output / "checkpoints", saved_draft(scan_id, deferred=[generic]))
+    os.utime(checkpoint, ns=(observed, observed))
+    terminal = saved_draft(
+        scan_id,
+        surfaces=[
+            {
+                "id": "decision",
+                "candidateId": "review",
+                "label": "Candidate",
+                "disposition": "rejected",
+                "sourceWorkerId": "worker",
+            }
+        ],
+        complete=True,
+    )
+    write_saved_parent(tmp_path, terminal, 200)
+    workers = [saved_discovery_worker(output)]
+    result = saved.merge_saved_results(
+        tmp_path, scan_id, binding, workers, [], stopped=True, reason="interrupted"
+    )
+    assert generic in result[2]["deferred"]
+    assert any(
+        row.get("candidateId") == "review" and row["disposition"] == "rejected"
+        for row in result[2]["surfaces"]
+    )
 
 
 @pytest.mark.parametrize("prior_owner", ["shared", "worker"])

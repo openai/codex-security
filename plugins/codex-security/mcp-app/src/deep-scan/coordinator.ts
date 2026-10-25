@@ -11,6 +11,7 @@ import {
 import {
   aggregateSourceCoverage,
   deepReductionToScanDraft,
+  collectUnresolvedCandidates,
   validateDiscoveryArtifacts,
   validateReducerArtifacts,
   type DeepReductionInput,
@@ -942,6 +943,7 @@ export class DeepScanCoordinator {
               label: `dedup-${String(reducerSequence).padStart(4, "0")}`,
               consumed,
               previousReducerResultPath,
+              previousUnresolvedCandidates: latestResult?.unresolvedCandidates,
               previousSourceCoverage: latestResult?.sourceCoverage,
             }),
           );
@@ -1092,7 +1094,7 @@ export class DeepScanCoordinator {
         this.artifacts,
         worker.resultManifestPath,
         this.state.scanId,
-        this.state,
+        { ...this.state, recoverCandidateReceipts: true },
       );
       recovered.push({
         id: worker.id,
@@ -1183,6 +1185,12 @@ export class DeepScanCoordinator {
         sources.discoveries,
         latestResult ?? null,
       );
+      const pending = collectUnresolvedCandidates(
+        sources.discoveries,
+        latestResult ?? null,
+      );
+      if (pending.length) result.unresolvedCandidates = pending;
+      else delete result.unresolvedCandidates;
       latestResult = result;
       resultPath = worker.resultManifestPath;
     }

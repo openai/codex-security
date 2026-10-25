@@ -178,6 +178,8 @@ def _frozen_source_times(
     scan_id: str,
     sources: dict[str, str],
     parent_context: dict[str, str] | None = None,
+    *,
+    receipt_states: dict[str, Any] | None = None,
 ) -> dict[str, int]:
     times: dict[str, int] = {}
     snapshots = [path for path in sources if _is_source_order_snapshot(path)]
@@ -185,6 +187,8 @@ def _frozen_source_times(
         record, digest, _ = _read_saved_result(scan_dir, path, scan_id)
         if digest != sources[path] or not isinstance(record.get("sources"), dict):
             raise ContractError("saved source ordering changed after the scan stopped")
+        if receipt_states is not None:
+            receipt_states.update(record.get("receiptRecovery", {}))
         context = record.get("parentContext")
         if parent_context is not None and context is not None:
             if not isinstance(context, dict) or any(
@@ -235,6 +239,7 @@ def _freeze_source_times(
     times: dict[str, int],
     parent_context: dict[str, str] | None = None,
     *,
+    receipt_states: dict[str, Any] | None = None,
     created_paths: set[str] | None = None,
 ) -> None:
     # Identical result rewrites must not change the order of frozen review evidence.
@@ -248,6 +253,8 @@ def _freeze_source_times(
     record = {"scanId": scan_id, "sources": observations}
     if parent_context:
         record["parentContext"] = parent_context
+    if recovered := {key: state for key, state in (receipt_states or {}).items() if state}:
+        record["receiptRecovery"] = recovered
     digest = _digest(record)
     path = f"source-order/{digest}.json"
     if not (scan_dir / path).exists():

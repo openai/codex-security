@@ -133,6 +133,41 @@ def test_stopped_receipt_ownership_requires_a_matching_checkpoint(
     assert result.read_bytes() == original
 
 
+def test_blank_candidate_ids_preserve_unmarked_shared_receipts_on_recovery(tmp_path):
+    import workbench_saved_results as saved
+
+    ref = "artifacts/shared.txt"
+    receipt = tmp_path / ref
+    receipt.parent.mkdir()
+    receipt.write_text("Synthetic shared proof.")
+    ids = {"empty": "", "space": " "}
+    surfaces = [
+        {
+            "id": name,
+            "label": name,
+            "candidateId": value,
+            "disposition": "no_issue_found",
+            "receiptRefs": [ref],
+        }
+        for name, value in ids.items()
+    ]
+    draft = saved_draft("identity-scan", complete=True, surfaces=surfaces)
+    worker = save_worker(tmp_path, saved, "reviewer", [], draft)
+    worker.update(
+        status="succeeded", result_manifest_path=str(tmp_path / "reviewer" / "result.json")
+    )
+    recovered = recover(tmp_path, saved, [worker])
+    assert len(recovered[2]["surfaces"]) == len(ids)
+    for row in recovered[2]["surfaces"]:
+        assert row["candidateId"] == ids[row["provenance"]["sourceId"]]
+        assert row["receiptRefs"] == [ref]
+        assert row["disposition"] == "no_issue_found"
+    assert (
+        recover(tmp_path, saved, [worker], recovered[0]["scan"]["preservedSources"])[2]
+        == recovered[2]
+    )
+
+
 CANDIDATE_IDS = [
     "candidate-\ud800",
     "candidate-\udfff",

@@ -2,6 +2,7 @@ import { testSharedReceiptSurvivesWorkerRetry } from "./deep_scan_receipt_cases.
 import { testSuccessfulDeepCoveragePreservesWorkerReviewStatus } from "./deep_scan_coverage_cases.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
+import { asRecord } from "../src/record.ts";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import type { JsonObject } from "../src/types.js";
 import type {
@@ -3167,12 +3168,21 @@ async function testResumedManifestPreservesCompletedReducer(
   });
   fixture.run.includePaths = includePaths;
   const store = new FakeStore(fixture.run);
+  const pendingCandidate = {
+    candidateId: "pending-review",
+    reason: "Candidate validation remains pending.",
+    candidate: { evidence: "The fixture handler needs review." },
+  };
   store.dedupCommitResponseGate = Promise.withResolvers<void>();
   const original = createCoordinator(
     fixture,
     store,
     new FakeExecutor({
       blockDiscoveryAfterCalls: 2,
+      discoveryDeferred: [
+        pendingCandidate,
+        { reason: "General follow-up work." },
+      ],
       discoveryCandidateId: includePaths ? "scope-candidate" : undefined,
     }),
     { run: store.run },
@@ -3247,13 +3257,50 @@ async function testResumedManifestPreservesCompletedReducer(
   assert.equal(manifest.scan.scanId, fixture.run.scanId);
   assert.equal(store.dedupCommits.length, 1);
   assert.equal(store.dedupClaims.length, 1);
+  assert.equal(published.length, 1);
+  const { coverage } = published[0];
+  const owners = store.dedupClaims[0].workerIds;
+  assert.deepEqual(
+    coverage.surfaces.map(({ label, disposition, provenance }) => [
+      label,
+      disposition,
+      asRecord(provenance)?.workerId,
+    ]),
+    owners.map((id) => [
+      "Fixture query",
+      includePaths ? "reported" : "no_issue_found",
+      id,
+    ]),
+  );
+  assert.deepEqual(coverage.explicitExclusions, []);
+  assert.deepEqual(
+    coverage.deferred
+      .filter((row) => row.candidateId)
+      .map((row) => [
+        asRecord(row.provenance)?.workerId,
+        asRecord(row.provenance)?.candidateId,
+        row.reason,
+        row.candidate,
+      ]),
+    owners.map((id) => [
+      id,
+      pendingCandidate.candidateId,
+      pendingCandidate.reason,
+      pendingCandidate.candidate,
+    ]),
+  );
+  assert.deepEqual(
+    coverage.deferred
+      .filter((row) => !row.candidateId)
+      .map((row) => [asRecord(row.provenance)?.workerId, row.reason]),
+    owners.map((id) => [id, "General follow-up work."]),
+  );
   assert.equal(
     replacementExecutor.discoveryCalls + replacementExecutor.dedupCalls,
     0,
     "accepted work needs no new worker launch",
   );
   assert.deepEqual(manifest.findings, committedResult.findings);
-  assert.equal(published.length, 1);
   assert.deepEqual(
     published[0].findings,
     includePaths ? [] : committedResult.findings,

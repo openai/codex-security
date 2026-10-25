@@ -21,7 +21,7 @@ export async function importModule(options: BuildOptions) {
     write: false,
     ...options,
   });
-  const contents = result.outputFiles![0].contents;
+  const contents = result.outputFiles![0]!.contents;
   // Keep content-based module identity without embedding the bundle in stacks.
   const digest = createHash("sha256").update(contents).digest("hex");
   const modulePath = join(moduleDirectory, `${digest}.mjs`);

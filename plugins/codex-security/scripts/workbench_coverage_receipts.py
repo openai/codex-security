@@ -9,6 +9,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from candidate_identity import _deferred_candidate_id as candidate_task_id
+from candidate_identity import candidate_key, is_candidate_row
 from finalize_scan_contract import (
     ContractError,
     _require_portable_relative_path,
@@ -112,14 +114,20 @@ def retain_recorded_receipt_ownership(
                 payloads.add(payload_digest({**draft, "findings": scoped}))
     for relative, draft, worker_id in sources:
         directory = Path(relative).parent
-        if worker_id is None or directory.name == "checkpoints":
+        if worker_id is None:
             continue
-        if payload_digest(draft) in recorded.get(directory, set()):
-            continue
-        surfaces = draft["coverage"].get("surfaces", [])
-        for surface in surfaces if isinstance(surfaces, list) else []:
-            if isinstance(surface, dict) and isinstance(surface.get("provenance"), dict):
-                surface["provenance"].pop("scanReceiptRefs", None)
+        trusted_surface_refs = directory.name == "checkpoints" or payload_digest(
+            draft
+        ) in recorded.get(directory, set())
+        for field in ("surfaces", "explicitExclusions"):
+            # The worker writer records inherited scan receipts on surfaces only.
+            if field == "surfaces" and trusted_surface_refs:
+                continue
+            rows = draft["coverage"].get(field, [])
+            for row in rows if isinstance(rows, list) else []:
+                if isinstance(row, dict) and isinstance(row.get("provenance"), dict):
+                    if field == "surfaces" or is_candidate_row(row):
+                        row["provenance"].pop("scanReceiptRefs", None)
 
 
 def resolve_coverage_receipts(
@@ -134,13 +142,6 @@ def resolve_coverage_receipts(
     output = Path(worker["artifact_dir"]).relative_to(scan_dir)
     worker_prefix = (output.parent if output.name == "output" else output).as_posix() + "/"
     active_prefix = output.as_posix() + "/"
-    if directory != output:
-        refs = [
-            f"{directory.as_posix()}/{Path(ref).as_posix()[len(active_prefix) :]}"
-            if isinstance(ref, str) and Path(ref).as_posix().startswith(active_prefix)
-            else ref
-            for ref in refs
-        ]
 
     def scan_receipt(ref: str) -> bool:
         try:
@@ -161,6 +162,12 @@ def resolve_coverage_receipts(
             # A worker prefix must not make result.json a valid coverage receipt.
             return ref
         ref = normalized
+        if (
+            directory != output
+            and ref.startswith(active_prefix)
+            and not ref.startswith(f"{worker_prefix}attempts/")
+        ):
+            return f"{directory.as_posix()}/{ref[len(active_prefix) :]}"
         provenance = item.get("provenance")
         inherited_scan_refs = (
             provenance.get("scanReceiptRefs", []) if isinstance(provenance, dict) else []
@@ -170,6 +177,13 @@ def resolve_coverage_receipts(
         ):
             return ref
         local_ref = Path(f"{directory}/{ref}").as_posix()
+        if (
+            candidate_key(item.get("candidateId")) is not None
+            or "candidate" in item
+            or "finding" in item
+        ):
+            # An unrelated parent receipt cannot settle a worker's proof gap.
+            return local_ref
         return local_ref if scan_receipt(local_ref) or not scan_receipt(ref) else ref
 
     return [qualified_receipt(ref) for ref in refs]
@@ -331,9 +345,7 @@ def _generic_surface_updates(
             by_source = dict(matches)
             if any(row != by_source[saved_path] for saved_path, row in matches):
                 continue
-            if any(
-                "candidateId" in row or "candidate" in row or "finding" in row for _, row in matches
-            ):
+            if any(is_candidate_row(row) for _, row in matches):
                 continue
             if any(
                 row is not surface
@@ -351,7 +363,7 @@ def _generic_surface_updates(
                     or (
                         isinstance(row.get("id"), str)
                         and (owner, row["id"]) in ambiguous_deferred
-                        and not any(key in row for key in ("candidateId", "candidate", "finding"))
+                        and not is_candidate_row(row)
                     )
                 )
                 and linked(row, identity, saved_owner)
@@ -364,7 +376,7 @@ def _generic_surface_updates(
                 saved_owner == surface_owner
                 and (owner, deferred_id) not in closed_deferred
                 and (
-                    (candidate_id := _deferred_candidate_id(row, owner, ambiguous_deferred)) is None
+                    (candidate_id := candidate_task_id(row)) is None
                     or (owner, candidate_id) not in resolved_candidates
                 )
                 and linked(row, identity, saved_owner)

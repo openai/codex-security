@@ -274,6 +274,14 @@ const coverageDocument = z.looseObject({
       ),
       riskArea: text.optional(),
       notes: text.optional(),
+      candidateId: z
+        .unknown()
+        .meta({
+          description:
+            "A non-blank string identifies a saved candidate; other historical metadata is preserved unchanged.",
+          tsType: "unknown",
+        })
+        .optional(),
     }),
   ),
   explicitExclusions: z.array(z.looseObject({ pattern: text, reason: text })),
@@ -283,12 +291,34 @@ const coverageDocument = z.looseObject({
       reason: text,
       paths: textList.optional(),
       surfaceIds: textList.optional(),
+      candidateId: z
+        .unknown()
+        .meta({
+          description:
+            "A non-blank string identifies a saved candidate; other historical metadata is preserved unchanged.",
+          tsType: "unknown",
+        })
+        .optional(),
+      candidate: z
+        .unknown()
+        .meta({
+          description:
+            "Saved candidate details and evidence awaiting a final decision.",
+          tsType: "unknown",
+        })
+        .optional(),
     }),
   ),
   resolvedDeferred: z
     .array(z.strictObject({ id: text, reason: text }))
     .describe(
       "Completed generic review tasks, with their saved IDs and completion reasons.",
+    )
+    .optional(),
+  receiptSealVersion: z
+    .literal(1)
+    .describe(
+      "Sealed receipt contract, including exclusion proof. Absent on legacy coverage, whose exclusion receipt metadata remains opaque.",
     )
     .optional(),
   openQuestions: z

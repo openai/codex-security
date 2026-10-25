@@ -8,14 +8,22 @@ import json
 from pathlib import Path
 from typing import Any
 
+from candidate_identity import coverage_candidate_key
 from finalize_scan_contract import (
     ContractError,
     _normalize_unsealed_open_questions,
     _read_json,
+    _recover_unsealed_coverage,
     _require_portable_relative_path,
-    _validate_resolved_deferred,
-    _validate_schema_node,
 )
+from finalize_scan_contract import (
+    resolved_deferred_rows as _resolved_deferred_rows,
+)
+
+
+def _coverage_rows(coverage: dict[str, Any], field: str) -> list[Any]:
+    rows = coverage.get(field, [])
+    return rows if isinstance(rows, list) else []
 
 
 def _saved_coverage_id(item: dict[str, Any]) -> str:
@@ -153,12 +161,18 @@ def _prepare_worker_coverage_recovery(
             rows = draft["coverage"].get(field, [])
             if not isinstance(rows, list):
                 continue
+            legacy_candidates = []
             for index, row in enumerate(rows):
                 if field == "openQuestions" and isinstance(row, str):
                     row = {"question": row}
                     rows[index] = row
                 if not isinstance(row, dict):
                     continue
+                legacy = (
+                    {**copy.deepcopy(row), "sourceWorkerId": owner}
+                    if coverage_candidate_key(row, owner) is not None
+                    else None
+                )
                 row["workerId"] = owner
                 if field == "surfaces" and receipt_resolver is not None:
                     row["receiptRefs"] = receipt_resolver(relative, row, owner)
@@ -179,8 +193,15 @@ def _prepare_worker_coverage_recovery(
                     row["receiptRefs"] = refs
                 if field == "surfaces":
                     row.setdefault("receiptRefs", [])
+                    if legacy is not None:
+                        legacy["receiptRefs"] = row["receiptRefs"]
+                if legacy is not None:
+                    legacy_candidates.append((_coverage_comparison_row(legacy, field), row))
             aggregate_rows = _aggregate_worker_coverage_rows(rows, owner, field)
             projected[field].extend(aggregate_rows)
+            # Earlier candidate-aware reducers copied the worker's local row
+            # with sourceWorkerId, before main qualified aggregate IDs.
+            projected[field].extend(aggregate for aggregate, _ in legacy_candidates)
             if field in {"surfaces", "deferred"}:
                 originals = surface_sources if field == "surfaces" else task_sources
                 originals.extend(
@@ -188,6 +209,7 @@ def _prepare_worker_coverage_recovery(
                     for aggregate, row in zip(aggregate_rows, rows)
                     if isinstance(aggregate, dict) and isinstance(row, dict)
                 )
+                originals.extend(legacy_candidates)
     # A canonical aggregate contains copies of the same worker evidence. Let
     # the existing per-worker chronology reconcile those originals exactly once.
     # Keep parent-only evidence when its bound worker source is unavailable.
@@ -273,6 +295,18 @@ class SavedCoverageProjection:
             if qualified or not self.project_worker_coverage
             else _project_worker_coverage_row(item, owner, field)
         )
+        if (
+            owner is not None
+            and not qualified
+            and isinstance(retained, dict)
+            and isinstance(retained.get("candidateId"), str)
+        ):
+            # A draft checkpoint carries a worker-local candidate ID until its attempt is accepted.
+            retained["sourceWorkerId"] = owner
+            provenance = retained.get("provenance")
+            if isinstance(provenance, dict):
+                provenance.pop("workerId", None)
+                provenance.pop("candidateId", None)
         if retained not in output:
             output.append(retained)
         retained = output[output.index(retained)]
@@ -773,20 +807,6 @@ def _deferred_rows(coverage: dict[str, Any]) -> list[Any]:
     return rows if isinstance(rows, list) else []
 
 
-def _resolved_deferred_rows(draft: dict[str, Any], schema: dict[str, Any]) -> list[dict[str, Any]]:
-    if draft.get("complete") is False:
-        return []
-    coverage = draft["coverage"]
-    rows = coverage.get("resolvedDeferred", [])
-    try:
-        # Invalid closure metadata cannot discard the evidence it names.
-        _validate_schema_node(rows, schema, "coverage.resolvedDeferred")
-        _validate_resolved_deferred({**coverage, "deferred": _deferred_rows(coverage)})
-    except ContractError:
-        return []
-    return rows
-
-
 def _project_worker_closure(
     relative: str,
     owner: str,
@@ -870,3 +890,37 @@ def _merge_tied_parent_observations(
         merged["complete"] = False
     coverage.pop("completeness", None)
     return merged
+
+
+def _recover_preserved_worker_coverage(
+    scan_dir, relative, worker_id, draft, discarded_findings, warnings
+):
+    discarded_coverage = False
+    for field in ("surfaces", "explicitExclusions", "deferred"):
+        rows = draft["coverage"].get(field)
+        for row in rows if isinstance(rows, list) else []:
+            if isinstance(row, dict):
+                row.setdefault("id", _saved_coverage_id(row))
+                if field == "surfaces":
+                    row.setdefault("receiptRefs", [])
+    source_warnings = []
+    discarded_fields = _recover_unsealed_coverage(
+        draft["coverage"],
+        Path(__file__).resolve().parents[2] / "schemas",
+        scan_dir,
+        source_warnings,
+        discarded_findings,
+        # Reconcile local IDs and valid outcomes against worker history below.
+        worker_draft=True,
+    )
+    if discarded_fields & {
+        "surfaces",
+        "explicitExclusions",
+        "deferred",
+        "resolvedDeferred",
+    }:
+        discarded_coverage = True
+    for row in draft["coverage"]["deferred"]:
+        row["workerId"] = worker_id
+    warnings.extend(f"{relative}: {warning}" for warning in source_warnings)
+    return discarded_coverage

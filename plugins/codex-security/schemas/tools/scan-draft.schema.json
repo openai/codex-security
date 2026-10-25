@@ -656,7 +656,8 @@
                 "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
               },
               "candidateId": {
-                "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/candidateId"
+                "description": "Preserve the saved candidate's semantic identity exactly, including names such as review/auth.",
+                "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
               },
               "reason": {
                 "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
@@ -666,7 +667,8 @@
               },
               "surfaceIds": {
                 "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
-              }
+              },
+              "candidate": {}
             },
             "required": ["reason"],
             "additionalProperties": true

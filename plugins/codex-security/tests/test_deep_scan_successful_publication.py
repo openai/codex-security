@@ -181,7 +181,7 @@ def assert_published_aggregate(scan):
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     for field in ("documentType", "schemaVersion", "scanId"):
         coverage.pop(field)
-    assert coverage == scan.coverage
+    assert coverage == {**scan.coverage, "receiptSealVersion": 1}
     assert (scan.scan_dir / "report.md").is_file()
 
 

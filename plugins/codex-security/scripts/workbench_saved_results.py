@@ -17,6 +17,18 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from candidate_identity import (
+    archive_candidate_payloads as archive_candidate_payloads,
+)
+from candidate_identity import (
+    coverage_candidate_key as coverage_candidate_key,
+)
+from candidate_identity import (
+    finding_candidate_key as finding_candidate_key,
+)
+from candidate_identity import (
+    unresolved_candidates as unresolved_candidates,
+)
 from finalize_scan_contract import (
     ContractError,
     ScanLocalIOError,
@@ -77,7 +89,12 @@ from workbench.retained_coverage import (
 from workbench.retained_coverage import (
     _worker_candidate_key as _worker_candidate_key,
 )
-from workbench.retained_coverage import merge_saved_results as merge_saved_results
+from workbench.retained_coverage import (
+    merge_saved_results as merge_saved_results,
+)
+from workbench.retained_coverage import (
+    recoverable_findings as recoverable_findings,
+)
 from workbench.saved_coverage import (
     _deferred_rows as _deferred_rows,
 )
@@ -125,6 +142,15 @@ from workbench.saved_sources import (
 )
 from workbench.saved_sources import (
     _worker_outputs as _worker_outputs,
+)
+from workbench_budget_candidates import (
+    _diff_candidate_decision as _diff_candidate_decision,
+)
+from workbench_budget_candidates import (
+    preserve_budget_candidates as preserve_budget_candidates,
+)
+from workbench_budget_candidates import (
+    recover_candidate_receipts as recover_candidate_receipts,
 )
 from workbench_constants import PHASES
 from workbench_coverage_receipts import (
@@ -306,7 +332,10 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[
     paths = dict(_saved_result_paths(scan_dir, workers))
     recovery_sources = dict(frozen_sources or {})
     parent_context: dict[str, str] = {}
-    source_times = _frozen_source_times(scan_dir, scan["id"], recovery_sources, parent_context)
+    receipt_states: dict[str, Any] = {}
+    source_times = _frozen_source_times(
+        scan_dir, scan["id"], recovery_sources, parent_context, receipt_states=receipt_states
+    )
     for relative, expected_digest in recovery_sources.items():
         try:
             _, digest, observed = _read_saved_result(
@@ -331,7 +360,14 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[
                 raise ContractError("checkpoint changed after the scan stopped")
             recovery_sources[path] = digest
             source_times.setdefault(path, observed)
-    _freeze_source_times(scan_dir, scan["id"], recovery_sources, source_times, parent_context)
+    _freeze_source_times(
+        scan_dir,
+        scan["id"],
+        recovery_sources,
+        source_times,
+        parent_context,
+        receipt_states=receipt_states,
+    )
     return recovery_sources, include_parent
 
 
@@ -712,7 +748,7 @@ def preserve_scan_results_locked(
                     (json.dumps(unpublished_warnings), db.now(), scan_id),
                 )
         return False
-    if frozen_source_digests is None or (
+    if frozen_source_digests != documents[0]["scan"]["preservedSources"] or (
         recovery_source_digests is None
         and model_source != ([saved_model_source] if saved_model_source is not None else [])
     ):
