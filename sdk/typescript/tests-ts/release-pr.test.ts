@@ -105,6 +105,7 @@ const {
     repository: string,
     token: string,
     fetcher?: Fetcher,
+    sleep?: (milliseconds: number) => Promise<void>,
   ) => GitHubClient;
   readReleaseHistory: (
     repo: GitRepository,
@@ -227,10 +228,33 @@ function apiError(status: number) {
 }
 
 class Fixture {
-  static async withInitialPull() {
+  private static initialPull?: ReturnType<typeof Fixture.createInitialPull>;
+
+  private static async createInitialPull() {
     const fixture = new Fixture();
     fixture.merge("feat: initial feature");
     const first = await fixture.run();
+    const directory = templates.create("initial release proposal ");
+    cpSync(fixture.directory, directory, { recursive: true });
+    const { pulls, commitPulls, comments, writes } = fixture.github;
+    return {
+      directory,
+      first,
+      state: { pulls, commitPulls, comments, writes },
+    };
+  }
+
+  static async withInitialPull() {
+    Fixture.initialPull ??= Fixture.createInitialPull().catch((error) => {
+      Fixture.initialPull = undefined;
+      throw error;
+    });
+    // Clone the GitHub state together: commitPulls and pulls refer to the same objects.
+    const { directory, first, state } = structuredClone(
+      await Fixture.initialPull,
+    );
+    const fixture = new Fixture(directory);
+    Object.assign(fixture.github, state);
     const pull = fixture.github.pulls.find(
       (candidate) => candidate.number === first.pull,
     )!;
@@ -242,9 +266,9 @@ class Fixture {
   readonly github = new FakeGitHub(this);
   readonly git = this.repo.git;
 
-  constructor() {
-    if (baseRepository !== undefined) {
-      cpSync(baseRepository, this.directory, { recursive: true });
+  constructor(repositoryTemplate = baseRepository) {
+    if (repositoryTemplate !== undefined) {
+      cpSync(repositoryTemplate, this.directory, { recursive: true });
       return;
     }
     this.git("init", "-b", "main");
@@ -495,6 +519,19 @@ class FakeGitHub {
 }
 
 describe("GitHub request transport", () => {
+  function retryClient(fetcher: Fetcher) {
+    const delays: number[] = [];
+    const github = createGitHubClient(
+      "example/release-fixture",
+      "synthetic-release-token",
+      fetcher,
+      async (milliseconds) => {
+        delays.push(milliseconds);
+      },
+    );
+    return { github, delays };
+  }
+
   const interruptedJsonResponse = (error: Error) =>
     new Response(
       new ReadableStream({
@@ -516,6 +553,8 @@ describe("GitHub request transport", () => {
     "recovers from %s without duplicating paginated results",
     async (failure) => {
       const pages: number[] = [];
+      const waiting = Promise.withResolvers<number>();
+      const resume = Promise.withResolvers<void>();
       const github = createGitHubClient(
         "example/release-fixture",
         "synthetic-release-token",
@@ -550,31 +589,33 @@ describe("GitHub request transport", () => {
                 : {},
           });
         },
+        (milliseconds) => {
+          waiting.resolve(milliseconds);
+          return resume.promise;
+        },
       );
-      expect(await github.list("pulls?per_page=1")).toEqual([
-        { number: 1 },
-        { number: 2 },
-      ]);
+      const result = github.list("pulls?per_page=1");
+      expect(await Promise.race([waiting.promise, result])).toBe(1000);
+      expect(pages).toEqual([1, 2]);
+      resume.resolve();
+      expect(await result).toEqual([{ number: 1 }, { number: 2 }]);
       expect(pages).toEqual([1, 2, 2]);
     },
   );
 
   test("recovers an interrupted successful request body", async () => {
     let requests = 0;
-    const github = createGitHubClient(
-      "example/release-fixture",
-      "synthetic-release-token",
-      async () => {
-        requests++;
-        return requests === 1
-          ? interruptedJsonResponse(new TypeError("terminated"))
-          : Response.json({ sha: "synthetic-main-sha" });
-      },
-    );
+    const { github, delays } = retryClient(async () => {
+      requests++;
+      return requests === 1
+        ? interruptedJsonResponse(new TypeError("terminated"))
+        : Response.json({ sha: "synthetic-main-sha" });
+    });
     expect(await github.request("GET", "git/ref/heads/main")).toEqual({
       sha: "synthetic-main-sha",
     });
     expect(requests).toBe(2);
+    expect(delays).toEqual([1000]);
   });
 
   test.each([false, true])(
@@ -586,21 +627,18 @@ describe("GitHub request transport", () => {
           code: "UND_ERR_SOCKET",
         }),
       });
-      const github = createGitHubClient(
-        "example/release-fixture",
-        "synthetic-release-token",
-        async () => {
-          requests++;
-          if (initialHttpError && requests === 1) {
-            return Response.json({ message: "Unavailable" }, { status: 503 });
-          }
-          throw error;
-        },
-      );
+      const { github, delays } = retryClient(async () => {
+        requests++;
+        if (initialHttpError && requests === 1) {
+          return Response.json({ message: "Unavailable" }, { status: 503 });
+        }
+        throw error;
+      });
       await expect(github.request("GET", "git/ref/heads/main")).rejects.toBe(
         error,
       );
       expect(requests).toBe(3);
+      expect(delays).toEqual([1000, 2000]);
     },
   );
 
@@ -613,22 +651,19 @@ describe("GitHub request transport", () => {
           code: "UND_ERR_SOCKET",
         }),
       });
-      const github = createGitHubClient(
-        "example/release-fixture",
-        "synthetic-release-token",
-        async () => {
-          requests++;
-          if (mixedFailures && requests === 1) {
-            return Response.json({ message: "Unavailable" }, { status: 503 });
-          }
-          if (mixedFailures && requests === 2) throw error;
-          return interruptedJsonResponse(error);
-        },
-      );
+      const { github, delays } = retryClient(async () => {
+        requests++;
+        if (mixedFailures && requests === 1) {
+          return Response.json({ message: "Unavailable" }, { status: 503 });
+        }
+        if (mixedFailures && requests === 2) throw error;
+        return interruptedJsonResponse(error);
+      });
       await expect(github.request("GET", "git/ref/heads/main")).rejects.toBe(
         error,
       );
       expect(requests).toBe(3);
+      expect(delays).toEqual([1000, 2000]);
     },
   );
 
@@ -644,17 +679,14 @@ describe("GitHub request transport", () => {
     async (method, failure) => {
       let requests = 0;
       const error = new TypeError("fetch failed");
-      const github = createGitHubClient(
-        "example/release-fixture",
-        "synthetic-release-token",
-        async () => {
-          requests++;
-          if (failure === "body") return interruptedJsonResponse(error);
-          throw error;
-        },
-      );
+      const { github, delays } = retryClient(async () => {
+        requests++;
+        if (failure === "body") return interruptedJsonResponse(error);
+        throw error;
+      });
       await expect(github.request(method, "pulls")).rejects.toBe(error);
       expect(requests).toBe(1);
+      expect(delays).toEqual([]);
     },
   );
 
@@ -662,33 +694,26 @@ describe("GitHub request transport", () => {
     "does not retry malformed JSON in a successful %s response",
     async (operation) => {
       let requests = 0;
-      const github = createGitHubClient(
-        "example/release-fixture",
-        "synthetic-release-token",
-        async () => {
-          requests++;
-          return new Response("{", { status: 200 });
-        },
-      );
+      const { github, delays } = retryClient(async () => {
+        requests++;
+        return new Response("{", { status: 200 });
+      });
       await expect(
         operation === "request"
           ? github.request("GET", "pulls")
           : github.list("pulls"),
       ).rejects.toBeInstanceOf(SyntaxError);
       expect(requests).toBe(1);
+      expect(delays).toEqual([]);
     },
   );
 
   test("reports a persistent server error after bounded read retries", async () => {
     let requests = 0;
-    const github = createGitHubClient(
-      "example/release-fixture",
-      "synthetic-release-token",
-      async () => {
-        requests++;
-        return Response.json({ message: "Unavailable" }, { status: 503 });
-      },
-    );
+    const { github, delays } = retryClient(async () => {
+      requests++;
+      return Response.json({ message: "Unavailable" }, { status: 503 });
+    });
     await expect(
       github.request("GET", "git/ref/heads/main"),
     ).rejects.toMatchObject({
@@ -696,6 +721,7 @@ describe("GitHub request transport", () => {
       message: "GitHub GET git/ref/heads/main failed with HTTP 503.",
     });
     expect(requests).toBe(3);
+    expect(delays).toEqual([1000, 2000]);
   });
 
   test.each([
@@ -708,18 +734,15 @@ describe("GitHub request transport", () => {
     "does not replay a %s request that fails with HTTP %i",
     async (method, status) => {
       let requests = 0;
-      const github = createGitHubClient(
-        "example/release-fixture",
-        "synthetic-release-token",
-        async () => {
-          requests++;
-          return Response.json({ message: "Failed request" }, { status });
-        },
-      );
+      const { github, delays } = retryClient(async () => {
+        requests++;
+        return Response.json({ message: "Failed request" }, { status });
+      });
       await expect(github.request(method, "pulls")).rejects.toMatchObject({
         status,
       });
       expect(requests).toBe(1);
+      expect(delays).toEqual([]);
     },
   );
 
