@@ -104,8 +104,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: node --experimental-strip-types sdk/typescript/scripts/check-devcontainer-cooldown.mts
-      - name: Test CI selection and result gating
-        run: node --test .github/scripts/test-ci-selection.mjs .github/scripts/test-verify-pr-source.mjs
+      - name: Test CI selection, result gating and the release guide
+        run: node --test .github/scripts/test-ci-selection.mjs .github/scripts/test-verify-pr-source.mjs .github/scripts/test-release-guide.mjs
       - name: Typecheck
         run: pnpm --dir sdk/typescript run types
       - name: Check formatting

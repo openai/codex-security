@@ -5,11 +5,14 @@ ordinary documentation-only change runs static checks and the final `ci` gate.
 Static checks format the tracked Markdown in this route. The Action README also
 runs Action CI to check generated input documentation and usage examples.
 Plugin skills, references, schemas, examples, and unrecognized paths receive
-full qualification because plugin Markdown is part of the product. SDK README and
-documentation changes also receive full qualification because those files are
-required package contents. Deleting or renaming them must pass archive checks.
-`RELEASING.md` also receives full qualification because SDK tests validate its
-canonical release recovery example.
+full qualification because plugin Markdown is part of the product.
+
+PRs limited to the SDK package manifest's Markdown files, optionally mixed with
+ordinary docs or `RELEASING.md`, require the native payload, the real package
+build and archive inspection, and one Ubuntu Node 24 installation. Removing or
+renaming a required guide must still pass archive inspection. The static job
+validates the canonical recovery example in `RELEASING.md` on docs-only PRs too.
+Mixing either kind of guide with product source selects full qualification.
 
 Source changes run the complete SDK suite on Linux, macOS, and Windows, plus
 MCP, standalone-plugin, native-runtime, and installed-package checks. Tests
@@ -89,7 +92,7 @@ itself does not change repository protection settings.
 The workflow-selection and gate tests run without installing dependencies:
 
 ```bash
-node --test .github/scripts/test-ci-selection.mjs .github/scripts/test-verify-pr-source.mjs
+node --test .github/scripts/test-ci-selection.mjs .github/scripts/test-verify-pr-source.mjs .github/scripts/test-release-guide.mjs
 ```
 
 The [SDK testing guide](../sdk/typescript/TESTING.md) describes local behavioral

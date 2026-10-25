@@ -11,9 +11,32 @@ const actionFiles =
 const evalFiles =
   /^evals\/(?:standard-time-budget\/(?:[^/]+\.mts|experiment\.json|README\.md)|triage-finding\/(?:package\.json|pnpm-lock\.yaml|README\.md|(?:assertions|scripts)\/[^/]+\.mts))$/;
 
+const packageManifest = JSON.parse(
+  readFileSync(
+    new URL("../../sdk/typescript/package.json", import.meta.url),
+    "utf8",
+  ),
+);
+const packagedDocs = new Set(
+  packageManifest.files
+    .filter((file) => file.endsWith(".md"))
+    .map((file) => `sdk/typescript/${file}`),
+);
+
 function scopeFor(paths, event, baseChanged) {
   if (event !== "pull_request" || baseChanged || !paths.length) return "full";
-  if (paths.every((path) => documentation.test(path))) return "docs";
+  if (
+    paths.every(
+      (path) =>
+        documentation.test(path) ||
+        path === "RELEASING.md" ||
+        packagedDocs.has(path),
+    )
+  ) {
+    // The Action profile already builds the package and installs it on Node 24.
+    // Select the separate Action job from its own inputs below.
+    return paths.some((path) => packagedDocs.has(path)) ? "action" : "docs";
+  }
   if (paths.every((path) => actionFiles.test(path))) return "action";
   if (paths.every((path) => evalFiles.test(path))) return "evals";
   if (
@@ -29,11 +52,9 @@ export function selectChecks(paths, { event, baseChanged = false }) {
   const source = full || scope === "source";
   const action =
     full ||
-    scope === "action" ||
     paths.some(
       (path) =>
-        path === "github-action/README.md" ||
-        path === "sdk/typescript/src/git-remote.ts",
+        actionFiles.test(path) || path === "sdk/typescript/src/git-remote.ts",
     );
   const compatibility = ["22.13.0", "24.0.0", "24", "26.0.0", "26"]
     .filter((version) => full || version !== "26")

@@ -302,10 +302,6 @@ const titleWorkflow = readFileSync(
   new URL("../../../.github/workflows/validate-pr-title.yml", import.meta.url),
   "utf8",
 );
-const releasingGuide = readFileSync(
-  new URL("../../../RELEASING.md", import.meta.url),
-  "utf8",
-);
 function publishedMetadata(): ReleaseMetadata {
   return {
     name: "@openai/codex-security",
@@ -3927,26 +3923,6 @@ describe("GitHub release workflow safeguards", () => {
       run: "node .github/scripts/check-ci-results.mjs",
       env: { CI_RESULTS: "${{ toJSON(needs) }}" },
     });
-  });
-
-  test("documents a canonical historical-summary prefix block", () => {
-    const start = "<!-- codex-security-release-summary:start -->";
-    const end = "<!-- codex-security-release-summary:end -->";
-    const recovery = releasingGuide.slice(
-      releasingGuide.indexOf("## Recover or repair a release"),
-    );
-    const markerBlock =
-      [...recovery.matchAll(/^```text\r?\n([\s\S]*?)^```[ \t]*$/gmu)]
-        .find(
-          (match) => match[1]?.includes(start) && match[1]?.includes(end),
-        )?.[1]
-        ?.replaceAll("\r\n", "\n") ?? "";
-
-    expect(markerBlock.startsWith(`${start}\n`)).toBe(true);
-    expect(markerBlock).toContain(`${end}\n\n`);
-    expect(extractHistoricalReleaseSummary(markerBlock)).toBe(
-      "Reviewed summary",
-    );
   });
 
   test.each([

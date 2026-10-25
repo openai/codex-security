@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { selectChecks } from "./select-ci-checks.mjs";
 import { failedChecks } from "./check-ci-results.mjs";
@@ -203,41 +202,34 @@ test("Standard and triage eval changes require all deterministic eval contracts"
   );
 });
 
-test("packaged SDK documentation keeps package validation selected", () => {
-  const manifest = JSON.parse(
-    readFileSync(
-      new URL("../../sdk/typescript/package.json", import.meta.url),
-      "utf8",
-    ),
-  );
-  for (const file of manifest.files.filter((file) => file.endsWith(".md"))) {
-    const path = `sdk/typescript/${file}`;
-    const selected = select([path]);
-    assert.deepEqual(selected, fullQualification, path);
+test("packaged guides keep the archive and installed-package gates", () => {
+  const expected = {
+    ...docs,
+    "package-required": "true",
+    "compatibility-matrix": JSON.stringify({
+      include: [{ os: "ubuntu-latest", node: "24" }],
+    }),
+  };
+  for (const paths of [
+    ["sdk/typescript/README.md"],
+    ["RELEASING.md", "sdk/typescript/docs/cli.md"],
+    // --no-renames includes the old required path even when the new path is ordinary docs.
+    ["sdk/typescript/docs/hosted-scans.md", "docs/hosted-scans.md"],
+  ]) {
+    assert.deepEqual(select(paths), expected, paths.join(", "));
   }
-  // The --no-renames diff reports the old path when a required doc is renamed.
-  const renamed = select([
-    "sdk/typescript/docs/hosted-scans.md",
-    "docs/hosted-scans.md",
-  ]);
-  assert.equal(renamed["source-required"], "true");
-  assert.equal(
-    select(["README.md", "sdk/typescript/README.md"])["source-required"],
-    "true",
+  assert.deepEqual(
+    failedChecks({
+      "classify-changes": { result: "success", outputs: expected },
+      "static-checks": { result: "success" },
+    }),
+    ["native", "package", "compatibility"],
   );
 });
 
-test("release recovery documentation keeps its SDK contract selected", () => {
-  for (const paths of [["RELEASING.md"], ["README.md", "RELEASING.md"]]) {
-    const outputs = select(paths);
-    assert.deepEqual(outputs, fullQualification);
-    // release-automation.test.ts validates the documented recovery marker.
-    const missing = failedChecks({
-      "classify-changes": { result: "success", outputs },
-      "static-checks": { result: "success" },
-    });
-    assert.ok(missing.includes("test"));
-  }
+test("release guide changes select the static route", () => {
+  assert.deepEqual(select(["RELEASING.md"]), docs);
+  assert.deepEqual(select(["README.md", "RELEASING.md"]), docs);
 });
 
 test("release helper changes select their release-progress regression checks", () => {
@@ -273,6 +265,9 @@ test("unknown paths and dependency configuration receive full qualification", ()
     ["other/sdk/typescript/src/runtime.ts"],
     [".npmrc"],
     ["sdk/typescript/.npmrc"],
+    ["sdk/typescript/docs/unlisted.md"],
+    ["RELEASING.md", "sdk/typescript/src/api.ts"],
+    ["sdk/typescript/docs/cli.md", "sdk/typescript/src/api.ts"],
     ["plugins/codex-security/mcp-app/src/.npmrc"],
     ["pnpm-workspace.yaml"],
     ["sdk/typescript/pnpm-workspace.yaml"],
