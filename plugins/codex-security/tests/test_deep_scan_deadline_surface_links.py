@@ -5,8 +5,8 @@ import os
 import sqlite3
 import subprocess
 import sys
-from pathlib import Path
 
+import deep_deadline_crash
 import pytest
 from test_deep_scan_stop_conditions import canceled_discovery_output, complete, finish
 from test_deep_scan_stop_conditions import deadline_scan as deadline_scan
@@ -30,44 +30,25 @@ def pending(identity, reason, surface_id="entry"):
 
 
 def interrupt_in_fresh_python(database, scan, hash_seed):
-    script = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
     result = subprocess.run(
         [
             sys.executable,
             "-B",
-            "-c",
-            """
-import runpy
-import sys
-from pathlib import Path
-from types import SimpleNamespace
-sys.path.insert(0, str(Path(sys.argv[1]).parents[1] / "tests"))
-from test_deep_scan_deadline_recovery import interrupt_finish_before_commit
-
-api = runpy.run_path(sys.argv[1], run_name="surface_link_recovery_test")
-api["deep_scan"]._dependencies = SimpleNamespace(
-    **api, preserve_stopped_results=api["preserve_stopped_results_after_transition"]
-)
-scan = SimpleNamespace(scan_id=sys.argv[3], scan_dir=Path(sys.argv[4]))
-interrupt_finish_before_commit(api, Path(sys.argv[2]), scan)
-""",
-            str(script),
+            deep_deadline_crash.__file__,
             str(database),
             scan.scan_id,
             str(scan.scan_dir),
         ],
-        cwd=Path(__file__).parent,
         env={**os.environ, "PYTHONHASHSEED": str(hash_seed)},
         capture_output=True,
         text=True,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode == deep_deadline_crash.COMMIT_EXIT, result.stdout + result.stderr
 
 
-@pytest.mark.skipif(
-    not hasattr(os, "fork"), reason="Crash boundary uses a forked workbench process."
+@pytest.mark.parametrize(
+    "parent_collision", [pytest.param(False, marks=pytest.mark.cross_platform), True]
 )
-@pytest.mark.parametrize("parent_collision", [False, True])
 def test_deadline_surface_links_follow_sources_across_repeated_crashes(
     workbench_api, workbench_db, deadline_scan, tmp_path, parent_collision
 ):
@@ -276,9 +257,6 @@ def test_stopped_recovery_preserves_source_link_union(workbench_api, tmp_path):
     assert {path: path.read_bytes() for path in originals} == originals
 
 
-@pytest.mark.skipif(
-    not hasattr(os, "fork"), reason="Crash boundary uses a forked workbench process."
-)
 @pytest.mark.parametrize("changed_task", [False, True], ids=["copied-task", "updated-task"])
 def test_deadline_retains_equal_task_origins_from_selected_worker_result(
     workbench_api, workbench_db, deadline_scan, tmp_path, changed_task
@@ -351,9 +329,6 @@ def test_deadline_retains_equal_task_origins_from_selected_worker_result(
     assert {path: path.read_bytes() for path in originals} == originals
 
 
-@pytest.mark.skipif(
-    not hasattr(os, "fork"), reason="Crash boundary uses a forked workbench process."
-)
 @pytest.mark.parametrize(
     "selected_result", [False, True], ids=["raw-checkpoint", "selected-result"]
 )
@@ -428,9 +403,6 @@ def test_deadline_dropped_legacy_surface_does_not_rebind_its_pending_task(
     assert {path: path.read_bytes() for path in originals} == originals
 
 
-@pytest.mark.skipif(
-    not hasattr(os, "fork"), reason="Crash boundary uses a forked workbench process."
-)
 @pytest.mark.parametrize(
     "history",
     ["parent-collision", "current-checkpoints", "retry-checkpoints", "coalesced-history"],
@@ -523,9 +495,6 @@ def test_deadline_inherited_surface_links_follow_historical_observations(
     assert {path: path.read_bytes() for path in originals} == originals
 
 
-@pytest.mark.skipif(
-    not hasattr(os, "fork"), reason="Crash boundary uses a forked workbench process."
-)
 @pytest.mark.parametrize(
     ("changed_surface_id", "legacy_duplicate_id"),
     [(False, False), (True, False), (True, True)],

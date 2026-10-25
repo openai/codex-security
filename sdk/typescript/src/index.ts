@@ -19,11 +19,7 @@ export type {
   RemediationExecutionEvent,
 } from "./hosted-remediation.js";
 export { runHostedRemediationProtocol } from "./hosted-remediation-protocol.js";
-export type {
-  FindingPatch,
-  FindingVerification,
-  FindingVerificationCheck,
-} from "./remediation.js";
+export type { FindingPatch, FindingVerification } from "./remediation.js";
 export {
   runHostedScan,
   HostedScanInputSchema,
@@ -88,7 +84,14 @@ export type {
   ComponentPlanningOptions,
 } from "./component-plan.js";
 export { estimateScanCost } from "./cost.js";
-export type { ScanCost, ScanSessionEvent, ScanWorkerEvent } from "./cost.js";
+export type {
+  ScanAccountRateLimit,
+  ScanAccountRateLimitWindow,
+  ScanCost,
+  ScanSessionEvent,
+  ScanUsageObservation,
+  ScanWorkerEvent,
+} from "./cost.js";
 export type { ScanTokenUsage } from "./cost-model.js";
 export type { DeepScanProgress } from "./scan-progress.js";
 export type { CustomValidationResult } from "./custom-validation.js";

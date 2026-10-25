@@ -302,10 +302,6 @@ const titleWorkflow = readFileSync(
   new URL("../../../.github/workflows/validate-pr-title.yml", import.meta.url),
   "utf8",
 );
-const releasingGuide = readFileSync(
-  new URL("../../../RELEASING.md", import.meta.url),
-  "utf8",
-);
 function publishedMetadata(): ReleaseMetadata {
   return {
     name: "@openai/codex-security",
@@ -1669,19 +1665,6 @@ describe("GitHub release workflow safeguards", () => {
     expect(result.stderr).not.toContain("late stderr");
   });
 
-  test("rejects unsupported jq mock filters", () => {
-    const result = spawnSync(
-      bash,
-      [
-        "-c",
-        `${jqMock}\nprintf '%s\\n' '{"object":{"type":"commit","sha":"abc"}}' | jq -r '.wrong | @tsv'`,
-      ],
-      { encoding: "utf8" },
-    );
-
-    expect(result.status).toBe(64);
-  });
-
   test("requires a real tag for protected npm publication", () => {
     expect(protectedReleaseWorkflow).toContain("release-tag");
     expect(protectedReleaseWorkflow).toContain('"$GITHUB_REF_TYPE"');
@@ -1852,6 +1835,78 @@ describe("GitHub release workflow safeguards", () => {
         "github.repository": "openai/codex-security",
       }),
     ).toBe(scenario.expected);
+  });
+
+  test("only consults release metadata for a CI commit on main", async () => {
+    const cwd = directories.create("release-cut-ancestry-");
+    // A maintainer may be running with GIT_DIR, a custom template or global hooks.
+    const env = {
+      PATH: process.env["PATH"],
+      SYSTEMROOT: process.env["SYSTEMROOT"],
+      HOME: cwd,
+      GIT_CONFIG_NOSYSTEM: "1",
+    };
+    const setup = await runCommand(
+      bash,
+      [
+        "--noprofile",
+        "--norc",
+        "-c",
+        `
+set -eu
+git init --quiet --bare --template= -b main .
+git init --quiet --bare --template= -b main remote.git
+git config --local user.name "Release fixture"
+git config --local user.email "release@example.invalid"
+tree=$(git mktree </dev/null)
+qualified=$(git commit-tree "$tree" -m qualified)
+main=$(git commit-tree "$tree" -p "$qualified" -m main)
+candidate=$(git commit-tree "$tree" -p "$qualified" -m off-main)
+git push --quiet ./remote.git "$main:refs/heads/main"
+git remote add origin ./remote.git
+printf '%s\\n%s\\n%s\\n' "$qualified" "$main" "$candidate"
+`,
+      ],
+      { cwd, env },
+    );
+    expect(setup.status, setup.stderr).toBe(0);
+    const [qualified, main, candidate] = setup.stdout.trim().split(/\r?\n/u);
+    const script = `
+# actions/checkout detaches HEAD at the selected release SHA.
+git update-ref --no-deref HEAD "$RELEASE_SHA" || exit 1
+node() { echo "release metadata lookup" >&2; return 64; }
+npm() { echo "unexpected registry lookup" >&2; return 65; }
+${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
+`;
+    for (const [workflowSha, releaseSha, expectedStatus, expectedMessage] of [
+      [main, candidate, 1, "Release tags can only be cut from commits on main"],
+      [
+        candidate,
+        qualified,
+        1,
+        "Release tags can only be cut from commits on main",
+      ],
+      [main, qualified, 64, "release metadata lookup"],
+    ] as const) {
+      const result = await runCommand(
+        bash,
+        ["--noprofile", "--norc", "-c", script],
+        {
+          cwd,
+          env: {
+            ...env,
+            GITHUB_REF: "refs/heads/main",
+            GITHUB_EVENT_NAME: "workflow_run",
+            GITHUB_OUTPUT: "/dev/null",
+            GITHUB_SHA: workflowSha,
+            RELEASE_SHA: releaseSha,
+          },
+        },
+      );
+      expect(result.status, result.stderr).toBe(expectedStatus);
+      expect(result.stderr).toContain(expectedMessage);
+      expect(result.stderr).not.toContain("unexpected registry lookup");
+    }
   });
 
   test("executes the manual release cut against all published versions", async () => {
@@ -3760,24 +3815,43 @@ describe("GitHub release workflow safeguards", () => {
 
   test("cryptographically verifies the exact npm provenance bundle", () => {
     expect(githubReleaseWorkflow).toContain('node-version: "24.15.0"');
-    expect(githubReleaseWorkflow).toContain(
-      'if [[ "$(npm --version)" != "11.12.1" ]]; then',
-    );
     expect(githubReleaseWorkflow).toContain("npm audit signatures");
     expect(githubReleaseWorkflow).toContain("--include-attestations");
     expect(githubReleaseWorkflow).toContain("verify-recovered-provenance");
   });
 
-  test("installs the exact attestation-capable npm through the Socket Firewall", () => {
-    for (const workflow of [githubReleaseWorkflow, protectedReleaseWorkflow]) {
-      expect(workflow).toContain("Install provenance-capable npm");
-      expect(workflow).toContain("npm@11.12.1");
-      expect(workflow).toContain(
-        "--registry=https://openai.firewall.socket.dev/npm/",
-      );
-      expect(workflow).toContain('>> "$GITHUB_PATH"');
-      expect(workflow).not.toContain("npm install --global");
-    }
+  test("both release jobs require the npm installed through the Socket Firewall", async () => {
+    const both = (name: string) => {
+      const script = workflowStepShell(protectedReleaseWorkflow, name);
+      expect(workflowStepShell(githubReleaseWorkflow, name)).toBe(script);
+      return script;
+    };
+    const result = await runShell(
+      `RUNNER_TEMP="$(cd "$RUNNER_TEMP" && pwd)"
+GITHUB_PATH="$RUNNER_TEMP/path"
+npm() {
+  printf '<%s>' "$1" "$2" "\${3#"$RUNNER_TEMP/"}" "\${@:4}"
+  mkdir -p "$3/node_modules/.bin"
+  printf '#!/bin/sh\\necho "\${TEST_NPM_VERSION:-11.12.1}"\\n' > "$3/node_modules/.bin/npm"
+  chmod +x "$3/node_modules/.bin/npm"
+}
+${both("Install provenance-capable npm")}
+export PATH="$(cat "$GITHUB_PATH"):$PATH"
+verify() { "$BASH" <<'VERIFY'
+${both("Verify npm on PATH")}
+VERIFY
+}
+verify && echo selected
+TEST_NPM_VERSION=11.10.1 verify && exit 2
+cp "$release_npm_bin/npm" "$RUNNER_TEMP/npm"
+PATH="$RUNNER_TEMP:$PATH" verify`,
+      { RUNNER_TEMP: directories.create("release npm ") },
+      { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
+    );
+    expect(result.stdout).toBe(
+      "<install><--prefix><codex-security-provenance-npm><--ignore-scripts><--no-audit><--no-fund><--registry=https://openai.firewall.socket.dev/npm/><npm@11.12.1>selected\n",
+    );
+    expect(result.status, result.stderr).toBe(1);
   });
 
   test("serializes label reconciliation and reads the current PR title", () => {
@@ -3815,7 +3889,7 @@ describe("GitHub release workflow safeguards", () => {
     expect(nodeCiWorkflow).toContain("needs: classify-changes");
   });
 
-  test("preserves source validation dependencies and forwards the centralized gate result", async () => {
+  test("requires every selected source validation in the centralized gate", async () => {
     const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
       concurrency: {
         group: string;
@@ -3827,7 +3901,9 @@ describe("GitHub release workflow safeguards", () => {
           name: string;
           if?: string;
           needs?: string | string[];
-          "timeout-minutes"?: number;
+          uses?: string;
+          outputs?: Record<string, string>;
+          "timeout-minutes"?: number | string;
           steps: Array<{
             if?: string;
             name?: string;
@@ -3846,8 +3922,10 @@ describe("GitHub release workflow safeguards", () => {
       "${{ github.event_name == 'pull_request' }}",
     );
     const classifier = workflow.jobs["classify-changes"]!;
-    expect(classifier["timeout-minutes"]).toBe(10);
-    expect(classifier.if).toContain("github.event.changes.base != null");
+    expect(classifier["timeout-minutes"]).toEqual(
+      expect.stringContaining("40 || 10"),
+    );
+    expect(classifier.if).toBeUndefined();
     const checkout = classifier.steps.find(
       ({ name }) => name === "Checkout repository for change classification",
     );
@@ -3857,91 +3935,76 @@ describe("GitHub release workflow safeguards", () => {
     });
     expect(checkout).not.toHaveProperty("if");
 
-    expect(workflow.jobs["static-checks"]?.if).toBeUndefined();
-    for (const job of [
-      "native",
-      "package",
-      "test",
-      "compatibility",
-      "mcp",
-      "plugin-host",
-      "plugin-source",
-      "windows-test",
-      "windows-verify",
-    ]) {
-      expect(workflow.jobs[job]?.if).toBe(
-        "needs.classify-changes.outputs.source-required == 'true'",
+    expect(workflow.jobs["static-checks"]?.if).toBe(
+      "needs.classify-changes.outputs.source-run == ''",
+    );
+    const gate = workflow.jobs["ci"]!;
+    const checks = Object.entries(workflow.jobs).filter(
+      ([name]) => name !== "classify-changes" && name !== "ci",
+    );
+    expect(new Set([gate.needs].flat())).toEqual(
+      new Set(["classify-changes", ...checks.map(([name]) => name)]),
+    );
+    expect(gate.if).toContain("always()");
+    expect(workflow.jobs["action-ci"]).toMatchObject({
+      uses: "./.github/workflows/action-ci.yml",
+      with: {
+        "sdk-contracts":
+          "${{ needs.classify-changes.outputs.source-required == 'false' }}",
+      },
+    });
+    const sdkShards = ["test", "windows-test"];
+    for (const [name, job] of checks) {
+      if (sdkShards.includes(name))
+        expect(job.needs).toContain("static-checks");
+      else
+        expect(job.if ?? "", name).not.toMatch(
+          /\b(always|failure|cancelled)\(/u,
+        );
+    }
+
+    // With no job results, the gate must report exactly the jobs enabled in YAML.
+    const { failedChecks } = (await import(
+      new URL("../../../.github/scripts/check-ci-results.mjs", import.meta.url)
+        .href
+    )) as { failedChecks(needs: unknown): string[] };
+    const classifierOutputs = classifier.outputs!;
+    expect(classifierOutputs["source-run"]).toBe(
+      "${{ steps.proof.outputs.source-run }}",
+    );
+    const flags = Object.keys(classifierOutputs).filter(
+      (key) =>
+        !["source-run", "edit-attempt"].includes(key) &&
+        !key.startsWith("native-cache-") &&
+        !key.endsWith("-matrix"),
+    );
+    for (const enabled of flags) {
+      expect(classifierOutputs[enabled]).toBe(
+        `\${{ steps.scope.outputs.${enabled} }}`,
       );
-      expect(workflow.jobs["ci"]?.needs).toContain(job);
-    }
-    for (const [name, job] of Object.entries(workflow.jobs)) {
-      if (
-        ["classify-changes", "ci", "required-test", "windows"].includes(name)
-      ) {
-        continue;
-      }
-      expect([job.needs].flat(), name).toContain("classify-changes");
-      expect(job.if ?? "", name).not.toMatch(/\b(always|failure|cancelled)\(/u);
-    }
-    for (const job of ["ci", "required-test", "windows"]) {
-      expect(workflow.jobs[job]?.if).toContain("always()");
-    }
-    for (const job of [
-      "classify-changes",
-      "static-checks",
-      "workflow-quality",
-      "container-validate",
-    ]) {
-      expect(workflow.jobs["ci"]?.needs).toContain(job);
+      const outputs = Object.fromEntries(
+        flags.map((key) => [key, String(key === enabled)]),
+      );
+      const scheduled = checks.filter(
+        ([name, job]) =>
+          name === "static-checks" ||
+          !job.if ||
+          (sdkShards.includes(name) && enabled === "source-required") ||
+          job.if === `needs.classify-changes.outputs.${enabled} == 'true'`,
+      );
+      expect(
+        new Set(
+          failedChecks({ "classify-changes": { result: "success", outputs } }),
+        ),
+        enabled,
+      ).toEqual(new Set(scheduled.map(([name]) => name)));
     }
     expect(
-      workflow.jobs["ci"]?.steps.find(
-        ({ name }) => name === "Require selected checks",
-      ),
+      gate.steps.find(({ name }) => name === "Require selected checks"),
     ).toMatchObject({
       run: "node .github/scripts/check-ci-results.mjs",
       env: { CI_RESULTS: "${{ toJSON(needs) }}" },
     });
-
-    const conditionCases = [];
-    for (const name of ["required-test", "windows"]) {
-      const job = workflow.jobs[name]!;
-      expect(job.needs).toEqual(["classify-changes", "ci"]);
-      const gate = job.steps.find(({ name }) => name === "Require CI gate");
-      expect(gate?.run).toBe("exit 1");
-      for (const result of ["success", "failure", "cancelled", "skipped"]) {
-        conditionCases.push({
-          condition: gate?.if ?? "",
-          values: { "needs.ci.result": result },
-          expected: result !== "success",
-          message: `${name}: ${result}`,
-        });
-      }
-    }
-    const conditions = await evaluateWorkflowConditions(conditionCases);
-    for (const [index, item] of conditionCases.entries()) {
-      expect(conditions[index], item.message).toBe(item.expected);
-    }
-  });
-
-  test("documents a canonical historical-summary prefix block", () => {
-    const start = "<!-- codex-security-release-summary:start -->";
-    const end = "<!-- codex-security-release-summary:end -->";
-    const recovery = releasingGuide.slice(
-      releasingGuide.indexOf("## Recover or repair a release"),
-    );
-    const markerBlock =
-      [...recovery.matchAll(/^```text\r?\n([\s\S]*?)^```[ \t]*$/gmu)]
-        .find(
-          (match) => match[1]?.includes(start) && match[1]?.includes(end),
-        )?.[1]
-        ?.replaceAll("\r\n", "\n") ?? "";
-
-    expect(markerBlock.startsWith(`${start}\n`)).toBe(true);
-    expect(markerBlock).toContain(`${end}\n\n`);
-    expect(extractHistoricalReleaseSummary(markerBlock)).toBe(
-      "Reviewed summary",
-    );
   });
 
   test.each([

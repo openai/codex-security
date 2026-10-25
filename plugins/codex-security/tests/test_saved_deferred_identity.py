@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import json
 import os
 import sys
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
@@ -32,6 +34,25 @@ def saved_results():
     import workbench_saved_results
 
     return workbench_saved_results
+
+
+@pytest.fixture
+def setup_workbench(monkeypatch, workbench_api):
+    def run(state, *args, environment=None):
+        with (
+            open(os.devnull) as stdin,
+            monkeypatch.context() as patch,
+            redirect_stdout(io.StringIO()) as stdout,
+        ):
+            patch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+            for name, value in (environment or {}).items():
+                patch.setenv(name, value)
+            patch.setattr(sys, "stdin", stdin)
+            patch.setattr(sys, "argv", ["workbench_db", *args])
+            workbench_api["main"]()
+        return json.loads(stdout.getvalue())
+
+    return run
 
 
 def save_worker(root: Path, module, worker_id: str, drafts: list[dict], result: dict):
@@ -554,6 +575,26 @@ def test_accepted_generic_update_keeps_its_id_in_frozen_recovery(tmp_path: Path,
     assert all(path.read_bytes() == contents for path, contents in originals.items())
 
 
+def test_unsafe_deferred_update_keeps_the_earlier_valid_path(tmp_path: Path) -> None:
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    original = {"id": "review", "reason": "Review remains.", "paths": ["app.py"]}
+    checkpoint = write_checkpoint(
+        result.parent / "checkpoints", saved_draft(scan_id, deferred=[original])
+    )
+    os.utime(checkpoint, ns=(100, 100))
+    update = {**original, "paths": ["../outside.py"]}
+    result.write_text(json.dumps(saved_draft(scan_id, deferred=[update])))
+    os.utime(result, ns=(200, 200))
+
+    fail_deep_scan(state, codex_home, scan_id, deep_status="failed")
+
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    assert [row["paths"] for row in coverage["deferred"] if "paths" in row] == [["app.py"]]
+    warnings = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["warnings"]
+    assert any("expected a safe repository-relative POSIX path" in warning for warning in warnings)
+
+
 def test_unnamed_changed_observation_stays_pending(tmp_path: Path, saved_results):
     generic = {"reason": "Review remains.", "paths": ["api.py"], "notes": "Initial review."}
     identity = "source-review"
@@ -648,11 +689,16 @@ def test_generic_surface_recovery_uses_resolved_candidate_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     saved_results,
+    setup_workbench,
     candidate_identity: str,
     outcome: str,
 ):
-    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path, workers=2)
-    worker_id, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(
+        tmp_path, workers=2, run=setup_workbench
+    )
+    worker_id, result_path = accepted_standard_worker(
+        state, codex_home, scan_dir, scan_id, run=setup_workbench
+    )
     candidate = {
         "id": "caller-review",
         "reason": "Caller needs validation.",
@@ -709,7 +755,7 @@ def test_generic_surface_recovery_uses_resolved_candidate_identity(
     os.utime(head, ns=(observed, observed))
     if outcome == "other_worker":
         other_worker_id, other_result = accepted_standard_worker(
-            state, codex_home, scan_dir, scan_id, name="other-worker"
+            state, codex_home, scan_dir, scan_id, name="other-worker", run=setup_workbench
         )
         other_result.write_text(
             json.dumps(saved_draft(scan_id, surfaces=[rejection], complete=True))
@@ -779,12 +825,15 @@ def test_split_deferred_rows_keep_distinct_ids_in_frozen_recovery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     saved_results,
+    setup_workbench,
     payload_field: str | None,
     explicit_ids: bool,
     close_first: bool,
 ):
-    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    worker_id, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path, run=setup_workbench)
+    worker_id, result_path = accepted_standard_worker(
+        state, codex_home, scan_dir, scan_id, run=setup_workbench
+    )
     combined = {
         "id": "combined-review",
         "reason": "Review remains.",
@@ -852,11 +901,14 @@ def test_unnamed_observation_does_not_replace_saved_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     saved_results,
+    setup_workbench,
     layout: str,
     observation: str,
 ):
-    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    worker_id, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path, run=setup_workbench)
+    worker_id, result_path = accepted_standard_worker(
+        state, codex_home, scan_dir, scan_id, run=setup_workbench
+    )
     broad = {
         "id": "caller-review",
         "reason": "Review the caller paths.",

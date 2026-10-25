@@ -3,13 +3,19 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { test } from "bun:test";
 
+// Always keep this file in the same shard for local replay and JUnit reporting.
+const it = test.skipIf(
+  process.platform === "linux" &&
+    process.env["CODEX_SECURITY_TEST_MCP_WORKERS_SEPARATE"] === "true",
+);
+
 for (const boundary of [
   "lifecycle",
   "runtime settings",
   "executable selection",
   "diagnostics",
 ]) {
-  test(`Deep worker ${boundary} at the child-process boundary`, async () => {
+  it(`Deep worker ${boundary} at the child-process boundary`, async () => {
     // Keep each portable boundary in the SDK's macOS and Windows test shards.
     const { stdout, stderr } = await promisify(execFile)(
       "node",

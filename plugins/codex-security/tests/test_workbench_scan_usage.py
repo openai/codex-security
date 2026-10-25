@@ -26,8 +26,6 @@ from workbench_test_support import (
     write_completed_contract,
 )
 
-pytestmark = pytest.mark.native_macos
-
 
 @dataclass(frozen=True)
 class ScanFixture:
@@ -723,6 +721,7 @@ def test_native_usage_preserves_partial_measurement_warnings(tmp_path: Path, fai
     }
 
 
+@pytest.mark.native_macos
 @pytest.mark.parametrize("mode", ["standard", "diff"])
 def test_completion_counts_only_scan_owned_parent_and_descendants(
     tmp_path: Path,
@@ -755,8 +754,11 @@ def test_completion_counts_only_scan_owned_parent_and_descendants(
         parent_thread_id="scan-worker",
     )
     unrelated = _rollout(tmp_path, "unrelated", [_token_event(counted, 80_000, 20_000)])
+    # The completion subprocess must open the spaced CODEX_HOME through its SQLite URI.
+    fixture.environment["CODEX_HOME"] = str(tmp_path / "native home")
+    fixture.environment["CODEX_SQLITE_HOME"] = ""
     _state_graph(
-        fixture.environment,
+        {"CODEX_SQLITE_HOME": fixture.environment["CODEX_HOME"]},
         {
             "scan-parent": parent,
             "scan-worker": worker,
@@ -1058,22 +1060,25 @@ def test_completion_marks_unverifiable_workers_partial(
     assert usage["totalTokens"] == 16
 
 
+@pytest.mark.cross_platform
 @pytest.mark.parametrize("home_variable", ["CODEX_HOME", "CODEX_SQLITE_HOME"])
 @pytest.mark.parametrize("home_kind", ["absolute", "literal_tilde", "relative_home", "home"])
-def test_completion_reads_usage_from_literal_home(
-    tmp_path: Path, home_variable: str, home_kind: str, monkeypatch: pytest.MonkeyPatch
+def test_usage_finds_state_database_in_configured_home(
+    tmp_path: Path,
+    home_variable: str,
+    home_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+    workbench_api,
 ) -> None:
-    fixture = _start_scan(tmp_path)
     home = tmp_path / ("native home" if sys.platform == "win32" else "native home ")
     if home_kind == "literal_tilde":
         home = tmp_path / ("~ literal" if sys.platform == "win32" else "~ ")
-    fixture.environment["CODEX_SQLITE_HOME"] = str(home)
-    parent = _rollout(
-        tmp_path,
-        "scan-parent",
-        [_token_event(fixture.started_at + timedelta(microseconds=1), 12, 3)],
-    )
-    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    home.mkdir()
+    database = home / "state_5.sqlite"
+    database.touch()
+    monkeypatch.setenv("CODEX_STATE_DB", "")
+    monkeypatch.setenv("CODEX_SQLITE_HOME", "")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "unused"))
     configured_home = str(home)
     if home_kind == "literal_tilde":
         monkeypatch.chdir(tmp_path)
@@ -1082,14 +1087,9 @@ def test_completion_reads_usage_from_literal_home(
         monkeypatch.setenv("HOME", str(home if home_kind == "home" else tmp_path))
         monkeypatch.setenv("USERPROFILE", str(home if home_kind == "home" else tmp_path))
         configured_home = "~" if home_kind == "home" else f"~/{home.name}"
-    fixture.environment[home_variable] = configured_home
-    if home_variable == "CODEX_HOME":
-        fixture.environment["CODEX_SQLITE_HOME"] = ""
+    monkeypatch.setenv(home_variable, configured_home)
 
-    usage = _complete_scan(fixture)["scan"]["usage"]
-
-    assert usage["coverage"] == "complete"
-    assert usage["totalTokens"] == 15
+    assert workbench_api["scan_usage"]._codex_state_database() == database.resolve()
 
 
 def test_completion_reports_unavailable_without_fabricating_zero(tmp_path: Path) -> None:
@@ -1186,6 +1186,7 @@ def test_missing_usage_preserves_measured_parent_or_descendant(
     assert _complete_scan(fixture)["scan"]["usage"].items() >= expected.items()
 
 
+@pytest.mark.native_macos
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS system path aliases")
 @pytest.mark.parametrize("temporary_root", [tempfile.gettempdir(), "/tmp"], ids=["var", "tmp"])
 def test_completion_accepts_macos_system_rollout_alias(
@@ -1206,6 +1207,7 @@ def test_completion_accepts_macos_system_rollout_alias(
     assert usage["totalTokens"] == 13
 
 
+@pytest.mark.native_macos
 def test_completion_rejects_non_system_rollout_symlink(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
@@ -1543,24 +1545,12 @@ def test_metadata_only_deep_owner_requires_direct_control_originator(
     }
 
 
-def test_usage_is_returned_by_completion_without_an_extra_command(tmp_path: Path) -> None:
-    fixture = _start_scan(tmp_path)
-    counted = fixture.started_at + timedelta(microseconds=1)
-    _state_graph(
-        fixture.environment,
-        {"scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 12, 4)])},
-        [],
-    )
-    assert _complete_scan(fixture)["scan"]["usage"]["totalTokens"] == 16
-    extra_command = scan_command(
-        fixture.state_dir,
-        "get-scan-usage",
-        fixture.scan_id,
-        check=False,
-        environment=fixture.environment,
-    )
-    assert extra_command["returncode"] != 0
-    assert "invalid choice" in str(extra_command["stderr"])
+def test_usage_has_no_separate_workbench_command(workbench_api, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["workbench_db.py", "get-scan-usage"])
+    with pytest.raises(SystemExit) as rejected:
+        workbench_api["parse_args"]("workbench")
+    assert rejected.value.code == 2
+    assert "invalid choice: 'get-scan-usage'" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("native", [False, True])
@@ -1743,6 +1733,7 @@ def test_host_final_usage_preserves_missing_worker_warning(
     )
 
 
+@pytest.mark.native_macos
 def test_host_final_usage_retries_a_locked_native_database_without_losing_counts(
     tmp_path: Path,
 ) -> None:
@@ -2439,10 +2430,9 @@ def test_closed_turn_coverage_survives_later_success(
     )
 
 
-@pytest.mark.parametrize("receipt", [False, True])
-@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("receipt", [None, "legacy", "native"])
 def test_closed_turn_coverage_retains_before_window_receipt_evidence(
-    tmp_path: Path, receipt: bool, native: bool
+    tmp_path: Path, receipt: str | None
 ) -> None:
     started = datetime.fromisoformat("2026-01-01T00:00:01+00:00")
     before = started - timedelta(seconds=1)
@@ -2450,7 +2440,7 @@ def test_closed_turn_coverage_retains_before_window_receipt_evidence(
     if receipt:
         events.append(
             _response_event(before, "scan-parent", "before", 20, 3, turn_id="first")
-            if native
+            if receipt == "native"
             else _token_event(before, 20, 3)
         )
     events.extend(

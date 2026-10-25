@@ -38,31 +38,47 @@ function workflow(name: string) {
 
 const native = workflow("native-artifacts");
 const prepare = native.jobs["prepare"]!;
-const keyScript = prepare.steps!.find((step) => step.id === "key")!.run!;
+const keyScript = readFileSync(
+  new URL("../../../.github/actions/native-cache-key/key.sh", import.meta.url),
+  "utf8",
+);
 
 test("native reuse hashes committed inputs with Git alone across platforms", () => {
   const root = mkdtempSync(join(tmpdir(), "native-cache-"));
   const repository = join(root, "repository");
-  const output = join(root, "output");
   const source = "plugins/codex-security/native/src/lib.rs";
   const helper = "plugins/codex-security/mcp-app/src/native.ts";
-  writeSource(repository, source, "native source\n");
-  writeSource(repository, helper, "helper source\n");
-  writeSource(repository, "README.md", "documentation\n");
+  const proof = "plugins/codex-security/native/proof.mjs";
+  const proofHelper = ".github/scripts/native-proof-helper.mjs";
+  const write = (path: string, contents: string) =>
+    writeSource(repository, path, contents);
+  const runProof = () =>
+    spawnSync(process.execPath, [proof], { cwd: repository }).status;
+  write(source, "native source\n");
+  write(helper, "helper source\n");
+  write(proof, `import "../../../${proofHelper}";\n`);
+  write(proofHelper, "process.exitCode = 0;\n");
+  write("README.md", "documentation\n");
   git(repository, "init", "-q");
   const commit = () => {
     git(repository, "add", ".");
     git(repository, "commit", "-qm", "fixture");
   };
-  const key = (week = "2026-43") => {
-    writeSource(root, "output", "");
+  const key = (
+    week = "2026-43",
+    run?: number,
+    cached = "",
+    admittedWeek = "0",
+  ) => {
     const result = spawnSync(
       Bun.which(bashCommand())!,
       [
         "--noprofile",
         "--norc",
         "-c",
-        `git() { "$TEST_GIT" "$@"; }\ndate() { printf '%s\\n' "$TEST_WEEK"; }\n${keyScript}`,
+        `git() { "$TEST_GIT" "$@"; }\ndate() { printf '%s\\n' "$TEST_WEEK"; }\ntimeout() { printf '%s\\n' "$TEST_CACHED"; }\n${keyScript}`,
+        "native-cache-key",
+        ...(run === undefined ? [] : ["cold-group"]),
       ],
       {
         cwd: repository,
@@ -73,39 +89,69 @@ test("native reuse hashes committed inputs with Git alone across platforms", () 
           // available here; the workflow's date command is fixed for this test.
           PATH: root,
           TEST_GIT: Bun.which("git")!,
-          GITHUB_OUTPUT: output,
-          TEST_WEEK: week,
+          TEST_WEEK: week.replace("-", ""),
+          NATIVE_CACHE_WEEK: admittedWeek,
+          TEST_CACHED: cached,
+          GITHUB_RUN_NUMBER: String(run),
         },
       },
     );
     expect(result.status, result.stderr).toBe(0);
-    return readFileSync(output, "utf8").trim();
+    return result.stdout.trim();
   };
   try {
     commit();
     const initial = key();
     expect(initial).toMatch(/^key=native-universal-v1-2026-43-[a-f0-9]{40}$/);
-    writeSource(repository, "README.md", "updated documentation\n");
-    commit();
-    expect(key()).toBe(initial);
+    const fingerprint = initial.slice("key=".length);
+    expect(runProof()).toBe(0);
 
-    writeSource(repository, source, "updated native source\n");
+    write("README.md", "updated documentation\n");
+    for (const script of [
+      "invoice-desk-target",
+      "check-ci-results",
+      "select-ci-checks",
+      "test-ci-selection",
+      "test-release-guide",
+      "verify-pr-source",
+    ]) {
+      write(`.github/scripts/${script}.mjs`, "// CI only\n");
+    }
+    write("plugins/codex-security/mcp-app/tests/support/new.ts", "fixture\n");
     commit();
-    const changedNative = key();
-    expect(changedNative).not.toBe(initial);
+    expect(key("2026-43", 4, fingerprint)).toBe("week=202643");
 
-    writeSource(repository, helper, "updated helper source\n");
-    commit();
-    const changedHelper = key();
-    expect(changedHelper).not.toBe(changedNative);
-
+    let previous = initial;
+    const expectNewKey = () => {
+      commit();
+      const next = key();
+      expect(next).not.toBe(previous);
+      previous = next;
+    };
+    write(proofHelper, "process.exitCode = 1;\n");
+    expect(runProof()).toBe(1);
+    expectNewKey();
+    write(".github/scripts/new-proof-input.mts", "compile me\n");
+    expectNewKey();
+    write(source, "updated native source\n");
+    expectNewKey();
+    write(helper, "updated helper source\n");
+    expectNewKey();
     renameSync(
       join(repository, source),
       join(repository, "plugins/codex-security/native/src/renamed.rs"),
     );
-    commit();
-    expect(key()).not.toBe(changedHelper);
-    expect(key("2026-44")).not.toBe(key());
+    expectNewKey();
+    const nextWeek = previous
+      .slice("key=".length)
+      .replace("2026-43", "2026-44");
+    const cold = key("2026-44", 4, fingerprint);
+    expect(cold).toBe(`week=202644\ncold-group=${nextWeek}-0-1`);
+    const admittedWeek = cold.split("\n")[0]!.slice("week=".length);
+    expect(key("2026-45", undefined, "", admittedWeek)).toBe(`key=${nextWeek}`);
+    expect(key("2026-44", 304, fingerprint)).toBe(
+      `week=202644\ncold-group=${nextWeek}-1-1`,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -201,19 +247,17 @@ test.each([
   expect(checked.status === 0, checked.stderr).toBe(result.passes);
 });
 
-test("source CI opts in while release and standalone qualification remain fresh", () => {
+test("source CI and rotating properties opt in to native artifact reuse", () => {
   expect(native.on.workflow_call?.inputs["reuse-verified"]?.default).toBe(
     false,
   );
   expect(workflow("node-ci").jobs["native"]?.with?.["reuse-verified"]).toBe(
     true,
   );
-  for (const caller of [
-    "node-release",
-    "container-release",
-    "container-ci",
-    "test-quality",
-  ]) {
+  expect(
+    workflow("test-quality").jobs["native"]?.with?.["reuse-verified"],
+  ).toBe("${{ !inputs.compare-layouts }}");
+  for (const caller of ["node-release", "container-release", "container-ci"]) {
     expect(
       workflow(caller).jobs["native"]?.with?.["reuse-verified"],
     ).toBeUndefined();

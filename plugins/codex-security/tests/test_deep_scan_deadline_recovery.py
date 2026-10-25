@@ -8,6 +8,7 @@ import sqlite3
 import traceback
 
 import pytest
+from deep_deadline_crash import COMMIT_EXIT, finish_until_commit
 from test_deep_scan_stop_conditions import (
     canceled_discovery_output,
     complete,
@@ -94,23 +95,13 @@ def test_deadline_completion_preserves_existing_tasks_and_recovered_findings(
 def interrupt_finish_before_commit(workbench_api, database, scan):
     child = os.fork()
     if child == 0:
-        connection = sqlite3.connect(database)
-        connection.row_factory = sqlite3.Row
-
-        class CrashBeforeCommit:
-            def __getattr__(self, name):
-                return getattr(connection, name)
-
-            def commit(self):
-                os._exit(0)
-
         try:
-            finish(workbench_api, CrashBeforeCommit(), scan, terminal_reason="capped")
+            finish_until_commit(workbench_api["deep_scan"], database, scan.scan_id, scan.scan_dir)
         except BaseException:
             traceback.print_exc()
         os._exit(1)
     _, status = os.waitpid(child, 0)
-    assert os.waitstatus_to_exitcode(status) == 0
+    assert os.waitstatus_to_exitcode(status) == COMMIT_EXIT
 
 
 def test_discarded_worker_finding_leaves_its_review_pending(

@@ -1501,7 +1501,7 @@ async function testMissingReducerResultResumesExistingThread(
   assert.equal(new Set(executor.dedupThreadIds).size, 1);
   assert.match(
     executor.dedupContinuationPrompts[1] ?? "",
-    /record_codex_security_deep_reduction\(\{ scanId, findings, threatModel\?, scope\? \}\)/,
+    /record_codex_security_deep_reduction\(\{ scanId, findings, retainedFindingRefs\?, threatModel\?, scope\? \}\)/,
   );
   assert.doesNotMatch(
     executor.dedupContinuationPrompts[1] ?? "",
@@ -1523,6 +1523,12 @@ async function testMissingReducerResultResumesExistingThread(
     executor.dedupContinuationPrompts[1] ?? "",
     /paginate all assigned findings and the previous aggregate/,
   );
+  for (const prompt of [
+    await readFile(executor.dedupPromptPaths[0], "utf8"),
+    executor.dedupContinuationPrompts[1] ?? "",
+  ]) {
+    assert.match(prompt, /without code mode[^\n]*\bdirectly\b/i);
+  }
   assert.equal(new Set(executor.dedupPromptPaths).size, 1);
   await assert.rejects(
     realpath(

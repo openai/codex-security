@@ -1,6 +1,8 @@
 rules:
   dangerous-triggers:
     ignore:
+      # Deletes only the merged PR's cache ref without checking out any code.
+      - clean-merged-pr-caches.yml:3
       # Labels only: no checkout or execution of pull request code.
       - node-release-labels.yml:3
       # Reads run metadata and comments using helpers checked out from protected main.

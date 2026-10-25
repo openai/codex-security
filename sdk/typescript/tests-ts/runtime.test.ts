@@ -1,4 +1,5 @@
 import { runNodePython } from "./support/python-probe.js";
+import { nodeCommand } from "./support/shell.js";
 import { scanRegistrationArguments } from "./support/workbench-command.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { parseJsonLines, jsonLines } from "./support/json.js";
@@ -422,21 +423,27 @@ describe("plugin runtime preparation", () => {
       expect(initialized.status, initialized.stderr).toBe(0);
     }
 
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
     const output = join(root, "inventory.txt");
     const repeatedOutput = join(root, "inventory-repeated.txt");
-    const generatorArguments = (destination: string) => [
-      join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
-      "--repo",
-      repository,
-      "--scope",
-      ".",
-      "--out",
-      destination,
-    ];
+    const generatorArguments = (destination: string) =>
+      [
+        join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+        "generate-in-scope-files",
+        "--repo",
+        repository,
+        "--scope",
+        ".",
+        "--out",
+        destination,
+      ] as const;
     for (const destination of [output, repeatedOutput]) {
-      const inventory = runNodePython(python!, generatorArguments(destination));
+      const inventory = spawnSync(
+        nodeCommand().command,
+        generatorArguments(destination),
+        {
+          encoding: "utf8",
+        },
+      );
       expect(inventory.status, inventory.stderr).toBe(0);
     }
 
@@ -462,7 +469,13 @@ describe("plugin runtime preparation", () => {
       );
       await writeFile(join(repository, "literal:colon.txt"), "colon\n");
       const posixOutput = join(root, "inventory-posix-filenames.txt");
-      const inventory = runNodePython(python!, generatorArguments(posixOutput));
+      const inventory = spawnSync(
+        nodeCommand().command,
+        generatorArguments(posixOutput),
+        {
+          encoding: "utf8",
+        },
+      );
       expect(inventory.status, inventory.stderr).toBe(0);
       const posixRows = (await readFile(posixOutput, "utf8"))
         .trimEnd()
@@ -486,34 +499,39 @@ describe("plugin runtime preparation", () => {
         join(repository, "source.ts:synthetic-stream"),
         "export const hidden = true;\n",
       );
-      const python =
-        process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
-      expect(python).not.toBeNull();
-
-      const inventory = runNodePython(python!, [
-        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
-        "--repo",
-        repository,
-        "--scope",
-        "source.ts:synthetic-stream",
-        "--out",
-        join(root, "inventory.txt"),
-      ]);
+      const inventory = spawnSync(
+        nodeCommand().command,
+        [
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "generate-in-scope-files",
+          "--repo",
+          repository,
+          "--scope",
+          "source.ts:synthetic-stream",
+          "--out",
+          join(root, "inventory.txt"),
+        ],
+        { encoding: "utf8" },
+      );
       expect(inventory.status).toBe(2);
-      expect(inventory.stderr).toContain("NTFS alternate data streams");
+      expect(inventory.stderr).toContain("NTFS alternate data stream");
 
       const scopes = join(root, "scopes.json");
       await writeFile(scopes, JSON.stringify(["source.ts:synthetic-stream"]));
-      const scopeInput = runNodePython(python!, [
-        join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
-        "make-repo-scope-input",
-        "--repo",
-        repository,
-        "--scopes-file",
-        scopes,
-        "--out",
-        join(root, "scope-input.jsonl"),
-      ]);
+      const scopeInput = spawnSync(
+        nodeCommand().command,
+        [
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "make-repo-scope-input",
+          "--repo",
+          repository,
+          "--scopes-file",
+          scopes,
+          "--out",
+          join(root, "scope-input.jsonl"),
+        ],
+        { encoding: "utf8" },
+      );
       expect(scopeInput.status).toBe(1);
       expect(scopeInput.stderr).toContain("NTFS alternate data stream");
     },
@@ -1166,7 +1184,12 @@ for await (const line of createInterface({ input: process.stdin })) {
           lines.close();
           child.stdin.end();
           child.kill();
-          await closed;
+          const timeout = setTimeout(() => child.kill("SIGKILL"), 5_000);
+          try {
+            await closed;
+          } finally {
+            clearTimeout(timeout);
+          }
         }
       };
       // Drain both clients before fixture cleanup, including when one fails.
@@ -3322,22 +3345,7 @@ describe("runtime directories and plugin Python boundary", () => {
     await release();
   });
 
-  test("protects active and stalled credential-lock owners and recovers after a crash with a reused PID", async () => {
-    const root = await temporaryDirectory();
-    await promisify(execFile)(
-      process.execPath,
-      [
-        fileURLToPath(
-          new URL("../scripts/fixtures/credential-lock.mjs", import.meta.url),
-        ),
-        new URL("../src/runtime.ts", import.meta.url).href,
-        join(root, "state"),
-      ],
-      { timeout: 120_000, windowsHide: true },
-    );
-  }, 125_000);
-
-  test("credential-lock fixture tolerates slow holder and legacy startup", async () => {
+  test("protects active and stalled credential-lock owners during slow legacy startup and recovers after a crash with a reused PID", async () => {
     const root = await temporaryDirectory();
     const runtime = join(root, "delayed-runtime.mjs");
     await writeFile(
@@ -6282,23 +6290,20 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test.skipIf(process.platform !== "win32")(
-    "runs plugin helpers with UTF-8 standard streams",
+    "runs Node inventory helpers with UTF-8 standard streams",
     async () => {
       const root = await temporaryDirectory("codex-security-python-utf8-");
       const repository = join(root, "repository");
       const output = join(root, "出力.jsonl");
       await mkdir(repository);
       await writeFile(join(repository, "source.py"), "value = 1\n");
-      const python = Bun.which("python3") ?? Bun.which("python");
-      expect(python).not.toBeNull();
 
       const scopes = join(root, "scopes.json");
       await writeFile(scopes, JSON.stringify(["."]));
       const result = spawnSync(
-        python!,
+        nodeCommand().command,
         [
-          "-B",
-          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
           "make-repo-scope-input",
           "--repo",
           repository,
@@ -6309,10 +6314,11 @@ describe("runtime directories and plugin Python boundary", () => {
         ],
         {
           encoding: "utf8",
-          env: pluginExecutionEnvironment(python!, {
+          env: {
             ...process.env,
             pythonutf8: "0",
-          }),
+            PYTHON: "missing-python",
+          },
         },
       );
 

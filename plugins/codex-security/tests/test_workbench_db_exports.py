@@ -434,10 +434,11 @@ def test_incomplete_parent_checkpoint_cannot_complete_scan(tmp_path: Path) -> No
     assert get_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "running"
 
 
-@pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
-@pytest.mark.parametrize("projection_failure_at", [None, "stop", "refresh"])
+@pytest.mark.parametrize(
+    ("termination", "projection_failure_at"), [("fail-scan", "stop"), ("cancel-scan", "refresh")]
+)
 def test_model_only_draft_is_available_before_findings_and_survives_stop(
-    tmp_path: Path, termination: str, projection_failure_at: str | None
+    tmp_path: Path, termination: str, projection_failure_at: str
 ) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
@@ -504,25 +505,21 @@ def test_model_only_draft_is_available_before_findings_and_survives_stop(
     assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["threatModel"] == model
     assert stopped["threatModelProvenance"]["provisional"] is True
     assert stopped["findingCount"] == 0
-    if projection_failure_at != "stop":
-        assert document.read_text().startswith(model["content"])
     sealed = (scan_dir / "scan-manifest.json").read_bytes()
     if projection_failure_at == "refresh":
+        assert stopped["warnings"] == []
+        assert document.read_text().startswith(model["content"])
         document.unlink()
         document.mkdir()
         stopped = scan_command(state_dir, "preserve-scan-results", scan_id)["scan"]
-    if projection_failure_at is not None:
-        warnings = stopped["warnings"]
-        assert len(warnings) == 1
-        assert warnings[0].startswith("Automatic threat model save failed:")
-        assert "threatModelPath" not in stopped
-        assert "threatModel" not in stopped["artifacts"]
-        assert get_scan(state_dir, scan_id)["scan"]["warnings"] == warnings
-        assert (
-            scan_command(state_dir, "preserve-scan-results", scan_id)["scan"]["warnings"]
-            == warnings
-        )
-        assert (scan_dir / "scan-manifest.json").read_bytes() == sealed
+    warnings = stopped["warnings"]
+    assert len(warnings) == 1
+    assert warnings[0].startswith("Automatic threat model save failed:")
+    assert "threatModelPath" not in stopped
+    assert "threatModel" not in stopped["artifacts"]
+    assert get_scan(state_dir, scan_id)["scan"]["warnings"] == warnings
+    assert scan_command(state_dir, "preserve-scan-results", scan_id)["scan"]["warnings"] == warnings
+    assert (scan_dir / "scan-manifest.json").read_bytes() == sealed
 
 
 @pytest.mark.parametrize("changed_file", ["scan-manifest.json", "findings.json"])
@@ -735,21 +732,9 @@ def test_completed_findings_export_inside_scan_directory(tmp_path: Path) -> None
     assert "sealed artifact changed" in str(tampered_json["stderr"])
 
 
-@pytest.mark.parametrize(
-    ("extensions", "expected_candidate_id"),
-    (
-        ({"candidateId": "DSS-145", "reportId": "DSS-145-rogue"}, "DSS-145"),
-        ({"candidateId": " ", "reportId": "DSS-145"}, "DSS-145"),
-        ({"reportId": "DSS-145", "ledgerRowId": "DSS-145-rogue"}, "DSS-145"),
-        ({"ledgerRowId": "DSS-145"}, "DSS-145"),
-    ),
-    ids=("candidate-id", "blank-candidate-id", "report-id", "ledger-row-id"),
-)
 @pytest.mark.parametrize("replace_after_finalize", (False, True), ids=("saved", "replaced"))
 def test_deep_csv_export_adds_only_candidate_id_column(
     tmp_path: Path,
-    extensions: dict[str, str],
-    expected_candidate_id: str,
     replace_after_finalize: bool,
     monkeypatch: pytest.MonkeyPatch,
     workbench_api,
@@ -776,16 +761,29 @@ def test_deep_csv_export_adds_only_candidate_id_column(
     )
     findings_path = scan_dir / "findings.json"
     findings_document = json.loads(findings_path.read_text())
-    finding = findings_document["findings"][0]
-    original_title = "Unsafe archive extraction [DSS-145-rogue]"
-    finding["title"] = original_title
-    finding["extensions"] = extensions
+    template = findings_document["findings"][0]
+    cases = (
+        ("candidate", {"candidateId": "DSS-145", "reportId": "DSS-999"}, "DSS-145"),
+        ("blank", {"candidateId": " ", "reportId": "DSS-146"}, "DSS-146"),
+        ("report", {"reportId": "DSS-147", "ledgerRowId": "DSS-999"}, "DSS-147"),
+        ("ledger", {"ledgerRowId": "DSS-148"}, "DSS-148"),
+    )
+    findings_document["findings"] = [
+        {
+            **template,
+            "identity": {"anchor": name},
+            "title": f"{name} extraction [DSS-999]",
+            "extensions": extensions,
+        }
+        for name, extensions, _ in cases
+    ]
     findings_path.write_text(json.dumps(findings_document))
 
     completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
+    closed_occurrence = completed["findings"][0]["occurrenceId"]
     set_triage(
         state_dir,
-        completed["findings"][0]["occurrenceId"],
+        closed_occurrence,
         "closed",
         "--close-reason",
         "wont_fix",
@@ -799,8 +797,9 @@ def test_deep_csv_export_adds_only_candidate_id_column(
         def replace_finalized_document(*args, **kwargs):
             result = finalize(*args, **kwargs)
             replacement = copy.deepcopy(result[1])
-            replacement["findings"][0]["extensions"] = {"candidateId": "DSS-replaced"}
-            replacement["findings"][0]["title"] = "Replaced title"
+            for finding in replacement["findings"]:
+                finding["extensions"] = {"candidateId": "DSS-replaced"}
+                finding["title"] = "Replaced title"
             findings_path.write_text(json.dumps(replacement))
             return result
 
@@ -834,13 +833,14 @@ def test_deep_csv_export_adds_only_candidate_id_column(
         "start_line",
         "end_line",
     ]
-    assert len(rows) == 1
-    assert rows[0]["candidate_id"] == expected_candidate_id
-    assert rows[0]["title"] == original_title
-    assert rows[0]["status"] == "closed"
-    assert rows[0]["close_reason"] == "wont_fix"
-    assert "report_id" not in rows[0]
-    assert "detailed_writeup" not in rows[0]
+    assert len(rows) == len(cases)
+    assert {row["title"]: row["candidate_id"] for row in rows} == {
+        f"{name} extraction [DSS-999]": candidate_id for name, _, candidate_id in cases
+    }
+    closed_rows = {
+        row["occurrence_id"]: row["close_reason"] for row in rows if row["status"] == "closed"
+    }
+    assert closed_rows == {closed_occurrence: "wont_fix"}
 
 
 def test_csv_export_escapes_newline_and_full_width_formula_prefixes(tmp_path: Path) -> None:

@@ -231,12 +231,14 @@ def test_missing_deferred_projection_links_first_duplicate_surface(
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
     )
+    coverage_path = scan.scan_dir / "coverage.json"
+    published = coverage_path.read_bytes()
     recovered = workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
-    coverage_path = scan.scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    assert coverage_path.read_bytes() == published
+    coverage = json.loads(published)
     pending = [item for item in coverage["deferred"] if item.get("reason") == deferred["reason"]]
     assert len(pending) == 1
     if parent_surfaces == "edited":
@@ -257,15 +259,17 @@ def test_missing_deferred_projection_links_first_duplicate_surface(
         assert len(coverage["surfaces"]) == len(projected)
     assert all(surface in coverage["surfaces"] for surface in projected)
     assert result.read_bytes() == original
-    published = coverage_path.read_bytes()
-    workbench_api["saved_results"].recover_scan_results(
-        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
-    )
-    assert coverage_path.read_bytes() == published
+
+    # Replay a new checkpoint with both worker-only coverage and a conflicting parent edit.
+    if (parent_surfaces, merge_state, tagged_surface) not in {
+        ("no-parent", "buffered", False),
+        ("edited", "merged", True),
+    }:
+        return
     late = write_checkpoint(
         result.parent / "checkpoints",
         {
-            **json.loads(result.read_text()),
+            **json.loads(original),
             "complete": False,
             "coverage": {**scan.coverage, "openQuestions": ["Late worker checkpoint."]},
         },
@@ -274,6 +278,8 @@ def test_missing_deferred_projection_links_first_duplicate_surface(
     workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_bytes())
+    assert late.relative_to(scan.scan_dir).as_posix() in manifest["scan"]["preservedSources"]
     assert coverage_path.read_bytes() == published
     assert result.read_bytes() == original
     assert late.read_bytes() == original_late

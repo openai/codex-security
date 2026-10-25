@@ -198,6 +198,28 @@ function commandPath(command: string): string {
   return path;
 }
 
+let cachedNode: string | undefined;
+const node = () => (cachedNode ??= commandPath("node"));
+let fixtureNpm: ReturnType<typeof resolveFixtureNpm> | undefined;
+
+// All consumers use the same Node/npm installation and keep independent npm configs and caches.
+async function resolveFixtureNpm() {
+  const resolved = await execFileAsync(
+    node(),
+    [
+      "--input-type=module",
+      "-e",
+      `import { resolveNpm } from ${JSON.stringify(new URL("../scripts/package-smoke-npm.mjs", import.meta.url).href)}; console.log(JSON.stringify(await resolveNpm()));`,
+    ],
+    { encoding: "utf8", windowsHide: true },
+  );
+  if (resolved.stderr) throw new Error(resolved.stderr);
+  return JSON.parse(resolved.stdout) as {
+    command: string;
+    args: string[];
+  };
+}
+
 async function installPackage(
   root: string,
   archivePath: string,
@@ -209,26 +231,14 @@ async function installPackage(
     join(consumer, "package.json"),
     JSON.stringify({ name: "synthetic-consumer", private: true }),
   );
-  const resolved = await execFileAsync(
-    commandPath("node"),
-    [
-      "--input-type=module",
-      "-e",
-      `import { resolveNpm } from ${JSON.stringify(new URL("../scripts/package-smoke-npm.mjs", import.meta.url).href)}; console.log(JSON.stringify(await resolveNpm()));`,
-    ],
-    { encoding: "utf8", env: environment, windowsHide: true },
-  );
-  expect(resolved.stderr).toBe("");
-  const npm = JSON.parse(resolved.stdout) as {
-    command: string;
-    args: string[];
-  };
+  const npm = await (fixtureNpm ??= resolveFixtureNpm());
   return runPackageCommand(
     consumer,
     npm.command,
     [
       ...npm.args,
       "install",
+      "--timing",
       "--global=false",
       "--prefix",
       consumer,
@@ -247,11 +257,11 @@ function checkPackage(
   root: string,
   archivePath: string,
   contractPath: string,
-  environment: NodeJS.ProcessEnv,
+  environment: NodeJS.ProcessEnv = process.env,
 ): Promise<{ status: number; stderr: string }> {
   return runPackageCommand(
     root,
-    commandPath("node"),
+    node(),
     [
       fileURLToPath(new URL("../scripts/check-package.mjs", import.meta.url)),
       archivePath,
@@ -347,7 +357,7 @@ describe("npm package tar listings", () => {
 
   test.each([false, true])(
     "rejects invalid package paths before Brotli expansion, complete=%p",
-    (complete) => {
+    async (complete) => {
       const root = mkdtempSync(join(tmpdir(), "codex-package-path-order-"));
       try {
         const archivePath = join(root, "unexpected-brotli.tgz");
@@ -364,17 +374,7 @@ describe("npm package tar listings", () => {
         );
         const contractPath = join(root, "plugin contract.json");
         writeFileSync(contractPath, JSON.stringify(pluginContract));
-        const result = spawnSync(
-          commandPath("node"),
-          [
-            fileURLToPath(
-              new URL("../scripts/check-package.mjs", import.meta.url),
-            ),
-            archivePath,
-            contractPath,
-          ],
-          { cwd: root, encoding: "utf8", timeout: 30_000, windowsHide: true },
-        );
+        const result = await checkPackage(root, archivePath, contractPath);
         expect(result.status).toBe(1);
         expect(result.stderr).toContain(
           complete
@@ -387,7 +387,7 @@ describe("npm package tar listings", () => {
     },
   );
 
-  test("escapes terminal controls in unexpected archive path diagnostics", () => {
+  test("escapes terminal controls in unexpected archive path diagnostics", async () => {
     const root = mkdtempSync(join(tmpdir(), "codex-package-terminal-path-"));
     try {
       const archivePath = join(root, "unexpected-path.tgz");
@@ -404,17 +404,7 @@ describe("npm package tar listings", () => {
       );
       const contractPath = join(root, "plugin contract.json");
       writeFileSync(contractPath, JSON.stringify(pluginContract));
-      const result = spawnSync(
-        commandPath("node"),
-        [
-          fileURLToPath(
-            new URL("../scripts/check-package.mjs", import.meta.url),
-          ),
-          archivePath,
-          contractPath,
-        ],
-        { cwd: root, encoding: "utf8", timeout: 30_000, windowsHide: true },
-      );
+      const result = await checkPackage(root, archivePath, contractPath);
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("unexpected file: package/unexpected");
       expect(result.stderr).not.toMatch(/[\u001b\u0007\u009b]/u);
@@ -424,7 +414,7 @@ describe("npm package tar listings", () => {
     }
   });
 
-  test("accepts equivalent bounded gzip representations", () => {
+  test("accepts equivalent bounded gzip representations", async () => {
     const root = mkdtempSync(join(tmpdir(), "codex-package-gzip-test-"));
     try {
       const tarBytes = packageTar({ trailingZeroBytes: 31 * 1024 * 1024 });
@@ -471,22 +461,11 @@ describe("npm package tar listings", () => {
       for (const [representation, contents] of archives) {
         const archivePath = join(root, `${representation}.tgz`);
         writeFileSync(archivePath, contents);
-        const result = spawnSync(
-          commandPath("node"),
-          [
-            fileURLToPath(
-              new URL("../scripts/check-package.mjs", import.meta.url),
-            ),
-            archivePath,
-            contractPath,
-          ],
-          {
-            cwd: root,
-            encoding: "utf8",
-            env: environment,
-            timeout: 30_000,
-            windowsHide: true,
-          },
+        const result = await checkPackage(
+          root,
+          archivePath,
+          contractPath,
+          environment,
         );
         expect({
           representation,
@@ -672,17 +651,16 @@ describe("npm package tar listings", () => {
           }),
         ),
       );
-      const nativeRoot = join(root, "native");
-      mkdirSync(nativeRoot);
+      const native = mkdtempSync(join(root, "native-"));
+      // The wrong-long-name fixtures have no portable asset path to select.
       const extracted = await execFileAsync(
         "tar",
-        ["-xzf", archivePath, "-C", nativeRoot],
+        ["-xzf", archivePath, "-C", native, ...(wrongLongName ? [] : [path])],
         { encoding: "buffer", timeout: 30_000, windowsHide: true },
       );
       expect(extracted.stderr.toString()).toBe("");
-      // These incompatible packages do not promise a portable native asset path.
       if (!wrongLongName)
-        expect(readFileSync(join(nativeRoot, path)).equals(logo)).toBe(true);
+        expect(readFileSync(join(native, path)).equals(logo)).toBe(true);
       const contractPath = join(root, "contract.json");
       writeFileSync(
         contractPath,
@@ -907,232 +885,235 @@ describe("npm package tar listings", () => {
     }
   });
 
-  test("checks reconstructed sparse binary assets and their discarded metadata", () => {
-    const root = mkdtempSync(join(tmpdir(), "codex-package-sparse-assets-"));
-    try {
-      const logo = readFileSync(
-        new URL(
-          "../../../plugins/codex-security/assets/logo.png",
-          import.meta.url,
-        ),
-      );
-      const oldGnuText = Buffer.alloc(32 * 1024);
-      const oldGnuExtents = Array.from({ length: 32 }, (_, index) => {
-        oldGnuText.write("Public contents.", index * 1024);
-        return { offset: index * 1024, size: 512 };
-      });
-      oldGnuExtents.push({ offset: oldGnuText.length, size: 0 });
-      const unicodeCompressedPayload = Buffer.from(cleanCompressedPayload);
-      Buffer.from("😀").copy(
-        unicodeCompressedPayload,
-        unicodeCompressedPayload.indexOf("Go/w") - 4,
-      );
-      const leadingMarker = cleanCompressedPayload.indexOf("Go/w");
-      expect(leadingMarker).toBeGreaterThan(0);
-      const repositoryCompressedPayload = Buffer.from(cleanCompressedPayload);
-      const repositoryMarker = Buffer.from(
-        ["github.com", "openai", "openai"].join("/"),
-      );
-      repositoryMarker.copy(repositoryCompressedPayload, 300);
-      const repositoryMarkerEnd = 300 + repositoryMarker.length;
-      expect(
-        brotliDecompressSync(repositoryCompressedPayload).toString("utf8"),
-      ).toMatch(/^[A-Za-z0-9]+$/u);
-      const middle = Math.floor(cleanCompressedPayload.length / 2);
-      const cases = [
-        {
-          name: "brotli",
-          files: [["runtime.mjs.br", cleanCompressedPayload, true]],
-        },
-        {
-          name: "unicode-brotli",
-          files: [["runtime.mjs.br", unicodeCompressedPayload, true]],
-        },
-        {
-          name: "sparse-brotli-leading-delimiter",
-          files: [
-            [
-              "runtime.mjs.br.part-000",
-              cleanCompressedPayload.subarray(0, leadingMarker),
-              false,
-            ],
-            [
-              "runtime.mjs.br.part-001",
-              cleanCompressedPayload.subarray(leadingMarker),
-              true,
-            ],
-          ],
-        },
-        {
-          name: "sparse-brotli-trailing-delimiter",
-          files: [
-            [
-              "runtime.mjs.br.part-000",
-              repositoryCompressedPayload.subarray(0, repositoryMarkerEnd),
-              true,
-            ],
-            [
-              "runtime.mjs.br.part-001",
-              repositoryCompressedPayload.subarray(repositoryMarkerEnd),
-              false,
-            ],
-          ],
-        },
-        {
-          name: "mixed-split-brotli",
-          files: [
-            [
-              "runtime.mjs.br.part-000",
-              cleanCompressedPayload.subarray(0, middle),
-              true,
-            ],
-            [
-              "runtime.mjs.br.part-001",
-              cleanCompressedPayload.subarray(middle),
-              false,
-            ],
-          ],
-        },
-        {
-          name: "mixed-sparse-split-tail",
-          files: [
-            [
-              "runtime.mjs.br.part-000",
-              cleanCompressedPayload.subarray(0, middle),
-              true,
-            ],
-            [
-              "runtime.mjs.br.part-001",
-              cleanCompressedPayload.subarray(middle),
-              "0.1-tail",
-            ],
-          ],
-          error: "npm tarball contains trailing Brotli data",
-        },
-        { name: "png", files: [["logo.png", logo, true]] },
-        {
-          name: "pax-sparse-zero-byte-hole-png",
-          files: [["logo.png", logo, "0.1-hole"]],
-          error: "npm tarball contains an unexpected PNG asset",
-        },
-        {
-          name: "pax-sparse-zero-byte-hole-tail",
-          files: [["logo.png", logo, "0.1-hole"]],
-          tailMarker: true,
-          error:
-            /npm tarball contains (?:an internal reference\.|an invalid tar entry)/u,
-        },
-        {
-          name: "oldgnu-brotli",
-          files: [["runtime.mjs.br", cleanCompressedPayload, "oldgnu"]],
-          error: "npm tarball contains an invalid tar entry",
-        },
-        {
-          name: "oldgnu-png",
-          files: [["logo.png", logo, "oldgnu"]],
-          error: "npm tarball contains an invalid tar entry",
-        },
-        {
-          name: "oldgnu-continuations",
-          files: [["helpers.mjs", oldGnuText, "oldgnu"]],
-          extents: oldGnuExtents,
-        },
-        {
-          name: "oldgnu-unused-main-slot",
-          files: [["runtime.mjs.br", cleanCompressedPayload, "oldgnu"]],
-          metadataMarker: "unused",
-          error: "npm tarball contains an invalid tar entry",
-        },
-        {
-          name: "oldgnu-unused-continuation-slot",
-          files: [["helpers.mjs", oldGnuText, "oldgnu"]],
-          extents: oldGnuExtents,
-          metadataMarker: "unused",
-        },
-        {
-          name: "oldgnu-continuation-marker",
-          files: [["helpers.mjs", oldGnuText, "oldgnu"]],
-          extents: oldGnuExtents,
-          metadataMarker: "continuation",
-          error: "npm tarball contains an internal reference.",
-        },
-        {
-          name: "oldgnu-metadata-boundary-marker",
-          files: [["helpers.mjs", oldGnuText, "oldgnu"]],
-          extents: oldGnuExtents,
-          metadataMarker: "boundary",
-          error: "npm tarball contains an internal reference.",
-        },
-        {
-          name: "oldgnu-text-body-boundary-marker",
-          files: [
-            ["helpers.mjs", Buffer.from("synthetic-reference\n"), "oldgnu"],
-          ],
-          metadataMarker: "boundary",
-          error: "npm tarball contains an internal reference.",
-        },
-        {
-          name: "global-sparse-keys",
-          files: [["runtime.mjs.br", cleanCompressedPayload, false]],
-          globalSparse: true,
-        },
-        {
-          name: "expanded-marker",
-          files: [
-            [
-              "runtime.mjs.br",
-              brotliCompressSync(Buffer.from("go/synthetic-reference")),
-              true,
-            ],
-          ],
-          error: "npm tarball contains an internal reference.",
-        },
-        {
-          name: "sparse-header-map-boundary-marker",
-          files: [["runtime.mjs.br", cleanCompressedPayload, "1.0"]],
-          headerMapMarker: true,
-          error: "npm tarball contains an internal reference.",
-        },
-        {
-          name: "sparse-tail-header-boundary-marker",
-          files: [
-            ["runtime.mjs.br", cleanCompressedPayload, "1.0"],
-            ["extra.mjs", Buffer.from("Public contents."), false],
-          ],
-          tailBoundaryMarker: true,
-          error:
-            /npm tarball contains (?:an internal reference\.|an invalid tar entry:)/u,
-        },
-        {
-          name: "map-padding-marker",
-          files: [["runtime.mjs.br", cleanCompressedPayload, "1.0"]],
-          mapMarker: true,
-          error: "npm tarball contains an internal reference.",
-        },
-        {
-          name: "discarded-tail-marker",
-          files: [["logo.png", logo, "1.0"]],
-          tailMarker: true,
-          error:
-            /npm tarball contains (?:an internal reference\.|an invalid tar entry:)/u,
-        },
-      ] satisfies {
-        name: string;
+  describe("reconstructed sparse binary assets and discarded metadata", () => {
+    const logo = readFileSync(
+      new URL(
+        "../../../plugins/codex-security/assets/logo.png",
+        import.meta.url,
+      ),
+    );
+    const oldGnuText = Buffer.alloc(32 * 1024);
+    const oldGnuExtents = Array.from({ length: 32 }, (_, index) => {
+      oldGnuText.write("Public contents.", index * 1024);
+      return { offset: index * 1024, size: 512 };
+    });
+    oldGnuExtents.push({ offset: oldGnuText.length, size: 0 });
+    const unicodeCompressedPayload = Buffer.from(cleanCompressedPayload);
+    Buffer.from("😀").copy(
+      unicodeCompressedPayload,
+      unicodeCompressedPayload.indexOf("Go/w") - 4,
+    );
+    const leadingMarker = cleanCompressedPayload.indexOf("Go/w");
+    const repositoryCompressedPayload = Buffer.from(cleanCompressedPayload);
+    const repositoryMarker = Buffer.from(
+      ["github.com", "openai", "openai"].join("/"),
+    );
+    repositoryMarker.copy(repositoryCompressedPayload, 300);
+    const repositoryMarkerEnd = 300 + repositoryMarker.length;
+    const middle = Math.floor(cleanCompressedPayload.length / 2);
+    const cases = [
+      {
+        name: "brotli",
+        files: [["runtime.mjs.br", cleanCompressedPayload, true]],
+      },
+      {
+        name: "unicode-brotli",
+        files: [["runtime.mjs.br", unicodeCompressedPayload, true]],
+      },
+      {
+        name: "sparse-brotli-leading-delimiter",
+        checkFixture: () => expect(leadingMarker).toBeGreaterThan(0),
         files: [
-          string,
-          Buffer,
-          boolean | "1.0" | "0.1-tail" | "0.1-hole" | "oldgnu",
-        ][];
-        extents?: { offset: number; size: number }[];
-        metadataMarker?: "continuation" | "boundary" | "unused";
-        globalSparse?: boolean;
-        mapMarker?: boolean;
-        headerMapMarker?: boolean;
-        tailMarker?: boolean;
-        tailBoundaryMarker?: boolean;
-        error?: string | RegExp;
-      }[];
-      for (const scenario of cases) {
+          [
+            "runtime.mjs.br.part-000",
+            cleanCompressedPayload.subarray(0, leadingMarker),
+            false,
+          ],
+          [
+            "runtime.mjs.br.part-001",
+            cleanCompressedPayload.subarray(leadingMarker),
+            true,
+          ],
+        ],
+      },
+      {
+        name: "sparse-brotli-trailing-delimiter",
+        checkFixture: () =>
+          expect(
+            brotliDecompressSync(repositoryCompressedPayload).toString("utf8"),
+          ).toMatch(/^[A-Za-z0-9]+$/u),
+        files: [
+          [
+            "runtime.mjs.br.part-000",
+            repositoryCompressedPayload.subarray(0, repositoryMarkerEnd),
+            true,
+          ],
+          [
+            "runtime.mjs.br.part-001",
+            repositoryCompressedPayload.subarray(repositoryMarkerEnd),
+            false,
+          ],
+        ],
+      },
+      {
+        name: "mixed-split-brotli",
+        files: [
+          [
+            "runtime.mjs.br.part-000",
+            cleanCompressedPayload.subarray(0, middle),
+            true,
+          ],
+          [
+            "runtime.mjs.br.part-001",
+            cleanCompressedPayload.subarray(middle),
+            false,
+          ],
+        ],
+      },
+      {
+        name: "mixed-sparse-split-tail",
+        files: [
+          [
+            "runtime.mjs.br.part-000",
+            cleanCompressedPayload.subarray(0, middle),
+            true,
+          ],
+          [
+            "runtime.mjs.br.part-001",
+            cleanCompressedPayload.subarray(middle),
+            "0.1-tail",
+          ],
+        ],
+        error: "npm tarball contains trailing Brotli data",
+      },
+      { name: "png", files: [["logo.png", logo, true]] },
+      {
+        name: "pax-sparse-zero-byte-hole-png",
+        files: [["logo.png", logo, "0.1-hole"]],
+        error: "npm tarball contains an unexpected PNG asset",
+      },
+      {
+        name: "pax-sparse-zero-byte-hole-tail",
+        files: [["logo.png", logo, "0.1-hole"]],
+        tailMarker: true,
+        error:
+          /npm tarball contains (?:an internal reference\.|an invalid tar entry)/u,
+      },
+      {
+        name: "oldgnu-brotli",
+        files: [["runtime.mjs.br", cleanCompressedPayload, "oldgnu"]],
+        error: "npm tarball contains an invalid tar entry",
+      },
+      {
+        name: "oldgnu-png",
+        files: [["logo.png", logo, "oldgnu"]],
+        error: "npm tarball contains an invalid tar entry",
+      },
+      {
+        name: "oldgnu-continuations",
+        files: [["helpers.mjs", oldGnuText, "oldgnu"]],
+        extents: oldGnuExtents,
+      },
+      {
+        name: "oldgnu-unused-main-slot",
+        files: [["runtime.mjs.br", cleanCompressedPayload, "oldgnu"]],
+        metadataMarker: "unused",
+        error: "npm tarball contains an invalid tar entry",
+      },
+      {
+        name: "oldgnu-unused-continuation-slot",
+        files: [["helpers.mjs", oldGnuText, "oldgnu"]],
+        extents: oldGnuExtents,
+        metadataMarker: "unused",
+      },
+      {
+        name: "oldgnu-continuation-marker",
+        files: [["helpers.mjs", oldGnuText, "oldgnu"]],
+        extents: oldGnuExtents,
+        metadataMarker: "continuation",
+        error: "npm tarball contains an internal reference.",
+      },
+      {
+        name: "oldgnu-metadata-boundary-marker",
+        files: [["helpers.mjs", oldGnuText, "oldgnu"]],
+        extents: oldGnuExtents,
+        metadataMarker: "boundary",
+        error: "npm tarball contains an internal reference.",
+      },
+      {
+        name: "oldgnu-text-body-boundary-marker",
+        files: [
+          ["helpers.mjs", Buffer.from("synthetic-reference\n"), "oldgnu"],
+        ],
+        metadataMarker: "boundary",
+        error: "npm tarball contains an internal reference.",
+      },
+      {
+        name: "global-sparse-keys",
+        files: [["runtime.mjs.br", cleanCompressedPayload, false]],
+        globalSparse: true,
+      },
+      {
+        name: "expanded-marker",
+        files: [
+          [
+            "runtime.mjs.br",
+            brotliCompressSync(Buffer.from("go/synthetic-reference")),
+            true,
+          ],
+        ],
+        error: "npm tarball contains an internal reference.",
+      },
+      {
+        name: "sparse-header-map-boundary-marker",
+        files: [["runtime.mjs.br", cleanCompressedPayload, "1.0"]],
+        headerMapMarker: true,
+        error: "npm tarball contains an internal reference.",
+      },
+      {
+        name: "sparse-tail-header-boundary-marker",
+        files: [
+          ["runtime.mjs.br", cleanCompressedPayload, "1.0"],
+          ["extra.mjs", Buffer.from("Public contents."), false],
+        ],
+        tailBoundaryMarker: true,
+        error:
+          /npm tarball contains (?:an internal reference\.|an invalid tar entry:)/u,
+      },
+      {
+        name: "map-padding-marker",
+        files: [["runtime.mjs.br", cleanCompressedPayload, "1.0"]],
+        mapMarker: true,
+        error: "npm tarball contains an internal reference.",
+      },
+      {
+        name: "discarded-tail-marker",
+        files: [["logo.png", logo, "1.0"]],
+        tailMarker: true,
+        error:
+          /npm tarball contains (?:an internal reference\.|an invalid tar entry:)/u,
+      },
+    ] satisfies {
+      name: string;
+      checkFixture?: () => void;
+      files: [
+        string,
+        Buffer,
+        boolean | "1.0" | "0.1-tail" | "0.1-hole" | "oldgnu",
+      ][];
+      extents?: { offset: number; size: number }[];
+      metadataMarker?: "continuation" | "boundary" | "unused";
+      globalSparse?: boolean;
+      mapMarker?: boolean;
+      headerMapMarker?: boolean;
+      tailMarker?: boolean;
+      tailBoundaryMarker?: boolean;
+      error?: string | RegExp;
+    }[];
+    test.each(cases)("$name", async (scenario) => {
+      scenario.checkFixture?.();
+      const root = mkdtempSync(join(tmpdir(), "codex-package-sparse-assets-"));
+      try {
         const records = scenario.files.map(([name, contents, sparse]) => {
           const path = `package/_bundled_plugin/${name}`;
           if (!sparse) return tarRecord(contents, { name: path });
@@ -1262,47 +1243,29 @@ describe("npm package tar listings", () => {
         );
         const environment = { ...process.env };
         delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
-        const result = spawnSync(
-          commandPath("node"),
-          [
-            fileURLToPath(
-              new URL("../scripts/check-package.mjs", import.meta.url),
-            ),
-            archivePath,
-            contractPath,
-          ],
-          {
-            cwd: root,
-            env: environment,
-            encoding: "utf8",
-            timeout: 30_000,
-            windowsHide: true,
-          },
+        const result = await checkPackage(
+          root,
+          archivePath,
+          contractPath,
+          environment,
         );
         if (scenario.error) {
-          expect({ scenario: scenario.name, status: result.status }).toEqual({
-            scenario: scenario.name,
-            status: 1,
-          });
+          expect(result.status, result.stderr).toBe(1);
           if (typeof scenario.error === "string")
             expect(result.stderr).toContain(scenario.error);
           else expect(result.stderr).toMatch(scenario.error);
         } else {
-          expect({
-            scenario: scenario.name,
-            status: result.status,
-            stderr: result.stderr,
-          }).toEqual({ scenario: scenario.name, status: 0, stderr: "" });
+          expect(result).toEqual({ status: 0, stderr: "" });
         }
+      } finally {
+        rmSync(root, { force: true, recursive: true });
       }
-    } finally {
-      rmSync(root, { force: true, recursive: true });
-    }
+    });
   });
 
   test.each([0x78, 0x67])(
     "preserves inherited character locale for Unicode pax owners, type=%i",
-    (type) => {
+    async (type) => {
       const root = mkdtempSync(join(tmpdir(), "codex-package-owner-test-"));
       try {
         const archivePath = join(root, "unicode owner.tgz");
@@ -1328,22 +1291,11 @@ describe("npm package tar listings", () => {
         if (process.platform !== "win32")
           environment["LC_ALL"] =
             process.platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8";
-        const result = spawnSync(
-          commandPath("node"),
-          [
-            fileURLToPath(
-              new URL("../scripts/check-package.mjs", import.meta.url),
-            ),
-            archivePath,
-            contractPath,
-          ],
-          {
-            cwd: root,
-            env: environment,
-            encoding: "utf8",
-            timeout: 30_000,
-            windowsHide: true,
-          },
+        const result = await checkPackage(
+          root,
+          archivePath,
+          contractPath,
+          environment,
         );
         expect({ status: result.status, stderr: result.stderr }).toEqual({
           status: 0,
@@ -1355,7 +1307,7 @@ describe("npm package tar listings", () => {
     },
   );
 
-  test("streams each archive without resolving tar from its directory", () => {
+  test("streams each archive without resolving tar from its directory", async () => {
     const root = mkdtempSync(join(tmpdir(), "codex-package-tar-test-"));
     try {
       const archiveDirectory = join(
@@ -1381,7 +1333,6 @@ describe("npm package tar listings", () => {
       writeFileSync(archivePath, archiveContents);
       writeFileSync(contractPath, JSON.stringify(pluginContract));
 
-      const nodePath = commandPath("node");
       const environment: NodeJS.ProcessEnv = { ...process.env };
       delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
       environment["PATH"] = `.${delimiter}${process.env["PATH"] ?? ""}`;
@@ -1440,22 +1391,11 @@ process.exit(result.status ?? 1);
         environment["TAR_PROXY_LOG"] = logPath;
       }
 
-      const result = spawnSync(
-        nodePath,
-        [
-          fileURLToPath(
-            new URL("../scripts/check-package.mjs", import.meta.url),
-          ),
-          archivePath,
-          contractPath,
-        ],
-        {
-          cwd: root,
-          encoding: "utf8",
-          env: environment,
-          timeout: 30_000,
-          windowsHide: true,
-        },
+      const result = await checkPackage(
+        root,
+        archivePath,
+        contractPath,
+        environment,
       );
       expect(existsSync(adjacentTarMarker)).toBe(false);
       expect({ status: result.status, stderr: result.stderr }).toEqual({
@@ -1509,22 +1449,11 @@ process.exit(result.status ?? 1);
       ]);
 
       environment["TAR_PROXY_FAIL_EXTRACT"] = "true";
-      const failed = spawnSync(
-        nodePath,
-        [
-          fileURLToPath(
-            new URL("../scripts/check-package.mjs", import.meta.url),
-          ),
-          archivePath,
-          contractPath,
-        ],
-        {
-          cwd: root,
-          encoding: "utf8",
-          env: environment,
-          timeout: 30_000,
-          windowsHide: true,
-        },
+      const failed = await checkPackage(
+        root,
+        archivePath,
+        contractPath,
+        environment,
       );
       expect(failed.status).not.toBe(0);
       expect(failed.stderr).toContain("synthetic extraction failure");

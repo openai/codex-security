@@ -301,6 +301,13 @@ import {
 } from "./scan-history-renderer.js";
 import { ScanDashboard } from "./scan-dashboard.js";
 import {
+  ACCOUNT_LIMITS_UNAVAILABLE,
+  formatAccountLimits,
+  formatUsageFreshness,
+  isChatGptAuthentication,
+  USAGE_TIME_UNAVAILABLE,
+} from "./scan-usage-display.js";
+import {
   policyDisplayData,
   runPolicyCommand,
   type PolicyPrompt,
@@ -2272,7 +2279,7 @@ export async function main(
       );
       return presentHistory(
         await history(
-          ["list-repositories"],
+          ["list-repositories", "--status", "scanned"],
           async (value): Promise<JsonObject> => {
             const repositories = value["repositories"] as JsonObject[];
             let target = repositories.find(
@@ -5100,10 +5107,12 @@ export async function main(
                       componentName,
                       event,
                       options.showCost || settings.maxCostUsd !== undefined,
+                      settings.auth,
                     );
                     if (line !== null) errorOutput.write(line);
                   }
-                : (event) => dashboard?.recordComponentEvent(event),
+                : (event) =>
+                    dashboard?.recordComponentEvent(event, settings.auth),
             onDeduplicationStarted: () => {
               if (dashboard !== null)
                 dashboard.showComponents("Combining duplicate findings");
@@ -9158,6 +9167,8 @@ async function executeScan(
   let deepConsolidating = false;
   let runningCost: Readonly<ScanCost> | null = null;
   let runningUsage: Readonly<ScanTokenUsage> | null = null;
+  let usageFreshness: string | null = null;
+  let accountLimits: string | null = null;
   let maxCostUsd = arguments_.maxCostUsd;
   const showCost = arguments_.showCost === true || maxCostUsd !== undefined;
   let phase: string | null = null;
@@ -9392,6 +9403,9 @@ async function executeScan(
         input: scanInput,
         onInterrupt,
       });
+      dashboard.setChatGptAuth(
+        isChatGptAuthentication(selectedAuthentication, auth),
+      );
     }
     const scope = scanScope(arguments_);
     const runningMessage = (): string => {
@@ -9412,11 +9426,7 @@ async function executeScan(
           `Reviews: ${deepProgress.completed} completed, ${deepProgress.active} active, cap ${deepProgress.maximum}`,
         );
       } else if (fileProgress !== null) {
-        const count = scanProgressCount(fileProgress);
-        if (count.total > 0)
-          details.push(
-            `${count.label === "reviews" ? "Reviews" : "Files"}: ${count.completed.toLocaleString("en-US")}/${count.total.toLocaleString("en-US")}`,
-          );
+        details.push(formatScanProgressCount(fileProgress, "status"));
       }
       const tokens =
         runningCost !== null
@@ -9426,6 +9436,11 @@ async function executeScan(
       if (showCost && runningCost !== null) {
         details.push(`Cost: ${formatScanCost(runningCost)}`);
       }
+      if (tokens !== null)
+        details.push(usageFreshness ?? USAGE_TIME_UNAVAILABLE);
+      if (accountLimits !== null) details.push(diagnosticValue(accountLimits));
+      else if (isChatGptAuthentication(selectedAuthentication, auth))
+        details.push(ACCOUNT_LIMITS_UNAVAILABLE);
       return details.length === 0 ? stage : `${stage} | ${details.join(" | ")}`;
     };
     if (dashboard === null) {
@@ -9463,6 +9478,22 @@ async function executeScan(
       archiveExisting: arguments_.archiveExisting,
       parentScanId: arguments_.parentScanId,
       expectedPluginVersion: arguments_.expectedPluginVersion,
+      onUsageObservation: async (observation) => {
+        if (dashboard !== null) {
+          dashboard.setUsageObservation(observation);
+          return;
+        }
+        usageFreshness = formatUsageFreshness(observation);
+        accountLimits = formatAccountLimits(observation);
+        const priorUsage = runningUsage;
+        const priorCost = runningCost;
+        // Usage and cost callbacks render the same poll. Refresh here for a receipt alone.
+        await Promise.resolve();
+        if (runningUsage === priorUsage && runningCost === priorCost) {
+          progress?.stopTimer();
+          progress?.startTimer(runningMessage());
+        }
+      },
       onUsage: async (usage) => {
         runningUsage = usage;
         if (dashboard !== null) {
@@ -9539,6 +9570,9 @@ async function executeScan(
       },
       onAuthentication: (authentication) => {
         selectedAuthentication = authentication;
+        dashboard?.setChatGptAuth(
+          isChatGptAuthentication(authentication, auth),
+        );
         const bedrock =
           providerOptions.provider === "amazon-bedrock" ||
           authentication.method === "aws_credentials";
@@ -9663,10 +9697,8 @@ async function executeScan(
         }
         if (progress === null) return;
         progress.stopTimer();
-        const count = scanProgressCount(update);
-        progress.stage(
-          `Scan phase: ${phase}${count.total === 0 ? "" : ` (${count.completed.toLocaleString("en-US")}/${count.total.toLocaleString("en-US")} ${count.label})`}.`,
-        );
+        const count = formatScanProgressCount(update, "phase");
+        progress.stage(`Scan phase: ${phase} (${count}).`);
         progress.startTimer(runningMessage());
       },
       onDeepProgress: (update) => {
@@ -10665,21 +10697,51 @@ function printScanSummary(
   }
 }
 
+function formatScanProgressCount(
+  progress: ScanProgress,
+  style: "phase" | "status",
+): string {
+  const { label, completed, total } = scanProgressCount(progress);
+  const totalText = total.toLocaleString("en-US");
+  if (label === "files" && completed === 0) {
+    return style === "phase"
+      ? `${totalText} ${total === 1 ? "file" : "files"} inventoried`
+      : `File inventory: ${totalText}`;
+  }
+  const ratio = `${completed.toLocaleString("en-US")}/${totalText}`;
+  return style === "phase"
+    ? `${ratio} ${label}`
+    : `${label === "reviews" ? "Reviews" : "Files"}: ${ratio}`;
+}
+
 function componentScanEventLine(
   componentName: string,
   event: ComponentScanEvent,
   showCost: boolean,
+  requestedAuth?: ScanAuthMode,
 ): string | null {
+  if (event.type === "authentication") {
+    return isChatGptAuthentication(event.value, requestedAuth)
+      ? `codex-security: ${componentName} | ${ACCOUNT_LIMITS_UNAVAILABLE}\n`
+      : null;
+  }
   if (event.type === "progress") {
     const progress = event.value;
-    const count = scanProgressCount(progress);
-    return `codex-security: ${componentName} ${scanPhase(progress.phase)} | ${count.label === "reviews" ? "Reviews" : "Files"}: ${count.completed.toLocaleString("en-US")}/${count.total.toLocaleString("en-US")}\n`;
+    const count = formatScanProgressCount(progress, "status");
+    return `codex-security: ${componentName} ${scanPhase(progress.phase)} | ${count}\n`;
   }
   if (event.type === "usage") {
     const tokens = formatTokenUsage(event.value);
     return tokens === null
       ? null
       : `codex-security: ${componentName} | Tokens: ${tokens}\n`;
+  }
+  if (event.type === "usage-observation") {
+    const details = [
+      formatUsageFreshness(event.value) ?? USAGE_TIME_UNAVAILABLE,
+      formatAccountLimits(event.value),
+    ].filter((detail) => detail !== null);
+    return `codex-security: ${componentName} | ${diagnosticValue(details.join(" | "))}\n`;
   }
   if (event.type !== "cost" || !showCost) return null;
   return `codex-security: ${componentName} | Cost: ${formatScanCost(event.value)}\n`;

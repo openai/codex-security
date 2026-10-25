@@ -74,6 +74,8 @@ def test_archived_output_preserves_old_scan_and_allows_fresh_registration(
 
     assert current["scanId"] != previous["scanId"]
     assert current["scanDir"] == str(scan_dir)
+    assert current["archivedScanDir"] == str(archived_scan_dir)
+    assert (archived_scan_dir / "report.md").read_text() == "# Previous scan\n"
     assert (archived_scan_dir / "previous.txt").read_text() == "keep the previous scan\n"
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute(

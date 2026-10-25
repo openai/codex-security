@@ -1,15 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import {
-  copyFileSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { runWorkflowScript } from "./support/workflow-script.js";
 
 type Step = {
@@ -42,15 +35,11 @@ function workflow(name: string) {
   };
 }
 const release = workflow("container-release");
-const directories: string[] = [];
-afterEach(() => {
-  for (const directory of directories.splice(0))
-    rmSync(directory, { recursive: true, force: true });
-});
+const directories = createTemporaryDirectoriesSync();
+afterEach(directories.cleanup);
 
 function fixture() {
-  const directory = mkdtempSync(join(tmpdir(), "container release "));
-  directories.push(directory);
+  const directory = directories.create("container release ");
   const repository = join(directory, "source");
   mkdirSync(join(repository, "sdk/typescript"), { recursive: true });
   const output = join(directory, "output");
@@ -102,7 +91,7 @@ function fixture() {
     );
     return { ...result, output: readFileSync(output, "utf8") };
   }
-  return { directory, repository, source, automation, git, commit, run };
+  return { source, automation, git, commit, run };
 }
 
 test("backfills the tagged release after main has advanced", () => {
@@ -258,18 +247,20 @@ test("builds and downloads native payloads from the same source as the image", (
 
 const digest = `sha256:${"a".repeat(64)}`;
 function existingFixture() {
-  const source = fixture();
-  const bin = join(source.directory, "bin");
-  const events = join(source.directory, "events");
-  const output = join(source.directory, "reuse-output");
+  const directory = directories.create("container release ");
+  const source = "1".repeat(40);
+  const repository = join(directory, "source");
+  const bin = join(directory, "bin");
+  const events = join(directory, "events");
+  const output = join(directory, "reuse-output");
   mkdirSync(bin);
-  mkdirSync(join(source.repository, "docker"));
+  mkdirSync(join(repository, "docker"), { recursive: true });
   copyFileSync(
     new URL(
       "../../../docker/verify-container-release-version.sh",
       import.meta.url,
     ),
-    join(source.repository, "docker/verify-container-release-version.sh"),
+    join(repository, "docker/verify-container-release-version.sh"),
   );
   writeFileSync(
     join(bin, "gh"),
@@ -297,7 +288,7 @@ esac
   const manifest = {
     annotations: {
       "org.opencontainers.image.version": "99.1.2",
-      "org.opencontainers.image.revision": source.source,
+      "org.opencontainers.image.revision": source,
     },
     manifests: ["amd64", "arm64"].map((architecture) => ({
       platform: { os: "linux", architecture },
@@ -309,7 +300,7 @@ esac
   function run(env: Record<string, string> = {}) {
     writeFileSync(events, "");
     writeFileSync(output, "");
-    const result = runWorkflowScript(source.repository, script, {
+    const result = runWorkflowScript(repository, script, {
       PATH: `${bin}${delimiter}${process.env["PATH"]}`,
       EVENTS: events.replaceAll("\\", "/"),
       GITHUB_OUTPUT: output.replaceAll("\\", "/"),
@@ -317,12 +308,12 @@ esac
       GITHUB_REPOSITORY_OWNER: "Example",
       IMAGE: "ghcr.io/example/codex-security",
       VERSION: "99.1.2",
-      RELEASE_SHA: source.source,
+      RELEASE_SHA: source,
       MOCK_VERSIONS: JSON.stringify([
         {
           name: digest,
           metadata: {
-            container: { tags: ["99.1.2", "latest", `sha-${source.source}`] },
+            container: { tags: ["99.1.2", "latest", `sha-${source}`] },
           },
         },
       ]),
@@ -338,7 +329,7 @@ esac
       events: readFileSync(events, "utf8"),
     };
   }
-  return { run, manifest, source: source.source };
+  return { run, manifest, source };
 }
 
 test("verifies and reuses the published source without a registry write", () => {

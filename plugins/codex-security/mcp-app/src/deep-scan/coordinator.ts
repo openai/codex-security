@@ -93,6 +93,7 @@ export interface CoordinatorOptions {
     publication: DeepScanPublication,
   ) => Promise<void>;
   onStopped?: (run: DeepScanRunState) => Promise<void>;
+  onStart?: (coordinator: DeepScanCoordinator) => void;
 }
 
 export { DeepScanNonRetryableError } from "./errors.js";

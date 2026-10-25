@@ -4,7 +4,7 @@ import copy
 import hashlib
 import io
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr
 from pathlib import Path
 
 from workbench_test_support import ScanFixtureTestCase, load_script
@@ -16,8 +16,11 @@ EXAMPLE_SCAN = PLUGIN_ROOT / "examples" / "completed-scan"
 VALIDATOR = load_script("validate_tracking_source")
 
 
-def test_completed_example_passes_tracking_validation() -> None:
-    assert VALIDATOR.validate_source(EXAMPLE_SCAN)
+def test_tracking_cli_lists_the_checked_in_finding(capsys) -> None:
+    assert VALIDATOR.main([str(EXAMPLE_SCAN)]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "csf_852f90d6e1177502ff113d4a\n"
+    assert captured.err == ""
 
 
 class ValidateTrackingSourceTest(ScanFixtureTestCase):
@@ -47,11 +50,6 @@ class ValidateTrackingSourceTest(ScanFixtureTestCase):
         )
         artifact["sha256"] = hashlib.sha256(coverage_bytes).hexdigest()
         self.write_json("scan-manifest.json", manifest)
-
-    def test_selects_the_finding_from_a_sealed_scan(self) -> None:
-        findings = VALIDATOR.validate_source(self.scan_dir)
-
-        self.assertEqual(findings[0]["findingId"], "csf_852f90d6e1177502ff113d4a")
 
     def test_tampered_findings_are_rejected(self) -> None:
         findings_path = self.scan_dir / "findings.json"
@@ -157,17 +155,6 @@ class ValidateTrackingSourceTest(ScanFixtureTestCase):
 
         self.assertEqual(len(finding_ids), 25)
         self.assertEqual(len(set(finding_ids)), 25)
-
-    def test_cli_prints_only_the_selected_finding_id(self) -> None:
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-
-        with redirect_stdout(stdout), redirect_stderr(stderr):
-            exit_code = VALIDATOR.main([str(self.scan_dir)])
-
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(stdout.getvalue(), "csf_852f90d6e1177502ff113d4a\n")
-        self.assertEqual(stderr.getvalue(), "")
 
 
 if __name__ == "__main__":

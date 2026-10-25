@@ -43,6 +43,14 @@ executor receipts. To rerun just the installed-package check, use
 Tests run in random order by default. To replay a failure, pass the seed from
 Bun's summary to `pnpm run test --seed 12345`.
 
+The SDK shards in `node-ci` use the workflow run number as their seed, so
+rerunning a job repeats its test order. To replay a shard locally, use its
+platform, shard selector, and seed, for example
+`node --experimental-strip-types scripts/run-ci-tests.mts 2/6 --seed=12345`.
+On Linux, if the original workflow ran the separate MCP tests, prefix that
+command with `CODEX_SECURITY_TEST_MCP_WORKERS_SEPARATE=true` to skip the four
+worker groups they cover. Leave it unset to replay a run that skipped MCP.
+
 The local test commands pass a 30-second per-test timeout explicitly. Windows
 CI and the Windows runner diagnostics allow 120 seconds for slower native
 credential and document checks. `test:ci` writes `reports/junit.xml` and
@@ -131,18 +139,20 @@ default to 100 cases; filesystem contract properties default to 20.
 
 ## GitHub Actions
 
-`node-ci` reports one `ci` gate for all selected required checks. The existing
-`ubuntu-latest / node-22`, `macos-latest / node-22`, and
-`windows-latest / node-22` check names forward that result while repository
-branch rules migrate. The [CI guide](../../docs/ci.md) describes documentation-only
-routing, platform/version selection, full scheduled qualification, and the gate
-migration.
+`node-ci` reports one `ci` gate for all selected required checks. The
+[CI guide](../../docs/ci.md) describes documentation-only routing,
+platform/version selection, and full scheduled qualification.
 
 For source qualification, CI builds and inspects one package archive, then passes
 that archive to jobs in the same workflow run, using the commit SHA in the
 artifact name. Selected Node runtimes install and inspect the package, including
 a strict NodeNext TypeScript consumer, the actual CLI, credential locking, and a
-nested Codex worker. Native plugin-build tests remain in the shared Bun suite.
+nested Codex worker. The installed Deep Scan smoke exercises a real retry on
+one runtime per OS for PRs and main pushes, and on every scheduled or manual
+qualification lane. All selected runtimes still complete direct and detached scans.
+Native plugin-build tests remain in the shared Bun suite. Each supported OS
+exercises the maintainer release preview, Git branch and commit updates,
+concurrent ref conflicts, and preservation of maintainer edits.
 Typechecking and formatting run once in an independent required job, so package
 consumers do not wait for those checks. Package compilation and archive
 validation still finish before the test jobs start.
@@ -151,9 +161,12 @@ Source qualification runs the full Bun suite once per OS under Node 22: six
 file shards on Linux and macOS, and fourteen on Windows. GitHub runs the shards
 as separate jobs; each job uses Bun's default serial runner. The other selected
 Node versions run the installed-package checks instead of repeating the same
-Bun suite. MCP tests run in three required jobs using Node's native file sharding,
-with two isolated test file processes per job. Local and release `test:mcp`
-commands still run the full suite. Python tests run separately and use four
+Bun suite. MCP CI assigns files by measured duration and starts the longest
+files first, using two isolated Node test processes per job. From
+`plugins/codex-security/mcp-app`, replay shard 1
+with `node --experimental-strip-types ../../../sdk/typescript/scripts/run-mcp-test-shard.mts 1 2`.
+Local and release `test:mcp` commands run the full suite. Python tests run
+separately and use four
 isolated pytest-xdist workers with work stealing; worker crashes fail the run
 without automatic restarts.
 
@@ -171,8 +184,9 @@ Refresh timing hints from successful CI JUnit artifacts when shard runtimes
 become uneven. From the SDK directory, pass reports for one platform to
 `node --experimental-strip-types scripts/update-test-timings.mts win32 <junit.xml> ...`
 (use `linux` or `darwin` for the other platforms). The updater sums testcase
-durations per file and uses their median across reports, preserving the other
-platforms. Review and commit the generated snapshot. The initial hints use runs
+durations for executed cases per file and uses their median across reports. A
+report that skipped every case in a file leaves its timing hint unchanged. Other
+platforms retain their hints. Review and commit the generated snapshot. The initial hints use runs
 `39521539826`, `39694506447`, and `39694510011`. Keep runner versions, coverage,
 timeouts, seeds, and platform-specific checks unchanged when comparing scheduling
 changes; compare complete JUnit inventories and outcomes as well as wall time.
@@ -183,10 +197,15 @@ Coverage is diagnostic and split across shards, not a combined percentage.
 Failed tests and missing package artifacts block CI; failed diagnostic uploads
 do not. Use `python -m pytest -n 0` to reproduce Python failures serially.
 
-The separate `test-quality` workflow runs weekly and can be dispatched manually.
+Each week `test-quality` runs the mutation trial on Linux. On Linux, macOS, and
+Windows it runs the test files that import the shared property options, using
+the workflow run number as the property seed. Each platform uploads its JUnit
+report. To replay the weekly jobs, dispatch with `compare-layouts` disabled.
 Ordinary source pull requests run focused contracts for the shard runner, timing
 metadata, report comparator, and Windows test-root helper in the required SDK suite.
-The diagnostic workflow compares the previous layout (three shards on Linux/macOS,
+
+Manual and reusable workflow runs default to comparing the previous layout
+(three shards on Linux/macOS,
 seven on Windows) with the expanded production layout (six on Linux/macOS,
 fourteen on Windows), for 39 sharded runner jobs. Both layouts use the same serial
 Bun runner and platform timing snapshot; the comparison combines all shards for
@@ -194,8 +213,9 @@ each OS before checking inventory and outcomes. Local full-suite runs still cove
 unsharded cross-file ordering. More jobs add setup overhead, so compare required-green
 latency and summed runner time alongside shard test timings.
 
-Scheduled and manual diagnostics use the workflow run number as the same seed for
-property cases and test ordering in every layout. Reports have unique OS/layout/shard
+The comparison uses the same seed for property cases and test ordering in every
+layout. Manual runs use the workflow run number. Calls from pull request workflows
+use seed 1. Reports have unique OS/layout/shard
 names. The workflow requires every expected shard report
 before accepting comparisons, then compares complete shard groups by test
 identity, outcome, assertion count, and occurrence count, retaining legitimate

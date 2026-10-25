@@ -19,7 +19,7 @@ SDK hosts supply their own progress instructions. Use actual deduplicated review
 
 ## Workflow
 
-1. Resolve the authorized target, scope, scan directory, and source context. Preserve the supplied threat model, applicable inherited `SECURITY.md` guidance, and optional `CODEX_SECURITY_KNOWLEDGE_BASE`. When `CODEX_SECURITY_TARGET_PATHS_FILE` is supplied, use the SDK's exact `make-repo-scope-input` command to resolve every requested file and non-ignored directory descendant before review. Pass the resulting inventory to the core audit without widening scope; do not print, modify, or evaluate the scope file.
+1. Resolve the authorized target, scope, scan directory, and source context. Preserve the supplied threat model, applicable inherited `SECURITY.md` guidance, and optional `CODEX_SECURITY_KNOWLEDGE_BASE`. When `CODEX_SECURITY_TARGET_PATHS_FILE` is supplied, use the SDK's exact `make-repo-scope-input` command to resolve every requested file and non-ignored directory descendant before review. If the host does not supply the command, run `<plugin_dir>/scripts/launch_codex_security_mcp --helper make-repo-scope-input --repo <repo_root> --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE" --out <scan_dir>/scoped-source-input.jsonl` or use the [PowerShell command](#windows-scoped-input) on Windows. Pass the resulting inventory to the core audit without widening scope; do not print, modify, or evaluate the scope file.
 2. Read `../../references/core-scan.md` and perform the audit within the resolved scope and configured limits. Retain its semantic `scope`, `threatModel`, `findings`, and `coverage`, including source evidence, validation, attack paths, calibrated severity/confidence, and unresolved work.
 3. Save semantic checkpoints throughout the audit as described below. For an SDK-owned scan with a bound semantic draft tool, save the first `complete: false` checkpoint as soon as the threat model is available, then checkpoint new findings and decisions and submit `complete: true` when review finishes. Without that tool, retain the model in an early unsealed canonical draft and update `scan-manifest.json`, `findings.json`, and `coverage.json` using `../../references/scan-contract.md` and the SDK's exact identity and directory. Omit `scan.sealedAt` and `scan.artifacts`. For requested scopes, use `scoped_path` for coverage mode and inventory strategy; otherwise use `repository` mode with `directory` strategy for non-Git targets and `repository` strategy for Git targets. On SDK file-authored paths, run the supplied scope-binding command when a target-paths file is present.
 4. Verify all three canonical JSON files exist. Return control for an SDK-owned scan; the SDK owns finalization and report generation. For other host-backed scans, call `complete_codex_security_scan({ scanId, handoffClaimToken? })` once and return after it succeeds and `report.md` exists. If completion fails, surface its exact error and preserve the scan for continuation. Do not hand-author reports or reread complete canonical findings unless requested. Report complete measured token usage only; leave pending usage to the host and identify unavailable counts.
@@ -44,3 +44,15 @@ cmd.exe /d /v:off /s /c '""%scopePluginRoot%\scripts\launch_codex_security_mcp.c
 ```
 
 These are temporary shell variables. Resolve paths against PowerShell's current location, including UNC shares. Missing paths stop the command. CMD expands these references once, preserving literal `%` and `!` in paths.
+
+## Windows Scoped Input
+
+Use the following PowerShell command to generate the source inventory when the host does not supply one.
+
+```powershell
+$env:scopePluginRoot = Convert-Path -LiteralPath '<plugin_dir>' -ErrorAction Stop
+$env:scopeRepository = Convert-Path -LiteralPath '<repo_root>' -ErrorAction Stop
+$env:scopeScanDir = Convert-Path -LiteralPath '<scan_dir>' -ErrorAction Stop
+$env:scopeTargetPaths = Convert-Path -LiteralPath $env:CODEX_SECURITY_TARGET_PATHS_FILE -ErrorAction Stop
+cmd.exe /d /v:off /s /c '""%scopePluginRoot%\scripts\launch_codex_security_mcp.cmd" --helper make-repo-scope-input --repo "%scopeRepository%\." --scopes-file "%scopeTargetPaths%" --out "%scopeScanDir%\scoped-source-input.jsonl""'
+```

@@ -92,13 +92,29 @@ test("incomplete or invalid PR inputs fail instead of falling back to a baseline
   }
 });
 
-test("ignores unexpected events without querying GitHub", async () => {
-  assert.deepEqual(
-    await resolveScanTargets({ ...context, eventName: "pull_request" }, () =>
-      assert.fail("unexpected API call"),
-    ),
-    [],
-  );
+test("PR events and completed PR workflows do not queue inference or query GitHub", async () => {
+  for (const trigger of [
+    { eventName: "pull_request", event: { pull_request: pullRequest() } },
+    {
+      eventName: "workflow_run",
+      event: {
+        workflow_run: {
+          event: "pull_request",
+          conclusion: "success",
+          head_sha: sourceSha,
+          pull_requests: [{ number: 7 }],
+        },
+      },
+    },
+  ]) {
+    assert.deepEqual(
+      await resolveScanTargets({ ...context, ...trigger }, () =>
+        assert.fail("unexpected API call"),
+      ),
+      [],
+      trigger.eventName,
+    );
+  }
 });
 
 test("scheduled baseline scans use the trusted workflow commit", async () => {
@@ -108,27 +124,6 @@ test("scheduled baseline scans use the trusted workflow commit", async () => {
       () => assert.fail("unexpected API call"),
     ),
     [{ pr: 0, sha: mainSha }],
-  );
-});
-
-test("completed behavior workflows no longer queue inference", async () => {
-  assert.deepEqual(
-    await resolveScanTargets(
-      {
-        ...context,
-        eventName: "workflow_run",
-        event: {
-          workflow_run: {
-            event: "pull_request",
-            conclusion: "success",
-            head_sha: sourceSha,
-            pull_requests: [{ number: 7 }],
-          },
-        },
-      },
-      () => assert.fail("unexpected API call"),
-    ),
-    [],
   );
 });
 

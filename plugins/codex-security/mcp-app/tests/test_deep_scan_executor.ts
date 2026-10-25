@@ -1,4 +1,10 @@
 import { testArtifactStartupTimeoutClassification } from "./deep_scan_startup_cases.ts";
+import {
+  workerGitEnvironment,
+  workerScanEnvironment,
+  expectedGitEnvironment,
+  restoreEnv,
+} from "./support/fake-codex-source.ts";
 import { windowsAcl } from "./support/windows-output-fixture.ts";
 import {
   createFakeCodexFixture,
@@ -39,6 +45,7 @@ import {
 } from "node:fs/promises";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import path from "node:path";
+import { rootCertificates } from "node:tls";
 import { fileURLToPath } from "node:url";
 import { importModule } from "./import-module.ts";
 
@@ -583,35 +590,22 @@ async function testWindowsWorkerEnvironmentPreservesMixedCaseKeys() {
   }
 }
 
+// Only Windows launches the resolved path; the other hosts exercise lookup.
+async function writeWindowsLaunchFixture(file: string) {
+  if (process.platform === "win32") await copyFile(process.execPath, file);
+  else await writeFile(file, "x", { mode: 0o755 });
+}
+
 async function testWindowsAppsCodexFallsBackToRelocatedBinary() {
   const root = await temporaryDirectories.create(
     "codex-security-windows-cache-",
   );
   const localAppData = path.join(root, "LocalAppData");
-  const olderBinary = path.join(
-    localAppData,
-    "OpenAI",
-    "Codex",
-    "bin",
-    "11111111",
-    "codex.exe",
-  );
-  const currentBinary = path.join(
-    localAppData,
-    "OpenAI",
-    "Codex",
-    "bin",
-    "22222222",
-    "codex.exe",
-  );
-  const emptyBinary = path.join(
-    localAppData,
-    "OpenAI",
-    "Codex",
-    "bin",
-    "33333333",
-    "codex.exe",
-  );
+  const cachedBinary = (id: string) =>
+    path.join(localAppData, "OpenAI", "Codex", "bin", id, "codex.exe");
+  const olderBinary = cachedBinary("11111111");
+  const currentBinary = cachedBinary("22222222");
+  const emptyBinary = cachedBinary("33333333");
   const protectedDirectory = path.join(
     root,
     "WindowsApps",
@@ -646,8 +640,8 @@ async function testWindowsAppsCodexFallsBackToRelocatedBinary() {
   await mkdir(path.dirname(currentBinary), { recursive: true });
   await mkdir(path.dirname(emptyBinary), { recursive: true });
   await mkdir(path.dirname(protectedPackageBinary), { recursive: true });
-  await copyFile(process.execPath, olderBinary);
-  await copyFile(process.execPath, currentBinary);
+  await writeFile(olderBinary, "x", { mode: 0o755 });
+  await writeWindowsLaunchFixture(currentBinary);
   await writeFile(emptyBinary, "");
   await writeFile(
     path.join(protectedDirectory, "codex.exe"),
@@ -806,7 +800,7 @@ async function testWindowsNpmPackageResolution(installation = "global") {
   await writeJson(path.join(platformPackage, "package.json"), {
     name: `@openai/codex-win32-${architecture}`,
   });
-  await copyFile(process.execPath, nativeBinary);
+  await writeWindowsLaunchFixture(nativeBinary);
 
   const environment = windowsLauncherEnvironment(shimDirectory);
   if (installation === "managed") {
@@ -1453,6 +1447,11 @@ async function testWorkerRuntimeSettings() {
     "PYTHON",
     "CODEX_SECURITY_PYTHON_COMMAND",
     "PATH",
+    "HOME",
+    "NODE_OPTIONS",
+    "NODE_DEBUG",
+    "NODE_EXTRA_CA_CERTS",
+    "CODEX_MCP_NODE_PATH",
     "CODEX_SECURITY_GIT",
     "GIT_SSH_COMMAND",
     "GIT_CONFIG_GLOBAL",
@@ -1502,16 +1501,8 @@ async function testWorkerRuntimeSettings() {
         "python",
       );
       process.env.PYTHON = python;
-      const gitEnvironment = {
-        PATH: [
-          path.join(fixture.root, "selected tools"),
-          "../selected tools",
-          "",
-        ].join(path.delimiter),
-        CODEX_SECURITY_GIT: path.join(fixture.root, "selected tools", "git"),
-        GIT_SSH_COMMAND: "synthetic-ssh --fixture",
-        GIT_CONFIG_GLOBAL: path.join(fixture.root, "operator.gitconfig"),
-      };
+      const gitEnvironment = workerGitEnvironment(fixture.root);
+      await writeFile(gitEnvironment.NODE_EXTRA_CA_CERTS, rootCertificates[0]!);
       Object.assign(process.env, gitEnvironment);
       const configPath = path.join(fixture.root, "active [scan] config.toml");
       const codexHome = path.join(
@@ -1716,6 +1707,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               index === 0
                 ? undefined
                 : {
+                    ...workerScanEnvironment(fixture.root, index),
                     SYNTHETIC_GATEWAY_KEY: providerKeys[index],
                     SYNTHETIC_HEADER_VALUE: providerHeaders[index],
                     CODEX_SQLITE_HOME: path.join(
@@ -1844,6 +1836,14 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ),
             ),
             writeFile(entry.path, stringifyToml(entry.configuration)),
+            ...(entry.environment === undefined
+              ? []
+              : [
+                  writeFile(
+                    entry.environment.NODE_EXTRA_CA_CERTS,
+                    rootCertificates[0]!,
+                  ),
+                ]),
             writeFile(
               entry.deepPath,
               stringifyToml({
@@ -1951,6 +1951,14 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         (modelSettings, index) =>
           new CodexSdkWorkerExecutor({
             ...modelSettings,
+            deepScanConfig: {
+              workers: index + 1,
+              subagents: index,
+              stopAfterNoNew: 2,
+              stopAfterConsecutiveErrors: 3,
+              maxDiscoveryRuns: 9,
+              maxTimeHours: index + 0.5,
+            },
             parentSandbox: workerConfigurations[index].parentSandbox,
             artifactContext: {
               pluginRoot: path.join(fixture.root, `plugin-${index}`),
@@ -2034,6 +2042,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             index,
             { model, reasoningEffort },
           ] of settings.entries()) {
+            const selectedProvider = workerConfigurations[index];
             const workerLaunch = workerLaunches.find(({ args }) =>
               model === undefined
                 ? !args.includes("--model")
@@ -2062,8 +2071,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerLaunch.environment!.CODEX_SECURITY_CONFIG_PATH,
               workerConfigurations[index].path,
             );
-            assert.equal(
-              workerLaunch.environment!.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
+            const deepConfigPath =
+              workerLaunch.environment!.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH!;
+            assert.ok(path.isAbsolute(deepConfigPath));
+            assert.notEqual(
+              deepConfigPath,
               workerConfigurations[index].workerConfigPath,
             );
             assert.deepEqual(
@@ -2133,16 +2145,29 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 temporaryEnvironments.at(-1)![name],
               );
             }
-            assert.equal(
-              invocation.deepConfigPath,
-              workerConfigurations[index].workerConfigPath,
+            assert.equal(invocation.deepConfigPath, deepConfigPath);
+            assert.deepEqual(
+              { ...(parseToml(invocation.deepConfig).deep_scan as object) },
+              {
+                workers: index + 1,
+                subagents: index,
+                stop_after_no_new: 2,
+                stop_after_consecutive_errors: 3,
+                max_discovery_runs: 9,
+                max_time_hours: index + 0.5,
+              },
             );
+            await assert.rejects(readFile(deepConfigPath), { code: "ENOENT" });
             assert.equal(
               invocation.runtimeEnvironment.CODEX_SECURITY_STATE_DIR,
               path.join(fixture.root, `state-${index}`),
             );
             assert.equal(invocation.providerKey, providerKeys[index]);
-            assert.equal(invocation.mcpNodePath, nodePaths[index]);
+            assert.equal(
+              invocation.mcpNodePath,
+              selectedProvider.environment?.CODEX_MCP_NODE_PATH ??
+                nodePaths[index],
+            );
             assert.equal(process.env.CODEX_MCP_NODE_PATH, nodePaths.at(-1));
             assert.equal(invocation.providerHeader, providerHeaders[index]);
 
@@ -2239,7 +2264,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               invocation.configPath,
               workerConfigurations[index].path,
             );
-            const selectedProvider = workerConfigurations[index];
             if (selectedProvider.provider === undefined) {
               assert.equal(
                 invocation.argv.some(
@@ -2310,8 +2334,18 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ),
               false,
             );
-            assert.deepEqual(invocation.gitEnvironment, gitEnvironment);
-            for (const [name, value] of Object.entries(gitEnvironment)) {
+            assert.deepEqual(
+              invocation.gitEnvironment,
+              expectedGitEnvironment(
+                gitEnvironment,
+                nodePaths[index],
+                selectedProvider.environment,
+              ),
+            );
+            for (const [name, value] of Object.entries({
+              ...gitEnvironment,
+              CODEX_MCP_NODE_PATH: nodePaths.at(-1),
+            })) {
               assert.equal(process.env[name], value);
             }
             assert.equal(invocation.python, python);
@@ -2353,10 +2387,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               await assert.rejects(readFile(scopeFile), { code: "ENOENT" });
             } else assert.equal(scopeFile, undefined);
             assert.equal(process.env.PYTHON, python);
-            assert.equal(
-              invocation.deepConfigPath,
-              workerConfigurations[index].workerConfigPath,
-            );
+            assert.equal(invocation.deepConfigPath, deepConfigPath);
             assert.deepEqual(
               JSON.parse(
                 JSON.stringify(
@@ -2396,13 +2427,20 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             args.includes("app-server"),
           )) {
             const preflight = await readJson(launch.markerPath);
-            assert.deepEqual(preflight.gitEnvironment, gitEnvironment);
             const selectedProvider = workerConfigurations.find(
               (entry) => preflight.configPath === entry.path,
             );
             assert.ok(
               selectedProvider,
               "worker preflight must use the same scan environment",
+            );
+            assert.deepEqual(
+              preflight.gitEnvironment,
+              expectedGitEnvironment(
+                gitEnvironment,
+                nodePaths[workerConfigurations.indexOf(selectedProvider)],
+                selectedProvider.environment,
+              ),
             );
             const index = workerConfigurations.indexOf(selectedProvider);
             assert.equal(preflight.codexHome, await realpath(codexHome));
@@ -3848,11 +3886,6 @@ function assertWorkerSubagentPolicy(
         }),
   });
   assert.equal(args.includes("features.multi_agent_v2.enabled=true"), false);
-}
-
-function restoreEnv(name: string, value: string | undefined) {
-  if (value === undefined) delete process.env[name];
-  else process.env[name] = value;
 }
 
 async function withWorkerFixture<Result>(

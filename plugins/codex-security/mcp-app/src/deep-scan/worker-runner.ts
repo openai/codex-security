@@ -663,7 +663,7 @@ function reducerCompletionContinuation(attempt: number): string {
   return [
     `Continue the existing Deep Scan reducer after attempt ${attempt} ended without its required result.`,
     ...reducerInputRecoveryInstructions(),
-    "Submit the aggregate with record_codex_security_deep_reduction({ scanId, findings, threatModel?, scope? }).",
+    "Submit the aggregate with record_codex_security_deep_reduction({ scanId, findings, retainedFindingRefs?, threatModel?, scope? }).",
     "If the tool rejects the arguments, use its error to correct them and retry the call until it succeeds.",
     "Do not end your turn, write the result directly, or call the tool again after it succeeds.",
   ].join("\n");
@@ -672,9 +672,10 @@ function reducerCompletionContinuation(attempt: number): string {
 function reducerInputRecoveryInstructions(): string[] {
   return [
     "If input retrieval exceeded a response or IPC size limit, call get_codex_security_deep_reducer_inputs({ cursor?, maxBytes, findingRef? }) with a smaller maxBytes budget (for example, halve the failed request's budget), preserving its cursor and findingRef to retry the same page.",
-    "Do not repeat an oversized request unchanged. If inputs have not been read yet, paginate all assigned findings and the previous aggregate, assembling each json fragment in code and following nextCursor until absent; inspect assembled data selectively and fetch details by findingRef.",
-    "Persist fragments, cursor: nextCursor ?? null, and completion together in one serializable store value after each successful page. Never store an undefined cursor or append a page already committed before a later cell failure. Check MCP isError before parsing its text as a page.",
+    "If inputs have not been read yet, paginate all assigned findings and the previous aggregate. Follow nextCursor until absent and assemble the json fragments in order for each findingRef. Check MCP isError before reading a page.",
+    "Without code mode, call the input and submission tools directly. With code mode, persist fragments, cursor: nextCursor ?? null, and completion together in one store value after each successful page. Resume from the next unread page.",
     "Preserve pages already read and account for every finding before submitting the aggregate.",
+    'Carry unchanged previous findings forward with retainedFindingRefs:["previous:N"] using their zero-based indices, and omit their bodies from findings. The host copies their full content and source refs. Submit new or synthesized findings in findings; never replace accepted descriptions with placeholders.',
   ];
 }
 

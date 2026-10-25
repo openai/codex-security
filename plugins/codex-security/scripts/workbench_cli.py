@@ -59,9 +59,11 @@ def parse_args(description: str) -> argparse.Namespace:
 
     inspect_setup = add_command("inspect-setup", "--target-path", "--scope")
     inspect_setup.add_argument("--mode", choices=MODES, required=True)
+    inspect_setup.add_argument("--deep-scan-project-json")
 
     save_workspace = add_command("save-workspace", "--workspace-id", "--target-path", "--scope")
     save_workspace.add_argument("--mode", choices=MODES, required=True)
+    save_workspace.add_argument("--deep-scan-project-json")
     save_workspace.add_argument("--target-summary")
     add_user_context(save_workspace)
 

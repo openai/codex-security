@@ -45,6 +45,23 @@ function canonicalFieldSchema(schema: object): z.ZodType {
   return z.fromJSONSchema(schema as Parameters<typeof z.fromJSONSchema>[0]);
 }
 
+const deferredFields = coverageDocument.properties.deferred.items.properties;
+function provisionalPaths(schema: Record<string, unknown>) {
+  const items = schema.items;
+  if (!isObject(items) || !Array.isArray(items.oneOf)) return schema;
+  return {
+    ...schema,
+    items: {
+      ...items,
+      oneOf: items.oneOf.map((branch) =>
+        isObject(branch) && branch.$comment === "invalidSealedDeferredPath"
+          ? false
+          : branch,
+      ),
+    },
+  };
+}
+
 // Canonical files can retain fields that the compact tool input does not accept.
 const canonicalScanDraftInputSchema = fileScanDraftInputSchema.extend({
   scope: canonicalFieldSchema({
@@ -79,6 +96,10 @@ const canonicalScanDraftInputSchema = fileScanDraftInputSchema.extend({
       ...coverageDocument.properties.deferred,
       items: {
         ...coverageDocument.properties.deferred.items,
+        properties: {
+          ...deferredFields,
+          paths: provisionalPaths(deferredFields.paths),
+        },
         required: z.toJSONSchema(
           draftDefinitions.coverage.shape.deferred.element,
           { io: "input" },

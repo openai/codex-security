@@ -387,6 +387,15 @@ const draft_scanDraftInput = z.strictObject({
   coverage: draft_coverage,
 });
 
+const deep_reductionInput = draft_scanDraftInput
+  .omit({ coverage: true })
+  .extend({
+    complete: z
+      .boolean()
+      .describe("Omit or set true when submitting the finished aggregate.")
+      .optional(),
+  });
+
 /** Native tool contracts; JSON resources are generated compatibility exports. */
 export const artifactSchemaDocuments = {
   "definitions/artifact-common": {
@@ -489,7 +498,7 @@ export const artifactSchemaDocuments = {
   },
   "tools/deep-reducer": {
     title: "Codex Security Deep Scan semantic reducer operations",
-    $ref: "#/$defs/reductionInput",
+    $ref: "#/$defs/reductionSubmission",
     $defs: {
       reducerInputs: z.strictObject({
         cursor: z
@@ -507,10 +516,13 @@ export const artifactSchemaDocuments = {
           )
           .optional(),
       }),
-      reductionInput: draft_scanDraftInput.omit({ coverage: true }).extend({
-        complete: z
-          .boolean()
-          .describe("Omit or set true when submitting the finished aggregate.")
+      reductionInput: deep_reductionInput,
+      reductionSubmission: deep_reductionInput.extend({
+        retainedFindingRefs: z
+          .array(z.string().regex(/^previous:(0|[1-9][0-9]*)$/))
+          .describe(
+            "Copy unchanged previous aggregate findings by previous:<zero-based index>. The host preserves their complete bodies, identities, and source references; do not also submit them in findings.",
+          )
           .optional(),
       }),
     },

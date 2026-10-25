@@ -721,6 +721,19 @@ for (const dryRun of [false, true]) {
       },
     ],
     ["duplicate evidence ID", { codeEvidence: [evidence, evidence] }],
+    [
+      "unsafe secondary location",
+      {
+        locations: [
+          { path: "src/extract.ts", startLine: 41 },
+          { path: "../outside.ts", startLine: 1 },
+        ],
+      },
+    ],
+    [
+      "unsafe evidence path",
+      { codeEvidence: [{ ...evidence, path: "../outside.ts" }] },
+    ],
   ] as const)(
     `rejects %s before import persistence (dryRun: ${dryRun})`,
     async (_name, details) => {

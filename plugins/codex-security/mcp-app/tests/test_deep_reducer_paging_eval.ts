@@ -17,7 +17,11 @@ for (const transport of ["stdio", "http"] as const) {
     const { report, fixture } = await runReducerPagingEval({ root, transport });
     assert.equal(report.realIpcErrorObserved, transport === "http");
     assert.equal(report.stdioResponseErrorObserved, transport === "stdio");
-    assert.ok(report.actualOversizedResponseBytes! > report.ipcFrameLimitBytes);
+    assert.equal(
+      report.responseLimitBytes,
+      (transport === "stdio" ? 16 : 64) * 1024 * 1024,
+    );
+    assert.ok(report.actualOversizedResponseBytes! > report.responseLimitBytes);
     assert.ok(report.recoveryBudget < report.firstBudget);
     assert.ok(report.successfulPages > 1);
     assert.equal(report.referenceReads, 2);
@@ -25,6 +29,9 @@ for (const transport of ["stdio", "http"] as const) {
     assert.equal(report.preservedOriginalCount, 3);
     assert.equal(report.previousIdentityPreserved, true);
     assert.equal(report.synthesizedHistoryPreserved, true);
+
+    // The trace and evidence graders are shared by both transports.
+    if (transport !== "stdio") return;
 
     const trace = await readJsonLines(path.join(root, "tool-trace.jsonl"));
     const rootPages = trace.filter(
@@ -41,7 +48,7 @@ for (const transport of ["stdio", "http"] as const) {
             (event) =>
               !(event.event === "response" && event.id === missingPage),
           ),
-          report.ipcFrameLimitBytes,
+          report.responseLimitBytes,
         ),
       /read every assigned-input page/,
     );
