@@ -9426,11 +9426,7 @@ async function executeScan(
           `Reviews: ${deepProgress.completed} completed, ${deepProgress.active} active, cap ${deepProgress.maximum}`,
         );
       } else if (fileProgress !== null) {
-        const count = scanProgressCount(fileProgress);
-        if (count.total > 0)
-          details.push(
-            `${count.label === "reviews" ? "Reviews" : "Files"}: ${count.completed.toLocaleString("en-US")}/${count.total.toLocaleString("en-US")}`,
-          );
+        details.push(formatScanProgressCount(fileProgress, "status"));
       }
       const tokens =
         runningCost !== null
@@ -9701,10 +9697,8 @@ async function executeScan(
         }
         if (progress === null) return;
         progress.stopTimer();
-        const count = scanProgressCount(update);
-        progress.stage(
-          `Scan phase: ${phase}${count.total === 0 ? "" : ` (${count.completed.toLocaleString("en-US")}/${count.total.toLocaleString("en-US")} ${count.label})`}.`,
-        );
+        const count = formatScanProgressCount(update, "phase");
+        progress.stage(`Scan phase: ${phase} (${count}).`);
         progress.startTimer(runningMessage());
       },
       onDeepProgress: (update) => {
@@ -10703,6 +10697,23 @@ function printScanSummary(
   }
 }
 
+function formatScanProgressCount(
+  progress: ScanProgress,
+  style: "phase" | "status",
+): string {
+  const { label, completed, total } = scanProgressCount(progress);
+  const totalText = total.toLocaleString("en-US");
+  if (label === "files" && completed === 0) {
+    return style === "phase"
+      ? `${totalText} ${total === 1 ? "file" : "files"} inventoried`
+      : `File inventory: ${totalText}`;
+  }
+  const ratio = `${completed.toLocaleString("en-US")}/${totalText}`;
+  return style === "phase"
+    ? `${ratio} ${label}`
+    : `${label === "reviews" ? "Reviews" : "Files"}: ${ratio}`;
+}
+
 function componentScanEventLine(
   componentName: string,
   event: ComponentScanEvent,
@@ -10716,8 +10727,8 @@ function componentScanEventLine(
   }
   if (event.type === "progress") {
     const progress = event.value;
-    const count = scanProgressCount(progress);
-    return `codex-security: ${componentName} ${scanPhase(progress.phase)} | ${count.label === "reviews" ? "Reviews" : "Files"}: ${count.completed.toLocaleString("en-US")}/${count.total.toLocaleString("en-US")}\n`;
+    const count = formatScanProgressCount(progress, "status");
+    return `codex-security: ${componentName} ${scanPhase(progress.phase)} | ${count}\n`;
   }
   if (event.type === "usage") {
     const tokens = formatTokenUsage(event.value);

@@ -10,12 +10,22 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: node-release-cut
-  queue: max
-
 jobs:
+  progress:
+    if: >-
+      github.repository == 'openai/codex-security' &&
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.event == 'push'
+    uses: ./.github/workflows/release-progress.yml
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: write
+
   cut:
+    concurrency:
+      group: node-release-cut
+      queue: max
     if: >-
       github.repository == 'openai/codex-security' &&
       (github.event_name == 'workflow_dispatch' ||

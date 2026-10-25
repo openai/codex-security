@@ -842,18 +842,49 @@ describe("GitHub request transport", () => {
 });
 
 describe("release workflow controls", () => {
-  const { permissions, jobs } = Bun.YAML.parse(workflow) as {
+  const { permissions, jobs, concurrency } = Bun.YAML.parse(workflow) as {
     permissions: Record<string, string>;
+    concurrency: { group: string; "cancel-in-progress": boolean };
     jobs: Record<
       string,
       {
         if: string;
         permissions?: Record<string, string>;
+        concurrency?: { group: string; queue: string };
         env: { RELEASE_PR_DRY_RUN: string };
         steps: { id?: string; if?: string }[];
       }
     >;
   };
+
+  test("manual release runs keep their place during a burst of main pushes", () => {
+    const slot = (event_name: string, run_id: number) =>
+      concurrency.group.replace(/\$\{\{(.*?)\}\}/gu, (_, expression) =>
+        String(
+          new Function("github", `return (${expression})`)({
+            event_name,
+            run_id,
+          }),
+        ),
+      );
+    const push = slot("push", 10);
+    expect(slot("push", 11)).toBe(push);
+    const slots = [
+      push,
+      slot("workflow_dispatch", 12),
+      slot("workflow_dispatch", 13),
+    ];
+    expect(new Set(slots).size).toBe(slots.length);
+    expect(concurrency["cancel-in-progress"]).toBe(false);
+    expect(slots).not.toContain(jobs["reconcile"]?.concurrency?.group);
+    expect(jobs["reconcile"]?.concurrency).toEqual({
+      group: "node-release-pr",
+      queue: "max",
+    });
+    expect(jobs["preview"]?.concurrency).toEqual(
+      jobs["reconcile"]?.concurrency,
+    );
+  });
 
   test.each([
     { dryRun: "false", clientId: "", createsAppToken: false },
