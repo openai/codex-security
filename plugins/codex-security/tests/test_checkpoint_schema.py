@@ -157,7 +157,7 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(
             )
         assert connection.execute(
             "SELECT COUNT(*), MAX(version) FROM schema_migrations"
-        ).fetchone()[:] == (len(migrations), 57)
+        ).fetchone()[:] == (len(migrations), migrations[-1][0])
         for version in (43, 44, 45, 46, 47):
             assert (
                 connection.execute(

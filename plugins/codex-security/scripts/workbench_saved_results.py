@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from filesystem_identity import stored_filesystem_identity_matches
 from finalize_scan_contract import (
     ContractError,
     ScanLocalIOError,
@@ -1296,12 +1297,124 @@ def _scan_draft_contents_digest(documents: dict[str, bytes | None]) -> str:
     return digest.hexdigest()
 
 
+def _cli_owned_deep_run(
+    connection: sqlite3.Connection, scan_id: str, args: Any
+) -> sqlite3.Row | None:
+    owner = getattr(args, "preserve_deep_owner", None)
+    if not owner or args.claim_token is not None:
+        return None
+    return connection.execute(
+        """
+        SELECT run.status, run.manifest_path FROM deep_scan_runs AS run
+        JOIN scans ON scans.id = run.scan_id JOIN workspaces ON workspaces.id = scans.workspace_id
+        WHERE scans.id = :id AND scans.mode = 'deep' AND scans.recipe_json IS NOT NULL
+            AND scans.status = 'running' AND scans.canceled_at IS NULL AND run.cancel_requested = 0
+            AND scans.handoff_status = 'delivered' AND scans.handoff_claim_token IS NULL
+            AND COALESCE(scans.deep_scan_owner_thread_id, workspaces.thread_id) = :owner
+            AND (scans.continuation_thread_id IS NULL OR scans.continuation_thread_id = :owner)
+        """,
+        {"id": scan_id, "owner": owner},
+    ).fetchone()
+
+
+def _verified_cli_publication(
+    db: Any, connection: sqlite3.Connection, scan_id: str, args: Any
+) -> str | None:
+    # The per-scan completion lock fences native publication. Validate its files
+    # before taking SQLite's write lock, then recheck ownership and selection in it.
+    run = _cli_owned_deep_run(connection, scan_id, args)
+    if run is None or run["status"] != "succeeded":
+        return None
+    scan = db.require_scan(connection, scan_id)
+    scan_dir = Path(scan["scan_dir"])
+    if run["manifest_path"] != str(scan_dir / "scan-manifest.json"):
+        return None
+    try:
+        db.deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
+        manifest, findings, coverage = (
+            _read_scan_local_json(scan_dir, name, name)
+            for name in ("scan-manifest.json", "findings.json", "coverage.json")
+        )
+        published = manifest.get("scan")
+        if not isinstance(published, dict) or published.get("complete") is False:
+            return None
+        binding = db.workbench_completion_binding(scan, published.get("completedAt"), manifest)
+        _validate_completion_binding(manifest, findings, coverage, binding)
+        _prepare_scan_finalization(
+            scan_dir,
+            completion_binding=binding,
+            allow_missing_writeups=True,
+            finding_scope=db.requested_finding_scope(scan),
+        )
+    except (ContractError, OSError, RecursionError, SystemExit):
+        return None
+    return run["manifest_path"]
+
+
+def preserve_deep_owner(
+    db: Any,
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    args: Any,
+    cost_json: str | None,
+    *,
+    verified_manifest: str | None = None,
+) -> bool:
+    """Keep this CLI attempt's coordinator under the caller's write transaction."""
+    run = _cli_owned_deep_run(connection, scan["id"], args)
+    if run is None or not (
+        run["status"] == "running"
+        or run["status"] == "succeeded"
+        and verified_manifest is not None
+        and run["manifest_path"] == verified_manifest
+    ):
+        return False
+    try:
+        identity = db.require_remediation_target(scan["target_path"]).stat()
+        if not (
+            stored_filesystem_identity_matches(scan["target_device"], identity.st_dev)
+            and stored_filesystem_identity_matches(scan["target_inode"], identity.st_ino)
+        ):
+            return False
+        db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+    except (OSError, RuntimeError, SystemExit):
+        return False
+    # Only fresh attempts send this guard. A concurrent estimate can fill a
+    # missing original measurement, but cannot replace one already recorded.
+    subtotal = scan["cli_handoff_cost_json"]
+    if subtotal in {None, "null"}:
+        cost = db.scan_usage.stored_scan_cost_fields(cost_json).get("cost")
+        if cost is None and args.handoff_cost_json is not None:
+            cost = db.scan_usage.stored_scan_cost_fields(
+                db.parse_scan_cost(args.handoff_cost_json)
+            ).get("cost")
+        subtotal = json.dumps(cost)
+    connection.execute(
+        "UPDATE scans SET continuation_thread_id = ?, cli_handoff_cost_json = ?, cost_json = ? WHERE id = ?",
+        (
+            args.preserve_deep_owner,
+            subtotal,
+            db.scan_usage.usage_without_handoff_total(scan, cost_json),
+            scan["id"],
+        ),
+    )
+    return True
+
+
 def fail_scan(db: Any, connection: Any, args: Any) -> dict[str, Any]:
-    with db.scan_completion_lock(db.require_uuid(args.scan_id, "scan-id")):
-        return fail_scan_locked(db, connection, args)
+    scan_id = db.require_uuid(args.scan_id, "scan-id")
+    with db.scan_completion_lock(scan_id):
+        return fail_scan_locked(
+            db,
+            connection,
+            args,
+            verified_manifest=_verified_cli_publication(db, connection, scan_id, args),
+        )
 
 
-def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
+def fail_scan_locked(
+    db: Any, connection: Any, args: Any, *, verified_manifest: str | None = None
+) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     cost_json = db.parse_scan_cost(args.cost_json)
     connection.execute("BEGIN IMMEDIATE")
@@ -1318,6 +1431,11 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             args.claim_token,
             error_message="Scan failure is owned by another continuation.",
         )
+        if preserve_deep_owner(
+            db, connection, scan, args, cost_json, verified_manifest=verified_manifest
+        ):
+            return {"preserved": True}
+        cost_json = db.scan_usage.terminal_scan_cost(scan, cost_json)
         message = db.optional_text(args.message)
         updated = connection.execute(
             """
@@ -1386,7 +1504,7 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
 def preserve_stopped_results_after_transition(db: Any, connection: Any, scan_id: str) -> None:
     try:
         published = preserve_scan_results_locked(db, connection, scan_id)
-    except (ContractError, OSError, SystemExit, ValueError) as exc:
+    except (ContractError, OSError, RecursionError, SystemExit, ValueError) as exc:
         scan = db.require_scan(connection, scan_id)
         warnings = json.loads(scan["completion_warnings_json"])
         warning = f"Saved scan evidence remains on disk; result publication needs follow-up: {exc}"

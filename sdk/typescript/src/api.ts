@@ -77,6 +77,7 @@ import {
 import {
   DEFAULT_CODEX_CONFIG,
   EXTERNAL_CODEX_PROVIDERS,
+  containsCodexOverrides,
   inlineToml,
   isExternalModelProvider,
   hasCommandAuth,
@@ -309,6 +310,7 @@ interface PreparedSession {
   runtimeHome: string;
   effectiveConfig: JsonObject;
   preflightConfig: JsonObject;
+  canReplayOverrides: boolean;
   sessionConfig: JsonObject;
   modelProvider: unknown;
   externalProvider:
@@ -329,6 +331,8 @@ export interface ScanOptions extends ScanSettings {
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   /** @internal Resume a CLI Deep Scan with its saved launch recipe. */
   resumeScanId?: string;
+  /** @internal The caller owns retries or follow-up work outside the saved recipe. */
+  managedAttempt?: boolean;
   /** Save synthetic Standard scan results without calling Codex or a model. */
   mock?: boolean;
   /** Opt into a durable scan -> custom publication -> dedupe workflow. */
@@ -1966,6 +1970,17 @@ export class CodexSecurity {
     let artifactRestorationFailure: OutputDirectoryError | null = null;
     let customValidationComplete = false;
     let completionCost: ScanCost | null = null;
+    let handoffResume = false;
+    let deferResumeTotals = false;
+    const pendingTotals: (() => void)[] = [];
+    const reportTotal = (notify: () => void) => {
+      if (handoffResume) return;
+      if (deferResumeTotals) pendingTotals.push(notify);
+      else notify();
+    };
+    let finalizationStarted = false;
+    let prepareFailed = false;
+    let recoverableOwner: (() => Promise<string | undefined>) | undefined;
     let scanTurnStatus: "in_progress" | "completed" | "failed" | null = null;
     let budgetRecovery: {
       expectation: ScanExpectation;
@@ -2121,8 +2136,10 @@ export class CodexSecurity {
           modelProvider,
         ),
       };
+      const checkoutRoot =
+        (await gitMarkerRoot(repo, signal, "outermost")) ?? repo;
       for (const root of [
-        (await gitMarkerRoot(repo, signal, "outermost")) ?? repo,
+        checkoutRoot,
         ...(knowledgeBase?.protectedRoots ?? []),
       ]) {
         git = await inspectTrustedExecutable("git", git.environment, root);
@@ -2371,11 +2388,20 @@ export class CodexSecurity {
         onUsage:
           options.onUsage === undefined
             ? undefined
-            : (usage) => notifyObserver(options, "onUsage")(usage),
+            : (usage) =>
+                reportTotal(() => notifyObserver(options, "onUsage")(usage)),
         onUsageObservation:
           options.onUsageObservation === undefined
             ? undefined
-            : notifyObserver(options, "onUsageObservation"),
+            : (observation) =>
+                notifyObserver(
+                  options,
+                  "onUsageObservation",
+                )(
+                  handoffResume
+                    ? { ...observation, tokensUpdatedAt: null }
+                    : observation,
+                ),
         onActivity:
           options.onActivity === undefined
             ? undefined
@@ -2404,7 +2430,9 @@ export class CodexSecurity {
                 latestCost = cost;
                 latestCostComplete = complete;
                 if (complete)
-                  notifyObserver(options, "onCost")(cost, maxCostUsd);
+                  reportTotal(() =>
+                    notifyObserver(options, "onCost")(cost, maxCostUsd),
+                  );
                 if (
                   maxCostUsd !== undefined &&
                   cost.estimatedUsd > maxCostUsd
@@ -2456,7 +2484,7 @@ export class CodexSecurity {
                     );
                     if (budgetSignal.aborted) return;
                     maxCostUsd = next;
-                    if (latestCostComplete)
+                    if (latestCostComplete && !handoffResume)
                       notifyObserver(options, "onCost")(
                         latestCost!,
                         maxCostUsd,
@@ -2478,13 +2506,17 @@ export class CodexSecurity {
       costTracker = tracker;
       const scanKnowledge =
         knowledgeBase === null ? undefined : options.knowledgeBaseSnapshot;
+      const recipeConfig: JsonObject = {
+        ...preflightConfig,
+        approval_policy: approvalPolicy,
+      };
       const recipe = scanRecipe({
         repository: repo,
         target: normalized,
         mode,
         repositoryRevision: expectation.repositoryRevision,
         pluginVersion: runtime.plugin.version,
-        config: { ...preflightConfig, approval_policy: approvalPolicy },
+        config: recipeConfig,
         failOnSeverity: options.failureSeverity,
         knowledgeBasePaths: knowledgeBase?.sources,
         maxCostUsd: options.maxCostUsd,
@@ -2501,6 +2533,13 @@ export class CodexSecurity {
       );
       if (options.safetyIdentifier !== undefined)
         recipe["safetyIdentifier"] = options.safetyIdentifier;
+      if (
+        mode === "deep" &&
+        !options.managedAttempt &&
+        options.workflowId === undefined &&
+        checkoutRoot !== repo
+      )
+        recipe["checkoutRoot"] = checkoutRoot;
       if (options.postScanPrompt !== undefined)
         recipe["postScanPrompt"] = options.postScanPrompt;
       if (options.validationPrompt !== undefined)
@@ -2545,6 +2584,8 @@ export class CodexSecurity {
           ? undefined
           : registration["threadId"];
       if (options.resumeScanId !== undefined) {
+        // This turn may report only its own usage. The Workbench measures scan history separately.
+        handoffResume = Object.hasOwn(registration, "handoffCost");
         const savedRecipe = registration["recipe"];
         if (
           scanId !== options.resumeScanId ||
@@ -2923,6 +2964,22 @@ export class CodexSecurity {
             signal,
           })
         : (await thread.runStreamed(prompt, turnOptions)).events;
+      const canPreserve =
+        mode === "deep" &&
+        !directDeepScan &&
+        options.resumeScanId === undefined &&
+        options.maxCostUsd === undefined &&
+        options.workflowId === undefined &&
+        !options.managedAttempt &&
+        options.validationPrompt === undefined &&
+        // A worker that fails after this caller exits cannot run its follow-up.
+        !postScanPrompt?.trim() &&
+        // Bare resume protects the target's enclosing checkout before restoring knowledge.
+        (knowledgeBase?.protectedRoots ?? []).every((root) =>
+          isWithin(protectedRoot, root),
+        ) &&
+        this.config.pluginPath === undefined &&
+        session.canReplayOverrides;
       scanTurnStatus = "in_progress";
       checkOpen();
 
@@ -2940,8 +2997,10 @@ export class CodexSecurity {
         modelProvider,
         workbenchValidated: true,
         model,
-        onTurnStatus: (status) => {
+        onTurnStatus: (status, usage) => {
           scanTurnStatus = status;
+          if (status === "completed" && recoverableOwner)
+            tracker.recordUsage(usage);
         },
         onThreadStarted: async (threadId) => {
           if (resumeThreadId !== undefined && threadId !== resumeThreadId) {
@@ -2967,6 +3026,17 @@ export class CodexSecurity {
           if (directDeepScan)
             tracker.recordUsage(DIRECT_DEEP_SCAN_CONTROL_USAGE, threadId);
           tracker.start(threadId);
+          if (canPreserve && recoverableOwner === undefined) {
+            recoverableOwner = async () => {
+              const saved = await findScanSession(
+                runtime.codexHome,
+                threadId,
+              ).catch(() => null);
+              return !signal.aborted && saved?.workingDirectory === scanDir
+                ? threadId
+                : undefined;
+            };
+          }
           try {
             await workbench(
               workbenchOptions,
@@ -2980,6 +3050,8 @@ export class CodexSecurity {
           }
         },
         onFinalize: async (usage) => {
+          // Codex can yield turn.completed before reporting a process exit.
+          finalizationStarted = true;
           if (options.validationPrompt !== undefined) {
             tracker.recordUsage(usage);
             await tracker.refresh().catch(reportTrackingError);
@@ -3039,6 +3111,8 @@ export class CodexSecurity {
             customValidationComplete = true;
           }
           budgetAbortController.abort();
+          // A concurrent parent can hand off before this resumed turn's fallback receipt.
+          deferResumeTotals = options.resumeScanId !== undefined;
           const snapshot = await tracker.stop(usage).catch((error: unknown) => {
             if (options.maxCostUsd !== undefined) throw error;
             reportTrackingError(error);
@@ -3053,7 +3127,7 @@ export class CodexSecurity {
               "Scan completed, but its cost limit could not be verified because model pricing or token usage is unavailable.",
             );
           }
-          completionCost = snapshot.cost;
+          completionCost = handoffResume ? null : snapshot.cost;
           let preparation: JsonObject;
           try {
             preparation = await workbench(
@@ -3061,6 +3135,7 @@ export class CodexSecurity {
               workbenchArgs("prepare-scan-completion", { scanId }),
             );
           } catch (error) {
+            prepareFailed = true;
             const saved = await workbench(
               workbenchOptions,
               workbenchArgs("get-scan", { scanId }),
@@ -3087,7 +3162,7 @@ export class CodexSecurity {
                 (warning): warning is string => typeof warning === "string",
               )
             : [];
-          return snapshot.usage;
+          return handoffResume ? null : snapshot.usage;
         },
         onScanStarted: options.onScanStarted,
         onTrustedAccessStatus: options.onTrustedAccessStatus,
@@ -3126,6 +3201,15 @@ export class CodexSecurity {
         completedScan,
         "completed",
       );
+      handoffResume ||=
+        isRecord(completedScan) && Object.hasOwn(completedScan, "handoffCost");
+      if (handoffResume && result.turnResult.usage != null) {
+        result = new ScanResult({
+          ...result,
+          turnResult: { ...result.turnResult, usage: null },
+        });
+      }
+      if (!handoffResume) for (const notify of pendingTotals) notify();
       if (directDeepScan) {
         result = new ScanResult({
           ...result,
@@ -3481,15 +3565,75 @@ export class CodexSecurity {
           }).catch(() => undefined);
         }
         try {
-          await workbench({ ...activeScan.options, signal: undefined }, [
-            "fail-scan",
-            "--scan-id",
-            activeScan.id,
-            `--message=${errorMessage(failure)}`,
-            ...(snapshot?.cost
-              ? ["--cost-json", JSON.stringify(snapshot.cost)]
-              : []),
-          ]);
+          const disconnected =
+            (scanTurnStatus === "in_progress" &&
+              failure instanceof IncompleteScanError) ||
+            (!finalizationStarted && lostParentTransport(failure));
+          const owner =
+            (prepareFailed || disconnected) && !signal.aborted
+              ? await recoverableOwner?.()
+              : undefined;
+          const subtotal =
+            owner && !snapshot?.cost
+              ? (costTracker?.lastMeasuredCost ?? completionCost)
+              : null;
+          const saved = await workbench(
+            { ...activeScan.options, signal: undefined },
+            [
+              "fail-scan",
+              "--scan-id",
+              activeScan.id,
+              `--message=${errorMessage(failure)}`,
+              ...(owner === undefined ? [] : ["--preserve-deep-owner", owner]),
+              ...(snapshot?.cost
+                ? ["--cost-json", JSON.stringify(snapshot.cost)]
+                : []),
+              ...(subtotal
+                ? ["--handoff-cost-json", JSON.stringify(subtotal)]
+                : []),
+            ],
+          );
+          if (owner && saved["preserved"] === true) {
+            const scanId = activeScan.id;
+            const current = await workbench(
+              { ...activeScan.options, signal: undefined },
+              workbenchArgs("get-scan", { scanId }),
+            ).catch(() => null);
+            const row = current?.["scan"];
+            const status =
+              isRecord(row) && isRecord(row["progress"])
+                ? row["progress"]["status"]
+                : undefined;
+            let action = `Check progress with codex-security scans show ${scanId}.`;
+            if (this.config.pythonPath !== undefined)
+              action = `Set PYTHON to the interpreter used for the original scan. ${action}`;
+            let reason = errorMessage(failure);
+            if (
+              isRecord(row) &&
+              status === "failed" &&
+              typeof row["failureMessage"] === "string"
+            )
+              reason = row["failureMessage"];
+            if (
+              signal.aborted &&
+              status !== "complete" &&
+              status !== "failed" &&
+              status !== "canceled"
+            ) {
+              // Cancellation can arrive after the workbench preserved the parent.
+              await workbench(
+                { ...activeScan.options, signal: undefined },
+                workbenchArgs("fail-scan", {
+                  scanId,
+                  message: scanInterruptionMessage(scanDir),
+                }),
+              );
+            } else if (status === "running")
+              action += ` With the original checkout, output directory, Codex session, Python and knowledge settings restored, run codex-security scans resume ${scanId}.`;
+            failure = new IncompleteScanError(`${reason}\n${action}`, {
+              cause: failure,
+            });
+          }
         } catch {}
       }
       if (runPostScan !== null && !signal.aborted) {
@@ -4000,6 +4144,7 @@ export class CodexSecurity {
         runtimeHome,
         effectiveConfig,
         preflightConfig,
+        canReplayOverrides: false,
         sessionConfig: preflightConfig,
         modelProvider: "host",
         externalProvider: null,
@@ -4078,8 +4223,12 @@ export class CodexSecurity {
       }
       const runtime = this.#runtime;
       if (deepScan) await requireCurrentDeepScanPlugin(runtime);
+      const configured = scanCyberAccessConfig(
+        requestedConfig,
+        options.cyberAccessProgram,
+      );
       const effectiveConfig = await scanSkillConfig(
-        scanCyberAccessConfig(requestedConfig, options.cyberAccessProgram),
+        configured,
         runtime.plugin,
         runtime.codexHome,
       );
@@ -4199,6 +4348,20 @@ export class CodexSecurity {
         runtimeHome,
         effectiveConfig,
         preflightConfig,
+        // Resume reapplies the bundled skill exclusions. Compare explicit settings
+        // before that overlay, using the same safe projection as the saved recipe.
+        canReplayOverrides:
+          deepScan &&
+          (this.config.codexOverrides === undefined ||
+            containsCodexOverrides(
+              {
+                ...(effectiveConfig === configured
+                  ? preflightConfig
+                  : scanPreflightCodexConfig(configured)),
+                approval_policy: approvalPolicy,
+              },
+              this.config.codexOverrides,
+            )),
         sessionConfig,
         modelProvider,
         externalProvider,
@@ -4901,7 +5064,7 @@ interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   workbenchValidated?: boolean;
   model?: string;
   onFinalize?: (usage: unknown) => Promise<unknown>;
-  onTurnStatus?: (status: "completed" | "failed") => void;
+  onTurnStatus?: (status: "completed" | "failed", usage?: unknown) => void;
   onThreadStarted?: (threadId: string) => Promise<void> | void;
   onScanStarted?: () => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
@@ -4925,7 +5088,7 @@ export async function runScanEvents(
       events: options.events,
       onEvent: async (event) => {
         if (event.type === "turn.completed")
-          options.onTurnStatus?.("completed");
+          options.onTurnStatus?.("completed", event["usage"]);
         if (event.type === "turn.failed") options.onTurnStatus?.("failed");
         if (
           !tacStatusReported &&
@@ -5751,6 +5914,33 @@ function turnFailureMessage(error: unknown): string {
   return "The Codex Security scan turn failed without a readable error message.";
 }
 
+function lostParentTransport(error: unknown): boolean {
+  const message = errorMessage(error);
+  const clientStatus =
+    /\b(?:HTTP(?:\/[\d.]+)?|status(?: code)?)\s*[:=]?\s*(4\d{2})\b/iu.exec(
+      message,
+    )?.[1];
+  if (clientStatus !== undefined && clientStatus !== "408") return false;
+  const classification = classifyConnectionFailure(error);
+  if (classification === "timeout") return true;
+  // Native exec prefixes provider response.failed messages with this text too.
+  const reason = message.replace(
+    /^stream disconnected before completion:\s*/iu,
+    "",
+  );
+  if (classification === "network_error") {
+    return /\b(?:ENOTFOUND|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|ETIMEDOUT|error sending request|(?:network|connection) (?:error|failed|lost|refused|reset|unreachable)|(?:DNS|TLS) (?:error|failure|failed)|timed? out)\b/iu.test(
+      reason,
+    );
+  }
+  return (
+    classification === "unknown" &&
+    /\b(?:(?:stream|transport) disconnected|(?:stream|websocket) closed (?:before|by server)|websocket closed$|Codex Exec exited with (?:code|signal))\b/iu.test(
+      reason,
+    )
+  );
+}
+
 export function classifyConnectionFailure(
   error: unknown,
 ):
@@ -6223,13 +6413,18 @@ async function pluginSupportsIsolatedDeepScanConfig(
   );
 }
 
+function scanInterruptionMessage(scanDir: string): string {
+  return scanDir
+    ? `Codex Security scan was interrupted; partial output remains at ${scanDir}.`
+    : "Codex Security scan was interrupted during preparation.";
+}
+
 function throwIfAborted(signal?: AbortSignal, scanDir = ""): void {
   if (!signal?.aborted) return;
   if (signal.reason instanceof ScanCostLimitExceededError) throw signal.reason;
-  const message = scanDir
-    ? `Codex Security scan was interrupted; partial output remains at ${scanDir}.`
-    : "Codex Security scan was interrupted during preparation.";
-  throw new ScanInterruptedError(message, scanDir, { cause: signal.reason });
+  throw new ScanInterruptedError(scanInterruptionMessage(scanDir), scanDir, {
+    cause: signal.reason,
+  });
 }
 
 function throwIfPatchAborted(signal?: AbortSignal, repository = ""): void {

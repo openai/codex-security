@@ -59,6 +59,28 @@ def stored_scan_cost_fields(value: str | None) -> dict[str, Any]:
     }
 
 
+def saved_scan_cost_fields(scan: sqlite3.Row) -> dict[str, Any]:
+    fields = stored_scan_cost_fields(scan["cost_json"])
+    if scan["cli_handoff_cost_json"] is not None:
+        fields["handoffCost"] = json.loads(scan["cli_handoff_cost_json"])
+    return fields
+
+
+def usage_without_handoff_total(scan: sqlite3.Row, value: str | None) -> str | None:
+    # A later turn can supply independent measured usage, but cannot establish
+    # a total cost across the interruption. Retain the original subtotal separately.
+    usage = stored_scan_cost_fields(value).get("usage") or stored_scan_cost_fields(
+        scan["cost_json"]
+    ).get("usage")
+    return json.dumps({"usage": usage}, separators=(",", ":")) if usage is not None else None
+
+
+def terminal_scan_cost(scan: sqlite3.Row, value: str | None) -> str | None:
+    return (
+        value if scan["cli_handoff_cost_json"] is None else usage_without_handoff_total(scan, value)
+    )
+
+
 def reconcile_completed_scan_cost(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
@@ -67,7 +89,7 @@ def reconcile_completed_scan_cost(
     """Persist authoritative SDK cost without discarding measured worker usage."""
 
     existing = json.loads(scan["cost_json"]) if scan["cost_json"] is not None else {}
-    if isinstance(existing, dict) and "usage" in existing:
+    if scan["cli_handoff_cost_json"] is None and isinstance(existing, dict) and "usage" in existing:
         cost_json = json.dumps(
             {**existing, "cost": json.loads(cost_json)},
             separators=(",", ":"),

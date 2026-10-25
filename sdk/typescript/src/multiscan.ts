@@ -561,6 +561,7 @@ async function runCampaign(
                 : {}),
               mode: task.mode,
               outputDir: scanDir,
+              managedAttempt: true,
               ...(scanPrompt ? { scanPrompt } : {}),
               ...(options.validationPrompt === undefined
                 ? {}

@@ -243,6 +243,7 @@ export async function runComponentScans(
               mode: options.scanOptions?.mode ?? "standard",
               target: receipt.paths.map((path) => resolve(repository, path)),
               outputDir: receipt.outputDir,
+              managedAttempt: true,
               signal: options.signal,
             });
             if (result.manifest.scan.status !== "completed")

@@ -2013,6 +2013,29 @@ def test_standard_worker_results_finish_with_only_canonical_parent_manifest(
 
 
 @pytest.mark.parametrize(
+    ("filename", "depth"),
+    [("findings.json", sys.getrecursionlimit() + 10), ("scan-manifest.json", 600)],
+)
+def test_guarded_cli_failure_rejects_deeply_nested_publication(
+    tmp_path: Path, filename: str, depth: int
+) -> None:
+    state, home, _, scan_dir, scan_id = standard_parent_results_fixture(tmp_path, budget=True)
+    env = {"CODEX_HOME": str(home)}
+    manifest = scan_dir / "scan-manifest.json"
+    finish_deep_scan(state, scan_id, "capped", str(manifest), environment=env)
+    artifact = scan_dir / filename
+    nested = "[" * depth + "0" + "]" * depth
+    artifact.write_text(artifact.read_text().replace("{", '{"nested":' + nested + ",", 1))
+
+    owner = "standard-worker-thread"
+    result = fail_scan(state, scan_id, "Parent stopped.", "--preserve-deep-owner", owner)
+    assert result["scan"]["progress"]["status"] == "failed"
+    assert result["scan"]["failureMessage"] == "Parent stopped."
+    coordinator = get_deep_scan(state, scan_id, owner, environment=env)["deepScan"]
+    assert coordinator["status"] == "succeeded"
+
+
+@pytest.mark.parametrize(
     "incidental_artifacts",
     ("inventory", "ledger", "both", "inventory_symlink", "ledger_symlink"),
 )

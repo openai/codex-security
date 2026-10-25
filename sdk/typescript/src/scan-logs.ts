@@ -72,12 +72,17 @@ const readsCompressedSessions = typeof zlib.createZstdDecompress === "function";
 
 type SessionLog = NonNullable<Awaited<ReturnType<typeof findScanSession>>>;
 
-async function* scanSessions(codexHome: string, directory = "sessions") {
+async function* scanSessions(
+  codexHome: string,
+  directory = "sessions",
+  onReadError?: (error: unknown) => void,
+) {
   for await (const path of sessionFiles(
     join(codexHome, directory),
     readsCompressedSessions,
+    onReadError,
   )) {
-    for await (const first of sessionEvents(path)) {
+    for await (const first of sessionEvents(path, onReadError)) {
       if (first["type"] !== "session_meta" || !isRecord(first["payload"])) {
         break;
       }
@@ -98,9 +103,13 @@ async function* scanSessions(codexHome: string, directory = "sessions") {
 }
 
 export async function findScanSession(codexHome: string, threadId: string) {
-  for await (const session of scanSessions(codexHome)) {
+  let readError: unknown;
+  for await (const session of scanSessions(codexHome, "sessions", (error) => {
+    readError ??= error;
+  })) {
     if (session.threadId === threadId) return session;
   }
+  if (readError !== undefined) throw readError;
   return null;
 }
 
@@ -261,6 +270,7 @@ async function extendsSessionLog(
 
 async function* sessionEvents(
   path: string,
+  onReadError?: (error: unknown) => void,
 ): AsyncGenerator<Record<string, unknown>> {
   const file = createReadStream(path);
   const stream = path.endsWith(".zst")
@@ -278,7 +288,10 @@ async function* sessionEvents(
       }
     }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      if (!onReadError) throw error;
+      onReadError(error);
+    }
   } finally {
     lines.close();
     stream.destroy();

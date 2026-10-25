@@ -228,6 +228,8 @@ def parse_args(description: str) -> argparse.Namespace:
     fail_scan = add_command("fail-scan", "--scan-id", "--message")
     fail_scan.add_argument("--claim-token")
     fail_scan.add_argument("--cost-json")
+    fail_scan.add_argument("--preserve-deep-owner")
+    fail_scan.add_argument("--handoff-cost-json")
 
     preserve_scan = add_command("preserve-scan-results", "--scan-id")
     preserve_scan.add_argument("--thread-id")

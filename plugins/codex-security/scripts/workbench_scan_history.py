@@ -25,7 +25,7 @@ from finalize_scan_contract import (
 from report_projection import SEVERITY_ORDER
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
 from workbench_scan_start import scan_target_identity
-from workbench_scan_usage import stored_scan_cost_fields
+from workbench_scan_usage import saved_scan_cost_fields
 from workbench_source_scopes import public_scan_recipe
 from workbench_target import git_output, require_scan_target_identity
 from workbench_validation import timestamp_key
@@ -122,6 +122,8 @@ def cli_scan_resume(
         "threadId": thread_id,
         "userContext": scan["user_context"],
     }
+    if scan["cli_handoff_cost_json"] is not None:
+        result["handoffCost"] = json.loads(scan["cli_handoff_cost_json"])
     # Active coordinators may still be writing drafts. Validate sealed results
     # before attaching to a coordinator that has finished.
     if run is not None and run["status"] == "succeeded":
@@ -287,7 +289,7 @@ def scan_summary(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "completedAt": row["completed_at"],
         "continuationThreadId": row["continuation_thread_id"],
-        **stored_scan_cost_fields(row["cost_json"]),
+        **saved_scan_cost_fields(row),
         "findingCount": row["finding_count"],
         "handoffStatus": row["handoff_status"],
         "mode": row["mode"],

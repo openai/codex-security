@@ -731,6 +731,8 @@ def _read_scan_local_json_with_metadata(
         if not isinstance(payload, dict):
             raise ContractError(f"{context}: expected a JSON object")
         _require_safe_json_value(payload, context, validate_strings=False)
+    except RecursionError as exc:
+        raise ContractError(f"{context}: JSON nesting is too deep: {exc}") from exc
     finally:
         if descriptor >= 0:
             os.close(descriptor)

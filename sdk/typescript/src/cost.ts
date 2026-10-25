@@ -159,6 +159,7 @@ export class ScanCostTracker {
   #pending: Promise<void> = Promise.resolve();
   #snapshot: ScanCostSnapshot = { usage: null, cost: null };
   #lastCost: string | null = null;
+  #lastMeasuredUsage = new Map<string, ScanTokenUsage | null>();
   #lastUsage: string | null = null;
   #lastObservation: ScanUsageObservation | null = null;
   #highestFilesCompleted = 0;
@@ -167,6 +168,20 @@ export class ScanCostTracker {
   public constructor(options: ScanCostTrackerOptions) {
     this.#options = options;
     this.#expectedFilesTotal = options.expectedFilesTotal;
+  }
+
+  /** A measured subtotal can survive an unmeasured worker; it is not a scan total. */
+  public get lastMeasuredCost(): Readonly<ScanCost> | null {
+    // A final parent receipt can arrive after the last readable session poll.
+    const measured = new Map(this.#lastMeasuredUsage);
+    for (const [id, receipt] of this.#receipts) {
+      measured.set(id, threadUsage(measured.get(id), receipt));
+    }
+    let usage: ScanTokenUsage | null = null;
+    for (const value of measured.values()) {
+      if (value !== null) usage = addTokenUsage(usage, value);
+    }
+    return estimateScanCost(this.#options.model, usage);
   }
 
   public setExpectedFilesTotal(filesTotal: number): void {
@@ -358,19 +373,8 @@ export class ScanCostTracker {
         }
         this.#reportWorkerProgress(session);
       }
-      const receipt = usages.get(threadId);
       // A discovered thread without a receipt has unknown usage, not zero.
-      // Retain it so a parent-only subtotal cannot appear to be complete.
-      if (receipt === undefined) usages.set(threadId, null);
-      if (
-        session.usage !== null &&
-        (session.usage.total_tokens > (receipt?.total_tokens ?? -1) ||
-          // The SDK inserts zero when the final receipt omits cache writes.
-          (session.usage.total_tokens === receipt?.total_tokens &&
-            receipt.cache_write_input_tokens === 0))
-      ) {
-        usages.set(threadId, session.usage);
-      }
+      usages.set(threadId, threadUsage(session.usage, usages.get(threadId)));
     }
     let usage: ScanTokenUsage | null = null;
     let complete = true;
@@ -384,6 +388,7 @@ export class ScanCostTracker {
     if (observeUsage) this.#reportUsageObservation(usages, complete);
     if (!complete) this.#snapshot = { usage: null, cost: null };
     if (usage === null) return;
+    this.#lastMeasuredUsage = usages;
     const cost = estimateScanCost(this.#options.model, usage);
     if (complete) {
       this.#snapshot = { usage, cost };
@@ -499,18 +504,23 @@ export class ScanCostTracker {
 export async function* sessionFiles(
   directory: string,
   compressed = false,
+  onReadError?: (error: unknown) => void,
 ): AsyncGenerator<string> {
   let entries;
   try {
     entries = await readdir(directory, { withFileTypes: true });
   } catch (error) {
     if (isMissingFile(error)) return;
+    if (onReadError) {
+      onReadError(error);
+      return;
+    }
     throw error;
   }
   for (const entry of entries) {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) {
-      yield* sessionFiles(path, compressed);
+      yield* sessionFiles(path, compressed, onReadError);
     } else if (
       entry.isFile() &&
       (entry.name.endsWith(".jsonl") ||
@@ -902,6 +912,22 @@ function sessionProgressUpdates(
     return [];
   }
   return scanProgressUpdatesFromText(output);
+}
+
+function threadUsage(
+  native: ScanTokenUsage | null | undefined,
+  receipt: ScanTokenUsage | null | undefined,
+): ScanTokenUsage | null {
+  if (
+    native &&
+    (!receipt ||
+      native.total_tokens > receipt.total_tokens ||
+      // The SDK inserts zero when its receipt omits cache writes.
+      (native.total_tokens === receipt.total_tokens &&
+        receipt.cache_write_input_tokens === 0))
+  )
+    return native;
+  return receipt ?? null;
 }
 
 function addTokenUsage(

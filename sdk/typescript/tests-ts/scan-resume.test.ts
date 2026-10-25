@@ -1,7 +1,8 @@
 import { createCliTest } from "./support/cli-run.js";
 import { workbenchCommand } from "./support/workbench-command.js";
 import { runWorkbenchFixtureCommands } from "./support/workbench-fixtures.js";
-import { gitText } from "./support/shell.js";
+import { gitText, runCommand } from "./support/shell.js";
+import { git as fixtureGit } from "./git-fixture.js";
 import { readJsonLines } from "./support/json.js";
 import { randomUUID } from "node:crypto";
 import { stripVTControlCharacters } from "node:util";
@@ -15,13 +16,15 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
-import { afterEach, expect, test } from "bun:test";
+import { delimiter, join } from "node:path";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { main } from "../src/cli.js";
 import { scanPreflightCodexConfig, type ScanOptions } from "../src/api.js";
+import { ScanCostTracker } from "../src/cost.js";
 import type { JsonObject } from "../src/config.js";
 import { runWorkbench } from "../src/runtime.js";
+import { workbenchArgs } from "../src/workbench-arguments.js";
 import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
 import { saveScanKnowledge, scanInputIdentity } from "../src/scan-inputs.js";
 import { workflowDigest } from "../src/finding-workflow.js";
@@ -313,6 +316,68 @@ test("resume resolves an interrupted scan without changing its ID, recipe, or co
   expect(await readFile(f.checkpoint, "utf8")).toBe('{"completed":"setup"}\n');
 });
 
+test("bare resume checks changed files with the host Git clean filter", async () => {
+  const f = await interruptedScan("deep", true);
+  const filter = "codex-test-clean";
+  const checkoutBin = join(f.repository, "bin");
+  const hostBin = join(f.root, "host-bin");
+  const caller = join(f.root, "caller");
+  for (const [label, bin] of [
+    ["checkout", checkoutBin],
+    ["caller", caller],
+    ["host", hostBin],
+  ] as const) {
+    await mkdir(bin);
+    await writeFile(
+      join(bin, filter),
+      `#!/bin/sh\necho ${label} >> .git/clean-calls\ncat\n`,
+      { mode: 0o755 },
+    );
+  }
+  gitText([
+    "-C",
+    f.repository,
+    "config",
+    "--local",
+    "filter.fixture.clean",
+    filter,
+  ]);
+  await writeFile(
+    join(f.repository, ".gitattributes"),
+    "source.py filter=fixture\n",
+  );
+  await appendFile(join(f.repository, "source.py"), "# changed\n");
+  const result = await runCommand(
+    process.execPath,
+    [
+      join(import.meta.dir, "../src/cli.ts"),
+      "scans",
+      "resume",
+      f.scanId.slice(0, 8),
+    ],
+    {
+      cwd: caller,
+      env: {
+        ...f.environment,
+        PATH: [caller, checkoutBin, hostBin, f.environment.PATH].join(
+          delimiter,
+        ),
+        PYTHON: f.python,
+        CODEX_SECURITY_NO_UPDATE_CHECK: "1",
+      },
+    },
+  );
+  expect(result.status).toBe(2);
+  expect(result.stderr).toContain(
+    "original checkout revision or contents changed",
+  );
+  const calls = await readFile(
+    join(f.repository, ".git", "clean-calls"),
+    "utf8",
+  );
+  expect(new Set(calls.trim().split(/\s+/u))).toEqual(new Set(["host"]));
+});
+
 test.each([
   "failed",
   "canceled",
@@ -571,6 +636,7 @@ function resumeDependencies(
     ConstructorParameters<typeof TestClient>[1]["createCodex"]
   >,
   runtimeOverrides: Partial<ReturnType<typeof preparedRuntime>> = {},
+  workbench = runWorkbench,
 ) {
   return {
     ...dependencies({ environment: f.environment, currentDirectory: f.root }),
@@ -598,7 +664,7 @@ function resumeDependencies(
           return runtime;
         },
         resolvePluginPython: async () => f.python,
-        runWorkbench,
+        runWorkbench: workbench,
         createCodex,
       }),
   };
@@ -646,6 +712,427 @@ async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
     "--manifest-path",
     join(f.scanDir, "scan-manifest.json"),
   ]);
+}
+
+test("resumes the original Deep scan after its parent returns during consolidation", () =>
+  parentReturnsDuringConsolidation());
+test("resumes the original Deep scan when the process exits after turn.completed", () =>
+  parentReturnsDuringConsolidation("signal"));
+test("resumes the original Deep scan when Codex reports a closed WebSocket", () =>
+  parentReturnsDuringConsolidation("websocket-close"));
+test.each([
+  [
+    "a provider policy rejection",
+    "stream disconnected before completion: Network access is disabled by policy",
+  ],
+  [
+    "an invalid network policy",
+    '{"error":{"code":"invalid_request_error","message":"Unsupported network policy"}}',
+  ],
+  [
+    "HTTP 422 with timeout wording",
+    "unexpected status 422 Unprocessable Entity: Network request timed out",
+  ],
+])("keeps a parent terminal after %s", (_kind, message) =>
+  parentReturnsDuringConsolidation(undefined, message),
+);
+test("resumes a nested Git target with knowledge in the scanned directory", () =>
+  parentReturnsDuringConsolidation("nested-knowledge"));
+test("does not offer bare resume with knowledge from a separate checkout", () =>
+  parentReturnsDuringConsolidation("external-knowledge"));
+test.each(["fail-scan", "get-scan"] as const)(
+  "honors an explicit abort after the handoff's %s returns",
+  (transition) => parentReturnsDuringConsolidation(transition),
+);
+
+test("a peer resume can seal a preserved scan", () =>
+  parentReturnsDuringConsolidation("peer-resume"));
+test("runs the requested post-scan prompt once after a failed Deep scan", () =>
+  parentReturnsDuringConsolidation("post-scan"));
+test.each(["--validate", "--patch"] as const)(
+  "retains the terminal Deep Scan outcome when the CLI owns %s",
+  (action) => parentReturnsDuringConsolidation(action),
+);
+
+async function parentReturnsDuringConsolidation(
+  transition?:
+    | "signal"
+    | "websocket-close"
+    | "fail-scan"
+    | "get-scan"
+    | "peer-resume"
+    | "nested-knowledge"
+    | "external-knowledge"
+    | "--validate"
+    | "--patch"
+    | "post-scan",
+  rejection?: string,
+) {
+  const cancellation = new AbortController();
+  const f = await interruptedScan("standard");
+  const { root, codexHome, python, environment, command } = f;
+  const nested = transition === "nested-knowledge";
+  const repository = nested ? join(f.repository, "service") : f.repository;
+  const userSkill = { path: join(root, "custom", "SKILL.md"), enabled: false };
+  const installedRoot = join(codexHome, "plugins", "cache", "codex-security");
+  const extraArgs: string[] = [];
+  const cliFollowup = transition === "--validate" || transition === "--patch";
+  if (cliFollowup) extraArgs.push(transition);
+  if (nested || transition === "external-knowledge") {
+    const checkout = nested ? f.repository : await temporaryDirectory();
+    fixtureGit(checkout, "init", "-q");
+    if (nested) {
+      await mkdir(repository);
+      await writeFile(join(repository, "source.py"), "# synthetic service\n");
+    }
+    const document = join(nested ? repository : checkout, "architecture.md");
+    await writeFile(document, "Synthetic architecture.\n");
+    if (nested) {
+      fixtureGit(checkout, "add", ".");
+      fixtureGit(checkout, "commit", "--no-gpg-sign", "-qm", "Add service");
+    }
+    extraArgs.push("--knowledge-base", document);
+  }
+  const scanDir = join(root, "fresh-deep-scan");
+  const threadId = randomUUID();
+  const workers = Array.from({ length: 3 }, () => randomUUID());
+  const reducer = randomUUID();
+  const promptPath = join(scanDir, "worker.md");
+  const resultManifestPath = join(scanDir, "worker-result.json");
+  const postScanPrompt = "Report only when the scan is terminal.";
+  if (transition === "post-scan") {
+    const promptFile = join(root, "post-scan.md");
+    await writeFile(promptFile, postScanPrompt);
+    extraArgs.push("--post-scan-prompt-file", promptFile);
+  }
+  let scanId = "";
+  let parentTurns = 0;
+  let resumeTurns = 0;
+  const followupStates: string[] = [];
+  let registration: JsonObject = {};
+  async function* startDiscovery() {
+    // Only session identity is known; this fixture has no cumulative token receipt.
+    await writeFile(
+      join(codexHome, "sessions", "rollout.jsonl"),
+      JSON.stringify({
+        type: "session_meta",
+        payload: { id: threadId, cwd: scanDir },
+      }) + "\n",
+    );
+    await writeFile(promptPath, "Review the synthetic source.\n");
+    await writeFile(resultManifestPath, "{}\n");
+    const paths = { scanId, promptPath, artifactDir: scanDir };
+    const worker = (workerId: string, status: string, kind = "discovery") =>
+      workbenchArgs("upsert-deep-scan-worker", {
+        ...paths,
+        workerId,
+        kind,
+        status,
+        resultManifestPath:
+          status === "succeeded" ? resultManifestPath : undefined,
+        attempt: kind === "dedup" ? 1 : undefined,
+      });
+    const run = { scanId, threadId, availableParallelism: 4 };
+    const claim = { ...paths, workerId: reducer, inputWorkerId: workers };
+    await runWorkbenchFixtureCommands(python, environment, [
+      workbenchArgs("begin-deep-scan", run),
+      ...workers.flatMap((id) => [
+        worker(id, "running"),
+        worker(id, "succeeded"),
+      ]),
+      workbenchArgs("claim-deep-scan-dedup", claim),
+      worker(reducer, "running", "dedup"),
+    ]);
+    const message =
+      transition === "websocket-close"
+        ? "stream disconnected before completion: websocket closed"
+        : rejection;
+    if (message) yield { type: "turn.failed" as const, error: { message } };
+  }
+  async function* parentEvents() {
+    yield* completedEvents(threadId, startDiscovery());
+    if (transition === "signal")
+      throw new Error("Codex Exec exited with signal SIGKILL");
+  }
+  const createCodex: Parameters<typeof resumeDependencies>[1] = (options) => ({
+    startThread: () => ({
+      id: threadId,
+      async runStreamed(prompt) {
+        scanId =
+          options.env?.["CODEX_SECURITY_SCAN_ID"] ?? fail("Expected scan ID");
+        parentTurns++;
+        if (prompt === postScanPrompt) {
+          const { scan } = await command(workbenchArgs("get-scan", { scanId }));
+          followupStates.push(
+            (scan as { progress: { status: string } }).progress.status,
+          );
+          return { events: completedEvents(threadId) };
+        }
+        return { events: parentEvents() };
+      },
+    }),
+    resumeThread(id) {
+      expect(id).toBe(threadId);
+      expect(options.config?.["features"]).toMatchObject({
+        multi_agent_v2: {
+          enabled: true,
+          max_concurrent_threads_per_session: 4,
+        },
+      });
+      expect(options.config?.["skills"]).toMatchObject({
+        config: expect.arrayContaining([
+          userSkill,
+          {
+            path: join(installedRoot, "skills", "security-scan", "SKILL.md"),
+            enabled: false,
+          },
+        ]),
+      });
+      return {
+        id,
+        async runStreamed() {
+          resumeTurns++;
+          if (nested) {
+            const staged =
+              options.env?.["CODEX_SECURITY_KNOWLEDGE_BASE"] ??
+              fail("Expected saved knowledge");
+            expect(
+              await readFile(join(staged, "0-architecture.md.txt"), "utf8"),
+            ).toBe("Synthetic architecture.\n");
+          }
+          await command(
+            workbenchArgs("commit-deep-scan-dedup", {
+              scanId,
+              workerId: reducer,
+              resultManifestPath,
+              newFindingsCount: 0,
+            }),
+          );
+          await finishDiscovery({ ...f, scanId, scanDir, registration });
+          return { events: completedEvents(id) };
+        },
+      };
+    },
+  });
+  let preserved = false;
+  const deps = resumeDependencies(
+    f,
+    createCodex,
+    { plugin: { ...preparedRuntime(codexHome).plugin, installedRoot } },
+    async (options, args, input) => {
+      if (
+        preserved &&
+        transition === "peer-resume" &&
+        args[0] === "get-scan" &&
+        options.signal === undefined
+      ) {
+        preserved = false;
+        await resume();
+      }
+      const result = await runWorkbench(options, args, input);
+      if (result["preserved"] === true) preserved = true;
+      if (preserved && args[0] === transition) cancellation.abort();
+      return result;
+    },
+  );
+  if (transition === "fail-scan" || transition === "get-scan") {
+    await using client = deps.createSecurity({});
+    await expect(
+      client.run(repository, {
+        mode: "deep",
+        auth: "chatgpt",
+        outputDir: scanDir,
+        signal: cancellation.signal,
+      }),
+    ).rejects.toThrow("interrupted");
+    expect(cancellation.signal.aborted).toBe(true);
+    expect(await command(workbenchArgs("get-scan", { scanId }))).toMatchObject({
+      scan: {
+        progress: { status: "failed" },
+        handoffCost: { inputTokens: 10, outputTokens: 3 },
+      },
+    });
+    expect(
+      await command(workbenchArgs("get-deep-scan", { scanId, threadId })),
+    ).toMatchObject({
+      deepScan: { status: "failed" },
+    });
+    const retry = createCliTest(main);
+    expect(
+      await retry.runCli(["scans", "resume", scanId, "--json"], deps),
+    ).toBe(2);
+    expect(parentTurns).toBe(1);
+    expect(resumeTurns).toBe(0);
+    return;
+  }
+  const first = createCliTest(main);
+  const scan = ["scan", repository, "--mode", "deep", "--auth", "chatgpt"];
+  using unreadableArchive =
+    transition === undefined && rejection === undefined
+      ? spyOn(ScanCostTracker.prototype, "refresh").mockRejectedValue(
+          new Error("Session archive unavailable"),
+        )
+      : undefined;
+  expect(
+    await first.runCli(
+      [
+        ...scan,
+        ...extraArgs,
+        "--codex",
+        "features.multi_agent_v2.max_concurrent_threads_per_session=4",
+        "--codex",
+        `skills.config=[{path=${JSON.stringify(userSkill.path)},enabled=false}]`,
+        "--output-dir",
+        scanDir,
+        "--json",
+      ],
+      deps,
+    ),
+    first.stderr.text(),
+  ).toBe(2);
+  unreadableArchive?.mockRestore();
+  const message = JSON.parse(first.stdout.text()).message;
+  const saved = await command(workbenchArgs("get-scan", { scanId }));
+  if (rejection) {
+    expect(message).not.toContain("scans resume");
+    expect(saved["scan"]).toMatchObject({
+      progress: { status: "failed" },
+      failureMessage: rejection,
+    });
+    expect(resumeTurns).toBe(0);
+    return;
+  }
+  if (transition === "post-scan") {
+    expect(followupStates).toEqual(["failed"]);
+    expect(parentTurns).toBe(2);
+    expect(resumeTurns).toBe(0);
+  }
+  if (
+    cliFollowup ||
+    transition === "external-knowledge" ||
+    transition === "post-scan"
+  ) {
+    expect(message).toContain("Deep Scan discovery orchestration must finish");
+    expect(message).not.toContain("scans resume");
+    expect(saved["scan"]).toMatchObject({
+      progress: { status: "failed" },
+      failureMessage: message,
+    });
+    if (cliFollowup) {
+      expect(first.stderr.text()).toContain(`scans show ${scanId}`);
+      expect(first.stderr.text()).not.toMatch(
+        /codex-security (?:validate |patch --scan)/u,
+      );
+      const retry = createCliTest(main);
+      expect(await retry.runCli(["scans", "resume", scanId], deps)).toBe(2);
+      expect(parentTurns).toBe(1);
+      expect(resumeTurns).toBe(0);
+    }
+    return;
+  }
+  if (transition === "peer-resume") {
+    expect(message).not.toContain("scans resume");
+    expect(saved["scan"]).toMatchObject({ progress: { status: "complete" } });
+    expect(saved["scan"]).not.toHaveProperty("cost");
+    expect(parentTurns).toBe(1);
+    expect(resumeTurns).toBe(1);
+    return;
+  }
+  expect({
+    message,
+    parentTurns,
+    scan: saved["scan"],
+  }).toMatchObject({
+    message: expect.stringContaining("codex-security scans resume " + scanId),
+    parentTurns: 1,
+    scan: {
+      progress: {
+        status: "running",
+        independentReviews: { completed: 3, consolidating: true },
+      },
+    },
+  });
+  await resume();
+  expect(resumeTurns).toBe(1);
+  expect(parentTurns).toBe(1);
+
+  async function resume() {
+    registration = await command(
+      workbenchArgs("get-cli-scan-resume", { scanId }),
+    );
+    expect(registration).toMatchObject({
+      scanId,
+      threadId,
+      recipe: { repository },
+    });
+    if (nested)
+      expect(registration["recipe"]).toMatchObject({
+        checkoutRoot: f.repository,
+      });
+    if (transition === undefined || transition === "signal")
+      expect(registration).toMatchObject({
+        handoffCost: { inputTokens: 10, outputTokens: 3 },
+      });
+    const { stdout, stderr, runCli } = createCliTest(main);
+    expect(
+      await runCli(
+        ["scans", "resume", scanId, "--json"],
+        resumeDependencies(f, createCodex),
+      ),
+      stderr.text(),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      manifest: { scan: { id: scanId } },
+      cost: null,
+    });
+  }
+}
+
+test("a resume cannot return a scan total when the parent hands off after attachment", () =>
+  verifyConcurrentHandoff("gpt-5.6-sol"));
+test("an unpriced model withholds turn-only tokens after a concurrent handoff", () =>
+  verifyConcurrentHandoff("unpriced-test-model"));
+
+async function verifyConcurrentHandoff(model: string) {
+  const f = await interruptedScan("deep", false, { config: { model } });
+  const cli = createCliTest(main);
+  const deps = resumeDependencies(f, () => ({
+    startThread: () => fail("Expected the original session"),
+    resumeThread(id) {
+      return {
+        id,
+        async runStreamed() {
+          // The SDK has read the running scan, but its original owner now detaches.
+          const handoff = await f.command([
+            "fail-scan",
+            "--scan-id",
+            f.scanId,
+            "--message",
+            "Parent disconnected",
+            "--preserve-deep-owner",
+            id,
+          ]);
+          expect(handoff).toHaveProperty("preserved", true);
+          await finishDiscovery(f);
+          return { events: completedEvents(id) };
+        },
+      };
+    },
+  }));
+  const exit = await cli.runCli(
+    ["scans", "resume", f.scanId, "--json", "--show-cost"],
+    deps,
+  );
+  expect(exit, cli.stderr.text()).toBe(0);
+  expect(cli.stderr.text()).not.toContain("13 total");
+  expect(cli.stderr.text()).not.toMatch(/\$[0-9]/);
+  expect(
+    (await f.command(workbenchArgs("get-scan", { scanId: f.scanId })))["scan"],
+  ).not.toHaveProperty("cost");
+  expect(JSON.parse(cli.stdout.text())).toMatchObject({
+    cost: null,
+    turn: { usage: null },
+  });
 }
 
 test.each([false, true])(
@@ -723,7 +1210,7 @@ test.each([
     const code = await runCli(
       bulk
         ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"]
-        : ["scans", "resume", f.scanId, "--json"],
+        : ["scans", "resume", f.scanId, "--json", "--show-cost"],
       resumeDependencies(f, () => ({
         startThread: () => fail("Unexpected new session"),
         resumeThread(threadId) {
@@ -795,6 +1282,7 @@ test.each([
         failed: 0,
       });
     } else {
+      expect(stderr.text()).toContain("Estimated cost: $");
       expect(result.coverage).not.toHaveProperty("completeness");
       expect(result.manifest.scan.id).toBe(f.scanId);
       expect(result.manifest.scan.sealedAt).toBeString();

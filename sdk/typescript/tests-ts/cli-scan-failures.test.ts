@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
-import { CodexSecurityError } from "../src/index.js";
+import { CodexSecurityError, IncompleteScanError } from "../src/index.js";
 import {
   FakeSignals,
   capture,
@@ -247,6 +247,38 @@ test.each(commands)(
         );
       }
     }
+  },
+);
+
+test.each([
+  ["SIGINT", 130],
+  ["SIGTERM", 143],
+] as const)(
+  "keeps the Deep Scan handoff when %s arrives during cleanup",
+  async (signal, code) => {
+    const stdout = capture();
+    const stderr = capture();
+    const signals = new FakeSignals();
+    const handoff =
+      "Parent disconnected.\nRun codex-security scans resume saved-scan.";
+    const deps = dependencies({
+      signals,
+      onRun: () => {
+        throw new IncompleteScanError(handoff);
+      },
+      onClose: () => signals.emit(signal),
+    });
+    expect(
+      await main(
+        ["scan", ".", "--mode", "deep", "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(code);
+    const message = `Scan cleanup interrupted by ${signal}.\n${handoff}`;
+    expect(JSON.parse(stdout.text()).message).toBe(message);
+    expect(stderr.text()).toContain(message);
   },
 );
 
