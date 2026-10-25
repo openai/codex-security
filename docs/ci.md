@@ -2,10 +2,12 @@
 
 The `node-ci` workflow selects checks from the complete pull request diff. An
 ordinary documentation-only change runs static checks and the final `ci` gate.
+Static checks format the tracked Markdown in this route. The Action README also
+runs Action CI to check generated input documentation and usage examples.
 Plugin skills, references, schemas, examples, and unrecognized paths receive
-full qualification: plugin Markdown is part of the product. SDK README and
+full qualification because plugin Markdown is part of the product. SDK README and
 documentation changes also receive full qualification because those files are
-required package contents; deleting or renaming them must pass archive checks.
+required package contents. Deleting or renaming them must pass archive checks.
 `RELEASING.md` also receives full qualification because SDK tests validate its
 canonical release recovery example.
 
@@ -23,11 +25,30 @@ current Node 24 for the Action adapter, macOS installation, and Windows Node 22
 installation. Python runs the full suite on 3.12 and the native subsets on macOS
 and Windows. All source changes still select container validation.
 
-Every other path selects full qualification, including workflow checks,
+PRs limited to Action metadata, wrapper implementation, tests, npm manifests,
+locks, or checked-in bundles run Action CI. It verifies a clean rebuild, runs
+the published CLI integration, audits the wrapper and pinned runtime, and
+exercises the local Action on eligible events. Fork PRs run validation and
+both audits. Same-repository PRs also run the hosted dry-run smoke. Changes to
+these Action files keep the Linux Node 24 integration against the package built
+from the PR. The focused SDK Action release contracts run when the rest of the
+SDK suite is skipped. Changes to the shared SDK Git remote parser also select
+Action CI.
+
+PRs limited to Standard time-budget eval modules, experiment configuration or
+README, or to the triage eval's scripts, assertions, README, manifest or lock,
+run the deterministic eval job and static checks. The eval job builds the SDK
+and host plugin, checks the Codex version across the SDK, MCP and triage
+lockfiles, and runs the triage, secret-discovery, Standard time-budget and
+workflow-routing suites. This job also runs on source changes, independently
+of the Python matrix.
+
+Inputs outside these routes select full qualification, including workflow checks,
 containers, current Node 26, Windows Node 24 installation, and Python 3.10 and
 3.14 Linux suites. This includes dependency configuration such as `.npmrc` and
 `pnpm-workspace.yaml`, build tooling, Python and native code, and unknown paths
-even when mixed with ordinary source or documentation.
+even when mixed with ordinary source or documentation. Mixing Action
+implementation or eval changes with product code also selects full qualification.
 
 Every push to `main`, nightly run, manual `node-ci` dispatch, and pull-request
 retarget runs the complete version matrices. Release automation still requires
@@ -38,9 +59,9 @@ neither cancel source runs nor satisfy their required check names.
 
 The `ci` job checks every selected required job. A failed, cancelled, missing,
 or unexpectedly skipped selected job fails the gate. An explicitly unselected
-job can be skipped. Static checks are always required. Broad test-runner
-experiments run through the separate scheduled/manual `test-quality` workflow;
-they are not merge gates.
+job can be skipped. Static checks are always required. The separate `test-quality`
+workflow runs weekly property and mutation tests. Dispatch it to compare full SDK
+shard layouts.
 
 The existing OS-named check contexts temporarily forward the `ci` result so
 repository branch rules continue to work during migration. To finish migration:

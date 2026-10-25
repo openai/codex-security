@@ -261,7 +261,7 @@ async function runDetachedPlugin(pluginRoot, executable) {
       )
       .catch((error) => error);
     const deadline = Date.now() + 30_000;
-    while (!(await readExecutions(f)).some((entry) => entry.phase === "held")) {
+    while ((await readFile(f.env.PACKAGE_DEEP_HOLD, "utf8")) !== "held") {
       assert.ok(
         Date.now() < deadline,
         "Second worker did not reach the interruption boundary.",

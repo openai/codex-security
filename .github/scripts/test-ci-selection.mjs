@@ -9,6 +9,9 @@ const select = (paths, options = {}) =>
 
 const regularSource = {
   "source-required": "true",
+  "package-required": "true",
+  "action-ci": "false",
+  "eval-contracts": "true",
   "workflow-quality": "false",
   "container-validate": "true",
   "compatibility-matrix": JSON.stringify({
@@ -38,7 +41,8 @@ const regularSource = {
   "windows-node-matrix": JSON.stringify({ node: ["22.13.0"] }),
 };
 const fullQualification = {
-  "source-required": "true",
+  ...regularSource,
+  "action-ci": "true",
   "workflow-quality": "true",
   "container-validate": "true",
   "compatibility-matrix": JSON.stringify({
@@ -71,12 +75,16 @@ const fullQualification = {
   "windows-node-matrix": JSON.stringify({ node: ["22.13.0", "24"] }),
 };
 
-test("only ordinary documentation can skip source qualification", () => {
-  assert.deepEqual(select(["README.md", "docs/bedrock.md"]), {
-    ...regularSource,
-    "source-required": "false",
-    "container-validate": "false",
-  });
+const docs = {
+  ...regularSource,
+  "source-required": "false",
+  "package-required": "false",
+  "eval-contracts": "false",
+  "container-validate": "false",
+};
+
+test("ordinary documentation selects static checks", () => {
+  assert.deepEqual(select(["README.md", "docs/bedrock.md"]), docs);
   for (const path of [
     "plugins/codex-security/skills/security-scan/SKILL.md",
     "plugins/codex-security/references/core-scan.md",
@@ -91,6 +99,106 @@ test("only ordinary documentation can skip source qualification", () => {
   assert.equal(
     select(["README.md"], { baseChanged: true })["source-required"],
     "true",
+  );
+});
+
+test("the Action README also requires Action documentation and release contracts", () => {
+  const expected = { ...docs, "action-ci": "true" };
+  assert.deepEqual(select(["github-action/README.md"]), expected);
+  assert.deepEqual(select(["docs/ci.md", "github-action/README.md"]), expected);
+  assert.deepEqual(
+    select(["sdk/typescript/src/cost.ts", "github-action/README.md"]),
+    { ...regularSource, "action-ci": "true" },
+  );
+  assert.deepEqual(
+    failedChecks({
+      "classify-changes": { result: "success", outputs: expected },
+      "static-checks": { result: "success" },
+    }),
+    ["action-ci"],
+  );
+});
+
+test("Action-only changes require Action CI and integration against the built package", () => {
+  const expected = {
+    ...docs,
+    "package-required": "true",
+    "action-ci": "true",
+    "compatibility-matrix": JSON.stringify({
+      include: [{ os: "ubuntu-latest", node: "24" }],
+    }),
+  };
+  for (const paths of [
+    ["action.yml", "github-action/README.md"],
+    ["github-action/src/results.ts", "github-action/dist/index.cjs"],
+    ["github-action/dist/post.cjs"],
+    ["github-action/package.json", "github-action/package-lock.json"],
+    [
+      "github-action/runtime/package.json",
+      "github-action/runtime/package-lock.json",
+    ],
+    [
+      "github-action/tests/release.test.mjs",
+      "github-action/scripts/release.mjs",
+    ],
+  ]) {
+    assert.deepEqual(select(paths), expected, paths.join(", "));
+  }
+  const needs = {
+    "classify-changes": { result: "success", outputs: expected },
+    "static-checks": { result: "success" },
+    "action-ci": { result: "success", outputs: { passed: "true" } },
+  };
+  assert.deepEqual(failedChecks(needs), ["native", "package", "compatibility"]);
+  for (const name of ["native", "package", "compatibility"])
+    needs[name] = { result: "success" };
+  assert.deepEqual(failedChecks(needs), []);
+  for (const action of [
+    { result: "failure", outputs: { passed: "true" } },
+    { result: "success", outputs: { passed: "false" } },
+    { result: "success" },
+  ]) {
+    assert.deepEqual(failedChecks({ ...needs, "action-ci": action }), [
+      "action-ci",
+    ]);
+  }
+  assert.deepEqual(select(["sdk/typescript/src/git-remote.ts"]), {
+    ...regularSource,
+    "action-ci": "true",
+  });
+});
+
+test("Standard and triage eval changes require all deterministic eval contracts", () => {
+  const expected = { ...docs, "eval-contracts": "true" };
+  for (const paths of [
+    [
+      "evals/standard-time-budget/fixtures.mts",
+      "evals/standard-time-budget/test_production.mts",
+    ],
+    [
+      "evals/standard-time-budget/experiment.json",
+      "evals/standard-time-budget/README.md",
+    ],
+    [
+      "evals/triage-finding/package.json",
+      "evals/triage-finding/pnpm-lock.yaml",
+    ],
+    [
+      "evals/triage-finding/assertions/output.mts",
+      "evals/triage-finding/scripts/test-triage-io.mts",
+    ],
+  ]) {
+    assert.deepEqual(select(paths), expected, paths.join(", "));
+  }
+  const needs = {
+    "classify-changes": { result: "success", outputs: expected },
+    "static-checks": { result: "success" },
+    "eval-contracts": { result: "skipped" },
+  };
+  assert.deepEqual(failedChecks(needs), ["eval-contracts"]);
+  assert.deepEqual(
+    failedChecks({ ...needs, "eval-contracts": { result: "success" } }),
+    [],
   );
 });
 
@@ -169,6 +277,17 @@ test("unknown paths and dependency configuration receive full qualification", ()
     ["sdk/typescript/pnpm-workspace.yaml"],
     ["plugins/codex-security/mcp-app/pnpm-workspace.yaml"],
     ["evals/triage-finding/pnpm-workspace.yaml"],
+    ["evals/standard-time-budget/fixtures.mts", "sdk/typescript/src/cost.ts"],
+    ["evals/triage-finding/fixtures/repo/package.json"],
+    [
+      "evals/triage-finding/pnpm-lock.yaml",
+      "github-action/runtime/package-lock.json",
+    ],
+    ["github-action/src/main.ts", "sdk/typescript/src/git-remote.ts"],
+    ["github-action/src/main.ts", "github-action/src/nested/unknown.ts"],
+    ["github-action/tsconfig.json"],
+    ["github-action/package.json", "github-action/.npmrc"],
+    ["plugins/codex-security/examples/completed-scan/findings.jsonl"],
     ["README.md", "new-runtime/file"],
     ["sdk/typescript/src/cost.ts", "new-runtime/file"],
     // --no-renames reports both sides when source becomes an unknown input.
@@ -188,6 +307,7 @@ test("tooling and non-TypeScript product inputs receive full qualification", () 
     "plugins/codex-security/native/src/lib.rs",
     "sdk/typescript/scripts/build-plugin.mjs",
     ".github/workflows/node-ci.yml",
+    ".github/workflows/action-ci.yml",
     "plugins/codex-security/scripts/workbench_db.py",
     "plugins/codex-security/tests/test_database.py",
     "plugins/codex-security/requirements-test.txt",
@@ -217,6 +337,8 @@ test("the final gate rejects every missing or unsuccessful selected check", () =
   const needs = Object.fromEntries(
     [
       "static-checks",
+      "action-ci",
+      "eval-contracts",
       "native",
       "package",
       "test",
@@ -230,6 +352,7 @@ test("the final gate rejects every missing or unsuccessful selected check", () =
       "container-validate",
     ].map((name) => [name, { result: "success" }]),
   );
+  needs["action-ci"].outputs = { passed: "true" };
   needs["classify-changes"] = { result: "success", outputs };
   assert.deepEqual(failedChecks(needs), []);
   for (const name of Object.keys(needs)) {
@@ -255,6 +378,9 @@ test("documentation requires static checks and explicit selection, without skipp
   );
   for (const key of [
     "source-required",
+    "package-required",
+    "action-ci",
+    "eval-contracts",
     "workflow-quality",
     "container-validate",
   ]) {

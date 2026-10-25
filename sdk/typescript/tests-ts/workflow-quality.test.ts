@@ -195,7 +195,7 @@ bashTest(
   },
 );
 
-test("classification reads the PR merge diff rather than unrelated base changes", async () => {
+test("classification uses the PR merge diff and validates retargeted merge parents", async () => {
   const scope = ci.jobs["classify-changes"]!.steps.find(
     (step) => step.name === "Select required checks",
   )!;
@@ -235,20 +235,23 @@ test("classification reads the PR merge diff rather than unrelated base changes"
     git("add", ".");
     git("commit", "-m", "Independent base change");
     git("merge", "--no-ff", "docs", "-m", "Merge fixture");
-    const result = spawnSync(
-      command!,
-      [fileURLToPath(new URL(`../../../${script}`, import.meta.url))],
-      {
-        cwd: repository,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          EVENT_NAME: "pull_request",
-          BASE_CHANGED: "false",
-          GITHUB_OUTPUT: output,
+    const classify = (env: Record<string, string> = {}) =>
+      spawnSync(
+        command!,
+        [fileURLToPath(new URL(`../../../${script}`, import.meta.url))],
+        {
+          cwd: repository,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            EVENT_NAME: "pull_request",
+            BASE_CHANGED: "false",
+            GITHUB_OUTPUT: output,
+            ...env,
+          },
         },
-      },
-    );
+      );
+    const result = classify();
     expect(result.status, result.stderr).toBe(0);
     const outputs = Object.fromEntries(
       (await readFile(output, "utf8"))
@@ -259,6 +262,39 @@ test("classification reads the PR merge diff rather than unrelated base changes"
     expect(outputs["source-required"]).toBe("false");
     expect(outputs["container-validate"]).toBe("false");
     expect(outputs["workflow-quality"]).toBe("false");
+
+    const base = git("rev-parse", "HEAD^1").trim();
+    const head = git("rev-parse", "docs").trim();
+    const old = git("rev-parse", "HEAD^1^1").trim();
+    const eventPath = join(directory, "event.json");
+    for (const [expectedBase, expectedHead, valid] of [
+      [base, head, true],
+      [old, head, false],
+      [base, old, false],
+    ] as const) {
+      await writeFile(
+        eventPath,
+        JSON.stringify({
+          pull_request: {
+            base: { ref: "main", sha: expectedBase },
+            head: { sha: expectedHead },
+          },
+        }),
+      );
+      await writeFile(output, "");
+      const retarget = classify({
+        BASE_CHANGED: "true",
+        GITHUB_EVENT_PATH: eventPath,
+      });
+      expect(retarget.status, retarget.stderr).toBe(valid ? 0 : 1);
+      const selection = await readFile(output, "utf8");
+      if (valid) expect(selection).toContain("workflow-quality=true");
+      else {
+        expect(retarget.stdout).toContain(`${base} ${head}`);
+        expect(retarget.stderr).toContain("stale test merge");
+        expect(selection).toBe("");
+      }
+    }
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

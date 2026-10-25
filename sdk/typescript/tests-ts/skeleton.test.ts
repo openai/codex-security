@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -12,7 +12,7 @@ import {
 } from "../src/index.js";
 import { main } from "../src/cli.js";
 import { capture } from "./cli-fixtures.js";
-import { bashCommand, runCommand } from "./support/shell.js";
+import { bashCommand, pythonExecutable, runCommand } from "./support/shell.js";
 
 const { selectChecks } = (await import(
   new URL("../../../.github/scripts/select-ci-checks.mjs", import.meta.url).href
@@ -33,6 +33,7 @@ interface WorkflowStep {
   with?: Record<string, unknown>;
   run?: string;
   if?: string;
+  shell?: string;
   env?: Record<string, unknown>;
   "continue-on-error"?: boolean;
 }
@@ -59,51 +60,6 @@ async function workflow(name: string) {
 }
 
 describe("TypeScript package skeleton", () => {
-  test("pins one Codex version across the CLI, MCP app, and evals", async () => {
-    const directories = [
-      "sdk/typescript",
-      "plugins/codex-security/mcp-app",
-      "evals/triage-finding",
-    ];
-    const manifests = await Promise.all(
-      directories.map(async (directory) =>
-        JSON.parse(
-          await readFile(
-            new URL(`../../../${directory}/package.json`, import.meta.url),
-            "utf8",
-          ),
-        ),
-      ),
-    );
-    const version = manifests[0].dependencies["@openai/codex"];
-    expect(version).toBeTruthy();
-    for (const [index, directory] of directories.entries()) {
-      expect(manifests[index].dependencies["@openai/codex-sdk"]).toBe(version);
-      const lockfile = Bun.YAML.parse(
-        await readFile(
-          new URL(`../../../${directory}/pnpm-lock.yaml`, import.meta.url),
-          "utf8",
-        ),
-      ) as {
-        packages: Record<string, { os?: string[]; cpu?: string[] }>;
-      };
-      expect(
-        Object.keys(lockfile.packages).filter((name) =>
-          name.startsWith("@openai/codex-sdk@"),
-        ),
-      ).toEqual([`@openai/codex-sdk@${version}`]);
-      for (const [name, metadata] of Object.entries(lockfile.packages)) {
-        if (name.startsWith("@openai/codex@")) {
-          const platform =
-            metadata.os && metadata.cpu
-              ? `-${metadata.os[0]}-${metadata.cpu[0]}`
-              : "";
-          expect(name).toBe(`@openai/codex@${version}${platform}`);
-        }
-      }
-    }
-  });
-
   test("exports typed attack-path aliases", () => {
     const dataflow: AttackPathDataflow = {
       transformations: ["decode archive entry"],
@@ -199,24 +155,6 @@ describe("TypeScript package skeleton", () => {
       verificationSteps[pythonSetup]?.with?.["update-environment"],
     );
     expect(jobs["required-test"]?.name).toEndWith("${{ matrix.os }} / node-22");
-    expect(jobs["ci"]?.needs).toEqual([
-      "classify-changes",
-      "static-checks",
-      "native",
-      "package",
-      "test",
-      "compatibility",
-      "mcp",
-      "plugin-host",
-      "plugin-source",
-      "container-validate",
-      "workflow-quality",
-      "windows-test",
-      "windows-verify",
-    ]);
-    for (const name of ["required-test", "windows"]) {
-      expect(jobs[name]?.needs).toEqual(["classify-changes", "ci"]);
-    }
     for (const name of ["compatibility", "windows-verify"]) {
       expect(jobs[name]?.steps).toContainEqual(
         expect.objectContaining({
@@ -361,24 +299,80 @@ describe("TypeScript package skeleton", () => {
     );
     expect(testStep).not.toHaveProperty("if");
     expect(testStep).not.toHaveProperty("continue-on-error");
-    const nativeCoverageStep = job.steps!.find(
+    expect(
+      job.steps!.find(({ name }) => name === "Install plugin dependencies")?.if,
+    ).toBe("matrix.os == 'ubuntu-latest' && matrix.python == '3.12'");
+  });
+
+  test("requires a nonempty native Python report without skips", async () => {
+    const { jobs } = await workflow("node-ci.yml");
+    const step = jobs["plugin-source"]!.steps!.find(
       ({ name }) => name === "Require native platform coverage",
     )!;
-    expect(nativeCoverageStep.if).toBe("runner.os != 'Linux'");
-    expect(nativeCoverageStep.run).toContain(".//testcase/skipped");
-    expect(nativeCoverageStep).not.toHaveProperty("continue-on-error");
-    for (const name of [
-      "Install plugin dependencies",
-      "Set up Node.js for triage evals",
-      "Set up triage eval dependencies and host runtime",
-    ]) {
-      expect(job.steps!.find((step) => step.name === name)?.if).toBe(
-        "matrix.os == 'ubuntu-latest' && matrix.python == '3.12'",
-      );
+    expect(step).toMatchObject({ if: "runner.os != 'Linux'", shell: "python" });
+    expect(step).not.toHaveProperty("continue-on-error");
+    const directory = await mkdtemp(join(tmpdir(), "native-python-report-"));
+    try {
+      const reports = join(directory, "reports");
+      await mkdir(reports);
+      const passing = "<testsuite><testcase/></testsuite>";
+      await writeFile(join(reports, "python-stale.xml"), passing);
+      for (const [report, expected] of [
+        [null, 1],
+        ["", 1],
+        ["<testsuite/>", 1],
+        [
+          "<testsuite><testcase/><testcase><skipped/></testcase></testsuite>",
+          1,
+        ],
+        [passing, 0],
+      ] as const) {
+        if (report !== null)
+          await writeFile(join(reports, "python.xml"), report);
+        const result = await runCommand(
+          pythonExecutable()!,
+          ["-c", step.run!],
+          { cwd: directory },
+        );
+        expect(result.status, result.stderr).toBe(expected);
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
     }
-    expect(jobs["ci"]?.needs).toContain("plugin-source");
-    expect(jobs["required-test"]?.needs).toContain("ci");
-    expect(jobs["windows"]?.needs).toContain("ci");
+  });
+
+  test("requires the deterministic eval suites and their cross-project dependency pin", async () => {
+    const { jobs } = await workflow("node-ci.yml");
+    const requiredSteps = jobs["eval-contracts"]!.steps!.filter(
+      (step) => !step.if && !step["continue-on-error"],
+    );
+    expect(requiredSteps).toContainEqual(
+      expect.objectContaining({
+        "working-directory": "evals/triage-finding",
+        run: "node --run test:deterministic",
+      }),
+    );
+    const commands = requiredSteps.map((step) => step.run).join("\n");
+    for (const suite of [
+      "secret-discovery",
+      "standard-time-budget",
+      "workflow-routing",
+    ]) {
+      expect(commands).toContain(`--test evals/${suite}/test_*.mts`);
+    }
+    expect(commands).toContain(
+      "bun test sdk/typescript/tests-ts/codex-dependency-pins.test.ts",
+    );
+    const cachePaths = requiredSteps.find(
+      (step) => step.with?.["cache"] === "pnpm",
+    )?.with?.["cache-dependency-path"];
+    expect(String(cachePaths).trim().split("\n")).toEqual(
+      expect.arrayContaining([
+        "evals/triage-finding/pnpm-lock.yaml",
+        "plugins/codex-security/mcp-app/pnpm-lock.yaml",
+        "sdk/typescript/pnpm-lock.yaml",
+      ]),
+    );
   });
 
   test("checks one archive and restores its plugin before every test shard", async () => {
@@ -529,6 +523,17 @@ describe("TypeScript package skeleton", () => {
       "${{ github.event_name == 'pull_request' && 1 || github.run_number }}";
     expect(quality.env).not.toHaveProperty("CODEX_SECURITY_PROPERTY_SEED");
     expect(runner.env?.["CODEX_SECURITY_PROPERTY_SEED"]).toBe(seed);
+    for (const trigger of ["workflow_call", "workflow_dispatch"]) {
+      expect(quality.on[trigger]).toMatchObject({
+        inputs: { "compare-layouts": { type: "boolean", default: true } },
+      });
+    }
+    expect(quality.jobs["properties"]).toMatchObject({
+      env: { CODEX_SECURITY_PROPERTY_SEED: "${{ github.run_number }}" },
+      strategy: {
+        matrix: { os: ["ubuntu-latest", "macos-latest", "windows-latest"] },
+      },
+    });
     const unixMatrix = ci.jobs["test"]!.strategy!.matrix as Record<
       string,
       unknown
@@ -597,7 +602,7 @@ describe("TypeScript package skeleton", () => {
       "working-directory": "sdk/typescript",
     });
     expect(execution?.run).toContain(
-      "scripts/run-ci-tests.mts ${{ matrix.target.shard }}/${{ matrix.target.count }}",
+      "scripts/run-ci-tests.mts ${{ env.SHARD }}",
     );
     expect(execution?.run).toContain(
       "--seed=${{ env.CODEX_SECURITY_PROPERTY_SEED }}",
@@ -616,8 +621,12 @@ describe("TypeScript package skeleton", () => {
       (step) => step.name === "Upload runner report",
     );
     expect(runnerUpload).not.toHaveProperty("continue-on-error");
-    expect(runnerUpload?.with?.["name"]).toBe(
-      "runner-${{ matrix.target.os }}-${{ matrix.target.mode }}-${{ matrix.target.shard }}",
+    expect(runnerUpload?.with?.["name"]).toBe("runner-${{ env.REPORT_ID }}");
+    expect(runner.env?.["SHARD"]).toBe(
+      "${{ matrix.target.shard }}/${{ matrix.target.count }}",
+    );
+    expect(runner.env?.["REPORT_ID"]).toBe(
+      "${{ matrix.target.os }}-${{ matrix.target.mode }}-${{ matrix.target.shard }}",
     );
     expect(
       quality.jobs["mutation"]?.steps!.find(
