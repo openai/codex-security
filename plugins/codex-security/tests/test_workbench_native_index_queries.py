@@ -332,28 +332,29 @@ def test_scan_list_returns_lightweight_running_first_summaries(workbench_api, in
     assert "findings" not in scans[0]
 
 
+@pytest.mark.parametrize(
+    "simulate_windows",
+    [
+        pytest.param(False, id="native", marks=pytest.mark.cross_platform),
+        pytest.param(True, id="ntpath"),
+    ],
+)
 def test_scan_root_filter_matches_windows_path_aliases(
-    workbench_api, indexed_collections, tmp_path, monkeypatch
+    workbench_api, indexed_collections, tmp_path, monkeypatch, simulate_windows
 ):
     connection, _ = indexed_collections
+    history = workbench_api["scan_history"]
+    if simulate_windows:
+        monkeypatch.setattr(history, "os", SimpleNamespace(name="nt", path=ntpath, sep="\\"))
     root = tmp_path / "Scan Results"
+    root.mkdir()
     for scan_id, directory in zip(
-        SCAN_IDS, (root / "first", tmp_path / "Scan Results Other", tmp_path / "unrelated")
+        SCAN_IDS, (f"{root}/first", tmp_path / "Scan Results Other", history.os.path.normpath(root))
     ):
         connection.execute("UPDATE scans SET scan_dir = ? WHERE id = ?", (str(directory), scan_id))
-    history = workbench_api["scan_history"]
-    monkeypatch.setattr(history, "os", SimpleNamespace(name="nt", path=ntpath, sep="\\"))
-    args = query_args(scan_root=str(root).upper(), limit=None)
-
-    assert [scan["scanId"] for scan in history.list_scans(connection, args)["scans"]] == [
-        SCAN_IDS[0]
-    ]
-    connection.execute(
-        "UPDATE scans SET scan_dir = ? WHERE id = ?", (ntpath.normpath(str(root)), SCAN_IDS[0])
-    )
-    assert [scan["scanId"] for scan in history.list_scans(connection, args)["scans"]] == [
-        SCAN_IDS[0]
-    ]
+    scan_root = str(root).upper() if history.os.name == "nt" else str(root)
+    scans = history.list_scans(connection, query_args(scan_root=scan_root, limit=None))["scans"]
+    assert {scan["scanId"] for scan in scans} == {SCAN_IDS[0], SCAN_IDS[2]}
 
 
 def test_scan_list_probes_requested_repository_once(

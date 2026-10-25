@@ -1184,11 +1184,6 @@
     "darwin": 2.5,
     "win32": 5.5
   },
-  "workbench-scan-root-alias.test.ts": {
-    "linux": 0.3,
-    "darwin": 0.4,
-    "win32": 0.7
-  },
   "workbench-windows-compatibility.test.ts": {
     "linux": 0.6,
     "darwin": 0.8,
