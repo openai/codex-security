@@ -61,13 +61,7 @@ jobs:
           package-manager-cache: false
       - &set-up-the-ubuntu-sandbox
         name: Set up the Ubuntu sandbox
-        run: |
-          # The hosted image's unrelated PHP service times out during needrestart.
-          printf '%s\n' '$nrconf{override_rc}{qr(^php8\.3-fpm\.service$)} = 0;' \
-            | sudo tee /etc/needrestart/conf.d/action-ci.conf > /dev/null
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap apparmor-profiles
-          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+        run: bash scripts/setup-ubuntu-sandbox.sh
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run validate
       - name: Set up Bun for Action release contracts
@@ -108,10 +102,16 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          # Run setup from the merge commit, then test the Action at its PR head.
+          fetch-depth: 2
           persist-credentials: false
       - *actions-setup-node
       - *set-up-the-ubuntu-sandbox
+      - name: Check out the PR head for the Action smoke tests
+        if: github.event_name == 'pull_request'
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: git switch --detach "$PR_HEAD_SHA"
       - name: Validate the default OpenAI configuration without model calls
         id: openai
         uses: ./
