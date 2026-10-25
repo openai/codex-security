@@ -57,6 +57,7 @@
 - document the deterministic triage CI checks ([#1932](https://github.com/openai/codex-security/pull/1932))
 - validate generated files before rebuilding them ([#1934](https://github.com/openai/codex-security/pull/1934))
 - consolidate required check forwarding into one matrix ([#1938](https://github.com/openai/codex-security/pull/1938))
+- refresh triage eval transport dependencies ([#1935](https://github.com/openai/codex-security/pull/1935))
 
 <!-- release-section: highlights:end -->
 
