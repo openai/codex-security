@@ -55,6 +55,7 @@
 - wait for static checks before validating container images ([#1949](https://github.com/openai/codex-security/pull/1949))
 - trace failures to the original job attempt ([#1922](https://github.com/openai/codex-security/pull/1922))
 - document the deterministic triage CI checks ([#1932](https://github.com/openai/codex-security/pull/1932))
+- validate generated files before rebuilding them ([#1934](https://github.com/openai/codex-security/pull/1934))
 
 <!-- release-section: highlights:end -->
 
