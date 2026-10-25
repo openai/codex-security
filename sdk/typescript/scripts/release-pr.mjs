@@ -439,7 +439,7 @@ function reviewComment(
     marker,
     proposalMarker,
     suggestionsMarker,
-    `Release PR head \`${headSha}\`. Release plan evaluated through main commit \`${plan.mainSha}\`.`,
+    `Release proposal updated through main commit \`${plan.mainSha}\`.`,
     plan.humanOwned.length > 0
       ? `Preserved human-owned sections: ${plan.humanOwned.join(", ")}. The suggestions below have not replaced them.`
       : "The note sections still match the generated draft and were refreshed.",
@@ -585,7 +585,6 @@ export async function reconcileReleasePullRequest({
   repo,
   github,
   dryRun = true,
-  refreshBase = true,
 }) {
   // Rebuild the plan only when main or the proposal actually moves.
   for (;;) {
@@ -629,7 +628,7 @@ export async function reconcileReleasePullRequest({
       };
     const branchChanged =
       !headSha ||
-      (refreshBase && previous.mergeBase !== mainSha) ||
+      previous.mergeBase !== mainSha ||
       Object.entries(plan.files).some(
         ([path, content]) => repo.readFile(headSha, path) !== content,
       );
@@ -785,7 +784,6 @@ if (isMain(import.meta.url)) {
     repo: createGitRepository(directory),
     github: createGitHubClient(repository, token),
     dryRun: process.env.RELEASE_PR_DRY_RUN !== "false",
-    refreshBase: process.env.GITHUB_EVENT_NAME !== "push",
   });
   console.log(JSON.stringify(result, null, 2));
 }

@@ -91,8 +91,9 @@ Review this policy before enabling automation for `1.x`.
 
 ## Rolling release PRs
 
-`node-release-pr` checks pushes to `main`, refreshes enabled proposals hourly,
-and can be dispatched manually.
+`node-release-pr` runs after pushes to `main` and can be dispatched manually.
+Newer pushes can replace pending pushes. Manual runs keep their own place and
+all runs that update the release PR share one writer queue.
 It defaults to a read-only preview. It does not merge, tag, publish, or change
 the existing publication gates.
 
@@ -104,20 +105,14 @@ repository's enabled merge method, so the whole proposal lands as one
 release boundary commit. Generated PR titles and commit subjects use
 `chore(release): X.Y.Z`, matching the proposed package version. Confirm the
 squash commit subject uses the current PR title when merging. A later breaking
-change updates the version and title on the same PR. If a push changes the
-proposal files, the updater immediately appends a commit containing the latest
-`main` and requests Codex review. If the proposal files are identical, the
-push keeps the existing PR head and CI results. The hourly run incorporates
-intervening changes to `main` without requesting the same proposal review.
-Scheduled and manually requested writes keep their place when newer pushes arrive.
-New suggestions for human-owned notes still appear on the PR.
-
-Before merging, check that the reviewed head contains current `main`.
-`gh api repos/{owner}/{repo}/compare/main...REVIEWED_SHA --jq .behind_by`
-must return `0`. If it is behind, run
-`gh workflow run node-release-pr.yml --ref main -f dry_run=false` for an
-immediate refresh. Wait for CI and check the final Codex review on the current
-PR head. Repeat the comparison if `main` advances before merge.
+change updates the version and title on the same PR. Each update incorporates
+the latest `main` and appends a commit; the updater never force-pushes.
+A concurrent commit causes it to reread and
+retry. It requests Codex review when the proposal files change. Updates that
+only incorporate `main` keep CI current without repeating the same proposal
+review. New suggestions for human-owned notes still appear in a comment.
+Before merging the proposal, check CI and request a final Codex review
+if the last review targets an older head.
 
 The proposal updates the SDK version and the Action version in
 `github-action/package.json` and `github-action/package-lock.json` together.
@@ -243,8 +238,7 @@ to this repository; a missing or invalid private key fails the run. Previews
 always use `GITHUB_TOKEN`. See [GitHub's token documentation](https://docs.github.com/en/actions/concepts/security/github_token).
 
 After the manual write run is verified, set the `RELEASE_PR_ENABLED`
-repository variable to `true` to enable updates on pushes to `main` and the
-hourly base refresh.
+repository variable to `true` to allow updates after pushes to `main`.
 Remove it or set it to `false` to return push-triggered runs to previews.
 Manual runs always honor their **dry_run** input, which defaults to a preview;
 disabling automatic updates does not prevent an explicit manual write run.

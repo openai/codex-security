@@ -108,6 +108,7 @@ test("main CI completions report independently of cutting a release", () => {
     "./.github/workflows/release-progress.yml",
   );
   expect(cut.jobs.cut).not.toHaveProperty("needs");
+  expect(cut.jobs.progress).not.toHaveProperty("needs");
   expect(cut.jobs.cut).toHaveProperty("concurrency", {
     group: "node-release-cut",
     queue: "max",
