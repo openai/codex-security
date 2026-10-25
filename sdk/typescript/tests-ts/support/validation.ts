@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
-import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import type {
   CodexOptions,
   ThreadEvent,
@@ -44,27 +45,39 @@ export function createValidationFixtures() {
     });
   }
   const actualLstat = fsPromises.lstat;
-  let systemConfigurationLookup: ReturnType<
-    typeof spyOn<typeof fsPromises, "lstat">
-  >;
-  beforeEach(() => {
-    const nativePath =
+  let guidanceLookup: ReturnType<typeof spyOn<typeof fsPromises, "lstat">>;
+  beforeEach(async () => {
+    const ambientGuidance = new Set([
       process.platform === "win32"
         ? join("C:\\ProgramData", "OpenAI", "Codex", "config.toml")
-        : "/etc/codex/config.toml";
-    systemConfigurationLookup = spyOn(fsPromises, "lstat").mockImplementation(
-      (async (...args: Parameters<typeof actualLstat>) => {
-        if (args[0] === nativePath)
-          throw Object.assign(
-            new Error("Synthetic absent native system configuration"),
-            { code: "ENOENT" },
-          );
-        return await actualLstat(...args);
-      }) as typeof actualLstat,
-    );
+        : "/etc/codex/config.toml",
+    ]);
+    guidanceLookup = spyOn(fsPromises, "lstat").mockImplementation((async (
+      ...args: Parameters<typeof actualLstat>
+    ) => {
+      if (typeof args[0] === "string" && ambientGuidance.has(args[0]))
+        throw Object.assign(new Error("Synthetic absent native guidance"), {
+          code: "ENOENT",
+        });
+      return await actualLstat(...args);
+    }) as typeof actualLstat);
+    // Guidance below the temporary directory belongs to the fixtures and stays visible.
+    let directory = await fsPromises.realpath(tmpdir());
+    for (;;) {
+      for (const name of [
+        ".codex/config.toml",
+        "AGENTS.override.md",
+        "AGENTS.md",
+        "REVIEW.md",
+      ])
+        ambientGuidance.add(join(directory, name));
+      const parent = dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
   });
   afterEach(async () => {
-    systemConfigurationLookup.mockRestore();
+    guidanceLookup.mockRestore();
     await cleanup();
   });
 

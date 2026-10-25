@@ -2148,7 +2148,6 @@ The extraction root is not enforced.
         second = FINALIZER._sarif_rule(sibling["ruleId"], [sibling])
         for key in ("id", "name", "shortDescription"):
             self.assertEqual(first[key], second[key])
-        self.assertNotEqual(first["name"], self.finding["ruleId"])
         self.assertEqual(first["properties"]["security-severity"], "8.1")
         self.assertEqual(second["properties"]["security-severity"], "9.4")
 

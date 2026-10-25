@@ -154,7 +154,6 @@ describe("TypeScript package skeleton", () => {
     expect([false, "false"]).not.toContain(
       verificationSteps[pythonSetup]?.with?.["update-environment"],
     );
-    expect(jobs["required-test"]?.name).toEndWith("${{ matrix.os }} / node-22");
     for (const name of ["compatibility", "windows-verify"]) {
       expect(jobs[name]?.steps).toContainEqual(
         expect.objectContaining({
@@ -341,16 +340,17 @@ describe("TypeScript package skeleton", () => {
     expect(commands).toContain(
       "bun test sdk/typescript/tests-ts/codex-dependency-pins.test.ts",
     );
-    const cachePaths = requiredSteps.find(
-      (step) => step.with?.["cache"] === "pnpm",
-    )?.with?.["cache-dependency-path"];
-    expect(String(cachePaths).trim().split("\n")).toEqual(
-      expect.arrayContaining([
-        "evals/triage-finding/pnpm-lock.yaml",
-        "plugins/codex-security/mcp-app/pnpm-lock.yaml",
-        "sdk/typescript/pnpm-lock.yaml",
-      ]),
+    const setup = requiredSteps.find(
+      (step) => step.uses === "./.github/actions/setup-tools",
     );
+    expect(setup?.with?.["node-version"]).toBe("24.15.0");
+    expect(
+      String(setup?.with?.["cache-dependency-path"]).trim().split("\n"),
+    ).toEqual([
+      "sdk/typescript/pnpm-lock.yaml",
+      "plugins/codex-security/mcp-app/pnpm-lock.yaml",
+      "evals/triage-finding/pnpm-lock.yaml",
+    ]);
   });
 
   test("checks one archive and restores its plugin before every test shard", async () => {

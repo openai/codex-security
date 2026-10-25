@@ -13,22 +13,10 @@ export const FindingPatchSchema = z.object({
 
 export type FindingPatch = z.infer<typeof FindingPatchSchema>;
 
-export const FindingVerificationCheckSchema = z.object({
-  name: z.string().trim().min(1),
-  status: z.enum(["passed", "failed", "not_run"]),
-  evidence: z.string().trim().min(1),
-  command: z.string().trim().min(1).optional(),
-});
-
-export type FindingVerificationCheck = z.infer<
-  typeof FindingVerificationCheckSchema
->;
-
 export const FindingVerificationSchema = z.object({
   id: z.string(),
   status: z.enum(["fixed", "still_vulnerable", "inconclusive"]),
   evidence: z.string().trim().min(1),
-  checks: z.array(FindingVerificationCheckSchema).optional(),
 });
 
 export type FindingVerification = z.infer<typeof FindingVerificationSchema>;
@@ -43,7 +31,6 @@ export interface RemediationPromptInput {
   pluginRoot: string;
   contents: readonly unknown[];
   structuredPatch?: boolean;
-  structuredVerification?: boolean;
   verificationIds?: readonly string[];
   findingInstructions?: Readonly<Record<string, string>>;
   instructions?: string;
@@ -71,12 +58,6 @@ export async function remediationPrompt(input: RemediationPromptInput) {
       `Expected result identifiers (JSON array): ${JSON.stringify(input.verificationIds)}`,
       "Return exactly one evidence-backed result per expected identifier in the same order, following the skill's JSON result contract.",
     );
-    if (input.structuredVerification) {
-      prompt.push(
-        'For hosted verification, extend each result with a nonempty "checks" array: {"name":"specific check name","status":"passed|failed|not_run","evidence":"specific source, observed result, or blocker","command":"exact command, only when one was attempted"}. Retain the skill\'s id, status, and evidence fields. Report the checks needed to establish that the original vulnerability is fixed and legitimate behavior remains intact, including all requested validation checks within the selected verification scope.',
-        'Distinguish static source assessment from executed tests in each check\'s name and evidence. Do not invent commands, tests, or passing checks from a prose summary. Use "passed" only for a completed check supported by evidence, "failed" for a completed check that did not pass, and "not_run" when a required check could not be completed, with the blocker in evidence. Omit command for static assessment and checks that were not attempted. Use "fixed" only when all required checks passed; unavailable or omitted required checks, an unproven legitimate control, and other material proof gaps require "inconclusive". Preserve the read-only boundary.',
-      );
-    }
   } else {
     prompt.push(
       `Use the bundled $codex-security:fix-finding skill at ${JSON.stringify(join(input.pluginRoot, "skills", "fix-finding", "SKILL.md"))}.`,
@@ -125,7 +106,6 @@ export async function remediationPrompt(input: RemediationPromptInput) {
 export function parseFindingVerifications(
   response: string,
   identifiers: readonly string[],
-  options: { requireChecks?: boolean } = {},
 ): FindingVerification[] {
   let reported: unknown;
   try {
@@ -134,13 +114,7 @@ export function parseFindingVerifications(
     throw new CodexSecurityError("Verification results were not valid JSON.");
   }
   const parsed = z
-    .object({
-      results: z.array(
-        options.requireChecks
-          ? FindingVerificationSchema
-          : FindingVerificationSchema.omit({ checks: true }),
-      ),
-    })
+    .object({ results: z.array(FindingVerificationSchema) })
     .safeParse(reported);
   if (
     !parsed.success ||
@@ -151,21 +125,7 @@ export function parseFindingVerifications(
       "Codex did not return an evidence-backed verification result for every finding.",
     );
   }
-  const results: FindingVerification[] = parsed.data.results;
-  if (
-    options.requireChecks &&
-    results.some(
-      ({ status, checks }) =>
-        !checks?.length ||
-        (status === "fixed" &&
-          checks.some((check) => check.status !== "passed")),
-    )
-  ) {
-    throw new CodexSecurityError(
-      "Hosted verification requires evidence-backed checks; a fixed result requires every reported check to pass.",
-    );
-  }
-  return results;
+  return parsed.data.results;
 }
 
 export function parseFindingPatch(

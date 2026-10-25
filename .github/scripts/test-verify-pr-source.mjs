@@ -40,11 +40,7 @@ function run(id, changes = {}) {
 const edit = (id, changes) =>
   run(id, { display_title: "PR edit CI · PR #42 → main", ...changes });
 function evidence(id, selected = "success") {
-  const names = [
-    "ci",
-    "classify changes",
-    ...["ubuntu", "macos", "windows"].map((os) => os + "-latest / node-22"),
-  ];
+  const names = ["ci", "classify changes"];
   const selection = {
     name: "Select required checks",
     status: "completed",
@@ -135,8 +131,9 @@ test("only fresh canonical source jobs and genuine selection can qualify a sourc
   assert.ok(realSource(page, source));
   for (const change of [
     { total_count: 99 },
-    { jobs: page.jobs.slice(1) },
-    { total_count: 6, jobs: [...page.jobs, page.jobs[0]] },
+    { total_count: 1, jobs: page.jobs.slice(1) },
+    { total_count: 1, jobs: page.jobs.slice(0, 1) },
+    { total_count: 3, jobs: [...page.jobs, page.jobs[0]] },
     { jobs: page.jobs.map((j) => ({ ...j, run_id: 1 })) },
     { jobs: page.jobs.map((j) => ({ ...j, run_attempt: 2 })) },
     {
@@ -192,7 +189,7 @@ test("retrying a failed edit cannot replace its full checks with older green res
   await retry.finish();
 });
 
-test("even full fallback needs a current target; repeat this check just before the aliases", async () => {
+test("even full fallback needs a current target when the CI gate finishes", async () => {
   const stale = { ...target, base: { ...pr.base, ref: "other" } },
     unavailable = new Error("target unavailable");
   for (const history of [

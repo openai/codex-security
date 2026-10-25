@@ -12,6 +12,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
+import pytest
 from workbench_test_support import load_script
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
@@ -25,12 +26,14 @@ class SarifProjectionTest(unittest.TestCase):
         self.findings = json.loads((EXAMPLE_DIR / "findings.json").read_text())
         self.finding = self.findings["findings"][0]
 
+    @pytest.mark.cross_platform
     def test_sarif_preserves_alert_identity_when_finding_text_changes(self) -> None:
         finding = self.finding
         finding["extensions"] = {"candidateId": "candidate-example"}
         run = FINALIZER.build_sarif(self.manifest, self.findings)["runs"][0]
         rule = run["tool"]["driver"]["rules"][0]
         result = run["results"][0]
+        self.assertNotEqual(rule["name"], finding["ruleId"])
         self.assertEqual(rule["shortDescription"]["text"], rule["name"])
         self.assertIn(finding["remediation"], rule["help"]["text"])
         for field in ("findingId", "occurrenceId"):
@@ -52,6 +55,7 @@ class SarifProjectionTest(unittest.TestCase):
         for field in ("ruleId", "ruleIndex", "locations", "partialFingerprints", "properties"):
             self.assertEqual(changed["results"][0][field], result[field])
 
+    @pytest.mark.cross_platform
     def test_sarif_merges_shared_rule_metadata_without_mixing_results(self) -> None:
         first = copy.deepcopy(self.finding)
         first["severity"] = {"level": "low"}
@@ -95,6 +99,7 @@ class SarifProjectionTest(unittest.TestCase):
             self.assertEqual(result["properties"]["severity"], own["severity"]["level"])
             self.assertEqual(result["ruleIndex"], 0)
 
+    @pytest.mark.cross_platform
     def test_sarif_security_severity_mapping(self) -> None:
         for level, score, expected in (
             ("critical", None, "9.5"),
