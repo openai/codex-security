@@ -47,6 +47,9 @@ The SDK shards in `node-ci` use the workflow run number as their seed, so
 rerunning a job repeats its test order. To replay a shard locally, use its
 platform, shard selector, and seed, for example
 `node --experimental-strip-types scripts/run-ci-tests.mts 2/6 --seed=12345`.
+On Linux, if the original workflow ran the separate MCP tests, prefix that
+command with `CODEX_SECURITY_TEST_MCP_WORKERS_SEPARATE=true` to skip the four
+worker groups they cover. Leave it unset to replay a run that skipped MCP.
 
 The local test commands pass a 30-second per-test timeout explicitly. Windows
 CI and the Windows runner diagnostics allow 120 seconds for slower native
