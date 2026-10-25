@@ -9,12 +9,17 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { expect, test } from "bun:test";
+import { bunTestTimeout } from "../scripts/bun-test-timeout.mts";
 import { partitionTests, type TestTimings } from "../scripts/test-shards.mts";
 import { readSubprocess } from "./support/shell.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 
 async function copyRunner(root: string, timings: TestTimings = {}) {
-  for (const name of ["run-ci-tests.mts", "test-shards.mts"]) {
+  for (const name of [
+    "run-ci-tests.mts",
+    "test-shards.mts",
+    "bun-test-timeout.mts",
+  ]) {
     await copyFile(
       new URL(`../scripts/${name}`, import.meta.url),
       join(root, "scripts", name),
@@ -66,74 +71,88 @@ test("uses each platform's history and includes new files without selecting dele
 });
 
 test.each([3, 6, 7, 14])(
-  "runs each eligible file once across %i native shards, including new files",
-  async (count) => {
-    const node = Bun.which("node");
-    expect(node).not.toBeNull();
-    const root = await temporaryDirectory("codex-security-native-shards-");
-    try {
-      await mkdir(join(root, "scripts"));
-      await mkdir(join(root, "tests-ts"));
-      await copyRunner(root, {
-        "probe-0.test.ts": { linux: 100, darwin: 100, win32: 100 },
-        "probe-1.test.ts": { linux: 80, darwin: 80, win32: 80 },
-        "deleted.test.ts": { linux: 1_000, darwin: 1_000, win32: 1_000 },
-      });
-      const files = [
-        ...Array.from({ length: 20 }, (_, index) => `probe-${index}.test.ts`),
-        "newly-added.test.ts",
-      ];
-      const executionLog = join(root, "executed.txt");
-      for (const file of files) {
-        await writeFile(
-          join(root, "tests-ts", file),
-          `import { appendFileSync } from "node:fs";
+  "assigns each discovered file once across %i shards",
+  (count) => {
+    const files = Array.from(
+      { length: 20 },
+      (_, index) => `probe-${index}.test.ts`,
+    );
+    const shards = partitionTests(
+      files,
+      count,
+      { "deleted.test.ts": { linux: 100 } },
+      "linux",
+    );
+    expect(shards).toHaveLength(count);
+    expect(shards.every((shard) => shard.length > 0)).toBe(true);
+    expect(shards.flat().sort()).toEqual(files.sort());
+  },
+);
+
+test("runs every discovered file once across two real shards, excluding machine policy", async () => {
+  const count = 2;
+  const node = Bun.which("node");
+  expect(node).not.toBeNull();
+  const root = await temporaryDirectory("codex-security-native-shards-");
+  try {
+    await mkdir(join(root, "scripts"));
+    await mkdir(join(root, "tests-ts"));
+    await copyRunner(root, {
+      "probe-0.test.ts": { linux: 100, darwin: 100, win32: 100 },
+      "probe-1.test.ts": { linux: 80, darwin: 80, win32: 80 },
+      "deleted.test.ts": { linux: 1_000, darwin: 1_000, win32: 1_000 },
+    });
+    const files = ["probe-0.test.ts", "probe-1.test.ts", "newly-added.test.ts"];
+    const executionLog = join(root, "executed.txt");
+    for (const file of files) {
+      await writeFile(
+        join(root, "tests-ts", file),
+        `import { appendFileSync } from "node:fs";
 import { test } from "bun:test";
 test(${JSON.stringify(file)}, () => {
   appendFileSync(${JSON.stringify(executionLog)}, ${JSON.stringify(`${file}\n`)});
 });\n`,
-        );
-      }
-      await writeFile(
-        join(root, "tests-ts", "windows-machine-policy.test.ts"),
-        'throw new Error("Machine policy test must run separately");\n',
       );
-      const executed: string[] = [];
-      for (let shard = 1; shard <= count; shard++) {
-        await writeFile(executionLog, "");
-        const child = Bun.spawn({
-          cmd: [
-            node!,
-            "--experimental-strip-types",
-            join(root, "scripts", "run-ci-tests.mts"),
-            `${shard}/${count}`,
-          ],
-          env: {
-            ...process.env,
-            PATH: `${dirname(process.execPath)}${delimiter}${process.env["PATH"] ?? ""}`,
-          },
-          stdin: "ignore",
-          stdout: "pipe",
-          stderr: "pipe",
-          timeout: 30_000,
-          windowsHide: true,
-        });
-        const { status, stdout, stderr } = await readSubprocess(child);
-        expect(status, stderr).toBe(0);
-        const shardFiles = (await readFile(executionLog, "utf8"))
-          .trim()
-          .split("\n");
-        expect(stdout).toContain(
-          `Test shard ${shard}/${count}: ${shardFiles.sort().join(" ")}`,
-        );
-        executed.push(...shardFiles);
-      }
-      expect(executed.sort()).toEqual(files.sort());
-    } finally {
-      await rm(root, { recursive: true, force: true });
     }
-  },
-);
+    await writeFile(
+      join(root, "tests-ts", "windows-machine-policy.test.ts"),
+      'throw new Error("Machine policy test must run separately");\n',
+    );
+    const executed: string[] = [];
+    for (let shard = 1; shard <= count; shard++) {
+      await writeFile(executionLog, "");
+      const child = Bun.spawn({
+        cmd: [
+          node!,
+          "--experimental-strip-types",
+          join(root, "scripts", "run-ci-tests.mts"),
+          `${shard}/${count}`,
+        ],
+        env: {
+          ...process.env,
+          PATH: `${dirname(process.execPath)}${delimiter}${process.env["PATH"] ?? ""}`,
+        },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 30_000,
+        windowsHide: true,
+      });
+      const { status, stdout, stderr } = await readSubprocess(child);
+      expect(status, stderr).toBe(0);
+      const shardFiles = (await readFile(executionLog, "utf8"))
+        .trim()
+        .split("\n");
+      expect(stdout).toContain(
+        `Test shard ${shard}/${count}: ${shardFiles.sort().join(" ")}`,
+      );
+      executed.push(...shardFiles);
+    }
+    expect(executed.sort()).toEqual(files.sort());
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("rejects an empty shard while allowing a nonempty shard with the same count", async () => {
   const node = Bun.which("node");
@@ -192,6 +211,12 @@ test("propagates a subprocess exit after successful test assertions", async () =
     await mkdir(join(root, "scripts"));
     await mkdir(join(root, "tests-ts"));
     await copyRunner(root);
+    // Exercise the two-digit selector used by Windows CI without extra processes.
+    await Promise.all(
+      Array.from({ length: 13 }, (_, index) =>
+        writeFile(join(root, "tests-ts", `earlier-${index}.test.ts`), ""),
+      ),
+    );
     await writeFile(
       join(root, "tests-ts", "probe.test.ts"),
       `import { writeFileSync } from "node:fs";
@@ -208,7 +233,7 @@ afterAll(() => { process.exit(7); });
         node!,
         "--experimental-strip-types",
         join(root, "scripts", "run-ci-tests.mts"),
-        "1/1",
+        "14/14",
       ],
       env: {
         ...process.env,
@@ -231,29 +256,38 @@ afterAll(() => { process.exit(7); });
 const defaultTimeoutMs = process.platform === "win32" ? "120000" : "30000";
 
 test.each([
-  [defaultTimeoutMs, [], "available", false],
-  [defaultTimeoutMs, [], "available", true],
-  [defaultTimeoutMs, [], "blocked directory", false],
-  [defaultTimeoutMs, [], "blocked directory", true],
-  ["5000", ["--timeout", "5000"], "available", false],
-  ["5000", ["--timeout=5000"], "available", false],
-  ["5000", ["--timeout", "9000", "--timeout=5000"], "available", false],
-  ["5000", ["--timeout=9000", "--timeout", "5000"], "available", false],
-  [defaultTimeoutMs, ["--", "--timeout", "5000"], "available", false],
-  [defaultTimeoutMs, ["-t", "--timeout=5000"], "available", false],
-  [defaultTimeoutMs, ["--grep", "--timeout=5000"], "available", false],
-  [
-    defaultTimeoutMs,
-    ["--test-name-pattern", "--timeout=5000"],
-    "available",
-    false,
-  ],
-  ["7000", ["--timeout", "7000", "-t", "--timeout=5000"], "available", false],
-  [defaultTimeoutMs, ["--coverage-dir", "--timeout=5000"], "available", false],
-  [defaultTimeoutMs, ["--title", "--timeout=5000"], "available", false],
+  [defaultTimeoutMs, []],
+  ["5000", ["--timeout", "5000"]],
+  ["5000", ["--timeout=5000"]],
+  ["5000", ["--timeout", "9000", "--timeout=5000"]],
+  ["5000", ["--timeout=9000", "--timeout", "5000"]],
+  [defaultTimeoutMs, ["--", "--timeout", "5000"]],
+  [defaultTimeoutMs, ["-t", "--timeout=5000"]],
+  [defaultTimeoutMs, ["--grep", "--timeout=5000"]],
+  [defaultTimeoutMs, ["--test-name-pattern", "--timeout=5000"]],
+  ["7000", ["--timeout", "7000", "-t", "--timeout=5000"]],
+  [defaultTimeoutMs, ["--coverage-dir", "--timeout=5000"]],
+  [defaultTimeoutMs, ["--title", "--timeout=5000"]],
+  ["7000", ["--config", "--timeout=7000"]],
+  ["7000", ["-c", "--timeout=7000"]],
+  ["7000", ["--bail", "--timeout=7000"]],
+] as const)("uses timeout %s when Bun receives %p", (expected, options) => {
+  expect(
+    bunTestTimeout([
+      "test",
+      "--timeout",
+      defaultTimeoutMs,
+      ...options,
+      "./tests-ts/probe.test.ts",
+    ]),
+  ).toBe(expected);
+});
+
+test.each([
   ["7000", ["--config", "--timeout=7000"], "available", false],
-  ["7000", ["-c", "--timeout=7000"], "available", false],
-  ["7000", ["--bail", "--timeout=7000"], "available", false],
+  [defaultTimeoutMs, [], "available", true],
+  [defaultTimeoutMs, ["-t", "--timeout=5000"], "blocked directory", false],
+  [defaultTimeoutMs, [], "blocked directory", true],
 ] as const)(
   "uses timeout %s with %p, %s reports and failure=%p",
   async (timeout, options, report, fail) => {

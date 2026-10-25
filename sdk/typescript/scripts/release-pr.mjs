@@ -267,9 +267,9 @@ export function createReleasePlan(history, previous = null) {
   };
 }
 
-export function createGitRepository(directory) {
+export function createGitRepository(directory, env = process.env) {
   const git = (...args) =>
-    gitText(args, { cwd: directory, stdio: ["pipe", "pipe", "pipe"] });
+    gitText(args, { cwd: directory, env, stdio: ["pipe", "pipe", "pipe"] });
   return {
     git,
     ensureCommit(sha) {

@@ -147,7 +147,12 @@ For source qualification, CI builds and inspects one package archive, then passe
 that archive to jobs in the same workflow run, using the commit SHA in the
 artifact name. Selected Node runtimes install and inspect the package, including
 a strict NodeNext TypeScript consumer, the actual CLI, credential locking, and a
-nested Codex worker. Native plugin-build tests remain in the shared Bun suite.
+nested Codex worker. The installed Deep Scan smoke exercises a real retry on
+one runtime per OS for PRs and main pushes, and on every scheduled or manual
+qualification lane. All selected runtimes still complete direct and detached scans.
+Native plugin-build tests remain in the shared Bun suite. The release PR writer
+and its Git ref races run on Linux, where the release workflow executes;
+maintainer dry runs use a real Git repository on each OS.
 Typechecking and formatting run once in an independent required job, so package
 consumers do not wait for those checks. Package compilation and archive
 validation still finish before the test jobs start.
