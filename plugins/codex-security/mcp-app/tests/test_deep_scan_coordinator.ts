@@ -1523,6 +1523,12 @@ async function testMissingReducerResultResumesExistingThread(
     executor.dedupContinuationPrompts[1] ?? "",
     /paginate all assigned findings and the previous aggregate/,
   );
+  for (const prompt of [
+    await readFile(executor.dedupPromptPaths[0], "utf8"),
+    executor.dedupContinuationPrompts[1] ?? "",
+  ]) {
+    assert.match(prompt, /without code mode[^\n]*\bdirectly\b/i);
+  }
   assert.equal(new Set(executor.dedupPromptPaths).size, 1);
   await assert.rejects(
     realpath(

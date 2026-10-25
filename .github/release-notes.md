@@ -59,6 +59,7 @@
 - consolidate required check forwarding into one matrix ([#1938](https://github.com/openai/codex-security/pull/1938))
 - refresh triage eval transport dependencies ([#1935](https://github.com/openai/codex-security/pull/1935))
 - preserve required checks after pull request edits ([#1944](https://github.com/openai/codex-security/pull/1944))
+- let reducers page inputs without code mode ([#1910](https://github.com/openai/codex-security/pull/1910))
 
 <!-- release-section: highlights:end -->
 
