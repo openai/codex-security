@@ -651,17 +651,15 @@ describe("npm package tar listings", () => {
           }),
         ),
       );
-      const nativeRoot = join(root, "native");
-      mkdirSync(nativeRoot);
+      // The wrong-long-name fixtures have no portable asset path to select.
       const extracted = await execFileAsync(
         "tar",
-        ["-xzf", archivePath, "-C", nativeRoot],
+        ["-xzf", archivePath, "-C", root, ...(wrongLongName ? [] : [path])],
         { encoding: "buffer", timeout: 30_000, windowsHide: true },
       );
       expect(extracted.stderr.toString()).toBe("");
-      // These incompatible packages do not promise a portable native asset path.
       if (!wrongLongName)
-        expect(readFileSync(join(nativeRoot, path)).equals(logo)).toBe(true);
+        expect(readFileSync(join(root, path)).equals(logo)).toBe(true);
       const contractPath = join(root, "contract.json");
       writeFileSync(
         contractPath,
