@@ -13,24 +13,28 @@ import { sha256 } from "./support/finding-identity.js";
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
-const bundle = await build({
-  stdin: {
-    resolveDir: fileURLToPath(
-      new URL("../../../plugins/codex-security/mcp-app/", import.meta.url),
-    ),
-    contents: `export * from "./src/artifact-scan-draft.ts";
+const bundlePath = join(await temporaryDirectory(), "deep-admission.mjs");
+try {
+  await build({
+    stdin: {
+      resolveDir: fileURLToPath(
+        new URL("../../../plugins/codex-security/mcp-app/", import.meta.url),
+      ),
+      contents: `export * from "./src/artifact-scan-draft.ts";
       export * from "./src/deep-scan/artifacts.ts";
       export * from "./src/deep-scan/artifact-validation.ts";
       export * from "./src/deep-scan/worker-runner.ts";`,
-  },
-  bundle: true,
-  format: "esm",
-  platform: "node",
-  loader: { ".md": "text" },
-  write: false,
-});
-const bundlePath = join(await temporaryDirectory(), "deep-admission.mjs");
-await writeFile(bundlePath, bundle.outputFiles[0]!.contents);
+    },
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    loader: { ".md": "text" },
+    outfile: bundlePath,
+  });
+} catch (error) {
+  await cleanup().catch(() => undefined);
+  throw error;
+}
 const {
   createDeepScanArtifacts,
   recordCodexSecurityScanDraftViaWorkbench,
