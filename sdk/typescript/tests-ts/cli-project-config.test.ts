@@ -1426,7 +1426,7 @@ test.each([
           codexHome: input.root,
           model,
           onUsage: options?.onUsage,
-          onCost: (cost, complete) => {
+          onCost: (cost, _usage, complete) => {
             if (complete) options?.onCost?.(cost);
           },
         });

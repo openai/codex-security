@@ -7,13 +7,26 @@ import { pathToFileURL } from "node:url";
 const spawn = childProcess.spawn;
 let workerArgs;
 let workerProcess;
-// Capture actual worker arguments in this isolated coordinator process.
+let workerThreadMethod;
+let workerProgram;
+// Capture the native process that receives the worker turn, excluding preflight.
 const recordedSpawn = (command, args, options) => {
   const child = spawn(command, args, options);
-  if (args[0] === "exec") {
-    workerArgs = args;
-    workerProcess = child;
-  }
+  if (!args.includes("app-server")) return child;
+  const write = child.stdin.write.bind(child.stdin);
+  let threadMethod;
+  child.stdin.write = (chunk, ...rest) => {
+    const message = JSON.parse(String(chunk));
+    if (message.method === "thread/start" || message.method === "thread/resume")
+      threadMethod = message.method;
+    if (message.method === "turn/start") {
+      workerArgs = args;
+      workerProcess = child;
+      workerThreadMethod = threadMethod;
+      workerProgram = message.params.cyberAccessProgram;
+    }
+    return write(chunk, ...rest);
+  };
   return child;
 };
 for (const name of ["node:child_process", "child_process"])
@@ -52,6 +65,8 @@ try {
     const requestCount = requests.length;
     workerArgs = undefined;
     workerProcess = undefined;
+    workerThreadMethod = undefined;
+    workerProgram = undefined;
     const result = await executor.run({
       ...request,
       promptPath: process.argv[3],
@@ -59,11 +74,13 @@ try {
       subagents: 0,
       signal: new AbortController().signal,
     });
-    if (!workerArgs)
-      throw new Error("Native worker arguments were not captured");
+    if (!workerArgs || !workerThreadMethod)
+      throw new Error(
+        "Native worker turn and thread request were not captured",
+      );
     if (requests.length === requestCount)
       throw new Error("Worker completed without a synthetic Responses request");
-    // Turn completion can precede exec's exit. Release its SQLite handles before
+    // Release the worker's SQLite handles before
     // this fixture starts a separate app-server against the same Codex home.
     if (workerProcess.exitCode === null && workerProcess.signalCode === null)
       await once(workerProcess, "exit");
@@ -79,8 +96,9 @@ try {
     process.stdout.write(
       JSON.stringify({
         threadId: result.threadId,
-        resumed: workerArgs.includes("resume"),
-        program: requests.at(-1)?.access_programs?.cyber,
+        resumed: workerThreadMethod === "thread/resume",
+        requestedProgram: workerProgram ?? null,
+        program: requests.at(-1)?.access_programs?.cyber ?? null,
         daybreak: config.daybreak ?? null,
         daybreakFeatures: Object.fromEntries(
           [

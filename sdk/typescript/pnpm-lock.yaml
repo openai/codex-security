@@ -76,6 +76,9 @@ importers:
       zod:
         specifier: 4.6.7
         version: 4.6.7
+      zstd-codec:
+        specifier: 0.1.5
+        version: 0.1.5
     devDependencies:
       '@stryker-mutator/core':
         specifier: 10.0.0
@@ -1653,6 +1656,9 @@ packages:
   zod@4.6.7:
     resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
 
+  zstd-codec@0.1.5:
+    resolution: {integrity: sha512-v3fyjpK8S/dpY/X5WxqTK3IoCnp/ZOLxn144GZVlNUjtwAchzrVo03h+oMATFhCIiJ5KTr4V3vDQQYz4RU684g==}
+
 snapshots:
 
   '@alcalzone/ansi-tokenize@0.3.1':
@@ -3019,3 +3025,5 @@ snapshots:
   yoga-layout@3.2.1: {}
 
   zod@4.6.7: {}
+
+  zstd-codec@0.1.5: {}

@@ -474,7 +474,12 @@ test.each(["patch", "verify-fix"] as const)(
   },
 );
 
-test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
+test.each([
+  "omitted",
+  "omitted with changed gates",
+  "explicit",
+  "explicit program",
+] as const)(
   "stored API-key patches preserve %s settings for an active scan's later workers",
   async (settings) => {
     await withStoredApiKey(
@@ -490,18 +495,23 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
         await writeCodexConfig(join(ambientHome, "config.toml"), {});
         const scanConfig = join(root, "scan.toml");
         const workerConfig = join(root, "workers.toml");
-        const workerRuntime: JsonObject =
-          settings !== "explicit"
-            ? {}
-            : {
-                daybreak: false,
-                features: {
-                  cli_daybreak: true,
-                  api_key_cyber_access_programs: true,
-                  api_key_model_discovery: true,
-                },
-              };
-        await writeCodexConfig(scanConfig, {});
+        const explicit = settings.startsWith("explicit");
+        const workerRuntime: JsonObject = !explicit
+          ? {}
+          : {
+              daybreak: false,
+              features: {
+                cli_daybreak: true,
+                api_key_cyber_access_programs: true,
+                api_key_model_discovery: true,
+              },
+            };
+        await writeCodexConfig(
+          scanConfig,
+          settings === "explicit program"
+            ? { codex_security: { cyber_access_program: "standard" } }
+            : {},
+        );
         await writeCodexConfig(workerConfig, { worker_runtime: workerRuntime });
         const prompt = join(root, "prompt.md");
         await writeFile(prompt, "Synthetic worker request.");
@@ -591,11 +601,13 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
           const { threadId, resumed, ...baseline } = await worker("discovery");
           expect(threadId).toBeString();
           expect(resumed).toBe(false);
-          expect(baseline.program).toBe("standard");
-          expect(baseline.daybreak).toBe(
-            settings === "explicit" ? false : null,
-          );
-          if (settings === "explicit")
+          // App-server leaves the default program absent; explicit selection
+          // must reach both the worker RPC and its native Responses request.
+          const program = settings === "explicit program" ? "standard" : null;
+          expect(baseline.requestedProgram).toBe(program);
+          expect(baseline.program).toBe(program);
+          expect(baseline.daybreak).toBe(explicit ? false : null);
+          if (explicit)
             expect(baseline.daybreakFeatures).toEqual(
               workerRuntime["features"],
             );

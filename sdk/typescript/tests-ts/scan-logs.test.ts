@@ -1,6 +1,6 @@
 import { writeJsonLines } from "./support/json.js";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { unlinkSync } from "node:fs";
+import fs, { unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { zstdCompressSync } from "node:zlib";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
@@ -10,6 +10,7 @@ import {
   readScanLogs,
 } from "../src/scan-logs.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const { temporaryDirectory: temporaryHome, cleanup } = createApiTestFixtures(
   "codex-security-scan-logs-",
@@ -433,6 +434,94 @@ describe("saved scan logs", () => {
       },
     ]);
   });
+
+  for (const format of ["plain", "compressed"]) {
+    const name = `keeps ${format} rollout reads independent of the descriptor offset`;
+    test(name, async () => {
+      if (runTestInSubprocess(import.meta.path, name)) return;
+      const home = await temporaryHome();
+      const event = commandEvent("parent work", "parent-call");
+      await writeSession(home, "parent", [event]);
+      let path = join(
+        home,
+        "sessions",
+        "2026",
+        "08",
+        "11",
+        "rollout-parent.jsonl",
+      );
+      if (format === "compressed") {
+        await writeFile(`${path}.zst`, zstdCompressSync(await readFile(path)));
+        unlinkSync(path);
+        path += ".zst";
+      }
+      const fixture = await readFile(path);
+      expect(await findScanSession(home, "parent")).toEqual({
+        threadId: "parent",
+        parentThreadId: null,
+        startedAt: null,
+        workingDirectory: null,
+        path,
+      });
+
+      const consumed = Buffer.alloc(fixture.length);
+      let consumedBytes = 0;
+      let injected = false;
+      const originalOpen = fs.open;
+      const openSpy = spyOn(fs, "open").mockImplementation(((
+        ...args: unknown[]
+      ) => {
+        if (args[0] === path && !injected) {
+          injected = true;
+          const callback = args.at(-1) as (
+            error: NodeJS.ErrnoException | null,
+            fd: number,
+          ) => void;
+          args[args.length - 1] = (
+            error: NodeJS.ErrnoException | null,
+            fd: number,
+          ) => {
+            if (!error) {
+              // Model a late read advancing a reused descriptor before its
+              // new reader starts, without depending on descriptor reuse.
+              consumedBytes = fs.readSync(
+                fd,
+                consumed,
+                0,
+                consumed.length,
+                null,
+              );
+            }
+            callback(error, fd);
+          };
+        }
+        return Reflect.apply(originalOpen, fs, args);
+      }) as typeof fs.open);
+      try {
+        const result = await readScanLogs({
+          scanId: "scan-1",
+          threadId: "parent",
+          codexHome: home,
+        });
+        expect(consumedBytes).toBe(fixture.length);
+        expect(consumed).toEqual(fixture);
+        expect(result).toEqual({
+          scanId: "scan-1",
+          threadId: "parent",
+          sessions: [{ threadId: "parent", parentThreadId: null, path }],
+          events: [
+            {
+              threadId: "parent",
+              event: { type: "session_meta", payload: { id: "parent" } },
+            },
+            { threadId: "parent", event },
+          ],
+        });
+      } finally {
+        openSpy.mockRestore();
+      }
+    });
+  }
 
   test("excludes inherited parent history from worker logs", async () => {
     const home = await temporaryHome();

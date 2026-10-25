@@ -262,7 +262,7 @@ async function extendsSessionLog(
 async function* sessionEvents(
   path: string,
 ): AsyncGenerator<Record<string, unknown>> {
-  const file = createReadStream(path);
+  const file = createReadStream(path, { start: 0 });
   const stream = path.endsWith(".zst")
     ? pipeline(file, zlib.createZstdDecompress(), () => {})
     : file;

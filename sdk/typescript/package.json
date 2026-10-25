@@ -101,7 +101,8 @@
     "strip-ansi": "7.2.0",
     "yaml": "2.9.1",
     "yauzl": "3.4.0",
-    "zod": "4.6.7"
+    "zod": "4.6.7",
+    "zstd-codec": "0.1.5"
   },
   "devDependencies": {
     "@stryker-mutator/core": "10.0.0",
