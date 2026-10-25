@@ -131,8 +131,8 @@ a PR that leaves those inputs unchanged, look for the exact key in
 matter which `main` run saved it. Different inputs can build in parallel.
 
 The key uses the UTC week and the paths listed in **Identify native build and
-proof inputs**. For repository CI scripts, the native jobs compile
-`.github/scripts/*.mts` through `build:ci`; changing unrelated workflow scripts
-does not require rebuilding native artifacts. Compare the next change against
-current `main`: its PR run may have tested an older base or skipped native
-preparation entirely. PR runs cannot populate this cache for `main`.
+proof inputs**. Repository scripts are included by default: a native proof can
+load a helper at runtime. The workflow excludes known CI entrypoints that run
+elsewhere. Compare the next change against current `main`: its PR run may have
+tested an older base or skipped native preparation. PRs cannot populate this
+cache for `main`.
