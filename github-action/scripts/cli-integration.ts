@@ -57,16 +57,23 @@ try {
     const cliResult = JSON.parse(stdout);
     assert.equal(cliResult.turn.mock, true, 'The integration scan must remain synthetic');
     assert.ok(cliResult.findings.findings.length > 0);
-    // Verify native SARIF, then exercise the CLI's manual export without model calls.
     assert.equal(cliResult.sarifPath, join(resultsDirectory, 'exports/results.sarif'));
-    run(['export', resultsDirectory, '--export-format', 'sarif', '--source-root', repository,
-      '--output', cliResult.sarifPath], 0);
+    // Analyze one native scan export untouched; exercise manual export on the other run.
+    if (threshold) {
+      await rm(cliResult.sarifPath);
+      run(['export', resultsDirectory, '--export-format', 'sarif', '--source-root', repository,
+        '--output', cliResult.sarifPath], 0);
+    }
     const result = await analyzeResults({ stdout, resultsDirectory, exitCode, publishable: true, scannedSha:git('rev-parse', 'HEAD').trim() });
     assert.equal(result.scanStatus, 'completed');
     assert.equal(result.policyStatus, threshold ? 'failed' : 'passed');
     assert.equal(result.reportStatus, 'ready');
     assert.equal(result.sarifUploadReady, true);
     const sarif = JSON.parse(await readFile(result.paths.sarifPath, 'utf8'));
+    const expectedIds = cliResult.findings.findings.map((finding: any) => [finding.occurrenceId, finding.ruleId]);
+    assert.ok(expectedIds.flat().every((id: unknown) => typeof id === 'string' && id.length > 0));
+    assert.deepEqual(sarif.runs.flatMap((run: any) => run.results.map((finding: any) =>
+      [finding.properties?.occurrenceId, finding.ruleId])).sort(), expectedIds.sort());
     assert.ok(sarif.runs.every((run: any) => run.automationDetails === undefined),
       'upload-sarif must be able to apply the workflow category to the real CLI export');
     assert.equal(result.findings.length, cliResult.findings.findings.length);
@@ -82,7 +89,9 @@ try {
   }
 
   // Deep Scan cannot use --mock; validate the Action's actual arguments without model calls.
-  const deepInputs: Record<string, string> = {mode: 'deep', 'max-time-hours': '0.25', paths: 'example.ts', 'dry-run': 'true'};
+  // Exercise all explicit cyber programs in existing CLI preflights; the Action input
+  // tests cover forwarding every spelling in both modes.
+  const deepInputs: Record<string, string> = {mode: 'deep', 'cyber-access-program': 'daybreak_blue', 'max-time-hours': '0.25', paths: 'example.ts', 'dry-run': 'true'};
   const deepArguments = scanArguments(parseInputs(name => deepInputs[name] ?? '', repository),
     {repository}, join(root, 'deep-results'));
   const deepPreflight = JSON.parse(run(deepArguments, 0));
@@ -91,32 +100,25 @@ try {
   assert.equal(deepPreflight.maxTimeHours, 0.25);
   assert.deepEqual(deepPreflight.target.paths, ['example.ts']);
 
-  // Validate explicit program selection against the locked CLI, without model calls.
-  for (const mode of ['standard', 'deep']) for (const program of ['standard', 'daybreak_blue', 'daybreak_red']) {
-    const values: Record<string, string> = {mode, 'cyber-access-program':program, 'dry-run':'true'};
-    const args = scanArguments(parseInputs(name => values[name] ?? '', repository),
-      {repository}, join(root, `cyber-${mode}-${program}`));
-    const preflight = JSON.parse(run(args, 0));
-    assert.equal(preflight.dryRun, true);
-    assert.equal(preflight.mode, mode);
-  }
-
-  // Pass provider/model through the locked CLI without copying its provider setup or validation.
-  for (const provider of ['amazon-bedrock', 'openrouter', 'fireworks']) for (const mode of ['standard', 'deep']) {
+  // Exercise each installed provider while covering both scan modes.
+  for (const [provider, mode] of [['amazon-bedrock', 'deep'], ['openrouter', 'standard'], ['fireworks', 'deep']]) {
     const values: Record<string, string> = {provider, model:'synthetic/model', mode, 'dry-run':'true'};
     const args = scanArguments(parseInputs(name => values[name] ?? '', repository),
       {repository}, join(root, `${provider}-${mode}`));
     const preflight = JSON.parse(run(args, 0));
     assert.equal(preflight.dryRun, true); assert.equal(preflight.mode, mode);
+    assert.equal(preflight.model, 'synthetic/model');
     assert.equal(preflight.modelProvider, provider);
     if (provider === 'amazon-bedrock') assert.equal(preflight.authentication.method, 'aws_credentials');
-    values.model = '';
-    const missingModelArgs = scanArguments(parseInputs(name => values[name] ?? '', repository), {repository}, join(root, 'missing-model'));
-    const missing = spawnSync(process.execPath, [cli, ...missingModelArgs], {cwd:repository, env, encoding:'utf8', timeout:120_000});
-    if (missing.error) throw missing.error;
-    assert.equal(missing.status, 2);
-    assert.match(missing.stderr + missing.stdout, /--model is required when using --provider/);
   }
+  // The CLI shares missing-model validation across external providers and scan modes.
+  const missingValues: Record<string, string> = {provider:'openrouter', 'dry-run':'true'};
+  const missingArgs = scanArguments(parseInputs(name => missingValues[name] ?? '', repository),
+    {repository}, join(root, 'missing-model'));
+  const missing = spawnSync(process.execPath, [cli, ...missingArgs], {cwd:repository, env, encoding:'utf8', timeout:120_000});
+  if (missing.error) throw missing.error;
+  assert.equal(missing.status, 2);
+  assert.match(missing.stderr + missing.stdout, /--model is required when using --provider openrouter/);
 
   // Exercise Action arguments through the installed CLI and native request serializer.
   // A terminal fixture error stops each scan before any model output or tool execution.
@@ -184,7 +186,7 @@ try {
   await writeFile(join(repository, '--help/example.ts'), 'export const example = 1;\n');
   git('add', '--', '--help/example.ts');
   git('commit', '-m', 'Synthetic option-shaped path');
-  const pathInputs: Record<string, string> = {paths: './--help', 'dry-run': 'true'};
+  const pathInputs: Record<string, string> = {paths: './--help', 'cyber-access-program':'daybreak_red', 'dry-run': 'true'};
   const pathArguments = scanArguments(parseInputs(name => pathInputs[name] ?? '', repository),
     {repository}, join(root, 'path-results'));
   const pathPreflight = JSON.parse(run(pathArguments, 0));
@@ -200,7 +202,7 @@ try {
   }
   git('add', '.'); git('commit', '-m', 'Synthetic literal path scopes');
   const scopes = ['src/[slug]', ...literalFiles.slice(1)];
-  const literalInputs: Record<string, string> = {paths: scopes.join('\n'), 'dry-run': 'true'};
+  const literalInputs: Record<string, string> = {paths: scopes.join('\n'), 'cyber-access-program':'standard', 'dry-run': 'true'};
   const python = await resolveTool('python3');
   const literalArguments = scanArguments(parseInputs(name => literalInputs[name] ?? '', repository),
     {repository}, join(root, 'literal-results'));

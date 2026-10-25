@@ -1,16 +1,54 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import { createServer } from "node:net";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { parse } from "yaml";
 import { beforeAll } from "./triage-provider.mts";
 
 const evalRoot = path.resolve(import.meta.dirname, "..");
 const runner = path.join(import.meta.dirname, "run-promptfoo.mts");
+const fixtureRunner = path.join(
+  import.meta.dirname,
+  "run-provider-fixture.mts",
+);
+const fixtureRoot = fs.realpathSync(
+  fs.mkdtempSync(path.join(os.tmpdir(), "triage-provider-bundle-")),
+);
+after(() => fs.rmSync(fixtureRoot, { recursive: true, force: true }));
+let builtMcp: string | undefined;
+
+function replayRunnerArgs() {
+  if (!builtMcp) {
+    const output = path.join(fixtureRoot, "mcp");
+    const mcpApp = path.join(evalRoot, "../../plugins/codex-security/mcp-app");
+    execFileSync(
+      process.execPath,
+      [
+        path.join(mcpApp, "scripts/build_mcp_app.mjs"),
+        "--output",
+        output,
+        "--native",
+        "host",
+      ],
+      { cwd: mcpApp },
+    );
+    builtMcp = output;
+  }
+  // Every child copies the same build into its own throwaway skill runtime.
+  return ["--experimental-strip-types", fixtureRunner, builtMcp];
+}
+
+const probeFixturePolicy = `
+const launcher = path.join(cwd, 'plugins/codex-security/scripts/launch_codex_security_mcp');
+const fixture = path.join(cwd, 'evals/triage-finding/fixtures/repo');
+fs.writeFileSync(path.join(fixture, 'SECURITY.md'), '# Synthetic policy\\n');
+const policy = require('node:child_process').execFileSync(launcher, ['--helper', 'resolve-security-md', '--repo', fixture, '--scope', 'src/server.js', '--out', '-'], {encoding:'utf8'});
+`;
+
 function providerConfig(name: string) {
   return parse(
     fs.readFileSync(path.join(evalRoot, "providers", `${name}.yaml`), "utf8"),
@@ -36,18 +74,18 @@ const proxies = {
   NO_PROXY: "localhost,.example.test",
 };
 
-function invoke(args: string[], environment: NodeJS.ProcessEnv) {
+function invoke(
+  args: string[],
+  environment: NodeJS.ProcessEnv,
+  runnerArgs = replayRunnerArgs(),
+) {
   return new Promise<{ code: number | null; output: string }>(
     (resolve, reject) => {
-      const child = spawn(
-        process.execPath,
-        ["--experimental-strip-types", runner, ...args],
-        {
-          cwd: evalRoot,
-          env: { ...process.env, ...environment, NODE_USE_ENV_PROXY: "" },
-          stdio: ["ignore", "pipe", "pipe"],
-        },
-      );
+      const child = spawn(process.execPath, [...runnerArgs, ...args], {
+        cwd: evalRoot,
+        env: { ...process.env, ...environment, NODE_USE_ENV_PROXY: "" },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
       let output = "";
       child.stdout.on("data", (chunk) => {
         output += chunk;
@@ -191,7 +229,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cwd = process.argv[process.argv.indexOf('--cd') + 1];
 fs.readFileSync(path.join(cwd, 'plugins/codex-security/skills/triage-finding/SKILL.md'));
-fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({cwd,node:process.env.CODEX_MCP_NODE_PATH,directories:process.argv.flatMap((arg,index)=>arg==='--add-dir'?[process.argv[index+1]]:[])}));
+${probeFixturePolicy}
+fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({cwd,policy,node:process.env.CODEX_MCP_NODE_PATH,directories:process.argv.flatMap((arg,index)=>arg==='--add-dir'?[process.argv[index+1]]:[])}));
 console.log(JSON.stringify({type:'thread.started',thread_id:'synthetic-cli-provider'}));
 console.log(JSON.stringify({type:'item.completed',item:{id:'message',type:'agent_message',text:'ok'}}));
 console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_tokens:1}}));
@@ -234,10 +273,12 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
         PROMPTFOO_DISABLE_TELEMETRY: "1",
         PROMPTFOO_DISABLE_UPDATE: "1",
       },
+      ["--experimental-strip-types", runner],
     );
     assert.equal(result.code, 0, result.output);
     const row = JSON.parse(fs.readFileSync(capture, "utf8"));
     assert.notEqual(row.cwd, evalRoot);
+    assert.match(row.policy, /Synthetic policy/);
     assert.equal(fs.existsSync(row.cwd), false);
     assert.equal(row.node, process.execPath);
     assert.deepEqual(row.directories, [
@@ -261,17 +302,15 @@ test(
     const capture = path.join(root, "captures.jsonl");
     const fakeCodex = path.join(root, "codex");
     const fail = path.join(root, "fail");
-    fs.writeFileSync(
-      fakeCodex,
-      `#!${process.execPath}
+    function writeCaptureCodex(executable: string, checkPolicy: boolean) {
+      fs.writeFileSync(
+        executable,
+        `#!${process.execPath}
 const fs = require('node:fs');
 const path = require('node:path');
-const cp = require('node:child_process');
 const cwd = process.argv[process.argv.indexOf('--cd') + 1];
-const launcher = path.join(cwd, 'plugins/codex-security/scripts/launch_codex_security_mcp');
-const fixture = path.join(cwd, 'evals/triage-finding/fixtures/repo');
-fs.writeFileSync(path.join(fixture, 'SECURITY.md'), '# Synthetic policy\\n');
-const policy = cp.execFileSync(launcher, ['--helper', 'resolve-security-md', '--repo', fixture, '--scope', 'src/server.js', '--out', '-'], {encoding:'utf8'});
+fs.readFileSync(path.join(cwd, 'plugins/codex-security/skills/triage-finding/SKILL.md'));
+${checkPolicy ? probeFixturePolicy : "const policy = undefined;"}
 const directories = process.argv.flatMap((arg, index) => arg === '--add-dir' ? [process.argv[index + 1]] : []);
 const overrides = process.argv.flatMap((arg, index) => arg === '--config' ? [process.argv[index + 1]] : []);
 fs.appendFileSync(${JSON.stringify(capture)}, JSON.stringify({cwd,policy,directories,overrides,nodePath:process.env.CODEX_MCP_NODE_PATH,nodeTarget:fs.realpathSync.native(process.env.CODEX_MCP_NODE_PATH), proxies: Object.fromEntries(${JSON.stringify(Object.keys(proxies))}.map(key => [key,process.env[key]]))}) + '\\n');
@@ -283,8 +322,10 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
  console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_input_tokens:0,output_tokens:1}}));
 }
 `,
-      { mode: 0o755 },
-    );
+        { mode: 0o755 },
+      );
+    }
+    writeCaptureCodex(fakeCodex, true);
     const ambientNode = path.join(root, "ambient-node", "bin", "node");
     fs.mkdirSync(path.dirname(ambientNode), { recursive: true });
     fs.copyFileSync(
@@ -442,6 +483,10 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
 
     // Prompt-specific settings merge and render separately for each concurrent
     // case, including the original configuration saved for retry and resume.
+    // The initial matrix already ran the helper through each selected Node
+    // launcher; these calls capture the configuration saved for replay.
+    const templatedCodex = path.join(root, "templated-codex");
+    writeCaptureCodex(templatedCodex, false);
     const templatedConfig = path.join(root, "templated.json");
     fs.writeFileSync(
       templatedConfig,
@@ -451,6 +496,7 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
             ...provider,
             config: {
               ...provider.config,
+              codex_path_override: templatedCodex,
               cli_env: {
                 ...provider.config.cli_env,
                 CODEX_MCP_NODE_PATH: "{{node_path}}",
@@ -554,7 +600,7 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
         path.dirname(row.nodePath),
         path.dirname(row.nodePath),
         path.dirname(row.nodePath),
-        path.dirname(fakeCodex),
+        path.dirname(templatedCodex),
       ]);
     }
   },
@@ -1136,14 +1182,7 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
     );
     const viewer = spawn(
       process.execPath,
-      [
-        "--experimental-strip-types",
-        runner,
-        "view",
-        "--port",
-        String(port),
-        "--no",
-      ],
+      [...replayRunnerArgs(), "view", "--port", String(port), "--no"],
       {
         cwd: evalRoot,
         env: { ...process.env, ...environment, NODE_USE_ENV_PROXY: "" },
@@ -1464,14 +1503,7 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
       );
       const viewer = spawn(
         process.execPath,
-        [
-          "--experimental-strip-types",
-          runner,
-          "view",
-          "--port",
-          String(port),
-          "--no",
-        ],
+        [...replayRunnerArgs(), "view", "--port", String(port), "--no"],
         {
           cwd: evalRoot,
           env: { ...process.env, ...environment, NODE_USE_ENV_PROXY: "" },
