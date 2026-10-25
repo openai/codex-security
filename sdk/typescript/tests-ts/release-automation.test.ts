@@ -3827,7 +3827,9 @@ describe("GitHub release workflow safeguards", () => {
           name: string;
           if?: string;
           needs?: string | string[];
-          "timeout-minutes"?: number;
+          uses?: string;
+          outputs?: Record<string, string>;
+          "timeout-minutes"?: number | string;
           steps: Array<{
             if?: string;
             name?: string;
@@ -3846,8 +3848,10 @@ describe("GitHub release workflow safeguards", () => {
       "${{ github.event_name == 'pull_request' }}",
     );
     const classifier = workflow.jobs["classify-changes"]!;
-    expect(classifier["timeout-minutes"]).toBe(10);
-    expect(classifier.if).toContain("github.event.changes.base != null");
+    expect(classifier["timeout-minutes"]).toEqual(
+      expect.stringContaining("40 || 10"),
+    );
+    expect(classifier.if).toBeUndefined();
     const checkout = classifier.steps.find(
       ({ name }) => name === "Checkout repository for change classification",
     );
@@ -3857,42 +3861,63 @@ describe("GitHub release workflow safeguards", () => {
     });
     expect(checkout).not.toHaveProperty("if");
 
-    expect(workflow.jobs["static-checks"]?.if).toBeUndefined();
-    for (const job of [
-      "native",
-      "package",
-      "test",
-      "compatibility",
-      "mcp",
-      "plugin-host",
-      "plugin-source",
-      "windows-test",
-      "windows-verify",
-    ]) {
-      expect(workflow.jobs[job]?.if).toBe(
-        "needs.classify-changes.outputs.source-required == 'true'",
-      );
-      expect(workflow.jobs["ci"]?.needs).toContain(job);
-    }
-    for (const [name, job] of Object.entries(workflow.jobs)) {
-      if (
-        ["classify-changes", "ci", "required-test", "windows"].includes(name)
-      ) {
-        continue;
-      }
-      expect([job.needs].flat(), name).toContain("classify-changes");
-      expect(job.if ?? "", name).not.toMatch(/\b(always|failure|cancelled)\(/u);
-    }
-    for (const job of ["ci", "required-test", "windows"]) {
+    expect(workflow.jobs["static-checks"]?.if).toBe(
+      "needs.classify-changes.outputs.source-run == ''",
+    );
+    const aggregates = ["ci", "required-test"];
+    const checks = Object.entries(workflow.jobs).filter(
+      ([name]) => name !== "classify-changes" && !aggregates.includes(name),
+    );
+    expect(new Set([workflow.jobs["ci"]!.needs].flat())).toEqual(
+      new Set(["classify-changes", ...checks.map(([name]) => name)]),
+    );
+    for (const job of aggregates) {
       expect(workflow.jobs[job]?.if).toContain("always()");
     }
-    for (const job of [
-      "classify-changes",
-      "static-checks",
-      "workflow-quality",
-      "container-validate",
-    ]) {
-      expect(workflow.jobs["ci"]?.needs).toContain(job);
+    expect(workflow.jobs["action-ci"]).toMatchObject({
+      uses: "./.github/workflows/action-ci.yml",
+      with: {
+        "sdk-contracts":
+          "${{ needs.classify-changes.outputs.source-required == 'false' }}",
+      },
+    });
+    for (const [name, job] of checks) {
+      expect(job.if ?? "", name).not.toMatch(/\b(always|failure|cancelled)\(/u);
+    }
+
+    // With no job results, the gate must report exactly the jobs enabled in YAML.
+    const { failedChecks } = (await import(
+      new URL("../../../.github/scripts/check-ci-results.mjs", import.meta.url)
+        .href
+    )) as { failedChecks(needs: unknown): string[] };
+    const classifierOutputs = classifier.outputs!;
+    expect(classifierOutputs["source-run"]).toBe(
+      "${{ steps.proof.outputs.source-run }}",
+    );
+    const flags = Object.keys(classifierOutputs).filter(
+      (key) =>
+        !["source-run", "edit-attempt"].includes(key) &&
+        !key.endsWith("-matrix"),
+    );
+    for (const enabled of flags) {
+      expect(classifierOutputs[enabled]).toBe(
+        `\${{ steps.scope.outputs.${enabled} }}`,
+      );
+      const outputs = Object.fromEntries(
+        flags.map((key) => [key, String(key === enabled)]),
+      );
+      const scheduled = checks.filter(
+        ([name, job]) =>
+          name === "static-checks" ||
+          !job.if ||
+          job.if === `needs.classify-changes.outputs.${enabled} == 'true'`,
+      );
+      expect(
+        new Set(
+          failedChecks({ "classify-changes": { result: "success", outputs } }),
+        ),
+        enabled,
+      ).toEqual(new Set(scheduled.map(([name]) => name)));
     }
     expect(
       workflow.jobs["ci"]?.steps.find(
@@ -3902,26 +3927,6 @@ describe("GitHub release workflow safeguards", () => {
       run: "node .github/scripts/check-ci-results.mjs",
       env: { CI_RESULTS: "${{ toJSON(needs) }}" },
     });
-
-    const conditionCases = [];
-    for (const name of ["required-test", "windows"]) {
-      const job = workflow.jobs[name]!;
-      expect(job.needs).toEqual(["classify-changes", "ci"]);
-      const gate = job.steps.find(({ name }) => name === "Require CI gate");
-      expect(gate?.run).toBe("exit 1");
-      for (const result of ["success", "failure", "cancelled", "skipped"]) {
-        conditionCases.push({
-          condition: gate?.if ?? "",
-          values: { "needs.ci.result": result },
-          expected: result !== "success",
-          message: `${name}: ${result}`,
-        });
-      }
-    }
-    const conditions = await evaluateWorkflowConditions(conditionCases);
-    for (const [index, item] of conditionCases.entries()) {
-      expect(conditions[index], item.message).toBe(item.expected);
-    }
   });
 
   test("documents a canonical historical-summary prefix block", () => {

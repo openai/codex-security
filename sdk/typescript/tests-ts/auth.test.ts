@@ -132,14 +132,13 @@ describe("Codex authentication process boundary", () => {
     const root = await temporaryDirectory("codex-security-auth-epipe-");
     const script = join(root, "exit.mjs");
     await writeFile(script, "process.exit(1);\n");
-    await expect(
-      runCodexCommand(
-        { command: process.execPath },
-        [script],
-        process.env,
-        "x".repeat(16 * 1024 * 1024),
-      ),
-    ).resolves.toMatchObject({ success: false, exitCode: 1 });
+    const result = await runCodexCommand(
+      { command: process.execPath },
+      [script],
+      process.env,
+      "x".repeat(16 * 1024 * 1024),
+    );
+    expect(result).toMatchObject({ success: false, exitCode: 1 });
   });
 
   test("retains large noninteractive authentication output", async () => {

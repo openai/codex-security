@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
-test('input docs preserve backslashes and escape adjacent table delimiters', async (t) => {
+test('input docs preserve escaped table values and reject reversed reference markers', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'action-input-docs-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const action = join(root, 'github-action');
@@ -36,4 +36,9 @@ test('input docs preserve backslashes and escape adjacent table delimiters', asy
   assert.ok(generated.includes('`C:\\temp`'), generated);
   assert.ok(generated.includes('`one\\|two`'), generated);
   execFileSync(process.execPath, [script, '--check']);
+
+  const reversed = '<!-- action-reference:end -->\nContributor notes\n<!-- action-reference:start -->\n';
+  await writeFile(readme, reversed);
+  assert.throws(() => execFileSync(process.execPath, [script], { stdio: 'pipe' }), /README must contain action reference markers in order/);
+  assert.equal(await readFile(readme, 'utf8'), reversed);
 });
