@@ -95,6 +95,7 @@ const distModules = [
   "scan-history-renderer",
   "scan-inputs",
   "scan-logs",
+  "scan-usage-display",
   "security-policy",
   "security-policy-cli",
   "security-policy-diff",
