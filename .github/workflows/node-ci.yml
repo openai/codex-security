@@ -454,6 +454,9 @@ jobs:
         run: node --experimental-strip-types --test evals/standard-time-budget/test_*.mts
       - name: Test workflow routing eval contracts
         run: node --experimental-strip-types --test evals/workflow-routing/test_*.mts
+      - name: Audit triage eval production dependencies
+        working-directory: evals/triage-finding
+        run: pnpm audit --prod --audit-level high --config.lockfile-dir=.
 
   ci:
     name: ci

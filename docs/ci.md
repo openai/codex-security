@@ -57,7 +57,8 @@ run the deterministic eval job and static checks. The eval job builds the SDK
 and host plugin, checks the Codex version across the SDK, MCP and triage
 lockfiles, and runs the triage, secret-discovery, Standard time-budget and
 workflow-routing suites. This job also runs on source changes, independently
-of the Python matrix.
+of the Python matrix. Its high-severity production audit covers the triage eval
+lockfile on selected PRs, on `main` and in the daily run.
 
 Inputs outside these routes select full qualification, including workflow checks,
 containers, current Node 26, Windows Node 24 installation, and Python 3.10 and
