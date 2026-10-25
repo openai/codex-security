@@ -7,11 +7,11 @@ Use this reference only for standalone or legacy diff discovery without a compac
 Generate `rank_input.jsonl` from every changed text file, including deleted files. Tracked changes remain in scope regardless of ignore rules; local patches also include non-ignored untracked files.
 
 ```text
-<python_command> <plugin_dir>/scripts/generate_rank_input.py make-diff-rank-input --repo <repo_root> --base <base> --mode revisions --head <head> --out <discovery_dir>/rank_input.jsonl
-<python_command> <plugin_dir>/scripts/generate_rank_input.py make-diff-rank-input --repo <repo_root> --base <base> --mode local-patch --out <discovery_dir>/rank_input.jsonl
+<plugin_dir>/scripts/launch_codex_security_mcp --helper make-diff-rank-input --repo <repo_root> --base <base> --mode revisions --head <head> --out <discovery_dir>/rank_input.jsonl
+<plugin_dir>/scripts/launch_codex_security_mcp --helper make-diff-rank-input --repo <repo_root> --base <base> --mode local-patch --out <discovery_dir>/rank_input.jsonl
 ```
 
-Choose the first command for PR, commit, or branch diffs, and the second for a local patch. Resolve `<python_command>` from the configured interpreter as described in the shared path reference. Keep the exact baseline and target unchanged.
+Choose the first command for PR, commit, or branch diffs, and the second for a local patch. On Windows, use the [PowerShell generation commands](#windows-diff-worklist-generation). Keep the exact baseline and target unchanged.
 
 Copy every row to the review worklist; diff scans do not rank or drop changed files:
 
@@ -19,7 +19,7 @@ Copy every row to the review worklist; diff scans do not rank or drop changed fi
 <plugin_dir>/scripts/launch_codex_security_mcp --helper copy-deep-review-input --rank-input <discovery_dir>/rank_input.jsonl --out <discovery_dir>/deep_review_input.jsonl
 ```
 
-On Windows, use the PowerShell command below. Run file-producing helpers in managed temporary storage and import retained output through the artifact tool. In these commands, `<discovery_dir>` is the prepared helper-output directory, not an invitation to write directly into retained storage.
+On Windows, use the [PowerShell copy command](#windows-worklist-copy). Run file-producing helpers in managed temporary storage and import retained output through the artifact tool. In these commands, `<discovery_dir>` is the prepared helper-output directory, not an invitation to write directly into retained storage.
 
 ## Scoped Deep Review
 
@@ -52,3 +52,30 @@ cmd.exe /d /v:off /s /c '""%worklistPluginRoot%\scripts\launch_codex_security_mc
 ```
 
 These are temporary shell variables. Resolve paths against PowerShell's current location, including UNC shares. The input directory and `rank_input.jsonl` must exist; the output file need not. CMD expands these references once, preserving literal `%` and `!` in paths.
+
+## Windows Diff Worklist Generation
+
+Use literal paths as in the copy command and the full commit object IDs resolved for the scan target.
+
+For PR, commit or branch diffs, run this command.
+
+```powershell
+$env:worklistPluginRoot = Convert-Path -LiteralPath '<plugin_dir>' -ErrorAction Stop
+$env:worklistRepoRoot = Convert-Path -LiteralPath '<repo_root>' -ErrorAction Stop
+$env:worklistDiscoveryDir = Convert-Path -LiteralPath '<discovery_dir>' -ErrorAction Stop
+$env:worklistBase = '<resolved_base_object_id>'
+$env:worklistHead = '<resolved_head_object_id>'
+cmd.exe /d /v:off /s /c '""%worklistPluginRoot%\scripts\launch_codex_security_mcp.cmd" --helper make-diff-rank-input --repo "%worklistRepoRoot%\." --base "%worklistBase%" --mode revisions --head "%worklistHead%" --out "%worklistDiscoveryDir%\rank_input.jsonl""'
+```
+
+For a local patch, run this command.
+
+```powershell
+$env:worklistPluginRoot = Convert-Path -LiteralPath '<plugin_dir>' -ErrorAction Stop
+$env:worklistRepoRoot = Convert-Path -LiteralPath '<repo_root>' -ErrorAction Stop
+$env:worklistDiscoveryDir = Convert-Path -LiteralPath '<discovery_dir>' -ErrorAction Stop
+$env:worklistBase = '<resolved_base_object_id>'
+cmd.exe /d /v:off /s /c '""%worklistPluginRoot%\scripts\launch_codex_security_mcp.cmd" --helper make-diff-rank-input --repo "%worklistRepoRoot%\." --base "%worklistBase%" --mode local-patch --out "%worklistDiscoveryDir%\rank_input.jsonl""'
+```
+
+The repository’s `\.` suffix preserves drive-root paths. Use the resolved object IDs because quotes in a revision expression can change CMD argument parsing.

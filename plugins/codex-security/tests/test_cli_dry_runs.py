@@ -25,8 +25,6 @@ def run_script(name: str, *args: str, isolated: bool = False) -> subprocess.Comp
     (
         "deep_scan_config.py",
         "finalize_scan_contract.py",
-        "generate_in_scope_files.py",
-        "generate_rank_input.py",
         "snapshot_sqlite.py",
         "threat_model_projection.py",
         "validate_scan_contract.py",
