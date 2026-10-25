@@ -302,7 +302,7 @@ test(
     const capture = path.join(root, "captures.jsonl");
     const fakeCodex = path.join(root, "codex");
     const fail = path.join(root, "fail");
-    function writeCaptureCodex(executable: string, checkPolicy: boolean) {
+    function writeCaptureCodex(executable: string, probeEveryCall: boolean) {
       fs.writeFileSync(
         executable,
         `#!${process.execPath}
@@ -310,10 +310,15 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cwd = process.argv[process.argv.indexOf('--cd') + 1];
 fs.readFileSync(path.join(cwd, 'plugins/codex-security/skills/triage-finding/SKILL.md'));
-${checkPolicy ? probeFixturePolicy : "const policy = undefined;"}
+// Each replay has a fresh cwd. One concurrent caller claims its helper probe.
+let capturedPolicy = '';
+if (${probeEveryCall} || (!fs.existsSync(${JSON.stringify(fail)}) && fs.mkdirSync(path.join(cwd, '.policy-probe'), {recursive: true}))) {
+  ${probeFixturePolicy}
+  capturedPolicy = policy;
+}
 const directories = process.argv.flatMap((arg, index) => arg === '--add-dir' ? [process.argv[index + 1]] : []);
 const overrides = process.argv.flatMap((arg, index) => arg === '--config' ? [process.argv[index + 1]] : []);
-fs.appendFileSync(${JSON.stringify(capture)}, JSON.stringify({cwd,policy,directories,overrides,nodePath:process.env.CODEX_MCP_NODE_PATH,nodeTarget:fs.realpathSync.native(process.env.CODEX_MCP_NODE_PATH), proxies: Object.fromEntries(${JSON.stringify(Object.keys(proxies))}.map(key => [key,process.env[key]]))}) + '\\n');
+fs.appendFileSync(${JSON.stringify(capture)}, JSON.stringify({cwd,policy:capturedPolicy,directories,overrides,nodePath:process.env.CODEX_MCP_NODE_PATH,nodeTarget:fs.realpathSync.native(process.env.CODEX_MCP_NODE_PATH), proxies: Object.fromEntries(${JSON.stringify(Object.keys(proxies))}.map(key => [key,process.env[key]]))}) + '\\n');
 console.log(JSON.stringify({type:'thread.started', thread_id:'synthetic-thread'}));
 if (fs.existsSync(${JSON.stringify(fail)})) {
  console.log(JSON.stringify({type:'turn.failed',error:{message:'synthetic retryable failure'}}));
@@ -483,8 +488,6 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
 
     // Prompt-specific settings merge and render separately for each concurrent
     // case, including the original configuration saved for retry and resume.
-    // The initial matrix already ran the helper through each selected Node
-    // launcher; these calls capture the configuration saved for replay.
     const templatedCodex = path.join(root, "templated-codex");
     writeCaptureCodex(templatedCodex, false);
     const templatedConfig = path.join(root, "templated.json");
@@ -585,6 +588,11 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
       .slice(startingRows);
     assert.equal(templatedRows.length, 12);
     assert.equal(new Set(templatedRows.map((row) => row.cwd)).size, 3);
+    const replayProbes = templatedRows.filter((row) => row.policy);
+    assert.equal(replayProbes.length, 2);
+    assert.equal(new Set(replayProbes.map((row) => row.cwd)).size, 2);
+    for (const row of replayProbes)
+      assert.match(row.policy, /Synthetic policy/);
     assert.equal(
       templatedRows.filter((row) => row.nodePath === customNode).length,
       6,

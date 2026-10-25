@@ -928,9 +928,10 @@ describe("CLI authentication", () => {
           expect(run(["login", "--with-api-key"], "synthetic-key\n")).toBe(0);
           expect(await stat(join(credentialHome, "auth.json"))).toBeDefined();
           await expect(stat(join(repository, "auth.json"))).rejects.toThrow();
-          if (configuredHome === mountedHome) {
+          if (expectedHome === relativeHome || expectedHome === mountedHome) {
             expect(run(["login", "status"])).toBe(0);
             expect(run(["logout"])).toBe(0);
+            expect(existsSync(join(credentialHome, "auth.json"))).toBe(false);
           } else {
             // Empty and blank settings share the default. Each login must create its own file.
             await rm(join(credentialHome, "auth.json"));
