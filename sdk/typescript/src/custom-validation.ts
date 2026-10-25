@@ -8,7 +8,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import Ajv2020, { _, type CodeKeywordDefinition } from "ajv/dist/2020.js";
+import Ajv2020, { _ } from "ajv/dist/2020.js";
 import {
   DEFERRED_PATH_LOCATION,
   readScanFile,
@@ -242,7 +242,10 @@ export async function runCustomValidation(options: {
   const ajv = new Ajv2020({ strict: false, validateFormats: false });
   // Skip the sealed oneOf only at provisional paths. Plugins may also $ref
   // either branch on its own, where it must retain its ordinary meaning.
-  const oneOf = ajv.getKeyword("oneOf") as CodeKeywordDefinition;
+  const oneOf = ajv.getKeyword("oneOf") as Extract<
+    ReturnType<typeof ajv.getKeyword>,
+    { code: unknown }
+  >;
   ajv.removeKeyword("oneOf").addKeyword({
     ...oneOf,
     before: "allOf",

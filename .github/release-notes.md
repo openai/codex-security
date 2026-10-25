@@ -76,6 +76,7 @@
 - share the exact npm setup for release workflows ([#1998](https://github.com/openai/codex-security/pull/1998))
 - include unscanned repository targets ([#547](https://github.com/openai/codex-security/pull/547))
 - constrain deferred coverage paths ([#558](https://github.com/openai/codex-security/pull/558))
+- compile evals with separate Ajv installations ([#2009](https://github.com/openai/codex-security/pull/2009))
 
 <!-- release-section: highlights:end -->
 
