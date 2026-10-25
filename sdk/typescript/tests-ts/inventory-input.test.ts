@@ -2495,6 +2495,22 @@ test("local diffs exclude SVN metadata and revision diffs retain it", () => {
   }
 });
 
+test("inventory helpers print their usage without a repository", () => {
+  for (const command of [
+    "generate-in-scope-files",
+    "make-repo-scope-input",
+    "make-diff-rank-input",
+  ]) {
+    const result = spawnSync(
+      node,
+      [join(PLUGIN_ROOT, "mcp", "helpers.mjs"), command, "--help"],
+      { encoding: "utf8" },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain(`--helper ${command}`);
+  }
+});
+
 test("keeps the retired repository-ranking helper unavailable", () => {
   const result = fixture().run("make-repo-rank-input", ["--help"]);
   expect(result.status).toBe(2);
