@@ -218,14 +218,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - *actions-checkout
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - uses: ./.github/actions/setup-tools
         with:
           # Stryker 10's Babel 8 requires Node 22.18+ or 24.11+.
           node-version: "24.15.0"
-      - name: Set up pnpm
-        uses: ./.github/actions/setup-tools
-        with:
-          setup-node: false
       - *set-up-bun
       - name: Install dependencies
         run: pnpm --dir sdk/typescript install --frozen-lockfile
