@@ -69,6 +69,7 @@
 - keep selected results stable during retries ([#915](https://github.com/openai/codex-security/pull/915))
 - request review when the updated PR head becomes visible ([#1989](https://github.com/openai/codex-security/pull/1989))
 - use the CLI verdict contract for hosted verification ([#1951](https://github.com/openai/codex-security/pull/1951))
+- run inventory and ranking helpers in Node ([#1432](https://github.com/openai/codex-security/pull/1432))
 
 <!-- release-section: highlights:end -->
 
@@ -79,5 +80,6 @@
 Review migration steps for these breaking changes:
 
 - use the CLI verdict contract for hosted verification ([#1951](https://github.com/openai/codex-security/pull/1951))
+- run inventory and ranking helpers in Node ([#1432](https://github.com/openai/codex-security/pull/1432))
 
 <!-- release-section: upgrades:end -->

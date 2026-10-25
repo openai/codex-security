@@ -18,6 +18,7 @@ import {
   readdir,
   realpath,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -2731,7 +2732,7 @@ export class CodexSecurity {
       }
       checkOpen();
       const basePrompt = scanPrompt(
-        normalized,
+        await targetInstruction(normalized, shellPluginRoot),
         mode,
         skillName,
         scanId,
@@ -5197,7 +5198,7 @@ function trustedAccessWarning(
 }
 
 function scanPrompt(
-  target: NormalizedTarget,
+  targetDescription: string,
   mode: ScanMode,
   skillName: string,
   scanId: string,
@@ -5276,8 +5277,8 @@ function scanPrompt(
             : []),
         ]
       : []),
-    "Runtime paths are environment-backed; keep them quoted in POSIX shells and use the corresponding $env: names in PowerShell. Do not copy or reparse their values.",
-    targetInstruction(target, python),
+    "Runtime paths are environment-backed; keep references quoted. Use $NAME in POSIX shells, $env:NAME in PowerShell expressions, and %NAME% inside CMD command strings. Do not copy or reparse their values.",
+    targetDescription,
     ...(mode === "deep"
       ? [
           "Once the Deep Scan coordinator returns its aggregate, end this turn with the returned scanId and manifestPath. The SDK owns finalization and report generation after the turn ends.",
@@ -5301,23 +5302,40 @@ function skillNameFor(target: NormalizedTarget, mode: ScanMode): string {
   return mode === "deep" ? "deep-security-scan" : "security-scan";
 }
 
-function targetInstruction(target: NormalizedTarget, python: string): string {
+async function targetInstruction(
+  target: NormalizedTarget,
+  pluginRoot: string,
+): Promise<string> {
   if (target.kind === "repository")
     return "Scan target: the entire repository.";
   if (target.kind === "paths") {
     const helper = shellEnvironmentReference(
       "CODEX_SECURITY_PLUGIN_ROOT",
-      "/scripts/generate_rank_input.py",
+      "/scripts/launch_codex_security_mcp",
     );
     const scopes = shellEnvironmentReference(
       "CODEX_SECURITY_TARGET_PATHS_FILE",
     );
+    let legacyGenerator = false;
+    try {
+      legacyGenerator = (
+        await stat(join(pluginRoot, "scripts", "generate_rank_input.py"))
+      ).isFile();
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+    }
+    const makeScope = legacyGenerator
+      ? `${pluginPythonCommand()} ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/scripts/generate_rank_input.py")} make-repo-scope-input --repo ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")} --scopes-file ${scopes} --out ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scoped-source-input.jsonl")}`
+      : process.platform === "win32"
+        ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper make-repo-scope-input --repo "%CODEX_SECURITY_REPOSITORY%\." --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --out "%CODEX_SECURITY_SCAN_DIR%\scoped-source-input.jsonl""'`
+        : `${helper} --helper make-repo-scope-input --repo ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")} --scopes-file ${scopes} --out ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scoped-source-input.jsonl")}`;
     // CMD expands the environment references once, preserving percent signs in path values.
     const bindScopes =
       process.platform === "win32"
         ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper bind-repo-scopes --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --manifest "%CODEX_SECURITY_SCAN_DIR%\scan-manifest.json" --coverage "%CODEX_SECURITY_SCAN_DIR%\coverage.json""'`
         : `${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/scripts/launch_codex_security_mcp")} --helper bind-repo-scopes --scopes-file ${scopes} --manifest ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scan-manifest.json")} --coverage ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/coverage.json")}`;
-    return `Scan target paths: resolve every requested file and all non-ignored descendants of requested directories using ${python} ${helper} make-repo-scope-input --repo ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")} --scopes-file ${scopes} --out ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scoped-source-input.jsonl")}. Before finalization, preserve every requested scope with ${bindScopes}. Do not print, evaluate, or modify the target-paths file.`;
+    return `Scan target paths: resolve every requested file and all non-ignored descendants of requested directories using ${makeScope}. Before finalization, preserve every requested scope with ${bindScopes}. Do not print, evaluate, or modify the target-paths file.`;
   }
   if (target.kind === "refs") {
     return `Scan target: Git diff from ${target.base} to ${target.head}.`;
