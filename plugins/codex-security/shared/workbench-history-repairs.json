@@ -1,5 +1,14 @@
 [
   [
+    "-- Move checkpoint previews before source-scope history checks.",
+    "WITH input AS (SELECT :history AS history)",
+    "SELECT 'sql' AS operation,",
+    "    'UPDATE schema_migrations SET version = 57 WHERE version = ' || version AS value",
+    "FROM schema_migrations",
+    "WHERE version IN (47, 48, 50, 52, 53, 54)",
+    "    AND name = 'freeze stopped scan checkpoint selections';"
+  ],
+  [
     "-- Move source-scope previews before the shared history repairs.",
     "WITH input AS (SELECT :history AS history)",
     "SELECT 'sql' AS operation,",
@@ -56,6 +65,18 @@
     "        ' WHERE version = ' || version || ' AND name = ' || quote(name)",
     "    FROM moves JOIN schema_migrations USING (version, name)",
     "ORDER BY position;"
+  ],
+  [
+    "-- A main-branch reader may have added discovery context under the old checkpoint number.",
+    "SELECT 'timestamp' AS operation,",
+    "    'INSERT INTO schema_migrations (version, name, applied_at) VALUES (47, ' ||",
+    "    quote(json_extract(value, '$.name')) || ', ?)' AS value",
+    "FROM json_each(:history) WHERE json_extract(value, '$.version') = 47",
+    "    AND EXISTS (SELECT 1 FROM schema_migrations WHERE version = 57",
+    "        AND name = 'freeze stopped scan checkpoint selections')",
+    "    AND NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = 47)",
+    "    AND EXISTS (SELECT 1 FROM pragma_table_info('deep_scan_runs')",
+    "        WHERE name = 'discovery_user_context_json');"
   ],
   [
     "-- profiles: preserve legacy columns before the later repairs.",
