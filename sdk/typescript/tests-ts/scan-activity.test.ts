@@ -965,13 +965,13 @@ describe("concrete repository path prefixes", () => {
     [
       "drive casing",
       "C:\\code\\project",
-      "c:\\CODE\\PROJECT\\Src\\Login.ts",
+      "c:\\code\\project\\Src\\Login.ts",
       ["Src/Login.ts"],
     ],
     [
       "drive forward slashes",
       "C:/code/project",
-      "c:/CODE/PROJECT/Src/Login.ts",
+      "c:/code/project/Src/Login.ts",
       ["Src/Login.ts"],
     ],
     ["drive root", "C:\\", "c:\\Src\\Login.ts", ["Src/Login.ts"]],
@@ -979,7 +979,7 @@ describe("concrete repository path prefixes", () => {
     [
       "UNC casing",
       "\\\\Server\\Share\\project",
-      "\\\\server\\SHARE\\PROJECT\\Src\\Login.ts",
+      "\\\\server\\SHARE\\project\\Src\\Login.ts",
       ["Src/Login.ts"],
     ],
     [
@@ -991,8 +991,26 @@ describe("concrete repository path prefixes", () => {
     [
       "UNC forward slashes",
       "//Server/Share/project",
-      "//server/share/PROJECT/Src/Login.ts",
+      "//server/share/project/Src/Login.ts",
       ["Src/Login.ts"],
+    ],
+    [
+      "case-sensitive Windows checkout sibling",
+      "C:\\work\\Repo",
+      "c:\\work\\repo\\Src\\Login.ts",
+      [],
+    ],
+    [
+      "case-sensitive Windows ancestor",
+      "C:\\Work\\Repo",
+      "c:\\work\\Repo\\Src\\Login.ts",
+      [],
+    ],
+    [
+      "case-sensitive UNC checkout sibling",
+      "\\\\Server\\Share\\Repo",
+      "\\\\server\\SHARE\\repo\\Src\\Login.ts",
+      [],
     ],
     [
       "matching POSIX casing",
@@ -1025,6 +1043,12 @@ describe("concrete repository path prefixes", () => {
       "c:\\code\\project-other\\Src\\Login.ts",
       [],
     ],
+    [
+      "drive-relative repository cannot be case-folded",
+      "C:work\\project",
+      "c:work\\project\\Src\\Login.ts",
+      [],
+    ],
     ["different drive", "C:\\", "D:\\Src\\Login.ts", []],
     [
       "different UNC share",
@@ -1035,7 +1059,7 @@ describe("concrete repository path prefixes", () => {
     [
       "parent traversal",
       "C:\\code\\project",
-      "c:\\CODE\\PROJECT\\..\\outside.ts",
+      "c:\\code\\project\\..\\outside.ts",
       [],
     ],
   ] as const)(

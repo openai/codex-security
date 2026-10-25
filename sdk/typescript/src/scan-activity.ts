@@ -378,11 +378,24 @@ function relativeRepositoryPath(
 ): string | null {
   const normalized = repository.replaceAll("\\", "/");
   const prefix = `${normalized.replace(/\/$/u, "")}/`;
-  const matches =
-    win32.isAbsolute(normalized) && win32.parse(normalized).root.length > 1
-      ? value.slice(0, prefix.length).toLowerCase() === prefix.toLowerCase()
-      : value.startsWith(prefix);
-  return matches ? value.slice(prefix.length) : null;
+  if (value.startsWith(prefix)) return value.slice(prefix.length);
+
+  // A Windows drive or UNC volume can differ in case. Its descendant
+  // directories may be case-sensitive, even on Windows, so folding the whole
+  // repository prefix could attribute a different checkout's files to this one.
+  // Saved sessions can be read on other hosts and cannot prove file identity.
+  const root = win32.parse(normalized).root;
+  const valueRoot = win32.parse(value).root;
+  if (
+    win32.isAbsolute(normalized) &&
+    root.length > 1 &&
+    root.length === valueRoot.length &&
+    root.toLowerCase() === valueRoot.toLowerCase() &&
+    value.slice(root.length, prefix.length) === prefix.slice(root.length)
+  ) {
+    return value.slice(prefix.length);
+  }
+  return null;
 }
 
 function commandRepositoryPaths(command: string, repository: string): string[] {
