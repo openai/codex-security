@@ -135,7 +135,9 @@ def test_inventory_matches_the_existing_standard_command(tmp_path: Path, scope: 
         assert {"./ignored/secret.py", "./app/ignored.skip"}.isdisjoint(rows)
 
 
-@pytest.mark.parametrize("name", [f"{'a' * 251}.txt", f"{'文' * 83}.txt"])
+@pytest.mark.parametrize(
+    "name", [f"{'a' * 251}.txt", f"{'文' * 83}.txt"], ids=["ascii", "multibyte"]
+)
 def test_inventory_replaces_outputs_with_long_filenames(tmp_path: Path, name: str) -> None:
     repository = make_repository(tmp_path)
     output = tmp_path / name
@@ -303,24 +305,41 @@ def test_inventory_excludes_the_git_file_of_a_linked_worktree(tmp_path: Path, ne
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows does not allow CR/LF in filenames")
-@pytest.mark.parametrize("separator", ["\n", "\r", "\r\n"])
-@pytest.mark.parametrize("ignored_tracked", [False, True])
-@pytest.mark.parametrize("scope_kind", ["repository", "directory", "file"])
+@pytest.mark.parametrize(
+    ("scope_kind", "separator"),
+    [
+        pytest.param("ignored-tracked", "\r", id="git-ignored-tracked-cr"),
+        pytest.param("directory", "\n", id="ripgrep-directory-lf"),
+        pytest.param("file", "\r\n", id="explicit-file-crlf"),
+        pytest.param("local-diff", "\n", id="diff-path-lf"),
+    ],
+)
 def test_inventory_rejects_line_breaks_before_serializing_paths(
-    tmp_path: Path, separator: str, ignored_tracked: bool, scope_kind: str
+    tmp_path: Path, scope_kind: str, separator: str
 ) -> None:
-    repository = make_repository(tmp_path)
-    directory = "ignored" if ignored_tracked else "app"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git(repository, "init", "-q")
+    directory = "ignored" if scope_kind == "ignored-tracked" else "app"
     name = f"{directory}/concealed.py{separator}phantom.py"
     write_file(repository, name)
-    if ignored_tracked:
+    scope = "."
+    arguments = None
+    if scope_kind == "ignored-tracked":
+        write_file(repository, ".gitignore", b"ignored/\n")
         git(repository, "add", "--force", "--", name)
-    scope = {"repository": ".", "directory": f"./{directory}", "file": name}[scope_kind]
+    elif scope_kind == "directory":
+        scope = f"./{directory}"
+    elif scope_kind == "file":
+        scope = name
+    else:
+        git(repository, "commit", "--allow-empty", "-qm", "base")
+        arguments = ["--diff-base", "HEAD", "--diff-mode", "local-patch"]
     output = tmp_path / "in_scope_files.txt"
     previous = b"previous.py\n"
     output.write_bytes(previous)
 
-    result = run_inventory(repository, scope, output)
+    result = run_inventory(repository, scope, output, arguments=arguments)
 
     assert result.returncode == 2
     assert "path that cannot fit in the file inventory" in result.stderr

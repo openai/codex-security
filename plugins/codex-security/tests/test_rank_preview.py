@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -89,52 +90,43 @@ def test_preview_for_ignores_incomplete_utf16_tail(
     assert preview_for_bytes(data, DEFAULT_PREVIEW_BYTES) == (source, False)
 
 
-def test_preview_for_does_not_fully_read_a_large_binary(tmp_path: Path) -> None:
-    source = tmp_path / "payload.bin"
-    with source.open("wb") as output:
-        output.write(b"header\0payload")
-        output.truncate(256 * 1024 * 1024)
+class BudgetedReader(BytesIO):
+    def __init__(self, data: bytes, limit: int) -> None:
+        super().__init__(data)
+        self.limit = limit
+        self.bytes_read = 0
 
-    with patch.object(Path, "read_bytes", side_effect=MemoryError("full binary read")):
-        assert preview_for(source, DEFAULT_PREVIEW_BYTES) == ("", True)
+    def read(self, size: int = -1) -> bytes:
+        assert 0 <= size <= self.limit - self.bytes_read
+        data = super().read(size)
+        self.bytes_read += len(data)
+        return data
 
 
-def test_preview_for_bounds_a_source_like_binary_after_the_initial_sample(tmp_path: Path) -> None:
-    source = tmp_path / "payload.py"
-    with source.open("wb") as output:
-        output.write(b"header-without-a-nul" * 256)
-        output.write(b"\0binary")
-        output.truncate(256 * 1024 * 1024)
-
-    assert preview_for(source, DEFAULT_PREVIEW_BYTES, max_read_bytes=64 * 1024) == ("", True)
+@pytest.mark.parametrize(
+    ("filename", "nul_offset", "limit"),
+    [("payload.bin", 0, 4096), ("payload.py", 4096, 64 * 1024)],
+    ids=["initial-sample", "after-initial-sample"],
+)
+def test_preview_for_bounds_binary_reads(filename: str, nul_offset: int, limit: int) -> None:
+    reader = BudgetedReader(b"x" * nul_offset + b"\0" + b"x" * limit, limit)
+    with patch.object(Path, "open", return_value=reader):
+        assert preview_for(Path(filename), DEFAULT_PREVIEW_BYTES) == ("", True)
+    assert reader.bytes_read > nul_offset
 
 
 @pytest.mark.parametrize("max_read_bytes", [None, 1024, 4096, 4097, 128 * 1024])
-def test_preview_for_bounds_large_text_reads(tmp_path: Path, max_read_bytes: int | None) -> None:
-    source = tmp_path / "large.py"
-    source.write_bytes(b"# source comment\n" * (128 * 1024))
+def test_preview_for_bounds_large_text_reads(max_read_bytes: int | None) -> None:
     limit = 64 * 1024 if max_read_bytes is None else max_read_bytes
-    bytes_read = 0
-    with source.open("rb") as reader:
-        read = reader.read
+    line = b"# source comment\n"
+    reader = BudgetedReader(line * (limit // len(line) + 1), limit)
+    with patch.object(Path, "open", return_value=reader):
+        if max_read_bytes is None:
+            preview, binary = preview_for(Path("large.py"), 128)
+        else:
+            preview, binary = preview_for(Path("large.py"), 128, max_read_bytes=max_read_bytes)
 
-        def bounded_read(size: int = -1) -> bytes:
-            nonlocal bytes_read
-            assert 0 <= size <= limit - bytes_read
-            data = read(size)
-            bytes_read += len(data)
-            return data
-
-        with (
-            patch.object(Path, "open", return_value=reader),
-            patch.object(reader, "read", side_effect=bounded_read),
-        ):
-            if max_read_bytes is None:
-                preview, binary = preview_for(source, 128)
-            else:
-                preview, binary = preview_for(source, 128, max_read_bytes=max_read_bytes)
-
-    assert bytes_read == limit
+    assert reader.bytes_read == limit
     assert not binary
     assert preview
     assert len(preview.encode("utf-8")) <= 128

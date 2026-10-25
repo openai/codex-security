@@ -14,7 +14,6 @@ from pathlib import Path
 import pytest
 from workbench_test_support import (
     BUDGET_COST,
-    begin_deep_scan,
     cancel_scan,
     claim_deep_scan_dedup,
     commit_deep_dedup,
@@ -1106,6 +1105,7 @@ def deep_scan_fixture(
     budget: bool = False,
     workers: int = 1,
     include_paths: list[str] | None = None,
+    run=run_workbench,
 ) -> tuple[Path, Path, Path, Path, str]:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
@@ -1124,7 +1124,7 @@ def deep_scan_fixture(
     if budget or include_paths is not None:
         scan_dir = tmp_path / "scan"
         scan_dir.mkdir(mode=0o700)
-        registered = run_workbench(
+        registered = run(
             state_dir,
             "register-cli-scan",
             "--scan-dir",
@@ -1146,12 +1146,20 @@ def deep_scan_fixture(
             ),
         )
         scan_id = str(registered["scanId"])
-        begin_deep_scan(
-            state_dir, "standard-worker-thread", "--scan-id", scan_id, environment=environment
+        run(
+            state_dir,
+            "begin-deep-scan",
+            "--thread-id",
+            "standard-worker-thread",
+            "--scan-id",
+            scan_id,
+            environment=environment,
         )
     else:
-        begun = begin_deep_scan(
+        begun = run(
             state_dir,
+            "begin-deep-scan",
+            "--thread-id",
             "standard-worker-thread",
             "--target-path",
             str(target),
@@ -1176,6 +1184,7 @@ def accepted_standard_worker(
     scan_id: str,
     *,
     name: str = "standard-worker",
+    run=run_workbench,
 ) -> tuple[str, Path]:
     worker_id = str(uuid.uuid4())
     prompt_path, artifact_dir, result_path = worker_paths(scan_dir, name)
@@ -1195,7 +1204,7 @@ def accepted_standard_worker(
         "1",
     )
     environment = {"CODEX_HOME": str(codex_home)}
-    run_workbench(state_dir, *base_args, "--status", "running", environment=environment)
+    run(state_dir, *base_args, "--status", "running", environment=environment)
     result_path.write_text(
         json.dumps(
             {
@@ -1206,7 +1215,7 @@ def accepted_standard_worker(
             }
         )
     )
-    run_workbench(
+    run(
         state_dir,
         *base_args,
         "--status",

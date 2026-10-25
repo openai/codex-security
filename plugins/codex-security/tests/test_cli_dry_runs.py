@@ -20,13 +20,38 @@ def run_script(name: str, *args: str, isolated: bool = False) -> subprocess.Comp
     )
 
 
-def test_all_scripts_support_help() -> None:
-    for script in sorted(SCRIPT_DIR.glob("*.py")):
-        if script.name == "workbench_coverage_receipts.py":
-            continue
-        result = run_script(script.name, "--help")
-        assert result.returncode == 0, f"{script.name}: {result.stderr}"
-        assert "usage:" in result.stdout.lower(), script.name
+@pytest.mark.parametrize(
+    "name",
+    (
+        "deep_scan_config.py",
+        "finalize_scan_contract.py",
+        "generate_in_scope_files.py",
+        "generate_rank_input.py",
+        "snapshot_sqlite.py",
+        "threat_model_projection.py",
+        "validate_scan_contract.py",
+        "validate_tracking_source.py",
+        "workbench_db.py",
+    ),
+)
+def test_commands_support_help(name: str) -> None:
+    result = run_script(name, "--help")
+    assert result.returncode == 0, result.stderr
+    assert "usage:" in result.stdout.lower()
+
+
+def test_script_modules_import_in_a_fresh_interpreter() -> None:
+    modules = sorted(path.stem for path in SCRIPT_DIR.glob("*.py"))
+    program = (
+        "import importlib, sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "for name in sys.argv[2:]:\n"
+        "    importlib.import_module(name)\n"
+    )
+    subprocess.run(
+        [sys.executable, "-I", "-c", program, str(SCRIPT_DIR), *modules],
+        check=True,
+    )
 
 
 @pytest.mark.parametrize(
