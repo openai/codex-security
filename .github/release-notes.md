@@ -53,6 +53,7 @@
 - bump libc from 0.2.190 to 0.2.191 in /plugins/codex-security/native ([#1918](https://github.com/openai/codex-security/pull/1918))
 - verify merge parents after a pull request retarget ([#1948](https://github.com/openai/codex-security/pull/1948))
 - wait for static checks before validating container images ([#1949](https://github.com/openai/codex-security/pull/1949))
+- trace failures to the original job attempt ([#1922](https://github.com/openai/codex-security/pull/1922))
 
 <!-- release-section: highlights:end -->
 
