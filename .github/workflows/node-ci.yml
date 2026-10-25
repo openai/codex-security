@@ -194,9 +194,7 @@ jobs:
           cp -R sdk/typescript/_bundled_plugin/mcp/native/. plugins/codex-security/native/prebuilt
       - name: Install ripgrep
         if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ripgrep
+        run: .github/scripts/install-ripgrep.sh
       - name: Test
         working-directory: sdk/typescript
         env:
@@ -288,9 +286,7 @@ jobs:
       - name: Install dependencies
         run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
       - name: Install ripgrep
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ripgrep
+        run: .github/scripts/install-ripgrep.sh
       - *download-package-for-this-commit
       - name: Restore bundled plugin
         run: tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
@@ -374,9 +370,7 @@ jobs:
         run: python -m pip install --disable-pip-version-check --no-input -r plugins/codex-security/requirements-test.txt
       - name: Install ripgrep
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ripgrep
+        run: .github/scripts/install-ripgrep.sh
       - name: Check plugin source compatibility
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: |
@@ -447,9 +441,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install ripgrep
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ripgrep
+        run: .github/scripts/install-ripgrep.sh
       - name: Set up eval dependencies and host runtime
         run: |
           pnpm --dir sdk/typescript install --frozen-lockfile
