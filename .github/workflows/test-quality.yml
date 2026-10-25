@@ -130,9 +130,7 @@ jobs:
         run: pnpm --dir sdk/typescript run build:plugin
       - name: Install ripgrep
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ripgrep
+        run: .github/scripts/install-ripgrep.sh
       - name: Test shard layout
         if: inputs.compare-layouts
         working-directory: sdk/typescript

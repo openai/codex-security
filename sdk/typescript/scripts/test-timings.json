@@ -192,7 +192,7 @@
   "cli-authentication.test.ts": {
     "linux": 13.7,
     "darwin": 12.5,
-    "win32": 233.6
+    "win32": 280.2
   },
   "cli-classify-severity.test.ts": {
     "linux": 0.1,
@@ -997,7 +997,7 @@
   "scan-resume.test.ts": {
     "linux": 80.8,
     "darwin": 140.9,
-    "win32": 167.9
+    "win32": 247.2
   },
   "scan-skill-paths.test.ts": {
     "linux": 0.1,

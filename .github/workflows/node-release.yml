@@ -157,9 +157,7 @@ jobs:
 
       - &install-release-ripgrep
         name: Install ripgrep
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ripgrep
+        run: .github/scripts/install-ripgrep.sh
 
       - name: Audit production dependencies
         run: sfw pnpm --dir sdk/typescript run audit:prod
