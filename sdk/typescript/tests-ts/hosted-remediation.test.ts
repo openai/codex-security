@@ -79,6 +79,8 @@ test.each([
           ? "$codex-security:fix-finding"
           : "$codex-security:verify-fix",
       );
+      if (operation === "verify")
+        expect(request.prompt).not.toContain('"checks"');
       options.onEvent?.({ type: "activity", description: "Checking guard" });
       if (!staticVerification) return receipt(request);
       expect(request.prompt).toContain("Verification mode: static");
@@ -141,26 +143,24 @@ test.each([
 );
 
 test.each([
-  [
-    "fixed",
-    "The guard blocks the original call and preserves authorized callers.",
-  ],
-  [
-    "still_vulnerable",
-    "The alternate route still reaches the unguarded handler.",
-  ],
-  [
-    "inconclusive",
-    "The source does not establish whether authorized callers still work.",
-  ],
+  {
+    status: "still_vulnerable",
+    evidence: "The alternate route still reaches the unguarded handler.",
+  },
+  {
+    status: "inconclusive",
+    evidence:
+      "The source does not establish whether authorized callers still work.",
+  },
+  { checks: [{ status: "not_run" }] },
 ] as const)(
-  "hosted static verification completes with the CLI verdict %s",
-  async (status, evidence) => {
+  "hosted static verification preserves the CLI verdict for %p",
+  async (fields) => {
     const input = {
       ...(await fixture("verify")),
       verificationMode: "static" as const,
     };
-    const verdict = { id: input.finding.id, status, evidence };
+    const verdict = { ...verificationResult, ...fields };
     const result = await runHostedRemediation(input, {
       executor: {
         run: async (request) =>
@@ -170,29 +170,37 @@ test.each([
       },
     });
     expect(result.status).toBe("completed");
-    expect(result.verification).toEqual(verdict);
+    const { id, status, evidence } = verdict;
+    expect(result.verification).toEqual({ id, status, evidence });
   },
 );
 
-test("hosted verification ignores extra fields like the local CLI", async () => {
-  const input = await fixture("verify");
-  const result = await runHostedRemediation(input, {
-    executor: {
-      run: async (request) =>
-        receipt(request, {
-          finalResponse: JSON.stringify({
-            results: [
-              {
-                ...verificationResult,
-                checks: [{ status: "not_run" }],
-              },
-            ],
-          }),
-        }),
-    },
+test.each([
+  {
+    name: "Replay original request",
+    status: "failed",
+    evidence: "The unauthorized request returned 200.",
+    command: "bun test tests/authorization.test.ts",
+  },
+  {
+    name: "Required legitimate-user control",
+    status: "not_run",
+    evidence: "The test runner is unavailable.",
+  },
+])("hosted verification rejects fixed with a $status check", async (check) => {
+  const finalResponse = JSON.stringify({
+    results: [{ ...verificationResult, checks: [check] }],
   });
-  expect(result.status).toBe("completed");
-  expect(result.verification).toEqual(verificationResult);
+  const result = await runHostedRemediation(await fixture("verify"), {
+    executor: { run: async (request) => receipt(request, { finalResponse }) },
+  });
+  expect(result.status).toBe("failed");
+  expect(result.error?.code).toBe("INVALID_RESULT");
+  expect(result.verification).toBeUndefined();
+  expect(result.execution).toMatchObject({
+    sessionId: "host-session",
+    finalResponse,
+  });
 });
 
 test.each([

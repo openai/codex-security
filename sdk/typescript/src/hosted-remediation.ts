@@ -179,9 +179,7 @@ export async function runHostedRemediation(
       input.operation === "patch"
         ? { patch: parseFindingPatch(response, input.finding.id) }
         : {
-            verification: parseFindingVerifications(response, [
-              input.finding.id,
-            ])[0]!,
+            verification: parseHostedVerification(response, input.finding.id),
           };
     return { ...base, status: "completed", execution, ...outcome };
   } catch (error) {
@@ -195,4 +193,26 @@ export async function runHostedRemediation(
       },
     };
   }
+}
+
+function parseHostedVerification(response: string, findingId: string) {
+  const verification = parseFindingVerifications(response, [findingId])[0]!;
+  if (verification.status !== "fixed") return verification;
+  // Recognize SDK 0.6.0 checks in the original report without requiring them.
+  const checks = z
+    .array(
+      z.object({
+        name: z.string().trim().min(1),
+        status: z.enum(["passed", "failed", "not_run"]),
+        evidence: z.string().trim().min(1),
+        command: z.string().trim().min(1).optional(),
+      }),
+    )
+    .safeParse(JSON.parse(response).results[0].checks);
+  if (checks.success && checks.data.some(({ status }) => status !== "passed")) {
+    throw new Error(
+      "A fixed verification result contradicts a failed or unrun required check.",
+    );
+  }
+  return verification;
 }

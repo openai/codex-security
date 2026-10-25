@@ -84,9 +84,16 @@ result validation finished; it does not imply that a patch fixed the finding:
   still works. If the selected mode cannot establish that, use `inconclusive`
   unless the evidence shows the finding is still vulnerable.
 
-Hosted and local verification use the same parser. Extra fields such as
-`checks` are ignored. Missing or invalid verdict fields still produce
-`INVALID_RESULT` in the hosted response, which retains the execution receipt.
+Hosted and local verification use the same verdict parser and do not require
+`checks`. At the hosted boundary, a `fixed` verdict is rejected if a nonempty
+`checks` array matches the SDK 0.6.0 check format and reports a `failed` or
+`not_run` required check. Other extra fields are ignored.
+
+When upgrading from SDK 0.6.0, remove imports of `FindingVerificationCheck`
+and read `verification.status` and `verification.evidence`. The SDK no longer
+returns `verification.checks`. The executor's original report, when supplied,
+remains in `execution.finalResponse`. Invalid or contradictory verdicts return
+`INVALID_RESULT` with the execution receipt.
 
 The host owns durable attempts, cancellation/reconciliation, usage, artifact
 storage and publication. No operation publishes a pull request or marks a
