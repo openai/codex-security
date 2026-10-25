@@ -19,9 +19,13 @@ import {
   readArtifactTextWithMetadata,
   replaceArtifactJson,
 } from "./artifact-io.js";
-import { artifactSchemaDocuments } from "./artifact-contracts.js";
+import {
+  acceptedDeepScanDraftInputSchema,
+  artifactSchemaDocuments,
+} from "./artifact-contracts.js";
 import { projectArtifactToolSchema } from "./artifact-schema-loader.js";
 import { saveThreatModelDocument } from "./threat-model-document.js";
+import { normalizeAcceptedDiscoveryFinding } from "./accepted-discovery-normalization.js";
 import { requireRegularFile } from "./deep-scan/artifacts.js";
 import coverageDocument from "../../schemas/coverage.schema.json" with { type: "json" };
 import findingsDocument from "../../schemas/findings.schema.json" with { type: "json" };
@@ -37,7 +41,8 @@ const fileScanDraftInputSchema = scanDraftInputSchema.extend({
   scanId: z.string().min(1),
 });
 export const completedScanInputSchema = draftDefinitions.completedScanInput;
-export type ScanDraftInput = z.infer<typeof scanDraftInputSchema>;
+// Host drafts include accepted historical findings as well as current inputs.
+export type ScanDraftInput = z.infer<typeof acceptedDeepScanDraftInputSchema>;
 type DraftCoverage = ScanDraftInput["coverage"];
 export type CompletedScanInput = z.infer<typeof completedScanInputSchema>;
 
@@ -46,7 +51,7 @@ function canonicalFieldSchema(schema: object): z.ZodType {
 }
 
 // Canonical files can retain fields that the compact tool input does not accept.
-const canonicalScanDraftInputSchema = fileScanDraftInputSchema.extend({
+const canonicalFields = fileScanDraftInputSchema.extend({
   scope: canonicalFieldSchema({
     ...scanManifestDocument.properties.scan.properties.scope,
     $defs: scanManifestDocument.$defs,
@@ -94,6 +99,17 @@ const canonicalScanDraftInputSchema = fileScanDraftInputSchema.extend({
       )
       .optional(),
   }),
+});
+const canonicalScanDraftInputSchema =
+  canonicalFields as z.ZodType<ScanDraftInput>;
+// A managed publication without a verified selection must pass the producer contract.
+const currentCanonicalFileScanDraftInputSchema = canonicalFields.extend({
+  findings: draftDefinitions.finding.array(),
+}) as z.ZodType<ScanDraftInput>;
+const acceptedCanonicalFileScanDraftInputSchema = canonicalFields.extend({
+  findings: canonicalFields.shape.findings.or(
+    acceptedDeepScanDraftInputSchema.shape.findings,
+  ),
 }) as z.ZodType<ScanDraftInput>;
 
 export interface ScanDraftResult {
@@ -141,7 +157,9 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
   signal?: AbortSignal,
   publication?: DeepScanPublication,
 ): Promise<ScanDraftResult> {
-  const parsed = parseScanDraft(input);
+  const parsed = publication
+    ? normalizeParsedScanDraft(parseAcceptedDeepScanDraft(input))
+    : parseScanDraft(input);
   requireBoundScan(context, parsed, true);
   const finalDeepDraft = context.mode === "deep" && parsed.complete !== false;
   if (
@@ -333,9 +351,7 @@ export async function recordCodexSecurityWorkerScanDraft(
   }
 
   validateRetainedCoverage(parsed.coverage);
-  for (const surface of parsed.coverage.surfaces as JsonObject[]) {
-    if (isObject(surface.provenance)) delete surface.provenance.scanReceiptRefs;
-  }
+  clearScanReceiptRefs(parsed);
   const previous = pendingWorkerDrafts.get(context.root) ?? Promise.resolve();
   const operation = previous.then(async () => {
     const includePaths = context.includePaths ?? [context.scope || "."];
@@ -497,6 +513,7 @@ export async function hasScanDraftCheckpoint(
     context,
     "current",
   )) {
+    if (recorded === undefined) continue;
     const { handoffClaimToken: _recordedClaim, ...checkpoint } = recorded;
     if (
       isDeepStrictEqual(
@@ -522,6 +539,10 @@ export async function retainRecordedReceiptOwnership(
   input: JsonObject,
 ): Promise<void> {
   if (await hasScanDraftCheckpoint(context, input)) return;
+  clearScanReceiptRefs(input);
+}
+
+function clearScanReceiptRefs(input: JsonObject): void {
   const coverage = input.coverage;
   if (!isObject(coverage) || !Array.isArray(coverage.surfaces)) return;
   for (const surface of coverage.surfaces) {
@@ -1944,7 +1965,7 @@ async function readSavedCheckpoints(
   context: ArtifactContext,
   kind: "current" | "archived",
   excludedCheckpoint?: string,
-): Promise<Array<SavedScanDraft & { name: string; snapshot: JsonObject }>> {
+): Promise<Array<SavedScanDraft & { name: string; snapshot?: JsonObject }>> {
   let checkpointRoot = join(context.root, "checkpoints");
   const checkpointRootMetadata = await lstatIfExists(checkpointRoot);
   if (checkpointRootMetadata === undefined) return [];
@@ -1971,7 +1992,7 @@ async function readSavedCheckpoints(
   const checkpointHead = head?.checkpoint;
 
   const checkpoints: Array<
-    SavedScanDraft & { name: string; snapshot: JsonObject }
+    SavedScanDraft & { name: string; snapshot?: JsonObject }
   > = [];
   const entries = (
     await fs.readdir(checkpointRoot, { withFileTypes: true })
@@ -1992,10 +2013,18 @@ async function readSavedCheckpoints(
       );
     }
     const label = `${kind} scan checkpoint`;
-    const draft = parseJsonObject(
-      await readArtifactText(context, ["checkpoints", entry.name], label),
+    const contents = await readArtifactText(
+      context,
+      ["checkpoints", entry.name],
       label,
     );
+    const draft = parseJsonObject(contents, label);
+    // A historical direct-result snapshot was named by its physical bytes.
+    const rawResult =
+      context.layout === "worker" &&
+      entry.name ===
+        createHash("sha256").update(contents).digest("hex") + ".json";
+    if (rawResult) clearScanReceiptRefs(draft);
     let input: ScanDraftInput;
     if (kind === "archived") input = parsePersistedScanDraft(draft);
     else if (context.layout === "scan") input = parseCanonicalCheckpoint(draft);
@@ -2008,7 +2037,7 @@ async function readSavedCheckpoints(
     }
     checkpoints.push({
       input,
-      snapshot: draft,
+      ...(rawResult ? {} : { snapshot: draft }),
       modifiedMs:
         entry.name === checkpointHead
           ? head!.modifiedMs
@@ -2133,10 +2162,12 @@ async function preserveDeepThreatModel(
     input:
       previous?.threatModel === undefined
         ? input
-        : scanDraftInputSchema.parse({
+        : {
             ...input,
-            threatModel: previous.threatModel,
-          }),
+            ...scanDraftInputSchema.pick({ threatModel: true }).parse({
+              threatModel: previous.threatModel,
+            }),
+          },
     previousDigest: digest,
   };
 }
@@ -2775,12 +2806,15 @@ function safeRelativePath(value: string, context: string): string {
 }
 
 /** Admit file-authored drafts through the current contract after removing host fields. */
-export function parseCanonicalScanDraft(input: {
-  scanId?: string;
-  manifest: JsonObject;
-  findings: JsonObject;
-  coverage: JsonObject;
-}): ScanDraftInput {
+export function parseCanonicalScanDraft(
+  input: {
+    scanId?: string;
+    manifest: JsonObject;
+    findings: JsonObject;
+    coverage: JsonObject;
+  },
+  acceptedFindings?: boolean,
+): ScanDraftInput {
   const scan = requireObject(input.manifest.scan, "scan draft manifest.scan");
   for (const scanId of [
     scan.id,
@@ -2793,22 +2827,31 @@ export function parseCanonicalScanDraft(input: {
       );
     }
   }
-  return parseCanonicalCheckpoint({
-    scanId: input.scanId,
-    ...(scan.complete === undefined ? {} : { complete: scan.complete }),
-    ...(scan.scope === undefined ? {} : { scope: scan.scope }),
-    ...(scan.threatModel === undefined
-      ? {}
-      : { threatModel: scan.threatModel }),
-    findings: input.findings.findings,
-    coverage: input.coverage,
-  });
+  return parseCanonicalCheckpoint(
+    {
+      scanId: input.scanId,
+      ...(scan.complete === undefined ? {} : { complete: scan.complete }),
+      ...(scan.scope === undefined ? {} : { scope: scan.scope }),
+      ...(scan.threatModel === undefined
+        ? {}
+        : { threatModel: scan.threatModel }),
+      findings: input.findings.findings,
+      coverage: input.coverage,
+    },
+    acceptedFindings,
+  );
 }
 
 function parseCanonicalCheckpoint(
   input: Record<string, unknown>,
+  acceptedFindings?: boolean,
 ): ScanDraftInput {
-  const parsed = parsePersistedCheckpoint(input, canonicalScanDraftInputSchema);
+  let schema = canonicalScanDraftInputSchema;
+  if (acceptedFindings === true)
+    schema = acceptedCanonicalFileScanDraftInputSchema;
+  if (acceptedFindings === false)
+    schema = currentCanonicalFileScanDraftInputSchema;
+  const parsed = parsePersistedCheckpoint(input, schema, acceptedFindings);
   for (const [index, finding] of parsed.findings.entries()) {
     for (const field of ["locations", "codeEvidence"] as const) {
       for (const [locationIndex, location] of (
@@ -2825,7 +2868,10 @@ function parseCanonicalCheckpoint(
 }
 
 export function parseScanDraft(input: unknown): ScanDraftInput {
-  const parsed = parsePersistedScanDraft(input);
+  return normalizeParsedScanDraft(parsePersistedScanDraft(input));
+}
+
+function normalizeParsedScanDraft(parsed: ScanDraftInput): ScanDraftInput {
   const deferredIds = new Set<string>();
   const ambiguousIds = ambiguousGenericDeferredIds([parsed]);
   for (const row of parsed.coverage.deferred) {
@@ -2862,9 +2908,32 @@ export function parsePersistedScanDraft(
   return parsed;
 }
 
+/** Replay host-accepted Deep findings while preserving their original details. */
+export function parseAcceptedDeepScanDraft(
+  input: unknown,
+  schema: z.ZodType<ScanDraftInput> = acceptedDeepScanDraftInputSchema,
+): ScanDraftInput {
+  const parsed = schema.parse(input);
+  validateFindingSemantics(parsed.findings, true);
+  delete parsed.coverage.completeness;
+  return parsed;
+}
+
+/** Replay the read contract used when the raw discovery bytes were accepted. */
+export function parseAcceptedDiscoveryDraft(input: unknown): ScanDraftInput {
+  const compatible = structuredClone(input);
+  if (isObject(compatible) && Array.isArray(compatible.findings)) {
+    for (const finding of compatible.findings) {
+      if (isObject(finding)) normalizeAcceptedDiscoveryFinding(finding);
+    }
+  }
+  return parseAcceptedDeepScanDraft(compatible);
+}
+
 function parsePersistedCheckpoint(
   input: Record<string, unknown>,
   schema: z.ZodType<ScanDraftInput> = fileScanDraftInputSchema,
+  acceptedFindings = false,
 ): ScanDraftInput {
   const compatible = structuredClone(input);
   delete compatible.previousParentCheckpoints;
@@ -2896,7 +2965,9 @@ function parsePersistedCheckpoint(
       delete finding.fingerprints;
     }
   }
-  return parsePersistedScanDraft(compatible, schema);
+  return acceptedFindings
+    ? parseAcceptedDeepScanDraft(compatible, schema)
+    : parsePersistedScanDraft(compatible, schema);
 }
 
 function requireBoundScan(
@@ -3269,7 +3340,10 @@ function inventoryStrategy(
   return "repository";
 }
 
-export function validateFindingSemantics(findings: JsonObject[]): void {
+export function validateFindingSemantics(
+  findings: JsonObject[],
+  accepted = false,
+): void {
   for (const [findingIndex, finding] of findings.entries()) {
     const severity = finding.severity as JsonObject;
     if (
@@ -3295,25 +3369,30 @@ export function validateFindingSemantics(findings: JsonObject[]): void {
     }
 
     const evidenceIds = new Set<string>();
-    for (const [evidenceIndex, evidence] of (
-      (finding.codeEvidence as JsonObject[] | undefined) ?? []
-    ).entries()) {
-      const id = evidence.id as string;
-      if (evidenceIds.has(id)) {
-        throw new Error(
-          `scan draft: findings[${findingIndex}].codeEvidence[${evidenceIndex}].id ` +
-            `duplicates ${id}.`,
-        );
-      }
-      evidenceIds.add(id);
-      if (
-        typeof evidence.endLine === "number" &&
-        evidence.endLine < (evidence.startLine as number)
-      ) {
-        throw new Error(
-          `scan draft: findings[${findingIndex}].codeEvidence[${evidenceIndex}].endLine ` +
-            "must not precede startLine.",
-        );
+    const catalogs = accepted
+      ? ["codeEvidence", "code_evidence"]
+      : ["codeEvidence"];
+    for (const catalog of catalogs) {
+      for (const [evidenceIndex, evidence] of (
+        (finding[catalog] as JsonObject[] | undefined) ?? []
+      ).entries()) {
+        const id = evidence.id as string;
+        if (evidenceIds.has(id)) {
+          throw new Error(
+            `scan draft: findings[${findingIndex}].${catalog}[${evidenceIndex}].id ` +
+              `duplicates ${id}.`,
+          );
+        }
+        evidenceIds.add(id);
+        if (
+          typeof evidence.endLine === "number" &&
+          evidence.endLine < (evidence.startLine as number)
+        ) {
+          throw new Error(
+            `scan draft: findings[${findingIndex}].${catalog}[${evidenceIndex}].endLine ` +
+              "must not precede startLine.",
+          );
+        }
       }
     }
 
@@ -3322,8 +3401,12 @@ export function validateFindingSemantics(findings: JsonObject[]): void {
       ["validation", finding.validation],
       ["attackPath", finding.attackPath],
     ];
+    if (accepted) referencedSections.push(["root_cause", finding.root_cause]);
     if (isObject(finding.attackPath)) {
-      for (const sectionName of ["dataflow", "reachability"]) {
+      const names = accepted
+        ? ["dataflow", "dataFlow", "data_flow", "reachability"]
+        : ["dataflow", "reachability"];
+      for (const sectionName of names) {
         referencedSections.push([
           `attackPath.${sectionName}`,
           finding.attackPath[sectionName],
@@ -3332,16 +3415,21 @@ export function validateFindingSemantics(findings: JsonObject[]): void {
     }
     for (const [sectionName, section] of referencedSections) {
       if (!isObject(section)) continue;
-      const references = section.evidenceRefs;
-      if (references === undefined) continue;
-      if (
-        !Array.isArray(references) ||
-        references.some((reference) => !evidenceIds.has(reference))
-      ) {
-        throw new Error(
-          `scan draft: findings[${findingIndex}].${sectionName}.evidenceRefs ` +
-            "must refer to that finding's existing code-evidence IDs.",
-        );
+      const fields = accepted
+        ? ["evidenceRefs", "evidence_refs"]
+        : ["evidenceRefs"];
+      for (const field of fields) {
+        const references = section[field];
+        if (references === undefined) continue;
+        if (
+          !Array.isArray(references) ||
+          references.some((reference) => !evidenceIds.has(reference))
+        ) {
+          throw new Error(
+            `scan draft: findings[${findingIndex}].${sectionName}.${field} ` +
+              "must refer to that finding's existing code-evidence IDs.",
+          );
+        }
       }
     }
   }

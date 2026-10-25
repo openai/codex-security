@@ -2,7 +2,7 @@ import { build, type BuildOptions } from "esbuild";
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const moduleDirectory = mkdtempSync(
@@ -18,6 +18,7 @@ export async function importModule(options: BuildOptions) {
     bundle: true,
     format: "esm",
     platform: "node",
+    nodePaths: [resolve(import.meta.dirname, "../node_modules")],
     write: false,
     ...options,
   });

@@ -49,6 +49,7 @@ from workbench.saved_sources import (
     _parent_publication_ancestors,
     _read_saved_parent_result,
     _read_saved_result,
+    _worker_checkpoint_heads,
     _worker_outputs,
 )
 from workbench_coverage_receipts import (
@@ -433,6 +434,8 @@ def merge_saved_results(
     reason: str,
     scan_mode: str | None = None,
     frozen_source_digests: dict[str, str] | None = None,
+    checkpoint_heads: dict[str, str] | None = None,
+    accepted_source_digests: dict[str, str] | None = None,
     allow_frozen_legacy_parent: bool = False,
     frozen_model_source: str | None = None,
     selected_model_source: list[str] | None = None,
@@ -451,6 +454,10 @@ def merge_saved_results(
         )
     except (ContractError, OSError, ValueError) as exc:
         raise ContractError("Frozen stopped-scan checkpoint set is incomplete.") from exc
+    if checkpoint_heads is None:
+        checkpoint_heads = _worker_checkpoint_heads(
+            scan_dir, workers, scan_id, accepted_source_digests
+        )
     parent: dict[str, Any] | None = None
     frozen_parent_path: str | None = None
     parent_manifest: dict[str, Any] | None = None
@@ -496,7 +503,11 @@ def merge_saved_results(
                     os.utime(checkpoint_path, ns=(parent_modified, parent_modified))
                 captured = (
                     _capture_saved_source(
-                        scan_dir, "checkpoint-head.json", scan_id, created_paths=created_paths
+                        scan_dir,
+                        "checkpoint-head.json",
+                        scan_id,
+                        created_paths=created_paths,
+                        accepted_source_digests=accepted_source_digests,
                     )
                     if head_modified is not None
                     else _capture_parent_observation(
@@ -597,7 +608,11 @@ def merge_saved_results(
             del paths[relative]
             try:
                 captured = _capture_saved_source(
-                    scan_dir, relative, scan_id, created_paths=created_paths
+                    scan_dir,
+                    relative,
+                    scan_id,
+                    created_paths=created_paths,
+                    accepted_source_digests=accepted_source_digests,
                 )
                 if relative == "checkpoint-head.json" and frozen_source_digests is None:
                     parent_context["head"] = next(iter(captured))
@@ -631,7 +646,11 @@ def merge_saved_results(
         relative, worker_id = pending.popleft()
         try:
             draft, digest, observed = _read_saved_result(
-                scan_dir, relative, scan_id, kind="dedup" if relative in reducer_paths else None
+                scan_dir,
+                relative,
+                scan_id,
+                kind="dedup" if relative in reducer_paths else None,
+                accepted_source_digests=accepted_source_digests,
             )
             if frozen_source_digests is not None and frozen_source_digests[relative] != digest:
                 raise ContractError("checkpoint changed after the scan stopped")
@@ -656,8 +675,9 @@ def merge_saved_results(
                 )
                 if discarded:
                     discarded_by_source[relative] = discarded
-            # Recovery expects coverage, but reducer results only contain findings
-            # and context. Add an empty value after hashing the original result.
+            if relative in reducer_paths and "sourceCoverage" in draft:
+                # The host projects coverage separately from the reducer findings.
+                draft = {**draft, "coverage": draft["sourceCoverage"]}
             sources.append((relative, {"coverage": {}, **draft}, worker_id))
             if frozen_source_digests is None:
                 pending.extend(
@@ -739,9 +759,6 @@ def merge_saved_results(
                 frozen_parent_path, parent = relative, draft
                 parent_is_canonical = draft.get("canonicalParent") is True
                 break
-    projected_coverage = parent["coverage"] if parent else {}
-    # V1 persists the review projection in the parent, without reducer sourceCoverage.
-
     coverage_receipts = partial(resolve_coverage_receipts, scan_dir)
 
     def canonical_coverage_record(field: str, item: dict[str, Any]) -> dict[str, Any]:
@@ -823,16 +840,6 @@ def merge_saved_results(
             result["id"] = surface_id(original, index)
             if not receipts_resolved and (origin := projection_origins.get(id(original))):
                 result["receiptRefs"] = coverage_receipts(result, worker, origin[1])
-            previous = retained_coverage_record("surfaces", result)
-            if previous is not None and isinstance(previous.get("id"), str):
-                result["id"] = previous["id"]
-            else:
-                surfaces = coverage.get("surfaces", [])
-                if any(
-                    isinstance(row, dict) and row.get("id") == result["id"]
-                    for row in (surfaces if isinstance(surfaces, list) else [])
-                ):
-                    result["id"] = f"{result['id']}-{_digest(result)[:16]}"
         elif field == "deferred":
             result["id"] = f"{prefix}-deferred-{index}"
             if isinstance(item.get("surfaceIds"), list):
@@ -882,9 +889,40 @@ def merge_saved_results(
                     surface_ids.get(value, value) if isinstance(value, str) else value
                     for value in item["surfaceIds"]
                 ]
+        # Live publication records the worker on its surfaces and linked tasks.
+        # Keep that form when replaying the very same accepted source.
+        if (
+            (field == "surfaces" or (field == "deferred" and result.get("surfaceIds")))
+            and id(source) in accepted_coverage_sources
+            and "workerId" not in result
+        ):
+            published = {**result, "workerId": worker["id"]}
+            if canonical_coverage_record(field, published) in _coverage_rows(coverage, field):
+                return published
+        if field == "surfaces":
+            previous = retained_coverage_record("surfaces", result)
+            if previous is not None and isinstance(previous.get("id"), str):
+                result["id"] = previous["id"]
+            else:
+                surfaces = coverage.get("surfaces", [])
+                if any(
+                    isinstance(row, dict) and row.get("id") == result["id"]
+                    for row in (surfaces if isinstance(surfaces, list) else [])
+                ):
+                    result["id"] = f"{result['id']}-{_digest(result)[:16]}"
         return result
 
     workers_by_id = {worker["id"]: worker for worker in workers}
+    accepted_reducer = (
+        latest_reducer if "sourceCoverage" in drafts_by_path.get(latest_reducer, {}) else None
+    )
+    accepted_coverage = drafts_by_path[accepted_reducer]["coverage"] if accepted_reducer else {}
+    accepted_reducer_rows = {
+        id(row)
+        for field in ("surfaces", "explicitExclusions", "deferred")
+        for row in _coverage_rows(accepted_coverage, field)
+        if isinstance(row, dict)
+    }
     latest_reducer_key = (
         (reducer["completed_at"] or "", reducer["id"], int(reducer["attempt"] or 0))
         if reducer is not None and latest_reducer in drafts_by_path
@@ -925,20 +963,28 @@ def merge_saved_results(
             ) != _parent_observation_content(parent):
                 parent = _merge_tied_parent_observations(parent, draft)
                 parent_is_canonical = False
-    # A reducer supplies findings but cannot supersede saved parent coverage.
+    # A saved parent and the latest reducer can both contribute accepted coverage.
     saved_parent = parent
     parent_is_root = parent is not None
     if parent is None and latest_reducer is not None:
         parent = drafts_by_path[latest_reducer]
 
     projected_coverage = saved_parent["coverage"] if saved_parent else {}
-    reviews = projected_coverage.get("reviews")
+    reviews = accepted_coverage.get("reviews")
     reviewed_attempts = {
         (review.get("workerId"), review.get("attempt"))
         for review in (reviews if isinstance(reviews, list) else [])
         if isinstance(review, dict)
         and isinstance(review.get("workerId"), str)
         and isinstance(review.get("attempt"), int)
+    }
+    reviewed_workers = {
+        worker["id"]
+        for worker in workers
+        if {"status", "merge_state", "attempt"}.issubset(worker.keys())
+        and worker["status"] == "succeeded"
+        and worker["merge_state"] == "merged"
+        and (worker["id"], worker["attempt"]) in reviewed_attempts
     }
     # Reconcile raw source IDs and timestamps before projecting accepted outputs.
     accepted_sources = {
@@ -949,16 +995,12 @@ def merge_saved_results(
         and worker["result_manifest_path"] == str(scan_dir / relative)
         and draft.get("complete") is not False
     }
-    reviewed_attempts.update(
-        (worker_id, workers_by_id[worker_id]["attempt"])
-        for relative, _, worker_id in sources
-        if relative in accepted_sources
-    )
     projection = prepare_saved_coverage_projection(
         sources,
         parent,
         source_order,
         project_worker_coverage=project_worker_coverage,
+        preserve_workers=reviewed_workers,
         preserve_canonical_parent=preserve_canonical_parent,
         receipt_resolver=lambda relative, row, owner: resolve_coverage_receipts(
             scan_dir, row, workers_by_id[owner], relative
@@ -1138,6 +1180,7 @@ def merge_saved_results(
         and parent_manifest["scan"].get("sealedAt")
         and parent_manifest["scan"].get("status") == binding["status"]
         and parent_manifest["scan"].get("preservedSources") == source_digests
+        and parent_manifest["scan"].get("preservedCheckpointHeads", {}) == checkpoint_heads
         and all(warning in initial_warnings for warning in warnings)
     ):
         return None
@@ -1177,6 +1220,7 @@ def merge_saved_results(
     for key in ("sealedAt", "artifacts"):
         manifest["scan"].pop(key, None)
     manifest["scan"]["preservedSources"] = source_digests
+    manifest["scan"]["preservedCheckpointHeads"] = checkpoint_heads
     # Completion follows the selected parent, including legacy terminal drafts
     # that omit the optional marker, rather than an older canonical manifest.
     if parent is not None:
@@ -1487,7 +1531,14 @@ def merge_saved_results(
                     isinstance(source_owner, str)
                     and isinstance(attempt, int)
                     and isinstance(candidate_id, str)
-                    and (source_owner, attempt, candidate_id) in accepted_pending_candidates
+                    and (
+                        (
+                            id(item) in accepted_reducer_rows
+                            and source_owner in reviewed_workers
+                            and workers_by_id[source_owner]["attempt"] == attempt
+                        )
+                        or (source_owner, attempt, candidate_id) in accepted_pending_candidates
+                    )
                 ):
                     return source_owner, candidate_id
         candidate_id = (
@@ -1552,7 +1603,10 @@ def merge_saved_results(
                 ambiguous_deferred.add(key)
             by_id[key] = row
     current_drafts = ([("parent", parent, None)] if parent else []) + [
-        source for source in sources if source[0] in current_results | selected_observations.keys()
+        source
+        for source in sources
+        if source[0] in current_results | selected_observations.keys()
+        or source[0] == accepted_reducer
     ]
 
     pending_surface_orders: dict[tuple[str | None, str], tuple[int, int]] = {}
@@ -1766,7 +1820,19 @@ def merge_saved_results(
             for (saved_owner, _), (saved_order, row, _) in active_deferred.items()
         ):
             continue
-        if key not in ordered_outcomes or order > ordered_outcomes[key][0]:
+        previous = ordered_outcomes.get(key)
+        # A recorded head resolves a timestamp tie with the same worker's replaceable result.
+        if (
+            previous is None
+            or order > previous[0]
+            or (
+                order == previous[0]
+                and owner is not None
+                and relative in selected_observations
+                and previous[1] in current_results
+                and source_owners[relative] == source_owners[previous[1]] == owner
+            )
+        ):
             resolved[key] = disposition
             ordered_outcomes[key] = (order, relative)
     # Only the current parent may claim that another worker finding was absorbed.
@@ -2443,7 +2509,7 @@ def merge_saved_results(
         )
         worker_coverage_order = terminal_coverage_orders.get(worker_id)
         coverage_superseded = (
-            superseded
+            superseded and relative != accepted_reducer
             if worker_id is None
             else (
                 relative not in current_results
@@ -2629,15 +2695,17 @@ def merge_saved_results(
                 removed_parent = [row for row in previous if id(row) in replaced]
                 coverage[field] = [row for row in coverage[field] if row not in removed_parent]
     if isinstance(coverage.get("surfaces"), list):
+        canonical_coverage = projected_coverage if parent_is_canonical else {}
         for relative, owner, source_surface, surface in surface_updates:
             original_surface = surface
             # Generic updates already resolve each receipt at its saved source.
             surface = projection.repair_reviewed_surface(
                 coverage,
-                projected_coverage if parent_is_canonical else {},
+                accepted_coverage if owner in reviewed_workers else canonical_coverage,
                 workers_by_id.get(owner),
                 source_surface,
                 surface,
+                merge_receipts=owner in reviewed_workers,
             ) or project_record("surfaces", surface, source_surface, receipts_resolved=True)
             reconciled_surface_ids[record_key("surfaces", owner, source_surface)] = surface["id"]
             if surface not in coverage["surfaces"] and (
@@ -2658,6 +2726,8 @@ def merge_saved_results(
     # Reopened work survives a superseded checkpoint, but current candidate
     # outcomes still apply. Parent closures cannot remove another worker's row.
     for owner, item in reopened_rows:
+        if owner in reviewed_workers:
+            continue
         source_owner, original = record_source("deferred", owner, item)
         if (
             identity := _deferred_candidate_id(original, source_owner, ambiguous_deferred)
@@ -2678,6 +2748,8 @@ def merge_saved_results(
                 pending, item, owner, "deferred", original_item, item is not original_item
             )
     for _, draft, owner in all_sources:
+        if owner in reviewed_workers:
+            continue
         for surface in _coverage_rows(draft["coverage"], "surfaces"):
             if (
                 isinstance(surface, dict)
@@ -2988,10 +3060,11 @@ def merge_saved_results(
             and worker["result_manifest_path"] == str(scan_dir / relative)
             and draft.get("complete") is not False
         )
-        if coverage_superseded and not selected_candidates and not retain_pending:
+        if worker_id in reviewed_workers or (
+            coverage_superseded and not selected_candidates and not retain_pending
+        ):
             continue
         if project_coverage:
-            reviewed_attempts.add((worker_id, worker["attempt"]))
             reviews = coverage.setdefault("reviews", [])
             if isinstance(reviews, list) and not any(
                 isinstance(review, dict)
@@ -3088,6 +3161,8 @@ def merge_saved_results(
                         if field == "surfaces":
                             retained_surface_rows.add(id(source_item))
                         continue
+                if field == "surfaces" and (worker is None or worker["kind"] == "dedup"):
+                    item = projection.restore_repaired_receipts(item)
                 retain_coverage_row(
                     output, item, worker_id, field, source_item, projected_row or project_coverage
                 )

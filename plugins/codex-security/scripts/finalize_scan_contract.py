@@ -3101,6 +3101,8 @@ def _prepare_scan_finalization(
     allow_missing_writeups: bool = False,
     draft_documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
     finding_scope: list[tuple[str, bool]] | None = None,
+    require_complete: bool = False,
+    accepted_findings: bool = False,
 ) -> PreparedScanFinalization:
     """Prepare validated documents and warnings without writing any output files."""
 
@@ -3113,6 +3115,10 @@ def _prepare_scan_finalization(
         else _read_scan_local_json(scan_dir, "scan-manifest.json", "scan-manifest.json")
     )
     scan = _require_dict(manifest, "scan", "manifest")
+    if require_complete and scan.get("complete") is False:
+        raise RecoverableContractError(
+            "The latest saved scan draft is incomplete; continue the scan before completing it."
+        )
     if scan.get("sealedAt") is None and scan.get("artifacts") == []:
         del scan["artifacts"]
     was_sealed = manifest_is_sealed(scan)
@@ -3170,8 +3176,12 @@ def _prepare_scan_finalization(
     if not was_sealed and scan["status"] == "completed":
         try:
             _populate_unsealed_finding_identities(manifest, findings)
-            _validate_findings(manifest, findings)
-            _validate_current_findings(findings, schema_dir)
+            if accepted_findings:
+                # SHA-verified Deep selections retain the historical artifact read contract.
+                findings_for_validation = _legacy_sealed_findings_for_validation(findings)
+            _validate_findings(manifest, findings_for_validation)
+            if not accepted_findings:
+                _validate_current_findings(findings, schema_dir)
         except ContractError as exc:
             raise RecoverableContractError(
                 "Scan result contains invalid findings; repair the finding records "
@@ -3264,6 +3274,22 @@ def _prepare_scan_finalization(
     )
 
 
+def warnings_for_seal(
+    prepared: PreparedScanFinalization, projection_warnings: list[str] | None
+) -> list[str]:
+    # Escape surrogate-escaped filesystem bytes for the Unicode JSON contract.
+    return list(
+        dict.fromkeys(
+            warning.encode("utf-8", errors="backslashreplace").decode("utf-8")
+            for warning in [
+                *prepared.manifest["scan"].get("warnings", []),
+                *(projection_warnings or []),
+                *prepared.warnings,
+            ]
+        )
+    )
+
+
 def _write_prepared_scan_finalization(
     prepared: PreparedScanFinalization,
     source_root: Path | None = None,
@@ -3277,17 +3303,7 @@ def _write_prepared_scan_finalization(
     if not prepared.was_sealed:
         # Capture warnings before the first seal; later operation diagnostics must
         # not change an existing scan's portable results.
-        # Escape surrogate-escaped filesystem bytes for the Unicode JSON contract.
-        warnings = list(
-            dict.fromkeys(
-                warning.encode("utf-8", errors="backslashreplace").decode("utf-8")
-                for warning in [
-                    *scan.get("warnings", []),
-                    *(projection_warnings or []),
-                    *prepared.warnings,
-                ]
-            )
-        )
+        warnings = warnings_for_seal(prepared, projection_warnings)
         if warnings:
             scan["warnings"] = warnings
             validate_against_schema(

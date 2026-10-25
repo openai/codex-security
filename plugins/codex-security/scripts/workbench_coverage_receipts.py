@@ -70,6 +70,14 @@ def receipt_checkpoints(
     return added
 
 
+def clear_scan_receipt_refs(draft: dict[str, Any]) -> None:
+    coverage = draft.get("coverage")
+    surfaces = coverage.get("surfaces") if isinstance(coverage, dict) else None
+    for surface in surfaces if isinstance(surfaces, list) else []:
+        if isinstance(surface, dict) and isinstance(surface.get("provenance"), dict):
+            surface["provenance"].pop("scanReceiptRefs", None)
+
+
 def retain_recorded_receipt_ownership(
     sources: list[tuple[str, dict[str, Any], str | None]],
     digest: Callable[[Any], str],
@@ -116,10 +124,7 @@ def retain_recorded_receipt_ownership(
             continue
         if payload_digest(draft) in recorded.get(directory, set()):
             continue
-        surfaces = draft["coverage"].get("surfaces", [])
-        for surface in surfaces if isinstance(surfaces, list) else []:
-            if isinstance(surface, dict) and isinstance(surface.get("provenance"), dict):
-                surface["provenance"].pop("scanReceiptRefs", None)
+        clear_scan_receipt_refs(draft)
 
 
 def resolve_coverage_receipts(

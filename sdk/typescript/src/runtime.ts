@@ -85,6 +85,17 @@ import {
   windowsUnsafePathComponent,
 } from "./windows-path.js";
 
+import {
+  nodeErrorCode,
+  requirePrivateOutputDirectory,
+  requireSecureOutputAncestry,
+} from "./scan-files.js";
+export {
+  requirePrivateOutputDirectory,
+  requireSecureOutputAncestry,
+  requireTrustedOutputAncestor,
+} from "./scan-files.js";
+
 const execFile = promisify(execFileCallback);
 
 export type StartCodex = (
@@ -1699,6 +1710,7 @@ export async function runWorkbench(
           )
         : input,
       signal,
+      undefined,
       archiveHandshake,
       // Match native argv's UTF-8 encoding for the private argument frame.
       framedArguments
@@ -2154,96 +2166,6 @@ export async function validatePreparedOutputDir(
   requirePrivateOutputDirectory(metadata, path);
   await requireSecureOutputAncestry(canonical);
   return canonical;
-}
-
-export function requirePrivateOutputDirectory(
-  metadata: Pick<Stats, "mode" | "uid">,
-  path: string,
-  effectiveUid = process.geteuid?.(),
-): void {
-  if (process.platform === "win32") return;
-  if ((metadata.mode & 0o077) !== 0) {
-    throw new OutputDirectoryError(
-      `Scan output directory must not be accessible to other users (chmod 700): ${path}`,
-    );
-  }
-  if (effectiveUid !== undefined && metadata.uid !== effectiveUid) {
-    throw new OutputDirectoryError(
-      `Scan output directory must be owned by the current user: ${path}`,
-    );
-  }
-}
-
-/** Reject shared parents whose owner can rename or replace private scan output. */
-export async function requireSecureOutputAncestry(
-  path: string,
-  effectiveUid = process.geteuid?.(),
-): Promise<void> {
-  if (process.platform === "win32") return;
-  let current = dirname(resolve(path));
-  while (true) {
-    try {
-      current = await realpath(current);
-      break;
-    } catch (error) {
-      if (nodeErrorCode(error) !== "ENOENT") {
-        throw new OutputDirectoryError(
-          `Unable to inspect scan output parent directory: ${current}`,
-          { cause: error },
-        );
-      }
-      const parent = dirname(current);
-      if (parent === current) {
-        throw new OutputDirectoryError(
-          `Unable to inspect scan output parent directory: ${current}`,
-          { cause: error },
-        );
-      }
-      current = parent;
-    }
-  }
-  while (true) {
-    let metadata: Stats;
-    try {
-      metadata = await lstat(current);
-    } catch (error) {
-      throw new OutputDirectoryError(
-        `Unable to inspect scan output parent directory: ${current}`,
-        { cause: error },
-      );
-    }
-    if (!metadata.isDirectory()) {
-      throw new OutputDirectoryError(
-        `Scan output parent must be a non-symlink directory: ${current}`,
-      );
-    }
-    requireTrustedOutputAncestor(metadata, current, effectiveUid);
-    const parent = dirname(current);
-    if (parent === current) return;
-    current = parent;
-  }
-}
-
-export function requireTrustedOutputAncestor(
-  metadata: Pick<Stats, "mode" | "uid">,
-  path: string,
-  effectiveUid = process.geteuid?.(),
-): void {
-  if (
-    effectiveUid !== undefined &&
-    metadata.uid !== 0 &&
-    metadata.uid !== effectiveUid
-  ) {
-    throw new OutputDirectoryError(
-      `Scan output parent must have a trusted owner: ${path}`,
-    );
-  }
-  if ((metadata.mode & 0o022) === 0) return;
-  if ((metadata.mode & 0o1000) === 0) {
-    throw new OutputDirectoryError(
-      `Scan output parent must not be group- or world-writable without the sticky bit: ${path}`,
-    );
-  }
 }
 
 async function removeEmptyDirectories(
@@ -3211,6 +3133,7 @@ export async function runCodexCommand(
   environment: ProcessEnvironment,
   input?: string | Uint8Array,
   signal?: AbortSignal,
+  cwd?: string,
   archiveHandshake = false,
   stdinPrefix?: string,
 ): Promise<CodexCommandResult> {
@@ -3226,6 +3149,7 @@ export async function runCodexCommand(
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       signal: commandSignal,
+      ...(cwd === undefined ? {} : { cwd }),
     },
   );
   let stdout = "";
@@ -3583,12 +3507,6 @@ function processErrorDetail(error: unknown): string {
     }
   }
   return String(error) || "unknown error";
-}
-
-function nodeErrorCode(error: unknown): string | undefined {
-  return isRecord(error) && typeof error["code"] === "string"
-    ? error["code"]
-    : undefined;
 }
 
 function throwIfSignalAborted(signal?: AbortSignal): void {

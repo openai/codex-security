@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { mock, test } from "node:test";
 import { fileURLToPath } from "node:url";
+import type { DeepScanExecutionSettings } from "../src/deep-scan/recovery-settings.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { importModule } from "./import-module.ts";
@@ -47,12 +49,19 @@ const { createCodexSecurityServer } = await importModule({
       name: "synthetic-worker",
       setup(build) {
         build.onLoad({ filter: /[/\\]deep-scan[/\\]executor\.ts$/ }, () => ({
-          contents: `export class CodexSdkWorkerExecutor { constructor() { return ${fixtureAccess}.executor; } }`,
+          contents: `export class CodexSdkWorkerExecutor { constructor() { return ${fixtureAccess}.executor; } }
+            export const resolveCodexPath = () => process.execPath;
+            export const workerRuntimeConfiguration = () => ({});
+            export const workerRuntimeConfigDigest = () => "0".repeat(64);
+            export const workerRuntimeSettingsFromConfig = () => ({});`,
           loader: "ts",
         }));
       },
     },
   ],
+  banner: {
+    js: `import { createRequire as fixtureRequire } from "node:module"; const require = fixtureRequire(${JSON.stringify(import.meta.url)});`,
+  },
   define: {
     __dirname: JSON.stringify(applicationRoot),
     "import.meta.url": JSON.stringify(
@@ -77,6 +86,12 @@ try {
       const signals: AbortSignal[] = [];
       let claims = 0;
       let now = 0;
+      const originalEnvironment = process.env;
+      process.env = {
+        ...process.env,
+        CODEX_HOME: join(fixture.pluginRoot, "codex-home"),
+      };
+      delete process.env.CODEX_SECURITY_CONFIG_PATH;
       const hold = async () => {
         entered.resolve();
         await release.promise;
@@ -86,7 +101,16 @@ try {
           registry,
           executor,
           store: Object.assign(store, {
-            begin: async () => {
+            begin: async ({
+              executionSettings,
+            }: {
+              executionSettings?: DeepScanExecutionSettings | null;
+            }) => {
+              assert.ok(executionSettings);
+              store.run.executionSettings ??= {
+                version: 1,
+                settings: executionSettings,
+              };
               if (stage === "begin" || stage === "queued") await hold();
               return structuredClone(store.run);
             },
@@ -205,6 +229,7 @@ try {
         await Promise.allSettled([coordinator?.settled()]);
         await server.close();
         clock.mock.restore();
+        process.env = originalEnvironment;
         Reflect.deleteProperty(globalThis, fixtureKey);
       }
     });

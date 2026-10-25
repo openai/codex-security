@@ -1097,6 +1097,31 @@ test("SDK cancellation waits for the executor receipt without losing known sessi
   });
 });
 
+test("SDK cancellation retains an unknown executor acceptance receipt", async () => {
+  const controller = new AbortController();
+  let requestId = "";
+  const executor = {
+    run: mock(async (request: ScanExecutionRequest) => {
+      requestId = request.requestId;
+      controller.abort();
+      await Promise.resolve();
+      throw new Error("Synthetic response lost after dispatch");
+    }),
+  };
+  const result = await runHostedScan(await fixture(), {
+    signal: controller.signal,
+    executor,
+  });
+  expect(executor.run).toHaveBeenCalledTimes(1);
+  expect(requestId).not.toBe("");
+  expect(result.status).toBe("acceptance_unknown");
+  expect(result.execution).toEqual({
+    requestId,
+    status: "acceptance_unknown",
+    message: "Synthetic response lost after dispatch",
+  });
+});
+
 test("mismatched execution receipts are never accepted or retried", async () => {
   const input = await fixture();
   const executor = {

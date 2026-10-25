@@ -87,12 +87,14 @@ def test_worker_failure_keeps_complete_diagnostic_and_exact_terminal_replay(
 
     failed = upsert_deep_worker(*failure_args, environment=environment)["deepScan"]
     assert failed["workers"][0]["error"] == message
+    assert failed["attempts"][0]["error"] == message
     replayed = upsert_deep_worker(*failure_args, environment=environment)["deepScan"]
     assert replayed["workers"] == failed["workers"]
     resumed = resume_deep_scan(state_dir, scan_id, "diagnostic-parent", environment=environment)[
         "deepScan"
     ]
     assert resumed["workers"][0]["error"] == message
+    assert resumed["attempts"][0]["error"] == message
     rejected = upsert_deep_worker(
         *worker_args,
         status,

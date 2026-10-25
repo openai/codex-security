@@ -171,6 +171,12 @@ export async function publishCoverageFixture(
   );
   const runWorkbench = async (args: string[]) => {
     const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
+    if (args[0] === "begin-deep-scan") {
+      args = [...args];
+      const version = args.indexOf("--workflow-version");
+      assert.notEqual(version, -1);
+      args[version + 1] = "deep-scan-mcp/v1";
+    }
     const command = [workbenchPath, ...args];
     if (interruptPublication && args[0] === "fail-scan") {
       command.unshift(

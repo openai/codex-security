@@ -1,12 +1,16 @@
 import { parseJson } from "./value.js";
-import { open, readdir, stat } from "node:fs/promises";
-import { join } from "node:path";
-import { StringDecoder } from "node:string_decoder";
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { pipeline } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
+import zlib from "node:zlib";
 import { z } from "zod";
+import { open, readdir, realpath, stat } from "node:fs/promises";
+import { join } from "node:path";
 import { isRecord } from "./record.js";
 import {
   estimateScanCost,
+  estimateScanCostLowerBound,
   tokenUsage,
   type ScanCost,
   type ScanTokenUsage,
@@ -17,10 +21,14 @@ import {
   type ScanActivity,
 } from "./scan-activity.js";
 import {
+  attributedScanThreads,
+  isAttributedScanEvent,
   isScanArtifactDirectory,
+  recordedScanCodexHome,
   sessionOwnsTurn,
   sessionParentThreadId,
   sessionStartedAt,
+  type ScanExecutionAttribution,
 } from "./scan-sessions.js";
 import {
   scanProgressUpdatesFromText,
@@ -86,9 +94,44 @@ function createSessionReasoning(id: string, text = "") {
   return { id, text, raw: false, activity: null as ScanActivity | null };
 }
 
-type SessionUsage = ReturnType<typeof createSessionUsage> & {
-  events?: Record<string, unknown>[];
-};
+interface SessionUsage {
+  offset: number;
+  compressedSize: number | null;
+  pendingLine: Buffer[];
+  unreadable: boolean;
+  threadId: string | null;
+  parentThreadId: string | null;
+  workingDirectory: string | null;
+  startedAt: number | null;
+  inheritedUsage: ScanTokenUsage | null;
+  replaying: boolean;
+  usage: ScanTokenUsage | null;
+  tokensUpdatedAt: string | null;
+  accountRateLimits: Map<string, ScanAccountRateLimit> | null;
+  counterUsage: ScanTokenUsage | null;
+  model: string | null;
+  modelUsage: Map<string | null, ScanTokenUsage>;
+  counterModelUsage: Map<string | null, ScanTokenUsage>;
+  currentTurnId: string | null;
+  previousUsage: ScanTokenUsage | null;
+  responseIds: Set<string>;
+  responseUsageObserved: boolean;
+  responseTokens: number;
+  expectedResponseTokens: number;
+  responseEpochUsageObserved: boolean;
+  incompleteResponseEpoch: boolean;
+  counterRegressed: boolean;
+  calls: Map<string, ScanActivity>;
+  activities: { index: number; activity: ScanActivity }[];
+  progress: ScanProgress[];
+  filesCompleted: number;
+  filesTotal: number | null;
+  prose: Set<string>;
+  reasoning: SessionReasoning | null;
+  reasoningCount: number;
+  eventIndex: number;
+  events?: { index: number; event: Record<string, unknown> }[];
+}
 
 interface ScanCostTrackerOptions {
   codexHome: string;
@@ -99,6 +142,8 @@ interface ScanCostTrackerOptions {
   expectedFilesTotal?: number;
   /** Incomplete costs are measured subtotals, usable for spending limits only. */
   onCost?: (cost: Readonly<ScanCost>, complete: boolean) => void;
+  // Only reported when the full public estimate is unavailable.
+  onCostLowerBound?: (cost: Readonly<ScanCost>) => void;
   onUsage?: (usage: Readonly<ScanTokenUsage>) => void;
   onUsageObservation?: (observation: ScanUsageObservation) => void;
   onActivity?: (activity: ScanActivity) => void;
@@ -116,11 +161,11 @@ interface ScanCostSnapshot {
 const COST_POLL_INTERVAL_MS = 100;
 const SESSION_READ_SIZE = 64 * 1_024;
 
-function createSessionUsage(observeUsage: boolean) {
+function createSessionUsage(observeUsage: boolean): SessionUsage {
   return {
     offset: 0,
-    decoder: new StringDecoder("utf8"),
-    pendingLine: [] as string[],
+    compressedSize: null,
+    pendingLine: [],
     unreadable: false,
     threadId: null as string | null,
     parentThreadId: null as string | null,
@@ -128,21 +173,31 @@ function createSessionUsage(observeUsage: boolean) {
     startedAt: null as number | null,
     inheritedUsage: null as ScanTokenUsage | null,
     replaying: false,
-    usage: null as ScanTokenUsage | null,
-    tokensUpdatedAt: null as string | null,
-    accountRateLimits: observeUsage
-      ? new Map<string, ScanAccountRateLimit>()
-      : null,
-    responseUsage: null as ScanTokenUsage | null,
-    responseIds: new Set<string>(),
-    calls: new Map<string, ScanActivity>(),
-    activities: [] as ScanActivity[],
-    progress: [] as ScanProgress[],
+    usage: null,
+    tokensUpdatedAt: null,
+    accountRateLimits: observeUsage ? new Map() : null,
+    counterUsage: null,
+    model: null,
+    modelUsage: new Map(),
+    counterModelUsage: new Map(),
+    currentTurnId: null,
+    previousUsage: null,
+    responseIds: new Set(),
+    responseUsageObserved: false,
+    responseTokens: 0,
+    expectedResponseTokens: 0,
+    responseEpochUsageObserved: false,
+    incompleteResponseEpoch: false,
+    counterRegressed: false,
+    calls: new Map(),
+    activities: [],
+    progress: [],
     filesCompleted: 0,
     filesTotal: null as number | null,
     prose: new Set<string>(),
     reasoning: null as SessionReasoning | null,
     reasoningCount: 0,
+    eventIndex: 0,
   };
 }
 
@@ -153,16 +208,25 @@ export class ScanCostTracker {
   readonly #workers = new Map<string, number>();
   readonly #workerProgress = new Map<string, number>();
   readonly #reportedProgress = new Set<string>();
+  readonly #reportedSessionEvents = new Map<string, Set<string>>();
+  readonly #reportedActivities = new Map<string, Set<string>>();
   #threadId: string | null = null;
   #observingWorkers = true;
   #timer: NodeJS.Timeout | null = null;
   #pending: Promise<void> = Promise.resolve();
   #snapshot: ScanCostSnapshot = { usage: null, cost: null };
   #lastCost: string | null = null;
+  #lastCostLowerBound: string | null = null;
   #lastUsage: string | null = null;
   #lastObservation: ScanUsageObservation | null = null;
   #highestFilesCompleted = 0;
   #expectedFilesTotal: number | undefined;
+  #attribution: ScanExecutionAttribution | null = null;
+  #readAttribution:
+    | ((
+        force?: boolean,
+      ) => Promise<ScanExecutionAttribution | null | undefined>)
+    | undefined;
 
   public constructor(options: ScanCostTrackerOptions) {
     this.#options = options;
@@ -173,10 +237,25 @@ export class ScanCostTracker {
     this.#expectedFilesTotal = filesTotal;
   }
 
+  public setAttributionReader(
+    reader: (
+      force?: boolean,
+    ) => Promise<ScanExecutionAttribution | null | undefined>,
+  ): void {
+    this.#readAttribution = reader;
+  }
+
   public recordUsage(usage: unknown, threadId = this.#threadId): void {
     const normalized = tokenUsage(usage);
     if (threadId !== null) {
-      this.#receipts.set(threadId, normalized);
+      const previous = this.#receipts.get(threadId);
+      if (
+        previous == null ||
+        (normalized !== null &&
+          normalized.total_tokens >= previous.total_tokens)
+      ) {
+        this.#receipts.set(threadId, normalized);
+      }
     }
   }
 
@@ -186,6 +265,7 @@ export class ScanCostTracker {
     if (
       this.#options.maxCostUsd === undefined &&
       this.#options.onCost === undefined &&
+      this.#options.onCostLowerBound === undefined &&
       this.#options.onUsage === undefined &&
       this.#options.onUsageObservation === undefined &&
       this.#options.onActivity === undefined &&
@@ -221,8 +301,12 @@ export class ScanCostTracker {
   }
 
   public async refresh(): Promise<ScanCostSnapshot> {
+    return this.#refresh(false);
+  }
+
+  async #refresh(forceAttribution: boolean): Promise<ScanCostSnapshot> {
     const update = this.#pending.then(async () => {
-      await this.#readSessions();
+      await this.#readSessions(forceAttribution);
     });
     this.#pending = update.catch(() => {});
     await update;
@@ -234,45 +318,96 @@ export class ScanCostTracker {
     this.#timer = null;
     if (fallbackUsage !== undefined) this.recordUsage(fallbackUsage);
     try {
-      await this.refresh();
+      await this.#refresh(true);
     } finally {
       this.#observingWorkers = false;
     }
-    if (this.#receipts.size > 0 || this.#snapshot.usage !== null)
+    if (
+      this.#attribution !== null ||
+      this.#receipts.size > 0 ||
+      this.#snapshot.usage !== null
+    )
       return this.#snapshot;
     const cost = estimateScanCost(this.#options.model, fallbackUsage);
     this.#snapshot = { usage: fallbackUsage ?? null, cost };
     this.#reportUsage(tokenUsage(fallbackUsage));
-    this.#reportCost(cost);
+    this.#reportCost(cost, fallbackUsage);
     return this.#snapshot;
   }
 
-  async #readSessions(): Promise<void> {
+  async #readSessions(forceAttribution: boolean): Promise<void> {
     if (this.#threadId === null) return;
     const observeUsage = this.#options.onUsageObservation !== undefined;
     const repository =
       this.#options.onActivity === undefined
         ? undefined
         : this.#options.repository;
-    const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
-    for await (const path of sessionFiles(
-      join(this.#options.codexHome, "sessions"),
-    )) {
-      let session = this.#sessions.get(path);
-      if (session === undefined) {
-        session = createSessionUsage(observeUsage);
-        this.#sessions.set(path, session);
+    let recordedAttribution = this.#attribution;
+    if (this.#readAttribution) {
+      const record = await this.#readAttribution(forceAttribution);
+      recordedAttribution = record ?? null;
+      const attribution = record == null || record.legacy ? null : record;
+      if (
+        attribution &&
+        (!this.#attribution ||
+          attribution.workerCodexHome !== this.#attribution.workerCodexHome ||
+          attribution.completedAt !== this.#attribution.completedAt)
+      ) {
+        this.#sessions.clear();
       }
-      try {
-        await readSessionUsage(path, session, repository);
-      } catch (error) {
-        if (session.threadId === null) throw error;
-        unreadable.push({ session, error });
+      this.#attribution = attribution;
+    }
+    const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
+    const homes = new Set([this.#options.codexHome]);
+    if (this.#options.scanDirectory !== undefined) {
+      const home = await recordedScanCodexHome(
+        this.#options.scanDirectory,
+        recordedAttribution,
+      );
+      if (home !== undefined) homes.add(home);
+    }
+    // Recovery restores workers to their recorded home; the SDK parent can
+    // continue in the current home. Apply the same scan membership to both.
+    const directories = new Set<string>();
+    for (const home of homes) {
+      for (const source of ["sessions", "archived_sessions"]) {
+        let directory: string;
+        try {
+          directory = await realpath(join(home, source));
+        } catch (error) {
+          if (isMissingFile(error)) continue;
+          throw error;
+        }
+        if (directories.has(directory)) continue;
+        directories.add(directory);
+        for await (const path of sessionFiles(
+          directory,
+          typeof zlib.createZstdDecompress === "function",
+        )) {
+          let session = this.#sessions.get(path);
+          if (session === undefined) {
+            session = createSessionUsage(observeUsage);
+            this.#sessions.set(path, session);
+          }
+          try {
+            await readSessionUsage(
+              path,
+              session,
+              repository,
+              this.#attribution,
+            );
+          } catch (error) {
+            if (session.threadId === null) throw error;
+            unreadable.push({ session, error });
+          }
+        }
       }
     }
 
-    const included = new Set([this.#threadId, ...this.#receipts.keys()]);
-    if (this.#options.scanDirectory !== undefined) {
+    const included = this.#attribution
+      ? attributedScanThreads(this.#sessions.values(), this.#attribution)
+      : new Set([this.#threadId, ...this.#receipts.keys()]);
+    if (!this.#attribution && this.#options.scanDirectory !== undefined) {
       const scanStartedAt =
         [...this.#sessions.values()].find(
           (session) => session.threadId === this.#threadId,
@@ -298,9 +433,9 @@ export class ScanCostTracker {
         }
       }
     }
-    let previousSize: number;
-    do {
-      previousSize = included.size;
+    let changed = this.#attribution === null;
+    while (changed) {
+      const previousSize = included.size;
       for (const session of this.#sessions.values()) {
         if (
           session.threadId !== null &&
@@ -310,12 +445,27 @@ export class ScanCostTracker {
           included.add(session.threadId);
         }
       }
-    } while (included.size !== previousSize);
+      changed = included.size !== previousSize;
+    }
     for (const { session, error } of unreadable) {
       if (included.has(session.threadId!)) throw error;
     }
 
-    const usages = new Map(this.#receipts);
+    let incomplete = false;
+    const usages = new Map(
+      [...this.#receipts].filter(
+        ([threadId]) =>
+          included.has(threadId) &&
+          (!this.#attribution ||
+            this.#attribution.executionThreadIds.includes(threadId)),
+      ),
+    );
+    if (this.#attribution) {
+      for (const threadId of included) {
+        if (!usages.has(threadId)) usages.set(threadId, null);
+      }
+    }
+    const usageSessions = new Map<string, SessionUsage>();
     for (const [path, tracked] of this.#sessions) {
       const threadId = tracked.threadId;
       if (threadId === null || !included.has(threadId)) continue;
@@ -327,7 +477,7 @@ export class ScanCostTracker {
         // Replay only newly associated sessions, including their early events.
         session = createSessionUsage(observeUsage);
         session.events = [];
-        await readSessionUsage(path, session, repository);
+        await readSessionUsage(path, session, repository, this.#attribution);
         this.#sessions.set(path, session);
       }
       let worker: number | undefined;
@@ -340,7 +490,20 @@ export class ScanCostTracker {
             this.#options.onWorkerEvent?.({ kind: "observed", worker });
         }
       }
-      for (const event of session.events?.splice(0) ?? []) {
+      for (const { index, event } of session.events?.splice(0) ?? []) {
+        let reported = this.#reportedSessionEvents.get(threadId);
+        if (reported === undefined) {
+          reported = new Set();
+          this.#reportedSessionEvents.set(threadId, reported);
+        }
+        // A physical copy keeps each event's position, including repeated
+        // identical events. Positions count unfiltered records so attribution
+        // changes can replay the same log without changing occurrence identity.
+        const identity = `${index}:${createHash("sha256")
+          .update(JSON.stringify(event))
+          .digest("hex")}`;
+        if (reported.has(identity)) continue;
+        reported.add(identity);
         this.#options.onSessionEvent?.({
           threadId,
           parentThreadId: session.parentThreadId,
@@ -349,7 +512,17 @@ export class ScanCostTracker {
         });
       }
       if (worker !== undefined) {
-        for (const activity of session.activities.splice(0)) {
+        for (const { index, activity } of session.activities.splice(0)) {
+          let reported = this.#reportedActivities.get(threadId);
+          if (reported === undefined) {
+            reported = new Set();
+            this.#reportedActivities.set(threadId, reported);
+          }
+          const identity = `${index}:${createHash("sha256")
+            .update(JSON.stringify(activity))
+            .digest("hex")}`;
+          if (reported.has(identity)) continue;
+          reported.add(identity);
           this.#options.onActivity?.({
             ...activity,
             id: `${threadId}:${activity.id}`,
@@ -357,6 +530,31 @@ export class ScanCostTracker {
           });
         }
         this.#reportWorkerProgress(session);
+      }
+      // Choose one copy using both receipts and cumulative lower bounds.
+      // Equal totals can still precede later corrections in the full log.
+      const previous = usageSessions.get(threadId);
+      const total = sessionUsageTotal(session);
+      const previousTotal = previous ? sessionUsageTotal(previous) : -1;
+      if (
+        previous === undefined ||
+        total > previousTotal ||
+        (total === previousTotal &&
+          (session.eventIndex > previous.eventIndex ||
+            (session.eventIndex === previous.eventIndex &&
+              session.pendingLine.length === 0 &&
+              previous.pendingLine.length > 0)))
+      ) {
+        usageSessions.set(threadId, session);
+      }
+    }
+    for (const [threadId, session] of usageSessions) {
+      if (
+        session.counterUsage &&
+        session.counterUsage.total_tokens >
+          (usages.get(threadId)?.total_tokens ?? -1)
+      ) {
+        usages.set(threadId, session.counterUsage);
       }
       const receipt = usages.get(threadId);
       // A discovered thread without a receipt has unknown usage, not zero.
@@ -371,25 +569,133 @@ export class ScanCostTracker {
       ) {
         usages.set(threadId, session.usage);
       }
+      if (!usages.has(threadId)) usages.set(threadId, null);
+      let selected = usages.get(threadId);
+      const counter = session.counterUsage;
+      if (selected && counter)
+        selected = addTokenUsage(
+          selected,
+          tokenUsageRemainder(counter, selected),
+        );
+      if (selected && session.usage) {
+        const remainder = tokenUsageRemainder(selected, session.usage);
+        if (remainder.total_tokens > 0) {
+          usages.set(threadId, addTokenUsage(session.usage, remainder));
+          if (session.responseUsageObserved) incomplete = true;
+        }
+      }
+      if (
+        (session.counterRegressed && !session.responseUsageObserved) ||
+        session.incompleteResponseEpoch ||
+        (session.responseEpochUsageObserved &&
+          session.expectedResponseTokens > session.responseTokens)
+      )
+        incomplete = true;
+      if (session.pendingLine.length > 0 && !this.#receipts.get(threadId))
+        incomplete = true;
     }
     let usage: ScanTokenUsage | null = null;
-    let complete = true;
+    let missingUsage = false;
     for (const value of usages.values()) {
       if (value === null) {
-        complete = false;
+        incomplete = true;
+        if (!this.#attribution) missingUsage = true;
         continue;
       }
       usage = addTokenUsage(usage, value);
     }
-    if (observeUsage) this.#reportUsageObservation(usages, complete);
-    if (!complete) this.#snapshot = { usage: null, cost: null };
-    if (usage === null) return;
-    const cost = estimateScanCost(this.#options.model, usage);
-    if (complete) {
-      this.#snapshot = { usage, cost };
-      this.#reportUsage(usage);
+    if (observeUsage) this.#reportUsageObservation(usages, !missingUsage);
+    if (usage === null) {
+      this.#snapshot = { usage: null, cost: null };
+      return;
     }
-    this.#reportCost(cost, complete);
+    const modelUsage = new Map<string | null, ScanTokenUsage>();
+    const liveModelUsage = new Map<string | null, ScanTokenUsage>();
+    let observedModel = false;
+    for (const [threadId, value] of usages) {
+      if (value === null) continue;
+      const session = usageSessions.get(threadId);
+      for (const [model, tokens] of reconcileModelUsage(
+        value,
+        session?.modelUsage,
+      ) ?? []) {
+        if (model !== null) observedModel = true;
+        modelUsage.set(
+          model,
+          addTokenUsage(modelUsage.get(model) ?? null, tokens),
+        );
+      }
+      const remainder = session?.usage
+        ? subtractTokenUsage(value, session.usage)
+        : value;
+      if (remainder !== null && remainder.total_tokens > 0) {
+        const model =
+          (this.#attribution && threadId !== this.#threadId) ||
+          (session?.modelUsage.size ?? 0) > 0
+            ? null
+            : (session?.model ??
+              (threadId === this.#threadId ? this.#options.model : null));
+        modelUsage.set(
+          model,
+          addTokenUsage(modelUsage.get(model) ?? null, remainder),
+        );
+      }
+      const live =
+        (session?.counterUsage?.total_tokens ?? -1) >
+        (session?.usage?.total_tokens ?? -1);
+      const liveModels = reconcileModelUsage(
+        value,
+        live ? session?.counterModelUsage : session?.modelUsage,
+      );
+      let liveTokens: ScanTokenUsage | null = null;
+      for (const [model, tokens] of liveModels ?? []) {
+        liveModelUsage.set(
+          model,
+          addTokenUsage(liveModelUsage.get(model) ?? null, tokens),
+        );
+        liveTokens = addTokenUsage(liveTokens, tokens);
+      }
+      // Native cumulative totals can exceed the history with a known model.
+      // Keep that history priced and represent only the unassigned remainder.
+      const liveRemainder = liveTokens
+        ? subtractTokenUsage(value, liveTokens)
+        : value;
+      if (liveRemainder !== null && liveRemainder.total_tokens > 0)
+        liveModelUsage.set(
+          null,
+          addTokenUsage(liveModelUsage.get(null) ?? null, liveRemainder),
+        );
+    }
+    const reconciled =
+      observedModel || this.#attribution !== null
+        ? {
+            ...usage,
+            modelUsage: [...modelUsage].map(([model, tokens]) => ({
+              model,
+              ...tokens,
+            })),
+          }
+        : usage;
+    const measured = incomplete
+      ? { ...reconciled, coverage: "partial" }
+      : reconciled;
+    const cost = estimateScanCost(this.#options.model, measured);
+    this.#snapshot = missingUsage
+      ? { usage: null, cost: null }
+      : { usage: measured, cost };
+    if (!missingUsage) this.#reportUsage(tokenUsage(measured));
+    this.#reportCost(
+      cost,
+      measured,
+      {
+        ...usage,
+        modelUsage: [...liveModelUsage].map(([model, tokens]) => ({
+          model,
+          ...tokens,
+        })),
+      },
+      missingUsage,
+    );
   }
 
   #reportUsageObservation(
@@ -417,13 +723,14 @@ export class ScanCostTracker {
     if (!complete) {
       // The display retains the last complete aggregate while a worker is unmeasured.
       tokensUpdatedAt = this.#lastObservation?.tokensUpdatedAt ?? null;
-    } else if (
-      usages
-        .entries()
-        .some(([id, usage]) => (usage?.total_tokens ?? 0) > 0 && !timed.has(id))
-    ) {
-      // A newer SDK fallback can supersede its thread's timestamped rollout receipt.
-      tokensUpdatedAt = null;
+    } else {
+      for (const [id, usage] of usages) {
+        if ((usage?.total_tokens ?? 0) > 0 && !timed.has(id)) {
+          // A newer SDK fallback can supersede its thread's timestamped rollout receipt.
+          tokensUpdatedAt = null;
+          break;
+        }
+      }
     }
     if (
       this.#lastObservation === null &&
@@ -460,9 +767,10 @@ export class ScanCostTracker {
       this.#workerProgress.set(session.threadId, progress.filesCompleted);
       const filesCompleted = Math.min(
         expectedFilesTotal ?? Number.MAX_SAFE_INTEGER,
-        this.#workerProgress
-          .values()
-          .reduce((total, reviewed) => total + reviewed, 0),
+        [...this.#workerProgress.values()].reduce(
+          (total, reviewed) => total + reviewed,
+          0,
+        ),
       );
       if (filesCompleted < this.#highestFilesCompleted) continue;
       const update = {
@@ -479,12 +787,38 @@ export class ScanCostTracker {
     }
   }
 
-  #reportCost(cost: ScanCost | null, complete = true): void {
-    if (cost === null) return;
-    const signature = JSON.stringify([cost, complete]);
+  #reportCost(
+    cost: ScanCost | null,
+    usage: unknown,
+    liveUsage?: unknown,
+    lowerBoundOnly = false,
+  ): void {
+    if (cost === null || lowerBoundOnly) {
+      const receiptCost = cost
+        ? { ...cost, coverage: "partial" as const }
+        : estimateScanCostLowerBound(this.#options.model, usage);
+      const liveCost = estimateScanCostLowerBound(
+        this.#options.model,
+        liveUsage,
+      );
+      const lowerBound =
+        liveCost && liveCost.estimatedUsd > (receiptCost?.estimatedUsd ?? -1)
+          ? liveCost
+          : receiptCost;
+      if (lowerBound === null) return;
+      const signature = JSON.stringify(lowerBound);
+      if (signature === this.#lastCostLowerBound) return;
+      this.#lastCostLowerBound = signature;
+      this.#options.onCostLowerBound?.(lowerBound);
+      this.#lastCost = JSON.stringify([lowerBound, false]);
+      this.#options.onCost?.(lowerBound, false);
+      return;
+    }
+    const signature = JSON.stringify([cost, true]);
     if (signature === this.#lastCost) return;
     this.#lastCost = signature;
-    this.#options.onCost?.(cost, complete);
+    this.#lastCostLowerBound = null;
+    this.#options.onCost?.(cost, true);
   }
 
   #reportUsage(usage: ScanTokenUsage | null): void {
@@ -525,8 +859,38 @@ async function readSessionUsage(
   path: string,
   session: SessionUsage,
   repository?: string,
+  attribution: ScanExecutionAttribution | null = null,
 ): Promise<void> {
   if (session.unreadable) return;
+  if (path.endsWith(".zst")) {
+    let size: number;
+    try {
+      size = (await stat(path)).size;
+    } catch (error) {
+      if (isMissingFile(error)) return;
+      throw error;
+    }
+    if (session.compressedSize === size) return;
+    Object.assign(
+      session,
+      createSessionUsage(session.accountRateLimits !== null),
+    );
+    const file = createReadStream(path);
+    const stream = pipeline(file, zlib.createZstdDecompress(), () => {});
+    try {
+      for await (const chunk of stream) {
+        readSessionChunk(chunk as Buffer, session, repository, attribution);
+      }
+      session.compressedSize = size;
+    } catch (error) {
+      session.unreadable = true;
+      session.pendingLine = [];
+      throw error;
+    } finally {
+      stream.destroy();
+    }
+    return;
+  }
   let file;
   try {
     if ((await stat(path)).size === session.offset) return;
@@ -547,14 +911,12 @@ async function readSessionUsage(
       if (bytesRead === 0) return;
       session.offset += bytesRead;
       try {
-        const lines = session.decoder
-          .write(buffer.subarray(0, bytesRead))
-          .split("\n");
-        session.pendingLine.push(lines[0]!);
-        for (const line of lines.slice(1)) {
-          readSessionEvent(session.pendingLine.join(""), session, repository);
-          session.pendingLine = [line];
-        }
+        readSessionChunk(
+          buffer.subarray(0, bytesRead),
+          session,
+          repository,
+          attribution,
+        );
       } catch (error) {
         session.unreadable = true;
         session.pendingLine = [];
@@ -566,19 +928,61 @@ async function readSessionUsage(
   }
 }
 
+function readSessionChunk(
+  contents: Buffer,
+  session: SessionUsage,
+  repository?: string,
+  attribution: ScanExecutionAttribution | null = null,
+): void {
+  let lineStart = 0;
+  while (lineStart < contents.length) {
+    const newline = contents.indexOf(0x0a, lineStart);
+    const lineEnd = newline === -1 ? contents.length : newline;
+    const fragment = contents.subarray(lineStart, lineEnd);
+
+    if (newline === -1) {
+      if (fragment.length > 0) {
+        session.pendingLine.push(Buffer.from(fragment));
+      }
+      return;
+    }
+
+    if (session.pendingLine.length === 0) {
+      readSessionEvent(
+        fragment.toString("utf8"),
+        session,
+        repository,
+        attribution,
+      );
+    } else {
+      if (fragment.length > 0) session.pendingLine.push(Buffer.from(fragment));
+      readSessionEvent(
+        Buffer.concat(session.pendingLine).toString("utf8"),
+        session,
+        repository,
+        attribution,
+      );
+      session.pendingLine = [];
+    }
+    lineStart = newline + 1;
+  }
+}
+
 function readSessionEvent(
   line: string,
   session: SessionUsage,
   repository?: string,
+  attribution: ScanExecutionAttribution | null = null,
 ): void {
   if (line.length === 0) return;
   const event = parseJson(() => line);
   if (!isRecord(event) || !isRecord(event["payload"])) return;
   const payload = event["payload"];
+  const index = session.eventIndex++;
   if (event["type"] === "session_meta") {
     if (session.threadId !== null) {
       session.replaying = payload["id"] !== session.threadId;
-      if (!session.replaying) session.events?.push(event);
+      if (!session.replaying) session.events?.push({ index, event });
       return;
     }
     if (typeof payload["id"] === "string") {
@@ -587,9 +991,10 @@ function readSessionEvent(
     if (typeof payload["cwd"] === "string") {
       session.workingDirectory = payload["cwd"];
     }
+    if (typeof payload["model"] === "string") session.model = payload["model"];
     session.startedAt = sessionStartedAt(payload["timestamp"]);
     session.parentThreadId = sessionParentThreadId(payload);
-    session.events?.push(event);
+    session.events?.push({ index, event });
     return;
   }
   if (session.replaying) {
@@ -603,40 +1008,109 @@ function readSessionEvent(
       sessionOwnsTurn(session, payload)
     ) {
       session.replaying = false;
-      session.events?.push(event);
+      session.events?.push({ index, event });
     }
     return;
   }
-  session.events?.push(event);
+  if (event["type"] === "compacted") {
+    // Later counter epochs cannot account for missing earlier scan receipts.
+    if (
+      session.responseEpochUsageObserved &&
+      session.expectedResponseTokens > session.responseTokens
+    )
+      session.incompleteResponseEpoch = true;
+    session.responseTokens = 0;
+    session.expectedResponseTokens = 0;
+    session.responseEpochUsageObserved = false;
+  }
+  if (
+    (event["type"] === "turn_context" || payload["type"] === "task_started") &&
+    typeof payload["turn_id"] === "string"
+  ) {
+    session.currentTurnId = payload["turn_id"];
+  }
+  if (
+    event["type"] === "turn_context" &&
+    typeof payload["model"] === "string"
+  ) {
+    session.model = payload["model"];
+  }
   if (event["type"] === "token_usage_record") {
     const responseId = payload["response_id"];
-    if (
-      payload["thread_id"] !== session.threadId ||
-      typeof responseId !== "string" ||
-      session.responseIds.has(responseId)
-    ) {
-      return;
-    }
     const usage = tokenUsage(payload["usage"]);
-    if (usage === null) return;
-    session.responseIds.add(responseId);
-    session.responseUsage = addTokenUsage(session.responseUsage, usage);
-    // Native thread totals include compaction and any earlier turns. They are
-    // scoped to thread_id, unlike inherited legacy token_count snapshots.
-    const total = tokenUsage(payload["thread_token_usage"]);
-    const recorded =
-      total !== null && total.total_tokens >= session.responseUsage.total_tokens
-        ? total
-        : session.responseUsage;
     if (
-      session.usage === null ||
-      recorded.total_tokens >= session.usage.total_tokens
-    ) {
-      observeUsageEvent(session, event["timestamp"], recorded);
-      session.usage = recorded;
+      typeof responseId !== "string" ||
+      usage === null ||
+      (typeof payload["thread_id"] === "string" &&
+        payload["thread_id"] !== session.threadId) ||
+      session.responseIds.has(responseId)
+    )
+      return;
+    session.responseIds.add(responseId);
+    const cumulative = tokenUsage(payload["thread_token_usage"]);
+    // Keep native resumed totals above an observed legacy counter floor.
+    if (
+      attribution === null &&
+      session.previousUsage !== null &&
+      cumulative !== null &&
+      cumulative.total_tokens >= usage.total_tokens &&
+      cumulative.total_tokens > (session.counterUsage?.total_tokens ?? -1)
+    )
+      session.counterUsage = cumulative;
+    if (cumulative)
+      session.expectedResponseTokens = Math.max(
+        session.expectedResponseTokens,
+        cumulative.total_tokens,
+      );
+    session.responseTokens += usage.total_tokens;
+    const turnId =
+      typeof payload["turn_id"] === "string"
+        ? payload["turn_id"]
+        : session.currentTurnId;
+    if (
+      attribution &&
+      !isAttributedScanEvent(
+        attribution,
+        session.threadId!,
+        turnId,
+        event["timestamp"],
+      )
+    )
+      return;
+    session.responseEpochUsageObserved = true;
+    if (!session.responseUsageObserved) {
+      // Exact receipts include compaction and survive counter resets. Keep the
+      // legacy counter as an independent lower bound, never add it to receipts.
+      session.responseUsageObserved = true;
+      session.usage = null;
+      session.modelUsage.clear();
     }
+    const model =
+      typeof payload["model"] === "string" ? payload["model"] : session.model;
+    const measured = addTokenUsage(session.usage, usage);
+    observeUsageEvent(session, event["timestamp"], measured);
+    session.usage = measured;
+    session.modelUsage.set(
+      model,
+      addTokenUsage(session.modelUsage.get(model) ?? null, usage),
+    );
+    session.events?.push({ index, event });
     return;
   }
+  const attributable =
+    attribution === null ||
+    isAttributedScanEvent(
+      attribution,
+      session.threadId!,
+      session.currentTurnId,
+      event["timestamp"],
+    );
+  if (attributable) session.events?.push({ index, event });
+  if (
+    !attributable &&
+    !(event["type"] === "event_msg" && payload["type"] === "token_count")
+  )
+    return;
   if (event["type"] === "response_item") {
     session.progress.push(...sessionProgressUpdates(payload));
     if (repository === undefined) return;
@@ -703,7 +1177,7 @@ function readSessionEvent(
       if (activity.status === "running") {
         session.calls.set(activity.id, activity);
       }
-      session.activities.push(activity);
+      session.activities.push({ index: session.eventIndex - 1, activity });
       return;
     }
     if (
@@ -714,8 +1188,11 @@ function readSessionEvent(
       const call = session.calls.get(payload["call_id"]);
       if (call !== undefined) {
         session.activities.push({
-          ...call,
-          status: payload["status"] === "failed" ? "failed" : "completed",
+          index: session.eventIndex - 1,
+          activity: {
+            ...call,
+            status: payload["status"] === "failed" ? "failed" : "completed",
+          },
         });
         session.calls.delete(call.id);
       }
@@ -748,35 +1225,78 @@ function readSessionEvent(
       !session.prose.has(`${activity.kind}:${activity.description}`)
     ) {
       session.prose.add(`${activity.kind}:${activity.description}`);
-      session.activities.push(activity);
+      session.activities.push({ index: session.eventIndex - 1, activity });
     }
     return;
   }
-  if (event["type"] !== "event_msg" || payload["type"] !== "token_count") {
+  if (event["type"] !== "event_msg" || payload["type"] !== "token_count")
     return;
-  }
-  const usage = isRecord(payload["info"])
-    ? tokenUsage(payload["info"]["total_token_usage"])
-    : null;
+  if (attributable && payload["rate_limits"] != null)
+    observeUsageEvent(
+      session,
+      event["timestamp"],
+      null,
+      payload["rate_limits"],
+    );
+  if (!isRecord(payload["info"])) return;
+  const usage = tokenUsage(payload["info"]["total_token_usage"]);
+  if (usage === null) return;
   const ownUsage =
-    session.inheritedUsage === null || usage === null
+    session.inheritedUsage === null
       ? usage
       : subtractTokenUsage(usage, session.inheritedUsage);
-  // Older runtimes only emit token_count. In newer rollouts these snapshots can
-  // lag compaction receipts, so do not replace a more complete native total.
-  const measured =
-    ownUsage !== null &&
-    (session.usage === null ||
-      ownUsage.total_tokens > session.usage.total_tokens ||
-      (session.responseUsage === null &&
-        ownUsage.total_tokens === session.usage.total_tokens));
-  observeUsageEvent(
-    session,
-    event["timestamp"],
-    measured ? ownUsage : null,
-    payload["rate_limits"],
-  );
-  if (measured) session.usage = ownUsage;
+  if (ownUsage !== null) {
+    const hadPreviousUsage = session.previousUsage !== null;
+    const delta =
+      session.previousUsage === null
+        ? ownUsage
+        : subtractTokenUsage(ownUsage, session.previousUsage);
+    if (
+      session.previousUsage !== null &&
+      ownUsage.total_tokens < session.previousUsage.total_tokens
+    ) {
+      session.counterRegressed = true;
+      return;
+    }
+    session.previousUsage = ownUsage;
+    if (
+      attribution &&
+      !isAttributedScanEvent(
+        attribution,
+        session.threadId!,
+        session.currentTurnId,
+        event["timestamp"],
+      )
+    )
+      return;
+    if (delta !== null) {
+      const model =
+        !hadPreviousUsage && session.responseUsageObserved
+          ? null
+          : session.model;
+      session.counterModelUsage.set(
+        model,
+        addTokenUsage(session.counterModelUsage.get(model) ?? null, delta),
+      );
+      if (!session.responseUsageObserved)
+        session.modelUsage.set(
+          session.model,
+          addTokenUsage(session.modelUsage.get(session.model) ?? null, delta),
+        );
+    }
+    session.counterUsage =
+      attribution && delta !== null
+        ? addTokenUsage(session.counterUsage, delta)
+        : session.responseUsageObserved &&
+            session.counterUsage !== null &&
+            session.counterUsage.total_tokens >= ownUsage.total_tokens
+          ? session.counterUsage
+          : ownUsage;
+    if (!session.responseUsageObserved) {
+      observeUsageEvent(session, event["timestamp"], session.counterUsage);
+      session.usage = session.counterUsage;
+    }
+  }
 }
 
 function observeUsageEvent(
@@ -877,7 +1397,7 @@ function recordReasoningActivity(
   }
   reasoning.activity = activity;
   session.prose.add(`${activity.kind}:${activity.description}`);
-  session.activities.push(activity);
+  session.activities.push({ index: session.eventIndex - 1, activity });
 }
 
 function sessionProgressUpdates(
@@ -926,6 +1446,23 @@ function addTokenUsage(
   };
 }
 
+function reconcileModelUsage(
+  usage: ScanTokenUsage,
+  models: ReadonlyMap<string | null, ScanTokenUsage> | undefined,
+): ReadonlyMap<string | null, ScanTokenUsage> | undefined {
+  if (models?.size !== 1) return models;
+  const [model, observed] = models.entries().next().value!;
+  if (
+    model === null ||
+    observed.input_tokens !== usage.input_tokens ||
+    observed.output_tokens !== usage.output_tokens
+  )
+    return models;
+  // A final receipt can classify existing input as cache reads or writes.
+  // When all tokens have one observed model, the classification belongs to it.
+  return new Map([[model, usage]]);
+}
+
 function subtractTokenUsage(
   usage: ScanTokenUsage,
   inherited: ScanTokenUsage,
@@ -948,4 +1485,50 @@ function subtractTokenUsage(
 
 function isMissingFile(error: unknown): boolean {
   return isRecord(error) && error["code"] === "ENOENT";
+}
+
+function sessionUsageTotal(session: SessionUsage): number {
+  if (session.usage === null) return session.counterUsage?.total_tokens ?? -1;
+  if (session.counterUsage === null) return session.usage.total_tokens;
+  return (
+    session.usage.total_tokens +
+    tokenUsageRemainder(session.counterUsage, session.usage).total_tokens
+  );
+}
+
+function tokenUsageRemainder(
+  usage: ScanTokenUsage,
+  inherited: ScanTokenUsage,
+): ScanTokenUsage {
+  const input = Math.max(0, usage.input_tokens - inherited.input_tokens);
+  const cached = Math.min(
+    input,
+    Math.max(0, usage.cached_input_tokens - inherited.cached_input_tokens),
+  );
+  const writes = Math.min(
+    input - cached,
+    Math.max(
+      0,
+      usage.cache_write_input_tokens - inherited.cache_write_input_tokens,
+    ),
+  );
+  const output = Math.max(0, usage.output_tokens - inherited.output_tokens);
+  return {
+    input_tokens: input,
+    cached_input_tokens: cached,
+    cache_write_input_tokens: writes,
+    output_tokens: output,
+    reasoning_output_tokens: Math.min(
+      output,
+      Math.max(
+        0,
+        usage.reasoning_output_tokens - inherited.reasoning_output_tokens,
+      ),
+    ),
+    total_tokens: input + output,
+    ...(usage.cache_write_input_tokens_reported === false ||
+    inherited.cache_write_input_tokens_reported === false
+      ? { cache_write_input_tokens_reported: false }
+      : {}),
+  };
 }

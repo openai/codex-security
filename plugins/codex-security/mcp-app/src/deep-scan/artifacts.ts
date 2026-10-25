@@ -1,7 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { errorMessage } from "./errors.js";
+import { readScanFile } from "../../../../../sdk/typescript/src/scan-files.js";
 export type DeepScanArtifacts = ReturnType<typeof createDeepScanArtifacts>;
 
 export function createDeepScanArtifacts(scanDir: string) {
@@ -53,10 +54,26 @@ export async function writeJsonAtomic(
 
 export async function readJsonObject(
   path: string,
+  accepted?: { scanRoot: string; sha256?: string },
 ): Promise<Record<string, unknown>> {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(await fs.readFile(path, "utf8"));
+    let contents: Buffer;
+    if (accepted?.sha256 !== undefined) {
+      contents = await readScanFile(
+        accepted.scanRoot,
+        relative(accepted.scanRoot, path).split(sep).join("/"),
+        "Accepted Deep Scan input",
+      );
+      if (
+        createHash("sha256").update(contents).digest("hex") !== accepted.sha256
+      ) {
+        throw new Error("Deep Scan input changed after acceptance.");
+      }
+    } else {
+      contents = await fs.readFile(path);
+    }
+    parsed = JSON.parse(contents.toString("utf8"));
   } catch (error) {
     throw new Error(
       `Invalid Deep Scan JSON artifact ${path}: ${errorMessage(error)}`,

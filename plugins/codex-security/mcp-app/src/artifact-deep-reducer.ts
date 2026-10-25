@@ -1,7 +1,7 @@
 import { dirname, join, posix, relative, sep } from "node:path";
 import type { ArtifactContext } from "./artifact-context.js";
 import {
-  parsePersistedScanDraft,
+  parseAcceptedDiscoveryDraft,
   retainRecordedReceiptOwnership,
   saveScanDraftCheckpoint,
 } from "./artifact-scan-draft.js";
@@ -37,11 +37,11 @@ export async function getCodexSecurityDeepReducerInputs(
       workerId,
       result,
     })),
-    previous: inputs.previous,
+    previous: inputs.previous && deepReductionForPersistence(inputs.previous),
   };
 }
 
-/** Snapshot accepted source review separately from the reducer's model inputs. */
+/** Capture host coverage alongside the reducer's immutable finding inputs. */
 export async function readDeepReductionSources(
   context: ArtifactContext,
 ): Promise<DeepReductionSources> {
@@ -53,16 +53,20 @@ export async function readDeepReductionSources(
           worker.resultPath,
           bound.artifacts.workersRoot,
         );
-        const stored = await readJsonObject(worker.resultPath);
+        const ownerDir = worker.artifactDir ?? dirname(worker.resultPath);
+        const stored = await readJsonObject(worker.resultPath, {
+          scanRoot: bound.artifacts.scanDir,
+          sha256: worker.resultSha256,
+        });
         await retainRecordedReceiptOwnership(
-          { ...context, root: dirname(worker.resultPath), layout: "worker" },
+          { ...context, root: ownerDir, layout: "worker" },
           stored,
         );
         const result = parseStoredScanDraft(
           stored,
           "Accepted Standard worker " + worker.id,
           bound.scanId,
-          parsePersistedScanDraft,
+          parseAcceptedDiscoveryDraft,
           " has an invalid Standard scan result: ",
           " belongs to a different scan.",
         );
@@ -96,8 +100,8 @@ export async function readDeepReductionSources(
             }
             try {
               await requireRegularFile(
-                join(dirname(worker.resultPath), normalized),
-                dirname(worker.resultPath),
+                join(ownerDir, normalized),
+                ownerDir,
                 true,
               );
               continue;
@@ -118,12 +122,11 @@ export async function readDeepReductionSources(
         }
         return {
           workerId: worker.id,
+          ...(worker.attempt === undefined ? {} : { attempt: worker.attempt }),
           coverage: projectDiscoveryCoverage(
             coverage,
             worker,
-            relative(bound.artifacts.scanDir, dirname(worker.resultPath))
-              .split(sep)
-              .join("/"),
+            relative(bound.artifacts.scanDir, ownerDir).split(sep).join("/"),
             scanReceiptRefs,
           ),
           result: reduction,
@@ -178,7 +181,10 @@ export async function recordCodexSecurityDeepReduction(
       inputs.previous,
     );
 
-    const persisted = deepReductionForPersistence(reduction);
+    const persisted = deepReductionForPersistence(
+      reduction,
+      bound.state.persistSourceCoverage,
+    );
     await saveScanDraftCheckpoint(context, persisted);
     await writeJsonAtomic(bound.resultPath, persisted);
     const documentWarning = await saveThreatModelDocument(
@@ -241,10 +247,13 @@ async function readPreviousReduction(
     bound.artifacts.dedupRoot,
   );
   return parseStoredScanDraft(
-    await readJsonObject(previousReducerResultPath),
+    await readJsonObject(previousReducerResultPath, {
+      scanRoot: bound.artifacts.scanDir,
+      sha256: bound.state.previousReducerResultSha256,
+    }),
     "The previous accepted Deep reduction",
     bound.scanId,
-    parseDeepReduction,
+    (value) => parseDeepReduction(value, true),
     " has an invalid Standard scan result: ",
     " belongs to a different scan.",
   );

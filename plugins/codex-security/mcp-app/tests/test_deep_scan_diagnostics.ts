@@ -7,6 +7,7 @@ import { importModule } from "./import-module.ts";
 import { finding } from "./scan-draft-fixture.ts";
 import {
   coordinatorFixture,
+  standardScanDraft,
   temporaryDirectories,
 } from "./deep_scan_coordinator_fixture.ts";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
@@ -98,6 +99,8 @@ for (const kind of ["discovery", "dedup"] as const) {
         subagents: 0,
         validate: async () => {
           if (validations++ === 0) throw validationError;
+          if (kind === "discovery")
+            return standardScanDraft(scanId, undefined, kind);
         },
       });
       assert.equal(outcome.status, "succeeded");

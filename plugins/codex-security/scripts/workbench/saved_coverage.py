@@ -102,6 +102,7 @@ def _prepare_worker_coverage_recovery(
     *,
     enabled: bool,
     receipt_resolver=None,
+    preserve_workers: set[str] | None = None,
 ) -> tuple[
     bool, list[tuple[dict[str, Any], str, dict[str, Any], dict[str, Any], dict[str, Any] | None]]
 ]:
@@ -179,6 +180,8 @@ def _prepare_worker_coverage_recovery(
                     row["receiptRefs"] = refs
                 if field == "surfaces":
                     row.setdefault("receiptRefs", [])
+            if preserve_workers and owner in preserve_workers:
+                continue  # The reducer already published this review.
             aggregate_rows = _aggregate_worker_coverage_rows(rows, owner, field)
             projected[field].extend(aggregate_rows)
             if field in {"surfaces", "deferred"}:
@@ -247,6 +250,7 @@ class SavedCoverageProjection:
         self.project_worker_coverage = project_worker_coverage
         self.legacy_surface_links = legacy_surface_links
         self.legacy_source_outputs: dict[int, dict[str, Any]] = {}
+        self.repaired_surface_refs: dict[str, list[str]] = {}
         self.worker_row_owners: dict[int, str] = {}
         self.worker_surface_outputs: dict[tuple[str, str], dict[int, dict[str, Any]]] = {}
         self.source_owner_by_id = {
@@ -282,6 +286,13 @@ class SavedCoverageProjection:
             retained, original if original is not None else item, owner, field
         )
         return retained
+
+    def restore_repaired_receipts(self, surface):
+        if self.repaired_surface_refs and isinstance(surface, dict):
+            refs = self.repaired_surface_refs.get(json.dumps(surface, sort_keys=True))
+            if refs is not None:
+                return {**surface, "receiptRefs": refs}
+        return surface
 
     def retained_record(self, coverage, field, item, canonical_record):
         item = canonical_record(field, item)
@@ -332,7 +343,9 @@ class SavedCoverageProjection:
             for review in (reviews if isinstance(reviews, list) else [])
         )
 
-    def repair_reviewed_surface(self, coverage, canonical, worker, source, surface):
+    def repair_reviewed_surface(
+        self, coverage, canonical, worker, source, surface, *, merge_receipts=False
+    ):
         if not self.is_reviewed_worker(canonical, worker):
             return None
         published = next(
@@ -363,7 +376,20 @@ class SavedCoverageProjection:
             retained = copy.deepcopy(published)
         # Receipt repair can recover earlier evidence without replacing the
         # accepted surface's identity, disposition, or host-owned provenance.
-        retained["receiptRefs"] = surface["receiptRefs"]
+        refs = surface["receiptRefs"]
+        if merge_receipts:
+            accepted = published.get("receiptRefs", [])
+            if not isinstance(accepted, list):
+                return None
+            if any(ref not in accepted for ref in refs):
+                # Parent and reducer checkpoints can repeat the exact pre-repair row.
+                self.repaired_surface_refs[json.dumps(published, sort_keys=True)] = accepted
+            published["receiptRefs"] = accepted
+            for ref in refs:
+                if ref not in accepted:
+                    accepted.append(ref)
+            refs = accepted
+        retained["receiptRefs"] = refs
         return self.retain_coverage_row(
             coverage["surfaces"], retained, worker["id"], "surfaces", source, True
         )
@@ -731,6 +757,7 @@ def prepare_saved_coverage_projection(
     project_worker_coverage,
     receipt_resolver,
     preserve_canonical_parent=False,
+    preserve_workers=None,
 ):
     if preserve_canonical_parent:
         return SavedCoverageProjection(False, [], sources)
@@ -751,6 +778,7 @@ def prepare_saved_coverage_projection(
         source_order,
         enabled=project_worker_coverage,
         receipt_resolver=receipt_resolver,
+        preserve_workers=preserve_workers,
     )
     for _, draft, _ in sources:
         for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):

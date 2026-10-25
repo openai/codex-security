@@ -134,12 +134,18 @@ def capture(*args, **kwargs):
 saved._capture_saved_source = capture
 retained._capture_saved_source = capture
 frozen = None
+heads = None
 if sys.argv[9] == "true":
     db = SimpleNamespace(require_canonical_scan_directory=lambda path: path, artifact_path=lambda *args, **kwargs: None, ARTIFACTS={"manifest": "scan-manifest.json"})
-    connection = SimpleNamespace(execute=lambda *args: SimpleNamespace(fetchall=lambda: [worker]))
+    def execute(query, parameters):
+        if "FROM deep_scan_workers" in query:
+            return SimpleNamespace(fetchall=lambda: [{**worker, "accepted_result_path": None}])
+        assert "FROM deep_scan_attempts" in query
+        return []
+    connection = SimpleNamespace(execute=execute)
     scan = {"scan_dir": str(root), "id": scan_id, "retained_source_digests_json": None, "seal_manifest_digest": None}
-    frozen, _ = saved._recovery_source_digests(db, connection, scan)
-merged = merge_saved_results(*args, stopped=True, reason="interrupted", frozen_source_digests=frozen)
+    frozen, _, heads = saved._recovery_source_digests(db, connection, scan)
+merged = merge_saved_results(*args, stopped=True, reason="interrupted", frozen_source_digests=frozen, checkpoint_heads=heads)
 saved._capture_saved_source = original_capture
 retained._capture_saved_source = original_retained_capture
 replay = merge_saved_results(*args, stopped=True, reason="interrupted", frozen_source_digests=merged[0]["scan"]["preservedSources"])

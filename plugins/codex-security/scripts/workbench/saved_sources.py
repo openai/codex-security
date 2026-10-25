@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -15,12 +16,18 @@ from typing import Any
 
 from finalize_scan_contract import (
     ContractError,
+    PreparedScanFinalization,
+    RecoverableContractError,
+    _contract_json_bytes,
+    _prepare_scan_finalization,
     _read_scan_local_json,
     _read_scan_local_json_with_metadata,
     manifest_is_sealed,
+    warnings_for_seal,
     write_scan_local_bytes,
 )
-from workbench_coverage_receipts import capture_receipt_checkpoints
+from workbench_coverage_receipts import capture_receipt_checkpoints, clear_scan_receipt_refs
+from workbench_validation import has_verified_selected_result, latest_publication_reducer
 
 
 def _encoded(value: Any) -> bytes:
@@ -98,17 +105,24 @@ def _capture_saved_source(
     snapshot_head: bool = True,
     write: bool = True,
     created_paths: set[str] | None = None,
+    accepted_source_digests: dict[str, str] | None = None,
 ) -> dict[str, tuple[str, int]]:
+    read = partial(
+        _read_saved_result,
+        scan_dir,
+        scan_id=scan_id,
+        accepted_source_digests=accepted_source_digests,
+    )
     if not snapshot_head or Path(relative).name != "checkpoint-head.json":
-        _, digest, observed = _read_saved_result(scan_dir, relative, scan_id, kind=kind)
+        _, digest, observed = read(relative, kind=kind)
         return capture_receipt_checkpoints(
             relative,
             kind,
             {relative: (digest, observed)},
             partial(_checkpoint_paths, scan_dir),
-            partial(_read_saved_result, scan_dir, scan_id=scan_id),
+            read,
         )
-    head, _, observed = _read_saved_result(scan_dir, relative, scan_id)
+    head, _, observed = read(relative)
     observation = {
         **{key: head[key] for key in ("checkpoint", "inputCheckpoint") if key in head},
         "observedAtNs": str(observed),
@@ -118,7 +132,7 @@ def _capture_saved_source(
     for key in ("checkpoint", "inputCheckpoint"):
         if key in head:
             selected = (directory / "checkpoints" / head[key]).as_posix()
-            _, selected_digest, selected_time = _read_saved_result(scan_dir, selected, scan_id)
+            _, selected_digest, selected_time = read(selected)
             selected_sources[selected] = (selected_digest, selected_time)
     digest = _digest(observation)
     snapshot = (directory / "checkpoint-heads" / f"{digest}.json").as_posix()
@@ -134,22 +148,40 @@ def _capture_saved_source(
 
 
 def _read_saved_result(
-    scan_dir: Path, relative: str, scan_id: str, *, kind: str | None = None
+    scan_dir: Path,
+    relative: str,
+    scan_id: str,
+    *,
+    kind: str | None = None,
+    accepted_source_digests: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], str, int]:
-    draft, _, metadata = _read_scan_local_json_with_metadata(
+    draft, contents, metadata = _read_scan_local_json_with_metadata(
         scan_dir, relative, "Saved scan checkpoint"
     )
+    expected = (accepted_source_digests or {}).get(str(scan_dir / relative))
+    if expected is not None and hashlib.sha256(contents).hexdigest() != expected:
+        raise ContractError("checkpoint changed after acceptance")
     directory = _checkpoint_head_directory(relative)
     if directory is not None:
         checkpoint = draft.get("checkpoint")
         if not isinstance(checkpoint, str) or not re.fullmatch(r"[0-9a-f]{64}\.json", checkpoint):
             raise ContractError("checkpoint head does not name a saved checkpoint")
-        _read_saved_result(scan_dir, (directory / "checkpoints" / checkpoint).as_posix(), scan_id)
+        _read_saved_result(
+            scan_dir,
+            (directory / "checkpoints" / checkpoint).as_posix(),
+            scan_id,
+            accepted_source_digests=accepted_source_digests,
+        )
         if "inputCheckpoint" in draft:
             raw = draft["inputCheckpoint"]
             if not isinstance(raw, str) or not re.fullmatch(r"[0-9a-f]{64}\.json", raw):
                 raise ContractError("checkpoint head does not name a saved input checkpoint")
-            _read_saved_result(scan_dir, (directory / "checkpoints" / raw).as_posix(), scan_id)
+            _read_saved_result(
+                scan_dir,
+                (directory / "checkpoints" / raw).as_posix(),
+                scan_id,
+                accepted_source_digests=accepted_source_digests,
+            )
         if Path(relative).name == "checkpoint-head.json":
             return draft, _digest([draft, metadata.st_mtime_ns]), metadata.st_mtime_ns
         observed = draft.get("observedAtNs")
@@ -160,10 +192,23 @@ def _read_saved_result(
         raise ContractError("checkpoint belongs to a different scan")
     if not _is_source_order_snapshot(relative) and (
         not isinstance(draft.get("findings"), list)
-        or not isinstance(draft.get("coverage", {} if kind == "dedup" else None), dict)
+        or not isinstance(
+            draft.get("sourceCoverage", draft.get("coverage", {}))
+            if kind == "dedup"
+            else draft.get("coverage"),
+            dict,
+        )
     ):
         raise ContractError("checkpoint has no semantic findings or coverage")
-    return draft, _digest(draft), metadata.st_mtime_ns
+    frozen_digest = _digest(draft)
+    path = Path(relative)
+    if expected is not None and (
+        (path.parent.name == "checkpoints" and path.name == f"{expected}.json")
+        or path.name == f"accepted-{expected}.json"
+    ):
+        # Direct snapshots retain their accepted bytes, but supply no host receipt ownership.
+        clear_scan_receipt_refs(draft)
+    return draft, frozen_digest, metadata.st_mtime_ns
 
 
 def _is_source_order_snapshot(relative: str) -> bool:
@@ -369,6 +414,68 @@ def _parent_scan_draft(
     return parent
 
 
+def _worker_checkpoint_head(
+    scan_dir: Path,
+    directory: str,
+    scan_id: str,
+    accepted_source_digests: dict[str, str] | None = None,
+) -> str | None:
+    relative = f"{directory}/checkpoint-head.json"
+    try:
+        (scan_dir / relative).lstat()
+    except FileNotFoundError:
+        return None
+    head = _read_scan_local_json(scan_dir, relative, "Saved worker checkpoint head")
+    name = head.get("checkpoint")
+    if not isinstance(name, str) or not re.fullmatch(r"[0-9a-f]{64}\.json", name):
+        raise ContractError("Saved worker checkpoint head is invalid.")
+    checkpoint = f"{directory}/checkpoints/{name}"
+    # A committed head precedes replacement of result.json. Do not fall back to
+    # that older result if the selected checkpoint cannot be read.
+    _read_saved_result(
+        scan_dir, checkpoint, scan_id, accepted_source_digests=accepted_source_digests
+    )
+    return checkpoint
+
+
+def _worker_checkpoint_heads(
+    scan_dir: Path,
+    workers: list[Any],
+    scan_id: str,
+    accepted_source_digests: dict[str, str] | None = None,
+    *,
+    unreadable_warnings: list[str] | None = None,
+) -> dict[str, str]:
+    heads: dict[str, str] = {}
+    for worker in workers:
+        if worker["kind"] != "discovery":
+            continue
+        try:
+            output = Path(worker["artifact_dir"]).relative_to(scan_dir)
+        except (TypeError, ValueError):
+            continue
+        attempts = (output.parent if output.name == "output" else output) / "attempts"
+        directories = [output] + [
+            attempts / name
+            for name in _children(scan_dir, attempts.as_posix())
+            if re.fullmatch(r"attempt-\d+", name)
+        ]
+        for directory in directories:
+            relative = directory.as_posix()
+            try:
+                head = _worker_checkpoint_head(scan_dir, relative, scan_id, accepted_source_digests)
+            except (ContractError, OSError) as exc:
+                if unreadable_warnings is None or worker["status"] != "canceled":
+                    raise
+                unreadable_warnings.append(
+                    f"Preserved unreadable checkpoint {relative}/checkpoint-head.json: {exc}"
+                )
+                continue
+            if head is not None:
+                heads[relative] = head
+    return heads
+
+
 def _read_saved_parent_result(
     scan_dir: Path, scan_id: str
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -387,68 +494,224 @@ def _read_saved_parent_result(
     return manifest, _parent_scan_draft(scan_id, parent_scan, findings, coverage)
 
 
+def _selected_publication_digest(
+    prepared: PreparedScanFinalization, legacy_completeness: str | None = None
+) -> str:
+    # Completion time is chosen at sealing, after publication. Everything else
+    # must remain the host projection of the same accepted aggregate.
+    manifest = copy.deepcopy(prepared.manifest)
+    for field in ("completedAt", "sealedAt"):
+        manifest["scan"].pop(field, None)
+    coverage = prepared.coverage
+    if legacy_completeness is not None:
+        # Reconstruct the historical projection and its coverage artifact binding.
+        coverage = {**coverage, "completeness": legacy_completeness}
+        coverage_digest = hashlib.sha256(
+            _contract_json_bytes("coverage.json", coverage)
+        ).hexdigest()
+        for artifact in manifest["scan"]["artifacts"]:
+            if artifact["path"] == manifest["scan"]["coverageRef"]:
+                artifact["sha256"] = coverage_digest
+    return _digest([manifest, prepared.findings, coverage])
+
+
+def _require_selected_result(scan: Any, selection: dict[str, Any]) -> None:
+    relative = selection["resultPath"]
+    if relative is not None:
+        _read_saved_result(
+            Path(scan["scan_dir"]),
+            relative,
+            scan["id"],
+            kind="dedup",
+            accepted_source_digests={
+                str(Path(scan["scan_dir"]) / relative): selection["resultSha256"]
+            },
+        )
+
+
+def bind_selected_publication(
+    selection: dict[str, Any], prepared: PreparedScanFinalization
+) -> None:
+    digest = _selected_publication_digest(prepared)
+    if selection.get("publicationSha256") != digest:
+        selection.pop("sealedPublicationSha256", None)
+        selection["publicationSha256"] = digest
+
+
+def record_selected_publication(
+    db: Any, connection: Any, scan: Any, prepared: PreparedScanFinalization
+) -> None:
+    run = db.deep_scan.require_deep_scan_run(connection, scan["id"])
+    selection = db.deep_scan.deep_scan_finalization_input(run)
+    if selection is None:
+        return
+    _require_selected_result(scan, selection)
+    bind_selected_publication(selection, prepared)
+    with connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET finalization_input_json = ? WHERE scan_id = ?",
+            (json.dumps(selection), scan["id"]),
+        )
+
+
+def require_selected_publication(
+    db: Any,
+    connection: Any,
+    scan: Any,
+    prepared: PreparedScanFinalization,
+    *,
+    sealing_warnings: list[str] | None = None,
+) -> None:
+    if scan["mode"] != "deep":
+        return
+    run = db.deep_scan.require_deep_scan_run(connection, scan["id"])
+    selection = db.deep_scan.deep_scan_finalization_input(run)
+    if selection is None or "publicationSha256" not in selection:
+        return
+    try:
+        _require_selected_result(scan, selection)
+    except ContractError as exc:
+        raise RecoverableContractError(str(exc)) from exc
+    digest = selection["publicationSha256"]
+    sealed_digest = selection.get("sealedPublicationSha256")
+    if prepared.was_sealed and sealed_digest is not None:
+        matches = sealed_digest == _selected_publication_digest(prepared)
+    else:
+        matches = digest == _selected_publication_digest(prepared)
+        if not matches and "completeness" not in prepared.coverage:
+            # Historical receipts include coverage completeness and its artifact digest.
+            matches = any(
+                digest == _selected_publication_digest(prepared, completeness)
+                for completeness in ("complete", "partial", "unknown")
+            )
+    if not matches:
+        raise RecoverableContractError(
+            "The selected Deep Scan publication changed or is missing; "
+            "republish its accepted result before completing the scan."
+        )
+    if prepared.was_sealed or sealing_warnings is None:
+        return
+    # Bind the host's exact warning projection before the seal can reach disk.
+    # The original receipt still verifies an unsealed retry after process loss.
+    warnings = warnings_for_seal(prepared, sealing_warnings)
+    manifest_scan = prepared.manifest["scan"]
+    if warnings and warnings != manifest_scan.get("warnings"):
+        manifest = {**prepared.manifest, "scan": {**manifest_scan, "warnings": warnings}}
+        selection["sealedPublicationSha256"] = _selected_publication_digest(
+            prepared._replace(manifest=manifest)
+        )
+    else:
+        selection.pop("sealedPublicationSha256", None)
+    if selection.get("sealedPublicationSha256") != sealed_digest:
+        with connection:
+            connection.execute(
+                "UPDATE deep_scan_runs SET finalization_input_json = ? WHERE scan_id = ?",
+                (json.dumps(selection), scan["id"]),
+            )
+
+
 def _require_current_deep_publication(
     db: Any, connection: Any, scan: Any, draft: dict[str, Any]
-) -> None:
+) -> bool:
     scan_id = scan["id"]
     run = connection.execute(
         "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
     ).fetchone()
     publication = draft.get("deepScanPublication")
+    selection = db.deep_scan.deep_scan_finalization_input(run) if run is not None else None
     if (
-        publication is None
+        selection is None
+        and publication is None
         and draft["manifest"]["scan"].get("complete") is False
         and (run is None or run["status"] == "running")
     ):
-        return
+        return False
     if run is None:
         run = db.deep_scan.require_deep_scan_run(connection, scan_id)
     # Finished discovery-only runs hand remaining publication back to the parent.
     if (
-        publication is None
+        selection is None
+        and publication is None
         and run["status"] != "running"
         and run["manifest_path"] != str(Path(scan["scan_dir"]) / "scan-manifest.json")
     ):
-        return
+        return False
     db.deep_scan.require_current_coordinator(
         run,
         argparse.Namespace(
             coordinator_generation=publication.get("coordinatorGeneration") if publication else None
         ),
     )
-    # Once finish selects the canonical parent, only completion may replay it.
-    if publication is None:
-        if run["status"] != "running" and run["manifest_path"] == str(
-            Path(scan["scan_dir"]) / "scan-manifest.json"
-        ):
-            raise SystemExit("Deep Scan is terminal; drafts cannot replace its publication.")
-        return
-
-    # Match the durable reducer sequence used by coordinator recovery.
-    def reducer_order(worker: Any) -> tuple[int, str]:
-        match = re.fullmatch(r"dedup-([0-9]+)", Path(worker["prompt_path"]).parent.name)
-        return (int(match[1]) if match else 0, worker["id"])
-
-    reducer = max(
-        (
-            worker
-            for worker in connection.execute(
-                "SELECT * FROM deep_scan_workers WHERE scan_id = ?", (scan_id,)
+    accepted_findings = False
+    if selection is not None:
+        if publication is None:
+            raise SystemExit("Deep Scan publication requires its committed selection.")
+        scan = db.require_scan(connection, scan_id)
+        accepted_findings = has_verified_selected_result(db, connection, scan)
+        if "publicationSha256" in selection:
+            prepared = _prepare_scan_finalization(
+                Path(scan["scan_dir"]),
+                expected_coverage_mode=db.expected_coverage_mode(scan),
+                completion_binding=db.workbench_completion_binding(scan, db.now()),
+                draft_documents=(draft["manifest"], draft["findings"], draft["coverage"]),
+                accepted_findings=accepted_findings,
             )
-            if worker["kind"] == "dedup"
-            and worker["status"] == "succeeded"
-            and worker["result_manifest_path"]
-        ),
-        key=reducer_order,
-        default=None,
-    )
-    selected_result = reducer["result_manifest_path"] if reducer is not None else None
+            require_selected_publication(db, connection, scan, prepared)
+        selected_result = (
+            str(Path(scan["scan_dir"]) / selection["resultPath"])
+            if selection["resultPath"] is not None
+            else None
+        )
+    else:
+        # Generation-one runs predate host publication metadata. Keep their existing
+        # draft path; adopted coordinators must carry their generation and selection.
+        if publication is None:
+            if run["status"] != "running" and run["manifest_path"] == str(
+                Path(scan["scan_dir"]) / "scan-manifest.json"
+            ):
+                raise SystemExit("Deep Scan is terminal; drafts cannot replace its publication.")
+            return False
+
+        reducer = latest_publication_reducer(db, connection, scan_id)
+        selected_result = reducer["result_manifest_path"] if reducer is not None else None
     if publication["resultPath"] != selected_result:
         raise SystemExit("Deep Scan aggregate belongs to a superseded publication selection.")
+    if selection is None:
+        accepted_findings = has_verified_selected_result(db, connection, scan, reducer=reducer)
+    return accepted_findings
 
 
 if __name__ == "__main__":
     argparse.ArgumentParser(description=__doc__).parse_args()
+
+
+def _saved_workers(connection: Any, scan_id: str) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        "SELECT worker.*, attempt.accepted_result_path FROM deep_scan_workers AS worker "
+        "LEFT JOIN deep_scan_attempts AS attempt "
+        "ON attempt.worker_id = worker.id AND attempt.attempt = worker.attempt "
+        "WHERE worker.scan_id = ? ORDER BY worker.created_at, worker.id",
+        (scan_id,),
+    ).fetchall()
+    return [
+        {
+            **dict(row),
+            "result_manifest_path": row["accepted_result_path"] or row["result_manifest_path"],
+        }
+        for row in rows
+    ]
+
+
+def _accepted_source_digests(connection: Any, scan_id: str) -> dict[str, str]:
+    return {
+        row["accepted_result_path"]: row["accepted_result_sha256"]
+        for row in connection.execute(
+            "SELECT accepted_result_path, accepted_result_sha256 FROM deep_scan_attempts "
+            "WHERE scan_id = ? AND accepted_result_path IS NOT NULL "
+            "AND accepted_result_sha256 IS NOT NULL",
+            (scan_id,),
+        )
+    }
 
 
 def _latest_successful_reducer(workers: list[Any]) -> Any | None:

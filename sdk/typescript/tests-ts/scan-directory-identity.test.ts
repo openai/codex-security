@@ -80,8 +80,8 @@ for (const scenario of scenarios) {
       const originalLstat = files.lstat;
       const originalRealpath = files.realpath;
       const originalOpen = files.open;
-      const runtime = await import("../src/runtime.js");
-      const originalAncestry = runtime.requireSecureOutputAncestry;
+      const scanFiles = await import("../src/scan-files.js");
+      const originalScanRoot = scanFiles.requireScanRoot;
       const originalDirectory = await originalLstat(swappedPath, {
         bigint: true,
       });
@@ -134,13 +134,13 @@ for (const scenario of scenarios) {
           await swap();
         return canonical;
       }) as typeof originalRealpath);
-      const ancestry = spyOn(
-        runtime,
-        "requireSecureOutputAncestry",
-      ).mockImplementation(async (...args) => {
-        await originalAncestry(...args);
-        if (scenario === "accepted-root" && args[0] === scanDir) await swap();
-      });
+      const accepting = spyOn(scanFiles, "requireScanRoot").mockImplementation(
+        async (...args) => {
+          const accepted = await originalScanRoot(...args);
+          if (scenario === "accepted-root" && args[0] === scanDir) await swap();
+          return accepted;
+        },
+      );
       const opening = spyOn(files, "open").mockImplementation(
         async (...args) => {
           const handle = await originalOpen(...args);
@@ -206,7 +206,7 @@ for (const scenario of scenarios) {
         inspecting.mockRestore();
         resolving.mockRestore();
         opening.mockRestore();
-        ancestry.mockRestore();
+        accepting.mockRestore();
         for (const restore of restoreCloses) restore();
       }
     });

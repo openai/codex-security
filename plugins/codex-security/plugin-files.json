@@ -1,8 +1,5 @@
 {
-  "externalOwnedExact": [
-    ".codex-plugin/plugin.json",
-    "OWNERS"
-  ],
+  "externalOwnedExact": [".codex-plugin/plugin.json", "OWNERS"],
   "shippedExact": [
     ".app.json",
     ".mcp.json",
@@ -13,6 +10,7 @@
     "examples/completed-scan/scan-manifest.json",
     "mcp/helpers.mjs",
     "mcp/helpers.mjs.br.part-000",
+    "mcp/helpers.mjs.br.part-001",
     "mcp/native/COPYRIGHT-library.html",
     "mcp/native/THIRD_PARTY_NOTICES.txt",
     "mcp/native/darwin-arm64/unix.node",
@@ -104,6 +102,7 @@
     "scripts/workbench_scan_start.py",
     "scripts/workbench_scan_usage.py",
     "scripts/workbench_schema.py",
+    "scripts/workbench_source_coverage.py",
     "scripts/workbench_source_excerpt.py",
     "scripts/workbench_source_scopes.py",
     "scripts/workbench_target.py",

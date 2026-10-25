@@ -42,7 +42,11 @@ export const emptyWorkerPermissionProfile = {
 
 export async function createFakeCodexFixture(
   temporaryDirectories: ReturnType<typeof createTemporaryDirectories>,
-  preflightProfile = emptyWorkerPermissionProfile,
+  preflightProfile: {
+    extends: string;
+    filesystem: Record<string, string | number | Record<string, string>>;
+    network: { enabled: boolean };
+  } = emptyWorkerPermissionProfile,
   preflightAllowed = true,
   accountResult: {
     account: { type: string } | null;
