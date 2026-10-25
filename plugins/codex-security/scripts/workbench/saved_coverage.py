@@ -18,6 +18,24 @@ from finalize_scan_contract import (
 )
 
 
+def _inherit_coverage_sources(
+    row: Any,
+    originals: list[Any],
+    sources: dict[int, tuple[dict[str, Any], list[str]]],
+) -> None:
+    if not isinstance(row, dict):
+        return
+    for original in originals:
+        saved = sources.get(id(original))
+        if saved is None:
+            continue
+        # Retain the object as well as its ID while copies are reconciled.
+        paths = sources.setdefault(id(row), (row, []))[1]
+        for relative in saved[1]:
+            if relative not in paths:
+                paths.append(relative)
+
+
 def _saved_coverage_id(item: dict[str, Any]) -> str:
     if candidate_id := item.get("candidateId"):
         return candidate_id
@@ -409,8 +427,6 @@ class SavedCoverageProjection:
         retained_surface_rows,
         resolved,
     ):
-        from workbench.retained_coverage import _inherit_coverage_sources
-
         source_owners = {relative: owner for relative, _, owner in all_sources}
         recovered_worker_ids = {
             worker_id for _, _, worker_id in all_sources if worker_id is not None

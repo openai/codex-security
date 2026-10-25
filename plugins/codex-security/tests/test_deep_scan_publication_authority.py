@@ -111,6 +111,86 @@ def test_stale_coordinator_cannot_replace_newer_canonical_publication(
     } == saved
 
 
+@pytest.mark.parametrize(
+    ("run_status", "accepted_complete", "draft_complete", "rejected"),
+    [
+        ("succeeded", True, False, True),
+        ("running", True, False, False),
+        ("succeeded", None, False, False),
+        ("succeeded", True, True, False),
+    ],
+)
+def test_legacy_partial_draft_preserves_accepted_completion(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    run_status,
+    accepted_complete,
+    draft_complete,
+    rejected,
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = ? WHERE scan_id = ?",
+            (run_status, scan.scan_id),
+        )
+        if not rejected:
+            # These legacy runs have not selected the canonical parent yet.
+            workbench_db.execute(
+                "UPDATE deep_scan_runs SET manifest_path = NULL WHERE scan_id = ?",
+                (scan.scan_id,),
+            )
+    if accepted_complete is not None:
+        result = add_worker(workbench_db, scan)
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' "
+                "WHERE result_manifest_path = ?",
+                (str(result),),
+            )
+        result.write_text(
+            json.dumps(
+                {
+                    "scanId": scan.scan_id,
+                    "complete": accepted_complete,
+                    "findings": scan.findings,
+                    "sourceCoverage": scan.coverage,
+                }
+            )
+        )
+    if rejected:
+        finalizer = workbench_api["_write_prepared_scan_finalization"].__globals__
+        write_bytes = finalizer["write_scan_local_bytes"]
+
+        def fail_report(root, relative_path, payload, **kwargs):
+            if relative_path == "report.md":
+                raise finalizer["ContractError"]("Synthetic report write interruption")
+            return write_bytes(root, relative_path, payload, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setitem(finalizer, "write_scan_local_bytes", fail_report)
+            with pytest.raises(SystemExit, match="Synthetic report write interruption"):
+                complete(workbench_api, workbench_db, scan)
+    args = stage_publication(scan, generation=None, result_path=None, title="Legacy aggregate")
+    draft = json.loads(Path(args.draft_path).read_text())
+    draft["manifest"]["scan"]["complete"] = draft_complete
+    Path(args.draft_path).write_text(json.dumps(draft))
+    artifact_names = ("scan-manifest.json", "findings.json", "coverage.json")
+    before = {name: (scan.scan_dir / name).read_bytes() for name in artifact_names}
+    writer = workbench_api["saved_results"].write_scan_draft
+    if rejected:
+        with pytest.raises(SystemExit, match="accepted complete|terminal"):
+            writer(workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, args)
+        assert {name: (scan.scan_dir / name).read_bytes() for name in artifact_names} == before
+        assert complete(workbench_api, workbench_db, scan)["progress"]["status"] == "complete"
+    else:
+        assert writer(workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, args)["status"] == (
+            "draft_written"
+        )
+
+
 @pytest.mark.parametrize("generation", [None, 3], ids=["legacy-generation-one", "current-lease"])
 def test_current_publication_replays_without_changing_checkpoint_or_worker_state(
     workbench_api, workbench_db, publication_scan, generation, monkeypatch

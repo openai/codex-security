@@ -727,7 +727,7 @@ def worker_paths(scan_dir: Path, name: str) -> tuple[Path, Path, Path]:
 
 def mark_deep_coordinator_succeeded(state_dir: Path, scan_id: str, scan_dir: Path) -> Path:
     manifest = scan_dir / "artifacts" / "deep_discovery" / "coordinator-manifest.json"
-    manifest.parent.mkdir(parents=True)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text('{"status":"succeeded"}\n')
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute(

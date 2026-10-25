@@ -11,7 +11,7 @@ import os
 import re
 import sqlite3
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -19,6 +19,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
+    RecoverableContractError,
     ScanLocalIOError,
     _populate_unsealed_artifact_envelope,
     _populate_unsealed_manifest_envelope,
@@ -29,6 +30,7 @@ from finalize_scan_contract import (
     _recover_unsealed_coverage,
     _recover_unsealed_findings,
     _remove_scan_local_file_if_exists,
+    _seal_warnings,
     _validate_completion_binding,
     _write_prepared_scan_finalization,
     finalize_scan,
@@ -66,9 +68,6 @@ from workbench.retained_coverage import (
     _identity_candidate as _identity_candidate,
 )
 from workbench.retained_coverage import (
-    _inherit_coverage_sources as _inherit_coverage_sources,
-)
-from workbench.retained_coverage import (
     _retained_findings as _retained_findings,
 )
 from workbench.retained_coverage import (
@@ -82,6 +81,9 @@ from workbench.saved_coverage import (
     _deferred_rows as _deferred_rows,
 )
 from workbench.saved_coverage import (
+    _inherit_coverage_sources as _inherit_coverage_sources,
+)
+from workbench.saved_coverage import (
     _merge_tied_parent_observations as _merge_tied_parent_observations,
 )
 from workbench.saved_coverage import (
@@ -92,6 +94,7 @@ from workbench.saved_coverage import (
 )
 from workbench.saved_outputs import _restore_published_outputs, _snapshot_published_outputs
 from workbench.saved_sources import (
+    _accepted_source_digests,
     _admit_parent_checkpoint,
     _capture_saved_source,
     _checkpoint_paths,
@@ -103,10 +106,12 @@ from workbench.saved_sources import (
     _parent_scan_draft,
     _read_saved_parent_result,
     _read_saved_result,
-    _require_current_deep_publication,
     _retained_source_state,
     _saved_result_paths,
+    _saved_workers,
     _source_digests,
+    _worker_checkpoint_head,
+    _worker_checkpoint_heads,
 )
 from workbench.saved_sources import (
     _capture_parent_observation as _capture_parent_observation,
@@ -132,6 +137,10 @@ from workbench_coverage_receipts import (
 )
 from workbench_coverage_receipts import (
     _generic_surface_updates as _generic_surface_updates,
+)
+from workbench_coverage_receipts import (
+    matches_worker_checkpoint,
+    resolve_coverage_receipts,
 )
 
 _PUBLICATION_FOLLOW_UP_WARNING = (
@@ -197,22 +206,49 @@ def refresh_completed_scan(
     return db.scan_context(connection, scan["id"])
 
 
+def validate_sealed_budget_draft(
+    db: Any, scan: sqlite3.Row, scan_dir: Path, manifest: dict[str, Any]
+) -> None:
+    # The seal can reach disk before parent completion commits. Validate
+    # it without changing bytes; the existing finalizer commits replay.
+    try:
+        prepared = _prepare_scan_finalization(
+            scan_dir,
+            expected_coverage_mode=db.expected_coverage_mode(scan),
+            completion_binding=db.workbench_completion_binding(scan, scan["started_at"], manifest),
+        )
+        coverage = prepared.coverage
+        if coverage.get("completeness") != "partial" and not any(
+            item["reason"] == "Validation was deferred because the scan reached its cost limit."
+            or item["reason"].startswith(
+                "Validation was deferred because the scan reached its cost limit: "
+            )
+            for item in coverage["deferred"]
+        ):
+            raise ContractError("Budget-exhausted completion requires saved cost-limit coverage.")
+    except ContractError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
 def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
     try:
         scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
         manifest_path = db.artifact_path(scan_dir, db.ARTIFACTS["manifest"], required=False)
-        workers = connection.execute(
-            "SELECT id, kind, status, completed_at, artifact_dir, result_manifest_path "
-            "FROM deep_scan_workers WHERE scan_id = ?",
-            (scan["id"],),
-        ).fetchall()
+        workers = _saved_workers(connection, scan["id"])
+        accepted_digests = _accepted_source_digests(connection, scan["id"])
         paths = dict(_saved_result_paths(scan_dir, workers))
         frozen_sources = scan["retained_source_digests_json"]
 
         def has_saved_source() -> bool:
             for path in paths:
                 try:
-                    _read_saved_result(scan_dir, path, scan["id"], kind=paths[path])
+                    _read_saved_result(
+                        scan_dir,
+                        path,
+                        scan["id"],
+                        kind=paths[path],
+                        accepted_source_digests=accepted_digests,
+                    )
                     return True
                 except (ContractError, OSError, ValueError):
                     continue
@@ -241,6 +277,12 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
             manifest_scan.get("preservedSources", {}),
             "Published scan source digests are malformed.",
         )
+        if (
+            "preservedCheckpointHeads" in manifest_scan
+            and _worker_checkpoint_heads(scan_dir, workers, scan["id"], accepted_digests)
+            != manifest_scan["preservedCheckpointHeads"]
+        ):
+            return True
         current_sources = dict(published_sources)
         paths.update({path: None for path in published_sources if _is_source_order_snapshot(path)})
         for path in paths:
@@ -250,6 +292,7 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
                     path,
                     scan["id"],
                     kind=paths[path],
+                    accepted_source_digests=accepted_digests,
                     snapshot_head=path not in published_sources,
                     write=False,
                 )
@@ -261,11 +304,17 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
         return False
 
 
-def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[str, str], bool]:
+def _recovery_source_digests(
+    db: Any, connection: Any, scan: Any
+) -> tuple[dict[str, str], bool, dict[str, str] | None]:
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     frozen_sources: dict[str, str] | None = None
     include_parent = True
     raw_frozen_sources = scan["retained_source_digests_json"]
+    raw_checkpoint_heads = scan["retained_checkpoint_heads_json"]
+    checkpoint_heads = (
+        json.loads(raw_checkpoint_heads) if raw_checkpoint_heads is not None else None
+    )
     if raw_frozen_sources is not None:
         frozen_sources, _ = _retained_source_state(json.loads(raw_frozen_sources))
         include_parent = False
@@ -281,6 +330,8 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[
         if not isinstance(manifest_scan, dict):
             raise ContractError("Saved scan manifest has no scan object")
         if scan["seal_manifest_digest"] is not None or manifest_is_sealed(manifest_scan):
+            if checkpoint_heads is None:
+                checkpoint_heads = manifest_scan.get("preservedCheckpointHeads")
             if "preservedSources" in manifest_scan:
                 published_sources = _source_digests(
                     manifest_scan["preservedSources"],
@@ -298,11 +349,8 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[
             else:
                 include_parent = True
 
-    workers = connection.execute(
-        "SELECT id, kind, status, completed_at, artifact_dir, result_manifest_path "
-        "FROM deep_scan_workers WHERE scan_id = ?",
-        (scan["id"],),
-    ).fetchall()
+    workers = _saved_workers(connection, scan["id"])
+    accepted_digests = _accepted_source_digests(connection, scan["id"])
     paths = dict(_saved_result_paths(scan_dir, workers))
     recovery_sources = dict(frozen_sources or {})
     parent_context: dict[str, str] = {}
@@ -310,7 +358,11 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[
     for relative, expected_digest in recovery_sources.items():
         try:
             _, digest, observed = _read_saved_result(
-                scan_dir, relative, scan["id"], kind=paths.get(relative)
+                scan_dir,
+                relative,
+                scan["id"],
+                kind=paths.get(relative),
+                accepted_source_digests=accepted_digests,
             )
         except (ContractError, OSError, ValueError) as exc:
             raise ContractError("Frozen stopped-scan checkpoint set is incomplete.") from exc
@@ -321,7 +373,14 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[
 
     for relative in paths.keys() - recovery_sources.keys():
         try:
-            captured = _capture_saved_source(scan_dir, relative, scan["id"], kind=paths[relative])
+            captured = _capture_saved_source(
+                scan_dir,
+                relative,
+                scan["id"],
+                kind=paths[relative],
+                write=checkpoint_heads is None,
+                accepted_source_digests=accepted_digests,
+            )
         except (ContractError, OSError, ValueError):
             continue
         if relative == "checkpoint-head.json":
@@ -331,8 +390,16 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[
                 raise ContractError("checkpoint changed after the scan stopped")
             recovery_sources[path] = digest
             source_times.setdefault(path, observed)
+    if checkpoint_heads is not None and (
+        recovery_sources != frozen_sources
+        or _worker_checkpoint_heads(scan_dir, workers, scan["id"], accepted_digests)
+        != checkpoint_heads
+    ):
+        raise SystemExit(
+            "This stopped scan requires a newer version to select recovery checkpoints."
+        )
     _freeze_source_times(scan_dir, scan["id"], recovery_sources, source_times, parent_context)
-    return recovery_sources, include_parent
+    return recovery_sources, include_parent, checkpoint_heads
 
 
 def scan_results_recovery_needed(db: Any, connection: Any, scan: Any) -> bool:
@@ -549,6 +616,7 @@ def preserve_scan_results_locked(
     scan_id: str,
     *,
     recovery_source_digests: dict[str, str] | None = None,
+    recovery_checkpoint_heads: dict[str, str] | None = None,
     include_parent_with_recovery: bool = False,
 ) -> bool:
     """Publish or verify retained terminal results through the workbench host."""
@@ -556,6 +624,7 @@ def preserve_scan_results_locked(
     if scan["status"] != "failed":
         return False
     frozen_source_digests: dict[str, str] | None = None
+    checkpoint_heads = recovery_checkpoint_heads
     model_source: list[str] = []
     saved_model_source: str | None = None
     raw_frozen_sources = scan["retained_source_digests_json"]
@@ -567,10 +636,17 @@ def preserve_scan_results_locked(
             model_source.append(saved_model_source)
     if recovery_source_digests is not None:
         frozen_source_digests = recovery_source_digests
+    elif raw_frozen_sources is not None:
+        raw_checkpoint_heads = scan["retained_checkpoint_heads_json"]
+        checkpoint_heads = (
+            json.loads(raw_checkpoint_heads) if raw_checkpoint_heads is not None else None
+        )
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     deep_run = connection.execute(
-        "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
+        "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
     ).fetchone()
+    if deep_run is not None:
+        db.deep_scan.require_supported_deep_scan(deep_run)
     outcome = (
         "canceled"
         if scan["canceled_at"]
@@ -649,11 +725,15 @@ def preserve_scan_results_locked(
         db.verify_manifest_binding(scan, existing)
         if existing_scan.get("status") == outcome:
             existing_sources = existing_scan.get("preservedSources")
+            existing_heads = existing_scan.get("preservedCheckpointHeads")
+            if checkpoint_heads is None:
+                checkpoint_heads = existing_heads
             if frozen_source_digests is None:
                 frozen_source_digests = _source_digests(
                     existing_sources, "Stopped scan source digests could not be frozen."
                 )
-            if existing_sources == frozen_source_digests:
+                checkpoint_heads = existing_heads
+            if existing_sources == frozen_source_digests and existing_heads == checkpoint_heads:
                 if (
                     raw_frozen_sources is not None
                     and scan["seal_manifest_digest"] is not None
@@ -675,10 +755,7 @@ def preserve_scan_results_locked(
         scan_dir,
         scan_id,
         binding,
-        connection.execute(
-            "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
-            (scan_id,),
-        ).fetchall(),
+        _saved_workers(connection, scan_id),
         warnings,
         stopped=True,
         scan_mode=scan["mode"],
@@ -688,6 +765,8 @@ def preserve_scan_results_locked(
             f"{scan['failure_message'] or ''}"
         ).strip(),
         frozen_source_digests=frozen_source_digests,
+        checkpoint_heads=checkpoint_heads,
+        accepted_source_digests=_accepted_source_digests(connection, scan_id),
         frozen_model_source=model_source[0] if model_source else None,
         selected_model_source=model_source,
         project_worker_coverage=scan["mode"] == "deep",
@@ -760,12 +839,20 @@ def recover_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit("Only a stopped scan can recover terminal results.")
         if scan["canceled_at"] is not None:
             raise SystemExit("Canceled scans cannot recover terminal results.")
-        recovery_source_digests, include_parent = _recovery_source_digests(db, connection, scan)
+        deep_run = connection.execute(
+            "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
+        ).fetchone()
+        if deep_run is not None:
+            db.deep_scan.require_supported_deep_scan(deep_run)
+        recovery_source_digests, include_parent, checkpoint_heads = _recovery_source_digests(
+            db, connection, scan
+        )
         if not preserve_scan_results_locked(
             db,
             connection,
             scan_id,
             recovery_source_digests=recovery_source_digests,
+            recovery_checkpoint_heads=checkpoint_heads,
             include_parent_with_recovery=include_parent,
         ):
             raise SystemExit("No saved stopped-scan results were available to recover.")
@@ -850,6 +937,428 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     return {"scanId": scan_id, "path": str(scan_dir / output)}
 
 
+def _selected_publication_digest(prepared: Any, *, warnings: list[str] | None = None) -> str:
+    # Completion time is chosen at sealing, after publication. Everything else
+    # must remain the host projection of the same accepted aggregate.
+    manifest = copy.deepcopy(prepared.manifest)
+    if warnings:
+        manifest["scan"]["warnings"] = warnings
+    for field in ("completedAt", "sealedAt"):
+        manifest["scan"].pop(field, None)
+    return _digest([manifest, prepared.findings, prepared.coverage])
+
+
+def _require_selected_result(scan: Any, selection: dict[str, Any]) -> None:
+    relative = selection["resultPath"]
+    if relative is not None:
+        _read_saved_result(
+            Path(scan["scan_dir"]),
+            relative,
+            scan["id"],
+            kind="dedup",
+            accepted_source_digests={
+                str(Path(scan["scan_dir"]) / relative): selection["resultSha256"]
+            },
+        )
+
+
+def record_selected_publication(db: Any, connection: Any, scan: Any, documents: Any) -> None:
+    run = db.deep_scan.require_deep_scan_run(connection, scan["id"])
+    selection = db.deep_scan.deep_scan_finalization_input(run)
+    if selection is None:
+        return
+    _require_selected_result(scan, selection)
+    prepared = _prepare_scan_finalization(
+        Path(scan["scan_dir"]),
+        expected_coverage_mode=db.expected_coverage_mode(scan),
+        completion_binding=db.workbench_completion_binding(scan, db.now(), documents[0]),
+        draft_documents=documents,
+    )
+    selection["publicationSha256"] = _selected_publication_digest(prepared)
+    selection.pop("sealedPublicationSha256", None)
+    _store_publication_selection(connection, scan["id"], selection)
+
+
+def _store_publication_selection(connection: Any, scan_id: str, selection: dict[str, Any]) -> None:
+    with connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET finalization_input_json = ? WHERE scan_id = ?",
+            (json.dumps(selection), scan_id),
+        )
+
+
+def retain_unmerged_budget_coverage(
+    scan: Any,
+    scan_dir: Path,
+    coverage: dict[str, Any],
+    worker: Any,
+    scope: Sequence[tuple[str, bool]],
+) -> None:
+    """Keep each unmerged review's obligations; its findings remain evidence only."""
+    accepted_digests = _source_digests(
+        {worker["accepted_result_path"]: worker["accepted_result_sha256"]}, "Accepted budget"
+    )
+    relative = Path(worker["accepted_result_path"]).relative_to(scan_dir).as_posix()
+    draft, _, _ = _read_saved_result(
+        scan_dir,
+        relative,
+        scan["id"],
+        accepted_source_digests=accepted_digests,
+    )
+    head = _worker_checkpoint_head(
+        scan_dir, Path(worker["artifact_dir"]).relative_to(scan_dir).as_posix(), scan["id"]
+    )
+    if head is not None and not matches_worker_checkpoint(
+        _read_saved_result(scan_dir, head, scan["id"])[0], draft, scope
+    ):
+        raise ContractError("The accepted discovery differs from its current checkpoint head.")
+    # The old Workbench named direct snapshots after their raw file digest.
+    # Typed worker checkpoints also recorded scan-owned receipts.
+    direct_result = head is None and Path(relative).stem == worker["accepted_result_sha256"]
+    source = draft["coverage"]
+    if (
+        direct_result
+        and not any(path == "." for path, _ in scope)
+        and any(
+            isinstance(row, dict)
+            and isinstance(row.get("provenance"), dict)
+            and row["provenance"].get("scanReceiptRefs")
+            for row in source.get("surfaces", [])
+        )
+    ):
+        # Older hosts checkpointed all findings before filtering result.json.
+        for sibling in _checkpoint_paths(scan_dir, Path(relative).parent.as_posix()):
+            if sibling == relative:
+                continue
+            try:
+                checkpoint, raw = _read_scan_local_json_bytes(
+                    scan_dir, sibling, "Worker checkpoint"
+                )
+            except (ContractError, OSError):
+                continue
+            if (
+                Path(sibling).stem != hashlib.sha256(raw).hexdigest()
+                and isinstance(checkpoint.get("findings"), list)
+                and matches_worker_checkpoint(checkpoint, draft, scope)
+            ):
+                direct_result = False
+                break
+    provenance = {"workerId": worker["id"], "attempt": worker["attempt"]}
+    prefix = f"{worker['id']}-attempt-{worker['attempt']}"
+    surfaces = {
+        item.get("id"): f"{prefix}-surface-{index + 1}"
+        for index, item in enumerate(source.get("surfaces", []))
+    }
+
+    def retain(field: str, item: dict[str, Any]) -> None:
+        # A committed budget draft can be replayed before the scan is sealed.
+        # These IDs and provenance identify the same immutable accepted review.
+        items = coverage.setdefault(field, [])
+        if "id" in item:
+            matches = []
+            for index, existing in enumerate(items):
+                existing_provenance = (
+                    existing.get("provenance") if isinstance(existing, dict) else None
+                )
+                if (
+                    isinstance(existing_provenance, dict)
+                    and existing.get("id") == item["id"]
+                    and all(
+                        existing_provenance.get(key) == value for key, value in provenance.items()
+                    )
+                ):
+                    previous = copy.deepcopy(existing)
+                    previous["provenance"] = {**item["provenance"], **existing_provenance}
+                    if previous != item:
+                        raise ContractError(
+                            "Legacy budget coverage changed from its accepted review."
+                        )
+                    matches.append(index)
+            if matches:
+                # Refresh older projections from the same accepted bytes, even
+                # if an interrupted writer saved more than one copy.
+                items[matches[0]] = item
+                for index in reversed(matches[1:]):
+                    del items[index]
+                return
+        if item not in items:
+            items.append(item)
+
+    for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
+        for index, original in enumerate(source.get(field, [])):
+            item = copy.deepcopy(original if isinstance(original, dict) else {"question": original})
+            source_provenance = item.get("provenance")
+            if not isinstance(source_provenance, dict):
+                source_provenance = {}
+            # Keep source descriptions; the accepted owner supplies identity.
+            for key in ("workerId", "attempt", "sourceId", "candidateId"):
+                source_provenance.pop(key, None)
+            item["provenance"] = {
+                **source_provenance,
+                **provenance,
+                **({"sourceId": item["id"]} if "id" in item else {}),
+                **({"candidateId": item["candidateId"]} if "candidateId" in item else {}),
+            }
+            item["id"] = f"{prefix}-{field}-{index + 1}"
+            if field == "surfaces":
+                item["id"] = f"{prefix}-surface-{index + 1}"
+                receipt_source = {**item, "provenance": {}} if direct_result else item
+                item["receiptRefs"] = resolve_coverage_receipts(
+                    scan_dir, receipt_source, worker, relative
+                )
+            if field == "deferred" and "candidateId" in item:
+                item["candidateId"] = f"{prefix}-candidate-{index + 1}"
+            if "surfaceIds" in item:
+                item["surfaceIds"] = [surfaces.get(value, value) for value in item["surfaceIds"]]
+            retain(field, item)
+    retain("reviews", {**provenance, "completeness": source["completeness"]})
+    for index, limitation in enumerate(draft.get("scope", {}).get("limitations", [])):
+        retain(
+            "deferred",
+            {
+                "id": f"{prefix}-scope-{index + 1}",
+                "reason": limitation,
+                "provenance": provenance,
+            },
+        )
+    retain(
+        "deferred",
+        {
+            "id": f"{prefix}-unmerged",
+            "provenance": provenance,
+            "reason": "This accepted discovery was not merged before the scan reached its cost limit.",
+        },
+    )
+
+
+def _require_budget_publication(db: Any, connection: Any, scan: Any, documents: Any) -> None:
+    prepared = _prepare_scan_finalization(
+        Path(scan["scan_dir"]),
+        expected_coverage_mode=db.expected_coverage_mode(scan),
+        completion_binding=db.workbench_completion_binding(scan, db.now(), documents[0]),
+        draft_documents=documents,
+    )
+    manifest = copy.deepcopy(documents[0])
+    manifest["scan"].setdefault("id", scan["id"])
+    manifest["scan"]["scope"] = {**prepared.manifest["scan"]["scope"], **manifest["scan"]["scope"]}
+    db.verify_manifest_binding(scan, manifest)
+    require_selected_publication(db, connection, scan, prepared)
+
+
+def _write_budget_documents(scan_dir: Path, documents: Any) -> None:
+    for name, payload in (
+        ("findings.json", documents[1]),
+        ("coverage.json", documents[2]),
+        ("scan-manifest.json", documents[0]),
+    ):
+        try:
+            write_scan_local_bytes(
+                scan_dir,
+                name,
+                (json.dumps(payload, allow_nan=False, indent=2, sort_keys=True) + "\n").encode(),
+            )
+        except (ContractError, OSError, TypeError, ValueError) as exc:
+            raise SystemExit(f"Budget-exhausted scan draft could not be saved: {exc}") from exc
+
+
+def prepare_budget_draft(db: Any, connection: Any, scan: Any, warning: str) -> None:
+    scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+    run = db.deep_scan.require_deep_scan_run(connection, scan["id"])
+    selection = db.deep_scan.deep_scan_finalization_input(run)
+    has_publication = selection is not None and "publicationSha256" in selection
+    candidates = (
+        []
+        if run["manifest_path"] == str(scan_dir / "scan-manifest.json")
+        else db.budget_exhausted_candidates(scan, scan_dir)
+    )
+    try:
+        if has_publication:
+            snapshot = f"drafts/{selection['publicationSha256']}.json"
+            try:
+                documents = tuple(
+                    _read_scan_local_json(scan_dir, name, name)
+                    for name in ("scan-manifest.json", "findings.json", "coverage.json")
+                )
+                _require_budget_publication(db, connection, scan, documents)
+            except (ContractError, OSError):
+                # Canonical files can outlive a failed digest commit. Replay only
+                # the saved projection bound to the still-committed selection.
+                saved = _read_scan_local_json(scan_dir, snapshot, "Saved budget publication")
+                documents = (saved["manifest"], saved["findings"], saved["coverage"])
+                _require_budget_publication(db, connection, scan, documents)
+                _write_budget_documents(scan_dir, documents)
+            write_scan_local_bytes(
+                scan_dir,
+                snapshot,
+                _encoded(
+                    {
+                        "manifest": documents[0],
+                        "findings": documents[1],
+                        "coverage": documents[2],
+                    }
+                ),
+            )
+        documents = db.budget_exhausted_draft(scan, scan_dir, candidates, warning)
+        if documents is None:
+            return
+        if selection is not None and not has_publication:
+            _require_selected_result(scan, selection)
+            unmerged = connection.execute(
+                "SELECT workers.*, attempts.accepted_result_path, attempts.accepted_result_sha256 "
+                "FROM deep_scan_workers AS workers JOIN deep_scan_attempts AS attempts "
+                "ON attempts.worker_id = workers.id AND attempts.attempt = workers.attempt "
+                "WHERE workers.scan_id = ? AND workers.kind = 'discovery' "
+                "AND workers.status = 'succeeded' AND workers.merge_state IN ('buffered', 'merging') "
+                "ORDER BY workers.completion_sequence, workers.id",
+                (scan["id"],),
+            ).fetchall()
+            for worker in unmerged:
+                retain_unmerged_budget_coverage(
+                    scan, scan_dir, documents[2], worker, db.requested_finding_scope(scan)
+                )
+        prepared = _prepare_scan_finalization(
+            scan_dir,
+            expected_coverage_mode=db.expected_coverage_mode(scan),
+            completion_binding=db.workbench_completion_binding(scan, db.now(), documents[0]),
+            draft_documents=documents,
+        )
+        manifest = copy.deepcopy(documents[0])
+        manifest["scan"].setdefault("id", scan["id"])
+        manifest["scan"]["scope"] = {
+            **prepared.manifest["scan"]["scope"],
+            **manifest["scan"]["scope"],
+        }
+        db.verify_manifest_binding(scan, manifest)
+        _write_budget_documents(scan_dir, documents)
+        if has_publication:
+            documents = tuple(
+                _read_scan_local_json(scan_dir, name, name)
+                for name in ("scan-manifest.json", "findings.json", "coverage.json")
+            )
+            record_selected_publication(db, connection, scan, documents)
+    except ContractError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def require_selected_publication(
+    db: Any,
+    connection: Any,
+    scan: Any,
+    prepared: Any,
+    *,
+    projection_warnings: list[str] | None = None,
+) -> None:
+    if scan["mode"] != "deep":
+        return
+    run = db.deep_scan.require_deep_scan_run(connection, scan["id"])
+    selection = db.deep_scan.deep_scan_finalization_input(run)
+    if selection is None or "publicationSha256" not in selection:
+        return
+    try:
+        _require_selected_result(scan, selection)
+    except ContractError as exc:
+        raise RecoverableContractError(str(exc)) from exc
+    expected = selection["publicationSha256"]
+    if prepared.was_sealed and projection_warnings is not None:
+        expected = selection.get("sealedPublicationSha256", expected)
+    if _selected_publication_digest(prepared) != expected:
+        raise RecoverableContractError(
+            "The selected Deep Scan publication changed or is missing; "
+            "republish its accepted result before completing the scan."
+        )
+    if not prepared.was_sealed and projection_warnings is not None:
+        # Bind the host projection before a file write can interrupt completion.
+        warnings = _seal_warnings(prepared, projection_warnings)
+        previous = selection.pop("sealedPublicationSha256", None)
+        if warnings != prepared.manifest["scan"].get("warnings", []):
+            selection["sealedPublicationSha256"] = _selected_publication_digest(
+                prepared, warnings=warnings
+            )
+        if selection.get("sealedPublicationSha256") != previous:
+            _store_publication_selection(connection, scan["id"], selection)
+
+
+def _require_current_deep_publication(
+    db: Any, connection: Any, scan: Any, draft: dict[str, Any]
+) -> None:
+    scan_id = scan["id"]
+    run = connection.execute(
+        "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
+    ).fetchone()
+    publication = draft.get("deepScanPublication")
+    selection = db.deep_scan.deep_scan_finalization_input(run) if run is not None else None
+    if (
+        selection is None
+        and publication is None
+        and draft["manifest"]["scan"].get("complete") is False
+        and (run is None or run["status"] == "running")
+    ):
+        return
+    if run is None:
+        run = db.deep_scan.require_deep_scan_run(connection, scan_id)
+    # Finished discovery-only runs hand remaining publication back to the parent.
+    if (
+        selection is None
+        and publication is None
+        and run["status"] != "running"
+        and run["manifest_path"] != str(Path(scan["scan_dir"]) / "scan-manifest.json")
+    ):
+        return
+    db.deep_scan.require_current_coordinator(
+        run,
+        argparse.Namespace(
+            coordinator_generation=publication.get("coordinatorGeneration") if publication else None
+        ),
+    )
+    if selection is not None:
+        if publication is None:
+            raise SystemExit("Deep Scan publication requires its committed selection.")
+        scan = db.require_scan(connection, scan_id)
+        if "publicationSha256" in selection:
+            prepared = _prepare_scan_finalization(
+                Path(scan["scan_dir"]),
+                expected_coverage_mode=db.expected_coverage_mode(scan),
+                completion_binding=db.workbench_completion_binding(scan, db.now()),
+                draft_documents=(draft["manifest"], draft["findings"], draft["coverage"]),
+            )
+            require_selected_publication(db, connection, scan, prepared)
+        selected_result = (
+            str(Path(scan["scan_dir"]) / selection["resultPath"])
+            if selection["resultPath"] is not None
+            else None
+        )
+    else:
+        # Generation-one runs predate host publication metadata. Keep their existing
+        # draft path; adopted coordinators must carry their generation and selection.
+        if publication is None:
+            if run["status"] != "running" and run["manifest_path"] == str(
+                Path(scan["scan_dir"]) / "scan-manifest.json"
+            ):
+                raise SystemExit("Deep Scan is terminal; drafts cannot replace its publication.")
+            return
+
+        # Publication follows the coordinator's durable reducer sequence. Stopped
+        # legacy recovery separately retains its completion-time source ordering.
+        def reducer_order(worker: Any) -> tuple[int, str]:
+            match = re.fullmatch(r"dedup-([0-9]+)", Path(worker["prompt_path"]).parent.name)
+            return (int(match[1]) if match else 0, worker["id"])
+
+        reducer = max(
+            (
+                worker
+                for worker in _saved_workers(connection, scan_id)
+                if worker["kind"] == "dedup"
+                and worker["status"] == "succeeded"
+                and worker["result_manifest_path"]
+            ),
+            key=reducer_order,
+            default=None,
+        )
+        selected_result = reducer["result_manifest_path"] if reducer is not None else None
+    if publication["resultPath"] != selected_result:
+        raise SystemExit("Deep Scan aggregate belongs to a superseded publication selection.")
+
+
 def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     with db.scan_completion_lock(scan_id):
@@ -915,8 +1424,14 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             ).fetchone()
             is not None
         )
-        if scan["mode"] == "deep" and not checkpoint_only:
-            _require_current_deep_publication(db, connection, scan, draft)
+        if scan["mode"] == "deep":
+            run = connection.execute(
+                "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
+            ).fetchone()
+            if run is not None:
+                db.deep_scan.require_supported_deep_scan(run)
+            if not checkpoint_only:
+                _require_current_deep_publication(db, connection, scan, draft)
         acceptance_input = {**accepted_input, "checkpoint": accepted_checkpoint}
         acceptance_relative = Path(relative).with_suffix(".accepted.json").as_posix()
         acknowledge = (

@@ -1,7 +1,12 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import type { ScanDraftInput } from "../src/accepted-audit.js";
+import * as auditModule from "../src/accepted-audit.js";
+import { resolvePluginPath } from "../src/runtime.js";
+import { strToU8, zipSync } from "fflate";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, writeFile, utimes } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, test, spyOn } from "bun:test";
 import { build } from "esbuild";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { runScanEvents } from "../src/api.js";
@@ -413,22 +418,153 @@ test("canonical admission still rejects reversed typed evidence bounds", async (
   expect(outcome.finalizations).toBe(0);
 });
 
+test.each(["directory", "zip"])(
+  "accepted older %s plugin does not supply the SDK admission reader",
+  async (kind) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    const manifest = JSON.stringify({
+      name: "codex-security",
+      version: "0.1.0",
+    });
+    const oldHelper =
+      "throw new Error('The older CLI-only helper must not be imported.');";
+    let selected: string;
+    if (kind === "directory") {
+      const plugin = join(root, "older-plugin");
+      await mkdir(join(plugin, ".codex-plugin"), { recursive: true });
+      await mkdir(join(plugin, "mcp"));
+      await writeFile(join(plugin, ".codex-plugin/plugin.json"), manifest);
+      await writeFile(join(plugin, "mcp/helpers.mjs"), oldHelper);
+      selected = await resolvePluginPath(plugin, join(root, "bootstrap"));
+    } else {
+      const archive = join(root, "older-plugin.zip");
+      await writeFile(
+        archive,
+        zipSync({
+          "release/.codex-plugin/plugin.json": strToU8(manifest),
+          "release/mcp/helpers.mjs": strToU8(oldHelper),
+        }),
+      );
+      selected = await resolvePluginPath(archive, join(root, "bootstrap"));
+    }
+    const scanDir = await copyCompletedScan(root);
+    const marker = new Error("The enclosing finalizer was reached.");
+    let finalizations = 0;
+    const error = await runScanEvents({
+      thread: {
+        id: "standard-thread",
+        async runStreamed() {
+          return { events: completedEvents("standard-thread") };
+        },
+      },
+      events: completedEvents("standard-thread"),
+      signal: new AbortController().signal,
+      scanDir,
+      pluginRoot: selected,
+      expectation: {
+        repository,
+        repositoryRevision: null,
+        target: { kind: "repository", paths: [] },
+        mode: "standard",
+        pluginVersion: "0.1.0",
+      },
+      onFinalize: async () => {
+        finalizations++;
+        throw marker;
+      },
+    }).catch((error: unknown) => error);
+    expect(error).toBe(marker);
+    expect(finalizations).toBe(1);
+  },
+);
+
+test.each([
+  "complete head",
+  "unfinished head",
+  "newer canonical",
+  "wrong scan",
+  "missing head",
+])("Standard admission honors committed publication: %s", async (scenario) => {
+  const root = await temporaryDirectory();
+  const repository = join(root, "repository");
+  await mkdir(repository);
+  const scanDir = await copyCompletedScan(root);
+  const names = ["scan-manifest.json", "findings.json", "coverage.json"];
+  const [manifest, findings, coverage] = await Promise.all(
+    names.map(async (name) =>
+      JSON.parse(await readFile(join(scanDir, name), "utf8")),
+    ),
+  );
+  manifest.scan.id = findings.scanId = coverage.scanId = scanId;
+  delete manifest.scan.sealedAt;
+  delete manifest.scan.completedAt;
+  manifest.scan.complete = false;
+  const helper = (
+    await import(pathToFileURL(join(PLUGIN_ROOT, "mcp/helpers.mjs")).href)
+  ).default;
+  const checkpoint: ScanDraftInput = helper.parseCanonicalScanDraft({
+    scanId,
+    manifest,
+    findings,
+    coverage,
+  });
+  checkpoint.complete =
+    scenario === "complete head" ||
+    scenario === "wrong scan" ||
+    scenario === "missing head";
+  if (scenario === "wrong scan")
+    checkpoint.scanId = "553a0c18-dcdf-4a3b-8e39-2751a8187bce";
+  const encoded = JSON.stringify(checkpoint);
+  const filename = createHash("sha256").update(encoded).digest("hex") + ".json";
+  await mkdir(join(scanDir, "checkpoints"));
+  if (scenario !== "missing head")
+    await writeFile(join(scanDir, "checkpoints", filename), encoded);
+  await writeFile(
+    join(scanDir, "checkpoint-head.json"),
+    JSON.stringify({ checkpoint: filename }),
+  );
+  await utimes(join(scanDir, "checkpoint-head.json"), 2000, 2000);
+  if (scenario === "newer canonical") manifest.scan.complete = true;
+  for (const [index, document] of [manifest, findings, coverage].entries()) {
+    const name = names[index]!;
+    await writeFile(join(scanDir, name), JSON.stringify(document));
+    const time = scenario === "newer canonical" ? 3000 : 1000;
+    await utimes(join(scanDir, name), time, time);
+  }
+  const result = await observeStandardAdmission(repository, scanDir, scanId);
+  const accepted =
+    scenario === "complete head" || scenario === "newer canonical";
+  expect(result.finalizations).toBe(accepted ? 1 : 0);
+  if (accepted) expect(result.error).toBe(result.finalization);
+  else expect(result.error).toBeInstanceOf(Error);
+  expect(manifest.scan.sealedAt).toBeUndefined();
+});
+
 async function observeStandardAdmission(
   repository: string,
   scanDir: string,
   scanId?: string,
 ) {
+  const drafts: ScanDraftInput[] = [];
+  const original = auditModule.auditEvidence;
+  const observer = spyOn(auditModule, "auditEvidence").mockImplementation(
+    (draft) => {
+      drafts.push(draft);
+      return original(draft);
+    },
+  );
   const finalization = new Error("The enclosing finalizer owns the next step.");
   let finalizations = 0;
-  const thread = {
-    id: "standard-thread",
-    async runStreamed() {
-      return { events: completedEvents("standard-thread") };
-    },
-  };
   const error = await runScanEvents({
     scanId,
-    thread,
+    thread: {
+      id: "standard-thread",
+      async runStreamed() {
+        return { events: completedEvents("standard-thread") };
+      },
+    },
     events: completedEvents("standard-thread"),
     signal: new AbortController().signal,
     scanDir,
@@ -444,11 +580,15 @@ async function observeStandardAdmission(
       finalizations++;
       throw finalization;
     },
-  }).catch((error: unknown) => error);
+  })
+    .catch((error: unknown) => error)
+    .finally(() => observer.mockRestore());
   return {
     error,
     finalization,
     finalizations,
+    drafts,
+    calls: drafts.length,
   };
 }
 
@@ -485,3 +625,55 @@ function mutateDraft(input: DraftFixture, mutation?: Mutation): DraftFixture {
     };
   return draft;
 }
+
+test.each([false, true])(
+  "recovered admission retries only unfinished managed finalization (initial failure: %s)",
+  async (failFirstFinalization) => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readFile(findingsPath);
+    await writeFile(findingsPath, "synthetic incomplete JSON");
+    let finalizations = 0;
+    let recoveries = 0;
+    const finalizedUsage = {
+      input_tokens: 30,
+      cached_input_tokens: 10,
+      output_tokens: 5,
+    };
+    const result = await runScanEvents({
+      thread: { id: "recovery-thread" },
+      events: completedEvents("recovery-thread"),
+      signal: new AbortController().signal,
+      scanDir,
+      pluginRoot: PLUGIN_ROOT,
+      expectation: {
+        repository: "/repository",
+        repositoryRevision: "deadbeef",
+        target: { kind: "repository", paths: [] },
+        mode: "standard",
+        pluginVersion: "0.1.0",
+      },
+      workbenchValidated: true,
+      onFinalize: async () => {
+        finalizations++;
+        if (failFirstFinalization && finalizations === 1)
+          throw new Error("Synthetic interrupted finalization.");
+        return finalizedUsage;
+      },
+      recoverCompletion: async () => {
+        recoveries++;
+        await writeFile(findingsPath, findings);
+        return {
+          status: "completed",
+          threadId: "recovery-thread",
+          finalResponse: "Recovered synthetic completion.",
+          usage: { input_tokens: 1, output_tokens: 1 },
+          lastStreamError: null,
+        };
+      },
+    });
+    expect(recoveries).toBe(1);
+    expect(finalizations).toBe(failFirstFinalization ? 2 : 1);
+    expect(result.turnResult.usage).toEqual(finalizedUsage);
+  },
+);

@@ -987,7 +987,26 @@ export function createCodexSecurityServer(): McpServer {
         }));
       if ("invocationFailure" in preparation)
         return preparation.invocationFailure;
-      if (preparation.immediate) return preparation.immediate;
+      const completeSelectedParent = async (run: DeepScanRunState) => {
+        if (run.finalizationInput && run.status === "succeeded") {
+          await runWorkbench([
+            "complete-scan",
+            "--scan-id",
+            run.scanId,
+            "--thread-id",
+            threadId,
+            ...optionalArg("--claim-token", handoffClaimToken),
+          ]);
+        }
+      };
+      if (preparation.immediate) {
+        try {
+          await completeSelectedParent(preparation.begun);
+        } catch (error) {
+          return toolErrorResult(deepScanInvocationFailureMessage(error));
+        }
+        return preparation.immediate;
+      }
       const { begun, coordinator, joined } = preparation;
       if (joined) {
         logDeepScanEvent({
@@ -996,6 +1015,11 @@ export function createCodexSecurityServer(): McpServer {
         });
       }
       const terminal = await coordinator.wait(abortSignalFromExtra(extra));
+      try {
+        await completeSelectedParent(terminal);
+      } catch (error) {
+        return toolErrorResult(deepScanInvocationFailureMessage(error));
+      }
       const result = deepScanTerminalResult(terminal);
       if (!result) {
         return toolErrorResult(

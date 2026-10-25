@@ -210,10 +210,16 @@ async function interruptedScan(
   const sessionPath = join(codexHome, "sessions", `rollout-${threadId}.jsonl`);
   await writeFile(
     sessionPath,
-    JSON.stringify({
-      type: "session_meta",
-      payload: { id: threadId, cwd: scanDir },
-    }) + "\n",
+    [
+      { type: "session_meta", payload: { id: threadId, cwd: scanDir } },
+      {
+        type: "turn_context",
+        timestamp: new Date().toISOString(),
+        payload: { turn_id: "synthetic-scan-turn", model: "gpt-5.6-sol" },
+      },
+    ]
+      .map((event) => JSON.stringify(event))
+      .join("\n") + "\n",
   );
   if (mode === "deep") {
     setupCommands.push([
@@ -710,6 +716,7 @@ test.each([
       f.sessionPath,
       JSON.stringify({
         type: "event_msg",
+        timestamp: new Date().toISOString(),
         payload: {
           type: "token_count",
           info: {
@@ -818,6 +825,83 @@ test.each([
     ).rejects.toThrow("running scan");
   },
 );
+
+test("reader resumes a saved budget selection without model work", async () => {
+  const f = await interruptedScan();
+  await finishDiscovery(f);
+  const selection = JSON.stringify({
+    version: 1,
+    resultPath: null,
+    resultSha256: null,
+    terminalReason: "capped",
+    omittedWorkerIds: [],
+    selectedAt: "2000-01-01T00:00:00Z",
+  });
+  // These committed facts came from the later writer before process loss.
+  const prepared = Bun.spawnSync(
+    [
+      f.python,
+      "-I",
+      "-B",
+      "-c",
+      "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE deep_scan_runs SET workflow_version='deep-security-scan/v2', cancel_requested=1, finalization_input_json=? WHERE scan_id=?\", (sys.argv[3],sys.argv[2])); c.commit()",
+      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+      f.scanId,
+      selection,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  expect(prepared.exitCode, new TextDecoder().decode(prepared.stderr)).toBe(0);
+  const stdout = capture();
+  const stderr = capture();
+  const code = await main(
+    ["scans", "resume", f.scanId, "--json"],
+    stdout.stream,
+    stderr.stream,
+    {
+      ...dependencies({ environment: f.environment, currentDirectory: f.root }),
+      ...resumeDependencies(f, () => ({
+        startThread() {
+          throw new Error("Saved publication must not start a new session");
+        },
+        resumeThread(threadId) {
+          expect(threadId).toBe(f.threadId);
+          return {
+            id: threadId,
+            async runStreamed() {
+              throw new Error(
+                "Saved publication must not run another model turn",
+              );
+            },
+          };
+        },
+      })),
+    },
+  );
+  expect(code, stderr.text()).toBe(0);
+  expect(stdout.text(), stderr.text()).not.toBe("");
+  const result = JSON.parse(stdout.text());
+  expect(result.manifest.scan.id).toBe(f.scanId);
+  expect(result.manifest.scan.status).toBe("completed");
+  expect(result.manifest.scan.sealedAt).toBeString();
+  expect(result.coverage).not.toHaveProperty("completeness");
+  const conserved = Bun.spawnSync(
+    [
+      f.python,
+      "-I",
+      "-B",
+      "-c",
+      "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); assert c.execute('SELECT finalization_input_json FROM deep_scan_runs WHERE scan_id=?',(sys.argv[2],)).fetchone()==(sys.argv[3],); assert c.execute('SELECT COUNT(*) FROM deep_scan_attempts').fetchone()==(0,); assert c.execute('SELECT COUNT(*) FROM deep_scan_attempt_sessions').fetchone()==(0,)",
+      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+      f.scanId,
+      selection,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  expect(conserved.exitCode, new TextDecoder().decode(conserved.stderr)).toBe(
+    0,
+  );
+});
 
 test.each([
   "single",
@@ -1024,8 +1108,8 @@ test.each([
     const selected = {
       model: `synthetic-${auth ?? "auto"}-model`,
       model_reasoning_effort: "high",
-      daybreak: auth === "api-key",
-      features: { goals: false },
+      daybreak: true,
+      features: { goals: false, cli_daybreak: true },
     };
     const settings = {
       config: scanPreflightCodexConfig({
@@ -1104,8 +1188,8 @@ test.each([
                       max_time_hours: 1.5,
                     },
                     worker_runtime: {
-                      daybreak: selected.daybreak,
-                      features: { goals: false },
+                      daybreak: true,
+                      features: { goals: false, cli_daybreak: true },
                     },
                   });
                   const workerConfigPath =
@@ -1117,7 +1201,6 @@ test.each([
                     await readFile(workerConfigPath!, "utf8"),
                   );
                   expect(workerConfig).toMatchObject({
-                    daybreak: selected.daybreak,
                     codex_security: {
                       cyber_access_program: settings.cyberAccessProgram,
                     },

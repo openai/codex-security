@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { importModule } from "./import-module.ts";
-import { finding } from "./scan-draft-fixture.ts";
+import { finding, workerDraft } from "./scan-draft-fixture.ts";
 import {
   coordinatorFixture,
   temporaryDirectories,
@@ -98,6 +98,7 @@ for (const kind of ["discovery", "dedup"] as const) {
         subagents: 0,
         validate: async () => {
           if (validations++ === 0) throw validationError;
+          return workerDraft(findings, { scanId });
         },
       });
       assert.equal(outcome.status, "succeeded");

@@ -3264,6 +3264,22 @@ def _prepare_scan_finalization(
     )
 
 
+def _seal_warnings(
+    prepared: PreparedScanFinalization, projection_warnings: list[str] | None
+) -> list[str]:
+    # Filesystem diagnostics can contain surrogate-escaped bytes.
+    return list(
+        dict.fromkeys(
+            warning.encode("utf-8", errors="backslashreplace").decode("utf-8")
+            for warning in [
+                *prepared.manifest["scan"].get("warnings", []),
+                *(projection_warnings or []),
+                *prepared.warnings,
+            ]
+        )
+    )
+
+
 def _write_prepared_scan_finalization(
     prepared: PreparedScanFinalization,
     source_root: Path | None = None,
@@ -3275,19 +3291,7 @@ def _write_prepared_scan_finalization(
     scan_dir = prepared.scan_dir
     scan = _require_dict(prepared.manifest, "scan", "manifest")
     if not prepared.was_sealed:
-        # Capture warnings before the first seal; later operation diagnostics must
-        # not change an existing scan's portable results.
-        # Escape surrogate-escaped filesystem bytes for the Unicode JSON contract.
-        warnings = list(
-            dict.fromkeys(
-                warning.encode("utf-8", errors="backslashreplace").decode("utf-8")
-                for warning in [
-                    *scan.get("warnings", []),
-                    *(projection_warnings or []),
-                    *prepared.warnings,
-                ]
-            )
-        )
+        warnings = _seal_warnings(prepared, projection_warnings)
         if warnings:
             scan["warnings"] = warnings
             validate_against_schema(

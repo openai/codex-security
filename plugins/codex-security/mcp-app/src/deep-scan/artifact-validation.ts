@@ -1,5 +1,6 @@
+import { isRecord } from "../record.js";
 import { createHash } from "node:crypto";
-import { dirname, posix, relative, sep } from "node:path";
+import { dirname, join, posix, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { JsonObject } from "../types.js";
 import type { AcceptedDiscovery } from "./worker-runner.js";
@@ -13,6 +14,7 @@ import { projectArtifactToolSchema } from "../artifact-schema-loader.js";
 import { requireFiniteNumbers } from "../helpers/json.js";
 import {
   parsePersistedScanDraft,
+  workerResultMatchesCurrentCheckpoint,
   retainRecordedReceiptOwnership,
   workerCoverageReceiptLocation,
   preserveFindingDetails,
@@ -29,7 +31,7 @@ import {
 import type { DeepScanArtifacts } from "./artifacts.js";
 
 export type DeepReductionInput = Omit<ScanDraftInput, "coverage"> & {
-  /** Host-owned accepted coverage, omitted from the legacy persisted reducer format. */
+  /** Host projection of accepted source coverage; never supplied by the reducer. */
   sourceCoverage?: ScanDraftInput["coverage"];
 };
 export const deepReductionInputSchema = projectArtifactToolSchema(
@@ -39,6 +41,7 @@ export const deepReductionInputSchema = projectArtifactToolSchema(
 export interface DeepReductionSources {
   discoveries: {
     workerId: string;
+    attempt?: number;
     coverage?: ScanDraftInput["coverage"];
     result: DeepReductionInput;
   }[];
@@ -57,12 +60,14 @@ export function deepReductionToScanDraft(
   return { ...draft, coverage: sourceCoverage ?? unknownSourceCoverage() };
 }
 
-/** Keep v1 checkpoints readable by older binaries. */
+/** Older workflow readers reject the host field; retain their persisted shape. */
 export function deepReductionForPersistence(
   result: DeepReductionInput,
-): Omit<ScanDraftInput, "coverage"> {
-  const { sourceCoverage: _coverage, ...persisted } = result;
-  return persisted;
+  persistSourceCoverage = false,
+): DeepReductionInput {
+  if (persistSourceCoverage) return result;
+  const { sourceCoverage: _coverage, ...legacy } = result;
+  return legacy;
 }
 
 /** Reduction combines findings; it does not complete the source workers' review. */
@@ -131,45 +136,55 @@ export function aggregateDiscoveryCoverage(
   return coverage;
 }
 
-export function parseDeepReduction(input: unknown): DeepReductionInput {
-  const parsed = deepReductionInputSchema.parse(input);
+export function parseDeepReduction(
+  input: unknown,
+  persisted = false,
+): DeepReductionInput {
+  const record = isRecord(input) ? input : {};
+  const { sourceCoverage, ...submitted } = record;
+  const parsed = deepReductionInputSchema.parse(submitted);
   validateFindingSemantics(parsed.findings);
+  if (persisted && sourceCoverage !== undefined) {
+    return {
+      ...parsed,
+      sourceCoverage: parsePersistedScanDraft({
+        ...submitted,
+        coverage: sourceCoverage,
+      }).coverage,
+    };
+  }
   return parsed;
 }
+
+type DiscoveryArtifactOptions = Pick<
+  ArtifactContext,
+  "scope" | "includePaths" | "filePaths"
+> & { artifactDir?: string };
 
 /** Admit exactly the complete semantic result written by an ordinary Standard scan. */
 export async function validateDiscoveryArtifacts(
   artifacts: DeepScanArtifacts,
   resultPath: string,
   expectedScanId: string,
-  boundScope: Pick<
-    ArtifactContext,
-    "scope" | "includePaths" | "filePaths"
-  > = {},
+  options: DiscoveryArtifactOptions = {},
 ): Promise<ScanDraftInput> {
-  await requireRegularFile(resultPath, artifacts.workersRoot);
-  const root = dirname(resultPath);
-  const context = {
-    root,
-    repoRoot: root,
-    layout: "worker" as const,
-    scanId: expectedScanId,
-    scope: boundScope.scope,
-    includePaths: boundScope.includePaths,
-    filePaths: boundScope.filePaths,
-  };
-  const stored = await readJsonObject(resultPath);
-  await retainRecordedReceiptOwnership(context, stored);
-  const result = parseStoredScanDraft(
-    stored,
-    "Standard scan worker",
+  const result = await readDiscoveryAuditDraft(
+    artifacts,
+    resultPath,
     expectedScanId,
-    parsePersistedScanDraft,
+    options,
   );
   if (result.complete === false)
     throw new Error(
       "Standard scan worker wrote only a checkpoint; its audit is not complete.",
     );
+  return result;
+}
+
+async function validateDiscoveryCoverage(
+  context: ArtifactContext,
+  result: ScanDraftInput,
+): Promise<void> {
   validateRetainedCoverage(result.coverage);
   const receiptPaths = new Map<string, string>();
   for (const row of result.coverage.surfaces as JsonObject[]) {
@@ -191,10 +206,51 @@ export async function validateDiscoveryArtifacts(
       );
     }
   }
+}
+
+export async function readDiscoveryAuditDraft(
+  artifacts: DeepScanArtifacts,
+  resultPath: string,
+  expectedScanId: string,
+  options: DiscoveryArtifactOptions = {},
+): Promise<ScanDraftInput> {
+  const {
+    artifactDir = dirname(resultPath),
+    scope,
+    includePaths,
+    filePaths,
+  } = options;
+  const context: ArtifactContext = {
+    root: artifactDir,
+    repoRoot: artifactDir,
+    layout: "worker",
+    scanId: expectedScanId,
+    scope,
+    includePaths,
+    filePaths,
+  };
+  await requireRegularFile(resultPath, artifacts.workersRoot);
+  const saved = await readJsonObject(resultPath);
+  if (
+    resultPath === join(artifactDir, "result.json") &&
+    !(await workerResultMatchesCurrentCheckpoint(context, saved))
+  )
+    throw new Error(
+      "The worker result does not match its current checkpoint head.",
+    );
+  await retainRecordedReceiptOwnership(context, saved);
+  const result = parseStoredScanDraft(
+    saved,
+    "Standard scan worker",
+    expectedScanId,
+    parsePersistedScanDraft,
+  );
+  if (result.complete !== false)
+    await validateDiscoveryCoverage(context, result);
   return result;
 }
 
-/** Validate the complete aggregate and derive convergence from retained source ancestry. */
+/** Validate the complete aggregate and derive convergence from stable finding identities. */
 export async function validateReducerArtifacts(
   input: {
     artifacts: DeepScanArtifacts;
@@ -202,7 +258,9 @@ export async function validateReducerArtifacts(
     resultPath: string;
     reducerId: string;
     previousReducerResultPath?: string;
+    resultSha256?: string;
     sources?: DeepReductionSources;
+    persistSourceCoverage?: boolean;
   },
   expectedScanId?: string,
 ): Promise<ReducerArtifactValidation> {
@@ -216,10 +274,10 @@ export async function validateReducerArtifacts(
 
   await requireRegularFile(resultPath, artifactDir);
   let result = parseStoredScanDraft(
-    await readJsonObject(resultPath),
+    await readJsonObject(resultPath, input.resultSha256),
     reducerId,
     expectedScanId,
-    parseDeepReduction,
+    (value) => parseDeepReduction(value, input.resultSha256 !== undefined),
   );
   if (result.complete === false)
     throw new Error(
@@ -233,7 +291,7 @@ export async function validateReducerArtifacts(
       await readJsonObject(previousReducerResultPath),
       "Previous successful reducer",
       result.scanId,
-      parseDeepReduction,
+      (value) => parseDeepReduction(value, true),
     );
   }
 
@@ -243,7 +301,10 @@ export async function validateReducerArtifacts(
       input.sources.discoveries,
       input.sources.previous,
     );
-    const persisted = deepReductionForPersistence(result);
+    const persisted = deepReductionForPersistence(
+      result,
+      input.persistSourceCoverage,
+    );
     await saveScanDraftCheckpoint(
       { root: artifactDir, repoRoot: artifacts.scanDir, layout: "reducer" },
       persisted,

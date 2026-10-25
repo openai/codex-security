@@ -148,7 +148,7 @@ await test("workbench scalar arguments reach the Python parser literally", async
       `import json, sys
 sys.path.insert(0, ${JSON.stringify(scripts)})
 from workbench_cli import parse_args
-def main():
+def main(*, select_finalization=False, with_execution_settings=False):
     print(json.dumps(vars(parse_args("argument transport"))))
 `,
     );
@@ -215,7 +215,7 @@ for (const variable of ["PYTHONPATH", "PYTHONUSERBASE"]) {
 
       const executeFixture = await fixtureWorkbench(
         root,
-        'import json, sys\nassert sys.dont_write_bytecode\ndef main():\n    print(json.dumps({"scans": []}))\n',
+        'import json, sys\nassert sys.dont_write_bytecode\ndef main(*, select_finalization=False, with_execution_settings=False):\n    print(json.dumps({"scans": []}))\n',
       );
       const result = await executeFixture(
         python,
@@ -263,7 +263,7 @@ await test("workbench can import dependencies installed in the Python user site"
     assert.equal(imported.trim(), "user-site dependency");
     const executeFixture = await fixtureWorkbench(
       root,
-      'import json, sys\nassert sys.dont_write_bytecode\nfrom synthetic_dependency import VALUE\ndef main():\n    print(json.dumps({"dependency": VALUE}))\n',
+      'import json, sys\nassert sys.dont_write_bytecode\nfrom synthetic_dependency import VALUE\ndef main(*, select_finalization=False, with_execution_settings=False):\n    print(json.dumps({"dependency": VALUE}))\n',
     );
     assert.deepEqual(await executeFixture(python, ["list-scans"]), {
       dependency: "user-site dependency",

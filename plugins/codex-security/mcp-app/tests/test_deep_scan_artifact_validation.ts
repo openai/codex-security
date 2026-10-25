@@ -2,6 +2,7 @@ import { readJson, writeJsonLine as writeResult } from "./support/json.ts";
 import { finding, scanId, workerDraft as draft } from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   mkdir,
   readFile,
@@ -40,6 +41,7 @@ const otherScanId = "12c17317-9594-49e0-b06a-d72fd7e14bba";
 const root = await temporaryDirectory("deep-scan-artifact-validation-", true);
 try {
   await testDiscoveryValidation(root);
+  await testDiscoveryRequiresCurrentCheckpoint(root);
   await testDiscoveryReceipts(root);
   for (const includeValidCheckpoint of [false, true])
     await testArchivedReceiptPathValidation(root, includeValidCheckpoint);
@@ -934,9 +936,20 @@ async function testReducerValidation(root: string) {
       ],
       previous: null,
     };
-  const validateSnapshot = (reducerId = "dedup-0001", snapshot = sources) =>
+  const validateSnapshot = (
+    reducerId = "dedup-0001",
+    snapshot = sources,
+    persistSourceCoverage = false,
+  ) =>
     validateReducerArtifacts(
-      { artifacts, artifactDir, resultPath, reducerId, sources: snapshot },
+      {
+        artifacts,
+        artifactDir,
+        resultPath,
+        reducerId,
+        sources: snapshot,
+        persistSourceCoverage,
+      },
       scanId,
     );
   await assert.rejects(validateSnapshot(), /unaccounted source findings/);
@@ -945,14 +958,37 @@ async function testReducerValidation(root: string) {
   const validatedSnapshot = await validateSnapshot();
   assert.equal(validatedSnapshot.newFindings, 2);
   const admitted = await readJson(resultPath);
-  const { sourceCoverage, ...persistedResult } = validatedSnapshot.result;
+  const { sourceCoverage, ...legacySnapshot } = validatedSnapshot.result;
   assert.ok(sourceCoverage);
   assert.equal(sourceCoverage.completeness, undefined);
   assert.deepEqual(
-    persistedResult,
+    legacySnapshot,
     admitted,
-    "accepted findings retain the legacy persisted shape while coverage stays host-owned",
+    "v1 preserves host coverage in memory while retaining the legacy persisted shape",
   );
+  const versionedSnapshot = await validateSnapshot("dedup-0001", sources, true);
+  assert.deepEqual(
+    versionedSnapshot.result,
+    JSON.parse(await readFile(resultPath, "utf8")),
+    "v2 persists the full host projection",
+  );
+  const resultSha256 = createHash("sha256")
+    .update(await readFile(resultPath))
+    .digest("hex");
+  const readAccepted = () =>
+    validateReducerArtifacts(
+      {
+        artifacts,
+        artifactDir,
+        resultPath,
+        reducerId: "dedup-0001",
+        resultSha256,
+      },
+      scanId,
+    );
+  assert.deepEqual((await readAccepted()).result, versionedSnapshot.result);
+  await writeResult(resultPath, admitted);
+  await assert.rejects(readAccepted(), /changed after acceptance/);
   assert.equal(Object.hasOwn(admitted, "coverage"), false);
   assert.deepEqual(admitted.findings[1].provenance.sourceFindingIds, [
     "worker-001:1",
@@ -1780,6 +1816,84 @@ function reduction<Finding extends Record<string, unknown>>(
   extra = {},
 ) {
   return { scanId, findings, ...extra };
+}
+
+async function testDiscoveryRequiresCurrentCheckpoint(root: string) {
+  const first = draft([finding("first", "src/a.js")], {
+    coverage: {
+      surfaces: [
+        {
+          id: "source",
+          label: "Source",
+          disposition: "reported",
+          receiptRefs: ["artifacts/source.md"],
+        },
+      ],
+      explicitExclusions: [],
+      deferred: [],
+    },
+  });
+  const current = draft([finding("current", "src/b.js")]);
+  const { artifacts, ...worker } = await createWorker(
+    path.join(root, "checkpoint-publication"),
+    "worker-001",
+    first,
+  );
+  const context = {
+    root: path.dirname(worker.resultPath),
+    repoRoot: root,
+    layout: "worker" as const,
+    scanId,
+  };
+  await mkdir(path.join(context.root, "artifacts"));
+  const receipt = path.join(context.root, "artifacts/source.md");
+  await writeFile(receipt, "Original source review.\n");
+  await saveScanDraftCheckpoint(context, first);
+  const acceptedCheckpoint = path.join(
+    context.root,
+    "checkpoints",
+    (await readJson(context.root, "checkpoint-head.json")).checkpoint,
+  );
+  assert.deepEqual(
+    await validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
+    first,
+  );
+  // The writer commits its immutable head before replacing the previous result.
+  await saveScanDraftCheckpoint(context, current);
+  await assert.rejects(
+    validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
+    /does not match its current checkpoint head/,
+  );
+  assert.deepEqual(
+    await validateDiscoveryArtifacts(artifacts, acceptedCheckpoint, scanId, {
+      artifactDir: context.root,
+    }),
+    first,
+    "accepted immutable evidence keeps its original output owner after a new head",
+  );
+  await rm(receipt);
+  await assert.rejects(
+    validateDiscoveryArtifacts(artifacts, acceptedCheckpoint, scanId, {
+      artifactDir: context.root,
+    }),
+    /coverage receipt.*unavailable/,
+  );
+  await writeFile(receipt, "Original source review.\n");
+  await writeResult(worker.resultPath, {
+    ...current,
+    handoffClaimToken: otherScanId,
+  });
+  assert.deepEqual(
+    await validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
+    { ...current, handoffClaimToken: otherScanId },
+  );
+  await rm(path.join(context.root, "checkpoint-head.json"));
+  await writeResult(worker.resultPath, first);
+  assert.deepEqual(
+    await validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
+    first,
+    "older workers without checkpoint heads retain their accepted result contract",
+  );
 }
 
 function workerReceiptRef(

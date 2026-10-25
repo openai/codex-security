@@ -72,6 +72,87 @@ def _children(scan_dir: Path, relative: str) -> list[str]:
     return sorted(child.name for child in cursor.iterdir())
 
 
+def _saved_workers(connection: Any, scan_id: str) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        "SELECT worker.*, attempt.accepted_result_path FROM deep_scan_workers AS worker "
+        "LEFT JOIN deep_scan_attempts AS attempt "
+        "ON attempt.worker_id = worker.id AND attempt.attempt = worker.attempt "
+        "WHERE worker.scan_id = ? ORDER BY worker.created_at, worker.id",
+        (scan_id,),
+    ).fetchall()
+    return [
+        {
+            **dict(row),
+            "result_manifest_path": row["accepted_result_path"] or row["result_manifest_path"],
+        }
+        for row in rows
+    ]
+
+
+def _accepted_source_digests(connection: Any, scan_id: str) -> dict[str, str]:
+    return {
+        row["accepted_result_path"]: row["accepted_result_sha256"]
+        for row in connection.execute(
+            "SELECT accepted_result_path, accepted_result_sha256 FROM deep_scan_attempts "
+            "WHERE scan_id = ? AND accepted_result_path IS NOT NULL "
+            "AND accepted_result_sha256 IS NOT NULL",
+            (scan_id,),
+        )
+    }
+
+
+def _worker_checkpoint_head(
+    scan_dir: Path,
+    directory: str,
+    scan_id: str,
+    accepted_source_digests: dict[str, str] | None = None,
+) -> str | None:
+    relative = f"{directory}/checkpoint-head.json"
+    try:
+        (scan_dir / relative).lstat()
+    except FileNotFoundError:
+        return None
+    head = _read_scan_local_json(scan_dir, relative, "Saved worker checkpoint head")
+    name = head.get("checkpoint")
+    if not isinstance(name, str) or not re.fullmatch(r"[0-9a-f]{64}\.json", name):
+        raise ContractError("Saved worker checkpoint head is invalid.")
+    checkpoint = f"{directory}/checkpoints/{name}"
+    # A committed head precedes replacement of result.json. Do not fall back to
+    # that older result if the selected checkpoint cannot be read.
+    _read_saved_result(
+        scan_dir, checkpoint, scan_id, accepted_source_digests=accepted_source_digests
+    )
+    return checkpoint
+
+
+def _worker_checkpoint_heads(
+    scan_dir: Path,
+    workers: list[Any],
+    scan_id: str,
+    accepted_source_digests: dict[str, str] | None = None,
+) -> dict[str, str]:
+    heads: dict[str, str] = {}
+    for worker in workers:
+        if worker["kind"] != "discovery":
+            continue
+        try:
+            output = Path(worker["artifact_dir"]).relative_to(scan_dir)
+        except (TypeError, ValueError):
+            continue
+        attempts = (output.parent if output.name == "output" else output) / "attempts"
+        directories = [output] + [
+            attempts / name
+            for name in _children(scan_dir, attempts.as_posix())
+            if re.fullmatch(r"attempt-\d+", name)
+        ]
+        for directory in directories:
+            relative = directory.as_posix()
+            head = _worker_checkpoint_head(scan_dir, relative, scan_id, accepted_source_digests)
+            if head is not None:
+                heads[relative] = head
+    return heads
+
+
 def _checkpoint_paths(scan_dir: Path, directory: str) -> list[str]:
     return [
         f"{directory}/{name}"
@@ -97,18 +178,25 @@ def _capture_saved_source(
     kind: str | None = None,
     snapshot_head: bool = True,
     write: bool = True,
+    accepted_source_digests: dict[str, str] | None = None,
     created_paths: set[str] | None = None,
 ) -> dict[str, tuple[str, int]]:
+    read_source = partial(
+        _read_saved_result,
+        scan_dir,
+        scan_id=scan_id,
+        accepted_source_digests=accepted_source_digests,
+    )
     if not snapshot_head or Path(relative).name != "checkpoint-head.json":
-        _, digest, observed = _read_saved_result(scan_dir, relative, scan_id, kind=kind)
+        _, digest, observed = read_source(relative, kind=kind)
         return capture_receipt_checkpoints(
             relative,
             kind,
             {relative: (digest, observed)},
             partial(_checkpoint_paths, scan_dir),
-            partial(_read_saved_result, scan_dir, scan_id=scan_id),
+            read_source,
         )
-    head, _, observed = _read_saved_result(scan_dir, relative, scan_id)
+    head, _, observed = read_source(relative)
     observation = {
         **{key: head[key] for key in ("checkpoint", "inputCheckpoint") if key in head},
         "observedAtNs": str(observed),
@@ -118,7 +206,7 @@ def _capture_saved_source(
     for key in ("checkpoint", "inputCheckpoint"):
         if key in head:
             selected = (directory / "checkpoints" / head[key]).as_posix()
-            _, selected_digest, selected_time = _read_saved_result(scan_dir, selected, scan_id)
+            _, selected_digest, selected_time = read_source(selected)
             selected_sources[selected] = (selected_digest, selected_time)
     digest = _digest(observation)
     snapshot = (directory / "checkpoint-heads" / f"{digest}.json").as_posix()
@@ -134,22 +222,40 @@ def _capture_saved_source(
 
 
 def _read_saved_result(
-    scan_dir: Path, relative: str, scan_id: str, *, kind: str | None = None
+    scan_dir: Path,
+    relative: str,
+    scan_id: str,
+    *,
+    kind: str | None = None,
+    accepted_source_digests: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], str, int]:
-    draft, _, metadata = _read_scan_local_json_with_metadata(
+    draft, contents, metadata = _read_scan_local_json_with_metadata(
         scan_dir, relative, "Saved scan checkpoint"
     )
+    expected = (accepted_source_digests or {}).get(str(scan_dir / relative))
+    if expected is not None and hashlib.sha256(contents).hexdigest() != expected:
+        raise ContractError("checkpoint changed after acceptance")
     directory = _checkpoint_head_directory(relative)
     if directory is not None:
         checkpoint = draft.get("checkpoint")
         if not isinstance(checkpoint, str) or not re.fullmatch(r"[0-9a-f]{64}\.json", checkpoint):
             raise ContractError("checkpoint head does not name a saved checkpoint")
-        _read_saved_result(scan_dir, (directory / "checkpoints" / checkpoint).as_posix(), scan_id)
+        _read_saved_result(
+            scan_dir,
+            (directory / "checkpoints" / checkpoint).as_posix(),
+            scan_id,
+            accepted_source_digests=accepted_source_digests,
+        )
         if "inputCheckpoint" in draft:
             raw = draft["inputCheckpoint"]
             if not isinstance(raw, str) or not re.fullmatch(r"[0-9a-f]{64}\.json", raw):
                 raise ContractError("checkpoint head does not name a saved input checkpoint")
-            _read_saved_result(scan_dir, (directory / "checkpoints" / raw).as_posix(), scan_id)
+            _read_saved_result(
+                scan_dir,
+                (directory / "checkpoints" / raw).as_posix(),
+                scan_id,
+                accepted_source_digests=accepted_source_digests,
+            )
         if Path(relative).name == "checkpoint-head.json":
             return draft, _digest([draft, metadata.st_mtime_ns]), metadata.st_mtime_ns
         observed = draft.get("observedAtNs")
@@ -160,7 +266,12 @@ def _read_saved_result(
         raise ContractError("checkpoint belongs to a different scan")
     if not _is_source_order_snapshot(relative) and (
         not isinstance(draft.get("findings"), list)
-        or not isinstance(draft.get("coverage", {} if kind == "dedup" else None), dict)
+        or not isinstance(
+            draft.get("sourceCoverage", draft.get("coverage", {}))
+            if kind == "dedup"
+            else draft.get("coverage"),
+            dict,
+        )
     ):
         raise ContractError("checkpoint has no semantic findings or coverage")
     return draft, _digest(draft), metadata.st_mtime_ns
@@ -387,66 +498,6 @@ def _read_saved_parent_result(
     return manifest, _parent_scan_draft(scan_id, parent_scan, findings, coverage)
 
 
-def _require_current_deep_publication(
-    db: Any, connection: Any, scan: Any, draft: dict[str, Any]
-) -> None:
-    scan_id = scan["id"]
-    run = connection.execute(
-        "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
-    ).fetchone()
-    publication = draft.get("deepScanPublication")
-    if (
-        publication is None
-        and draft["manifest"]["scan"].get("complete") is False
-        and (run is None or run["status"] == "running")
-    ):
-        return
-    if run is None:
-        run = db.deep_scan.require_deep_scan_run(connection, scan_id)
-    # Finished discovery-only runs hand remaining publication back to the parent.
-    if (
-        publication is None
-        and run["status"] != "running"
-        and run["manifest_path"] != str(Path(scan["scan_dir"]) / "scan-manifest.json")
-    ):
-        return
-    db.deep_scan.require_current_coordinator(
-        run,
-        argparse.Namespace(
-            coordinator_generation=publication.get("coordinatorGeneration") if publication else None
-        ),
-    )
-    # Once finish selects the canonical parent, only completion may replay it.
-    if publication is None:
-        if run["status"] != "running" and run["manifest_path"] == str(
-            Path(scan["scan_dir"]) / "scan-manifest.json"
-        ):
-            raise SystemExit("Deep Scan is terminal; drafts cannot replace its publication.")
-        return
-
-    # Match the durable reducer sequence used by coordinator recovery.
-    def reducer_order(worker: Any) -> tuple[int, str]:
-        match = re.fullmatch(r"dedup-([0-9]+)", Path(worker["prompt_path"]).parent.name)
-        return (int(match[1]) if match else 0, worker["id"])
-
-    reducer = max(
-        (
-            worker
-            for worker in connection.execute(
-                "SELECT * FROM deep_scan_workers WHERE scan_id = ?", (scan_id,)
-            )
-            if worker["kind"] == "dedup"
-            and worker["status"] == "succeeded"
-            and worker["result_manifest_path"]
-        ),
-        key=reducer_order,
-        default=None,
-    )
-    selected_result = reducer["result_manifest_path"] if reducer is not None else None
-    if publication["resultPath"] != selected_result:
-        raise SystemExit("Deep Scan aggregate belongs to a superseded publication selection.")
-
-
 if __name__ == "__main__":
     argparse.ArgumentParser(description=__doc__).parse_args()
 
@@ -479,6 +530,23 @@ def _worker_outputs(scan_dir: Path, worker: Any) -> list[tuple[str, int]]:
     return [(output.as_posix(), attempt), *archived]
 
 
+def _reducer_output_paths(
+    scan_dir: Path, worker: Any, directory: str, attempt: int
+) -> tuple[str | None, list[str]]:
+    # A durable acceptance replaces the mutable output for exactly this attempt.
+    if (
+        attempt == worker["attempt"]
+        and "accepted_result_path" in worker.keys()
+        and worker["accepted_result_path"]
+    ):
+        try:
+            return Path(worker["accepted_result_path"]).relative_to(scan_dir).as_posix(), []
+        except ValueError:
+            return None, []
+    checkpoints = _checkpoint_paths(scan_dir, f"{directory}/checkpoints")
+    return (f"{directory}/result.json" if checkpoints else None), checkpoints
+
+
 def _saved_result_paths(scan_dir: Path, workers: list[Any]) -> Iterator[tuple[str, str | None]]:
     latest_reducer = _latest_successful_reducer(workers)
     yield "checkpoint-head.json", None
@@ -491,17 +559,20 @@ def _saved_result_paths(scan_dir: Path, workers: list[Any]) -> Iterator[tuple[st
             outputs = _worker_outputs(scan_dir, worker)
         except (TypeError, ValueError):
             continue
-        for directory, _ in outputs:
-            if worker["kind"] == "discovery":
+        for directory, attempt in outputs:
+            if worker["kind"] == "dedup":
+                result, checkpoints = _reducer_output_paths(scan_dir, worker, directory, attempt)
+                if result is not None:
+                    yield result, worker["kind"]
+            else:
                 yield f"{directory}/checkpoint-head.json", worker["kind"]
                 yield from (
                     (path, worker["kind"])
                     for path in _checkpoint_paths(scan_dir, f"{directory}/checkpoint-heads")
                 )
-            checkpoint_paths = _checkpoint_paths(scan_dir, f"{directory}/checkpoints")
-            if worker["kind"] == "discovery" or checkpoint_paths:
                 yield f"{directory}/result.json", worker["kind"]
-                yield from ((path, worker["kind"]) for path in checkpoint_paths)
+                checkpoints = _checkpoint_paths(scan_dir, f"{directory}/checkpoints")
+            yield from ((path, worker["kind"]) for path in checkpoints)
         if worker["result_manifest_path"] and (
             worker["kind"] == "discovery"
             or (latest_reducer is not None and worker["id"] == latest_reducer["id"])

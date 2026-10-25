@@ -13,6 +13,7 @@
     "examples/completed-scan/scan-manifest.json",
     "mcp/helpers.mjs",
     "mcp/helpers.mjs.br.part-000",
+    "mcp/helpers.mjs.br.part-001",
     "mcp/native/COPYRIGHT-library.html",
     "mcp/native/THIRD_PARTY_NOTICES.txt",
     "mcp/native/darwin-arm64/unix.node",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import os
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -13,6 +13,7 @@ from finalize_scan_contract import (
     ContractError,
     _require_portable_relative_path,
     _require_str,
+    _schema_values_equal,
     _validate_schema_node,
     open_scan_local_file_descriptor,
     path_within_scope,
@@ -70,17 +71,58 @@ def receipt_checkpoints(
     return added
 
 
+def _worker_result_payload(draft: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in draft.items() if key != "handoffClaimToken"}
+
+
+def _worker_checkpoint_payloads(
+    checkpoint: dict[str, Any], scope: Sequence[tuple[str, bool]]
+) -> Iterator[dict[str, Any]]:
+    payload = _worker_result_payload(checkpoint)
+    yield payload
+    if any(path == "." for path, _ in scope):
+        return
+    # Legacy writers checkpointed all findings before filtering the final result.
+    yield {
+        **payload,
+        "findings": [
+            finding
+            for finding in checkpoint["findings"]
+            if isinstance(finding, dict)
+            and isinstance(finding.get("locations"), list)
+            and any(
+                isinstance(location, dict)
+                and isinstance(location.get("path"), str)
+                and any(
+                    PurePosixPath(location["path"]) == PurePosixPath(path)
+                    if is_file
+                    else path_within_scope(location["path"], path)
+                    for path, is_file in scope
+                )
+                for location in finding["locations"]
+            )
+        ],
+    }
+
+
+def matches_worker_checkpoint(
+    checkpoint: dict[str, Any], result: Any, scope: Sequence[tuple[str, bool]]
+) -> bool:
+    if not isinstance(result, dict):
+        return False
+    result = _worker_result_payload(result)
+    return any(
+        _schema_values_equal(result, candidate)
+        for candidate in _worker_checkpoint_payloads(checkpoint, scope)
+    )
+
+
 def retain_recorded_receipt_ownership(
     sources: list[tuple[str, dict[str, Any], str | None]],
     digest: Callable[[Any], str],
     include_paths: Sequence[str],
     finding_scope: Sequence[tuple[str, bool]] | None = None,
 ) -> None:
-    # Checkpoints are written by the host tool; direct result files can be authored
-    # without it. Compare the entire payload within the same worker attempt.
-    def payload_digest(draft: dict[str, Any]) -> str:
-        return digest({key: value for key, value in draft.items() if key != "handoffClaimToken"})
-
     scope = (
         finding_scope if finding_scope is not None else [(path, False) for path in include_paths]
     )
@@ -89,32 +131,14 @@ def retain_recorded_receipt_ownership(
         directory = Path(relative).parent
         if worker_id is not None and directory.name == "checkpoints":
             payloads = recorded.setdefault(directory.parent, set())
-            payloads.add(payload_digest(draft))
-            if "." not in include_paths:
-                # Legacy writers saved the checkpoint before filtering inherited findings.
-                scoped = [
-                    finding
-                    for finding in draft["findings"]
-                    if isinstance(finding, dict)
-                    and isinstance(finding.get("locations"), list)
-                    and any(
-                        isinstance(location, dict)
-                        and isinstance(location.get("path"), str)
-                        and any(
-                            PurePosixPath(location["path"]) == PurePosixPath(path)
-                            if is_file
-                            else path_within_scope(location["path"], path)
-                            for path, is_file in scope
-                        )
-                        for location in finding["locations"]
-                    )
-                ]
-                payloads.add(payload_digest({**draft, "findings": scoped}))
+            payloads.update(
+                digest(payload) for payload in _worker_checkpoint_payloads(draft, scope)
+            )
     for relative, draft, worker_id in sources:
         directory = Path(relative).parent
         if worker_id is None or directory.name == "checkpoints":
             continue
-        if payload_digest(draft) in recorded.get(directory, set()):
+        if digest(_worker_result_payload(draft)) in recorded.get(directory, set()):
             continue
         surfaces = draft["coverage"].get("surfaces", [])
         for surface in surfaces if isinstance(surfaces, list) else []:

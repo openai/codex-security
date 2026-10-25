@@ -1,31 +1,95 @@
 import type { DeepReducerContext } from "../artifact-io.js";
 import type { WorkbenchDeepScanStore } from "./store.js";
-import type { z } from "zod";
-import type {
-  configSchema,
-  dedupInputSchema,
-  runSchema,
-  workerSchema,
-} from "./response.js";
+import type { DeepScanExecutionSettingsSnapshot } from "./recovery-settings.js";
+
+export type DeepScanTerminalReason = "saturated" | "capped";
+
+export type DeepScanRunStatus =
+  "running" | "succeeded" | "canceled" | "failed" | "interrupted";
+
+export type DeepScanWorkerKind = "setup" | "discovery" | "dedup";
+
+export type DeepScanWorkerStatus =
+  "queued" | "running" | "succeeded" | "failed" | "canceled";
+
+export type DeepScanMergeState = "none" | "buffered" | "merging" | "merged";
 
 /** Effective configuration and durable run state returned by the workbench. */
-export type DeepScanConfig = z.output<typeof configSchema>;
-export type DeepScanRunState = Omit<
-  z.output<typeof runSchema>,
-  "persistedWorkers" | "persistedDedupInputs"
-> & {
+export interface DeepScanConfig {
+  workers: number;
+  subagents: number;
+  stopAfterNoNew: number;
+  stopAfterConsecutiveErrors: number;
+  maxDiscoveryRuns: number;
+  maxTimeHours?: number;
+}
+
+export interface DeepScanFinalizationInput {
+  version: number;
+  resultPath: string | null;
+  resultSha256: string | null;
+  terminalReason: DeepScanTerminalReason;
+  omittedWorkerIds: string[];
+  selectedAt: string;
+}
+
+export interface DeepScanRunState {
+  scanId: string;
+  startDisposition?: "created" | "joined";
+  schemaVersion?: number;
+  workflowVersion?: string;
+  finalizationInput?: DeepScanFinalizationInput;
+  usageOwner?: {
+    threadId: string | null;
+    turnId: string | null;
+    startedAt: string;
+  } | null;
+  executionSettings?: DeepScanExecutionSettingsSnapshot | null;
+  status: DeepScanRunStatus;
+  coordinatorGeneration?: number;
+  createdAt?: string;
+  updatedAt?: string;
+  targetPath: string;
+  scope: string;
+  includePaths?: string[];
+  filePaths?: string[];
+  userContext?: string;
+  model?: string;
+  reasoningEffort?: string;
+  scanDir: string;
+  config: DeepScanConfig;
+  dispatchedCount: number;
+  noNewStreak: number;
+  consecutiveErrors: number;
+  manifestPath?: string;
+  terminalReason?: DeepScanTerminalReason;
+  error?: string;
   persistedWorkers?: PersistedDeepScanWorker[];
   persistedDedupInputs?: PersistedDeepScanDedupInput[];
-};
-export type DeepScanTerminalReason = NonNullable<
-  DeepScanRunState["terminalReason"]
->;
-export type PersistedDeepScanDedupInput = z.output<typeof dedupInputSchema>;
-/** The authoritative worker record returned after SQLite commits the change. */
-export type PersistedDeepScanWorker = z.output<typeof workerSchema> & {
-  consecutiveErrors?: number;
-};
-export type DeepScanWorkerKind = PersistedDeepScanWorker["kind"];
+  persistedMergeClaims?: PersistedDeepScanMergeClaim[];
+  committedMerge?: {
+    workerId: string;
+    resultManifestPath: string;
+    resultManifestSha256: string;
+    newFindings: number;
+  };
+}
+
+export interface PersistedDeepScanMergeClaim {
+  workerId: string;
+  previousWorkerId?: string;
+  previousResultPath?: string;
+  previousResultSha256?: string;
+}
+
+export interface PersistedDeepScanDedupInput {
+  dedupWorkerId: string;
+  discoveryWorkerId: string;
+  inputOrder: number;
+  resultManifestPath?: string;
+  resultManifestSha256?: string;
+  attempt?: number;
+}
 
 export interface DeepScanCoordinatorClaim {
   run: DeepScanRunState;
@@ -39,16 +103,34 @@ export interface DeepScanCoordinatorLeaseInput {
 }
 
 /** Fields supplied when the coordinator changes one worker. */
-export type DeepScanWorkerMutation = Omit<
-  PersistedDeepScanWorker,
-  "completionSequence" | "consecutiveErrors" | "mergeState"
-> & {
+export interface DeepScanWorkerMutation {
+  id: string;
   scanId: string;
+  kind: DeepScanWorkerKind;
+  status: DeepScanWorkerStatus;
+  promptPath: string;
+  artifactDir: string;
+  attempt: number;
+  threadId?: string;
+  resultManifestPath?: string;
+  error?: string;
   replaceableFailureKind?: DeepScanReplaceableFailureKind;
-};
+}
 
 export type DeepScanReplaceableFailureKind =
   "policy_refusal" | "transient_error" | "invalid_discovery_artifacts";
+
+/** The authoritative worker record returned after SQLite commits the change. */
+export interface PersistedDeepScanWorker extends Omit<
+  DeepScanWorkerMutation,
+  "scanId" | "replaceableFailureKind"
+> {
+  acceptedResultPath?: string;
+  acceptedResultSha256?: string;
+  completionSequence?: number;
+  consecutiveErrors?: number;
+  mergeState: DeepScanMergeState;
+}
 
 /** Inputs committed atomically when a reducer finishes. */
 export interface DedupCommit {
@@ -60,10 +142,74 @@ export interface DedupCommit {
 }
 
 /** Durable operations implemented by the Python workbench. */
-export type DeepScanStore = Omit<
-  WorkbenchDeepScanStore,
-  "begin" | "coordinatorLeaseArgs"
->;
+export interface DeepScanStore {
+  begin(input: {
+    scanId?: string;
+    targetPath?: string;
+    scope?: string;
+    userContext?: string;
+    handoffClaimToken?: string;
+    model?: string;
+    reasoningEffort?: string;
+    threadId: string;
+    scanRoot: string;
+  }): Promise<DeepScanRunState>;
+  get(scanId: string, threadId: string): Promise<DeepScanRunState>;
+  claimCoordinator(
+    input: DeepScanCoordinatorLeaseInput,
+  ): Promise<DeepScanCoordinatorClaim>;
+  heartbeatCoordinator(
+    input: DeepScanCoordinatorLeaseInput,
+  ): Promise<DeepScanRunState>;
+  cancel(scanId: string, threadId: string): Promise<Record<string, unknown>>;
+  updateWorker(
+    update: DeepScanWorkerMutation,
+  ): Promise<PersistedDeepScanWorker>;
+  claimDedup(input: {
+    id: string;
+    scanId: string;
+    workerIds: string[];
+    promptPath: string;
+    artifactDir: string;
+  }): Promise<DeepScanRunState | void>;
+  commitDedup(commit: DedupCommit): Promise<DeepScanRunState>;
+  selectFinalization?(input: {
+    scanId: string;
+    coordinatorGeneration?: number;
+    reason: DeepScanTerminalReason;
+    manifestPath: string;
+    resultPath?: string;
+    omittedWorkerIds: string[];
+  }): Promise<DeepScanRunState>;
+  finish(input: {
+    scanId: string;
+    coordinatorGeneration?: number;
+    reason: DeepScanTerminalReason;
+    manifestPath: string;
+    stagedManifestPath?: string;
+    omittedWorkerIds: string[];
+  }): Promise<DeepScanRunState>;
+  fail(
+    scanId: string,
+    message: string,
+    status?: "failed" | "interrupted",
+    manifestPath?: string,
+    stagedManifestPath?: string,
+  ): Promise<DeepScanRunState>;
+  recordStoppedPublicationFailure(
+    scanId: string,
+    message: string,
+    coordinatorGeneration?: number,
+  ): Promise<DeepScanRunState>;
+  updateProgress(input: {
+    scanId: string;
+    handoffClaimToken?: string;
+    phase?: "preflight" | "discovery";
+    deepReviewPass?: number;
+    reviewItemsTotal?: number;
+    reviewItemsCompleted?: number;
+  }): Promise<void>;
+}
 
 /** Host-bound worker artifact state; never populate this from model input. */
 export interface CodexWorkerArtifactContext {

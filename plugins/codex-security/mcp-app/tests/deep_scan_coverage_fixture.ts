@@ -9,7 +9,7 @@ import { build } from "esbuild";
 
 import type { JsonObject } from "../src/types.js";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
-import { readJson } from "./support/json.ts";
+import { readJson, writeJson } from "./support/json.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
 type FixtureRuntime = typeof import("../src/deep-scan/artifacts.js") &
@@ -875,24 +875,28 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       promptPath,
     });
     const resultManifestPath = path.join(artifactDir, "result.json");
-    // Legacy accepted reducers omitted coverage entirely.
-    await writeFile(
-      resultManifestPath,
-      JSON.stringify({
-        scanId: run.scanId,
-        findings: retryFindings?.flat() ?? [],
-      }),
-    );
-    rawSources.set(
-      resultManifestPath,
-      await readFile(resultManifestPath, "utf8"),
-    );
+    const result = {
+      scanId: run.scanId,
+      findings: retryFindings?.flat() ?? [],
+    };
+    await writeJson(resultManifestPath, result);
     await store.commitDedup({
       id,
       scanId: run.scanId,
       newFindings: retryFindings ? 1 : 0,
       resultManifestPath,
     });
+    if (continueAfterResume) {
+      // A mutable v1 result can change after the workbench accepts it.
+      await writeJson(resultManifestPath, {
+        ...result,
+        sourceCoverage: { surfaces: [], explicitExclusions: [], deferred: [] },
+      });
+    }
+    rawSources.set(
+      resultManifestPath,
+      await readFile(resultManifestPath, "utf8"),
+    );
     run = await store.get(run.scanId, threadId);
   }
   let discoveryCalls = 0;
@@ -990,15 +994,15 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     (worker) => worker.kind === "dedup",
   )) {
     assert.ok(worker.resultManifestPath);
-    const result = JSON.parse(
-      await readFile(worker.resultManifestPath, "utf8"),
-    );
-    assert.equal(
-      Object.hasOwn(result, "sourceCoverage"),
-      false,
-      "v1 reducers remain readable by earlier binaries",
-    );
     if (!rawSources.has(worker.resultManifestPath)) {
+      const result = JSON.parse(
+        await readFile(worker.resultManifestPath, "utf8"),
+      );
+      assert.equal(
+        Object.hasOwn(result, "sourceCoverage"),
+        false,
+        "v1 reducers remain readable by earlier binaries",
+      );
       for (const name of await readdir(
         path.join(worker.artifactDir, "checkpoints"),
       )) {

@@ -135,10 +135,17 @@ saved._capture_saved_source = capture
 retained._capture_saved_source = capture
 frozen = None
 if sys.argv[9] == "true":
+    from unittest.mock import patch
     db = SimpleNamespace(require_canonical_scan_directory=lambda path: path, artifact_path=lambda *args, **kwargs: None, ARTIFACTS={"manifest": "scan-manifest.json"})
-    connection = SimpleNamespace(execute=lambda *args: SimpleNamespace(fetchall=lambda: [worker]))
-    scan = {"scan_dir": str(root), "id": scan_id, "retained_source_digests_json": None, "seal_manifest_digest": None}
-    frozen, _ = saved._recovery_source_digests(db, connection, scan)
+    scan = {
+        "scan_dir": str(root), "id": scan_id, "seal_manifest_digest": None,
+        "retained_source_digests_json": None, "retained_checkpoint_heads_json": None,
+    }
+    with (
+        patch.object(saved, "_saved_workers", return_value=[worker]),
+        patch.object(saved, "_accepted_source_digests", return_value={}),
+    ):
+        frozen = saved._recovery_source_digests(db, None, scan)[0]
 merged = merge_saved_results(*args, stopped=True, reason="interrupted", frozen_source_digests=frozen)
 saved._capture_saved_source = original_capture
 retained._capture_saved_source = original_retained_capture

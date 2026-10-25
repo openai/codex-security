@@ -259,3 +259,60 @@ def test_legacy_file_scope_preserves_shared_receipts_when_stopped(
     saved.preserve_scan_results(db, workbench_db, args)
     assert coverage_path.read_bytes() == published
     assert {path: path.read_bytes() for path in original} == original
+
+
+@pytest.mark.parametrize("scope", ["subdir", "subdir/extract.py"])
+def test_scoped_worker_acceptance_matches_selected_legacy_checkpoint(
+    workbench_api, workbench_db, publication_scan, scope
+):
+    scan = publication_scan(paths=[scope])
+    db = workbench_api["_WORKBENCH_DB_CONTEXT"]
+    registered = db.require_scan(workbench_db, scan.scan_id)
+    fixture = (
+        Path(__file__).parents[1] / "mcp-app/tests/fixtures/legacy-scoped-worker-receipts.json"
+    )
+    legacy = json.loads(fixture.read_text())
+    for draft in legacy.values():
+        draft["scanId"] = scan.scan_id
+        draft["findings"][0]["locations"][0]["path"] = "subdir/extract.py"
+    if scope.endswith(".py"):
+        legacy["checkpoint"]["findings"][1]["locations"][0]["path"] = f"{scope}/generated"
+
+    result = add_worker(workbench_db, scan)
+    result.write_text(json.dumps(legacy["result"]))
+    checkpoints = result.parent / "checkpoints"
+    head = write_checkpoint(checkpoints, legacy["checkpoint"])
+    (result.parent / "checkpoint-head.json").write_text(json.dumps({"checkpoint": head.name}))
+    worker = db.deep_scan.require_deep_scan_worker(workbench_db, result.parent.name)
+    db.deep_scan.validate_accepted_checkpoint(registered, worker)
+
+    accepted = write_checkpoint(checkpoints, legacy["result"])
+    ref = "artifacts/evidence.txt"
+    for root in (scan.scan_dir, result.parent):
+        (root / ref).parent.mkdir(exist_ok=True)
+        (root / ref).write_text("shared" if root == scan.scan_dir else "local")
+    coverage = {}
+    workbench_api["saved_results"].retain_unmerged_budget_coverage(
+        registered,
+        scan.scan_dir,
+        coverage,
+        {
+            **dict(worker),
+            "accepted_result_path": str(accepted),
+            "accepted_result_sha256": accepted.stem,
+        },
+        db.requested_finding_scope(registered),
+    )
+    assert coverage["surfaces"][0]["receiptRefs"] == [ref]
+
+    changed = copy.deepcopy(legacy["result"])
+    changed["coverage"]["surfaces"][0]["provenance"]["scanReceiptRefs"] = []
+    result.write_text(json.dumps(changed))
+    with pytest.raises(SystemExit, match="does not match its current checkpoint head"):
+        db.deep_scan.validate_accepted_checkpoint(registered, worker)
+
+    changed = copy.deepcopy(legacy["result"])
+    changed["findings"][0]["locations"][0]["startLine"] = True
+    result.write_text(json.dumps(changed))
+    with pytest.raises(SystemExit, match="does not match its current checkpoint head"):
+        db.deep_scan.validate_accepted_checkpoint(registered, worker)

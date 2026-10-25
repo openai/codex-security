@@ -11,6 +11,7 @@ import { assertFlagPair } from "./assertions.ts";
 import { readJson } from "./support/json.ts";
 
 export async function testWorkerCyberAccessSettings({
+  restoredDeepScanWorkerSettings,
   CodexSdkWorkerExecutor,
   fakeCodexFixture,
   parentSandbox,
@@ -20,6 +21,7 @@ export async function testWorkerCyberAccessSettings({
   assertWorkerSubagentPolicy,
   restoreEnv,
 }: {
+  restoredDeepScanWorkerSettings: typeof import("../src/deep-scan/recovery-settings.js").restoredDeepScanWorkerSettings;
   CodexSdkWorkerExecutor: typeof Executor;
   fakeCodexFixture: () => Promise<{ root: string; executablePath: string }>;
   parentSandbox: DeepWorkerParentSandbox;
@@ -42,6 +44,7 @@ export async function testWorkerCyberAccessSettings({
   const cases: {
     name: string;
     configuration?: string;
+    restored?: boolean;
     workerFeatures?: Record<string, boolean>;
     daybreak?: boolean;
     workerDaybreak?: boolean;
@@ -58,6 +61,12 @@ export async function testWorkerCyberAccessSettings({
     executor?: import("../src/deep-scan/executor.js").CodexSdkWorkerExecutor;
   }[] = [
     { name: "unset", configuration: "" },
+    {
+      name: "recorded-omissions",
+      configuration:
+        'model_reasoning_summary = "detailed"\nservice_tier = "fast"\n[codex_security]\ncyber_access_program = "daybreak_red"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = true\n',
+      restored: true,
+    },
     {
       name: "blue",
       configuration:
@@ -299,6 +308,12 @@ export async function testWorkerCyberAccessSettings({
         );
       }
       testCase.executor = new CodexSdkWorkerExecutor({
+        ...(testCase.restored
+          ? restoredDeepScanWorkerSettings(
+              { codexPath: process.execPath, codexHome: fixture.root },
+              parentSandbox,
+            )
+          : {}),
         model: testCase.name,
         parentSandbox,
         parentTurn: testCase.parentTurn,
@@ -397,6 +412,10 @@ export async function testWorkerCyberAccessSettings({
             ({ args }) => args[args.indexOf("--model") + 1] === name,
           );
           const invocation = await readJson(launch!.markerPath);
+          if (name === "recorded-omissions")
+            assertConfigOverrides(invocation.argv, {
+              model_reasoning_summary: undefined,
+            });
           assert.deepEqual(
             invocation.argv.filter((arg: string) =>
               arg.startsWith("service_tier="),

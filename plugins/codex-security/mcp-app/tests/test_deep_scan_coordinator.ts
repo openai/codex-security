@@ -27,6 +27,8 @@ import {
 import path from "node:path";
 import {
   testDeepScanLifecycle,
+  testStaleDiscoveryCheckpointRetriesBeforeAcceptance,
+  testResumeUsesHistoricalCandidateSnapshotForEachReducer,
   testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus,
 } from "./deep_scan_lifecycle_cases.ts";
 import {
@@ -3276,94 +3278,6 @@ async function testResumedManifestPreservesCompletedReducer(
   );
 }
 
-async function testResumeUsesHistoricalCandidateSnapshotForEachReducer() {
-  const { fixture, store } = await coordinatorFixture({
-    workers: 3,
-    stopAfterNoNew: 10,
-    maxDiscoveryRuns: 5,
-  });
-  const originalExecutor = new FakeExecutor({
-    discoveryCandidateId: "candidate-1",
-    dedupEvidenceByCall: ["first reducer evidence", "final reducer evidence"],
-  });
-  const run = originalExecutor.run.bind(originalExecutor);
-  originalExecutor.run = async (request) => {
-    const outcome = await run(request);
-    if (request.kind === "discovery") {
-      const resultPath = path.join(
-        request.artifactContext!.root,
-        "result.json",
-      );
-      const result = await readJson(resultPath);
-      result.coverage.deferred = [
-        { id: "remaining-review", reason: "Source review remains pending." },
-      ];
-      await writeJson(resultPath, result);
-    }
-    return outcome;
-  };
-  const original = createCoordinator(fixture, store, originalExecutor);
-  original.start();
-  assert.equal((await original.wait(undefined, 5_000))?.status, "succeeded");
-  assert.equal(store.dedupClaims.length >= 2, true);
-
-  store.run = {
-    ...store.run,
-    status: "running" as const,
-    terminalReason: undefined,
-    manifestPath: undefined,
-    persistedWorkers: structuredClone([...store.workers.values()]),
-    persistedDedupInputs: store.dedupClaims.flatMap(claimDedupInputs),
-  };
-  const persistedInputs = structuredClone(store.run.persistedDedupInputs);
-  await Promise.all(
-    store.run.persistedWorkers!.map((worker) =>
-      rm(worker.promptPath, { force: true }),
-    ),
-  );
-  const replacementExecutor = new FakeExecutor();
-  const completedDrafts: ScanDraftInput[] = [];
-  const resumed = await runCoordinator(fixture, store, replacementExecutor, {
-    run: store.run,
-    onComplete: async (draft) =>
-      void completedDrafts.push(structuredClone(draft)),
-  });
-  assert.equal(resumed?.status, "succeeded", resumed?.error);
-
-  assert.equal(
-    (completedDrafts[0].coverage.deferred as unknown[]).length,
-    5,
-    "resumed reduction must retain pending review from every merged worker",
-  );
-  const firstReducer = store.run.persistedWorkers!.find(
-    (worker) =>
-      worker.kind === "dedup" && worker.promptPath.includes("dedup-0001"),
-  );
-  assert.ok(firstReducer);
-  const firstResult = await readJson(firstReducer.resultManifestPath!);
-  assert.equal(
-    firstResult.findings[0]?.rootCause.summary,
-    "first reducer evidence",
-  );
-  const lastReducer = store.run.persistedWorkers!.findLast(
-    (worker) => worker.kind === "dedup" && worker.status === "succeeded",
-  );
-  const latestResult = await readJson(lastReducer!.resultManifestPath!);
-  assert.equal(
-    latestResult.findings[0]?.rootCause.summary,
-    "final reducer evidence",
-  );
-  assert.deepEqual(
-    completedDrafts.map((draft) => draft.findings),
-    [latestResult.findings],
-  );
-  assert.deepEqual(store.run.persistedDedupInputs, persistedInputs);
-  assert.equal(
-    replacementExecutor.discoveryCalls + replacementExecutor.dedupCalls,
-    0,
-  );
-}
-
 async function testPersistedErrorLimitStopsBeforeRescheduling() {
   const fixture = await fixtureRun({
     stopAfterNoNew: 2,
@@ -3957,7 +3871,8 @@ async function testResumeDoesNotRequireHistoricalWorkerPrompt(
         attempt: 1,
         promptPath,
         artifactDir: fixture.run.scanDir,
-      } as PersistedDeepScanWorker,
+        mergeState: "none",
+      } satisfies PersistedDeepScanWorker,
     ],
   });
   const executor = new FakeExecutor();
@@ -4241,6 +4156,7 @@ async function testQuotaFailureStopsDispatchBeforeWorkerShutdown(
 }
 
 try {
+  await testStaleDiscoveryCheckpointRetriesBeforeAcceptance();
   await testDeepScanLifecycle({
     fixtureRun,
     FakeStore,

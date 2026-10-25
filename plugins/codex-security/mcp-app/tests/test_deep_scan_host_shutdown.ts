@@ -47,7 +47,8 @@ const { createCodexSecurityServer } = await importModule({
       name: "synthetic-worker",
       setup(build) {
         build.onLoad({ filter: /[/\\]deep-scan[/\\]executor\.ts$/ }, () => ({
-          contents: `export class CodexSdkWorkerExecutor { constructor() { return ${fixtureAccess}.executor; } }`,
+          contents: `export const resolveCodexPath = () => process.execPath;
+          export class CodexSdkWorkerExecutor { constructor() { return ${fixtureAccess}.executor; } }`,
           loader: "ts",
         }));
       },
@@ -68,6 +69,13 @@ try {
       const fixture = await fixtureRun();
       const registry = new DeepScanCoordinatorRegistry();
       const store = new FakeStore(fixture.run);
+      store.run.executionSettings = {
+        version: 1,
+        settings: {
+          codexPath: process.execPath,
+          codexHome: fixture.pluginRoot,
+        },
+      };
       const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
       const entered = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();

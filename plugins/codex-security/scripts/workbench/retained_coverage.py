@@ -27,6 +27,7 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
 )
 from workbench.saved_coverage import (
+    _inherit_coverage_sources,
     _merge_tied_parent_observations,
     _parent_observation_content,
     _project_worker_closure,
@@ -49,6 +50,7 @@ from workbench.saved_sources import (
     _parent_publication_ancestors,
     _read_saved_parent_result,
     _read_saved_result,
+    _reducer_output_paths,
     _worker_outputs,
 )
 from workbench_coverage_receipts import (
@@ -285,24 +287,6 @@ def _coverage_rows(coverage: dict[str, Any], field: str) -> list[Any]:
     return rows if isinstance(rows, list) else []
 
 
-def _inherit_coverage_sources(
-    row: Any,
-    originals: list[Any],
-    sources: dict[int, tuple[dict[str, Any], list[str]]],
-) -> None:
-    if not isinstance(row, dict):
-        return
-    for original in originals:
-        saved = sources.get(id(original))
-        if saved is None:
-            continue
-        # Retain the object as well as its ID while copies are reconciled.
-        paths = sources.setdefault(id(row), (row, []))[1]
-        for relative in saved[1]:
-            if relative not in paths:
-                paths.append(relative)
-
-
 def _recover_preserved_worker_source(
     scan_dir, relative, scan_id, binding, worker_id, worker, draft, warnings
 ):
@@ -433,7 +417,9 @@ def merge_saved_results(
     reason: str,
     scan_mode: str | None = None,
     frozen_source_digests: dict[str, str] | None = None,
+    checkpoint_heads: dict[str, str] | None = None,
     allow_frozen_legacy_parent: bool = False,
+    accepted_source_digests: dict[str, str] | None = None,
     frozen_model_source: str | None = None,
     selected_model_source: list[str] | None = None,
     finding_scope: list[tuple[str, bool]] | None = None,
@@ -543,6 +529,7 @@ def merge_saved_results(
             reducer_paths.add(latest_reducer)
         except ValueError:
             warnings.append("Skipped a reducer result outside the scan directory.")
+    accepted_reducer = latest_reducer
 
     def checkpoints(directory: str, worker_id: str | None, attempt: int = 0) -> None:
         if worker_id is not None:
@@ -564,10 +551,11 @@ def merge_saved_results(
             continue
         if worker["kind"] == "dedup":
             for directory, attempt in outputs:
-                checkpoint_paths = _checkpoint_paths(scan_dir, f"{directory}/checkpoints")
-                if not checkpoint_paths:
+                result_path, checkpoint_paths = _reducer_output_paths(
+                    scan_dir, worker, directory, attempt
+                )
+                if result_path is None:
                     continue
-                result_path = f"{directory}/result.json"
                 retained_paths = [result_path, *checkpoint_paths]
                 paths.update(dict.fromkeys(retained_paths))
                 reducer_paths.update(retained_paths)
@@ -576,9 +564,18 @@ def merge_saved_results(
         if worker["kind"] != "discovery":
             continue
         output, attempt = outputs[0]
+        head = (checkpoint_heads or {}).get(output)
+        if head is not None:
+            paths[head] = worker["id"]
+            current_results.add(head)
         paths[f"{output}/result.json"] = worker["id"]
-        current_results.add(f"{output}/result.json")
+        if head is None:
+            current_results.add(f"{output}/result.json")
         for archived, archived_attempt in outputs[1:]:
+            archived_head = (checkpoint_heads or {}).get(archived)
+            if archived_head is not None:
+                paths[archived_head] = worker["id"]
+                current_results.add(archived_head)
             paths[f"{archived}/result.json"] = worker["id"]
             checkpoints(f"{archived}/checkpoints", worker["id"], archived_attempt)
         checkpoints(f"{output}/checkpoints", worker["id"], attempt)
@@ -586,7 +583,8 @@ def merge_saved_results(
             try:
                 current_path = Path(worker["result_manifest_path"]).relative_to(scan_dir).as_posix()
                 paths[current_path] = worker["id"]
-                current_results.add(current_path)
+                if head is None:
+                    current_results.add(current_path)
             except ValueError:
                 warnings.append("Skipped a worker result outside the scan directory.")
 
@@ -631,7 +629,11 @@ def merge_saved_results(
         relative, worker_id = pending.popleft()
         try:
             draft, digest, observed = _read_saved_result(
-                scan_dir, relative, scan_id, kind="dedup" if relative in reducer_paths else None
+                scan_dir,
+                relative,
+                scan_id,
+                kind="dedup" if relative in reducer_paths else None,
+                accepted_source_digests=accepted_source_digests,
             )
             if frozen_source_digests is not None and frozen_source_digests[relative] != digest:
                 raise ContractError("checkpoint changed after the scan stopped")
@@ -656,8 +658,13 @@ def merge_saved_results(
                 )
                 if discarded:
                     discarded_by_source[relative] = discarded
-            # Recovery expects coverage, but reducer results only contain findings
-            # and context. Add an empty value after hashing the original result.
+            # The host supplies reducer coverage separately from model output.
+            # Preserve the digest of the original accepted document.
+            if relative in reducer_paths:
+                draft = {
+                    **draft,
+                    "coverage": draft.get("sourceCoverage", draft.get("coverage", {})),
+                }
             sources.append((relative, {"coverage": {}, **draft}, worker_id))
             if frozen_source_digests is None:
                 pending.extend(
@@ -885,6 +892,14 @@ def merge_saved_results(
         return result
 
     workers_by_id = {worker["id"]: worker for worker in workers}
+    if "sourceCoverage" not in drafts_by_path.get(accepted_reducer, {}):
+        accepted_reducer = None
+    accepted_coverage = drafts_by_path.get(accepted_reducer, {}).get("coverage", {})
+    reducer_reviews = {
+        (review.get("workerId"), review.get("attempt"))
+        for review in _coverage_rows(accepted_coverage, "reviews")
+        if isinstance(review, dict)
+    }
     latest_reducer_key = (
         (reducer["completed_at"] or "", reducer["id"], int(reducer["attempt"] or 0))
         if reducer is not None and latest_reducer in drafts_by_path
@@ -931,7 +946,7 @@ def merge_saved_results(
     if parent is None and latest_reducer is not None:
         parent = drafts_by_path[latest_reducer]
 
-    projected_coverage = saved_parent["coverage"] if saved_parent else {}
+    projected_coverage = saved_parent["coverage"] if saved_parent else accepted_coverage
     reviews = projected_coverage.get("reviews")
     reviewed_attempts = {
         (review.get("workerId"), review.get("attempt"))
@@ -1138,6 +1153,7 @@ def merge_saved_results(
         and parent_manifest["scan"].get("sealedAt")
         and parent_manifest["scan"].get("status") == binding["status"]
         and parent_manifest["scan"].get("preservedSources") == source_digests
+        and parent_manifest["scan"].get("preservedCheckpointHeads") == checkpoint_heads
         and all(warning in initial_warnings for warning in warnings)
     ):
         return None
@@ -1177,6 +1193,8 @@ def merge_saved_results(
     for key in ("sealedAt", "artifacts"):
         manifest["scan"].pop(key, None)
     manifest["scan"]["preservedSources"] = source_digests
+    if checkpoint_heads is not None:
+        manifest["scan"]["preservedCheckpointHeads"] = checkpoint_heads
     # Completion follows the selected parent, including legacy terminal drafts
     # that omit the optional marker, rather than an older canonical manifest.
     if parent is not None:
@@ -1552,7 +1570,10 @@ def merge_saved_results(
                 ambiguous_deferred.add(key)
             by_id[key] = row
     current_drafts = ([("parent", parent, None)] if parent else []) + [
-        source for source in sources if source[0] in current_results | selected_observations.keys()
+        source
+        for source in sources
+        if source[0] in current_results | selected_observations.keys()
+        or source[0] == accepted_reducer
     ]
 
     pending_surface_orders: dict[tuple[str | None, str], tuple[int, int]] = {}
@@ -1766,7 +1787,11 @@ def merge_saved_results(
             for (saved_owner, _), (saved_order, row, _) in active_deferred.items()
         ):
             continue
-        if key not in ordered_outcomes or order > ordered_outcomes[key][0]:
+        previous = ordered_outcomes.get(key)
+        if previous is None or (order, relative in selected_observations) > (
+            previous[0],
+            previous[1] in selected_observations,
+        ):
             resolved[key] = disposition
             ordered_outcomes[key] = (order, relative)
     # Only the current parent may claim that another worker finding was absorbed.
@@ -2424,6 +2449,7 @@ def merge_saved_results(
             and saved_parent is not None
             and saved_parent.get("complete") is not False
             and relative != "parent"
+            and relative != accepted_reducer
             and source_order[relative] <= (0, parent_modified)
             and (not stopped_parent_seal or relative in parent_preserved_sources)
             and (
@@ -2634,7 +2660,7 @@ def merge_saved_results(
             # Generic updates already resolve each receipt at its saved source.
             surface = projection.repair_reviewed_surface(
                 coverage,
-                projected_coverage if parent_is_canonical else {},
+                projected_coverage if parent_is_canonical else accepted_coverage,
                 workers_by_id.get(owner),
                 source_surface,
                 surface,
@@ -2988,7 +3014,20 @@ def merge_saved_results(
             and worker["result_manifest_path"] == str(scan_dir / relative)
             and draft.get("complete") is not False
         )
-        if coverage_superseded and not selected_candidates and not retain_pending:
+        if (
+            coverage_superseded
+            and relative != accepted_reducer
+            and not selected_candidates
+            and not retain_pending
+        ):
+            continue
+        if (
+            project_coverage
+            and (worker_id, worker["attempt"]) in reducer_reviews
+            and "merge_state" in worker.keys()
+            and worker["merge_state"] == "merged"
+        ):
+            # The accepted reducer already carries this attempt's coverage and its saved IDs.
             continue
         if project_coverage:
             reviewed_attempts.add((worker_id, worker["attempt"]))

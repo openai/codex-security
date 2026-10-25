@@ -1,0 +1,1333 @@
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { execFileSync } from "node:child_process";
+import {
+  appendFile,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import zlib, { zstdCompressSync } from "node:zlib";
+import { afterEach, expect, test, spyOn } from "bun:test";
+import type { ThreadEvent } from "@openai/codex-sdk";
+import {
+  ScanCostLimitExceededError,
+  ScanInterruptedError,
+} from "../src/errors.js";
+import { prepareScanArtifactRestorer, runWorkbench } from "../src/runtime.js";
+import { TestClient } from "./support/api-client.js";
+import { completedEvents, preparedRuntime } from "./support/api-events.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
+
+import { ScanCostTracker } from "../src/cost.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
+
+const { temporaryDirectory, cleanup } = createApiTestFixtures();
+afterEach(cleanup);
+const threadId = "1af317a1-c9ed-4c73-b428-cb0d160cf8e8";
+const followUp = "Explain the selected finding.";
+
+for (const boundary of ["registration", "stream-start"] as const) {
+  test(`SDK cancels registered Deep Scan before first thread event: ${boundary}`, async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    const codexHome = join(root, "codex-home");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(scanDir, { mode: 0o700 }),
+      mkdir(codexHome),
+    ]);
+    await writeFile(join(repository, "source.py"), "# Synthetic source\n");
+    const environment = {
+      ...process.env,
+      CODEX_HOME: codexHome,
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    };
+    const cancellation = new AbortController();
+    const reason = new Error(
+      "Synthetic cancellation before first thread event",
+    );
+    const commands: string[][] = [];
+    let scanId = "";
+    let savedOptions: Parameters<typeof runWorkbench>[0];
+    let startedTurns = 0;
+    const client = new TestClient(
+      {},
+      {
+        environment,
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          environment,
+        }),
+        resolvePluginPython: async () => "python3",
+        prepareOutputDir: async () => scanDir,
+        runWorkbench: async (options, args, input) => {
+          savedOptions = options;
+          commands.push([...args]);
+          const result = await runWorkbench(options, args, input);
+          if (args[0] === "register-cli-scan") {
+            scanId = result["scanId"] as string;
+            if (boundary === "registration") cancellation.abort(reason);
+          }
+          return result;
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            runStreamed: async () => {
+              startedTurns++;
+              cancellation.abort(reason);
+              throw reason;
+            },
+          }),
+        }),
+      },
+    );
+    try {
+      const error = await client
+        .run(repository, {
+          mode: "deep",
+          signal: cancellation.signal,
+          postScanPrompt: followUp,
+        })
+        .catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(ScanInterruptedError);
+      expect((error as ScanInterruptedError).cause).toBe(reason);
+      const stopped = await runWorkbench(
+        { ...savedOptions!, signal: undefined },
+        ["get-scan", "--scan-id", scanId],
+      );
+      expect(stopped["scan"]).toMatchObject({
+        progress: { status: "canceled" },
+      });
+      expect(commands.filter((args) => args[0] === "cancel-scan")).toEqual([
+        ["cancel-scan", "--scan-id", scanId],
+      ]);
+      expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
+      expect(commands.some((args) => args[0] === "set-scan-thread")).toBe(
+        false,
+      );
+      expect(startedTurns).toBe(boundary === "registration" ? 0 : 1);
+    } finally {
+      await client.close();
+    }
+  }, 30_000);
+}
+
+const outcomes = [
+  "failed",
+  "completed",
+  "restart",
+  "restart-without-session",
+  "restart-archived-session",
+  "canceled-before-publication",
+  "canceled-during-publication",
+  "canceled-during-resumed-publication",
+  "published-before-cancellation",
+  "closed-during-publication",
+  "budget-during-publication",
+  "budget-after-deep-finish",
+  "budget-at-final-reconciliation",
+  "budget-during-resumed-publication",
+  "closed-during-resumed-publication",
+  "lost-completion-response",
+  "lost-completion-response-followup-canceled",
+  "completion-before-commit-fails",
+  "followup-canceled",
+] as const;
+type BudgetCompletionFault = "lost" | "before-commit" | "lost-and-canceled";
+const compressionRuntimes = [
+  "decoder-enabled",
+  "without-decoder-budgeted",
+  "without-decoder-optional",
+  "without-decoder-unrelated",
+  "corrupt-unrelated-budgeted",
+  "corrupt-noncanonical-budgeted",
+  "corrupt-unknown-budgeted",
+  "corrupt-attributed-budgeted",
+  "corrupt-attributed-optional",
+] as const;
+const cases: {
+  outcome: (typeof outcomes)[number];
+  budgetCompletionFault?: BudgetCompletionFault;
+  initialResumeUsage?: boolean;
+  archivedWorkerUsage?: boolean;
+  compressionRuntime?: (typeof compressionRuntimes)[number];
+  unpricedUsage?: boolean;
+  cancellationFault?: "status-read" | "deep-state-read" | "cancel-response";
+}[] = [
+  ...outcomes.map((outcome) => ({ outcome })),
+  ...(
+    [
+      "budget-during-publication",
+      "budget-after-deep-finish",
+      "budget-during-resumed-publication",
+    ] as const
+  ).flatMap((outcome) => [
+    { outcome, unpricedUsage: true },
+    { outcome, unpricedUsage: true, budgetCompletionFault: "lost" as const },
+  ]),
+  ...(
+    [
+      "budget-during-publication",
+      "budget-after-deep-finish",
+      "budget-during-resumed-publication",
+    ] as const
+  ).map((outcome) => ({ outcome, budgetCompletionFault: "lost" as const })),
+  {
+    outcome: "budget-after-deep-finish",
+    budgetCompletionFault: "before-commit",
+  },
+  {
+    outcome: "budget-after-deep-finish",
+    budgetCompletionFault: "lost-and-canceled",
+  },
+  {
+    outcome: "canceled-during-publication",
+    cancellationFault: "status-read",
+  },
+  {
+    outcome: "canceled-during-publication",
+    cancellationFault: "cancel-response",
+  },
+  {
+    outcome: "canceled-during-publication",
+    cancellationFault: "deep-state-read",
+  },
+  {
+    outcome: "canceled-during-resumed-publication",
+    cancellationFault: "deep-state-read",
+  },
+  {
+    outcome: "canceled-before-publication",
+    cancellationFault: "deep-state-read",
+  },
+  {
+    outcome: "canceled-during-resumed-publication",
+    initialResumeUsage: true,
+  },
+  {
+    outcome: "canceled-during-resumed-publication",
+    initialResumeUsage: true,
+    archivedWorkerUsage: true,
+  },
+  ...compressionRuntimes.map((compressionRuntime) => ({
+    outcome: "restart" as const,
+    archivedWorkerUsage: true,
+    compressionRuntime,
+  })),
+];
+for (const {
+  outcome,
+  budgetCompletionFault,
+  cancellationFault,
+  initialResumeUsage,
+  archivedWorkerUsage,
+  compressionRuntime,
+  unpricedUsage,
+} of cases) {
+  const resumedStop = outcome.includes("-resumed-");
+  const restart = outcome.startsWith("restart") || resumedStop;
+  const localRecovery =
+    outcome === "restart-without-session" ||
+    outcome === "restart-archived-session";
+  const closed = outcome.startsWith("closed-");
+  const budgeted = outcome.startsWith("budget-");
+  const canceledFollowUp = outcome.endsWith("followup-canceled");
+  const loseCompletionResponse = outcome.startsWith("lost-completion-response");
+  const corruptArchive = compressionRuntime?.startsWith("corrupt-") === true;
+  const name =
+    outcome === "followup-canceled"
+      ? "SDK preserves a selected aggregate when its follow-up is canceled"
+      : `SDK handles selected aggregate: ${outcome}${budgetCompletionFault ? ` (budget completion ${budgetCompletionFault})` : ""}${cancellationFault ? ` (cancellation ${cancellationFault})` : ""}${initialResumeUsage ? " (initial resume cost)" : ""}${archivedWorkerUsage ? " (compressed archived worker)" : ""}${compressionRuntime ? ` (${compressionRuntime})` : ""}${unpricedUsage ? " (unpriced remainder)" : ""}`;
+  const runCase = async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    const codexHome = join(root, "codex-home");
+    const stateDir = join(root, "state");
+    const workerHome = join(root, "recorded-worker-home");
+    const workerThreadId = "0fb9f0de-939e-422d-9d75-1ddcaa066d81";
+    await Promise.all([
+      mkdir(repository),
+      mkdir(scanDir, { mode: 0o700 }),
+      mkdir(codexHome),
+    ]);
+    await writeFile(join(repository, "extract.py"), "# Synthetic source\n");
+    const environment = {
+      ...process.env,
+      CODEX_HOME: codexHome,
+      CODEX_SECURITY_STATE_DIR: stateDir,
+    };
+    const cancellation = new AbortController();
+    const parentError = new Error(
+      "Parent turn ended before its final completion tool call",
+    );
+    let scanId = "";
+    let workbenchOptions: Parameters<typeof runWorkbench>[0];
+    let publicationFails = restart;
+    let completionReceiptLost = loseCompletionResponse;
+    let budgetReceiptLost =
+      budgetCompletionFault === "lost" ||
+      budgetCompletionFault === "lost-and-canceled";
+    let budgetTriggered = false;
+    let cancellationReadLost = false;
+    let lostCancellationDeepState: unknown;
+    let originalFinalizationInput: unknown;
+    let selectedPath = "";
+    let selectedBytes: Buffer<ArrayBuffer>;
+    let originalResumeSignal: AbortSignal | undefined;
+    let acceptedReport = "";
+    let completedArtifacts: Buffer<ArrayBuffer>[] = [];
+    const modelInputs: string[] = [];
+    const commands: string[] = [];
+    const reportedCosts: number[] = [];
+    const reportedWarnings: string[] = [];
+    const usagePath = join(
+      codexHome,
+      "sessions",
+      "2026",
+      "01",
+      "01",
+      `rollout-${threadId}.jsonl`,
+    );
+    const recordBudgetUsage = () =>
+      appendFile(
+        usagePath,
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          type: "turn_context",
+          payload: {
+            turn_id: "synthetic-scan-turn",
+            model: "gpt-5.6-sol",
+          },
+        }) +
+          "\n" +
+          JSON.stringify({
+            timestamp: new Date().toISOString(),
+            type: "event_msg",
+            payload: {
+              type: "token_count",
+              info: {
+                total_token_usage: {
+                  input_tokens: 1_250,
+                  cached_input_tokens: 200,
+                  output_tokens: 30,
+                },
+              },
+            },
+          }) +
+          "\n" +
+          (unpricedUsage
+            ? [
+                JSON.stringify({
+                  timestamp: new Date().toISOString(),
+                  type: "turn_context",
+                  payload: {
+                    turn_id: "synthetic-scan-turn",
+                    model: "synthetic-unpriced-model",
+                  },
+                }),
+                JSON.stringify({
+                  timestamp: new Date().toISOString(),
+                  type: "event_msg",
+                  payload: {
+                    type: "token_count",
+                    info: {
+                      total_token_usage: {
+                        input_tokens: 1_350,
+                        cached_input_tokens: 200,
+                        output_tokens: 30,
+                      },
+                    },
+                  },
+                }),
+                "",
+              ].join("\n")
+            : ""),
+      );
+    const originalStop = ScanCostTracker.prototype.stop;
+    const stopSpy =
+      outcome === "budget-at-final-reconciliation"
+        ? spyOn(ScanCostTracker.prototype, "stop").mockImplementation(
+            async function (
+              this: ScanCostTracker,
+              ...args: Parameters<ScanCostTracker["stop"]>
+            ) {
+              if (!budgetTriggered) {
+                budgetTriggered = true;
+                await recordBudgetUsage();
+              }
+              return originalStop.apply(this, args);
+            },
+          )
+        : null;
+    let closePromise: Promise<void> | undefined;
+    const makeClient = () =>
+      new TestClient(
+        {},
+        {
+          environment,
+          prepareScanArtifactRestorer,
+          prepareRuntime: async () => {
+            const runtime = preparedRuntime(codexHome);
+            const manifest = JSON.parse(
+              await readFile(
+                join(PLUGIN_ROOT, ".codex-plugin/plugin.json"),
+                "utf8",
+              ),
+            );
+            return {
+              ...runtime,
+              environment,
+              persistentCredentialHome: true,
+              plugin: { ...runtime.plugin, version: manifest.version },
+            };
+          },
+          resolvePluginPython: async () => "python3",
+          prepareOutputDir: async () => scanDir,
+          runWorkbench: async (options, args, input) => {
+            workbenchOptions = options;
+            if (args[0] === "get-cli-scan-resume")
+              originalResumeSignal = options.signal;
+            commands.push(args[0]!);
+            if (
+              args[0] === "get-scan" &&
+              cancellation.signal.aborted &&
+              cancellationFault === "status-read"
+            ) {
+              throw new Error("Synthetic lost cancellation status response");
+            }
+            if (args[0] === "write-scan-draft" && publicationFails) {
+              publicationFails = false;
+              throw new Error("Synthetic publication write failure");
+            }
+            if (
+              args[0] === "complete-scan" &&
+              outcome === "completion-before-commit-fails"
+            )
+              throw new Error("Synthetic completion failure before commit");
+            if (
+              args[0] === "complete-budget-exhausted-scan" &&
+              budgetCompletionFault === "before-commit"
+            )
+              throw new Error(
+                "Synthetic budget completion failure before commit",
+              );
+            const result = await runWorkbench(options, args, input);
+            if (
+              args[0] === "get-deep-scan" &&
+              cancellation.signal.aborted &&
+              cancellationFault === "deep-state-read" &&
+              !cancellationReadLost
+            ) {
+              cancellationReadLost = true;
+              lostCancellationDeepState = result["deepScan"];
+              throw new Error(
+                "Synthetic lost cancellation Deep state response",
+              );
+            }
+            if (
+              args[0] === "cancel-scan" &&
+              cancellationFault === "cancel-response"
+            ) {
+              completedArtifacts = await Promise.all(
+                ["report.md", "scan-manifest.json"].map((name) =>
+                  readFile(join(scanDir, name)),
+                ),
+              );
+              throw new Error("Synthetic lost cancellation response");
+            }
+            if (
+              args[0] === "complete-budget-exhausted-scan" &&
+              budgetReceiptLost
+            ) {
+              budgetReceiptLost = false;
+              if (budgetCompletionFault === "lost-and-canceled") {
+                completedArtifacts = await Promise.all(
+                  ["report.md", "scan-manifest.json"].map((name) =>
+                    readFile(join(scanDir, name)),
+                  ),
+                );
+                cancellation.abort(
+                  "Synthetic cancellation after budget completion",
+                );
+              }
+              throw Object.assign(
+                new Error("Synthetic lost budget completion response"),
+                { code: "ETIMEDOUT" },
+              );
+            }
+            if (args[0] === "complete-scan" && completionReceiptLost) {
+              completionReceiptLost = false;
+              throw new Error("Synthetic lost completion response");
+            }
+            if (
+              !budgetTriggered &&
+              ((args[0] === "write-scan-draft" &&
+                (outcome === "budget-during-publication" ||
+                  outcome === "budget-during-resumed-publication")) ||
+                (args[0] === "finish-deep-scan" &&
+                  outcome === "budget-after-deep-finish"))
+            ) {
+              budgetTriggered = true;
+              await recordBudgetUsage();
+              await new Promise<void>((resolve) => {
+                if (options.signal?.aborted) resolve();
+                else
+                  options.signal!.addEventListener("abort", () => resolve(), {
+                    once: true,
+                  });
+              });
+            }
+            if (args[0] === "write-scan-draft" && closed) {
+              closePromise = client.close();
+            }
+            if (
+              args[0] === "write-scan-draft" &&
+              (outcome === "canceled-during-publication" ||
+                outcome === "canceled-during-resumed-publication")
+            ) {
+              if (initialResumeUsage) {
+                expect(originalResumeSignal?.reason).toBeInstanceOf(
+                  ScanCostLimitExceededError,
+                );
+                expect(options.signal?.aborted).toBe(false);
+              }
+              cancellation.abort("Synthetic user cancellation");
+            }
+            if (
+              args[0] === "complete-scan" &&
+              outcome === "published-before-cancellation"
+            ) {
+              cancellation.abort(
+                "Synthetic user cancellation after completion",
+              );
+            }
+            if (args[0] === "register-cli-scan")
+              scanId = result["scanId"] as string;
+            return result;
+          },
+          createCodex: () => {
+            const thread = {
+              id: threadId,
+              async runStreamed(input: string) {
+                modelInputs.push(input);
+                if (input === followUp) {
+                  if (canceledFollowUp) {
+                    const reportPath = join(scanDir, "report.md");
+                    acceptedReport = await readFile(reportPath, "utf8");
+                    expect(acceptedReport).toContain(
+                      "Validate the resolved destination",
+                    );
+                    await writeFile(
+                      reportPath,
+                      "Incomplete follow-up report.\n",
+                    );
+                    cancellation.abort(
+                      "Synthetic cancellation during follow-up",
+                    );
+                  }
+                  return { events: completedEvents(threadId) };
+                }
+                expect(modelInputs.length).toBe(1);
+                async function* events(): AsyncGenerator<ThreadEvent> {
+                  yield { type: "thread.started", thread_id: threadId };
+                  await runWorkbench(workbenchOptions, [
+                    "begin-deep-scan",
+                    "--scan-id",
+                    scanId,
+                    "--thread-id",
+                    threadId,
+                  ]);
+                  const draft = {
+                    scanId,
+                    complete: true,
+                    findings: [
+                      {
+                        ruleId: "path-traversal.archive",
+                        title: "Unsafe archive extraction",
+                        summary:
+                          "An untrusted entry reaches a filesystem write.",
+                        severity: { level: "high" },
+                        confidence: {
+                          level: "high",
+                          rationale: "Source evidence.",
+                        },
+                        taxonomy: {
+                          category: "path-traversal",
+                          cwe: ["CWE-22"],
+                        },
+                        locations: [{ path: "extract.py", startLine: 1 }],
+                        remediation:
+                          "Validate the resolved destination before writing.",
+                        provenance: {
+                          source: "local_plugin",
+                          candidateId: "archive-entry",
+                        },
+                      },
+                    ],
+                    coverage: {
+                      completeness:
+                        outcome === "budget-at-final-reconciliation"
+                          ? "complete"
+                          : "partial",
+                      surfaces: [],
+                      explicitExclusions: [],
+                      deferred:
+                        outcome === "budget-at-final-reconciliation"
+                          ? []
+                          : [
+                              {
+                                id: "dependency",
+                                reason: "A dependency remains unreviewed.",
+                              },
+                            ],
+                    },
+                  };
+                  const seeded = JSON.parse(
+                    execFileSync(
+                      "python3",
+                      [
+                        fileURLToPath(
+                          new URL(
+                            "./fixtures/selected-deep-scan.py",
+                            import.meta.url,
+                          ),
+                        ),
+                      ],
+                      {
+                        input: JSON.stringify({
+                          scanId,
+                          scanDir,
+                          database: join(stateDir, "workbench.sqlite3"),
+                          draft,
+                          terminalReason: loseCompletionResponse
+                            ? "capped"
+                            : "saturated",
+                          ...(archivedWorkerUsage
+                            ? {
+                                ownerThreadId: threadId,
+                                worker: {
+                                  threadId: workerThreadId,
+                                  codexHome: workerHome,
+                                  codexPath: process.execPath,
+                                },
+                              }
+                            : {}),
+                        }),
+                        encoding: "utf8",
+                        env: environment,
+                      },
+                    ),
+                  );
+                  // Exercise the dedicated function bridge, without extending CLI arguments.
+                  const selectionOutput = execFileSync(
+                    "python3",
+                    [
+                      "-c",
+                      "import runpy, sys; script = sys.argv.pop(1); runpy.run_path(script)['main'](select_finalization=True)",
+                      join(PLUGIN_ROOT, "scripts/workbench_db.py"),
+                      "finish-deep-scan",
+                      "--scan-id",
+                      scanId,
+                      "--coordinator-generation",
+                      "2",
+                      "--terminal-reason",
+                      loseCompletionResponse ? "capped" : "saturated",
+                      "--manifest-path",
+                      join(scanDir, "scan-manifest.json"),
+                    ],
+                    {
+                      input: JSON.stringify({
+                        resultPath: seeded.resultPath,
+                      }),
+                      encoding: "utf8",
+                      env: environment,
+                    },
+                  );
+                  originalFinalizationInput =
+                    JSON.parse(selectionOutput).deepScan.finalizationInput;
+                  selectedPath = join(
+                    scanDir,
+                    (originalFinalizationInput as { resultPath: string })
+                      .resultPath,
+                  );
+                  selectedBytes = await readFile(selectedPath);
+                  const sessions = join(
+                    codexHome,
+                    "sessions",
+                    "2026",
+                    "01",
+                    "01",
+                  );
+                  await mkdir(sessions, { recursive: true });
+                  await writeFile(
+                    join(sessions, `rollout-${threadId}.jsonl`),
+                    JSON.stringify({
+                      timestamp: new Date().toISOString(),
+                      type: "session_meta",
+                      payload: { id: threadId, cwd: scanDir },
+                    }) + "\n",
+                  );
+                  if (outcome === "canceled-before-publication")
+                    cancellation.abort("Synthetic user cancellation");
+                  if (outcome === "completed") {
+                    yield {
+                      type: "turn.completed",
+                      usage: {
+                        input_tokens: 0,
+                        cached_input_tokens: 0,
+                        cache_write_input_tokens: 0,
+                        reasoning_output_tokens: 0,
+                        output_tokens: 0,
+                      },
+                    };
+                  } else {
+                    throw parentError;
+                  }
+                }
+                return { events: events() };
+              },
+            };
+            return {
+              startThread: () => thread,
+              resumeThread: (id: string) => {
+                expect(id).toBe(threadId);
+                return thread;
+              },
+            };
+          },
+        },
+      );
+    let client = makeClient();
+    // Native usage polling is unref'ed; the transport double has no child process.
+    const keepAlive = setTimeout(() => {}, 30_000);
+    try {
+      if (restart) {
+        await expect(
+          client.run(repository, {
+            mode: "deep",
+            postScanPrompt:
+              resumedStop || compressionRuntime ? undefined : followUp,
+            ...(budgeted ? { maxCostUsd: 0.004 } : {}),
+          }),
+        ).rejects.toThrow("Synthetic publication write failure");
+        const pending = await runWorkbench(workbenchOptions!, [
+          "get-deep-scan",
+          "--scan-id",
+          scanId,
+          "--thread-id",
+          threadId,
+        ]);
+        expect(pending["deepScan"]).toMatchObject({
+          status: "running",
+          terminalReason: "saturated",
+        });
+        expect(commands).not.toContain("fail-scan");
+        await client.close();
+        client = makeClient();
+        if (archivedWorkerUsage) {
+          const archive = join(workerHome, "archived_sessions");
+          await mkdir(archive, { recursive: true });
+          const timestamp = new Date().toISOString();
+          const unrelatedRootId = "a5cbe3b8-2171-4708-907d-b4f03c207b94";
+          const knownUnrelated =
+            compressionRuntime === "corrupt-unrelated-budgeted" ||
+            compressionRuntime === "corrupt-noncanonical-budgeted";
+          const archivedThreadId =
+            compressionRuntime === "without-decoder-unrelated" ||
+            knownUnrelated ||
+            compressionRuntime === "corrupt-unknown-budgeted"
+              ? "01fb9839-ef7a-4cff-965b-4477cc64ee90"
+              : workerThreadId;
+          const archiveName = corruptArchive
+            ? `rollout-2026-10-22T01-02-03-${archivedThreadId}`
+            : `rollout-${archivedThreadId}`;
+          const archivedUsage =
+            [
+              {
+                type: "session_meta",
+                payload: {
+                  id: archivedThreadId,
+                  timestamp,
+                  cwd: knownUnrelated
+                    ? join(root, "unrelated-repository")
+                    : join(
+                        scanDir,
+                        "artifacts",
+                        "deep_discovery",
+                        "review-1",
+                        "output",
+                      ),
+                  ...(knownUnrelated
+                    ? {
+                        source: {
+                          subagent: {
+                            thread_spawn: { parent_thread_id: unrelatedRootId },
+                          },
+                        },
+                      }
+                    : {}),
+                },
+              },
+              {
+                type: "token_usage_record",
+                timestamp,
+                payload: {
+                  thread_id: archivedThreadId,
+                  turn_id: "synthetic-worker-turn",
+                  response_id: "synthetic-worker-response",
+                  model: "gpt-5.6-sol",
+                  usage: {
+                    input_tokens: 1_250,
+                    cached_input_tokens: 200,
+                    output_tokens: 30,
+                  },
+                },
+              },
+            ]
+              .map((event) => JSON.stringify(event))
+              .join("\n") + "\n";
+          if (knownUnrelated) {
+            await writeFile(
+              join(archive, `${archiveName}.jsonl`),
+              archivedUsage,
+            );
+            await writeFile(
+              join(archive, `rollout-${unrelatedRootId}.jsonl`),
+              JSON.stringify({
+                type: "session_meta",
+                payload: {
+                  id: unrelatedRootId,
+                  timestamp,
+                  cwd: join(root, "unrelated-repository"),
+                  source: "cli",
+                },
+              }) + "\n",
+            );
+          }
+          const compressedUsage = zstdCompressSync(archivedUsage);
+          if (corruptArchive) compressedUsage[0] = compressedUsage[0]! ^ 0xff;
+          await writeFile(
+            join(
+              archive,
+              compressionRuntime === "corrupt-noncanonical-budgeted"
+                ? `arbitrary-${archivedThreadId}.jsonl.zst`
+                : `${archiveName}.jsonl.zst`,
+            ),
+            compressedUsage,
+          );
+          const saved = await runWorkbench(
+            {
+              ...workbenchOptions!,
+              signal: undefined,
+              withExecutionSettings: true,
+            },
+            ["get-scan", "--scan-id", scanId],
+          );
+          expect(saved["scan"]).toMatchObject({
+            executionAttribution: {
+              codexHome: workerHome,
+              owner: {
+                threadId,
+                turnId: "synthetic-scan-turn",
+                dedicated: true,
+              },
+            },
+          });
+          expect(
+            (saved["scan"] as { executionAttribution: object })
+              .executionAttribution,
+          ).not.toHaveProperty("legacy");
+          const attribution = (
+            saved["scan"] as {
+              executionAttribution: { executionThreadIds: string[] };
+            }
+          ).executionAttribution;
+          expect(attribution.executionThreadIds).toContain(workerThreadId);
+          if (knownUnrelated) {
+            expect(attribution.executionThreadIds).not.toContain(
+              archivedThreadId,
+            );
+            expect(attribution.executionThreadIds).not.toContain(
+              unrelatedRootId,
+            );
+          }
+        } else if (initialResumeUsage) await recordBudgetUsage();
+        if (outcome === "restart-without-session") await rm(usagePath);
+        if (outcome === "restart-archived-session") {
+          await mkdir(join(codexHome, "archived_sessions"));
+          await rename(
+            usagePath,
+            join(codexHome, "archived_sessions", "owner.jsonl"),
+          );
+        }
+      }
+      if (compressionRuntime) {
+        expect(modelInputs).toHaveLength(1);
+        const commandsBeforeResume = commands.length;
+        const resumed = client.run(repository, {
+          mode: "deep",
+          resumeScanId: scanId,
+          outputDir: scanDir,
+          postScanPrompt: followUp,
+          ...(compressionRuntime === "without-decoder-optional" ||
+          compressionRuntime === "corrupt-attributed-optional"
+            ? {}
+            : { maxCostUsd: 0.004 }),
+          onCost: (cost) => reportedCosts.push(cost.estimatedUsd),
+          onWarning: (message) => reportedWarnings.push(message),
+        });
+        if (
+          compressionRuntime === "without-decoder-budgeted" ||
+          compressionRuntime === "corrupt-attributed-budgeted" ||
+          compressionRuntime === "corrupt-unknown-budgeted" ||
+          compressionRuntime === "corrupt-noncanonical-budgeted"
+        ) {
+          const error = await resumed.catch((error: unknown) => error);
+          expect(error).toBeInstanceOf(ScanInterruptedError);
+          expect((error as ScanInterruptedError).cause).toBe(
+            originalResumeSignal?.reason,
+          );
+          if (corruptArchive) {
+            expect(originalResumeSignal?.reason).toBeInstanceOf(Error);
+            expect(originalResumeSignal?.reason).toMatchObject({
+              code: "ZSTD_error_prefix_unknown",
+              message: "Unknown frame descriptor",
+            });
+          } else {
+            expect(String(originalResumeSignal?.reason)).toContain(
+              "cannot decode compressed usage",
+            );
+            expect(String(originalResumeSignal?.reason)).toContain(
+              workerThreadId,
+            );
+          }
+          expect(modelInputs).toHaveLength(1);
+          expect(commands.slice(commandsBeforeResume)).not.toContain(
+            "write-scan-draft",
+          );
+          for (const command of [
+            "fail-scan",
+            "cancel-scan",
+            "complete-scan",
+            "complete-budget-exhausted-scan",
+          ])
+            expect(commands.slice(commandsBeforeResume)).not.toContain(command);
+          const saved = await runWorkbench(
+            { ...workbenchOptions!, signal: undefined },
+            ["get-scan", "--scan-id", scanId],
+          );
+          expect(saved["scan"]).toMatchObject({
+            progress: { status: "running" },
+          });
+          const deep = await runWorkbench(
+            { ...workbenchOptions!, signal: undefined },
+            ["get-deep-scan", "--scan-id", scanId, "--thread-id", threadId],
+          );
+          expect(deep["deepScan"]).toMatchObject({
+            status: "running",
+          });
+          expect(
+            (deep["deepScan"] as { finalizationInput: unknown })
+              .finalizationInput,
+          ).toEqual(originalFinalizationInput);
+        } else if (compressionRuntime === "decoder-enabled") {
+          const error = await resumed.catch((error: unknown) => error);
+          expect(error).toBeInstanceOf(ScanCostLimitExceededError);
+          expect(error).toBe(originalResumeSignal?.reason);
+          expect((error as ScanCostLimitExceededError).maxCostUsd).toBe(0.004);
+          expect(
+            (error as ScanCostLimitExceededError).cost.estimatedUsd,
+          ).toBeGreaterThan(0.004);
+          expect(modelInputs).toHaveLength(1);
+        } else {
+          const result = await resumed;
+          expect(result.findings.findings[0]?.remediation).toBe(
+            "Validate the resolved destination before writing.",
+          );
+          expect(originalResumeSignal?.aborted).toBe(false);
+          expect(modelInputs).toHaveLength(2);
+          expect(modelInputs[1]).toBe(followUp);
+          expect(result.cost).toBeNull();
+          expect(commands.slice(commandsBeforeResume)).toContain(
+            "complete-scan",
+          );
+          if (compressionRuntime === "corrupt-attributed-optional")
+            expect(reportedWarnings).toContain(
+              "Could not track scan activity: Unknown frame descriptor",
+            );
+          if (compressionRuntime === "corrupt-unrelated-budgeted")
+            expect(reportedWarnings).not.toContain(
+              "Could not track scan activity: Unknown frame descriptor",
+            );
+        }
+        expect(await readFile(selectedPath)).toEqual(selectedBytes!);
+        return;
+      }
+      if (budgeted || closed) {
+        const running = client.run(repository, {
+          mode: "deep",
+          signal: cancellation.signal,
+          ...(budgeted ? { maxCostUsd: 0.004 } : {}),
+          ...(resumedStop ? { resumeScanId: scanId, outputDir: scanDir } : {}),
+          ...(unpricedUsage
+            ? { onCost: (cost) => reportedCosts.push(cost.estimatedUsd) }
+            : {}),
+          postScanPrompt: followUp,
+        });
+        if (budgeted) {
+          if (
+            budgetCompletionFault === "before-commit" ||
+            budgetCompletionFault === "lost-and-canceled"
+          ) {
+            await expect(running).rejects.toBeInstanceOf(
+              ScanCostLimitExceededError,
+            );
+            expect(
+              commands.filter(
+                (command) => command === "complete-budget-exhausted-scan",
+              ),
+            ).toHaveLength(1);
+            expect(commands).not.toContain("complete-scan");
+            expect(modelInputs).toHaveLength(1);
+            const saved = await runWorkbench(
+              { ...workbenchOptions!, signal: undefined },
+              ["get-scan", "--scan-id", scanId],
+            );
+            expect(saved["scan"]).toMatchObject({
+              progress: {
+                status:
+                  budgetCompletionFault === "before-commit"
+                    ? "failed"
+                    : "complete",
+              },
+              findingCount: 1,
+              reportAvailable: true,
+            });
+            if (budgetCompletionFault === "lost-and-canceled") {
+              expect(
+                await Promise.all(
+                  ["report.md", "scan-manifest.json"].map((name) =>
+                    readFile(join(scanDir, name)),
+                  ),
+                ),
+              ).toEqual(completedArtifacts);
+            }
+            return;
+          }
+          const result = await running;
+          expect(result.coverage).not.toHaveProperty("completeness");
+          expect(JSON.stringify(result.coverage)).toContain("cost limit");
+          if (unpricedUsage) {
+            expect(result.cost).toBeNull();
+            expect(reportedCosts).toEqual([]);
+            const saved = await runWorkbench(workbenchOptions!, [
+              "get-scan",
+              "--scan-id",
+              scanId,
+            ]);
+            expect(
+              (saved["scan"] as { cost?: unknown }).cost ?? null,
+            ).toBeNull();
+          } else expect(result.cost?.estimatedUsd).toBeGreaterThan(0.004);
+          expect(result.threadId).toBe(threadId);
+          expect(modelInputs).toHaveLength(1);
+          expect(commands).toContain("complete-budget-exhausted-scan");
+          expect(commands).not.toContain("fail-scan");
+          expect(
+            commands.filter(
+              (command) => command === "complete-budget-exhausted-scan",
+            ),
+          ).toHaveLength(1);
+          if (budgetCompletionFault === "lost") {
+            expect(
+              commands.filter((command) => command === "complete-scan"),
+            ).toHaveLength(1);
+            expect(result.findings.findings[0]?.remediation).toBe(
+              "Validate the resolved destination before writing.",
+            );
+            const saved = await runWorkbench(workbenchOptions!, [
+              "get-scan",
+              "--scan-id",
+              scanId,
+            ]);
+            expect(saved["scan"]).toMatchObject({
+              progress: { status: "complete" },
+              findingCount: 1,
+              reportAvailable: true,
+            });
+          }
+          const completed = await runWorkbench(workbenchOptions!, [
+            "get-deep-scan",
+            "--scan-id",
+            scanId,
+            "--thread-id",
+            threadId,
+          ]);
+          expect(completed["deepScan"]).toMatchObject({
+            status: "succeeded",
+            finalizationInput: { terminalReason: "saturated" },
+          });
+          return;
+        }
+        await expect(running).rejects.toThrow(/closed/);
+        await closePromise;
+        const stopped = await runWorkbench(
+          { ...workbenchOptions!, signal: undefined },
+          ["get-scan", "--scan-id", scanId],
+        );
+        const deep = await runWorkbench(
+          { ...workbenchOptions!, signal: undefined },
+          ["get-deep-scan", "--scan-id", scanId, "--thread-id", threadId],
+        );
+        expect(stopped["scan"]).toMatchObject({
+          progress: { status: "failed" },
+          findingCount: 1,
+          reportAvailable: true,
+        });
+        expect(deep["deepScan"]).toMatchObject({
+          status: "failed",
+          finalizationInput: { terminalReason: "saturated" },
+        });
+        expect(await readFile(join(scanDir, "report.md"), "utf8")).toContain(
+          "Validate the resolved destination",
+        );
+        expect(
+          JSON.parse(await readFile(join(scanDir, "coverage.json"), "utf8")),
+        ).not.toHaveProperty("completeness");
+        expect(commands).toContain("fail-scan");
+        expect(modelInputs).toHaveLength(1);
+        await client.close();
+        client = makeClient();
+        await expect(
+          client.run(repository, {
+            mode: "deep",
+            resumeScanId: scanId,
+            outputDir: scanDir,
+          }),
+        ).rejects.toThrow();
+        expect(modelInputs).toHaveLength(1);
+        return;
+      }
+      if (outcome.startsWith("canceled-")) {
+        const error = await client
+          .run(repository, {
+            mode: "deep",
+            signal: cancellation.signal,
+            ...(resumedStop
+              ? { resumeScanId: scanId, outputDir: scanDir }
+              : {}),
+            postScanPrompt: followUp,
+            ...(initialResumeUsage ? { maxCostUsd: 0.004 } : {}),
+          })
+          .catch((error: unknown) => error);
+        if (initialResumeUsage) {
+          expect(error).toBeInstanceOf(ScanCostLimitExceededError);
+          expect(error).toBe(originalResumeSignal?.reason);
+          expect((error as ScanCostLimitExceededError).maxCostUsd).toBe(0.004);
+          expect(
+            (error as ScanCostLimitExceededError).cost.estimatedUsd,
+          ).toBeGreaterThan(0.004);
+        } else {
+          expect(error).toBeInstanceOf(ScanInterruptedError);
+          expect((error as ScanInterruptedError).cause).toBe(
+            outcome === "canceled-before-publication"
+              ? parentError
+              : cancellation.signal.reason,
+          );
+        }
+        expect(await readFile(selectedPath)).toEqual(selectedBytes!);
+        if (cancellationReadLost) {
+          expect(lostCancellationDeepState).toMatchObject({
+            status: "running",
+            finalizationInput: { terminalReason: "saturated" },
+          });
+        }
+        expect(originalFinalizationInput).toMatchObject({
+          terminalReason: "saturated",
+        });
+        const stopped = await runWorkbench(
+          { ...workbenchOptions!, signal: undefined },
+          ["get-scan", "--scan-id", scanId],
+        );
+        const deep = await runWorkbench(
+          { ...workbenchOptions!, signal: undefined },
+          ["get-deep-scan", "--scan-id", scanId, "--thread-id", threadId],
+        );
+        expect(stopped["scan"]).toMatchObject({
+          progress: { status: "canceled" },
+          findingCount: 1,
+          reportAvailable: true,
+        });
+        expect(
+          JSON.parse(await readFile(join(scanDir, "coverage.json"), "utf8")),
+        ).not.toHaveProperty("completeness");
+        expect(await readFile(join(scanDir, "report.md"), "utf8")).toContain(
+          "Validate the resolved destination",
+        );
+        expect(deep["deepScan"]).toMatchObject({
+          status: "canceled",
+        });
+        expect(
+          (deep["deepScan"] as Record<string, unknown>)["finalizationInput"],
+        ).toEqual(originalFinalizationInput);
+        expect(
+          commands.filter((command) => command === "cancel-scan"),
+        ).toHaveLength(1);
+        expect(commands).not.toContain("fail-scan");
+        expect(modelInputs.length).toBe(1);
+        if (cancellationFault === "cancel-response") {
+          expect(
+            await Promise.all(
+              ["report.md", "scan-manifest.json"].map((name) =>
+                readFile(join(scanDir, name)),
+              ),
+            ),
+          ).toEqual(completedArtifacts);
+        }
+        await expect(
+          client.run(repository, {
+            mode: "deep",
+            resumeScanId: scanId,
+            outputDir: scanDir,
+          }),
+        ).rejects.toThrow();
+        expect(modelInputs.length).toBe(1);
+        return;
+      }
+      if (canceledFollowUp) {
+        await expect(
+          client.run(repository, {
+            mode: "deep",
+            signal: cancellation.signal,
+            postScanPrompt: followUp,
+          }),
+        ).rejects.toThrow(/interrupted/);
+        const completed = await runWorkbench(
+          { ...workbenchOptions!, signal: undefined },
+          ["get-scan", "--scan-id", scanId],
+        );
+        expect(completed["scan"]).toMatchObject({
+          progress: { status: "complete" },
+          findingCount: 1,
+          reportAvailable: true,
+        });
+        expect(modelInputs.length).toBe(2);
+        expect(modelInputs[1]).toBe(followUp);
+        expect(
+          commands.filter((command) => command === "complete-scan"),
+        ).toHaveLength(loseCompletionResponse ? 2 : 1);
+        expect(commands).not.toContain("cancel-scan");
+        expect(commands).not.toContain("fail-scan");
+        expect(await readFile(join(scanDir, "report.md"), "utf8")).toBe(
+          acceptedReport,
+        );
+        return;
+      }
+      if (outcome === "completion-before-commit-fails") {
+        await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+          "Synthetic completion failure before commit",
+        );
+        expect(
+          commands.filter((command) => command === "complete-scan"),
+        ).toHaveLength(1);
+        expect(commands).not.toContain("fail-scan");
+        expect(modelInputs).toHaveLength(1);
+        const saved = await runWorkbench(workbenchOptions!, [
+          "get-scan",
+          "--scan-id",
+          scanId,
+        ]);
+        expect(saved["scan"]).toMatchObject({
+          progress: { status: "running" },
+        });
+        return;
+      }
+      const result = await client.run(repository, {
+        mode: "deep",
+        signal: cancellation.signal,
+        postScanPrompt:
+          outcome === "published-before-cancellation" || localRecovery
+            ? undefined
+            : followUp,
+        ...(restart ? { resumeScanId: scanId, outputDir: scanDir } : {}),
+      });
+      expect(result.threadId).toBe(threadId);
+      if (outcome === "lost-completion-response") {
+        expect(
+          commands.filter((command) => command === "complete-scan"),
+        ).toHaveLength(2);
+      }
+      if (outcome === "completed") {
+        // This transport emits an explicit zero-usage completion receipt.
+        expect(result.cost).toMatchObject({
+          inputTokens: 0,
+          cachedInputTokens: 0,
+          cacheWriteInputTokens: 0,
+          outputTokens: 0,
+          estimatedUsd: 0,
+        });
+      } else expect(result.cost).toBeNull();
+      expect(result.coverage).not.toHaveProperty("completeness");
+      expect(result.findings.findings[0]?.remediation).toBe(
+        "Validate the resolved destination before writing.",
+      );
+      // postScanPrompt retains its existing behavior on each caller invocation.
+      expect(modelInputs.filter((input) => input !== followUp).length).toBe(1);
+      expect(modelInputs.filter((input) => input === followUp).length).toBe(
+        outcome === "published-before-cancellation"
+          ? 0
+          : localRecovery
+            ? 1
+            : restart
+              ? 2
+              : 1,
+      );
+      const completed = await runWorkbench(
+        { ...workbenchOptions!, signal: undefined },
+        ["get-scan", "--scan-id", scanId],
+      );
+      expect(completed["scan"]).toMatchObject({
+        progress: { status: "complete" },
+      });
+      expect(await readFile(join(scanDir, "report.md"), "utf8")).toContain(
+        "Validate the resolved destination",
+      );
+      expect(commands).not.toContain("fail-scan");
+    } finally {
+      clearTimeout(keepAlive);
+      await client.close();
+      stopSpy?.mockRestore();
+    }
+  };
+  test(
+    name,
+    async () => {
+      if (compressionRuntime) {
+        const decoderEnabled =
+          !compressionRuntime.startsWith("without-decoder-");
+        const preload = join(
+          await temporaryDirectory(),
+          "zstd-capabilities.mjs",
+        );
+        await writeFile(
+          preload,
+          `import zlib from "node:zlib";\n${decoderEnabled ? "" : "delete zlib.createZstdDecompress;\n"}`,
+        );
+        if (runTestInSubprocess(fileURLToPath(import.meta.url), name, preload))
+          return;
+        expect(typeof zlib.createZstdDecompress === "function").toBe(
+          decoderEnabled,
+        );
+      }
+      await runCase();
+    },
+    30_000,
+  );
+}

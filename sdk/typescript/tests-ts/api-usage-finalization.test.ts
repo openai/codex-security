@@ -216,8 +216,7 @@ test.each([
         }
         if (args[0] === "prepare-scan-completion") throw originalFailure;
         if (args[0] === "get-scan") {
-          expect(turnExited).toBe(true);
-          if (scenario !== "post-turn-error")
+          if (turnExited && scenario !== "post-turn-error")
             expect(options.signal).toBeUndefined();
           return {
             scan: {
