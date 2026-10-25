@@ -651,15 +651,16 @@ describe("npm package tar listings", () => {
           }),
         ),
       );
+      const native = mkdtempSync(join(root, "native-"));
       // The wrong-long-name fixtures have no portable asset path to select.
       const extracted = await execFileAsync(
         "tar",
-        ["-xzf", archivePath, "-C", root, ...(wrongLongName ? [] : [path])],
+        ["-xzf", archivePath, "-C", native, ...(wrongLongName ? [] : [path])],
         { encoding: "buffer", timeout: 30_000, windowsHide: true },
       );
       expect(extracted.stderr.toString()).toBe("");
       if (!wrongLongName)
-        expect(readFileSync(join(root, path)).equals(logo)).toBe(true);
+        expect(readFileSync(join(native, path)).equals(logo)).toBe(true);
       const contractPath = join(root, "contract.json");
       writeFileSync(
         contractPath,
