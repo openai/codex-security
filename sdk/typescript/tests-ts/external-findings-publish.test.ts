@@ -61,6 +61,113 @@ const normalized = (id = "vendor-1", severity = "high") => ({
   },
 });
 
+for (const value of [undefined, "", "0", "true", " 1 "]) {
+  test(`external publication stays disabled without exact opt-in (${JSON.stringify(value)})`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "external-import-disabled-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const state = join(root, "state");
+    let sideEffects = 0;
+    const disabled = {
+      environment: {
+        CODEX_SECURITY_STATE_DIR: state,
+        CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: value,
+      },
+      credentials: async () => {
+        sideEffects++;
+        throw new Error("Unexpected credential read");
+      },
+      fetch: async () => {
+        sideEffects++;
+        throw new Error("Unexpected Cloud request");
+      },
+    };
+    // The missing path would fail differently if the file reader ran first.
+    await expect(
+      prepareExternalPublication(join(root, "missing.json"), options, disabled),
+    ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
+    await expect(
+      prepareNormalizedExternalPublication(
+        { read: 0, findings: [], excluded: [] },
+        options,
+        disabled,
+      ),
+    ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
+    expect(sideEffects).toBe(0);
+    await expect(readdir(state)).rejects.toThrow("ENOENT");
+  });
+}
+
+test("concurrent external publications use their own opt-in environments", async () => {
+  const f = await fixture();
+  const parsed = await readVendorFindings(f.file);
+  let disabledSideEffects = 0;
+  const disabled = {
+    ...f.deps,
+    environment: {
+      ...f.environment,
+      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "0",
+    },
+    credentials: async () => {
+      disabledSideEffects++;
+      throw new Error("Unexpected credential read");
+    },
+    fetch: async () => {
+      disabledSideEffects++;
+      throw new Error("Unexpected Cloud request");
+    },
+  };
+  const results = await Promise.allSettled([
+    prepareExternalPublication(f.file, options, f.deps),
+    prepareExternalPublication(f.file, options, disabled),
+    prepareNormalizedExternalPublication(parsed, options, f.deps),
+    prepareNormalizedExternalPublication(parsed, options, disabled),
+  ]);
+  expect(results.map((result) => result.status)).toEqual([
+    "fulfilled",
+    "rejected",
+    "fulfilled",
+    "rejected",
+  ]);
+  for (const result of results) {
+    if (result.status === "fulfilled") {
+      expect(result.value.preview.findings).toHaveLength(1);
+    } else {
+      expect(String(result.reason)).toContain(
+        "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1",
+      );
+    }
+  }
+  expect(disabledSideEffects).toBe(0);
+  expect(f.posts).toHaveLength(0);
+});
+
+for (const provider of ["wiz", "snyk"] as const) {
+  test(`${provider} publication rechecks the selected Cloud opt-in after reading`, async () => {
+    const { snykSarif } = await import("./support/snyk-import-fixtures.js");
+    const f =
+      provider === "snyk" ? await fixture(snykSarif()) : await fixture();
+    let credentialReads = 0;
+    const dependencies = {
+      ...f.deps,
+      environment: { ...f.environment },
+      credentials: async () => {
+        credentialReads++;
+        throw new Error("Unexpected credential read");
+      },
+    };
+    const pending = prepareExternalPublication(
+      f.file,
+      { ...options, provider },
+      dependencies,
+    );
+    dependencies.environment.CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS = "0";
+    await expect(pending).rejects.toThrow(
+      "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1",
+    );
+    expect(credentialReads).toBe(0);
+  });
+}
+
 test("Wiz's gzip JSON report retains finding identity, evidence and repository locations", async () => {
   const report = {
     id: "vendor-report-1",
@@ -159,6 +266,7 @@ async function fixture(
   await writeFile(file, JSON.stringify(records));
   const environment = {
     ...process.env,
+    CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
     CODEX_HOME: join(root, "credentials"),
     CODEX_SECURITY_STATE_DIR: join(root, "state"),
   };
@@ -3770,4 +3878,50 @@ test("Endor source repository binding preserves immutable requests across a repo
   ).rejects.toThrow("does not match the selected Cloud repository");
   expect(f.posts).toHaveLength(posted);
   expect(input).toEqual(original);
+});
+
+test("publication rejects malformed options without writing findings", async () => {
+  const f = await fixture();
+  const missingSourceKey = [
+    ...f.command.slice(1, f.command.indexOf("--source-key") + 1),
+    "--dry-run",
+    "--yes",
+  ];
+  for (const flags of [
+    ["--json"],
+    ["--json", "--filter-output", "--token-limit"],
+    ["--filter-output", "--to"],
+  ]) {
+    const cli = createCliTest(main);
+    expect(
+      await cli.runCli(["publish", ...flags, ...missingSourceKey], f.cliDeps),
+    ).toBe(2);
+    expect(cli.stderr.text()).toContain("Missing value for flag");
+  }
+  const extraArguments = createCliTest(main);
+  expect(
+    await extraArguments.runCli(
+      [
+        "--filter-output",
+        "--token-limit",
+        ...f.command,
+        "--yes",
+        "extra-1",
+        "extra-2",
+      ],
+      f.cliDeps,
+    ),
+  ).toBe(2);
+  expect(extraArguments.stderr.text()).toContain(
+    "Unexpected positional argument",
+  );
+  const preview = createCliTest(main);
+  expect(
+    await preview.runCli(
+      ["--json", ...f.command, "--dry-run", "--yes"],
+      f.cliDeps,
+    ),
+  ).toBe(0);
+  expect(JSON.parse(preview.stdout.text())).toMatchObject({ dryRun: true });
+  expect(f.posts).toHaveLength(0);
 });
