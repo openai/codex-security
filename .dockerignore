@@ -1,5 +1,6 @@
 .git
 .github
+plugins/codex-security/tests
 **/.DS_Store
 **/.env
 **/.env.*
