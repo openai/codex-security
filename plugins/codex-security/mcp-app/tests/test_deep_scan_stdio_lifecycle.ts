@@ -1118,12 +1118,12 @@ model_reasoning_summary = "none"
         JSON.stringify(completionFailed.result.content),
         /injected complete-scan failure/,
       );
-      const retryScanId = restartedServer
-        .stderrEvents()
-        .find(
-          (event) => event.event === "coordinator_completion_failed",
-        )?.scanId;
-      assert.ok(retryScanId);
+      const retryScanId = completionFailed.result.structuredContent?.scanId;
+      assert.ok(
+        retryScanId,
+        "the caller needs the scan ID to retry finalization",
+      );
+      assert.ok(completionFailed.result.content[0].text.includes(retryScanId));
       const retryRun = await getDeepScan({
         environment,
         scanId: retryScanId,
@@ -1138,6 +1138,10 @@ model_reasoning_summary = "none"
       assert.equal(pending.scan.progress.status, "running");
       assert.equal(pending.scan.reportAvailable, false);
       const workerCountBeforeRetry = (await readLogLines(startLogPath)).length;
+      await writeFile(
+        path.join(retryTarget, "source.py"),
+        "# Target changed after the failed completion\n",
+      );
       const retry = await restartedServer.request(
         5,
         "tools/call",
@@ -1148,6 +1152,7 @@ model_reasoning_summary = "none"
         ),
       );
       assertNoError(retry);
+      assert.equal(retry.result.structuredContent.scanId, retryScanId);
       assert.equal(
         retry.result.structuredContent.completion.scan.progress.status,
         "complete",

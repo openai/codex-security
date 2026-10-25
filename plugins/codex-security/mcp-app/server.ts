@@ -1009,7 +1009,12 @@ export function createCodexSecurityServer(): McpServer {
             scanId: run.scanId,
             reason: failureDiagnostic(error),
           });
-          return toolErrorResult(completionFailureMessage(error));
+          return {
+            ...toolErrorResult(
+              `${completionFailureMessage(error)}\nScan ID: ${run.scanId}`,
+            ),
+            structuredContent: { scanId: run.scanId },
+          };
         }
       };
       const preparation = await deepScanStartLock
