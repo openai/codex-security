@@ -32,20 +32,14 @@ interface CoverageFixtureOptions {
   sameNamedNewSurface?: boolean;
   closeRetriedSurface?: boolean;
   receiptOwnershipRetry?: "ordinary" | "candidate" | "unrelated";
-  receiptSpelling?:
-    | "worker"
-    | "scan"
-    | "equivalent scan"
-    | "active scan"
-    | "equivalent active scan"
-    | "shared scan"
-    | "equivalent shared scan";
+  receiptSpelling?: "worker" | "scan" | "active scan" | "shared scan";
   activeReceiptSpelling?: "worker" | "scan" | "equivalent scan";
   sharedReceipt?: boolean;
   receiptCollision?: boolean;
   emptyReceipt?: boolean;
   retryPending?: boolean;
   retryCoverage?: JsonObject[];
+  otherWorkerCandidateIds?: string[];
   retryFindings?: JsonObject[][];
   questionRows?: (string | JsonObject)[];
   interruptPublication?: boolean;
@@ -134,6 +128,7 @@ export async function publishCoverageFixture(
     emptyReceipt = false,
     retryPending = false,
     retryCoverage,
+    otherWorkerCandidateIds = ["candidate-1"],
     retryFindings,
     questionRows,
     interruptPublication = false,
@@ -169,6 +164,7 @@ export async function publishCoverageFixture(
     path.join(codexHome, "codex-security", "config.toml"),
     `[deep_scan]\nworkers = 1\nsubagents = 0\nstop_after_no_new = ${statuses.length}\nmax_discovery_runs = ${statuses.length}\n`,
   );
+  const workbenchAbort = new AbortController();
   const runWorkbench = async (args: string[]) => {
     const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
     const command = [workbenchPath, ...args];
@@ -190,6 +186,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       );
     }
     const { stdout } = await exec(process.env.PYTHON || "python3", command, {
+      signal: workbenchAbort.signal,
       env: {
         ...process.env,
         CODEX_HOME: codexHome,
@@ -242,10 +239,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     }
     const archivedRef = `${path.relative(run.scanDir, path.dirname(artifactDir)).split(path.sep).join("/")}/attempts/attempt-01/artifacts/prior.txt`;
     const sharedPrior = "artifacts/01_context/false_positive_feedback.json";
-    const sharedPriorReceipt =
-      receiptSpelling === "shared scan" ||
-      receiptSpelling === "equivalent shared scan";
-    if (sharedPriorReceipt) {
+    if (receiptSpelling === "shared scan") {
       await mkdir(path.dirname(path.join(run.scanDir, sharedPrior)), {
         recursive: true,
       });
@@ -254,25 +248,14 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         emptyReceipt ? "" : "Archived receipt.\n",
       );
     }
-    const receiptRef = sharedPriorReceipt
-      ? sharedPrior.replace(
-          "artifacts/",
-          receiptSpelling === "equivalent shared scan"
-            ? "artifacts/./"
-            : "artifacts/",
-        )
-      : receiptSpelling === "worker"
-        ? "artifacts/prior.txt"
-        : receiptSpelling === "scan"
-          ? archivedRef
-          : receiptSpelling === "equivalent scan"
-            ? archivedRef.replace("artifacts/", "artifacts/./")
-            : `${path.relative(run.scanDir, artifactDir).split(path.sep).join("/")}/artifacts/prior.txt`.replace(
-                "artifacts/",
-                receiptSpelling === "equivalent active scan"
-                  ? "artifacts/./"
-                  : "artifacts/",
-              );
+    const receiptRef =
+      receiptSpelling === "shared scan"
+        ? sharedPrior
+        : receiptSpelling === "worker"
+          ? "artifacts/prior.txt"
+          : receiptSpelling === "scan"
+            ? archivedRef
+            : `${path.relative(run.scanDir, artifactDir).split(path.sep).join("/")}/artifacts/prior.txt`;
     if (receiptOwnershipRetry) {
       await recordCodexSecurityWorkerScanDraft(
         {
@@ -395,7 +378,11 @@ runpy.run_path(sys.argv[0], run_name="__main__")
               label: "Prior second surface",
               disposition: "needs_follow_up",
               candidateId: "shared-prior-candidate",
-              receiptRefs: [receiptRef],
+              receiptRefs: [
+                receiptSpelling === "worker"
+                  ? receiptRef
+                  : receiptRef.replace("artifacts/", "artifacts/./"),
+              ],
             },
           ],
           explicitExclusions: [],
@@ -549,18 +536,16 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         { pattern: "vendor/", reason: "External dependency." },
       ],
       deferred: pending
-        ? [
-            {
-              id: "same-id",
-              candidateId: "candidate-1",
-              reason:
-                index === 0
-                  ? "Verify entry boundaries."
-                  : "Verify symbolic links.",
-              paths: ["source.py"],
-              surfaceIds: ["shared-surface"],
-            },
-          ]
+        ? otherWorkerCandidateIds.map((candidateId, gapIndex) => ({
+            id: gapIndex === 0 ? "same-id" : `same-id-${gapIndex}`,
+            candidateId,
+            reason:
+              index === 0
+                ? "Verify entry boundaries."
+                : "Verify symbolic links.",
+            paths: ["source.py"],
+            surfaceIds: ["shared-surface"],
+          }))
         : [],
       openQuestions:
         questionRows ??
@@ -599,12 +584,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         "Synthetic unrelated parent review.\n",
       );
     }
-    if (
-      receiptRetry &&
-      receiptCollision &&
-      (receiptSpelling === "shared scan" ||
-        receiptSpelling === "equivalent shared scan")
-    ) {
+    if (receiptRetry && receiptCollision && receiptSpelling === "shared scan") {
       const collision = path.join(
         artifactDir,
         "artifacts",
@@ -963,13 +943,19 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     },
   });
   coordinator.start();
-  const terminal = await coordinator.wait(undefined, 30_000);
+  // A loaded runner may take over 30 seconds to publish through the workbench.
+  const terminal = await coordinator.wait(undefined, 120_000);
+  if (!terminal) {
+    coordinator.cancel("Coverage fixture timed out.");
+    workbenchAbort.abort();
+    await coordinator.wait(undefined, 5_000).catch(() => undefined);
+    assert.fail("The coverage fixture did not finish within 120 seconds.");
+  }
   assert.equal(
-    terminal?.status,
+    terminal.status,
     stopBeforeDraft ? "failed" : "succeeded",
-    terminal?.error ?? "Deep Scan did not reach the expected terminal state.",
+    terminal.error ?? "Unexpected Deep Scan terminal status.",
   );
-  assert.ok(terminal);
   if (!retryFindings) {
     assert.equal(
       terminal.noNewStreak,
@@ -1064,6 +1050,13 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       stopAfterDraft || stopBeforeDraft ? ["scan-stopped"] : [],
     );
     if (sameAttemptCloseout) {
+      assert.deepEqual(
+        coverage.resolvedDeferred,
+        coverage.reviews.map(({ workerId, attempt }) => ({
+          id: `${workerId}-attempt-${attempt}-resolved-first-gap`,
+          reason: "The same boundary is verified.",
+        })),
+      );
       const surface = coverage.surfaces.find(
         (row) => row.label === "First checkpoint",
       );
@@ -1224,23 +1217,20 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         "Verify the same candidate's second boundary.",
       ].sort(),
     );
-    if (
-      receiptSpelling === "shared scan" ||
-      receiptSpelling === "equivalent shared scan"
-    )
+    for (const surface of prior) {
+      const [ref] = surface.receiptRefs;
+      if (receiptSpelling === "shared scan")
+        assert.equal(ref, "artifacts/01_context/false_positive_feedback.json");
+      else
+        assert.match(
+          ref,
+          /\/(?:attempts|archived-receipts)\/attempt-01\/artifacts\/prior\.txt$/,
+        );
       assert.equal(
-        prior[0].receiptRefs[0],
-        "artifacts/01_context/false_positive_feedback.json",
+        await readFile(path.join(run.scanDir, ref), "utf8"),
+        emptyReceipt ? "" : "Archived receipt.\n",
       );
-    else
-      assert.match(
-        prior[0].receiptRefs[0],
-        /\/(?:attempts|archived-receipts)\/attempt-01\/artifacts\/prior\.txt$/,
-      );
-    assert.equal(
-      await readFile(path.join(run.scanDir, prior[0].receiptRefs[0]), "utf8"),
-      emptyReceipt ? "" : "Archived receipt.\n",
-    );
+    }
   }
   return { scanDir: run.scanDir, threadId, terminal };
 }

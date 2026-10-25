@@ -369,37 +369,35 @@ for (const [label, metadata, count] of [
 }
 
 for (const layout of ["standard", "diff", "deep"] as const) {
-  for (const [label, candidateId] of Object.entries({
-    bom: "\ufeff",
-    nextLine: "\u0085",
-    controlSeparators: "\u001c\u001f",
-    spaces: " \u00a0\u2003\u3000",
-  })) {
-    test(`${layout}: ${label} candidate metadata matches recovered identity`, async (t) => {
-      const normal = await fixture(t, layout);
-      const recovered = await fixture(t, layout);
-      const findings = [
-        finding("Synthetic review", {
-          provenance: { source: "local_plugin", candidateId },
-        }),
-      ];
-      await normal.write({ ...normal.draft(), findings });
-      await draftApi.saveScanDraftCheckpoint(
-        recovered.context,
-        { ...recovered.draft(), findings },
-        false,
-      );
-      const result = await recoverAndFinalize(
-        normal,
-        recovered,
-        [],
-        true,
-        true,
-      );
-      assert.deepEqual(result.recovered, result.normal);
-      assert.deepEqual(result.warnings, []);
-    });
-  }
+  test(`${layout}: Unicode whitespace candidate IDs match recovered identities`, async (t) => {
+    const normal = await fixture(t, layout);
+    const recovered = await fixture(t, layout);
+    const candidates = {
+      bom: "\ufeff",
+      "next-line": "\u0085",
+      "control-separators": "\u001c\u001f",
+      spaces: " \u00a0\u2003\u3000",
+    };
+    const findings = Object.entries(candidates).map(([label, candidateId]) =>
+      finding(label, {
+        ruleId: `fixture.${label}`,
+        provenance: { source: "local_plugin", candidateId },
+      }),
+    );
+    await normal.write({ ...normal.draft(), findings });
+    await draftApi.saveScanDraftCheckpoint(
+      recovered.context,
+      { ...recovered.draft(), findings },
+      false,
+    );
+    const result = await recoverAndFinalize(normal, recovered, [], true, true);
+    assert.deepEqual(
+      result.normal.map((row) => row.title).sort(),
+      Object.keys(candidates).sort(),
+    );
+    assert.deepEqual(result.recovered, result.normal);
+    assert.deepEqual(result.warnings, []);
+  });
 }
 
 for (const layout of ["standard", "diff", "deep"] as const) {
