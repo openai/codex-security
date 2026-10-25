@@ -32,6 +32,7 @@ jobs:
       source-run: ${{ steps.proof.outputs.source-run }}
       edit-attempt: ${{ steps.proof.outputs.edit-attempt }}
       source-required: ${{ steps.scope.outputs.source-required }}
+      plugin-tests-required: ${{ steps.scope.outputs.plugin-tests-required }}
       package-required: ${{ steps.scope.outputs.package-required }}
       action-ci: ${{ steps.scope.outputs.action-ci }}
       eval-contracts: ${{ steps.scope.outputs.eval-contracts }}
