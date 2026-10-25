@@ -264,8 +264,8 @@ jobs:
       - name: Inspect installed package
         working-directory: sdk/typescript
         env: &package-deep-retry
-          # Qualify retries on each OS's floor or only runtime, and on every scheduled/manual lane.
-          PACKAGE_DEEP_RETRY: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || matrix.node == '22.13.0' || strategy.job-total == 1 }}
+          # A successful main push can be tagged for release. Only PRs sample retries by runtime.
+          PACKAGE_DEEP_RETRY: ${{ github.event_name != 'pull_request' || matrix.node == '22.13.0' || strategy.job-total == 1 }}
         run: node scripts/check-package.mjs ../../dist/*.tgz
 
       - name: Check Action against the release candidate
