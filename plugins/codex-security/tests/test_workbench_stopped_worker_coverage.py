@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from workbench_test_support import (
     saved_draft,
     upsert_deep_worker,
     worker_paths,
+    write_checkpoint,
 )
 
 
@@ -225,3 +227,88 @@ def test_stopped_worker_links_follow_explicit_surface_identity_through_collision
     )
     assert coverage_path.read_bytes() == sealed
     assert result.read_bytes() == original
+
+
+def test_pending_worker_surface_receipt_precedes_historical_receipt_repair(tmp_path: Path) -> None:
+    state_dir, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    worker_id, result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
+    output = result.parent
+    artifacts = output / "artifacts"
+    artifacts.mkdir()
+    current_receipt = artifacts / "Review.md"
+    current_receipt.write_text("Current API review.\n")
+    historical_receipt = artifacts / "review.md"
+    if historical_receipt.exists():
+        pytest.skip("This regression requires case-sensitive receipt paths.")
+    historical_receipt.write_text("Historical writer review.\n")
+    other_receipt = artifacts / "other.md"
+    other_receipt.write_text("Current writer review.\n")
+    surface = {
+        "id": "api",
+        "label": "API",
+        "disposition": "no_issue_found",
+        "receiptRefs": ["artifacts/Review.md"],
+    }
+    writer = {
+        **surface,
+        "id": "writer",
+        "label": "Writer",
+        "receiptRefs": ["artifacts/other.md"],
+    }
+    task = {"id": "review-api", "reason": "Review remains.", "surfaceIds": ["api"]}
+    result.write_text(
+        json.dumps(saved_draft(scan_id, complete=True, surfaces=[surface, writer], deferred=[task]))
+    )
+    os.utime(result, ns=(100, 100))
+    historical = write_checkpoint(
+        output / "checkpoints",
+        saved_draft(
+            scan_id,
+            complete=True,
+            surfaces=[
+                {
+                    **writer,
+                    "receiptRefs": ["artifacts/review.md", "artifacts/missing.md"],
+                }
+            ],
+        ),
+    )
+    os.utime(historical, ns=(50, 50))
+    selected = write_checkpoint(
+        output / "checkpoints", saved_draft(scan_id, complete=True, surfaces=[writer])
+    )
+    os.utime(selected, ns=(300, 300))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": selected.name}))
+    os.utime(head, ns=(400, 400))
+    originals = {
+        path: path.read_bytes()
+        for path in (result, historical, selected, head, current_receipt, historical_receipt)
+    }
+    assert not (scan_dir / "coverage.json").exists()
+
+    fail_deep_scan(state_dir, codex_home, scan_id)
+
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    surfaces = {row["label"]: row for row in coverage["surfaces"]}
+    retained = surfaces["API"]
+    assert retained["disposition"] == "no_issue_found"
+    assert retained["receiptRefs"] == [current_receipt.relative_to(scan_dir).as_posix()]
+    assert surfaces["Writer"]["receiptRefs"] == [other_receipt.relative_to(scan_dir).as_posix()]
+    retained_task = next(
+        row
+        for row in coverage["deferred"]
+        if row.get("provenance") == {"workerId": worker_id, "attempt": 1, "sourceId": "review-api"}
+    )
+    assert retained_task["surfaceIds"] == [retained["id"]]
+    assert not any(
+        "Skipped malformed coverage receipt" in warning
+        for warning in get_scan(state_dir, scan_id)["scan"]["warnings"]
+    )
+    sealed = coverage_path.read_bytes()
+    preserve_scan_results(
+        state_dir, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
+    )
+    assert coverage_path.read_bytes() == sealed
+    assert all(path.read_bytes() == content for path, content in originals.items())
