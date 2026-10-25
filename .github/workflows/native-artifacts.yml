@@ -11,6 +11,10 @@ on:
         description: Reuse this week's verified payload when all native build and proof inputs match.
         type: boolean
         default: false
+      cache-week:
+        description: UTC ISO year and week selected by the source CI classifier; zero uses the current week.
+        type: number
+        default: 0
   workflow_dispatch:
 
 permissions:
@@ -30,35 +34,10 @@ jobs:
           persist-credentials: false
       - name: Identify native build and proof inputs
         id: key
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Include filenames and modes, not only file contents. Windows proofs
-          # bundle MCP helpers, including their schema and workbench dependencies.
-          empty_tree="$(git hash-object -t tree --stdin </dev/null)"
-          # These existing CI entrypoints run outside the native jobs.
-          ci_only=':(exclude).github/scripts/'
-          source_hash="$(git diff-tree -r -z --no-abbrev "$empty_tree" HEAD -- \
-            .gitattributes .cargo .npmrc .pnpmfile.cjs package.json pnpm-workspace.yaml \
-            .github/actions/setup-tools .github/scripts \
-            "${ci_only}"invoice-desk-{source,target}{,.test}.mjs \
-            "${ci_only}"{check-ci-results,select-ci-checks,test-ci-selection,test-release-guide}.mjs \
-            "${ci_only}"{verify-pr-source,test-verify-pr-source,release-progress,test_release_progress}.mjs \
-            "${ci_only}"{install-ripgrep.sh,require_native_python_report.py,test_require_native_python_report.py} \
-            .github/workflows/native-artifacts.yml \
-            .github/workflows/native-unix.yml \
-            .github/workflows/native-windows.yml \
-            .github/workflows/native-musl.yml \
-            sdk/typescript/.npmrc sdk/typescript/.pnpmfile.cjs \
-            sdk/typescript/package.json sdk/typescript/pnpm-lock.yaml \
-            sdk/typescript/pnpm-workspace.yaml \
-            sdk/typescript/tsconfig.json sdk/typescript/tsconfig.ci.json \
-            plugins/codex-security/native plugins/codex-security/mcp-app \
-            ':(exclude)plugins/codex-security/mcp-app/tests' \
-            plugins/codex-security/schemas plugins/codex-security/scripts \
-            plugins/codex-security/shared | git hash-object --stdin)"
-          # Hosted runner images can change without a source change.
-          printf 'key=native-universal-v1-%s-%s\n' "$(date -u +%G-%V)" "$source_hash" >> "$GITHUB_OUTPUT"
+        # Resolve the helper from this workflow even when the caller selects an older checkout.
+        uses: $/.github/actions/native-cache-key
+        env:
+          NATIVE_CACHE_WEEK: ${{ inputs.cache-week }}
       - name: Restore verified native payload
         if: inputs.reuse-verified
         id: restore

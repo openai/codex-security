@@ -124,16 +124,18 @@ execution time, prerequisite waits, runner scheduling, approval waits, and
 manual retry delays. Compare matching revisions and test configurations, and
 record failures as well as successful runs.
 
-When a batch of merges can wait, check **Restore verified native payload** in
-an active `node-ci` push or scheduled run on `main`. On a miss, another push
-with the same inputs can start all eight platform builds again. Before merging
-a PR that leaves those inputs unchanged, look for the exact key in
-`gh cache list --ref refs/heads/main --key KEY`. Once it is there, it does not
-matter which `main` run saved it. Different inputs can build in parallel.
+Protected `main` pushes that miss the same native cache use three queues per
+300 workflow numbers, keeping each queue within GitHub’s capacity. Each run looks
+up the verified payload again; a miss still builds and proves all eight
+platforms. The cache listing only selects a queue. Hits, unavailable listings,
+different inputs, and PR checks can start independently.
 
-The key uses the UTC week and the paths listed in **Identify native build and
-proof inputs**. Repository scripts are included by default: a native proof can
-load a helper at runtime. The workflow excludes known CI entrypoints that run
-elsewhere. Compare the next change against current `main`: its PR run may have
-tested an older base or skipped native preparation. PRs cannot populate this
+When a batch can wait, look for the first protected cache save before landing
+more changes with the same inputs: `gh cache list --ref refs/heads/main --key KEY`.
+The key uses the UTC week selected for the run and the paths in
+[the native key action](../.github/actions/native-cache-key/key.sh). Repository
+scripts are included by default: a native proof can load a helper at runtime.
+The workflow excludes known CI entrypoints that run elsewhere. Compare the
+next change against current `main`: its PR run may have tested an older base
+or skipped native preparation. PRs cannot populate this
 cache for `main`.
