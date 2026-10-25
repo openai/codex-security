@@ -23,6 +23,7 @@ const passed = { status: "completed", conclusion: "success" };
 function run(id, changes = {}) {
   return {
     id,
+    html_url: `https://github.com/example/repo/actions/runs/${id}`,
     run_number: id,
     run_attempt: 1,
     run_started_at: id,
@@ -148,7 +149,7 @@ test("only fresh canonical source jobs and genuine selection can qualify a sourc
     assert.ok(!realSource({ ...page, ...change }, source));
 });
 
-test("pending sources settle, genuine red remains red, and newer attempts cannot be masked", async () => {
+test("pending sources settle, genuine red remains red, and newer attempts cannot be masked", async (t) => {
   const green = run(3),
     red = run(3, { conclusion: "failure" }),
     pending = run(3, { status: "in_progress" });
@@ -163,10 +164,14 @@ test("pending sources settle, genuine red remains red, and newer attempts cannot
     await fixture([[green, run(1, { run_attempt: 2 })]]).check(),
     "full",
   );
+  const log = t.mock.method(console, "log", () => {});
   assert.equal(
     await fixture([[edit(8, { conclusion: "failure" }), red]]).check(),
     "failed",
   );
+  assert.deepEqual(log.mock.calls[0]?.arguments, [
+    `Failed source CI: ${red.html_url}/attempts/1`,
+  ]);
   for (const changed of [
     [run(3, { run_attempt: 2 })],
     [run(5, { conclusion: "failure" }), green],
