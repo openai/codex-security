@@ -652,15 +652,6 @@ describe("npm package tar listings", () => {
         ),
       );
       const native = mkdtempSync(join(root, "native-"));
-      // The wrong-long-name fixtures have no portable asset path to select.
-      const extracted = await execFileAsync(
-        "tar",
-        ["-xzf", archivePath, "-C", native, ...(wrongLongName ? [] : [path])],
-        { encoding: "buffer", timeout: 30_000, windowsHide: true },
-      );
-      expect(extracted.stderr.toString()).toBe("");
-      if (!wrongLongName)
-        expect(readFileSync(join(native, path)).equals(logo)).toBe(true);
       const contractPath = join(root, "contract.json");
       writeFileSync(
         contractPath,
@@ -674,7 +665,26 @@ describe("npm package tar listings", () => {
         npm_config_cache: join(root, "npm-cache"),
       };
       delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
-      const installed = await installPackage(root, archivePath, environment);
+      const packageCheck = checkPackage(
+        root,
+        archivePath,
+        contractPath,
+        environment,
+      );
+      // The wrong-long-name fixtures have no portable asset path to select.
+      const extraction = execFileAsync(
+        "tar",
+        ["-xzf", archivePath, "-C", native, ...(wrongLongName ? [] : [path])],
+        { encoding: "buffer", timeout: 30_000, windowsHide: true },
+      );
+      const installation = installPackage(root, archivePath, environment);
+      // All three read the same archive. Keep it until every reader exits, including on failure.
+      await Promise.allSettled([extraction, installation, packageCheck]);
+      const extracted = await extraction;
+      expect(extracted.stderr.toString()).toBe("");
+      if (!wrongLongName)
+        expect(readFileSync(join(native, path)).equals(logo)).toBe(true);
+      const installed = await installation;
       const consumer = join(root, "consumer");
       expect({
         status: installed.status,
@@ -714,12 +724,7 @@ describe("npm package tar listings", () => {
       ).toBe(compatible);
       if (overwrite)
         expect(readFileSync(installedLogo).equals(stored)).toBe(true);
-      const checked = await checkPackage(
-        root,
-        archivePath,
-        contractPath,
-        environment,
-      );
+      const checked = await packageCheck;
       expect({
         status: checked.status,
         stderr: compatible ? checked.stderr : "",
