@@ -24,28 +24,21 @@ const packagedDocs = new Set(
     .filter((file) => file.endsWith(".md"))
     .map((file) => `sdk/typescript/${file}`),
 );
+const isDocumentation = (path) =>
+  documentation.test(path) || packagedDocs.has(path);
 
 function scopeFor(paths, { event, baseChanged, modifiedOnly }) {
   if (event !== "pull_request" || baseChanged || !paths.length) return "full";
   if (modifiedOnly && paths.every((path) => pythonTest.test(path)))
     return "python-tests";
-  if (
-    paths.every(
-      (path) =>
-        documentation.test(path) ||
-        path === "RELEASING.md" ||
-        packagedDocs.has(path),
-    )
-  ) {
+  if (paths.every((path) => isDocumentation(path) || path === "RELEASING.md")) {
     // The Action profile already builds the package and installs it on Node 24.
     // Select the separate Action job from its own inputs below.
     return paths.some((path) => packagedDocs.has(path)) ? "action" : "docs";
   }
   if (paths.every((path) => actionFiles.test(path))) return "action";
   if (paths.every((path) => evalFiles.test(path))) return "evals";
-  if (
-    paths.every((path) => ordinarySource.test(path) || documentation.test(path))
-  )
+  if (paths.every((path) => ordinarySource.test(path) || isDocumentation(path)))
     return "source";
   return "full";
 }

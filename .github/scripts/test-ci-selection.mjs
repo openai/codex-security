@@ -306,7 +306,9 @@ test("ordinary TypeScript source and tests retain the reduced version matrices",
     "plugins/codex-security/mcp-app/tests/support/fixture.ts",
   ]) {
     assert.deepEqual(select([path]), regularSource, path);
-    assert.deepEqual(select(["README.md", path]), regularSource, path);
+    for (const guide of ["README.md", "sdk/typescript/docs/cli.md"]) {
+      assert.deepEqual(select([guide, path]), regularSource, path);
+    }
   }
 });
 
@@ -352,7 +354,7 @@ test("unknown paths and dependency configuration receive full qualification", ()
     ["sdk/typescript/.npmrc"],
     ["sdk/typescript/docs/unlisted.md"],
     ["RELEASING.md", "sdk/typescript/src/api.ts"],
-    ["sdk/typescript/docs/cli.md", "sdk/typescript/src/api.ts"],
+    ["sdk/typescript/docs/cli.md", "sdk/typescript/docs/unlisted.md"],
     ["plugins/codex-security/mcp-app/src/.npmrc"],
     ["pnpm-workspace.yaml"],
     ["sdk/typescript/pnpm-workspace.yaml"],

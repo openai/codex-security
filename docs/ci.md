@@ -12,7 +12,7 @@ ordinary docs or `RELEASING.md`, require the native payload, the real package
 build and archive inspection, and one Ubuntu Node 24 installation. Removing or
 renaming a required guide must still pass archive inspection. The static job
 validates the canonical recovery example in `RELEASING.md` on docs-only PRs too.
-Mixing either kind of guide with product source selects full qualification.
+Mixing the release guide with product source selects full qualification.
 
 Product source changes run the complete SDK suite on Linux, macOS, and Windows,
 plus MCP, standalone-plugin, native-runtime, and installed-package checks. Tests
@@ -32,7 +32,7 @@ slow-file estimates in `run-mcp-test-shard.mts` when the jobs drift apart.
 
 Pull requests limited to `.ts` files under `sdk/typescript/src/`,
 `sdk/typescript/tests-ts/`, `plugins/codex-security/mcp-app/src/`, and
-`plugins/codex-security/mcp-app/tests/`, optionally mixed with ordinary docs,
+`plugins/codex-security/mcp-app/tests/`, plus any ordinary docs or packaged SDK guides,
 use reduced version matrices. They test the minimum Node 22, 24, and 26 versions,
 current Node 24 for the Action adapter, macOS installation, and Windows Node 22
 installation. When selected, Python runs the full suite on 3.12 and the native
