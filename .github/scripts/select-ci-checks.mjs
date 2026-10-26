@@ -48,8 +48,9 @@ export function selectChecks(paths, options) {
   const scope = scopeFor(paths, options);
   const full = scope === "full" || scope === "python-tests";
   const source = full || scope === "source";
-  const sourceBeyondSdkTests =
-    full || (scope === "source" && !paths.every((path) => sdkTest.test(path)));
+  const sdkTestsOnly =
+    scope === "source" && paths.every((path) => sdkTest.test(path));
+  const sourceBeyondSdkTests = source && !sdkTestsOnly;
   const action =
     full ||
     paths.some(
@@ -96,7 +97,7 @@ export function selectChecks(paths, options) {
     "workflow-quality": String(full),
     "compatibility-matrix": JSON.stringify({
       include:
-        scope === "action"
+        scope === "action" || sdkTestsOnly
           ? [{ os: "ubuntu-latest", node: "24" }]
           : compatibility,
     }),

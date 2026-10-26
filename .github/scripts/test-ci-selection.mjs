@@ -10,6 +10,10 @@ import { failedChecks } from "./check-ci-results.mjs";
 const select = (paths, options = {}) =>
   selectChecks(paths, { event: "pull_request", ...options });
 
+const ubuntuNode24Install = JSON.stringify({
+  include: [{ os: "ubuntu-latest", node: "24" }],
+});
+
 const regularSource = {
   "source-required": "true",
   "plugin-tests-required": "true",
@@ -190,9 +194,7 @@ test("Action-only changes require Action CI and integration against the built pa
     ...docs,
     "package-required": "true",
     "action-ci": "true",
-    "compatibility-matrix": JSON.stringify({
-      include: [{ os: "ubuntu-latest", node: "24" }],
-    }),
+    "compatibility-matrix": ubuntuNode24Install,
   };
   for (const paths of [
     ["action.yml", "github-action/README.md"],
@@ -272,9 +274,7 @@ test("packaged guides keep the archive and installed-package gates", () => {
   const expected = {
     ...docs,
     "package-required": "true",
-    "compatibility-matrix": JSON.stringify({
-      include: [{ os: "ubuntu-latest", node: "24" }],
-    }),
+    "compatibility-matrix": ubuntuNode24Install,
   };
   for (const paths of [
     ["sdk/typescript/README.md"],
@@ -326,7 +326,11 @@ test("SDK test-only PRs skip independent suites and retain any changed eval inpu
     "sdk/typescript/tests-ts/skeleton.test.ts",
     "sdk/typescript/tests-ts/windows-machine-policy.test.ts",
   ];
-  const sdk = { ...regularSource, "plugin-tests-required": "false" };
+  const sdk = {
+    ...regularSource,
+    "plugin-tests-required": "false",
+    "compatibility-matrix": ubuntuNode24Install,
+  };
   assert.deepEqual(select(paths), { ...sdk, "eval-contracts": "false" });
   assert.deepEqual(
     select([...paths, "sdk/typescript/tests-ts/codex-dependency-pins.test.ts"]),

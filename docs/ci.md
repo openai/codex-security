@@ -39,10 +39,11 @@ installation. When selected, Python runs the full suite on 3.12 and the native
 subsets on macOS and Windows. All source changes still select container
 validation.
 
-PRs limited to top-level `sdk/typescript/tests-ts/*.test.ts` keep all SDK
-shards, static checks, native builds, packages, and containers. They skip the
-plugin suites and run evals only when their `codex-dependency-pins.test.ts`
-input changes. Mixed changes follow the usual source or full route.
+PRs limited to top-level `sdk/typescript/tests-ts/*.test.ts` keep all SDK shards,
+static checks, native builds, packaging, and containers. These files are outside
+the npm package, so one Ubuntu Node 24 install checks it and the Action adapter.
+These PRs skip the plugin suites and run evals only for `codex-dependency-pins.test.ts`.
+Mixed changes follow the usual source or full route.
 
 PRs limited to Action metadata, wrapper implementation, tests, npm manifests,
 locks, or checked-in bundles run Action CI. It verifies a clean rebuild, runs
