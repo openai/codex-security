@@ -17,17 +17,13 @@ describe("scan navigation", () => {
   test.each(["show", "logs"])(
     "%s keeps saved output when optional navigation fails",
     async (command) => {
-      for (const failure of ["sync", "EPIPE", "ENOSPC"]) {
-        const result = await runCommand(process.execPath, [
-          join(import.meta.dir, "fixtures", "scan-navigation-output.mts"),
-          command,
-          failure,
-        ]);
-        expect(result.status, result.stderr).toBe(0);
-        expect(JSON.parse(result.stdout)).toMatchObject({ status: 0 });
-        expect(JSON.parse(result.stdout).output).toContain(completedId);
-        expect(result.stderr).toBe("");
-      }
+      const result = await runCommand(process.execPath, [
+        join(import.meta.dir, "fixtures", "scan-navigation-output.mts"),
+        command,
+      ]);
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toBe("sync\nEPIPE\nENOSPC\n");
+      expect(result.stderr).toBe("");
     },
   );
 

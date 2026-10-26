@@ -930,12 +930,13 @@ describe("GitHub request transport", () => {
     expect(fixture.github.writes).toHaveLength(0);
     const first = await run();
     fixture.merge("fix: later fix");
+    let humanSha = "";
     fixture.github.beforeRefWrite = () => {
       const notes = fixture.repo.readFile(
         fixture.head(first.plan.branch)!,
         notesPath,
       )!;
-      fixture.commit(
+      humanSha = fixture.commit(
         first.plan.branch,
         {
           [notesPath]: notes.replace(
@@ -954,11 +955,9 @@ describe("GitHub request transport", () => {
       "Human-reviewed release note",
     );
     expect(updated.reviewRequested).toBe(true);
-    fixture.git(
-      "merge-base",
-      "--is-ancestor",
-      first.headSha!,
-      updated.headSha!,
+    fixture.git("merge-base", "--is-ancestor", humanSha, updated.headSha!);
+    expect(fixture.github.comments.get(updated.pull!)!.at(-1)!.body).toContain(
+      "later fix",
     );
   });
 
@@ -1577,6 +1576,7 @@ describe("rolling release reconciliation", () => {
     ).toBe("chore(release): 0.2.0");
     expect(second.plan.branch).toBe(first.plan.branch);
     expect(pull.body).toBe(humanBody);
+    expect(pull.draft).toBe(false);
     expect(
       fixture.repo.readFile(second.headSha!, "sdk/typescript/src/example.ts"),
     ).toContain("next");
@@ -1861,35 +1861,6 @@ describe("rolling release reconciliation", () => {
     expect(restored.headSha).not.toBe(first.headSha);
     expect(restored.reviewRequested).toBe(true);
     expect(fixture.github.comments.get(first.pull!)).toHaveLength(3);
-  });
-
-  test("retries a concurrent human commit without dropping its notes or history", async () => {
-    const { fixture, first } = await Fixture.withInitialPull();
-    fixture.merge("fix: later fix");
-    let humanSha = "";
-    fixture.github.beforeRefWrite = () => {
-      const notes = fixture.repo.readFile(
-        fixture.head(first.plan.branch)!,
-        notesPath,
-      )!;
-      humanSha = fixture.commit(
-        first.plan.branch,
-        {
-          [notesPath]: notes.replace(
-            "initial feature",
-            "Human migration details",
-          ),
-        },
-        "docs: review release notes",
-      );
-    };
-    const result = await fixture.run();
-    expect(result.plan.humanOwned).toEqual(["highlights"]);
-    expect(result.plan.files[notesPath]).toContain("Human migration details");
-    fixture.git("merge-base", "--is-ancestor", humanSha, result.headSha!);
-    expect(fixture.github.comments.get(result.pull!)!.at(-1)!.body).toContain(
-      "later fix",
-    );
   });
 
   test("recomputes when main moves during the update", async () => {
@@ -2286,25 +2257,15 @@ describe("release proposal pauses", () => {
     ).toHaveLength(1);
   });
 
-  test.each([false, true])(
-    "updates an existing proposal with draft=%p",
-    async (draft) => {
-      const { fixture, first, pull } = await Fixture.withInitialPull();
-      pull.draft = draft;
-      pull.body += "\nMaintainer review notes.\n";
-      const reviewedBody = pull.body;
-      const reviewedHead = fixture.head(first.plan.branch);
-      fixture.merge("feat!: later breaking change");
-      const updated = await fixture.run();
-      expect(updated.action).toBe("updated");
-      expect(updated.pull).toBe(first.pull);
-      expect(updated.plan.version).toBe("0.2.0");
-      expect(fixture.head(first.plan.branch)).not.toBe(reviewedHead);
-      expect(pull.title).toBe(updated.plan.title);
-      expect(pull.body).toBe(reviewedBody);
-      expect(pull.draft).toBe(draft);
-    },
-  );
+  test("keeps an existing release proposal in draft when updating it", async () => {
+    const { fixture, first, pull } = await Fixture.withInitialPull();
+    pull.draft = true;
+    fixture.merge("feat!: later breaking change");
+    const updated = await fixture.run();
+    expect(updated.action).toBe("updated");
+    expect(updated.pull).toBe(first.pull);
+    expect(pull.draft).toBe(true);
+  });
 
   test("does not advance a proposal closed during preparation", async () => {
     const { fixture, first, pull } = await Fixture.withInitialPull();

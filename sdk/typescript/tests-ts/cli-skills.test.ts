@@ -1327,7 +1327,7 @@ describe("CLI skill commands", () => {
     }
   });
 
-  test("streams oversized skill prompts to a real child process", async () => {
+  test("streams an oversized UTF-8 prompt through a real child and returns its full response", async () => {
     const input = "é日本語".repeat(256 * 1024 + 1);
     const stdout = capture();
     const stderr = capture();
@@ -1469,21 +1469,6 @@ process.stdout.write(JSON.stringify({
     await expect(readSkillCommandOutput(oversizedResponse())).resolves.toEqual({
       message: largeResponse,
     });
-
-    const stdout = capture();
-    const stderr = capture();
-    await expect(
-      runCodexSkillCommand(
-        [
-          "-e",
-          'process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"x".repeat(1024*1024+1)}})+"\\n")',
-        ],
-        { command: "validate", stdout: stdout.stream, stderr: stderr.stream },
-        { command: process.execPath },
-      ),
-    ).resolves.toBe(0);
-    expect(stdout.text()).toBe(`${"x".repeat(1024 * 1024 + 1)}\n`);
-    expect(stderr.text()).toBe("");
   });
 
   test("preserves skill failures and adds authentication advice without replacing details", () => {

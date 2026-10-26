@@ -35,16 +35,12 @@ import { throwing } from "./support/errors.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { execNodePython } from "./support/python-probe.js";
+import { scanRegistrationArguments } from "./support/workbench-command.js";
 
 describe("CLI scan validation preflight", () => {
-  test.each([
-    ["other head", false],
-    ["local changes", false],
-    ["other head", true],
-    ["local changes", true],
-  ] as const)(
-    "rejects committed diffs with %s before scanning (workflow: %p)",
-    async (checkout, workflow) => {
+  test.each(["other head", "local changes"] as const)(
+    "rejects committed diffs with %s before scanning with or without a workflow",
+    async (checkout) => {
       const root = await temporaryDirectory("scan-validation-preflight-");
       try {
         const repository = join(root, "repository");
@@ -65,33 +61,35 @@ describe("CLI scan validation preflight", () => {
         }
         const prepareRuntime = mock(throwing("Unexpected runtime setup"));
         const createCodex = mock(throwing("Unexpected model invocation"));
-        const { stdout, stderr, runCli } = createCliTest(main);
-        expect(
-          await runCli(
-            [
-              "scan",
-              repository,
-              "--diff",
-              base,
-              "--head",
-              head,
-              "--validate",
-              ...(workflow ? ["--workflow-id", "diff-validation"] : []),
-              "--json",
-            ],
-            {
-              ...dependencies({ currentDirectory: root }),
-              createSecurity: (config) =>
-                new TestClient(config, { prepareRuntime, createCodex }),
-            },
-          ),
-        ).toBe(2);
-        expect(JSON.parse(stdout.text())).toMatchObject({ status: "failed" });
-        expect(stderr.text()).toContain(
-          checkout === "other head"
-            ? "checkout to match the requested head revision"
-            : "clean repository checkout",
-        );
+        for (const workflow of [false, true]) {
+          const { stdout, stderr, runCli } = createCliTest(main);
+          expect(
+            await runCli(
+              [
+                "scan",
+                repository,
+                "--diff",
+                base,
+                "--head",
+                head,
+                "--validate",
+                ...(workflow ? ["--workflow-id", "diff-validation"] : []),
+                "--json",
+              ],
+              {
+                ...dependencies({ currentDirectory: root }),
+                createSecurity: (config) =>
+                  new TestClient(config, { prepareRuntime, createCodex }),
+              },
+            ),
+          ).toBe(2);
+          expect(JSON.parse(stdout.text())).toMatchObject({ status: "failed" });
+          expect(stderr.text()).toContain(
+            checkout === "other head"
+              ? "checkout to match the requested head revision"
+              : "clean repository checkout",
+          );
+        }
         expect(prepareRuntime).not.toHaveBeenCalled();
         expect(createCodex).not.toHaveBeenCalled();
       } finally {
@@ -123,20 +121,10 @@ test.each([false, true])(
         protectedRoot: repository,
       });
       const workbench = { python, pluginRoot: PLUGIN_ROOT, environment };
-      const registered = await runWorkbench(workbench, [
-        "register-cli-scan",
-        "--repository",
-        repository,
-        "--scan-dir",
-        scanDir,
-        "--recipe-json",
-        JSON.stringify({
-          repository,
-          mode: "standard",
-          target: { kind: "repository", paths: [] },
-          config: {},
-        }),
-      ]);
+      const registered = await runWorkbench(
+        workbench,
+        scanRegistrationArguments(repository, scanDir),
+      );
       const base = fakeResult(["high"]);
       base.manifest.scan.id = String(registered["scanId"]);
       const result = new ScanResult({
@@ -487,20 +475,7 @@ test("empty scan validation preserves configured Python and Git ignore rules", a
     await symlink(repositoryGit, join(hostBin, `git${suffix}`), "file");
     const registered = await runWorkbench(
       { python, pluginRoot: PLUGIN_ROOT, environment: process.env },
-      [
-        "register-cli-scan",
-        "--repository",
-        repository,
-        "--scan-dir",
-        scanDir,
-        "--recipe-json",
-        JSON.stringify({
-          repository,
-          mode: "standard",
-          target: { kind: "repository", paths: [] },
-          config: {},
-        }),
-      ],
+      scanRegistrationArguments(repository, scanDir),
     );
     const result = fakeResult();
     result.manifest.scan.id = String(registered["scanId"]);
@@ -623,20 +598,10 @@ test("empty scan validation preserves knowledge-base Git exclusions", async () =
               selectedGit,
             ),
           };
-          const registered = await runWorkbench(workbenchOptions, [
-            "register-cli-scan",
-            "--repository",
-            repository,
-            "--scan-dir",
-            scanDir,
-            "--recipe-json",
-            JSON.stringify({
-              repository,
-              mode: "standard",
-              target: { kind: "repository", paths: [] },
-              config: {},
-            }),
-          ]);
+          const registered = await runWorkbench(
+            workbenchOptions,
+            scanRegistrationArguments(repository, scanDir),
+          );
           expect(registered["targetRevision"]).toBe(
             trustedFallback ? revision : "unversioned",
           );

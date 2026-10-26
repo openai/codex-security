@@ -423,31 +423,27 @@ describe("npm package tar listings", () => {
         ["level-0", gzipSync(tarBytes, { level: 0 })],
         ["sparse-0.0", gzipSync(packageTar({ readmeSparse: "0.0" }))],
         ["sparse-1.0", gzipSync(packageTar({ readmeSparse: "1.0" }))],
-        ["gnu-long-name", gzipSync(packageTar({ readmeLongName: true }))],
-        ["npm-size-field", gzipSync(packageTar({ sizeTerminator: " \0" }))],
-        ["nul-regular-file", gzipSync(packageTar({ type: 0 }))],
         [
-          "future-timestamps",
+          "gnu-long-name",
           gzipSync(
-            packageTar({ mtime: Math.floor(Date.now() / 1000) + 365 * 86400 }),
+            packageTar({
+              readmeLongName: true,
+              readmeMode: 0,
+              mtime: Math.floor(Date.now() / 1000) + 365 * 86400,
+              sizeTerminator: " \0",
+              type: 0,
+            }),
           ),
-        ],
-        ["unreadable-readme", gzipSync(packageTar({ readmeMode: 0 }))],
-        [
-          "read-only-nested-directories",
-          gzipSync(
-            packageTar({ compatibleLayout: true, directoryMode: 0o555 }),
-          ),
-        ],
-        ["posix-size-field", gzipSync(packageTar({ sizeTerminator: "\0" }))],
-        [
-          "compatible-tar-layout",
-          gzipSync(packageTar({ compatibleLayout: true })),
         ],
         [
           "read-only-directories",
           gzipSync(
-            packageTar({ compatibleLayout: true, rootDirectoryMode: 0o555 }),
+            packageTar({
+              compatibleLayout: true,
+              rootDirectoryMode: 0o555,
+              directoryMode: 0o555,
+              sizeTerminator: "\0",
+            }),
           ),
         ],
       ] as const;

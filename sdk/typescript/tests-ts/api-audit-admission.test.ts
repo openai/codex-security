@@ -307,39 +307,27 @@ for (const scenario of cases) {
   });
 }
 
-test("Standard admission preserves existing canonical scan IDs", async () => {
+test("Standard admission accepts the existing scan ID and preserves BOM-prefixed canonical files", async () => {
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
   await mkdir(repository);
   const scanDir = await copyCompletedScan(root);
-  const manifest = JSON.parse(
-    await readFile(join(scanDir, "scan-manifest.json"), "utf8"),
-  );
+  const files = [];
+  for (const name of ["scan-manifest.json", "findings.json", "coverage.json"]) {
+    const file = join(scanDir, name);
+    const original = await readFile(file);
+    if (name === "scan-manifest.json")
+      expect(JSON.parse(original.toString()).scan.id).toBe("scan_example_001");
+    const bytes = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), original]);
+    await writeFile(file, bytes);
+    files.push({ file, bytes });
+  }
   const standard = await observeStandardAdmission(repository, scanDir);
-  expect(manifest.scan.id).toBe("scan_example_001");
   expect(standard.error).toBe(standard.finalization);
   expect(standard.finalizations).toBe(1);
-});
-
-test.each(["scan-manifest.json", "findings.json", "coverage.json"])(
-  "Standard admission preserves BOM-prefixed %s bytes",
-  async (name) => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    await mkdir(repository);
-    const scanDir = await copyCompletedScan(root);
-    const file = join(scanDir, name);
-    const bytes = Buffer.concat([
-      Buffer.from([0xef, 0xbb, 0xbf]),
-      await readFile(file),
-    ]);
-    await writeFile(file, bytes);
-    const standard = await observeStandardAdmission(repository, scanDir);
-    expect(standard.error).toBe(standard.finalization);
-    expect(standard.finalizations).toBe(1);
+  for (const { file, bytes } of files)
     expect(await readFile(file)).toEqual(bytes);
-  },
-);
+});
 
 test("sealed legacy evidence stays readable during canonical admission", async () => {
   const scanDir = await copyCompletedScan(await temporaryDirectory());

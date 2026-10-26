@@ -67,36 +67,35 @@ function expectation(
 }
 
 describe("canonical scan contract", () => {
-  test.each(["report.md", "report.html", "exports/results.sarif"])(
-    "re-finalizing an imported bundle preserves sealed %s",
-    async (projection) => {
-      const scanDir = await copyExample();
-      const destination = join(scanDir, projection);
-      const content = "Synthetic externally sealed projection.\n";
-      await mkdir(dirname(destination), { recursive: true });
-      await writeFile(destination, content);
-      const manifestPath = join(scanDir, "scan-manifest.json");
-      const manifest = await readJson(manifestPath);
+  test("re-finalizing an imported bundle preserves its sealed projections", async () => {
+    const scanDir = await copyExample();
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const manifest = await readJson(manifestPath);
+    const projections = ["report.md", "report.html", "exports/results.sarif"];
+    for (const path of projections) {
+      await mkdir(dirname(join(scanDir, path)), { recursive: true });
+      await writeFile(join(scanDir, path), path);
       manifest["scan"].artifacts.push({
-        path: projection,
-        sha256: sha256(content),
+        path,
+        sha256: sha256(path),
         mediaType: "text/plain",
       });
-      await writeJson(manifestPath, manifest);
-      await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
-      const result = runPython(
-        process.env["PYTHON"] ?? Bun.which("python3") ?? "python",
-        [
-          join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
-          "--scan-dir",
-          scanDir,
-        ],
-      );
-      expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
-      expect(await readFile(destination, "utf8")).toBe(content);
-      await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
-    },
-  );
+    }
+    await writeJson(manifestPath, manifest);
+    await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    const result = runPython(
+      process.env["PYTHON"] ?? Bun.which("python3") ?? "python",
+      [
+        join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+        "--scan-dir",
+        scanDir,
+      ],
+    );
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    for (const path of projections)
+      expect(await readFile(join(scanDir, path), "utf8")).toBe(path);
+    await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+  });
 
   test.each([
     "duplicate finding",
@@ -900,45 +899,35 @@ describe("canonical scan contract", () => {
   });
 
   test("rejects unsafe Windows and traversal artifact paths", async () => {
+    const scanDir = await copyExample();
+    const path = join(scanDir, "scan-manifest.json");
+    const manifest = await readJson(path);
+    const invalidArtifact = {
+      path: "",
+      sha256: "0".repeat(64),
+      mediaType: "text/plain",
+    };
+    manifest["scan"]["artifacts"].push(invalidArtifact);
     for (const unsafe of [
+      "/escape",
       "D:/escape",
       "../escape",
+      "artifacts/../escape",
       "artifacts\\escape",
       "artifacts/report?.json",
-    ]) {
-      const scanDir = await copyExample();
-      const path = join(scanDir, "scan-manifest.json");
-      const manifest = await readJson(path);
-      manifest["scan"]["artifacts"].push({
-        path: unsafe,
-        sha256: "0".repeat(64),
-        mediaType: "text/plain",
-      });
-      await writeJson(path, manifest);
-      await expect(
-        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-      ).rejects.toThrow(ContractValidationError);
-    }
-
-    for (const unsafe of [
       "artifacts/report.json.",
       "artifacts/report.json ",
       "artifacts/CON.txt",
       " ",
       "\u00a0",
     ]) {
-      const scanDir = await copyExample();
-      const path = join(scanDir, "scan-manifest.json");
-      const manifest = await readJson(path);
-      manifest["scan"]["artifacts"].push({
-        path: unsafe,
-        sha256: "0".repeat(64),
-        mediaType: "text/plain",
-      });
+      invalidArtifact.path = unsafe;
       await writeJson(path, manifest);
-      await expect(
-        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-      ).rejects.toThrow("safe scan-relative POSIX path");
+      const rejected = loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      await expect(rejected).rejects.toBeInstanceOf(ContractValidationError);
+      await expect(rejected).rejects.toThrow(
+        /safe scan-relative POSIX path|schema validation failed \(pattern/u,
+      );
     }
   });
 

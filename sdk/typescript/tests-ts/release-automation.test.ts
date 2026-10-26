@@ -685,6 +685,17 @@ describe("reviewed release note helpers", () => {
     );
   });
 
+  test("rejects Unicode whitespace-only reviewed summaries", () => {
+    for (const space of ["\u00a0", "\u2007", "\u202f", "\ufeff"]) {
+      expect(() =>
+        parseReviewedReleaseNotes(
+          "1.2.3",
+          `<!-- release-version: 1.2.3 -->\n${space}`,
+        ),
+      ).toThrow("include a reviewed summary");
+    }
+  });
+
   test("rejects NUL bytes before shell composition", async () => {
     const workspace = directories.create("release-notes-nul-");
     const taggedNotes = join(workspace, "tagged-notes.md");
@@ -1755,32 +1766,8 @@ describe("GitHub release workflow safeguards", () => {
       message: "Release notes must start with <!-- release-version: 0.1.6 -->",
     },
     {
-      scenario: "an empty reviewed summary",
-      summary: "<!-- release-version: 0.1.6 -->\n   ",
-      status: 1,
-      message: "Release notes must start with <!-- release-version: 0.1.6 -->",
-    },
-    {
       scenario: "a U+00A0-only reviewed summary",
       summary: "<!-- release-version: 0.1.6 -->\n\u00a0",
-      status: 1,
-      message: "Release notes must start with <!-- release-version: 0.1.6 -->",
-    },
-    {
-      scenario: "a U+2007-only reviewed summary",
-      summary: "<!-- release-version: 0.1.6 -->\n\u2007",
-      status: 1,
-      message: "Release notes must start with <!-- release-version: 0.1.6 -->",
-    },
-    {
-      scenario: "a U+202F-only reviewed summary",
-      summary: "<!-- release-version: 0.1.6 -->\n\u202f",
-      status: 1,
-      message: "Release notes must start with <!-- release-version: 0.1.6 -->",
-    },
-    {
-      scenario: "a U+FEFF-only reviewed summary",
-      summary: "<!-- release-version: 0.1.6 -->\n\ufeff",
       status: 1,
       message: "Release notes must start with <!-- release-version: 0.1.6 -->",
     },

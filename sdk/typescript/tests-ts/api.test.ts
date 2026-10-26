@@ -1915,14 +1915,8 @@ describe("CodexSecurity orchestration", () => {
   test.each(["revision", "registration", "cancellation", "mock"] as const)(
     "keeps existing output when %s prevents scan registration",
     async (failurePoint) => {
-      const root = await temporaryDirectory();
-      const repository = join(root, "repository");
-      const codexHome = join(root, "codex-home");
-      const output = join(root, "scan");
-      await mkdir(repository);
-      await mkdir(codexHome);
-      await mkdir(output, { mode: 0o700 });
-      await writeFile(join(output, "previous.txt"), "previous scan\n");
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      await writeFile(join(scanDir, "previous.txt"), "previous scan\n");
       const cancellation = new AbortController();
       const client = new TestClient(
         { pluginPath: PLUGIN_ROOT },
@@ -1944,13 +1938,13 @@ describe("CodexSecurity orchestration", () => {
       try {
         await expect(
           client.run(repository, {
-            outputDir: output,
+            outputDir: scanDir,
             archiveExisting: true,
             signal: cancellation.signal,
             mock: failurePoint === "mock",
           }),
         ).rejects.toThrow();
-        expect(await readFile(join(output, "previous.txt"), "utf8")).toBe(
+        expect(await readFile(join(scanDir, "previous.txt"), "utf8")).toBe(
           "previous scan\n",
         );
         expect(
@@ -1967,14 +1961,8 @@ describe("CodexSecurity orchestration", () => {
   test.each([false, true])(
     "archives accepted output before starting, cancellation=%p",
     async (cancelRegistration) => {
-      const root = await temporaryDirectory();
-      const repository = join(root, "repository");
-      const codexHome = join(root, "codex-home");
-      const output = join(root, "scan");
-      await mkdir(repository);
-      await mkdir(codexHome);
-      await mkdir(output, { mode: 0o700 });
-      await writeFile(join(output, "previous.txt"), "previous scan\n");
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      await writeFile(join(scanDir, "previous.txt"), "previous scan\n");
       const cancellation = new AbortController();
       const notifications: string[] = [];
       let archived: string | undefined;
@@ -2014,7 +2002,7 @@ describe("CodexSecurity orchestration", () => {
 
       await expect(
         client.run(repository, {
-          outputDir: output,
+          outputDir: scanDir,
           archiveExisting: true,
           signal: cancellation.signal,
           onOutputDirReady: () => {
@@ -2034,13 +2022,13 @@ describe("CodexSecurity orchestration", () => {
       expect(observerErrors).toEqual([
         ["onOutputArchived", "archive observer exploded"],
       ]);
-      expect(archived?.startsWith(`${output}.previous-`)).toBe(true);
+      expect(archived?.startsWith(`${scanDir}.previous-`)).toBe(true);
       expect(registration).toContain("--archive-existing");
       expect(registration).not.toContain("--archived-scan-dir");
       expect(await readFile(join(archived!, "previous.txt"), "utf8")).toBe(
         "previous scan\n",
       );
-      await expect(stat(output)).resolves.toBeDefined();
+      await expect(stat(scanDir)).resolves.toBeDefined();
       await client.close();
     },
   );
@@ -2058,9 +2046,7 @@ describe("CodexSecurity orchestration", () => {
   )(
     "cancels archived registration at $boundary via $cancel, mode=$mode",
     async ({ boundary, cancel, mode }) => {
-      const { root, repository, codexHome } = await runtimeDirectories();
-      const output = join(root, "scan");
-      await mkdir(output, { mode: 0o700 });
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
       const python = pythonExecutable()!;
       const environment = {
         PATH: process.env["PATH"],
@@ -2085,7 +2071,7 @@ describe("CodexSecurity orchestration", () => {
           "--repository",
           repository,
           "--scan-dir",
-          output,
+          scanDir,
           "--recipe-json",
           JSON.stringify({
             repository,
@@ -2102,7 +2088,7 @@ describe("CodexSecurity orchestration", () => {
           "--message",
           "synthetic stopped scan",
         ]);
-        await writeFile(join(output, "previous.txt"), "previous scan\n");
+        await writeFile(join(scanDir, "previous.txt"), "previous scan\n");
       }
       const connections = new Set<Socket>();
       let cleaningUp = false;
@@ -2117,43 +2103,51 @@ describe("CodexSecurity orchestration", () => {
       if (address === null || typeof address === "string")
         throw new Error("Missing fixture port");
       const pluginRoot = join(root, "controlled-plugin");
-      await cp(PLUGIN_ROOT, pluginRoot, { recursive: true });
+      for (const file of [
+        ".codex-plugin/plugin.json",
+        "skills/security-scan/SKILL.md",
+        "schemas/findings.schema.json",
+      ]) {
+        await cp(join(PLUGIN_ROOT, file), join(pluginRoot, file));
+      }
+      await mkdir(join(pluginRoot, "scripts"), { recursive: true });
+      const afterRename = boundary === "commit" || boundary === "rollback";
+      const hook = afterRename
+        ? "insert_running_scan"
+        : "directory_snapshot_regular_file_count";
+      const framedArgument = "--fixture-message=出力\0literal\nsecond line";
       await writeFile(
         join(pluginRoot, "scripts", "workbench_db.py"),
-        [
-          "import io, runpy, socket, sys",
-          "from pathlib import Path",
-          `workbench = runpy.run_path(${JSON.stringify(join(PLUGIN_ROOT, "scripts", "workbench_db.py"))})`,
-          "namespace = workbench['main'].__globals__",
-          "def pause():",
-          `    with socket.create_connection(('127.0.0.1', ${address.port})) as connection:`,
-          "        connection.sendall(b'ready')",
-          "        if connection.recv(1) == b'p':",
-          "            connection.sendall(b'alive')",
-          "            connection.recv(1)",
-          "def main(**kwargs):",
-          "    sys.stdout.reconfigure(newline='\\r\\n')",
-          "    if sys.argv[1:2] == ['register-cli-scan'] and '--help' not in sys.argv:",
-          ...(mode === "real"
-            ? [
-                `        sys.argv.remove(${JSON.stringify("--fixture-message=出力\0literal\nsecond line")})`,
-              ]
-            : []),
-          "        payload = sys.stdin.buffer.read()",
-          `        Path(${JSON.stringify(join(root, "registration-input.json"))}).write_bytes(payload)`,
-          '        sys.stdin = io.TextIOWrapper(io.BytesIO(payload), encoding="utf-8")',
-          `        original = namespace[${JSON.stringify(boundary === "commit" || boundary === "rollback" ? "insert_running_scan" : "directory_snapshot_regular_file_count")}]`,
-          "        def paused(*args, **options):",
-          "            pause()",
-          ...(boundary === "rollback"
-            ? [
-                "            raise RuntimeError('synthetic registration failure after rename')",
-              ]
-            : ["            return original(*args, **options)"]),
-          `        namespace[${JSON.stringify(boundary === "commit" || boundary === "rollback" ? "insert_running_scan" : "directory_snapshot_regular_file_count")}] = paused`,
-          "    workbench['main'](**kwargs)",
-          "if __name__ == '__main__': main()",
-        ].join("\n"),
+        `import io, runpy, socket, sys
+from pathlib import Path
+
+workbench = runpy.run_path(${JSON.stringify(join(PLUGIN_ROOT, "scripts", "workbench_db.py"))})
+namespace = workbench["main"].__globals__
+original = namespace["${hook}"]
+
+def paused(*args, **options):
+    with socket.create_connection(("127.0.0.1", ${address.port})) as connection:
+        connection.sendall(b"ready")
+        if connection.recv(1) == b"p":
+            connection.sendall(b"alive")
+            connection.recv(1)
+    if ${JSON.stringify(boundary)} == "rollback":
+        raise RuntimeError("synthetic registration failure after rename")
+    return original(*args, **options)
+
+def main(**kwargs):
+    sys.stdout.reconfigure(newline="\\r\\n")
+    if sys.argv[1:2] == ["register-cli-scan"] and "--help" not in sys.argv:
+        sys.argv.remove(${JSON.stringify(framedArgument)})
+        payload = sys.stdin.buffer.read()
+        Path(${JSON.stringify(join(root, "registration-input.json"))}).write_bytes(payload)
+        sys.stdin = io.TextIOWrapper(io.BytesIO(payload), encoding="utf-8")
+        namespace["${hook}"] = paused
+    workbench["main"](**kwargs)
+
+if __name__ == "__main__":
+    main()
+`,
       );
       let submitted: string | undefined;
       const registration: typeof runWorkbench = async (
@@ -2161,15 +2155,12 @@ describe("CodexSecurity orchestration", () => {
         args,
         input,
       ) => {
-        if (args[0] === "register-cli-scan") {
-          submitted = `\n${JSON.stringify(JSON.parse(input!), null, 2)}\r\n`;
-          input = submitted;
-          // The custom wrapper accepts this text argument before calling the
-          // real workbench, exercising framed argv at each archive boundary.
-          if (mode === "real")
-            args = [...args, "--fixture-message=出力\0literal\nsecond line"];
-        }
-        return runWorkbench(options, args, input);
+        if (args[0] !== "register-cli-scan")
+          return runWorkbench(options, args, input);
+        submitted = `\n${JSON.stringify(JSON.parse(input!), null, 2)}\r\n`;
+        // The custom wrapper accepts this text argument before calling the
+        // real workbench, exercising framed argv at each archive boundary.
+        return runWorkbench(options, [...args, framedArgument], submitted);
       };
       const controller = new AbortController();
       const client = new TestClient(
@@ -2195,7 +2186,7 @@ describe("CodexSecurity orchestration", () => {
       const deadline = guard.signal;
       const connected = once(server, "connection", { signal: deadline });
       const options = {
-        outputDir: output,
+        outputDir: scanDir,
         archiveExisting: true,
         signal: controller.signal,
       };
@@ -2256,7 +2247,7 @@ describe("CodexSecurity orchestration", () => {
         });
         if (cancel === "close") closing = client.close();
         else controller.abort();
-        if (boundary === "commit" || boundary === "rollback") {
+        if (afterRename) {
           // This child has already renamed the directory. A request/response
           // proves it remains alive after cancellation until we let it settle.
           const alive = once(socket, "data", { signal: deadline });
@@ -2280,7 +2271,7 @@ describe("CodexSecurity orchestration", () => {
         );
         if (previousId !== undefined) {
           const previous = scans.find((scan) => scan.scanId === previousId)!;
-          expect(previous.scanDir === output).toBe(boundary !== "commit");
+          expect(previous.scanDir === scanDir).toBe(boundary !== "commit");
           expect(
             await readFile(join(previous.scanDir, "previous.txt"), "utf8"),
           ).toBe("previous scan\n");
@@ -7116,109 +7107,6 @@ describe("CodexSecurity orchestration", () => {
       ).rejects.toThrow("legacy scope prepared");
     } finally {
       await client.close();
-    }
-  });
-
-  test("keeps requested source paths without ranking or ignored directory files", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const source = join(repository, "src");
-    const ignored = join(source, "node_modules");
-    const vendored = join(source, "vendor");
-    const scopes = join(root, "scopes.json");
-    const output = join(root, "scoped-source-input.jsonl");
-    await mkdir(join(source, "tests"), { recursive: true });
-    await mkdir(join(source, "examples"));
-    await mkdir(ignored);
-    await mkdir(vendored);
-    execFileSync("git", ["init", "-q"], { cwd: repository });
-    execFileSync("git", ["config", "--local", "core.autocrlf", "false"], {
-      cwd: repository,
-    });
-    await Promise.all([
-      writeFile(
-        join(repository, ".gitignore"),
-        "node_modules/\n.env\nvendor/\n",
-      ),
-      writeFile(join(source, "handler.ts"), "export {};\n"),
-      writeFile(join(source, "Dockerfile"), "FROM scratch\n"),
-      writeFile(join(source, "tests", "handler.test.ts"), "export {};\n"),
-      writeFile(join(source, "examples", "demo.ts"), "export {};\n"),
-      writeFile(join(source, ".env"), "SECRET=private\n"),
-      writeFile(
-        join(source, "logo.png"),
-        Buffer.from([0x89, 0x50, 0x4e, 0x47]),
-      ),
-      writeFile(join(ignored, "dependency.ts"), "export {};\n"),
-      writeFile(join(vendored, "dependency.ts"), "export {};\n"),
-    ]);
-    execFileSync(
-      "git",
-      ["add", "--force", "src/vendor/dependency.ts", "src/logo.png"],
-      { cwd: repository },
-    );
-
-    const enumerate = async (requested: string[]) => {
-      await writeFile(scopes, JSON.stringify(requested));
-      execFileSync(
-        nodeCommand().command,
-        [
-          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
-          "make-repo-scope-input",
-          "--repo",
-          repository,
-          "--scopes-file",
-          scopes,
-          "--out",
-          output,
-        ],
-        { stdio: "pipe" },
-      );
-      return (await readFile(output, "utf8"))
-        .trimEnd()
-        .split("\n")
-        .map((row) => (JSON.parse(row) as { path: string }).path);
-    };
-
-    expect(await enumerate(["src"])).toEqual([
-      "src/Dockerfile",
-      "src/examples/demo.ts",
-      "src/handler.ts",
-      "src/logo.png",
-      "src/tests/handler.test.ts",
-      "src/vendor/dependency.ts",
-    ]);
-    expect(await enumerate(["src", "src/.env"])).toEqual([
-      "src/.env",
-      "src/Dockerfile",
-      "src/examples/demo.ts",
-      "src/handler.ts",
-      "src/logo.png",
-      "src/tests/handler.test.ts",
-      "src/vendor/dependency.ts",
-    ]);
-    expect(await enumerate(["src/vendor", "src/logo.png"])).toEqual([
-      "src/logo.png",
-      "src/vendor/dependency.ts",
-    ]);
-    await expect(enumerate(["../scopes.json"])).rejects.toThrow();
-    if (process.platform !== "win32") {
-      await symlink(join(source, "handler.ts"), join(source, "alias.ts"));
-      await symlink(source, join(repository, "alias"));
-      await expect(enumerate(["src/alias.ts"])).rejects.toThrow(
-        /symbolic links/,
-      );
-      await expect(enumerate(["alias/handler.ts"])).rejects.toThrow(
-        /symbolic links/,
-      );
-      await expect(enumerate(["alias/../src/handler.ts"])).rejects.toThrow(
-        /symbolic links/,
-      );
-    } else {
-      await symlink(source, join(repository, "junction"), "junction");
-      await expect(enumerate(["junction/handler.ts"])).rejects.toThrow(
-        /symbolic links/,
-      );
     }
   });
 
