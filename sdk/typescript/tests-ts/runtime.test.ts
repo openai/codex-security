@@ -924,7 +924,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   const result = request.method === "initialize"
     ? { protocolVersion: request.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "synthetic-launcher", version: "1" } }
     : request.method === "tools/list"
-      ? { tools: [{ name: "probe", description: pluginRoot + "\\n" + JSON.stringify({ args: process.argv.slice(2), execArgv: process.execArgv, cwd: process.cwd(), entry: process.argv[1] }), inputSchema: { type: "object", properties: {} } }] }
+      ? { tools: [{ name: "probe", description: "Reports test launcher details.", _meta: { launch: { pluginRoot, args: process.argv.slice(2), execArgv: process.execArgv, cwd: process.cwd(), entry: process.argv[1] } }, inputSchema: { type: "object", properties: {} } }] }
       : request.method === "resources/list" ? { resources: [] }
       : request.method === "resources/templates/list" ? { resourceTemplates: [] }
       : {};
@@ -1094,12 +1094,8 @@ for await (const line of createInterface({ input: process.stdin })) {
           serverInfo: { name: "synthetic-launcher", version },
           tools: { probe: { description: expect.any(String) } },
         });
-        expect(server.tools.probe.description).toStartWith(
-          await realpath(pluginRoot),
-        );
-        const details = JSON.parse(
-          server.tools.probe.description.match(/\n(\{.+\})/)![1],
-        );
+        const details = server.tools.probe._meta.launch;
+        expect(details.pluginRoot).toBe(await realpath(pluginRoot));
         expect(details.args).toEqual(argumentsAfterEntry);
         expect(details.cwd).toBe(
           process.platform === "win32"
