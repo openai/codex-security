@@ -55,12 +55,14 @@ try {
   await testPrepareUsesOnlyAuthoritativeDiffChanges();
   await testPrepareIncludesPerlSourceWithMixedEncodings();
   await testPrepareIncludesStagedAndUnstagedChanges();
+  await testEmptyDiffInventoryIsValid();
   await testInventoryChildPreservesSettingsAndCwd();
   if (process.platform !== "win32") await testInventoryChildPreservesRawPaths();
   await testInventoryChildFailuresPreserveOutput();
   await testWorkerReadsItsOwnBoundInventory();
   await testCursorDoesNotExceedInventory();
   await testEmptyInventoryIsValid();
+  await testEmptyChildDoesNotInheritParentGitFiles();
   await testUnsafeInventoryRowsAreRejected();
   await testSymlinkedInventoryIsRejected();
   await testInventoryReadErrorsAreReported();
@@ -667,6 +669,36 @@ async function testPrepareIncludesStagedAndUnstagedChanges() {
   });
 }
 
+async function testEmptyDiffInventoryIsValid() {
+  const fixture = await createFixture("empty selected diff");
+  await runGit(fixture.repoRoot, "init", "-q");
+  await fixture.writeRepositoryFile("src/app.ts", "export const app = 1;\n");
+  await runGit(fixture.repoRoot, "add", "src/app.ts");
+  await runGit(fixture.repoRoot, "commit", "-qm", "initial source");
+  const revision = await runGit(
+    fixture.repoRoot,
+    "rev-parse",
+    "--verify",
+    "HEAD",
+  );
+  const context = {
+    ...fixture.scan,
+    mode: "diff",
+    targetContract: {
+      diffTarget: {
+        kind: "range",
+        baseRevision: revision,
+        headRevision: revision,
+      },
+    },
+  };
+
+  assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
+    reviewItemsTotal: 0,
+  });
+  assert.equal(await readFile(fixture.scanInventory, "utf8"), "");
+}
+
 async function testWorkerReadsItsOwnBoundInventory() {
   const fixture = await createFixture("isolated worker inventory");
   await writeInventory(fixture.scanInventory, "./src/parent.ts\n");
@@ -702,6 +734,25 @@ async function testEmptyInventoryIsValid() {
   assert.deepEqual(await inventory.listCodexSecurityReviewItems(fixture.scan), {
     items: [],
   });
+}
+
+async function testEmptyChildDoesNotInheritParentGitFiles() {
+  const fixture = await createFixture("empty selected child");
+  const repository = path.dirname(fixture.repoRoot);
+  await runGit(repository, "init", "-q");
+  await writeFile(path.join(repository, "parent-source.ts"), "export {}\n");
+  await runGit(repository, "add", "parent-source.ts");
+  await runGit(repository, "commit", "-qm", "parent source");
+
+  assert.match(
+    await runGit(fixture.repoRoot, "rev-parse", "--verify", "HEAD"),
+    /^[0-9a-f]+$/u,
+  );
+  assert.deepEqual(
+    await inventory.prepareCodexSecurityReviewItems(fixture.scan),
+    { reviewItemsTotal: 0 },
+  );
+  assert.equal(await readFile(fixture.scanInventory, "utf8"), "");
 }
 
 async function testUnsafeInventoryRowsAreRejected() {

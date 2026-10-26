@@ -30,6 +30,10 @@ import { startRpcServer } from "./support/rpc-server.ts";
 const execFileAsync = promisify(execFile);
 
 const pluginRoot = path.resolve(mcpAppRoot, "..");
+const bundledPluginRoot = path.resolve(
+  mcpAppRoot,
+  "../../../sdk/typescript/_bundled_plugin",
+);
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
 let parentSandboxState: unknown = readOnlyParentSandboxState(pluginRoot);
 
@@ -47,6 +51,12 @@ async function testDeepScanStdioLifecycle() {
   const failedTargetPath = path.join(fixtureRoot, "failed-target");
   const stateDir = path.join(fixtureRoot, "state");
   const codexHome = path.join(fixtureRoot, "codex [home]");
+  const activePluginRoot = path.join(fixtureRoot, "active-plugin");
+  const activeWorkbenchPath = path.join(
+    activePluginRoot,
+    "scripts",
+    "workbench_db.py",
+  );
   const installedPluginRoot = path.join(codexHome, "plugins", "installed");
   const runtimeConfigPath = path.join(fixtureRoot, "active-config.toml");
   const projectConfigPath = path.join(fixtureRoot, "selected.yaml");
@@ -89,14 +99,29 @@ async function testDeepScanStdioLifecycle() {
     "scripts",
     "references",
     "schemas",
+    "shared",
     ".codex-plugin",
   ]) {
-    await cp(
-      path.join(pluginRoot, directory),
-      path.join(installedPluginRoot, directory),
-      { recursive: true },
-    );
+    for (const destination of [installedPluginRoot, activePluginRoot]) {
+      await cp(
+        path.join(pluginRoot, directory),
+        path.join(destination, directory),
+        {
+          recursive: true,
+        },
+      );
+    }
   }
+  await cp(
+    path.join(bundledPluginRoot, "mcp"),
+    path.join(activePluginRoot, "mcp"),
+    { recursive: true },
+  );
+  await cp(
+    path.join(bundledPluginRoot, "mcp", "native"),
+    path.join(installedPluginRoot, "mcp", "native"),
+    { recursive: true },
+  );
   const parentSandbox = readOnlyParentSandboxState(pluginRoot);
   parentSandboxState = {
     ...parentSandbox,
@@ -168,7 +193,7 @@ model_reasoning_summary = "none"
     CODEX_CLI_PATH: fakeCodexPath,
     CODEX_HOME: codexHome,
     CODEX_SECURITY_CONFIG_PATH: runtimeConfigPath,
-    CODEX_SECURITY_PLUGIN_ROOT: pluginRoot,
+    CODEX_SECURITY_PLUGIN_ROOT: activePluginRoot,
     CODEX_SECURITY_SCAN_ROOT: path.join(fixtureRoot, "scans"),
     CODEX_SECURITY_STATE_DIR: stateDir,
     PYTHON: pythonWrapperPath,
@@ -310,7 +335,7 @@ model_reasoning_summary = "none"
       path.join(installedPluginRoot, "scripts", "workbench_db.py"),
       'raise RuntimeError("Installed plugin helpers replaced during another scan")\n',
     );
-    assert.equal(workerContext.pluginRoot, pluginRoot);
+    assert.equal(workerContext.pluginRoot, activePluginRoot);
     assert.equal(startedWorker.readCoreScanReference, true);
     assert.equal(workerContext.targetPath, await realpath(targetPath));
     assert.deepEqual(workerContext.includePaths, ["."]);
@@ -351,7 +376,7 @@ model_reasoning_summary = "none"
     assertReadOnlyWorkerInvocation(startedWorker.argv, codexHome);
     assertWorkerArtifactEnvironment(
       startedWorker.argv,
-      pluginRoot,
+      activePluginRoot,
       pythonWrapperPath,
     );
 
@@ -598,7 +623,7 @@ model_reasoning_summary = "none"
       (worker: PersistedDeepScanWorker) => worker.kind === "discovery",
     )?.artifactDir;
     assert.equal(typeof failedArtifactRoot, "string");
-    assert.equal(failedWorkerContext.pluginRoot, pluginRoot);
+    assert.equal(failedWorkerContext.pluginRoot, activePluginRoot);
     assert.equal(failedWorker.readCoreScanReference, true);
     assert.equal(
       failedWorkerContext.targetPath,
@@ -1020,16 +1045,17 @@ model_reasoning_summary = "none"
         ),
         true,
       );
-      await assert.rejects(
-        readFile(
+      assert.equal(
+        await readFile(
           path.join(
             resumedScan.scanDir,
             "artifacts",
             "02_discovery",
             "in_scope_files.txt",
           ),
+          "utf8",
         ),
-        { code: "ENOENT" },
+        "./fixture.py\n",
       );
       assert.deepEqual(
         (await readJson(resumedScan.scanDir, "findings.json")).findings,
@@ -1054,9 +1080,9 @@ model_reasoning_summary = "none"
         assert.ok(launches.length > 0);
         for (const launch of launches) {
           assert.deepEqual(launch.args.slice(0, 2), ["-B", "-c"]);
-          assert.equal(launch.args.at(-1), workbenchPath);
+          assert.equal(launch.args.at(-1), activeWorkbenchPath);
           assert.equal(launch.args.length, 4);
-          assert.equal(launch.cwd, pluginRoot);
+          assert.equal(launch.cwd, await realpath(activePluginRoot));
         }
       }
       const executions = (await readLogLines(startLogPath)).slice(
@@ -1068,12 +1094,12 @@ model_reasoning_summary = "none"
         assert.equal(execution.readCoreScanReference, true);
         const context = discoveryPromptContext(execution.stdin);
         if (context.workerLabel) {
-          assert.equal(context.pluginRoot, pluginRoot);
+          assert.equal(context.pluginRoot, activePluginRoot);
           assert.deepEqual(context.includePaths, ["."]);
         }
         assertWorkerArtifactEnvironment(
           execution.argv,
-          pluginRoot,
+          activePluginRoot,
           pythonWrapperPath,
         );
         assertFlagPair(
@@ -1364,9 +1390,19 @@ async function testCliDeepScanEngine({
   assert.ok(helperLaunches.length > 0);
   for (const launch of helperLaunches) {
     assert.deepEqual(launch.args.slice(0, 5), ["-I", "-X", "utf8", "-B", "-c"]);
-    assert.equal(launch.args.at(-1), workbenchPath);
+    assert.equal(
+      launch.args.at(-1),
+      path.join(
+        environment.CODEX_SECURITY_PLUGIN_ROOT!,
+        "scripts",
+        "workbench_db.py",
+      ),
+    );
     assert.equal(launch.args.length, 7);
-    assert.equal(launch.cwd, pluginRoot);
+    assert.equal(
+      launch.cwd,
+      await realpath(environment.CODEX_SECURITY_PLUGIN_ROOT!),
+    );
   }
   assert.deepEqual(JSON.parse(result.stdout), {
     scanId: completed.scanId,
@@ -1673,6 +1709,11 @@ async function getDeepScan({
 async function waitForDeepScanWorker(input: Parameters<typeof getDeepScan>[0]) {
   await waitFor(async () => {
     const deepScan = await getDeepScan(input);
+    if (deepScan.status === "failed") {
+      throw new Error(
+        `Deep Scan failed before starting a worker: ${deepScan.error}`,
+      );
+    }
     const worker = deepScan.workers.find(
       (candidate: PersistedDeepScanWorker) =>
         candidate.kind === "discovery" && candidate.status === "running",

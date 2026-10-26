@@ -1,0 +1,235 @@
+import assert from "node:assert/strict";
+import { execFile as nodeExecFile } from "node:child_process";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { after, test } from "node:test";
+import { promisify } from "node:util";
+import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
+import {
+  DeepScanCoordinatorRegistry,
+  FakeExecutor,
+  FakeStore,
+  fixtureRun,
+  runCoordinator,
+  standardScanDraft,
+  temporaryDirectories,
+  type TestWorker,
+} from "./deep_scan_coordinator_fixture.ts";
+import { importSource } from "./import-module.ts";
+import { writeJson } from "./support/json.ts";
+
+const execFile = promisify(nodeExecFile);
+const { startDeepScanEngine } = await importSource("src/deep-scan/engine.ts", {
+  loader: { ".md": "text" },
+  define: {
+    "import.meta.url": JSON.stringify(
+      new URL(
+        "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
+        import.meta.url,
+      ).href,
+    ),
+  },
+});
+
+after(() => temporaryDirectories.cleanup());
+
+test("a fresh empty target fails before discovery or reduction", async () => {
+  const fixture = await fixtureRun();
+  const store = new FakeStore(fixture.run);
+  const executor = new FakeExecutor();
+  let completed = false;
+
+  const terminal = await runCoordinator(fixture, store, executor, {
+    prepareReviewItems: async () => ({ reviewItemsTotal: 0 }),
+    onComplete: async () => {
+      completed = true;
+    },
+  });
+
+  assert.equal(terminal?.status, "failed");
+  assert.match(
+    terminal?.error ?? "",
+    /no reviewable source files.*no security audit was performed/iu,
+  );
+  assert.equal(executor.discoveryCalls, 0);
+  assert.equal(executor.dedupCalls, 0);
+  assert.deepEqual(store.workerUpdates, []);
+  assert.deepEqual(store.finishCalls, []);
+  assert.equal(store.failureMessages.length, 1);
+  assert.equal(completed, false);
+});
+
+test("a nonempty target retains normal discovery and reduction", async () => {
+  const fixture = await fixtureRun();
+  const store = new FakeStore(fixture.run);
+  const executor = new FakeExecutor();
+
+  const terminal = await runCoordinator(fixture, store, executor, {
+    prepareReviewItems: async () => ({ reviewItemsTotal: 1 }),
+  });
+
+  assert.equal(terminal?.status, "succeeded", terminal?.error);
+  assert.equal(executor.discoveryCalls, 1);
+  assert.equal(executor.dedupCalls, 1);
+});
+
+test("an inventory failure is not treated as an empty target", async () => {
+  const fixture = await fixtureRun();
+  const store = new FakeStore(fixture.run);
+  const executor = new FakeExecutor();
+
+  const terminal = await runCoordinator(fixture, store, executor, {
+    prepareReviewItems: async () => {
+      throw new Error("synthetic inventory failure");
+    },
+  });
+
+  assert.equal(terminal?.status, "failed");
+  assert.equal(terminal?.error, "synthetic inventory failure");
+  assert.doesNotMatch(terminal?.error ?? "", /empty target/iu);
+  assert.equal(executor.discoveryCalls, 0);
+  assert.equal(executor.dedupCalls, 0);
+  assert.deepEqual(store.workerUpdates, []);
+});
+
+test("resume preserves accepted work without replacing the source inventory", async () => {
+  const fixture = await fixtureRun();
+  const resultPath = path.join(
+    fixture.run.scanDir,
+    "artifacts",
+    "deep_discovery",
+    "workers",
+    "discovery-0001",
+    "output",
+    "result.json",
+  );
+  await mkdir(path.dirname(resultPath), { recursive: true });
+  await writeJson(
+    resultPath,
+    standardScanDraft(fixture.run.scanId, undefined, "discovery-0001"),
+  );
+  const worker: TestWorker = {
+    id: "accepted-discovery",
+    kind: "discovery",
+    status: "succeeded",
+    mergeState: "buffered",
+    promptPath: path.join(
+      fixture.run.scanDir,
+      "artifacts",
+      "deep_discovery",
+      "workers",
+      "discovery-0001",
+      "prompt.md",
+    ),
+    artifactDir: path.dirname(resultPath),
+    attempt: 1,
+    resultManifestPath: resultPath,
+    completionSequence: 1,
+  };
+  fixture.run.persistedWorkers = [worker];
+  fixture.run.dispatchedCount = 1;
+  const store = new FakeStore(fixture.run);
+  store.workers.set(worker.id, worker);
+  store.completionSequence = 1;
+  const executor = new FakeExecutor();
+  let preflightCalls = 0;
+
+  const terminal = await runCoordinator(fixture, store, executor, {
+    prepareReviewItems: async () => {
+      preflightCalls += 1;
+      return { reviewItemsTotal: 0 };
+    },
+  });
+
+  assert.equal(terminal?.status, "succeeded", terminal?.error);
+  assert.equal(preflightCalls, 0);
+  assert.equal(executor.discoveryCalls, 0);
+  assert.equal(executor.dedupCalls, 1);
+  assert.equal(store.dedupClaims[0]?.workerIds.includes(worker.id), true);
+});
+
+test("an empty child of a nonempty Git repository fails through the shared engine", async () => {
+  const fixture = await fixtureRun();
+  const repository = path.dirname(fixture.run.targetPath);
+  await mkdir(fixture.run.targetPath, { recursive: true });
+  await writeFile(path.join(repository, "parent-source.ts"), "export {}\n");
+  await runGit(repository, "init", "-q");
+  await runGit(repository, "add", "parent-source.ts");
+  await runGit(repository, "commit", "-qm", "parent source");
+  const revision = await runGit(
+    fixture.run.targetPath,
+    "rev-parse",
+    "--verify",
+    "HEAD",
+  );
+  assert.match(revision, /^[0-9a-f]+$/u);
+
+  const store = new FakeStore(fixture.run);
+  const executor = new FakeExecutor();
+  const registry = new DeepScanCoordinatorRegistry();
+  const start = registry.start.bind(registry);
+  registry.start = (options: CoordinatorOptions) =>
+    start({ ...options, executor });
+  const pluginRoot = path.resolve(
+    import.meta.dirname,
+    "../../../../sdk/typescript/_bundled_plugin",
+  );
+  const { coordinator } = await startDeepScanEngine({
+    run: store.run,
+    store,
+    registry,
+    runWorkbench: async (args: string[]) => {
+      if (args[0] === "preserve-scan-results") return {};
+      assert.equal(args[0], "get-scan");
+      return {
+        scan: {
+          scanId: fixture.run.scanId,
+          scanDir: fixture.run.scanDir,
+          targetPath: fixture.run.targetPath,
+          scope: ".",
+          mode: "deep",
+          status: "running",
+          contract: {},
+          targetRevision: revision,
+        },
+      };
+    },
+    pluginRoot,
+    pythonCommand: "fixture-python",
+    parentSandbox: { filesystemDenies: [] },
+    threadId: "fixture-owner",
+  });
+  const terminal = await coordinator.wait(undefined, 10_000);
+
+  assert.equal(terminal?.status, "failed");
+  assert.match(terminal?.error ?? "", /no security audit was performed/iu);
+  assert.equal(executor.discoveryCalls, 0);
+  assert.equal(executor.dedupCalls, 0);
+  assert.equal(
+    await readFile(
+      path.join(
+        fixture.run.scanDir,
+        "artifacts",
+        "02_discovery",
+        "in_scope_files.txt",
+      ),
+      "utf8",
+    ),
+    "",
+  );
+});
+
+async function runGit(repository: string, ...arguments_: string[]) {
+  const { stdout } = await execFile(
+    "git",
+    [
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.com",
+      ...arguments_,
+    ],
+    { cwd: repository, encoding: "utf8" },
+  );
+  return stdout.trim();
+}
