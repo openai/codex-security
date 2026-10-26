@@ -20,6 +20,7 @@ import {
   classifySeverity,
   type ClassifySeverityOptions,
 } from "../src/classify-severity.js";
+import { Database } from "bun:sqlite";
 import { loadContract } from "../src/contract.js";
 import type { JsonObject } from "../src/config.js";
 import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
@@ -151,22 +152,11 @@ function classifier(finding: Finding, excluded = false) {
 }
 
 async function query(environment: NodeJS.ProcessEnv, sql: string) {
-  const result = spawnSync(
-    Bun.which("node")!,
-    [
-      "--input-type=module",
-      "--eval",
-      `import { DatabaseSync } from "node:sqlite";
-const database = new DatabaseSync(process.argv[1]);
-try { console.log(JSON.stringify(database.prepare(process.argv[2]).all())); }
-finally { database.close(); }`,
-      join(environment["CODEX_SECURITY_STATE_DIR"]!, "workbench.sqlite3"),
-      sql,
-    ],
-    { encoding: "utf8", env: environment },
+  using database = new Database(
+    join(environment["CODEX_SECURITY_STATE_DIR"]!, "workbench.sqlite3"),
   );
-  expect(result.status, result.stderr).toBe(0);
-  return JSON.parse(result.stdout) as Record<string, unknown>[];
+  database.run("PRAGMA foreign_keys = ON");
+  return database.query<Record<string, unknown>, []>(sql).all();
 }
 
 test("classification and saved assessments run with Node and no Python", async () => {
