@@ -413,7 +413,7 @@ function initialPullBody(template) {
     Changes:
       "Update the package version and draft release notes. The version header and PR title are maintained by automation. Edit the marked note sections in `.github/release-notes.md`; edited or deleted sections become human-owned. New suggestions appear in subsequent bot comments. The PR description is never regenerated.",
     Testing:
-      "The updater does not run package tests. Check required CI and Codex review on the current head before merging. Request a final Codex review if the last review targets an older head. Record any additional checks here.",
+      "The updater does not run package tests. Before merging, verify required CI in the **Checks** tab and Codex review on the current commit. Request a final review if Codex last reviewed an older commit. Post later manual test results in a PR comment or review with the tested commit SHA. Editing the description to update status can trigger CI.",
     "Risk and rollout":
       "Merging this PR starts the existing CI and protected release process. Review migration details and complete the public disclosure review before merging.",
   };
