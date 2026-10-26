@@ -1951,6 +1951,11 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
       changed: true,
     },
     {
+      scenario: "an unavailable blob for the previous package manifest",
+      previousVersion: null,
+      changed: false,
+    },
+    {
       scenario: "a successful fix after the version-increase commit failed CI",
       changed: true,
     },
@@ -2027,8 +2032,8 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
         "      fi",
         "      ;;",
         "    rev-parse)",
-        '      if [[ "$2" == "$RELEASE_SHA^" ]]; then',
-        "        printf '%s\\n' \"$MOCK_PREVIOUS_SHA\"",
+        '      if [[ "$2" == "--verify" && "$3" == "$RELEASE_SHA^:sdk/typescript/package.json" ]]; then',
+        "        echo previous-manifest",
         '      elif [[ "$2" == "--verify" && "$3" == "refs/tags/npm-v$MOCK_RELEASE_VERSION^{commit}" ]]; then',
         '        [[ -n "$MOCK_TAGGED_SHA" ]] || return 1',
         "        printf '%s\\n' \"$MOCK_TAGGED_SHA\"",
@@ -2042,8 +2047,13 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
         '      elif [[ "$2" == "$MOCK_TAGGED_SHA:sdk/typescript/package.json" ]]; then',
         '        printf \'{"version":"%s"}\\n\' "$MOCK_TAGGED_VERSION"',
         "      else",
-        '        printf \'{"version":"%s"}\\n\' "$MOCK_PREVIOUS_VERSION"',
+        "        return 64",
         "      fi",
+        "      ;;",
+        "    cat-file)",
+        '      [[ "$2 $3" == "blob previous-manifest" ]] || return 64',
+        '      [[ -n "$MOCK_PREVIOUS_VERSION" ]] || { echo "unavailable manifest blob" >&2; return 1; }',
+        '      printf \'{"version":"%s"}\\n\' "$MOCK_PREVIOUS_VERSION"',
         "      ;;",
         "    *) return 64 ;;",
         "  esac",
@@ -2067,8 +2077,7 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
           GITHUB_OUTPUT: outputPath,
           GITHUB_REF: "refs/heads/main",
           GITHUB_SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          MOCK_PREVIOUS_SHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          MOCK_PREVIOUS_VERSION: previousVersion,
+          MOCK_PREVIOUS_VERSION: previousVersion ?? "",
           MOCK_PUBLISHED_VERSIONS: JSON.stringify(publishedVersions),
           MOCK_RELEASE_VERSION: currentVersion,
           MOCK_TAGGED_SHA: taggedSha,
@@ -2079,6 +2088,12 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
         { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
       );
 
+      if (previousVersion === null) {
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain("unavailable manifest blob");
+        expect(existsSync(outputPath)).toBe(false);
+        return;
+      }
       expect(result.stderr).toBe("");
       expect(result.status).toBe(0);
 
