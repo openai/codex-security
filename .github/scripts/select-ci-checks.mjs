@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { checkoutBase } from "./verify-pr-source.mjs";
 
 const documentation =
   /^(?:README\.md|CONTRIBUTING\.md|CODE_OF_CONDUCT\.md|docs\/.*\.md|github-action\/README\.md|docker\/README\.md)$/;
@@ -122,20 +123,16 @@ if (
   const event = process.env.EVENT_NAME;
   const baseChanged = process.env.BASE_CHANGED === "true";
   if (event === "pull_request" && baseChanged) {
-    const { base, head } = JSON.parse(
+    const { changes, pull_request: pr } = JSON.parse(
       readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"),
-    ).pull_request;
-    const parents = execFileSync("git", ["show", "-s", "--format=%P", "HEAD"], {
-      encoding: "utf8",
-    }).trim();
-    const expected = `${base.sha} ${head.sha}`;
-    console.log(
-      `Requested base ${base.ref}. Expected merge parents ${expected}. Checked out ${parents}.`,
     );
-    if (parents !== expected) {
-      throw new Error(
-        "GitHub supplied a stale test merge. After the merge ref updates, reopen the pull request to start a fresh source run. Rerunning this attempt uses the same commit.",
-      );
+    // Ordinary edits already proved their live target before falling back to full checks.
+    if (changes?.base) {
+      const base = checkoutBase(pr, process.env.GITHUB_SHA);
+      if (base !== pr.base.sha)
+        throw new Error(
+          `Stale test merge. Requested ${pr.base.ref} at ${pr.base.sha}, checked out base ${base} with head ${pr.head.sha}. Start a fresh pull request event after the merge ref updates.`,
+        );
     }
   }
   const changes =

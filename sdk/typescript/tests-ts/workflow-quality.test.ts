@@ -243,6 +243,7 @@ test("classification uses the PR merge diff and validates retargeted merge paren
           env: {
             ...process.env,
             EVENT_NAME: "pull_request",
+            GITHUB_SHA: git("rev-parse", "HEAD").trim(),
             BASE_CHANGED: "false",
             GITHUB_OUTPUT: output,
             ...env,
@@ -265,14 +266,17 @@ test("classification uses the PR merge diff and validates retargeted merge paren
     const head = git("rev-parse", "docs").trim();
     const old = git("rev-parse", "HEAD^1^1").trim();
     const eventPath = join(directory, "event.json");
-    for (const [expectedBase, expectedHead, valid] of [
-      [base, head, true],
-      [old, head, false],
-      [base, old, false],
+    const baseEdit = { base: { ref: { from: "previous" } } };
+    for (const [changes, expectedBase, expectedHead, valid] of [
+      [baseEdit, base, head, true],
+      [baseEdit, old, head, false],
+      [baseEdit, base, old, false],
+      [{ title: { from: "Previous title" } }, old, head, true],
     ] as const) {
       await writeFile(
         eventPath,
         JSON.stringify({
+          changes,
           pull_request: {
             base: { ref: "main", sha: expectedBase },
             head: { sha: expectedHead },
@@ -288,8 +292,9 @@ test("classification uses the PR merge diff and validates retargeted merge paren
       const selection = await readFile(output, "utf8");
       if (valid) expect(selection).toContain("workflow-quality=true");
       else {
-        expect(retarget.stdout).toContain(`${base} ${head}`);
-        expect(retarget.stderr).toContain("stale test merge");
+        expect(retarget.stderr).toContain(base);
+        expect(retarget.stderr).toContain(head);
+        expect(retarget.stderr).toContain("Stale test merge");
         expect(selection).toBe("");
       }
     }

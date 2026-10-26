@@ -80,6 +80,10 @@ successful CI for the exact main commit before publication. Title and body edits
 leave source CI running. On an edit, CI checks the source result for the same
 pull request, base, head and test merge. It waits for a running source check and
 reports a verified result, including static checks, through the required checks.
+If the PR event reports an older base, CI can verify the edit on a newer test
+merge whose first parent is the current tip of that same branch. A stale merge
+or a retarget with different parents needs a fresh PR event after the merge ref
+updates. Reopening the PR or pushing a commit starts one.
 Only the original source run and an uninterrupted sequence of successful edits
 can carry a green result. A cancelled or retried run, a changed target, missing
 evidence or conflicting results require full qualification. Use **Re-run all
