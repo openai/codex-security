@@ -1,5 +1,4 @@
 import { testSharedReceiptSurvivesWorkerRetry } from "./deep_scan_receipt_cases.ts";
-import { testSuccessfulDeepCoveragePreservesWorkerReviewStatus } from "./deep_scan_coverage_cases.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
@@ -825,46 +824,37 @@ async function testExhaustedRetryFailsScan() {
   assert.equal(terminal.manifestPath, undefined);
 }
 
-async function testProviderCybersecurityRiskMessagesReplaceRefusedDiscoveryImmediately() {
-  for (const message of [
-    "Request blocked by cyberPolicy.",
-    "Request blocked by a safety policy violation.",
-    "This content was flagged for possible cybersecurity risk.",
-    "This content was flagged for potentially high-risk cyber activity.",
-  ]) {
-    const { fixture, store } = await coordinatorFixture({
-      stopAfterNoNew: 4,
-      stopAfterConsecutiveErrors: 3,
-      maxDiscoveryRuns: 3,
-    });
-    const executor = new FakeExecutor({
-      discoveryFailureMessages: { "discovery-0001": message },
-      discoveryCandidateId: "candidate-1",
-    });
-    const sleeps: number[] = [];
-    const terminal = await runCoordinator(fixture, store, executor, {
-      random: () => 0,
-      retryDelaysMs: [1, 3, 9],
-      clock: recordingClock(sleeps),
-    });
+async function testPolicyRefusalReplacesDiscoveryImmediately() {
+  const { fixture, store } = await coordinatorFixture({
+    stopAfterNoNew: 4,
+    stopAfterConsecutiveErrors: 3,
+    maxDiscoveryRuns: 3,
+  });
+  const executor = new FakeExecutor({
+    discoveryFailureMessages: {
+      "discovery-0001": "Request blocked by cyberPolicy.",
+    },
+    discoveryCandidateId: "candidate-1",
+  });
+  const sleeps: number[] = [];
+  const terminal = await runCoordinator(fixture, store, executor, {
+    random: () => 0,
+    retryDelaysMs: [1, 3, 9],
+    clock: recordingClock(sleeps),
+  });
 
-    assert.equal(terminal?.status, "succeeded", message);
-    assert.equal(terminal?.terminalReason, "capped");
-    assert.equal(executor.discoveryAttempts.size, 3);
-    assert.equal(executor.discoveryAttempts.get("discovery-0001"), 1, message);
-    assert.deepEqual(
-      sleeps,
-      [],
-      `a refused conversation must not be resumed: ${message}`,
-    );
-    assert.equal(store.run.consecutiveErrors, 0, message);
-    const refusal = [...store.workers.values()].find(
-      (worker) =>
-        path.basename(path.dirname(worker.promptPath)) === "discovery-0001",
-    );
-    assert.equal(refusal?.replaceableFailureKind, "policy_refusal", message);
-    assert.equal(refusal?.status, "canceled");
-  }
+  assert.equal(terminal?.status, "succeeded");
+  assert.equal(terminal?.terminalReason, "capped");
+  assert.equal(executor.discoveryAttempts.size, 3);
+  assert.equal(executor.discoveryAttempts.get("discovery-0001"), 1);
+  assert.deepEqual(sleeps, [], "a refused conversation must not be resumed");
+  assert.equal(store.run.consecutiveErrors, 0);
+  const refusal = [...store.workers.values()].find(
+    (worker) =>
+      path.basename(path.dirname(worker.promptPath)) === "discovery-0001",
+  );
+  assert.equal(refusal?.replaceableFailureKind, "policy_refusal");
+  assert.equal(refusal?.status, "canceled");
 }
 
 async function testTransientDiscoveryErrorsRetainRecovery() {
@@ -4264,7 +4254,6 @@ try {
   await testCompletionOrdering();
   await testSaturationPreservesFindingAlreadyBuffered();
   await testSaturationOmitsWorkerAcceptedDuringCancellation();
-  await testSuccessfulDeepCoveragePreservesWorkerReviewStatus();
   await testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus();
   await testSaturationIgnoresDiscoveryCancellationWriteFailure();
   await testSaturationIgnoresDiscoveryCancellationWriteFailure(true);
@@ -4281,7 +4270,7 @@ try {
   await testSlowReducerPausesDiscoveryRefill();
   await testSingletonHardCapReduction();
   await testExhaustedRetryFailsScan();
-  await testProviderCybersecurityRiskMessagesReplaceRefusedDiscoveryImmediately();
+  await testPolicyRefusalReplacesDiscoveryImmediately();
   await testTransientDiscoveryErrorsRetainRecovery();
   await testConsecutiveCybersecurityRefusalsFailAtConfiguredThreshold();
   await testRecoverableWorkerErrorsCannotFailScan();

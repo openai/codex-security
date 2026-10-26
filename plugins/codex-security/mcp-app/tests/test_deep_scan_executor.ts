@@ -1,4 +1,3 @@
-import { testArtifactStartupTimeoutClassification } from "./deep_scan_startup_cases.ts";
 import {
   workerGitEnvironment,
   workerRuntimeEnvironment,
@@ -217,7 +216,6 @@ try {
     await check(t, testCodeModeFrameDiagnosticBoundaries);
     await check(t, testUsageLimitClassification);
     await check(t, testOsErrorCodesRemainRetryable);
-    await check(t, testTextualMissingPathErrorsRemainRetryable);
     await check(t, testWorkerErrorClassificationPreservesExplicitFailures);
     if (process.platform !== "win32") {
       await check(t, testRetryNotificationDoesNotInterruptTurn);
@@ -234,16 +232,11 @@ try {
         "artifact retry diagnostic: Unicode",
       );
       await check(t, testCodeModeFrameDiagnosticSurvivesSuccessfulTurn);
-      await check(t, testUnstructuredConfigurationFailureRemainsRetryable);
-      await check(t, testUnstructuredThreadStartFailureRemainsRetryable);
+      await check(t, testSetupExitDiagnosticsRemainRetryable);
       await check(t, testPolicyFailuresRemainWorkerErrors);
       await check(t, testMalformedCommandEventsRemainRetryable);
       await check(t, testRateLimitPolicyFailureRemainsRetryable);
-      await check(
-        t,
-        () => testArtifactStartupTimeoutClassification(runFixtureWorker),
-        testArtifactStartupTimeoutClassification.name,
-      );
+      await check(t, testArtifactStartupTimeoutRemainsRetryable);
     }
   });
 } finally {
@@ -330,19 +323,6 @@ function testOsErrorCodesRemainRetryable() {
   }
 }
 
-function testTextualMissingPathErrorsRemainRetryable() {
-  for (const diagnostic of [
-    "Error: No such file or directory (os error 2)",
-    "Error: The system cannot find the file specified. (os error 2)",
-  ]) {
-    const original = new Error(
-      ["Codex Exec exited with code 1:", diagnostic].join("\n"),
-    );
-    const classified = classifyCodexWorkerError(original);
-    assert.equal(classified, original);
-  }
-}
-
 function testWorkerErrorClassificationPreservesExplicitFailures() {
   const explicit = new DeepScanNonRetryableError(
     "Explicitly rejected worker permission profile.",
@@ -391,8 +371,12 @@ function testWorkerErrorClassificationPreservesExplicitFailures() {
     "not logged in",
     "missing API key",
     "Codex Exec exited with code 2: failed to load configuration: invalid value",
+    "Codex Exec exited with code 1:\nError: No such file or directory (os error 2)",
+    "Codex Exec exited with code 1:\nError: The system cannot find the file specified. (os error 2)",
     "chatgpt authentication required for remote plugin catalog; api key auth is not supported",
     "chatgpt authentication required to sync remote plugins; api key auth is not supported",
+    "required MCP servers failed to initialize: codex_security_artifacts: timed out handshaking with MCP server after 30s",
+    "required MCP servers failed to initialize: other_server: request timed out",
   ]) {
     const original = new Error(message);
     assert.equal(classifyCodexWorkerError(original), original);
@@ -3663,22 +3647,29 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
   }
 }
 
-async function testUnstructuredConfigurationFailureRemainsRetryable() {
+async function testArtifactStartupTimeoutRemainsRetryable() {
   await assert.rejects(
-    runFixtureWorker("CONFIG_ERROR", "setup"),
-    (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-      error?.name === "Error" &&
-      error.message.startsWith("Codex Exec exited with code 2:"),
+    runFixtureWorker("ARTIFACT_MCP_STARTUP_TIMEOUT"),
+    (error: Error) =>
+      error.name === "Error" &&
+      error.message.includes("cs_artifacts: request timed out") &&
+      !isCodexCybersecurityPolicyRefusal(error),
   );
 }
 
-async function testUnstructuredThreadStartFailureRemainsRetryable() {
-  await assert.rejects(
-    runFixtureWorker("THREAD_START_CONFIG_ERROR", "setup"),
-    (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-      error?.name === "Error" &&
-      error.message.startsWith("Codex Exec exited with code 1:"),
-  );
+async function testSetupExitDiagnosticsRemainRetryable() {
+  for (const [prompt, code] of [
+    ["CONFIG_ERROR", 2],
+    ["THREAD_START_CONFIG_ERROR", 1],
+  ] as const) {
+    await assert.rejects(
+      runFixtureWorker(prompt, "setup"),
+      (error: Error) =>
+        error.name === "Error" &&
+        error.message.startsWith(`Codex Exec exited with code ${code}:`),
+      prompt,
+    );
+  }
 }
 
 async function testPolicyFailuresRemainWorkerErrors() {

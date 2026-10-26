@@ -79,18 +79,11 @@ if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => { if (!std
 
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }
 if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }
-if (stdin.includes('MCP_STARTUP_TIMEOUT') || stdin.includes('CATALOG_AUTH_ONLY') || stdin.includes('SYNC_AUTH_ONLY')) {
-  const syncWarning = stdin.includes('SYNC_AUTH_WARNING') || stdin.includes('SYNC_AUTH_ONLY');
-  const bothWarnings = stdin.includes('BOTH_AUTH_WARNINGS');
-  if (!syncWarning || bothWarnings) console.error('chatgpt authentication required for remote plugin catalog; api key auth is not supported');
-  if (syncWarning || bothWarnings) console.error('chatgpt authentication required to sync remote plugins; api key auth is not supported');
-  if (!stdin.includes('CATALOG_AUTH_ONLY') && !stdin.includes('SYNC_AUTH_ONLY')) {
-    const serverName = stdin.includes('OTHER_MCP_STARTUP_TIMEOUT') ? 'other_server' : stdin.includes('LEGACY_ARTIFACT_MCP_STARTUP_TIMEOUT') ? 'codex_security_artifacts' : 'cs_artifacts';
-    const timeout = stdin.includes('REQUEST_TIMED_OUT') ? 'request timed out' : 'timed out handshaking with MCP server after 30s';
-    console.error('required MCP servers failed to initialize: ' + serverName + ': ' + timeout);
-  }
-  if (stdin.includes('WITH_MISSING_API_KEY')) console.error('missing API key');
-  if (stdin.includes('WITH_POLICY_REFUSAL')) console.error('Request blocked by cyberPolicy.');
+if (stdin.includes('ARTIFACT_MCP_STARTUP_TIMEOUT')) {
+  console.error('chatgpt authentication required to sync remote plugins; api key auth is not supported');
+  console.error('required MCP servers failed to initialize: cs_artifacts: request timed out');
+  console.error('missing API key');
+  console.error('Request blocked by cyberPolicy.');
   process.exit(1);
 }
 const resumeIndex = process.argv.indexOf('resume');

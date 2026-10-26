@@ -849,12 +849,10 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     });
     const resultManifestPath = path.join(artifactDir, "result.json");
     // Legacy accepted reducers omitted coverage entirely.
+    const findings = retryFindings?.flat() ?? [];
     await writeFile(
       resultManifestPath,
-      JSON.stringify({
-        scanId: run.scanId,
-        findings: retryFindings?.flat() ?? [],
-      }),
+      JSON.stringify({ scanId: run.scanId, findings }),
     );
     rawSources.set(
       resultManifestPath,
@@ -863,7 +861,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     await store.commitDedup({
       id,
       scanId: run.scanId,
-      newFindings: retryFindings ? 1 : 0,
+      newFindings: findings.length,
       resultManifestPath,
     });
     run = await store.get(run.scanId, threadId);

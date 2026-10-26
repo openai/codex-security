@@ -946,5 +946,16 @@ class ScanFixtureTestCase(TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
+    def rewrite_sealed_artifact(self, relative_path: str, payload: object) -> None:
+        self.write_json(relative_path, payload)
+        manifest = self.read_json("scan-manifest.json")
+        for artifact in manifest["scan"]["artifacts"]:
+            if artifact["path"] == relative_path:
+                artifact["sha256"] = self.sha256_file(relative_path)
+                break
+        else:
+            raise AssertionError(f"missing sealed artifact: {relative_path}")
+        self.write_json("scan-manifest.json", manifest)
+
     def sha256_file(self, name: str) -> str:
         return hashlib.sha256((self.scan_dir / name).read_bytes()).hexdigest()

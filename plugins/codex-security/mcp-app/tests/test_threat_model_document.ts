@@ -173,7 +173,7 @@ test("terminal Deep model inheritance retries a changed canonical draft", async 
   }
 });
 
-test("model-only worker checkpoints save Markdown before findings and retain it on retry", async () => {
+test("model-only worker checkpoints save Markdown without Python and retain it on retry", async () => {
   const root = await temporaryDirectory("threatmodel-worker-");
   try {
     const context = {
@@ -183,6 +183,7 @@ test("model-only worker checkpoints save Markdown before findings and retain it 
       scanId,
       pluginRoot,
       scope: ".",
+      pythonCommand: join(root, "missing-interpreter"),
     };
     const checkpoint = {
       scanId,
@@ -219,6 +220,10 @@ test("model-only worker checkpoints save Markdown before findings and retain it 
       checkpoint,
     );
     assert.equal(result.warnings, undefined);
+    assert.deepEqual(
+      (await readJson(root, "result.json")).threatModel,
+      threatModel,
+    );
     const contents = await readFile(join(root, "threatmodel.md"), "utf8");
     assert.ok(contents.startsWith(markdown));
     assert.match(contents, /Model scope: services\/api/);
@@ -289,35 +294,6 @@ test("a renderer failure preserves saved canonical bytes and reports a warning",
     await assert.rejects(readFile(join(root, "threatmodel.md")), {
       code: "ENOENT",
     });
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("saved-model rendering does not require the worker's Python interpreter", async () => {
-  const root = await temporaryDirectory("threatmodel-python-");
-  try {
-    const result = await recordCodexSecurityWorkerScanDraft(
-      {
-        root,
-        repoRoot: root,
-        layout: "worker",
-        scanId,
-        pluginRoot,
-        pythonCommand: join(root, "missing-interpreter"),
-      },
-      { scanId, complete: false, threatModel, findings: [], coverage },
-    );
-    assert.equal(result.warnings, undefined);
-    assert.ok(
-      (await readFile(join(root, "threatmodel.md"), "utf8")).startsWith(
-        markdown,
-      ),
-    );
-    assert.deepEqual(
-      (await readJson(root, "result.json")).threatModel,
-      threatModel,
-    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

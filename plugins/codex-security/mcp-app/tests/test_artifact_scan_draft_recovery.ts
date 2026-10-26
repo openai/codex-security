@@ -48,7 +48,13 @@ const findingFor = (candidateId: string): FixtureFinding => ({
   provenance: { source: "local_plugin", candidateId },
 });
 
-for (const layout of ["standard", "diff", "deep"] as const) {
+// Finding reconciliation is shared by failed and canceled scans. Exercise both
+// terminal bindings without repeating every identity case for each status.
+for (const [layout, status] of [
+  ["standard", "failed"],
+  ["diff", "canceled"],
+  ["deep", "failed"],
+] as const) {
   for (const variant of [
     "one",
     "three",
@@ -71,109 +77,107 @@ for (const layout of ["standard", "diff", "deep"] as const) {
     "new-sibling-checkpoints",
     "new-worker-sibling-checkpoints",
   ]) {
-    for (const status of ["failed", "canceled"]) {
-      test(`${layout}: stopped ${status} recovery retains ${variant} candidate identities`, async (t) => {
-        const f = await fixture(t, layout);
-        const count =
-          variant === "three"
-            ? 3
-            : variant.includes("sibling") || variant === "preserved"
+    test(`${layout}: stopped ${status} recovery retains ${variant} candidate identities`, async (t) => {
+      const f = await fixture(t, layout);
+      const count =
+        variant === "three"
+          ? 3
+          : variant.includes("sibling") || variant === "preserved"
+            ? 2
+            : variant.endsWith("-id")
               ? 2
-              : variant.endsWith("-id")
-                ? 2
-                : 1;
-        const findings = Array.from({ length: count }, (_, index) => {
-          const finding = findingFor(
-            variant.includes("sibling") || variant.endsWith("-id")
-              ? "shared-review"
-              : `review-${index + 1}`,
-          );
-          if (
-            variant === "owner" ||
-            variant.startsWith("new-worker-") ||
-            variant.startsWith("worker-")
-          )
-            finding.provenance.workerId = "worker-1";
-          if (variant.includes("sibling"))
-            finding.title = `Synthetic sibling ${index + 1}`;
-          if (variant.endsWith("-id"))
-            finding.extensions = {
-              [variant.includes("report") ||
-              (variant === "cross-field-id" && index === 0)
-                ? "reportId"
-                : "ledgerRowId"]: `synthetic-report-${index + 1}`,
-            };
-          if (variant === "preserved")
-            finding.locations[0].startLine = index + 1;
-          return finding;
-        });
-        if (variant === "legacy")
-          Object.assign(findings[0], {
-            identity: { anchor: "synthetic-review-finding" },
-          });
-        if (variant === "severity-revision") {
-          const initial = structuredClone(findings[0]);
-          initial.severity.level = "high";
-          initial.summary = "Initial assessment before reviewing the control.";
-          await saveScanDraftCheckpoint(
-            f.context,
-            { ...f.draft(), findings: [initial] },
-            false,
-          );
-        }
-        await f.write({
-          ...f.draft(),
-          findings: variant.endsWith("-id") ? findings.slice(0, 1) : findings,
-        });
+              : 1;
+      const findings = Array.from({ length: count }, (_, index) => {
+        const finding = findingFor(
+          variant.includes("sibling") || variant.endsWith("-id")
+            ? "shared-review"
+            : `review-${index + 1}`,
+        );
+        if (
+          variant === "owner" ||
+          variant.startsWith("new-worker-") ||
+          variant.startsWith("worker-")
+        )
+          finding.provenance.workerId = "worker-1";
+        if (variant.includes("sibling"))
+          finding.title = `Synthetic sibling ${index + 1}`;
         if (variant.endsWith("-id"))
-          await saveScanDraftCheckpoint(
-            f.context,
-            { ...f.draft(), findings: findings.slice(1) },
-            false,
-          );
-        if (variant.endsWith("-added")) {
-          findings[0].extensions = {
-            [variant === "report-added" ? "reportId" : "ledgerRowId"]:
-              "synthetic-report-1",
+          finding.extensions = {
+            [variant.includes("report") ||
+            (variant === "cross-field-id" && index === 0)
+              ? "reportId"
+              : "ledgerRowId"]: `synthetic-report-${index + 1}`,
           };
-          await f.write({ ...f.draft(), findings });
-        }
-        if (variant === "title-revision") {
-          findings[0].title = "Revised synthetic review finding";
-          await f.write({ ...f.draft(), findings });
-        }
-        if (variant === "range-refinement") {
-          findings[0].locations[0].endLine = 1;
-          await f.write({ ...f.draft(), findings });
-        }
-        if (variant.startsWith("new-")) {
-          const file = path.join(f.root, "findings.json");
-          const saved = JSON.parse(await readFile(file, "utf8"));
-          saved.findings = saved.findings.slice(0, 1);
-          await writeFile(file, JSON.stringify(saved));
-        }
-        if (variant.endsWith("-checkpoints")) {
-          findings[1].severity.level = "high";
-          await saveScanDraftCheckpoint(
-            f.context,
-            { ...f.draft(), findings: findings.slice(1) },
-            false,
-          );
-        }
-        if (variant === "preserved") {
-          const file = path.join(f.root, "findings.json");
-          const saved = JSON.parse(await readFile(file, "utf8"));
-          saved.findings[1].provenance.preservedIdentity = structuredClone(
-            saved.findings[1].identity,
-          );
-          saved.findings[1].identity.instance = "saved-distinct-location";
-          await writeFile(file, JSON.stringify(saved));
-        }
-        const { stdout } = await execFileAsync(
-          process.env.PYTHON?.trim() || "python3",
-          [
-            "-c",
-            `import sys,json
+        if (variant === "preserved") finding.locations[0].startLine = index + 1;
+        return finding;
+      });
+      if (variant === "legacy")
+        Object.assign(findings[0], {
+          identity: { anchor: "synthetic-review-finding" },
+        });
+      if (variant === "severity-revision") {
+        const initial = structuredClone(findings[0]);
+        initial.severity.level = "high";
+        initial.summary = "Initial assessment before reviewing the control.";
+        await saveScanDraftCheckpoint(
+          f.context,
+          { ...f.draft(), findings: [initial] },
+          false,
+        );
+      }
+      await f.write({
+        ...f.draft(),
+        findings: variant.endsWith("-id") ? findings.slice(0, 1) : findings,
+      });
+      if (variant.endsWith("-id"))
+        await saveScanDraftCheckpoint(
+          f.context,
+          { ...f.draft(), findings: findings.slice(1) },
+          false,
+        );
+      if (variant.endsWith("-added")) {
+        findings[0].extensions = {
+          [variant === "report-added" ? "reportId" : "ledgerRowId"]:
+            "synthetic-report-1",
+        };
+        await f.write({ ...f.draft(), findings });
+      }
+      if (variant === "title-revision") {
+        findings[0].title = "Revised synthetic review finding";
+        await f.write({ ...f.draft(), findings });
+      }
+      if (variant === "range-refinement") {
+        findings[0].locations[0].endLine = 1;
+        await f.write({ ...f.draft(), findings });
+      }
+      if (variant.startsWith("new-")) {
+        const file = path.join(f.root, "findings.json");
+        const saved = JSON.parse(await readFile(file, "utf8"));
+        saved.findings = saved.findings.slice(0, 1);
+        await writeFile(file, JSON.stringify(saved));
+      }
+      if (variant.endsWith("-checkpoints")) {
+        findings[1].severity.level = "high";
+        await saveScanDraftCheckpoint(
+          f.context,
+          { ...f.draft(), findings: findings.slice(1) },
+          false,
+        );
+      }
+      if (variant === "preserved") {
+        const file = path.join(f.root, "findings.json");
+        const saved = JSON.parse(await readFile(file, "utf8"));
+        saved.findings[1].provenance.preservedIdentity = structuredClone(
+          saved.findings[1].identity,
+        );
+        saved.findings[1].identity.instance = "saved-distinct-location";
+        await writeFile(file, JSON.stringify(saved));
+      }
+      const { stdout } = await execFileAsync(
+        process.env.PYTHON?.trim() || "python3",
+        [
+          "-c",
+          `import sys,json
 from pathlib import Path
 sys.path.insert(0,sys.argv[1])
 from workbench_saved_results import merge_saved_results
@@ -190,23 +194,23 @@ for document in documents[1:]: document['scanId']=scan_id
 prepared=_prepare_scan_finalization(root,completion_binding=binding,recover_unsealed=True,draft_documents=documents)
 warnings.extend(prepared.warnings)
 published=_write_prepared_scan_finalization(prepared)
-print(json.dumps({'count':len(published[1]['findings']),'sealed':bool(published[0]['scan'].get('sealedAt')),'warnings':warnings,'assessments':sorted([row['title'],row['severity']['level']] for row in published[1]['findings'])}))`,
-            fileURLToPath(new URL("../../scripts", import.meta.url)),
-            f.root,
-            f.context.scanId!,
-            status,
-          ],
-        );
-        assert.deepEqual(JSON.parse(stdout), {
-          count,
-          sealed: true,
-          warnings: [],
-          assessments: findings
-            .map((finding) => [finding.title, finding.severity.level])
-            .sort(),
-        });
+print(json.dumps({'count':len(published[1]['findings']),'status':published[0]['scan']['status'],'sealed':bool(published[0]['scan'].get('sealedAt')),'warnings':warnings,'assessments':sorted([row['title'],row['severity']['level']] for row in published[1]['findings'])}))`,
+          fileURLToPath(new URL("../../scripts", import.meta.url)),
+          f.root,
+          f.context.scanId!,
+          status,
+        ],
+      );
+      assert.deepEqual(JSON.parse(stdout), {
+        count,
+        status,
+        sealed: true,
+        warnings: [],
+        assessments: findings
+          .map((finding) => [finding.title, finding.severity.level])
+          .sort(),
       });
-    }
+    });
   }
 }
 

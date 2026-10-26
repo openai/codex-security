@@ -13,6 +13,29 @@ from test_deep_scan_successful_publication import publication_scan as publicatio
 from workbench_test_support import write_checkpoint
 
 
+@pytest.fixture
+def stop_scan(workbench_api, workbench_db, monkeypatch):
+    saved = workbench_api["saved_results"]
+
+    def fail_publication(*args, **kwargs):
+        raise OSError("Synthetic publication interruption.")
+
+    def stop(scan, interrupt_publication):
+        with monkeypatch.context() as patch:
+            if interrupt_publication:
+                patch.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
+            stopped = saved.fail_scan(
+                workbench_api["_WORKBENCH_DB_CONTEXT"],
+                workbench_db,
+                Namespace(
+                    scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."
+                ),
+            )["scan"]
+        assert stopped["resultsRecoveryNeeded"] is interrupt_publication
+
+    return stop
+
+
 @pytest.mark.parametrize("attempt", [1, 2])
 @pytest.mark.parametrize("has_head", [False, True])
 @pytest.mark.parametrize("newer_parent", [False, True])
@@ -21,7 +44,7 @@ def test_parent_candidate_outcome_compares_headless_worker_chronology(
     workbench_api,
     workbench_db,
     publication_scan,
-    monkeypatch,
+    stop_scan,
     attempt,
     has_head,
     newer_parent,
@@ -90,22 +113,7 @@ def test_parent_candidate_outcome_compares_headless_worker_chronology(
     )
     modified = 400 if newer_parent else 200
     os.utime(parent, ns=(modified, modified))
-    with monkeypatch.context() as interrupted:
-        if retry_publication:
-
-            def fail_publication(*args, **kwargs):
-                raise OSError("Synthetic publication interruption.")
-
-            interrupted.setattr(
-                workbench_api["saved_results"],
-                "_write_prepared_scan_finalization",
-                fail_publication,
-            )
-        workbench_api["saved_results"].fail_scan(
-            workbench_api["_WORKBENCH_DB_CONTEXT"],
-            workbench_db,
-            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-        )
+    stop_scan(scan, retry_publication)
     workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )
@@ -602,7 +610,7 @@ def test_missing_projection_keeps_surface_links_and_independent_reviews(
 @pytest.mark.parametrize("attempt", [1, 2])
 @pytest.mark.parametrize("retry_publication", [False, True])
 def test_previous_attempt_resolution_does_not_clear_current_gap(
-    workbench_api, workbench_db, publication_scan, attempt, retry_publication, monkeypatch
+    workbench_api, workbench_db, publication_scan, attempt, retry_publication, stop_scan
 ):
     scan = publication_scan()
     result = add_worker(workbench_db, scan)
@@ -651,23 +659,7 @@ def test_previous_attempt_resolution_does_not_clear_current_gap(
     os.utime(result, ns=(observed, observed))
     parent_observed = observed + 2_000_000_000
     os.utime(parent_path, ns=(parent_observed, parent_observed))
-    with monkeypatch.context() as interrupted:
-        if retry_publication:
-
-            def fail_publication(*args, **kwargs):
-                raise OSError("Synthetic publication interruption.")
-
-            interrupted.setattr(
-                workbench_api["saved_results"],
-                "_write_prepared_scan_finalization",
-                fail_publication,
-            )
-        stopped = workbench_api["saved_results"].fail_scan(
-            workbench_api["_WORKBENCH_DB_CONTEXT"],
-            workbench_db,
-            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-        )["scan"]
-    assert stopped["resultsRecoveryNeeded"] is retry_publication
+    stop_scan(scan, retry_publication)
     recovered = workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
@@ -737,7 +729,7 @@ def test_recovery_compares_open_questions_using_canonical_normalization(
 @pytest.mark.parametrize("parent_projection", ["raw", "projected", "missing"])
 @pytest.mark.parametrize("retry_publication", [False, True])
 def test_rejected_retry_preserves_original_finding_history(
-    workbench_api, workbench_db, publication_scan, monkeypatch, parent_projection, retry_publication
+    workbench_api, workbench_db, publication_scan, stop_scan, parent_projection, retry_publication
 ):
     scan = publication_scan()
     result = add_worker(workbench_db, scan)
@@ -817,23 +809,7 @@ def test_rejected_retry_preserves_original_finding_history(
         for name in ("scan-manifest.json", "findings.json", "coverage.json"):
             (scan.scan_dir / name).unlink()
     originals = {path: path.read_bytes() for path in (previous, result, other_result)}
-    with monkeypatch.context() as interrupted:
-        if retry_publication:
-
-            def fail_publication(*args, **kwargs):
-                raise OSError("Synthetic publication interruption.")
-
-            interrupted.setattr(
-                workbench_api["saved_results"],
-                "_write_prepared_scan_finalization",
-                fail_publication,
-            )
-        stopped = workbench_api["saved_results"].fail_scan(
-            workbench_api["_WORKBENCH_DB_CONTEXT"],
-            workbench_db,
-            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-        )["scan"]
-    assert stopped["resultsRecoveryNeeded"] is retry_publication
+    stop_scan(scan, retry_publication)
     recovered = workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
@@ -861,7 +837,7 @@ def test_rejected_retry_preserves_original_finding_history(
     "recovery", [None, "retry", "missing", "changed", "incomplete", "late", "fallback-late"]
 )
 def test_stopped_recovery_keeps_current_parent_projection(
-    workbench_api, workbench_db, publication_scan, monkeypatch, older_complete, recovery
+    workbench_api, workbench_db, publication_scan, stop_scan, older_complete, recovery
 ):
     retry_publication = recovery not in {None, "fallback-late"}
     scan = publication_scan()
@@ -944,23 +920,7 @@ def test_stopped_recovery_keeps_current_parent_projection(
             (scan.scan_dir / name).unlink()
         obsolete.unlink()
         del original_sources[obsolete]
-    with monkeypatch.context() as interrupted:
-        if retry_publication:
-
-            def fail_publication(*args, **kwargs):
-                raise OSError("Synthetic publication interruption.")
-
-            interrupted.setattr(
-                workbench_api["saved_results"],
-                "_write_prepared_scan_finalization",
-                fail_publication,
-            )
-        stopped = workbench_api["saved_results"].fail_scan(
-            workbench_api["_WORKBENCH_DB_CONTEXT"],
-            workbench_db,
-            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-        )["scan"]
-    assert stopped["resultsRecoveryNeeded"] is retry_publication
+    stop_scan(scan, retry_publication)
     frozen_sources = {
         path: path.read_bytes() for path in (scan.scan_dir / "checkpoints").glob("*.json")
     }
@@ -1087,7 +1047,7 @@ def test_matching_accepted_checkpoint_preserves_receipt_path(
 
 @pytest.mark.parametrize("retry_publication", [False, True])
 def test_accepted_worker_missing_completeness_keeps_valid_findings(
-    workbench_api, workbench_db, publication_scan, monkeypatch, retry_publication
+    workbench_api, workbench_db, publication_scan, stop_scan, retry_publication
 ):
     scan = publication_scan()
     result = add_worker(workbench_db, scan)
@@ -1108,23 +1068,7 @@ def test_accepted_worker_missing_completeness_keeps_valid_findings(
         )
     )
     original = result.read_bytes()
-    with monkeypatch.context() as interrupted:
-        if retry_publication:
-
-            def fail_publication(*args, **kwargs):
-                raise OSError("Synthetic publication interruption.")
-
-            interrupted.setattr(
-                workbench_api["saved_results"],
-                "_write_prepared_scan_finalization",
-                fail_publication,
-            )
-        stopped = workbench_api["saved_results"].fail_scan(
-            workbench_api["_WORKBENCH_DB_CONTEXT"],
-            workbench_db,
-            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-        )["scan"]
-    assert stopped["resultsRecoveryNeeded"] is retry_publication
+    stop_scan(scan, retry_publication)
     recovered = workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
@@ -1139,7 +1083,7 @@ def test_accepted_worker_missing_completeness_keeps_valid_findings(
 
 @pytest.mark.parametrize("retry_publication", [False, True])
 def test_idless_accepted_surface_matches_projection_after_checkpoint_id_inference(
-    workbench_api, workbench_db, publication_scan, monkeypatch, retry_publication
+    workbench_api, workbench_db, publication_scan, stop_scan, retry_publication
 ):
     scan = publication_scan()
     result = add_worker(workbench_db, scan)
@@ -1181,23 +1125,7 @@ def test_idless_accepted_surface_matches_projection_after_checkpoint_id_inferenc
         )
     )
     originals = {path: path.read_bytes() for path in (result, checkpoint)}
-    with monkeypatch.context() as interrupted:
-        if retry_publication:
-
-            def fail_publication(*args, **kwargs):
-                raise OSError("Synthetic publication interruption.")
-
-            interrupted.setattr(
-                workbench_api["saved_results"],
-                "_write_prepared_scan_finalization",
-                fail_publication,
-            )
-        stopped = workbench_api["saved_results"].fail_scan(
-            workbench_api["_WORKBENCH_DB_CONTEXT"],
-            workbench_db,
-            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-        )["scan"]
-    assert stopped["resultsRecoveryNeeded"] is retry_publication
+    stop_scan(scan, retry_publication)
     recovered = workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
@@ -1220,7 +1148,7 @@ def test_parent_candidate_provenance_cannot_override_accepted_worker_evidence(
     workbench_api,
     workbench_db,
     publication_scan,
-    monkeypatch,
+    stop_scan,
     claimed_worker,
     retry_publication,
     selected_checkpoint,
@@ -1287,23 +1215,7 @@ def test_parent_candidate_provenance_cannot_override_accepted_worker_evidence(
         )
     )
     os.utime(scan.scan_dir / "coverage.json", ns=(400, 400))
-    with monkeypatch.context() as interrupted:
-        if retry_publication:
-
-            def fail_publication(*args, **kwargs):
-                raise OSError("Synthetic publication interruption.")
-
-            interrupted.setattr(
-                workbench_api["saved_results"],
-                "_write_prepared_scan_finalization",
-                fail_publication,
-            )
-        stopped = workbench_api["saved_results"].fail_scan(
-            workbench_api["_WORKBENCH_DB_CONTEXT"],
-            workbench_db,
-            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-        )["scan"]
-    assert stopped["resultsRecoveryNeeded"] is retry_publication
+    stop_scan(scan, retry_publication)
     recovered = workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
@@ -1316,7 +1228,7 @@ def test_parent_candidate_provenance_cannot_override_accepted_worker_evidence(
 @pytest.mark.parametrize("other_worker", [False, True])
 @pytest.mark.parametrize("retry_publication", [False, True])
 def test_projected_generic_closure_updates_parent_copy_in_its_worker_namespace(
-    workbench_api, workbench_db, publication_scan, monkeypatch, other_worker, retry_publication
+    workbench_api, workbench_db, publication_scan, stop_scan, other_worker, retry_publication
 ):
     scan = publication_scan()
     result = add_worker(workbench_db, scan)
@@ -1388,23 +1300,7 @@ def test_projected_generic_closure_updates_parent_copy_in_its_worker_namespace(
         json.dumps({"checkpoint": checkpoint.name})
     )
     originals = {path: path.read_bytes() for path in {result, closure_result, checkpoint}}
-    with monkeypatch.context() as interrupted:
-        if retry_publication:
-
-            def fail_publication(*args, **kwargs):
-                raise OSError("Synthetic publication interruption.")
-
-            interrupted.setattr(
-                workbench_api["saved_results"],
-                "_write_prepared_scan_finalization",
-                fail_publication,
-            )
-        stopped = workbench_api["saved_results"].fail_scan(
-            workbench_api["_WORKBENCH_DB_CONTEXT"],
-            workbench_db,
-            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-        )["scan"]
-    assert stopped["resultsRecoveryNeeded"] is retry_publication
+    stop_scan(scan, retry_publication)
     workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )
@@ -1435,7 +1331,7 @@ def test_selected_candidate_outcome_removes_its_projected_parent_pending_rows(
     workbench_api,
     workbench_db,
     publication_scan,
-    monkeypatch,
+    stop_scan,
     disposition,
     retry_publication,
     parent_review,
@@ -1524,23 +1420,7 @@ def test_selected_candidate_outcome_removes_its_projected_parent_pending_rows(
     head.write_text(json.dumps({"checkpoint": checkpoint.name}))
     os.utime(head, ns=(300, 300))
     originals = {path: path.read_bytes() for path in (result, checkpoint)}
-    with monkeypatch.context() as interrupted:
-        if retry_publication:
-
-            def fail_publication(*args, **kwargs):
-                raise OSError("Synthetic publication interruption.")
-
-            interrupted.setattr(
-                workbench_api["saved_results"],
-                "_write_prepared_scan_finalization",
-                fail_publication,
-            )
-        stopped = workbench_api["saved_results"].fail_scan(
-            workbench_api["_WORKBENCH_DB_CONTEXT"],
-            workbench_db,
-            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-        )["scan"]
-    assert stopped["resultsRecoveryNeeded"] is retry_publication
+    stop_scan(scan, retry_publication)
     workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )
@@ -1581,7 +1461,7 @@ def test_selected_candidate_outcome_removes_its_projected_parent_pending_rows(
     ],
 )
 def test_selected_worker_projection_keeps_links_and_pending_authority(
-    workbench_api, workbench_db, publication_scan, monkeypatch, change, retry_publication
+    workbench_api, workbench_db, publication_scan, stop_scan, change, retry_publication
 ):
     scan = publication_scan()
     result = add_worker(workbench_db, scan)
@@ -1751,23 +1631,7 @@ def test_selected_worker_projection_keeps_links_and_pending_authority(
     originals = {
         path: path.read_bytes() for path in [result] + ([checkpoint] if checkpoint else [])
     }
-    with monkeypatch.context() as interrupted:
-        if retry_publication:
-
-            def fail_publication(*args, **kwargs):
-                raise OSError("Synthetic publication interruption.")
-
-            interrupted.setattr(
-                workbench_api["saved_results"],
-                "_write_prepared_scan_finalization",
-                fail_publication,
-            )
-        stopped = workbench_api["saved_results"].fail_scan(
-            workbench_api["_WORKBENCH_DB_CONTEXT"],
-            workbench_db,
-            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-        )["scan"]
-    assert stopped["resultsRecoveryNeeded"] is retry_publication
+    stop_scan(scan, retry_publication)
     workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )
@@ -1849,21 +1713,10 @@ def publish_review_projection(workbench_api, connection, scan, coverage):
     )
 
 
-def stop_and_recover_projection(workbench_api, connection, scan, monkeypatch, retry):
+def stop_and_recover_projection(workbench_api, connection, scan, stop_scan, retry):
     saved = workbench_api["saved_results"]
     context = workbench_api["_WORKBENCH_DB_CONTEXT"]
-    with monkeypatch.context() as interrupted:
-        if retry:
-
-            def fail_publication(*args, **kwargs):
-                raise OSError("Synthetic publication interruption.")
-
-            interrupted.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
-        saved.fail_scan(
-            context,
-            connection,
-            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-        )
+    stop_scan(scan, retry)
     saved.recover_scan_results(context, connection, Namespace(scan_id=scan.scan_id))
     published = (scan.scan_dir / "coverage.json").read_bytes()
     saved.recover_scan_results(context, connection, Namespace(scan_id=scan.scan_id))
@@ -1871,77 +1724,11 @@ def stop_and_recover_projection(workbench_api, connection, scan, monkeypatch, re
     return json.loads(published)
 
 
-@pytest.mark.parametrize(
-    "receipt_ref",
-    ["artifacts/review.txt", "artifacts/./review.txt", "scan-relative", "scan-relative-equivalent"],
-    ids=["canonical", "equivalent", "scan-relative", "scan-relative-equivalent"],
-)
-@pytest.mark.parametrize("closure", [False, True], ids=["unchanged", "generic-closure"])
-@pytest.mark.parametrize("retry", [False, True], ids=["direct", "failed-retry"])
-def test_generic_surface_receipt_union_keeps_each_source_directory(
-    workbench_api, workbench_db, publication_scan, monkeypatch, closure, retry, receipt_ref
-):
-    scan = publication_scan()
-    initial = add_worker(workbench_db, scan)
-    worker_id = initial.parent.name
-    output = scan.scan_dir / "artifacts" / worker_id / "output"
-    output.mkdir(parents=True)
-    result = output / "result.json"
-    with workbench_db:
-        workbench_db.execute(
-            "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ? WHERE id = ?",
-            (str(output), str(result), worker_id),
-        )
-    receipt = output / "artifacts" / "review.txt"
-    receipt.parent.mkdir()
-    receipt.write_text("Synthetic completed source review.\n")
-    if receipt_ref.startswith("scan-relative"):
-        canonical_ref = receipt.relative_to(scan.scan_dir).as_posix()
-        receipt_ref = (
-            canonical_ref.replace("artifacts/", "artifacts/./", 1)
-            if receipt_ref == "scan-relative-equivalent"
-            else canonical_ref
-        )
-    surface = {
-        "id": "review",
-        "label": "Completed source review",
-        "disposition": "no_issue_found",
-        "receiptRefs": [receipt_ref],
-    }
-    source = {**scan.coverage, "surfaces": [surface], "deferred": []}
-    if closure:
-        source["resolvedDeferred"] = [{"id": "review", "reason": "Source review completed."}]
-    result.write_text(
-        json.dumps({"scanId": scan.scan_id, "complete": True, "findings": [], "coverage": source})
-    )
-    original = result.read_bytes()
-    projected = {
-        **surface,
-        "id": f"{worker_id}-attempt-1-surface-1",
-        "receiptRefs": [receipt.relative_to(scan.scan_dir).as_posix()],
-        "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "review"},
-    }
-    publish_review_projection(
-        workbench_api,
-        workbench_db,
-        scan,
-        {
-            **scan.coverage,
-            "surfaces": [projected],
-            "deferred": [],
-            "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "complete"}],
-        },
-    )
-    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
-    assert coverage["surfaces"] == [projected]
-    assert result.read_bytes() == original
-
-
 @pytest.mark.parametrize("spelling", ["unchanged", "equivalent", "scan relative", "omitted"])
 @pytest.mark.parametrize("parent", [False, True])
 @pytest.mark.parametrize("retry", [False, True])
 def test_linked_archived_receipts_preserve_accepted_surface_links(
-    workbench_api, workbench_db, publication_scan, monkeypatch, spelling, parent, retry
+    workbench_api, workbench_db, publication_scan, stop_scan, spelling, parent, retry
 ):
     scan = publication_scan()
     initial = add_worker(workbench_db, scan)
@@ -2015,7 +1802,7 @@ def test_linked_archived_receipts_preserve_accepted_surface_links(
         for name in ("scan-manifest.json", "findings.json", "coverage.json"):
             (scan.scan_dir / name).unlink()
     originals = {path: path.read_bytes() for path in (result, checkpoint, head)}
-    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, stop_scan, retry)
     pending = [
         row for row in coverage["deferred"] if row.get("reason") == "Verify accepted source review."
     ]
@@ -2025,12 +1812,32 @@ def test_linked_archived_receipts_preserve_accepted_surface_links(
     assert all(path.read_bytes() == value for path, value in originals.items())
 
 
-@pytest.mark.parametrize("source", ["worker", "shared", "worker-collision"])
+@pytest.mark.parametrize(
+    ("source", "parent", "closure"),
+    [
+        ("worker", False, False),
+        ("worker", True, False),
+        ("worker", True, True),
+        ("worker-scan-relative", True, False),
+        ("worker-scan-relative", True, True),
+        ("shared", False, False),
+        ("shared", True, False),
+        ("worker-collision", False, False),
+        ("worker-collision", True, False),
+    ],
+)
 @pytest.mark.parametrize("equivalent", [False, True])
-@pytest.mark.parametrize("parent", [False, True])
 @pytest.mark.parametrize("retry", [False, True])
-def test_shared_scan_receipts_preserve_existing_context_evidence(
-    workbench_api, workbench_db, publication_scan, monkeypatch, source, equivalent, parent, retry
+def test_recovery_projects_receipts_from_their_source_directory(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    stop_scan,
+    source,
+    parent,
+    closure,
+    equivalent,
+    retry,
 ):
     scan = publication_scan()
     initial = add_worker(workbench_db, scan)
@@ -2052,20 +1859,27 @@ def test_shared_scan_receipts_preserve_existing_context_evidence(
     receipt = (scan.scan_dir if shared else output) / ref
     receipt.parent.mkdir(exist_ok=True, parents=True)
     receipt.write_text("Synthetic completed source review.\n")
-    source_ref = ref.replace("artifacts/", "artifacts/./") if equivalent else ref
+    if source == "worker-scan-relative":
+        ref = receipt.relative_to(scan.scan_dir).as_posix()
+    source_ref = ref.replace("artifacts/", "artifacts/./", 1) if equivalent else ref
     surface = {
         "id": "review",
         "label": "Completed source review",
         "disposition": "no_issue_found",
         "receiptRefs": [source_ref],
     }
+    worker_coverage = {**scan.coverage, "surfaces": [surface], "deferred": []}
+    if closure:
+        worker_coverage["resolvedDeferred"] = [
+            {"id": "review", "reason": "Source review completed."}
+        ]
     result.write_text(
         json.dumps(
             {
                 "scanId": scan.scan_id,
                 "complete": True,
                 "findings": [],
-                "coverage": {**scan.coverage, "surfaces": [surface], "deferred": []},
+                "coverage": worker_coverage,
             }
         )
     )
@@ -2091,7 +1905,7 @@ def test_shared_scan_receipts_preserve_existing_context_evidence(
     else:
         for name in ("scan-manifest.json", "findings.json", "coverage.json"):
             (scan.scan_dir / name).unlink()
-    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, stop_scan, retry)
     assert coverage["surfaces"] == [projected]
     assert result.read_bytes() == original
 

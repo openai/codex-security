@@ -175,27 +175,17 @@ class ScanContractExamplesTest(unittest.TestCase):
                 )
         self.assertFalse(validator.is_valid({"candidates": [], "merges": []}))
 
-    def test_documents_refer_to_one_scan(self) -> None:
+    def test_manifest_identifies_and_hashes_the_example_documents(self) -> None:
         scan = self.manifest["scan"]
         self.assertEqual(scan["id"], self.findings["scanId"])
         self.assertEqual(scan["id"], self.coverage["scanId"])
         self.assertEqual(scan["findingsRef"], "findings.json")
         self.assertEqual(scan["coverageRef"], "coverage.json")
-
-    def test_manifest_lists_canonical_documents(self) -> None:
-        paths = {artifact["path"] for artifact in self.manifest["scan"]["artifacts"]}
         self.assertEqual(
-            paths,
-            {
-                "coverage.json",
-                "findings.json",
-            },
+            {item["path"] for item in scan["artifacts"]}, {"coverage.json", "findings.json"}
         )
-
-    def test_manifest_artifacts_exist_with_recorded_hashes(self) -> None:
-        for artifact in self.manifest["scan"]["artifacts"]:
+        for artifact in scan["artifacts"]:
             path = EXAMPLE_DIR / artifact["path"]
-            self.assertTrue(path.is_file(), artifact["path"])
             self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), artifact["sha256"])
 
     def test_manifest_requires_snapshot_signal_for_target_kind(self) -> None:

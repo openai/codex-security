@@ -3180,54 +3180,20 @@ def commit_source_fixture(target: Path, source: bytes) -> str:
     ).stdout.strip()
 
 
-@pytest.mark.parametrize(
-    "separator", ["\f", "\v", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
-)
-def test_source_excerpt_breaks_lines_only_at_newlines(tmp_path: Path, separator: str) -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    finding_source_excerpt = namespace["finding_source_excerpt"]
+def test_source_excerpt_breaks_lines_only_at_newlines(tmp_path: Path, workbench_api) -> None:
+    separators = "\f\v\x1c\x1d\x1e\x85\u2028\u2029"
+    source = f"one\r\ntwo{separators}\rthree\nfour\r\nfive\rsix\nseven\r\neight\rnine\n"
     target = tmp_path / "target"
-    revision = commit_source_fixture(
-        target,
-        "".join(
-            f"source line {line_number}{separator if line_number == 2 else ''}\n"
-            for line_number in range(1, 11)
-        ).encode(),
-    )
+    revision = commit_source_fixture(target, source.encode())
 
-    excerpt = finding_source_excerpt(
+    excerpt = workbench_api["finding_source_excerpt"](
         {"target_revision": revision, "target_snapshot_digest": None, "diff_target_kind": None},
         target,
         [{"path": "README.md", "startLine": 5, "endLine": 5}],
         ["."],
     )
 
-    assert excerpt == "\n".join(
-        f"{line_number}  source line {line_number}{separator if line_number == 2 else ''}"
-        for line_number in range(2, 9)
-    )
-
-
-@pytest.mark.parametrize("line_ending", ["\n", "\r\n", "\r"])
-def test_source_excerpt_numbers_standard_line_endings(tmp_path: Path, line_ending: str) -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    finding_source_excerpt = namespace["finding_source_excerpt"]
-    target = tmp_path / "target"
-    revision = commit_source_fixture(
-        target,
-        "".join(f"source line {line_number}{line_ending}" for line_number in range(1, 11)).encode(),
-    )
-
-    excerpt = finding_source_excerpt(
-        {"target_revision": revision, "target_snapshot_digest": None, "diff_target_kind": None},
-        target,
-        [{"path": "README.md", "startLine": 5, "endLine": 5}],
-        ["."],
-    )
-
-    assert excerpt == "\n".join(
-        f"{line_number}  source line {line_number}" for line_number in range(2, 9)
-    )
+    assert excerpt == f"2  two{separators}\n3  three\n4  four\n5  five\n6  six\n7  seven\n8  eight"
 
 
 @pytest.mark.parametrize(
@@ -3244,10 +3210,9 @@ def test_source_excerpt_numbers_standard_line_endings(tmp_path: Path, line_endin
     ],
 )
 def test_source_excerpt_preserves_final_lines(
-    tmp_path: Path, source: bytes, expected_lines: list[str]
+    tmp_path: Path, source: bytes, expected_lines: list[str], workbench_api
 ) -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    finding_source_excerpt = namespace["finding_source_excerpt"]
+    finding_source_excerpt = workbench_api["finding_source_excerpt"]
     target = tmp_path / "target"
     revision = commit_source_fixture(target, source)
     scan = {"target_revision": revision, "target_snapshot_digest": None, "diff_target_kind": None}

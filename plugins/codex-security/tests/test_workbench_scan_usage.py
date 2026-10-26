@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import runpy
 import sqlite3
 import sys
 import tempfile
@@ -25,6 +24,11 @@ from workbench_test_support import (
     upsert_deep_worker,
     write_completed_contract,
 )
+
+
+@pytest.fixture(scope="session")
+def scan_usage(workbench_api):
+    return workbench_api["scan_usage"]
 
 
 @dataclass(frozen=True)
@@ -424,7 +428,7 @@ def test_completion_counts_native_responses_and_compaction_without_legacy_duplic
     ],
 )
 def test_legacy_compaction_usage_is_unverifiable_only_inside_scan_window(
-    tmp_path: Path, scope: str, native: bool, expected_warning: bool
+    scan_usage, tmp_path: Path, scope: str, native: bool, expected_warning: bool
 ) -> None:
     started = datetime.fromisoformat("2026-01-01T00:00:01+00:00")
     completed = started + timedelta(seconds=1)
@@ -447,12 +451,9 @@ def test_legacy_compaction_usage_is_unverifiable_only_inside_scan_window(
     events.insert(0 if scope == "before" else len(events), marker)
     events.append(_event(completed, "event_msg", {"type": "task_complete"}))
     parent = _rollout(tmp_path, "scan-parent", events)
-    helper = runpy.run_path(
-        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
-    )
 
-    measurement = helper["_read_rollout_usage"](
-        helper["RolloutSession"]("scan-parent", None, parent),
+    measurement = scan_usage._read_rollout_usage(
+        scan_usage.RolloutSession("scan-parent", None, parent),
         started_at=started,
         completed_at=completed,
         completed_turn_id="turn-scan-parent" if scope == "completion_turn" else None,
@@ -464,7 +465,7 @@ def test_legacy_compaction_usage_is_unverifiable_only_inside_scan_window(
     assert warnings == ({"compaction_usage_unavailable"} if expected_warning else set())
 
 
-def test_legacy_compaction_warning_survives_a_later_native_turn(tmp_path: Path) -> None:
+def test_legacy_compaction_warning_survives_a_later_native_turn(scan_usage, tmp_path: Path) -> None:
     started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
     parent = _rollout(
         tmp_path,
@@ -477,12 +478,9 @@ def test_legacy_compaction_warning_survives_a_later_native_turn(tmp_path: Path) 
             _event(started, "event_msg", {"type": "task_complete"}),
         ],
     )
-    helper = runpy.run_path(
-        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
-    )
 
-    measurement = helper["_read_rollout_usage"](
-        helper["RolloutSession"]("scan-parent", None, parent),
+    measurement = scan_usage._read_rollout_usage(
+        scan_usage.RolloutSession("scan-parent", None, parent),
         started_at=started,
         completed_at=started,
     )
@@ -493,7 +491,9 @@ def test_legacy_compaction_warning_survives_a_later_native_turn(tmp_path: Path) 
     assert warnings == {"compaction_usage_unavailable"}
 
 
-def test_native_usage_respects_scan_window_and_preserves_cache_details(tmp_path: Path) -> None:
+def test_native_usage_respects_scan_window_and_preserves_cache_details(
+    scan_usage, tmp_path: Path
+) -> None:
     started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
     before = started - timedelta(seconds=1)
     completed = started + timedelta(seconds=1)
@@ -523,12 +523,9 @@ def test_native_usage_respects_scan_window_and_preserves_cache_details(tmp_path:
             ),
         ],
     )
-    helper = runpy.run_path(
-        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
-    )
 
-    measurement = helper["_read_rollout_usage"](
-        helper["RolloutSession"]("scan-parent", None, parent),
+    measurement = scan_usage._read_rollout_usage(
+        scan_usage.RolloutSession("scan-parent", None, parent),
         started_at=started,
         completed_at=completed,
     )
@@ -539,7 +536,9 @@ def test_native_usage_respects_scan_window_and_preserves_cache_details(tmp_path:
     assert warnings == set()
 
 
-def test_native_worker_usage_excludes_inherited_totals_and_survives_resume(tmp_path: Path) -> None:
+def test_native_worker_usage_excludes_inherited_totals_and_survives_resume(
+    scan_usage, tmp_path: Path
+) -> None:
     started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
     inherited = _response_event(started, "scan-parent", "parent-response", 1_000, 100)
     owned = _response_event(started, "scan-worker", "worker-response", 20, 2)
@@ -566,12 +565,9 @@ def test_native_worker_usage_excludes_inherited_totals_and_survives_resume(tmp_p
         parent_thread_id="scan-parent",
         copied_events=[inherited, _token_event(started, 1_000, 100)],
     )
-    helper = runpy.run_path(
-        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
-    )
 
-    measurement = helper["_read_rollout_usage"](
-        helper["RolloutSession"]("scan-worker", "scan-parent", worker),
+    measurement = scan_usage._read_rollout_usage(
+        scan_usage.RolloutSession("scan-worker", "scan-parent", worker),
         started_at=started,
         completed_at=started,
     )
@@ -583,7 +579,9 @@ def test_native_worker_usage_excludes_inherited_totals_and_survives_resume(tmp_p
 
 
 @pytest.mark.parametrize("gap", ["before", "after", "inside"])
-def test_native_usage_only_marks_receipt_gaps_inside_scan_window(tmp_path: Path, gap: str) -> None:
+def test_native_usage_only_marks_receipt_gaps_inside_scan_window(
+    scan_usage, tmp_path: Path, gap: str
+) -> None:
     started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
     baseline = 120 if gap == "before" else 20
     in_window = baseline + (40 if gap == "inside" else 30)
@@ -612,12 +610,9 @@ def test_native_usage_only_marks_receipt_gaps_inside_scan_window(tmp_path: Path,
             ),
         ],
     )
-    helper = runpy.run_path(
-        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
-    )
 
-    measurement = helper["_read_rollout_usage"](
-        helper["RolloutSession"]("scan-parent", None, parent),
+    measurement = scan_usage._read_rollout_usage(
+        scan_usage.RolloutSession("scan-parent", None, parent),
         started_at=started,
         completed_at=started,
     )
@@ -629,6 +624,7 @@ def test_native_usage_only_marks_receipt_gaps_inside_scan_window(tmp_path: Path,
 
 
 def test_native_usage_continues_cumulative_baseline_when_recovering_same_turn(
+    scan_usage,
     tmp_path: Path,
 ) -> None:
     started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
@@ -648,12 +644,9 @@ def test_native_usage_continues_cumulative_baseline_when_recovering_same_turn(
             _event(started, "event_msg", {"type": "task_complete"}),
         ],
     )
-    helper = runpy.run_path(
-        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
-    )
 
-    measurement = helper["_read_rollout_usage"](
-        helper["RolloutSession"]("scan-parent", None, parent),
+    measurement = scan_usage._read_rollout_usage(
+        scan_usage.RolloutSession("scan-parent", None, parent),
         started_at=started,
         completed_at=started,
     )
@@ -677,7 +670,9 @@ def test_native_usage_continues_cumulative_baseline_when_recovering_same_turn(
         "truncated",
     ],
 )
-def test_native_usage_preserves_partial_measurement_warnings(tmp_path: Path, failure: str) -> None:
+def test_native_usage_preserves_partial_measurement_warnings(
+    scan_usage, tmp_path: Path, failure: str
+) -> None:
     started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
     first = _response_event(started, "scan-parent", "first", 10, 1)
     second = _response_event(started, "scan-parent", "second", 20, 2, turn_usage=(30, 3))
@@ -698,12 +693,9 @@ def test_native_usage_preserves_partial_measurement_warnings(tmp_path: Path, fai
     parent = _rollout(tmp_path, "scan-parent", events)
     if failure == "truncated":
         parent.write_bytes(parent.read_bytes().removesuffix(b"\n"))
-    helper = runpy.run_path(
-        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
-    )
 
-    measurement = helper["_read_rollout_usage"](
-        helper["RolloutSession"]("scan-parent", None, parent),
+    measurement = scan_usage._read_rollout_usage(
+        scan_usage.RolloutSession("scan-parent", None, parent),
         started_at=started,
         completed_at=started,
     )
@@ -806,10 +798,9 @@ def test_completion_counts_only_scan_owned_parent_and_descendants(
 
 @pytest.mark.parametrize("cache_write_field", ["cache_write_input_tokens", "cache_write_tokens"])
 def test_scan_usage_helper_preserves_cached_token_totals(
+    scan_usage,
     cache_write_field: str,
 ) -> None:
-    helper = Path(__file__).resolve().parents[1] / "scripts" / "workbench_scan_usage.py"
-    snapshot = runpy.run_path(str(helper))["_token_snapshot"]
     usage = {
         "input_tokens": 120,
         "cached_input_tokens": 30,
@@ -819,7 +810,7 @@ def test_scan_usage_helper_preserves_cached_token_totals(
         "total_tokens": 135,
     }
 
-    assert snapshot({"info": {"total_token_usage": usage}}) == _counts(
+    assert scan_usage._token_snapshot({"info": {"total_token_usage": usage}}) == _counts(
         120, 30, 15, cache_write_input_tokens=12
     )
 
@@ -829,11 +820,8 @@ def test_scan_usage_helper_preserves_cached_token_totals(
     [(0, 12, 12), (0, 0, 0), (5, 12, 5), (False, 12, None), (0.0, 12, None)],
 )
 def test_scan_usage_helper_requires_integer_cache_write_placeholder(
-    canonical: object, legacy: int, expected: int | None
+    scan_usage, canonical: object, legacy: int, expected: int | None
 ) -> None:
-    helper = runpy.run_path(
-        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
-    )
     usage = {
         "input_tokens": 120,
         "cached_input_tokens": 30,
@@ -843,7 +831,7 @@ def test_scan_usage_helper_requires_integer_cache_write_placeholder(
         "total_tokens": 135,
     }
 
-    assert helper["_usage_counts"](usage) == (
+    assert scan_usage._usage_counts(usage) == (
         None if expected is None else _counts(120, 30, 15, cache_write_input_tokens=expected)
     )
 
@@ -859,11 +847,10 @@ def test_scan_usage_helper_requires_integer_cache_write_placeholder(
         ("2026-01-01T00:00:00", None),
     ],
 )
-def test_scan_usage_timestamp_handles_utc_boundaries(value: str, expected: str | None) -> None:
-    helper = runpy.run_path(
-        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
-    )
-    assert helper["_timestamp"](value) == (
+def test_scan_usage_timestamp_handles_utc_boundaries(
+    scan_usage, value: str, expected: str | None
+) -> None:
+    assert scan_usage._timestamp(value) == (
         datetime.fromisoformat(expected) if expected is not None else None
     )
 
@@ -906,7 +893,7 @@ def test_scan_cost_preserves_diagnostics_for_overflowing_amount(
     assert json.loads(workbench_api["parse_scan_cost"](json.dumps(value))) == value
 
 
-@pytest.mark.parametrize("coverage", [[], {}])
+@pytest.mark.parametrize("coverage", [[], ["complete"], {}])
 def test_scan_cost_preserves_diagnostics_for_non_scalar_coverage(workbench_api, coverage) -> None:
     value = {"usage": {"coverage": coverage, "source": "codex_rollout", "threadCount": 0}}
     with pytest.raises(SystemExit) as error:
@@ -1068,7 +1055,7 @@ def test_usage_finds_state_database_in_configured_home(
     home_variable: str,
     home_kind: str,
     monkeypatch: pytest.MonkeyPatch,
-    workbench_api,
+    scan_usage,
 ) -> None:
     home = tmp_path / ("native home" if sys.platform == "win32" else "native home ")
     if home_kind == "literal_tilde":
@@ -1089,7 +1076,7 @@ def test_usage_finds_state_database_in_configured_home(
         configured_home = "~" if home_kind == "home" else f"~/{home.name}"
     monkeypatch.setenv(home_variable, configured_home)
 
-    assert workbench_api["scan_usage"]._codex_state_database() == database.resolve()
+    assert scan_usage._codex_state_database() == database.resolve()
 
 
 def test_completion_reports_unavailable_without_fabricating_zero(tmp_path: Path) -> None:
@@ -1278,7 +1265,7 @@ def test_completion_counts_deep_worker_retries_and_descendants(tmp_path: Path) -
 
 @pytest.mark.parametrize("owner_first", [True, False])
 def test_usage_counts_registered_worker_when_its_parent_rollout_is_missing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner_first: bool
+    scan_usage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner_first: bool
 ) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
@@ -1310,8 +1297,6 @@ def test_usage_counts_registered_worker_when_its_parent_rollout_is_missing(
     )
     for key, value in fixture.environment.items():
         monkeypatch.setenv(key, value)
-    helper = Path(__file__).resolve().parents[1] / "scripts" / "workbench_scan_usage.py"
-    collect_usage = runpy.run_path(str(helper))["collect_scan_usage"]
     with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
         connection.row_factory = sqlite3.Row
         connection.execute(
@@ -1319,7 +1304,7 @@ def test_usage_counts_registered_worker_when_its_parent_rollout_is_missing(
             ("registered-worker", fixture.scan_id),
         )
         scan = connection.execute("SELECT * FROM scans WHERE id = ?", (fixture.scan_id,)).fetchone()
-        usage = collect_usage(
+        usage = scan_usage.collect_scan_usage(
             connection,
             scan,
             thread_id="scan-parent" if owner_first else None,
@@ -1555,7 +1540,7 @@ def test_usage_has_no_separate_workbench_command(workbench_api, monkeypatch, cap
 
 @pytest.mark.parametrize("native", [False, True])
 def test_host_finalizes_exact_completion_turn_without_changing_artifacts(
-    tmp_path: Path, native: bool
+    scan_usage, tmp_path: Path, native: bool
 ) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
@@ -1660,11 +1645,8 @@ def test_host_finalizes_exact_completion_turn_without_changing_artifacts(
     ]
     with parent.open("a", encoding="utf-8") as output:
         output.writelines(f"{json.dumps(event)}\n" for event in later_events)
-    helper = runpy.run_path(
-        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
-    )
-    measurement = helper["_read_rollout_usage"](
-        helper["RolloutSession"]("scan-parent", None, parent),
+    measurement = scan_usage._read_rollout_usage(
+        scan_usage.RolloutSession("scan-parent", None, parent),
         started_at=fixture.started_at,
         completed_at=datetime.fromisoformat(stopped_at.replace("Z", "+00:00")),
         completed_turn_id=turn_id,
@@ -2022,6 +2004,7 @@ def test_completion_recovers_replaced_deep_worker_threads(tmp_path: Path, worker
     ],
 )
 def test_worker_discovery_matches_platform_path_spelling(
+    scan_usage,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     platform_name: str,
@@ -2045,14 +2028,10 @@ def test_worker_discovery_matches_platform_path_spelling(
             "UPDATE threads SET cwd = ?, created_at = ? WHERE id = ?",
             (recorded_cwd, int(started.timestamp()), "replaced-worker"),
         )
-    scripts = Path(__file__).resolve().parents[1] / "scripts"
-    monkeypatch.syspath_prepend(str(scripts))
-    helper = runpy.run_path(str(scripts / "workbench_scan_usage.py"))
-    discover = helper["_discover_rollout_sessions"]
-    monkeypatch.setitem(discover.__globals__, "os", SimpleNamespace(name=platform_name))
+    monkeypatch.setattr(scan_usage, "os", SimpleNamespace(name=platform_name))
     warnings: set[str] = set()
 
-    sessions, missing = discover(
+    sessions, missing = scan_usage._discover_rollout_sessions(
         state_database,
         ["current-worker"],
         warnings,
@@ -2385,7 +2364,7 @@ def test_completion_preserves_receipts_when_later_worker_usage_is_missing(
 @pytest.mark.parametrize("terminal", ["task_complete", "turn_aborted"])
 @pytest.mark.parametrize("receipt", ["none", "native", "legacy", "zero"])
 def test_closed_turn_coverage_survives_later_success(
-    tmp_path: Path, worker: bool, terminal: str, receipt: str
+    scan_usage, tmp_path: Path, worker: bool, terminal: str, receipt: str
 ) -> None:
     started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
     thread_id = "worker" if worker else "scan-parent"
@@ -2415,11 +2394,8 @@ def test_closed_turn_coverage_survives_later_success(
     rollout = _rollout(
         tmp_path, thread_id, events, parent_thread_id=parent_id, include_task_start=False
     )
-    helper = runpy.run_path(
-        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
-    )
-    measurement = helper["_read_rollout_usage"](
-        helper["RolloutSession"](thread_id, parent_id, rollout),
+    measurement = scan_usage._read_rollout_usage(
+        scan_usage.RolloutSession(thread_id, parent_id, rollout),
         started_at=started,
         completed_at=started,
     )
@@ -2432,7 +2408,7 @@ def test_closed_turn_coverage_survives_later_success(
 
 @pytest.mark.parametrize("receipt", [None, "legacy", "native"])
 def test_closed_turn_coverage_retains_before_window_receipt_evidence(
-    tmp_path: Path, receipt: str | None
+    scan_usage, tmp_path: Path, receipt: str | None
 ) -> None:
     started = datetime.fromisoformat("2026-01-01T00:00:01+00:00")
     before = started - timedelta(seconds=1)
@@ -2452,11 +2428,8 @@ def test_closed_turn_coverage_retains_before_window_receipt_evidence(
         ]
     )
     rollout = _rollout(tmp_path, "scan-parent", events)
-    helper = runpy.run_path(
-        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
-    )
-    measurement = helper["_read_rollout_usage"](
-        helper["RolloutSession"]("scan-parent", None, rollout),
+    measurement = scan_usage._read_rollout_usage(
+        scan_usage.RolloutSession("scan-parent", None, rollout),
         started_at=started,
         completed_at=started,
     )
@@ -2465,7 +2438,9 @@ def test_closed_turn_coverage_retains_before_window_receipt_evidence(
     assert warnings == (set() if receipt else {"token_record_missing"})
 
 
-def test_closed_turn_coverage_accepts_delayed_receipt_for_same_turn(tmp_path: Path) -> None:
+def test_closed_turn_coverage_accepts_delayed_receipt_for_same_turn(
+    scan_usage, tmp_path: Path
+) -> None:
     started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
     rollout = _rollout(
         tmp_path,
@@ -2476,11 +2451,8 @@ def test_closed_turn_coverage_accepts_delayed_receipt_for_same_turn(tmp_path: Pa
             _response_event(started, "scan-parent", "late", 10, 2, turn_id="first"),
         ],
     )
-    helper = runpy.run_path(
-        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
-    )
-    measurement = helper["_read_rollout_usage"](
-        helper["RolloutSession"]("scan-parent", None, rollout),
+    measurement = scan_usage._read_rollout_usage(
+        scan_usage.RolloutSession("scan-parent", None, rollout),
         started_at=started,
         completed_at=started,
     )
@@ -2490,6 +2462,7 @@ def test_closed_turn_coverage_accepts_delayed_receipt_for_same_turn(tmp_path: Pa
 
 
 def test_closed_turn_coverage_preserves_interruption_after_same_turn_resumes(
+    scan_usage,
     tmp_path: Path,
 ) -> None:
     started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
@@ -2504,11 +2477,8 @@ def test_closed_turn_coverage_preserves_interruption_after_same_turn_resumes(
             _event(started, "event_msg", {"type": "task_complete", "turn_id": "same-turn"}),
         ],
     )
-    helper = runpy.run_path(
-        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
-    )
-    measurement = helper["_read_rollout_usage"](
-        helper["RolloutSession"]("scan-parent", None, rollout),
+    measurement = scan_usage._read_rollout_usage(
+        scan_usage.RolloutSession("scan-parent", None, rollout),
         started_at=started,
         completed_at=started,
     )
@@ -2518,6 +2488,7 @@ def test_closed_turn_coverage_preserves_interruption_after_same_turn_resumes(
 
 
 def test_closed_turn_coverage_ignores_inherited_and_outside_window_interruptions(
+    scan_usage,
     tmp_path: Path,
 ) -> None:
     started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
@@ -2537,11 +2508,8 @@ def test_closed_turn_coverage_ignores_inherited_and_outside_window_interruptions
             _event(before, "event_msg", {"type": "turn_aborted", "turn_id": "inherited"}),
         ],
     )
-    helper = runpy.run_path(
-        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
-    )
-    measurement = helper["_read_rollout_usage"](
-        helper["RolloutSession"]("worker", "scan-parent", rollout),
+    measurement = scan_usage._read_rollout_usage(
+        scan_usage.RolloutSession("worker", "scan-parent", rollout),
         started_at=started,
         completed_at=started,
     )

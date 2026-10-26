@@ -1963,10 +1963,10 @@ def test_independent_worker_candidate_ids_do_not_share_rejection(tmp_path: Path)
     assert "previousFindings" not in rejected
 
 
-def test_standard_worker_results_commit_and_recover_without_discovery_ledgers(
+def test_standard_worker_results_commit_recover_and_finish_without_discovery_ledgers(
     tmp_path: Path,
 ) -> None:
-    state_dir, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     worker_id, worker_result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
     reducer_id, reducer_result, committed = committed_standard_reducer(
         state_dir,
@@ -1985,25 +1985,20 @@ def test_standard_worker_results_commit_and_recover_without_discovery_ledgers(
     assert workers[reducer_id]["resultManifestPath"] == str(reducer_result)
     assert not (scan_dir / "artifacts" / "02_discovery").exists()
 
+    environment = {"CODEX_HOME": str(codex_home)}
     recovered = get_deep_scan(
-        state_dir, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
+        state_dir, scan_id, "standard-worker-thread", environment=environment
     )["deepScan"]
     assert recovered["canonicalArtifacts"] is None
     assert recovered["workers"] == committed["workers"]
 
-
-def test_standard_worker_results_finish_with_only_canonical_parent_manifest(
-    tmp_path: Path,
-) -> None:
-    state_dir, codex_home, target, scan_dir, scan_id = standard_parent_results_fixture(tmp_path)
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
     manifest_path = scan_dir / "scan-manifest.json"
 
     finished = finish_deep_scan(
-        state_dir,
-        scan_id,
-        "capped",
-        str(manifest_path),
-        environment={"CODEX_HOME": str(codex_home)},
+        state_dir, scan_id, "capped", str(manifest_path), environment=environment
     )["deepScan"]
 
     assert finished["status"] == "succeeded"

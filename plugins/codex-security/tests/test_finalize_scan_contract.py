@@ -118,32 +118,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         self.write_json("scan-manifest.json", self.manifest)
         self.write_json("findings.json", self.findings)
         self.write_json("coverage.json", self.coverage)
-        (self.scan_dir / "report.md").write_text(
-            """# Security Review: example/repo
-
-## Findings
-
-| Title | Severity |
-| --- | --- |
-| [Unsafe archive extraction can escape the output directory](#1-unsafe-archive-extraction-can-escape-the-output-directory) | high |
-
-### [1] Unsafe archive extraction can escape the output directory
-
-| Field | Value |
-| --- | --- |
-| Severity | high |
-| Confidence | high |
-| Confidence rationale | Direct source trace reaches the filesystem write without a containment check. |
-| Category | Path traversal |
-| CWE | CWE-22 |
-| Affected lines | src/extract.py:41-44 |
-
-#### Summary
-
-The extraction root is not enforced.
-""",
-            encoding="utf-8",
-        )
+        (self.scan_dir / "report.md").write_text("# Existing report\n", encoding="utf-8")
 
     def completion_binding(self) -> dict[str, object]:
         return {
@@ -161,18 +136,6 @@ The extraction root is not enforced.
             "scope": {"includePaths": ["src/"], "excludePaths": []},
             "coverageMode": "repository",
         }
-
-    def rewrite_sealed_artifact(self, relative_path: str, payload: object) -> None:
-        self.write_json(relative_path, payload)
-        manifest = self.read_json("scan-manifest.json")
-        artifacts = manifest["scan"]["artifacts"]
-        for artifact in artifacts:
-            if artifact["path"] == relative_path:
-                artifact["sha256"] = self.sha256_file(relative_path)
-                break
-        else:
-            raise AssertionError(f"missing sealed artifact: {relative_path}")
-        self.write_json("scan-manifest.json", manifest)
 
     @contextmanager
     def preserving_sealed_findings(self, findings: dict) -> Iterator[None]:
@@ -627,15 +590,7 @@ The extraction root is not enforced.
         )
         coverage = self.read_json("coverage.json")
         coverage["inventoryStrategy"] = "deep_repository_repeated_discovery"
-        self.write_json("coverage.json", coverage)
-        manifest = self.read_json("scan-manifest.json")
-        coverage_artifact = next(
-            artifact
-            for artifact in manifest["scan"]["artifacts"]
-            if artifact["path"] == "coverage.json"
-        )
-        coverage_artifact["sha256"] = self.sha256_file("coverage.json")
-        self.write_json("scan-manifest.json", manifest)
+        self.rewrite_sealed_artifact("coverage.json", coverage)
 
         with self.assertRaisesRegex(
             FINALIZER.ContractError,
@@ -1453,19 +1408,13 @@ The extraction root is not enforced.
 
     def test_rejects_sealed_findings_missing_derived_identity(self) -> None:
         self.write_sealed_scan()
-        sealed_manifest = self.read_json("scan-manifest.json")
         sealed_findings = self.read_json("findings.json")
 
         for field in ("findingId", "occurrenceId", "fingerprints"):
             with self.subTest(field=field):
-                manifest = copy.deepcopy(sealed_manifest)
                 findings = copy.deepcopy(sealed_findings)
                 findings["findings"][0].pop(field)
-                self.write_json("findings.json", findings)
-                for artifact in manifest["scan"]["artifacts"]:
-                    if artifact["path"] == "findings.json":
-                        artifact["sha256"] = self.sha256_file("findings.json")
-                self.write_json("scan-manifest.json", manifest)
+                self.rewrite_sealed_artifact("findings.json", findings)
 
                 with self.assertRaisesRegex(FINALIZER.ContractError, field):
                     FINALIZER.finalize_scan(self.scan_dir)
@@ -2356,40 +2305,27 @@ The extraction root is not enforced.
         ):
             FINALIZER.finalize_scan(self.scan_dir)
 
-    def test_rejects_remote_url_credentials(self) -> None:
-        self.manifest["scan"]["target"]["remote"] = "https://token@example.com/repo"
+    def test_rejects_remote_credentials_and_query(self) -> None:
         self.write_scan()
-        with self.assertRaisesRegex(FINALIZER.ContractError, "must not contain credentials"):
-            FINALIZER.finalize_scan(self.scan_dir)
-
-    def test_rejects_remote_url_query(self) -> None:
-        self.manifest["scan"]["target"]["remote"] = "https://example.com/repo?token=secret"
-        self.write_scan()
-        with self.assertRaisesRegex(FINALIZER.ContractError, "must not contain credentials"):
-            FINALIZER.finalize_scan(self.scan_dir)
-
-    def test_rejects_remote_control_characters(self) -> None:
-        for character in ("\0", "\t", "\n", "\r", "\x7f", "\x85", "\u2028", "\u2029"):
-            with self.subTest(character=repr(character)):
-                self.manifest["scan"]["target"]["remote"] = f"https://example.com{character}/repo"
-                self.write_scan()
-                with self.assertRaisesRegex(
-                    FINALIZER.ContractError, "expected a sanitized canonical absolute URL"
-                ):
-                    FINALIZER.finalize_scan(self.scan_dir)
-
-    def test_rejects_remote_unsupported_port(self) -> None:
-        for remote in ("https://example.com:bad/repo", "https://example.com:99999/repo"):
+        for remote in (
+            "https://token@example.com/repo",
+            "https://example.com/repo?token=secret",
+            "https://@example.com/repo",
+        ):
             with self.subTest(remote=remote):
                 self.manifest["scan"]["target"]["remote"] = remote
-                self.write_scan()
+                self.write_json("scan-manifest.json", self.manifest)
                 with self.assertRaisesRegex(
-                    FINALIZER.ContractError, "expected a sanitized canonical absolute URL"
+                    FINALIZER.ContractError, "must not contain credentials"
                 ):
                     FINALIZER.finalize_scan(self.scan_dir)
 
     def test_rejects_remote_unsafe_authority(self) -> None:
+        self.write_scan()
         for remote in (
+            *(f"https://example.com{char}/repo" for char in "\0\t\n\r\x7f\x85\u2028\u2029"),
+            "https://example.com:bad/repo",
+            "https://example.com:99999/repo",
             "https://exa mple.com/repo",
             "https://example.com>/repo",
             "https://exa^mple.com/repo",
@@ -2401,17 +2337,11 @@ The extraction root is not enforced.
         ):
             with self.subTest(remote=remote):
                 self.manifest["scan"]["target"]["remote"] = remote
-                self.write_scan()
+                self.write_json("scan-manifest.json", self.manifest)
                 with self.assertRaisesRegex(
                     FINALIZER.ContractError, "expected a sanitized canonical absolute URL"
                 ):
                     FINALIZER.finalize_scan(self.scan_dir)
-
-    def test_rejects_remote_bare_userinfo_separator(self) -> None:
-        self.manifest["scan"]["target"]["remote"] = "https://@example.com/repo"
-        self.write_scan()
-        with self.assertRaisesRegex(FINALIZER.ContractError, "must not contain credentials"):
-            FINALIZER.finalize_scan(self.scan_dir)
 
     def test_seals_remote_port_and_ipv6_authority(self) -> None:
         for remote in (

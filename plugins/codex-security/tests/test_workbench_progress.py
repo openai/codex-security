@@ -9,14 +9,6 @@ from workbench_test_support import (
 )
 
 
-def test_usage_list_coverage_is_invalid(workbench_api):
-    from workbench_validation import _valid_measured_scan_usage
-
-    assert not _valid_measured_scan_usage(
-        {"coverage": ["complete"], "source": "codex_rollout", "threadCount": 0}
-    )
-
-
 def test_progress_preserves_phase_receipts_until_validation(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"

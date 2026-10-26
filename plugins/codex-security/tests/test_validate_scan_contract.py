@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import io
 import json
 import subprocess
 import sys
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from workbench_test_support import ScanFixtureTestCase, load_script
@@ -36,15 +34,7 @@ class ValidateScanContractTest(ScanFixtureTestCase):
         findings["findings"][0]["attackPath"] = {
             "dataFlow": {"evidenceRefs": ["legacy-missing-evidence"]}
         }
-        self.write_json("findings.json", findings)
-        manifest = self.read_json("scan-manifest.json")
-        findings_artifact = next(
-            artifact
-            for artifact in manifest["scan"]["artifacts"]
-            if artifact["path"] == "findings.json"
-        )
-        findings_artifact["sha256"] = self.sha256_file("findings.json")
-        self.write_json("scan-manifest.json", manifest)
+        self.rewrite_sealed_artifact("findings.json", findings)
 
         validated = VALIDATOR.validate_contract(self.scan_dir)
 
@@ -60,24 +50,14 @@ class ValidateScanContractTest(ScanFixtureTestCase):
         self.assertEqual(len(validated["manifest"]["metadata"]), 16 * 1024 * 1024)
 
     def test_rejects_unsafe_values_in_sealed_finding_extensions(self) -> None:
-        original_manifest = (self.scan_dir / "scan-manifest.json").read_bytes()
-        original_findings = (self.scan_dir / "findings.json").read_bytes()
+        findings = self.read_json("findings.json")
         for value, reason in (
             (1e20, "unsafe integer-valued JSON numbers"),
             ("bad-" + chr(0xD800), "well-formed Unicode"),
         ):
             with self.subTest(reason=reason):
-                (self.scan_dir / "scan-manifest.json").write_bytes(original_manifest)
-                (self.scan_dir / "findings.json").write_bytes(original_findings)
-                findings = self.read_json("findings.json")
                 findings["findings"][0].setdefault("extensions", {})["unsafe"] = value
-                self.write_json("findings.json", findings)
-                manifest = self.read_json("scan-manifest.json")
-                for artifact in manifest["scan"]["artifacts"]:
-                    if artifact["path"] == "findings.json":
-                        artifact["sha256"] = self.sha256_file("findings.json")
-                        break
-                self.write_json("scan-manifest.json", manifest)
+                self.rewrite_sealed_artifact("findings.json", findings)
 
                 with self.assertRaisesRegex(VALIDATOR.FINALIZER.ContractError, reason):
                     VALIDATOR.validate_contract(self.scan_dir)
@@ -96,22 +76,6 @@ class ValidateScanContractTest(ScanFixtureTestCase):
 
         with self.assertRaisesRegex(VALIDATOR.FINALIZER.ContractError, "sealed"):
             VALIDATOR.validate_contract(self.scan_dir)
-
-    def test_cli_prints_machine_readable_receipt(self) -> None:
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-
-        with redirect_stdout(stdout), redirect_stderr(stderr):
-            exit_code = VALIDATOR.main(["--scan-dir", str(self.scan_dir)])
-
-        receipt = json.loads(stdout.getvalue())
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(receipt["status"], "valid")
-        self.assertEqual(
-            receipt["manifestPath"],
-            str(self.scan_dir.resolve() / "scan-manifest.json"),
-        )
-        self.assertEqual(stderr.getvalue(), "")
 
     def test_finalizer_then_validator_cli_smoke(self) -> None:
         (self.scan_dir / "report.md").unlink()
@@ -134,7 +98,10 @@ class ValidateScanContractTest(ScanFixtureTestCase):
             text=True,
         )
         self.assertEqual(validated.returncode, 0, validated.stderr)
-        self.assertEqual(json.loads(validated.stdout)["status"], "valid")
+        receipt = json.loads(validated.stdout)
+        self.assertEqual(receipt["status"], "valid")
+        self.assertEqual(receipt["manifestPath"], str(scan_dir / "scan-manifest.json"))
+        self.assertEqual(validated.stderr, "")
 
 
 if __name__ == "__main__":

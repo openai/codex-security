@@ -27,30 +27,6 @@ class ValidateTrackingSourceTest(ScanFixtureTestCase):
     validator = VALIDATOR
     example_scan = EXAMPLE_SCAN
 
-    def rewrite_findings_and_seal(self, findings: dict[str, object]) -> None:
-        self.write_json("findings.json", findings)
-        manifest = self.read_json("scan-manifest.json")
-        findings_bytes = (self.scan_dir / "findings.json").read_bytes()
-        artifact = next(
-            item
-            for item in manifest["scan"]["artifacts"]
-            if item["path"] == manifest["scan"]["findingsRef"]
-        )
-        artifact["sha256"] = hashlib.sha256(findings_bytes).hexdigest()
-        self.write_json("scan-manifest.json", manifest)
-
-    def rewrite_coverage_and_seal(self, coverage: dict[str, object]) -> None:
-        self.write_json("coverage.json", coverage)
-        manifest = self.read_json("scan-manifest.json")
-        coverage_bytes = (self.scan_dir / "coverage.json").read_bytes()
-        artifact = next(
-            item
-            for item in manifest["scan"]["artifacts"]
-            if item["path"] == manifest["scan"]["coverageRef"]
-        )
-        artifact["sha256"] = hashlib.sha256(coverage_bytes).hexdigest()
-        self.write_json("scan-manifest.json", manifest)
-
     def test_tampered_findings_are_rejected(self) -> None:
         findings_path = self.scan_dir / "findings.json"
         findings_path.write_text(
@@ -82,7 +58,7 @@ class ValidateTrackingSourceTest(ScanFixtureTestCase):
     def test_digest_matching_invalid_coverage_is_rejected(self) -> None:
         coverage = self.read_json("coverage.json")
         coverage["scanId"] = "wrong-scan-id"
-        self.rewrite_coverage_and_seal(coverage)
+        self.rewrite_sealed_artifact("coverage.json", coverage)
 
         with self.assertRaisesRegex(
             VALIDATOR.FINALIZER.ContractError,
@@ -114,28 +90,7 @@ class ValidateTrackingSourceTest(ScanFixtureTestCase):
         with self.assertRaisesRegex(VALIDATOR.FINALIZER.ContractError, "scan-manifest.json"):
             VALIDATOR.validate_source(report_dir)
 
-    def test_multiple_findings_can_be_listed_or_selected(self) -> None:
-        findings = self.read_json("findings.json")
-        sibling = copy.deepcopy(findings["findings"][0])
-        sibling["identity"]["instance"] = "second-archive-write"
-        sibling.pop("findingId")
-        sibling.pop("occurrenceId")
-        sibling.pop("fingerprints")
-        findings["findings"].append(sibling)
-        manifest = self.read_json("scan-manifest.json")
-        VALIDATOR.FINALIZER._populate_unsealed_finding_identities(manifest, findings)
-        self.rewrite_findings_and_seal(findings)
-
-        listed = VALIDATOR.validate_source(self.scan_dir)
-        self.assertEqual(len(listed), 2)
-
-        selected = VALIDATOR.validate_source(
-            self.scan_dir,
-            fingerprint=sibling["fingerprints"]["primary"],
-        )
-        self.assertEqual(selected[0]["findingId"], sibling["findingId"])
-
-    def test_lists_twenty_five_findings_for_a_max_size_batch(self) -> None:
+    def test_max_size_batch_can_be_listed_or_selected_by_fingerprint(self) -> None:
         findings = self.read_json("findings.json")
         template = findings["findings"][0]
         for index in range(1, 25):
@@ -148,13 +103,19 @@ class ValidateTrackingSourceTest(ScanFixtureTestCase):
 
         manifest = self.read_json("scan-manifest.json")
         VALIDATOR.FINALIZER._populate_unsealed_finding_identities(manifest, findings)
-        self.rewrite_findings_and_seal(findings)
+        self.rewrite_sealed_artifact("findings.json", findings)
 
         listed = VALIDATOR.validate_source(self.scan_dir)
         finding_ids = [finding["findingId"] for finding in listed]
 
         self.assertEqual(len(finding_ids), 25)
         self.assertEqual(len(set(finding_ids)), 25)
+
+        finding = findings["findings"][-1]
+        selected = VALIDATOR.validate_source(
+            self.scan_dir, fingerprint=finding["fingerprints"]["primary"]
+        )
+        self.assertEqual([item["findingId"] for item in selected], [finding["findingId"]])
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { buildServer } from "./build-server.ts";
 import { importModule } from "./import-module.ts";
+import { readJson } from "./support/json.ts";
 import type { RunArtifactWorkbench } from "../src/artifact-context.ts";
 import type {
   DeepScanRunState,
@@ -683,9 +684,12 @@ async function assertInterleavedProgressRetained(fixture: PublicationFixture) {
 
 async function createFixture(t: TestContext, paths: FixturePaths = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "deep-publication-"));
-  let client: Client | undefined;
+  const client = new Client({
+    name: "publication-integration",
+    version: "1.0.0",
+  });
   t.after(async () => {
-    await client?.close();
+    await client.close();
     await rm(root, { recursive: true, force: true });
   });
   const targetPath = path.join(root, paths.target ?? "target");
@@ -727,7 +731,6 @@ async function createFixture(t: TestContext, paths: FixturePaths = {}) {
     threadId: owner,
     scanRoot: environment.CODEX_SECURITY_SCAN_ROOT,
   });
-  client = new Client({ name: "publication-integration", version: "1.0.0" });
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [serverPath, "--stdio"],
@@ -736,7 +739,7 @@ async function createFixture(t: TestContext, paths: FixturePaths = {}) {
     stderr: "pipe",
   });
   if (transport.stderr instanceof Readable) transport.stderr.resume();
-  await client.connect(transport);
+  let connected: Promise<void> | undefined;
   return {
     run,
     store,
@@ -745,9 +748,10 @@ async function createFixture(t: TestContext, paths: FixturePaths = {}) {
     environment,
     setTime(offset: number) {
       now = new Date(Date.parse(instant) + offset * 1_000).toISOString();
+      return now;
     },
-    call(name: string, args: Record<string, unknown> | ScanDraftInput) {
-      assert.ok(client);
+    async call(name: string, args: Record<string, unknown> | ScanDraftInput) {
+      await (connected ??= client.connect(transport));
       return client.callTool({
         name,
         arguments: { ...args },
@@ -1171,30 +1175,33 @@ test("accepted response recovery cannot replace a later publication from the sam
   assert.deepEqual(await snapshot(f.run), newer);
 });
 
-for (const code of ["EPERM", "EACCES", "EIO"]) {
-  test(`optional receipt cleanup ${code} preserves publication success`, async (t) => {
-    const f = await publicationFixture(t);
-    const filesystem = await import("node:fs");
-    const original = filesystem.promises.rm;
-    t.mock.method(
+test("receipt cleanup failures preserve publication success", async (t) => {
+  const f = await publicationFixture(t);
+  const filesystem = await import("node:fs");
+  const original = filesystem.promises.rm;
+  for (const [index, code] of ["EPERM", "EACCES", "EIO"].entries()) {
+    const completedAt = f.setTime(10 + index);
+    let attempted = false;
+    const remove = t.mock.method(
       filesystem.promises,
       "rm",
       async (...[file, options]: Parameters<typeof original>) => {
-        if (String(file).endsWith(".accepted.json"))
+        if (String(file).endsWith(".accepted.json")) {
+          attempted = true;
           throw Object.assign(new Error(`Synthetic receipt cleanup ${code}`), {
             code,
           });
+        }
         return original(file, options);
       },
     );
     assert.equal((await f.publish()).status, "draft_written");
-    assert.ok(
-      JSON.parse((await snapshot(f.run)).files["scan-manifest.json"]).scan
-        .completedAt,
-    );
-    t.mock.restoreAll();
-  });
-}
+    const manifest = await readJson(f.run.scanDir, "scan-manifest.json");
+    assert.equal(manifest.scan.completedAt, completedAt, code);
+    assert.ok(attempted, code);
+    remove.mock.restore();
+  }
+});
 
 test("receipt I/O failure cannot authorize replay after response loss", async (t) => {
   const f = await publicationFixture(t);
@@ -1220,13 +1227,13 @@ test("receipt I/O failure cannot authorize replay after response loss", async (t
   assert.deepEqual(await readdir(path.join(f.run.scanDir, "drafts")), []);
 });
 
-for (const code of ["EACCES", "ECONNRESET"]) {
-  for (const matching of [false, true]) {
-    test(`publication ${code} before acceptance is one attempt (matching=${matching})`, async (t) => {
-      const f = await publicationFixture(t);
-      if (matching) await f.publish();
-      const before = await snapshot(f.run);
-      const workers = await f.workers();
+for (const matching of [false, true]) {
+  test(`failure before acceptance is one attempt (matching=${matching})`, async (t) => {
+    const f = await publicationFixture(t);
+    if (matching) await f.publish();
+    const before = await snapshot(f.run);
+    const workers = await f.workers();
+    for (const code of ["EACCES", "ECONNRESET"]) {
       const original = Object.assign(new Error(`Synthetic precommit ${code}`), {
         code,
       });
@@ -1244,8 +1251,8 @@ for (const code of ["EACCES", "ECONNRESET"]) {
       assert.deepEqual(await snapshot(f.run), before);
       assert.deepEqual(await f.workers(), workers);
       assert.deepEqual(await readdir(path.join(f.run.scanDir, "drafts")), []);
-    });
-  }
+    }
+  });
 }
 
 for (const takeover of ["coordinator", "continuation"]) {

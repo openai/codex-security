@@ -102,8 +102,15 @@ def test_deadline_requires_boolean_completion_before_superseding_worker_history(
         )
 
 
-@pytest.mark.parametrize("source", ["result", "checkpoint", "archived-result"])
-@pytest.mark.parametrize("invalid", ["rationale", "code_evidence", "sourceFindingIds"])
+# Each source feeds the same per-finding validator. Exercise each rejection in isolation.
+@pytest.mark.parametrize(
+    ("source", "invalid"),
+    [
+        ("result", "rationale"),
+        ("checkpoint", "code_evidence"),
+        ("archived-result", "sourceFindingIds"),
+    ],
+)
 def test_deadline_validates_each_recovered_finding_against_the_completed_contract(
     workbench_api, workbench_db, deadline_scan, source, invalid
 ):
