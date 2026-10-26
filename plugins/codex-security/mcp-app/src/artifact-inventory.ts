@@ -47,11 +47,11 @@ export async function prepareCodexSecurityReviewItems(
   const arguments_ = [
     "generate-in-scope-files",
     `--repo=${context.repoRoot}`,
-    `--scope=${context.scope ?? "."}`,
     `--out=${destination}`,
   ];
 
   if (context.mode === "diff") {
+    arguments_.push(`--scope=${context.scope ?? "."}`);
     const target = context.targetContract?.diffTarget;
     if (!target || typeof target !== "object" || Array.isArray(target)) {
       throw new Error(
@@ -75,6 +75,10 @@ export async function prepareCodexSecurityReviewItems(
       `--diff-base=${baseRevision}`,
       `--diff-head=${headRevision}`,
       `--diff-mode=${kind === "working_tree" ? "local-patch" : "revisions"}`,
+    );
+  } else {
+    arguments_.push(
+      ...authoritativeIncludePaths(context).map((scope) => `--scope=${scope}`),
     );
   }
 
@@ -116,6 +120,26 @@ export async function prepareCodexSecurityReviewItems(
   }
 
   return { reviewItemsTotal: (await readReviewItems(context)).length };
+}
+
+function authoritativeIncludePaths(context: ArtifactContext): string[] {
+  const scope = context.targetContract?.scope;
+  if (scope === undefined) return [context.scope ?? "."];
+  if (!scope || typeof scope !== "object" || Array.isArray(scope)) {
+    throw new Error(`${label}: the authoritative scope is invalid.`);
+  }
+  const includePaths = (scope as Record<string, unknown>).requiredIncludePaths;
+  if (includePaths === undefined) return [context.scope ?? "."];
+  if (
+    !Array.isArray(includePaths) ||
+    includePaths.length === 0 ||
+    includePaths.some((entry) => typeof entry !== "string" || !entry)
+  ) {
+    throw new Error(
+      `${label}: the authoritative included scope must contain a nonempty array of paths.`,
+    );
+  }
+  return [...new Set(includePaths)];
 }
 
 /** Return bounded source paths from the fixed scan or worker inventory. */

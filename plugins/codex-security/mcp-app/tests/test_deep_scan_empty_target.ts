@@ -30,6 +30,16 @@ const { startDeepScanEngine } = await importSource("src/deep-scan/engine.ts", {
     ),
   },
 });
+const artifactInventory = await importSource("src/artifact-inventory.ts", {
+  define: {
+    "import.meta.url": JSON.stringify(
+      new URL(
+        "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
+        import.meta.url,
+      ).href,
+    ),
+  },
+});
 
 after(() => temporaryDirectories.cleanup());
 
@@ -218,6 +228,141 @@ test("an empty child of a nonempty Git repository fails through the shared engin
     "",
   );
 });
+
+test("empty requested paths do not widen to the repository root", async () => {
+  const fixture = await fixtureRun();
+  await mkdir(path.join(fixture.run.targetPath, "left"), { recursive: true });
+  await mkdir(path.join(fixture.run.targetPath, "right"), { recursive: true });
+  await writeFile(
+    path.join(fixture.run.targetPath, "outside-selection.py"),
+    "# outside the requested scope\n",
+  );
+  await runGit(fixture.run.targetPath, "init", "-q");
+  await runGit(fixture.run.targetPath, "add", "outside-selection.py");
+  await runGit(fixture.run.targetPath, "commit", "-qm", "root source");
+  const revision = await runGit(
+    fixture.run.targetPath,
+    "rev-parse",
+    "--verify",
+    "HEAD",
+  );
+  fixture.run.includePaths = ["left", "right"];
+
+  const store = new FakeStore(fixture.run);
+  const executor = new FakeExecutor();
+  const registry = new DeepScanCoordinatorRegistry();
+  const start = registry.start.bind(registry);
+  registry.start = (options: CoordinatorOptions) =>
+    start({ ...options, executor });
+  const pluginRoot = path.resolve(
+    import.meta.dirname,
+    "../../../../sdk/typescript/_bundled_plugin",
+  );
+  const { coordinator } = await startDeepScanEngine({
+    run: store.run,
+    store,
+    registry,
+    runWorkbench: async (args: string[]) => {
+      if (args[0] === "preserve-scan-results") return {};
+      assert.equal(args[0], "get-scan");
+      return {
+        scan: {
+          scanId: fixture.run.scanId,
+          scanDir: fixture.run.scanDir,
+          targetPath: fixture.run.targetPath,
+          scope: ".",
+          mode: "deep",
+          status: "running",
+          contract: {
+            scope: {
+              requiredIncludePaths: ["left", "right"],
+              requiredExcludePaths: [],
+            },
+          },
+          targetRevision: revision,
+        },
+      };
+    },
+    pluginRoot,
+    pythonCommand: "fixture-python",
+    parentSandbox: { filesystemDenies: [] },
+    threadId: "fixture-owner",
+  });
+  const terminal = await coordinator.wait(undefined, 10_000);
+
+  assert.equal(terminal?.status, "failed");
+  assert.match(terminal?.error ?? "", /no security audit was performed/iu);
+  assert.equal(executor.discoveryCalls, 0);
+  assert.equal(executor.dedupCalls, 0);
+  assert.equal(
+    await readFile(
+      path.join(
+        fixture.run.scanDir,
+        "artifacts",
+        "02_discovery",
+        "in_scope_files.txt",
+      ),
+      "utf8",
+    ),
+    "",
+  );
+});
+
+for (const selected of ["left", "right"]) {
+  test(`a source in requested path ${selected} retains normal scanning`, async () => {
+    const fixture = await fixtureRun();
+    await mkdir(path.join(fixture.run.targetPath, "left"), {
+      recursive: true,
+    });
+    await mkdir(path.join(fixture.run.targetPath, "right"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(fixture.run.targetPath, selected, "selected.py"),
+      "# selected source\n",
+    );
+    await writeFile(
+      path.join(fixture.run.targetPath, "outside-selection.py"),
+      "# outside the requested scope\n",
+    );
+    await runGit(fixture.run.targetPath, "init", "-q");
+    await runGit(fixture.run.targetPath, "add", ".");
+    await runGit(fixture.run.targetPath, "commit", "-qm", "source tree");
+    fixture.run.includePaths = ["left", "right"];
+
+    const store = new FakeStore(fixture.run);
+    const executor = new FakeExecutor();
+    const pluginRoot = path.resolve(
+      import.meta.dirname,
+      "../../../../sdk/typescript/_bundled_plugin",
+    );
+    const context = {
+      root: fixture.run.scanDir,
+      repoRoot: fixture.run.targetPath,
+      layout: "scan" as const,
+      scope: ".",
+      pluginRoot,
+      targetContract: {
+        scope: {
+          requiredIncludePaths: ["left", "right"],
+          requiredExcludePaths: [],
+        },
+      },
+    };
+    const terminal = await runCoordinator(fixture, store, executor, {
+      prepareReviewItems: () =>
+        artifactInventory.prepareCodexSecurityReviewItems(context),
+    });
+
+    assert.equal(terminal?.status, "succeeded", terminal?.error);
+    assert.equal(executor.discoveryCalls, 1);
+    assert.equal(executor.dedupCalls, 1);
+    assert.deepEqual(
+      await artifactInventory.listCodexSecurityReviewItems(context),
+      { items: [{ path: `${selected}/selected.py` }] },
+    );
+  });
+}
 
 async function runGit(repository: string, ...arguments_: string[]) {
   const { stdout } = await execFile(

@@ -58,6 +58,7 @@ export interface InventoryOptions {
   repo: string;
   out: string;
   scope?: string;
+  scopes?: readonly string[];
   scopesFile?: string;
   stateDir?: string;
   area?: string;
@@ -256,93 +257,99 @@ export async function generateInventory(
   const diff =
     command === "make-diff-rank-input" ||
     (inventory && options.base !== undefined);
-  const scope = options.scope ?? ".";
-  const resolveInventoryScope = () => {
-    if (!scope || scope.includes("\0"))
+  const scopes = options.scopes ?? [options.scope ?? "."];
+  const scope = scopes[0] ?? ".";
+  const resolveInventoryScope = (selectedScope: string) => {
+    if (!selectedScope || selectedScope.includes("\0"))
       throw new Error("--scope: expected a non-empty file or directory");
     try {
-      return scopePath(repo, scope, home, false, false);
+      return scopePath(repo, selectedScope, home, false, false);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (message.startsWith("Scope must be inside repo"))
-        throw new Error(`--scope: path must remain inside --repo: ${scope}`);
+        throw new Error(
+          `--scope: path must remain inside --repo: ${selectedScope}`,
+        );
       if (error instanceof Error && "code" in error)
-        throw new Error(`--scope: path does not exist: ${scope}`);
+        throw new Error(`--scope: path does not exist: ${selectedScope}`);
       throw error;
     }
   };
   if (inventory && !diff) {
-    const absolute = resolveInventoryScope();
-    const requested = isAbsolute(expandHome(scope, home))
-      ? inside(repo, absolute)
-      : scope;
-    const result = await runRipgrep(
-      [
-        "--files",
-        "--null",
-        "--hidden",
-        "--path-separator",
-        "/",
-        "--glob",
-        "!**/{.git,.svn}",
-        "--glob",
-        "!**/{.git,.svn}/**",
-        "--",
-        requested,
-      ],
-      repo,
-    ).catch((error: unknown) => {
-      throw new Error(
-        `could not run ripgrep: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    });
-    if (result.status !== 0 && result.status !== 1)
-      throw new Error(
-        `ripgrep ${result.signal ? `terminated by ${result.signal}` : `exited with status ${result.status}`}${result.stderr.trim() ? `: ${result.stderr.trim()}` : ""}`,
-      );
-    let bytes = result.stdout;
-    if ([...ancestors(repo)].some((path) => exists(append(path, ".git")))) {
-      const tracked = await git(repo, [
-        "ls-files",
-        "--cached",
-        "--ignored",
-        "--exclude-standard",
-        "-z",
-        "--",
-        requested,
-      ]).catch((error: unknown) => {
-        if (error instanceof Error && "code" in error)
-          return { status: 127, stdout: Buffer.alloc(0) };
-        throw error;
-      });
-      if (tracked.status === 0) {
-        const prefix =
-          requested === "." || requested.startsWith("./") ? "./" : "";
-        const paths = decodeGitPath(tracked.stdout)
-          .split("\0")
-          .filter((path) => path && regular(append(repo, path)));
-        bytes = Buffer.concat([
-          bytes,
-          encodeGitPath(paths.map((path) => prefix + path + "\0").join("")),
-        ]);
-      }
-    }
-    for (const path of decodePosixBytes(bytes).split("\0").filter(Boolean)) {
-      if (path.split("/").some((part) => sourceMetadata.has(part))) continue;
-      if (/[\r\n]/u.test(path))
+    for (const selectedScope of scopes) {
+      const absolute = resolveInventoryScope(selectedScope);
+      const requested = isAbsolute(expandHome(selectedScope, home))
+        ? inside(repo, absolute)
+        : selectedScope;
+      const result = await runRipgrep(
+        [
+          "--files",
+          "--null",
+          "--hidden",
+          "--path-separator",
+          "/",
+          "--glob",
+          "!**/{.git,.svn}",
+          "--glob",
+          "!**/{.git,.svn}/**",
+          "--",
+          requested,
+        ],
+        repo,
+      ).catch((error: unknown) => {
         throw new Error(
-          "Repository contains a path that cannot fit in the file inventory",
+          `could not run ripgrep: ${error instanceof Error ? error.message : String(error)}`,
         );
-      inventoryRows.push(encodePosixPath(path + "\n"));
+      });
+      if (result.status !== 0 && result.status !== 1)
+        throw new Error(
+          `ripgrep ${result.signal ? `terminated by ${result.signal}` : `exited with status ${result.status}`}${result.stderr.trim() ? `: ${result.stderr.trim()}` : ""}`,
+        );
+      let bytes = result.stdout;
+      if ([...ancestors(repo)].some((path) => exists(append(path, ".git")))) {
+        const tracked = await git(repo, [
+          "ls-files",
+          "--cached",
+          "--ignored",
+          "--exclude-standard",
+          "-z",
+          "--",
+          requested,
+        ]).catch((error: unknown) => {
+          if (error instanceof Error && "code" in error)
+            return { status: 127, stdout: Buffer.alloc(0) };
+          throw error;
+        });
+        if (tracked.status === 0) {
+          const prefix =
+            requested === "." || requested.startsWith("./") ? "./" : "";
+          const paths = decodeGitPath(tracked.stdout)
+            .split("\0")
+            .filter((path) => path && regular(append(repo, path)));
+          bytes = Buffer.concat([
+            bytes,
+            encodeGitPath(paths.map((path) => prefix + path + "\0").join("")),
+          ]);
+        }
+      }
+      for (const path of decodePosixBytes(bytes).split("\0").filter(Boolean)) {
+        if (path.split("/").some((part) => sourceMetadata.has(part))) continue;
+        if (/[\r\n]/u.test(path))
+          throw new Error(
+            "Repository contains a path that cannot fit in the file inventory",
+          );
+        inventoryRows.push(encodePosixPath(path + "\n"));
+      }
     }
   } else if (diff) {
     if (
       inventory &&
-      ![".", "./"].includes(
-        isAbsolute(expandHome(scope, home))
-          ? inside(repo, scopePath(repo, scope, home, false, false))
-          : scope,
-      )
+      (scopes.length !== 1 ||
+        ![".", "./"].includes(
+          isAbsolute(expandHome(scope, home))
+            ? inside(repo, scopePath(repo, scope, home, false, false))
+            : scope,
+        ))
     )
       throw new Error("--scope: diff scans must use the repository root");
     const mode = options.mode ?? "revisions",
@@ -482,7 +489,7 @@ export async function inventoryCommand(
   if (command === "make-hosted-repo-scope-input") optional.push("state-dir");
   const usage = `usage: launch_codex_security_mcp[.cmd] --helper ${command} ${required.map((name) => `--${name} VALUE`).join(" ")}`;
   try {
-    let values: Record<string, string | boolean | undefined>;
+    let values: Record<string, string | string[] | boolean | undefined>;
     try {
       const normalizedArgs = args.flatMap((value, index) =>
         value === "--preview-bytes" && /^-\d+$/u.test(args[index + 1] ?? "")
@@ -499,7 +506,10 @@ export async function inventoryCommand(
           ...Object.fromEntries(
             [...required, ...optional].map((name) => [
               name,
-              { type: "string" as const },
+              {
+                type: "string" as const,
+                ...(inventory && name === "scope" ? { multiple: true } : {}),
+              },
             ]),
           ),
           help: { type: "boolean", short: "h" },
@@ -539,7 +549,10 @@ Defaults: scope=., head=HEAD, mode=revisions, preview-bytes=1024; area uses the 
       {
         repo: values.repo as string,
         out: values.out as string,
-        scope: values.scope as string | undefined,
+        scope: Array.isArray(values.scope)
+          ? undefined
+          : (values.scope as string | undefined),
+        scopes: Array.isArray(values.scope) ? values.scope : undefined,
         scopesFile: values["scopes-file"] as string | undefined,
         stateDir: values["state-dir"] as string | undefined,
         area: values.area as string | undefined,

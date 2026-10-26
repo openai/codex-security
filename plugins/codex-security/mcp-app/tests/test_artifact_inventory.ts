@@ -48,6 +48,7 @@ const EUC_JP_PERL_HEAD = Buffer.from(
 try {
   await testSchemasAreBoundAndExact();
   await testPrepareUsesTheExistingStandardGenerator();
+  await testPrepareUsesAuthoritativeRequestedPaths();
   if (!["win32", "darwin"].includes(process.platform))
     await testNonUtf8InventoryPaths();
   await testPrepareListsIgnoredTrackedFilesOnce();
@@ -190,6 +191,78 @@ async function testPrepareUsesTheExistingStandardGenerator() {
     { reviewItemsTotal: 1 },
   );
   assert.equal(await readFile(fixture.scanInventory, "utf8"), "-source.py\n");
+}
+
+async function testPrepareUsesAuthoritativeRequestedPaths() {
+  const fixture = await createFixture("authoritative requested paths");
+  await mkdir(path.join(fixture.repoRoot, "left", "nested"), {
+    recursive: true,
+  });
+  await mkdir(path.join(fixture.repoRoot, "right"), { recursive: true });
+  await fixture.writeRepositoryFile(
+    "outside-selection.py",
+    "# outside the requested scope\n",
+  );
+  await runGit(fixture.repoRoot, "init", "-q");
+  await runGit(fixture.repoRoot, "add", "outside-selection.py");
+  await runGit(fixture.repoRoot, "commit", "-qm", "root source");
+  const context = (requiredIncludePaths: string[]) => ({
+    ...fixture.scan,
+    targetContract: {
+      scope: { requiredIncludePaths, requiredExcludePaths: [] },
+    },
+  });
+  const prepare = async (requiredIncludePaths: string[]) => {
+    const selected = context(requiredIncludePaths);
+    const result = await inventory.prepareCodexSecurityReviewItems(selected);
+    return {
+      result,
+      paths: (await inventory.listCodexSecurityReviewItems(selected)).items.map(
+        (item: { path: string }) => item.path,
+      ),
+    };
+  };
+
+  assert.deepEqual(await prepare(["left", "right"]), {
+    result: { reviewItemsTotal: 0 },
+    paths: [],
+  });
+
+  await fixture.writeRepositoryFile("left/left.py", "# left\n");
+  assert.deepEqual(await prepare(["left", "right"]), {
+    result: { reviewItemsTotal: 1 },
+    paths: ["left/left.py"],
+  });
+
+  await unlink(path.join(fixture.repoRoot, "left", "left.py"));
+  await fixture.writeRepositoryFile("right/right.py", "# right\n");
+  assert.deepEqual(await prepare(["left", "right"]), {
+    result: { reviewItemsTotal: 1 },
+    paths: ["right/right.py"],
+  });
+
+  await fixture.writeRepositoryFile("left/left.py", "# left\n");
+  assert.deepEqual(await prepare(["left", "right"]), {
+    result: { reviewItemsTotal: 2 },
+    paths: ["left/left.py", "right/right.py"],
+  });
+
+  await fixture.writeRepositoryFile("left/nested/source.py", "# nested\n");
+  assert.deepEqual(await prepare(["left", "left/nested"]), {
+    result: { reviewItemsTotal: 2 },
+    paths: ["left/left.py", "left/nested/source.py"],
+  });
+  assert.deepEqual(await prepare(["left/left.py"]), {
+    result: { reviewItemsTotal: 1 },
+    paths: ["left/left.py"],
+  });
+
+  await writeInventory(fixture.scanInventory, "previous.py\n");
+  await assert.rejects(
+    inventory.prepareCodexSecurityReviewItems(context(["missing"])),
+    /scope.*does not exist|scope path not found/iu,
+  );
+  assert.equal(await readFile(fixture.scanInventory, "utf8"), "previous.py\n");
 }
 
 async function testInventoryChildPreservesSettingsAndCwd() {
