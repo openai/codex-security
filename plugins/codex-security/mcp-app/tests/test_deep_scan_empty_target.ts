@@ -300,6 +300,60 @@ test("an empty child of a nonempty Git repository fails through the shared engin
   );
 });
 
+for (const included of [false, true])
+  test(`an inherited .ignore ${included ? "retains an included sibling" : "can make a selected child empty"}`, async () => {
+    const fixture = await fixtureRun();
+    const repository = path.dirname(fixture.run.targetPath);
+    await mkdir(path.join(fixture.run.targetPath, "excluded"), {
+      recursive: true,
+    });
+    await writeFile(path.join(repository, ".ignore"), "excluded/\n");
+    await writeFile(
+      path.join(fixture.run.targetPath, "excluded", "example.py"),
+      "# ignored source\n",
+    );
+    if (included)
+      await writeFile(
+        path.join(fixture.run.targetPath, "included.py"),
+        "# included source\n",
+      );
+    await runGit(repository, "init", "-q");
+    await runGit(repository, "add", ".ignore");
+    await runGit(repository, "commit", "-qm", "ignore rules");
+
+    const store = new FakeStore(fixture.run);
+    const executor = new FakeExecutor();
+    const pluginRoot = path.resolve(
+      import.meta.dirname,
+      "../../../../sdk/typescript/_bundled_plugin",
+    );
+    const terminal = await runCoordinator(fixture, store, executor, {
+      prepareReviewItems: (signal) =>
+        artifactInventory.preflightCodexSecurityReviewItems(
+          {
+            root: fixture.run.scanDir,
+            repoRoot: fixture.run.targetPath,
+            layout: "scan",
+            scope: ".",
+            pluginRoot,
+          },
+          signal,
+        ),
+    });
+
+    if (included) {
+      assert.equal(terminal?.status, "succeeded", terminal?.error);
+      assert.equal(executor.discoveryCalls, 1);
+      assert.equal(executor.dedupCalls, 1);
+    } else {
+      assert.equal(terminal?.status, "failed");
+      assert.match(terminal?.error ?? "", /no security audit was performed/iu);
+      assert.equal(executor.discoveryCalls, 0);
+      assert.equal(executor.dedupCalls, 0);
+      assert.deepEqual(store.finishCalls, []);
+    }
+  });
+
 test("empty requested paths do not widen to the repository root", async () => {
   const fixture = await fixtureRun();
   await mkdir(path.join(fixture.run.targetPath, "left"), { recursive: true });

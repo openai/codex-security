@@ -787,6 +787,83 @@ test("scope input honors ripgrep-only ignore rules in Git repositories", () => {
   ).toEqual(["selected/hidden.py"]);
 });
 
+for (const ignoreName of [".ignore", ".rgignore"])
+  test(`scope input honors inherited ${ignoreName} rules for a selected child`, () => {
+    const f = fixture();
+    const selected = join(f.repo, "target");
+    f.write(ignoreName, "excluded/\n");
+    f.write("target/excluded/example.py");
+    const paths = (scope = ".") =>
+      f
+        .rows("make-repo-scope-input", [
+          "--repo",
+          selected,
+          ...f.scopeArgs(scope),
+        ])
+        .map((row) => row.path);
+
+    expect(paths()).toEqual([]);
+    expect(paths("excluded/example.py")).toEqual(["excluded/example.py"]);
+    f.write("target/included.py");
+    expect(paths()).toEqual(["included.py"]);
+  });
+
+test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+  "inherited ignore rules do not hide unreadable selected directories",
+  () => {
+    const f = fixture();
+    const selected = join(f.repo, "target");
+    f.write(".ignore", "excluded/\n");
+    f.write("target/excluded/example.py");
+    const excluded = join(selected, "excluded");
+    writeFileSync(f.out, "previous\n");
+    chmodSync(excluded, 0);
+    try {
+      const result = f.run("make-repo-scope-input", [
+        "--repo",
+        selected,
+        ...f.scopeArgs("."),
+      ]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/EACCES|permission denied/iu);
+      expect(readFileSync(f.out, "utf8")).toBe("previous\n");
+    } finally {
+      chmodSync(excluded, 0o700);
+    }
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "inherited ripgrep-only rules fail closed when standalone rg is unavailable",
+  () => {
+    const f = fixture();
+    const selected = join(f.repo, "target");
+    f.write(".ignore", "excluded/\n");
+    f.write("target/excluded/example.py");
+    const tools = join(f.root, "git-only-tools");
+    mkdirSync(tools);
+    const resolvedGit = spawnSync("sh", ["-c", "command -v git"], {
+      encoding: "utf8",
+    }).stdout.trim();
+    const selectedGit = join(tools, "git");
+    symlinkSync(resolvedGit, selectedGit);
+    writeFileSync(f.out, "previous\n");
+
+    const result = f.run(
+      "make-repo-scope-input",
+      ["--repo", selected, ...f.scopeArgs(".")],
+      {
+        ...f.toolEnvironment,
+        CODEX_SECURITY_GIT: selectedGit,
+        PATH: tools,
+      },
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("without Git or ripgrep");
+    expect(readFileSync(f.out, "utf8")).toBe("previous\n");
+  },
+);
+
 for (const mode of ["revisions", "local-patch"]) {
   test(`${mode} previews decode UTF-8 and UTF-16 and exclude binary files`, () => {
     const f = fixture();
