@@ -38,7 +38,6 @@ jobs:
       package-required: ${{ steps.scope.outputs.package-required }}
       action-ci: ${{ steps.scope.outputs.action-ci }}
       eval-contracts: ${{ steps.scope.outputs.eval-contracts }}
-      container-validate: ${{ steps.scope.outputs.container-validate }}
       workflow-quality: ${{ steps.scope.outputs.workflow-quality }}
       compatibility-matrix: ${{ steps.scope.outputs.compatibility-matrix }}
       python-matrix: ${{ steps.scope.outputs.python-matrix }}
@@ -139,7 +138,7 @@ jobs:
 
   container-validate:
     needs: [classify-changes, native, static-checks]
-    if: needs.classify-changes.outputs.container-validate == 'true'
+    if: needs.classify-changes.outputs.source-required == 'true'
     uses: ./.github/workflows/container-validate.yml
 
   package:

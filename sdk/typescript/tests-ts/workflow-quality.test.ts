@@ -258,7 +258,6 @@ test("classification uses the PR merge diff and validates retargeted merge paren
         .map((line) => line.split("=")),
     );
     expect(outputs["source-required"]).toBe("false");
-    expect(outputs["container-validate"]).toBe("false");
     expect(outputs["workflow-quality"]).toBe("false");
 
     const base = git("rev-parse", "HEAD^1").trim();

@@ -62,10 +62,10 @@ lockfiles, and runs the triage, secret-discovery, Standard time-budget and
 workflow-routing suites.
 
 Edits limited to existing top-level `plugins/codex-security/tests/test_*.py`
-modules keep all five Python jobs, MCP, host, native, package, compatibility,
-and container checks. They skip the SDK shards, Windows install checks, Action
-and eval jobs. Adding, removing, or renaming modules, editing shared helpers,
-or including any other path selects full qualification.
+modules keep all five Python jobs, static and workflow checks, MCP, plugin host,
+native builds, packaging, and Unix installs. Docker excludes these modules from
+the image. Adding, removing, or renaming modules, editing shared helpers, or
+including any other path selects full qualification.
 
 Inputs outside these routes select full qualification, including workflow checks,
 containers, current Node 26, Windows Node 24 installation, and Python 3.10 and

@@ -17,7 +17,6 @@ const regularSource = {
   "action-ci": "false",
   "eval-contracts": "true",
   "workflow-quality": "false",
-  "container-validate": "true",
   "compatibility-matrix": JSON.stringify({
     include: [
       { os: "ubuntu-latest", node: "22.13.0" },
@@ -48,7 +47,6 @@ const fullQualification = {
   ...regularSource,
   "action-ci": "true",
   "workflow-quality": "true",
-  "container-validate": "true",
   "compatibility-matrix": JSON.stringify({
     include: [
       { os: "ubuntu-latest", node: "22.13.0" },
@@ -86,10 +84,15 @@ const docs = {
   "plugin-tests-required": "false",
   "package-required": "false",
   "eval-contracts": "false",
-  "container-validate": "false",
 };
 
 test("only edits to existing direct pytest modules skip independent jobs", (t) => {
+  const ignore = ["Dockerfile.dockerignore", ".dockerignore"]
+    .map((file) => new URL(`../../${file}`, import.meta.url))
+    .find((file) => fs.existsSync(file));
+  const rules = fs.readFileSync(ignore, "utf8");
+  assert.match(rules, /^plugins\/codex-security\/tests\r?$/m);
+  assert.doesNotMatch(rules, /^\s*!/m);
   const cwd = fs.mkdtempSync(resolve(tmpdir(), "ci-pytest-"));
   t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
   const files = join(cwd, "plugins/codex-security/tests");
@@ -472,7 +475,14 @@ test("the final gate distinguishes a failed check from a skipped dependent job",
     });
   const needs = successfulFullRun();
   for (const selected of [true, false]) {
-    const outputs = select([selected ? "Dockerfile" : "README.md"]);
+    const outputs = select(
+      [
+        selected
+          ? "Dockerfile"
+          : "plugins/codex-security/tests/test_workbench.py",
+      ],
+      { modifiedOnly: true },
+    );
     for (const result of ["success", "failure", "cancelled", "skipped"]) {
       const verdict = run({
         ...needs,
@@ -523,7 +533,6 @@ test("documentation requires static checks and explicit selection, without skipp
     "action-ci",
     "eval-contracts",
     "workflow-quality",
-    "container-validate",
   ]) {
     assert.deepEqual(
       failedChecks({

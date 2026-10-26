@@ -100,7 +100,6 @@ export function selectChecks(paths, options) {
         paths.includes("sdk/typescript/tests-ts/codex-dependency-pins.test.ts"),
     ),
     "workflow-quality": String(full),
-    "container-validate": String(source),
     "compatibility-matrix": JSON.stringify({
       include:
         scope === "action"
