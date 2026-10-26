@@ -86,7 +86,9 @@ export interface CoordinatorOptions {
     run: DeepScanRunState,
     signal: AbortSignal,
   ) => Promise<DeepScanRunState>;
-  prepareReviewItems?: () => Promise<{ reviewItemsTotal: number }>;
+  prepareReviewItems?: (
+    signal: AbortSignal,
+  ) => Promise<{ reviewItemsTotal: number }>;
   onComplete?: (
     draft: ScanDraftInput,
     signal: AbortSignal,
@@ -369,7 +371,10 @@ export class DeepScanCoordinator {
         this.options.prepareReviewItems &&
         !hasAcceptedWorkerResults(this.state)
       ) {
-        const inventory = await this.options.prepareReviewItems();
+        const inventory = await this.options.prepareReviewItems(
+          this.abortController.signal,
+        );
+        if (this.canceled || this.externallyFailed) return;
         if (inventory.reviewItemsTotal === 0) {
           throw new Error(
             "Deep Scan target contains no reviewable source files; no security audit was performed.",

@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import * as z from "zod/v4";
 import { join } from "node:path";
 import {
@@ -15,6 +16,11 @@ import { environmentValue } from "./helpers/helper-files";
 import { decodePosixBytes, encodePosixPath } from "./helpers/posix-path";
 
 const inventoryComponents = ["artifacts", "02_discovery", "in_scope_files.txt"];
+const preflightComponents = [
+  "artifacts",
+  "deep_discovery",
+  "source_preflight.jsonl",
+];
 const label = "review_items";
 
 const definitions = artifactSchemaDocuments["tools/review-items"].$defs;
@@ -28,15 +34,9 @@ export const {
 /** Build the selected repository or diff inventory from host-bound scan context. */
 export async function prepareCodexSecurityReviewItems(
   context: ArtifactContext,
+  signal?: AbortSignal,
 ) {
-  if (context.layout !== "scan") {
-    throw new Error(
-      `${label}: only a parent scan can prepare its shared inventory.`,
-    );
-  }
-  if (!context.pluginRoot) {
-    throw new Error(`${label}: the scan has no bound plugin context.`);
-  }
+  requireInventoryPreparationContext(context);
 
   const destination = await artifactDestination(
     context,
@@ -47,11 +47,11 @@ export async function prepareCodexSecurityReviewItems(
   const arguments_ = [
     "generate-in-scope-files",
     `--repo=${context.repoRoot}`,
+    `--scope=${context.scope ?? "."}`,
     `--out=${destination}`,
   ];
 
   if (context.mode === "diff") {
-    arguments_.push(`--scope=${context.scope ?? "."}`);
     const target = context.targetContract?.diffTarget;
     if (!target || typeof target !== "object" || Array.isArray(target)) {
       throw new Error(
@@ -76,17 +76,87 @@ export async function prepareCodexSecurityReviewItems(
       `--diff-head=${headRevision}`,
       `--diff-mode=${kind === "working_tree" ? "local-patch" : "revisions"}`,
     );
-  } else {
-    arguments_.push(
-      ...authoritativeIncludePaths(context).map((scope) => `--scope=${scope}`),
-    );
   }
 
+  await runInventoryHelper(context, arguments_, signal);
+
+  return { reviewItemsTotal: (await readReviewItems(context)).length };
+}
+
+/** Establish fresh non-diff source existence without rewriting review items. */
+export async function preflightCodexSecurityReviewItems(
+  context: ArtifactContext,
+  signal?: AbortSignal,
+) {
+  requireInventoryPreparationContext(context);
+  if (context.mode === "diff")
+    return prepareCodexSecurityReviewItems(context, signal);
+
+  const destination = await artifactDestination(
+    context,
+    preflightComponents,
+    label,
+  );
+  const suffix = randomUUID();
+  const scopesFile = `${destination}.${suffix}.scopes.json`;
+  const output = `${destination}.${suffix}.tmp`;
   try {
+    await writeFile(
+      scopesFile,
+      JSON.stringify(authoritativeIncludePaths(context)),
+      {
+        encoding: "utf8",
+        mode: 0o600,
+        flag: "wx",
+        signal,
+      },
+    );
+    await runInventoryHelper(
+      context,
+      [
+        "make-repo-scope-input",
+        `--repo=${context.repoRoot}`,
+        `--scopes-file=${scopesFile}`,
+        `--out=${output}`,
+      ],
+      signal,
+    );
+    const reviewItemsTotal = parsePreflightItems(
+      await readFile(output, { encoding: "utf8", signal }),
+    ).length;
+    signal?.throwIfAborted();
+    return { reviewItemsTotal };
+  } finally {
+    await Promise.all([
+      rm(scopesFile, { force: true }),
+      rm(output, { force: true }),
+    ]);
+  }
+}
+
+function requireInventoryPreparationContext(context: ArtifactContext): void {
+  if (context.layout !== "scan") {
+    throw new Error(
+      `${label}: only a parent scan can prepare its shared inventory.`,
+    );
+  }
+  if (!context.pluginRoot) {
+    throw new Error(`${label}: the scan has no bound plugin context.`);
+  }
+}
+
+async function runInventoryHelper(
+  context: ArtifactContext,
+  arguments_: string[],
+  signal?: AbortSignal,
+): Promise<void> {
+  try {
+    signal?.throwIfAborted();
     if (arguments_.some((argument) => argument.includes("\0")))
       throw new TypeError("Process arguments must not contain NUL bytes");
-    const helper = join(context.pluginRoot, "mcp", "helpers.mjs");
+    const helper = join(context.pluginRoot!, "mcp", "helpers.mjs");
     const home = environmentValue("HOME");
+    const windows = process.platform === "win32";
     const input = windows
       ? undefined
       : Buffer.from(
@@ -103,6 +173,7 @@ export async function prepareCodexSecurityReviewItems(
       undefined,
       input,
       windows ? 0 : 3,
+      signal,
     );
     if (result.status !== 0)
       throw new Error(
@@ -112,14 +183,13 @@ export async function prepareCodexSecurityReviewItems(
             : `Inventory helper exited with status ${result.status}`),
       );
   } catch (error) {
+    if (signal?.aborted) throw error;
     const details = error instanceof Error ? error.message : String(error);
     throw new Error(
       `${label}: the scan inventory helper failed${details ? `: ${details}` : "."}`,
       { cause: error },
     );
   }
-
-  return { reviewItemsTotal: (await readReviewItems(context)).length };
 }
 
 function authoritativeIncludePaths(context: ArtifactContext): string[] {
@@ -188,5 +258,28 @@ async function readReviewItems(
     rows.push(parsed.data);
   }
 
+  return rows;
+}
+
+function parsePreflightItems(source: string): ReviewItem[] {
+  const rows: ReviewItem[] = [];
+  for (const [index, line] of source.split(/\r?\n/u).entries()) {
+    if (!line) continue;
+    let value: unknown;
+    try {
+      value = JSON.parse(line);
+    } catch {
+      throw new Error(
+        `${label}: source preflight row ${index + 1} is invalid.`,
+      );
+    }
+    const parsed = reviewItemSchema.safeParse(value);
+    if (!parsed.success) {
+      throw new Error(
+        `${label}: source preflight row ${index + 1} has an unsafe repository path.`,
+      );
+    }
+    rows.push(parsed.data);
+  }
   return rows;
 }

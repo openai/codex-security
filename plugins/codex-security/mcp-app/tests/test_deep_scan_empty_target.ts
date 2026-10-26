@@ -9,6 +9,7 @@ import {
   DeepScanCoordinatorRegistry,
   FakeExecutor,
   FakeStore,
+  createCoordinator,
   fixtureRun,
   runCoordinator,
   standardScanDraft,
@@ -158,6 +159,76 @@ test("resume preserves accepted work without replacing the source inventory", as
   assert.equal(store.dedupClaims[0]?.workerIds.includes(worker.id), true);
 });
 
+test("cancellation reaches a pending inventory preflight", async () => {
+  const fixture = await fixtureRun();
+  const store = new FakeStore(fixture.run);
+  const executor = new FakeExecutor();
+  let receivedSignal: AbortSignal | undefined;
+  const entered = Promise.withResolvers<void>();
+  const coordinator = createCoordinator(fixture, store, executor, {
+    prepareReviewItems: async (signal?: AbortSignal) => {
+      receivedSignal = signal;
+      assert.ok(signal instanceof AbortSignal);
+      entered.resolve();
+      await new Promise<void>((resolve) =>
+        signal.addEventListener("abort", () => resolve(), { once: true }),
+      );
+      return { reviewItemsTotal: 0 };
+    },
+  });
+  coordinator.start();
+  await entered.promise;
+  coordinator.cancel("cancel pending inventory");
+  const terminal = await coordinator.wait(undefined, 5_000);
+
+  assert.ok(receivedSignal?.aborted);
+  assert.equal(terminal?.status, "canceled");
+  assert.equal(executor.discoveryCalls, 0);
+  assert.equal(executor.dedupCalls, 0);
+  assert.deepEqual(store.failureMessages, []);
+});
+
+test("cancellation before inventory preflight does not launch it", async () => {
+  const fixture = await fixtureRun();
+  const store = new FakeStore(fixture.run);
+  const executor = new FakeExecutor();
+  let preflightCalls = 0;
+  const coordinator = createCoordinator(fixture, store, executor, {
+    prepareReviewItems: async () => {
+      preflightCalls += 1;
+      return { reviewItemsTotal: 1 };
+    },
+  });
+  coordinator.cancel("cancel before inventory");
+  coordinator.start();
+  const terminal = await coordinator.wait(undefined, 5_000);
+
+  assert.equal(terminal?.status, "canceled");
+  assert.equal(preflightCalls, 0);
+  assert.equal(executor.discoveryCalls, 0);
+  assert.equal(executor.dedupCalls, 0);
+});
+
+test("cancellation after inventory preflight wins over an empty result", async () => {
+  const fixture = await fixtureRun();
+  const store = new FakeStore(fixture.run);
+  const executor = new FakeExecutor();
+  let coordinator: ReturnType<typeof createCoordinator>;
+  coordinator = createCoordinator(fixture, store, executor, {
+    prepareReviewItems: async () => {
+      coordinator.cancel("cancel after inventory");
+      return { reviewItemsTotal: 0 };
+    },
+  });
+  coordinator.start();
+  const terminal = await coordinator.wait(undefined, 5_000);
+
+  assert.equal(terminal?.status, "canceled");
+  assert.equal(executor.discoveryCalls, 0);
+  assert.equal(executor.dedupCalls, 0);
+  assert.deepEqual(store.failureMessages, []);
+});
+
 test("an empty child of a nonempty Git repository fails through the shared engine", async () => {
   const fixture = await fixtureRun();
   const repository = path.dirname(fixture.run.targetPath);
@@ -215,8 +286,8 @@ test("an empty child of a nonempty Git repository fails through the shared engin
   assert.match(terminal?.error ?? "", /no security audit was performed/iu);
   assert.equal(executor.discoveryCalls, 0);
   assert.equal(executor.dedupCalls, 0);
-  assert.equal(
-    await readFile(
+  await assert.rejects(
+    readFile(
       path.join(
         fixture.run.scanDir,
         "artifacts",
@@ -225,7 +296,7 @@ test("an empty child of a nonempty Git repository fails through the shared engin
       ),
       "utf8",
     ),
-    "",
+    /ENOENT/iu,
   );
 });
 
@@ -294,8 +365,8 @@ test("empty requested paths do not widen to the repository root", async () => {
   assert.match(terminal?.error ?? "", /no security audit was performed/iu);
   assert.equal(executor.discoveryCalls, 0);
   assert.equal(executor.dedupCalls, 0);
-  assert.equal(
-    await readFile(
+  await assert.rejects(
+    readFile(
       path.join(
         fixture.run.scanDir,
         "artifacts",
@@ -304,7 +375,7 @@ test("empty requested paths do not widen to the repository root", async () => {
       ),
       "utf8",
     ),
-    "",
+    /ENOENT/iu,
   );
 });
 
@@ -350,17 +421,13 @@ for (const selected of ["left", "right"]) {
       },
     };
     const terminal = await runCoordinator(fixture, store, executor, {
-      prepareReviewItems: () =>
-        artifactInventory.prepareCodexSecurityReviewItems(context),
+      prepareReviewItems: (signal) =>
+        artifactInventory.preflightCodexSecurityReviewItems(context, signal),
     });
 
     assert.equal(terminal?.status, "succeeded", terminal?.error);
     assert.equal(executor.discoveryCalls, 1);
     assert.equal(executor.dedupCalls, 1);
-    assert.deepEqual(
-      await artifactInventory.listCodexSecurityReviewItems(context),
-      { items: [{ path: `${selected}/selected.py` }] },
-    );
   });
 }
 

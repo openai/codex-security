@@ -1045,17 +1045,16 @@ model_reasoning_summary = "none"
         ),
         true,
       );
-      assert.equal(
-        await readFile(
+      await assert.rejects(
+        readFile(
           path.join(
             resumedScan.scanDir,
             "artifacts",
             "02_discovery",
             "in_scope_files.txt",
           ),
-          "utf8",
         ),
-        "./fixture.py\n",
+        { code: "ENOENT" },
       );
       assert.deepEqual(
         (await readJson(resumedScan.scanDir, "findings.json")).findings,
