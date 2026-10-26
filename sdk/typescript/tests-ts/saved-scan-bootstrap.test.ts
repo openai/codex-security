@@ -26,6 +26,7 @@ import { screeningPairSlot } from "../src/deduplication/deduplication-reviewer.j
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting } from "./support/errors.js";
+import { scanRegistrationArguments } from "./support/workbench-command.js";
 import { runWorkbenchFixtureCommands } from "./support/workbench-fixtures.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
@@ -33,7 +34,7 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 );
 afterEach(cleanup);
 
-async function fixture(git = false, separateSetupCommands = false) {
+async function workspace(git = false) {
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
   await mkdir(join(repository, "src"), { recursive: true });
@@ -71,21 +72,15 @@ async function fixture(git = false, separateSetupCommands = false) {
     CODEX_SECURITY_STATE_DIR: join(root, "state"),
   };
   const python = await resolvePluginPython({ environment });
+  return { root, repository, environment, python };
+}
+
+async function fixture(git = false, separateSetupCommands = false) {
+  const base = await workspace(git);
+  const { root, repository, environment, python } = base;
   const options = { environment, python, pluginRoot: PLUGIN_ROOT };
-  const registrationArguments = (scanDir: string) => [
-    "register-cli-scan",
-    "--repository",
-    repository,
-    "--scan-dir",
-    scanDir,
-    "--recipe-json",
-    JSON.stringify({
-      config: {},
-      mode: "standard",
-      repository,
-      target: { kind: "repository", paths: [] },
-    }),
-  ];
+  const registrationArguments = (scanDir: string) =>
+    scanRegistrationArguments(repository, scanDir);
   async function scan(name: string, registered?: JsonObject) {
     const scanDir = join(root, name);
     if (registered === undefined) {
@@ -199,10 +194,7 @@ async function fixture(git = false, separateSetupCommands = false) {
     })),
   };
   return {
-    root,
-    repository,
-    environment,
-    python,
+    ...base,
     first,
     second,
     embedding,
@@ -702,7 +694,7 @@ test("latest explains the explicit scan-ID fallback when history protects the ho
 test.skipIf(process.platform === "win32")(
   "Python rediscovery keeps protecting the caller checkout when a saved target is supplied",
   async () => {
-    const f = await fixture();
+    const f = await workspace();
     const caller = join(f.root, "caller-checkout");
     await mkdir(caller);
     await mkdir(join(caller, ".git"));
@@ -778,7 +770,7 @@ test.skipIf(process.platform === "win32")(
 test.skipIf(process.platform === "win32")(
   "an unrelated working directory does not exclude trusted Python",
   async () => {
-    const f = await fixture();
+    const f = await workspace();
     const source = new URL("../src/runtime.ts", import.meta.url).href;
     for (const cwd of ["/", f.root]) {
       const result = spawnSync(
@@ -809,7 +801,11 @@ for (const entry of [
   test.skipIf(process.platform === "win32")(
     `non-Git caller PATH is protected before Python probes through ${entry}`,
     async () => {
-      const f = await fixture();
+      const saved =
+        entry === "bootstrap" || entry === "helper"
+          ? await fixture()
+          : undefined;
+      const f = saved ?? (await workspace());
       const caller = join(f.root, "non-git-caller");
       const callerBin = join(caller, "bin");
       const trustedBin = join(f.root, "trusted-bin");
@@ -840,13 +836,14 @@ for (const entry of [
         import assert from "node:assert/strict";
         import { realpath } from "node:fs/promises";
         const { resolvePluginPython, runWorkbench } = await import(${JSON.stringify(runtime)});
+        const scanId = ${JSON.stringify(saved?.first.scanId)};
         const options = { environment: process.env, protectedRoot: ${JSON.stringify(f.repository)}, pluginRoot: ${JSON.stringify(PLUGIN_ROOT)} };
         if (${JSON.stringify(entry)} === "bootstrap") {
           const { savedScanWorkbench } = await import(${JSON.stringify(bootstrap)});
-          const workbench = await savedScanWorkbench(${JSON.stringify(f.first.scanId)}, { ...options, currentDirectory: ${JSON.stringify(caller)} });
-          assert.equal((await workbench(["get-scan", "--scan-id", ${JSON.stringify(f.first.scanId)}])).scan.scanId, ${JSON.stringify(f.first.scanId)});
+          const workbench = await savedScanWorkbench(scanId, { ...options, currentDirectory: ${JSON.stringify(caller)} });
+          assert.equal((await workbench(["get-scan", "--scan-id", scanId])).scan.scanId, scanId);
         } else if (${JSON.stringify(entry)} === "helper") {
-          assert.equal((await runWorkbench(options, ["get-scan", "--scan-id", ${JSON.stringify(f.first.scanId)}])).scan.scanId, ${JSON.stringify(f.first.scanId)});
+          assert.equal((await runWorkbench(options, ["get-scan", "--scan-id", scanId])).scan.scanId, scanId);
         } else {
           const selected = await resolvePluginPython({ ...options, managedRuntimeRoots: [], ...(${JSON.stringify(entry)} === "configured dot-name resolver" ? { configuredPath: ".python" } : {}) });
           assert.equal(await realpath(selected), await realpath(${JSON.stringify(f.python)}));
@@ -876,7 +873,7 @@ for (const entry of [
 test.skipIf(process.platform === "win32")(
   "Python discovery protects the enclosing checkout of a nested target",
   async () => {
-    const f = await fixture();
+    const f = await workspace();
     const target = join(f.repository, "component");
     await mkdir(target);
     await mkdir(join(f.repository, ".git"));
@@ -1057,7 +1054,8 @@ test.skipIf(process.platform === "win32")(
 test.skipIf(process.platform === "win32")(
   "legacy workflow state resolves its bound target before Python discovery",
   async () => {
-    const f = await fixture();
+    const f = await workspace();
+    const scanId = "11111111-1111-4111-8111-111111111111";
     const state = join(f.root, "legacy-state");
     await mkdir(state);
     const db = new Database(join(state, "workbench.sqlite3"));
@@ -1065,13 +1063,10 @@ test.skipIf(process.platform === "win32")(
       db.exec(
         "CREATE TABLE scans (id TEXT PRIMARY KEY, target_path TEXT NOT NULL); CREATE TABLE finding_workflows (id TEXT PRIMARY KEY, state_json TEXT NOT NULL)",
       );
-      db.query("INSERT INTO scans VALUES (?, ?)").run(
-        f.first.scanId,
-        f.repository,
-      );
+      db.query("INSERT INTO scans VALUES (?, ?)").run(scanId, f.repository);
       db.query("INSERT INTO finding_workflows VALUES (?, ?)").run(
         "legacy-workflow",
-        JSON.stringify({ scanId: f.first.scanId }),
+        JSON.stringify({ scanId }),
       );
     } finally {
       db.close();
