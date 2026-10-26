@@ -854,6 +854,7 @@ export function createGitHubClient(
       ? "https://api.github.com/graphql"
       : `${apiRoot}${path}`;
     for (let retry = 0; ; retry += 1) {
+      const retryDelay = 1000 * 2 ** retry;
       let response;
       try {
         response = await fetcher(url, {
@@ -871,16 +872,26 @@ export function createGitHubClient(
         }
       } catch (error) {
         if (!read || retry >= 2 || error instanceof SyntaxError) throw error;
-        await sleep(1000 * 2 ** retry);
+        await sleep(retryDelay);
         continue;
       }
-      if (read && retry < 2 && [500, 502, 503, 504].includes(response.status)) {
+      const retryAfter = response.headers.get("retry-after");
+      const minimumDelay = /^\d+$/u.test(retryAfter ?? "")
+        ? Number(retryAfter) * 1000
+        : Date.parse(retryAfter ?? "") - Date.now() || 0;
+      if (
+        read &&
+        retry < 2 &&
+        [500, 502, 503, 504].includes(response.status) &&
+        minimumDelay <= retryDelay
+      ) {
         await response.body?.cancel().catch(() => undefined);
-        await sleep(1000 * 2 ** retry);
+        await sleep(retryDelay);
         continue;
       }
       const error = new Error(
-        `GitHub ${method} ${path} failed with HTTP ${response.status}.`,
+        `GitHub ${method} ${path} failed with HTTP ${response.status}.` +
+          (retryAfter ? ` Retry-After: ${retryAfter}.` : ""),
       );
       error.status = response.status;
       throw error;

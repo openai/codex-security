@@ -829,21 +829,34 @@ describe("GitHub request transport", () => {
     },
   );
 
-  test("reports a persistent server error after bounded read retries", async () => {
-    let requests = 0;
-    const { github, delays } = retryClient(async () => {
-      requests++;
-      return Response.json({ message: "Unavailable" }, { status: 503 });
-    });
-    await expect(
-      github.request("GET", "git/ref/heads/main"),
-    ).rejects.toMatchObject({
-      status: 503,
-      message: "GitHub GET git/ref/heads/main failed with HTTP 503.",
-    });
-    expect(requests).toBe(3);
-    expect(delays).toEqual([1000, 2000]);
-  });
+  test.each([
+    [null, [1000, 2000]],
+    ["1", [1000, 2000]],
+    ["120", []],
+    ["Fri, 01 Jan 2100 00:00:00 GMT", []],
+  ])(
+    "limits retries on HTTP 503 with Retry-After %j",
+    async (retryAfter, expectedDelays) => {
+      let requests = 0;
+      const { github, delays } = retryClient(async () => {
+        requests++;
+        return new Response(null, {
+          status: 503,
+          headers: retryAfter ? { "Retry-After": retryAfter } : {},
+        });
+      });
+      await expect(
+        github.request("GET", "git/ref/heads/main"),
+      ).rejects.toMatchObject({
+        status: 503,
+        message:
+          "GitHub GET git/ref/heads/main failed with HTTP 503." +
+          (retryAfter ? ` Retry-After: ${retryAfter}.` : ""),
+      });
+      expect(requests).toBe(expectedDelays.length + 1);
+      expect(delays).toEqual(expectedDelays);
+    },
+  );
 
   test.each([
     ["POST", 500],
