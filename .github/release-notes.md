@@ -81,6 +81,7 @@
 - require Marketplace publication for Action releases ([#2008](https://github.com/openai/codex-security/pull/2008))
 - wait for the coordinator before ending CLI scans ([#2007](https://github.com/openai/codex-security/pull/2007))
 - omit GitHub event data from container validation provenance ([#2010](https://github.com/openai/codex-security/pull/2010))
+- honor cancellation during PDF extraction ([#532](https://github.com/openai/codex-security/pull/532))
 
 <!-- release-section: highlights:end -->
 
