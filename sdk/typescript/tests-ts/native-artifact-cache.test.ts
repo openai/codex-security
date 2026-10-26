@@ -247,16 +247,13 @@ test.each([
   expect(checked.status === 0, checked.stderr).toBe(result.passes);
 });
 
-test("source CI and rotating properties opt in to native artifact reuse", () => {
+test("source CI opts in to native artifact reuse", () => {
   expect(native.on.workflow_call?.inputs["reuse-verified"]?.default).toBe(
     false,
   );
   expect(workflow("node-ci").jobs["native"]?.with?.["reuse-verified"]).toBe(
     true,
   );
-  expect(
-    workflow("test-quality").jobs["native"]?.with?.["reuse-verified"],
-  ).toBe("${{ !inputs.compare-layouts }}");
   for (const caller of ["node-release", "container-release", "container-ci"]) {
     expect(
       workflow(caller).jobs["native"]?.with?.["reuse-verified"],
