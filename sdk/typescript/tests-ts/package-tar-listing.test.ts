@@ -250,6 +250,11 @@ async function installPackage(
       archivePath,
     ],
     environment,
+    // Allow repeated tarball extraction within the Windows shard's 120s test budget.
+    process.platform === "win32" &&
+      Number(environment["CODEX_SECURITY_TEST_TIMEOUT_MS"]) >= 120_000
+      ? 60_000
+      : 30_000,
   );
 }
 
@@ -276,6 +281,7 @@ function runPackageCommand(
   command: string,
   args: string[],
   environment: NodeJS.ProcessEnv,
+  timeout = 30_000,
 ): Promise<{ status: number; stderr: string }> {
   return new Promise((resolve, reject) => {
     execFile(
@@ -285,7 +291,7 @@ function runPackageCommand(
         cwd: root,
         env: environment,
         encoding: "utf8",
-        timeout: 30_000,
+        timeout,
         windowsHide: true,
       },
       (error, _stdout, stderr) => {
