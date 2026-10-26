@@ -273,6 +273,7 @@ test("dedupe help and schema expose concurrency and its default", async () => {
   expect(await help.run(["dedupe", "--help"], dependencies())).toBe(0);
   expect(help.text()).toContain("--concurrency");
   expect(help.text()).toContain("serial execution");
+  expect(help.text()).toContain("CODEX_SECURITY_RECORDS_FRAMING=lf");
 
   const schema = captureCli(main, "stdout");
   expect(
@@ -281,6 +282,9 @@ test("dedupe help and schema expose concurrency and its default", async () => {
       dependencies(),
     ),
   ).toBe(0);
+  expect(
+    JSON.parse(schema.text()).options.properties.records.description,
+  ).toContain("CODEX_SECURITY_RECORDS_FRAMING=lf");
   expect(
     JSON.parse(schema.text()).options.properties.concurrency,
   ).toMatchObject({

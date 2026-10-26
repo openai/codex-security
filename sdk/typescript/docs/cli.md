@@ -944,6 +944,7 @@ For filesystem and approval behavior, see the
 | `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan credentials; the first takes precedence.                                                                                 |
 | `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS`                                    | Set to `1` to enable vendor finding imports, imported-findings readback, and GitHub advisory acquisition; disabled otherwise. |
 | `CODEX_SECURITY_STATE_DIR`                                                  | Private history, database, and default artifacts.                                                                             |
+| `CODEX_SECURITY_RECORDS_FRAMING`                                            | `lf` requires LF delimiters from startup for `dedupe --records` only. The default also accepts legacy CR frames.              |
 | `CODEX_SECURITY_PROJECT_CONFIG`                                             | Selected project file; `-c` overrides it.                                                                                     |
 | `CODEX_HOME`                                                                | Ambient Codex home; default `~/.codex`.                                                                                       |
 | `CODEX_CLI_PATH`                                                            | Codex executable for login, setup, scans, and workers.                                                                        |

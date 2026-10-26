@@ -190,6 +190,14 @@ a complete merged finding.
 Codex Security validates these contracts and all assigned ID references after
 receiving the answer. A completed remote model turn alone is insufficient.
 
+### Hosted validation feedback
+
+Verify the worker upgrade before enabling LF framing, and retain a compatible worker for rollback. Keep earlier reviews with ambiguous outcomes fenced. With either legacy peer, the host submits once over the original version-1 exchange. A feedback-capable host sets `CODEX_SECURITY_RECORDS_FRAMING=lf` and waits for `capabilities.reviewValidation: 1` on `review.run`. Send `review.validate` with a unique ID, the active `params.requestId` and the candidate in `params.result`. Terminate frames with LF or CRLF. In LF mode a bare CR is JSON whitespace and a missing final LF leaves an outstanding review uncertain.
+
+A `valid: true` reply permits final submission. For `valid: false`, a host may deliver `invalid_decisions` to the same review only when authorized by the original customer policy. Otherwise report the rejection and clean up. Wait for each reply. One validation may queue while a reply flushes. The host owns cleanup and may retry only after confirmed nonacceptance or with idempotency.
+
+Validation or a host rejection with `error.data.feedbackVersion: 1` and a string `kind` negotiates typed failures. Kinds are `cancelled`, `permanent_rejection`, `transient_rejection`, `invalid_decisions`, `internal_failure` and `uncertain_acceptance`. Unknown kinds map to `uncertain_acceptance` and validator exceptions to `internal_failure`. The CLI preserves `host.code` and serializable `host.data`. A serialization failure retains the kind and code. Send precision-sensitive numbers and IDs as strings.
+
 For failure or an inconclusive review, send an explicit error:
 
 ```json
@@ -205,7 +213,7 @@ For failure or an inconclusive review, send an explicit error:
 ```
 
 The CLI never resubmits a review, including after this error. Invalid model
-answers, missing decisions, and host errors make the whole batch unresolved;
+answers, missing decisions, and host errors make a legacy run unresolved;
 previous successful reviews in that run do not become persistence decisions.
 The existing algorithm treats a validated `DISTINCT` as a nonmatch, when
 supplied finding content is insufficient to establish a shared correction. If the host considers the review
@@ -243,7 +251,7 @@ anchor; they are not assigned singleton dispositions. Groups can join observatio
 from different scans and include a severity-selected representative from any
 member. All returned IDs identify original observations, never canonical records.
 
-A failed or inconclusive review returns no groups and marks every anchor unresolved
+A failed or inconclusive legacy review returns no groups and marks every anchor unresolved
 with reason `review_failed`, an `observationId`, and a diagnostic `message`.
 Any unresolved entry makes `status` equal `unresolved`.
 
@@ -269,6 +277,7 @@ instead of sending a second response; the host must discard an incomplete reply.
 The host must also cancel/reconcile its remote turn; terminating this CLI cannot
 cancel host-owned execution. SIGINT/SIGTERM also stop the run. EOF, pipe errors,
 or closed pipes stop scheduling; an error is returned when stdout remains usable.
+EOF preserves a selected response while stdout drains. A fatal validation error answers both request IDs. Cancellation queues behind a validation receipt but can abandon an unrelated blocked review write. Closing stdout or signaling the process interrupts blocked writes.
 
 Malformed JSON yields `-32700`; malformed envelopes, duplicate/unknown/mismatched
 review responses, multiple runs, and mismatched cancellation yield `-32600`.
@@ -277,7 +286,7 @@ use the active run ID, or `null` if no run was accepted, and provide no decision
 Envelopes must contain exactly one of `result` or `error` for a response.
 
 Exit codes: `0` completed; `1` unresolved decisions; `2` input/protocol failure,
-disconnect, or protocol cancellation; `130` SIGINT; `143` SIGTERM. The host
+disconnect, negotiated review failure, or protocol cancellation; `130` SIGINT; `143` SIGTERM. The host
 controls timeouts by sending cancellation or terminating the process. It must
 keep reading both stdout and stderr and must not share one execution session or
 workspace concurrently on the assumption that reviews are independent.
@@ -341,3 +350,5 @@ errors for incomplete/uncertain remote outcomes, and owns remote cancellation
 and persistence. Fake-host tests do not establish live Managed Agents
 compatibility; that requires an integration test with the separately implemented
 adapter.
+
+The Node records host waits for the write callback on a native Writable such as `process.stdout`. Plain `write` adapters retain synchronous delivery.

@@ -1999,6 +1999,8 @@ export async function main(
                 dependencies.recordsInput ?? process.stdin,
                 output,
                 controller.signal,
+                dependencies.environment["CODEX_SECURITY_RECORDS_FRAMING"] ===
+                  "lf",
               );
       exitCode =
         controller.signal.reason === "SIGINT"
@@ -4780,7 +4782,7 @@ export async function main(
           .boolean()
           .default(false)
           .describe(
-            "Run the versioned records JSON-RPC protocol on stdin/stdout; use alone.",
+            "Run records JSON-RPC on stdin/stdout. Use alone. Set CODEX_SECURITY_RECORDS_FRAMING=lf to require LF. The default also accepts legacy CR frames.",
           ),
         workflowId: optionValue("--workflow-id")
           .optional()

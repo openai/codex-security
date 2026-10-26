@@ -375,7 +375,7 @@ test("rejects invalid inputs before calling the host", async () => {
       ],
     },
   ];
-  for (const data of cases)
+  for (const data of cases) {
     await expect(
       deduplicateRecords(data as DeduplicateRecordsInput, {
         reviewRunner: {
@@ -383,6 +383,11 @@ test("rejects invalid inputs before calling the host", async () => {
         },
       }),
     ).rejects.toThrow();
+    const host = fakeHost(throwing("Review must not start"));
+    expect(await runHost(host, data)).toBe(2);
+    expect(host.messages.at(-1)?.error).toMatchObject({ code: -32602 });
+    expect(host.messages.at(-1)?.error).not.toHaveProperty("data");
+  }
 });
 
 test("SDK aborts even while a host runner is stuck", async () => {
@@ -407,14 +412,17 @@ type Message = {
   method?: string;
   params: DeduplicationReviewRequest;
   result?: unknown;
-  error?: { code: number };
+  error?: Record<string, unknown> & { code: number };
 };
+const jsonrpc = "2.0";
 function fakeHost(
   onReview: (
     message: Message,
     send: (value: unknown) => void,
     input: PassThrough,
   ) => void,
+  onMessage?: (message: Message, send: (value: unknown) => void) => void,
+  write?: (message: Message, callback: () => void) => void,
 ) {
   const stream = new PassThrough();
   const messages: Message[] = [];
@@ -423,14 +431,266 @@ function fakeHost(
     write(chunk, _encoding, callback) {
       const message = JSON.parse(chunk.toString()) as Message;
       messages.push(message);
+      if (write) return write(message, callback);
       if (message.method === "review.run")
         queueMicrotask(() => onReview(message, send, stream));
+      if (onMessage) setImmediate(() => onMessage(message, send));
       callback();
     },
   });
   return { stream, output, messages, send };
 }
 const run = { jsonrpc: "2.0", id: "run-1", method: "run", params: input() };
+const cancelRun = { jsonrpc, method: "cancel", params: { id: run.id } };
+const encodeFrames = (...messages: unknown[]) =>
+  messages.map((message) => JSON.stringify(message) + "\n").join("");
+function embeddedCR(frame: unknown, key: "method" | "result") {
+  return encodeFrames(frame).replace(`,"${key}"`, `,\r"${key}"`);
+}
+const reviewRequests = (host: TestHost) =>
+  host.messages.filter((message) => message.method === "review.run");
+const results = (host: TestHost) =>
+  host.messages.filter(({ result }) => result !== undefined);
+
+async function runHost(
+  { stream, output, send }: TestHost,
+  params: unknown = run.params,
+  lineFeedOnly = false,
+) {
+  const done = runRecordsProtocol(stream, output, undefined, lineFeedOnly);
+  send({ ...run, params });
+  return await done.finally(() => stream.destroy());
+}
+
+const legacyReviewKeys = ["id", "jsonrpc", "method", "params"];
+
+test.each(["legacy", "preflight", "split-CRLF"])(
+  "hosted %s uses SDK normalization without replay",
+  async (mode) => {
+    const expected = await deduplicateRecords(input(), {
+      reviewRunner: { run: async (request) => answer(request) },
+    });
+    let current: Message;
+    let result: unknown;
+    const host = fakeHost(
+      (review, send) => {
+        current = review;
+        result = answer(review.params);
+        if (review.params.stage === "pair-review")
+          result = { ...(result as object), extra: "ignored by SDK" };
+        if (mode === "legacy") send(answered(review, result));
+        else if (mode === "preflight")
+          send(validation(review, "check", result));
+        else
+          host.stream.write(
+            embeddedCR(validation(review, "invalid", {}), "method"),
+          );
+      },
+      (message, send) => {
+        if (message.id === "invalid") {
+          expect(message.result).toMatchObject({
+            valid: false,
+            failure: { kind: "invalid_decisions" },
+          });
+          send(validation(current, "check", result));
+        } else if (message.id === "check") {
+          expect(message.result).toEqual({ valid: true });
+          const reply = answered(current, result);
+          if (mode === "split-CRLF") {
+            host.stream.write(JSON.stringify(reply) + "\r");
+            setImmediate(() => host.stream.write("\n"));
+          } else send(reply);
+        }
+      },
+    );
+    expect(await runHost(host, run.params, mode !== "legacy")).toBe(0);
+    expect(host.messages.at(-1)?.result).toEqual(expected);
+    const reviews = reviewRequests(host);
+    for (const review of reviews)
+      if (mode === "legacy")
+        expect(Object.keys(review).sort()).toEqual(legacyReviewKeys);
+      else expect(review).toHaveProperty("capabilities.reviewValidation", 1);
+    expect(reviews).toHaveLength(6);
+    expect(new Set(reviews.map(({ id }) => id)).size).toBe(reviews.length);
+    expect(reviews.map(({ params }) => params.stage)).toContain("pair-review");
+    const checks = host.messages.filter(({ id }) => id === "check");
+    expect(checks).toHaveLength(mode === "legacy" ? 0 : reviews.length);
+  },
+);
+
+test.each([
+  ["cancelled", false, false],
+  ["permanent_rejection", false, false],
+  ["transient_rejection", false, false],
+  ["invalid_decisions", false, false],
+  ["internal_failure", false, false],
+  ["uncertain_acceptance", false, false],
+  ["future_failure", false, false],
+  [undefined, false, false],
+  [1, false, false],
+  ["uncertain_acceptance", true, false],
+  ["uncertain_acceptance", true, true],
+] as const)(
+  "typed %s failure preserves host diagnostics (cancel=%p, mismatch=%p)",
+  async (kind, cancel, mismatch) => {
+    const error = { ...hostRejection, data: { ...hostRejection.data, kind } };
+    const host = fakeHost((review, send, stream) => {
+      const reply = { jsonrpc, id: mismatch ? "wrong" : review.id, error };
+      if (cancel) stream.write(encodeFrames(reply, cancelRun));
+      else if (kind === "permanent_rejection")
+        stream.write(`${JSON.stringify(reply)}\r`);
+      else send(reply);
+    });
+    expect(await runHost(host, run.params, cancel)).toBe(
+      typeof kind === "string" ? 2 : 1,
+    );
+    if (cancel) expect(host.output.destroyed).toBe(false);
+    if (mismatch) expectTerminalError(host, { code: -32600 });
+    else if (typeof kind !== "string")
+      expect(host.messages.at(-1)).toMatchObject({
+        result: { status: "unresolved" },
+      });
+    else
+      expectTerminalError(host, {
+        code: error.code,
+        data: {
+          feedbackVersion: 1,
+          kind: kind === "future_failure" ? "uncertain_acceptance" : kind,
+          message: error.message,
+          host: { code: error.code, data: error.data },
+        },
+      });
+    expect(reviewRequests(host)).toHaveLength(1);
+  },
+);
+
+test.each(["request", "compact", "brief", "receipt"] as const)(
+  "a %s encoding failure exits as a transport error without replay",
+  async (mode) => {
+    const detail = "synthetic diagnostic".repeat(1024);
+    const frameLimit = mode === "brief" ? 6_000 : detail.length + 1000;
+    const serialize = JSON.stringify;
+    const encoder = spyOn(JSON, "stringify").mockImplementation(
+      (value, ...options) => {
+        const encoded: string = Reflect.apply(serialize, JSON, [
+          value,
+          ...options,
+        ]);
+        if (
+          (mode === "request" && value?.method === "review.run") ||
+          (mode === "receipt" && value?.id === "check" && value?.result) ||
+          (value?.id === run.id && value?.error && encoded.length > frameLimit)
+        )
+          throw new RangeError("Synthetic frame limit");
+        return encoded;
+      },
+    );
+    onTestFinished(() => encoder.mockRestore());
+    const error = { ...hostRejection, message: detail };
+    const reply =
+      mode === "receipt"
+        ? validation
+        : (review: Message) => rejected(review, error);
+    const host = fakeHost((review, send) => send(reply(review)));
+    expect(await runHost(host)).toBe(2);
+    if (mode === "request") return expect(host.messages).toEqual([]);
+    if (mode === "receipt") {
+      const failure = { code: -32603, data: { kind: "internal_failure" } };
+      expectTerminalError(host, failure);
+      expectReceiptError(host, failure);
+      return expect(reviewRequests(host)).toHaveLength(1);
+    }
+    expectTerminalError(host, {
+      code: -32603,
+      message: expect.stringContaining("could not serialize error data"),
+      data: {
+        kind: "permanent_rejection",
+        message: mode === "brief" ? detail.slice(0, 4096) : detail,
+        host: { code: hostRejection.code },
+      },
+    });
+    expect(reviewRequests(host)).toHaveLength(1);
+  },
+);
+
+test.each([
+  ["cancel", "cancelled", -32800],
+  ["disconnect", "uncertain_acceptance", -32000],
+  ["answered-disconnect", "internal_failure", -32000],
+  ["unframed-next-result", "uncertain_acceptance", -32000],
+  ["unframed-next-error", "uncertain_acceptance", -32000],
+  ["wrong-review", "uncertain_acceptance", -32600],
+  ["invalid-final", "invalid_decisions", -32602],
+  ["truncated", "uncertain_acceptance", -32000],
+  ["unterminated", "uncertain_acceptance", -32000],
+  ["cr-only", "uncertain_acceptance", -32000],
+  ["wrong-id", "uncertain_acceptance", -32600],
+  ["adapter-error", "internal_failure", -32603],
+  ["adapter-zod-error", "internal_failure", -32603],
+] as const)(
+  "validation handles %s without advancing the review",
+  async (scenario, kind, code) => {
+    const adapterFault = scenario.startsWith("adapter-");
+    if (adapterFault) {
+      const previous = z.config().customError;
+      onTestFinished(() => z.config({ customError: previous }));
+      const fault =
+        scenario === "adapter-error"
+          ? new Error("Synthetic validator fault")
+          : new z.ZodError([]);
+      z.config({
+        customError(issue) {
+          if (issue.path?.[0] === "decisions") throw fault;
+          return previous?.(issue);
+        },
+      });
+    }
+    const unframedNext = scenario.startsWith("unframed-next");
+    let current: Message;
+    const host = fakeHost(
+      (message, send) => {
+        if (unframedNext && reviewRequests(host).length === 2) {
+          const reply = scenario.endsWith("error")
+            ? rejected(message)
+            : answered(message);
+          return void host.stream.end(JSON.stringify(reply));
+        }
+        current = message;
+        const result = adapterFault ? {} : undefined;
+        const check = validation(message, "check", result);
+        if (scenario === "wrong-review") check.params.requestId = "stale";
+        send(check);
+      },
+      (message, send) => {
+        if (message.id !== "check" || scenario === "wrong-review") return;
+        if (adapterFault) {
+          if (message.result) send(cancelRun);
+          return;
+        }
+        expect(message.result).toEqual({ valid: true });
+        if (unframedNext || scenario === "answered-disconnect")
+          send(answered(current));
+        if (scenario === "cancel") send(cancelRun);
+        if (scenario.endsWith("disconnect")) host.stream.end();
+        if (scenario === "invalid-final") send(answered(current, {}));
+        if (scenario === "truncated") host.stream.end('{"jsonrpc":');
+        if (scenario === "unterminated" || scenario === "cr-only") {
+          const suffix = scenario === "cr-only" ? "\r" : "";
+          host.stream.end(JSON.stringify(answered(current)) + suffix);
+        }
+        if (scenario === "wrong-id") send({ jsonrpc, id: "wrong", result: {} });
+      },
+    );
+    expect(await runHost(host)).toBe(2);
+    expect(reviewRequests(host)).toHaveLength(unframedNext ? 2 : 1);
+    if (scenario === "wrong-review" || adapterFault)
+      expectReceiptError(
+        host,
+        adapterFault ? { code, data: { kind } } : { code },
+      );
+    expectTerminalError(host, { code, data: { kind } });
+  },
+);
 
 test("CLI records mode uses only the fake host, bypassing saved scans, persistence, auth, and updates", async () => {
   const host = fakeHost((message, send) => {
@@ -481,9 +741,14 @@ test("CLI records mode uses only the fake host, bypassing saved scans, persisten
 
 test.each([
   "wrong-id",
+  "wrong-id-cancel",
+  "double-cancel",
   "wrong-type",
   "duplicate",
   "malformed",
+  "malformed-cr",
+  "malformed-object-cr",
+  "malformed-joined-answer",
   "both",
   "no-result",
   "second-run",
@@ -496,6 +761,13 @@ test.each([
   const host = fakeHost((message, send, stream) => {
     if (scenario === "wrong-id")
       send({ jsonrpc: "2.0", id: "wrong", result: answer(message.params) });
+    if (scenario === "wrong-id-cancel" || scenario === "double-cancel") {
+      const first =
+        scenario === "double-cancel"
+          ? cancelRun
+          : { ...answered(message), id: "wrong" };
+      stream.write(encodeFrames(first, cancelRun));
+    }
     if (scenario === "wrong-type")
       send({ jsonrpc: "2.0", id: 1, result: answer(message.params) });
     if (scenario === "duplicate") {
@@ -503,6 +775,10 @@ test.each([
       send({ jsonrpc: "2.0", id: message.id, result: answer(message.params) });
     }
     if (scenario === "malformed") stream.write("not-json\n");
+    if (scenario === "malformed-cr") stream.write("not-json\r");
+    if (scenario === "malformed-object-cr") stream.write('{"id":\r');
+    if (scenario === "malformed-joined-answer")
+      stream.write(embeddedCR(answered(message), "result"));
     if (scenario === "both")
       send({
         jsonrpc: "2.0",
@@ -538,13 +814,21 @@ test.each([
   ).toHaveLength(1);
   const final = host.messages.at(-1)!;
   expect(final.id).toBe("run-1");
+  if (scenario === "disconnect") {
+    expect(final.error?.code).toBe(-32000);
+    expect(results(host)).toHaveLength(0);
+  }
   if (scenario === "host-error")
     expect(final.result).toMatchObject({
       status: "unresolved",
       groups: [],
     });
+  else if (scenario.startsWith("malformed"))
+    expect(final.error?.code).toBe(-32700);
+  else if (scenario === "wrong-id-cancel")
+    expect(final.error?.code).toBe(-32600);
+  else if (scenario === "double-cancel") expect(final.error?.code).toBe(-32800);
   else expect(final.error).toBeDefined();
-  host.stream.destroy();
 });
 
 test.each(["SIGINT", "SIGTERM"] as const)(
@@ -586,6 +870,7 @@ test("real CLI pipes exit after a fake-host run without local Codex or state wri
         ...process.env,
         CODEX_CLI_PATH: join(directory, "no-local-codex"),
         CODEX_SECURITY_STATE_DIR: join(directory, "state"),
+        CODEX_SECURITY_RECORDS_FRAMING: "lf",
         CODEX_HOME: join(directory, "home"),
       },
       stdio: ["pipe", "pipe", "pipe"],
@@ -620,9 +905,7 @@ test("real CLI pipes exit after a fake-host run without local Codex or state wri
             .filter((id) => id === "neighbor")
             .sort(),
         });
-        child.stdin.write(
-          `${JSON.stringify({ jsonrpc: "2.0", id: message.id, result: answer(message.params) })}\n`,
-        );
+        child.stdin.write(embeddedCR(answered(message), "result"));
       } else final = message;
     }
     expect(
@@ -697,6 +980,64 @@ test("a disconnect while flushing the final result does not send a second respon
   expect(messages).toHaveLength(1);
 });
 
+function controlledHost(
+  write: (message: Message, callback: () => void) => void,
+) {
+  const host = fakeHost(() => {}, undefined, write);
+  onTestFinished(() => void host.output.destroy());
+  return host;
+}
+
+function validation(
+  review: Message,
+  id = "check",
+  result: unknown = answer(review.params),
+) {
+  const params = { requestId: review.id, result };
+  return { jsonrpc, id, method: "review.validate", params };
+}
+
+function validationFor(review: Message, scenario: string, id = "check") {
+  const check = validation(review, id);
+  if (scenario === "extra-field") return { ...check, result: {} };
+  if (scenario === "bad-version") check.jsonrpc = "1.0";
+  if (scenario === "omitted-params") Reflect.deleteProperty(check, "params");
+  if (scenario === "stale") check.params.requestId = "stale";
+  if (scenario === "missing-result")
+    Reflect.deleteProperty(check.params, "result");
+  return check;
+}
+
+function answered(review: Message, result = answer(review.params)) {
+  return { jsonrpc, id: review.id, result };
+}
+
+function rejected(review: Message, error = hostRejection) {
+  return { jsonrpc, id: review.id, error };
+}
+
+type TestHost = ReturnType<typeof fakeHost>;
+function expectReceiptError(host: TestHost, error: object) {
+  expect(host.messages.at(-2)).toMatchObject({ id: "check", error });
+}
+function expectTerminalError(host: TestHost, error: object) {
+  const final = host.messages.at(-1)!;
+  expect(host.messages.filter(({ id }) => id === run.id)).toEqual([final]);
+  expect(final).toMatchObject({ id: run.id, error });
+}
+
+const hostRejection = {
+  code: -32009,
+  message: "Synthetic rejection",
+  data: {
+    feedbackVersion: 1,
+    kind: "permanent_rejection",
+    detail: "original",
+    receipt: "receipt-1",
+    acceptedAtNs: "1792800000123456789",
+  },
+};
+
 const completed = { result: { status: "completed" } };
 for (const trigger of ["signal", "notification"]) {
   test.serial.each([
@@ -714,18 +1055,22 @@ for (const trigger of ["signal", "notification"]) {
       });
       const writes = spyOn(output, "write");
       let pendingReview: Promise<unknown> | undefined;
-      const dedupe = records.deduplicateRecords;
+      const dedupe = records.runDeduplicateRecords;
       const operation =
         stage === "review request"
-          ? spyOn(records, "deduplicateRecords").mockImplementationOnce(
-              (input, options) =>
-                dedupe(input, {
-                  ...options,
-                  reviewRunner: {
-                    run: (...args) =>
-                      (pendingReview = options.reviewRunner.run(...args)),
+          ? spyOn(records, "runDeduplicateRecords").mockImplementationOnce(
+              (input, options, hostFeedback) =>
+                dedupe(
+                  input,
+                  {
+                    ...options,
+                    reviewRunner: {
+                      run: (...args) =>
+                        (pendingReview = options.reviewRunner.run(...args)),
+                    },
                   },
-                }),
+                  hostFeedback,
+                ),
             )
           : undefined;
       const controller = new AbortController();
@@ -1259,3 +1604,147 @@ test("review-scoped provider getters retain their existing lifecycle", async () 
   expect(result.status).toBe("completed");
   expect(providers).toBe(6);
 });
+
+test.each([
+  ["rejection", false, -32009, "", "EOF"],
+  ["validation", false, -32000, "", "EOF"],
+  ["validation", true, -32000, "", "EOF"],
+  ["rejection", true, -32000, "", "EOF"],
+  ["missing-result", false, -32000, "", "EOF"],
+  ["missing-result", true, -32000, "", "EOF"],
+  ["validation", false, -32000, "{", "EOF"],
+  ["rejection", false, -32009, "{", "EOF"],
+  ["validation", false, -32000, "{", "error"],
+  ["rejection", false, -32009, "{", "close"],
+  ["validation", false, -32000, "", "error"],
+  ["rejection", false, -32000, "", "close"],
+  ["cancel", false, -32800, "", "EOF"],
+  ["cancel", true, -32000, "", "EOF"],
+  ["malformed", true, -32000, "", "EOF"],
+  ["malformed", false, -32700, "", "EOF"],
+  ["bad-version", false, -32600, "", "open"],
+  ["rejection", false, -32009, "", "cancel"],
+] as const)(
+  "first %s frame (LF only: %p, code: %i, suffix: %s) on %s",
+  async (kind, lfOnly, code, suffix, teardown) => {
+    const feedback = kind !== "cancel" && kind !== "malformed";
+    const host = controlledHost((review, callback) => {
+      if (review.method !== "review.run") {
+        if (teardown !== "cancel") return callback();
+        return host.stream.write(JSON.stringify(cancelRun) + "\r");
+      }
+      const open = teardown === "open" || teardown === "cancel";
+      if (feedback && !open) setImmediate(() => setImmediate(callback));
+      else callback();
+      let frameText: string;
+      if (kind === "malformed") frameText = "{truncated";
+      else if (kind === "cancel") frameText = JSON.stringify(cancelRun);
+      else
+        frameText = JSON.stringify(
+          kind === "rejection" ? rejected(review) : validationFor(review, kind),
+        );
+      if (open) return host.stream.write(frameText + "\r");
+      const padding = feedback && (suffix || (teardown === "EOF" && !lfOnly));
+      const tail = frameText + (padding ? "\r".repeat(32) : "") + suffix;
+      if (teardown === "EOF") host.stream.end(tail);
+      else {
+        host.stream.write(tail);
+        host.stream.destroy(
+          teardown === "error" ? new Error("Input failed") : undefined,
+        );
+      }
+    });
+    expect(await runHost(host, run.params, lfOnly)).toBe(2);
+    expectTerminalError(host, { code });
+    expect(host.messages).toHaveLength(kind === "bad-version" ? 3 : 2);
+    if (feedback && kind !== "bad-version") {
+      const expected =
+        code === hostRejection.code
+          ? "permanent_rejection"
+          : "uncertain_acceptance";
+      expect(host.messages.at(-1)?.error).toHaveProperty("data.kind", expected);
+    }
+  },
+);
+
+test("validation is negotiated for late requests only when the run advertised it", async () => {
+  const host = fakeHost((message, _send, stream) =>
+    stream.write(
+      encodeFrames(answered(message), validation(message, "late", {})),
+    ),
+  );
+  expect(await runHost(host)).toBe(2);
+  expectTerminalError(host, { data: { feedbackVersion: 1 } });
+
+  const unsolicited = fakeHost(() => {});
+  const stopped = runRecordsProtocol(unsolicited.stream, unsolicited.output);
+  unsolicited.send(validation(host.messages[0]!, "early", {}));
+  expect(await stopped).toBe(2);
+  expect(unsolicited.messages).toHaveLength(1);
+  expect(unsolicited.messages[0]?.id).toBeNull();
+  unsolicited.stream.destroy();
+});
+
+test.each([
+  ["stale", "initial", -32600, true],
+  ["missing-result", "initial", -32602, true],
+  ["run-id", "initial", -32600, true],
+  ["extra-field", "initial", -32600, true],
+  ["omitted-params", "initial", -32602, true],
+  ["bad-version", "initial", -32600, true],
+  ["stale", "queued", -32600, true],
+  ["missing-result", "queued", -32602, true],
+  ["valid", "queued", -32600, true],
+  ["reject", "initial", hostRejection.code],
+  ["reject", "queued", hostRejection.code],
+  ["cancel", "queued", -32800],
+] as const)(
+  "%s during %s validation preserves the terminal exchange",
+  async (...row) => {
+    const [action, phase, code, overtake] = row;
+    const host = controlledHost((message, callback) => {
+      const review = host.messages[0]!;
+      if (message === review && phase === "queued") {
+        callback();
+        return queueMicrotask(() => host.send(validation(review)));
+      }
+      if (message !== review && (message.id !== "check" || message.error))
+        return callback();
+      const deliver = () => {
+        const id = phase === "queued" ? "queued" : "check";
+        if (overtake) {
+          const requestId = action === "run-id" ? run.id : id;
+          host.send(validationFor(review, action, requestId));
+          host.send(answered(review));
+        } else {
+          if (phase === "queued") host.send(validation(review, id));
+          host.send(action === "reject" ? rejected(review) : cancelRun);
+        }
+      };
+      if (message === review && overtake) {
+        callback();
+        return queueMicrotask(deliver);
+      }
+      deliver();
+      setImmediate(callback);
+    });
+    expect(await runHost(host)).toBe(2);
+    expectTerminalError(host, { code });
+    if (overtake) {
+      expectTerminalError(host, { data: { feedbackVersion: 1 } });
+      expect(results(host)).toHaveLength(phase === "queued" ? 1 : 0);
+      if (phase === "initial" && action !== "run-id")
+        expectReceiptError(host, { code });
+    }
+    if (action === "reject") {
+      const { data } = hostRejection;
+      expectTerminalError(host, {
+        data: { kind: data.kind, host: { code, data } },
+      });
+    }
+    if (phase === "queued") {
+      const queued = host.messages.filter(({ id }) => id === "queued");
+      expect(queued).toMatchObject([{ error: { code } }]);
+    }
+  },
+);

@@ -28,7 +28,7 @@ class RecordsReviewRefusal extends Error {
 function reviewValidation<T>(
   validator: CodexReview<T>["validate"] | undefined,
   signal: AbortSignal | undefined,
-  detailedErrors: boolean | undefined,
+  detailedErrors?: () => boolean | undefined,
 ) {
   let cancellation: { reason: unknown } | undefined;
   const check = (value: unknown, final: boolean): T => {
@@ -39,7 +39,7 @@ function reviewValidation<T>(
     if (!validate) throw new Error("The review has already ended.");
     if (final) validator = undefined;
     try {
-      return validate(value, final ? detailedErrors : true);
+      return validate(value, final ? detailedErrors?.() : true);
     } finally {
       currentSignal?.throwIfAborted();
     }
@@ -52,6 +52,7 @@ function reviewValidation<T>(
     close: () => {
       if (signal?.aborted) cancellation = { reason: signal.reason };
       validator = undefined;
+      detailedErrors = undefined;
       signal = undefined;
     },
   };
@@ -125,13 +126,23 @@ export interface DeduplicateRecordsResult {
 }
 
 /** Pure records workflow: no retrieval, local model execution, or persistence. */
-export async function deduplicateRecords(
+export function deduplicateRecords(
   input: DeduplicateRecordsInput,
   options: DeduplicateRecordsOptions,
+): Promise<DeduplicateRecordsResult> {
+  return runDeduplicateRecords(input, options);
+}
+
+/** The hosted CLI can negotiate detailed failures during its first review. */
+export async function runDeduplicateRecords(
+  input: DeduplicateRecordsInput,
+  options: DeduplicateRecordsOptions,
+  hostFeedback?: () => boolean,
 ): Promise<DeduplicateRecordsResult> {
   const { signal } = options;
   signal?.throwIfAborted();
   const { throwReviewErrors } = options;
+  const detailedErrors = hostFeedback ?? (() => throwReviewErrors);
   // Snapshot before yielding: a host cannot mutate evidence during the review.
   const data = deduplicateRecordsInputSchema.parse(structuredClone(input));
   const references = new Map<string, string>();
@@ -180,7 +191,7 @@ export async function deduplicateRecords(
       findingIds,
       ...review
     }: CodexReview<T>): Promise<T> {
-      const validation = reviewValidation(validate, signal, throwReviewErrors);
+      const validation = reviewValidation(validate, signal, detailedErrors);
       try {
         return await abortable(async () => {
           try {
@@ -253,7 +264,7 @@ export async function deduplicateRecords(
     groups = decisions.duplicateGroups;
   } catch (error) {
     signal?.throwIfAborted();
-    if (throwReviewErrors)
+    if (detailedErrors())
       throw error instanceof RecordsReviewRefusal ? error.refusal : error;
     result.status = "unresolved";
     result.unresolved = [...relationships.keys()].map((id) => ({
