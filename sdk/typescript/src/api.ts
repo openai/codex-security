@@ -5655,7 +5655,8 @@ export function selectedScanEnvironment(
       if (
         key === "OPENROUTER_API_KEY" ||
         key === "FIREWORKS_API_KEY" ||
-        key === "CHEAPER_INFERENCE_API_KEY"
+        key === "CHEAPER_INFERENCE_API_KEY" ||
+        key === "OPPER_API_KEY"
       ) {
         return (
           !bedrockProvider &&
@@ -5699,7 +5700,8 @@ function environmentApiKeyEntry(
     | "CODEX_API_KEY"
     | "OPENROUTER_API_KEY"
     | "FIREWORKS_API_KEY"
-    | "CHEAPER_INFERENCE_API_KEY";
+    | "CHEAPER_INFERENCE_API_KEY"
+    | "OPPER_API_KEY";
   value: string;
 } | null {
   const keys = isExternalModelProvider(modelProvider)

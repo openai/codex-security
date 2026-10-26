@@ -55,6 +55,7 @@ import {
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
+  OPPER_CODEX_PROVIDER,
   resolveCodexProfile,
   type JsonObject,
 } from "../src/config.js";
@@ -156,6 +157,7 @@ const EXTERNAL_PROVIDER_CASES = [
     "gpt-5.4",
     CHEAPERINFERENCE_CODEX_PROVIDER,
   ],
+  ["Opper", "opper", "OPPER_API_KEY", "gpt-5.5", OPPER_CODEX_PROVIDER],
 ] as const;
 const BEDROCK_AUTHENTICATION_CASES = [
   [

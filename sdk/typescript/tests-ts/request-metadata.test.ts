@@ -21,6 +21,7 @@ test.each([
   ["cheaperinference", "cheaperinference"],
   ["openrouter", "openrouter"],
   ["fireworks", "fireworks"],
+  ["opper", "opper"],
   ["ollama", "ollama"],
   ["lmstudio", "lmstudio"],
   ["synthetic.private-provider", "custom"],

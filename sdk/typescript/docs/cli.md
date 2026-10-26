@@ -235,6 +235,9 @@ codex-security scan . --provider fireworks --model accounts/fireworks/models/qwe
 
 export CHEAPER_INFERENCE_API_KEY="<your-cheaper-inference-api-key>"
 codex-security scan . --provider cheaperinference --model gpt-5.4
+
+export OPPER_API_KEY="<your-opper-api-key>"
+codex-security scan . --provider opper --model gpt-5.5
 ```
 
 ### Amazon Bedrock
