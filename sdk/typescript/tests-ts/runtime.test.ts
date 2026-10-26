@@ -866,7 +866,13 @@ describe("plugin runtime preparation", () => {
     expect(installerCalls).toBe(1);
   });
 
-  test.each(["shell", "shell with root", "node", "node with root"])(
+  test.each([
+    "shell",
+    "shell with root",
+    // Without a source update, both shebangs exercise the same Windows batch launcher.
+    ...(process.platform === "win32" ? [] : ["node"]),
+    "node with root",
+  ])(
     "keeps %s MCP roots isolated outside the credential home",
     async (interpreter) => {
       const root = await temporaryDirectory();
