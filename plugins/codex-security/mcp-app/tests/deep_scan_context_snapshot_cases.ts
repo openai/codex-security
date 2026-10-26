@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -73,7 +74,7 @@ export async function testDeepScanContextSnapshots({
           const maxTimeHours = 1.5 + index;
           await writeFile(deepConfig, `[deep_scan]\nmax_time_hours = 48\n`);
           const command = async (args: string[], input?: string) => {
-            const result = spawnSync(
+            const execution = promisify(execFile)(
               process.env.PYTHON?.trim() || "python3",
               [path.join(pluginRoot, "scripts/workbench_db.py"), ...args],
               {
@@ -81,12 +82,11 @@ export async function testDeepScanContextSnapshots({
                   ...environment,
                   CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: deepConfig,
                 },
-                input,
-                encoding: "utf8",
               },
             );
-            assert.equal(result.status, 0, result.stderr);
-            return JSON.parse(result.stdout);
+            execution.child.stdin!.on("error", () => {});
+            execution.child.stdin!.end(input);
+            return JSON.parse((await execution).stdout);
           };
           const threadId = `context-owner-${index}`;
           const projectConfigPath = path.join(

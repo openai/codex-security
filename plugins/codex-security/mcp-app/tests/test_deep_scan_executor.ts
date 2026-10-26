@@ -47,6 +47,7 @@ import {
 } from "node:fs/promises";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import path from "node:path";
+import { createInterface } from "node:readline";
 import { rootCertificates } from "node:tls";
 import { fileURLToPath } from "node:url";
 import { importModule } from "./import-module.ts";
@@ -3514,6 +3515,41 @@ async function testAbortPropagation() {
   });
 }
 
+function mockWorkerSpawn(
+  executablePath: string,
+  onExec: (
+    child: ChildProcess,
+    args: readonly string[],
+    options: SpawnOptions,
+  ) => void,
+) {
+  const previousPath = process.env.CODEX_CLI_PATH;
+  process.env.CODEX_CLI_PATH = process.execPath;
+  const originalSpawn = childProcess.spawn;
+  childProcess.spawn = ((
+    command: string,
+    args: readonly string[] = [],
+    options: SpawnOptions = {},
+  ) => {
+    const child = originalSpawn(
+      command,
+      command === process.execPath ||
+        command === path.toNamespacedPath(process.execPath)
+        ? [executablePath, ...args]
+        : args,
+      options,
+    );
+    if (args[0] === "exec") onExec(child, args, options);
+    return child;
+  }) as typeof childProcess.spawn;
+  syncBuiltinESMExports();
+  return () => {
+    restoreEnv("CODEX_CLI_PATH", previousPath);
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+  };
+}
+
 async function testCompletedWorkerSettlesWithoutWaitingForProcessExit() {
   await completedWorkerSettlesWithoutWaitingForProcessExit();
   for (const kind of ["discovery", "dedup"] as const) {
@@ -3529,27 +3565,27 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
 ) {
   const fixture = await fakeCodexFixture();
   const saved = [
-    "CODEX_CLI_PATH",
     "CODEX_HOME",
     "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
   ].map((name) => [name, process.env[name]] as const);
-  process.env.CODEX_CLI_PATH = process.execPath;
-  const originalSpawn = childProcess.spawn;
-  childProcess.spawn = ((
-    command: string,
-    args: readonly string[] = [],
-    options: SpawnOptions = {},
-  ) =>
-    originalSpawn(
-      command,
-      command === process.execPath ||
-        command === path.win32.toNamespacedPath(process.execPath)
-        ? [fixture.executablePath, ...args]
-        : args,
-      options,
-    )) as typeof childProcess.spawn;
-  syncBuiltinESMExports();
+  const deadline = Promise.withResolvers<never>();
+  let timeout: NodeJS.Timeout | undefined;
+  function armDeadline(ms: number, message: string) {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => deadline.reject(new Error(message)), ms);
+  }
+  let worker: ChildProcess | undefined;
+  const restoreSpawn = mockWorkerSpawn(fixture.executablePath, (child) => {
+    worker = child;
+    createInterface({ input: child.stdout! }).on("line", (line) => {
+      if (JSON.parse(line).type === "turn.completed")
+        armDeadline(
+          1_000,
+          "completed worker did not settle after turn.completed",
+        );
+    });
+  });
   if (kind !== undefined) {
     const home = path.join(fixture.root, "private profile home");
     await mkdir(home);
@@ -3575,8 +3611,6 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
   const captureUnexpectedError = (error: NodeJS.ErrnoException) =>
     unexpectedErrors.push(error);
   let execution;
-  let timeout;
-  let childPid!: number;
 
   process.on("uncaughtException", captureUnexpectedError);
   try {
@@ -3589,6 +3623,7 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
         ? "COMPLETE_THEN_HANG\n"
         : "COMPLETE_THEN_HANG_IGNORE_TERMINATION\n",
     );
+    armDeadline(10_000, "worker did not emit turn.completed");
     execution = new CodexSdkWorkerExecutor({
       parentSandbox: trustedParentSandbox,
     }).run({
@@ -3598,22 +3633,9 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
       subagents: 0,
       signal: controller.signal,
       ...(resumed ? { resumeThreadId: "fixture-resumed-thread-id" } : {}),
-      onThreadStarted: async () => {
-        childPid = (await readJson(fixture.markerPath)).pid;
-      },
     });
 
-    const result = await Promise.race([
-      execution,
-      new Promise((_, reject) => {
-        timeout = setTimeout(() => {
-          controller.abort("completed worker fixture timed out");
-          reject(
-            new Error("completed worker did not settle after turn.completed"),
-          );
-        }, 1_000);
-      }),
-    ]);
+    const result = await Promise.race([execution, deadline.promise]);
     clearTimeout(timeout);
     assert.equal(
       result.threadId,
@@ -3628,20 +3650,15 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
 
     assert.deepEqual(unexpectedErrors, []);
     if (kind === undefined) {
-      assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
+      assert.throws(() => process.kill(worker!.pid!, 0), { code: "ESRCH" });
     }
   } finally {
     clearTimeout(timeout);
     controller.abort("completed worker fixture cleanup");
-    if (childPid) {
-      try {
-        process.kill(childPid, "SIGKILL");
-      } catch {}
-    }
+    worker?.kill("SIGKILL");
     await execution?.catch(() => {});
     process.removeListener("uncaughtException", captureUnexpectedError);
-    childProcess.spawn = originalSpawn;
-    syncBuiltinESMExports();
+    restoreSpawn();
     for (const [name, value] of saved) restoreEnv(name, value);
   }
 }
@@ -3909,26 +3926,13 @@ async function withWorkerFixture<Result>(
 
 async function testWorkerCancellation() {
   const fixture = await fakeCodexFixture();
-  const previousPath = process.env.CODEX_CLI_PATH;
-  const originalSpawn = childProcess.spawn;
   let worker: ChildProcess | undefined;
   let workerSignal: AbortSignal | undefined;
   let cancelDuringCleanup: (() => void) | undefined;
   let timeout: NodeJS.Timeout | undefined;
-  childProcess.spawn = ((
-    command: string,
-    args: readonly string[] = [],
-    options: SpawnOptions = {},
-  ) => {
-    const child = originalSpawn(
-      command,
-      command === process.execPath ||
-        command === path.toNamespacedPath(process.execPath)
-        ? [fixture.executablePath, ...args]
-        : args,
-      options,
-    );
-    if (args[0] === "exec") {
+  const restoreSpawn = mockWorkerSpawn(
+    fixture.executablePath,
+    (child, args, options) => {
       assertFlagPair(args, "--thread-source", "security_scan");
       worker = child;
       workerSignal = options.signal;
@@ -3937,11 +3941,8 @@ async function testWorkerCancellation() {
         cancelDuringCleanup?.();
         return kill.apply(this, args);
       };
-    }
-    return child;
-  }) as typeof childProcess.spawn;
-  syncBuiltinESMExports();
-  process.env.CODEX_CLI_PATH = process.execPath;
+    },
+  );
   try {
     const promptPath = path.join(fixture.root, "prompt.md");
     const workingDirectory = path.join(fixture.root, "artifacts");
@@ -4060,9 +4061,7 @@ async function testWorkerCancellation() {
     cancelDuringCleanup = undefined;
     if (worker && worker.exitCode === null && worker.signalCode === null)
       worker.kill("SIGKILL");
-    childProcess.spawn = originalSpawn;
-    syncBuiltinESMExports();
-    restoreEnv("CODEX_CLI_PATH", previousPath);
+    restoreSpawn();
   }
 }
 
