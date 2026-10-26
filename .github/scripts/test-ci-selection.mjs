@@ -25,6 +25,7 @@ const regularSource = {
       { os: "ubuntu-latest", node: "24" },
       { os: "ubuntu-latest", node: "26.0.0" },
       { os: "macos-latest", node: "22.13.0" },
+      { os: "windows-latest", node: "22.13.0" },
     ],
   }),
   "python-matrix": JSON.stringify({
@@ -42,7 +43,6 @@ const regularSource = {
       },
     ],
   }),
-  "windows-node-matrix": JSON.stringify({ node: ["22.13.0"] }),
 };
 const fullQualification = {
   ...regularSource,
@@ -57,6 +57,8 @@ const fullQualification = {
       { os: "ubuntu-latest", node: "26.0.0" },
       { os: "ubuntu-latest", node: "26" },
       { os: "macos-latest", node: "22.13.0" },
+      { os: "windows-latest", node: "22.13.0" },
+      { os: "windows-latest", node: "24" },
     ],
   }),
   "python-matrix": JSON.stringify({
@@ -76,7 +78,6 @@ const fullQualification = {
       },
     ],
   }),
-  "windows-node-matrix": JSON.stringify({ node: ["22.13.0", "24"] }),
 };
 
 const docs = {
@@ -120,6 +121,11 @@ test("only edits to existing direct pytest modules skip independent jobs", (t) =
   commit("test_2fa.py", "conftest.py");
   const reduced = {
     ...fullQualification,
+    "compatibility-matrix": JSON.stringify({
+      include: JSON.parse(
+        fullQualification["compatibility-matrix"],
+      ).include.filter(({ os }) => os !== "windows-latest"),
+    }),
     "source-required": "false",
     "action-ci": "false",
     "eval-contracts": "false",
@@ -435,7 +441,6 @@ function successfulFullRun() {
       "plugin-host",
       "plugin-source",
       "windows-test",
-      "windows-verify",
       "workflow-quality",
       "container-validate",
     ].map((name) => [name, { result: "success" }]),
