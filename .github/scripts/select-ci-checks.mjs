@@ -66,6 +66,10 @@ export function selectChecks(paths, options) {
     .filter((version) => full || version !== "26")
     .map((version) => ({ os: "ubuntu-latest", node: version }));
   compatibility.push({ os: "macos-latest", node: "22.13.0" });
+  if (scope !== "python-tests") {
+    compatibility.push({ os: "windows-latest", node: "22.13.0" });
+    if (full) compatibility.push({ os: "windows-latest", node: "24" });
+  }
   const pythonMatrix = [
     ...["3.10", "3.12", "3.14"]
       .filter((version) => full || version === "3.12")
@@ -104,9 +108,6 @@ export function selectChecks(paths, options) {
           : compatibility,
     }),
     "python-matrix": JSON.stringify({ include: pythonMatrix }),
-    "windows-node-matrix": JSON.stringify({
-      node: full ? ["22.13.0", "24"] : ["22.13.0"],
-    }),
   };
   if (scope === "python-tests") {
     for (const name of ["source-required", "action-ci", "eval-contracts"])

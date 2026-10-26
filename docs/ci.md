@@ -124,11 +124,10 @@ execution time, prerequisite waits, runner scheduling, approval waits, and
 manual retry delays. Compare matching revisions and test configurations, and
 record failures as well as successful runs.
 
-Protected `main` pushes that miss the same native cache use three queues per
-300 workflow numbers, keeping each queue within GitHub’s capacity. Each run looks
-up the verified payload again; a miss still builds and proves all eight
-platforms. The cache listing only selects a queue. Hits, unavailable listings,
-different inputs, and PR checks can start independently.
+Protected `main` pushes that miss the same native cache share a queue per block
+of 16 consecutive workflow numbers. Each run waits behind at most 15 others,
+then restores the verified payload or builds and proves all eight platforms.
+Hits, unavailable listings, different inputs, and PR checks can start independently.
 
 When a batch can wait, look for the first protected cache save before landing
 more changes with the same inputs: `gh cache list --ref refs/heads/main --key KEY`.

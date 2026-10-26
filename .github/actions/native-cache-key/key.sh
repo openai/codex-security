@@ -33,9 +33,9 @@ if [[ ${1-} == cold-group ]]; then
   printf 'week=%s\n' "$week"
   # The listing is only a scheduling hint. prepare always restores or builds.
   hit="$(timeout 5s gh cache list --ref refs/heads/main --key "$key" --limit 1 --json key --jq '.[0].key // empty')"
-  # Three lanes per 300 workflow numbers keep each group within GitHub's 100-pending limit.
+  # Keep adjacent misses together, with at most 15 other runs in the group.
   if [[ "$hit" != "$key" ]]; then
-    printf 'cold-group=%s-%s-%s\n' "$key" "$((GITHUB_RUN_NUMBER / 300))" "$((GITHUB_RUN_NUMBER % 3))"
+    printf 'cold-group=%s-%s\n' "$key" "$(((GITHUB_RUN_NUMBER - 1) / 16))"
   fi
 else
   printf 'key=%s\n' "$key"
