@@ -792,6 +792,7 @@ async function preparePublicationInput(
     );
     requests = [];
     let current: FindingImportRequest | undefined;
+    let currentBytes = 0;
     for (const [index, finding] of parsed.findings.entries()) {
       const previous = previousReports[index];
       const environmentId =
@@ -800,31 +801,40 @@ async function preparePublicationInput(
         throw new CodexSecurityError(
           "Configure an authorized Cloud environment for this repository before importing findings.",
         );
-      const repository = {
-        id: destination.id,
-        repo_connector_id: destination.repo_connector_id,
-        environment_id: environmentId,
-        reset_marker: destination.reset_marker,
-      };
       const item = {
         client_id: `item-${index + 1}`,
         source_finding_id: finding.source_finding_id,
         expected_version: previous?.version ?? 0,
         evidence: finding.evidence,
       };
+      const itemBytes = Buffer.byteLength(JSON.stringify(item));
       if (
         current &&
         (current.repository.environment_id !== environmentId ||
           current.items.length === 100 ||
-          Buffer.byteLength(
-            JSON.stringify({ ...current, items: [...current.items, item] }),
-          ) > MAX_REQUEST_BYTES)
+          currentBytes + 1 + itemBytes > MAX_REQUEST_BYTES)
       ) {
         requests.push(validateImportRequest(current));
         current = undefined;
       }
-      current ??= { request_id: randomUUID(), repository, source, items: [] };
+      if (!current) {
+        current = {
+          request_id: randomUUID(),
+          repository: {
+            id: destination.id,
+            repo_connector_id: destination.repo_connector_id,
+            environment_id: environmentId,
+            reset_marker: destination.reset_marker,
+          },
+          source,
+          items: [],
+        };
+        currentBytes = Buffer.byteLength(JSON.stringify(current));
+      } else {
+        currentBytes++;
+      }
       current.items.push(item);
+      currentBytes += itemBytes;
     }
     if (current) requests.push(validateImportRequest(current));
   }

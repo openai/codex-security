@@ -1461,15 +1461,95 @@ test.each(["environment-example", "replacement-environment", null])(
   },
 );
 
-test("batching preserves item order and keeps final item errors visible", async () => {
-  const f = await fixture(
-    Array.from({ length: 101 }, (_, index) => normalized(`vendor-${index}`)),
-  );
-  const prepared = await prepareExternalPublication(f.file, options, f.deps);
-  expect(
-    prepared.preview.requests.map((request) => request.items.length),
-  ).toEqual([100, 1]);
-  expect((await prepared.publish()).counts.created).toBe(101);
+test("empty or oversized normalized input stops before Cloud discovery", async () => {
+  const oversized = {
+    source_finding_id: "oversized",
+    evidence: {
+      title: "Oversized evidence",
+      severity: "high" as const,
+      source_data: { raw: "x".repeat(5 * 1024 * 1024) },
+    },
+  };
+  const prepare = (findings: (typeof oversized)[]) =>
+    prepareNormalizedExternalPublication(
+      { read: findings.length, findings, excluded: [] },
+      options,
+      {
+        environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+        credentials: async () => {
+          throw new Error("Unexpected authentication");
+        },
+      },
+    );
+  await expect(prepare([])).rejects.toThrow("No supported findings");
+  await expect(prepare([oversized])).rejects.toThrow("256 KiB");
+});
+
+test.each([0, 1])(
+  "batching accounts for exactly 5 MiB plus %i UTF-8 bytes",
+  async (extraByte) => {
+    const f = await fixture();
+    const findings = Array.from({ length: 21 }, (_, index) => ({
+      source_finding_id: `vendor-${index}`,
+      evidence: {
+        title: 'Quoted "雪"\\\n🌱',
+        severity: "high" as const,
+        source_data: { padding: "" },
+      },
+    }));
+    const prepare = () =>
+      prepareNormalizedExternalPublication(
+        { read: findings.length, findings, excluded: [] },
+        { ...options, sourceKey: 'tenant/"境界"' },
+        f.deps,
+      );
+    const template = (await prepare()).preview.requests[0]!;
+    const targetBytes = 5 * 1024 * 1024 + extraByte;
+    const padding = targetBytes - Buffer.byteLength(JSON.stringify(template));
+    for (const [index, finding] of findings.entries())
+      finding.evidence.source_data.padding = "x".repeat(
+        Math.floor(padding / findings.length) +
+          Number(index < padding % findings.length),
+      );
+    findings.push({ ...findings[0]!, source_finding_id: "trailing" });
+    const { requests } = (await prepare()).preview;
+    expect(requests.map((request) => request.items.length)).toEqual(
+      extraByte === 0 ? [21, 1] : [20, 2],
+    );
+    const items = requests.flatMap((request) => request.items).slice(0, -1);
+    expect(Buffer.byteLength(JSON.stringify({ ...requests[0], items }))).toBe(
+      targetBytes,
+    );
+  },
+);
+
+test.each([100, 101])(
+  "batching preserves order for %i items",
+  async (count) => {
+    const records = Array.from({ length: count }, (_, index) =>
+      normalized(`vendor-${index}`),
+    );
+    const f = await fixture(records);
+    const prepared = await prepareExternalPublication(f.file, options, f.deps);
+    const { requests } = prepared.preview;
+    expect(requests.map((request) => request.items.length)).toEqual(
+      count === 100 ? [100] : [100, 1],
+    );
+    expect(
+      requests.flatMap((request) =>
+        request.items.map((item) => [item.client_id, item.source_finding_id]),
+      ),
+    ).toEqual(
+      records.map((record, index) => [
+        `item-${index + 1}`,
+        record.source_finding_id,
+      ]),
+    );
+    expect((await prepared.publish()).counts.created).toBe(count);
+  },
+);
+
+test("publication keeps final item errors visible", async () => {
   const errorFixture = await fixture();
   errorFixture.state.finalError = true;
   const cli = createCliTest(main);
