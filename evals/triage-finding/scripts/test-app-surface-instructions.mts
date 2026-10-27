@@ -27,6 +27,26 @@ assert.match(
 );
 assert.match(ticketIntake, /natural-language search[\s\S]*discover[\s\S]*JQL/);
 assert.match(ticketIntake, /exhaust[\s\S]*pag(?:es|ination)/i);
+assert.match(ticketIntake, /missing connector|connector.*unavailable/i);
+assert.match(ticketIntake, /authentication|reauthorize/i);
+assert.match(ticketIntake, /insufficient permission|request access/i);
+assert.match(ticketIntake, /not found|inaccessible/i);
+assert.match(ticketIntake, /transient/i);
+const provenance =
+  ticketIntake
+    .split("\n")
+    .find((line) => line.includes("normalized_input.references")) ?? "";
+for (const field of [
+  "issue key",
+  "URL",
+  "project",
+  "status",
+  "labels",
+  "components",
+  "priority",
+]) {
+  assert.ok(provenance.includes(field), field);
+}
 const sentences = ticketIntake
   .split(/[.!?]|\n\s*\n|^#{1,6}[ \t]+.*$/m)
   .map((sentence) => sentence.trim().replace(/\s+/g, " "));
@@ -54,7 +74,8 @@ assert(
   ),
 );
 assert(
-  plugin.interface.defaultPrompt.some((prompt: string) =>
-    /\btriage\b/i.test(prompt),
+  plugin.interface.defaultPrompt.some(
+    (prompt: string) =>
+      /\btriage\b/i.test(prompt) && /\bfindings?\b/i.test(prompt),
   ),
 );
