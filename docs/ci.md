@@ -39,9 +39,10 @@ installation. When selected, Python runs the full suite on 3.12 and the native
 subsets on macOS and Windows. Product source changes select container validation.
 
 PRs limited to top-level `sdk/typescript/tests-ts/*.test.ts` keep all SDK shards,
-static checks, native builds, and packaging. Docker excludes the SDK test tree,
-so these PRs skip container validation. These files are outside the npm package,
-so one Ubuntu Node 24 install checks it and the Action adapter.
+static checks, native builds, and packaging. Docker excludes these top-level
+test modules, so these PRs skip container validation. Test support files used by
+package inspection remain in the build context. The test modules are outside the
+npm package, so one Ubuntu Node 24 install checks it and the Action adapter.
 These PRs skip the plugin suites and run evals only for `codex-dependency-pins.test.ts`.
 Mixed changes follow the usual source or full route.
 

@@ -92,13 +92,13 @@ const docs = {
   "eval-contracts": "false",
 };
 
-test("the Docker context excludes both test trees skipped by container CI", () => {
+test("the Docker context excludes the test modules skipped by container CI", () => {
   const ignore = ["Dockerfile.dockerignore", ".dockerignore"]
     .map((file) => new URL(`../../${file}`, import.meta.url))
     .find((file) => fs.existsSync(file));
   const rules = fs.readFileSync(ignore, "utf8");
   assert.match(rules, /^plugins\/codex-security\/tests\r?$/m);
-  assert.match(rules, /^sdk\/typescript\/tests-ts\r?$/m);
+  assert.match(rules, /^sdk\/typescript\/tests-ts\/\*\.test\.ts\r?$/m);
   assert.doesNotMatch(rules, /^\s*!/m);
 });
 
