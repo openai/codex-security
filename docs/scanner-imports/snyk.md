@@ -1,7 +1,8 @@
 # Snyk Open Source imports
 
 Vendor finding import and readback require `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`.
-See the [opt-in instructions](../../sdk/typescript/docs/cli.md#import-vendor-findings-locally).
+See the [opt-in instructions](../../sdk/typescript/docs/cli.md#import-vendor-findings-locally)
+and [how saved scanner reports map to imported evidence](schema-guide.md).
 
 Use the [official Snyk Codex plugin](https://github.com/snyk/studio-recipes/tree/main/plugins/codex)
 to collect a fresh workspace scan. The existing
@@ -148,14 +149,7 @@ repository when using the default SSH port or port 22. The public
 `github.com`. Other hosts, nondefault SSH ports and explicit HTTPS ports remain
 distinct; the importer does not infer an Enterprise host from the artifact alone.
 Unknown repository context requires the user to select the correct destination.
-Gzip and UTF-8 BOM input are supported. All three file formats
-normalize to the Cloud evidence model before either local import or Cloud publication.
-Records exceeding that model's field or total-size limits appear as exclusions in
-the preview, without truncation. The normalized local SDK import API has a separate
-contract that accepts larger evidence. Inspect preview exclusions before importing.
-
-The plugin and CLI paths scan the current workspace. Existing Snyk platform
-findings need a separate [REST Issues API](https://docs.snyk.io/snyk-api/reference/issues)
-reader with tenant access and repository mapping. This adapter does not read that
-backlog or synchronize triage decisions. Synthetic contract and publication tests
-do not establish live tenant, plugin-runtime or deployed Cloud compatibility.
+Gzip and UTF-8 BOM input are supported. Records exceeding the destination's
+field or total-size limits appear as exclusions in the preview, without
+truncation. Inspect preview exclusions before importing. Synthetic tests do
+not establish live tenant, plugin-runtime or deployed Cloud compatibility.
