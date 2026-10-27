@@ -1,0 +1,38 @@
+---
+name: threat-model-visualize
+description: Turn an existing threat model into an interactive architecture and threat-path explorer. Resolve simple requests for a target's last scan; do not perform a new assessment.
+---
+
+# Threat Model Visualize
+
+Create a standalone explorer that shows application teams and leadership what can go wrong, how it could happen, why it matters, and where controls would stop or limit it. Use the shared workbench and role palette; do not use Mermaid or run a new scan.
+
+A request such as “Visualize the threat model generated in the last scan of X” is sufficient. Resolve the target, latest assessment and snapshot. If the latest artifact is missing, disclose that before using an older fallback. The default input is the existing threat-model artifact, not an automatic import of a complete scan. Keep inputs immutable and do not silently combine snapshots. Do not inspect application code or invent topology, authority, controls, reachability or validation.
+
+Capture source-supported deployment context: exposure, trust, tenant and process boundaries, identities, and conditional deployment assumptions. Do not treat repository defaults as proof of deployed configuration. Preserve uncertainty and the distinction between hypotheses, findings, declared controls and observed enforcement. For explicitly supplied supplemental findings or scattered evidence, use [assessment preparation](references/assessment-preparation.md) to reconcile provenance and snapshots.
+
+For a **fresh candidate or regeneration**, author a new view model; do not patch or copy a previous candidate model or HTML. Ordinary edits may reuse the existing model. Renderer-only polishing is a display update, not fresh generation.
+
+## Compose
+
+Read the [view-model contract](references/view-model.md) and [presentation guidance](references/context-explorer.md), then build a source-backed JSON model and geometry. The shell supplies interaction, colors and exports.
+
+Default to **standard**: compose a readable architecture overview before adding threats. Show the actors and entry points, trust boundaries, application or library components, identity and authorization, stores, and external dependencies needed to explain the assessment. Include administrative, automation and build contexts when relevant. Connect them with meaningful request, data and authority relationships. Use grouping, clear boundaries, aligned flows and short labels while preserving distinctions that change a threat or control. Do not collapse the whole system into one threat's pipeline or move substantive sources and control owners off-map merely for sparsity.
+
+Keep the primary architecture visible in muted colors when a threat is selected. Emphasize its complete source-supported route, including proxies, other transit components, handoffs and meaningful returns. Highlight active transit with fill while retaining its neutral outline; transit alone is not a weakness. Distinguish conditional transitions from ordinary flows. A partial or unmapped view needs an evidence-based scope explanation. Secondary connections may appear under **More connections**, but the basic architecture must stand on its own.
+
+Enumerate substantive threats and any explicitly supplied findings in scope, and make each independently selectable. Check the inventory against the source; embedding the assessment alone does not make a case selectable. Label a user-requested subset incomplete. Optional authoring fidelity is `simple` for a more grouped summary, `standard` by default, or `detailed` for useful secondary connections and facets; it does not change claims or require a UI selector.
+
+Bind each case's mechanism, priority, prerequisites, impact and evidence to its own substantive source section. Verify that quotations match and support the claims. Do not invent a sequence, authority gain or successful transition. Where order is unsupported, show related components with an explicit scope note. Model the actual starting actor or input and least required authority; a caller-controlled value is **untrusted input** unless a hostile actor or assumed compromise is established. Keep alternative footholds distinct and scope each selection to its relevant relationships and controls, with other architecture muted.
+
+Expose consequential supplied controls and proposals at their actual operations and enforcing owners. Split controls with different owners or effects. Label proposals **Proposed control** and their effects conditionally as “Would block” or “Would limit.” Show where and why a control acts, its conditions and residual effect; mark the effect unknown when it is not established. Preserve arrival at the decision owner where required; blocking a sensitive result does not necessarily stop ordinary traffic. Do not present a proposal as deployed or validated.
+
+## Build and check
+
+```sh
+python3.12 <skill-directory>/scripts/build_explorer.py <model.json> --assessment <threat-model.md> --output <explorer.html>
+```
+
+Open the HTML in a browser and inspect the overview, selected scenarios and representative controls at desktop sizes. Check that the architecture, source, route, impact and control remain understandable in context. Inspect representative source and route alternatives and blocked and restored states where mapped. Check readable default-fit text, crossings, control markers, evidence, navigation, scope and residuals; repack rather than relying on zoom. Verify offline loading and SVG export. The builder checks structure and exact quotations, not claim truth or visual clarity.
+
+Deliver standalone HTML without a site or runtime dependency. For requested hosting use the available Sites workflow and preserve audience; use visualize integration for an inline preview. Static requests use an SVG or PNG of the same selected state.

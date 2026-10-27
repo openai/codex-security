@@ -1,0 +1,4 @@
+interface:
+  display_name: "Threat Model Explorer"
+  short_description: "Explore threat models, attack paths, and scoped controls"
+  default_prompt: "Use $threat-model-visualize to visualize the threat model from the latest scan of the requested repository."
