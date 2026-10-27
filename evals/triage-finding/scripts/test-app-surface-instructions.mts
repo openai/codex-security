@@ -4,21 +4,16 @@ import path from "node:path";
 
 const pluginRoot = path.resolve(
   import.meta.dirname,
-  "..",
-  "..",
-  "..",
-  "plugins",
-  "codex-security",
+  "../../../plugins/codex-security",
 );
-const skillRoot = path.join(pluginRoot, "skills", "triage-finding");
-const skillPath = path.join(skillRoot, "SKILL.md");
-const skill = fs.readFileSync(skillPath, "utf8");
-const ticketIntakePath = path.join(skillRoot, "references", "ticket-intake.md");
-const ticketIntake = fs.readFileSync(ticketIntakePath, "utf8");
-const agentPath = path.join(skillRoot, "agents", "openai.yaml");
-const agent = fs.readFileSync(agentPath, "utf8");
-const pluginPath = path.join(pluginRoot, ".codex-plugin", "plugin.json");
-const plugin = JSON.parse(fs.readFileSync(pluginPath, "utf8"));
+function readPluginFile(relativePath: string) {
+  return fs.readFileSync(path.join(pluginRoot, relativePath), "utf8");
+}
+const skillRoot = "skills/triage-finding";
+const skill = readPluginFile(`${skillRoot}/SKILL.md`);
+const ticketIntake = readPluginFile(`${skillRoot}/references/ticket-intake.md`);
+const agent = readPluginFile(`${skillRoot}/agents/openai.yaml`);
+const plugin = JSON.parse(readPluginFile(".codex-plugin/plugin.json"));
 
 assert.match(skill, /references\/ticket-intake\.md/);
 assert.match(
@@ -34,8 +29,9 @@ assert.match(ticketIntake, /not found|inaccessible/i);
 assert.match(ticketIntake, /transient/i);
 const provenance =
   ticketIntake
-    .split("\n")
-    .find((line) => line.includes("normalized_input.references")) ?? "";
+    .split(/\n\s*\n/u)
+    .find((paragraph) => paragraph.includes("normalized_input.references")) ??
+  "";
 for (const field of [
   "issue key",
   "URL",
