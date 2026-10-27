@@ -1461,15 +1461,95 @@ test.each(["environment-example", "replacement-environment", null])(
   },
 );
 
-test("batching preserves item order and keeps final item errors visible", async () => {
-  const f = await fixture(
-    Array.from({ length: 101 }, (_, index) => normalized(`vendor-${index}`)),
-  );
-  const prepared = await prepareExternalPublication(f.file, options, f.deps);
-  expect(
-    prepared.preview.requests.map((request) => request.items.length),
-  ).toEqual([100, 1]);
-  expect((await prepared.publish()).counts.created).toBe(101);
+test("empty or oversized normalized input stops before Cloud discovery", async () => {
+  const oversized = {
+    source_finding_id: "oversized",
+    evidence: {
+      title: "Oversized evidence",
+      severity: "high" as const,
+      source_data: { raw: "x".repeat(5 * 1024 * 1024) },
+    },
+  };
+  const prepare = (findings: (typeof oversized)[]) =>
+    prepareNormalizedExternalPublication(
+      { read: findings.length, findings, excluded: [] },
+      options,
+      {
+        environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+        credentials: async () => {
+          throw new Error("Unexpected authentication");
+        },
+      },
+    );
+  await expect(prepare([])).rejects.toThrow("No supported findings");
+  await expect(prepare([oversized])).rejects.toThrow("256 KiB");
+});
+
+test.each([0, 1])(
+  "batching accounts for exactly 5 MiB plus %i UTF-8 bytes",
+  async (extraByte) => {
+    const f = await fixture();
+    const findings = Array.from({ length: 21 }, (_, index) => ({
+      source_finding_id: `vendor-${index}`,
+      evidence: {
+        title: 'Quoted "雪"\\\n🌱',
+        severity: "high" as const,
+        source_data: { padding: "" },
+      },
+    }));
+    const prepare = () =>
+      prepareNormalizedExternalPublication(
+        { read: findings.length, findings, excluded: [] },
+        { ...options, sourceKey: 'tenant/"境界"' },
+        f.deps,
+      );
+    const template = (await prepare()).preview.requests[0]!;
+    const targetBytes = 5 * 1024 * 1024 + extraByte;
+    const padding = targetBytes - Buffer.byteLength(JSON.stringify(template));
+    for (const [index, finding] of findings.entries())
+      finding.evidence.source_data.padding = "x".repeat(
+        Math.floor(padding / findings.length) +
+          Number(index < padding % findings.length),
+      );
+    findings.push({ ...findings[0]!, source_finding_id: "trailing" });
+    const { requests } = (await prepare()).preview;
+    expect(requests.map((request) => request.items.length)).toEqual(
+      extraByte === 0 ? [21, 1] : [20, 2],
+    );
+    const items = requests.flatMap((request) => request.items).slice(0, -1);
+    expect(Buffer.byteLength(JSON.stringify({ ...requests[0], items }))).toBe(
+      targetBytes,
+    );
+  },
+);
+
+test.each([100, 101])(
+  "batching preserves order for %i items",
+  async (count) => {
+    const records = Array.from({ length: count }, (_, index) =>
+      normalized(`vendor-${index}`),
+    );
+    const f = await fixture(records);
+    const prepared = await prepareExternalPublication(f.file, options, f.deps);
+    const { requests } = prepared.preview;
+    expect(requests.map((request) => request.items.length)).toEqual(
+      count === 100 ? [100] : [100, 1],
+    );
+    expect(
+      requests.flatMap((request) =>
+        request.items.map((item) => [item.client_id, item.source_finding_id]),
+      ),
+    ).toEqual(
+      records.map((record, index) => [
+        `item-${index + 1}`,
+        record.source_finding_id,
+      ]),
+    );
+    expect((await prepared.publish()).counts.created).toBe(count);
+  },
+);
+
+test("publication keeps final item errors visible", async () => {
   const errorFixture = await fixture();
   errorFixture.state.finalError = true;
   const cli = createCliTest(main);
@@ -2363,22 +2443,45 @@ test("interrupted CLI output preserves acknowledged batches and resumes only unf
   expect(f.posts[2]).toBe(f.posts[1]);
 });
 
-test("readback interruption distinguishes acknowledged findings from verified findings", async () => {
-  const f = await fixture();
+test("readback retry preserves acknowledged findings and scanner diagnostics", async () => {
+  const { opengrepJson } =
+    await import("./support/opengrep-import-fixtures.js");
+  const input = opengrepJson();
+  const f = await fixture(input);
   f.state.brokenReadback = true;
-  const prepared = await prepareExternalPublication(f.file, options, f.deps);
+  const settings = {
+    ...options,
+    provider: "opengrep" as const,
+    sourceRepositoryUrl: f.destination().url,
+  };
+  const prepared = await prepareExternalPublication(f.file, settings, f.deps);
   try {
     await prepared.publish();
     throw new Error("Expected readback interruption");
   } catch (error) {
-    expect(error).toBeInstanceOf(ExternalPublicationError);
-    expect((error as ExternalPublicationError).result).toMatchObject({
+    if (!(error instanceof ExternalPublicationError)) throw error;
+    expect(error.result).toMatchObject({
       status: "interrupted",
       counts: { created: 1 },
       unacknowledged: 0,
       verified: 0,
     });
+    (error.result.report!["errors"] as unknown[]).pop();
   }
+  const changed = structuredClone(input);
+  changed.errors[0]!.message = "A different scanner diagnostic";
+  await writeFile(f.file, JSON.stringify(changed));
+  const different = await prepareExternalPublication(f.file, settings, f.deps);
+  expect(different.preview.resumed).toBe(false);
+  expect(different.preview.report?.["errors"]).toEqual(changed.errors);
+  await writeFile(f.file, JSON.stringify(input));
+  const original = await prepareExternalPublication(f.file, settings, f.deps);
+  expect(original.preview.resumed).toBe(true);
+  f.state.brokenReadback = false;
+  const retried = await original.publish();
+  expect(retried.report?.["errors"]).toEqual(input.errors);
+  expect(retried.verified).toBe(1);
+  expect(f.posts).toHaveLength(1);
 });
 
 test("repository selection is sent on every discovery page", async () => {
@@ -2913,6 +3016,7 @@ test("normalized SDK publication detaches raw evidence aliases before validating
   const sharedPackage = { name: "example-package" };
   const input = {
     read: 2,
+    report: { package: sharedPackage },
     findings: [
       {
         source_finding_id: "shared-first",
@@ -2941,6 +3045,9 @@ test("normalized SDK publication detaches raw evidence aliases before validating
     f.deps,
   );
   expect(JSON.stringify(input)).toBe(original);
+  expect(prepared.preview.report).toEqual({
+    package: { name: "example-package" },
+  });
   expect(prepared.preview.findings[0]!.evidence.source_data).toEqual({
     package: { name: "example-package" },
   });
@@ -3009,6 +3116,95 @@ test("normalized SDK publication rejects nonfinite raw evidence without JSON coe
   ).rejects.toThrow("finite JSON numbers");
   expect(input.findings[0]!.evidence.source_data.score).toBe(Infinity);
   expect(f.posts).toHaveLength(0);
+});
+
+test("normalized SDK publication rejects unserializable report metadata before upload", async () => {
+  const f = await fixture();
+  const input = {
+    read: 1,
+    report: { elapsedNs: 1n },
+    findings: [
+      {
+        source_finding_id: "synthetic-report",
+        evidence: { title: "Example", severity: "unknown" as const },
+      },
+    ],
+    excluded: [],
+  };
+  await expect(
+    prepareNormalizedExternalPublication(input, options, f.deps),
+  ).rejects.toThrow(/bigint/i);
+  await expect(
+    prepareNormalizedExternalPublication(
+      { ...input, report: { elapsed: new Number(Infinity) } },
+      options,
+      f.deps,
+    ),
+  ).rejects.toThrow("finite JSON numbers");
+  expect(f.posts).toHaveLength(0);
+});
+
+test("publication JSON retains native Error messages and scanner diagnostics", async () => {
+  const { opengrepJson } =
+    await import("./support/opengrep-import-fixtures.js");
+  const scannerErrors = opengrepJson().errors;
+  const error = new Error("Scanner rule timed out.");
+  const nested = {
+    path: "src/example.ts",
+    cause: new Error("Parser stopped."),
+  };
+  const report = { errors: [error, nested, ...scannerErrors] };
+  const jsonErrors = [
+    { message: error.message },
+    { path: nested.path, cause: { message: nested.cause.message } },
+    ...scannerErrors,
+  ];
+  const f = await fixture();
+  await expect(
+    prepareNormalizedExternalPublication(
+      { read: 0, findings: [], excluded: [], report },
+      options,
+      f.deps,
+    ),
+  ).rejects.toThrow(`Scanner diagnostics: ${JSON.stringify(jsonErrors)}`);
+  expect(f.posts).toHaveLength(0);
+
+  const prepared = await prepareNormalizedExternalPublication(
+    {
+      read: 1,
+      findings: [
+        {
+          source_finding_id: "synthetic-report",
+          evidence: { title: "Example finding", severity: "high" },
+        },
+      ],
+      excluded: [],
+      report,
+    },
+    options,
+    f.deps,
+  );
+  const original = structuredClone(report);
+  nested.cause.message = "Caller changed the diagnostic.";
+  const completed = await prepared.publish();
+  expect(completed.verified).toBe(1);
+  for (const value of [prepared.preview.report, completed.report]) {
+    expect(value).toEqual(original);
+    expect(value?.["errors"]).toEqual([
+      expect.any(Error),
+      { path: nested.path, cause: expect.any(Error) },
+      ...scannerErrors,
+    ]);
+  }
+  const dir = join(f.root, "state", "external-finding-publications");
+  const receipt = (await readdir(dir)).find((name) =>
+    name.endsWith(".result.json"),
+  )!;
+  expect(JSON.parse(await readFile(join(dir, receipt), "utf8")).report).toEqual(
+    {
+      errors: jsonErrors,
+    },
+  );
 });
 
 test("invalid source namespaces fail before authentication or Cloud requests", async () => {
@@ -3531,6 +3727,132 @@ test("Semgrep publication preserves identity across JSON and SARIF with explicit
   expect(updated.evidence.source_data).toMatchObject({
     result: semgrepSarif().runs[0]!.results[0],
   });
+});
+
+test("OpenGrep publication retains grouped evidence through Cloud readback and replay", async () => {
+  const { opengrepTraceJson } =
+    await import("./support/opengrep-import-fixtures.js");
+  const input = opengrepTraceJson();
+  const { results, ...report } = input;
+  const f = await fixture(input);
+  const settings = {
+    ...options,
+    provider: "opengrep" as const,
+    sourceKey: "organization/project/main/opengrep",
+    sourceRepositoryUrl: "https://github.com/example/project",
+  };
+  const prepared = await prepareExternalPublication(f.file, settings, f.deps);
+  expect(prepared.preview.source).toEqual({
+    provider: "semgrep",
+    source_key: settings.sourceKey,
+  });
+  expect(prepared.preview.report).toEqual(report);
+  expect(prepared.preview.findings).toHaveLength(1);
+  expect(prepared.preview.excluded).toEqual([]);
+  prepared.preview.report!["errors"] = [];
+  const first = await prepared.publish();
+  expect(first.counts.created).toBe(1);
+  expect(first.verified).toBe(1);
+  expect(first.report).toEqual(report);
+  const original = structuredClone([...f.reports.values()][0]!);
+  expect(original).toMatchObject({
+    origin: "imported",
+    source: { provider: "semgrep" },
+    assessment: { state: "not_assessed" },
+    evidence: {
+      details: { kind: "sast", scanner_origin: "OpenGrep" },
+      source_data: { scan_error_count: input.errors.length },
+    },
+  });
+  expect(original.evidence.source_data!["results"]).toHaveLength(2);
+  expect(original.evidence.source_data!["results"]).toEqual(
+    expect.arrayContaining(results),
+  );
+  expect(original.evidence).not.toHaveProperty("confidence");
+  expect(JSON.parse(f.posts[0]!).source.provider).toBe("semgrep");
+  const repeated = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(repeated.counts.unchanged).toBe(1);
+  expect(repeated.report).toEqual(report);
+
+  input.results[0]!.extra.message = "Updated OpenGrep evidence";
+  input.results[0]!.extra.fingerprint = "new-scanner-fingerprint_9";
+  await writeFile(f.file, JSON.stringify(input));
+  const changed = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(changed.counts.updated).toBe(1);
+  expect(changed.verified).toBe(1);
+  expect(changed.report).toEqual(report);
+  expect([...f.reports.values()]).toHaveLength(1);
+  const updated = [...f.reports.values()][0]!;
+  expect(updated).toMatchObject({
+    id: original.id,
+    canonical_finding_id: original.canonical_finding_id,
+    source_finding_id: original.source_finding_id,
+    version: 2,
+    origin: "imported",
+    assessment: { state: "not_assessed" },
+  });
+  expect(updated.evidence.source_data!["results"]).toHaveLength(2);
+  expect(updated.evidence.source_data!["results"]).toEqual(
+    expect.arrayContaining(input.results),
+  );
+});
+
+test("empty OpenGrep Cloud imports retain scanner diagnostics without uploading", async () => {
+  const { opengrepJson } =
+    await import("./support/opengrep-import-fixtures.js");
+  const input = opengrepJson();
+  input.results = [];
+  const f = await fixture(input);
+  await expect(
+    prepareExternalPublication(
+      f.file,
+      {
+        ...options,
+        provider: "opengrep",
+        sourceRepositoryUrl: "https://github.com/example/project",
+      },
+      f.deps,
+    ),
+  ).rejects.toThrow(input.errors[0]!.message);
+  expect(f.posts).toHaveLength(0);
+});
+
+test("OpenGrep CLI Cloud preview forwards source provenance without uploading", async () => {
+  const { opengrepJson } =
+    await import("./support/opengrep-import-fixtures.js");
+  const input = opengrepJson();
+  const f = await fixture(input);
+  const command = [
+    ...f.command,
+    "--dry-run",
+    "--source-repository-url",
+    "https://github.com/example/project",
+  ];
+  command[command.indexOf("--provider") + 1] = "opengrep";
+  const cli = createCliTest(main);
+  expect(await cli.runCli(command, f.cliDeps)).toBe(0);
+  expect(JSON.parse(cli.stdout.text())).toMatchObject({
+    source: { provider: "semgrep", source_key: options.sourceKey },
+    report: { errors: input.errors },
+    findings: [
+      {
+        evidence: {
+          details: { scanner_origin: "OpenGrep" },
+          source_data: { results: input.results },
+        },
+      },
+    ],
+  });
+  const humanCommand = [...command];
+  humanCommand.splice(humanCommand.indexOf("--format"), 2);
+  const human = createCliTest(main);
+  expect(await human.runCli(humanCommand, f.cliDeps)).toBe(0);
+  expect(human.stderr.text()).toContain(input.errors[0]!.message);
+  expect(f.posts).toHaveLength(0);
 });
 
 test("Semgrep native percent paths retain CE records through JSON-to-SARIF publication", async () => {

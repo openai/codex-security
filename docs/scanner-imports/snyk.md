@@ -1,7 +1,8 @@
 # Snyk Open Source imports
 
 Vendor finding import and readback require `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`.
-See the [opt-in instructions](../../sdk/typescript/docs/cli.md#import-vendor-findings-locally).
+See the [opt-in instructions](../../sdk/typescript/docs/cli.md#import-vendor-findings-locally)
+and [how saved scanner reports map to imported evidence](schema-guide.md).
 
 Use the [official Snyk Codex plugin](https://github.com/snyk/studio-recipes/tree/main/plugins/codex)
 to collect a fresh workspace scan. The existing
@@ -60,9 +61,26 @@ alternate dependency paths. The plugin cannot recover data its MCP server did
 not return. See the [official SCA mapper](https://github.com/snyk/studio-mcp/blob/main/internal/oss/map.go).
 The bundle's composite occurrence identity includes package version and dependency
 path. Keep the same source key for each repository, branch and scan target across
-exports; a changed occurrence has a new ID. Plugin v1 paths are relative to the
-scan target and do not carry its Git-root offset. They remain in original evidence
+exports. A change to the composite identity produces a new source ID; changing
+only the evidence preserves that ID. Plugin v1 paths are relative to the scan
+target and do not carry its Git-root offset. They remain in original evidence
 without being projected as repository locations or package manifest paths.
+
+### How to read import counts
+
+For the same repository and source key, `created` means a new source identity.
+For an existing identity, `updated` means the whole evidence snapshot changed;
+`unchanged` means it did not. These counts describe imported Snyk evidence, not
+new vulnerabilities, fixes, or Codex assessments.
+
+Each plugin finding retains its collection context. If a scan's `issueCount`
+falls from three to two, both remaining findings can get a new version even if
+neither occurrence changed. Their source IDs stay the same, and omitting the
+third finding does not close it. Native CLI JSON likewise retains the project's
+[`uniqueCount`](https://github.com/snyk/cli/blob/8b2d0a695c6b1b31f681e32039db958fba6f0c2f/src/lib/snyk-test/run-test.ts#L555)
+when supplied. It counts distinct vulnerabilities, not dependency-path
+occurrences: two paths to the same advisory contribute one to the count.
+Keep the original evidence; do not edit or strip scan metadata to suppress updates.
 
 ### Native CLI JSON
 
@@ -148,14 +166,7 @@ repository when using the default SSH port or port 22. The public
 `github.com`. Other hosts, nondefault SSH ports and explicit HTTPS ports remain
 distinct; the importer does not infer an Enterprise host from the artifact alone.
 Unknown repository context requires the user to select the correct destination.
-Gzip and UTF-8 BOM input are supported. All three file formats
-normalize to the Cloud evidence model before either local import or Cloud publication.
-Records exceeding that model's field or total-size limits appear as exclusions in
-the preview, without truncation. The normalized local SDK import API has a separate
-contract that accepts larger evidence. Inspect preview exclusions before importing.
-
-The plugin and CLI paths scan the current workspace. Existing Snyk platform
-findings need a separate [REST Issues API](https://docs.snyk.io/snyk-api/reference/issues)
-reader with tenant access and repository mapping. This adapter does not read that
-backlog or synchronize triage decisions. Synthetic contract and publication tests
-do not establish live tenant, plugin-runtime or deployed Cloud compatibility.
+Gzip and UTF-8 BOM input are supported. Records exceeding the destination's
+field or total-size limits appear as exclusions in the preview, without
+truncation. Inspect preview exclusions before importing. Synthetic tests do
+not establish live tenant, plugin-runtime or deployed Cloud compatibility.

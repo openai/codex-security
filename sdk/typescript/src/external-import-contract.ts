@@ -1,4 +1,5 @@
 import { isIP } from "node:net";
+import { isNumberObject } from "node:util/types";
 import Ajv2020 from "ajv/dist/2020.js";
 import schema from "../schemas/external-findings.schema.json" with { type: "json" };
 import type {
@@ -225,6 +226,27 @@ export const validateSourceReports =
   validator<SourceReportPage>("SourceReportPage");
 export const validateSourceReport = validator<SourceReport>("SourceReport");
 
+function requireJsonNumber(value: number, label: string): void {
+  if (!Number.isFinite(value))
+    throw new Error(`${label} must contain finite JSON numbers.`);
+  if (Number.isInteger(value) && !Number.isSafeInteger(value))
+    throw new Error(
+      `${label} integers must be within JavaScript's safe integer range; export larger values as strings to preserve them exactly.`,
+    );
+}
+
+/** Report metadata is retained in previews and receipts without Cloud evidence size limits. */
+export function validateExternalReport(
+  report: Record<string, unknown> | undefined,
+): void {
+  if (report === undefined) return;
+  JSON.stringify(report, (_key, value: unknown) => {
+    if (isNumberObject(value)) value = +value;
+    if (typeof value === "number") requireJsonNumber(value, "Scanner report");
+    return value;
+  });
+}
+
 export function validateExternalEvidence(
   input: unknown,
   target: ExternalImportTarget = "cloud",
@@ -303,10 +325,20 @@ export function validateExternalEvidence(
         "Evidence URLs must be HTTP(S) links without credentials.",
       );
   }
+  validateExternalEvidenceJson(result, target);
+  return result;
+}
+
+/** Return the validated Cloud wire size, or zero for local evidence. */
+export function validateExternalEvidenceJson(
+  input: unknown,
+  target: ExternalImportTarget,
+  additionalCloudBytes = 0,
+): number {
   // Local evidence still has to be serializable JSON, including acyclic source data.
-  if (target === "local") JSON.stringify(result);
+  if (target === "local") JSON.stringify(input);
   let numericByteAdjustment = 0;
-  const pending: [unknown, number][] = [[result, 0]];
+  const pending: [unknown, number][] = [[input, 0]];
   while (pending.length > 0) {
     const [value, depth] = pending.pop()!;
     if (target === "cloud" && depth > 20)
@@ -315,12 +347,7 @@ export function validateExternalEvidence(
       for (const child of Object.values(value))
         pending.push([child, depth + 1]);
     } else if (typeof value === "number") {
-      if (!Number.isFinite(value))
-        throw new Error("Evidence must contain finite JSON numbers.");
-      if (Number.isInteger(value) && !Number.isSafeInteger(value))
-        throw new Error(
-          "Evidence integers must be within JavaScript's safe integer range; export larger values as strings to preserve them exactly.",
-        );
+      requireJsonNumber(value, "Evidence");
       const wire = JSON.stringify(value);
       // Cloud pads short exponents and formats small fractions scientifically.
       const cloud = (
@@ -331,13 +358,15 @@ export function validateExternalEvidence(
       numericByteAdjustment += cloud.length - wire.length;
     }
   }
-  if (
-    target === "cloud" &&
-    Buffer.byteLength(JSON.stringify(result)) + numericByteAdjustment >
-      256 * 1024
-  )
+  const bytes =
+    target === "cloud"
+      ? Buffer.byteLength(JSON.stringify(input)) +
+        numericByteAdjustment +
+        additionalCloudBytes
+      : 0;
+  if (bytes > 256 * 1024)
     throw new Error("Evidence exceeds the Cloud limit of 256 KiB.");
-  return result;
+  return bytes;
 }
 
 export function validateImportRequest(input: unknown): FindingImportRequest {

@@ -271,6 +271,7 @@ for examples.
 - [Online documentation](https://learn.chatgpt.com/docs/security/cli)
 - [Agent workflows and recovery](docs/agent-workflows.md)
 - [CLI reference](sdk/typescript/docs/cli.md)
+- [Scanner file import schema and capability guide](docs/scanner-imports/schema-guide.md)
 - [Project configuration](docs/project-configuration.md)
 - [Examples](examples/README.md)
 

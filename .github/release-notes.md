@@ -21,6 +21,11 @@
 - clarify recovery for historical scan entries ([#2027](https://github.com/openai/codex-security/pull/2027))
 - add a local Wolfi build for Linux amd64 ([#2053](https://github.com/openai/codex-security/pull/2053))
 - continue hosted reviews after a missing submission ([#2090](https://github.com/openai/codex-security/pull/2090))
+- count Cloud request bytes without reserializing batches ([#2079](https://github.com/openai/codex-security/pull/2079))
+- avoid redundant SQLite reads and parsing on replay ([#2083](https://github.com/openai/codex-security/pull/2083))
+- map scanner evidence and test cross-provider replay ([#2080](https://github.com/openai/codex-security/pull/2080))
+- distinguish Snyk evidence changes from finding edits ([#2081](https://github.com/openai/codex-security/pull/2081))
+- support OpenGrep reports locally and in Cloud ([#1872](https://github.com/openai/codex-security/pull/1872))
 
 <!-- release-section: highlights:end -->
 

@@ -30,6 +30,8 @@ const distModules = [
   "scanner-import",
   "snyk-findings",
   "semgrep-findings",
+  "native-json-findings",
+  "opengrep-findings",
   "external-findings-publish",
   "external-import-contract",
   "external-import-models",

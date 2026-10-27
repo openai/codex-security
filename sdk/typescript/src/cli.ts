@@ -3544,15 +3544,15 @@ export async function main(
   function registerFindingPublication() {
     publication.command("findings", {
       description:
-        "Preview and import selected Wiz, Snyk, Semgrep Code, Endor, or GitHub findings locally or to Cloud.",
-      hint: "For Snyk Open Source SCA vulnerabilities only, prefer native snyk test JSON or an official plugin snyk-findings-export/v1 bundle; Open Source SARIF 2.1.0 is also supported. Snyk licenses, Code, Container, IaC and platform backlogs are unsupported. For Semgrep Code, supply native JSON or SARIF and --source-repository-url. For Endor, supply native Finding JSON or endorctl SARIF 2.1.0. For GitHub, supply complete JSON/JSONL saved by import github or import github-advisories. GHSA advisories do not establish an installed dependency or applicability. For Wiz, prefer a native package vulnerability JSON report or named SAST/repository-secret/IaC JSON collections with repository metadata. Normalized JSONL and repository package-vulnerability CSV (SCA only, GitHub repositories) are also supported. Gzip is supported for each format; Wiz CSV does not cover SAST or cloud posture. Other Wiz CSV profiles, scan events, workload secrets, and cloud configuration exports are not supported. --to local stores unassessed evidence for a local repository path without Cloud login. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
+        "Preview and import selected Wiz, Snyk, Semgrep Code, OpenGrep, Endor, or GitHub findings locally or to Cloud.",
+      hint: "For Snyk Open Source SCA vulnerabilities only, prefer native snyk test JSON or an official plugin snyk-findings-export/v1 bundle; Open Source SARIF 2.1.0 is also supported. Snyk licenses, Code, Container, IaC and platform backlogs are unsupported. For Semgrep Code, supply native JSON or SARIF and --source-repository-url. For OpenGrep, supply native JSON and --source-repository-url; imports use the semgrep storage provider and preserve OpenGrep as the scanner origin. For Endor, supply native Finding JSON or endorctl SARIF 2.1.0. For GitHub, supply complete JSON/JSONL saved by import github or import github-advisories. GHSA advisories do not establish an installed dependency or applicability. For Wiz, prefer a native package vulnerability JSON report or named SAST/repository-secret/IaC JSON collections with repository metadata. Normalized JSONL and repository package-vulnerability CSV (SCA only, GitHub repositories) are also supported. Gzip is supported for each format; Wiz CSV does not cover SAST or cloud posture. Other Wiz CSV profiles, scan events, workload secrets, and cloud configuration exports are not supported. --to local stores unassessed evidence for a local repository path without Cloud login. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
       destructive: true,
       mcp: false,
       args: z.object({
         file: z
           .string()
           .describe(
-            "Snyk native test JSON, plugin SCA bundle or Open Source SARIF; Semgrep Code JSON/SARIF; Endor Finding JSON/endorctl SARIF; saved GitHub import output; native Wiz JSON, normalized JSONL, or repository package-vulnerability CSV.",
+            "Snyk native test JSON, plugin SCA bundle or Open Source SARIF; Semgrep Code JSON/SARIF; OpenGrep native JSON; Endor Finding JSON/endorctl SARIF; saved GitHub import output; native Wiz JSON, normalized JSONL, or repository package-vulnerability CSV.",
           ),
       }),
       options: z.object({
@@ -3564,11 +3564,13 @@ export async function main(
         ),
         provider: z
           .enum(EXTERNAL_FINDINGS_READERS)
-          .describe("Provider that produced these findings."),
+          .describe(
+            "Report reader; OpenGrep uses the semgrep storage provider.",
+          ),
         sourceRepositoryUrl: optionValue("--source-repository-url")
           .optional()
           .describe(
-            "Required for Semgrep: source repository URL, checked against the Cloud destination or configured local Git remotes.",
+            "Required for Semgrep and OpenGrep: source repository URL, checked against the Cloud destination or configured local Git remotes.",
           ),
         sourceKey: optionValue("--source-key").describe(
           "Stable vendor tenant and finding namespace; not a project selection filter.",
@@ -3632,6 +3634,20 @@ export async function main(
               controller.signal,
             );
           };
+          const showScannerReport = (preview: ExternalFindings) => {
+            if (options.provider !== "opengrep") return;
+            writeDiagnostic("Reader: OpenGrep (stored provider: semgrep)\n");
+            const diagnostics = preview.report?.["errors"];
+            if (Array.isArray(diagnostics) && diagnostics.length) {
+              writeDiagnostic(
+                `Scanner diagnostics: ${diagnostics.length}. Scan coverage may be incomplete.\n`,
+              );
+              for (const diagnostic of diagnostics)
+                writeDiagnostic(
+                  `${diagnosticValue(JSON.stringify(diagnostic))}\n`,
+                );
+            }
+          };
           let lastProgress = "";
           const onProgress = (event: ExternalPublicationProgress) => {
             if (errorOutput.isTTY !== true) return;
@@ -3676,6 +3692,7 @@ export async function main(
               );
               const { preview } = prepared;
               const showPreview = () => {
+                showScannerReport(preview);
                 writeDiagnostic(
                   `Local repository: ${diagnosticValue(preview.repository)}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}\n`,
                 );
@@ -3720,6 +3737,7 @@ export async function main(
             );
             const { preview } = prepared;
             const showPreview = () => {
+              showScannerReport(preview);
               writeDiagnostic(
                 `Cloud API: ${diagnosticValue(preview.cloudApiUrl)}\nAccount: ${diagnosticValue(preview.accountId)}\nDestination: ${diagnosticValue(preview.destination.url)} (${diagnosticValue(preview.destination.id)})\nEnvironment: ${[...new Set(preview.requests.map((request) => request.repository.environment_id))].map(diagnosticValue).join(", ")}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}${preview.resumed ? "\nResuming the saved submission." : ""}\n`,
               );
