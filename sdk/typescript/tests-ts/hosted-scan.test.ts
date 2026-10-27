@@ -48,9 +48,12 @@ test("hosted owner artifact is opt-in and included in the completed receipt", as
   for (const enabled of [false, true]) {
     const input = await fixture();
     const executor = draftExecutor();
+    const startThread = mock(() => {
+      throw new Error("No additional owner turn");
+    });
     const result = await runHostedScan(
       { ...input, ownerSuggestions: enabled },
-      { executor },
+      enabled ? { executor, ownerCodex: { startThread } } : { executor },
     );
     expect(result.status).toBe("completed");
     expect(executor.run).toHaveBeenCalledTimes(1);
@@ -62,7 +65,9 @@ test("hosted owner artifact is opt-in and included in the completed receipt", as
       join(input.outputDirectory, "scan-manifest.json"),
     );
     expect(JSON.stringify(manifest)).not.toContain("owner-suggestions.json");
-    if (enabled)
+    if (enabled) {
+      expect(startThread).not.toHaveBeenCalled();
+      expect(result).not.toHaveProperty("ownerSuggestionsError");
       expect(
         await readJson(join(input.outputDirectory, "owner-suggestions.json")),
       ).toMatchObject({
@@ -70,6 +75,7 @@ test("hosted owner artifact is opt-in and included in the completed receipt", as
         revision: input.revision,
         results: [],
       });
+    }
   }
 });
 
@@ -147,9 +153,26 @@ async function fixture(
 
 async function writeDraft(request: ScanExecutionRequest) {
   const directory = request.runtime.outputDirectory;
+  const reviewState = {
+    inventoryStrategy:
+      request.scope.paths[0] === "." ? "repository" : "scoped_path",
+    surfaces: [
+      {
+        id: "fixture",
+        label: "Synthetic scope fixture",
+        disposition: "no_issue_found",
+        receiptRefs: [],
+        notes: "Synthetic test only.",
+      },
+    ],
+    explicitExclusions: [],
+    deferred: [],
+  };
   const documents = {
     "scan-manifest.json": {
       scan: {
+        mode: request.scope.paths[0] === "." ? "repository" : "scoped_path",
+        reviewState,
         target: { kind: "git_revision" },
         scope: {
           summary: "Synthetic scope fixture",
@@ -159,21 +182,6 @@ async function writeDraft(request: ScanExecutionRequest) {
       },
     },
     "findings.json": { findings: [] },
-    "coverage.json": {
-      inventoryStrategy:
-        request.scope.paths[0] === "." ? "repository" : "scoped_path",
-      surfaces: [
-        {
-          id: "fixture",
-          label: "Synthetic scope fixture",
-          disposition: "no_issue_found",
-          receiptRefs: [],
-          notes: "Synthetic test only.",
-        },
-      ],
-      explicitExclusions: [],
-      deferred: [],
-    },
   };
   for (const [name, document] of Object.entries(documents))
     await writeJson(join(directory, name), document);
@@ -356,14 +364,11 @@ test.each(sealedScopes)(
     const manifest = await readJson<any>(
       join(result.outputDirectory, "scan-manifest.json"),
     );
-    const coverage = await readJson<any>(
-      join(result.outputDirectory, "coverage.json"),
-    );
     expect(manifest.scan.scope.includePaths).toEqual(normalized);
     expect(manifest.scan.target.revision).toBe(input.revision);
     expect(manifest.scan.sealedAt).toBeTruthy();
-    expect(coverage).toMatchObject({
-      includePaths: normalized,
+    expect(manifest.scan).toMatchObject({
+      scope: { includePaths: normalized },
       mode: normalized[0] === "." ? "repository" : "scoped_path",
     });
     const report = await readFile(
@@ -590,23 +595,19 @@ test.each(["missing", "invalid"] as const)(
   },
 );
 
-test("sealed coverage with follow-up diagnostics remains completed", async () => {
+test("sealed review with follow-up diagnostics remains completed", async () => {
   const result = await runHostedScan(await fixture(), {
     executor: draftExecutor(async (request) => {
-      const file = join(request.runtime.outputDirectory, "coverage.json");
-      const coverage = await readJson<any>(file);
-      coverage.surfaces[0].disposition = "needs_follow_up";
-      await writeJson(file, coverage);
+      const file = join(request.runtime.outputDirectory, "scan-manifest.json");
+      const manifest = await readJson<any>(file);
+      manifest.scan.reviewState.surfaces[0].disposition = "needs_follow_up";
+      await writeJson(file, manifest);
     }),
   });
   expect(result.status).toBe("completed");
-  expect(result.artifacts.map((artifact) => artifact.path)).toContain(
+  expect(result.artifacts.map((artifact) => artifact.path)).not.toContain(
     "coverage.json",
   );
-  const coverage = await readJson<any>(
-    join(result.outputDirectory, "coverage.json"),
-  );
-  expect(coverage.surfaces[0].disposition).toBe("needs_follow_up");
 });
 
 test("a changed checkout cannot produce accepted completed output", async () => {
@@ -656,7 +657,10 @@ test.each([false, true])(
   "CLI pipes retain reasoning effort, progress and execution receipts, including cancellation (%p)",
   async (cancel) => {
     const input = await fixture();
-    if (!cancel) input.reasoningEffort = "synthetic-future-effort";
+    if (!cancel) {
+      input.reasoningEffort = "synthetic-future-effort";
+      input.ownerSuggestions = true;
+    }
     const child = spawn(
       process.execPath,
       [join(import.meta.dirname, "../src/cli.ts"), "scan", "--host"],
@@ -731,13 +735,27 @@ test.each([false, true])(
           method: "scan.progress",
           params: { id: "run", event },
         });
-      expect(messages.at(-1)).toMatchObject({
+      const response = messages.at(-1);
+      expect(response).toMatchObject({
         id: "run",
         result: {
           status: cancel ? "canceled" : "completed",
           execution: { sessionId: "fake-host", usage },
         },
       });
+      if (!cancel) {
+        expect(response.result).not.toHaveProperty("ownerSuggestionsError");
+        expect(response.result.artifacts).toContainEqual(
+          expect.objectContaining({ path: "owner-suggestions.json" }),
+        );
+        expect(
+          await readJson(join(input.outputDirectory, "owner-suggestions.json")),
+        ).toMatchObject({
+          schemaVersion: 2,
+          revision: input.revision,
+          results: [],
+        });
+      }
     } finally {
       child.kill();
     }
@@ -1253,31 +1271,3 @@ test("ordinary SDK rejects the removed hosted option instead of using local infe
     await client.close();
   }
 });
-
-test.each([true, false])(
-  "hosted owner reporting never invokes the legacy callback (supplied=%p)",
-  async (supplied) => {
-    const input = await fixture();
-    const startThread = mock(() => {
-      throw new Error("No additional owner turn");
-    });
-    const result = await runHostedScan(
-      { ...input, ownerSuggestions: true },
-      {
-        executor: draftExecutor(),
-        ...(supplied ? { ownerCodex: { startThread } } : {}),
-      },
-    );
-    expect(result.status).toBe("completed");
-    expect(result).not.toHaveProperty("ownerSuggestionsError");
-    expect(startThread).not.toHaveBeenCalled();
-    expect(
-      JSON.parse(
-        await readFile(
-          join(input.outputDirectory, "owner-suggestions.json"),
-          "utf8",
-        ),
-      ),
-    ).toHaveProperty("results");
-  },
-);

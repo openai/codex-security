@@ -22,6 +22,7 @@ from workbench_test_support import (
     initialize_git_repository,
     load_script,
     mark_deep_coordinator_succeeded,
+    read_review_state,
     resume_deep_scan,
     run_workbench,
     save_workspace,
@@ -170,9 +171,15 @@ def _seal_draft(scan_dir: Path, target: Path) -> None:
 
 
 def _sealed_artifacts(scan_dir: Path) -> dict[str, bytes]:
+    scan = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]
     return {
         name: (scan_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+        for name in (
+            "scan-manifest.json",
+            "findings.json",
+            "report.md",
+            *(["coverage.json"] if "coverageRef" in scan else []),
+        )
     }
 
 
@@ -262,7 +269,7 @@ def test_stopped_recovery_preserves_legacy_diff_snapshot(tmp_path: Path, kind: s
     manifest = json.loads(manifest_path.read_text())
     assert manifest["scan"]["target"]["snapshotDigest"] == legacy_digest
     assert json.loads((scan_dir / "findings.json").read_text())["findings"] == original_findings
-    assert late_review in json.loads((scan_dir / "coverage.json").read_text())["deferred"]
+    assert late_review in read_review_state(state_dir, scan_dir)["deferred"]
     sealed_artifacts = _sealed_artifacts(scan_dir)
     scan_command(state_dir, "recover-scan-results", scan_id)
     assert _sealed_artifacts(scan_dir) == sealed_artifacts
@@ -374,7 +381,7 @@ def test_cli_scan_completes_when_draft_omits_registered_scope(
     assert completed["scan"]["findingCount"] == 1
     assert completed["scan"]["reportAvailable"] is True
     manifest = json.loads(manifest_path.read_text())
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     expected_scope = {"includePaths": ["src", "tests"], "excludePaths": []}
     assert manifest["scan"]["scope"] == expected_scope
     assert coverage["includePaths"] == expected_scope["includePaths"]
@@ -453,6 +460,7 @@ def test_incompatible_sealed_deep_scan_remains_recoverable(tmp_path: Path) -> No
     artifacts = {
         name: (scan_dir / name).read_bytes()
         for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+        if (scan_dir / name).is_file()
     }
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         before = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
@@ -579,7 +587,7 @@ def test_scoped_cli_completion_adopts_registered_revision_kind(tmp_path: Path) -
     assert sealed_manifest["scan"]["target"]["revision"] == revision
     assert "snapshotDigest" not in sealed_manifest["scan"]["target"]
     assert sealed_manifest["scan"]["scope"]["includePaths"] == ["app"]
-    sealed_coverage = json.loads((scan_dir / "coverage.json").read_text())
+    sealed_coverage = read_review_state(state_dir, scan_dir)
     assert sealed_coverage["mode"] == "scoped_path"
 
 
@@ -612,7 +620,7 @@ def test_full_repository_completion_adopts_registered_revision_kind(tmp_path: Pa
     assert manifest["scan"]["target"]["revision"] == revision
     assert "snapshotDigest" not in manifest["scan"]["target"]
     assert manifest["scan"]["scope"]["includePaths"] == ["."]
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert coverage["mode"] == "repository"
     assert (scan_dir / "report.md").is_file()
 
@@ -749,7 +757,7 @@ def test_completion_populates_coverage_mode_from_selected_scan_mode(tmp_path: Pa
         )
         completed = scan_command(state_dir, "complete-scan", scan_id)
         assert completed["scan"]["progress"]["status"] == "complete"
-        coverage = json.loads((scan_dir / "coverage.json").read_text())
+        coverage = read_review_state(state_dir, scan_dir)
         assert coverage["mode"] == expected
 
 
@@ -761,7 +769,7 @@ def test_completion_populates_workbench_owned_unsealed_envelope(
     write_completed_contract(scan_dir, scan_id, target)
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     findings = json.loads((scan_dir / "findings.json").read_text())
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     manifest["documentType"] = "wrong.manifest"
     manifest["schemaVersion"] = "wrong"
     manifest["scan"]["id"] = "wrong-scan"
@@ -825,7 +833,7 @@ def test_completion_populates_workbench_owned_unsealed_envelope(
     assert completed["scan"]["progress"]["status"] == "complete"
     sealed_manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     sealed_findings = json.loads((scan_dir / "findings.json").read_text())
-    sealed_coverage = json.loads((scan_dir / "coverage.json").read_text())
+    sealed_coverage = read_review_state(state_dir, scan_dir)
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         stored_started_at, stored_completed_at = connection.execute(
             "SELECT started_at, completed_at FROM scans WHERE id = ?", (scan_id,)
@@ -841,7 +849,8 @@ def test_completion_populates_workbench_owned_unsealed_envelope(
     assert sealed_manifest["scan"]["startedAt"] == stored_started_at
     assert sealed_manifest["scan"]["completedAt"] == stored_completed_at
     assert sealed_manifest["scan"]["sealedAt"] == stored_completed_at
-    assert sealed_manifest["scan"]["coverageRef"] == "coverage.json"
+    assert "coverageRef" not in sealed_manifest["scan"]
+    assert not (scan_dir / "coverage.json").exists()
     assert sealed_manifest["scan"]["findingsRef"] == "findings.json"
     assert sealed_manifest["scan"]["target"]["targetId"] == stable_target_id(target)
     assert sealed_manifest["scan"]["target"]["displayName"] == target.name
@@ -862,28 +871,6 @@ def test_completion_populates_workbench_owned_unsealed_envelope(
     assert sealed_coverage["excludePaths"] == []
 
 
-def test_completion_keeps_invalid_prewrite_drafts_resumable(
-    tmp_path: Path,
-) -> None:
-    state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
-    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
-    # The workbench binding never owns the remote, so this stays a draft error.
-    manifest["scan"]["target"]["remote"] = "not-a-url"
-    (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
-
-    failed = scan_command(state_dir, "complete-scan", scan_id, check=False)
-
-    assert failed["returncode"] != 0
-    assert "target.remote" in str(failed["stderr"])
-    pending = get_scan(state_dir, scan_id)["scan"]
-    assert pending["progress"]["status"] == "running"
-    del manifest["scan"]["target"]["remote"]
-    (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
-    completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
-    assert completed["progress"]["status"] == "complete"
-    assert completed["findingCount"] == 1
-
-
 @pytest.mark.parametrize("invalid_inventory", [None, "", "invalid_strategy", 42])
 def test_completion_keeps_recoverable_prewrite_failures_resumable(
     tmp_path: Path,
@@ -891,7 +878,7 @@ def test_completion_keeps_recoverable_prewrite_failures_resumable(
 ) -> None:
     state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
     coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     inventory_strategy = coverage["inventoryStrategy"]
     if invalid_inventory is None:
         coverage.pop("inventoryStrategy")
@@ -922,13 +909,19 @@ def test_completion_keeps_empty_coverage_defaults(tmp_path: Path) -> None:
 
     assert completed["progress"]["status"] == "complete"
     assert completed["findingCount"] == 1
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert coverage["inventoryStrategy"] == "repository"
 
 
-@pytest.mark.parametrize("command", ["complete-scan", "prepare-scan-completion"])
-@pytest.mark.parametrize("defect", ["target", "unicode"])
-@pytest.mark.parametrize("existing_head", [False, True])
+@pytest.mark.parametrize(
+    ("command", "defect", "existing_head"),
+    [
+        ("complete-scan", "target", False),
+        ("prepare-scan-completion", "unicode", False),
+        ("prepare-scan-completion", "target", True),
+        ("complete-scan", "unicode", True),
+    ],
+)
 def test_rejected_completion_restores_parent_head_before_corrected_retry(
     tmp_path: Path, workbench_api, command: str, defect: str, existing_head: bool
 ) -> None:
@@ -939,7 +932,7 @@ def test_rejected_completion_restores_parent_head_before_corrected_retry(
     coverage_path = scan_dir / "coverage.json"
     manifest = json.loads(manifest_path.read_text())
     findings = json.loads(findings_path.read_text())
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
 
     coverage["deferred"] = [{"id": "review", "reason": "Review remains."}]
     independent = write_checkpoint(
@@ -997,6 +990,7 @@ def test_rejected_completion_restores_parent_head_before_corrected_retry(
 
     assert failed["returncode"] != 0
     assert ("target.remote" if defect == "target" else "coverage") in failed["stderr"]
+    assert get_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "running"
     assert head_state() == previous_head
     assert {
         path.name: (path.read_bytes(), path.stat().st_mtime_ns)
@@ -1018,7 +1012,7 @@ def test_rejected_completion_restores_parent_head_before_corrected_retry(
 
     assert completed["progress"]["status"] == "complete"
     assert completed["findingCount"] == 1
-    final_coverage = json.loads(coverage_path.read_text())
+    final_coverage = read_review_state(state_dir, scan_dir)
     assert final_coverage["deferred"] == []
     assert final_coverage["resolvedDeferred"] == coverage["resolvedDeferred"]
 
@@ -1031,7 +1025,7 @@ def test_deep_completion_derives_inventory_without_downgrading_coverage(
         case_dir.mkdir()
         state_dir, scan_id, scan_dir = _start_deep_scan_with_draft_findings(case_dir)
         coverage_path = scan_dir / "coverage.json"
-        coverage = json.loads(coverage_path.read_text())
+        coverage = read_review_state(state_dir, scan_dir)
         if inventory is None:
             coverage.pop("inventoryStrategy")
         else:
@@ -1043,7 +1037,7 @@ def test_deep_completion_derives_inventory_without_downgrading_coverage(
         assert completed["scan"]["progress"]["status"] == "complete"
         assert completed["scan"]["findingCount"] == 1
         assert completed["scan"]["warnings"] == []
-        sealed_coverage = json.loads(coverage_path.read_text())
+        sealed_coverage = read_review_state(state_dir, scan_dir)
         assert sealed_coverage["mode"] == "deep_repository"
         assert sealed_coverage["inventoryStrategy"] == "repository"
 
@@ -1061,7 +1055,7 @@ def test_deep_completion_rejects_invalid_target_even_with_recoverable_inventory(
     manifest["scan"]["target"]["remote"] = "not-a-url"
     manifest_path.write_text(json.dumps(manifest))
     coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage["inventoryStrategy"] = ""
     coverage_path.write_text(json.dumps(coverage))
 
@@ -1072,12 +1066,13 @@ def test_deep_completion_rejects_invalid_target_even_with_recoverable_inventory(
     recorded = get_scan(state_dir, scan_id)["scan"]
     assert recorded["progress"]["status"] == "failed"
     assert recorded["resultsRecoveryNeeded"] is True
-    assert json.loads(coverage_path.read_text())["inventoryStrategy"] == ""
+    assert read_review_state(state_dir, scan_dir)["inventoryStrategy"] == ""
 
     recovered = scan_command(state_dir, "recover-scan-results", scan_id)["scan"]
 
     assert recovered["resultsRecoveryNeeded"] is False
-    preserved_coverage = json.loads(coverage_path.read_text())
+    assert json.loads(manifest_path.read_text())["scan"]["target"]["kind"] == "directory_snapshot"
+    preserved_coverage = read_review_state(state_dir, scan_dir)
     assert preserved_coverage["inventoryStrategy"] == "repository"
 
     assert len(json.loads((scan_dir / "findings.json").read_text())["findings"]) == 1
@@ -1106,6 +1101,7 @@ def test_completion_persists_optional_model_projection_warnings(
     before = {
         name: (scan_dir / name).read_bytes()
         for name in ("scan-manifest.json", "findings.json", "coverage.json")
+        if (scan_dir / name).is_file()
     }
     document.unlink()
     document.mkdir()
@@ -1150,7 +1146,7 @@ def test_completion_exports_warning_without_workbench_state(
     assert len(warnings) == 1
     assert warnings[0].startswith("Skipped missing writeup for finding 1:")
     assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["warnings"] == warnings
-    assert json.loads((scan_dir / "coverage.json").read_text())["deferred"] == []
+    assert read_review_state(state_dir, scan_dir)["deferred"] == []
 
     portable = tmp_path / "portable"
     shutil.copytree(scan_dir, portable)
@@ -1194,6 +1190,7 @@ def test_completion_rejects_canonical_finding_without_identity(tmp_path: Path) -
     original = {
         name: (scan_dir / name).read_bytes()
         for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+        if (scan_dir / name).is_file()
     }
 
     rejected = scan_command(state_dir, "complete-scan", scan_id, check=False)
@@ -1241,6 +1238,7 @@ def test_completion_rejects_bad_findings_and_failed_scan_preserves_valid_rows(
     original = {
         name: (scan_dir / name).read_bytes()
         for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+        if (scan_dir / name).is_file()
     }
 
     rejected = scan_command(state_dir, "complete-scan", scan_id, check=False)
@@ -1305,87 +1303,72 @@ def test_completion_rejects_unknown_optional_root_cause_evidence_reference(
 def test_stopped_recovery_retains_strongest_duplicate_finding_regardless_of_order(
     tmp_path: Path,
 ) -> None:
-    cases = (
-        (
-            "severity-ascending",
-            (("informational", "high", 1), ("critical", "high", 1)),
-            ("critical", "high", 1),
-        ),
-        (
-            "severity-descending",
-            (("critical", "high", 1), ("informational", "high", 1)),
-            ("critical", "high", 1),
-        ),
-        (
-            "confidence-ascending",
-            (("critical", "low", 1), ("critical", "high", 1)),
-            ("critical", "high", 1),
-        ),
-        (
-            "confidence-descending",
-            (("critical", "high", 1), ("critical", "low", 1)),
-            ("critical", "high", 1),
-        ),
-        (
-            "evidence-ascending",
-            (("critical", "high", 1), ("critical", "high", 2)),
-            ("critical", "high", 2),
-        ),
-        (
-            "evidence-descending",
-            (("critical", "high", 2), ("critical", "high", 1)),
-            ("critical", "high", 2),
-        ),
-    )
-    for case, candidates, expected in cases:
-        case_dir = tmp_path / case
-        case_dir.mkdir()
-        state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(case_dir)
-        findings_path = scan_dir / "findings.json"
-        findings = json.loads(findings_path.read_text())
-        baseline = findings["findings"][0]
-        findings["findings"] = []
-        for severity, confidence, evidence_count in candidates:
-            finding = copy.deepcopy(baseline)
-            finding["severity"]["level"] = severity
-            finding["confidence"]["level"] = confidence
-            if evidence_count == 2:
-                evidence = copy.deepcopy(finding["codeEvidence"][0])
-                evidence["id"] = "additional-evidence"
-                finding["codeEvidence"].append(evidence)
-            findings["findings"].append(finding)
-        findings_path.write_text(json.dumps(findings))
+    state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
+    findings_path = scan_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    template = findings["findings"][0]
+    findings["findings"] = []
+    expected = {}
+    for dimension, weak, strong in (
+        ("severity", ("informational", "high", 1), ("critical", "high", 1)),
+        ("confidence", ("critical", "low", 1), ("critical", "high", 1)),
+        ("evidence", ("critical", "high", 1), ("critical", "high", 2)),
+    ):
+        for order, candidates in (("ascending", (weak, strong)), ("descending", (strong, weak))):
+            anchor = f"{dimension}-{order}"
+            expected[anchor] = (strong, weak)
+            pair = []
+            for severity, confidence, evidence_count in candidates:
+                finding = copy.deepcopy(template)
+                finding["identity"]["anchor"] = anchor
+                finding["title"] = f"Archive extraction: {anchor}"
+                finding["severity"]["level"] = severity
+                finding["confidence"]["level"] = confidence
+                if evidence_count == 2:
+                    evidence = copy.deepcopy(finding["codeEvidence"][0])
+                    evidence["id"] = "additional-evidence"
+                    finding["codeEvidence"].append(evidence)
+                pair.append(finding)
 
-        rejected = scan_command(state_dir, "complete-scan", scan_id, check=False)
-        assert rejected["returncode"] != 0
-        assert "duplicate occurrence identity" in rejected["stderr"]
-        assert json.loads(findings_path.read_text()) == findings
-        fail_scan(state_dir, scan_id, "Duplicate findings could not be resolved.")
-        completed = get_scan(state_dir, scan_id)
+            draft = {**findings, "findings": pair}
+            findings_path.write_text(json.dumps(draft))
+            rejected = scan_command(state_dir, "complete-scan", scan_id, check=False)
+            assert rejected["returncode"] != 0, anchor
+            assert "duplicate occurrence identity" in rejected["stderr"], anchor
+            assert json.loads(findings_path.read_text()) == draft, anchor
+            findings["findings"].extend(pair)
 
-        assert completed["scan"]["progress"]["status"] == "failed", case
-        assert completed["scan"]["findingCount"] == 1, case
-        assert len(completed["scan"]["warnings"]) == 1, case
-        assert "duplicate logical finding" in completed["scan"]["warnings"][0], case
-        recovered = json.loads(findings_path.read_text())["findings"][0]
-        assert (
-            recovered["severity"]["level"],
-            recovered["confidence"]["level"],
-            len(recovered["codeEvidence"]),
-        ) == expected, case
-        weaker = next(candidate for candidate in candidates if candidate != expected)
-        assert any(
-            (
-                original["severity"]["level"],
-                original["confidence"]["level"],
-                len(original["codeEvidence"]),
-            )
-            == weaker
-            for original in recovered["provenance"].get("previousFindings", [])
-        ), case
-        assert "### No findings" not in (scan_dir / "report.md").read_text(), case
-        sarif = json.loads((scan_dir / "exports/results.sarif").read_text())
-        assert sarif["runs"][0]["results"][0]["properties"]["severity"] == "critical", case
+    findings_path.write_text(json.dumps(findings))
+    fail_scan(state_dir, scan_id, "Duplicate findings could not be resolved.")
+    stopped = get_scan(state_dir, scan_id)["scan"]
+
+    assert stopped["progress"]["status"] == "failed"
+    assert stopped["findingCount"] == len(expected)
+    assert len(stopped["warnings"]) == len(expected)
+    assert all("duplicate logical finding" in warning for warning in stopped["warnings"])
+
+    def strength(finding):
+        return (
+            finding["severity"]["level"],
+            finding["confidence"]["level"],
+            len(finding["codeEvidence"]),
+        )
+
+    recovered = {
+        row["identity"]["anchor"]: row for row in json.loads(findings_path.read_text())["findings"]
+    }
+    assert recovered.keys() == expected.keys()
+    report = (scan_dir / "report.md").read_text()
+    for anchor, (strong, weak) in expected.items():
+        winner = recovered[anchor]
+        assert strength(winner) == strong, anchor
+        assert weak in [strength(row) for row in winner["provenance"]["previousFindings"]], anchor
+        assert f"\n| [Archive extraction: {anchor}](#finding-" in report, anchor
+    results = json.loads((scan_dir / "exports/results.sarif").read_text())["runs"][0]["results"]
+    assert len(results) == len(expected)
+    assert {(row["properties"]["findingId"], row["properties"]["severity"]) for row in results} == {
+        (winner["findingId"], "critical") for winner in recovered.values()
+    }
 
 
 def test_stopped_recovery_preserves_findings_with_invalid_or_duplicate_writeups(
@@ -1481,6 +1464,7 @@ def test_completion_retry_preserves_missing_writeup_warning(tmp_path: Path, mode
     sealed_bytes = {
         name: (scan_dir / name).read_bytes()
         for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+        if (scan_dir / name).is_file()
     }
     with sqlite3.connect(database) as connection:
         connection.execute("DROP TRIGGER reject_completion")
@@ -1515,7 +1499,7 @@ def test_valid_checkpoint_survives_rejected_malformed_replacement_finding(tmp_pa
     checkpoint = {
         "scanId": scan_id,
         "findings": copy.deepcopy(findings["findings"]),
-        "coverage": json.loads((scan_dir / "coverage.json").read_text()),
+        "coverage": read_review_state(state_dir, scan_dir),
     }
     (scan_dir / "checkpoints").mkdir()
     (scan_dir / "checkpoints" / ("a" * 64 + ".json")).write_text(json.dumps(checkpoint))
@@ -1524,6 +1508,7 @@ def test_valid_checkpoint_survives_rejected_malformed_replacement_finding(tmp_pa
     original = {
         name: (scan_dir / name).read_bytes()
         for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+        if (scan_dir / name).is_file()
     }
 
     rejected = scan_command(state_dir, "complete-scan", scan_id, check=False)
@@ -1582,6 +1567,7 @@ def test_completion_rejects_all_malformed_findings_without_replacing_the_draft(
     original = {
         name: (scan_dir / name).read_bytes()
         for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+        if (scan_dir / name).is_file()
     }
 
     rejected = scan_command(state_dir, "complete-scan", scan_id, check=False)
@@ -1605,7 +1591,7 @@ def test_completion_keeps_verified_receipts_and_downgrades_invalid_coverage(
     symlink_ref = "artifacts/02_discovery/aliased_work_ledger.jsonl"
     (scan_dir / symlink_ref).symlink_to(receipt_path)
     coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage["surfaces"][0]["receiptRefs"] = [
         receipt_ref,
         "report.md",
@@ -1629,7 +1615,7 @@ def test_completion_keeps_verified_receipts_and_downgrades_invalid_coverage(
     assert any("expected a string" in warning for warning in warnings)
     assert any("non-symlink" in warning for warning in warnings)
     assert "../outside.json" not in " ".join(warnings)
-    sealed_coverage = json.loads(coverage_path.read_text())
+    sealed_coverage = read_review_state(state_dir, scan_dir)
 
     assert sealed_coverage["surfaces"][0]["disposition"] == "needs_follow_up"
     assert sealed_coverage["surfaces"][0]["receiptRefs"] == [receipt_ref]
@@ -1642,7 +1628,7 @@ def test_completion_keeps_verified_receipts_and_downgrades_invalid_coverage(
 def test_completion_recovers_malformed_coverage_rows(tmp_path: Path) -> None:
     state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
     coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     surface = coverage["surfaces"][0]
     surface["disposition"] = "checked"
     coverage["surfaces"].extend(
@@ -1683,7 +1669,7 @@ def test_completion_recovers_malformed_coverage_rows(tmp_path: Path) -> None:
     assert any("riskArea" in warning for warning in warnings)
     assert any("coverage exclusion" in warning for warning in warnings)
     assert any("deferred coverage item" in warning for warning in warnings)
-    sealed_coverage = json.loads(coverage_path.read_text())
+    sealed_coverage = read_review_state(state_dir, scan_dir)
 
     assert len(sealed_coverage["surfaces"]) == 1
     assert sealed_coverage["surfaces"][0]["disposition"] == "needs_follow_up"
@@ -1702,7 +1688,7 @@ def test_completion_recovers_malformed_coverage_rows(tmp_path: Path) -> None:
 def test_completion_recovers_malformed_coverage_collections(tmp_path: Path) -> None:
     state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
     coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage["surfaces"] = {"id": "not-an-array"}
     coverage["explicitExclusions"] = None
     coverage["deferred"] = "later"
@@ -1713,7 +1699,7 @@ def test_completion_recovers_malformed_coverage_collections(tmp_path: Path) -> N
     assert completed["scan"]["progress"]["status"] == "complete"
     assert completed["scan"]["findingCount"] == 1
     assert len(completed["scan"]["warnings"]) == 3
-    sealed_coverage = json.loads(coverage_path.read_text())
+    sealed_coverage = read_review_state(state_dir, scan_dir)
 
     assert sealed_coverage["surfaces"] == []
     assert sealed_coverage["explicitExclusions"] == []

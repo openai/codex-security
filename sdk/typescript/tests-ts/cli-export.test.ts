@@ -261,8 +261,8 @@ describe("CLI", () => {
         await chmod(join(scanDir, "exports"), 0o500);
       }
 
-      for (const selector of [["--scan", scanId.slice(0, 8)], []]) {
-        const result = await runCommand(
+      const exportModel = (...selector: string[]) =>
+        runCommand(
           process.execPath,
           [
             join(import.meta.dir, "../src/cli.ts"),
@@ -277,6 +277,9 @@ describe("CLI", () => {
           ],
           { cwd: repository, env: environment, timeout: 30_000 },
         );
+      const selectors = [[], ["--scan", scanId.slice(0, 8)]];
+      for (const selector of selectors) {
+        const result = await exportModel(...selector);
         expect(result.stderr).toBe("");
         expect(result.status).toBe(0);
         expect(result.stdout).toStartWith(content);
@@ -314,22 +317,8 @@ describe("CLI", () => {
       const changed = JSON.parse(await readFile(manifestPath, "utf8"));
       changed.scan.threatModel.content = "# Changed after completion\n";
       await writeFile(manifestPath, JSON.stringify(changed));
-      for (const selector of [["--scan", scanId.slice(0, 8)], []]) {
-        const rejected = await runCommand(
-          process.execPath,
-          [
-            join(import.meta.dir, "../src/cli.ts"),
-            "export",
-            ...selector,
-            "--artifact",
-            "threat-model",
-            "--output",
-            "-",
-            "--python",
-            python,
-          ],
-          { cwd: repository, env: environment, timeout: 30_000 },
-        );
+      for (const selector of selectors) {
+        const rejected = await exportModel(...selector);
         expect(rejected.status).toBe(2);
         expect(rejected.stdout).toBe("");
         expect(rejected.stderr).toContain("manifest changed after completion");
@@ -723,7 +712,7 @@ describe("CLI", () => {
         const manifest = JSON.parse(
           await readFile(manifestPath, "utf8"),
         ) as ScanManifest;
-        const coveragePath = join(scan, manifest.scan.coverageRef);
+        const coveragePath = join(scan, manifest.scan.coverageRef!);
         const coverage = JSON.parse(
           await readFile(coveragePath, "utf8"),
         ) as CoverageDocument;
@@ -1085,34 +1074,15 @@ describe("CLI", () => {
     }
   });
 
-  test("reports strict export failures without a stack trace", async () => {
+  test("preserves strict export diagnostics without a stack trace", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
-
+    const diagnostic = `manifest.scan: SARIF projection requires a sealed scan ${SYNTHETIC_CREDENTIALS}`;
     const deps = dependencies();
     deps.exportFindings = async () => {
-      throw new CodexSecurityError(
-        "manifest.scan: SARIF projection requires a sealed scan",
-      );
+      throw new CodexSecurityError(diagnostic);
     };
     expect(await runCli(["export", "scan", "--output", "-"], deps)).toBe(2);
     expect(stdout.text()).toBe("");
-    expect(stderr.text()).toBe(
-      "codex-security: manifest.scan: SARIF projection requires a sealed scan\n",
-    );
-  });
-
-  test("preserves caught export failures", async () => {
-    const { stdout, stderr, runCli } = createCliTest(main);
-
-    const deps = dependencies();
-    deps.exportFindings = async () => {
-      throw new CodexSecurityError(`export failed ${SYNTHETIC_CREDENTIALS}`);
-    };
-
-    expect(await runCli(["export", "scan", "--output", "-"], deps)).toBe(2);
-    expect(stdout.text()).toBe("");
-    expect(stderr.text()).toBe(
-      `codex-security: export failed ${SYNTHETIC_CREDENTIALS}\n`,
-    );
+    expect(stderr.text()).toBe(`codex-security: ${diagnostic}\n`);
   });
 });

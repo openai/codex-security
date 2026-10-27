@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parse } from "smol-toml";
+import { forwardExternalImportSetting } from "./external-imports-feature.js";
 import type { JsonObject } from "./config.js";
 import {
   CodexSecurityError,
@@ -37,12 +38,14 @@ export function environmentEntry(
 export function withoutOpenAiApiKeys<Value>(
   environment: Record<string, Value>,
 ): Record<string, Value> {
-  return Object.fromEntries(
+  const child = Object.fromEntries(
     Object.entries(environment).filter(
       ([name]) =>
         !["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
     ),
   );
+  forwardExternalImportSetting(environment, child);
+  return child;
 }
 
 /** @internal */

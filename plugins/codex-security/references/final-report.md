@@ -1,14 +1,14 @@
 # Final Scan Results
 
-The canonical inputs are `scan-manifest.json`, `findings.json`, and `coverage.json`. The host validates and seals those documents and evidence, then projects `report.md`. Do not author or repair that report, parse it back into findings, or use it to fill gaps in canonical evidence. Follow `artifact-storage.md` for retained files.
+The canonical inputs are `scan-manifest.json` and `findings.json`. The host validates and seals those documents and evidence, then projects `report.md`. Do not author or repair that report, parse it back into findings, or use it to fill gaps in canonical evidence. Follow `artifact-storage.md` for retained files.
 
 ## Ownership And Submission
 
 | Caller | Submit | Completion owner |
 | --- | --- | --- |
-| Workbench Standard or diff | `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, coverage, complete? })` | Parent calls `complete_codex_security_scan` after an accepted final draft |
+| Workbench Standard or diff | `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, reviewState, complete? })` | Parent calls `complete_codex_security_scan` after an accepted final draft |
 | Bound Deep Standard worker | Its bound semantic draft tool | Deep coordinator |
-| Deep parent | Coordinator's accepted aggregate; do not submit another draft | Parent calls completion after the coordinator returns its canonical manifest |
+| Workbench Deep parent | Coordinator's accepted aggregate | Coordinator finalizes the scan and returns `completion` with the sealed manifest |
 | SDK-owned scan | Unsealed canonical files with the SDK-provided identity and metadata, using a bound draft tool when supplied | SDK; do not call completion or a finalizer |
 
 Other scans need authoritative managed context; do not substitute shell-authored canonical files. Checkpoint findings, pending candidates, and the threat model with `complete: false`. An accepted `complete: true` draft (or the backwards-compatible omitted flag) ends submission; a checkpoint does not claim completed review.
@@ -27,15 +27,15 @@ Use `schemas/tools/scan-draft.schema.json` for new drafts and `finding-detail-fi
 
 Use `scope` for reviewed context, artifacts, runtime/test status, validation mode, and limitations. Preserve the completed canonical `threatModel`, including source citations and uncertainty; do not reconstruct it from the final findings. A supplied or completed Markdown model is retained as `{ "format": "markdown", "content": "<exact model text>" }`. A historical context file can supply missing content but must not replace a newer canonical model.
 
-## Coverage And Pending Work
+## Review State And Pending Work
 
-Keep unfinished requested work and essential in-scope proof gaps in `coverage.deferred`. The report presents these in `Deferred Requested Work`, separately from optional `coverage.openQuestions` follow-up. Neither section changes the scan execution outcome.
+Keep unfinished requested work and essential in-scope proof gaps in `reviewState.deferred`. Retain optional follow-up in `reviewState.openQuestions`. These notes are checkpoint bookkeeping, not measured file coverage, and do not change the scan execution outcome.
 
 Standard and diff drafts use `{ surfaces, explicitExclusions, deferred }`. Give surfaces meaningful labels and schema-defined dispositions, preserving saved surface IDs in updates. Retain reasons and evidence for rejected, not-applicable, and follow-up work. Open questions may be strings or `{ question, followUpPrompt? }` objects. An open question does not prevent the configured review from finishing.
 
-Preserve each saved deferred `id` or `candidateId`, use each deferred ID only once, and copy IDs assigned by the draft response into later updates. Close a generic saved task in the final Standard or diff draft with `coverage.resolvedDeferred: [{ id, reason }]`; keep unfinished tasks deferred and update linked surfaces by ID. Candidate-linked tasks close through findings or terminal dispositions. Deep parents cannot close worker tasks; original checkpoints remain unchanged.
+Preserve each saved deferred `id` or `candidateId`, use each deferred ID only once, and copy IDs assigned by the draft response into later updates. Close a generic saved task in the final Standard or diff draft with `reviewState.resolvedDeferred: [{ id, reason }]`; keep unfinished tasks deferred and update linked surfaces by ID. Candidate-linked tasks close through findings or terminal dispositions. Deep parents cannot close worker tasks; original checkpoints remain unchanged.
 
-The workbench derives target/scope metadata, inventory strategy, finding identities/fingerprints, and IDs for new surfaces. Do not put those workbench-owned fields or top-level receipt references into semantic draft arguments. SDK-authored canonical files still follow `scan-contract.md` and the SDK's supplied metadata.
+The workbench derives target/scope metadata, inventory strategy, finding identities/fingerprints, and IDs for new surfaces. Review notes do not measure file coverage; do not add reviewed-surface tables or file-coverage claims to the report. Do not put those workbench-owned fields or top-level receipt references into semantic draft arguments. SDK-authored canonical files still follow `scan-contract.md` and the SDK's supplied metadata.
 
 For compact diff candidates, map recorded outcomes in this order:
 

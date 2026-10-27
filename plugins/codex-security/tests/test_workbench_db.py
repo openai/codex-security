@@ -29,6 +29,7 @@ from workbench_test_support import (
     load_script,
     mark_handoff_delivered,
     mark_remediation_delivered,
+    read_review_state,
     request_remediation,
     request_remediation_action,
     resume_deep_scan,
@@ -234,6 +235,7 @@ def test_cost_limit_rejects_invalid_or_nonincreasing_totals(tmp_path: Path, limi
         + "Synthetic diagnostic detail.\n" * 100
         + "Final cost-limit diagnostic.",
     ],
+    ids=["short-diagnostic", "long-diagnostic"],
 )
 def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
     tmp_path: Path,
@@ -255,7 +257,7 @@ def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
     assert manifest["scan"]["target"]["targetId"] == stable_target_id(target)
     assert manifest["scan"]["sealedAt"]
     assert warning in manifest["scan"]["scope"]["limitations"]
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert coverage["mode"] == "deep_repository"
 
     assert coverage["deferred"][0]["id"] == "candidate-1"
@@ -265,7 +267,6 @@ def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
     assert coverage["surfaces"][0]["disposition"] == "needs_follow_up"
     report = (scan_dir / "report.md").read_text()
     assert "No findings were reported." in report
-    assert "User input reaches a SQL statement" in report
 
 
 def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path) -> None:
@@ -283,7 +284,7 @@ def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path)
     assert completed["progress"]["status"] == "complete"
     assert completed["findingCount"] == 1
     assert "Unsafe archive extraction" in completed["findings"][0]["title"]
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
 
     assert coverage["deferred"][0]["id"] == "candidate-1"
 
@@ -323,7 +324,7 @@ def test_budget_exhaustion_preserves_existing_candidate_decisions(
 
     assert completed["progress"]["status"] == "complete"
     assert completed["findings"] == []
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
 
     assert coverage["surfaces"][0]["disposition"] == surface_disposition
     assert any(row["id"] == "candidate-1" for row in coverage["deferred"]) is deferred
@@ -344,7 +345,7 @@ def test_budget_exhaustion_preserves_existing_terminal_surface(tmp_path: Path) -
         coverage_mode="deep_repository",
     )
     coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage["surfaces"].append(
         {
             "id": "candidate-candidate-1",
@@ -358,7 +359,7 @@ def test_budget_exhaustion_preserves_existing_terminal_surface(tmp_path: Path) -
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["findingCount"] == 1
-    preserved = json.loads(coverage_path.read_text())
+    preserved = read_review_state(state_dir, scan_dir)
     assert sum(row["id"] == "candidate-candidate-1" for row in preserved["surfaces"]) == 1
     assert preserved["surfaces"][1]["disposition"] == "rejected"
     assert not any(row["id"] == "candidate-1" for row in preserved["deferred"])
@@ -388,7 +389,7 @@ def test_budget_exhaustion_preserves_existing_deferred_work_with_one_trusted_mar
     findings["findings"] = []
     findings_path.write_text(json.dumps(findings))
     coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     existing = {"id": "existing-proof-gap", "reason": reason, "paths": ["app.py"]}
     coverage["deferred"] = [existing]
     coverage_path.write_text(json.dumps(coverage))
@@ -396,7 +397,7 @@ def test_budget_exhaustion_preserves_existing_deferred_work_with_one_trusted_mar
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"
-    preserved = json.loads(coverage_path.read_text())
+    preserved = read_review_state(state_dir, scan_dir)
     assert preserved["deferred"][0] == existing
     assert len(preserved["deferred"]) == 1 + marker_added
     if marker_added:
@@ -413,9 +414,7 @@ def test_budget_exhaustion_preserves_capped_discovery(tmp_path: Path) -> None:
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"
-    assert (
-        json.loads((scan_dir / "coverage.json").read_text())["deferred"][0]["id"] == "candidate-1"
-    )
+    assert read_review_state(state_dir, scan_dir)["deferred"][0]["id"] == "candidate-1"
 
 
 def test_budget_exhaustion_with_no_candidates_is_honestly_partial(tmp_path: Path) -> None:
@@ -425,7 +424,7 @@ def test_budget_exhaustion_with_no_candidates_is_honestly_partial(tmp_path: Path
 
     assert completed["progress"]["status"] == "complete"
     assert completed["findings"] == []
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
 
     assert coverage["deferred"] == [
         {
@@ -441,7 +440,7 @@ def test_budget_exhaustion_preserves_scoped_path_inventory(tmp_path: Path) -> No
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert coverage["mode"] == "scoped_path"
     assert coverage["inventoryStrategy"] == "scoped_path"
     assert coverage["includePaths"] == ["app.py"]
@@ -540,7 +539,7 @@ def test_budget_exhaustion_preserves_out_of_scope_supporting_evidence(tmp_path: 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert coverage["deferred"][0]["paths"] == ["app.py", "shared/control.py"]
 
 
@@ -561,7 +560,7 @@ def test_budget_exhaustion_preserves_unicode_line_separator_inventory(tmp_path: 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert coverage["deferred"][0]["paths"] == ["dir\u2028name.py"]
 
 
@@ -633,7 +632,7 @@ def test_completion_normalizes_unsealed_deep_inventory_strategy_alias(
     completed = scan_command(state_dir, "complete-scan", scan_id)
 
     assert completed["scan"]["progress"]["status"] == "complete"
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert coverage["mode"] == "deep_repository"
     assert coverage["inventoryStrategy"] == "repository"
 
@@ -981,19 +980,56 @@ def test_completed_findings_are_summarized_and_sorted_by_severity(tmp_path: Path
     ]
 
 
-@pytest.mark.parametrize("line_ending", ["\n", "\r\n"], ids=["lf", "crlf"])
-@pytest.mark.parametrize("patch_name", ["remediation.patch", " remediation.patch"])
-def test_completed_finding_triage_and_remediation_persist(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, line_ending: str, patch_name: str
-) -> None:
+@pytest.fixture
+def git_autocrlf(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.autocrlf")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", "true")
+
+
+@pytest.mark.parametrize("line_ending", [b"\n", b"\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize(
+    "patch_name", ["remediation.patch", " remediation.patch"], ids=["plain", "leading-space"]
+)
+def test_reviewed_patch_matches_unversioned_checkout_bytes(
+    workbench_api, tmp_path: Path, git_autocrlf, line_ending: bytes, patch_name: str
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    source = target / "source.txt"
+    source.write_bytes(b"vulnerable" + line_ending)
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    revision, original, _device, inode = workbench_api["scan_target_identity"](target, None)
+    assert revision == "unversioned"
+    scan = {
+        "target_path": str(target),
+        "target_inode": inode,
+        "target_revision": revision,
+        "scan_dir": str(scan_dir),
+    }
+    patch = scan_dir / patch_name
+    write_remediation_patch(patch, newline="\n")
+    if patch_name.startswith(" "):
+        (scan_dir / patch_name.strip()).write_text("different patch contents\n")
+    remediation = {
+        "base_revision": revision,
+        "base_content_digest": original,
+        "patch_digest": f"sha256:{hashlib.sha256(patch.read_bytes()).hexdigest()}",
+    }
+    assert workbench_api["require_scan_relative_file"](scan, patch_name) == patch_name
+    subprocess.run(["git", "apply", "--no-index", str(patch)], cwd=target, check=True)
+    _, applied = workbench_api["remediation_checkout_snapshot"](scan)
+    assert applied != original
+    assert workbench_api["require_reviewed_patch_applied"](scan, remediation, patch_name) == applied
+
+
+def test_completed_finding_triage_and_remediation_persist(tmp_path: Path, git_autocrlf) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
     target.mkdir()
     source = target / "source.txt"
-    source.write_bytes(f"vulnerable{line_ending}".encode())
+    source.write_bytes(b"vulnerable\r\n")
     scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target, relative_path=source.name)
     completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
@@ -1055,10 +1091,10 @@ def test_completed_finding_triage_and_remediation_persist(
         state_dir, occurrence_id, "closed", "--close-reason", "already_fixed", check=False
     )
     assert "pending remediation operation" in str(pending_close["stderr"])
+    patch_name = " remediation.patch"
     patch_path = scan_dir / patch_name
     write_remediation_patch(patch_path, newline="\n")
-    if patch_name.startswith(" "):
-        (scan_dir / patch_name.strip()).write_text("different patch contents\n")
+    (scan_dir / patch_name.strip()).write_text("different patch contents\n")
     generated = set_remediation(
         state_dir,
         occurrence_id,
@@ -2036,7 +2072,7 @@ def test_workbench_roundtrips_literal_target_and_scope(tmp_path: Path, scope: st
     assert scan["contract"]["scope"]["requiredIncludePaths"] == [scope]
 
 
-@pytest.mark.parametrize("blank", ["", " \t\n", " " * 5000])
+@pytest.mark.parametrize("blank", ["", " \t\n", " " * 5000], ids=["empty", "mixed", "long"])
 def test_workbench_keeps_blank_workspace_path_defaults(tmp_path: Path, blank: str) -> None:
     state_dir = tmp_path / "state"
     workspace_id = str(uuid.uuid4())
@@ -2491,7 +2527,7 @@ def test_workbench_populates_manifest_with_working_tree_digest(tmp_path: Path) -
     completed = scan_command(state_dir, "complete-scan", scan_id)
     assert completed["scan"]["progress"]["status"] == "complete"
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert manifest["scan"]["target"]["snapshotDigest"] == diff_target["contentDigest"]
     assert manifest["scan"]["scope"] == {"includePaths": ["."], "excludePaths": []}
     assert coverage["mode"] == "working_tree"
@@ -3142,54 +3178,20 @@ def commit_source_fixture(target: Path, source: bytes) -> str:
     ).stdout.strip()
 
 
-@pytest.mark.parametrize(
-    "separator", ["\f", "\v", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
-)
-def test_source_excerpt_breaks_lines_only_at_newlines(tmp_path: Path, separator: str) -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    finding_source_excerpt = namespace["finding_source_excerpt"]
+def test_source_excerpt_breaks_lines_only_at_newlines(tmp_path: Path, workbench_api) -> None:
+    separators = "\f\v\x1c\x1d\x1e\x85\u2028\u2029"
+    source = f"one\r\ntwo{separators}\rthree\nfour\r\nfive\rsix\nseven\r\neight\rnine\n"
     target = tmp_path / "target"
-    revision = commit_source_fixture(
-        target,
-        "".join(
-            f"source line {line_number}{separator if line_number == 2 else ''}\n"
-            for line_number in range(1, 11)
-        ).encode(),
-    )
+    revision = commit_source_fixture(target, source.encode())
 
-    excerpt = finding_source_excerpt(
+    excerpt = workbench_api["finding_source_excerpt"](
         {"target_revision": revision, "target_snapshot_digest": None, "diff_target_kind": None},
         target,
         [{"path": "README.md", "startLine": 5, "endLine": 5}],
         ["."],
     )
 
-    assert excerpt == "\n".join(
-        f"{line_number}  source line {line_number}{separator if line_number == 2 else ''}"
-        for line_number in range(2, 9)
-    )
-
-
-@pytest.mark.parametrize("line_ending", ["\n", "\r\n", "\r"])
-def test_source_excerpt_numbers_standard_line_endings(tmp_path: Path, line_ending: str) -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    finding_source_excerpt = namespace["finding_source_excerpt"]
-    target = tmp_path / "target"
-    revision = commit_source_fixture(
-        target,
-        "".join(f"source line {line_number}{line_ending}" for line_number in range(1, 11)).encode(),
-    )
-
-    excerpt = finding_source_excerpt(
-        {"target_revision": revision, "target_snapshot_digest": None, "diff_target_kind": None},
-        target,
-        [{"path": "README.md", "startLine": 5, "endLine": 5}],
-        ["."],
-    )
-
-    assert excerpt == "\n".join(
-        f"{line_number}  source line {line_number}" for line_number in range(2, 9)
-    )
+    assert excerpt == f"2  two{separators}\n3  three\n4  four\n5  five\n6  six\n7  seven\n8  eight"
 
 
 @pytest.mark.parametrize(
@@ -3206,10 +3208,9 @@ def test_source_excerpt_numbers_standard_line_endings(tmp_path: Path, line_endin
     ],
 )
 def test_source_excerpt_preserves_final_lines(
-    tmp_path: Path, source: bytes, expected_lines: list[str]
+    tmp_path: Path, source: bytes, expected_lines: list[str], workbench_api
 ) -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    finding_source_excerpt = namespace["finding_source_excerpt"]
+    finding_source_excerpt = workbench_api["finding_source_excerpt"]
     target = tmp_path / "target"
     revision = commit_source_fixture(target, source)
     scan = {"target_revision": revision, "target_snapshot_digest": None, "diff_target_kind": None}

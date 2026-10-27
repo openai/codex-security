@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import Ajv2020 from "ajv/dist/2020.js";
+import * as z from "zod/v4";
 import { readJson } from "./support/json.ts";
 
 const ajv = new Ajv2020({ strict: false, validateFormats: false });
@@ -13,7 +14,7 @@ const canonical = Object.fromEntries(
       );
       const example = await readJson(
         import.meta.dirname,
-        `../../examples/completed-scan/${name}.json`,
+        `../../examples/${name === "coverage" ? "legacy-completed-scan" : "completed-scan"}/${name}.json`,
       );
       const validate = ajv.compile(schema);
       assert.equal(validate(example), true, JSON.stringify(validate.errors));
@@ -127,19 +128,38 @@ for (const kind of [
     document.scan.target.snapshotDigest = `codex-security-snapshot/v1:sha256:${"a".repeat(64)}`;
   assert.equal(manifest.validate(document), true);
 }
-for (const path of ["findings.json", "coverage.json"]) {
+for (const example of [
+  manifest.example,
+  await readJson(
+    import.meta.dirname,
+    "../../examples/legacy-completed-scan/scan-manifest.json",
+  ),
+]) {
+  assert.equal(manifest.validate(example), true);
+  for (const path of [
+    "findings.json",
+    ...(example.scan.coverageRef ? ["coverage.json"] : []),
+  ]) {
+    const document = structuredClone(example);
+    const artifact = document.scan.artifacts.find(
+      (entry: { path: string }) => entry.path === path,
+    );
+    document.scan.artifacts = document.scan.artifacts.filter(
+      (entry: { path: string }) => entry.path !== path,
+    );
+    assert.equal(manifest.validate(document), false);
+    document.scan.artifacts.push(artifact, artifact);
+    assert.equal(manifest.validate(document), false);
+  }
+}
+for (const field of ["mode", "review"]) {
   const document = structuredClone(manifest.example);
-  const artifact = document.scan.artifacts.find(
-    (entry: { path: string }) => entry.path === path,
-  );
-  document.scan.artifacts = document.scan.artifacts.filter(
-    (entry: { path: string }) => entry.path !== path,
-  );
-  assert.equal(manifest.validate(document), false);
-  document.scan.artifacts.push(artifact, artifact);
+  delete document.scan[field];
   assert.equal(manifest.validate(document), false);
 }
 const coverage = canonical.coverage;
+const validateCoverage = new Ajv2020().compile(coverage.schema);
+const coverageInZod = z.fromJSONSchema(coverage.schema);
 for (const fields of [
   { deferred: [{ id: "task", reason: "Review remains." }] },
   {
@@ -154,6 +174,37 @@ for (const fields of [
   },
 ])
   assert.equal(coverage.validate({ ...coverage.example, ...fields }), true);
+
+for (const [path, valid] of [
+  [".", true],
+  ["./src//./name:part/", true],
+  [" ", true],
+  ["\u0085", true],
+  ["\ufeff", true],
+  ["src/\u007f", true],
+  ["src/..\u2028", true],
+  ["src/\u2029emoji-😀", true],
+  ["", false],
+  ["..", false],
+  ["src/../outside", false],
+  ["src/\u2028/..", false],
+  ["/absolute", false],
+  ["C:relative", false],
+  ["src\\file", false],
+  ["name\n", false],
+  ["src/\u0000file", false],
+  ["\ud800", false],
+  ["\udfff", false],
+] as const) {
+  const deferred = [{ id: "task", reason: "Review remains.", paths: [path] }];
+  const document = { ...coverage.example, deferred };
+  assert.equal(validateCoverage(document), valid, JSON.stringify(path));
+  assert.equal(
+    coverageInZod.safeParse(document).success,
+    valid,
+    JSON.stringify(path),
+  );
+}
 
 // Shared named definitions remain available to consumers that extract fragments.
 assert.deepEqual(Object.keys(findingSchema.$defs).sort(), [

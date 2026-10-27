@@ -38,31 +38,47 @@ function workflow(name: string) {
 
 const native = workflow("native-artifacts");
 const prepare = native.jobs["prepare"]!;
-const keyScript = prepare.steps!.find((step) => step.id === "key")!.run!;
+const keyScript = readFileSync(
+  new URL("../../../.github/actions/native-cache-key/key.sh", import.meta.url),
+  "utf8",
+);
 
 test("native reuse hashes committed inputs with Git alone across platforms", () => {
   const root = mkdtempSync(join(tmpdir(), "native-cache-"));
   const repository = join(root, "repository");
-  const output = join(root, "output");
   const source = "plugins/codex-security/native/src/lib.rs";
   const helper = "plugins/codex-security/mcp-app/src/native.ts";
-  writeSource(repository, source, "native source\n");
-  writeSource(repository, helper, "helper source\n");
-  writeSource(repository, "README.md", "documentation\n");
+  const proof = "plugins/codex-security/native/proof.mjs";
+  const proofHelper = ".github/scripts/native-proof-helper.mjs";
+  const write = (path: string, contents: string) =>
+    writeSource(repository, path, contents);
+  const runProof = () =>
+    spawnSync(process.execPath, [proof], { cwd: repository }).status;
+  write(source, "native source\n");
+  write(helper, "helper source\n");
+  write(proof, `import "../../../${proofHelper}";\n`);
+  write(proofHelper, "process.exitCode = 0;\n");
+  write("README.md", "documentation\n");
   git(repository, "init", "-q");
   const commit = () => {
     git(repository, "add", ".");
     git(repository, "commit", "-qm", "fixture");
   };
-  const key = (week = "2026-43") => {
-    writeSource(root, "output", "");
+  const key = (
+    week = "2026-43",
+    run?: number,
+    cached = "",
+    admittedWeek = "0",
+  ) => {
     const result = spawnSync(
       Bun.which(bashCommand())!,
       [
         "--noprofile",
         "--norc",
         "-c",
-        `git() { "$TEST_GIT" "$@"; }\ndate() { printf '%s\\n' "$TEST_WEEK"; }\n${keyScript}`,
+        `git() { "$TEST_GIT" "$@"; }\ndate() { printf '%s\\n' "$TEST_WEEK"; }\ntimeout() { printf '%s\\n' "$TEST_CACHED"; }\n${keyScript}`,
+        "native-cache-key",
+        ...(run === undefined ? [] : ["cold-group"]),
       ],
       {
         cwd: repository,
@@ -73,39 +89,68 @@ test("native reuse hashes committed inputs with Git alone across platforms", () 
           // available here; the workflow's date command is fixed for this test.
           PATH: root,
           TEST_GIT: Bun.which("git")!,
-          GITHUB_OUTPUT: output,
-          TEST_WEEK: week,
+          TEST_WEEK: week.replace("-", ""),
+          NATIVE_CACHE_WEEK: admittedWeek,
+          TEST_CACHED: cached,
+          GITHUB_RUN_NUMBER: String(run),
         },
       },
     );
     expect(result.status, result.stderr).toBe(0);
-    return readFileSync(output, "utf8").trim();
+    return result.stdout.trim();
   };
   try {
     commit();
     const initial = key();
     expect(initial).toMatch(/^key=native-universal-v1-2026-43-[a-f0-9]{40}$/);
-    writeSource(repository, "README.md", "updated documentation\n");
-    commit();
-    expect(key()).toBe(initial);
+    const fingerprint = initial.slice("key=".length);
+    expect(runProof()).toBe(0);
 
-    writeSource(repository, source, "updated native source\n");
+    write("README.md", "updated documentation\n");
+    for (const script of [
+      "invoice-desk-target",
+      "check-ci-results",
+      "select-ci-checks",
+      "test-ci-selection",
+      "test-release-guide",
+      "verify-pr-source",
+    ]) {
+      write(`.github/scripts/${script}.mjs`, "// CI only\n");
+    }
+    write("plugins/codex-security/mcp-app/tests/support/new.ts", "fixture\n");
     commit();
-    const changedNative = key();
-    expect(changedNative).not.toBe(initial);
+    expect(key("2026-43", 4, fingerprint)).toBe("week=202643");
 
-    writeSource(repository, helper, "updated helper source\n");
-    commit();
-    const changedHelper = key();
-    expect(changedHelper).not.toBe(changedNative);
-
+    let previous = initial;
+    const expectNewKey = () => {
+      commit();
+      const next = key();
+      expect(next).not.toBe(previous);
+      previous = next;
+    };
+    write(proofHelper, "process.exitCode = 1;\n");
+    expect(runProof()).toBe(1);
+    expectNewKey();
+    write(".github/scripts/new-proof-input.mts", "compile me\n");
+    expectNewKey();
+    write(source, "updated native source\n");
+    expectNewKey();
+    write(helper, "updated helper source\n");
+    expectNewKey();
     renameSync(
       join(repository, source),
       join(repository, "plugins/codex-security/native/src/renamed.rs"),
     );
-    commit();
-    expect(key()).not.toBe(changedHelper);
-    expect(key("2026-44")).not.toBe(key());
+    expectNewKey();
+    const nextWeek = previous
+      .slice("key=".length)
+      .replace("2026-43", "2026-44");
+    const cold = key("2026-44", 15, fingerprint);
+    expect(cold).toBe(`week=202644\ncold-group=${nextWeek}-0`);
+    expect(key("2026-44", 16, fingerprint)).toBe(cold);
+    const admittedWeek = cold.split("\n")[0]!.slice("week=".length);
+    expect(key("2026-45", undefined, "", admittedWeek)).toBe(`key=${nextWeek}`);
+    expect(key("2026-44", 17, fingerprint)).not.toBe(cold);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -134,86 +179,49 @@ test("only exact hits replace fresh native builds and cache failures fall back t
 test("only a successful fresh matrix can save a main-branch cache", () => {
   const bundle = native.jobs["bundle"]!;
   expect(bundle.needs).toEqual(["prepare", "unix", "windows", "musl"]);
-  expect(bundle.if).toBe("${{ !cancelled() }}");
+  expect(bundle.if).toBe(
+    "${{ !cancelled() && (needs.prepare.result != 'success' || needs.prepare.outputs.cache-hit != 'true') }}",
+  );
   const save = bundle.steps!.find((step) =>
     step.uses?.startsWith("actions/cache/save@"),
   )!;
   expect(save.if).toBe(
-    "needs.prepare.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule') && (inputs.ref == '' || inputs.ref == github.sha)",
+    "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule') && (inputs.ref == '' || inputs.ref == github.sha)",
   );
   expect(save["continue-on-error"]).toBe(true);
 });
 
 test.each([
-  {
-    cache: "true",
-    prepare: "success",
-    unix: "skipped",
-    windows: "skipped",
-    musl: "skipped",
-    passes: true,
+  ["success", "success", "success", "success", true],
+  ["failure", "skipped", "skipped", "skipped", false],
+  ["success", "success", "failure", "success", false],
+  ["success", "success", "success", "skipped", false],
+] as const)(
+  "fresh native payload requires successful preparation and proofs (%s, %s, %s, %s)",
+  (prepare, unix, windows, musl, passes) => {
+    const guard = native.jobs["bundle"]!.steps![0]!.run!;
+    const checked = spawnSync(bashCommand(), ["-c", guard], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PREPARE_RESULT: prepare,
+        UNIX_RESULT: unix,
+        WINDOWS_RESULT: windows,
+        MUSL_RESULT: musl,
+      },
+    });
+    expect(checked.status === 0, checked.stderr).toBe(passes);
   },
-  {
-    cache: "false",
-    prepare: "success",
-    unix: "success",
-    windows: "success",
-    musl: "success",
-    passes: true,
-  },
-  {
-    cache: "true",
-    prepare: "failure",
-    unix: "skipped",
-    windows: "skipped",
-    musl: "skipped",
-    passes: false,
-  },
-  {
-    cache: "false",
-    prepare: "success",
-    unix: "success",
-    windows: "failure",
-    musl: "success",
-    passes: false,
-  },
-  {
-    cache: "",
-    prepare: "success",
-    unix: "success",
-    windows: "success",
-    musl: "skipped",
-    passes: false,
-  },
-])("native completion checks the cache or every fresh proof: %j", (result) => {
-  const guard = native.jobs["bundle"]!.steps![0]!.run!;
-  const checked = spawnSync(bashCommand(), ["-c", guard], {
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      CACHE_HIT: result.cache,
-      PREPARE_RESULT: result.prepare,
-      UNIX_RESULT: result.unix,
-      WINDOWS_RESULT: result.windows,
-      MUSL_RESULT: result.musl,
-    },
-  });
-  expect(checked.status === 0, checked.stderr).toBe(result.passes);
-});
+);
 
-test("source CI opts in while release and standalone qualification remain fresh", () => {
+test("source CI opts in to native artifact reuse", () => {
   expect(native.on.workflow_call?.inputs["reuse-verified"]?.default).toBe(
     false,
   );
   expect(workflow("node-ci").jobs["native"]?.with?.["reuse-verified"]).toBe(
     true,
   );
-  for (const caller of [
-    "node-release",
-    "container-release",
-    "container-ci",
-    "test-quality",
-  ]) {
+  for (const caller of ["node-release", "container-release", "container-ci"]) {
     expect(
       workflow(caller).jobs["native"]?.with?.["reuse-verified"],
     ).toBeUndefined();

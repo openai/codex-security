@@ -71,7 +71,12 @@ binding.update(scanId=scan_id,producer={'name':'codex-security-plugin','version'
 warnings=[]
 recovery=merge_saved_results(recovered,scan_id,binding,json.loads(sys.argv[5]),warnings,stopped=True,reason='Synthetic interruption',scan_mode=sys.argv[10]) if sys.argv[9]=='saved' else tuple(json.loads((recovered/name).read_text()) for name in ['scan-manifest.json','findings.json','coverage.json'])
 if json.loads(sys.argv[7]):
- replayed=merge_saved_results(recovered,scan_id,binding,json.loads(sys.argv[5]),[],stopped=True,reason='Synthetic interruption',frozen_source_digests=recovery[0]['scan']['preservedSources'],scan_mode=sys.argv[10])
+ frozen=recovery[0]['scan']
+ replayed=merge_saved_results(
+  recovered,scan_id,binding,json.loads(sys.argv[5]),[],stopped=True,reason='Synthetic interruption',
+  frozen_source_digests=frozen['preservedSources'],checkpoint_heads=frozen['preservedCheckpointHeads'].copy(),
+  scan_mode=sys.argv[10],
+ )
  assert replayed == recovery, 'Frozen recovery changed the retained documents'
 ordinary=(manifest,json.loads((normal/'findings.json').read_text()),coverage)
 results=[]

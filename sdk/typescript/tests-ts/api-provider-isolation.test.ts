@@ -1,6 +1,5 @@
 import { codexFactory, completedEvents } from "./support/api-events.js";
 import { afterEach, expect, mock, test } from "bun:test";
-import { build } from "esbuild";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import type { JsonObject } from "../src/config.js";
 import { spawn } from "node:child_process";
@@ -9,13 +8,24 @@ import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
-import { fileURLToPath, pathToFileURL } from "node:url";
 import { executablePathForSpawn, resolveCodexCommand } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { profileConfigOverrides } from "../../../plugins/codex-security/scripts/codex_profile.mjs";
 import { TestClient } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+
+const workerExecutorUrl = new URL(
+  "../../../plugins/codex-security/mcp-app/src/deep-scan/executor.ts",
+  import.meta.url,
+).href;
+const { workerRuntimeSettings } = (await import(workerExecutorUrl)) as {
+  workerRuntimeSettings: (environment: Record<string, string>) => Promise<{
+    config: JsonObject;
+    nativeProfile?: string;
+    environment?: Record<string, string>;
+  }>;
+};
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
@@ -243,47 +253,6 @@ test("native patch overrides disable repository MCP while preserving host MCP", 
   ).toBe(repositoryConfig);
 });
 
-async function bundleWorkerSettings(root: string) {
-  const executor = fileURLToPath(
-    new URL(
-      "../../../plugins/codex-security/mcp-app/src/deep-scan/executor.ts",
-      import.meta.url,
-    ),
-  );
-  const bundled = await build({
-    bundle: true,
-    format: "esm",
-    platform: "node",
-    write: false,
-    define: { "import.meta.url": JSON.stringify(pathToFileURL(executor).href) },
-    stdin: {
-      contents:
-        (await readFile(executor, "utf8")) +
-        "\nexport { workerRuntimeSettings };",
-      loader: "ts",
-      resolveDir: dirname(executor),
-      sourcefile: executor,
-    },
-  });
-  const bundledPath = join(root, "worker-settings.mjs");
-  await writeFile(bundledPath, bundled.outputFiles[0]!.contents);
-  return bundledPath;
-}
-
-async function loadWorkerSettings(root: string) {
-  const { workerRuntimeSettings } = (await import(
-    pathToFileURL(await bundleWorkerSettings(root)).href
-  )) as {
-    workerRuntimeSettings: (environment: Record<string, string>) => Promise<{
-      config: JsonObject;
-      nativeProfile?: string;
-      environment?: Record<string, string>;
-    }>;
-  };
-
-  return workerRuntimeSettings;
-}
-
 test.each([
   "root",
   "selected profile",
@@ -301,7 +270,6 @@ test.each([
     await mkdir(repository);
     await mkdir(sourceHome, { mode: 0o700 });
     await mkdir(sharedHome, { recursive: true, mode: 0o700 });
-    const workerRuntimeSettings = await loadWorkerSettings(root);
 
     const ready = [
       Promise.withResolvers<void>(),
@@ -582,7 +550,6 @@ test("workers preserve native provider inheritance without an explicit selection
     CODEX_SECURITY_CONFIG_PATH: snapshot,
     CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: workerSnapshot,
   };
-  const workerRuntimeSettings = await loadWorkerSettings(root);
   for (const providers of [
     undefined,
     {
@@ -645,11 +612,12 @@ for (const resume of [false, true]) {
       await mkdir(repository);
       await mkdir(scan, { mode: 0o700 });
       await mkdir(home, { mode: 0o700 });
-      await cp(PLUGIN_ROOT, plugin, { recursive: true });
-      const manifestPath = join(plugin, ".codex-plugin", "plugin.json");
-      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-      manifest.codexSecurity = capabilities;
-      await writeFile(manifestPath, JSON.stringify(manifest));
+      const manifestDirectory = join(plugin, ".codex-plugin");
+      await mkdir(manifestDirectory, { recursive: true });
+      await writeFile(
+        join(manifestDirectory, "plugin.json"),
+        JSON.stringify({ codexSecurity: capabilities }),
+      );
       const runtime = preparedRuntime(home);
       const createCodex = mock(() => {
         throw new Error("Model execution must not begin.");
@@ -782,13 +750,12 @@ test.each(["root", "profile"])(
 async function createPluginProbe(root: string, report: string) {
   const plugin = join(root, "plugin");
   await cp(PLUGIN_ROOT, plugin, { recursive: true });
-  await bundleWorkerSettings(plugin);
   const probe = join(plugin, "environment-probe.mjs");
   await writeFile(
     probe,
     `import { writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import { workerRuntimeSettings } from "./worker-settings.mjs";
+import { workerRuntimeSettings } from ${JSON.stringify(workerExecutorUrl)};
 for await (const line of createInterface({ input: process.stdin })) {
   const request = JSON.parse(line);
   if (request.id === undefined) continue;

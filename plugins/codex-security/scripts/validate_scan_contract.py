@@ -41,7 +41,7 @@ def validate_contract(scan_dir: Path) -> dict[str, Any]:
         "scanDir": str(scan_dir),
         "manifest": manifest,
         "findings": findings,
-        "coverage": coverage,
+        "review": FINALIZER.review_summary(coverage),
     }
 
 
@@ -53,7 +53,6 @@ def receipt(validated: dict[str, Any]) -> dict[str, Any]:
         "scanDir": str(scan_dir),
         "manifestPath": str(scan_dir / "scan-manifest.json"),
         "findingsPath": str(scan_dir / scan["findingsRef"]),
-        "coveragePath": str(scan_dir / scan["coverageRef"]),
         "reportPath": str(scan_dir / "report.md"),
     }
 

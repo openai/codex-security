@@ -50,7 +50,7 @@ jobs:
         uses: SocketDev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
         with:
           mode: firewall-free
-          firewall-version: "1.15.0"
+          firewall-version: "1.15.4"
 
       - &setup-release-node
         name: Set up Node.js
@@ -157,9 +157,7 @@ jobs:
 
       - &install-release-ripgrep
         name: Install ripgrep
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ripgrep
+        run: .github/scripts/install-ripgrep.sh
 
       - name: Audit production dependencies
         run: sfw pnpm --dir sdk/typescript run audit:prod
@@ -331,42 +329,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          npm_tools="$RUNNER_TEMP/codex-security-provenance-npm"
-          npm install \
-            --prefix "$npm_tools" \
-            --ignore-scripts \
-            --no-audit \
-            --no-fund \
-            --registry=https://openai.firewall.socket.dev/npm/ \
-            npm@11.12.1
+          source .github/scripts/release-npm.sh
+          install_release_npm
+          printf '%s\n' "$release_npm_bin" >> "$GITHUB_PATH"
 
-          if [[ "$("$npm_tools/node_modules/.bin/npm" --version)" != "11.12.1" ]]; then
-            echo "npm 11.12.1 is required to verify Sigstore attestations." >&2
-            exit 1
-          fi
-          printf '%s\n' "$npm_tools/node_modules/.bin" >> "$GITHUB_PATH"
-
-      - name: Verify bundled trusted-publishing npm
+      - name: Verify npm on PATH
         shell: bash
         run: |
           set -euo pipefail
-          node --eval '
-            const version = process.argv[1];
-            const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
-            const [major, minor, patch] = match?.slice(1).map(Number) ?? [];
-            if (
-              !match ||
-              major < 11 ||
-              (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))
-            ) {
-              console.error(
-                "npm 11.5.1 or newer is required for trusted publishing; found " +
-                  version +
-                  ".",
-              );
-              process.exit(1);
-            }
-          ' "$(npm --version)"
+          source .github/scripts/release-npm.sh
+          verify_release_npm "$(command -v npm)"
 
       - name: Download verified package
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2

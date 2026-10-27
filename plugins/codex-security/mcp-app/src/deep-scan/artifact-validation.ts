@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { dirname, posix, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { JsonObject } from "../types.js";
+import { asRecord } from "../record.js";
 import type { AcceptedDiscovery } from "./worker-runner.js";
 import { artifactSourcePath, type ArtifactContext } from "../artifact-io.js";
 import {
@@ -28,9 +29,9 @@ import {
 } from "./artifacts.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
 
-export type DeepReductionInput = Omit<ScanDraftInput, "coverage"> & {
+export type DeepReductionInput = Omit<ScanDraftInput, "reviewState"> & {
   /** Host-owned accepted coverage, omitted from the legacy persisted reducer format. */
-  sourceCoverage?: ScanDraftInput["coverage"];
+  sourceCoverage?: ScanDraftInput["reviewState"];
 };
 export const deepReductionInputSchema = projectArtifactToolSchema(
   artifactSchemaDocuments["tools/deep-reducer"].$defs.reductionInput,
@@ -39,7 +40,7 @@ export const deepReductionInputSchema = projectArtifactToolSchema(
 export interface DeepReductionSources {
   discoveries: {
     workerId: string;
-    coverage?: ScanDraftInput["coverage"];
+    coverage?: ScanDraftInput["reviewState"];
     result: DeepReductionInput;
   }[];
   previous: DeepReductionInput | null;
@@ -54,13 +55,13 @@ export function deepReductionToScanDraft(
   result: DeepReductionInput,
 ): ScanDraftInput {
   const { sourceCoverage, ...draft } = structuredClone(result);
-  return { ...draft, coverage: sourceCoverage ?? unknownSourceCoverage() };
+  return { ...draft, reviewState: sourceCoverage ?? unknownSourceCoverage() };
 }
 
 /** Keep v1 checkpoints readable by older binaries. */
 export function deepReductionForPersistence(
   result: DeepReductionInput,
-): Omit<ScanDraftInput, "coverage"> {
+): Omit<ScanDraftInput, "reviewState"> {
   const { sourceCoverage: _coverage, ...persisted } = result;
   return persisted;
 }
@@ -69,14 +70,14 @@ export function deepReductionForPersistence(
 export function aggregateDiscoveryCoverage(
   artifacts: DeepScanArtifacts,
   discoveries: Pick<AcceptedDiscovery, "id" | "resultPath" | "result">[],
-): ScanDraftInput["coverage"] {
-  const coverage: ScanDraftInput["coverage"] = {
+): ScanDraftInput["reviewState"] {
+  const coverage: ScanDraftInput["reviewState"] = {
     surfaces: [],
     explicitExclusions: [],
     deferred: [],
   };
   for (const worker of discoveries) {
-    const source = structuredClone(worker.result.coverage);
+    const source = structuredClone(worker.result.reviewState);
     const prefix = relative(artifacts.scanDir, dirname(worker.resultPath))
       .split(sep)
       .join("/");
@@ -170,9 +171,9 @@ export async function validateDiscoveryArtifacts(
     throw new Error(
       "Standard scan worker wrote only a checkpoint; its audit is not complete.",
     );
-  validateRetainedCoverage(result.coverage);
+  validateRetainedCoverage(result.reviewState);
   const receiptPaths = new Map<string, string>();
-  for (const row of result.coverage.surfaces as JsonObject[]) {
+  for (const row of result.reviewState.surfaces as JsonObject[]) {
     for (const ref of (row.receiptRefs as string[] | undefined) ?? []) {
       const components = coverageReceiptComponents(ref);
       const normalized = components.join("/");
@@ -252,20 +253,11 @@ export async function validateReducerArtifacts(
   } else {
     validateRetainedFindings(result, [], previous);
   }
-  const previousFindingIds = new Set(
-    input.sources
-      ? (previous?.findings ?? [])
-          .flatMap(retainedFindingSources)
-          .map((source) => source.id)
-      : (previous?.findings ?? []).map(scanFindingIdentity),
-  );
+  const assignments = previousFindingAssignments(result, previous);
   return {
     result,
-    newFindings: result.findings.filter((finding) =>
-      input.sources
-        ? !findingSourceIds(finding).some((id) => previousFindingIds.has(id))
-        : !previousFindingIds.has(scanFindingIdentity(finding)),
-    ).length,
+    newFindings: result.findings.filter((finding) => !assignments.has(finding))
+      .length,
   };
 }
 
@@ -274,6 +266,7 @@ export function reconcileDeepReduction(
   input: DeepReductionInput,
   discoveries: DeepReductionSources["discoveries"],
   previous: DeepReductionInput | null,
+  retainedFindingRefs: string[] = [],
 ): DeepReductionInput {
   // Check retained fresh data before merging historical sources. The host
   // replaces submitted sourceFindings with the original source payloads below.
@@ -293,6 +286,18 @@ export function reconcileDeepReduction(
     throw new Error(
       "Deep reduction is only a checkpoint, not a complete result.",
     );
+  for (const ref of retainedFindingRefs) {
+    const index = Number(ref.slice("previous:".length));
+    const finding = previous?.findings[index];
+    if (!finding)
+      throw new Error(
+        `Deep reduction retained finding ${ref} is not assigned to this reducer.`,
+      );
+    const retained = structuredClone(finding);
+    (retained.provenance as Record<string, unknown>).sourceFindingIds =
+      retainedFindingSources(finding, index).map((source) => source.id);
+    result.findings.push(retained);
+  }
   for (const source of [
     ...discoveries.map((discovery) => discovery.result),
     ...(previous ? [previous] : []),
@@ -304,25 +309,23 @@ export function reconcileDeepReduction(
         "Deep reduction source is only a checkpoint, not a complete result.",
       );
   }
-  validateRetainedFindings(
+  validateReductionHasFindings(
     result,
     discoveries.map((discovery) => discovery.result),
     previous ?? undefined,
   );
   retainSourceFindings(result, { discoveries, previous });
-  for (const [index, finding] of (previous?.findings ?? []).entries()) {
-    const previousRefs = retainedFindingSources(finding, index).map(
-      (source) => source.id,
-    );
-    const retained = result.findings.find((current) =>
-      findingSourceIds(current).some((ref) => previousRefs.includes(ref)),
-    );
-    if (retained) {
-      const sourceIds = findingSourceIds(retained);
+  for (const [retained, previousFindings] of previousFindingAssignments(
+    result,
+    previous,
+  )) {
+    const sourceIds = findingSourceIds(retained);
+    for (const finding of previousFindings) {
+      validateRetainedFindingContent(retained, finding, sourceIds);
       preserveFindingDetails(retained, finding);
-      (retained.provenance as Record<string, unknown>).sourceFindingIds =
-        sourceIds;
     }
+    (retained.provenance as Record<string, unknown>).sourceFindingIds =
+      sourceIds;
   }
   retainSourceFindings(result, { discoveries, previous });
   for (const [field, label] of [
@@ -352,12 +355,12 @@ export function reconcileDeepReduction(
 export function aggregateSourceCoverage(
   discoveries: DeepReductionSources["discoveries"],
   previous: DeepReductionInput | null,
-): ScanDraftInput["coverage"] {
+): ScanDraftInput["reviewState"] {
   const sources = [
     ...(previous ? [previous.sourceCoverage ?? unknownSourceCoverage()] : []),
     ...discoveries.map((source) => source.coverage ?? unknownSourceCoverage()),
   ];
-  const result: ScanDraftInput["coverage"] = {
+  const result: ScanDraftInput["reviewState"] = {
     surfaces: [],
     explicitExclusions: [],
     deferred: [],
@@ -383,7 +386,7 @@ export function aggregateSourceCoverage(
   return result;
 }
 
-function unknownSourceCoverage(): ScanDraftInput["coverage"] {
+function unknownSourceCoverage(): ScanDraftInput["reviewState"] {
   return {
     surfaces: [],
     explicitExclusions: [],
@@ -393,11 +396,11 @@ function unknownSourceCoverage(): ScanDraftInput["coverage"] {
 
 /** Qualify worker-local IDs and receipt paths before combining accepted coverage. */
 export function projectDiscoveryCoverage(
-  coverage: ScanDraftInput["coverage"],
+  coverage: ScanDraftInput["reviewState"],
   worker: { id: string; attempt?: number },
   artifactPrefix: string,
   scanReceiptRefs: ReadonlyMap<number, ReadonlySet<string>> = new Map(),
-): ScanDraftInput["coverage"] {
+): ScanDraftInput["reviewState"] {
   const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;
   const provenance = {
     workerId: worker.id,
@@ -556,6 +559,7 @@ function retainSourceFindings(
         throw new Error(
           `Deep reduction attributes source finding ${id} more than once.`,
         );
+      validateRetainedFindingContent(finding, sources.get(id)!, [id]);
       claimed.add(id);
     }
     provenance.sourceFindingIds = refs;
@@ -571,8 +575,41 @@ function retainSourceFindings(
     );
 }
 
-/** Preserve previously accepted identities and never discard every reported finding. */
-export function validateRetainedFindings(
+/** Reject placeholder substitutions without limiting legitimate synthesis. */
+function validateRetainedFindingContent(
+  current: Record<string, unknown>,
+  previous: Record<string, unknown>,
+  sourceRefs: string[],
+): void {
+  const placeholder = /^(?:x|tbd|todo|\.{3}|…)$/i;
+  const compare = (value: unknown, original: unknown, field: string): void => {
+    if (
+      typeof original === "string" &&
+      original.trim() &&
+      !placeholder.test(original.trim()) &&
+      typeof value === "string" &&
+      placeholder.test(value.trim())
+    ) {
+      throw new Error(
+        `Deep reduction replaced ${field} with placeholder text for source findings ${sourceRefs.join(", ")}. Preserve the accepted content or retain the unchanged finding by reference.`,
+      );
+    }
+    const currentFields = asRecord(value);
+    const previousFields = asRecord(original);
+    if (currentFields && previousFields)
+      for (const [name, text] of Object.entries(previousFields))
+        compare(currentFields[name], text, `${field}.${name}`);
+  };
+  for (const field of ["title", "summary", "remediation", "writeup"])
+    compare(current[field], previous[field], field);
+  compare(
+    asRecord(current.rootCause)?.summary ?? current.rootCause,
+    asRecord(previous.rootCause)?.summary ?? previous.rootCause,
+    "rootCause",
+  );
+}
+
+function validateReductionHasFindings(
   result: DeepReductionInput,
   sources: DeepReductionInput[],
   previous?: DeepReductionInput,
@@ -586,19 +623,94 @@ export function validateRetainedFindings(
       "Deep reduction discarded every accepted Standard scan finding.",
     );
   }
+}
 
-  const currentFindingIds = new Set(result.findings.map(scanFindingIdentity));
-  for (const finding of previous?.findings ?? []) {
-    if (currentFindingIds.has(scanFindingIdentity(finding))) continue;
-    throw Object.assign(
-      new Error(
-        "Deep reduction discarded or changed a previously accepted finding identity.",
-      ),
-      {
-        code: "merge_traceability_unstable_candidate_id",
-      },
+/** Each prior source group stays whole, but semantic aliases can share a recipient. */
+function previousFindingAssignments(
+  result: DeepReductionInput,
+  previous?: DeepReductionInput | null,
+): Map<DeepReductionInput["findings"][number], DeepReductionInput["findings"]> {
+  const assignments = new Map<
+    DeepReductionInput["findings"][number],
+    DeepReductionInput["findings"]
+  >();
+  for (const [index, finding] of (previous?.findings ?? []).entries()) {
+    const previousRefs = retainedFindingSources(finding, index).map(
+      (source) => source.id,
     );
+    const originals = (finding.provenance as { sourceFindings?: unknown[] })
+      .sourceFindings;
+    const legacy = !originals?.length;
+    let matches = result.findings.filter((current) => {
+      const refs = new Set(findingSourceIds(current));
+      return previousRefs.every((ref) => refs.has(ref));
+    });
+    if (legacy && matches.length === 0) {
+      matches = result.findings.filter(
+        (current) =>
+          scanFindingIdentity(current) === scanFindingIdentity(finding),
+      );
+    }
+    if (matches.length !== 1) {
+      throw Object.assign(
+        new Error(
+          `Deep reduction discarded, split, or ambiguously reassigned a previously accepted finding (${previousRefs.join(", ")}).`,
+        ),
+        { code: "merge_traceability_unstable_candidate_id" },
+      );
+    }
+    const retained = matches[0]!;
+    if (
+      legacy &&
+      scanFindingIdentity(retained) !== scanFindingIdentity(finding)
+    ) {
+      throw Object.assign(
+        new Error(
+          "Deep reduction changed a previously accepted finding identity.",
+        ),
+        { code: "merge_traceability_unstable_candidate_id" },
+      );
+    }
+    const assigned = assignments.get(retained) ?? [];
+    assigned.push(finding);
+    assignments.set(retained, assigned);
   }
+  for (const [retained, assigned] of assignments) {
+    if (
+      assigned.length === 1 &&
+      scanFindingIdentity(retained) !== scanFindingIdentity(assigned[0]!)
+    ) {
+      throw Object.assign(
+        new Error(
+          "Deep reduction changed an independently retained previously accepted finding identity.",
+        ),
+        { code: "merge_traceability_unstable_candidate_id" },
+      );
+    }
+  }
+  return assignments;
+}
+
+/** Preserve accepted source groups and keep independent finding identities stable. */
+export function validateRetainedFindings(
+  result: DeepReductionInput,
+  sources: DeepReductionInput[],
+  previous?: DeepReductionInput,
+): void {
+  validateReductionHasFindings(result, sources, previous);
+  for (const [current, originals] of previousFindingAssignments(
+    result,
+    previous,
+  ))
+    for (const original of originals)
+      validateRetainedFindingContent(
+        current,
+        original,
+        findingSourceIds(current),
+      );
+  for (const [index, finding] of result.findings.entries())
+    for (const source of retainedFindingSources(finding, index))
+      validateRetainedFindingContent(finding, source.finding, [source.id]);
 }
 
 export function parseStoredScanDraft<Result extends DeepReductionInput>(

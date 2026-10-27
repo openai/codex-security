@@ -74,6 +74,13 @@ jobs:
       - name: Prepare shared native notices
         if: matrix.platform == 'linux' && matrix.arch == 'x64'
         run: node notices.mjs
+      - name: Pull pinned glibc image
+        if: matrix.platform == 'linux'
+        run: |
+          if ! docker pull "$NATIVE_IMAGE"; then
+            sleep 5
+            docker pull "$NATIVE_IMAGE"
+          fi
       - name: Build and verify Linux on glibc 2.28 with Node.js 22
         if: matrix.platform == 'linux'
         run: |
@@ -81,7 +88,7 @@ jobs:
           printf '#!/bin/sh\nexit 99\n' > "$RUNNER_TEMP/native-no-python/python"
           cp "$RUNNER_TEMP/native-no-python/python" "$RUNNER_TEMP/native-no-python/python3"
           chmod +x "$RUNNER_TEMP/native-no-python/"*
-          docker run --rm \
+          docker run --pull=never --rm \
             --volume "$PWD:/source" \
             --volume "$RUNNER_TEMP/native-cargo:/cargo" \
             --volume "${CARGO_HOME:-$HOME/.cargo}/registry:/cargo/registry:ro" \
@@ -110,7 +117,7 @@ jobs:
       - name: Verify the same Linux artifact with Node.js 20
         if: matrix.platform == 'linux'
         run: |
-          docker run --rm \
+          docker run --pull=never --rm \
             --volume "$PWD:/source:ro" \
             --volume "$(dirname "$(dirname "$(command -v node)")"):/node:ro" \
             --workdir /source "$NATIVE_IMAGE" /bin/bash -euc '

@@ -114,7 +114,7 @@ try {
   delete globalThis.workbenchProcessFixture;
 }
 
-const { executeWorkbench } = await loadWorkbenchProcess();
+const { executeWorkbench, runWorkbench } = await loadWorkbenchProcess();
 const { workbenchArgs } = await importSource(
   path.join(import.meta.dirname, "../src/workbench-arguments.ts"),
 );
@@ -397,14 +397,21 @@ await test("large saved context retains cancellation results and diagnostics", a
       "canceled",
     );
     await assert.rejects(
-      executeWorkbench(python, [
+      runWorkbench([
         "cancel-scan",
         "--scan-id",
         "00000000-0000-4000-8000-000000000000",
       ]),
       (error: unknown) => {
-        assert.ok(error instanceof Error && "stderr" in error);
-        assert.match(String(error.stderr), /Codex Security scan not found/);
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /Codex Security scan not found/);
+        assert.ok(
+          error.cause instanceof Error &&
+            "stderr" in error.cause &&
+            "code" in error.cause,
+        );
+        assert.equal(error.message, String(error.cause.stderr).trim());
+        assert.ok(typeof error.cause.code === "number" && error.cause.code > 0);
         return true;
       },
     );

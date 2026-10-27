@@ -183,17 +183,17 @@ directory must be private to you (`chmod 700`).
 | --------------------------------- | ---------------------------------------------------------------- |
 | `findings.findings`               | Findings from this scan.                                         |
 | `reportPath`                      | Path to the Markdown report.                                     |
-| `coverage`                        | What the scan assessed and any coverage gaps.                    |
+| `review`                          | Additional excluded paths. This is not file coverage.            |
 | `repositoryFindings`              | This scan's findings plus earlier open findings, when available. |
 | `sarifPath`                       | SARIF export path, or `null`.                                    |
 | `threatModel` / `threatModelPath` | Saved threat model and document path; either can be `null`.      |
 | `cost`                            | Estimated model usage cost, or `null` when unavailable.          |
 
 Review the requested paths and exclusions alongside the execution outcome.
-`coverage.deferred` records unfinished requested work, while
-`coverage.openQuestions` records optional follow-up separately.
+`reviewState.deferred` records unfinished requested work, while
+`reviewState.openQuestions` records optional follow-up separately.
 
-Review coverage alongside findings. A report with no findings does not establish
+Review the scan status and scope alongside findings. A report with no findings does not establish
 that the repository is secure. Reports and logs can contain source code,
 vulnerability details, and credentials; review them before sharing.
 
@@ -385,6 +385,10 @@ Deep discovery retains its enforced deadline, with a default and maximum of
 ### Progress and cost
 
 Use `onProgress` for scan progress and `onCost` for cost updates.
+Use `onUsageObservation` for the last reported token measurement time
+(`tokensUpdatedAt`) and account-wide allowance readings (`accountRateLimits`).
+Each reading includes its own `observedAt` timestamp and the percentage used in
+each reported window. A limit-only update can arrive before any token measurement.
 
 Follow scans with `onWorkerEvent` and `onReconnect`. `onWorkerEvent` reports
 persisted worker sessions discovered by the SDK's existing session tracker,
@@ -639,6 +643,14 @@ It requires ChatGPT credentials; inference API keys and AWS credentials do not
 grant Cloud access. See [Cloud publication](docs/cli.md#publish-findings-to-cloud)
 for setup and review steps, or [Linear publication](docs/cli.md#publish-completed-scans-to-linear)
 for issue creation.
+
+External vendor imports are opt-in. Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`
+to enable `publish findings`, `findings imported`, `import github-advisories`, and
+the SDK's external publication, local import/readback, and advisory acquisition
+APIs. They are disabled otherwise; CLI commands are hidden from help and schemas.
+SDK callers can supply the flag through the existing per-call
+`dependencies.environment`. Pure normalizers and file readers remain available.
+This does not affect scan publishing or the existing GitHub alert collector.
 
 The SDK also exposes `prepareExternalPublication(file, options)` for supported
 vendor exports and `prepareNormalizedExternalPublication(findings, options)` for

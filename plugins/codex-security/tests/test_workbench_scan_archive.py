@@ -74,6 +74,8 @@ def test_archived_output_preserves_old_scan_and_allows_fresh_registration(
 
     assert current["scanId"] != previous["scanId"]
     assert current["scanDir"] == str(scan_dir)
+    assert current["archivedScanDir"] == str(archived_scan_dir)
+    assert (archived_scan_dir / "report.md").read_text() == "# Previous scan\n"
     assert (archived_scan_dir / "previous.txt").read_text() == "keep the previous scan\n"
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute(
@@ -227,31 +229,15 @@ def test_archive_cannot_move_the_active_workbench_database(
             if state_subdirectory == "aliased-state-child":
                 state_dir /= "child"
     previous = register_scan(state_dir, repository, previous_dir)
+    (previous_dir / "report.md").write_text("saved report")
     (scan_dir / "previous.txt").write_text("keep existing output")
 
-    rejected = run_workbench(
-        state_dir,
-        "register-cli-scan",
-        "--repository",
-        str(repository),
-        "--scan-dir",
-        str(scan_dir),
-        "--recipe-json",
-        json.dumps(
-            {
-                "config": {},
-                "mode": "standard",
-                "repository": str(repository),
-                "target": {"kind": "repository", "paths": []},
-            }
-        ),
-        "--archive-existing",
-        check=False,
-    )
+    rejected = register_scan(state_dir, repository, scan_dir, "--archive-existing", check=False)
 
     assert rejected["returncode"] != 0
     assert "workbench state or active database" in str(rejected["stderr"])
     assert (scan_dir / "previous.txt").read_text() == "keep existing output"
+    assert (previous_dir / "report.md").read_text() == "saved report"
     assert not list(tmp_path.glob("scan.previous-*"))
     saved = run_workbench(state_dir, "get-scan", "--scan-id", str(previous["scanId"]))
     assert saved["scan"]["scanId"] == previous["scanId"]

@@ -290,7 +290,6 @@ export async function runHostedScan(
     const names = new Set([
       "scan-manifest.json",
       "findings.json",
-      "coverage.json",
       "report.md",
       ...result.manifest.scan.artifacts.map((artifact) => artifact.path),
       ...(isRecord(sources) ? Object.keys(sources) : []),

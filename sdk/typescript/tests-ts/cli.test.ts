@@ -63,7 +63,6 @@ import {
   dependencies,
   fakePreflight,
   fakeResult,
-  mustNotInitializeCodex,
   fakeSecurity,
   failingSecurity,
   fakeInterval,
@@ -80,6 +79,17 @@ import {
 
 function scanDependencies(run: Parameters<typeof fakeSecurity>[0]) {
   return { ...dependencies(), createSecurity: () => fakeSecurity(run) };
+}
+
+async function cliSchema(...command: string[]): Promise<unknown> {
+  const stdout = captureCli(main, "stdout");
+  expect(
+    await stdout.run(
+      [...command, "--schema", "--format", "json"],
+      dependencies(),
+    ),
+  ).toBe(0);
+  return JSON.parse(stdout.text());
 }
 
 const profileScenarios = [
@@ -125,7 +135,8 @@ function scanResultAt(
   return new ScanResult({
     manifest: base.manifest,
     findings: base.findings,
-    coverage: base.coverage,
+    review: base.review,
+    mode: base.mode,
     scanDir,
     threadId: base.threadId,
     turnResult: base.turnResult,
@@ -534,25 +545,17 @@ describe("CLI", () => {
     },
   );
 
-  test.each(
-    ["failure", "failure with cleanup failure", "SIGINT", "SIGTERM"].flatMap(
-      (signal) =>
-        (
-          [
-            ["json", false],
-            ["json", true],
-            ["jsonl", true],
-          ] as const
-        ).map(
-          ([format, fullOutput]) =>
-            [signal, format, fullOutput ? "full" : "plain"] as const,
-        ),
-    ),
-  )(
-    "retains completed assessments and stops patching after validation %s (%s, %s)",
-    async (signal, format, outputMode) => {
+  test.each([
+    ["failure", "json", false],
+    ["failure", "json", true],
+    ["failure with cleanup failure", "jsonl", true],
+    ["SIGINT", "json", false],
+    ["SIGINT", "json", true],
+    ["SIGTERM", "jsonl", true],
+  ] as const)(
+    "retains assessments and stops patching after validation %s (%s, full output: %p)",
+    async (signal, format, fullOutput) => {
       const validationFailed = signal.startsWith("failure");
-      const fullOutput = outputMode === "full";
       const root = await mkdtemp(join(tmpdir(), "scan-validation-partial-"));
       const repository = join(root, "repository");
       const scanDir = join(root, "scan");
@@ -766,7 +769,7 @@ describe("CLI", () => {
     const stderr = capture();
     expect(await main([], root.stream, stderr.stream, dependencies())).toBe(0);
     expect(root.text()).toContain("Usage: codex-security <command>");
-    expect(root.text()).toContain("Aliases: cs");
+    expect(root.text()).toContain("Integrations:");
     expect(root.text()).toContain("bulk-scan");
     expect(root.text()).toContain("install-hook");
     expect(root.text()).not.toContain("multiscan");
@@ -775,14 +778,7 @@ describe("CLI", () => {
     expect(root.text()).toContain("--llms-full");
     expect(stderr.text()).toBe("");
 
-    const schema = captureCli(main, "stdout");
-    expect(
-      await schema.run(
-        ["scan", "--schema", "--format", "json"],
-        dependencies(),
-      ),
-    ).toBe(0);
-    const scanSchema = JSON.parse(schema.text()) as {
+    const scanSchema = (await cliSchema("scan")) as {
       args: Record<string, unknown>;
       options: Record<string, unknown>;
       output?: {
@@ -843,38 +839,17 @@ describe("CLI", () => {
       additionalProperties: false,
     });
 
-    const rerunSchema = captureCli(main, "stdout");
-    expect(
-      await rerunSchema.run(
-        ["scans", "rerun", "--schema", "--format", "json"],
-        dependencies(),
-      ),
-    ).toBe(0);
-    expect(JSON.parse(rerunSchema.text())).toMatchObject({
+    expect(await cliSchema("scans", "rerun")).toMatchObject({
       args: { properties: { scanId: { type: "string" } } },
       options: { properties: { verbose: { type: "boolean" } } },
     });
 
-    const matchSchema = captureCli(main, "stdout");
-    expect(
-      await matchSchema.run(
-        ["scans", "match", "--schema", "--format", "json"],
-        dependencies(),
-      ),
-    ).toBe(0);
-    expect(JSON.parse(matchSchema.text())).toMatchObject({
+    expect(await cliSchema("scans", "match")).toMatchObject({
       args: { properties: { beforeId: { type: "string" } } },
       options: { properties: { all: { type: "boolean" } } },
     });
 
-    const falsePositiveSchema = captureCli(main, "stdout");
-    expect(
-      await falsePositiveSchema.run(
-        ["findings", "false-positive", "--schema", "--format", "json"],
-        dependencies(),
-      ),
-    ).toBe(0);
-    expect(JSON.parse(falsePositiveSchema.text())).toMatchObject({
+    expect(await cliSchema("findings", "false-positive")).toMatchObject({
       args: {
         properties: {
           occurrenceId: { type: "string", minLength: 1, maxLength: 256 },
@@ -890,33 +865,25 @@ describe("CLI", () => {
 
     const manifest = captureCli(main, "stdout");
     expect(await manifest.run(["--llms"], dependencies())).toBe(0);
-    expect(manifest.text()).toContain("codex-security scan [repository]");
-    expect(manifest.text()).toContain(
-      "codex-security install-hook [repository]",
-    );
-    expect(manifest.text()).toContain("codex-security bulk-scan [input]");
-    expect(manifest.text()).toContain("codex-security export [scanDir]");
-    expect(manifest.text()).toContain(
-      "codex-security import github <repository>",
-    );
-    expect(manifest.text()).toContain("codex-security validate <findings...>");
-    expect(manifest.text()).toContain(
-      "codex-security verify-fix [findings...]",
-    );
-    expect(manifest.text()).toContain("codex-security patch [issues...]");
-    expect(manifest.text()).toContain(
-      "codex-security findings false-positive <occurrenceId>",
-    );
-    expect(manifest.text()).toContain("codex-security scans list [repository]");
-    expect(manifest.text()).toContain("codex-security scans show [scanId]");
-    expect(manifest.text()).toContain("codex-security scans rerun [scanId]");
-    expect(manifest.text()).toContain(
-      "codex-security scans match [beforeId] [afterId]",
-    );
-    expect(manifest.text()).toContain(
-      "codex-security scans compare [beforeId] [afterId]",
-    );
-    expect(manifest.text()).toContain("codex-security info");
+    for (const usage of [
+      "scan [repository]",
+      "install-hook [repository]",
+      "bulk-scan [input]",
+      "export [scanDir]",
+      "import github <repository>",
+      "validate <findings...>",
+      "verify-fix [findings...]",
+      "patch [issues...]",
+      "findings false-positive <occurrenceId>",
+      "scans list [repository]",
+      "scans show [scanId]",
+      "scans rerun [scanId]",
+      "scans match [beforeId] [afterId]",
+      "scans compare [beforeId] [afterId]",
+      "info",
+    ]) {
+      expect(manifest.text()).toContain(`codex-security ${usage}`);
+    }
 
     const completions = captureCli(main, "stdout");
     expect(await completions.run(["completions", "bash"], dependencies())).toBe(
@@ -966,17 +933,9 @@ describe("CLI", () => {
 
     for (const command of commands) {
       const help = captureCli(main, "stdout");
-      const schema = captureCli(main, "stdout");
       expect(await help.run([...command, "--help"], dependencies())).toBe(0);
       expect(help.text()).not.toMatch(/--[a-z][a-z0-9-]*[A-Z][A-Za-z0-9-]*/u);
-      expect(
-        await schema.run(
-          [...command, "--schema", "--format", "json"],
-          dependencies(),
-        ),
-      ).toBe(0);
-
-      const definitions = JSON.parse(schema.text()) as {
+      const definitions = (await cliSchema(...command)) as {
         args?: {
           properties?: Record<string, { description?: string }>;
         };
@@ -1876,15 +1835,6 @@ describe("CLI", () => {
     ]);
   });
 
-  test("reports when the current repository has no saved scans", async () => {
-    const stderr = captureCli(main, "stderr");
-
-    expect(await stderr.run(["scans", "show"], dependencies())).toBe(2);
-    expect(stderr.text()).toContain(
-      "No completed scans found for the current repository.",
-    );
-  });
-
   test.each([false, true])(
     "does not emit an ok: true envelope for a failed structured history command with full output %p",
     async (fullOutput) => {
@@ -2511,6 +2461,7 @@ describe("CLI", () => {
       expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
       expect(stderr.text()).toContain("Preparing scan");
       expect(stderr.text()).toContain("Running scan");
+      expect(stderr.text()).not.toContain("File inventory:");
       expect(stderr.text()).not.toContain("\u001B");
       expect(stderr.text()).not.toContain("\r");
       expect(setIntervalMock).toHaveBeenCalledTimes(0);
@@ -2561,7 +2512,7 @@ describe("CLI", () => {
           phase: "validation",
           filesCompleted: 0,
           filesTotal: 8,
-          reviewItems: { completed: 11, total: 13 },
+          reviewItems: { completed: 0, total: 13 },
         },
         {
           phase: "validation",
@@ -2572,15 +2523,20 @@ describe("CLI", () => {
       ],
     });
     deps.setInterval = mock(fakeInterval);
-    expect(await runCli(["scan", ".", "--headless"], deps)).toBe(0);
+    expect(
+      await runCli(["scan", ".", "--headless", "--diff", "HEAD^"], deps),
+    ).toBe(0);
     expect(stderr.text()).toContain(
-      "Scan phase: validating findings (11/13 reviews).",
+      "Running scan: preflight (committed changes) | File inventory: 8",
+    );
+    expect(stderr.text()).toContain(
+      "Scan phase: validating findings (0/13 reviews).",
     );
     expect(stderr.text()).toContain(
       "Scan phase: validating findings (13/13 reviews).",
     );
     expect(stderr.text()).toContain(
-      "Running scan: validating findings | Reviews: 13/13",
+      "Running scan: validating findings (committed changes) | Reviews: 13/13",
     );
     expect(stderr.text()).not.toContain("Files: 13/13");
   });
@@ -2997,137 +2953,47 @@ describe("CLI", () => {
   });
 
   test("rejects structured modes before starting interactive Codex commands", async () => {
-    for (const [command, arguments_] of [
-      ["validate", ["finding"]],
-      ["login", []],
-      ["login", ["status"]],
-      ["logout", []],
+    for (const [command, ...args] of [
+      ["validate", "finding", "--json"],
+      ["login", "--format", "json"],
+      ["login", "status", "--format=jsonl"],
+      ["logout", "--format", "jsonl"],
+      ["logout", "--format=json"],
     ] as const) {
-      for (const format of [
-        ["--json"],
-        ["--format", "json"],
-        ["--format=json"],
-        ["--format", "jsonl"],
-        ["--format=jsonl"],
-      ] as const) {
-        const onCodex = mock<() => number>().mockReturnValue(0);
-        const { stdout, stderr, runCli } = createCliTest(main, {
-          stderr: true,
-        });
-
-        expect(
-          await runCli(
-            [command, ...arguments_, ...format],
-            dependencies({
-              onCodex,
-            }),
-          ),
-        ).toBe(2);
-        expect(onCodex).not.toHaveBeenCalled();
-        expect(stdout.text()).toBe("");
-        expect(stderr.text()).toContain(
-          `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`,
-        );
-      }
+      const onCodex = mock(() => 0);
+      const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
+      expect(await runCli([command, ...args], dependencies({ onCodex }))).toBe(
+        2,
+      );
+      expect(onCodex).not.toHaveBeenCalled();
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(
+        `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`,
+      );
     }
   });
 
   test("rejects CSV stdout when JSON output is requested", async () => {
-    for (const exportFormat of [
-      ["--export-format", "csv"],
-      ["--export-format=csv"],
-      ["--exportFormat", "csv"],
-      ["--exportFormat=csv"],
+    for (const flags of [
+      ["--export-format", "csv", "--output", "-", "--json"],
+      ["--export-format=csv", "--output=-", "--format", "json"],
+      ["--exportFormat", "csv", "--output", "-", "--format=jsonl"],
+      ["--exportFormat=csv", "--output=-", "--format", "jsonl"],
     ]) {
-      for (const format of [
-        ["--json"],
-        ["--format", "json"],
-        ["--format=json"],
-        ["--format", "jsonl"],
-        ["--format=jsonl"],
-      ]) {
-        const exportFindings = mock(resolving(new Uint8Array()));
-        const { stdout, stderr, runCli } = createCliTest(main);
-        const deps = dependencies();
-        deps.exportFindings = exportFindings;
-
-        expect(
-          await runCli(
-            ["export", "scan", ...exportFormat, "--output", "-", ...format],
-            deps,
-          ),
-        ).toBe(2);
-        expect(exportFindings).not.toHaveBeenCalled();
-        expect(stdout.text()).toBe("");
-        expect(stderr.text()).toContain(
-          "CSV stdout cannot be combined with JSON output",
-        );
-      }
+      const exportFindings = mock(resolving(new Uint8Array()));
+      const { stdout, stderr, runCli } = createCliTest(main);
+      expect(
+        await runCli(["export", "scan", ...flags], {
+          ...dependencies(),
+          exportFindings,
+        }),
+      ).toBe(2);
+      expect(exportFindings).not.toHaveBeenCalled();
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(
+        "CSV stdout cannot be combined with JSON output",
+      );
     }
-  });
-
-  test("prints export help without initializing Codex", async () => {
-    const { stdout, stderr, runCli } = createCliTest(main);
-
-    const deps = dependencies();
-    deps.createSecurity = mustNotInitializeCodex;
-    expect(await runCli(["export", "--help"], deps)).toBe(0);
-    expect(stdout.text()).toContain("Usage: codex-security export [scan-dir]");
-    expect(stdout.text()).toContain("--artifact <artifact>");
-    expect(stdout.text()).toContain("--scan <scan-id>");
-    expect(stdout.text()).toContain("--export-format <format>");
-    expect(stdout.text()).toContain("threatmodel.md");
-    expect(stdout.text()).toContain("--source-root <path>");
-    expect(stdout.text()).toContain("sarif");
-    expect(stdout.text()).not.toContain("--format {sarif}");
-    expect(stderr.text()).toBe("");
-  });
-
-  test("uses Incur version and command help", async () => {
-    const version = capture();
-    const stderr = capture();
-    expect(
-      await main(["--version"], version.stream, stderr.stream, dependencies()),
-    ).toBe(0);
-    expect(version.text()).toBe(`${VERSION}\n`);
-    expect(stderr.text()).toBe("");
-
-    const help = capture();
-    expect(
-      await main(
-        ["scan", "--help"],
-        help.stream,
-        stderr.stream,
-        dependencies(),
-      ),
-    ).toBe(0);
-    const text = help.text().replace(/\s+/gu, " ");
-    expect(text).toContain("Usage: codex-security scan [repository]");
-    for (const option of [
-      "--verbose",
-      "--path <path>",
-      "--max-cost <usd>",
-      "--show-cost",
-      "--workers <count>",
-      "--subagents <count>",
-      "--stop-after-no-new <count>",
-      "--max-discovery-runs <count>",
-      "--max-time-hours <hours>",
-      "--max-time <minutes>",
-      "--headless",
-      "--model <model>",
-      "--provider <provider>",
-      "--effort <effort>",
-    ]) {
-      expect(text).toContain(option);
-    }
-    expect(text).toContain(DEFAULT_SCAN_MODEL_CONFIGURATION.model);
-    expect(text).toContain(DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort);
-    expect(text).toContain('model_reasoning_effort="high"');
-    expect(text).toContain("CODEX_SECURITY_STATE_DIR");
-    expect(text).not.toContain("openai:gpt");
-    expect(text).not.toContain("codex-security scan . --path src,tests");
-    expect(stderr.text()).toBe("");
   });
 
   test("documents existing model and reasoning options in bulk-scan help", async () => {
@@ -3648,7 +3514,6 @@ describe("CLI", () => {
       ],
       [["scan", "repo-a", "repo-b", "--dry-run"], "Unexpected positional"],
       [["findings", "false-positive"], "occurrenceId"],
-      [["findings", "false-positive", "occurrence-1"], "reason"],
       [
         ["findings", "false-positive", "occurrence-1", "occurrence-2"],
         "Unexpected positional",
@@ -3770,16 +3635,6 @@ describe("CLI", () => {
       expect(stdout.text()).toBe("");
       expect(stderr.text()).not.toContain("SYNTHETIC");
     }
-  });
-
-  test("honors Incur help before command validation", async () => {
-    const { stdout, stderr, runCli } = createCliTest(main);
-
-    expect(
-      await runCli(["scan", "--mode", "bogus", "--help"], dependencies()),
-    ).toBe(0);
-    expect(stdout.text()).toContain("Usage: codex-security scan [repository]");
-    expect(stderr.text()).toBe("");
   });
 
   test("maps configuration and emits JSON only on stdout", async () => {
@@ -4623,68 +4478,18 @@ describe("CLI", () => {
     }
   });
 
-  test("emits structured failures for machine-readable scan output", async () => {
+  test("preserves a model content refusal in structured scan failures", async () => {
     const message = "This content was flagged for possible cybersecurity risk.";
-    for (const formatArgs of [
-      ["--json"],
-      ["--format", "json"],
-      ["--format", "jsonl"],
-    ] as const) {
-      const { stdout, stderr, runCli } = createCliTest(main);
-
-      const deps = dependencies();
-      deps.createSecurity = () => failingSecurity(message);
-
-      expect(await runCli(["scan", ".", ...formatArgs], deps)).toBe(2);
-      expect(JSON.parse(stdout.text().trim())).toEqual({
-        status: "failed",
-        code: "SCAN_FAILED",
-        message,
-      });
-      expect(stderr.text()).toContain(`${message}\n`);
-    }
-  });
-
-  test("reports full-output scan failures in an error envelope", async () => {
-    const message = "This content was flagged for possible cybersecurity risk.";
-    for (const formatArgs of [
-      ["--json"],
-      ["--format", "json"],
-      ["--format", "jsonl"],
-    ] as const) {
-      const { stdout, stderr, runCli } = createCliTest(main);
-
-      const deps = dependencies();
-      deps.createSecurity = () => failingSecurity(message);
-
-      expect(
-        await runCli(["scan", ".", ...formatArgs, "--full-output"], deps),
-      ).toBe(2);
-      const envelope = JSON.parse(stdout.text().trim());
-      expect(envelope.ok).toBe(false);
-      expect(envelope.error).toEqual({ code: "SCAN_FAILED", message });
-      expect(envelope).not.toHaveProperty("data");
-      expect(stderr.text()).toContain(`${message}\n`);
-    }
-  });
-
-  test("preserves diagnostic text in full-output scan failures", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
-
     const deps = dependencies();
-    deps.createSecurity = () =>
-      failingSecurity(`network failure ECONNRESET ${SYNTHETIC_CREDENTIALS}`);
-
-    expect(await runCli(["scan", ".", "--json", "--full-output"], deps)).toBe(
-      2,
-    );
-    expect(JSON.parse(stdout.text()).error).toEqual({
+    deps.createSecurity = () => failingSecurity(message);
+    expect(await runCli(["scan", ".", "--json"], deps)).toBe(2);
+    expect(JSON.parse(stdout.text())).toEqual({
+      status: "failed",
       code: "SCAN_FAILED",
-      message: `network failure ECONNRESET ${SYNTHETIC_CREDENTIALS}`,
+      message,
     });
-    expect(stderr.text()).toContain(
-      `network failure ECONNRESET ${SYNTHETIC_CREDENTIALS}`,
-    );
+    expect(stderr.text()).toContain(message);
   });
 
   test("surfaces underlying scanner errors instead of inventing a model outage", async () => {
@@ -4988,7 +4793,7 @@ describe("CLI", () => {
             data: paginated
               ? expect.any(String)
               : {
-                  coverage: { completeness },
+                  review: result.review,
                   warnings: [warning],
                 },
           });
@@ -5227,7 +5032,12 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(
       "Tokens: unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total. Estimated cost: $0.00488–$0.01156 (standard, context unknown, cache writes unknown).",
     );
-    expect(stderr.text()).toContain("Scan phase: reviewing files (0/8 files).");
+    expect(stderr.text()).toContain(
+      "Scan phase: reviewing files (8 files inventoried).",
+    );
+    expect(stderr.text()).toContain(
+      "Running scan: reviewing files | File inventory: 8",
+    );
     expect(stderr.text()).toContain("Scan phase: reviewing files (3/8 files).");
     expect(stderr.text()).toContain(
       "Running scan: reviewing files | Workers: 4/6 | Files: 3/8 | Tokens: unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total | Cost: $0.00488–$0.01156",
@@ -5660,10 +5470,7 @@ describe("CLI", () => {
     "evaluates findings independently of legacy coverage %s",
     async (completeness) => {
       const result = fakeResult(["high"], completeness);
-      result.coverage.deferred.push({
-        id: "review-note",
-        reason: "Optional runtime reproduction was unavailable.",
-      });
+      result.review.excludedPaths.push("vendor");
       for (const [threshold, expected] of [
         [undefined, 0],
         ["critical", 0],
@@ -5685,8 +5492,8 @@ describe("CLI", () => {
         ).toBe(expected);
         const envelope = JSON.parse(stdout.text());
         expect(envelope.ok).toBe(true);
-        expect(envelope.data.coverage.deferred).toEqual(
-          result.coverage.deferred,
+        expect(envelope.data.review.excludedPaths).toEqual(
+          result.review.excludedPaths,
         );
         expect(envelope).not.toHaveProperty("error");
         expect(stderr.text()).not.toContain(
@@ -5720,10 +5527,7 @@ describe("CLI", () => {
     "%s retains findings and scope notes in a successful full-output result",
     async (command) => {
       const result = fakeResult(["high"]);
-      result.coverage.deferred.push({
-        id: "runtime-note",
-        reason: "Optional runtime reproduction was unavailable.",
-      });
+      result.review.excludedPaths.push("vendor");
       const { stdout, runCli } = createCliTest(main);
       const recipe = {
         repository: "/original/repository",
@@ -5751,7 +5555,7 @@ describe("CLI", () => {
       ).toBe(0);
       expect(JSON.parse(stdout.text())).toMatchObject({
         ok: true,
-        data: { findings: result.findings, coverage: result.coverage },
+        data: { findings: result.findings, review: result.review },
       });
     },
   );

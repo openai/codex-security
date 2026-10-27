@@ -92,6 +92,8 @@ Review this policy before enabling automation for `1.x`.
 ## Rolling release PRs
 
 `node-release-pr` runs after pushes to `main` and can be dispatched manually.
+Newer pushes can replace pending pushes. Manual runs keep their own place.
+Previews and writes share one queue so a preview sees a consistent proposal.
 It defaults to a read-only preview. It does not merge, tag, publish, or change
 the existing publication gates.
 
@@ -108,7 +110,8 @@ the latest `main` and appends a commit; the updater never force-pushes.
 A concurrent commit causes it to reread and
 retry. It requests Codex review when the proposal files change. Updates that
 only incorporate `main` keep CI current without repeating the same proposal
-review. New suggestions for human-owned notes still appear in a comment.
+review, even when the earlier request names an older commit. New suggestions
+for human-owned notes still appear in a comment.
 Before merging the proposal, check CI and request a final Codex review
 if the last review targets an older head.
 
@@ -127,7 +130,10 @@ changes; other workflow content comes from the latest `main`. After the release
 PR merges, this example can reference the new version before npm publication
 finishes. Wait for publication before using that pin.
 
-If a run reports that GitHub has not exposed the updated PR head, manually
+After updating an existing release branch and its title, the updater waits briefly
+if GitHub still shows the exact commit it just replaced. A different head or a
+newer `main` stops that review handoff; the next updater can use the current branches.
+If GitHub still has not exposed the updated PR head, manually
 rerun the updater with **dry_run** disabled after the PR catches up. This
 allows any deferred review request or note suggestions to be posted. Verify
 review on the current head before merging the proposal.
@@ -225,8 +231,11 @@ job with read-only permissions for both scopes.
 
 Review the resulting PR and select **Approve workflows to run** in its merge
 box to start hosted CI. GitHub requires this approval for PRs created or updated
-with `GITHUB_TOKEN`. Check the Codex review on the current head as well, and
-request it manually if the automated request has not started a review.
+with `GITHUB_TOKEN`. Check that a Codex code review completed on the current
+commit; a passing security check alone does not confirm this. If the automated
+request does not start a review or the integration asks the automated account
+to connect, a maintainer with a connected account should request the code
+review manually and verify it completed on that commit.
 
 For CI to start without this approval, optionally configure a GitHub App
 installed on this repository with **Contents: write** and **Pull requests: write**.
@@ -256,9 +265,12 @@ Generated PRs leave the disclosure attestations unchecked for maintainer review.
    pull-request inventory to the generated section.
 4. Open a pull request with a strict Conventional Commit title such as
    `chore(release): 0.2.0`.
-5. Run the checks required by the changed files and record the results in the
-   pull request. Do not merge until required CI, review, and public disclosure
-   checks pass on the current commit.
+5. Run the checks required by the changed files and record the initial results
+   in the PR description. Post later manual test results in a comment or review
+   with the tested commit SHA. Editing the description to update status can
+   trigger CI. Before merging, confirm that required CI passed in the **Checks**
+   tab and that review and the PR's public disclosure checklist cover the current
+   commit.
 
 Review the summary with the same standard as product documentation. Keep it
 specific, describe behavior before implementation, and do not include private
@@ -320,8 +332,9 @@ do not prepare a release by editing or committing files there.
 The merged release PR receives one progress comment covering post-merge CI,
 release verification, protected npm approval, public-package provenance,
 installation checks, Action publication, and container approval and publication.
-It links to the relevant workflow
-runs and updates at workflow boundaries. Each automatic release dispatch starts
+The main CI completion handler requests the first update for a merged release
+PR, including when CI fails. Subsequent updates link to the relevant workflows
+and track each publication stage. Each automatic release dispatch starts
 a separate observer using the returned run ID; this does not depend on chained
 `workflow_run` events from the built-in token. The observer checks release jobs
 every 30 seconds, including while protected approval is pending, and requests a refresh
@@ -336,7 +349,7 @@ and `watch` enabled. GitHub publication starts its own observer after npm succee
 
 The observer and comment writer execute only helpers from protected `main`.
 Only the comment writer can update PR comments, and only the observer can request
-a refresh. Both run outside the publication workflows. Verification and
+a refresh. Reporting runs independently of the tag-cut job. Verification and
 publication jobs retain their existing permissions. The dispatch jobs use their
 existing Actions permission for a best-effort notification bounded to 15 seconds,
 within the downstream resolver's 60-second completion wait. Progress-reporting
@@ -375,15 +388,14 @@ See [Container releases](docker/README.md) for publication and verification.
 
 ## Publish to GitHub Marketplace
 
-Publishing the companion `action-vX.Y.Z` GitHub Release does not publish its
-Marketplace listing. Complete this step separately for each Action version
-that should appear in Marketplace:
+Before announcing a new release that includes the GitHub Action, a maintainer
+must publish the companion `action-vX.Y.Z` release to GitHub Marketplace.
 
-1. Wait for `node-github-release` to succeed for the version.
-2. Open the existing `action-vX.Y.Z` release and choose **Edit**. Select
-   **Publish this Action to the GitHub Marketplace**. Use the Action release,
-   whose tag contains the tested distribution, rather than the `npm-vX.Y.Z`
-   source release or a new tag on `main`.
+1. After `node-github-release` succeeds, follow **edit the Action release** in
+   the **release status** job summary, or open `action-vX.Y.Z` and choose **Edit**.
+   That tag contains the tested Action distribution. `npm-vX.Y.Z` points to the
+   CLI source.
+2. Under **Release Action**, select **Publish this Action to the GitHub Marketplace**.
 3. Confirm the metadata checks pass. The Marketplace display name comes from
    `name` in the tagged `action.yml`, currently **OpenAI Codex Security**.
    GitHub requires a globally unique Action name. If a released version's name
@@ -417,6 +429,8 @@ Check the published state before announcing the release:
   Its companion GitHub Release contains the manifest and SBOM, links to the
   npm changelog, and lists that full distribution commit SHA. The manifest and
   runtime lock identify the same CLI version and npm integrity.
+- For new releases with the Action, the public Marketplace listing offers the
+  matching `action-vX.Y.Z` version.
 - The newest npm release is marked Latest. Action releases and historical
   backfills are not.
 - For releases created under this process, the reviewed highlights, category

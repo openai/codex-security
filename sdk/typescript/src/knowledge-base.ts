@@ -226,6 +226,8 @@ async function discover(
         documents.push(document);
       }
     } else if (entry.isFile()) {
+      // Office keeps a "~$" owner file next to each open document.
+      if (entry.name.startsWith("~$")) continue;
       if (!DOCUMENT_EXTENSIONS.has(extname(path).toLowerCase())) {
         const bytes = await readFile(path, {
           flag: constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
@@ -271,10 +273,13 @@ async function extractPdf(
     });
     try {
       const document = await loadingTask.promise;
+      signal?.throwIfAborted();
       const pages: string[] = [];
       for (let number = 1; number <= document.numPages; number++) {
         signal?.throwIfAborted();
-        const content = await (await document.getPage(number)).getTextContent();
+        const page = await document.getPage(number);
+        signal?.throwIfAborted();
+        const content = await page.getTextContent();
         signal?.throwIfAborted();
         pages.push(
           content.items
@@ -285,9 +290,10 @@ async function extractPdf(
       return pages.join("\n");
     } finally {
       await loadingTask.destroy();
+      signal?.throwIfAborted();
     }
   } catch (error) {
-    if (signal?.aborted) throw error;
+    signal?.throwIfAborted();
     throw new Error(`Cannot extract text from knowledge base PDF: ${path}`, {
       cause: error,
     });

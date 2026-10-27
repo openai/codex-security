@@ -1,5 +1,5 @@
 import { requestMetadata } from "./support/request-metadata.js";
-import { nodeCommand } from "./support/shell.js";
+import { nodeCommand, runCommand } from "./support/shell.js";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
@@ -451,11 +451,28 @@ describe("CodexSecurity orchestration", () => {
     let scansStarted = 0;
     const deepScanConfigPaths = new Set<string>();
     const concurrentScans = Promise.withResolvers<void>();
+    const inheritedOptIn = Object.defineProperty(
+      {},
+      "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
+      { value: "1", enumerable: false, writable: true },
+    );
 
     const clients = await Promise.all(
-      [0, 1].map(async (index) => {
+      [
+        {},
+        {
+          CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS:
+            process.platform === "win32" ? undefined : "0",
+          Codex_Security_Enable_External_Imports: "1",
+        },
+      ].map(async (overrides, index) => {
         const scanDir = join(root, `parallel-scan-${index}`);
         await mkdir(scanDir, { mode: 0o700 });
+        const environment: NodeJS.ProcessEnv = Object.assign(
+          Object.create(inheritedOptIn),
+          { CODEX_HOME: ambientHome, CODEX_SECURITY_STATE_DIR: stateDirectory },
+          overrides,
+        );
         return new TestClient(
           {
             pluginPath: PLUGIN_ROOT,
@@ -464,10 +481,7 @@ describe("CodexSecurity orchestration", () => {
             },
           },
           {
-            environment: {
-              CODEX_HOME: ambientHome,
-              CODEX_SECURITY_STATE_DIR: stateDirectory,
-            },
+            environment,
             resolvePluginPython: async () => "/managed/python",
             prepareOutputDir: async () => scanDir,
             repositoryRevision: async () => "deadbeef",
@@ -500,6 +514,15 @@ describe("CodexSecurity orchestration", () => {
                   workers: index + 2,
                 });
                 await concurrentScans.promise;
+                const child = await runCommand(
+                  nodeCommand().command,
+                  ["-p", "process.env.CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS"],
+                  { env: options.env },
+                );
+                expect(child.status, child.stderr).toBe(0);
+                expect(child.stdout.trim()).toBe(
+                  String(environment["CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS"]),
+                );
                 const after = parseToml(
                   await readFile(deepScanConfigPath!, "utf8"),
                 );
@@ -518,7 +541,11 @@ describe("CodexSecurity orchestration", () => {
       const results = await Promise.allSettled(
         clients.map((client, index) =>
           client
-            .run(repository, { mode: "deep", workers: index + 2 })
+            .run(repository, {
+              mode: "deep",
+              workers: index + 2,
+              auth: index === 0 ? "chatgpt" : "auto",
+            })
             .finally(concurrentScans.resolve),
         ),
       );

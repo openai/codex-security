@@ -8,6 +8,84 @@ import { listLocalExternalFindings } from "../src/external-findings-local.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 
+test("requires opt-in before reading the source file", async () => {
+  const fixture = await localFindingsFixture();
+  try {
+    const environment: NodeJS.ProcessEnv = { ...fixture.environment };
+    delete environment["CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS"];
+    let workbenchCalls = 0;
+    await expect(
+      prepareLocalExternalImport(
+        join(fixture.root, "missing-findings.json"),
+        {
+          repository: fixture.repository,
+          provider: "wiz",
+          sourceKey: "example-project/main",
+        },
+        {
+          environment,
+          runWorkbench: async () => {
+            workbenchCalls++;
+            throw new Error("Disabled imports must not access the workbench");
+          },
+        },
+      ),
+    ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
+    expect(workbenchCalls).toBe(0);
+    await expect(access(fixture.stateDirectory)).rejects.toThrow();
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("a file import rechecks the selected workbench opt-in after reading", async () => {
+  const f = await localFindingsFixture();
+  try {
+    const file = join(f.root, "report.json");
+    await writeFile(
+      file,
+      JSON.stringify([
+        {
+          source_finding_id: "example",
+          evidence: { title: "Example finding", severity: "high" },
+        },
+      ]),
+    );
+    const selection = {
+      repository: f.repository,
+      provider: "wiz" as const,
+      sourceKey: "example",
+    };
+    class Workbench {
+      get environment() {
+        return { ...f.environment, HOME: f.root, USERPROFILE: f.root };
+      }
+    }
+    const prepared = await prepareLocalExternalImport(
+      file,
+      { ...selection, repository: "~/repository" },
+      new Workbench(),
+    );
+    expect(prepared.preview.repository).toBe(f.repository);
+
+    const dependencies = { environment: { ...f.environment } };
+    const pending = prepareLocalExternalImport(file, selection, dependencies);
+    const disabledState = join(f.root, "disabled-state");
+    dependencies.environment = {
+      ...f.environment,
+      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "0",
+      CODEX_SECURITY_STATE_DIR: disabledState,
+    };
+    await expect(pending).rejects.toThrow(
+      "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1",
+    );
+    await expect(access(f.stateDirectory)).rejects.toThrow();
+    await expect(access(disabledState)).rejects.toThrow();
+  } finally {
+    await f.dispose();
+  }
+});
+
 test("cancels preparation while the source file read is pending", async () => {
   const fixture = await localFindingsFixture();
   try {

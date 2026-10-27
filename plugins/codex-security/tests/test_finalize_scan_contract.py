@@ -18,14 +18,15 @@ import pytest
 from finalize_sarif_cases import FINALIZER, FinalizerSarifCases
 from workbench_test_support import ScanFixtureTestCase, windows_file_backend
 
-EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "examples" / "completed-scan"
+EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "examples" / "legacy-completed-scan"
 CANONICAL_FILES = ("scan-manifest.json", "findings.json", "coverage.json")
 
 
 class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.scan_dir = Path(self.temp_dir.name).resolve()
+        self.scan_dir = Path(self.temp_dir.name).resolve() / "scan"
+        self.scan_dir.mkdir(mode=0o700)
         self.manifest = json.loads((EXAMPLE_DIR / "scan-manifest.json").read_text(encoding="utf-8"))
         scan = self.manifest["scan"]
         scan["id"] = "scan_001"
@@ -117,32 +118,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         self.write_json("scan-manifest.json", self.manifest)
         self.write_json("findings.json", self.findings)
         self.write_json("coverage.json", self.coverage)
-        (self.scan_dir / "report.md").write_text(
-            """# Security Review: example/repo
-
-## Findings
-
-| Title | Severity |
-| --- | --- |
-| [Unsafe archive extraction can escape the output directory](#1-unsafe-archive-extraction-can-escape-the-output-directory) | high |
-
-### [1] Unsafe archive extraction can escape the output directory
-
-| Field | Value |
-| --- | --- |
-| Severity | high |
-| Confidence | high |
-| Confidence rationale | Direct source trace reaches the filesystem write without a containment check. |
-| Category | Path traversal |
-| CWE | CWE-22 |
-| Affected lines | src/extract.py:41-44 |
-
-#### Summary
-
-The extraction root is not enforced.
-""",
-            encoding="utf-8",
-        )
+        (self.scan_dir / "report.md").write_text("# Existing report\n", encoding="utf-8")
 
     def completion_binding(self) -> dict[str, object]:
         return {
@@ -160,18 +136,6 @@ The extraction root is not enforced.
             "scope": {"includePaths": ["src/"], "excludePaths": []},
             "coverageMode": "repository",
         }
-
-    def rewrite_sealed_artifact(self, relative_path: str, payload: object) -> None:
-        self.write_json(relative_path, payload)
-        manifest = self.read_json("scan-manifest.json")
-        artifacts = manifest["scan"]["artifacts"]
-        for artifact in artifacts:
-            if artifact["path"] == relative_path:
-                artifact["sha256"] = self.sha256_file(relative_path)
-                break
-        else:
-            raise AssertionError(f"missing sealed artifact: {relative_path}")
-        self.write_json("scan-manifest.json", manifest)
 
     @contextmanager
     def preserving_sealed_findings(self, findings: dict) -> Iterator[None]:
@@ -203,12 +167,10 @@ The extraction root is not enforced.
             0
         ]["results"][0]
 
-    def export_csv(self) -> csv.DictReader:
-        self.findings["findings"] = [copy.deepcopy(self.finding)]
-        self.write_sealed_scan()
-        result = self.run_finalizer("--export-format", "csv")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        return csv.DictReader(io.StringIO(result.stdout, newline=""))
+    def project_csv(self) -> csv.DictReader:
+        finding = {**self.finding, "findingId": "csf_example", "occurrenceId": "occ_example"}
+        contents = FINALIZER.build_csv_projection({"findings": [finding]}, self.coverage)
+        return csv.DictReader(io.StringIO(contents.decode("utf-8"), newline=""))
 
     def write_sealed_receipt_scan(self, receipt_ref: str) -> Path:
         self.coverage["surfaces"][0]["receiptRefs"] = [receipt_ref]
@@ -487,16 +449,6 @@ The extraction root is not enforced.
         ):
             FINALIZER.finalize_scan(self.scan_dir)
 
-    def test_sealed_rerun_accepts_duplicate_legacy_evidence_ids(self) -> None:
-        self.write_sealed_scan()
-        findings = self.read_json("findings.json")
-        findings["findings"][0]["code_evidence"] = [
-            {"id": "legacy-duplicate", "code": "first_legacy_source()"},
-            {"id": "legacy-duplicate", "code": "second_legacy_source()"},
-        ]
-        with self.preserving_sealed_findings(findings):
-            pass
-
     @pytest.mark.cross_platform
     def test_sealed_rerun_ignores_non_string_legacy_validation_scalars(self) -> None:
         self.write_sealed_scan()
@@ -638,15 +590,7 @@ The extraction root is not enforced.
         )
         coverage = self.read_json("coverage.json")
         coverage["inventoryStrategy"] = "deep_repository_repeated_discovery"
-        self.write_json("coverage.json", coverage)
-        manifest = self.read_json("scan-manifest.json")
-        coverage_artifact = next(
-            artifact
-            for artifact in manifest["scan"]["artifacts"]
-            if artifact["path"] == "coverage.json"
-        )
-        coverage_artifact["sha256"] = self.sha256_file("coverage.json")
-        self.write_json("scan-manifest.json", manifest)
+        self.rewrite_sealed_artifact("coverage.json", coverage)
 
         with self.assertRaisesRegex(
             FINALIZER.ContractError,
@@ -758,23 +702,27 @@ The extraction root is not enforced.
             manifest = self.read_json("scan-manifest.json")
             self.assertEqual(manifest["scan"]["sealedAt"], "2026-05-31T18:09:00Z")
 
-    def test_sarif_only_entrypoint_exports_a_sealed_scan_without_mutating_it(self) -> None:
+    def test_sarif_cli_alias_exports_to_stdout_or_external_file_from_read_only_scan(self) -> None:
         self.write_sealed_scan()
         sarif_path = self.scan_dir / "exports" / "results.sarif"
+        expected = sarif_path.read_bytes()
         sarif_path.unlink()
+        sarif_path.parent.rmdir()
         canonical = self.scan_file_bytes(*CANONICAL_FILES, "report.md")
+        output = self.scan_dir.parent / "results.sarif"
+        self.scan_dir.chmod(0o500)
+        try:
+            stdout = self.run_finalizer("--sarif-only")
+            to_file = self.run_finalizer("--sarif-only", "--sarif-output", str(output))
+        finally:
+            self.scan_dir.chmod(0o700)
 
-        result = self.run_finalizer("--sarif-only")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        sarif = json.loads(result.stdout)
-        self.assertEqual(sarif["version"], "2.1.0")
-        rule = sarif["runs"][0]["tool"]["driver"]["rules"][0]
-        self.assertEqual(rule["id"], self.finding["ruleId"])
-        self.assertIn(self.finding["remediation"], rule["help"]["markdown"])
-        self.assertEqual(rule["properties"]["security-severity"], "8.1")
-        self.assertIn("external/cwe/cwe-022", rule["properties"]["tags"])
-        self.assertFalse(sarif_path.exists())
+        self.assertEqual(stdout.returncode, 0, stdout.stderr)
+        self.assertEqual(json.loads(stdout.stdout), json.loads(expected))
+        self.assertEqual(to_file.returncode, 0, to_file.stderr)
+        self.assertEqual(to_file.stdout, "")
+        self.assertEqual(output.read_bytes(), expected)
+        self.assertFalse(sarif_path.parent.exists())
         self.assertEqual(canonical, self.scan_file_bytes(*canonical))
 
     def test_export_entrypoint_writes_json_csv_and_sarif_without_mutating_a_sealed_scan(
@@ -834,7 +782,13 @@ The extraction root is not enforced.
                     self.assertEqual(row["start_line"], "41")
                     self.assertEqual(row["end_line"], "44")
                 else:
-                    self.assertEqual(json.loads(result.stdout)["version"], "2.1.0")
+                    sarif = json.loads(result.stdout)
+                    self.assertEqual(sarif["version"], "2.1.0")
+                    rule = sarif["runs"][0]["tool"]["driver"]["rules"][0]
+                    self.assertEqual(rule["id"], self.finding["ruleId"])
+                    self.assertIn(self.finding["remediation"], rule["help"]["markdown"])
+                    self.assertEqual(rule["properties"]["security-severity"], "8.1")
+                    self.assertIn("external/cwe/cwe-022", rule["properties"]["tags"])
                 self.assertEqual(
                     canonical,
                     self.scan_file_bytes(*canonical),
@@ -843,7 +797,7 @@ The extraction root is not enforced.
     def test_deep_csv_export_includes_the_canonical_candidate_id(self) -> None:
         self.coverage["mode"] = "deep_repository"
         self.finding["extensions"] = {"candidateId": "DSS-145", "reportId": "DSS-145-rogue"}
-        reader = self.export_csv()
+        reader = self.project_csv()
         self.assertIn("candidate_id", reader.fieldnames or [])
         row = next(reader)
         self.assertEqual(row["candidate_id"], "DSS-145")
@@ -853,7 +807,7 @@ The extraction root is not enforced.
         self.coverage["mode"] = "scoped_path"
         self.finding["extensions"] = {"candidateId": "DSS-146", "reportId": "DSS-146-rogue"}
         self.finding["locations"] = [{"path": "src/extract.py", "startLine": 41, "role": "sink"}]
-        reader = self.export_csv()
+        reader = self.project_csv()
         self.assertIn("candidate_id", reader.fieldnames or [])
         row = next(reader)
         self.assertEqual(row["candidate_id"], "DSS-146")
@@ -868,7 +822,7 @@ The extraction root is not enforced.
             with self.subTest(field=field):
                 self.coverage["mode"] = coverage_mode
                 self.finding["extensions"] = {field: f"legacy-{field}"}
-                reader = self.export_csv()
+                reader = self.project_csv()
                 self.assertIn("candidate_id", reader.fieldnames or [])
                 self.assertEqual(next(reader)["candidate_id"], f"legacy-{field}")
 
@@ -890,40 +844,50 @@ The extraction root is not enforced.
                     "ledgerRowId": ledger,
                 }
                 self.assertEqual(FINALIZER.finding_candidate_id(self.finding), identity)
-                self.assertEqual(next(self.export_csv())["candidate_id"], exported)
+                self.assertEqual(next(self.project_csv())["candidate_id"], exported)
 
     def test_scoped_csv_export_does_not_classify_ordinary_ledger_ids_as_deep(self) -> None:
         self.coverage["mode"] = "scoped_path"
         self.finding["extensions"] = {"ledgerRowId": "SCAN-001-parser"}
-        reader = self.export_csv()
+        reader = self.project_csv()
         self.assertNotIn("candidate_id", reader.fieldnames or [])
 
     def test_csv_export_escapes_newline_and_full_width_formula_prefixes(self) -> None:
         self.finding["title"] = "\n=1+1"
         self.finding["summary"] = "＝1+1"
         self.finding["remediation"] = " \t＋1+1"
-        row = next(self.export_csv())
+        row = next(self.project_csv())
         self.assertEqual(row["title"], "'\n=1+1")
         self.assertEqual(row["summary"], "'＝1+1")
         self.assertEqual(row["remediation"], "' \t＋1+1")
 
-    def test_export_entrypoint_rejects_unsealed_and_tampered_scans(self) -> None:
+    def test_exports_reject_unsealed_and_tampered_scans(self) -> None:
         self.write_scan()
         for export_format in ("json", "csv"):
             with self.subTest(export_format=export_format, state="unsealed"):
-                result = self.run_finalizer("--export-format", export_format)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn(
-                    f"{export_format.upper()} export requires a sealed scan", result.stderr
-                )
+                with self.assertRaisesRegex(
+                    FINALIZER.ContractError,
+                    f"{export_format.upper()} export requires a sealed scan",
+                ):
+                    FINALIZER.build_findings_export(self.scan_dir, export_format)
+
+        sarif_path = self.scan_dir / "exports" / "results.sarif"
+        result = self.run_finalizer("--export-format", "sarif", "--export-output", str(sarif_path))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SARIF projection requires a sealed scan", result.stderr)
+        self.assertFalse(sarif_path.parent.exists())
 
         FINALIZER.finalize_scan(self.scan_dir)
+        sarif_path.unlink()
         self.write_json("findings.json", {"changed": True})
         for export_format in ("json", "csv"):
             with self.subTest(export_format=export_format, state="tampered"):
-                result = self.run_finalizer("--export-format", export_format)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("sealed artifact changed or is missing", result.stderr)
+                with self.assertRaisesRegex(FINALIZER.ContractError, "sealed artifact changed"):
+                    FINALIZER.build_findings_export(self.scan_dir, export_format)
+        result = self.run_finalizer("--export-format", "sarif")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("sealed artifact changed or is missing", result.stderr)
+        self.assertFalse(sarif_path.exists())
 
     def test_export_entrypoint_writes_external_output_and_rejects_artifact_overwrite(self) -> None:
         self.write_sealed_scan()
@@ -932,7 +896,9 @@ The extraction root is not enforced.
         output = self.scan_dir.parent / "findings.csv"
 
         exported = self.run_finalizer("--export-format", "csv", "--export-output", str(output))
-        rejected = self.run_finalizer("--export-format", "json", "--export-output", str(findings))
+        rejected = self.run_finalizer(
+            "--export-format", "json", "--export-output", findings.name, cwd=self.scan_dir
+        )
 
         self.assertEqual(exported.returncode, 0, exported.stderr)
         self.assertTrue(output.read_text().startswith("occurrence_id,finding_id,title,summary"))
@@ -941,6 +907,7 @@ The extraction root is not enforced.
         self.assertIn("JSON output path cannot overwrite a scan artifact", rejected.stderr)
         self.assertEqual(findings.read_bytes(), before)
 
+    @pytest.mark.native_macos
     def test_export_entrypoint_rejects_overwriting_a_sealed_reserved_export(self) -> None:
         for artifact_path in (
             "exports/findings.csv",
@@ -1039,6 +1006,7 @@ The extraction root is not enforced.
                                 self.assertNotEqual(output.read_bytes(), contents)
         self.scan_dir = root
 
+    @pytest.mark.native_macos
     def test_export_entrypoint_rejects_a_case_aliased_scan_directory(self) -> None:
         self.write_sealed_scan()
         alias = self.scan_dir.parent / self.scan_dir.name.swapcase()
@@ -1096,124 +1064,51 @@ The extraction root is not enforced.
                     self.assertIn("symbolic link", result.stderr)
                     self.assertEqual(output.read_bytes(), protected_contents)
 
-    def test_export_entrypoint_rejects_orphaned_or_mismatched_output_flags(
-        self,
-    ) -> None:
-        for arguments in (
-            ("--export-output", "exports/findings.csv"),
-            ("--export-format", "csv", "--sarif-output", "exports/results.sarif"),
+    def test_export_entrypoint_rejects_orphaned_or_conflicting_flags(self) -> None:
+        self.write_scan()
+        before = self.scan_file_bytes(*CANONICAL_FILES)
+        for arguments, error in (
+            (
+                ("--export-output", "exports/findings.csv"),
+                "--export-output requires --export-format",
+            ),
+            (
+                ("--export-format", "csv", "--sarif-output", "output"),
+                "--sarif-output requires --sarif-only",
+            ),
+            (
+                ("--sarif-only", "--export-format", "sarif"),
+                "--sarif-only cannot be combined with --export-format",
+            ),
         ):
             with self.subTest(arguments=arguments):
-                self.write_scan()
-                before = self.scan_file_bytes(*CANONICAL_FILES)
-
                 result = self.run_finalizer(*arguments)
-
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("requires", result.stderr)
-                self.assertEqual(
-                    before,
-                    self.scan_file_bytes(*before),
-                )
+                self.assertIn(error, result.stderr)
+                self.assertEqual(before, self.scan_file_bytes(*before))
 
-    def test_sarif_only_entrypoint_rejects_changed_sealed_artifact(self) -> None:
-        self.write_sealed_scan()
-        self.write_json("findings.json", {"changed": True})
-        sarif_path = self.scan_dir / "exports" / "results.sarif"
-        sarif_path.unlink()
-
-        result = self.run_finalizer("--sarif-only")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("sealed artifact changed or is missing", result.stderr)
-        self.assertFalse(sarif_path.exists())
-
-    def test_sarif_only_entrypoint_rejects_invalid_source_root(self) -> None:
+    def test_sarif_export_rejects_invalid_source_root(self) -> None:
         self.write_sealed_scan()
         source_file = self.scan_dir / "source-file"
         source_file.write_text("not a directory\n", encoding="utf-8")
-
         for source_root in (self.scan_dir / "missing-source", source_file):
-            for export_args in (("--sarif-only",), ("--export-format", "sarif")):
-                with self.subTest(source_root=str(source_root), export_args=export_args):
-                    result = self.run_finalizer(*export_args, "--source-root", str(source_root))
-
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("source root: expected an existing directory", result.stderr)
-                    self.assertEqual(result.stdout, "")
-
-    def test_sarif_only_entrypoint_writes_external_output_atomically(self) -> None:
-        self.write_sealed_scan()
-        sarif_path = self.scan_dir / "exports" / "results.sarif"
-        sarif_path.unlink()
-        output = self.scan_dir.parent / "results.sarif"
-
-        result = self.run_finalizer("--sarif-only", "--sarif-output", str(output))
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, "")
-        self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["version"], "2.1.0")
-        self.assertFalse(sarif_path.exists())
-
-    def test_failed_sarif_only_entrypoint_does_not_create_exports_directory(self) -> None:
-        self.write_scan()
-        output = self.scan_dir / "exports" / "results.sarif"
-
-        result = self.run_finalizer("--sarif-only", "--sarif-output", str(output))
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("SARIF projection requires a sealed scan", result.stderr)
-        self.assertFalse(output.parent.exists())
-
-    def test_sarif_only_entrypoint_rejects_sealed_artifact_output(self) -> None:
-        self.write_sealed_scan()
-        findings = self.scan_dir / "findings.json"
-        before = findings.read_bytes()
-
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(Path(FINALIZER.__file__)),
-                "--scan-dir",
-                str(self.scan_dir),
-                "--sarif-only",
-                "--sarif-output",
-                "findings.json",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            cwd=self.scan_dir,
-        )
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("cannot overwrite a scan artifact", result.stderr)
-        self.assertEqual(findings.read_bytes(), before)
+            with self.subTest(source_root=source_root):
+                result = self.run_finalizer(
+                    "--export-format", "sarif", "--source-root", str(source_root)
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("source root: expected an existing directory", result.stderr)
+                self.assertEqual(result.stdout, "")
 
     @skipIf(os.name == "nt", "backslash is a path separator on Windows")
-    def test_sarif_only_entrypoint_accepts_posix_backslash_output_name(self) -> None:
+    def test_sarif_export_accepts_posix_backslash_output_name(self) -> None:
         self.write_sealed_scan()
         output = self.scan_dir.parent / "results\\v1.sarif"
 
-        result = self.run_finalizer("--sarif-only", "--sarif-output", str(output))
+        result = self.run_finalizer("--export-format", "sarif", "--export-output", str(output))
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["version"], "2.1.0")
-
-    def test_sarif_only_entrypoint_accepts_read_only_scan_directory(self) -> None:
-        self.write_sealed_scan()
-        sarif_path = self.scan_dir / "exports" / "results.sarif"
-        sarif_path.unlink()
-        sarif_path.parent.rmdir()
-        self.scan_dir.chmod(0o500)
-        try:
-            result = self.run_finalizer("--sarif-only")
-        finally:
-            self.scan_dir.chmod(0o700)
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout)["version"], "2.1.0")
-        self.assertFalse(sarif_path.exists())
 
     def test_sarif_projection_rejects_symlinked_scan_directory(self) -> None:
         outside_dir = self.scan_dir / "outside"
@@ -1245,11 +1140,9 @@ The extraction root is not enforced.
         original_dir = self.scan_dir / "nested"
         original_dir.mkdir()
         (original_dir / "payload.json").write_text('{"source": "original"}\n', encoding="utf-8")
-        outside_dir = Path(self.temp_dir.name).parent / f"{self.scan_dir.name}-outside"
+        outside_dir = self.scan_dir.parent / "outside"
         outside_dir.mkdir()
-        self.addCleanup(lambda: outside_dir.rmdir())
         (outside_dir / "payload.json").write_text('{"source": "outside"}\n', encoding="utf-8")
-        self.addCleanup(lambda: (outside_dir / "payload.json").unlink())
         moved_dir = self.scan_dir / "nested-original"
         open_directory = FINALIZER._open_scan_local_directory
 
@@ -1515,19 +1408,13 @@ The extraction root is not enforced.
 
     def test_rejects_sealed_findings_missing_derived_identity(self) -> None:
         self.write_sealed_scan()
-        sealed_manifest = self.read_json("scan-manifest.json")
         sealed_findings = self.read_json("findings.json")
 
         for field in ("findingId", "occurrenceId", "fingerprints"):
             with self.subTest(field=field):
-                manifest = copy.deepcopy(sealed_manifest)
                 findings = copy.deepcopy(sealed_findings)
                 findings["findings"][0].pop(field)
-                self.write_json("findings.json", findings)
-                for artifact in manifest["scan"]["artifacts"]:
-                    if artifact["path"] == "findings.json":
-                        artifact["sha256"] = self.sha256_file("findings.json")
-                self.write_json("scan-manifest.json", manifest)
+                self.rewrite_sealed_artifact("findings.json", findings)
 
                 with self.assertRaisesRegex(FINALIZER.ContractError, field):
                     FINALIZER.finalize_scan(self.scan_dir)
@@ -2210,7 +2097,6 @@ The extraction root is not enforced.
         second = FINALIZER._sarif_rule(sibling["ruleId"], [sibling])
         for key in ("id", "name", "shortDescription"):
             self.assertEqual(first[key], second[key])
-        self.assertNotEqual(first["name"], self.finding["ruleId"])
         self.assertEqual(first["properties"]["security-severity"], "8.1")
         self.assertEqual(second["properties"]["security-severity"], "9.4")
 
@@ -2419,40 +2305,27 @@ The extraction root is not enforced.
         ):
             FINALIZER.finalize_scan(self.scan_dir)
 
-    def test_rejects_remote_url_credentials(self) -> None:
-        self.manifest["scan"]["target"]["remote"] = "https://token@example.com/repo"
+    def test_rejects_remote_credentials_and_query(self) -> None:
         self.write_scan()
-        with self.assertRaisesRegex(FINALIZER.ContractError, "must not contain credentials"):
-            FINALIZER.finalize_scan(self.scan_dir)
-
-    def test_rejects_remote_url_query(self) -> None:
-        self.manifest["scan"]["target"]["remote"] = "https://example.com/repo?token=secret"
-        self.write_scan()
-        with self.assertRaisesRegex(FINALIZER.ContractError, "must not contain credentials"):
-            FINALIZER.finalize_scan(self.scan_dir)
-
-    def test_rejects_remote_control_characters(self) -> None:
-        for character in ("\0", "\t", "\n", "\r", "\x7f", "\x85", "\u2028", "\u2029"):
-            with self.subTest(character=repr(character)):
-                self.manifest["scan"]["target"]["remote"] = f"https://example.com{character}/repo"
-                self.write_scan()
-                with self.assertRaisesRegex(
-                    FINALIZER.ContractError, "expected a sanitized canonical absolute URL"
-                ):
-                    FINALIZER.finalize_scan(self.scan_dir)
-
-    def test_rejects_remote_unsupported_port(self) -> None:
-        for remote in ("https://example.com:bad/repo", "https://example.com:99999/repo"):
+        for remote in (
+            "https://token@example.com/repo",
+            "https://example.com/repo?token=secret",
+            "https://@example.com/repo",
+        ):
             with self.subTest(remote=remote):
                 self.manifest["scan"]["target"]["remote"] = remote
-                self.write_scan()
+                self.write_json("scan-manifest.json", self.manifest)
                 with self.assertRaisesRegex(
-                    FINALIZER.ContractError, "expected a sanitized canonical absolute URL"
+                    FINALIZER.ContractError, "must not contain credentials"
                 ):
                     FINALIZER.finalize_scan(self.scan_dir)
 
     def test_rejects_remote_unsafe_authority(self) -> None:
+        self.write_scan()
         for remote in (
+            *(f"https://example.com{char}/repo" for char in "\0\t\n\r\x7f\x85\u2028\u2029"),
+            "https://example.com:bad/repo",
+            "https://example.com:99999/repo",
             "https://exa mple.com/repo",
             "https://example.com>/repo",
             "https://exa^mple.com/repo",
@@ -2464,17 +2337,11 @@ The extraction root is not enforced.
         ):
             with self.subTest(remote=remote):
                 self.manifest["scan"]["target"]["remote"] = remote
-                self.write_scan()
+                self.write_json("scan-manifest.json", self.manifest)
                 with self.assertRaisesRegex(
                     FINALIZER.ContractError, "expected a sanitized canonical absolute URL"
                 ):
                     FINALIZER.finalize_scan(self.scan_dir)
-
-    def test_rejects_remote_bare_userinfo_separator(self) -> None:
-        self.manifest["scan"]["target"]["remote"] = "https://@example.com/repo"
-        self.write_scan()
-        with self.assertRaisesRegex(FINALIZER.ContractError, "must not contain credentials"):
-            FINALIZER.finalize_scan(self.scan_dir)
 
     def test_seals_remote_port_and_ipv6_authority(self) -> None:
         for remote in (

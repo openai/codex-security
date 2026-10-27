@@ -163,7 +163,7 @@ test("exports fingerprints and only signals readiness after a successful export"
 
 test("retains selected reports without copying raw state or credentials", () => {
   const collect = steps.find((step) => step.name === "stageReports")!;
-  const reports = ["coverage.json", "findings.json", "report.md"];
+  const reports = ["findings.json", "report.md", "scan-manifest.json"];
   const result = runStep(collect, {}, [
     ...reports,
     "auth.json",

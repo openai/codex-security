@@ -30,6 +30,32 @@ import {
 } from "./scan-identity-recovery-fixture.ts";
 
 const execFileAsync = promisify(execFile);
+const savedWorker = (root: string) => ({
+  id: "reviewer",
+  kind: "discovery",
+  status: "canceled",
+  artifact_dir: root,
+  result_manifest_path: null,
+  attempt: 1,
+});
+
+const checkpointName = (input: unknown) =>
+  createHash("sha256").update(JSON.stringify(input)).digest("hex") + ".json";
+
+async function saveCheckpointAt(
+  writer: DraftFixture,
+  draft: ReturnType<DraftFixture["draft"]>,
+  time: number,
+) {
+  await draftApi.saveScanDraftCheckpoint(writer.context, draft, false);
+  const { handoffClaimToken: _claim, ...snapshot } = draft;
+  await utimes(
+    path.join(writer.root, "checkpoints", checkpointName(snapshot)),
+    time,
+    time,
+  );
+}
+
 const variants = {
   provenance: [
     finding("Synthetic review", {
@@ -369,37 +395,35 @@ for (const [label, metadata, count] of [
 }
 
 for (const layout of ["standard", "diff", "deep"] as const) {
-  for (const [label, candidateId] of Object.entries({
-    bom: "\ufeff",
-    nextLine: "\u0085",
-    controlSeparators: "\u001c\u001f",
-    spaces: " \u00a0\u2003\u3000",
-  })) {
-    test(`${layout}: ${label} candidate metadata matches recovered identity`, async (t) => {
-      const normal = await fixture(t, layout);
-      const recovered = await fixture(t, layout);
-      const findings = [
-        finding("Synthetic review", {
-          provenance: { source: "local_plugin", candidateId },
-        }),
-      ];
-      await normal.write({ ...normal.draft(), findings });
-      await draftApi.saveScanDraftCheckpoint(
-        recovered.context,
-        { ...recovered.draft(), findings },
-        false,
-      );
-      const result = await recoverAndFinalize(
-        normal,
-        recovered,
-        [],
-        true,
-        true,
-      );
-      assert.deepEqual(result.recovered, result.normal);
-      assert.deepEqual(result.warnings, []);
-    });
-  }
+  test(`${layout}: Unicode whitespace candidate IDs match recovered identities`, async (t) => {
+    const normal = await fixture(t, layout);
+    const recovered = await fixture(t, layout);
+    const candidates = {
+      bom: "\ufeff",
+      "next-line": "\u0085",
+      "control-separators": "\u001c\u001f",
+      spaces: " \u00a0\u2003\u3000",
+    };
+    const findings = Object.entries(candidates).map(([label, candidateId]) =>
+      finding(label, {
+        ruleId: `fixture.${label}`,
+        provenance: { source: "local_plugin", candidateId },
+      }),
+    );
+    await normal.write({ ...normal.draft(), findings });
+    await draftApi.saveScanDraftCheckpoint(
+      recovered.context,
+      { ...recovered.draft(), findings },
+      false,
+    );
+    const result = await recoverAndFinalize(normal, recovered, [], true, true);
+    assert.deepEqual(
+      result.normal.map((row) => row.title).sort(),
+      Object.keys(candidates).sort(),
+    );
+    assert.deepEqual(result.recovered, result.normal);
+    assert.deepEqual(result.warnings, []);
+  });
 }
 
 for (const layout of ["standard", "diff", "deep"] as const) {
@@ -867,14 +891,7 @@ for (const [kind, metadata, identifier] of [
       })),
     });
     const comparison = await recoverAndFinalize(normal, recovered, [
-      {
-        id: "reviewer",
-        kind: "discovery",
-        status: "canceled",
-        artifact_dir: recoveryRoot,
-        result_manifest_path: null,
-        attempt: 1,
-      },
+      savedWorker(recoveryRoot),
     ]);
     assert.equal(
       comparison.normal.length,
@@ -976,14 +993,7 @@ for (const variant of [
         })),
       });
       const comparison = await recoverAndFinalize(normal, recovered, [
-        {
-          id: "reviewer",
-          kind: "discovery",
-          status: "canceled",
-          artifact_dir: rwroot,
-          result_manifest_path: null,
-          attempt: 1,
-        },
+        savedWorker(rwroot),
       ]);
       assert.equal(comparison.normal.length, withSibling ? 2 : 1);
       assert.deepEqual(comparison.recovered, comparison.normal);
@@ -1038,14 +1048,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
           path.join(recovered.root, "reviewer"),
           "worker",
         );
-        workers.push({
-          id: "reviewer",
-          kind: "discovery",
-          status: "canceled",
-          artifact_dir: recoveredSource.root,
-          result_manifest_path: null,
-          attempt: 1,
-        });
+        workers.push(savedWorker(recoveredSource.root));
       }
       const first = finding("First review", {
         provenance: { source: "local_plugin", candidateId: "candidate-1" },
@@ -1263,14 +1266,7 @@ for (const field of ["reportId", "ledgerRowId"]) {
       })),
     });
     const result = await recoverAndFinalize(normal, recovered, [
-      {
-        id: "reviewer",
-        kind: "discovery",
-        status: "canceled",
-        artifact_dir: recoveredRoot,
-        result_manifest_path: null,
-        attempt: 1,
-      },
+      savedWorker(recoveredRoot),
     ]);
     assert.equal(result.normal.length, 1);
     assert.equal(result.recovered.length, 1);
@@ -1412,16 +1408,7 @@ test("deep: refined candidate retains independent cross-location report", async 
   const result = await recoverAndFinalize(
     normal,
     recovered,
-    [
-      {
-        id: "reviewer",
-        kind: "discovery",
-        status: "canceled",
-        artifact_dir: recoveredRoot,
-        result_manifest_path: null,
-        attempt: 1,
-      },
-    ],
+    [savedWorker(recoveredRoot)],
     true,
   );
 
@@ -1597,8 +1584,6 @@ for (const authored of [false, true]) {
   });
 }
 
-const checkpointName = (input: unknown) =>
-  createHash("sha256").update(JSON.stringify(input)).digest("hex") + ".json";
 for (const order of ["earlier-first", "later-first"]) {
   for (const metadata of ["extensions", "provenance"] as const) {
     for (const initialLevel of ["low", "high"]) {
@@ -1636,16 +1621,7 @@ for (const order of ["earlier-first", "later-first"]) {
         );
         for (const [index, draft] of [oldDraft, newDraft].entries()) {
           await worker.write(draft);
-          await draftApi.saveScanDraftCheckpoint(
-            recoveryWorker.context,
-            draft,
-            false,
-          );
-          await utimes(
-            path.join(recoveredRoot, "checkpoints", checkpointName(draft)),
-            100 + index * 100,
-            100 + index * 100,
-          );
+          await saveCheckpointAt(recoveryWorker, draft, 100 + index * 100);
         }
         const saved = JSON.parse(
           await readFile(path.join(normalRoot, "result.json"), "utf8"),
@@ -1664,16 +1640,7 @@ for (const order of ["earlier-first", "later-first"]) {
         const result = await recoverAndFinalize(
           normal,
           recovered,
-          [
-            {
-              id: "reviewer",
-              kind: "discovery",
-              status: "canceled",
-              artifact_dir: recoveredRoot,
-              result_manifest_path: null,
-              attempt: 1,
-            },
-          ],
+          [savedWorker(recoveredRoot)],
           true,
         );
         assert.deepEqual(result.warnings, []);
@@ -1833,15 +1800,6 @@ for (const authored of [false, true]) {
   });
 }
 
-const savedWorker = (root: string) => ({
-  id: "reviewer",
-  kind: "discovery",
-  status: "canceled",
-  artifact_dir: root,
-  result_manifest_path: null,
-  attempt: 1,
-});
-
 for (const metadata of ["provenance", "extensions"] as const) {
   for (const shape of ["shared siblings", "reportId", "ledgerRowId"]) {
     test(`raw group authority preserves ${shape} with ${metadata} candidates`, async (t) => {
@@ -1929,13 +1887,7 @@ for (const layout of ["standard", "diff", "deep"] as const) {
       };
       const update = { ...normal.draft(), findings: [revised] };
       await normal.write(update);
-      await draftApi.saveScanDraftCheckpoint(recovered.context, update, false);
-      const { handoffClaimToken: _claim, ...checkpoint } = update;
-      await utimes(
-        path.join(recovered.root, "checkpoints", checkpointName(checkpoint)),
-        200,
-        200,
-      );
+      await saveCheckpointAt(recovered, update, 200);
       const result = await recoverAndFinalize(
         normal,
         recovered,
@@ -1980,13 +1932,7 @@ for (const layout of ["standard", "diff"] as const) {
         saved.findings.map((row: FixtureFinding) => row.identity),
         before.findings.map((row: FixtureFinding) => row.identity),
       );
-      await draftApi.saveScanDraftCheckpoint(recovered.context, update, false);
-      const { handoffClaimToken: _claim, ...checkpoint } = update;
-      await utimes(
-        path.join(recovered.root, "checkpoints", checkpointName(checkpoint)),
-        200,
-        200,
-      );
+      await saveCheckpointAt(recovered, update, 200);
       const result = await recoverAndFinalize(
         normal,
         recovered,
@@ -2086,17 +2032,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
     for (const f of [writer, interrupted]) await f.write(terminal);
     await dateDraftFiles(recoveredRoot, 100);
     await writer.write(progress);
-    await draftApi.saveScanDraftCheckpoint(
-      interrupted.context,
-      progress,
-      false,
-    );
-    const { handoffClaimToken: _claim, ...rawProgress } = progress;
-    await utimes(
-      path.join(recoveredRoot, "checkpoints", checkpointName(rawProgress)),
-      200,
-      200,
-    );
+    await saveCheckpointAt(interrupted, progress, 200);
     if (layout === "worker") {
       const saved = JSON.parse(
         await readFile(path.join(normalRoot, "result.json"), "utf8"),
@@ -2367,17 +2303,7 @@ for (const layout of ["standard", "diff", "deep"] as const) {
         const rows = reverse ? [second, revised] : [revised, second];
         await normal.write({ ...normal.draft(), findings: rows });
         const update = { ...recovered.draft(), findings: rows };
-        await draftApi.saveScanDraftCheckpoint(
-          recovered.context,
-          update,
-          false,
-        );
-        const { handoffClaimToken: _claim, ...checkpoint } = update;
-        await utimes(
-          path.join(recovered.root, "checkpoints", checkpointName(checkpoint)),
-          200,
-          200,
-        );
+        await saveCheckpointAt(recovered, update, 200);
         const result = await recoverAndFinalize(
           normal,
           recovered,
@@ -2407,17 +2333,7 @@ for (const layout of ["standard", "diff", "deep"] as const) {
       for (const [index, rows] of [[first], [second], finalRows].entries()) {
         await normal.write({ ...normal.draft(), findings: rows });
         const update = { ...recovered.draft(), findings: rows };
-        await draftApi.saveScanDraftCheckpoint(
-          recovered.context,
-          update,
-          false,
-        );
-        const { handoffClaimToken: _claim, ...checkpoint } = update;
-        await utimes(
-          path.join(recovered.root, "checkpoints", checkpointName(checkpoint)),
-          (index + 1) * 100,
-          (index + 1) * 100,
-        );
+        await saveCheckpointAt(recovered, update, (index + 1) * 100);
       }
       const result = await recoverAndFinalize(
         normal,
@@ -2520,17 +2436,7 @@ for (const layout of ["standard", "diff", "deep"] as const) {
         const rows = reversed ? [sibling, first] : [first, sibling];
         await normal.write({ ...normal.draft(), findings: rows });
         const update = { ...recovered.draft(), findings: rows };
-        await draftApi.saveScanDraftCheckpoint(
-          recovered.context,
-          update,
-          false,
-        );
-        const { handoffClaimToken: _claim, ...checkpoint } = update;
-        await utimes(
-          path.join(recovered.root, "checkpoints", checkpointName(checkpoint)),
-          200,
-          200,
-        );
+        await saveCheckpointAt(recovered, update, 200);
         const result = await recoverAndFinalize(
           normal,
           recovered,
@@ -2575,17 +2481,7 @@ for (const layout of ["standard", "diff", "deep"] as const) {
         const rows = reversed ? [added, second] : [second, added];
         await normal.write({ ...normal.draft(), findings: rows });
         const update = { ...recovered.draft(), findings: rows };
-        await draftApi.saveScanDraftCheckpoint(
-          recovered.context,
-          update,
-          false,
-        );
-        const { handoffClaimToken: _claim, ...checkpoint } = update;
-        await utimes(
-          path.join(recovered.root, "checkpoints", checkpointName(checkpoint)),
-          200,
-          200,
-        );
+        await saveCheckpointAt(recovered, update, 200);
         const result = await recoverAndFinalize(
           normal,
           recovered,
@@ -2615,13 +2511,7 @@ for (const layout of ["standard", "diff", "deep"] as const) {
       const refined = { ...first, extensions: { [field]: "report-1" } };
       await normal.write({ ...normal.draft(), findings: [refined] });
       const update = { ...recovered.draft(), findings: [refined] };
-      await draftApi.saveScanDraftCheckpoint(recovered.context, update, false);
-      const { handoffClaimToken: _claim, ...checkpoint } = update;
-      await utimes(
-        path.join(recovered.root, "checkpoints", checkpointName(checkpoint)),
-        200,
-        200,
-      );
+      await saveCheckpointAt(recovered, update, 200);
       const result = await recoverAndFinalize(
         normal,
         recovered,
@@ -2669,16 +2559,7 @@ for (const field of ["description", "source", "version"]) {
         await readFile(path.join(workerRoot, "result.json"), "utf8"),
       );
       await normal.write({ ...normal.draft(), findings: saved.findings });
-      const workers = [
-        {
-          id: "reviewer",
-          kind: "discovery",
-          status: "canceled",
-          artifact_dir: workerRoot,
-          result_manifest_path: null,
-          attempt: 1,
-        },
-      ];
+      const workers = [savedWorker(workerRoot)];
       const result = await recoverAndFinalize(
         normal,
         recovered,
@@ -2717,16 +2598,7 @@ for (const metadata of ["extensions", "provenance"] as const) {
       saved.findings = malformedFirst ? [malformed, row] : [row, malformed];
       await writeFile(resultFile, JSON.stringify(saved));
       await utimes(resultFile, 200, 200);
-      const workers = [
-        {
-          id: "reviewer",
-          kind: "discovery",
-          status: "canceled",
-          artifact_dir: workerRoot,
-          result_manifest_path: null,
-          attempt: 1,
-        },
-      ];
+      const workers = [savedWorker(workerRoot)];
       const result = await recoverAndFinalize(
         normal,
         recovered,
@@ -2786,16 +2658,7 @@ for (const field of ["description", "source", "version"]) {
         );
         for (const [index, draft] of [oldDraft, newDraft].entries()) {
           await worker.write(draft);
-          await draftApi.saveScanDraftCheckpoint(
-            recoveryWorker.context,
-            draft,
-            false,
-          );
-          await utimes(
-            path.join(recoveredRoot, "checkpoints", checkpointName(draft)),
-            100 + index * 100,
-            100 + index * 100,
-          );
+          await saveCheckpointAt(recoveryWorker, draft, 100 + index * 100);
         }
         const saved = JSON.parse(
           await readFile(path.join(normalRoot, "result.json"), "utf8"),
@@ -2803,16 +2666,7 @@ for (const field of ["description", "source", "version"]) {
         assert.equal(saved.findings.length, 1);
         assert.equal(saved.findings[0].identity[field], "revised");
         await normal.write({ ...normal.draft(), findings: saved.findings });
-        const workers = [
-          {
-            id: "reviewer",
-            kind: "discovery",
-            status: "canceled",
-            artifact_dir: recoveredRoot,
-            result_manifest_path: null,
-            attempt: 1,
-          },
-        ];
+        const workers = [savedWorker(recoveredRoot)];
         const result = await recoverAndFinalize(
           normal,
           recovered,
@@ -2907,12 +2761,7 @@ for (const sameLocation of [false, true]) {
       await dateDraftFiles(recovered.root, 200);
       await dateDraftFiles(workerRoot, 100);
       const checkpoint = { ...worker.draft(), findings: [first, second] };
-      await draftApi.saveScanDraftCheckpoint(worker.context, checkpoint, false);
-      await utimes(
-        path.join(workerRoot, "checkpoints", checkpointName(checkpoint)),
-        300,
-        300,
-      );
+      await saveCheckpointAt(worker, checkpoint, 300);
       await normal.write({
         ...normal.draft({}, true),
         findings: [parent, second],
@@ -2920,16 +2769,7 @@ for (const sameLocation of [false, true]) {
       const result = await recoverAndFinalize(
         normal,
         recovered,
-        [
-          {
-            id: "reviewer",
-            kind: "discovery",
-            status: "canceled",
-            artifact_dir: workerRoot,
-            result_manifest_path: null,
-            attempt: 1,
-          },
-        ],
+        [savedWorker(workerRoot)],
         true,
         true,
       );
@@ -2953,14 +2793,7 @@ for (const layout of ["standard", "diff", "deep", "worker"] as const) {
         for (const root of [normalRoot, recoveredRoot]) await mkdir(root);
         normalWriter = draftFixture(normalRoot, "worker");
         recoveredWriter = draftFixture(recoveredRoot, "worker");
-        workers.push({
-          id: "reviewer",
-          kind: "discovery",
-          status: "canceled",
-          artifact_dir: recoveredRoot,
-          result_manifest_path: null,
-          attempt: 1,
-        });
+        workers.push(savedWorker(recoveredRoot));
       }
       const raw = finding("Synthetic finding", {
         identity: { anchor: "stable" },
@@ -3023,21 +2856,7 @@ for (const layout of ["standard", "diff", "deep", "worker"] as const) {
         findings: [revised],
       });
       const checkpoint = { ...recoveredWriter.draft(), findings: [revised] };
-      await draftApi.saveScanDraftCheckpoint(
-        recoveredWriter.context,
-        checkpoint,
-        false,
-      );
-      const { handoffClaimToken: _claim, ...snapshot } = checkpoint;
-      await utimes(
-        path.join(
-          recoveredWriter.root,
-          "checkpoints",
-          checkpointName(snapshot),
-        ),
-        200,
-        200,
-      );
+      await saveCheckpointAt(recoveredWriter, checkpoint, 200);
       if (layout === "worker") {
         const accepted = JSON.parse(
           await readFile(path.join(normalWriter.root, "result.json"), "utf8"),
@@ -3072,14 +2891,7 @@ for (const layout of ["standard", "diff", "deep", "worker"] as const) {
         for (const root of [normalRoot, recoveredRoot]) await mkdir(root);
         normalWriter = draftFixture(normalRoot, "worker");
         recoveredWriter = draftFixture(recoveredRoot, "worker");
-        workers.push({
-          id: "reviewer",
-          kind: "discovery",
-          status: "canceled",
-          artifact_dir: recoveredRoot,
-          result_manifest_path: null,
-          attempt: 1,
-        });
+        workers.push(savedWorker(recoveredRoot));
       }
       const first = finding(
         "First review",
@@ -3102,21 +2914,7 @@ for (const layout of ["standard", "diff", "deep", "worker"] as const) {
         findings: [revised],
       });
       const checkpoint = { ...recoveredWriter.draft(), findings: [revised] };
-      await draftApi.saveScanDraftCheckpoint(
-        recoveredWriter.context,
-        checkpoint,
-        false,
-      );
-      const { handoffClaimToken: _claim, ...snapshot } = checkpoint;
-      await utimes(
-        path.join(
-          recoveredWriter.root,
-          "checkpoints",
-          checkpointName(snapshot),
-        ),
-        200,
-        200,
-      );
+      await saveCheckpointAt(recoveredWriter, checkpoint, 200);
       if (layout === "worker") {
         const accepted = JSON.parse(
           await readFile(path.join(normalWriter.root, "result.json"), "utf8"),
@@ -3398,14 +3196,7 @@ for (const layout of ["standard", "diff", "deep", "worker"] as const) {
         for (const root of [normalRoot, recoveredRoot]) await mkdir(root);
         normalWriter = draftFixture(normalRoot, "worker");
         recoveredWriter = draftFixture(recoveredRoot, "worker");
-        workers.push({
-          id: "reviewer",
-          kind: "discovery",
-          status: "canceled",
-          artifact_dir: recoveredRoot,
-          result_manifest_path: null,
-          attempt: 1,
-        });
+        workers.push(savedWorker(recoveredRoot));
       }
       const original = finding("Synthetic historical revision", {
         identity: { anchor: "stable-report" },
@@ -3930,14 +3721,7 @@ for (const missing of [false, true]) {
       await utimes(path.join(recovered.root, "checkpoints", name), 1.5, 1.5);
     await utimes(path.join(workerRoot, "result.json"), 1, 1);
     const result = await recoverAndFinalize(normal, recovered, [
-      {
-        id: "reviewer",
-        kind: "discovery",
-        status: "canceled",
-        artifact_dir: workerRoot,
-        result_manifest_path: null,
-        attempt: 1,
-      },
+      savedWorker(workerRoot),
     ]);
     assert.equal(result.normal.length, 1);
     assert.deepEqual(result.recovered, result.normal);

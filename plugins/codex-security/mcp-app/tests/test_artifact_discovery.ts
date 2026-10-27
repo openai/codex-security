@@ -488,6 +488,11 @@ async function verifyDiffInventoryAllowsDeletedFiles() {
     return git("rev-parse", "HEAD");
   };
   git("init", "-q");
+  const metadata = [".svn/entries", "nested/.svn/entries"];
+  for (const name of [...metadata, ".svn-backup/support.ts"]) {
+    await mkdir(path.dirname(path.join(repository, name)), { recursive: true });
+    await writeFile(path.join(repository, name), "synthetic saved source\n");
+  }
   await writeFile(
     path.join(repository, "deleted.ts"),
     "one\rtwo\r\nthree\nfour",
@@ -554,6 +559,9 @@ async function verifyDiffInventoryAllowsDeletedFiles() {
       git("reset", "--hard", baseRevision);
       await rm(path.join(repository, "deleted.ts"));
       await writeFile(path.join(repository, "changed.ts"), "current\n");
+      git("rm", "--", metadata[0]!);
+      await rm(path.join(repository, metadata[1]!));
+      await rm(path.join(repository, ".svn-backup/support.ts"));
     }
     const scan: ArtifactContext = {
       ...context,
@@ -592,6 +600,23 @@ async function verifyDiffInventoryAllowsDeletedFiles() {
       path.dirname(inventory),
       "candidate_ledger.jsonl",
     );
+    if (kind === "working_tree") {
+      await record(scan, [
+        ["changed.ts", 1],
+        [".svn-backup/support.ts", 1],
+      ]);
+      for (const name of metadata) {
+        const accepted = await readFile(destination, "utf8");
+        await assert.rejects(
+          record(scan, [
+            ["changed.ts", 1],
+            [name, 1],
+          ]),
+        );
+        assert.equal(await readFile(destination, "utf8"), accepted);
+      }
+      await record(scan, sources);
+    }
     const accepted = await readFile(destination, "utf8");
     await assert.rejects(
       record(
