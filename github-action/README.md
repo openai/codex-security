@@ -1,8 +1,7 @@
 # Codex Security GitHub Action
 
 Run Codex Security scans in GitHub Actions. Scan a repository or pull request,
-check findings against a severity threshold, and export JSON, coverage, and
-SARIF reports.
+check findings against a severity threshold, and export JSON and SARIF reports.
 
 ## Quick start
 
@@ -360,7 +359,7 @@ are report-only; scanner and required reporting failures still fail the job.
 
 A completed scan means the configured analysis produced a valid result. Scope
 exclusions, deferred investigations, and other coverage notes remain in the
-coverage report; they do not create a separate scan outcome or bypass the
+review notes, they do not create a separate scan outcome or bypass the
 findings policy. Completion does not certify that every vulnerability was found.
 
 The Action follows the CLI outcome consistently:
@@ -459,7 +458,7 @@ and artifact uploads retain their existing controls.
 - **Missing SARIF uploads:** inspect `scan-status`, `report-status`, and
   `sarif-upload-ready`.
 - **Failed scans:** inspect the CLI diagnostics for execution errors. Scope
-  exclusions and deferred investigations in the coverage report do not cause
+  exclusions and deferred investigations in the review notes do not cause
   execution failures or bypass the severity policy.
 
 CLI diagnostics stream by default. Set `verbose: 'false'` for lifecycle and
@@ -547,7 +546,8 @@ All outputs are strings. An empty cost or count means unavailable, not zero.
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | `sarif-path`          | Absolute validated SARIF file path, or empty when unavailable or withheld.                                                             |
 | `json-path`           | Absolute canonical findings JSON path, or empty when unavailable or withheld.                                                          |
-| `coverage-path`       | Absolute coverage JSON path, or empty when unavailable or withheld.                                                                    |
+| `manifest-path`       | Absolute scan manifest path, including scan status and scope, or empty when unavailable or withheld.                                   |
+| `coverage-path`       | Legacy coverage JSON path. Empty for current CLI results.                                                                              |
 | `results-directory`   | Runner-local reports directory; do not upload it recursively.                                                                          |
 | `scan-status`         | completed, failed, or skipped. Completed means analysis produced a valid result. Skipped is reserved for empty diffs or dry-run.       |
 | `skip-reason`         | empty-diff or dry-run when no scan ran; otherwise empty.                                                                               |

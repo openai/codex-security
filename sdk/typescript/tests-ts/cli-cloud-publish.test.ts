@@ -664,7 +664,7 @@ describe("publish scan to Cloud", () => {
           ["scan-one", "scan-two"].map(async (name) => {
             const directory = join(root, name);
             await cp(
-              join(PLUGIN_ROOT, "examples", "completed-scan"),
+              join(PLUGIN_ROOT, "examples", "legacy-completed-scan"),
               directory,
               {
                 recursive: true,
@@ -996,7 +996,7 @@ describe("publish scan to Cloud", () => {
     }
   });
 
-  test("reuses the completed-scan picker when no directory is supplied", async () => {
+  test("reuses the legacy-completed-scan picker when no directory is supplied", async () => {
     const root = await mkdtemp(join(tmpdir(), "cloud-publish-picker-"));
     const scanDir = join(root, "completed-scan");
     try {

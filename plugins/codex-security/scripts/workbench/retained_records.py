@@ -306,7 +306,7 @@ def _recover_preserved_worker_source(
         warnings.extend(f"{relative} finding {index + 1}: {warning}" for warning in source_warnings)
     draft["findings"] = recovered_findings
     for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
-        rows = draft["coverage"].get(field)
+        rows = draft["reviewState"].get(field)
         if not isinstance(rows, list):
             continue
         for index, row in enumerate(rows):
@@ -330,7 +330,7 @@ def _recover_preserved_worker_coverage(
 ):
     discarded_coverage = False
     for field in ("surfaces", "explicitExclusions", "deferred"):
-        rows = draft["coverage"].get(field)
+        rows = draft["reviewState"].get(field)
         for row in rows if isinstance(rows, list) else []:
             if isinstance(row, dict):
                 row.setdefault("id", _saved_coverage_id(row))
@@ -338,7 +338,7 @@ def _recover_preserved_worker_coverage(
                     row.setdefault("receiptRefs", [])
     source_warnings = []
     discarded_fields = _recover_unsealed_coverage(
-        draft["coverage"],
+        draft["reviewState"],
         Path(__file__).resolve().parents[2] / "schemas",
         scan_dir,
         source_warnings,
@@ -353,7 +353,7 @@ def _recover_preserved_worker_coverage(
         "resolvedDeferred",
     }:
         discarded_coverage = True
-    for row in draft["coverage"]["deferred"]:
+    for row in draft["reviewState"]["deferred"]:
         row["workerId"] = worker_id
     warnings.extend(f"{relative}: {warning}" for warning in source_warnings)
     return discarded_coverage
@@ -539,7 +539,7 @@ def _saved_candidate_outcomes(
         }
         pending_candidates = set()
         for field in ("deferred", "surfaces"):
-            items = draft["coverage"].get(field, [])
+            items = draft["reviewState"].get(field, [])
             for item in items if isinstance(items, list) else []:
                 if isinstance(item, dict) and (
                     field == "deferred" or item.get("disposition") == "needs_follow_up"
@@ -573,7 +573,7 @@ def _saved_candidate_outcomes(
                     )
                 )
         for field in ("surfaces", "explicitExclusions"):
-            for item in _coverage_rows(draft["coverage"], field):
+            for item in _coverage_rows(draft["reviewState"], field):
                 if (
                     isinstance(item, dict)
                     and isinstance(item.get("candidateId"), str)
@@ -617,7 +617,7 @@ def _competing_rejection_receipts(outcomes, all_sources, source_surface_receipts
         and (spellings := receipt_spellings.get(Path(ref).as_posix().lower())) is not None
         and spellings != {Path(ref).as_posix()}
         for relative, draft, owner in all_sources
-        for row in _coverage_rows(draft["coverage"], "surfaces")
+        for row in _coverage_rows(draft["reviewState"], "surfaces")
         if isinstance(row, dict)
         for refs in (source_surface_receipts(relative, row),)
         if isinstance(refs, list)

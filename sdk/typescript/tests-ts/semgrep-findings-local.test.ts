@@ -1,4 +1,4 @@
-import { access, readFile, writeFile } from "node:fs/promises";
+import { access, readFile, rm, writeFile } from "node:fs/promises";
 import { gzipSync } from "node:zlib";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
@@ -16,18 +16,26 @@ import {
   semgrepJson,
   semgrepSarif,
 } from "./support/semgrep-import-fixtures.js";
+import { temporaryDirectory } from "./support/temporary-directories.js";
 
 const repositoryUrl = "https://github.com/example/project";
 const formats = ["JSON", "SARIF"] as const;
 
 function report(
   format: (typeof formats)[number],
-  message = "Synthetic finding",
-  sparse = false,
+  {
+    line = 3,
+    fingerprint = "synthetic-fingerprint",
+    message = "Synthetic finding",
+    sparse = false,
+  } = {},
 ) {
   if (format === "JSON") {
     const input = semgrepJson();
     const result = input.results[0]!;
+    result.start.line = line;
+    result.end.line = line;
+    result.extra.fingerprint = fingerprint;
     result.extra.message = message;
     if (sparse) {
       result.path = "../outside.ts";
@@ -39,6 +47,10 @@ function report(
   const input = semgrepSarif();
   const run = input.runs[0]!;
   const result = run.results[0]!;
+  const region = result.locations[0]!.physicalLocation.region;
+  region.startLine = line;
+  region.endLine = line;
+  result.fingerprints["matchBasedId/v1"] = fingerprint;
   result.message.text = message;
   if (sparse) {
     result.locations[0]!.physicalLocation.artifactLocation.uri =
@@ -48,37 +60,11 @@ function report(
   return input;
 }
 
-function reportAtLine(
-  format: (typeof formats)[number],
-  line: number,
-  fingerprint: string,
-) {
-  if (format === "JSON") {
-    const input = semgrepJson();
-    const result = input.results[0]!;
-    result.start.line = line;
-    result.end.line = line;
-    result.extra.fingerprint = fingerprint;
-    return input;
-  }
-  const input = semgrepSarif();
-  const result = input.runs[0]!.results[0]!;
-  const region = result.locations[0]!.physicalLocation.region;
-  region.startLine = line;
-  region.endLine = line;
-  result.fingerprints["matchBasedId/v1"] = fingerprint;
-  return input;
-}
-
 test("Semgrep file reader rejects malformed SARIF repository provenance", async () => {
-  const fixture = await localFindingsFixture();
+  const directory = await temporaryDirectory("semgrep-reader-");
   try {
-    const file = join(fixture.root, "semgrep.sarif");
-    const input = semgrepSarif();
-    input.runs = input.runs.map((run) => ({
-      ...run,
-      versionControlProvenance: [{ repositoryUri: 'http://""?\nX' }],
-    }));
+    const file = join(directory, "semgrep.sarif");
+    const input = sarifWithRepositories(['http://""?\nX']);
     await writeFile(file, JSON.stringify(input));
     await expect(
       readSemgrepFindings(file, { sourceRepositoryUrl: repositoryUrl }),
@@ -86,7 +72,7 @@ test("Semgrep file reader rejects malformed SARIF repository provenance", async 
       "SARIF source repository does not match the declared source repository URL.",
     );
   } finally {
-    await fixture.dispose();
+    await rm(directory, { recursive: true, force: true });
   }
 });
 
@@ -107,16 +93,22 @@ for (const suppliedFingerprint of [true, false]) {
         const fingerprint = suppliedFingerprint
           ? "synthetic-fingerprint"
           : "requires login";
-        async function importLine(line: number) {
+        async function prepareLine(line: number, message?: string) {
           await writeFile(
             file,
-            JSON.stringify(reportAtLine(format, line, fingerprint)),
+            JSON.stringify(report(format, { line, fingerprint, message })),
           );
-          return (
-            await prepareLocalExternalImport(file, options, dependencies)
-          ).import();
+          return prepareLocalExternalImport(file, options, dependencies);
         }
-        expect((await importLine(3)).counts).toEqual({
+
+        const prepared = await prepareLine(3);
+        expect(prepared.preview.findings).toHaveLength(1);
+        expect(prepared.preview.excluded).toEqual([]);
+        expect(prepared.preview.source).toEqual({
+          provider: "semgrep",
+          source_key: options.sourceKey,
+        });
+        expect((await prepared.import()).counts).toEqual({
           created: 1,
           updated: 0,
           unchanged: 0,
@@ -125,7 +117,23 @@ for (const suppliedFingerprint of [true, false]) {
           options,
           dependencies,
         );
-        expect((await importLine(9)).counts).toEqual(
+        expect(original).toMatchObject({
+          provider: "semgrep",
+          sourceKey: options.sourceKey,
+          sourceFindingId: prepared.preview.findings[0]!.source_finding_id,
+          assessment: { state: "not_assessed" },
+          version: 1,
+        });
+        expect(original!.evidence).toEqual(
+          prepared.preview.findings[0]!.evidence,
+        );
+        expect(original!.evidence).not.toHaveProperty("confidence");
+        expect(original!.evidence.locations).toEqual([
+          { path: "src/example.ts", line: 3 },
+        ]);
+
+        const next = await prepareLine(9);
+        expect((await next.import()).counts).toEqual(
           suppliedFingerprint
             ? { created: 0, updated: 1, unchanged: 0 }
             : { created: 1, updated: 0, unchanged: 0 },
@@ -160,7 +168,12 @@ for (const suppliedFingerprint of [true, false]) {
           expect(moved!.sourceFindingId).not.toBe(original!.sourceFindingId);
           expect(moved!.version).toBe(1);
         }
-        expect((await importLine(9)).counts).toEqual({
+        const repeated = await prepareLocalExternalImport(
+          file,
+          options,
+          dependencies,
+        );
+        expect((await repeated.import()).counts).toEqual({
           created: 0,
           updated: 0,
           unchanged: 1,
@@ -168,6 +181,33 @@ for (const suppliedFingerprint of [true, false]) {
         expect(await listLocalExternalFindings(options, dependencies)).toEqual(
           records,
         );
+
+        if (suppliedFingerprint) {
+          const edited = await prepareLine(9, "Updated scanner evidence");
+          expect((await edited.import()).counts).toEqual({
+            created: 0,
+            updated: 1,
+            unchanged: 0,
+          });
+          const updated = await listLocalExternalFindings(
+            options,
+            dependencies,
+          );
+          expect(updated).toHaveLength(1);
+          expect(updated[0]).toMatchObject({
+            id: original!.id,
+            sourceFindingId: original!.sourceFindingId,
+            createdAt: original!.createdAt,
+            assessment: { state: "not_assessed" },
+            version: 3,
+          });
+          expect(updated[0]!.evidence).toEqual(
+            edited.preview.findings[0]!.evidence,
+          );
+          expect(updated[0]!.evidence.description).toBe(
+            "Updated scanner evidence",
+          );
+        }
       } finally {
         await fixture.dispose();
       }
@@ -176,99 +216,15 @@ for (const suppliedFingerprint of [true, false]) {
 }
 
 test.each(formats)(
-  "Semgrep %s imports into SQLite and updates the same source finding",
-  async (format) => {
-    const fixture = await localFindingsFixture({ remote: repositoryUrl });
-    try {
-      const file = join(fixture.root, "semgrep.json");
-      const options = {
-        repository: fixture.repository,
-        provider: "semgrep" as const,
-        sourceKey: "example-project:main",
-        sourceRepositoryUrl: repositoryUrl,
-      };
-      const dependencies = { environment: fixture.environment };
-      await writeFile(file, JSON.stringify(report(format)));
-      const prepared = await prepareLocalExternalImport(
-        file,
-        options,
-        dependencies,
-      );
-      expect(prepared.preview.findings).toHaveLength(1);
-      expect(prepared.preview.excluded).toEqual([]);
-      expect(prepared.preview.source).toEqual({
-        provider: "semgrep",
-        source_key: options.sourceKey,
-      });
-      const imported = await prepared.import();
-      expect(imported.counts).toEqual({ created: 1, updated: 0, unchanged: 0 });
-
-      const [stored] = await listLocalExternalFindings(options, dependencies);
-      expect(stored).toMatchObject({
-        provider: "semgrep",
-        sourceKey: options.sourceKey,
-        sourceFindingId: prepared.preview.findings[0]!.source_finding_id,
-        evidence: prepared.preview.findings[0]!.evidence,
-        assessment: { state: "not_assessed" },
-        version: 1,
-      });
-      expect(stored!.evidence.locations).toEqual([
-        { path: "src/example.ts", line: 3 },
-      ]);
-      expect(stored!.evidence).not.toHaveProperty("confidence");
-
-      const repeated = await prepareLocalExternalImport(
-        file,
-        options,
-        dependencies,
-      );
-      expect((await repeated.import()).counts).toEqual({
-        created: 0,
-        updated: 0,
-        unchanged: 1,
-      });
-      expect(await listLocalExternalFindings(options, dependencies)).toEqual([
-        stored!,
-      ]);
-
-      await writeFile(
-        file,
-        JSON.stringify(report(format, "Updated scanner evidence")),
-      );
-      const changed = await prepareLocalExternalImport(
-        file,
-        options,
-        dependencies,
-      );
-      expect((await changed.import()).counts).toEqual({
-        created: 0,
-        updated: 1,
-        unchanged: 0,
-      });
-      const records = await listLocalExternalFindings(options, dependencies);
-      expect(records).toHaveLength(1);
-      expect(records[0]).toMatchObject({
-        id: stored!.id,
-        sourceFindingId: stored!.sourceFindingId,
-        evidence: changed.preview.findings[0]!.evidence,
-        assessment: { state: "not_assessed" },
-        version: 2,
-        createdAt: stored!.createdAt,
-      });
-      expect(records[0]!.evidence.description).toBe("Updated scanner evidence");
-    } finally {
-      await fixture.dispose();
-    }
-  },
-);
-
-test.each(formats)(
   "Semgrep %s preserves sparse evidence without inventing a repository location or assessment",
   async (format) => {
     const fixture = await localFindingsFixture({ remote: repositoryUrl });
     try {
       const file = join(fixture.root, "semgrep.json");
-      await writeFile(file, JSON.stringify(report(format, "", true)));
+      await writeFile(
+        file,
+        JSON.stringify(report(format, { message: "", sparse: true })),
+      );
       const options = {
         repository: fixture.repository,
         provider: "semgrep" as const,

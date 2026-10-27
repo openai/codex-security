@@ -96,14 +96,29 @@ test("main CI completions report independently of cutting a release", () => {
       "utf8",
     ),
   ) as {
-    on: { workflow_run: unknown };
-    jobs: { progress: { if: string; uses: string }; cut: unknown };
+    on: Record<string, unknown>;
+    jobs: {
+      progress: { if: string; uses: string };
+      cut: {
+        env: { RELEASE_SHA: string };
+        steps: { uses?: string; with?: { ref?: string } }[];
+      };
+    };
   };
-  expect(cut.on.workflow_run).toEqual({
-    workflows: ["node-ci"],
-    types: ["completed"],
-    branches: ["main"],
+  expect(cut.on).toEqual({
+    workflow_run: {
+      workflows: ["node-ci"],
+      types: ["completed"],
+      branches: ["main"],
+    },
+    workflow_dispatch: null,
   });
+  const verifiedSha = "${{ github.event.workflow_run.head_sha || github.sha }}";
+  expect(cut.jobs.cut.env.RELEASE_SHA).toBe(verifiedSha);
+  expect(
+    cut.jobs.cut.steps.find(({ uses }) => uses?.startsWith("actions/checkout@"))
+      ?.with?.ref,
+  ).toBe(verifiedSha);
   expect(cut.jobs.progress.uses).toBe(
     "./.github/workflows/release-progress.yml",
   );

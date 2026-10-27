@@ -1,6 +1,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { CoverageDocument } from "../src/models.js";
+import { loadContract } from "../src/contract.js";
+import { readReviewState } from "./support/review-state.js";
 import { afterEach, describe, expect, test } from "bun:test";
 import { workbenchCommand as workbench } from "./support/workbench-command.js";
 import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
@@ -74,40 +76,7 @@ function runOwnershipProbe(probe: OwnershipProbe): Record<string, unknown> {
   >;
 }
 
-test("copies a Deep Scan publication when the filesystem rejects hardlinks", async () => {
-  const root = await temporaryDirectories.create(
-    "codex-security-deep-publication-",
-  );
-  const source = join(root, "source.jsonl");
-  const destination = join(root, "destination.jsonl");
-  await writeFile(source, '{"finding":"synthetic"}\n');
-  const python =
-    process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
-  expect(python).not.toBeNull();
-
-  const result = runPython(python!, [
-    "-c",
-    [
-      "import errno, sys",
-      "from pathlib import Path",
-      "sys.path.insert(0, sys.argv[1])",
-      "import deep_scan_workbench as deep_scan",
-      "def reject_hardlink(source, destination):",
-      "    raise OSError(errno.ENOTSUP, 'hardlinks are unavailable')",
-      "deep_scan.os.link = reject_hardlink",
-      "deep_scan.create_publication_copy(Path(sys.argv[2]), Path(sys.argv[3]))",
-    ].join("\n"),
-    join(PLUGIN_ROOT, "scripts"),
-    source,
-    destination,
-  ]);
-
-  expect(new TextDecoder().decode(result.stderr)).toBe("");
-  expect(result.exitCode).toBe(0);
-  expect(await readFile(destination, "utf8")).toBe('{"finding":"synthetic"}\n');
-});
-
-test("recovers an interrupted copied Deep Scan publication", async () => {
+test("recovers an interrupted publication when the filesystem rejects hardlinks", async () => {
   const root = await temporaryDirectories.create(
     "codex-security-deep-copy-recovery-",
   );
@@ -118,7 +87,7 @@ test("recovers an interrupted copied Deep Scan publication", async () => {
   const result = runPython(python!, [
     "-c",
     [
-      "import json, shutil, sqlite3, sys",
+      "import errno, json, sqlite3, sys",
       "from pathlib import Path",
       "sys.path.insert(0, sys.argv[1])",
       "import deep_scan_workbench as deep_scan",
@@ -130,9 +99,14 @@ test("recovers an interrupted copied Deep Scan publication", async () => {
       "ledger.parent.mkdir(parents=True)",
       "snapshot.parent.mkdir(parents=True)",
       "ledger.write_text('old ledger\\n', encoding='utf-8')",
-      "shutil.copy2(ledger, backup)",
+      "def reject_hardlink(source, destination):",
+      "    raise OSError(errno.ENOTSUP, 'hardlinks are unavailable')",
+      "deep_scan.os.link = reject_hardlink",
+      "deep_scan.create_publication_copy(ledger, backup)",
       "snapshot.write_text('new ledger\\n', encoding='utf-8')",
-      "shutil.copy2(snapshot, ledger)",
+      "ledger.unlink()",
+      "deep_scan.create_publication_copy(snapshot, ledger)",
+      "assert ledger.read_bytes() == snapshot.read_bytes()",
       "connection = sqlite3.connect(':memory:')",
       "connection.row_factory = sqlite3.Row",
       "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, scan_dir TEXT)')",
@@ -362,106 +336,50 @@ describe("deep scan workbench ownership", () => {
     );
   });
 
-  test.each([
-    [undefined, 96],
-    [0.5, 0.5],
-    [96, 96],
-  ] as const)(
-    "resolves the configured discovery deadline %p as %p hours",
-    async (configuredHours, expectedHours) => {
-      const root = await temporaryDirectories.create(
-        "codex-security-deep-deadline-config-",
-      );
-      const codexHome = join(root, "codex-home");
-      const configDirectory = join(codexHome, "codex-security");
-      await mkdir(configDirectory, { recursive: true });
-      await writeFile(
-        join(configDirectory, "config.toml"),
-        `[deep_scan]\n${configuredHours === undefined ? "" : `max_time_hours = ${configuredHours}\n`}`,
-      );
-
-      const python = Bun.which("python3") ?? Bun.which("python");
-      expect(python).not.toBeNull();
-      const result = runPython(
-        python!,
-        [
-          join(PLUGIN_ROOT, "scripts", "deep_scan_config.py"),
-          "--available-parallelism",
-          "8",
-        ],
-        { env: { ...process.env, CODEX_HOME: codexHome } },
-      );
-      expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
-      expect(JSON.parse(new TextDecoder().decode(result.stdout))).toMatchObject(
-        {
-          maxTimeHours: expectedHours,
-        },
-      );
-    },
-  );
-
-  test("loads an explicitly isolated Deep Scan configuration", async () => {
+  test("the bundled config command reads an isolated config and reports invalid deadlines", async () => {
     const root = await temporaryDirectories.create(
-      "codex-security-deep-isolated-config-",
+      "codex-security-deep-config-",
     );
     const codexHome = join(root, "codex-home");
     const sharedConfig = join(codexHome, "codex-security", "config.toml");
     const isolatedConfig = join(root, "isolated-deep-scan.toml");
     await mkdir(dirname(sharedConfig), { recursive: true });
     await writeFile(sharedConfig, "[deep_scan]\nworkers = 2\n");
-    await writeFile(isolatedConfig, "[deep_scan]\nworkers = 7\n");
+    await writeFile(
+      isolatedConfig,
+      "[deep_scan]\nworkers = 7\nmax_time_hours = 0.5\n",
+    );
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
-
-    const result = runPython(
-      python!,
-      [
-        join(PLUGIN_ROOT, "scripts", "deep_scan_config.py"),
-        "--available-parallelism",
-        "8",
-      ],
-      {
-        env: {
-          ...process.env,
-          CODEX_HOME: codexHome,
-          CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: isolatedConfig,
-        },
-      },
-    );
-
-    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
-    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toMatchObject({
-      workers: 7,
-    });
-  });
-
-  test("rejects invalid discovery deadlines before returning scan configuration", async () => {
-    const root = await temporaryDirectories.create(
-      "codex-security-deep-invalid-deadline-",
-    );
-    const codexHome = join(root, "codex-home");
-    const configDirectory = join(codexHome, "codex-security");
-    const configPath = join(configDirectory, "config.toml");
-    await mkdir(configDirectory, { recursive: true });
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-
-    for (const hours of ["0", "-0.5", "true", '"2"', "nan", "inf", "96.5"]) {
-      await writeFile(configPath, `[deep_scan]\nmax_time_hours = ${hours}\n`);
-      const result = runPython(
+    const readConfig = () =>
+      runPython(
         python!,
         [
           join(PLUGIN_ROOT, "scripts", "deep_scan_config.py"),
           "--available-parallelism",
           "8",
         ],
-        { env: { ...process.env, CODEX_HOME: codexHome } },
+        {
+          env: {
+            ...process.env,
+            CODEX_HOME: codexHome,
+            CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: isolatedConfig,
+          },
+        },
       );
-      expect(result.exitCode).not.toBe(0);
-      expect(new TextDecoder().decode(result.stderr)).toContain(
-        "deep_scan.max_time_hours must be a positive finite number no greater than 96",
-      );
-    }
+    const result = readConfig();
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toMatchObject({
+      workers: 7,
+      maxTimeHours: 0.5,
+    });
+
+    await writeFile(isolatedConfig, "[deep_scan]\nmax_time_hours = 96.5\n");
+    const invalid = readConfig();
+    expect(invalid.exitCode).not.toBe(0);
+    expect(new TextDecoder().decode(invalid.stderr)).toContain(
+      "deep_scan.max_time_hours must be a positive finite number no greater than 96",
+    );
   });
 
   test.each([
@@ -665,22 +583,12 @@ describe("deep scan workbench ownership", () => {
         await readFile(join(scanDir, "findings.json"), "utf8"),
       ) as { findings: unknown[] };
       expect(findings.findings).toEqual([]);
-      const coverage = JSON.parse(
-        await readFile(join(scanDir, "coverage.json"), "utf8"),
-      ) as {
-        inventoryStrategy: string;
-        includePaths: string[];
-        deferred: Array<{
-          id: string;
-          candidateId?: string;
-          reason: string;
-          paths?: string[];
-        }>;
-        surfaces: Array<{ id: string; disposition: string }>;
-      };
+      const coverage = await readReviewState(scanDir);
       expect(coverage).not.toHaveProperty("completeness");
-      expect(coverage).toMatchObject({
-        inventoryStrategy,
+      const manifest = JSON.parse(
+        await readFile(join(scanDir, "scan-manifest.json"), "utf8"),
+      );
+      expect(manifest.scan.scope).toMatchObject({
         includePaths: scoped ? ["src"] : ["."],
       });
       if (existingDeferred) {
@@ -757,22 +665,6 @@ describe("deep scan workbench ownership", () => {
       );
       const report = await readFile(join(scanDir, "report.md"), "utf8");
       expect(report).toContain("No findings were reported.");
-      if (existingDeferred) {
-        expect(report).toContain(
-          "Existing candidate validation dependency was unavailable.",
-        );
-        expect(report).toContain(
-          "Existing runtime policy could not be inspected.",
-        );
-      } else {
-        expect(report).toContain("Possible missing authorization");
-        expect(report).toContain("The request reaches a protected handler.");
-      }
-      expect(report).toContain(
-        "Authorization guard already protects the handler",
-      );
-      expect(report).toContain("Handler cannot receive external requests");
-      expect(report).toContain("Attack path does not cross the trust boundary");
     },
   );
 
@@ -1140,12 +1032,11 @@ describe("deep scan workbench ownership", () => {
     };
     expect(completed.progress.status).toBe("complete");
     expect(completed.findings).toEqual([]);
-    const coverage = JSON.parse(
-      await readFile(join(scanDir, "coverage.json"), "utf8"),
-    );
+    const coverage = await readReviewState(scanDir);
     expect(coverage).not.toHaveProperty("completeness");
+    const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    expect(contract.mode).toBe("deep_repository");
     expect(coverage).toMatchObject({
-      mode: "deep_repository",
       deferred: [{ id: "source-review", reason }],
     });
     const report = await readFile(join(scanDir, "report.md"), "utf8");

@@ -866,13 +866,16 @@ describe("CodexSecurity policy API", () => {
     }
   });
 
-  test("rejects hard-linked policy evidence before starting Codex", async () => {
-    for (const [scope, policyPath] of [
-      [".", "SECURITY.md"],
-      ["component", "SECURITY.md"],
-      [".", "child/SECURITY.md"],
-      [".", ".github/SECURITY.md"],
-    ] as const) {
+  test.each([
+    [".", "SECURITY.md", false],
+    ["component", "SECURITY.md", false],
+    [".", "child/SECURITY.md", false],
+    [".", ".github/SECURITY.md", false],
+    [".", "SECURITY.md", true],
+    ["component", "component/SECURITY.md", true],
+  ] as const)(
+    "rejects hard-linked policy evidence before starting Codex (%s, %s, ignored: %j)",
+    async (scope, policyPath, ignored) => {
       let prepared = false;
       const f = await setup({ onPrepare: () => (prepared = true) });
       policyGit(f.repository, "init", "--quiet");
@@ -880,6 +883,8 @@ describe("CodexSecurity policy API", () => {
       await mkdir(join(f.repository, scope), { recursive: true });
       await mkdir(dirname(target), { recursive: true });
       await link(join(f.repository, ".git", "config"), target);
+      if (ignored)
+        await writeFile(join(f.repository, ".gitignore"), `${policyPath}\n`);
       const options = { path: scope, outputDir: f.outputDir };
       await expect(
         f.security.preflightPolicy(f.repository, options),
@@ -891,8 +896,8 @@ describe("CodexSecurity policy API", () => {
       expect(f.threads).toHaveLength(0);
       expect(await readdir(f.outputDir)).toEqual([]);
       await f.security.close();
-    }
-  });
+    },
+  );
 
   test("rejects non-UTF-8 descendant policies before starting Codex", async () => {
     let prepared = false;

@@ -157,8 +157,8 @@ def _prepare_worker_coverage_recovery(
             for draft in parents
             for field in fields
             for row in (
-                draft["coverage"].get(field, [])
-                if isinstance(draft["coverage"].get(field, []), list)
+                draft["reviewState"].get(field, [])
+                if isinstance(draft["reviewState"].get(field, []), list)
                 else []
             )
         )
@@ -177,7 +177,7 @@ def _prepare_worker_coverage_recovery(
         if directory.name == "checkpoints":
             directory = directory.parent
         for field in fields:
-            rows = draft["coverage"].get(field, [])
+            rows = draft["reviewState"].get(field, [])
             if not isinstance(rows, list):
                 continue
             for index, row in enumerate(rows):
@@ -219,13 +219,13 @@ def _prepare_worker_coverage_recovery(
     # the existing per-worker chronology reconcile those originals exactly once.
     # Keep parent-only evidence when its bound worker source is unavailable.
     for draft in parents:
-        if not draft["coverage"]:
+        if not draft["reviewState"]:
             continue
         for field in fields:
-            rows = draft["coverage"].get(field, [])
+            rows = draft["reviewState"].get(field, [])
             if isinstance(rows, list):
                 if field == "surfaces":
-                    tasks = draft["coverage"].get("deferred", [])
+                    tasks = draft["reviewState"].get("deferred", [])
                     for row in rows:
                         if not isinstance(row, dict) or not isinstance(row.get("id"), str):
                             continue
@@ -259,7 +259,7 @@ def _prepare_worker_coverage_recovery(
                                     )
                                     for source in matching_sources
                                 )
-                draft["coverage"][field] = [
+                draft["reviewState"][field] = [
                     row
                     for row in rows
                     if _coverage_comparison_row(row, field) not in projected[field]
@@ -280,7 +280,7 @@ class SavedCoverageProjection:
             id(row): owner
             for _, draft, owner in sources
             for field in ("surfaces", "deferred")
-            for rows in (draft["coverage"].get(field, []),)
+            for rows in (draft["reviewState"].get(field, []),)
             if isinstance(rows, list)
             for row in rows
             if isinstance(row, dict)
@@ -644,7 +644,7 @@ class SavedCoverageProjection:
                 # tasks. Preserve their original links, even when the outcome changes ID
                 # or a distinct retained surface shares the old source-local ID.
                 for relative, draft, owner in all_sources:
-                    originals = draft["coverage"].get("surfaces", [])
+                    originals = draft["reviewState"].get("surfaces", [])
                     for original in originals if isinstance(originals, list) else []:
                         if (
                             not isinstance(original, dict)
@@ -686,7 +686,7 @@ class SavedCoverageProjection:
             prospective_surfaces = {}
             prospective_named = {}
             for relative, draft, owner in all_sources:
-                rows = draft["coverage"].get("surfaces", [])
+                rows = draft["reviewState"].get("surfaces", [])
                 for row in rows if isinstance(rows, list) else []:
                     if owner is None or not isinstance(row, dict):
                         continue
@@ -745,7 +745,7 @@ def prepare_saved_coverage_projection(
         id(row): ("workerId" in row, row.get("workerId"))
         for relative, draft, _ in sources
         for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions")
-        for rows in (draft["coverage"].get(field, []),)
+        for rows in (draft["reviewState"].get(field, []),)
         if isinstance(rows, list)
         for row in rows
         if isinstance(row, dict)
@@ -759,7 +759,7 @@ def prepare_saved_coverage_projection(
     )
     for _, draft, _ in sources:
         for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
-            rows = draft["coverage"].get(field, [])
+            rows = draft["reviewState"].get(field, [])
             if not isinstance(rows, list):
                 continue
             for row in rows:
@@ -781,7 +781,7 @@ def _deferred_rows(coverage: dict[str, Any]) -> list[Any]:
 def _resolved_deferred_rows(draft: dict[str, Any], schema: dict[str, Any]) -> list[dict[str, Any]]:
     if draft.get("complete") is False:
         return []
-    coverage = draft["coverage"]
+    coverage = draft["reviewState"]
     rows = coverage.get("resolvedDeferred", [])
     try:
         # Invalid closure metadata cannot discard the evidence it names.
@@ -845,9 +845,9 @@ def _merge_tied_parent_observations(
     for finding in previous["findings"]:
         if finding not in merged["findings"]:
             merged["findings"].append(copy.deepcopy(finding))
-    coverage = merged["coverage"]
+    coverage = merged["reviewState"]
     for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
-        rows = previous["coverage"].get(field, [])
+        rows = previous["reviewState"].get(field, [])
         output = coverage.setdefault(field, [])
         if isinstance(rows, list) and isinstance(output, list):
             for row in rows:

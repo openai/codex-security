@@ -83,7 +83,7 @@ test("mock scans seal real artifacts and index shared and unique findings withou
       },
     ]);
     expect(first.findings.findings).toHaveLength(12);
-    expect(first.coverage).not.toHaveProperty("completeness");
+    expect(first.review).not.toHaveProperty("status");
     expect(first.manifest.scan.status).toBe("completed");
     expect(first.manifest.scan.sealedAt).toBeTruthy();
     expect(first.turnResult["mock"]).toBe(true);
@@ -99,7 +99,8 @@ test("mock scans seal real artifacts and index shared and unique findings withou
     ).toEqual({
       manifest: first.manifest,
       findings: first.findings,
-      coverage: first.coverage,
+      review: first.review,
+      mode: first.mode,
     });
     const previousIds = new Set(
       first.findings.findings.map((finding) => finding.findingId),
@@ -220,8 +221,8 @@ test("mock scans preserve output protection and archive existing completed resul
       original,
     );
     expect(second.manifest.scan.id).not.toBe(first.manifest.scan.id);
-    expect(first.coverage.mode).toBe("scoped_path");
-    expect(first.coverage.includePaths).toEqual(["example.ts"]);
+    expect(first.manifest.scan.mode).toBe("scoped_path");
+    expect(first.manifest.scan.scope.includePaths).toEqual(["example.ts"]);
     const resumed = await client.run(repository, firstOptions);
     expect(resumed.manifest).toEqual(first.manifest);
     expect(resumed.scanDir).toBe(archive);
@@ -286,7 +287,7 @@ test("mock scans bind clean Git, committed diff, and working-tree snapshots", as
       target: DiffTarget.refs({ base: "HEAD~1" }),
     });
     expect(diff.manifest.scan.target.kind).toBe("git_diff");
-    expect(diff.coverage.mode).toBe("branch_diff");
+    expect(diff.manifest.scan.mode).toBe("branch_diff");
     await writeFile(
       join(repository, "example.ts"),
       "export const example = 3;\n",
@@ -296,7 +297,7 @@ test("mock scans bind clean Git, committed diff, and working-tree snapshots", as
       target: DiffTarget.workingTree({}),
     });
     expect(workingTree.manifest.scan.target.kind).toBe("git_diff");
-    expect(workingTree.coverage.mode).toBe("working_tree");
+    expect(workingTree.manifest.scan.mode).toBe("working_tree");
   } finally {
     await client.close();
   }

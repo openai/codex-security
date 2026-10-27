@@ -250,6 +250,11 @@ async function installPackage(
       archivePath,
     ],
     environment,
+    // Allow repeated tarball extraction within the Windows shard's 120s test budget.
+    process.platform === "win32" &&
+      Number(environment["CODEX_SECURITY_TEST_TIMEOUT_MS"]) >= 120_000
+      ? 60_000
+      : 30_000,
   );
 }
 
@@ -276,6 +281,7 @@ function runPackageCommand(
   command: string,
   args: string[],
   environment: NodeJS.ProcessEnv,
+  timeout = 30_000,
 ): Promise<{ status: number; stderr: string }> {
   return new Promise((resolve, reject) => {
     execFile(
@@ -285,7 +291,7 @@ function runPackageCommand(
         cwd: root,
         env: environment,
         encoding: "utf8",
-        timeout: 30_000,
+        timeout,
         windowsHide: true,
       },
       (error, _stdout, stderr) => {
@@ -423,31 +429,27 @@ describe("npm package tar listings", () => {
         ["level-0", gzipSync(tarBytes, { level: 0 })],
         ["sparse-0.0", gzipSync(packageTar({ readmeSparse: "0.0" }))],
         ["sparse-1.0", gzipSync(packageTar({ readmeSparse: "1.0" }))],
-        ["gnu-long-name", gzipSync(packageTar({ readmeLongName: true }))],
-        ["npm-size-field", gzipSync(packageTar({ sizeTerminator: " \0" }))],
-        ["nul-regular-file", gzipSync(packageTar({ type: 0 }))],
         [
-          "future-timestamps",
+          "gnu-long-name",
           gzipSync(
-            packageTar({ mtime: Math.floor(Date.now() / 1000) + 365 * 86400 }),
+            packageTar({
+              readmeLongName: true,
+              readmeMode: 0,
+              mtime: Math.floor(Date.now() / 1000) + 365 * 86400,
+              sizeTerminator: " \0",
+              type: 0,
+            }),
           ),
-        ],
-        ["unreadable-readme", gzipSync(packageTar({ readmeMode: 0 }))],
-        [
-          "read-only-nested-directories",
-          gzipSync(
-            packageTar({ compatibleLayout: true, directoryMode: 0o555 }),
-          ),
-        ],
-        ["posix-size-field", gzipSync(packageTar({ sizeTerminator: "\0" }))],
-        [
-          "compatible-tar-layout",
-          gzipSync(packageTar({ compatibleLayout: true })),
         ],
         [
           "read-only-directories",
           gzipSync(
-            packageTar({ compatibleLayout: true, rootDirectoryMode: 0o555 }),
+            packageTar({
+              compatibleLayout: true,
+              rootDirectoryMode: 0o555,
+              directoryMode: 0o555,
+              sizeTerminator: "\0",
+            }),
           ),
         ],
       ] as const;
@@ -652,15 +654,6 @@ describe("npm package tar listings", () => {
         ),
       );
       const native = mkdtempSync(join(root, "native-"));
-      // The wrong-long-name fixtures have no portable asset path to select.
-      const extracted = await execFileAsync(
-        "tar",
-        ["-xzf", archivePath, "-C", native, ...(wrongLongName ? [] : [path])],
-        { encoding: "buffer", timeout: 30_000, windowsHide: true },
-      );
-      expect(extracted.stderr.toString()).toBe("");
-      if (!wrongLongName)
-        expect(readFileSync(join(native, path)).equals(logo)).toBe(true);
       const contractPath = join(root, "contract.json");
       writeFileSync(
         contractPath,
@@ -674,7 +667,26 @@ describe("npm package tar listings", () => {
         npm_config_cache: join(root, "npm-cache"),
       };
       delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
-      const installed = await installPackage(root, archivePath, environment);
+      const packageCheck = checkPackage(
+        root,
+        archivePath,
+        contractPath,
+        environment,
+      );
+      // The wrong-long-name fixtures have no portable asset path to select.
+      const extraction = execFileAsync(
+        "tar",
+        ["-xzf", archivePath, "-C", native, ...(wrongLongName ? [] : [path])],
+        { encoding: "buffer", timeout: 30_000, windowsHide: true },
+      );
+      const installation = installPackage(root, archivePath, environment);
+      // All three read the same archive. Keep it until every reader exits, including on failure.
+      await Promise.allSettled([extraction, installation, packageCheck]);
+      const extracted = await extraction;
+      expect(extracted.stderr.toString()).toBe("");
+      if (!wrongLongName)
+        expect(readFileSync(join(native, path)).equals(logo)).toBe(true);
+      const installed = await installation;
       const consumer = join(root, "consumer");
       expect({
         status: installed.status,
@@ -714,12 +726,7 @@ describe("npm package tar listings", () => {
       ).toBe(compatible);
       if (overwrite)
         expect(readFileSync(installedLogo).equals(stored)).toBe(true);
-      const checked = await checkPackage(
-        root,
-        archivePath,
-        contractPath,
-        environment,
-      );
+      const checked = await packageCheck;
       expect({
         status: checked.status,
         stderr: compatible ? checked.stderr : "",

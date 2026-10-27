@@ -66,8 +66,8 @@ async function fixture() {
 
 function draft(receiptRefs: string[], extra = {}) {
   return workerDraft([], {
-    coverage: {
-      ...workerDraft([]).coverage,
+    reviewState: {
+      ...workerDraft([]).reviewState,
       surfaces: [
         {
           id: "reviewed-route",
@@ -271,7 +271,7 @@ for (const changed of ["result provenance", "checkpoint contents"] as const) {
       const resultPath = path.join(f.workerRoot, "result.json");
       if (changed === "result provenance") {
         const saved = JSON.parse(await readFile(resultPath, "utf8"));
-        saved.coverage.surfaces[0].provenance.extra =
+        saved.reviewState.surfaces[0].provenance.extra =
           "Directly authored extension";
         await writeFile(resultPath, JSON.stringify(saved));
       } else {
@@ -279,7 +279,7 @@ for (const changed of ["result provenance", "checkpoint contents"] as const) {
         for (const name of await readdir(checkpointRoot)) {
           const checkpoint = path.join(checkpointRoot, name);
           const saved = JSON.parse(await readFile(checkpoint, "utf8"));
-          saved.coverage.surfaces[0].provenance.extra = "Changed checkpoint";
+          saved.reviewState.surfaces[0].provenance.extra = "Changed checkpoint";
           await writeFile(checkpoint, JSON.stringify(saved));
         }
       }
@@ -590,7 +590,7 @@ for (const fileScope of [false, true])
               onComplete: async (draft) => {
                 receiptRefs.push(
                   ...(
-                    draft.coverage.surfaces as { receiptRefs: string[] }[]
+                    draft.reviewState.surfaces as { receiptRefs: string[] }[]
                   ).flatMap((surface) => surface.receiptRefs),
                 );
               },
@@ -628,9 +628,10 @@ test("a retained surface keeps only retained shared references and resolves new 
       f.worker,
       draft([retained, added], { notes: "Updated review." }),
     );
-    assert.deepEqual(result.coverage.surfaces[0].provenance.scanReceiptRefs, [
-      retained,
-    ]);
+    assert.deepEqual(
+      result.reviewState.surfaces[0].provenance.scanReceiptRefs,
+      [retained],
+    );
     const sources = await readDeepReductionSources(f.reducer);
     assert.deepEqual(sources.discoveries[0].coverage.surfaces[0].receiptRefs, [
       retained,
@@ -649,8 +650,8 @@ test("ambiguous saved surface IDs do not transfer shared ownership to an edited 
     await recordCodexSecurityWorkerScanDraft(f.worker, draft([ref]));
     const resultPath = path.join(f.workerRoot, "result.json");
     const previous = JSON.parse(await readFile(resultPath, "utf8"));
-    previous.coverage.surfaces.push({
-      ...previous.coverage.surfaces[0],
+    previous.reviewState.surfaces.push({
+      ...previous.reviewState.surfaces[0],
       label: "Separate review with a reused ID",
     });
     await writeFile(resultPath, JSON.stringify(previous));
@@ -833,7 +834,7 @@ for (const spelling of ["original", "returned"] as const) {
             const submitted =
               spelling === "original"
                 ? ref
-                : first.coverage.surfaces[0].receiptRefs[0];
+                : first.reviewState.surfaces[0].receiptRefs[0];
             let ownedRef = `${f.prefix}/${ref}`;
             let contents = "Original local evidence\n";
             for (const attempt of [1, 2]) {
@@ -944,7 +945,7 @@ for (const spelling of ["original", "returned"] as const) {
         draft([
           spelling === "original"
             ? ref
-            : first.coverage.surfaces[0].receiptRefs[0],
+            : first.reviewState.surfaces[0].receiptRefs[0],
         ]),
       );
       const expected = `${path.relative(f.root, archive).split(path.sep).join("/")}/${ref}`;
@@ -1000,8 +1001,8 @@ for (const disposition of ["rejected", "not_applicable"]) {
           const input = draft([ref], { disposition: next, candidateId });
           const result = await recordCodexSecurityWorkerScanDraft(f.worker, {
             ...input,
-            coverage: {
-              ...input.coverage,
+            reviewState: {
+              ...input.reviewState,
               ...(next === "needs_follow_up"
                 ? {
                     completeness: "partial",
@@ -1016,7 +1017,7 @@ for (const disposition of ["rejected", "not_applicable"]) {
                 : {}),
             },
           });
-          assert.deepEqual(result.coverage.surfaces[0].receiptRefs, [
+          assert.deepEqual(result.reviewState.surfaces[0].receiptRefs, [
             `${f.prefix}/${ref}`,
           ]);
         }

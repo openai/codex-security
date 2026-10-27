@@ -34,8 +34,13 @@ const identities = [
   ["unchanged", 2n ** 60n, 2n ** 60n],
 ] as const;
 
-for (const scenario of scenarios) {
-  for (const [kind, originalId, replacementId] of identities) {
+for (const [kind, originalId, replacementId] of identities) {
+  // Without a swap, the hooks all read the same root or parent directory.
+  const cases =
+    kind === "unchanged"
+      ? (["initial-root", "parent-retains-leaf"] as const)
+      : scenarios;
+  for (const scenario of cases) {
     const title = `checked scan directory ${scenario} preserves ${kind} identities`;
     test(title, async () => {
       if (runTestInSubprocess(import.meta.path, title)) return;

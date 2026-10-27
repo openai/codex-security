@@ -32,7 +32,7 @@ jobs:
       security-events: write
       actions: read
     env:
-      CODEX_SECURITY_VERSION: "0.6.0"
+      CODEX_SECURITY_VERSION: "0.7.0"
       BEDROCK_MODEL_ID: ${{ vars.BEDROCK_MODEL_ID }}
       # Report-only by default. Set to "high" to fail on high/critical findings.
       FAIL_ON_SEVERITY: ""
@@ -139,5 +139,5 @@ jobs:
             ${{ runner.temp }}/codex-security-result.json
             ${{ runner.temp }}/codex-security.sarif
             ${{ runner.temp }}/codex-security-scan/report.md
-            ${{ runner.temp }}/codex-security-scan/coverage.json
+            ${{ runner.temp }}/codex-security-scan/scan-manifest.json
             ${{ runner.temp }}/codex-security-scan/findings.json

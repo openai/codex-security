@@ -123,6 +123,16 @@ def test_excerpt_uses_target_relative_committed_path(tmp_path: Path) -> None:
     )
 
 
+@pytest.fixture(scope="module")
+def excerpt_repository(tmp_path_factory):
+    target = tmp_path_factory.mktemp("source-excerpts") / "target"
+    revision = initialize_git_repository(target)
+    scopes = load_script("workbench_source_scopes").capture_source_scopes(
+        target, (revision, None, 0, 0), ["."]
+    )
+    return target, revision, json.dumps(scopes)
+
+
 @pytest.mark.parametrize("captured", [False, True], ids=["legacy-scopes", "saved-scopes"])
 @pytest.mark.parametrize(
     ("mode", "kind", "expected"),
@@ -136,10 +146,9 @@ def test_excerpt_uses_target_relative_committed_path(tmp_path: Path) -> None:
     ],
 )
 def test_saved_excerpt_requires_a_known_diff_source(
-    tmp_path: Path, mode: str, kind: str | None, expected: str | None, captured: bool
+    excerpt_repository, mode: str, kind: str | None, expected: str | None, captured: bool
 ) -> None:
-    target = tmp_path / "target"
-    revision = initialize_git_repository(target)
+    target, revision, scopes_json = excerpt_repository
     scan = {
         "mode": mode,
         "diff_target_kind": kind,
@@ -147,10 +156,7 @@ def test_saved_excerpt_requires_a_known_diff_source(
         "target_snapshot_digest": None,
     }
     if captured:
-        scopes = load_script("workbench_source_scopes").capture_source_scopes(
-            target, (revision, None, 0, 0), ["."]
-        )
-        scan["source_scopes_json"] = json.dumps(scopes)
+        scan["source_scopes_json"] = scopes_json
     assert (
         load_script("workbench_source_excerpt").finding_source_excerpt(
             scan, target, [{"path": "README.md", "startLine": 1}], ["."]

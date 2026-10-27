@@ -23,9 +23,11 @@ import {
   prepareNormalizedExternalPublication,
   type ExternalPublicationProgress,
 } from "../src/external-findings-publish.js";
+import { snykRepositoryUrls } from "../src/snyk-findings.js";
 import { readGitHubFindings } from "../src/github-findings.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
 import {
+  cloudRepositoryUrlKey,
   validateExternalEvidence,
   validateImportRequest,
   validateRepositories,
@@ -61,41 +63,38 @@ const normalized = (id = "vendor-1", severity = "high") => ({
   },
 });
 
-for (const value of [undefined, "", "0", "true", " 1 "]) {
-  test(`external publication stays disabled without exact opt-in (${JSON.stringify(value)})`, async () => {
-    const root = await mkdtemp(join(tmpdir(), "external-import-disabled-"));
-    cleanups.push(() => rm(root, { recursive: true, force: true }));
-    const state = join(root, "state");
-    let sideEffects = 0;
-    const disabled = {
-      environment: {
-        CODEX_SECURITY_STATE_DIR: state,
-        CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: value,
-      },
-      credentials: async () => {
-        sideEffects++;
-        throw new Error("Unexpected credential read");
-      },
-      fetch: async () => {
-        sideEffects++;
-        throw new Error("Unexpected Cloud request");
-      },
-    };
-    // The missing path would fail differently if the file reader ran first.
-    await expect(
-      prepareExternalPublication(join(root, "missing.json"), options, disabled),
-    ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
-    await expect(
-      prepareNormalizedExternalPublication(
-        { read: 0, findings: [], excluded: [] },
-        options,
-        disabled,
-      ),
-    ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
-    expect(sideEffects).toBe(0);
-    await expect(readdir(state)).rejects.toThrow("ENOENT");
-  });
-}
+test("external publication requires opt-in before reading input or accessing Cloud", async () => {
+  const root = await mkdtemp(join(tmpdir(), "external-import-disabled-"));
+  cleanups.push(() => rm(root, { recursive: true, force: true }));
+  const state = join(root, "state");
+  let sideEffects = 0;
+  const disabled = {
+    environment: {
+      CODEX_SECURITY_STATE_DIR: state,
+    },
+    credentials: async () => {
+      sideEffects++;
+      throw new Error("Unexpected credential read");
+    },
+    fetch: async () => {
+      sideEffects++;
+      throw new Error("Unexpected Cloud request");
+    },
+  };
+  // The missing path would fail differently if the file reader ran first.
+  await expect(
+    prepareExternalPublication(join(root, "missing.json"), options, disabled),
+  ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
+  await expect(
+    prepareNormalizedExternalPublication(
+      { read: 0, findings: [], excluded: [] },
+      options,
+      disabled,
+    ),
+  ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
+  expect(sideEffects).toBe(0);
+  await expect(readdir(state)).rejects.toThrow("ENOENT");
+});
 
 test("concurrent external publications use their own opt-in environments", async () => {
   const f = await fixture();
@@ -3350,78 +3349,42 @@ async function snykRepositoryEvidence(
   };
 }
 
+const gitHubProject = "https://github.com/example/project";
+const connectedProject = "https://git.example.test/example/project";
+const tenantProject = "https://tenant.ghe.com/example/project";
+
 const snykRepositoryAliases: [string, string][] = [
-  [
-    "https://github.com/example/project.git",
-    "https://github.com/example/project",
-  ],
-  ["git@github.com:example/project.git", "https://github.com/example/project"],
-  [
-    "ssh://git@github.com/example/project.git",
-    "https://github.com/example/project",
-  ],
-  [
-    "ssh://git@github.com:22/example/project.git",
-    "https://github.com/example/project",
-  ],
-  [
-    "ssh://git@ssh.github.com:443/example/project.git",
-    "https://github.com/example/project",
-  ],
-  [
-    "git@git.example.test:example/project.git",
-    "https://git.example.test/example/project",
-  ],
-  [
-    "ssh://git@git.example.test/example/project.git",
-    "https://git.example.test/example/project",
-  ],
-  [
-    "ssh://git@git.example.test:22/example/project.git",
-    "https://git.example.test/example/project",
-  ],
-  [
-    "tenant@tenant.ghe.com:example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://tenant@tenant.ghe.com/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://tenant@tenant.ghe.com:22/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
+  ["https://github.com/example/project.git", gitHubProject],
+  ["git@github.com:example/project.git", gitHubProject],
+  ["ssh://git@github.com/example/project.git", gitHubProject],
+  ["ssh://git@github.com:22/example/project.git", gitHubProject],
+  ["ssh://git@ssh.github.com:443/example/project.git", gitHubProject],
+  ["git@git.example.test:example/project.git", connectedProject],
+  ["ssh://git@git.example.test/example/project.git", connectedProject],
+  ["ssh://git@git.example.test:22/example/project.git", connectedProject],
+  ["tenant@tenant.ghe.com:example/project.git", tenantProject],
+  ["ssh://tenant@tenant.ghe.com/example/project.git", tenantProject],
+  ["ssh://tenant@tenant.ghe.com:22/example/project.git", tenantProject],
   // Preserve the existing generic git-user aliases for connected catalog hosts.
-  [
-    "git@tenant.ghe.com:example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://git@tenant.ghe.com/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://git@tenant.ghe.com:22/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "git@GIT.EXAMPLE.TEST:example/project.git",
-    "https://git.example.test/example/project",
-  ],
-  [
-    "https://git.example.test/example/project.git",
-    "https://git.example.test/example/project",
-  ],
+  ["git@tenant.ghe.com:example/project.git", tenantProject],
+  ["ssh://git@tenant.ghe.com/example/project.git", tenantProject],
+  ["ssh://git@tenant.ghe.com:22/example/project.git", tenantProject],
+  ["git@GIT.EXAMPLE.TEST:example/project.git", connectedProject],
+  ["https://git.example.test/example/project.git", connectedProject],
 ];
 
 test.each([
-  ...snykRepositoryAliases.flatMap(([repository, destination]) =>
-    (["plugin", "SARIF"] as const).map(
-      (format) => [format, repository, destination] as const,
-    ),
-  ),
-  ["plugin", "unknown", "https://github.com/example/project"] as const,
+  [
+    "plugin",
+    "ssh://tenant@tenant.ghe.com:22/example/project.git",
+    tenantProject,
+  ] as const,
+  [
+    "SARIF",
+    "ssh://git@ssh.github.com:443/example/project.git",
+    gitHubProject,
+  ] as const,
+  ["plugin", "unknown", gitHubProject] as const,
 ])(
   "Snyk %s export imports and replays with repository remote %s",
   async (format, repository, destination) => {
@@ -3455,95 +3418,50 @@ test.each([
 
 const snykRepositoryMismatches: [string, string][] = [
   ...["\t", "\r", "\n"].flatMap((control): [string, string][] => [
-    [
-      `ssh://git@github.${control}com/example/project.git`,
-      "https://github.com/example/project",
-    ],
-    [
-      `ssh://git@github.com/example/pro${control}ject.git`,
-      "https://github.com/example/project",
-    ],
+    [`ssh://git@github.${control}com/example/project.git`, gitHubProject],
+    [`ssh://git@github.com/example/pro${control}ject.git`, gitHubProject],
     [
       `ssh://tenant@tenant.${control}ghe.com/example/project.git`,
-      "https://tenant.ghe.com/example/project",
+      tenantProject,
     ],
     [
       `ssh://tenant@tenant.ghe.com/example/pro${control}ject.git`,
-      "https://tenant.ghe.com/example/project",
+      tenantProject,
     ],
     [
       `ssh://git@ssh.github.${control}com:443/example/project.git`,
-      "https://github.com/example/project",
+      gitHubProject,
     ],
     [
       `ssh://git@ssh.github.com:443/example/pro${control}ject.git`,
-      "https://github.com/example/project",
+      gitHubProject,
     ],
   ]),
   [
     "ssh://tenant@other:synthetic@tenant.ghe.com/example/project.git",
-    "https://tenant.ghe.com/example/project",
+    tenantProject,
   ],
-  [
-    "ssh://tenant@other:@tenant.ghe.com/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://git@other:synthetic@github.com/example/project.git",
-    "https://github.com/example/project",
-  ],
-  [
-    "ssh://git@other:@github.com/example/project.git",
-    "https://github.com/example/project",
-  ],
-  [
-    "ssh://te\nnant@tenant.ghe.com/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://te\tnant@tenant.ghe.com/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://te\rnant@tenant.ghe.com/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://gi\nt@github.com/example/project.git",
-    "https://github.com/example/project",
-  ],
-  [
-    "ssh://tenant@other@tenant.ghe.com/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "other@tenant.ghe.com:example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://other@tenant.ghe.com:22/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
+  ["ssh://tenant@other:@tenant.ghe.com/example/project.git", tenantProject],
+  ["ssh://git@other:synthetic@github.com/example/project.git", gitHubProject],
+  ["ssh://git@other:@github.com/example/project.git", gitHubProject],
+  ["ssh://te\nnant@tenant.ghe.com/example/project.git", tenantProject],
+  ["ssh://te\tnant@tenant.ghe.com/example/project.git", tenantProject],
+  ["ssh://te\rnant@tenant.ghe.com/example/project.git", tenantProject],
+  ["ssh://gi\nt@github.com/example/project.git", gitHubProject],
+  ["ssh://tenant@other@tenant.ghe.com/example/project.git", tenantProject],
+  ["other@tenant.ghe.com:example/project.git", tenantProject],
+  ["ssh://other@tenant.ghe.com:22/example/project.git", tenantProject],
   [
     "tenant@tenant.ghe.com:example/project.git",
     "https://other.ghe.com/example/project",
   ],
-  [
-    "ssh://tenant@git.example.test/example/project.git",
-    "https://git.example.test/example/project",
-  ],
+  ["ssh://tenant@git.example.test/example/project.git", connectedProject],
   [
     "ssh://tenant@api.tenant.ghe.com/example/project.git",
     "https://api.tenant.ghe.com/example/project",
   ],
-  [
-    "ssh://tenant:synthetic@tenant.ghe.com/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://tenant:@tenant.ghe.com/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
+  ["ssh://tenant:synthetic@tenant.ghe.com/example/project.git", tenantProject],
+  ["ssh://tenant:@tenant.ghe.com/example/project.git", tenantProject],
   [
     "ssh://tenant@tenant.ghe.com:443/example/project.git",
     "https://tenant.ghe.com:443/example/project",
@@ -3552,31 +3470,16 @@ const snykRepositoryMismatches: [string, string][] = [
     "ssh://tenant@tenant.ghe.com:22/example/project.git",
     "https://tenant.ghe.com:443/example/project",
   ],
-  [
-    "tenant@tenant.ghe.com:other/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://tenant@ssh.github.com:443/example/project.git",
-    "https://github.com/example/project",
-  ],
+  ["tenant@tenant.ghe.com:other/project.git", tenantProject],
+  ["ssh://tenant@ssh.github.com:443/example/project.git", gitHubProject],
   [
     "tenant@tenant.ghe.com:example/project.git",
     "http://tenant.ghe.com/example/project",
   ],
-  ["git@github.com:other/project.git", "https://github.com/example/project"],
-  [
-    "ssh://git@github.com:2222/example/project.git",
-    "https://github.com/example/project",
-  ],
-  [
-    "ssh://git@ssh.github.com:2222/example/project.git",
-    "https://github.com/example/project",
-  ],
-  [
-    "ssh://git@git.example.test:443/example/project.git",
-    "https://github.com/example/project",
-  ],
+  ["git@github.com:other/project.git", gitHubProject],
+  ["ssh://git@github.com:2222/example/project.git", gitHubProject],
+  ["ssh://git@ssh.github.com:2222/example/project.git", gitHubProject],
+  ["ssh://git@git.example.test:443/example/project.git", gitHubProject],
   [
     "ssh://git@git.example.test:2222/example/project.git",
     "https://git.example.test:2222/example/project",
@@ -3601,14 +3504,8 @@ const snykRepositoryMismatches: [string, string][] = [
     "ssh://git@ssh.github.com:2222/example/project.git",
     "https://ssh.github.com:2222/example/project",
   ],
-  [
-    "git@other.example.test:example/project.git",
-    "https://git.example.test/example/project",
-  ],
-  [
-    "git@git.example.test:other/project.git",
-    "https://git.example.test/example/project",
-  ],
+  ["git@other.example.test:example/project.git", connectedProject],
+  ["git@git.example.test:other/project.git", connectedProject],
   [
     "git@git.example.test:example/project.git",
     "https://git.example.test:443/example/project",
@@ -3623,13 +3520,47 @@ const snykRepositoryMismatches: [string, string][] = [
   ],
 ];
 
+// Check the URL matrix before involving the filesystem, catalog, or publication state.
+for (const [cases, matches] of [
+  [snykRepositoryAliases, true],
+  [snykRepositoryMismatches, false],
+] as const) {
+  test.each(cases)(
+    `Snyk repository %j against %j (matches=${matches})`,
+    async (repository, destination) => {
+      for (const format of ["plugin", "SARIF"] as const) {
+        const { normalized, original } = await snykRepositoryEvidence(
+          format,
+          repository,
+        );
+        const source = normalized.findings[0]!.evidence.source_data;
+        const urls = snykRepositoryUrls(source, {
+          cloudRepositoryUrl: destination,
+        });
+        expect(urls, format).toHaveLength(1);
+        expect(
+          cloudRepositoryUrlKey(urls[0]!) ===
+            cloudRepositoryUrlKey(destination),
+          format,
+        ).toBe(matches);
+        expect(source, format).toMatchObject(original);
+      }
+    },
+  );
+}
+
 test.each([
-  ...snykRepositoryMismatches.flatMap(([repository, destination]) =>
-    (["plugin", "SARIF"] as const).map(
-      (format) => [format, repository, destination] as const,
-    ),
-  ),
-  ["SARIF", "unknown", "https://github.com/example/project"] as const,
+  [
+    "plugin",
+    "ssh://git@github.\tcom/example/project.git",
+    gitHubProject,
+  ] as const,
+  [
+    "SARIF",
+    "ssh://git@github.com:2222/example/project.git",
+    gitHubProject,
+  ] as const,
+  ["SARIF", "unknown", gitHubProject] as const,
 ])(
   "Snyk %s repository claim %s cannot target %s",
   async (format, repository, destination) => {

@@ -24,6 +24,7 @@ from workbench_test_support import (
     get_deep_scan,
     get_scan,
     preserve_scan_results,
+    read_review_state,
     replay_saved_results,
     run_workbench,
     saved_binding,
@@ -104,7 +105,7 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
     assert "Model scope: app.py" in model_document
     assert "Model origin: recovered" in model_document
     assert stopped["findingCount"] == 1
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
 
     assert any(item.get("candidateId") == "pending-query" for item in coverage["deferred"])
     assert result_path.read_text() == "{incomplete"
@@ -735,7 +736,7 @@ def test_malformed_current_finding_does_not_override_worker_rejection(tmp_path: 
     failed = get_scan(state_dir, scan_id)["scan"]
 
     assert failed["findingCount"] == 0
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert coverage["surfaces"][0]["disposition"] == "rejected"
     assert len(coverage["surfaces"][0]["previousFindings"]) == 1
 
@@ -1344,7 +1345,7 @@ def test_failure_preserves_last_committed_reducer_without_parent_draft(
     assert failed["progress"]["status"] == "failed"
     assert failed["findingCount"] == 1
     assert failed["findings"][0]["summary"] == reduced["findings"][0]["summary"]
-    assert json.loads((scan_dir / "coverage.json").read_text())["mode"] == "deep_repository"
+    assert read_review_state(state_dir, scan_dir)["mode"] == "deep_repository"
 
 
 @pytest.mark.parametrize("tied_head", [False, True])
@@ -1401,7 +1402,7 @@ def test_stopped_rejection_recovers_malformed_parent_surfaces(
     failed = get_scan(state_dir, scan_id)["scan"]
     assert failed["progress"]["status"] == "failed"
     assert failed["findingCount"] == 1
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert isinstance(coverage["surfaces"], list)
 
 
@@ -1572,7 +1573,7 @@ def test_complete_worker_supersedes_obsolete_checkpoint_coverage(tmp_path: Path)
 
     fail_deep_scan(state_dir, codex_home, scan_id, message="Stopped after the worker completed.")
 
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert not any(item.get("id") == "obsolete-surface" for item in coverage["surfaces"])
     assert not any(item.get("id") == "obsolete-work" for item in coverage["deferred"])
     model = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["threatModel"]
@@ -1617,7 +1618,7 @@ def test_complete_partial_parent_supersedes_obsolete_checkpoint_questions(
         state_dir, codex_home, scan_id, message="Stopped after the final partial parent draft."
     )
 
-    recovered = json.loads(coverage_path.read_text())
+    recovered = read_review_state(state_dir, scan_dir)
     assert recovered.get("openQuestions", []) == []
 
 
@@ -1659,7 +1660,7 @@ def test_canceled_reducer_checkpoint_supersedes_discovery_result(tmp_path: Path)
     fail_deep_scan(state_dir, codex_home, scan_id, message="Canceled after reducer validation.")
 
     findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert findings[0]["summary"] == reduced["findings"][0]["summary"]
     assert coverage["surfaces"][0]["notes"] == "Reducer-validated merged evidence."
 
@@ -1958,15 +1959,15 @@ def test_independent_worker_candidate_ids_do_not_share_rejection(tmp_path: Path)
     assert failed["findingCount"] == 1
     canonical_findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
     assert canonical_findings[0]["extensions"]["candidateId"] == "candidate-1"
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     rejected = next(item for item in coverage["surfaces"] if item["disposition"] == "rejected")
     assert "previousFindings" not in rejected
 
 
-def test_standard_worker_results_commit_and_recover_without_discovery_ledgers(
+def test_standard_worker_results_commit_recover_and_finish_without_discovery_ledgers(
     tmp_path: Path,
 ) -> None:
-    state_dir, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     worker_id, worker_result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
     reducer_id, reducer_result, committed = committed_standard_reducer(
         state_dir,
@@ -1985,25 +1986,20 @@ def test_standard_worker_results_commit_and_recover_without_discovery_ledgers(
     assert workers[reducer_id]["resultManifestPath"] == str(reducer_result)
     assert not (scan_dir / "artifacts" / "02_discovery").exists()
 
+    environment = {"CODEX_HOME": str(codex_home)}
     recovered = get_deep_scan(
-        state_dir, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
+        state_dir, scan_id, "standard-worker-thread", environment=environment
     )["deepScan"]
     assert recovered["canonicalArtifacts"] is None
     assert recovered["workers"] == committed["workers"]
 
-
-def test_standard_worker_results_finish_with_only_canonical_parent_manifest(
-    tmp_path: Path,
-) -> None:
-    state_dir, codex_home, target, scan_dir, scan_id = standard_parent_results_fixture(tmp_path)
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
     manifest_path = scan_dir / "scan-manifest.json"
 
     finished = finish_deep_scan(
-        state_dir,
-        scan_id,
-        "capped",
-        str(manifest_path),
-        environment={"CODEX_HOME": str(codex_home)},
+        state_dir, scan_id, "capped", str(manifest_path), environment=environment
     )["deepScan"]
 
     assert finished["status"] == "succeeded"
@@ -2171,7 +2167,7 @@ def test_budget_exhaustion_preserves_validated_standard_results_without_candidat
     assert completed["findingCount"] == 1
     assert "Unsafe archive extraction" in completed["findings"][0]["title"]
     assert completed["warnings"] == [warning]
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
 
     assert coverage["deferred"] == [
         {
@@ -2180,7 +2176,12 @@ def test_budget_exhaustion_preserves_validated_standard_results_without_candidat
         }
     ]
     sarif = json.loads((scan_dir / "exports/results.sarif").read_text())
-    assert sarif["runs"][0]["invocations"][0]["executionSuccessful"] is True
+    assert sarif["runs"][0]["invocations"] == [
+        {
+            "executionSuccessful": True,
+            "toolExecutionNotifications": [{"level": "warning", "message": {"text": warning}}],
+        }
+    ]
     assert not (scan_dir / "artifacts" / "02_discovery").exists()
 
 
@@ -2568,7 +2569,18 @@ def test_recovery_rejects_closures_that_would_discard_saved_evidence(
         scan_dir, completion_binding=binding, recover_unsealed=True, draft_documents=documents
     )
     workbench_saved_results._write_prepared_scan_finalization(prepared)
-    recovered = json.loads((scan_dir / "coverage.json").read_text())
+    replay = workbench_saved_results.merge_saved_results(
+        scan_dir,
+        scan_id,
+        binding,
+        [],
+        [],
+        stopped=True,
+        reason="interrupted",
+        frozen_source_digests=prepared[2]["scan"]["preservedSources"],
+    )
+    assert replay is not None
+    recovered = replay[2]
     assert pending in recovered["deferred"]
     assert not recovered.get("resolvedDeferred")
 

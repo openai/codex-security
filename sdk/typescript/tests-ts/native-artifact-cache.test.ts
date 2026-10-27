@@ -117,6 +117,7 @@ test("native reuse hashes committed inputs with Git alone across platforms", () 
     ]) {
       write(`.github/scripts/${script}.mjs`, "// CI only\n");
     }
+    write(".github/scripts/test_check_plugin_source_compatibility.mts", "");
     write("plugins/codex-security/mcp-app/tests/support/new.ts", "fixture\n");
     commit();
     expect(key("2026-43", 4, fingerprint)).toBe("week=202643");
@@ -145,13 +146,12 @@ test("native reuse hashes committed inputs with Git alone across platforms", () 
     const nextWeek = previous
       .slice("key=".length)
       .replace("2026-43", "2026-44");
-    const cold = key("2026-44", 4, fingerprint);
-    expect(cold).toBe(`week=202644\ncold-group=${nextWeek}-0-1`);
+    const cold = key("2026-44", 15, fingerprint);
+    expect(cold).toBe(`week=202644\ncold-group=${nextWeek}-0`);
+    expect(key("2026-44", 16, fingerprint)).toBe(cold);
     const admittedWeek = cold.split("\n")[0]!.slice("week=".length);
     expect(key("2026-45", undefined, "", admittedWeek)).toBe(`key=${nextWeek}`);
-    expect(key("2026-44", 304, fingerprint)).toBe(
-      `week=202644\ncold-group=${nextWeek}-1-1`,
-    );
+    expect(key("2026-44", 17, fingerprint)).not.toBe(cold);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -180,83 +180,48 @@ test("only exact hits replace fresh native builds and cache failures fall back t
 test("only a successful fresh matrix can save a main-branch cache", () => {
   const bundle = native.jobs["bundle"]!;
   expect(bundle.needs).toEqual(["prepare", "unix", "windows", "musl"]);
-  expect(bundle.if).toBe("${{ !cancelled() }}");
+  expect(bundle.if).toBe(
+    "${{ !cancelled() && (needs.prepare.result != 'success' || needs.prepare.outputs.cache-hit != 'true') }}",
+  );
   const save = bundle.steps!.find((step) =>
     step.uses?.startsWith("actions/cache/save@"),
   )!;
   expect(save.if).toBe(
-    "needs.prepare.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule') && (inputs.ref == '' || inputs.ref == github.sha)",
+    "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule') && (inputs.ref == '' || inputs.ref == github.sha)",
   );
   expect(save["continue-on-error"]).toBe(true);
 });
 
 test.each([
-  {
-    cache: "true",
-    prepare: "success",
-    unix: "skipped",
-    windows: "skipped",
-    musl: "skipped",
-    passes: true,
+  ["success", "success", "success", "success", true],
+  ["failure", "skipped", "skipped", "skipped", false],
+  ["success", "success", "failure", "success", false],
+  ["success", "success", "success", "skipped", false],
+] as const)(
+  "fresh native payload requires successful preparation and proofs (%s, %s, %s, %s)",
+  (prepare, unix, windows, musl, passes) => {
+    const guard = native.jobs["bundle"]!.steps![0]!.run!;
+    const checked = spawnSync(bashCommand(), ["-c", guard], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PREPARE_RESULT: prepare,
+        UNIX_RESULT: unix,
+        WINDOWS_RESULT: windows,
+        MUSL_RESULT: musl,
+      },
+    });
+    expect(checked.status === 0, checked.stderr).toBe(passes);
   },
-  {
-    cache: "false",
-    prepare: "success",
-    unix: "success",
-    windows: "success",
-    musl: "success",
-    passes: true,
-  },
-  {
-    cache: "true",
-    prepare: "failure",
-    unix: "skipped",
-    windows: "skipped",
-    musl: "skipped",
-    passes: false,
-  },
-  {
-    cache: "false",
-    prepare: "success",
-    unix: "success",
-    windows: "failure",
-    musl: "success",
-    passes: false,
-  },
-  {
-    cache: "",
-    prepare: "success",
-    unix: "success",
-    windows: "success",
-    musl: "skipped",
-    passes: false,
-  },
-])("native completion checks the cache or every fresh proof: %j", (result) => {
-  const guard = native.jobs["bundle"]!.steps![0]!.run!;
-  const checked = spawnSync(bashCommand(), ["-c", guard], {
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      CACHE_HIT: result.cache,
-      PREPARE_RESULT: result.prepare,
-      UNIX_RESULT: result.unix,
-      WINDOWS_RESULT: result.windows,
-      MUSL_RESULT: result.musl,
-    },
-  });
-  expect(checked.status === 0, checked.stderr).toBe(result.passes);
-});
+);
 
-test("source CI and rotating properties opt in to native artifact reuse", () => {
+test("source CI opts in to native artifact reuse", () => {
   expect(native.on.workflow_call?.inputs["reuse-verified"]?.default).toBe(
     false,
   );
   expect(workflow("node-ci").jobs["native"]?.with?.["reuse-verified"]).toBe(
     true,
   );
-  expect(
-    workflow("test-quality").jobs["native"]?.with?.["reuse-verified"],
-  ).toBe("${{ !inputs.compare-layouts }}");
   for (const caller of ["node-release", "container-release", "container-ci"]) {
     expect(
       workflow(caller).jobs["native"]?.with?.["reuse-verified"],

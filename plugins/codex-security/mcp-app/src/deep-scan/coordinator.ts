@@ -373,7 +373,7 @@ export class DeepScanCoordinator {
         : scanDraftInputSchema.parse({
             scanId: this.state.scanId,
             findings: [],
-            coverage: {
+            reviewState: {
               surfaces: [],
               explicitExclusions: [],
               deferred: [

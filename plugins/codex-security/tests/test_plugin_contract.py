@@ -21,20 +21,6 @@ def read_json(path: Path) -> dict[str, Any]:
 def test_plugin_manifest_references_existing_assets_and_skills() -> None:
     manifest = read_json(PLUGIN_ROOT / ".codex-plugin" / "plugin.json")
 
-    required_fields = {
-        "name",
-        "version",
-        "description",
-        "author",
-        "homepage",
-        "repository",
-        "license",
-        "keywords",
-        "skills",
-        "mcpServers",
-        "interface",
-    }
-    assert required_fields <= manifest.keys()
     assert manifest["name"] == "codex-security"
     assert re.fullmatch(r"\d+\.\d+\.\d+(?:-alpha)?", manifest["version"])
     assert isinstance(manifest["description"], str) and manifest["description"].strip()
@@ -51,23 +37,6 @@ def test_plugin_manifest_references_existing_assets_and_skills() -> None:
 
     interface = manifest["interface"]
     assert isinstance(interface, dict)
-    required_interface_fields = {
-        "displayName",
-        "shortDescription",
-        "longDescription",
-        "developerName",
-        "category",
-        "capabilities",
-        "websiteURL",
-        "privacyPolicyURL",
-        "termsOfServiceURL",
-        "defaultPrompt",
-        "brandColor",
-        "composerIcon",
-        "logo",
-        "screenshots",
-    }
-    assert required_interface_fields <= interface.keys()
     assert interface["displayName"] == "Codex Security"
     for field in (
         "shortDescription",

@@ -8,17 +8,27 @@ from pathlib import Path
 import pytest
 from test_saved_deferred_identity import recover, save_worker
 from test_workbench_standard_deep_results import accepted_standard_worker, deep_scan_fixture
-from workbench_test_support import fail_deep_scan, saved_draft, scan_command, write_checkpoint
+from workbench_test_support import (
+    fail_deep_scan,
+    read_review_state,
+    saved_draft,
+    scan_command,
+    write_checkpoint,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import workbench_saved_results as saved
+
+SURROGATE_IDS = (
+    ("\ud800", "deferred-7b02db7069064f21"),
+    ("\udfff", "deferred-042d3e8a3549a045"),
+)
 
 
 @pytest.mark.parametrize(
     ("reason", "identity"),
     [
-        pytest.param("\ud800", "deferred-7b02db7069064f21", id="high-surrogate"),
-        pytest.param("\udfff", "deferred-042d3e8a3549a045", id="low-surrogate"),
+        *SURROGATE_IDS,
         pytest.param("\U0001f600", "deferred-6403b70908c737af", id="emoji"),
         pytest.param("\\ud800", "deferred-6e08d26c2848d312", id="literal-escape"),
         pytest.param("é", "deferred-397a18fac04fedaa", id="accent"),
@@ -47,32 +57,29 @@ def test_recovery_accepts_unicode_ids_from_legacy_writers(
     assert replay[2] == result[2]
 
 
-@pytest.mark.parametrize(
-    ("reason", "identity"),
-    [
-        pytest.param("\ud800", "deferred-7b02db7069064f21", id="high-surrogate"),
-        pytest.param("\udfff", "deferred-042d3e8a3549a045", id="low-surrogate"),
-    ],
-)
-def test_stopped_publication_recovers_after_unicode_review_is_closed(
-    tmp_path: Path, reason: str, identity: str
-) -> None:
+def test_stopped_publication_recovers_after_unicode_reviews_are_closed(tmp_path: Path) -> None:
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
-    pending = saved_draft(scan_id, deferred=[{"reason": reason, "paths": ["src/example.py"]}])
+    worker_id, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    pending = saved_draft(
+        scan_id,
+        deferred=[{"reason": reason, "paths": ["src/example.py"]} for reason, _ in SURROGATE_IDS],
+    )
     checkpoint = write_checkpoint(result.parent / "checkpoints", pending)
     os.utime(checkpoint, ns=(100, 100))
     closed = saved_draft(
         scan_id,
-        closures=[{"id": identity, "reason": "Review completed."}],
+        closures=[{"id": identity, "reason": "Review completed."} for _, identity in SURROGATE_IDS],
         complete=True,
     )
     result.write_text(json.dumps(closed), encoding="utf-8")
     os.utime(result, ns=(200, 200))
     environment = {"CODEX_HOME": str(codex_home)}
     fail_deep_scan(state, codex_home, scan_id, deep_status="failed")
-    coverage = json.loads((scan_dir / "coverage.json").read_text(encoding="utf-8"))
+    coverage = read_review_state(state, scan_dir)
     assert {row["id"] for row in coverage["deferred"]} == {"scan-stopped"}
+    assert {row["id"] for row in coverage["resolvedDeferred"]} == {
+        f"{worker_id}-attempt-1-resolved-{identity}" for _, identity in SURROGATE_IDS
+    }
     manifest = (scan_dir / "scan-manifest.json").read_bytes()
     recovered = scan_command(state, "recover-scan-results", scan_id, environment=environment)
     assert recovered["scan"]["resultsRecoveryNeeded"] is False

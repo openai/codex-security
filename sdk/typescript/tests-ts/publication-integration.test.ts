@@ -7,6 +7,7 @@ import {
 import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
 import { parseJsonLines, jsonLines } from "./support/json.js";
 import { nodeCommand } from "./support/shell.js";
+import { Database } from "bun:sqlite";
 import { execFileSync } from "node:child_process";
 import {
   appendFile,
@@ -265,20 +266,16 @@ function killTestProcess(pid: number): void {
 }
 
 function storedPublications(fixture: PublicationFixture): StoredPublication[] {
-  const script = [
-    "import json, sqlite3, sys",
-    "connection = sqlite3.connect(sys.argv[1])",
-    "connection.row_factory = sqlite3.Row",
-    `rows = connection.execute("SELECT scan_id, finding_id, occurrence_id, json_extract(destination_key, '$[0]') AS destination_type, json_extract(destination_key, '$[1]') AS team_id, json_extract(destination_key, '$[2]') AS project_id, external_id, external_url FROM finding_issue_receipts ORDER BY id").fetchall()`,
-    "print(json.dumps([dict(row) for row in rows]))",
-  ].join("\n");
-  return JSON.parse(
-    execNodePython(
-      fixture.python,
-      ["-c", script, join(fixture.stateDirectory, "workbench.sqlite3")],
-      fixture.environment,
-    ),
-  ) as StoredPublication[];
+  using database = new Database(
+    join(fixture.stateDirectory, "workbench.sqlite3"),
+    { readwrite: true, create: false },
+  );
+  database.exec("PRAGMA query_only = ON");
+  return database
+    .query<StoredPublication, []>(
+      "SELECT scan_id, finding_id, occurrence_id, json_extract(destination_key, '$[0]') AS destination_type, json_extract(destination_key, '$[1]') AS team_id, json_extract(destination_key, '$[2]') AS project_id, external_id, external_url FROM finding_issue_receipts ORDER BY id",
+    )
+    .all();
 }
 
 function receiptPath(fixture: PublicationFixture): string {

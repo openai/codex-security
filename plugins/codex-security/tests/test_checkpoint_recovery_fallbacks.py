@@ -7,9 +7,19 @@ from argparse import Namespace
 from pathlib import Path
 
 import pytest
-from test_deep_scan_successful_publication import add_worker
+from test_deep_scan_successful_publication import (
+    add_worker,
+    fail_scan,
+    preserve_scan_results,
+    recover_scan_results,
+)
 from test_deep_scan_successful_publication import publication_scan as publication_scan
-from workbench_test_support import interrupt_publication, saved_draft, write_checkpoint
+from workbench_test_support import (
+    interrupt_publication,
+    read_review_state,
+    saved_draft,
+    write_checkpoint,
+)
 
 
 @pytest.mark.parametrize(
@@ -45,11 +55,7 @@ def test_published_raw_head_compatibility_converts_before_later_selection(
 
     with monkeypatch.context() as patch:
         patch.setattr("workbench.retained_coverage._capture_saved_source", legacy_capture)
-        saved.fail_scan(
-            context,
-            workbench_db,
-            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-        )
+        fail_scan(workbench_api, workbench_db, scan)
     original = (scan.scan_dir / "scan-manifest.json").read_bytes()
     assert (
         head.relative_to(scan.scan_dir).as_posix()
@@ -74,9 +80,7 @@ def test_published_raw_head_compatibility_converts_before_later_selection(
     later = write_checkpoint(directory / "checkpoints", {**initial, "findings": scan.findings})
     head.write_text(json.dumps({"checkpoint": later.name}))
     os.utime(head, ns=(200, 200))
-    recovered = saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))[
-        "scan"
-    ]
+    recovered = recover_scan_results(workbench_api, workbench_db, scan)
     assert recovered["findingCount"] == 1
     assert not recovered["resultsRecoveryNeeded"]
 
@@ -132,11 +136,7 @@ def test_early_head_error_keeps_captured_records_during_sibling_capture(
 
     with monkeypatch.context() as patch:
         patch.setattr("workbench.saved_sources.write_scan_local_bytes", capture_sibling)
-        saved.fail_scan(
-            context,
-            workbench_db,
-            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-        )
+        fail_scan(workbench_api, workbench_db, scan)
     assert changed
     args = Namespace(
         scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
@@ -154,7 +154,7 @@ def test_early_head_error_keeps_captured_records_during_sibling_capture(
     assert {row["identity"]["anchor"] for row in findings["findings"]} == {"before", "second"}
     head.write_bytes(later)
     os.utime(head, ns=(200, 200))
-    saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+    recover_scan_results(workbench_api, workbench_db, scan)
     _, findings, _ = saved.finalize_scan(scan.scan_dir)
     assert "after" in {row["identity"]["anchor"] for row in findings["findings"]}
 
@@ -165,7 +165,6 @@ def test_frozen_model_capture_keeps_earlier_worker_finding(
 ):
     scan = publication_scan()
     saved = workbench_api["saved_results"]
-    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
     model = {"summary": "Retained scan model."}
     manifest_path = scan.scan_dir / "scan-manifest.json"
     manifest = json.loads(manifest_path.read_text())
@@ -202,11 +201,7 @@ def test_frozen_model_capture_keeps_earlier_worker_finding(
             patch.setattr("workbench.retained_coverage.write_scan_local_bytes", interrupt_capture)
         else:
             patch.setattr(saved, "_write_prepared_scan_finalization", interrupt)
-        saved.fail_scan(
-            context,
-            workbench_db,
-            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-        )
+        fail_scan(workbench_api, workbench_db, scan)
     if not restore_capture:
         assert len(initial) == len(initial[0]) == 1
     retained = json.loads(
@@ -217,13 +212,7 @@ def test_frozen_model_capture_keeps_earlier_worker_finding(
     capture = scan.scan_dir / retained["threatModelSource"]
     assert retained["threatModelSource"] == model_path
     assert capture.exists() is not restore_capture
-    saved.preserve_scan_results(
-        context,
-        workbench_db,
-        Namespace(
-            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
-        ),
-    )
+    preserve_scan_results(workbench_api, workbench_db, scan)
     final_manifest, findings, _ = saved.finalize_scan(scan.scan_dir)
     assert final_manifest["scan"]["threatModel"] == model
     assert len(findings["findings"]) == 1
@@ -284,13 +273,7 @@ def test_frozen_model_ignores_unselected_live_manifest_changes(
     if late_model:
         manifest["scan"]["threatModel"] = {"summary": "Late unselected model"}
         manifest_path.write_text(json.dumps(manifest))
-    replayed = saved.preserve_scan_results(
-        context,
-        workbench_db,
-        Namespace(
-            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
-        ),
-    )["scan"]
+    replayed = preserve_scan_results(workbench_api, workbench_db, scan)
     published, findings, _ = saved.finalize_scan(scan.scan_dir)
     assert published["scan"]["threatModel"] == model
     assert len(findings["findings"]) == replayed["findingCount"] == 1
@@ -345,11 +328,7 @@ def test_resumed_head_snapshot_allows_later_recovery(
     with monkeypatch.context() as patch:
         if snapshot_failure:
             patch.setattr("workbench.saved_sources.write_scan_local_bytes", fail_head)
-        saved.fail_scan(
-            context,
-            workbench_db,
-            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-        )
+        fail_scan(workbench_api, workbench_db, scan)
     args = Namespace(
         scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
     )
@@ -377,9 +356,7 @@ def test_resumed_head_snapshot_allows_later_recovery(
     os.utime(later, ns=(50, 50))
     head.write_text(json.dumps({"checkpoint": later.name}))
     os.utime(head, ns=(200, 200))
-    result = saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))[
-        "scan"
-    ]
+    result = recover_scan_results(workbench_api, workbench_db, scan)
     assert result["findingCount"] == 1
     assert not result["resultsRecoveryNeeded"]
     published, findings, _ = saved.finalize_scan(scan.scan_dir)
@@ -411,7 +388,6 @@ def test_early_head_failure_keeps_frozen_model_choice(
 ):
     scan = publication_scan(mode=mode)
     saved = workbench_api["saved_results"]
-    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
     manifest_path = scan.scan_dir / "scan-manifest.json"
     manifest = json.loads(manifest_path.read_text())
     manifest["scan"]["threatModel"] = {"summary": "Canonical model"}
@@ -458,11 +434,7 @@ def test_early_head_failure_keeps_frozen_model_choice(
 
     with monkeypatch.context() as patch:
         patch.setattr("workbench.saved_sources.write_scan_local_bytes", fail_snapshot)
-        saved.fail_scan(
-            context,
-            workbench_db,
-            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-        )
+        fail_scan(workbench_api, workbench_db, scan)
     if failure != "none":
         if live_change == "coverage":
             coverage_path = scan.scan_dir / "coverage.json"
@@ -472,13 +444,7 @@ def test_early_head_failure_keeps_frozen_model_choice(
         else:
             manifest["scan"]["threatModel"] = {"summary": "Late unselected model"}
             manifest_path.write_text(json.dumps(manifest))
-    result = saved.preserve_scan_results(
-        context,
-        workbench_db,
-        Namespace(
-            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
-        ),
-    )["scan"]
+    result = preserve_scan_results(workbench_api, workbench_db, scan)
     published, findings, _ = saved.finalize_scan(scan.scan_dir)
     expected = {
         "canonical": "Canonical model",
@@ -522,6 +488,7 @@ def test_failed_head_fallback_rejects_changes_before_resume(
     original_outputs = {
         name: (scan.scan_dir / name).read_bytes()
         for name in ("scan-manifest.json", "findings.json", "coverage.json")
+        if (scan.scan_dir / name).exists()
     }
     write = saved.write_scan_local_bytes
 
@@ -532,11 +499,7 @@ def test_failed_head_fallback_rejects_changes_before_resume(
 
     with monkeypatch.context() as patch:
         patch.setattr("workbench.saved_sources.write_scan_local_bytes", fail_head)
-        saved.fail_scan(
-            context,
-            workbench_db,
-            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-        )
+        fail_scan(workbench_api, workbench_db, scan)
     if change == "head":
         later = write_checkpoint(directory / "checkpoints", {**initial, "findings": scan.findings})
         head.write_text(json.dumps({"checkpoint": later.name}))
@@ -611,11 +574,7 @@ def test_rejected_historical_model_does_not_poison_recovery(
     select({**draft, "threatModel": {"summary": "Older accepted model"}}, 100)
     saved._capture_saved_source(scan.scan_dir, "checkpoint-head.json", scan.scan_id)
     invalid_source = select({**draft, "threatModel": invalid}, 200)
-    stopped = saved.fail_scan(
-        context,
-        workbench_db,
-        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-    )["scan"]
+    stopped = fail_scan(workbench_api, workbench_db, scan)
     assert stopped["findingCount"] == 1
     assert any("Skipped malformed saved threat model" in warning for warning in stopped["warnings"])
     assert json.loads(manifest_path.read_text())["scan"]["threatModel"] == model
@@ -639,13 +598,7 @@ def test_rejected_historical_model_does_not_poison_recovery(
                 saved.recover_scan_results(context, workbench_db, args)
         else:
             saved.recover_scan_results(context, workbench_db, args)
-    replayed = saved.preserve_scan_results(
-        context,
-        workbench_db,
-        Namespace(
-            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
-        ),
-    )["scan"]
+    replayed = preserve_scan_results(workbench_api, workbench_db, scan)
     published, findings, _ = saved.finalize_scan(scan.scan_dir)
     assert published["scan"]["threatModel"] == (
         {"summary": "Replacement model"} if replacement == "valid" else model
@@ -703,7 +656,6 @@ def test_partial_head_retains_previous_terminal_coverage_boundary(
         else add_worker(workbench_db, scan, status="canceled").parent
     )
     saved = workbench_api["saved_results"]
-    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
     for label, observed in [("Obsolete", 100), ("Replacement", 200), ("Partial", partial_time)]:
         draft = saved_draft(scan.scan_id, complete=label != "Partial")
         draft["coverage"] = {**coverage, **draft["coverage"]}
@@ -732,15 +684,9 @@ def test_partial_head_retains_previous_terminal_coverage_boundary(
                     (str(checkpoint), directory.name),
                 )
         if label == "Obsolete":
-            saved.fail_scan(
-                context,
-                workbench_db,
-                Namespace(
-                    scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."
-                ),
-            )
+            fail_scan(workbench_api, workbench_db, scan)
         elif label == "Replacement":
-            saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+            recover_scan_results(workbench_api, workbench_db, scan)
             if repeated_terminal:
                 os.utime(head, ns=(400, 400))
                 saved._capture_saved_source(
@@ -751,21 +697,12 @@ def test_partial_head_retains_previous_terminal_coverage_boundary(
                 if interrupted:
                     patch.setattr(saved, "_write_prepared_scan_finalization", interrupt_publication)
                     with pytest.raises(OSError, match="Synthetic publication interruption"):
-                        saved.recover_scan_results(
-                            context, workbench_db, Namespace(scan_id=scan.scan_id)
-                        )
+                        recover_scan_results(workbench_api, workbench_db, scan)
                 else:
-                    saved.recover_scan_results(
-                        context, workbench_db, Namespace(scan_id=scan.scan_id)
-                    )
-    replayed = saved.preserve_scan_results(
-        context,
-        workbench_db,
-        Namespace(
-            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
-        ),
-    )["scan"]
-    _, _, coverage = saved.finalize_scan(scan.scan_dir)
+                    recover_scan_results(workbench_api, workbench_db, scan)
+    replayed = preserve_scan_results(workbench_api, workbench_db, scan)
+    saved.finalize_scan(scan.scan_dir)
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     expected = {"Replacement"} if partial_time == 300 or registered else {"Obsolete", "Replacement"}
     assert {row["label"] for row in coverage["surfaces"]} == expected
     assert {row["pattern"] for row in coverage["explicitExclusions"]} == {
@@ -781,7 +718,6 @@ def test_retry_keeps_canonical_finding_when_its_checkpoint_copy_is_unreadable(
 ):
     scan = publication_scan(mode="standard")
     saved = workbench_api["saved_results"]
-    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
     manifest_path = scan.scan_dir / "scan-manifest.json"
     manifest = json.loads(manifest_path.read_text())
     model = {"summary": "Canonical model"}
@@ -808,22 +744,12 @@ def test_retry_keeps_canonical_finding_when_its_checkpoint_copy_is_unreadable(
 
     with monkeypatch.context() as patch:
         patch.setattr(saved, "_write_prepared_scan_finalization", interrupt)
-        saved.fail_scan(
-            context,
-            workbench_db,
-            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-        )
+        fail_scan(workbench_api, workbench_db, scan)
     assert attempted == [(scan.findings[0]["title"], model)]
     with pytest.raises(
         saved.ContractError, match="Frozen stopped-scan checkpoint set is incomplete"
     ):
-        saved.preserve_scan_results(
-            context,
-            workbench_db,
-            Namespace(
-                scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
-            ),
-        )
+        preserve_scan_results(workbench_api, workbench_db, scan)
     assert broken.read_bytes() == b"{"
     assert "sealedAt" not in json.loads(manifest_path.read_text())["scan"]
 
@@ -878,11 +804,7 @@ def test_inherited_model_capture_is_bound_before_publication_retry(
             patch.setattr("workbench.retained_coverage.write_scan_local_bytes", fail_capture)
         else:
             patch.setattr(saved, "_write_prepared_scan_finalization", interrupt_publication)
-        saved.fail_scan(
-            context,
-            workbench_db,
-            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-        )
+        fail_scan(workbench_api, workbench_db, scan)
     row = workbench_db.execute(
         "SELECT retained_source_digests_json, completion_warnings_json FROM scans WHERE id = ?",
         (scan.scan_id,),
@@ -946,7 +868,6 @@ def test_restored_terminal_keeps_surfaces_for_surviving_deferred_work(
         else add_worker(workbench_db, scan, status="canceled").parent
     )
     saved = workbench_api["saved_results"]
-    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
     terminal = saved_draft(scan.scan_id, complete=True)
     terminal["coverage"] = {**coverage, **terminal["coverage"]}
     task = {"id": "review-task", "reason": "Review remains pending."}
@@ -973,33 +894,18 @@ def test_restored_terminal_keeps_surfaces_for_surviving_deferred_work(
         head.write_text(json.dumps({"checkpoint": checkpoint.name}))
         os.utime(head, ns=(observed, observed))
         if index == 0:
-            saved.fail_scan(
-                context,
-                workbench_db,
-                Namespace(
-                    scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."
-                ),
-            )
+            fail_scan(workbench_api, workbench_db, scan)
         else:
             with monkeypatch.context() as patch:
                 if interrupted and index == len(sequence) - 1:
                     patch.setattr(saved, "_write_prepared_scan_finalization", interrupt_publication)
                     with pytest.raises(OSError, match="Synthetic publication interruption"):
-                        saved.recover_scan_results(
-                            context, workbench_db, Namespace(scan_id=scan.scan_id)
-                        )
+                        recover_scan_results(workbench_api, workbench_db, scan)
                 else:
-                    saved.recover_scan_results(
-                        context, workbench_db, Namespace(scan_id=scan.scan_id)
-                    )
-    replayed = saved.preserve_scan_results(
-        context,
-        workbench_db,
-        Namespace(
-            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
-        ),
-    )["scan"]
-    _, _, coverage = saved.finalize_scan(scan.scan_dir)
+                    recover_scan_results(workbench_api, workbench_db, scan)
+    replayed = preserve_scan_results(workbench_api, workbench_db, scan)
+    saved.finalize_scan(scan.scan_dir)
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     if owner == "worker":
         surface = {**surface, "id": f"{directory.name}/pending-surface", "workerId": directory.name}
         task = {**task, "id": f"{directory.name}/review-task", "workerId": directory.name}
@@ -1007,7 +913,7 @@ def test_restored_terminal_keeps_surfaces_for_surviving_deferred_work(
             task["surfaceIds"] = [surface["id"]]
     assert coverage["surfaces"] == ([surface] if pending == "linked" else [])
     assert (task in coverage["deferred"]) is (pending != "closed")
-    assert (surface["label"] in (scan.scan_dir / "report.md").read_text()) is (pending == "linked")
+    assert surface["label"] not in (scan.scan_dir / "report.md").read_text()
     assert not replayed["resultsRecoveryNeeded"]
 
 
@@ -1018,7 +924,6 @@ def test_source_order_failure_retains_accepted_parent_input(
 
     scan = publication_scan()
     saved = workbench_api["saved_results"]
-    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
     scan_dir = scan.scan_dir
     manifest = scan_dir / "scan-manifest.json"
     contents = json.loads(manifest.read_text())
@@ -1060,21 +965,11 @@ def test_source_order_failure_retains_accepted_parent_input(
 
     with monkeypatch.context() as patch:
         patch.setattr(saved_sources, "write_scan_local_bytes", fail_order)
-        saved.fail_scan(
-            context,
-            workbench_db,
-            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-        )
+        fail_scan(workbench_api, workbench_db, scan)
     assert "sealedAt" not in json.loads(manifest.read_text())["scan"]
     head.write_text(json.dumps({"checkpoint": abandoned.name, "inputCheckpoint": abandoned.name}))
     os.utime(head, ns=(400, 400))
-    saved.preserve_scan_results(
-        context,
-        workbench_db,
-        Namespace(
-            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
-        ),
-    )
+    preserve_scan_results(workbench_api, workbench_db, scan)
     _, findings, _ = saved.finalize_scan(scan_dir)
     assert [finding["title"] for finding in findings["findings"]] == [scan.findings[0]["title"]]
 
@@ -1086,7 +981,6 @@ def test_headless_canonical_snapshot_failure(
 
     scan = publication_scan()
     saved = workbench_api["saved_results"]
-    db = workbench_api["_WORKBENCH_DB_CONTEXT"]
     write = saved_sources.write_scan_local_bytes
     original = scan.findings[0]["title"]
     head = scan.scan_dir / "checkpoint-head.json"
@@ -1099,11 +993,7 @@ def test_headless_canonical_snapshot_failure(
 
     with monkeypatch.context() as patch:
         patch.setattr(saved_sources, "write_scan_local_bytes", fail_snapshot)
-        saved.fail_scan(
-            db,
-            workbench_db,
-            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-        )
+        fail_scan(workbench_api, workbench_db, scan)
     assert not head.exists()
     assert "sealedAt" not in json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
     raw = write_checkpoint(
@@ -1115,13 +1005,7 @@ def test_headless_canonical_snapshot_failure(
     )
     head.write_text(json.dumps({"checkpoint": raw.name, "inputCheckpoint": raw.name}))
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
-    saved.preserve_scan_results(
-        db,
-        workbench_db,
-        Namespace(
-            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
-        ),
-    )
+    preserve_scan_results(workbench_api, workbench_db, scan)
     manifest, findings, _ = saved.finalize_scan(scan.scan_dir)
     assert [f["title"] for f in findings["findings"]] == [original]
     assert "." not in manifest["scan"]["preservedCheckpointHeads"]

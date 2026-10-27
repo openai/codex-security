@@ -36,7 +36,7 @@ test("shares one native build and container matrix in automatic CI", () => {
   ).toEqual([ci.jobs["container-validate"]!]);
   expect(ci.jobs["container-validate"]).toMatchObject({
     needs: ["classify-changes", "native", "static-checks"],
-    if: "needs.classify-changes.outputs.container-validate == 'true'",
+    if: "needs.classify-changes.outputs.container-required == 'true'",
     uses: "./.github/workflows/container-validate.yml",
   });
   expect(container.jobs["container"]).toMatchObject({

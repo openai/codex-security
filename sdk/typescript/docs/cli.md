@@ -506,7 +506,7 @@ or JSONL output produce:
 With `--full-output`, the error appears under `error` in an `ok: false` envelope.
 If the scan target changed, the error explains that the results no longer
 represent the current checkout. Retained sealed results remain available under
-`data`, including their manifest, findings, coverage, scan directory, and report
+`data`, including their manifest, findings, review summary, scan directory, and report
 path. Unsealed or invalid artifacts are not included. This also applies to
 `scans rerun` and `scans resume`.
 For `scans rerun` and `scans resume`, `--filter-output` applies to retained `data`;

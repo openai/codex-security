@@ -1,16 +1,16 @@
 {
-  "externalOwnedExact": [
-    ".codex-plugin/plugin.json",
-    "OWNERS"
-  ],
+  "externalOwnedExact": [".codex-plugin/plugin.json", "OWNERS"],
   "shippedExact": [
     ".app.json",
     ".mcp.json",
     "assets/logo.png",
-    "examples/completed-scan/coverage.json",
     "examples/completed-scan/findings.json",
     "examples/completed-scan/report.md",
     "examples/completed-scan/scan-manifest.json",
+    "examples/legacy-completed-scan/coverage.json",
+    "examples/legacy-completed-scan/findings.json",
+    "examples/legacy-completed-scan/report.md",
+    "examples/legacy-completed-scan/scan-manifest.json",
     "mcp/helpers.mjs",
     "mcp/helpers.mjs.br.part-000",
     "mcp/helpers.mjs.br.part-001",
@@ -71,6 +71,7 @@
     "scripts/launch_codex_security_mcp",
     "scripts/launch_codex_security_mcp.cmd",
     "scripts/report_projection.py",
+    "scripts/review_state.py",
     "scripts/reserved_artifact_paths.json",
     "scripts/snapshot_sqlite.py",
     "scripts/threat_model_projection.py",

@@ -146,7 +146,6 @@ async function completed(
   original.manifest.scan.id = scanId;
   original.findings.scanId = scanId;
   original.findings.findings = findings;
-  original.coverage.scanId = scanId;
   const result = new ScanResult({
     ...original,
     scanDir: options.outputDir!,
@@ -158,7 +157,6 @@ async function completed(
   for (const [name, value] of Object.entries({
     "scan-manifest.json": result.manifest,
     "findings.json": result.findings,
-    "coverage.json": result.coverage,
     "report.md": "Original report",
   })) {
     await writeFile(
@@ -1898,13 +1896,11 @@ test.each([
             [
               'import { cpSync, existsSync, readFileSync, writeFileSync } from "node:fs";',
               'import { join } from "node:path";',
-              'import { createHash } from "node:crypto";',
               "for await (const chunk of process.stdin) {}",
               `const scan = process.env.CODEX_SECURITY_SCAN_DIR; cpSync(${JSON.stringify(join(PLUGIN_ROOT, "examples", "completed-scan"))}, scan, { recursive: true });`,
               'writeFileSync(join(scan, "report.md"), "# Synthetic scan\\n");',
-              'const coveragePath = join(scan, "coverage.json"); const coverage = JSON.parse(readFileSync(coveragePath, "utf8")); coverage.mode = "scoped_path";',
-              'const bytes = JSON.stringify(coverage); writeFileSync(coveragePath, bytes); const manifestPath = join(scan, "scan-manifest.json"); const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));',
-              'manifest.scan.artifacts.find(artifact => artifact.path === "coverage.json").sha256 = createHash("sha256").update(bytes).digest("hex"); writeFileSync(manifestPath, JSON.stringify(manifest));',
+              'const manifestPath = join(scan, "scan-manifest.json"); const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));',
+              'manifest.scan.mode = "scoped_path"; writeFileSync(manifestPath, JSON.stringify(manifest));',
               'const authPath = join(process.env.CODEX_HOME, "auth.json");',
               `writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ executable: process.execPath, home: process.env.CODEX_HOME, state: process.env.CODEX_SECURITY_STATE_DIR, key: process.env.CODEX_API_KEY ?? null, auth: existsSync(authPath) ? JSON.parse(readFileSync(authPath, "utf8")) : null, value: process.env.SYNTHETIC_COMPONENT, python: process.env.PYTHON, workerConfig: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH ? readFileSync(process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, "utf8") : null }));`,
               'console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-thread" }));',

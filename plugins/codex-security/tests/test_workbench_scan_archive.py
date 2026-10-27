@@ -229,31 +229,15 @@ def test_archive_cannot_move_the_active_workbench_database(
             if state_subdirectory == "aliased-state-child":
                 state_dir /= "child"
     previous = register_scan(state_dir, repository, previous_dir)
+    (previous_dir / "report.md").write_text("saved report")
     (scan_dir / "previous.txt").write_text("keep existing output")
 
-    rejected = run_workbench(
-        state_dir,
-        "register-cli-scan",
-        "--repository",
-        str(repository),
-        "--scan-dir",
-        str(scan_dir),
-        "--recipe-json",
-        json.dumps(
-            {
-                "config": {},
-                "mode": "standard",
-                "repository": str(repository),
-                "target": {"kind": "repository", "paths": []},
-            }
-        ),
-        "--archive-existing",
-        check=False,
-    )
+    rejected = register_scan(state_dir, repository, scan_dir, "--archive-existing", check=False)
 
     assert rejected["returncode"] != 0
     assert "workbench state or active database" in str(rejected["stderr"])
     assert (scan_dir / "previous.txt").read_text() == "keep existing output"
+    assert (previous_dir / "report.md").read_text() == "saved report"
     assert not list(tmp_path.glob("scan.previous-*"))
     saved = run_workbench(state_dir, "get-scan", "--scan-id", str(previous["scanId"]))
     assert saved["scan"]["scanId"] == previous["scanId"]

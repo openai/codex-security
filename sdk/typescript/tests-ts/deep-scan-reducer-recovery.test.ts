@@ -113,10 +113,12 @@ test("advertises distinct Standard worker and Deep reducer contracts", async () 
       expect(recordTool!.inputSchema.properties).toHaveProperty("scope");
       if (layout === "reducer")
         expect(recordTool!.inputSchema.properties).not.toHaveProperty(
-          "coverage",
+          "reviewState",
         );
       else
-        expect(recordTool!.inputSchema.properties).toHaveProperty("coverage");
+        expect(recordTool!.inputSchema.properties).toHaveProperty(
+          "reviewState",
+        );
     }
   } finally {
     rmSync(root, { recursive: true, force: true });

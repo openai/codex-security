@@ -134,7 +134,7 @@ equivalent(
   },
   { target: "R&D &lt;workspace&gt;" },
 );
-for (const url of [
+const footerUrls = [
   "https://example.com/?first=1&second=2",
   "http://example.com/?payload=&#x3C;tag&#x3E;&mode=1",
   "ftp://example.com/?first=1&second=2",
@@ -157,11 +157,14 @@ for (const url of [
   "{//example.com/?first=1&word;=2}",
   "?example.com/?first=1&word;=2",
   "mailto:user&tag@localhost",
-]) {
-  equivalent(`footer URL ampersands ${url}`, markdownModel, {
-    target: `${url} then &amp; and \`https://example.com/?a=1&b=2 &amp;\`.`,
-  });
-}
+];
+equivalent("footer URL ampersands", markdownModel, {
+  target: footerUrls
+    .map(
+      (url) => `${url} then &amp; and \`https://example.com/?a=1&b=2 &amp;\`.`,
+    )
+    .join(" "),
+});
 for (const [paths, expected] of [
   [
     [

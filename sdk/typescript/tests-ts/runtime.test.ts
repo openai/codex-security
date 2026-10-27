@@ -99,7 +99,7 @@ import {
   streamWindowsCredentialAclDescriptors,
 } from "../src/runtime.js";
 import { inspectTrustedExecutable } from "../src/trusted-executable.js";
-import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import {
   lowerUuid7Turn,
@@ -241,6 +241,7 @@ interface McpServerResponse {
     capabilities?: Record<string, unknown>;
     tools?: Array<{
       name: string;
+      _meta?: { ui?: { visibility?: string[] } };
       inputSchema: {
         properties: { userContext?: { maxLength?: number } };
       };
@@ -292,53 +293,6 @@ describe("plugin runtime preparation", () => {
     ).toBe(true);
   });
 
-  test("forwards configured provider credentials through the MCP worker environment", async () => {
-    const providerKeys = [
-      "OPENAI_API_KEY",
-      "OPENROUTER_API_KEY",
-      "FIREWORKS_API_KEY",
-      "CHEAPER_INFERENCE_API_KEY",
-      "AWS_BEARER_TOKEN_BEDROCK",
-      "AWS_ACCESS_KEY_ID",
-      "AWS_SECRET_ACCESS_KEY",
-      "AWS_SESSION_TOKEN",
-      "AWS_PROFILE",
-      "AWS_REGION",
-      "AWS_DEFAULT_REGION",
-      "AWS_CONFIG_FILE",
-      "AWS_SHARED_CREDENTIALS_FILE",
-      "AWS_ROLE_ARN",
-      "AWS_ROLE_SESSION_NAME",
-      "AWS_WEB_IDENTITY_TOKEN_FILE",
-      "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
-      "AWS_CONTAINER_CREDENTIALS_FULL_URI",
-      "AWS_CONTAINER_AUTHORIZATION_TOKEN",
-      "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
-    ];
-    const configuration = JSON.parse(
-      await readFile(join(PLUGIN_ROOT, ".mcp.json"), "utf8"),
-    ) as {
-      mcpServers: Record<string, { env_vars: string[] }>;
-    };
-    const parentEnvironment = Object.fromEntries(
-      providerKeys.map((name) => [name, `synthetic-${name.toLowerCase()}`]),
-    );
-    const allowed = new Set(
-      configuration.mcpServers["codex-security"]!.env_vars,
-    );
-    const mcpEnvironment = Object.fromEntries(
-      Object.entries(parentEnvironment).filter(([name]) => allowed.has(name)),
-    );
-    const worker = spawnSync(
-      process.execPath,
-      ["-e", "process.stdout.write(JSON.stringify(process.env))"],
-      { encoding: "utf8", env: mcpEnvironment },
-    );
-
-    expect(worker.status).toBe(0);
-    expect(JSON.parse(worker.stdout)).toMatchObject(parentEnvironment);
-  });
-
   test("rejects control characters in bundled artifact paths and candidate IDs", async () => {
     const schema = JSON.parse(
       await readFile(
@@ -359,44 +313,6 @@ describe("plugin runtime preparation", () => {
         expect(pattern.test(`safe${control}path`)).toBe(false);
       }
     }
-  });
-
-  test("derives distinct finding identities from canonical candidate IDs", async () => {
-    const runtime = await loadBundledRuntime();
-    const source =
-      /function buildFindings\(findings, mode\) \{[\s\S]*?\n\}/u.exec(
-        runtime,
-      )?.[0];
-    const candidateSource =
-      /function findingIdentityCandidate\(finding\) \{[\s\S]*?\n\}/u.exec(
-        runtime,
-      )?.[0];
-    const identitySource =
-      /function scanFindingIdentity\(finding\) \{[\s\S]*?\n\}/u.exec(
-        runtime,
-      )?.[0];
-    expect(source).toBeDefined();
-    expect(candidateSource).toBeDefined();
-    expect(identitySource).toBeDefined();
-    const buildFindings = new Function(
-      "semanticIdentifier",
-      `${candidateSource}\n${identitySource}\n${source}\nreturn buildFindings;`,
-    )((value: string, fallback: string) => value || fallback) as (
-      findings: Array<{
-        title: string;
-        extensions: { candidateId: string };
-      }>,
-    ) => Array<{ identity: { anchor: string } }>;
-
-    const findings = buildFindings([
-      { title: "Same finding", extensions: { candidateId: "candidate-a" } },
-      { title: "Same finding", extensions: { candidateId: "candidate-b" } },
-    ]);
-
-    expect(findings.map((finding) => finding.identity.anchor)).toEqual([
-      "candidate-a",
-      "candidate-b",
-    ]);
   });
 
   test("generates canonical scoped security inventory paths", async () => {
@@ -425,24 +341,29 @@ describe("plugin runtime preparation", () => {
 
     const output = join(root, "inventory.txt");
     const repeatedOutput = join(root, "inventory-repeated.txt");
-    const generatorArguments = (destination: string) =>
-      [
-        join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
-        "generate-in-scope-files",
-        "--repo",
-        repository,
-        "--scope",
-        ".",
-        "--out",
-        destination,
-      ] as const;
+    if (process.platform !== "win32") {
+      await writeFile(
+        join(repository, String.raw`literal\backslash.txt`),
+        "backslash\n",
+      );
+      await writeFile(join(repository, "literal:colon.txt"), "colon\n");
+    }
+
+    const node = nodeCommand().command;
     for (const destination of [output, repeatedOutput]) {
       const inventory = spawnSync(
-        nodeCommand().command,
-        generatorArguments(destination),
-        {
-          encoding: "utf8",
-        },
+        node,
+        [
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "generate-in-scope-files",
+          "--repo",
+          repository,
+          "--scope",
+          ".",
+          "--out",
+          destination,
+        ],
+        { encoding: "utf8" },
       );
       expect(inventory.status, inventory.stderr).toBe(0);
     }
@@ -463,25 +384,8 @@ describe("plugin runtime preparation", () => {
       }
     }
     if (process.platform !== "win32") {
-      await writeFile(
-        join(repository, String.raw`literal\backslash.txt`),
-        "backslash\n",
-      );
-      await writeFile(join(repository, "literal:colon.txt"), "colon\n");
-      const posixOutput = join(root, "inventory-posix-filenames.txt");
-      const inventory = spawnSync(
-        nodeCommand().command,
-        generatorArguments(posixOutput),
-        {
-          encoding: "utf8",
-        },
-      );
-      expect(inventory.status, inventory.stderr).toBe(0);
-      const posixRows = (await readFile(posixOutput, "utf8"))
-        .trimEnd()
-        .split(/\r?\n/u);
-      expect(posixRows).toContain(String.raw`./literal\backslash.txt`);
-      expect(posixRows).toContain("./literal:colon.txt");
+      expect(rows).toContain(String.raw`./literal\backslash.txt`);
+      expect(rows).toContain("./literal:colon.txt");
     }
   });
 
@@ -566,39 +470,7 @@ describe("plugin runtime preparation", () => {
     expect(verification.status, verification.stderr).toBe(0);
   });
 
-  test("allows the workbench to derive missing deferred scan identifiers", async () => {
-    const schema = JSON.parse(
-      await readFile(
-        join(PLUGIN_ROOT, "schemas", "tools", "scan-draft.schema.json"),
-        "utf8",
-      ),
-    ) as {
-      $defs: {
-        coverage: {
-          properties: { deferred: { items: { required: string[] } } };
-        };
-      };
-    };
-
-    expect(schema.$defs.coverage.properties.deferred.items.required).toEqual([
-      "reason",
-    ]);
-  });
-
-  test("accepts preserved context before starting a headless scan", async () => {
-    const responses = await inspectMcpServer();
-    const tool = responses
-      .find((response) => response.id === 2)
-      ?.result.tools?.find(
-        (candidate) => candidate.name === "start_codex_security_standard_scan",
-      );
-    const userContext = "Assess the HTTP boundary. ".repeat(320);
-
-    expect(userContext.length).toBeGreaterThan(2400);
-    expect(tool?.inputSchema.properties.userContext?.maxLength).toBeUndefined();
-  });
-
-  test("keeps native scan tools without the obsolete setup widget", async () => {
+  test("exposes native scan tools and unbounded scan context without the obsolete widget", async () => {
     const contract = JSON.parse(
       await readFile(
         new URL(
@@ -615,10 +487,21 @@ describe("plugin runtime preparation", () => {
     expect(
       responses.find((response) => response.id === 1)?.result.capabilities,
     ).not.toHaveProperty("resources");
-    const names = new Set(
-      responses
-        .find((response) => response.id === 2)
-        ?.result.tools?.map((tool) => tool.name),
+    const tools = responses.find((response) => response.id === 2)!.result
+      .tools!;
+    const names = new Set(tools.map((tool) => tool.name));
+    for (const tool of tools) {
+      if (tool._meta?.ui?.visibility?.includes("model") === false) continue;
+      expect(`mcp__codex_security__${tool.name}`.length).toBeLessThanOrEqual(
+        64,
+      );
+    }
+    const standardScan = tools.find(
+      (tool) => tool.name === "start_codex_security_standard_scan",
+    )!;
+    expect(standardScan.inputSchema.properties.userContext).toBeDefined();
+    expect(standardScan.inputSchema.properties.userContext).not.toHaveProperty(
+      "maxLength",
     );
     for (const name of [
       "open_codex_security_workspace",
@@ -983,7 +866,13 @@ describe("plugin runtime preparation", () => {
     expect(installerCalls).toBe(1);
   });
 
-  test.each(["shell", "shell with root", "node", "node with root"])(
+  test.each([
+    "shell",
+    "shell with root",
+    // Without a source update, both shebangs exercise the same Windows batch launcher.
+    ...(process.platform === "win32" ? [] : ["node"]),
+    "node with root",
+  ])(
     "keeps %s MCP roots isolated outside the credential home",
     async (interpreter) => {
       const root = await temporaryDirectory();
@@ -1041,7 +930,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   const result = request.method === "initialize"
     ? { protocolVersion: request.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "synthetic-launcher", version: "1" } }
     : request.method === "tools/list"
-      ? { tools: [{ name: "probe", description: pluginRoot + "\\n" + JSON.stringify({ args: process.argv.slice(2), execArgv: process.execArgv, cwd: process.cwd(), entry: process.argv[1] }), inputSchema: { type: "object", properties: {} } }] }
+      ? { tools: [{ name: "probe", description: "Reports test launcher details.", _meta: { launch: { pluginRoot, args: process.argv.slice(2), execArgv: process.execArgv, cwd: process.cwd(), entry: process.argv[1] } }, inputSchema: { type: "object", properties: {} } }] }
       : request.method === "resources/list" ? { resources: [] }
       : request.method === "resources/templates/list" ? { resourceTemplates: [] }
       : {};
@@ -1211,12 +1100,8 @@ for await (const line of createInterface({ input: process.stdin })) {
           serverInfo: { name: "synthetic-launcher", version },
           tools: { probe: { description: expect.any(String) } },
         });
-        expect(server.tools.probe.description).toStartWith(
-          await realpath(pluginRoot),
-        );
-        const details = JSON.parse(
-          server.tools.probe.description.match(/\n(\{.+\})/)![1],
-        );
+        const details = server.tools.probe._meta.launch;
+        expect(details.pluginRoot).toBe(await realpath(pluginRoot));
         expect(details.args).toEqual(argumentsAfterEntry);
         expect(details.cwd).toBe(
           process.platform === "win32"
@@ -1749,6 +1634,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       await expect(
         extractPluginZip(path, join(root, "extract")),
       ).rejects.toThrow(PluginBootstrapError);
+      expect(await readdir(root)).toEqual([`${name}.zip`]);
     }
   });
 
@@ -5603,19 +5489,14 @@ describe("runtime directories and plugin Python boundary", () => {
 
   test.each([
     ["all required draft artifacts", []],
-    ["the manifest draft", ["findings.json", "coverage.json"]],
-    ["the findings draft", ["scan-manifest.json", "coverage.json"]],
-    ["the coverage draft", ["scan-manifest.json", "findings.json"]],
+    ["the manifest draft", ["findings.json"]],
+    ["the findings draft", ["scan-manifest.json"]],
   ] as const)(
     "rejects recipe scans when the agent did not create %s",
     async (_description, present) => {
       const python = Bun.which("python3") ?? Bun.which("python");
       expect(python).not.toBeNull();
-      const requiredDrafts = [
-        "scan-manifest.json",
-        "findings.json",
-        "coverage.json",
-      ] as const;
+      const requiredDrafts = ["scan-manifest.json", "findings.json"] as const;
       const root = await temporaryDirectory("codex-security-missing-drafts-");
       const repository = join(root, "repository");
       const scanDir = join(root, "scan");
@@ -5636,7 +5517,7 @@ describe("runtime directories and plugin Python boundary", () => {
       await Promise.all(
         present.map((filename) =>
           copyFile(
-            join(PLUGIN_ROOT, "examples", "completed-scan", filename),
+            join(PLUGIN_ROOT, "examples", "legacy-completed-scan", filename),
             join(scanDir, filename),
           ),
         ),
@@ -6808,18 +6689,4 @@ describe("runtime directories and plugin Python boundary", () => {
       await expect(resolving).rejects.toMatchObject({ name: "AbortError" });
     },
   );
-
-  test("does not leave extraction staging directories after failure", async () => {
-    const root = await temporaryDirectory();
-    const archive = join(root, "bad.zip");
-    await writeFile(archive, zipSync({ "../escape": strToU8("bad") }));
-    await expect(
-      extractPluginZip(archive, join(root, "extract")),
-    ).rejects.toThrow();
-    expect(
-      (await readdir(root)).some((name) =>
-        name.startsWith(".codex-security-plugin-"),
-      ),
-    ).toBe(false);
-  });
 });

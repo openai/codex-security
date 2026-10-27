@@ -95,9 +95,9 @@ process.exitCode = result.status;
     expect(result.status, result.stderr).toBe(0);
     return readFileSync(out, "utf8");
   };
-  const scopeArgs = (scope = ".") => {
+  const scopeArgs = (scope = ".", ...others: string[]) => {
     const file = join(root, "requested-scopes.json");
-    writeFileSync(file, JSON.stringify([scope]));
+    writeFileSync(file, JSON.stringify([scope, ...others]));
     return ["--scopes-file", file];
   };
   const rows = (command = "make-repo-scope-input", args?: string[]) =>
@@ -674,86 +674,97 @@ for (const scope of [".", "src", "./src", "src/résumé.py"]) {
 test("make-repo-scope-input retains explicit and ignored tracked files without widening directory scope", () => {
   const f = fixture();
   f.write("src/source.py");
-  f.write("src/entrypoint", "run\n");
-  f.write("outside.py");
-  f.write(".gitignore", "src/ignored*\n");
+  f.write("src/Dockerfile");
+  f.write("src/examples/demo.ts");
+  f.write("src/tests/handler.test.ts");
+  f.write("src/entrypoint");
   f.write("src/ignored-tracked.py");
   f.write("src/ignored-untracked.py");
+  f.write("src/.env");
+  f.write("src/node_modules/dependency.ts");
+  f.write("src/vendor/tracked.py");
+  f.write("src/vendor/untracked.py");
+  f.write("outside.py");
+  f.write(".gitignore", ".env\nnode_modules/\nvendor/\nsrc/ignored*\n");
   f.write("src/binary", Buffer.from([0]));
   f.write("direct.bin", Buffer.from([0]));
-  git(f.repo, "add", "--force", "src/ignored-tracked.py");
-  const scopes = join(f.root, "scopes.json");
-  writeFileSync(scopes, JSON.stringify(["src", "direct.bin", "src/source.py"]));
-  const rows = f.rows("make-repo-scope-input", ["--scopes-file", scopes]);
-  expect(rows.map((row) => row.path)).toEqual([
-    "direct.bin",
+  f.write("src/logo.png", Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  git(
+    f.repo,
+    "add",
+    "--force",
+    "src/vendor/tracked.py",
+    "src/ignored-tracked.py",
+    "src/logo.png",
+  );
+  const paths = (scope: string, ...others: string[]) =>
+    f
+      .rows("make-repo-scope-input", f.scopeArgs(scope, ...others))
+      .map((row) => row.path);
+  const directory = [
+    "src/Dockerfile",
     "src/binary",
     "src/entrypoint",
+    "src/examples/demo.ts",
     "src/ignored-tracked.py",
+    "src/logo.png",
     "src/source.py",
+    "src/tests/handler.test.ts",
+    "src/vendor/tracked.py",
+  ];
+  expect(paths("src", "direct.bin", "src/source.py")).toEqual([
+    "direct.bin",
+    ...directory,
+  ]);
+  expect(paths("src", "src/.env")).toEqual(["src/.env", ...directory]);
+  expect(paths("src/vendor", "src/logo.png")).toEqual([
+    "src/logo.png",
+    "src/vendor/tracked.py",
   ]);
 });
 
-for (const encoding of ["utf8", "utf16le", "utf16be"] as const) {
-  for (const mode of ["revisions", "local-patch"]) {
-    test(`${mode} previews decode ${encoding} and detect binary bytes beyond the prefix`, () => {
-      const f = fixture();
-      f.write("existing.py");
-      const base = f.commit();
-      const source = "    value = 'café 😀  literal'  \n\n    return value  \n";
-      const bytes =
-        encoding === "utf8"
-          ? Buffer.from(source)
-          : Buffer.concat([
-              Buffer.from([0xff, 0xfe]),
-              Buffer.from(source, "utf16le"),
-            ]);
-      if (encoding === "utf16be") bytes.swap16();
-      f.write("text", bytes);
-      const lateBinary =
-        encoding === "utf8"
-          ? Buffer.concat([Buffer.alloc(96 * 1024, 120), Buffer.from([0])])
-          : Buffer.concat([
-              Buffer.from([0xff, 0xfe]),
-              Buffer.from("x".repeat(96 * 1024) + "\0", "utf16le"),
-            ]);
-      if (encoding === "utf16be") lateBinary.swap16();
-      f.write("encoded-binary", lateBinary);
+for (const mode of ["revisions", "local-patch"]) {
+  test(`${mode} previews decode UTF-8 and UTF-16 and exclude binary files`, () => {
+    const f = fixture();
+    f.write("existing.py");
+    const base = f.commit();
+    const source = "    value = 'café 😀  literal'  \n\n    return value  \n";
+    const binary = "x".repeat(96 * 1024) + "\0";
+    for (const [name, text] of [
+      ["text", source],
+      ["binary", binary],
+    ] as const) {
+      f.write(`${name}-utf8`, text);
+      const utf16 = Buffer.from("\ufeff" + text, "utf16le");
+      f.write(`${name}-utf16le`, utf16);
+      f.write(`${name}-utf16be`, utf16.swap16());
+    }
+    for (const bom of [
+      [0xff, 0xfe],
+      [0xfe, 0xff],
+    ]) {
       f.write(
-        "late-binary",
-        Buffer.concat([Buffer.alloc(96 * 1024, 120), Buffer.from([0])]),
+        `late-bom-${bom[0]}`,
+        Buffer.concat([
+          Buffer.alloc(64 * 1024, 120),
+          Buffer.from([...bom, 104, 0, 105, 0]),
+        ]),
       );
-      for (const bom of [
-        [0xff, 0xfe],
-        [0xfe, 0xff],
-      ])
-        f.write(
-          `late-bom-${bom[0]}`,
-          Buffer.concat([
-            Buffer.alloc(64 * 1024, 120),
-            Buffer.from([...bom, 104, 0, 105, 0]),
-          ]),
-        );
-      if (mode === "revisions") f.commit();
-      const rows = f.rows("make-diff-rank-input", [
-        "--base",
-        base,
-        "--mode",
-        mode,
-      ]);
-      expect(rows.find((row) => row.path === "text")?.preview).toBe(
+    }
+    if (mode === "revisions") f.commit();
+    const rows = f.rows("make-diff-rank-input", [
+      "--base",
+      base,
+      "--mode",
+      mode,
+    ]);
+    expect(rows.map(({ path, preview }) => [path, preview])).toEqual(
+      ["text-utf16be", "text-utf16le", "text-utf8"].map((path) => [
+        path,
         source.slice(0, -1),
-      );
-      expect(
-        rows.some(
-          (row) =>
-            row.path === "late-binary" ||
-            row.path === "encoded-binary" ||
-            row.path.startsWith("late-bom-"),
-        ),
-      ).toBe(false);
-    });
-  }
+      ]),
+    );
+  });
 }
 
 for (const budget of [0, -1, 2, 30, 220, 1024]) {
@@ -1263,18 +1274,26 @@ test("inventory excludes nested Git metadata and handles long destination names"
   }
 });
 
-test("scope inventory rejects symbolic-link components before lexical parent traversal", () => {
+test("scope inventory rejects escaping paths and symbolic links before lexical traversal", () => {
   const f = fixture();
-  f.write("src/source");
+  const source = f.write("src/source");
+  const escaped = f.run(
+    "make-repo-scope-input",
+    f.scopeArgs("../requested-scopes.json"),
+  );
+  expect(escaped.status).toBe(1);
   symlinkSync(join(f.repo, "src"), join(f.repo, "alias"), "junction");
-  const scopes = join(f.root, "scopes.json");
-  for (const scope of [
+  const scopes = [
     "alias/source",
     "alias/../src/source",
     `${f.root}${sep}.${sep}repository${sep}alias${sep}..${sep}src${sep}source`,
-  ]) {
-    writeFileSync(scopes, JSON.stringify([scope]));
-    const result = f.run("make-repo-scope-input", ["--scopes-file", scopes]);
+  ];
+  if (process.platform !== "win32") {
+    symlinkSync(source, join(f.repo, "src", "alias"));
+    scopes.push("src/alias");
+  }
+  for (const scope of scopes) {
+    const result = f.run("make-repo-scope-input", f.scopeArgs(scope));
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("symbolic links");
   }

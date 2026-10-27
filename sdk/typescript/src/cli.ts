@@ -2611,7 +2611,7 @@ export async function main(
           }
           scanArguments = await prepareScanArgumentsFromRecipe(
             saved["recipe"],
-            saved["scanId"],
+            "resume",
             {
               scanPrompt:
                 typeof saved["userContext"] === "string"
@@ -2632,7 +2632,6 @@ export async function main(
               (saved["recipe"] as JsonObject)["scanInputs"],
             );
           }
-          scanArguments.parentScanId = undefined;
           // Resume uses the installed engine with the saved recipe and checkpoints.
           scanArguments.expectedPluginVersion = undefined;
           scanArguments.verbose = options.verbose;
@@ -2762,7 +2761,7 @@ export async function main(
           }
           scanArguments = await prepareScanArgumentsFromRecipe(
             recipe,
-            parentScanId,
+            "rerun",
             {
               scanPromptFile:
                 options.scanPromptFile === undefined
@@ -2783,6 +2782,7 @@ export async function main(
           );
           scanArguments.verbose = options.verbose;
           scanArguments.showCost = options.showCost;
+          scanArguments.parentScanId = parentScanId;
           scanArguments.rerunInputIdentity = isJsonObject(recipe)
             ? (recipe["scanInputs"] ?? null)
             : null;
@@ -2856,7 +2856,7 @@ export async function main(
       },
     })
     .command("compare", {
-      description: "Match and compare findings and coverage between scans.",
+      description: "Match and compare findings between scans.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -5461,7 +5461,7 @@ export async function main(
                     }
                     const recipe = await prepareScanArgumentsFromRecipe(
                       saved["recipe"],
-                      scan.scanId,
+                      "resume",
                       {
                         scanPrompt:
                           typeof saved["userContext"] === "string"
@@ -7185,7 +7185,7 @@ async function runScanImport(
 
 async function prepareScanArgumentsFromRecipe(
   recipe: JsonValue | undefined,
-  parentScanId: string,
+  operation: "resume" | "rerun",
   {
     scanPrompt,
     scanPromptFile,
@@ -7201,11 +7201,9 @@ async function prepareScanArgumentsFromRecipe(
       "This scan does not have a saved launch recipe.",
     );
   }
-  if (
-    recipe["requiresScanPrompt"] === true &&
-    scanPrompt === undefined &&
-    scanPromptFile === undefined
-  ) {
+  const requiresRerunPrompt =
+    operation === "rerun" && recipe["requiresScanPrompt"] === true;
+  if (requiresRerunPrompt && scanPromptFile === undefined) {
     throw new CodexSecurityError(
       "This scan used additional instructions. Supply --scan-prompt-file to rerun it.",
     );
@@ -7369,7 +7367,7 @@ async function prepareScanArgumentsFromRecipe(
     repository,
     directory,
   );
-  if (recipe["requiresScanPrompt"] === true && !prompts.scanPrompt?.trim()) {
+  if (requiresRerunPrompt && !prompts.scanPrompt?.trim()) {
     throw new CodexSecurityError(
       "This scan used additional instructions. The --scan-prompt-file must not be empty.",
     );
@@ -7408,7 +7406,6 @@ async function prepareScanArgumentsFromRecipe(
     maxCostUsd,
     maxTimeMinutes: maxTimeMinutes.data,
     dryRun: false,
-    parentScanId,
     ...(recipe["mock"] === true ? { mock: true } : {}),
     expectedPluginVersion:
       typeof recipe["pluginVersion"] === "string"
@@ -10776,7 +10773,7 @@ function printScanSummary(
         ? ""
         : `  ${paint("THREAT MODEL", "1;36")}  ${paint(errorMessage(threatModelPath), 4)}\n`) +
       `\n  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${findingSummary === "" ? "" : ` (${findingSummary})`}`, findingColor)}\n` +
-      `  ${paint("SCOPE", 1)}     ${formatCoverageScope(result.coverage)}\n` +
+      `  ${paint("SCOPE", 1)}     ${formatCoverageScope({ mode: result.mode, ...result.manifest.scan.scope, explicitExclusions: result.review.excludedPaths.map((pattern) => ({ pattern, reason: "Excluded from review" })) })}\n` +
       (deepScanStop === undefined
         ? ""
         : `  ${paint("STOPPED", 1)}   ${deepScanStop.reason}\n`) +

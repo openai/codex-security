@@ -153,9 +153,26 @@ async function fixture(
 
 async function writeDraft(request: ScanExecutionRequest) {
   const directory = request.runtime.outputDirectory;
+  const reviewState = {
+    inventoryStrategy:
+      request.scope.paths[0] === "." ? "repository" : "scoped_path",
+    surfaces: [
+      {
+        id: "fixture",
+        label: "Synthetic scope fixture",
+        disposition: "no_issue_found",
+        receiptRefs: [],
+        notes: "Synthetic test only.",
+      },
+    ],
+    explicitExclusions: [],
+    deferred: [],
+  };
   const documents = {
     "scan-manifest.json": {
       scan: {
+        mode: request.scope.paths[0] === "." ? "repository" : "scoped_path",
+        reviewState,
         target: { kind: "git_revision" },
         scope: {
           summary: "Synthetic scope fixture",
@@ -165,21 +182,6 @@ async function writeDraft(request: ScanExecutionRequest) {
       },
     },
     "findings.json": { findings: [] },
-    "coverage.json": {
-      inventoryStrategy:
-        request.scope.paths[0] === "." ? "repository" : "scoped_path",
-      surfaces: [
-        {
-          id: "fixture",
-          label: "Synthetic scope fixture",
-          disposition: "no_issue_found",
-          receiptRefs: [],
-          notes: "Synthetic test only.",
-        },
-      ],
-      explicitExclusions: [],
-      deferred: [],
-    },
   };
   for (const [name, document] of Object.entries(documents))
     await writeJson(join(directory, name), document);
@@ -362,14 +364,11 @@ test.each(sealedScopes)(
     const manifest = await readJson<any>(
       join(result.outputDirectory, "scan-manifest.json"),
     );
-    const coverage = await readJson<any>(
-      join(result.outputDirectory, "coverage.json"),
-    );
     expect(manifest.scan.scope.includePaths).toEqual(normalized);
     expect(manifest.scan.target.revision).toBe(input.revision);
     expect(manifest.scan.sealedAt).toBeTruthy();
-    expect(coverage).toMatchObject({
-      includePaths: normalized,
+    expect(manifest.scan).toMatchObject({
+      scope: { includePaths: normalized },
       mode: normalized[0] === "." ? "repository" : "scoped_path",
     });
     const report = await readFile(
@@ -596,23 +595,19 @@ test.each(["missing", "invalid"] as const)(
   },
 );
 
-test("sealed coverage with follow-up diagnostics remains completed", async () => {
+test("sealed review with follow-up diagnostics remains completed", async () => {
   const result = await runHostedScan(await fixture(), {
     executor: draftExecutor(async (request) => {
-      const file = join(request.runtime.outputDirectory, "coverage.json");
-      const coverage = await readJson<any>(file);
-      coverage.surfaces[0].disposition = "needs_follow_up";
-      await writeJson(file, coverage);
+      const file = join(request.runtime.outputDirectory, "scan-manifest.json");
+      const manifest = await readJson<any>(file);
+      manifest.scan.reviewState.surfaces[0].disposition = "needs_follow_up";
+      await writeJson(file, manifest);
     }),
   });
   expect(result.status).toBe("completed");
-  expect(result.artifacts.map((artifact) => artifact.path)).toContain(
+  expect(result.artifacts.map((artifact) => artifact.path)).not.toContain(
     "coverage.json",
   );
-  const coverage = await readJson<any>(
-    join(result.outputDirectory, "coverage.json"),
-  );
-  expect(coverage.surfaces[0].disposition).toBe("needs_follow_up");
 });
 
 test("a changed checkout cannot produce accepted completed output", async () => {

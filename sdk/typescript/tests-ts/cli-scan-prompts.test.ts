@@ -1,9 +1,9 @@
-import { spawnSync } from "node:child_process";
 import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
 import { dependencies } from "./cli-fixtures.js";
+import { git } from "./git-fixture.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { runCapturedCli, captureCli } from "./support/cli-run.js";
 
@@ -74,11 +74,12 @@ describe("CLI scan prompts", () => {
         process.platform === "win32" ? "junction" : "dir",
       );
 
-      for (const [option, property] of [
-        ["--scan-prompt-file", "scanPrompt"],
-        ["--validation-prompt-file", "validationPrompt"],
-        ["--post-scan-prompt-file", "postScanPrompt"],
-      ] as const) {
+      const promptFlags = [
+        "--scan-prompt-file",
+        "--validation-prompt-file",
+        "--post-scan-prompt-file",
+      ];
+      for (const option of promptFlags) {
         for (const [directory, target, input] of [
           [repository, ".", "linked-prompt.md"],
           [repository, ".", join("linked-directory", "external-prompt.md")],
@@ -113,27 +114,34 @@ describe("CLI scan prompts", () => {
           expect(stderr.text()).not.toContain("SYNTHETIC_EXTERNAL_PROMPT");
           expect(onTurn).not.toHaveBeenCalled();
         }
+      }
 
-        for (const [directory, target] of [
-          [repository, "."],
-          [physicalRepository, repositoryAlias],
-          [repositoryAlias, physicalRepository],
-        ] as const) {
-          let selected: unknown;
-          expect(
-            await runCapturedCli(
-              main,
-              ["scan", target, option, external, "--json"],
-              dependencies({
-                currentDirectory: directory,
-                onTurn: (_repository, value) => (selected = value),
-              }),
-            ),
-          ).toBe(0);
-          expect(selected).toMatchObject({
-            [property]: "SYNTHETIC_EXTERNAL_PROMPT\n",
-          });
-        }
+      for (const [directory, target] of [
+        [repository, "."],
+        [physicalRepository, repositoryAlias],
+        [repositoryAlias, physicalRepository],
+      ] as const) {
+        let selected: unknown;
+        expect(
+          await runCapturedCli(
+            main,
+            [
+              "scan",
+              target,
+              ...promptFlags.flatMap((flag) => [flag, external]),
+              "--json",
+            ],
+            dependencies({
+              currentDirectory: directory,
+              onTurn: (_repository, value) => (selected = value),
+            }),
+          ),
+        ).toBe(0);
+        expect(selected).toMatchObject({
+          scanPrompt: "SYNTHETIC_EXTERNAL_PROMPT\n",
+          validationPrompt: "SYNTHETIC_EXTERNAL_PROMPT\n",
+          postScanPrompt: "SYNTHETIC_EXTERNAL_PROMPT\n",
+        });
       }
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -144,30 +152,17 @@ describe("CLI scan prompts", () => {
     const root = await temporaryDirectory("codex-security-cli-prompts-");
     try {
       const repository = join(root, "repository");
-      for (const args of [
-        ["init", "-q", repository],
-        [
-          "-C",
-          repository,
-          "-c",
-          "user.email=test@example.com",
-          "-c",
-          "user.name=Test",
-          "-c",
-          "commit.gpgsign=false",
-          "commit",
-          "--allow-empty",
-          "-qm",
-          "initial",
-        ],
-      ]) {
-        expect(spawnSync("git", args, { encoding: "utf8" }).status).toBe(0);
-      }
-      const revision = spawnSync(
-        "git",
-        ["-C", repository, "rev-parse", "HEAD"],
-        { encoding: "utf8" },
-      ).stdout.trim();
+      await mkdir(repository);
+      git(repository, "init", "-q");
+      git(
+        repository,
+        "commit",
+        "--no-gpg-sign",
+        "--allow-empty",
+        "-qm",
+        "initial",
+      );
+      const revision = git(repository, "rev-parse", "HEAD");
       await Promise.all([
         writeFile(
           join(root, "repositories.csv"),

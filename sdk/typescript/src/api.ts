@@ -165,7 +165,11 @@ import {
   type KnowledgeBaseSnapshot,
 } from "./knowledge-base.js";
 import { scanInputIdentity, saveScanKnowledge } from "./scan-inputs.js";
-import { FindingWorkflow, workflowDigest } from "./finding-workflow.js";
+import {
+  FindingWorkflow,
+  scanArtifactDigest,
+  workflowDigest,
+} from "./finding-workflow.js";
 import { reviewSqliteHome } from "./deduplication/codex-review.js";
 import {
   ScanResult,
@@ -819,7 +823,7 @@ export class CodexSecurity {
           expectedScanId: state.scanId,
           signal,
         });
-        await workflow.bind({ artifactDigest: workflowDigest(contract) });
+        await workflow.bind({ artifactDigest: scanArtifactDigest(contract) });
         metadata ??= { threadId: "", turnResult: { status: "completed" } };
         await workflow.complete("scan", metadata);
         return new ScanResult({
@@ -850,11 +854,7 @@ export class CodexSecurity {
       await workflow.bind({
         scanId: result.manifest.scan.id,
         scanDir: result.scanDir,
-        artifactDigest: workflowDigest({
-          manifest: result.manifest,
-          findings: result.findings,
-          coverage: result.coverage,
-        }),
+        artifactDigest: scanArtifactDigest(result),
       });
       await workflow.complete("scan", metadata);
       return result;
@@ -2856,6 +2856,9 @@ export class CodexSecurity {
           runtimePaths,
           options.auth,
           git,
+          mode === "deep" && !directDeepScan
+            ? deepScanParentConfig(session.sessionConfig)
+            : undefined,
         );
       const threadOptions: ThreadOptions = {
         threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
@@ -3167,7 +3170,6 @@ export class CodexSecurity {
             ...new Set([
               "scan-manifest.json",
               "findings.json",
-              "coverage.json",
               "report.md",
               ...(result.threatModelPath === null
                 ? []
@@ -4472,13 +4474,7 @@ export class CodexSecurity {
       }
       throwIfAborted(signal, scanDir);
       notifyObserver(options, "onScanStarted")();
-      await writeMockScanDraft(
-        scanDir,
-        scanId,
-        local.target,
-        registration,
-        signal,
-      );
+      await writeMockScanDraft(scanDir, scanId, registration, signal);
       const usage = {
         input_tokens: 0,
         cached_input_tokens: 0,
@@ -5003,17 +4999,16 @@ export async function runScanEvents(
     options.signal.throwIfAborted();
     await requireScanArtifacts(
       options.scanDir,
-      ["scan-manifest.json", "findings.json", "coverage.json"],
+      ["scan-manifest.json", "findings.json"],
       options.signal,
     );
-    const [manifest, findings, coverage] = await Promise.all(
-      ["scan-manifest.json", "findings.json", "coverage.json"].map(
-        async (name) =>
-          JSON.parse(
-            new TextDecoder("utf-8", { fatal: true }).decode(
-              await readScanFile(options.scanDir, name, name, options.signal),
-            ),
+    const [manifest, findings] = await Promise.all(
+      ["scan-manifest.json", "findings.json"].map(async (name) =>
+        JSON.parse(
+          new TextDecoder("utf-8", { fatal: true }).decode(
+            await readScanFile(options.scanDir, name, name, options.signal),
           ),
+        ),
       ),
     );
     const helper = (
@@ -5025,7 +5020,24 @@ export async function runScanEvents(
       scanId: options.scanId ?? manifest.scan.id,
       manifest,
       findings,
-      coverage,
+      reviewState:
+        manifest.scan.reviewState ??
+        (manifest.scan.coverageRef
+          ? JSON.parse(
+              new TextDecoder("utf-8", { fatal: true }).decode(
+                await readScanFile(
+                  options.scanDir,
+                  "coverage.json",
+                  "legacy review state",
+                  options.signal,
+                ),
+              ),
+            )
+          : {
+              surfaces: [],
+              explicitExclusions: [],
+              deferred: [],
+            }),
     });
     options.signal.throwIfAborted();
     if (draft.complete === false) {
@@ -5251,7 +5263,7 @@ function scanPrompt(
     `Use ${python} as <python_command> for plugin Python helper scripts (.py files); replace any literal python or python3 helper invocation with this exact interpreter.`,
     `Repository root: ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")}`,
     `Use this exact scan directory for all scan output: ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR")}`,
-    `Use exactly ${JSON.stringify(scanId)} as the scan ID in the manifest, findings, and coverage.`,
+    `Use exactly ${JSON.stringify(scanId)} as the scan ID in the manifest and findings.`,
     `Use exactly ${shellEnvironmentReference("CODEX_SECURITY_TARGET_ID")} as scan.target.targetId; do not derive a different target ID.`,
     `Use exactly ${shellEnvironmentReference("CODEX_SECURITY_TARGET_DISPLAY_NAME")} as scan.target.displayName; do not infer a display name from the Git remote.`,
     `Use exactly ${shellEnvironmentReference("CODEX_SECURITY_TARGET_KIND")} as scan.target.kind; do not infer the target kind from the checkout.`,
@@ -5286,7 +5298,7 @@ function scanPrompt(
         ]
       : skillName === "security-scan" || enforceCostLimit || customValidation
         ? [
-            "Write the complete canonical scan-manifest.json, findings.json, and coverage.json, but do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
+            "Write the complete canonical scan-manifest.json and findings.json with review bookkeeping in scan.reviewState, but do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
           ]
         : [
             "Use record_codex_security_scan_draft and complete_codex_security_scan as directed by the selected skill; the workbench owns authoritative metadata, finalization, report generation, and sealing.",
@@ -5334,8 +5346,8 @@ async function targetInstruction(
     // CMD expands the environment references once, preserving percent signs in path values.
     const bindScopes =
       process.platform === "win32"
-        ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper bind-repo-scopes --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --manifest "%CODEX_SECURITY_SCAN_DIR%\scan-manifest.json" --coverage "%CODEX_SECURITY_SCAN_DIR%\coverage.json""'`
-        : `${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/scripts/launch_codex_security_mcp")} --helper bind-repo-scopes --scopes-file ${scopes} --manifest ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scan-manifest.json")} --coverage ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/coverage.json")}`;
+        ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper bind-repo-scopes --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --manifest "%CODEX_SECURITY_SCAN_DIR%\scan-manifest.json""'`
+        : `${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/scripts/launch_codex_security_mcp")} --helper bind-repo-scopes --scopes-file ${scopes} --manifest ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scan-manifest.json")}`;
     return `Scan target paths: resolve every requested file and all non-ignored descendants of requested directories using ${makeScope}. Before finalization, preserve every requested scope with ${bindScopes}. Do not print, evaluate, or modify the target-paths file.`;
   }
   if (target.kind === "refs") {
@@ -5490,7 +5502,7 @@ async function collectResult(
 ): Promise<ScanResult> {
   await requireScanArtifacts(
     scanDir,
-    ["scan-manifest.json", "findings.json", "coverage.json", "report.md"],
+    ["scan-manifest.json", "findings.json", "report.md"],
     signal,
   );
   const contract = await loadContract(scanDir, {
@@ -5808,6 +5820,32 @@ export function classifyConnectionFailure(
   }
   if (/\b(?:timed? out|timeout)\b/iu.test(message)) return "timeout";
   return "unknown";
+}
+
+function deepScanParentConfig(config: JsonObject): JsonObject {
+  const resolved = resolveCodexProfile(config);
+  const features = resolved["features"] ?? {};
+  if (!isRecord(features)) return resolved;
+  const mode = features["code_mode"];
+  const settings = typeof mode === "boolean" ? { enabled: mode } : (mode ?? {});
+  // Leave malformed user settings for the native config parser to reject.
+  if (!isRecord(settings)) return resolved;
+  const direct = settings["direct_only_tool_namespaces"] ?? [];
+  if (!Array.isArray(direct)) return resolved;
+  // The native parent waits for direct tool calls before it can end its turn.
+  // A code-mode cell can yield the still-running coordinator to the model.
+  return {
+    ...resolved,
+    features: {
+      ...features,
+      code_mode: {
+        ...settings,
+        direct_only_tool_namespaces: [
+          ...new Set([...direct, "mcp__codex_security", "codex_security"]),
+        ],
+      },
+    },
+  };
 }
 
 export function scanRuntimeCodexConfig(

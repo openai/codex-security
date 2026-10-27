@@ -1,6 +1,6 @@
 {
   "name": "@openai/codex-security",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "TypeScript SDK and CLI for Codex Security",
   "license": "Apache-2.0",
   "author": "OpenAI",
@@ -81,7 +81,7 @@
     "types": "node scripts/generate-deep-defaults.mjs --check && node scripts/generate-project-config-schema.mjs --check && pnpm run generate:models:check && pnpm run generate:external-import-models:check && pnpm --dir ../../plugins/codex-security/mcp-app run typecheck && tsc --noEmit"
   },
   "dependencies": {
-    "@inquirer/prompts": "8.7.3",
+    "@inquirer/prompts": "8.7.4",
     "@linear/sdk": "98.0.0",
     "@octokit/core": "7.0.8",
     "@openai/codex": "0.164.0",

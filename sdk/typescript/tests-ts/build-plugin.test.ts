@@ -89,7 +89,7 @@ describe("bundled plugin build", () => {
       (path) =>
         (path.startsWith("scripts/") && path.endsWith(".py")) ||
         path.startsWith("schemas/") ||
-        path.startsWith("examples/completed-scan/"),
+        path.startsWith("examples/legacy-completed-scan/"),
     )) {
       expect(await readFile(join(PLUGIN_ROOT, path)), path).toEqual(
         await readFile(join(source, path)),
@@ -298,13 +298,13 @@ describe("bundled plugin build", () => {
             scanId: "synthetic-scan",
             manifest: { scan: {} },
             findings: { findings: [] },
-            coverage: {
+            reviewState: {
               surfaces: [], explicitExclusions: [], deferred: [],
             },
           };
           assert.equal(helpers.parseCanonicalScanDraft(input).scanId, input.scanId);
           assert.throws(() => helpers.parseCanonicalScanDraft({
-            ...input, coverage: { ...input.coverage, surfaces: "invalid" },
+            ...input, reviewState: { ...input.reviewState, surfaces: "invalid" },
           }));
           assert.equal(process.exitCode, undefined);
         `,
