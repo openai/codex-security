@@ -34,6 +34,7 @@ jobs:
       source-run: ${{ steps.proof.outputs.source-run }}
       edit-attempt: ${{ steps.proof.outputs.edit-attempt }}
       source-required: ${{ steps.scope.outputs.source-required }}
+      container-required: ${{ steps.scope.outputs.container-required }}
       plugin-tests-required: ${{ steps.scope.outputs.plugin-tests-required }}
       package-required: ${{ steps.scope.outputs.package-required }}
       action-ci: ${{ steps.scope.outputs.action-ci }}
@@ -138,7 +139,7 @@ jobs:
 
   container-validate:
     needs: [classify-changes, native, static-checks]
-    if: needs.classify-changes.outputs.source-required == 'true'
+    if: needs.classify-changes.outputs.container-required == 'true'
     uses: ./.github/workflows/container-validate.yml
 
   package:
