@@ -26,6 +26,7 @@ from workbench_test_support import (
     get_deep_scan,
     get_scan,
     mark_deep_coordinator_succeeded,
+    read_review_state,
     resume_deep_scan,
     run_workbench,
     save_workspace,
@@ -3233,7 +3234,7 @@ def test_late_worker_rejection_supersedes_stopped_checkpoint_finding(tmp_path: P
         state_dir, "recover-scan-results", scan_id, environment=deep_environment(codex_home)
     )["scan"]
     final_findings = json.loads(findings_path.read_text())["findings"]
-    final_coverage = json.loads(coverage_path.read_text())
+    final_coverage = read_review_state(state_dir, scan_dir)
     assert recovered["findingCount"] == len(final_findings) == 0
     assert any(
         item.get("candidateId") == "candidate-late-rejection"

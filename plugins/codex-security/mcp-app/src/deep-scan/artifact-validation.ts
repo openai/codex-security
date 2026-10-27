@@ -29,9 +29,9 @@ import {
 } from "./artifacts.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
 
-export type DeepReductionInput = Omit<ScanDraftInput, "coverage"> & {
+export type DeepReductionInput = Omit<ScanDraftInput, "reviewState"> & {
   /** Host-owned accepted coverage, omitted from the legacy persisted reducer format. */
-  sourceCoverage?: ScanDraftInput["coverage"];
+  sourceCoverage?: ScanDraftInput["reviewState"];
 };
 export const deepReductionInputSchema = projectArtifactToolSchema(
   artifactSchemaDocuments["tools/deep-reducer"].$defs.reductionInput,
@@ -40,7 +40,7 @@ export const deepReductionInputSchema = projectArtifactToolSchema(
 export interface DeepReductionSources {
   discoveries: {
     workerId: string;
-    coverage?: ScanDraftInput["coverage"];
+    coverage?: ScanDraftInput["reviewState"];
     result: DeepReductionInput;
   }[];
   previous: DeepReductionInput | null;
@@ -55,13 +55,13 @@ export function deepReductionToScanDraft(
   result: DeepReductionInput,
 ): ScanDraftInput {
   const { sourceCoverage, ...draft } = structuredClone(result);
-  return { ...draft, coverage: sourceCoverage ?? unknownSourceCoverage() };
+  return { ...draft, reviewState: sourceCoverage ?? unknownSourceCoverage() };
 }
 
 /** Keep v1 checkpoints readable by older binaries. */
 export function deepReductionForPersistence(
   result: DeepReductionInput,
-): Omit<ScanDraftInput, "coverage"> {
+): Omit<ScanDraftInput, "reviewState"> {
   const { sourceCoverage: _coverage, ...persisted } = result;
   return persisted;
 }
@@ -70,14 +70,14 @@ export function deepReductionForPersistence(
 export function aggregateDiscoveryCoverage(
   artifacts: DeepScanArtifacts,
   discoveries: Pick<AcceptedDiscovery, "id" | "resultPath" | "result">[],
-): ScanDraftInput["coverage"] {
-  const coverage: ScanDraftInput["coverage"] = {
+): ScanDraftInput["reviewState"] {
+  const coverage: ScanDraftInput["reviewState"] = {
     surfaces: [],
     explicitExclusions: [],
     deferred: [],
   };
   for (const worker of discoveries) {
-    const source = structuredClone(worker.result.coverage);
+    const source = structuredClone(worker.result.reviewState);
     const prefix = relative(artifacts.scanDir, dirname(worker.resultPath))
       .split(sep)
       .join("/");
@@ -171,9 +171,9 @@ export async function validateDiscoveryArtifacts(
     throw new Error(
       "Standard scan worker wrote only a checkpoint; its audit is not complete.",
     );
-  validateRetainedCoverage(result.coverage);
+  validateRetainedCoverage(result.reviewState);
   const receiptPaths = new Map<string, string>();
-  for (const row of result.coverage.surfaces as JsonObject[]) {
+  for (const row of result.reviewState.surfaces as JsonObject[]) {
     for (const ref of (row.receiptRefs as string[] | undefined) ?? []) {
       const components = coverageReceiptComponents(ref);
       const normalized = components.join("/");
@@ -355,12 +355,12 @@ export function reconcileDeepReduction(
 export function aggregateSourceCoverage(
   discoveries: DeepReductionSources["discoveries"],
   previous: DeepReductionInput | null,
-): ScanDraftInput["coverage"] {
+): ScanDraftInput["reviewState"] {
   const sources = [
     ...(previous ? [previous.sourceCoverage ?? unknownSourceCoverage()] : []),
     ...discoveries.map((source) => source.coverage ?? unknownSourceCoverage()),
   ];
-  const result: ScanDraftInput["coverage"] = {
+  const result: ScanDraftInput["reviewState"] = {
     surfaces: [],
     explicitExclusions: [],
     deferred: [],
@@ -386,7 +386,7 @@ export function aggregateSourceCoverage(
   return result;
 }
 
-function unknownSourceCoverage(): ScanDraftInput["coverage"] {
+function unknownSourceCoverage(): ScanDraftInput["reviewState"] {
   return {
     surfaces: [],
     explicitExclusions: [],
@@ -396,11 +396,11 @@ function unknownSourceCoverage(): ScanDraftInput["coverage"] {
 
 /** Qualify worker-local IDs and receipt paths before combining accepted coverage. */
 export function projectDiscoveryCoverage(
-  coverage: ScanDraftInput["coverage"],
+  coverage: ScanDraftInput["reviewState"],
   worker: { id: string; attempt?: number },
   artifactPrefix: string,
   scanReceiptRefs: ReadonlyMap<number, ReadonlySet<string>> = new Map(),
-): ScanDraftInput["coverage"] {
+): ScanDraftInput["reviewState"] {
   const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;
   const provenance = {
     workerId: worker.id,

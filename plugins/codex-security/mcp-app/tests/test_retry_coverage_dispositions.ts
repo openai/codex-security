@@ -1,164 +1,143 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
+import { rm } from "node:fs/promises";
 import test from "node:test";
 import {
   publishCoverageFixture,
   readFixtureCoverage,
 } from "./deep_scan_coverage_fixture.ts";
+import { finding } from "./scan-draft-fixture.ts";
+import { readJson } from "./support/json.ts";
+import { temporaryDirectory } from "./support/temporary-directories.ts";
 
-for (const surfaceOnly of [false, true]) {
-  for (const resume of [false, true]) {
-    for (const dispositions of [["rejected", "not_applicable"], ["reported"]]) {
-      for (const resolveOnRetry of [false, true]) {
-        test(`${resume ? "resumed" : "live"} ${surfaceOnly ? "surface-only" : "deferred"} stopped recovery preserves ${resolveOnRetry ? "the later disposition" : "newer gaps"} after ${dispositions.join(" and ")} retries`, async () => {
-          const root = await mkdtemp(path.join(tmpdir(), "retry-disposition-"));
-          try {
-            const cases = dispositions.map((disposition) => ({
-              disposition,
-              candidateId: `candidate-${disposition}`,
-              label: `Retry boundary: ${disposition}`,
-              gapReasons: ["First", "Second"].map(
-                (boundary) =>
-                  `${boundary} ${disposition} boundary needs proof.`,
-              ),
-            }));
-            const resolved = {
-              completeness: "complete",
-              surfaces: cases.map(({ candidateId, disposition }) => ({
-                id: `disposition-${disposition}`,
-                label: `Disposition: ${disposition}`,
-                candidateId,
-                disposition,
-                receiptRefs: [],
-              })),
-              explicitExclusions: [],
-              deferred: [],
-              openQuestions: [],
-            };
-            const pending = {
-              completeness: "partial",
-              surfaces: cases.flatMap(({ candidateId, disposition, label }) =>
-                (surfaceOnly ? ["first", "second"] : ["first"]).map(
-                  (suffix) => ({
-                    id: `follow-up-${disposition}-${suffix}`,
-                    label,
-                    candidateId,
-                    disposition: "needs_follow_up",
-                    receiptRefs: [],
-                  }),
-                ),
-              ),
-              explicitExclusions: [],
-              deferred: surfaceOnly
-                ? []
-                : cases.flatMap(({ candidateId, disposition, gapReasons }) =>
-                    gapReasons.map((reason, index) => ({
-                      id: `retry-gap-${disposition}-${index}`,
-                      candidateId,
-                      reason,
-                      surfaceIds: [`follow-up-${disposition}-first`],
-                    })),
-                  ),
-              openQuestions: [],
-            };
-            const findings = dispositions.includes("reported")
-              ? [
-                  {
-                    ruleId: "synthetic.retained-boundary",
-                    title: "Synthetic boundary finding",
-                    summary: "A finding retained from an earlier review.",
-                    severity: {
-                      level: "high",
-                      score: 8.1,
-                      scoringSystem: "CVSS:3.1",
-                    },
-                    confidence: {
-                      level: "high",
-                      rationale: "Synthetic evidence.",
-                    },
-                    taxonomy: { category: "path-traversal", cwe: ["CWE-22"] },
-                    locations: [
-                      { path: "source.py", startLine: 1, endLine: 1 },
-                    ],
-                    remediation: "Review the synthetic boundary.",
-                    provenance: {
-                      source: "local_plugin",
-                      candidateId: "candidate-reported",
-                    },
-                  },
-                ]
-              : undefined;
-            const { scanDir } = await publishCoverageFixture(root, "partial", {
-              stopBeforeDraft: true,
-              resume,
-              otherWorkerCandidateIds: cases.map((row) => row.candidateId),
-              retryCoverage: resolveOnRetry
-                ? [pending, resolved]
-                : [resolved, pending],
-              retryFindings:
-                findings && (resolveOnRetry ? [[], findings] : [findings, []]),
-            });
-            const coverage = await readFixtureCoverage(scanDir);
-            if (findings) {
-              const retained = JSON.parse(
-                await readFile(path.join(scanDir, "findings.json"), "utf8"),
-              );
-              assert.equal(retained.findings.length, 1);
-              assert.equal(retained.findings[0].ruleId, findings[0].ruleId);
-            }
-            for (const {
+for (const resume of [false, true]) {
+  for (const dispositions of [["rejected", "not_applicable"], ["reported"]]) {
+    for (const resolveOnRetry of [false, true]) {
+      test(`${resume ? "resumed" : "live"} stopped recovery preserves ${resolveOnRetry ? "the later disposition" : "newer gaps"} after ${dispositions.join(" and ")} retries`, async (t) => {
+        const root = await temporaryDirectory("retry-disposition-");
+        t.after(() => rm(root, { recursive: true, force: true }));
+        const cases = dispositions.flatMap((disposition) =>
+          ["surface-only", "deferred"].map((kind) => {
+            const candidateId = `${disposition}-${kind}`;
+            return {
               candidateId,
               disposition,
+              label: `Retry boundary: ${candidateId}`,
+              surfaceOnly: kind === "surface-only",
+              gapReasons: ["First", "Second"].map(
+                (boundary) =>
+                  `${boundary} ${candidateId} boundary needs proof.`,
+              ),
+            };
+          }),
+        );
+        const resolved = {
+          completeness: "complete",
+          surfaces: cases.map(({ candidateId, disposition }) => ({
+            id: `disposition-${candidateId}`,
+            label: `Disposition: ${candidateId}`,
+            candidateId,
+            disposition,
+            receiptRefs: [],
+          })),
+          explicitExclusions: [],
+          deferred: [],
+          openQuestions: [],
+        };
+        const pending = {
+          completeness: "partial",
+          surfaces: cases.flatMap(({ candidateId, label, surfaceOnly }) =>
+            (surfaceOnly ? ["first", "second"] : ["first"]).map((suffix) => ({
+              id: `follow-up-${candidateId}-${suffix}`,
               label,
-              gapReasons,
-            } of cases) {
-              const retryGaps = coverage.deferred.filter((item) =>
-                gapReasons.includes(item.reason),
-              );
-              assert.deepEqual(
-                retryGaps.map((item) => item.reason),
-                resolveOnRetry || surfaceOnly ? [] : gapReasons,
-              );
-              assert.equal(
-                coverage.surfaces.filter((row) => row.label === label).length,
-                resolveOnRetry ? 0 : surfaceOnly ? 2 : 1,
-              );
-              const dispositionRows = coverage.surfaces.filter(
-                (item) => item.disposition === disposition,
-              );
-              assert.equal(
-                dispositionRows.length,
-                resolveOnRetry || (surfaceOnly && disposition !== "reported")
-                  ? 1
-                  : 0,
-              );
-              for (const row of dispositionRows) {
-                assert.equal(row.provenance?.candidateId, candidateId);
-              }
-              assert.ok(
-                coverage.deferred.some(
-                  (item) =>
-                    item.reason === "Verify symbolic links." &&
-                    item.provenance?.candidateId === candidateId,
-                ),
-                `another worker's gap for ${candidateId} remains independent`,
-              );
-              for (const gap of retryGaps) {
-                assert.equal(
-                  coverage.surfaces.find(
-                    (surface) => surface.id === gap.surfaceIds[0],
-                  )?.label,
-                  label,
-                );
-              }
-            }
-          } finally {
-            await rm(root, { recursive: true, force: true });
-          }
+              candidateId,
+              disposition: "needs_follow_up",
+              receiptRefs: [],
+            })),
+          ),
+          explicitExclusions: [],
+          deferred: cases
+            .filter((row) => !row.surfaceOnly)
+            .flatMap(({ candidateId, gapReasons }) =>
+              gapReasons.map((reason, index) => ({
+                id: `retry-gap-${candidateId}-${index}`,
+                candidateId,
+                reason,
+                surfaceIds: [`follow-up-${candidateId}-first`],
+              })),
+            ),
+          openQuestions: [],
+        };
+        const findings = cases
+          .filter(({ disposition }) => disposition === "reported")
+          .map(({ candidateId }) => ({
+            ...finding(candidateId, "source.py"),
+            provenance: { source: "local_plugin", candidateId },
+          }));
+        const { scanDir } = await publishCoverageFixture(root, "partial", {
+          stopBeforeDraft: true,
+          resume,
+          otherWorkerCandidateIds: cases.map((row) => row.candidateId),
+          retryCoverage: resolveOnRetry
+            ? [pending, resolved]
+            : [resolved, pending],
+          retryFindings: findings.length
+            ? resolveOnRetry
+              ? [[], findings]
+              : [findings, []]
+            : undefined,
         });
-      }
+        const coverage = await readFixtureCoverage(scanDir);
+        const retained = await readJson(scanDir, "findings.json");
+        assert.deepEqual(
+          retained.findings.map((row: { ruleId: string }) => row.ruleId).sort(),
+          findings.map((row) => row.ruleId).sort(),
+        );
+        for (const disposition of dispositions) {
+          const expected = cases.filter(
+            (row) =>
+              row.disposition === disposition &&
+              (resolveOnRetry ||
+                (row.surfaceOnly && disposition !== "reported")),
+          );
+          assert.deepEqual(
+            coverage.surfaces
+              .filter((row) => row.disposition === disposition)
+              .map((row) => row.provenance?.candidateId)
+              .sort(),
+            expected.map((row) => row.candidateId).sort(),
+          );
+        }
+        for (const { candidateId, label, gapReasons, surfaceOnly } of cases) {
+          const retryGaps = coverage.deferred.filter((item) =>
+            gapReasons.includes(item.reason),
+          );
+          assert.deepEqual(
+            retryGaps.map((item) => item.reason),
+            resolveOnRetry || surfaceOnly ? [] : gapReasons,
+          );
+          assert.equal(
+            coverage.surfaces.filter((row) => row.label === label).length,
+            resolveOnRetry ? 0 : surfaceOnly ? 2 : 1,
+          );
+          assert.ok(
+            coverage.deferred.some(
+              (item) =>
+                item.reason === "Verify symbolic links." &&
+                item.provenance?.candidateId === candidateId,
+            ),
+            `another worker's gap for ${candidateId} remains independent`,
+          );
+          for (const gap of retryGaps) {
+            assert.equal(gap.provenance?.candidateId, candidateId);
+            assert.equal(
+              coverage.surfaces.find(
+                (surface) => surface.id === gap.surfaceIds[0],
+              )?.label,
+              label,
+            );
+          }
+        }
+      });
     }
   }
 }

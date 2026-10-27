@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, relative, sep } from "node:path";
 import type { JsonObject } from "./config.js";
+import type { LoadedContract } from "./contract.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import { findingsBaseUrl } from "./findings-client.js";
 import type { FindingSearchScope } from "./finding-retrieval.js";
@@ -58,6 +59,14 @@ export function workflowDigest(value: unknown): string {
       : item,
   );
   return createHash("sha256").update(json).digest("hex");
+}
+
+export function scanArtifactDigest({
+  manifest,
+  findings,
+  review,
+}: Pick<LoadedContract, "manifest" | "findings" | "review">): string {
+  return workflowDigest({ manifest, findings, review });
 }
 
 export function workflowDestination(url: string): string {

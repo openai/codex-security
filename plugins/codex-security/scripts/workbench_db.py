@@ -51,10 +51,8 @@ from finalize_scan_contract import (
     _prepare_scan_finalization,
     _write_prepared_scan_finalization,
     finalize_scan,
-    finding_candidate_id,
     manifest_is_sealed,
     open_scan_local_file_descriptor,
-    write_scan_local_bytes,
 )
 from finding_preview import bounded_finding_details
 from workbench import handoff
@@ -1355,151 +1353,9 @@ def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[
 
 
 def budget_exhausted_draft(
-    scan: sqlite3.Row,
-    scan_dir: Path,
-    candidates: list[dict[str, Any]],
-    warning: str,
+    scan: sqlite3.Row, scan_dir: Path, candidates: list[dict[str, Any]], warning: str
 ) -> None:
-    documents: dict[str, dict[str, Any]] = {}
-    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
-        path = artifact_path(scan_dir, name, required=False)
-        if path is not None:
-            documents[name] = read_json_object(path)
-    if documents and len(documents) != 3:
-        raise SystemExit("Budget-exhausted scan contains an incomplete canonical scan draft.")
-
-    if documents:
-        manifest = documents["scan-manifest.json"]
-        findings = documents["findings.json"]
-        coverage = documents["coverage.json"]
-        if not isinstance(manifest.get("scan"), dict) or not isinstance(
-            findings.get("findings"), list
-        ):
-            raise SystemExit("Budget-exhausted scan contains an invalid canonical scan draft.")
-        for key in ("surfaces", "explicitExclusions", "deferred"):
-            if not isinstance(coverage.get(key), list):
-                raise SystemExit("Budget-exhausted scan contains invalid canonical coverage.")
-        if manifest_is_sealed(manifest["scan"]):
-            raise SystemExit("Budget-exhausted scan cannot replace an already sealed scan draft.")
-    else:
-        contract = scan_contract(scan)
-        target_contract = contract["target"]
-        target: dict[str, Any] = {
-            "kind": target_contract["allowedKinds"][0],
-            "targetId": target_contract["targetId"],
-            "displayName": target_contract["displayName"],
-        }
-        if scan["target_revision"] != "unversioned":
-            target["revision"] = scan["target_revision"]
-        if "requiredSnapshotDigest" in target_contract:
-            target["snapshotDigest"] = target_contract["requiredSnapshotDigest"]
-        manifest = {
-            "scan": {
-                "target": target,
-                "scope": {"limitations": [warning]},
-            }
-        }
-        findings = {"findings": []}
-        coverage = {
-            "inventoryStrategy": (
-                "scoped_path" if expected_coverage_mode(scan) == "scoped_path" else "repository"
-            ),
-            "surfaces": [],
-            "explicitExclusions": [],
-            "deferred": [],
-        }
-
-    findings_by_candidate = {
-        candidate_id
-        for finding in findings["findings"]
-        if isinstance(finding, dict)
-        and isinstance(candidate_id := finding_candidate_id(finding), str)
-    }
-    existing_deferred = {
-        item.get("candidateId", item.get("id"))
-        for item in coverage["deferred"]
-        if isinstance(item, dict) and isinstance(item.get("candidateId", item.get("id")), str)
-    }
-    existing_surfaces = {
-        item.get("id")
-        for item in coverage["surfaces"]
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
-    }
-    for candidate in candidates:
-        candidate_id = candidate["candidate_id"]
-        if candidate_id in findings_by_candidate or candidate_id in existing_deferred:
-            continue
-        paths = list(dict.fromkeys(location["path"] for location in candidate["locations"]))
-        surface_id = f"candidate-{candidate_id}"
-        validation = candidate.get("validation")
-        validation = validation.get("disposition") if isinstance(validation, dict) else None
-        attack = candidate.get("attack_path")
-        attack = attack.get("decision") if isinstance(attack, dict) else None
-        disposition = (
-            "needs_follow_up"
-            if validation == "deferred" or attack == "deferred"
-            else "not_applicable"
-            if validation == "not_applicable"
-            else "rejected"
-            if validation == "suppressed" or attack == "ignore"
-            else "needs_follow_up"
-        )
-        if surface_id not in existing_surfaces:
-            coverage["surfaces"].append(
-                {
-                    "id": surface_id,
-                    "label": candidate["summary"],
-                    "disposition": disposition,
-                    "notes": candidate["evidence"],
-                    "receiptRefs": [],
-                }
-            )
-            existing_surfaces.add(surface_id)
-        if disposition != "needs_follow_up":
-            continue
-        coverage["deferred"].append(
-            {
-                "id": candidate_id,
-                "candidateId": candidate_id,
-                "reason": (
-                    "Validation was deferred because the scan reached its cost limit: "
-                    f"{candidate['summary']}. Evidence: {candidate['evidence']}"
-                ),
-                "paths": paths,
-                "surfaceIds": [surface_id],
-            }
-        )
-    if not any(
-        isinstance(item, dict)
-        and isinstance(reason := item.get("reason"), str)
-        and (
-            reason == "Validation was deferred because the scan reached its cost limit."
-            or reason.startswith(
-                "Validation was deferred because the scan reached its cost limit: "
-            )
-        )
-        for item in coverage["deferred"]
-    ):
-        coverage["deferred"].append(
-            {
-                "id": "scan-cost-limit",
-                "reason": "Validation was deferred because the scan reached its cost limit.",
-            }
-        )
-    coverage.pop("completeness", None)
-    for name, payload in (
-        ("findings.json", findings),
-        ("coverage.json", coverage),
-        ("scan-manifest.json", manifest),
-    ):
-        try:
-            write_scan_local_bytes(
-                scan_dir,
-                name,
-                (json.dumps(payload, allow_nan=False, indent=2, sort_keys=True) + "\n").encode(),
-            )
-        except (ContractError, OSError, TypeError, ValueError) as exc:
-            raise SystemExit(f"Budget-exhausted scan draft could not be saved: {exc}") from exc
+    saved_results.budget_exhausted_draft(sys.modules[__name__], scan, scan_dir, candidates, warning)
 
 
 def complete_scan_locked(
@@ -1552,7 +1408,6 @@ def complete_scan_locked(
         for file_name in (
             ARTIFACTS["manifest"],
             ARTIFACTS["findings"],
-            ARTIFACTS["coverage"],
         ):
             try:
                 (scan_dir / file_name).lstat()
@@ -1613,9 +1468,9 @@ def complete_scan_locked(
             )
         warnings.extend(warning for warning in prepared.warnings if warning not in warnings)
         add_warning()
-        if prepared.warnings:
-            # Save the explanation before publication removes the broken reference,
-            # so a retry after failed publication retains it.
+        if warnings != json.loads(scan["completion_warnings_json"]):
+            # Persist all observed warnings before output writes can fail, so
+            # stopped-result publication and retries retain those diagnostics.
             with connection:
                 connection.execute(
                     "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",

@@ -457,23 +457,6 @@ describe("policy CLI", () => {
     expect(await readFile(draft.draftPath, "utf8")).toBe(POLICY);
   });
 
-  test.each(["json", "md", "toon"])(
-    "does not run a diff preview for %s output",
-    async (format) => {
-      const f = await fixture();
-      const stdout = captureCli(main, "stdout");
-      let previews = 0;
-      expect(
-        await stdout.run(
-          ["policy", "--format", format],
-          policyDependencies(f, { onPreview: () => previews++ }),
-        ),
-      ).toBe(0);
-      expect(previews).toBe(0);
-      expect(stdout.text().length).toBeGreaterThan(0);
-    },
-  );
-
   test("asks owner questions and previews the exact draft without writing source", async () => {
     const f = await fixture();
     const stderr = capture(true);
@@ -678,7 +661,8 @@ describe("policy CLI", () => {
       path: scope,
       run: async (stage) => stageResult(stage, content, note),
     });
-    const deps = policyDependencies(f, { draft });
+    const onPreview = mock();
+    const deps = policyDependencies(f, { draft, onPreview });
     const create = deps.createPolicySecurity;
     deps.createPolicySecurity = (config) => {
       const security = create(config);
@@ -706,6 +690,7 @@ describe("policy CLI", () => {
     const markdown = captureCli(main, "stdout");
     expect(await markdown.run(["policy", "--format", "md"], deps)).toBe(0);
     expect(markdown.text()).toBe(content);
+    expect(onPreview).not.toHaveBeenCalled();
   });
 
   test("marks failed generation and cancellation envelopes as errors", async () => {

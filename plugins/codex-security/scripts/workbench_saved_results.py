@@ -38,6 +38,7 @@ from finalize_scan_contract import (
     write_threat_model_projection_if_possible,
 )
 from finalize_scan_contract import finding_candidate_id as finding_candidate_id
+from review_state import checkpoint_review_state, review_state, review_summary, uses_legacy_review
 from workbench.retained_coverage import (
     _append_previous_finding as _append_previous_finding,
 )
@@ -606,6 +607,7 @@ def preserve_deep_deadline_draft(
         manifest, findings, coverage = prepared.manifest, prepared.findings, prepared.coverage
         manifest["scan"].pop("sealedAt", None)
         manifest["scan"].pop("artifacts", None)
+        manifest["scan"]["reviewState"] = checkpoint_review_state(coverage)
         checkpoint = _parent_scan_draft(scan["id"], manifest["scan"], findings, coverage)
         contents = _encoded(checkpoint)
         name = f"{hashlib.sha256(contents).hexdigest()}.json"
@@ -617,7 +619,7 @@ def preserve_deep_deadline_draft(
         write_scan_local_bytes(scan_dir, "checkpoint-head.json", _encoded({"checkpoint": name}))
         for filename, document in (
             ("findings.json", findings),
-            ("coverage.json", coverage),
+            *([("coverage.json", coverage)] if "coverageRef" in manifest["scan"] else []),
             ("scan-manifest.json", manifest),
         ):
             write_scan_local_bytes(scan_dir, filename, _encoded(document))
@@ -1102,12 +1104,20 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         draft = _read_scan_local_json(scan_dir, relative, "Staged scan draft")
         accepted_input = copy.deepcopy(draft)
         accepted_checkpoint = None
-        manifest, findings, coverage = draft["manifest"], draft["findings"], draft["coverage"]
+        manifest, findings, coverage = (
+            draft["manifest"],
+            draft["findings"],
+            draft.get("reviewState", draft.get("coverage")),
+        )
+        manifest["scan"]["reviewState"] = checkpoint_review_state(coverage)
+        manifest["scan"].pop("coverageRef", None)
         binding = db.workbench_completion_binding(scan, db.now())
         # Save scan IDs without sealing the draft.
         _populate_unsealed_manifest_envelope(manifest, manifest["scan"], binding)
         _populate_unsealed_artifact_envelope(manifest, findings, coverage, binding)
         _validate_completion_binding(manifest, findings, coverage, binding)
+        manifest["scan"]["mode"] = coverage["mode"]
+        manifest["scan"]["review"] = review_summary(coverage)
         projected = _parent_scan_draft(scan_id, manifest["scan"], findings, coverage)
         admitted_input = None
         checkpoint = manifest["scan"]
@@ -1202,12 +1212,12 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             filename: (json.dumps(document, allow_nan=False, indent=2) + "\n").encode()
             for filename, document in (
                 ("findings.json", findings),
-                ("coverage.json", coverage),
                 ("scan-manifest.json", manifest),
             )
         }
         for filename, contents in documents.items():
             write_scan_local_bytes(scan_dir, filename, contents)
+        _remove_scan_local_file_if_exists(scan_dir, "coverage.json")
         if scan["mode"] == "deep" and manifest["scan"].get("complete") is not False:
             # Select the accepted final publication before releasing the write lock.
             with connection:
@@ -1286,7 +1296,7 @@ def _scan_draft_contents_digest(documents: dict[str, bytes | None]) -> str:
     for filename in ("scan-manifest.json", "findings.json", "coverage.json"):
         digest.update(filename.encode())
         digest.update(b"\0")
-        contents = documents[filename]
+        contents = documents.get(filename)
         if contents is None:
             digest.update(b"missing\0")
         else:
@@ -1402,3 +1412,158 @@ def preserve_stopped_results_after_transition(db: Any, connection: Any, scan_id:
 
 if __name__ == "__main__":
     argparse.ArgumentParser(description=__doc__).parse_args()
+
+
+def budget_exhausted_draft(
+    db: Any,
+    scan: sqlite3.Row,
+    scan_dir: Path,
+    candidates: list[dict[str, Any]],
+    warning: str,
+) -> None:
+    documents: dict[str, dict[str, Any]] = {}
+    for name in ("scan-manifest.json", "findings.json"):
+        path = db.artifact_path(scan_dir, name, required=False)
+        if path is not None:
+            documents[name] = db.read_json_object(path)
+    if documents and len(documents) != 2:
+        raise SystemExit("Budget-exhausted scan contains an incomplete canonical scan draft.")
+
+    if documents:
+        manifest = documents["scan-manifest.json"]
+        findings = documents["findings.json"]
+        coverage = (
+            db.read_json_object(db.artifact_path(scan_dir, "coverage.json", required=True))
+            if uses_legacy_review(manifest["scan"])
+            else review_state(manifest["scan"])
+        )
+        if not isinstance(manifest.get("scan"), dict) or not isinstance(
+            findings.get("findings"), list
+        ):
+            raise SystemExit("Budget-exhausted scan contains an invalid canonical scan draft.")
+        for key in ("surfaces", "explicitExclusions", "deferred"):
+            if not isinstance(coverage.get(key), list):
+                raise SystemExit("Budget-exhausted scan contains invalid canonical coverage.")
+        if manifest_is_sealed(manifest["scan"]):
+            raise SystemExit("Budget-exhausted scan cannot replace an already sealed scan draft.")
+    else:
+        contract = db.scan_contract(scan)
+        target_contract = contract["target"]
+        target: dict[str, Any] = {
+            "kind": target_contract["allowedKinds"][0],
+            "targetId": target_contract["targetId"],
+            "displayName": target_contract["displayName"],
+        }
+        if scan["target_revision"] != "unversioned":
+            target["revision"] = scan["target_revision"]
+        if "requiredSnapshotDigest" in target_contract:
+            target["snapshotDigest"] = target_contract["requiredSnapshotDigest"]
+        manifest = {
+            "scan": {
+                "target": target,
+                "scope": {"limitations": [warning]},
+            }
+        }
+        findings = {"findings": []}
+        coverage = {
+            "inventoryStrategy": (
+                "scoped_path" if db.expected_coverage_mode(scan) == "scoped_path" else "repository"
+            ),
+            "surfaces": [],
+            "explicitExclusions": [],
+            "deferred": [],
+        }
+
+    findings_by_candidate = {
+        candidate_id
+        for finding in findings["findings"]
+        if isinstance(finding, dict)
+        and isinstance(candidate_id := finding_candidate_id(finding), str)
+    }
+    existing_deferred = {
+        item.get("candidateId", item.get("id"))
+        for item in coverage["deferred"]
+        if isinstance(item, dict) and isinstance(item.get("candidateId", item.get("id")), str)
+    }
+    existing_surfaces = {
+        item.get("id")
+        for item in coverage["surfaces"]
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    for candidate in candidates:
+        candidate_id = candidate["candidate_id"]
+        if candidate_id in findings_by_candidate or candidate_id in existing_deferred:
+            continue
+        paths = list(dict.fromkeys(location["path"] for location in candidate["locations"]))
+        surface_id = f"candidate-{candidate_id}"
+        validation = candidate.get("validation")
+        validation = validation.get("disposition") if isinstance(validation, dict) else None
+        attack = candidate.get("attack_path")
+        attack = attack.get("decision") if isinstance(attack, dict) else None
+        disposition = (
+            "needs_follow_up"
+            if validation == "deferred" or attack == "deferred"
+            else "not_applicable"
+            if validation == "not_applicable"
+            else "rejected"
+            if validation == "suppressed" or attack == "ignore"
+            else "needs_follow_up"
+        )
+        if surface_id not in existing_surfaces:
+            coverage["surfaces"].append(
+                {
+                    "id": surface_id,
+                    "label": candidate["summary"],
+                    "disposition": disposition,
+                    "notes": candidate["evidence"],
+                    "receiptRefs": [],
+                }
+            )
+            existing_surfaces.add(surface_id)
+        if disposition != "needs_follow_up":
+            continue
+        coverage["deferred"].append(
+            {
+                "id": candidate_id,
+                "candidateId": candidate_id,
+                "reason": (
+                    "Validation was deferred because the scan reached its cost limit: "
+                    f"{candidate['summary']}. Evidence: {candidate['evidence']}"
+                ),
+                "paths": paths,
+                "surfaceIds": [surface_id],
+            }
+        )
+    if not any(
+        isinstance(item, dict)
+        and isinstance(reason := item.get("reason"), str)
+        and (
+            reason == "Validation was deferred because the scan reached its cost limit."
+            or reason.startswith(
+                "Validation was deferred because the scan reached its cost limit: "
+            )
+        )
+        for item in coverage["deferred"]
+    ):
+        coverage["deferred"].append(
+            {
+                "id": "scan-cost-limit",
+                "reason": "Validation was deferred because the scan reached its cost limit.",
+            }
+        )
+    coverage.pop("completeness", None)
+    manifest["scan"].pop("coverageRef", None)
+    manifest["scan"]["mode"] = db.expected_coverage_mode(scan)
+    manifest["scan"]["reviewState"] = checkpoint_review_state(coverage)
+    for name, payload in (
+        ("findings.json", findings),
+        ("scan-manifest.json", manifest),
+    ):
+        try:
+            write_scan_local_bytes(
+                scan_dir,
+                name,
+                (json.dumps(payload, allow_nan=False, indent=2, sort_keys=True) + "\n").encode(),
+            )
+        except (ContractError, OSError, TypeError, ValueError) as exc:
+            raise SystemExit(f"Budget-exhausted scan draft could not be saved: {exc}") from exc

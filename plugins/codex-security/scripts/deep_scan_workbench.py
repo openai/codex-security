@@ -1791,7 +1791,7 @@ def finish_deep_scan_locked(
             )
         canonical_artifacts = None
         if standard_scan_manifest:
-            for artifact_name in ("scan-manifest.json", "findings.json", "coverage.json"):
+            for artifact_name in ("scan-manifest.json", "findings.json"):
                 deep_scan_path(
                     scan,
                     str(Path(scan["scan_dir"]) / artifact_name),

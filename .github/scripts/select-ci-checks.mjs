@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { checkoutBase } from "./verify-pr-source.mjs";
 
 const documentation =
   /^(?:README\.md|CONTRIBUTING\.md|CODE_OF_CONDUCT\.md|docs\/.*\.md|github-action\/README\.md|docker\/README\.md)$/;
@@ -24,28 +25,21 @@ const packagedDocs = new Set(
     .filter((file) => file.endsWith(".md"))
     .map((file) => `sdk/typescript/${file}`),
 );
+const isDocumentation = (path) =>
+  documentation.test(path) || packagedDocs.has(path);
 
 function scopeFor(paths, { event, baseChanged, modifiedOnly }) {
   if (event !== "pull_request" || baseChanged || !paths.length) return "full";
   if (modifiedOnly && paths.every((path) => pythonTest.test(path)))
     return "python-tests";
-  if (
-    paths.every(
-      (path) =>
-        documentation.test(path) ||
-        path === "RELEASING.md" ||
-        packagedDocs.has(path),
-    )
-  ) {
+  if (paths.every((path) => isDocumentation(path) || path === "RELEASING.md")) {
     // The Action profile already builds the package and installs it on Node 24.
     // Select the separate Action job from its own inputs below.
     return paths.some((path) => packagedDocs.has(path)) ? "action" : "docs";
   }
   if (paths.every((path) => actionFiles.test(path))) return "action";
   if (paths.every((path) => evalFiles.test(path))) return "evals";
-  if (
-    paths.every((path) => ordinarySource.test(path) || documentation.test(path))
-  )
+  if (paths.every((path) => ordinarySource.test(path) || isDocumentation(path)))
     return "source";
   return "full";
 }
@@ -54,8 +48,9 @@ export function selectChecks(paths, options) {
   const scope = scopeFor(paths, options);
   const full = scope === "full" || scope === "python-tests";
   const source = full || scope === "source";
-  const sourceBeyondSdkTests =
-    full || (scope === "source" && !paths.every((path) => sdkTest.test(path)));
+  const sdkTestsOnly =
+    scope === "source" && paths.every((path) => sdkTest.test(path));
+  const sourceBeyondSdkTests = source && !sdkTestsOnly;
   const action =
     full ||
     paths.some(
@@ -100,10 +95,9 @@ export function selectChecks(paths, options) {
         paths.includes("sdk/typescript/tests-ts/codex-dependency-pins.test.ts"),
     ),
     "workflow-quality": String(full),
-    "container-validate": String(source),
     "compatibility-matrix": JSON.stringify({
       include:
-        scope === "action"
+        scope === "action" || sdkTestsOnly
           ? [{ os: "ubuntu-latest", node: "24" }]
           : compatibility,
     }),
@@ -123,20 +117,16 @@ if (
   const event = process.env.EVENT_NAME;
   const baseChanged = process.env.BASE_CHANGED === "true";
   if (event === "pull_request" && baseChanged) {
-    const { base, head } = JSON.parse(
+    const { changes, pull_request: pr } = JSON.parse(
       readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"),
-    ).pull_request;
-    const parents = execFileSync("git", ["show", "-s", "--format=%P", "HEAD"], {
-      encoding: "utf8",
-    }).trim();
-    const expected = `${base.sha} ${head.sha}`;
-    console.log(
-      `Requested base ${base.ref}. Expected merge parents ${expected}. Checked out ${parents}.`,
     );
-    if (parents !== expected) {
-      throw new Error(
-        "GitHub supplied a stale test merge. After the merge ref updates, reopen the pull request to start a fresh source run. Rerunning this attempt uses the same commit.",
-      );
+    // Ordinary edits already proved their live target before falling back to full checks.
+    if (changes?.base) {
+      const base = checkoutBase(pr, process.env.GITHUB_SHA);
+      if (base !== pr.base.sha)
+        throw new Error(
+          `Stale test merge. Requested ${pr.base.ref} at ${pr.base.sha}, checked out base ${base} with head ${pr.head.sha}. Start a fresh pull request event after the merge ref updates.`,
+        );
     }
   }
   const changes =

@@ -4,9 +4,9 @@ import { execFile as nodeExecFile } from "node:child_process";
 import {
   chmod,
   cp,
-  readdir,
   mkdir,
   readFile,
+  readdir,
   rename,
   symlink,
   unlink,
@@ -37,7 +37,6 @@ const inventory = await importSource(
 try {
   await testSchemasAreBoundAndExact();
   await testPrepareUsesTheExistingStandardGenerator();
-  await testPrepareDoesNotWritePluginBytecode();
   if (!["win32", "darwin"].includes(process.platform))
     await testNonUtf8InventoryPaths();
   await testPrepareListsIgnoredTrackedFilesOnce();
@@ -55,7 +54,6 @@ try {
   await testInventoryReadErrorsAreReported();
   await testWorkersCannotPrepareInventory();
   await testBoundScopeFailurePreservesPreviousInventory();
-  await testInventoryDoesNotLaunchPython();
   await testInvalidDiffTargetPreservesPreviousInventory();
 } finally {
   await temporaryDirectories.cleanup();
@@ -95,7 +93,29 @@ async function testPrepareUsesTheExistingStandardGenerator() {
     "export const c = 3;\n",
   );
 
-  const result = await inventory.prepareCodexSecurityReviewItems(fixture.scan);
+  const pluginRoot = path.join(fixture.root, "installed-plugin");
+  for (const directory of ["mcp", "scripts"]) {
+    await cp(
+      path.join(fixture.scan.pluginRoot, directory),
+      path.join(pluginRoot, directory),
+      {
+        recursive: true,
+        filter: (file) => path.basename(file) !== "__pycache__",
+      },
+    );
+  }
+  const result = await inventory.prepareCodexSecurityReviewItems({
+    ...fixture.scan,
+    pluginRoot,
+    pythonCommand: process.env.PYTHON ?? "python3",
+  });
+  const scripts = await readdir(path.join(pluginRoot, "scripts"), {
+    recursive: true,
+  });
+  assert.deepEqual(
+    scripts.filter((name) => name.endsWith(".pyc")),
+    [],
+  );
   const stored = await readFile(fixture.scanInventory, "utf8");
   const { stdout } = await execFile(
     "rg",
@@ -145,9 +165,12 @@ async function testPrepareUsesTheExistingStandardGenerator() {
     ),
     expectedPaths,
   );
+  const nonExecutablePython = path.join(fixture.root, "non-executable-python");
+  await writeFile(nonExecutablePython, "", { mode: 0o600 });
   assert.deepEqual(
     await inventory.prepareCodexSecurityReviewItems({
       ...fixture.scan,
+      pythonCommand: nonExecutablePython,
       scope: "-source.py",
     }),
     { reviewItemsTotal: 1 },
@@ -353,35 +376,6 @@ async function testInventoryChildFailuresPreserveOutput() {
       "previous.py\n",
     );
   }
-}
-
-async function testPrepareDoesNotWritePluginBytecode() {
-  const fixture = await createFixture("plugin bytecode");
-  const pluginRoot = path.join(fixture.root, "plugin");
-  const scripts = path.join(pluginRoot, "scripts");
-  await cp(path.resolve(import.meta.dirname, "../../scripts"), scripts, {
-    recursive: true,
-    filter: (file) => path.basename(file) !== "__pycache__",
-  });
-  await cp(
-    path.join(fixture.scan.pluginRoot, "mcp"),
-    path.join(pluginRoot, "mcp"),
-    {
-      recursive: true,
-    },
-  );
-  await fixture.writeRepositoryFile("example.py", "value = 1\n");
-  const result = await inventory.prepareCodexSecurityReviewItems({
-    ...fixture.scan,
-    pluginRoot,
-  });
-  assert.equal(result.reviewItemsTotal, 1);
-  assert.equal(
-    (await readdir(scripts, { recursive: true })).some((file) =>
-      file.endsWith(".pyc"),
-    ),
-    false,
-  );
 }
 
 async function testNonUtf8InventoryPaths() {
@@ -759,26 +753,6 @@ async function testInvalidDiffTargetPreservesPreviousInventory() {
   );
 }
 
-async function testInventoryDoesNotLaunchPython() {
-  const fixture = await createFixture("unused Python selection");
-  await fixture.writeRepositoryFile("source.py", "source\n");
-  const pythonCommand = path.join(fixture.root, "python");
-  for (const present of [false, true]) {
-    if (present) await writeFile(pythonCommand, "", { mode: 0o600 });
-    assert.deepEqual(
-      await inventory.prepareCodexSecurityReviewItems({
-        ...fixture.scan,
-        pythonCommand,
-      }),
-      { reviewItemsTotal: 1 },
-    );
-    assert.equal(
-      await readFile(fixture.scanInventory, "utf8"),
-      "./source.py\n",
-    );
-  }
-}
-
 async function createFixture(label: string) {
   const root = await temporaryDirectories.create(
     "security-artifact-inventory-",
@@ -817,7 +791,7 @@ async function createFixture(label: string) {
       layout: "scan",
       scope: ".",
       pluginRoot,
-      pythonCommand: process.env.PYTHON ?? "python3",
+      pythonCommand: path.join(root, "missing-python"),
     },
     worker: {
       root: workerRoot,

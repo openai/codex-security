@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import {
-  checkCheckout,
+  checkoutBase,
   confirmEdit,
   realSource,
   verifyEdit,
@@ -57,7 +57,14 @@ function evidence(id, selected = "success") {
 }
 function fixture(
   history,
-  { jobs = evidence, targets = [target], wait = false, runAttempt = 1 } = {},
+  {
+    jobs = evidence,
+    targets = [target],
+    wait = false,
+    runAttempt = 1,
+    base = pr.base.sha,
+    comparisons = [],
+  } = {},
 ) {
   let current = [],
     live = target;
@@ -67,6 +74,12 @@ function fixture(
       if (live instanceof Error) throw live;
       return live;
     }
+    if (path.startsWith("compare/")) {
+      assert.equal(path, "compare/refs%2Fheads%2Fmain...base?per_page=1");
+      const result = comparisons.shift();
+      if (result instanceof Error) throw result;
+      return result;
+    }
     const runId = path.match(/runs\/(\d+)\/jobs/);
     if (runId) return jobs(Number(runId[1]));
     current = history.shift() ?? current;
@@ -75,7 +88,7 @@ function fixture(
     const runs = [edit(99, { run_attempt: runAttempt }), ...current];
     return { total_count: runs.length, workflow_runs: runs };
   };
-  const input = { pr, sha, runId: 99, runAttempt, api };
+  const input = { pr, sha, base, runId: 99, runAttempt, api };
   return {
     check: () => verifyEdit(input, () => wait),
     finish: (id, classifierAttempt = runAttempt) =>
@@ -220,6 +233,45 @@ test("even full fallback needs a current target when the CI gate finishes", asyn
   );
 });
 
+test("an edit can use a newer test-merge base only while its named branch still proves that advance", async () => {
+  const base = "new-base";
+  const current = { base_commit: { sha: base }, status: "behind" };
+  const changed = { base_commit: { sha: "moved" }, status: "behind" };
+  const check = (comparisons, history = [[run(2)]]) =>
+    fixture(history, { base, comparisons });
+  const updated = { ...target, base: { ...pr.base, sha: base } };
+  const source = run(2, { pull_requests: [updated] });
+  const caughtUp = fixture([[run(2)], [source]], {
+    base,
+    comparisons: [current, current, current],
+    targets: [target, updated],
+  });
+  assert.equal(await caughtUp.check(), 2);
+  await caughtUp.finish(2);
+  await assert.rejects(
+    fixture([[source]], {
+      base,
+      targets: [{ ...updated, base: { ...pr.base, sha: "unrelated" } }],
+    }).finish(2),
+    /target changed/,
+  );
+  assert.equal(await check([current, current], [[]]).check(), "full");
+  for (const invalid of [
+    changed,
+    { ...current, status: "ahead" },
+    { ...current, status: "diverged" },
+    { ...current, status: "identical" },
+    new Error("comparison unavailable"),
+  ]) {
+    const error =
+      invalid instanceof Error ? /comparison unavailable/ : /Stale test merge/;
+    await assert.rejects(check([invalid]).check(), error);
+    await assert.rejects(check([current, invalid]).check(), error);
+    await assert.rejects(check([invalid]).finish(2), error);
+    await assert.rejects(check([invalid]).finish(), error);
+  }
+});
+
 test("the final gate reads both actual merge parents from a depth-one checkout", (t) => {
   const root = mkdtempSync(join(tmpdir(), "ci-source-parents-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -264,14 +316,10 @@ test("the final gate reads both actual merge parents from a depth-one checkout",
   );
   assert.equal(git(checkout, "rev-parse", "--is-shallow-repository"), "true");
   const pull = { base: { sha: base }, head: { sha: head } };
-  checkCheckout(pull, merge, checkout);
+  assert.equal(checkoutBase(pull, merge, checkout), base);
   assert.throws(
-    () => checkCheckout({ ...pull, base: { sha: head } }, merge, checkout),
-    /checked-out merge/,
+    () => checkoutBase({ ...pull, head: { sha: base } }, merge, checkout),
+    /Stale test merge/,
   );
-  assert.throws(
-    () => checkCheckout({ ...pull, head: { sha: base } }, merge, checkout),
-    /checked-out merge/,
-  );
-  assert.throws(() => checkCheckout(pull, base, checkout), /checked-out merge/);
+  assert.throws(() => checkoutBase(pull, base, checkout), /Stale test merge/);
 });

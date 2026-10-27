@@ -6,120 +6,6 @@ import { listLocalExternalFindings } from "../src/external-findings-local.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 import { endorFinding, endorSarif } from "./support/endor-import-fixtures.js";
 
-test.each(["native JSON", "SARIF"] as const)(
-  "Endor %s findings persist locally and update the same source identity",
-  async (format) => {
-    const fixture = await localFindingsFixture();
-    try {
-      const input = format === "native JSON" ? endorFinding() : endorSarif();
-      const path = join(fixture.root, "endor.json");
-      const options = {
-        repository: fixture.repository,
-        provider: "endor" as const,
-        sourceKey: "endor-project-example",
-      };
-      const dependencies = { environment: fixture.environment };
-      await writeFile(path, JSON.stringify(input));
-
-      const prepared = await prepareLocalExternalImport(
-        path,
-        options,
-        dependencies,
-      );
-      expect(prepared.preview.excluded).toEqual([]);
-      expect(prepared.preview.findings).toHaveLength(1);
-      expect(await listLocalExternalFindings(options, dependencies)).toEqual(
-        [],
-      );
-      expect((await prepared.import()).counts).toEqual({
-        created: 1,
-        updated: 0,
-        unchanged: 0,
-      });
-
-      const [stored] = await listLocalExternalFindings(options, dependencies);
-      expect(stored).toMatchObject({
-        repository: fixture.repository,
-        provider: "endor",
-        sourceKey: options.sourceKey,
-        sourceFindingId: "finding-example-1",
-        version: 1,
-      });
-      expect(stored!.evidence).toEqual(prepared.preview.findings[0]!.evidence);
-      expect(stored!.assessment).toEqual({ state: "not_assessed" });
-      expect(stored!.evidence).not.toHaveProperty("confidence");
-      expect(stored!.evidence.locations).toEqual(
-        "spec" in input
-          ? [
-              { path: "package.json", line: null },
-              { path: "package-lock.json", line: null },
-            ]
-          : [{ path: "package.json", line: null }],
-      );
-      if ("spec" in input) {
-        expect(stored!.evidence.source_data).toEqual(input);
-        expect(stored!.evidence.packages![0]!.fixed_versions).toEqual([]);
-      } else {
-        expect(stored!.evidence.severity).toBe("unknown");
-        expect(stored!.evidence.source_data).toMatchObject({
-          result: input.runs[0]!.results[0],
-          rule: input.runs[0]!.tool.driver.rules[0],
-        });
-      }
-
-      const repeated = await prepareLocalExternalImport(
-        path,
-        options,
-        dependencies,
-      );
-      expect((await repeated.import()).counts).toEqual({
-        created: 0,
-        updated: 0,
-        unchanged: 1,
-      });
-      expect(await listLocalExternalFindings(options, dependencies)).toEqual([
-        stored!,
-      ]);
-
-      if ("spec" in input) {
-        input.spec.dismiss = true;
-        input.spec.target_dependency_version = "1.1.0";
-      } else {
-        input.runs[0]!.results[0]!.message.text = "Updated source explanation";
-        input.runs[0]!.results[0]!.properties.tags = [];
-      }
-      await writeFile(path, JSON.stringify(input));
-      const changed = await prepareLocalExternalImport(
-        path,
-        options,
-        dependencies,
-      );
-      expect((await changed.import()).counts).toEqual({
-        created: 0,
-        updated: 1,
-        unchanged: 0,
-      });
-      const updated = await listLocalExternalFindings(options, dependencies);
-      expect(updated).toHaveLength(1);
-      expect(updated[0]).toMatchObject({
-        id: stored!.id,
-        sourceFindingId: stored!.sourceFindingId,
-        createdAt: stored!.createdAt,
-        version: 2,
-      });
-      expect(updated[0]!.assessment).toEqual({ state: "not_assessed" });
-      expect(updated[0]!.evidence).toEqual(
-        changed.preview.findings[0]!.evidence,
-      );
-      expect(updated[0]!.evidence.source_data).not.toEqual(
-        stored!.evidence.source_data,
-      );
-    } finally {
-      await fixture.dispose();
-    }
-  },
-);
-
 test("switching Endor JSON and SARIF replaces the same local source snapshot without merging evidence", async () => {
   const fixture = await localFindingsFixture();
   try {
@@ -159,6 +45,13 @@ test("switching Endor JSON and SARIF replaces the same local source snapshot wit
 
     const original = await importAndRead({ list: { objects: [native] } });
     expect(original.counts).toEqual({ created: 1, updated: 0, unchanged: 0 });
+    expect(original.record).toMatchObject({
+      repository: fixture.repository,
+      provider: "endor",
+      sourceKey: options.sourceKey,
+      sourceFindingId: native.uuid,
+      version: 1,
+    });
     expect(original.record.evidence).toMatchObject({
       severity: "critical",
       code_revision: native.spec.source_code_version.sha,
@@ -171,6 +64,10 @@ test("switching Endor JSON and SARIF replaces the same local source snapshot wit
       installed_version: "1.0.0",
     });
 
+    expect(await importAndRead(native)).toEqual({
+      record: original.record,
+      counts: { created: 0, updated: 0, unchanged: 1 },
+    });
     const replaced = await importAndRead(sarif);
     expect(replaced.counts).toEqual({ created: 0, updated: 1, unchanged: 0 });
     expect(replaced.record).toMatchObject({
@@ -187,8 +84,13 @@ test("switching Endor JSON and SARIF replaces the same local source snapshot wit
     expect(replaced.record.evidence.source_data).not.toHaveProperty("spec");
     expect(replaced.record.evidence.source_data).toMatchObject({
       result: sarif.runs[0]!.results[0],
+      rule: sarif.runs[0]!.tool.driver.rules[0],
     });
 
+    expect(await importAndRead(sarif)).toEqual({
+      record: replaced.record,
+      counts: { created: 0, updated: 0, unchanged: 1 },
+    });
     const restored = await importAndRead(native);
     expect(restored.counts).toEqual({ created: 0, updated: 1, unchanged: 0 });
     expect(restored.record).toMatchObject({
@@ -224,6 +126,7 @@ test("sparse Endor findings remain unassessed without invented locations or reme
       options,
       dependencies,
     );
+    expect(await listLocalExternalFindings(options, dependencies)).toEqual([]);
     expect((await prepared.import()).counts.created).toBe(1);
     const records = await listLocalExternalFindings(options, dependencies);
     expect(records).toHaveLength(1);

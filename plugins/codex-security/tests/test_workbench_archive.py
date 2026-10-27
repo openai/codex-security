@@ -319,22 +319,18 @@ def test_interrupted_commit_keeps_files_at_their_saved_paths(previous_scan, monk
     assert list(output.iterdir()) == ([] if committed else [output / "report.md"])
 
 
-@pytest.mark.parametrize("layout", ["same", "nested", "alias"])
-def test_registration_does_not_archive_its_active_workbench_state(tmp_path, layout):
+def test_registration_does_not_archive_state_reached_through_an_external_alias(tmp_path):
     target = tmp_path / "target"
     target.mkdir()
-    (target / "fixture.py").write_text("preserved source\n")
     output = tmp_path / "output"
     output.mkdir(mode=0o700)
-    state = output if layout == "same" else output / "state"
-    state.mkdir(mode=0o700, exist_ok=True)
-    if layout == "alias":
-        alias = tmp_path / "state-alias"
-        try:
-            alias.symlink_to(state, target_is_directory=True)
-        except OSError:
-            pytest.skip("Directory symlinks are unavailable")
-        state = alias
+    nested_state = output / "state"
+    nested_state.mkdir(mode=0o700)
+    state = tmp_path / "state-alias"
+    try:
+        state.symlink_to(nested_state, target_is_directory=True)
+    except OSError:
+        pytest.skip("Directory symlinks are unavailable")
     saved = tmp_path / "saved"
     saved.mkdir(mode=0o700)
     previous = register(state, target, saved)

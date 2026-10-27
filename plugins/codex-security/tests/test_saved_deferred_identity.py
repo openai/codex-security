@@ -19,6 +19,7 @@ from test_workbench_standard_deep_results import (
 from workbench_test_support import (
     fail_deep_scan,
     preserve_scan_results,
+    read_review_state,
     run_workbench,
     saved_discovery_worker,
     saved_draft,
@@ -53,6 +54,21 @@ def setup_workbench(monkeypatch, workbench_api):
         return json.loads(stdout.getvalue())
 
     return run
+
+
+def saved_finding(title, **fields):
+    return {
+        "ruleId": "fixture.review",
+        "title": title,
+        "summary": "Synthetic evidence.",
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "remediation": "Complete the review.",
+        "provenance": {"source": "local_plugin"},
+        **fields,
+    }
 
 
 def save_worker(root: Path, module, worker_id: str, drafts: list[dict], result: dict):
@@ -105,18 +121,11 @@ def test_repeated_colliding_variant_keeps_its_assigned_identity(
 ):
     from finalize_scan_contract import _recover_unsealed_findings
 
-    first = {
-        "ruleId": "fixture.review",
-        "identity": {"anchor": "shared-review"},
-        "title": "First independent review",
-        "summary": "Synthetic evidence at the first location.",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 1}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin"},
-    }
+    first = saved_finding(
+        "First independent review",
+        identity={"anchor": "shared-review"},
+        summary="Synthetic evidence at the first location.",
+    )
     second = {
         **copy.deepcopy(first),
         "title": "Second independent review",
@@ -165,18 +174,10 @@ def test_repeated_colliding_variant_keeps_its_assigned_identity(
 def test_legacy_frozen_source_order_parent_context_remains_readable(
     tmp_path, saved_results, retain_roles
 ):
-    finding = {
-        "ruleId": "fixture.review",
-        "identity": {"anchor": "review"},
-        "title": "Review",
-        "summary": "Synthetic evidence.",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 1}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin"},
-    }
+    finding = saved_finding(
+        "Review",
+        identity={"anchor": "review"},
+    )
     write_saved_parent(tmp_path, saved_draft("identity-scan", findings=[finding]), 100)
     first = recover(tmp_path, saved_results, [])
     legacy_sources = dict(first[0]["scan"]["preservedSources"])
@@ -217,17 +218,10 @@ def test_malformed_coverage_does_not_interrupt_saved_evidence(
 
 
 def test_missing_parent_identity_is_identical_on_frozen_replay(tmp_path: Path, saved_results):
-    finding = {
-        "ruleId": "fixture.review",
-        "title": "Synthetic review finding",
-        "summary": "Retain the saved result.",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 1}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin"},
-    }
+    finding = saved_finding(
+        "Synthetic review finding",
+        summary="Retain the saved result.",
+    )
     draft = saved_draft("identity-scan", findings=[finding])
     write_saved_parent(tmp_path, draft, 100)
     first = recover(tmp_path, saved_results, [])
@@ -247,17 +241,10 @@ def test_missing_parent_identity_reuses_established_checkpoint(
     from finalize_scan_contract import _recover_unsealed_findings
     from workbench_test_support import saved_binding
 
-    finding = {
-        "ruleId": "fixture.review",
-        "title": "Synthetic review finding",
-        "summary": "Retain the saved result.",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 1}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin"},
-    }
+    finding = saved_finding(
+        "Synthetic review finding",
+        summary="Retain the saved result.",
+    )
     checkpoint = write_checkpoint(
         tmp_path / "checkpoints",
         saved_draft(
@@ -298,9 +285,11 @@ def test_missing_parent_identity_reuses_established_checkpoint(
 
 @pytest.mark.parametrize("artifacts", ["omitted", None, []])
 @pytest.mark.parametrize("outcome", ["failed", "canceled"])
-def test_empty_artifact_envelope_remains_a_recoverable_draft(tmp_path: Path, artifacts, outcome):
-    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+def test_empty_artifact_envelope_remains_a_recoverable_draft(
+    tmp_path: Path, setup_workbench, artifacts, outcome
+):
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path, run=setup_workbench)
+    accepted_standard_worker(state, codex_home, scan_dir, scan_id, run=setup_workbench)
     write_saved_parent(
         scan_dir,
         saved_draft(scan_id, deferred=[{"id": "review", "reason": "Review remains."}]),
@@ -359,21 +348,17 @@ def test_empty_artifact_envelope_remains_a_recoverable_draft(tmp_path: Path, art
     assert manifest_path.read_bytes() == original
 
 
-def test_stopped_deep_recovery_uses_host_mode_for_terminal_replacement(tmp_path: Path):
-    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    accepted_standard_worker(state, codex_home, scan_dir, scan_id)
-    first = {
-        "ruleId": "fixture.review",
-        "identity": {"anchor": "first-review"},
-        "title": "First review",
-        "summary": "Earlier synthetic evidence.",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "app.py", "startLine": 1}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin"},
-    }
+def test_stopped_deep_recovery_uses_host_mode_for_terminal_replacement(
+    tmp_path: Path, setup_workbench
+):
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path, run=setup_workbench)
+    accepted_standard_worker(state, codex_home, scan_dir, scan_id, run=setup_workbench)
+    first = saved_finding(
+        "First review",
+        identity={"anchor": "first-review"},
+        summary="Earlier synthetic evidence.",
+        locations=[{"path": "app.py", "startLine": 1}],
+    )
     write_saved_parent(scan_dir, saved_draft(scan_id, findings=[first], complete=True), 100)
     revised = {**first, "title": "Revised review", "summary": "Revised synthetic evidence."}
     del revised["identity"]
@@ -474,7 +459,7 @@ def cancel_and_preserve(monkeypatch, saved_results, state, codex_home, scan_dir,
     preserve_scan_results(
         state, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
     )
-    return prepared_coverage[0], json.loads((scan_dir / "coverage.json").read_text())
+    return prepared_coverage[0], read_review_state(state, scan_dir)
 
 
 @pytest.mark.parametrize("named_history", [False, True])
@@ -575,9 +560,11 @@ def test_accepted_generic_update_keeps_its_id_in_frozen_recovery(tmp_path: Path,
     assert all(path.read_bytes() == contents for path, contents in originals.items())
 
 
-def test_unsafe_deferred_update_keeps_the_earlier_valid_path(tmp_path: Path) -> None:
-    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+def test_unsafe_deferred_update_keeps_the_earlier_valid_path(
+    tmp_path: Path, setup_workbench
+) -> None:
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path, run=setup_workbench)
+    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id, run=setup_workbench)
     original = {"id": "review", "reason": "Review remains.", "paths": ["app.py"]}
     checkpoint = write_checkpoint(
         result.parent / "checkpoints", saved_draft(scan_id, deferred=[original])
@@ -589,7 +576,7 @@ def test_unsafe_deferred_update_keeps_the_earlier_valid_path(tmp_path: Path) -> 
 
     fail_deep_scan(state, codex_home, scan_id, deep_status="failed")
 
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, scan_dir)
     assert [row["paths"] for row in coverage["deferred"] if "paths" in row] == [["app.py"]]
     warnings = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["warnings"]
     assert any("expected a safe repository-relative POSIX path" in warning for warning in warnings)
@@ -1010,17 +997,11 @@ def test_legacy_summary_stays_pending_after_an_explicit_closure(
 def test_worker_local_candidates_remain_distinct_on_frozen_recovery(
     tmp_path, saved_results, same_title
 ):
-    finding = {
-        "ruleId": "fixture.review",
-        "title": "First review",
-        "summary": "Retain the saved result.",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 1}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin", "candidateId": "candidate-1"},
-    }
+    finding = saved_finding(
+        "First review",
+        summary="Retain the saved result.",
+        provenance={"source": "local_plugin", "candidateId": "candidate-1"},
+    )
     workers = [
         save_worker(
             tmp_path,
@@ -1051,19 +1032,12 @@ def test_recovery_finalization_coalesces_repeated_authored_reports(
 ):
     from finalize_scan_contract import _recover_unsealed_findings
 
-    first = {
-        "ruleId": "fixture.review",
-        "title": "Existing report",
-        "summary": "Synthetic evidence.",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 1}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin", "candidateId": "candidate-1"},
-        "identity": {"anchor": "shared"},
-        "extensions": {"reportId": "report-1"},
-    }
+    first = saved_finding(
+        "Existing report",
+        provenance={"source": "local_plugin", "candidateId": "candidate-1"},
+        identity={"anchor": "shared"},
+        extensions={"reportId": "report-1"},
+    )
     latest = (
         {
             **first,
@@ -1094,18 +1068,12 @@ def test_recovery_finalization_preserves_distinct_reports_at_a_revised_location(
 ):
     from finalize_scan_contract import _recover_unsealed_findings
 
-    first = {
-        "ruleId": "fixture.review",
-        "title": "Existing report",
-        "summary": "Synthetic evidence.",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 2}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin", "candidateId": "candidate-1"},
-        "identity": {"anchor": "shared"},
-    }
+    first = saved_finding(
+        "Existing report",
+        locations=[{"path": "src/example.py", "startLine": 2}],
+        provenance={"source": "local_plugin", "candidateId": "candidate-1"},
+        identity={"anchor": "shared"},
+    )
     independent = {
         **first,
         "title": "Independent report",
@@ -1167,18 +1135,11 @@ def test_recovery_finalization_preserves_distinct_reports_at_a_revised_location(
 def test_worker_report_metadata_enrichment_matches_published_identity(
     tmp_path, saved_results, metadata, identifier
 ):
-    first = {
-        "ruleId": "fixture.review",
-        "title": "Synthetic report",
-        "summary": "Retain the saved result.",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 1}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin"},
-        "extensions": {identifier: "report-1"},
-    }
+    first = saved_finding(
+        "Synthetic report",
+        summary="Retain the saved result.",
+        extensions={identifier: "report-1"},
+    )
     second = {**first, metadata: {**first[metadata], "candidateId": "candidate-1"}}
     drafts = [saved_draft("identity-scan", findings=[value]) for value in (first, second)]
     worker = save_worker(tmp_path, saved_results, "reviewer", drafts, drafts[1])
@@ -1197,17 +1158,7 @@ def test_worker_report_metadata_enrichment_matches_published_identity(
 def test_parent_represents_worker_versions_before_candidate_enrichment(
     tmp_path, saved_results, metadata
 ):
-    first = {
-        "ruleId": "fixture.review",
-        "title": "Synthetic review",
-        "summary": "Synthetic evidence.",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 1}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin"},
-    }
+    first = saved_finding("Synthetic review")
     latest = {**first, metadata: {**first.get(metadata, {}), "candidateId": "candidate-1"}}
     reduced = {
         **latest,
@@ -1264,18 +1215,12 @@ def test_parent_represents_worker_versions_before_candidate_enrichment(
 def test_worker_revision_keeps_assigned_sibling_on_frozen_recovery(
     tmp_path, saved_results, reversed_rows, revised_identity, preserve_reduction
 ):
-    first = {
-        "ruleId": "fixture.review",
-        "title": "Synthetic first review",
-        "summary": "Original first evidence.",
-        "identity": {"anchor": "shared-review", "instance": "first"},
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 1}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin", "candidateId": "candidate-1"},
-    }
+    first = saved_finding(
+        "Synthetic first review",
+        summary="Original first evidence.",
+        identity={"anchor": "shared-review", "instance": "first"},
+        provenance={"source": "local_plugin", "candidateId": "candidate-1"},
+    )
     sibling = {
         **{key: value for key, value in first.items() if key != "identity"},
         "title": "Independent review",
@@ -1336,18 +1281,10 @@ def test_claimed_report_does_not_resolve_an_independent_recovery_match(
 ):
     from finalize_scan_contract import _recover_unsealed_findings
 
-    first = {
-        "ruleId": "fixture.review",
-        "title": "First independent report",
-        "summary": "Synthetic evidence.",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 1}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin"},
-        "extensions": {identifier: "report-1"},
-    }
+    first = saved_finding(
+        "First independent report",
+        extensions={identifier: "report-1"},
+    )
     independent = {
         **{key: value for key, value in first.items() if key != "extensions"},
         "title": "Second independent report",
@@ -1399,18 +1336,14 @@ def test_claimed_report_does_not_resolve_an_independent_recovery_match(
 def test_latest_eligible_worker_revision_survives_out_of_scope_result(
     tmp_path, saved_results, monkeypatch, reverse_checkpoints
 ):
-    first = {
-        "ruleId": "fixture.review",
-        "title": "Synthetic review",
-        "summary": "Older assessment 0",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic fixture."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 1}],
-        "remediation": "Complete review.",
-        "provenance": {"source": "local_plugin", "candidateId": "candidate-1"},
-        "identity": {"anchor": "stable"},
-    }
+    first = saved_finding(
+        "Synthetic review",
+        summary="Older assessment 0",
+        confidence={"level": "high", "rationale": "Synthetic fixture."},
+        remediation="Complete review.",
+        provenance={"source": "local_plugin", "candidateId": "candidate-1"},
+        identity={"anchor": "stable"},
+    )
     latest = {
         **first,
         "summary": "Confirmed newer high severity assessment",

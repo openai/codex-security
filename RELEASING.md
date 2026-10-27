@@ -265,9 +265,12 @@ Generated PRs leave the disclosure attestations unchecked for maintainer review.
    pull-request inventory to the generated section.
 4. Open a pull request with a strict Conventional Commit title such as
    `chore(release): 0.2.0`.
-5. Run the checks required by the changed files and record the results in the
-   pull request. Do not merge until required CI, review, and public disclosure
-   checks pass on the current commit.
+5. Run the checks required by the changed files and record the initial results
+   in the PR description. Post later manual test results in a comment or review
+   with the tested commit SHA. Editing the description to update status can
+   trigger CI. Before merging, confirm that required CI passed in the **Checks**
+   tab and that review and the PR's public disclosure checklist cover the current
+   commit.
 
 Review the summary with the same standard as product documentation. Keep it
 specific, describe behavior before implementation, and do not include private

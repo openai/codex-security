@@ -254,7 +254,7 @@ describe("scan publication and artifact recovery", () => {
               reportPath: join(fixture.scanDir, "report.md"),
             });
             expect(envelope.data.findings.findings).toHaveLength(1);
-            expect(envelope.data.coverage.deferred.length).toBeGreaterThan(0);
+            expect(envelope.data.review).toEqual({ excludedPaths: [] });
             expect(envelope.data).not.toHaveProperty("turn");
           }
         }
@@ -306,11 +306,21 @@ describe("scan publication and artifact recovery", () => {
     },
   );
 
-  test("registers a Unicode scan recipe delivered through stdin", async () => {
+  test("registers a Unicode stdin recipe with the authoritative directory contract", async () => {
     const fixture = await startDraftScan("directory", true);
     expect(fixture.registration).toMatchObject({
       scanDir: fixture.scanDir,
       targetRevision: "unversioned",
+      contract: {
+        target: {
+          allowedKinds: ["directory_snapshot"],
+          displayName: "répository-日本語",
+          targetId: fixture.registration["targetId"],
+          requiredSnapshotDigest: expect.stringMatching(
+            /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/,
+          ),
+        },
+      },
     });
     const saved = await workbench(fixture, [
       "get-scan-recipe",
@@ -372,29 +382,6 @@ describe("scan publication and artifact recovery", () => {
       userContext: null,
     });
   }, 30_000);
-
-  test("returns the authoritative directory snapshot contract at registration", async () => {
-    const fixture = await startDraftScan();
-    const registration = fixture.registration;
-    const contract = registration["contract"] as {
-      target: {
-        allowedKinds: string[];
-        displayName: string;
-        targetId: string;
-        requiredSnapshotDigest?: string;
-      };
-    };
-
-    expect(registration["targetRevision"]).toBe("unversioned");
-    expect(contract.target).toMatchObject({
-      allowedKinds: ["directory_snapshot"],
-      displayName: "repository",
-      targetId: registration["targetId"],
-      requiredSnapshotDigest: expect.stringMatching(
-        /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/,
-      ),
-    });
-  });
 
   test("builds each ordinary scan context once without losing selected findings", async () => {
     const fixture = await startDraftScan();
@@ -519,29 +506,6 @@ describe("scan publication and artifact recovery", () => {
     }
   });
 
-  test("seals a prepared scan without publishing it before acceptance", async () => {
-    const fixture = await startDraftScan();
-
-    const prepared = await workbench(fixture, [
-      "prepare-scan-completion",
-      "--scan-id",
-      fixture.scanId,
-    ]);
-
-    expect((prepared["scan"] as ScanSummary).progress.status).toBe("running");
-    const manifest = await readJson<{
-      scan: { sealedAt: string; completedAt: string };
-    }>(join(fixture.scanDir, "scan-manifest.json"));
-    expect(manifest.scan.sealedAt).toBe(manifest.scan.completedAt);
-    const running = await workbench(fixture, [
-      "get-scan",
-      "--scan-id",
-      fixture.scanId,
-    ]);
-    expect((running["scan"] as ScanSummary).progress.status).toBe("running");
-    expect((await completeScan(fixture)).progress.status).toBe("complete");
-  });
-
   test.each([
     ["unavailable", undefined],
     [
@@ -584,7 +548,6 @@ describe("scan publication and artifact recovery", () => {
       const artifactNames = [
         "scan-manifest.json",
         "findings.json",
-        "coverage.json",
         "report.md",
       ];
       const sealedArtifacts = await Promise.all(
@@ -698,7 +661,7 @@ describe("scan publication and artifact recovery", () => {
     });
   });
 
-  test("preserves missing-writeup warnings across prepared scan completion", async () => {
+  test("keeps a prepared scan running and preserves its missing-writeup warning on completion", async () => {
     const fixture = await startDraftScan();
     const path = join(fixture.scanDir, "findings.json");
     const document = await readJson<FindingsDocument>(path);
@@ -720,6 +683,17 @@ describe("scan publication and artifact recovery", () => {
     const preparedFindings = (await readJson<FindingsDocument>(path)).findings;
     expect(preparedFindings).toHaveLength(1);
     expect(preparedFindings[0]).not.toHaveProperty("writeup");
+    const manifest = await readJson<{
+      scan: { sealedAt: string; completedAt: string };
+    }>(join(fixture.scanDir, "scan-manifest.json"));
+    expect(manifest.scan.sealedAt).toBeTruthy();
+    expect(manifest.scan.sealedAt).toBe(manifest.scan.completedAt);
+    const running = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+    expect((running["scan"] as ScanSummary).progress.status).toBe("running");
     const completion = await workbench(fixture, [
       "complete-scan",
       "--scan-id",
@@ -811,11 +785,6 @@ describe("scan publication and artifact recovery", () => {
       ),
     ).toBe(true);
     expect(completed.warnings.join("\n")).not.toContain("../outside");
-    const recovered = await readJson<CoverageDocument>(path);
-    expect((recovered.surfaces as CoverageSurface[])[0]).toMatchObject({
-      disposition: "needs_follow_up",
-      receiptRefs: [receipt],
-    });
     const manifest = await readJson<{
       scan: { artifacts: Array<{ path: string }> };
     }>(manifestPath);
@@ -862,31 +831,17 @@ describe("scan publication and artifact recovery", () => {
       expect(completed.warnings).toContainEqual(
         expect.stringMatching(/^Skipped malformed hardening portfolio:/),
       );
-      expect(await readJson<CoverageDocument>(coveragePath)).toMatchObject({
-        surfaces: [],
-        explicitExclusions: [],
-        deferred: [],
-      });
       expect(await readJson<FindingsDocument>(findingsPath)).toMatchObject({
         findings: [{ summary: findings[0]!.summary }],
       });
       const sealed = await readJson<typeof manifest>(manifestPath);
       expect(sealed.scan.sealedAt).toBeTruthy();
+      expect(sealed.scan).toMatchObject({ review: { excludedPaths: [] } });
+      expect(sealed.scan).not.toHaveProperty("coverageRef");
+      expect(sealed.scan).not.toHaveProperty("reviewState");
       expect(sealed.scan).not.toHaveProperty("hardening");
     },
   );
-
-  test("refuses to repair scan-wide coverage contract violations", async () => {
-    const fixture = await startDraftScan();
-    const path = join(fixture.scanDir, "coverage.json");
-    const document = await readJson<CoverageDocument>(path);
-    document.inventoryStrategy = "";
-    await writeJson(path, document);
-    const original = await readFile(path, "utf8");
-
-    await expect(completeScan(fixture)).rejects.toThrow("inventoryStrategy");
-    expect(await readFile(path, "utf8")).toBe(original);
-  });
 
   test.each(["complete-scan", "prepare-scan-completion"] as const)(
     "keeps a repairable %s contract failure resumable",
@@ -897,10 +852,12 @@ describe("scan publication and artifact recovery", () => {
       const validInventoryStrategy = document.inventoryStrategy;
       document.inventoryStrategy = "";
       await writeJson(path, document);
+      const original = await readFile(path);
 
       await expect(
         workbench(fixture, [command, "--scan-id", fixture.scanId]),
       ).rejects.toThrow("inventoryStrategy");
+      expect(await readFile(path)).toEqual(original);
       const pending = await workbench(fixture, [
         "get-scan",
         "--scan-id",

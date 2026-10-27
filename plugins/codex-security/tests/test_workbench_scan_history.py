@@ -77,22 +77,6 @@ def test_rename_rejects_blank_names(tmp_path: Path) -> None:
     assert run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]["name"] is None
 
 
-@pytest.mark.parametrize(
-    ("name", "query"),
-    [("Évaluation", "évaluation"), ("Straße", "STRASSE"), ("Проверка", "проверка")],
-)
-def test_scan_name_search_ignores_unicode_case(tmp_path: Path, name: str, query: str) -> None:
-    state_dir = tmp_path / "state"
-    repository = tmp_path / "repository"
-    repository.mkdir()
-    scan = create_cli_scan(state_dir, tmp_path / "scans", repository, complete=False)
-    run_workbench(state_dir, "rename-scan", "--scan-id", scan["scanId"], f"--name={name}")
-
-    listed = run_workbench(state_dir, "list-scans", "--query", query)["scans"]
-
-    assert [(item["scanId"], item["name"]) for item in listed] == [(scan["scanId"], name)]
-
-
 def test_scan_history_search_casefolds_displayed_fields(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "Straße"
@@ -104,9 +88,11 @@ def test_scan_history_search_casefolds_displayed_fields(tmp_path: Path) -> None:
         tmp_path / "scans",
         extra_args=("--scope=Ä", "--target-summary=Überblick"),
     )["scan"]
-    for query in ("Straße", "STRASSE", "Ä", "ä", "Überblick", "ÜBERBLICK"):
+    name = "Évaluation Größe Проверка"
+    run_workbench(state_dir, "rename-scan", "--scan-id", scan["scanId"], f"--name={name}")
+    for query in ("STRASSE", "ä", "ÜBERBLICK", "évaluation", "GRÖSSE", "проверка"):
         listed = run_workbench(state_dir, "list-scans", "--query", query)["scans"]
-        assert [item["scanId"] for item in listed] == [scan["scanId"]]
+        assert [(item["scanId"], item["name"]) for item in listed] == [(scan["scanId"], name)]
     assert run_workbench(state_dir, "list-scans", "--query", "unrelated")["scans"] == []
 
 

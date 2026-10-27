@@ -12,7 +12,7 @@ ordinary docs or `RELEASING.md`, require the native payload, the real package
 build and archive inspection, and one Ubuntu Node 24 installation. Removing or
 renaming a required guide must still pass archive inspection. The static job
 validates the canonical recovery example in `RELEASING.md` on docs-only PRs too.
-Mixing either kind of guide with product source selects full qualification.
+Mixing the release guide with product source selects full qualification.
 
 Product source changes run the complete SDK suite on Linux, macOS, and Windows,
 plus MCP, standalone-plugin, native-runtime, and installed-package checks. Tests
@@ -32,17 +32,18 @@ slow-file estimates in `run-mcp-test-shard.mts` when the jobs drift apart.
 
 Pull requests limited to `.ts` files under `sdk/typescript/src/`,
 `sdk/typescript/tests-ts/`, `plugins/codex-security/mcp-app/src/`, and
-`plugins/codex-security/mcp-app/tests/`, optionally mixed with ordinary docs,
+`plugins/codex-security/mcp-app/tests/`, plus any ordinary docs or packaged SDK guides,
 use reduced version matrices. They test the minimum Node 22, 24, and 26 versions,
 current Node 24 for the Action adapter, macOS installation, and Windows Node 22
 installation. When selected, Python runs the full suite on 3.12 and the native
 subsets on macOS and Windows. All source changes still select container
 validation.
 
-PRs limited to top-level `sdk/typescript/tests-ts/*.test.ts` keep all SDK
-shards, static checks, native builds, packages, and containers. They skip the
-plugin suites and run evals only when their `codex-dependency-pins.test.ts`
-input changes. Mixed changes follow the usual source or full route.
+PRs limited to top-level `sdk/typescript/tests-ts/*.test.ts` keep all SDK shards,
+static checks, native builds, packaging, and containers. These files are outside
+the npm package, so one Ubuntu Node 24 install checks it and the Action adapter.
+These PRs skip the plugin suites and run evals only for `codex-dependency-pins.test.ts`.
+Mixed changes follow the usual source or full route.
 
 PRs limited to Action metadata, wrapper implementation, tests, npm manifests,
 locks, or checked-in bundles run Action CI. It verifies a clean rebuild, runs
@@ -62,10 +63,10 @@ lockfiles, and runs the triage, secret-discovery, Standard time-budget and
 workflow-routing suites.
 
 Edits limited to existing top-level `plugins/codex-security/tests/test_*.py`
-modules keep all five Python jobs, MCP, host, native, package, compatibility,
-and container checks. They skip the SDK shards, Windows install checks, Action
-and eval jobs. Adding, removing, or renaming modules, editing shared helpers,
-or including any other path selects full qualification.
+modules keep all five Python jobs, static and workflow checks, MCP, plugin host,
+native builds, packaging, and Unix installs. Docker excludes these modules from
+the image. Adding, removing, or renaming modules, editing shared helpers, or
+including any other path selects full qualification.
 
 Inputs outside these routes select full qualification, including workflow checks,
 containers, current Node 26, Windows Node 24 installation, and Python 3.10 and
@@ -80,6 +81,10 @@ successful CI for the exact main commit before publication. Title and body edits
 leave source CI running. On an edit, CI checks the source result for the same
 pull request, base, head and test merge. It waits for a running source check and
 reports a verified result, including static checks, through the required checks.
+If the PR event reports an older base, CI can verify the edit on a newer test
+merge whose first parent is the current tip of that same branch. A stale merge
+or a retarget with different parents needs a fresh PR event after the merge ref
+updates. Reopening the PR or pushing a commit starts one.
 Only the original source run and an uninterrupted sequence of successful edits
 can carry a green result. A cancelled or retried run, a changed target, missing
 evidence or conflicting results require full qualification. Use **Re-run all

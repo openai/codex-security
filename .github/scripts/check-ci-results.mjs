@@ -8,10 +8,9 @@ export function failedChecks(needs) {
   const required = ["static-checks"];
   const groups = {
     "package-required": ["native", "package", "compatibility"],
-    "source-required": ["test", "windows-test"],
+    "source-required": ["test", "windows-test", "container-validate"],
     "plugin-tests-required": ["mcp", "plugin-host", "plugin-source"],
     "workflow-quality": ["workflow-quality"],
-    "container-validate": ["container-validate"],
     "action-ci": ["action-ci"],
     "eval-contracts": ["eval-contracts"],
   };

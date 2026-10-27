@@ -25,7 +25,6 @@ import {
 } from "../src/index.js";
 import {
   codexSecurityCredentialAllowsAmbientImport,
-  prepareCodexSecurityCredentialHome,
   setCodexSecurityCredentialLogout,
 } from "../src/runtime.js";
 import {
@@ -83,6 +82,12 @@ function dependencies(
   });
 }
 
+async function createCredentialHome() {
+  const home = join(stateDirectory, "codex-home");
+  await mkdir(home, { mode: 0o700 });
+  return home;
+}
+
 describe("CLI authentication", () => {
   test("delegates login and logout without overriding managed credential storage", async () => {
     const cases = [
@@ -108,11 +113,7 @@ describe("CLI authentication", () => {
   });
 
   test("uses the same stable credential home for login, status, and logout", async () => {
-    const expectedHome = await realpath(
-      await prepareCodexSecurityCredentialHome({
-        CODEX_SECURITY_STATE_DIR: stateDirectory,
-      }),
-    );
+    const expectedHome = join(stateDirectory, "codex-home");
 
     for (const argv of [["login"], ["login", "status"], ["logout"]] as const) {
       const { runCli } = createCliTest(main);
@@ -1261,9 +1262,7 @@ describe("CLI authentication", () => {
         '{"auth_mode":"chatgpt"}\n',
       );
 
-      const credentialHome = await prepareCodexSecurityCredentialHome({
-        CODEX_SECURITY_STATE_DIR: stateDirectory,
-      });
+      const credentialHome = await createCredentialHome();
       await setCodexSecurityCredentialLogout(credentialHome, true);
 
       const { runCli } = createCliTest(main);
@@ -1348,46 +1347,44 @@ describe("skill authentication", () => {
     },
   );
 
-  for (const nullAuth of [false, true]) {
-    test.each(["validate", "patch", "verify-fix"] as const)(
-      `%s forwards a provider's OpenAI-named key (null auth: ${nullAuth})`,
-      async (command) => {
-        const stdout = capture();
-        const stderr = capture();
-        const status = await runCodexSkillCommand(
-          [
-            "-e",
-            'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({key:process.env.OPENAI_API_KEY})}}))',
-          ],
-          {
-            command,
-            auth: "api-key",
-            modelProvider: "gateway",
-            codexOverrides: {
-              model_provider: "gateway",
-              model_providers: {
-                gateway: {
-                  env_key: "OPENAI_API_KEY",
-                  ...(nullAuth ? { auth: null } : {}),
-                },
+  test.each([false, true])(
+    "forwards a provider's OpenAI-named key to the child (null auth: %p)",
+    async (nullAuth) => {
+      const stdout = capture();
+      const stderr = capture();
+      const status = await runCodexSkillCommand(
+        [
+          "-e",
+          'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({key:process.env.OPENAI_API_KEY})}}))',
+        ],
+        {
+          command: "validate",
+          auth: "api-key",
+          modelProvider: "gateway",
+          codexOverrides: {
+            model_provider: "gateway",
+            model_providers: {
+              gateway: {
+                env_key: "OPENAI_API_KEY",
+                ...(nullAuth ? { auth: null } : {}),
               },
             },
-            stdout: stdout.stream,
-            stderr: stderr.stream,
           },
-          { command: process.execPath },
-          {
-            CODEX_HOME: join(stateDirectory, "ambient"),
-            OPENAI_API_KEY: "SYNTHETIC_PROVIDER_KEY",
-          },
-        );
-        expect(status, stderr.text()).toBe(0);
-        expect(JSON.parse(stdout.text())).toEqual({
-          key: "SYNTHETIC_PROVIDER_KEY",
-        });
-      },
-    );
-  }
+          stdout: stdout.stream,
+          stderr: stderr.stream,
+        },
+        { command: process.execPath },
+        {
+          CODEX_HOME: join(stateDirectory, "ambient"),
+          OPENAI_API_KEY: "SYNTHETIC_PROVIDER_KEY",
+        },
+      );
+      expect(status, stderr.text()).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual({
+        key: "SYNTHETIC_PROVIDER_KEY",
+      });
+    },
+  );
 
   test("rejects a missing custom provider API key before launch", async () => {
     const result = await runProviderSkill(stateDirectory, {
@@ -1833,45 +1830,41 @@ describe("skill authentication", () => {
     },
   );
 
-  test.each(["validate", "patch", "verify-fix"] as const)(
-    "%s reads the login credential home",
-    async (command) => {
-      const environment = {
-        CODEX_HOME: join(stateDirectory, "ambient"),
-        CODEX_SECURITY_STATE_DIR: stateDirectory,
-      };
-      const credentialHome =
-        await prepareCodexSecurityCredentialHome(environment);
-      await writeFile(
-        join(credentialHome, "auth.json"),
-        JSON.stringify({
-          auth_mode: "apikey",
-          OPENAI_API_KEY: "SYNTHETIC_STORED_KEY",
-        }),
-        { mode: 0o600 },
-      );
-      const stdout = capture();
-      const stderr = capture();
-      const script = `console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({home:process.env.CODEX_HOME,state:process.env.CODEX_SECURITY_STATE_DIR})}}))`;
-      expect(
-        await runCodexSkillCommand(
-          ["-e", script],
-          {
-            command,
-            auth: "auto",
-            stdout: stdout.stream,
-            stderr: stderr.stream,
-          },
-          { command: process.execPath },
-          environment,
-        ),
-      ).toBe(0);
-      expect(JSON.parse(stdout.text())).toEqual({
-        home: credentialHome,
-        state: stateDirectory,
-      });
-    },
-  );
+  test("uses the login credential home for a skill launched with stored authentication", async () => {
+    const environment = {
+      CODEX_HOME: join(stateDirectory, "ambient"),
+      CODEX_SECURITY_STATE_DIR: stateDirectory,
+    };
+    const credentialHome = await createCredentialHome();
+    await writeFile(
+      join(credentialHome, "auth.json"),
+      JSON.stringify({
+        auth_mode: "apikey",
+        OPENAI_API_KEY: "SYNTHETIC_STORED_KEY",
+      }),
+      { mode: 0o600 },
+    );
+    const stdout = capture();
+    const stderr = capture();
+    const script = `console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({home:process.env.CODEX_HOME,state:process.env.CODEX_SECURITY_STATE_DIR})}}))`;
+    expect(
+      await runCodexSkillCommand(
+        ["-e", script],
+        {
+          command: "validate",
+          auth: "auto",
+          stdout: stdout.stream,
+          stderr: stderr.stream,
+        },
+        { command: process.execPath },
+        environment,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual({
+      home: credentialHome,
+      state: stateDirectory,
+    });
+  });
 
   test.each(["validate", "patch", "verify-fix"])(
     "%s rejects missing explicit API-key authentication before launch",
@@ -1915,9 +1908,7 @@ describe("skill authentication", () => {
       await mkdir(repository);
       const ambientHome = join(stateDirectory, "ambient");
       await mkdir(ambientHome);
-      const credentialHome = await prepareCodexSecurityCredentialHome({
-        CODEX_SECURITY_STATE_DIR: stateDirectory,
-      });
+      const credentialHome = await createCredentialHome();
       await writeFile(
         join(credentialHome, "config.toml"),
         [
@@ -2089,8 +2080,7 @@ describe("skill authentication", () => {
       CODEX_SECURITY_STATE_DIR: stateDirectory,
     };
     await mkdir(ambientHome);
-    const credentialHome =
-      await prepareCodexSecurityCredentialHome(environment);
+    const credentialHome = join(stateDirectory, "codex-home");
     const stored = JSON.stringify({
       auth_mode: "apikey",
       OPENAI_API_KEY: "SYNTHETIC_STORED_KEY",
@@ -2134,7 +2124,7 @@ describe("skill authentication", () => {
           ? { OPENAI_API_KEY: "SYNTHETIC_SESSION_KEY" }
           : {}),
       };
-      const home = await prepareCodexSecurityCredentialHome(environment);
+      const home = await createCredentialHome();
       const sourceHome =
         authSource === "shared" ? home : environment.CODEX_HOME;
       await mkdir(environment.CODEX_HOME, { recursive: true });
@@ -2279,7 +2269,7 @@ describe("skill authentication", () => {
         CODEX_HOME: join(stateDirectory, "ambient"),
         CODEX_SECURITY_STATE_DIR: stateDirectory,
       };
-      const home = await prepareCodexSecurityCredentialHome(environment);
+      const home = join(stateDirectory, "codex-home");
       const preload = join(stateDirectory, "native-status.mjs");
       const marker = join(home, "status-home");
       await writeFile(

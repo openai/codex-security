@@ -59,7 +59,7 @@ test("attribution rejects absent, unknown, and context-only participants", () =>
 
 const document: FindingsDocument = JSON.parse(
   await readFile(
-    join(PLUGIN_ROOT, "examples/completed-scan/findings.json"),
+    join(PLUGIN_ROOT, "examples/legacy-completed-scan/findings.json"),
     "utf8",
   ),
 );

@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { setTimeout as delay } from "node:timers/promises";
 import { consumeStreamLines, writeMessage } from "./streams.ts";
 
 export function startRpcServer(
@@ -118,8 +117,8 @@ export function startRpcServer(
       child.stdin!.end();
       if (options.terminateOnStop) child.kill();
       else {
-        await Promise.race([exited, delay(2_000)]);
-        child.kill("SIGKILL");
+        const timer = setTimeout(() => child.kill("SIGKILL"), 2_000);
+        child.once("exit", () => clearTimeout(timer));
       }
       await exited;
     },
