@@ -149,6 +149,9 @@ docker build --target scanner -t codex-security:local .
 export CODEX_SECURITY_IMAGE=codex-security:local
 ```
 
+For a local Linux amd64 build of the pinned npm release on Wolfi, see the
+[melange and apko recipe](wolfi/README.md).
+
 The existing `CODEX_SECURITY_RESULTS` and `CODEX_SECURITY_STATE` settings select
 the host directories (default `./results` and `./state`):
 

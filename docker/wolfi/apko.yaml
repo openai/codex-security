@@ -1,0 +1,97 @@
+# The image lock binds the public Wolfi packages and the locally signed scanner.
+contents:
+  repositories:
+    - https://packages.wolfi.dev/os
+  build_repositories:
+    - ./packages
+  keyring:
+    - ./wolfi-signing.rsa.pub
+    - ./melange.rsa.pub
+  packages:
+    - busybox=1.38.0-r3
+    - c-ares=1.34.9-r0
+    - ca-certificates-bundle=20261020-r0
+    - codex-security=0.7.0-r1
+    - cyrus-sasl-heimdal-libs=2.1.28-r58
+    - gdbm=1.26-r8
+    - git=2.56.0-r3
+    - glibc-2.44-locale-posix=2.44-r9
+    - glibc-2.44=2.44-r9
+    - heimdal-libs=7.8.0-r54
+    - icu78-data-full=78.3-r4
+    - keyutils-libs=1.6.3-r41
+    - krb5-conf=1.0-r10
+    - krb5-libs=1.22.2-r5
+    - ld-linux-2.44=2.44-r9
+    - libbrotlicommon1=1.2.1-r1
+    - libbrotlidec1=1.2.1-r1
+    - libbrotlienc1=1.2.1-r1
+    - libbz2-1=1.0.8-r27
+    - libcom_err=1.47.4-r4
+    - libcrypt1-2.44=2.44-r9
+    - libcurl-openssl4=8.23.0-r2
+    - libedit=3.1-r20
+    - libexpat1=2.9.0-r0
+    - libffi=3.8.0-r2
+    - libgcc=16.2.0-r1
+    - libicu78=78.3-r4
+    - libidn2=2.3.8-r11
+    - libldap-2.7=2.7.2-r0
+    - libnghttp2-14=1.70.0-r6
+    - libpcre2-8-0=10.49-r1
+    - libpsl=0.23.3-r3
+    - libselinux=3.11-r2
+    - libsepol=3.11-r3
+    - libstdc++=16.2.0-r1
+    - libunistring=1.5-r0
+    - libuuid=2.42.4-r1
+    - libuv=1.53.0-r0
+    - libverto=0.3.2-r10
+    - libxcrypt=4.5.2-r6
+    - mpdecimal=4.0.1-r5
+    - ncurses-terminfo-base=6.6.20261024-r0
+    - ncurses=6.6.20261024-r0
+    - nghttp3=1.18.0-r2
+    - ngtcp2=1.25.0-r6
+    - nodejs-26=26.12.1-r2
+    - openssh-client=10.6_p1-r0
+    - openssl-4.0-libcrypto=4.0.3-r8
+    - openssl-4.0-libssl=4.0.3-r8
+    - openssl-provider-legacy-allowed=4.1.0-r0
+    - py3-pip-wheel=26.2.2-r0
+    - python-3.13-base=3.13.17_git20261023-r0
+    - python-3.13=3.13.17_git20261023-r0
+    - readline=8.3-r3
+    - sqlite-libs=3.54.1-r0
+    - wolfi-baselayout=20230201-r30
+    - xz=5.8.4-r0
+    - zlib=1.3.2.1_rc20260921-r0
+archs:
+  - x86_64
+accounts:
+  groups:
+    - groupname: codex-security
+      gid: 10001
+  users:
+    - username: codex-security
+      uid: 10001
+      gid: 10001
+      homedir: /state
+      shell: /bin/sh
+  run-as: '10001:10001'
+paths:
+  - {path: /input, type: directory, uid: 0, gid: 0, permissions: 0o755}
+  - {path: /output, type: directory, uid: 10001, gid: 10001, permissions: 0o755}
+  - {path: /state, type: directory, uid: 10001, gid: 10001, permissions: 0o755}
+environment:
+  PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  HOME: /state
+  CODEX_HOME: /state
+  CODEX_SECURITY_STATE_DIR: /output/.codex-security-state
+  GIT_TERMINAL_PROMPT: '0'
+  PYTHON: /usr/bin/python3
+  SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+work-dir: /state
+entrypoint:
+  command: /usr/local/bin/codex-security-entrypoint
+cmd: --help

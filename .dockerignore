@@ -15,3 +15,4 @@ sdk/typescript/tests-ts/*.test.ts
 **/security-scans
 **/state
 **/*.log
+docker/wolfi/build
