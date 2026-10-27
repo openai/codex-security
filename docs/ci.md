@@ -36,12 +36,12 @@ Pull requests limited to `.ts` files under `sdk/typescript/src/`,
 use reduced version matrices. They test the minimum Node 22, 24, and 26 versions,
 current Node 24 for the Action adapter, macOS installation, and Windows Node 22
 installation. When selected, Python runs the full suite on 3.12 and the native
-subsets on macOS and Windows. All source changes still select container
-validation.
+subsets on macOS and Windows. Product source changes select container validation.
 
 PRs limited to top-level `sdk/typescript/tests-ts/*.test.ts` keep all SDK shards,
-static checks, native builds, packaging, and containers. These files are outside
-the npm package, so one Ubuntu Node 24 install checks it and the Action adapter.
+static checks, native builds, and packaging. Docker excludes the SDK test tree,
+so these PRs skip container validation. These files are outside the npm package,
+so one Ubuntu Node 24 install checks it and the Action adapter.
 These PRs skip the plugin suites and run evals only for `codex-dependency-pins.test.ts`.
 Mixed changes follow the usual source or full route.
 

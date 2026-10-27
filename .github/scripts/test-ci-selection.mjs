@@ -16,6 +16,7 @@ const ubuntuNode24Install = JSON.stringify({
 
 const regularSource = {
   "source-required": "true",
+  "container-required": "true",
   "plugin-tests-required": "true",
   "package-required": "true",
   "action-ci": "false",
@@ -85,18 +86,23 @@ const fullQualification = {
 const docs = {
   ...regularSource,
   "source-required": "false",
+  "container-required": "false",
   "plugin-tests-required": "false",
   "package-required": "false",
   "eval-contracts": "false",
 };
 
-test("only edits to existing direct pytest modules skip independent jobs", (t) => {
+test("the Docker context excludes both test trees skipped by container CI", () => {
   const ignore = ["Dockerfile.dockerignore", ".dockerignore"]
     .map((file) => new URL(`../../${file}`, import.meta.url))
     .find((file) => fs.existsSync(file));
   const rules = fs.readFileSync(ignore, "utf8");
   assert.match(rules, /^plugins\/codex-security\/tests\r?$/m);
+  assert.match(rules, /^sdk\/typescript\/tests-ts\r?$/m);
   assert.doesNotMatch(rules, /^\s*!/m);
+});
+
+test("only edits to existing direct pytest modules skip independent jobs", (t) => {
   const cwd = fs.mkdtempSync(resolve(tmpdir(), "ci-pytest-"));
   t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
   const files = join(cwd, "plugins/codex-security/tests");
@@ -134,6 +140,7 @@ test("only edits to existing direct pytest modules skip independent jobs", (t) =
       ).include.filter(({ os }) => os !== "windows-latest"),
     }),
     "source-required": "false",
+    "container-required": "false",
     "action-ci": "false",
     "eval-contracts": "false",
   };
@@ -328,6 +335,7 @@ test("SDK test-only PRs skip independent suites and retain any changed eval inpu
   ];
   const sdk = {
     ...regularSource,
+    "container-required": "false",
     "plugin-tests-required": "false",
     "compatibility-matrix": ubuntuNode24Install,
   };
@@ -534,6 +542,7 @@ test("documentation requires static checks and explicit selection, without skipp
   );
   for (const key of [
     "source-required",
+    "container-required",
     "plugin-tests-required",
     "package-required",
     "action-ci",
