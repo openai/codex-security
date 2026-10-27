@@ -190,7 +190,7 @@ For failure or an inconclusive review, send an explicit error:
 }
 ```
 
-The CLI never resubmits a review, including after this error. Invalid model
+A host error ends the review without another submission. Invalid model
 answers, missing decisions, and host errors make the whole batch unresolved;
 previous successful reviews in that run do not become persistence decisions.
 The existing algorithm treats a validated `DISTINCT` as a nonmatch, when
@@ -202,6 +202,20 @@ The existing screening, independent pair review, contradiction-aware grouping, a
 severity-based representative selection are reused. No local review checkpoints
 are read or written in records mode. Local saved-scan execution retains its
 existing tool-submission validation and workflow checkpoints.
+
+### Continuing a review
+
+A `review.run` request with `supportsContinuation: true` can receive the result
+`{"status":"missing_submission"}`. Send this only after verifying that the
+original turn completed without a pending decision or blocker. Keep that
+review session open. The CLI then sends one `review.continue` request with a
+fresh JSON-RPC ID and `params: {requestId, prompt}`. The request ID in the
+parameters identifies the original review. Submit the prompt in the same
+session and reply on the new JSON-RPC ID. The correction omits
+`supportsContinuation`, so the host releases the session after that turn. A second missing submission ends
+the review as unresolved. A pending tool call uses the original turn and
+requires no correction. An uncertain outcome or explicit blocker follows the
+existing error path. Hosts without continuation support can ignore the field.
 
 ## Final response and persistence
 
