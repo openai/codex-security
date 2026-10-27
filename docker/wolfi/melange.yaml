@@ -1,5 +1,5 @@
 # Stage once using payload/stage.py; pass that directory as melange --source-dir.
-# Supply the Wolfi signing key and repository as build inputs for local mirrors.
+# build.sh supplies the signed local repository prepared from builder.lock.json.
 package:
   name: codex-security
   version: "0.7.0"
@@ -33,7 +33,7 @@ pipeline:
   - name: Verify and install the locked Linux scanner payload
     runs: |
       set -eu
-      expected=cdb15529f39fbdc9f4b97966c3f4166ed3e8adaebad5c5d180dcacfa87a60e59
+      expected=db42f7b5b4d0bfc79975e38778ece88d02d31887a262f8a5c0e5bdfdbbe3563d
       actual=$(gzip -dc payload.tar.gz | sha256sum)
       test "${actual%% *}" = "$expected"
       mkdir -p "${{targets.destdir}}"

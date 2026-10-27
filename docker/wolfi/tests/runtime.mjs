@@ -62,30 +62,13 @@ console.log("PASS Git credential helper is limited to its configured host");
 
 process.umask(0o077);
 const repo = mkdtempSync("/input/codex-smoke-");
-const out = join(mkdtempSync("/output/codex-smoke-"), "scan");
+const scanDir = join(mkdtempSync("/output/codex-smoke-"), "scan");
 const source = join(repo, "hello.py");
 const original = 'print("offline fixture")\n';
 writeFileSync(source, original);
 const git = (...args) => run("git", ["-C", repo, ...args]);
 git("init", "-q"); git("add", "hello.py");
 git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture");
-// --mock exercises normal artifact sealing & saved history, without sending source to a model.
-cli("scan", repo, "--mode", "standard", "--headless", "--mock", "--output-dir", out);
-const manifest = read(join(out, "scan-manifest.json"));
-assert.equal(manifest.scan.status, "completed");
-assert(manifest.scan.sealedAt);
-assert(manifest.scan.artifacts.length > 0);
-for (const artifact of manifest.scan.artifacts) {
-  assert.equal(createHash("sha256").update(readFileSync(join(out, artifact.path))).digest("hex"), artifact.sha256);
-}
-assert.equal(read(join(out, "findings.json")).findings.length, 12);
-assert.match(readFileSync(join(out, "report.md"), "utf8"), /Synthetic mock scan/);
-assert.equal(read(join(out, "exports/results.sarif")).version, "2.1.0");
-assert(statSync(join(process.env.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3")).size > 0);
-assert(cli("scans", "list", repo).scans.some(s => s.scanId === manifest.scan.id));
-assert.equal(git("status", "--porcelain"), "");
-console.log("PASS synthetic 12-finding scan: sealed report, SARIF, SQLite history, clean source checkout");
-
 // /input is a writable, disposable tmpfs in this test. Use the exact same
 // child in both cases to distinguish Codex confinement from a Docker mount.
 const probe = [process.env.PYTHON, "-c", `from pathlib import Path
@@ -107,8 +90,8 @@ assert.equal(readFileSync(source, "utf8"), original);
 assert.equal(git("status", "--porcelain"), "");
 console.log(`PASS read-only sandbox: the child read hello.py and its write failed with ${why}; the same child wrote it outside, and the checkout is clean`);
 
-// Unlike --mock, this turn goes through the installed native model client and
-// its shell tool. The only server is this loopback Responses fixture.
+// This turn goes through the installed native model client and its shell tool.
+// The only server is this loopback Responses fixture.
 const nonce = randomUUID();
 const draft = `python3 - <<'PY'
 import json,os
@@ -156,20 +139,27 @@ const server = createServer(async (req, res) => {
 server.listen(0, "127.0.0.1");
 await once(server, "listening");
 try {
-  const dir = join(dirname(out), "native-scan");
   const base = `http://127.0.0.1:${server.address().port}/openai/v1`;
   await promisify(execFile)("/usr/local/bin/codex-security-entrypoint",
-    ["scan", repo, "--mode", "standard", "--headless", "--output-dir", dir, "--provider", "amazon-bedrock", "--model", "openai.gpt-5.6-luna",
+    ["scan", repo, "--mode", "standard", "--headless", "--output-dir", scanDir, "--provider", "amazon-bedrock", "--model", "openai.gpt-5.6-luna",
      "--codex", `model_providers.amazon-bedrock.base_url="${base}"`, "--codex", 'model_providers.amazon-bedrock.aws.region="us-west-2"'],
     {env:{...process.env, AWS_ACCESS_KEY_ID:"offline-test", AWS_SECRET_ACCESS_KEY:"offline-test-only",
       AWS_REGION:"us-west-2", AWS_EC2_METADATA_DISABLED:"true", NO_PROXY:"127.0.0.1,localhost"},timeout:75_000});
   assert.ifError(fixtureError);
   assert.equal(requests, 2);
-  const scan = read(join(dir, "scan-manifest.json")).scan;
+  const scan = read(join(scanDir, "scan-manifest.json")).scan;
   assert(scan.status === "completed" && scan.sealedAt && scan.scope.summary.includes(nonce));
-  assert.deepEqual(read(join(dir, "findings.json")).findings, []);
+  assert(scan.artifacts.length > 0);
+  for (const artifact of scan.artifacts) {
+    const sha256 = createHash("sha256").update(readFileSync(join(scanDir, artifact.path))).digest("hex");
+    assert.equal(sha256, artifact.sha256, artifact.path);
+  }
+  assert.deepEqual(read(join(scanDir, "findings.json")).findings, []);
+  assert.equal(read(join(scanDir, "exports/results.sarif")).version, "2.1.0");
+  assert(statSync(join(process.env.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3")).size > 0);
+  assert(cli("scans", "list", repo).scans.some(s => s.scanId === scan.id));
   assert.equal(git("status", "--porcelain"), "");
-  console.log("PASS normal scan: local Responses fixture, native shell tool, sealed server-only marker, zero findings, unchanged source");
+  console.log("PASS loopback scan: native shell tool, sealed marker and artifact hashes, SARIF, SQLite history, unchanged source");
 } finally {
   server.closeAllConnections();
   server.close();

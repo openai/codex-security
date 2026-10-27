@@ -12,7 +12,7 @@ or publish tags to a registry.
 ## Build and inspect
 
 Use a Linux amd64 builder with user namespaces and Bubblewrap, apko 1.4.13,
-melange 0.61.1, Python 3.9 or later with PyYAML, Node.js with npm 11, OpenSSL,
+melange 0.61.1, Python 3.9 or later, Node.js with npm 11, OpenSSL,
 and Docker for runtime testing. From the repository root:
 
 ```sh
@@ -36,6 +36,17 @@ Each run generates a local signing key, adds its public half to the APK keyring,
 and removes the private key at exit. The key identifies that build; it is not
 an upstream release signature. A new key changes the APK and image digests.
 
+To test that the melange guest can be built without access to Wolfi, run a
+build with the [offline melange wrapper](tests/offline-melange.sh) on a Linux
+builder that permits `unshare --net`:
+
+```sh
+MELANGE="$PWD/docker/wolfi/tests/offline-melange.sh" docker/wolfi/build.sh /tmp/codex-security-offline-guest
+```
+
+The wrapper disconnects melange before it installs the guest packages. Staging
+the inputs and resolving the runtime lock still need the network.
+
 ## Run the offline smoke test
 
 On a native Linux amd64 Docker host with AppArmor and user namespaces, load
@@ -58,8 +69,11 @@ does not include a model.
 
 ## Inputs and updates
 
-[build-inputs.json](build-inputs.json) pins both the builder and runtime APKs,
-their lock identities, and Wolfi's signing key. The
+[builder.yaml](builder.yaml) and [apko.yaml](apko.yaml) list the exact builder
+and runtime packages. [build-inputs.json](build-inputs.json) pins their resolved
+lock identities and Wolfi's signing key. The build downloads the locked builder
+APKs, verifies their bytes, and gives melange only a local, signed index of those
+files. The
 [npm lock](payload/package-lock.json) pins the scanner and dependencies.
 [stage.py](payload/stage.py) checks the target dependency graph, skips npm
 lifecycle scripts, and stages the Linux scanner. [melange.yaml](melange.yaml)
@@ -68,6 +82,8 @@ voice runtime and plugin binaries for other platforms; it keeps the matching
 Linux addon, Codex, code-mode host, Bubblewrap, ripgrep, and license notices.
 In the image, `/usr/share/licenses/codex-security/SOURCES.json` records the
 sources and hashes of the native files along with the npm dependency inventory.
+The original npm lock is retained, including optional packages for other
+platforms; the inventory lists only packages installed in the image.
 Components keep their upstream licenses.
 
 If the public Wolfi index moves past a pinned version, refresh the affected

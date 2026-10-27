@@ -153,10 +153,8 @@ def stage_root(root):
     for key, pkg in wanted.items():
         if installed[key]["integrity"] != pkg["integrity"] or read_json(app / key / "package.json")["version"] != pkg["version"]:
             raise ValueError(f"Installed version/integrity differs for {key}")
-    # Publish a lock for precisely the installed packages next to their normal npm
-    # metadata. Keep the cross-platform input lock in the build source.
-    lock["packages"] = {"": lock["packages"][""], **wanted}
-    (app / "package-lock.json").write_text(json.dumps(lock, indent=2, sort_keys=True) + "\n")
+    # Keep the original lock usable by npm ci. SOURCES.json records the subset
+    # installed for this platform.
     (app / "node_modules/.package-lock.json").unlink()  # transient local npm cache
     select_scanner_payload(app)
     for name in ("bin/codex", "bin/codex-code-mode-host", "codex-resources/bwrap", "codex-path/rg"):
