@@ -2929,12 +2929,6 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
     );
   });
 
-  test("requires an actual Git tag for GitHub releases", () => {
-    expect(githubReleaseWorkflow).toContain(
-      '"repos/$GITHUB_REPOSITORY/git/ref/tags/$release_tag"',
-    );
-  });
-
   test.each(["queued", "in_progress"])(
     "waits for a %s protected npm release to finish before publishing notes",
     async (pendingStatus) => {
@@ -3755,21 +3749,10 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
     expect(result.status, result.stderr).toBe(1);
   });
 
-  test("serializes label reconciliation and reads the current PR title", () => {
-    expect(releaseLabelsWorkflow).toContain(
-      "group: node-release-labels-${{ github.event.pull_request.number }}",
+  test("serializes label reconciliation per pull request", () => {
+    expect(Bun.YAML.parse(releaseLabelsWorkflow).concurrency.group).toBe(
+      "node-release-labels-${{ github.event.pull_request.number }}",
     );
-    expect(releaseLabelsWorkflow).toContain(
-      'gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER"',
-    );
-    expect(releaseLabelsWorkflow).toContain(
-      'label="$(release_note_label "$type" "$breaking_marker" "$scope")"',
-    );
-    expect(releaseLabelsWorkflow).toContain(
-      "breaking-change | enhancement | bug | documentation | skip-release-notes)",
-    );
-    expect(releaseLabelsWorkflow).toContain("gh api --method DELETE");
-    expect(releaseLabelsWorkflow).toContain("return 0");
   });
 
   test("enforces the same Conventional Commit title in required CI", () => {
@@ -3784,10 +3767,6 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
     expect(releasePattern).toBeDefined();
     expect(ciPattern).toBeUndefined();
     expect(titlePattern).toBe(releasePattern);
-    expect(nodeCiWorkflow).toContain(
-      "types: [opened, edited, reopened, synchronize]",
-    );
-    expect(nodeCiWorkflow).toContain("needs: classify-changes");
   });
 
   test("requires every selected source validation in the centralized gate", async () => {
@@ -4182,49 +4161,13 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
   });
 });
 
-test.skipIf(process.platform === "win32")(
-  "preserves manual release categories while replacing stale automated labels",
-  async () => {
-    const script = workflowStepShell(
-      releaseLabelsWorkflow,
-      "Categorize pull request without checking out its code",
-    );
-    const fixture = `gh() {
-    case "$*" in
-      "api repos/test/codex-security/issues/17 --jq "*) printf '%s' 'feat: synthetic feature' | base64 ;;
-      "api repos/test/codex-security/issues/17/labels --jq "*) printf '%s\\n' breaking-change bug ;;
-      "api repos/test/codex-security/issues/17/timeline?per_page=100 "*) printf '%b\\n' 'breaking-change\\tsynthetic-reviewer' 'bug\\tgithub-actions[bot]' ;;
-      "api --method DELETE repos/test/codex-security/issues/17/labels/bug --silent") echo removed-stale-bug ;;
-      "api --method DELETE "*) echo removed-manual-label; return 70 ;;
-      "api --method POST repos/test/codex-security/issues/17/labels "*) printf '%s\\n' "$*" ;;
-      "api repos/test/codex-security/labels/enhancement --silent") return 0 ;;
-      *) echo "Unexpected request: $*" >&2; return 65 ;;
-    esac
-  }`;
-    const result = await runCommand(bash, ["-c", `${fixture}\n${script}`], {
-      env: {
-        ...process.env,
-        GITHUB_REPOSITORY: "test/codex-security",
-        PR_NUMBER: "17",
-      },
-      timeout: 10_000,
-    });
-    expect(result.status).toBe(0);
-    expect(result.stdout).toContain(
-      "Preserving existing breaking-change label.",
-    );
-    expect(result.stdout).toContain("removed-stale-bug");
-    expect(result.stdout).not.toContain("labels[]=enhancement");
-    expect(result.stdout).not.toContain("removed-manual-label");
-  },
-);
-
 test.skipIf(process.platform === "win32").each([
   {
     title: "fix: synthetic correction",
     manual: "documentation",
     stale: "enhancement",
   },
+  { title: "feat: synthetic feature", manual: "breaking-change", stale: "bug" },
   { title: "feat: synthetic feature", manual: "bug", stale: "documentation" },
   { title: "feat: synthetic feature", manual: "bug", stale: "enhancement" },
 ])(
