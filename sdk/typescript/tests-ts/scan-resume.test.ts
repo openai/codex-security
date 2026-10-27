@@ -702,9 +702,20 @@ test.each([
   [false, true],
   [true, true],
 ])(
-  "resumed CLI seals the original scan (coordinator finished: %p, bulk: %p)",
+  "resumed CLI seals the original scan after its instructions are cleared (coordinator finished: %p, bulk: %p)",
   async (alreadyFinished, bulk) => {
     const f = await interruptedScan("deep", bulk);
+    await f.command(
+      [
+        "update-scan-context",
+        "--scan-id",
+        f.scanId,
+        "--thread-id",
+        f.threadId,
+        "--user-context-stdin",
+      ],
+      "",
+    );
     if (alreadyFinished) await finishDiscovery(f);
     await appendFile(
       f.sessionPath,
@@ -730,7 +741,10 @@ test.each([
           expect(threadId).toBe(f.threadId);
           return {
             id: threadId,
-            async runStreamed() {
+            async runStreamed(prompt) {
+              expect(prompt).not.toContain(
+                "Keep the original scan instructions.",
+              );
               if (!alreadyFinished) await finishDiscovery(f);
               return { events: completedEvents(threadId) };
             },
