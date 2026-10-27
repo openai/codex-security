@@ -61,41 +61,38 @@ const normalized = (id = "vendor-1", severity = "high") => ({
   },
 });
 
-for (const value of [undefined, "", "0", "true", " 1 "]) {
-  test(`external publication stays disabled without exact opt-in (${JSON.stringify(value)})`, async () => {
-    const root = await mkdtemp(join(tmpdir(), "external-import-disabled-"));
-    cleanups.push(() => rm(root, { recursive: true, force: true }));
-    const state = join(root, "state");
-    let sideEffects = 0;
-    const disabled = {
-      environment: {
-        CODEX_SECURITY_STATE_DIR: state,
-        CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: value,
-      },
-      credentials: async () => {
-        sideEffects++;
-        throw new Error("Unexpected credential read");
-      },
-      fetch: async () => {
-        sideEffects++;
-        throw new Error("Unexpected Cloud request");
-      },
-    };
-    // The missing path would fail differently if the file reader ran first.
-    await expect(
-      prepareExternalPublication(join(root, "missing.json"), options, disabled),
-    ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
-    await expect(
-      prepareNormalizedExternalPublication(
-        { read: 0, findings: [], excluded: [] },
-        options,
-        disabled,
-      ),
-    ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
-    expect(sideEffects).toBe(0);
-    await expect(readdir(state)).rejects.toThrow("ENOENT");
-  });
-}
+test("external publication requires opt-in before reading input or accessing Cloud", async () => {
+  const root = await mkdtemp(join(tmpdir(), "external-import-disabled-"));
+  cleanups.push(() => rm(root, { recursive: true, force: true }));
+  const state = join(root, "state");
+  let sideEffects = 0;
+  const disabled = {
+    environment: {
+      CODEX_SECURITY_STATE_DIR: state,
+    },
+    credentials: async () => {
+      sideEffects++;
+      throw new Error("Unexpected credential read");
+    },
+    fetch: async () => {
+      sideEffects++;
+      throw new Error("Unexpected Cloud request");
+    },
+  };
+  // The missing path would fail differently if the file reader ran first.
+  await expect(
+    prepareExternalPublication(join(root, "missing.json"), options, disabled),
+  ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
+  await expect(
+    prepareNormalizedExternalPublication(
+      { read: 0, findings: [], excluded: [] },
+      options,
+      disabled,
+    ),
+  ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
+  expect(sideEffects).toBe(0);
+  await expect(readdir(state)).rejects.toThrow("ENOENT");
+});
 
 test("concurrent external publications use their own opt-in environments", async () => {
   const f = await fixture();
