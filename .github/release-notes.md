@@ -13,6 +13,7 @@
 - bump fast-uri from 3.1.8 to 3.1.9 in /plugins/codex-security/mcp-app ([#2062](https://github.com/openai/codex-security/pull/2062))
 - bump fast-uri from 3.1.8 to 3.1.9 in /evals/triage-finding ([#2063](https://github.com/openai/codex-security/pull/2063))
 - stop source excerpts at the end of the file ([#2015](https://github.com/openai/codex-security/pull/2015))
+- update @inquirer/prompts to 8.7.4 in the SDK ([#2072](https://github.com/openai/codex-security/pull/2072))
 
 <!-- release-section: highlights:end -->
 
