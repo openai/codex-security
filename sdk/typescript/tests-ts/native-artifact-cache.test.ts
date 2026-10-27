@@ -117,6 +117,7 @@ test("native reuse hashes committed inputs with Git alone across platforms", () 
     ]) {
       write(`.github/scripts/${script}.mjs`, "// CI only\n");
     }
+    write(".github/scripts/test_check_plugin_source_compatibility.mts", "");
     write("plugins/codex-security/mcp-app/tests/support/new.ts", "fixture\n");
     commit();
     expect(key("2026-43", 4, fingerprint)).toBe("week=202643");
