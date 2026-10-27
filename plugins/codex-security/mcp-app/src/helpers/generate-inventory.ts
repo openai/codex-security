@@ -179,7 +179,31 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
     .map((path) => append(repo, path));
 }
 
-function loadScopes(path: string): string[] {
+export async function* scopedSourceFiles(
+  repo: string,
+  scopes: string[],
+  home: string | undefined,
+) {
+  const resolved = scopes.map((value) =>
+    scopePath(repo, value, home, true, true),
+  );
+  for (const selected of resolved) {
+    const explicit = regular(selected);
+    for (const path of await scopeCandidates(repo, selected)) {
+      let name: string;
+      try {
+        if (!regular(path)) continue;
+        name = inside(repo, canonical(path));
+      } catch {
+        continue;
+      }
+      if (name.split("/").some((part) => sourceMetadata.has(part))) continue;
+      yield { name, explicit };
+    }
+  }
+}
+
+export function loadScopes(path: string): string[] {
   let scopes: unknown;
   try {
     scopes = JSON.parse(decodeUtf8(readFile(path)));
@@ -401,22 +425,8 @@ export async function generateInventory(
     }
   } else {
     const scopes = loadScopes(expandHome(options.scopesFile!, home));
-    const resolved = scopes.map((value) =>
-      scopePath(repo, value, home, true, true),
-    );
-    for (const selected of resolved) {
-      for (const path of await scopeCandidates(repo, selected)) {
-        let name: string;
-        try {
-          if (!regular(path)) continue;
-          name = inside(repo, canonical(path));
-        } catch {
-          continue;
-        }
-        if (name.split("/").some((part) => sourceMetadata.has(part))) continue;
-        rankRows.set(name, { path: name });
-      }
-    }
+    for await (const { name } of scopedSourceFiles(repo, scopes, home))
+      rankRows.set(name, { path: name });
   }
   if (inventory) return writeInventory(output, inventoryRows);
   mkdir(dirname(output));

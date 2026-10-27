@@ -55,6 +55,7 @@ from finalize_scan_contract import (
     open_scan_local_file_descriptor,
 )
 from finding_preview import bounded_finding_details
+from standard_validation import require_standard_decisions
 from workbench import handoff
 from workbench.storage import create_private_directory, resolve_scan_root, state_dir
 from workbench_cli import parse_args
@@ -1446,6 +1447,8 @@ def complete_scan_locked(
                 draft_documents=draft_documents,
                 finding_scope=requested_finding_scope(scan) if scan["mode"] == "deep" else None,
             )
+            if not already_sealed:
+                require_standard_decisions(scan, prepared.findings, prepared.coverage)
         warnings.extend(warning for warning in prepared.warnings if warning not in warnings)
         add_warning()
         if warnings != json.loads(scan["completion_warnings_json"]):

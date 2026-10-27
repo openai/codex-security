@@ -194,7 +194,7 @@ export function paginateArtifactRows<Row>(
  * Resolve one operation-owned destination inside its bound scan or worker root.
  */
 export async function artifactDestination(
-  context: ArtifactContext,
+  context: Pick<ArtifactContext, "root">,
   components: readonly string[],
   label: string,
 ): Promise<string> {

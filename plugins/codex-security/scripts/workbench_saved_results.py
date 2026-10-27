@@ -39,6 +39,7 @@ from finalize_scan_contract import (
 )
 from finalize_scan_contract import finding_candidate_id as finding_candidate_id
 from review_state import checkpoint_review_state, review_state, review_summary, uses_legacy_review
+from standard_validation import require_standard_decisions
 from workbench.retained_coverage import (
     _append_previous_finding as _append_previous_finding,
 )
@@ -1186,6 +1187,8 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit(
                 "scan_draft_conflict: canonical scan results changed; reconcile the saved checkpoint again."
             )
+        if manifest["scan"].get("complete") is not False:
+            require_standard_decisions(scan, findings, coverage)
         if checkpoint_contents is not None:
             checkpoint_digest = hashlib.sha256(checkpoint_contents).hexdigest()
             if scan["mode"] == "deep":

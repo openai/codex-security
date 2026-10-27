@@ -15,6 +15,7 @@ import {
 } from "./src/helpers/normalize-candidates";
 import { validatePatchRiskAssessmentCommand } from "./src/helpers/validate-patch-risk-assessment";
 import { deepReviewInputCommand } from "./src/helpers/deep-review-input";
+import { standardQueue } from "./src/helpers/standard-queue";
 import { inventoryCommand } from "./src/helpers/generate-inventory";
 import { bindRepoScopesCommand } from "./src/helpers/bind-repo-scopes";
 import { escapeControls, stringifyJson } from "./src/helpers/json";
@@ -93,6 +94,14 @@ function runHelper(): void {
     void inventoryCommand(command, args).then((code) => {
       process.exitCode = code;
     });
+  } else if (command === "standard-queue") {
+    void standardQueue(args, posixHome).then(
+      (summary) => console.log(stringifyJson(summary, 0)),
+      (error: Error) => {
+        console.error(escapeControls(error.message));
+        process.exitCode = 1;
+      },
+    );
   } else if (command === "resolve-security-md") {
     process.exitCode = resolveSecurityMdCommand(args, posixHome);
   } else if (command === "normalize-candidates") {
@@ -149,7 +158,7 @@ function runHelper(): void {
     });
   } else {
     console.error(
-      `Usage: launch_codex_security_mcp[.cmd] --helper <generate-in-scope-files | make-repo-scope-input | make-diff-rank-input | resolve-security-md | normalize-candidates | validate-patch-risk-assessment | copy-deep-review-input | bind-repo-scopes | ${Object.keys(workbenchUsage).join(" | ")}> [options]`,
+      `Usage: launch_codex_security_mcp[.cmd] --helper <standard-queue | generate-in-scope-files | make-repo-scope-input | make-diff-rank-input | resolve-security-md | normalize-candidates | validate-patch-risk-assessment | copy-deep-review-input | bind-repo-scopes | ${Object.keys(workbenchUsage).join(" | ")}> [options]`,
     );
     process.exitCode = 2;
   }

@@ -129,8 +129,8 @@ export async function prepareEval(
   await writeFile(join(runtime, "references/core-scan.md"), core);
   const referenceSha256: Record<string, string> = {};
   for (const name of [
-    "baseline-auditor.md",
     "focused-investigator.md",
+    "standard-search-rules.md",
     "validate-scan-findings.md",
     "threat-model.md",
     "finding-detail-fields.md",
@@ -149,8 +149,8 @@ export async function prepareEval(
     `Plugin reference directory: ${runtime}. Bare reference filenames are relative to ${join(runtime, "references")}.`,
     "Applicable inherited SECURITY.md guidance: none; the caller checked the authorized scope and its ancestors.",
     "User security context: none. Supplied threat model: none. Knowledge base: none.",
-    "Subagent allowance: 0. Perform the core workflow sequentially, including its baseline audit and final validation.",
-    "This caller has no scan tools. Return the final semantic result as JSON matching the provided output schema; do not write artifacts.",
+    "Subagent allowance: 0. Perform the core workflow sequentially, including file batches and final validation.",
+    "This caller has no scan directory or scan tools. Apply your search rules with offline source tools, keep the full queue in context and review it serially. Return the final semantic result as JSON matching the provided output schema; do not write artifacts.",
     "Follow the production core workflow below. Inspect source with offline read-only tools; do not execute application code or contact services.",
     core,
   ].join("\n\n");
