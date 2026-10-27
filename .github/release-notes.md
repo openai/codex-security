@@ -18,6 +18,7 @@
 - resume deep scans after clearing their instructions ([#2049](https://github.com/openai/codex-security/pull/2049))
 - read completed scan artifacts after checkout removal ([#2050](https://github.com/openai/codex-security/pull/2050))
 - skip container builds for SDK test-only pull requests ([#2069](https://github.com/openai/codex-security/pull/2069))
+- clarify recovery for historical scan entries ([#2027](https://github.com/openai/codex-security/pull/2027))
 
 <!-- release-section: highlights:end -->
 
