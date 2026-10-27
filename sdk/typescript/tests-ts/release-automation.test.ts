@@ -3750,9 +3750,11 @@ PATH="$RUNNER_TEMP:$PATH" verify`,
   });
 
   test("serializes label reconciliation per pull request", () => {
-    expect(Bun.YAML.parse(releaseLabelsWorkflow).concurrency.group).toBe(
-      "node-release-labels-${{ github.event.pull_request.number }}",
-    );
+    expect(Bun.YAML.parse(releaseLabelsWorkflow)).toMatchObject({
+      concurrency: {
+        group: "node-release-labels-${{ github.event.pull_request.number }}",
+      },
+    });
   });
 
   test("enforces the same Conventional Commit title in required CI", () => {
