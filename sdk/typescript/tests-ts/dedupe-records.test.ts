@@ -418,7 +418,10 @@ function fakeHost(
     write(chunk, _encoding, callback) {
       const message = JSON.parse(chunk.toString()) as Message;
       messages.push(message);
-      if (message.method === "review.run")
+      if (
+        message.method === "review.run" ||
+        message.method === "review.continue"
+      )
         queueMicrotask(() => onReview(message, send, stream));
       callback();
     },
@@ -426,6 +429,39 @@ function fakeHost(
   return { stream, output, messages, send };
 }
 const run = { jsonrpc: "2.0", id: "run-1", method: "run", params: input() };
+
+test.each([false, true])(
+  "a confirmed missing submission gets one correction (missing again: %s)",
+  async (missingAgain) => {
+    let original!: Message;
+    const host = fakeHost((message, send) => {
+      if (message.method === "review.run") original = message;
+      else {
+        expect(message.id).not.toBe(original.id);
+        expect(message.params.requestId).toBe(original.params.requestId);
+        expect(message.params.prompt).toContain(
+          "review_validator.submit_decisions",
+        );
+      }
+      const result =
+        message.method === "review.run" || missingAgain
+          ? { status: "missing_submission" }
+          : answer(original.params);
+      send({ jsonrpc: "2.0", id: message.id, result });
+    });
+    const done = runRecordsProtocol(host.stream, host.output);
+    host.send(run);
+    expect(await done).toBe(missingAgain ? 1 : 0);
+    const originals = host.messages.filter((m) => m.method === "review.run");
+    const corrections = host.messages.filter(
+      (m) => m.method === "review.continue",
+    );
+    expect(originals.length).toBeGreaterThan(0);
+    expect(corrections.map((m) => m.params.requestId)).toEqual(
+      originals.map((m) => m.params.requestId),
+    );
+  },
+);
 
 test("CLI records mode uses only the fake host, bypassing saved scans, persistence, auth, and updates", async () => {
   const host = fakeHost((message, send) => {

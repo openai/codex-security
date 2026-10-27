@@ -20,6 +20,7 @@
 - skip container builds for SDK test-only pull requests ([#2069](https://github.com/openai/codex-security/pull/2069))
 - clarify recovery for historical scan entries ([#2027](https://github.com/openai/codex-security/pull/2027))
 - add a local Wolfi build for Linux amd64 ([#2053](https://github.com/openai/codex-security/pull/2053))
+- continue hosted reviews after a missing submission ([#2090](https://github.com/openai/codex-security/pull/2090))
 
 <!-- release-section: highlights:end -->
 
