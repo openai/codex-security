@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { hash } from "node:crypto";
 import { PassThrough, Writable } from "node:stream";
@@ -8,6 +8,7 @@ import {
   realpath,
   stat,
   symlink,
+  unlink,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
@@ -397,6 +398,65 @@ test.each(sealedScopes)(
       expect(artifactPaths).toContain(path);
     for (const artifact of manifest.scan.artifacts)
       expect(artifactPaths).toContain(artifact.path);
+  },
+);
+
+test.skipIf(process.platform !== "linux").each([
+  ["private", "completed"],
+  ["private", "acceptance_unknown"],
+  ["output", "completed"],
+  ["lost", "completed"],
+] as const)(
+  "hosted scope generation with %s scratch preserves the %s receipt",
+  async (storage, status) => {
+    const input = await fixture(["service-a/nested/route [x].ts"]);
+    const outputCopy = join(input.outputDirectory, "scoped-source-input.jsonl");
+    let inventory = "";
+    const run: ScanExecutor["run"] = async (request) => {
+      const commands = request.prompt.split("\n");
+      const [primary, recovery] = commands.filter((line) =>
+        line.includes("--helper make-hosted-repo-scope-input "),
+      );
+      const environment = { ...request.runtime.environment };
+      if (storage === "output")
+        environment["CODEX_SECURITY_STATE_DIR"] =
+          request.runtime.outputDirectory;
+      const shell = (command: string) =>
+        execFileSync("/bin/sh", ["-c", command], {
+          cwd: request.runtime.outputDirectory,
+          env: environment,
+          encoding: "utf8",
+        });
+      const generate = (command: string) =>
+        shell(command).match(/^Wrote 2 scoped paths to (.+)$/mu)![1]!;
+      inventory = generate(primary!);
+      if (storage !== "output") {
+        expect(await realpath(dirname(inventory))).toBe(
+          await realpath(request.runtime.stateDirectory),
+        );
+      }
+      if (storage === "lost") {
+        await unlink(inventory);
+        inventory = generate(recovery!);
+      }
+      if (storage !== "private") expect(inventory).toBe(outputCopy);
+      if (status === "completed") {
+        await writeDraft(request);
+        shell(
+          commands.find((line) => line.includes("--helper bind-repo-scopes "))!,
+        );
+      }
+      return receipt(request, { status });
+    };
+    const result = await runHostedScan(input, { executor: { run } });
+    expect(result.status, JSON.stringify(result)).toBe(status);
+    expect(result.execution?.sessionId).toBe("host-session");
+    expect(parseJsonLines(await readFile(inventory, "utf8"))).toEqual([
+      { path: "service-a/index.ts" },
+      { path: "service-a/nested/route [x].ts" },
+    ]);
+    if (storage === "private")
+      await expect(stat(outputCopy)).rejects.toMatchObject({ code: "ENOENT" });
   },
 );
 
