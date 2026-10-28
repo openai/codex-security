@@ -10,6 +10,7 @@
 - share scanner report file decoding ([#2113](https://github.com/openai/codex-security/pull/2113))
 - keep hosted path inventories outside captured scan output ([#2110](https://github.com/openai/codex-security/pull/2110))
 - bump the codex group across 3 directories with 2 updates ([#2107](https://github.com/openai/codex-security/pull/2107))
+- flag published documentation updates in pull requests ([#2093](https://github.com/openai/codex-security/pull/2093))
 
 <!-- release-section: highlights:end -->
 
