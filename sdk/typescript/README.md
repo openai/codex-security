@@ -587,12 +587,18 @@ Install OSV-Scanner separately on PATH, then run:
 ```bash
 cs scan dependencies . --max-cost 5
 cs scan dependencies /path/to/repository --json
+cs scan dependencies . --verbose
 ```
 
 Omit the repository to assess the current directory. The command saves scanner
 evidence, all advisory matches, static assessments, and a Markdown report outside
 the repository. Completed runs return `0`, including runs with advisory matches;
 partial or failed runs return `2`. Assessments never remove advisory matches.
+
+Interactive terminals show the current phase, work counts, elapsed time, time
+since the last observed event, and the current input or Codex activity. Use
+`--verbose` for timestamped milestones in redirected logs, and `--show-cost`
+for estimated model cost. Progress goes to stderr; JSON stays on stdout.
 
 The SDK provides `scanDependencies()`. See the
 [dependency assessment guide](docs/cli.md#dependency-assessment-sca-mvp) for

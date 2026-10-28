@@ -95,6 +95,7 @@ const distModules = [
   "sca",
   "sca-inputs",
   "sca-osv",
+  "sca-progress",
   "sca-report",
   "sca-triage",
   "sca-types",

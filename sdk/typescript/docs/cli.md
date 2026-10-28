@@ -2959,7 +2959,7 @@ scan on a directory named `dependencies`, use `cs scan ./dependencies`.
 | `--auth auto\|chatgpt\|api-key`, `--model MODEL`, `--effort LEVEL`, `--provider PROVIDER` | Reuse scan authentication and model settings. Authentication defaults to `auto`; model and effort retain the existing scan defaults. |
 | `--codex KEY=VALUE`, `--plugin-path PATH`, `--python PATH`                                | Reuse the existing Codex and plugin runtime configuration. `--codex` can be repeated.                                                |
 | `--output-dir PATH`, `--max-cost USD`                                                     | Choose the artifact directory and optional assessment cost limit. No cost limit is added by default.                                 |
-| `--verbose`, `--show-cost`                                                                | Include diagnostics or estimated model cost in progress output.                                                                      |
+| `--verbose`, `--show-cost`                                                                | Log timestamped milestones and Codex activity, or show estimated model cost. A cost limit also enables cost display.                 |
 | `--json`, `--format FORMAT`, `--full-output`                                              | Select structured command output. `--json` is shorthand for `--format json`.                                                         |
 
 The command supports project `auth`, `codex`, `output.directory`, and
@@ -2972,8 +2972,8 @@ Source paths and diffs, scan modes and Deep Scan settings, custom prompts,
 knowledge bases, Cyber access program and safety-identifier selectors, severity
 gates, patching, archive replacement, workflow selection, dry runs, and mock
 scans are unsupported. `--headless` is also unsupported: dependency assessment
-always uses a plain summary without an interactive dashboard. Unsupported
-settings fail instead of silently changing the requested scope or behavior.
+automatically selects terminal progress or plain output. Unsupported settings
+fail instead of silently changing the requested scope or behavior.
 
 By default, the summary and diagnostics go to stderr and stdout remains empty.
 `--json` emits the native dependency result, including all matches and coverage;
@@ -2991,6 +2991,37 @@ With JSON or JSONL, `--full-output` wraps the result; incomplete execution retur
 Advisories do not set a failing exit code. A cost stop or interruption preserves
 available artifacts and reports their directory. OSV's own process exit codes
 remain in the saved scanner evidence.
+
+### Dependency scan progress
+
+When stderr is a terminal, the command shows a live line with the phase, elapsed
+time, work counts, and time since the last observed event. Matching shows finished
+OSV invocations and failed inputs; assessment shows completed, failed, and queued
+assessments. The current dependency file, package and advisory, or latest Codex
+activity appears when space permits. `--show-cost` or `--max-cost` includes the
+estimated model cost. Cost is unavailable until usage is reported.
+
+The line reflects observed work, without an estimated completion time. A quiet
+interval does not establish that a scan is stuck. Completed assessments include
+`needs_review` verdicts; failed assessments are counted separately. Saved
+`partial` checkpoints do not mean the command has stopped. The final result and
+exit code describe the outcome.
+
+Redraws are disabled when stderr is redirected, `CI` is set, or `TERM=dumb`.
+Use `--verbose` to retain timestamped milestones and observed Codex activity in
+those environments. Otherwise they keep the existing summary-only output.
+Interactive and verbose runs also report the artifact directory after the initial
+checkpoint is saved. All progress goes to stderr, including with `--json`:
+
+```bash
+cs scan dependencies . --verbose --show-cost --json \
+  > /path/outside/repository/dependency-result.json \
+  2> /path/outside/repository/dependency-progress.log
+```
+
+Choose an existing directory outside the scanned repository for redirected
+files. A growing progress log inside the repository changes the source snapshot
+and can interrupt assessment.
 
 ### Supported dependency inputs
 
@@ -3045,6 +3076,9 @@ const result = await security.scanDependencies({
   repositoryPath: "/path/to/repository",
   outputDir: "/path/outside/repository/dependencies",
   maxCostUsd: 5, // optional; applies to static model assessment
+  onProgress: (progress) => console.error(progress),
+  onActivity: (activity) => console.error(activity.description),
+  onCost: (cost) => console.error(`Estimated cost: $${cost.estimatedUsd}`),
 });
 console.log(result.status, result.matches.length, result.outputDir);
 ```
@@ -3052,6 +3086,21 @@ console.log(result.status, result.matches.length, result.outputDir);
 Options also accept the existing `auth` mode and `signal`. Source matching runs
 before model authentication. Zero matches with complete coverage require no
 model call. Model errors preserve the scanner evidence and return `partial`.
+Optional `onProgress` callbacks receive `DependencyScanProgress` snapshots for
+preparation, discovery, matching, assessment preparation, assessment, and saving.
+Matching counts finished OSV invocations separately from failed inputs;
+selection alone does not count as processed work. Assessment counts advance
+after the result is saved. A `needs_review` verdict is a completed assessment.
+`onActivity` reports observed Codex activity; `onUsage` and `onCost` report model
+usage and estimated cost across assessment turns. `onOutputDirReady` reports
+the output directory after its initial checkpoint is saved.
+Activity IDs are scoped to their advisory match, so separate assessment turns
+can be displayed without overwriting earlier activity.
+These observers are optional, are not awaited, and cannot gate work. Exceptions
+and rejected promises are passed to `onObserverError` without stopping the scan.
+Events are observations, not a durable log or a promise of future progress.
+Use the returned result or interruption error for the terminal outcome; saved
+`partial` checkpoints do not mean a running scan has stopped.
 Each matched advisory gets a separate assessment turn. The SDK saves completed
 assessments before continuing, and an invalid response affects only its match.
 Each assessment retains its originating `threadId` once its Codex thread starts,
