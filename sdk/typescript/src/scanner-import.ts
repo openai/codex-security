@@ -49,12 +49,16 @@ export function stableId(prefix: string, fields: unknown[]): string {
   return `${prefix}:${hash("sha256", JSON.stringify(fields))}`;
 }
 
-/** Detect gzip from the report bytes and preserve identities with strict UTF-8. */
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+const gunzipAsync = promisify(gunzip);
+
+async function readScannerBytes(path: string): Promise<Buffer> {
+  const bytes = await readFile(path);
+  return bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipAsync(bytes) : bytes;
+}
+
 export async function readScannerText(path: string): Promise<string> {
-  let bytes = await readFile(path);
-  if (bytes[0] === 0x1f && bytes[1] === 0x8b)
-    bytes = await promisify(gunzip)(bytes);
-  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  return strictUtf8.decode(await readScannerBytes(path));
 }
 
 export function parseJsonOrJsonl(contents: string): unknown {
@@ -69,12 +73,10 @@ export function parseJsonOrJsonl(contents: string): unknown {
 }
 
 export async function readScannerJson(path: string): Promise<unknown> {
-  let bytes = await readFile(path);
-  if (bytes[0] === 0x1f && bytes[1] === 0x8b)
-    bytes = await promisify(gunzip)(bytes);
+  const bytes = await readScannerBytes(path);
   let decoded: string;
   try {
-    decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    decoded = strictUtf8.decode(bytes);
   } catch (error) {
     throw new CodexSecurityError(
       `Scanner report is not valid UTF-8. ${errorMessage(error)}`,
