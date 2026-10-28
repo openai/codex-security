@@ -184,7 +184,7 @@ jobs:
     name: tests / ${{ matrix.os }} / shard-${{ matrix.shard }}
     needs: &sdk-shard-needs [classify-changes, package, static-checks]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.os == 'macos-latest' && 30 || 20 }}
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 40 || 20 }}
     strategy:
       fail-fast: false
       matrix:

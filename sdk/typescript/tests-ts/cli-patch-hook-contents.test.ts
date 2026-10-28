@@ -58,7 +58,8 @@ for (const mutate of [false, true])
               return args[1] === "list"
                 ? "[]"
                 : "https://github.example.test/example/repository/pull/1";
-            if (["switch", "commit", "push"].includes(args[0]!)) boundaries++;
+            const operation = args[0] === "-C" ? args[2] : args[0];
+            if (["switch", "commit", "push"].includes(operation!)) boundaries++;
             return runGitRepositoryCommand(command, args, cwd, options);
           },
           onCodex: async (_args, output) => {

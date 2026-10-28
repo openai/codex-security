@@ -11,7 +11,7 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { selectedGitFileReference } from "../src/patch-git-controls.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
@@ -439,7 +439,14 @@ for (const selector of ["GIT_DIR", "GIT_COMMON_DIR"] as const) {
           currentDirectory: root,
           environment,
           onRepositoryCommand: (command, args, cwd, options) => {
-            if (launches > 0) afterTurnCommands.push([...args]);
+            if (launches > 0) {
+              afterTurnCommands.push([...args]);
+              if (command === "git" && selector === "GIT_COMMON_DIR") {
+                const boundCommon = options?.environment?.["GIT_COMMON_DIR"];
+                expect(boundCommon).toBeDefined();
+                expect(resolve(boundCommon!)).toBe(join(root, ".git"));
+              }
+            }
             return runGitRepositoryCommand(command, args, cwd, {
               ...options,
               environment: { ...environment, ...options?.environment },
@@ -465,7 +472,9 @@ for (const selector of ["GIT_DIR", "GIT_COMMON_DIR"] as const) {
         );
         expect(outcome.stderr).toContain(alias);
         expect(afterTurnCommands).toEqual([]);
-      } else expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);
+      } else {
+        expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);
+      }
       expect(await readFile(effect).catch(() => null)).toBeNull();
       expect(git("rev-parse", "HEAD")).toBe(head);
       expect(await readFile(join(root, ".git", "index"))).toEqual(index);

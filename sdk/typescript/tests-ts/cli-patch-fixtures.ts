@@ -205,6 +205,7 @@ export async function runWorkflow(
     const run = current.runRepositoryCommand;
     const localRemotes = new Map<string, string>();
     let hostedRemote = "https://github.example.test/example/repository.git";
+    let creatingRequest = false;
     current.runRepositoryCommand = async (
       command,
       args,
@@ -212,24 +213,39 @@ export async function runWorkflow(
       commandOptions,
     ) => {
       if (command === "gh" && args[0] === "repo" && args[1] === "view") {
-        if (localRemotes.size && args.at(-1) === ".id")
-          return "synthetic-origin-id";
-        if (args.at(-1) === ".url") return hostedRemote.replace(/\.git$/u, "");
-        if (args.at(-1) === ".nameWithOwner")
-          return args[2]!.slice(args[2]!.indexOf("/") + 1);
+        if (args.at(-1) === ".url") {
+          creatingRequest = true;
+          return hostedRemote.replace(/\.git$/u, "");
+        }
+        if (
+          (localRemotes.size || creatingRequest) &&
+          args.at(-1) === "tojson" &&
+          args.includes("id,url")
+        )
+          return JSON.stringify({
+            id: "synthetic-origin-id",
+            url: hostedRemote.replace(/\.git$/u, ""),
+          });
       }
+      if (
+        (localRemotes.size || creatingRequest) &&
+        command === "gh" &&
+        args[0] === "repo" &&
+        args[1] === "set-default"
+      )
+        return new URL(hostedRemote).pathname.slice(1).replace(/\.git$/u, "");
       const environment = { ...commandOptions?.environment };
-      for (const [key, value] of Object.entries(environment)) {
+      for (const key of Object.keys(environment)) {
         if (!key.startsWith("GIT_CONFIG_KEY_")) continue;
         for (const [hosted, local] of localRemotes)
-          if (value === `url.${hosted}.insteadOf`)
+          if (environment[key] === `url.${hosted}.insteadOf`)
             environment[key] = `url.${local}.insteadOf`;
       }
       const output = await run(command, args, cwd, {
         ...commandOptions,
         environment,
       });
-      if (command !== "git" || args[0] !== "remote" || args[1] !== "get-url")
+      if (command !== "git" || args[args.indexOf("remote") + 1] !== "get-url")
         return output;
       if (!output.trim()) return hostedRemote;
       const remotes = output.split("\n").map((remote) => {
@@ -286,7 +302,7 @@ export const runGitRepositoryCommand: (
       options?.encoding === "base64" || options?.onStdout !== undefined
         ? "buffer"
         : "utf8",
-    cwd: workingDirectory,
+    cwd: options?.directory ?? workingDirectory,
     env: { ...process.env, ...options?.environment },
     maxBuffer: options?.maxBuffer,
     input: options?.input,

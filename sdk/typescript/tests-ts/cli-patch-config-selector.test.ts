@@ -188,6 +188,116 @@ test.each([
   },
 );
 
+test("publication preflight uses the native remote with an unrelated GIT_CONFIG selector", async () => {
+  const { publicationRepository, resultWithFindings, savedScan } =
+    await import("./cli-patch-fixtures.js");
+  const { directory, git, remote } = await publicationRepository(fixtures);
+  const support = await fixtures.create("patch-selector-remote-");
+  const decoy = join(support, "decoy.git");
+  git("init", "--bare", decoy);
+  git("push", "origin", "HEAD:refs/heads/codex-security/patch-scan-1");
+  const selector = join(support, "selector");
+  await writeFile(
+    selector,
+    `[remote "origin"]\nurl = ${JSON.stringify(decoy.replaceAll("\\", "/"))}\n`,
+  );
+  const environment = { GIT_CONFIG: selector };
+  expect(
+    execFileSync("git", ["remote", "get-url", "origin"], {
+      cwd: directory,
+      env: { ...process.env, ...environment },
+      encoding: "utf8",
+    }).trim(),
+  ).toBe(remote);
+  let launches = 0;
+  const outcome = await runWorkflow(
+    ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+    {
+      currentDirectory: directory,
+      environment,
+      onWorkbench: () =>
+        savedScan(resultWithFindings(["high"]), "scan-1", directory),
+      onRepositoryCommand: (command, args, cwd, options) =>
+        command === "git"
+          ? runGitRepositoryCommand(command, args, cwd, {
+              ...options,
+              environment: { ...environment, ...options?.environment },
+            })
+          : "[]",
+      onCodex: () => {
+        launches++;
+        return 0;
+      },
+    },
+  );
+  expect(outcome.exitCode).toBe(2);
+  expect(outcome.stderr).toContain("already exists");
+  expect(launches).toBe(0);
+});
+
+test.each([false, true])(
+  "nested snapshot ignores the config-only selector (linked worktree: %p)",
+  async (linked) => {
+    const { publicationRepository, patchRiskAssessment, repositoryGit } =
+      await import("./cli-patch-fixtures.js");
+    const { directory, git } = await publicationRepository(fixtures);
+    const support = await fixtures.create("patch-selector-nested-");
+    const nested = join(directory, "nested");
+    const origin = linked ? join(support, "origin") : nested;
+    await mkdir(origin);
+    const nestedGit = repositoryGit(origin);
+    nestedGit("init", "--initial-branch=main");
+    nestedGit("config", "user.name", "Synthetic User");
+    nestedGit("config", "user.email", "synthetic@example.test");
+    await writeFile(join(origin, "app.ts"), "nested source\n");
+    nestedGit("add", ".");
+    nestedGit("commit", "-m", "Synthetic nested baseline");
+    if (linked) nestedGit("worktree", "add", "-b", "nested", nested);
+    git("add", "nested");
+    git("commit", "-m", "Synthetic gitlink");
+    const selector = join(support, "selector");
+    await writeFile(
+      selector,
+      `[core]\nworktree = ${JSON.stringify(support.replaceAll("\\", "/"))}\n[extensions]\nworktreeConfig = true\n`,
+    );
+    const environment = {
+      GIT_CONFIG: selector,
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "core.quotePath",
+      GIT_CONFIG_VALUE_0: "false",
+    };
+    let launches = 0;
+    const outcome = await runWorkflow(
+      ["patch", "Synthetic issue", "--assess-patch-risk", "--json"],
+      {
+        currentDirectory: directory,
+        environment,
+        onRepositoryCommand: (command, args, cwd, options) =>
+          runGitRepositoryCommand(command, args, cwd, {
+            ...options,
+            environment: { ...environment, ...options?.environment },
+          }),
+        onCodex: async (_args, output) => {
+          launches++;
+          if (
+            output?.appServer?.prompt.includes(
+              "$codex-security:assess-patch-risk",
+            )
+          )
+            output.stdout.write(patchRiskAssessment().report);
+          else {
+            await writeFile(join(directory, "src", "finding-1.ts"), "fixed\n");
+            output?.stdout.write("Synthetic patch complete.");
+          }
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(launches).toBe(2);
+  },
+);
+
 test.each(["unset", "missing", "unrelated", "decoy remote"] as const)(
   "publication preflight reads effective Git configuration with selector: %s",
   async (mode) => {
