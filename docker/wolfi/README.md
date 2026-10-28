@@ -5,9 +5,9 @@ Linux amd64. [melange](https://github.com/chainguard-dev/melange) creates
 the scanner APK; [apko](https://github.com/chainguard-dev/apko) assembles it
 with packages from the [public Wolfi repository](https://github.com/wolfi-dev/os).
 The image uses the same entrypoint, UID/GID 10001, and `/input`, `/output`, and
-`/state` directories as the [published scanner](../README.md). It is a local
-alternative to that image. It does not build unreleased changes in this checkout
-or publish tags to a registry.
+`/state` directories as the [published scanner](../README.md). The local build
+packages the pinned npm release. To publish it, use the separate
+[amd64 release workflow](#publish-the-amd64-variant).
 
 ## Build and inspect
 
@@ -66,6 +66,35 @@ artifact and SARIF output, saved history, and a model turn against a loopback
 fixture. It also checks that a sandboxed child can read the test repository but
 cannot modify it. A real scan needs a compatible model endpoint; the image
 does not include a model.
+
+## Publish the amd64 variant
+
+Pull requests that change this recipe or its shared inputs run the native build
+and smoke test. The build also verifies that the scanner archive in the image's
+npm inventory matches the signed provenance for its upstream release tag.
+Publishing is a separate manual run. After the workflow is on protected
+`main`, a maintainer can start it with:
+
+```sh
+gh workflow run publish-wolfi.yml --repo openai/codex-security --ref main
+```
+
+Approve the pending `container` deployment in GitHub Actions after the build
+and smoke test pass. The workflow publishes the tested platform digest, checks
+an anonymous pull, and attaches build provenance and an SPDX inventory covering
+OS packages, installed npm packages, and bundled native components. The run
+summary includes the digest for a pinned pull.
+
+The first Wolfi image for a scanner version uses a tag such as
+`ghcr.io/openai/codex-security:0.7.0-wolfi-amd64`. To ship a Wolfi OS fix
+without changing the scanner version, update the OS pins and increment
+`image_revision` in [build-inputs.json](build-inputs.json) in the same PR.
+Revision 1 publishes `0.7.0-wolfi-amd64-r1` and leaves the first tag in place.
+Reset the revision to 0 for a new scanner version.
+
+Retries cannot replace a versioned tag with a different digest. To retry a
+failed publication using the same build, rerun the failed job within the
+seven-day artifact retention period.
 
 ## Inputs and updates
 

@@ -1,10 +1,15 @@
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { hash } from "node:crypto";
+import { GHSA_ID, githubRepositoryParts } from "./github-identifiers.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import { validateExternalEvidence } from "./external-import-contract.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
 import type { ImportedGitHubCodeScanningAlert } from "./github.js";
 import type { ImportedGitHubAdvisory } from "./github-advisories.js";
+import {
+  isGitHubDependabotAlert,
+  normalizeGitHubDependabotAlerts,
+} from "./github-dependabot-findings.js";
 import { parseJsonOrJsonl, readScannerText, text } from "./scanner-import.js";
 
 function object(value: unknown): Record<string, unknown> | undefined {
@@ -15,10 +20,9 @@ function object(value: unknown): Record<string, unknown> | undefined {
 
 function repositoryName(value: unknown): string {
   const repository = text(value);
-  const parts = /^([a-z0-9_.-]+)\/([a-z0-9_.-]+)$/iu.exec(repository ?? "");
-  if (!parts || parts.slice(1).some((part) => /^\.{1,2}$/u.test(part)))
+  if (!repository || !githubRepositoryParts(repository))
     throw new Error("GitHub repository must be OWNER/REPO.");
-  return repository!;
+  return repository;
 }
 
 function sourceUrl(value: string): {
@@ -160,7 +164,7 @@ function advisoryFinding(
   if (
     !advisory ||
     !id ||
-    !/^GHSA-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/iu.test(id) ||
+    !GHSA_ID.test(id) ||
     text(advisory["ghsa_id"])?.toUpperCase() !== id.toUpperCase()
   )
     throw new Error(
@@ -324,10 +328,17 @@ export async function readGitHubFindings(
 ): Promise<ExternalFindings> {
   try {
     const payload = parseJsonOrJsonl(await readScannerText(path));
-    return normalizeRecords(
-      Array.isArray(payload) ? payload : [payload],
-      target,
-    );
+    const rows = Array.isArray(payload) ? payload : [payload];
+    if (
+      (rows.length > 0 && rows.every(Array.isArray)) ||
+      rows.some((row) =>
+        Array.isArray(row)
+          ? row.some(isGitHubDependabotAlert)
+          : isGitHubDependabotAlert(row),
+      )
+    )
+      return normalizeGitHubDependabotAlerts(payload, target);
+    return normalizeRecords(rows, target);
   } catch (cause) {
     throw new CodexSecurityError(
       `Could not read GitHub findings as UTF-8 JSON or JSONL: ${errorMessage(cause)}`,

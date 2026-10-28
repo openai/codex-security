@@ -64,6 +64,12 @@ export interface LoadedContract {
   review: NonNullable<ScanManifest["scan"]["review"]>;
 }
 
+// Hosted receipts compare reread files with the bytes that passed validation.
+export const validatedFileDigests = new WeakMap<
+  ScanManifest,
+  ReadonlyMap<string, string>
+>();
+
 export class ContractSchemaError extends ContractValidationError {}
 
 export const SEALED_DEFERRED_PATH_RULE = "invalidSealedDeferredPath";
@@ -94,12 +100,12 @@ export async function loadContractWithScanDirectory(
   );
   const scanRoot = await requireScanRoot(scanDirectory, options.signal);
   const scanDir = scanRoot.path;
-  const documentDigests = new Map<string, string>();
+  const fileDigests = new Map<string, string>();
   const payloads: Record<string, unknown> = {};
   payloads["scan-manifest.json"] = await readScanJson(
     scanDir,
     "scan-manifest.json",
-    documentDigests,
+    fileDigests,
     options.signal,
     scanRoot,
   );
@@ -114,7 +120,7 @@ export async function loadContractWithScanDirectory(
     payloads[filename] = await readScanJson(
       scanDir,
       filename as keyof typeof DOCUMENTS,
-      documentDigests,
+      fileDigests,
       options.signal,
       scanRoot,
     );
@@ -196,7 +202,7 @@ export async function loadContractWithScanDirectory(
     manifest,
     findings,
     coverage,
-    documentDigests,
+    fileDigests,
     options.signal,
     scanRoot,
   );
@@ -209,6 +215,7 @@ export async function loadContractWithScanDirectory(
     );
   }
   await verifyScanRoot(scanRoot, options.signal);
+  validatedFileDigests.set(manifest, fileDigests);
   return {
     contract: { manifest, findings, review, mode },
     scanDirectory: scanRoot.path,
@@ -510,7 +517,7 @@ async function validateSeal(
   manifest: ScanManifest,
   findings: FindingsDocument,
   coverage: CoverageDocument | undefined,
-  documentDigests: ReadonlyMap<string, string>,
+  fileDigests: Map<string, string>,
   signal?: AbortSignal,
   expectedRoot?: ScanRoot,
 ): Promise<void> {
@@ -536,7 +543,7 @@ async function validateSeal(
     artifactPaths.add(normalized);
     artifactCollisionKeys.add(collisionKey);
     const digest =
-      documentDigests.get(normalized) ??
+      fileDigests.get(normalized) ??
       (await sha256ScanFile(
         scanDir,
         normalized,
@@ -549,6 +556,7 @@ async function validateSeal(
         `${context}: sealed artifact changed or is missing.`,
       );
     }
+    fileDigests.set(artifact.path, digest);
   }
 
   const requireSealedReference = (reference: unknown, context: string) => {
@@ -823,7 +831,7 @@ export function safeScopePath(value: string): string {
 async function readScanJson(
   scanDir: string,
   relativePath: keyof typeof DOCUMENTS,
-  documentDigests: Map<string, string>,
+  fileDigests: Map<string, string>,
   signal?: AbortSignal,
   expectedRoot?: ScanRoot,
 ): Promise<Record<string, unknown>> {
@@ -836,7 +844,7 @@ async function readScanJson(
   );
   try {
     const bytes = await file.readFile({ signal });
-    documentDigests.set(relativePath, hash("sha256", bytes));
+    fileDigests.set(relativePath, hash("sha256", bytes));
     return parseJson(join(scanDir, relativePath), bytes);
   } catch (error) {
     throwIfAborted(signal);

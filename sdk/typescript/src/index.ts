@@ -249,6 +249,7 @@ export {
   readGitHubFindings,
 } from "./github-findings.js";
 export { importGitHubAdvisories } from "./github-advisories.js";
+export { normalizeGitHubDependabotAlerts } from "./github-dependabot-findings.js";
 export type {
   GitHubAdvisoryImportOptions,
   ImportedGitHubAdvisory,

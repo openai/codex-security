@@ -32,6 +32,7 @@ import {
 } from "./external-findings-read.js";
 import { canonicalJson } from "./record.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
+import { dependabotRepository } from "./github-dependabot-findings.js";
 import { snykRepositoryUrls } from "./snyk-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
 import type {
@@ -742,6 +743,9 @@ async function preparePublicationInput(
         ...(options.provider === "endor"
           ? endorRepositoryUrls(finding.evidence.source_data)
           : []),
+        options.provider === "github"
+          ? dependabotRepository(finding)
+          : undefined,
       ];
       for (const sourceRepository of sourceRepositories)
         if (
@@ -857,9 +861,6 @@ async function preparePublicationInput(
   };
   const preview: ExternalPublicationPreview = {
     ...parsed,
-    ...(parsed.report === undefined
-      ? {}
-      : { report: structuredClone(parsed.report) }),
     findings: submissionFindings(requests),
     cloudApiUrl,
     cloudUrl: cloudFindingsUrl(environment, destination.id),
@@ -870,7 +871,7 @@ async function preparePublicationInput(
     requests,
   };
   return {
-    preview,
+    preview: structuredClone(preview),
     async publish() {
       progress({ phase: "waiting", completed: 0 });
       const result = (

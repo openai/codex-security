@@ -1237,6 +1237,9 @@ describe("custom validation", () => {
   test("renders only the discovery portion of the shipped workflows", async () => {
     const standard = await customDiscoveryPrompt(PLUGIN_ROOT, "security-scan");
     const diff = await customDiscoveryPrompt(PLUGIN_ROOT, "security-diff-scan");
+    expect(standard.match(/^1\. .+$/mu)?.[0]).toContain(
+      "make-hosted-repo-scope-input",
+    );
     expect(standard).toContain("## Baseline Auditor Prompt");
     expect(standard).toContain("## Focused Investigator Prompt");
     expect(standard).toContain("<plugin_dir>/references/scan-prologue.md");
