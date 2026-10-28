@@ -5,6 +5,7 @@ import {
   readFile,
   realpath,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { join, relative } from "node:path";
@@ -163,7 +164,7 @@ describe("CodexSecurity finding validation", () => {
     "modified",
     "git metadata",
     "unbound",
-    ...(process.platform === "win32" ? [] : ["insecure permissions"]),
+    ...(process.platform === "win32" ? [] : ["shared permissions"]),
   ])(
     "checks saved validation evidence before cache reuse: %s",
     async (change) => {
@@ -217,21 +218,22 @@ describe("CodexSecurity finding validation", () => {
           join(first.outputDir, ".git", "HEAD"),
           "Changed metadata.\n",
         );
-      if (change === "insecure permissions")
-        await chmod(first.outputDir, 0o777);
+      if (change === "shared permissions") await chmod(first.outputDir, 0o777);
       const second = await client.validate(request);
-      expect(modelCalls).toBe(change === "unchanged" ? 1 : 2);
+      const reusesEvidence =
+        change === "unchanged" || change === "shared permissions";
+      expect(modelCalls).toBe(reusesEvidence ? 1 : 2);
       expect(await readFile(join(second.outputDir, "proof.txt"), "utf8")).toBe(
         `Synthetic evidence ${modelCalls}.\n`,
       );
       expect(await client.validate(request)).toEqual(second);
-      expect(modelCalls).toBe(change === "unchanged" ? 1 : 2);
-      if (change === "insecure permissions") {
-        expect(second.outputDir).not.toBe(first.outputDir);
+      expect(modelCalls).toBe(reusesEvidence ? 1 : 2);
+      if (change === "shared permissions") {
+        expect(second.outputDir).toBe(first.outputDir);
+        expect((await stat(first.outputDir)).mode & 0o777).toBe(0o777);
         expect(await readFile(join(first.outputDir, "proof.txt"), "utf8")).toBe(
           "Synthetic evidence 1.\n",
         );
-        await chmod(first.outputDir, 0o700);
       }
     },
   );
@@ -257,10 +259,8 @@ describe("CodexSecurity finding validation", () => {
     expect(modelCalls).toBe(1);
     if (process.platform !== "win32") {
       await chmod(first.outputDir, 0o770);
-      await expect(client.validate(request)).rejects.toThrow(
-        "must not be accessible to other users",
-      );
-      await chmod(first.outputDir, 0o700);
+      expect(await client.validate(request)).toEqual(first);
+      expect((await stat(first.outputDir)).mode & 0o777).toBe(0o770);
     }
     await writeFile(join(first.outputDir, "proof.txt"), "Changed evidence.\n");
     await expect(client.validate(request)).rejects.toBeInstanceOf(

@@ -120,12 +120,13 @@ commands, output, and exit codes through the existing scanner entrypoint.
 
 Run these commands from the repository root after
 [verifying an image](#image-metadata-and-verification). Keep the verified
-`reference` in the same shell. Prepare private directories and choose the host
-user's UID/GID so the runner can write its bind mounts:
+`reference` in the same shell. Prepare the output and state directories, keep
+state private, and choose the host user's UID/GID so the runner can write its
+bind mounts:
 
 ```bash
 mkdir -p results state
-chmod 700 results state
+chmod 700 state
 export CODEX_SECURITY_USER="$(id -u):$(id -g)"
 export CODEX_SECURITY_IMAGE="$reference"
 docker compose -f compose.runner.yaml pull

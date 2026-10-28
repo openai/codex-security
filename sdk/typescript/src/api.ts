@@ -246,7 +246,7 @@ import {
   requireOutputOutsideRepositories,
   requireOutputOutsideRepository,
   requirePrivateCredentialHome,
-  requirePrivatePolicyOutputDirectory,
+  preparePolicyOutputDirectory,
   resolveCodexCommand,
   resolvePluginPath,
   resolvePluginPython,
@@ -671,7 +671,7 @@ interface ClientDependencies {
   ) => Promise<PreparedRuntime>;
   resolvePluginPython?: typeof resolvePluginPython;
   prepareOutputDir?: typeof prepareOutputDir;
-  requirePrivatePolicyOutputDirectory?: typeof requirePrivatePolicyOutputDirectory;
+  preparePolicyOutputDirectory?: typeof preparePolicyOutputDirectory;
   prepareScanArtifactRestorer?: typeof prepareScanArtifactRestorer;
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
@@ -1696,8 +1696,8 @@ export class CodexSecurity {
       requireOutputOutsideRepositories(inputs.protectedRoots, outputDir);
       requireModelSafeOutputDir(outputDir);
       await (
-        this.#dependencies.requirePrivatePolicyOutputDirectory ??
-        requirePrivatePolicyOutputDirectory
+        this.#dependencies.preparePolicyOutputDirectory ??
+        preparePolicyOutputDirectory
       )(outputDir);
       if (options.knowledgeBasePaths?.length) {
         knowledgeBase = await prepareKnowledgeBase(
