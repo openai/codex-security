@@ -2733,7 +2733,11 @@ export class CodexSecurity {
       }
       checkOpen();
       const basePrompt = scanPrompt(
-        await targetInstruction(normalized, shellPluginRoot),
+        await targetInstruction(
+          normalized,
+          shellPluginRoot,
+          this.#dependencies.hostedScan !== undefined,
+        ),
         mode,
         skillName,
         scanId,
@@ -5318,6 +5322,7 @@ function skillNameFor(target: NormalizedTarget, mode: ScanMode): string {
 async function targetInstruction(
   target: NormalizedTarget,
   pluginRoot: string,
+  hosted: boolean,
 ): Promise<string> {
   if (target.kind === "repository")
     return "Scan target: the entire repository.";
@@ -5338,16 +5343,39 @@ async function targetInstruction(
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
     }
+    const inventory = shellEnvironmentReference(
+      "CODEX_SECURITY_SCAN_DIR",
+      "/scoped-source-input.jsonl",
+    );
+    const scopeArgs = `--repo ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")} --scopes-file ${scopes} --out ${inventory}`;
     const makeScope = legacyGenerator
-      ? `${pluginPythonCommand()} ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/scripts/generate_rank_input.py")} make-repo-scope-input --repo ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")} --scopes-file ${scopes} --out ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scoped-source-input.jsonl")}`
+      ? `${pluginPythonCommand()} ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/scripts/generate_rank_input.py")} make-repo-scope-input ${scopeArgs}`
       : process.platform === "win32"
         ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper make-repo-scope-input --repo "%CODEX_SECURITY_REPOSITORY%\." --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --out "%CODEX_SECURITY_SCAN_DIR%\scoped-source-input.jsonl""'`
-        : `${helper} --helper make-repo-scope-input --repo ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")} --scopes-file ${scopes} --out ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scoped-source-input.jsonl")}`;
+        : `${helper} --helper make-repo-scope-input ${scopeArgs}`;
     // CMD expands the environment references once, preserving percent signs in path values.
     const bindScopes =
       process.platform === "win32"
         ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper bind-repo-scopes --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --manifest "%CODEX_SECURITY_SCAN_DIR%\scan-manifest.json""'`
         : `${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/scripts/launch_codex_security_mcp")} --helper bind-repo-scopes --scopes-file ${scopes} --manifest ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scan-manifest.json")}`;
+    if (hosted && process.platform === "linux" && !legacyGenerator) {
+      const capabilities = await pluginCapabilities(pluginRoot).catch(
+        () => undefined,
+      );
+      if (capabilities?.["hostedScopeInventory"] === 1) {
+        const hostedHelper = `${helper} --helper make-hosted-repo-scope-input ${scopeArgs}`;
+        return [
+          "Scan target paths: resolve every requested file and all non-ignored descendants of requested directories using the hosted scope helper:",
+          `${hostedHelper} --state-dir ${shellEnvironmentReference("CODEX_SECURITY_STATE_DIR")}`,
+          "Use the inventory at the path it reports. If a later shell cannot read that inventory, regenerate it in the scan directory:",
+          hostedHelper,
+          "Use the path reported by the recovery command.",
+          "Before finalization, preserve every requested scope with:",
+          bindScopes,
+          "Do not print, evaluate, or modify the target-paths file.",
+        ].join("\n");
+      }
+    }
     return `Scan target paths: resolve every requested file and all non-ignored descendants of requested directories using ${makeScope}. Before finalization, preserve every requested scope with ${bindScopes}. Do not print, evaluate, or modify the target-paths file.`;
   }
   if (target.kind === "refs") {
@@ -6157,21 +6185,23 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   return result;
 }
 
-async function requireCurrentDeepScanPlugin(
-  runtime: PreparedRuntime,
-): Promise<void> {
+async function pluginCapabilities(pluginRoot: string) {
   const manifest: unknown = JSON.parse(
-    await readFile(
-      join(runtime.plugin.pluginRoot, ".codex-plugin", "plugin.json"),
-      "utf8",
-    ),
+    await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"),
   );
   const capabilities = isRecord(manifest)
     ? manifest["codexSecurity"]
     : undefined;
+  return isRecord(capabilities) ? capabilities : undefined;
+}
+
+async function requireCurrentDeepScanPlugin(
+  runtime: PreparedRuntime,
+): Promise<void> {
+  const capabilities = await pluginCapabilities(runtime.plugin.pluginRoot);
   if (
     runtime.deepScanConfigPath === undefined ||
-    !isRecord(capabilities) ||
+    capabilities === undefined ||
     capabilities["directDeepScanEngine"] !== 1 ||
     capabilities["workerProviderSnapshot"] !== 4
   ) {

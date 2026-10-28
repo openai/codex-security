@@ -5,7 +5,16 @@ import {
   resolvedPathText as canonical,
 } from "./helper-files";
 import { randomBytes } from "node:crypto";
-import { renameSync, unlinkSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fchmodSync,
+  fstatSync,
+  openSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, isAbsolute, parse, relative, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { mkdir, readFile, writeFile } from "./helper-files";
@@ -44,14 +53,19 @@ import {
   runRipgrep,
 } from "./inventory-git";
 import { PREVIEW_BYTES, previewForBytes, sampleFile } from "./source-preview";
+import { writeHostedScopeInventory } from "./hosted-scope-inventory";
 
 export type InventoryCommand =
-  "generate-in-scope-files" | "make-repo-scope-input" | "make-diff-rank-input";
+  | "generate-in-scope-files"
+  | "make-repo-scope-input"
+  | "make-hosted-repo-scope-input"
+  | "make-diff-rank-input";
 export interface InventoryOptions {
   repo: string;
   out: string;
   scope?: string;
   scopesFile?: string;
+  stateDir?: string;
   area?: string;
   previewBytes?: number;
   base?: string;
@@ -212,13 +226,18 @@ function writeInventory(output: string, rows: Buffer[]): number {
   const unique = [
     ...new Map(rows.map((row) => [row.toString("hex"), row])).values(),
   ].sort(Buffer.compare);
+  replaceInventory(output, unique);
+  return unique.length;
+}
+
+function replaceInventory(output: string, rows: Buffer[]): void {
   mkdir(dirname(output));
   const temporary = append(
     dirname(output),
     `.${randomBytes(12).toString("hex")}.tmp`,
   );
   try {
-    writeFile(temporary, unique, true);
+    writeFile(temporary, rows, true);
     if (windows)
       windowsFiles().rename(
         Buffer.from(temporary, "utf16le"),
@@ -231,14 +250,54 @@ function writeInventory(output: string, rows: Buffer[]): number {
       else unlinkSync(fsPath(temporary));
     }
   }
-  return unique.length;
+}
+
+function writeHostedOutput(output: string, rows: Buffer[]): void {
+  mkdir(dirname(output));
+  const path = fsPath(output);
+  const create = () => openSync(path, "wx");
+  let writer: number;
+  try {
+    writer = create();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const entry = lstat(output);
+    if (!entry.isFile() && !entry.isSymbolicLink()) throw error;
+    // Replace only this disposable scan entry, without writing through a link.
+    unlinkSync(path);
+    writer = create();
+  }
+  try {
+    const file = fstatSync(writer);
+    if (file.uid === process.geteuid!() && !(file.mode & 0o400)) {
+      try {
+        fchmodSync(writer, (file.mode & 0o777) | 0o600);
+      } catch {
+        // Some fixed-mode mounts permit reading even when chmod is unavailable.
+      }
+    }
+    for (const row of rows) writeFileSync(writer, row);
+  } finally {
+    closeSync(writer);
+  }
+  // Some filesystems expose a newly written file only after the writer closes.
+  const reader = openSync(
+    path,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
+  try {
+    if (!fstatSync(reader).isFile())
+      throw new Error(`--out: expected a regular file path: ${output}`);
+  } finally {
+    closeSync(reader);
+  }
 }
 
 export async function generateInventory(
   command: InventoryCommand,
   options: InventoryOptions,
   home = environmentValue("HOME"),
-): Promise<number> {
+): Promise<{ count: number; output: string }> {
   const repo = canonical(expandHome(options.repo, home));
   if (!directory(repo)) throw new Error(`Repo path not found: ${repo}`);
   const outputPath = expandHome(options.out, home),
@@ -418,22 +477,36 @@ export async function generateInventory(
       }
     }
   }
-  if (inventory) return writeInventory(output, inventoryRows);
-  mkdir(dirname(output));
-  writeFile(
-    output,
-    [...rankRows.values()]
-      .sort((left, right) => compare(left.path, right.path))
-      .map((row) =>
-        Buffer.from(
-          stringifyJson(row, 0).replace(
-            /[\u007f-\uffff]/g,
-            (unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`,
-          ) + (windows ? "\r\n" : "\n"),
-        ),
+  if (inventory)
+    return { count: writeInventory(output, inventoryRows), output };
+  const rows = [...rankRows.values()]
+    .sort((left, right) => compare(left.path, right.path))
+    .map((row) =>
+      Buffer.from(
+        stringifyJson(row, 0).replace(
+          /[\u007f-\uffff]/g,
+          (unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`,
+        ) + (windows ? "\r\n" : "\n"),
       ),
-  );
-  return rankRows.size;
+    );
+  if (command === "make-hosted-repo-scope-input") {
+    if (options.stateDir !== undefined) {
+      const hosted = writeHostedScopeInventory(
+        expandHome(options.stateDir, home),
+        expandHome(options.scopesFile!, home),
+        repo,
+        output,
+        rows,
+      );
+      if (hosted !== undefined) return { count: rows.length, output: hosted };
+    }
+    if (windows) replaceInventory(output, rows);
+    else writeHostedOutput(output, rows);
+  } else {
+    mkdir(dirname(output));
+    writeFile(output, rows);
+  }
+  return { count: rows.length, output };
 }
 
 export async function inventoryCommand(
@@ -443,7 +516,9 @@ export async function inventoryCommand(
 ): Promise<number> {
   const inventory = command === "generate-in-scope-files",
     diff = command === "make-diff-rank-input",
-    scoped = command === "make-repo-scope-input";
+    scoped =
+      command === "make-repo-scope-input" ||
+      command === "make-hosted-repo-scope-input";
   const required = [
     "repo",
     "out",
@@ -460,6 +535,7 @@ export async function inventoryCommand(
     : diff
       ? ["head", "mode", "area", "preview-bytes"]
       : [];
+  if (command === "make-hosted-repo-scope-input") optional.push("state-dir");
   const usage = `usage: launch_codex_security_mcp[.cmd] --helper ${command} ${required.map((name) => `--${name} VALUE`).join(" ")}`;
   try {
     let values: Record<string, string | boolean | undefined>;
@@ -514,13 +590,14 @@ Defaults: scope=., head=HEAD, mode=revisions, preview-bytes=1024; area uses the 
         error instanceof Error ? error.message : String(error),
       );
     }
-    const count = await generateInventory(
+    const { count, output } = await generateInventory(
       command,
       {
         repo: values.repo as string,
         out: values.out as string,
         scope: values.scope as string | undefined,
         scopesFile: values["scopes-file"] as string | undefined,
+        stateDir: values["state-dir"] as string | undefined,
         area: values.area as string | undefined,
         previewBytes:
           values["preview-bytes"] === undefined
@@ -535,7 +612,7 @@ Defaults: scope=., head=HEAD, mode=revisions, preview-bytes=1024; area uses the 
     print(
       inventory
         ? `Recorded ${count} in-scope files.`
-        : `Wrote ${count} ${scoped ? "scoped paths" : "rows"} to ${expandHome(values.out as string, home)}`,
+        : `Wrote ${count} ${scoped ? "scoped paths" : "rows"} to ${output}`,
     );
     return 0;
   } catch (error) {

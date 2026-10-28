@@ -1,10 +1,10 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { createHash } from "node:crypto";
 import { PassThrough, Writable } from "node:stream";
-import { readFile, realpath, stat, symlink } from "node:fs/promises";
+import { readFile, realpath, stat, symlink, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, isAbsolute, join } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join } from "node:path";
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import {
   normalizeHostedScope,
@@ -389,6 +389,88 @@ test.each(sealedScopes)(
       expect(artifactPaths).toContain(path);
     for (const artifact of manifest.scan.artifacts)
       expect(artifactPaths).toContain(artifact.path);
+  },
+);
+
+test.skipIf(process.platform !== "linux").each([
+  ["private", "completed"],
+  ["aliased", "acceptance_unknown"],
+  ["output", "completed"],
+  ["lost", "completed"],
+] as const)(
+  "hosted scope generation with %s scratch preserves the %s receipt",
+  async (storage, status) => {
+    const input = await fixture(["service-a/nested/route [x].ts"]);
+    const outputCopy = join(input.outputDirectory, "scoped-source-input.jsonl");
+    let inventory = "";
+    let contents = "";
+    const run: ScanExecutor["run"] = async (request) => {
+      const command = (helper: string, usesState = false) =>
+        request.prompt
+          .split("\n")
+          .find(
+            (line) =>
+              line.includes(`--helper ${helper} `) &&
+              line.includes(" --state-dir ") === usesState,
+          )!;
+      const environment = { ...request.runtime.environment };
+      const targets = environment["CODEX_SECURITY_TARGET_PATHS_FILE"]!;
+      if (storage === "output")
+        environment["CODEX_SECURITY_STATE_DIR"] =
+          request.runtime.outputDirectory;
+      if (storage === "aliased") {
+        const alias = join(dirname(input.repository), "executor state alias");
+        await symlink(request.runtime.stateDirectory, alias, "dir");
+        environment["CODEX_SECURITY_STATE_DIR"] = alias;
+      }
+      const shell = (script: string, ...args: string[]) =>
+        execFileSync("/bin/sh", ["-c", script, "sh", ...args], {
+          cwd: request.runtime.outputDirectory,
+          env: environment,
+          encoding: "utf8",
+        });
+      const generate = (script: string) =>
+        shell(script).match(/^Wrote 2 scoped paths to (.+)$/mu)![1]!;
+      const hosted = command("make-hosted-repo-scope-input", true);
+      inventory = generate(
+        storage === "private" ? `umask 0777; ${hosted}` : hosted,
+      );
+      environment["CODEX_SECURITY_STATE_DIR"] = request.runtime.stateDirectory;
+      if (storage !== "output") {
+        expect(await realpath(dirname(inventory))).toBe(
+          await realpath(request.runtime.stateDirectory),
+        );
+        const filename = basename(inventory);
+        expect(filename).toStartWith(basename(targets));
+        expect(filename.slice(basename(targets).length)).toMatch(
+          /^\.scoped-[0-9a-f]{24}\.jsonl$/u,
+        );
+        expect((await stat(inventory)).mode & 0o777).toBe(0o600);
+      } else {
+        expect(inventory).toBe(outputCopy);
+      }
+      contents = shell('cat "$1"', inventory);
+      expect(parseJsonLines(contents)).toEqual([
+        { path: "service-a/index.ts" },
+        { path: "service-a/nested/route [x].ts" },
+      ]);
+      if (storage === "lost") {
+        await unlink(inventory);
+        inventory = generate(command("make-hosted-repo-scope-input"));
+        expect(inventory).toBe(outputCopy);
+      }
+      if (status === "completed") {
+        await writeDraft(request);
+        shell(command("bind-repo-scopes"));
+      }
+      return receipt(request, { status });
+    };
+    const result = await runHostedScan(input, { executor: { run } });
+    expect(result.status, JSON.stringify(result)).toBe(status);
+    expect(result.execution?.sessionId).toBe("host-session");
+    expect(await readFile(inventory, "utf8")).toBe(contents);
+    if (storage === "private" || storage === "aliased")
+      await expect(stat(outputCopy)).rejects.toMatchObject({ code: "ENOENT" });
   },
 );
 
