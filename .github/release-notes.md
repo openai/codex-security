@@ -4,28 +4,10 @@
 
 ## Highlights
 
-- skip Office owner files in knowledge-base folders ([#1913](https://github.com/openai/codex-security/pull/1913))
-- leave Git-ignored SECURITY.md files out of policy discovery ([#1535](https://github.com/openai/codex-security/pull/1535))
-- retain pre-seal warnings across publication failures ([#1907](https://github.com/openai/codex-security/pull/1907))
-- simplify scan completion and recovery ([#1762](https://github.com/openai/codex-security/pull/1762))
-- bump fast-uri from 3.1.8 to 3.1.9 in /github-action/runtime ([#1914](https://github.com/openai/codex-security/pull/1914))
-- bump fast-uri from 3.1.8 to 3.1.9 in /sdk/typescript ([#2061](https://github.com/openai/codex-security/pull/2061))
-- bump fast-uri from 3.1.8 to 3.1.9 in /plugins/codex-security/mcp-app ([#2062](https://github.com/openai/codex-security/pull/2062))
-- bump fast-uri from 3.1.8 to 3.1.9 in /evals/triage-finding ([#2063](https://github.com/openai/codex-security/pull/2063))
-- stop source excerpts at the end of the file ([#2015](https://github.com/openai/codex-security/pull/2015))
-- update @inquirer/prompts to 8.7.4 in the SDK ([#2072](https://github.com/openai/codex-security/pull/2072))
-- request fields when reading back GitHub issues ([#2048](https://github.com/openai/codex-security/pull/2048))
-- resume deep scans after clearing their instructions ([#2049](https://github.com/openai/codex-security/pull/2049))
-- read completed scan artifacts after checkout removal ([#2050](https://github.com/openai/codex-security/pull/2050))
-- skip container builds for SDK test-only pull requests ([#2069](https://github.com/openai/codex-security/pull/2069))
-- clarify recovery for historical scan entries ([#2027](https://github.com/openai/codex-security/pull/2027))
-- add a local Wolfi build for Linux amd64 ([#2053](https://github.com/openai/codex-security/pull/2053))
-- continue hosted reviews after a missing submission ([#2090](https://github.com/openai/codex-security/pull/2090))
-- count Cloud request bytes without reserializing batches ([#2079](https://github.com/openai/codex-security/pull/2079))
-- avoid redundant SQLite reads and parsing on replay ([#2083](https://github.com/openai/codex-security/pull/2083))
-- map scanner evidence and test cross-provider replay ([#2080](https://github.com/openai/codex-security/pull/2080))
-- distinguish Snyk evidence changes from finding edits ([#2081](https://github.com/openai/codex-security/pull/2081))
-- support OpenGrep reports locally and in Cloud ([#1872](https://github.com/openai/codex-security/pull/1872))
+Codex Security 0.8.0 adds OpenGrep report imports and changes how scan results record scope and review details.
+
+- **OpenGrep imports.** Import a native JSON or gzip-compressed report into the local workbench or publish it to Cloud with `publish findings --provider opengrep`. Supply `--source-repository-url` and enable external imports with `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`. Imported findings retain their scanner evidence and start as unassessed. See the [OpenGrep guide](https://github.com/openai/codex-security/blob/npm-v0.8.0/docs/scanner-imports/opengrep.md).
+- **Scan recovery.** Resume an interrupted Deep Scan after clearing its additional instructions. Read a completed Workbench scan’s saved artifacts even after moving or removing the original checkout.
 
 <!-- release-section: highlights:end -->
 
@@ -33,8 +15,7 @@
 
 ## Upgrade notes
 
-Review migration steps for these breaking changes:
-
-- simplify scan completion and recovery ([#1762](https://github.com/openai/codex-security/pull/1762))
+- **SDK and JSON consumers.** Replace reads of `ScanResult.coverage` or the serialized `coverage` field with `review` for comparison exclusions. Read scan mode and scope from `manifest.scan`. Integrations that write drafts should put reviewed surfaces, unfinished work, and open questions in `reviewState`.
+- **Saved files and GitHub Actions.** New scans no longer write `coverage.json`. Replace `ScanResult.coveragePath` with `manifestPath` and read `scan.review` in `scan-manifest.json`. Workflows that read the Action’s `coverage-path` output should switch to `manifest-path`. The legacy output is empty for current scans. Existing saved scans remain readable. See [Action outputs](https://github.com/openai/codex-security/blob/npm-v0.8.0/github-action/README.md#outputs).
 
 <!-- release-section: upgrades:end -->
