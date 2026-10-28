@@ -88,6 +88,7 @@ function runHelper(): void {
   if (
     command === "generate-in-scope-files" ||
     command === "make-repo-scope-input" ||
+    command === "make-hosted-repo-scope-input" ||
     command === "make-diff-rank-input"
   ) {
     void inventoryCommand(command, args).then((code) => {
