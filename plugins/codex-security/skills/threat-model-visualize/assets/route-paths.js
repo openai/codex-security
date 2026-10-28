@@ -28,46 +28,47 @@
     // A decision may call a dependency before rejecting the selected operation.
     // Keep that explicitly authored prerequisite without activating other work
     // from the blocked destination merely because the decision point is visible.
-    const reachable = new Set(activeNodes);
+    const reachable = new Set(activeNodes), prerequisiteNodes = new Set();
+    const owner = stopIndex < 0 ? null : edges.get(stopEdge).to;
     // Receipt makes the owner visible, but must not activate arbitrary work
     // from that owner after its decision. Earlier occurrences remain reachable.
     if (arrival && stopIndex >= 0) {
-      const owner = edges.get(stopEdge).to;
       const before = route.edges.slice(0, stopIndex).some(id =>
         edges.get(id).from === owner || edges.get(id).to === owner);
       if (!before) reachable.delete(owner);
     }
     // Keep occurrence state separate: another branch may use the same edge.
     for (const branch of route.branches || []) branchStates.push({branch, active:false});
-    // A later-listed branch may reach an earlier branch's origin. Each pass
-    // activates previously inactive branches, so even cyclic paths converge.
+    // A later-listed branch may reach an earlier branch's origin. Revisit active
+    // branches when an independent path reaches a prerequisite node. Each pass
+    // only adds reachability, so even cyclic paths converge.
     let changed = true;
     while (changed) {
       changed = false;
       for (const state of branchStates) {
-        if (state.active) continue;
         const {branch} = state;
         const start = edges.get(branch.edges[0]).from;
-        const decisionEdge = branch.beforeStep === undefined ? null : scenario.steps[branch.beforeStep - 1]?.edge;
-        const decisionIndex = decisionEdge ? route.edges.indexOf(decisionEdge) : -1;
         const prerequisite = stopIndex >= 0 && branch.beforeStep === stop + 1 &&
-          start === edges.get(stopEdge).to;
+          start === owner;
         // An annotated branch belongs to a particular decision occurrence, not
         // an earlier visit to the same node on a looping or response route.
-        const actionEdge = branch.afterStep === undefined ? null : scenario.steps[branch.afterStep - 1]?.edge;
-        const actionIndex = actionEdge ? route.edges.indexOf(actionEdge) : -1;
         const active = branch.beforeStep !== undefined ?
-          decisionIndex >= 0 && (stopIndex < 0 || decisionIndex <= stopIndex) &&
-            (!prerequisite || arrival) :
-          branch.afterStep !== undefined ? reachable.has(start) && actionIndex >= 0 &&
-            (stopIndex < 0 || actionIndex < stopIndex) : reachable.has(start);
+          (stopIndex < 0 || branch.beforeStep <= stop + 1) && (!prerequisite || arrival) :
+          (reachable.has(start) || prerequisiteNodes.has(start)) &&
+            (branch.afterStep === undefined || stopIndex < 0 || branch.afterStep < stop + 1);
         if (!active) continue;
-        state.active = true;
-        changed = true;
+        if (!state.active) { state.active = true; changed = true; }
+        // A dependency's reply remains visible without enabling the denied
+        // owner's other work. Independent earlier paths may still reach it.
+        const dependency = prerequisite || (branch.beforeStep === undefined && !reachable.has(start));
+        const reached = dependency ? prerequisiteNodes : reachable;
         for (const id of branch.edges) {
           const edge = edges.get(id);
-          if (!(prerequisite && edge.from === start)) reachable.add(edge.from);
-          if (!(prerequisite && edge.to === start)) reachable.add(edge.to);
+          for (const node of [edge.from, edge.to]) {
+            if (!(dependency && node === owner) && !reached.has(node)) {
+              reached.add(node); changed = true;
+            }
+          }
         }
       }
     }

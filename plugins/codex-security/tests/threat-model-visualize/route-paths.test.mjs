@@ -64,6 +64,39 @@ test('a decision retains its explicit prerequisite without enabling other work f
     assert(!denied.activeEdges.has('api-auth') && !denied.activeEdges.has('sessions'));
   }
 });
+test('prerequisite replies do not reactivate a denied owner across branch boundaries',()=>{
+  const m={edges:[['request','caller','gateway'],['forward','gateway','service'],
+    ['call','gateway','policy'],['reply','policy','gateway'],['write','gateway','store'],
+    ['earlier','caller','gateway'],['independent','caller','policy']]
+    .map(([id,from,to])=>({id,from,to}))};
+  for (const grouped of [false,true]) {
+    const branches=[{edges:grouped?['call','reply']:['call'],beforeStep:1},
+      ...(!grouped?[{edges:['reply']}]:[]),{edges:['write']}];
+    const orders=grouped?[[0,1],[1,0]]:[[0,1,2],[0,2,1],[2,0,1]];
+    for (const order of orders) {
+      for (const earlier of [false,true]) {
+        const s={steps:[{edge:'request'}],routes:[{id:'r',edges:['request','forward'],
+          branches:[...order.map(i=>branches[i]),...(earlier?[{edges:['earlier'],beforeStep:1}]:[])]}]};
+        for (const stop of [0,-1]) {
+          const r=RoutePaths.resolve(m,s,'r',stop,true), write=stop<0 || earlier;
+          const context=JSON.stringify({grouped,order,earlier,stop});
+          assert.equal(r.activeEdges.has('write'),write,context);
+          assert.equal(r.unreachedEdges.has('write'),!write,context);
+          assert.equal(r.activeNodes.has('store'),write,context);
+          assert(r.activeNodes.has('gateway') && r.activeEdges.has('call') && r.activeEdges.has('reply'));
+          assert.equal(r.activeEdges.has('forward'),stop<0,context);
+          assert.equal(r.branchStates.find(({branch})=>branch.edges[0]==='write').active,write,context);
+        }
+      }
+    }
+  }
+  // The reply is first reached by the prerequisite, then by an independent path.
+  const s={steps:[{edge:'request'}],routes:[{id:'r',edges:['request','forward'],branches:[
+    {edges:['call'],beforeStep:1},{edges:['reply']},{edges:['write']},
+    {edges:['independent'],beforeStep:1}
+  ]}]};
+  assert(RoutePaths.resolve(m,s,'r',0,true).activeEdges.has('write'));
+});
 test('a branch reached through another branch is independent of array order',()=>{
   const m={edges:[['ab','a','b'],['bc','b','c'],['cd','c','d'],['ac','a','c']]
     .map(([id,from,to])=>({id,from,to}))};

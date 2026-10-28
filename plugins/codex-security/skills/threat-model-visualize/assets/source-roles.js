@@ -19,8 +19,11 @@
     const selected = scenario?.sourceMode === 'alternatives' ? allSources.find(s => s.id === sourceId) || allSources[0] : null;
     const sources = selected ? [selected] : allSources;
     const nodes = new Map();
-    for (const p of model.participants || [])
-      nodes.set(p.node, {...palette[p.kind], kind:p.kind, items:[p], source:false});
+    for (const p of model.participants || []) {
+      if (!nodes.has(p.node))
+        nodes.set(p.node, {...palette[p.kind], kind:p.kind, items:[], source:false});
+      nodes.get(p.node).items.push(p);
+    }
     const mapped = new Map();
     for (const s of sources) {
       if (s.node === null) continue;

@@ -76,13 +76,16 @@ def validate(model, assessment):
             "overviewEdges must contain unique resolved edge IDs (may be empty)",
         )
 
-    def refs(item):
-        values = item.get("evidence", [])
+    def id_array(item, field):
+        values = item.get(field, [])
         require(
             isinstance(values, list) and all(isinstance(ref, str) for ref in values),
-            f"{item['id']}: evidence must be an array of string IDs",
+            f"{item['id']}: {field} must be an array of string IDs",
         )
-        for ref in values:
+        return values
+
+    def refs(item):
+        for ref in id_array(item, "evidence"):
             require(ref in evidence, f"{item['id']}: unresolved evidence {ref}")
 
     for n in nodes.values():
@@ -178,11 +181,11 @@ def validate(model, assessment):
         refs(s)
         require(isinstance(s.get("steps"), list), f"{s['id']}: steps array required (may be empty)")
         require(
-            all(i in nodes for i in s.get("affectedNodes", [])),
+            all(i in nodes for i in id_array(s, "affectedNodes")),
             f"{s['id']}: unresolved affected node",
         )
         require(
-            all(i in edges for i in s.get("affectedEdges", [])),
+            all(i in edges for i in id_array(s, "affectedEdges")),
             f"{s['id']}: unresolved affected edge",
         )
         if "focusNodes" in s:
@@ -286,10 +289,10 @@ def validate(model, assessment):
             require(c["kind"] in ("existing", "proposed"), f"{c['id']}: invalid control kind")
             refs(c)
             require(
-                all(i in nodes for i in c.get("nodes", [])), f"{c['id']}: unresolved control node"
+                all(i in nodes for i in id_array(c, "nodes")), f"{c['id']}: unresolved control node"
             )
             require(
-                all(i in edges for i in c.get("edges", [])), f"{c['id']}: unresolved control edge"
+                all(i in edges for i in id_array(c, "edges")), f"{c['id']}: unresolved control edge"
             )
             for field, resolved in (
                 ("sourceIds", {source["id"] for source in s.get("sources", [])}),
@@ -346,20 +349,36 @@ def validate(model, assessment):
                 )
             if "edge" in effect:
                 require(effect["edge"] in edges, f"{c['id']}: unresolved effect edge")
-                scoped = (
-                    {step["edge"] for step in s["steps"]}
-                    | set(s.get("affectedEdges", []))
-                    | {edge for route in routes for edge in route["edges"]}
-                    | {
-                        edge
-                        for route in routes
-                        for branch in route.get("branches", [])
-                        for edge in branch["edges"]
-                    }
-                )
-                require(
-                    effect["edge"] in scoped, f"{c['id']}: effect edge is outside this scenario"
-                )
+                if (
+                    s.get("sourceMode") == "alternatives"
+                    and s.get("sources")
+                    and not s["steps"]
+                    and not routes
+                ):
+                    for source in s["sources"]:
+                        if c.get("sourceIds") and source["id"] not in c["sourceIds"]:
+                            continue
+                        source_edges = source.get("relatedEdges", s.get("affectedEdges", []))
+                        require(
+                            effect["edge"] in source_edges,
+                            f"{c['id']}: effect edge is outside source {source['id']}",
+                        )
+                else:
+                    scoped = (
+                        {step["edge"] for step in s["steps"]}
+                        | set(s.get("affectedEdges", []))
+                        | {edge for route in routes for edge in route["edges"]}
+                        | {
+                            edge
+                            for route in routes
+                            for branch in route.get("branches", [])
+                            for edge in branch["edges"]
+                        }
+                    )
+                    require(
+                        effect["edge"] in scoped,
+                        f"{c['id']}: effect edge is outside this scenario",
+                    )
                 if effect.get("traffic") == "continues" and routes:
                     for route in applicable_routes(c, routes, s.get("sources", [])):
                         route_edges = set(route["edges"]) | {
@@ -528,6 +547,11 @@ def main():
     try:
         model = json.loads(args.model.read_text(encoding="utf-8"))
         assessment = args.assessment.read_bytes().decode("utf-8")
+        if args.output.exists():
+            require(
+                not any(args.output.samefile(path) for path in (args.model, args.assessment)),
+                "output must not overwrite the model or assessment input",
+            )
         validate(model, assessment)
         diagnostic = layout_diagnostic(model, args.fit_area)
         assets = Path(__file__).resolve().parents[1] / "assets"

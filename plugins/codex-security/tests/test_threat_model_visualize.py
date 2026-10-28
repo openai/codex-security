@@ -201,6 +201,26 @@ class ControlValidation(unittest.TestCase):
                 (path + ("evidence",), {"ev": True}, "evidence must be an array of string IDs")
                 for path in (("nodes", 0), ("scenarios", 0), ("scenarios", 0, "controls", 0))
             ],
+            (
+                ("scenarios", 0, "affectedNodes"),
+                "ab",
+                "affectedNodes must be an array of string IDs",
+            ),
+            (
+                ("scenarios", 0, "affectedEdges"),
+                {"ab": True},
+                "affectedEdges must be an array of string IDs",
+            ),
+            (
+                ("scenarios", 0, "controls", 0, "nodes"),
+                "ab",
+                "nodes must be an array of string IDs",
+            ),
+            (
+                ("scenarios", 0, "controls", 0, "edges"),
+                ["ab", None],
+                "edges must be an array of string IDs",
+            ),
         ]
         for path, value, message in cases:
             with self.subTest(path=path), tempfile.TemporaryDirectory() as folder:
@@ -237,6 +257,45 @@ class ControlValidation(unittest.TestCase):
                 self.assertFalse(output.exists())
                 self.assertEqual(model_file.read_bytes(), original_model)
                 self.assertEqual(assessment.read_bytes(), original_assessment)
+
+    def test_builder_rejects_output_aliasing_either_input(self):
+        for input_name in ("model", "assessment"):
+            for alias in ("direct", "symlink", "hardlink"):
+                with (
+                    self.subTest(input=input_name, alias=alias),
+                    tempfile.TemporaryDirectory() as folder,
+                ):
+                    folder = Path(folder)
+                    inputs = {
+                        "model": folder / "model.json",
+                        "assessment": folder / "assessment.md",
+                    }
+                    inputs["model"].write_text(json.dumps(self.model), encoding="utf-8")
+                    inputs["assessment"].write_text("policy denies this caller", encoding="utf-8")
+                    original = {name: path.read_bytes() for name, path in inputs.items()}
+                    target = inputs[input_name]
+                    output = target if alias == "direct" else folder / "output.html"
+                    if alias == "symlink":
+                        output.symlink_to(target)
+                    elif alias == "hardlink":
+                        output.hardlink_to(target)
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            str(Path(builder.__file__)),
+                            str(inputs["model"]),
+                            "--assessment",
+                            str(inputs["assessment"]),
+                            "--output",
+                            str(output),
+                        ],
+                        text=True,
+                        capture_output=True,
+                    )
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn("output must not overwrite", result.stderr)
+                    for name, path in inputs.items():
+                        self.assertEqual(path.read_bytes(), original[name])
 
     def test_overview_edges_require_unique_resolved_ids(self):
         self.model["overviewEdges"] = ["ab"]
@@ -793,6 +852,43 @@ class ControlValidation(unittest.TestCase):
         scenario["routes"] = [{"id": "r", "label": "Flow", "edges": ["ab"], "evidence": ["ev"]}]
         with self.assertRaisesRegex(ValueError, "without routes"):
             self.check()
+
+    def test_unordered_effect_honors_each_source_relationship_override(self):
+        source = self.origin()
+        scenario = self.model["scenarios"][0]
+        second = dict(source, id="second", node="b")
+        scenario["sources"].append(second)
+        scenario["sourceMode"] = "alternatives"
+        scenario["steps"] = []
+        control = scenario["controls"][0]
+        effect = self.effect()
+        effect.pop("step")
+        cases = [
+            (["ab"], ["bc"], ["second"], "ab", "blocks", False),
+            ([], ["bc"], ["second"], "bc", "detects", True),
+            (["ab"], [], ["second"], "ab", "blocks", False),
+            (["ab"], None, ["second"], "ab", "blocks", True),
+            (["ab"], ["bc"], None, "ab", "blocks", False),
+            (["ab", "bc"], ["bc"], None, "bc", "detects", True),
+        ]
+        for shared, related, source_ids, edge, outcome, valid in cases:
+            with self.subTest(shared=shared, related=related, sources=source_ids, edge=edge):
+                scenario["affectedEdges"] = shared
+                second.pop("relatedEdges", None)
+                if related is not None:
+                    second["relatedEdges"] = related
+                control.pop("sourceIds", None)
+                if source_ids is not None:
+                    control["sourceIds"] = source_ids
+                effect.update(edge=edge, outcome=outcome)
+                effect.pop("traffic", None)
+                if outcome == "blocks":
+                    effect["traffic"] = "continues"
+                if valid:
+                    self.check()
+                else:
+                    with self.assertRaisesRegex(ValueError, "effect edge"):
+                        self.check()
 
     def test_control_scope_requires_resolved_nonempty_unique_ids(self):
         self.origin()

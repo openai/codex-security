@@ -14,10 +14,10 @@ function renderer() {
    setAttribute(key,value){this.attributes.set(key,String(value));},
    getAttribute(key){return this.attributes.get(key) ?? null;},
    removeAttribute(key){this.attributes.delete(key);},
-   querySelector(){return element('viewport');},
+   querySelector(selector){return selector==='#viewport' ? element('viewport') : null;},
    cloneNode(){
     const viewport={...element('viewport'),attributes:new Map(element('viewport').attributes)};
-    return {...this,attributes:new Map(this.attributes),querySelector:()=>viewport,
+    return {...this,attributes:new Map(this.attributes),querySelector:selector=>selector==='#viewport' ? viewport : null,
      insertAdjacentHTML(_,html){this.innerHTML+=html;}};
    }
   });
@@ -447,4 +447,42 @@ test('SVG export retains dimensions and fonts while clearing only the clone tran
  assert.match(exported.getAttribute('style'),/font-family:Inter, system-ui, sans-serif/);
  assert.equal(exported.querySelector('#viewport').getAttribute('transform'),null);
  assert.equal(viewport.getAttribute('transform'),transform,'export leaves the live view intact');
+});
+
+test('markerless control exports retain their evidence qualification',()=>{
+ for(const [outcome,basis,qualification] of [
+  ['detects','unverified','EXISTING · EFFECT UNVERIFIED'],
+  ['limits','declared','DECLARED · IF ENFORCED'],
+  ['does-not-block','verified','VERIFIED · SUPPLIED EVIDENCE']
+ ]) {
+  const r=renderer();
+  r.run(`const e=M.scenarios[0].controls[0].effect;
+   e.outcome=${JSON.stringify(outcome)};e.basis=${JSON.stringify(basis)};
+   delete e.marker;state.tab='controls';render();`);
+  assert.ok(r.elements.get('trace').innerHTML.includes(qualification));
+  assert.ok(r.run('exportMapSvg()').includes(qualification),`${outcome}: export retains ${basis}`);
+ }
+});
+
+test('actor inspection retains every authorized role and its evidence',()=>{
+ const r=renderer();
+ r.run(`M.evidence=[{id:'approver',label:'Approver citation'},{id:'requester',label:'Requester citation'}];
+ M.participants=[{id:'approve',node:'b',kind:'authorized-user',label:'Approver',evidence:['approver']},
+  {id:'request',node:'b',kind:'authorized-user',label:'Requester',evidence:['requester']}];
+ state.node='b';render();`);
+ const inspector=r.elements.get('inspector').innerHTML;
+ assert.match(inspector,/Approver citation/);
+ assert.match(inspector,/Requester citation/);
+});
+
+test('review priority does not hide a supplied severity',()=>{
+ const r=renderer();
+ r.run("Object.assign(M.scenarios[0],{priority:'low',severity:'critical'});render()");
+ let trace=r.elements.get('trace').innerHTML;
+ assert.match(trace,/low review priority/);
+ assert.match(trace,/critical severity/);
+ r.run("delete M.scenarios[0].priority;render()");
+ trace=r.elements.get('trace').innerHTML;
+ assert.match(trace,/critical severity/);
+ assert.doesNotMatch(trace,/review priority/);
 });

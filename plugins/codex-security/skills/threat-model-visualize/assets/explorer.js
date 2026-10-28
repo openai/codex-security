@@ -296,8 +296,8 @@ function renderTrace(s) {
     return `<button data-step="${i}" class="${state.step === i ? 'current ' : ''}${stopped ? 'stop ' + esc(blocker.kind) : ''}${unreached ? 'unreached' : ''}" aria-pressed="${state.step === i}" ${unreached ? 'disabled' : ''}><span>${stopped ? blocker.kind === 'proposed' ? 'Proposed control · would stop at ' : 'CONTROL · STOP AT ' : unreached ? 'NOT REACHED · ' : ''}${String(i + 1).padStart(2, '0')}</span>${esc(stopped ? blocker.effect.label : t.title)}</button>`;
   }).join('')}</div>`;
   const stepText = state.step >= 0 ? `<div class="step-description">${state.step === stop ? esc(blocker.effect.reason) : esc(s.steps[state.step].description)}</div>` : '';
-  const rating = s.priority ? ' · ' + esc(s.priority) + ' review priority' :
-    s.severity && !s.status.toLowerCase().includes(s.severity.toLowerCase()) ? ' · ' + esc(s.severity) + ' severity' : '';
+  const rating = (s.priority ? ' · ' + esc(s.priority) + ' review priority' : '') +
+    (s.severity && !s.status.toLowerCase().includes(s.severity.toLowerCase()) ? ' · ' + esc(s.severity) + ' severity' : '');
   return `<span class="badge">${esc(s.status)}${rating}</span><h2 class="trace-title">${esc(s.title)}</h2>${tabs}${state.tab === 'controls' ? renderControls(s) : `${sourceContext(s)}${routing}<p>${applicableControls().some(c => c.effect?.outcome === 'blocks' && c.effect.traffic === 'continues') ? '<strong>Assessment context:</strong> ' : ''}${esc(s.summary)}</p>${blocker ? effectCard(blocker, true) : ''}${blocker && continuing.length ? '<p>A separate barrier may stop the flow before another effect occurs.</p>' : ''}${continuing.map(c => effectCard(c, true)).join('')}${steps}${stepText}${!s.steps.length ? `<p>${esc(s.pathNote || 'Affected components only; an ordered path is not established.')}</p>` : ''}`}${context}`;
 }
 function render() {
@@ -493,6 +493,7 @@ function download(data, type, name) { const a = document.createElement('a'), url
 function exportMapSvg() {
   const clone = $('map').cloneNode(true), s = hypothesis(), {blocker, controls} = effectState(), c = selectedControl() || blocker || controls.find(item => item.effect.outcome === 'blocks' && item.effect.traffic === 'continues');
   clone.querySelector('#viewport').removeAttribute('transform');
+  const qualifiedCaption = control => `${ControlEffects.basis(control)} · ${ControlEffects.caption(control)}`;
   const foot = [s ? `${s.id}: ${s.title} · ${s.status}` : M.title,
     Array.isArray(M.overviewEdges) && !state.context ? 'Primary architecture connections remain visible; additional connections are available in the HTML.' : '',
     s && !routeState() && !s.steps.length ? 'Amber fill: related components; order unestablished · orange outline: scenario focus · teal: existing control · purple: proposed control' : 'Amber fill: on selected route · normal outline: transit · orange outline: scenario focus · teal: existing control · purple: proposed control',
@@ -501,9 +502,9 @@ function exportMapSvg() {
     routeState() ? `Documented flow: ${routeState().route.label}` : s && !s.steps.length ? (sourceState().sourceSpecific ? 'Related components: supplied for selected starting position; order unestablished.' : 'Related components: shared scenario set; order unestablished.') : '',
     s && applicableControls().some(item => item.effect?.outcome === 'blocks' && item.effect.traffic === 'continues') ? `Assessment context: ${s.summary}` : '',
     selectedControl()?.nodes?.length ? `C badge: selected control locus for ${selectedControl().title}; not proof of enforcement.` : '',
-    blocker ? `${ControlEffects.caption(blocker)}: ${blocker.effect.label}. ${blocker.effect.conditions} ${blocker.effect.residual}` : '',
-    ...controls.filter(item => item.effect.outcome === 'blocks' && item.effect.traffic === 'continues').map(item => `${ControlEffects.caption(item)}: ${item.effect.label}. ${item.effect.conditions} ${item.effect.residual}${blocker ? ' A separate barrier may stop the flow before this effect occurs.' : ''}`),
-    c && c.id !== blocker?.id && !controls.some(item => item.id === c.id && item.effect.traffic === 'continues') ? `${ControlEffects.caption(c)}: ${c.title}${c.effect ? `. ${c.effect.conditions} ${c.effect.residual}` : ''}` : '',
+    blocker ? `${qualifiedCaption(blocker)}: ${blocker.effect.label}. ${blocker.effect.conditions} ${blocker.effect.residual}` : '',
+    ...controls.filter(item => item.effect.outcome === 'blocks' && item.effect.traffic === 'continues').map(item => `${qualifiedCaption(item)}: ${item.effect.label}. ${item.effect.conditions} ${item.effect.residual}${blocker ? ' A separate barrier may stop the flow before this effect occurs.' : ''}`),
+    c && c.id !== blocker?.id && !controls.some(item => item.id === c.id && item.effect.traffic === 'continues') ? `${qualifiedCaption(c)}: ${c.title}${c.effect ? `. ${c.effect.conditions} ${c.effect.residual}` : ''}` : '',
     !blocker && !c ? M.exportNote || 'Assessment evidence; no runtime validation implied.' : ''];
   const lines = foot.filter(Boolean).flatMap(line => wrap(line, Math.floor((M.canvas.width - 40) / 7.5)));
   const height = lines.length * 22 + 30;
