@@ -34,7 +34,7 @@ function renderer() {
  element('model-data').textContent=JSON.stringify(model);element('assessment-data').textContent=JSON.stringify('source');
  const location={hash:'#scenario=routed&route=r&source=one&control=scoped'};
  const context=vm.createContext({document:{getElementById:element,querySelector:element,addEventListener(type,handler){handlers[type]=handler;},activeElement:null},window:{addEventListener(){}},location,history:{replaceState(_a,_b,h){location.hash=h;}},URLSearchParams,XMLSerializer:class {serializeToString(e){exported=e;return e.innerHTML;}}});
- for (const file of ['control-effects.js','route-paths.js','source-roles.js','explorer.js']) vm.runInContext(asset(file),context);
+ for (const file of ['control-effects.js','route-paths.js','source-roles.js','svg-layout.js','explorer.js']) vm.runInContext(asset(file),context);
  const run=code=>vm.runInContext(code,context);
  return {elements,location,run,get exported(){return exported;},
   outputs:()=>[element('map').innerHTML,run('exportMapSvg()')],

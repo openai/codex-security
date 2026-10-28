@@ -565,6 +565,7 @@ def main():
             ("__ROUTE_PATHS_JS__", "route-paths.js"),
             ("__SOURCE_ROLES_JS__", "source-roles.js"),
             ("__EXPLORER_CSS__", "explorer.css"),
+            ("__SVG_LAYOUT_JS__", "svg-layout.js"),
             ("__EXPLORER_JS__", "explorer.js"),
         ):
             replacements[placeholder] = (assets / filename).read_text(encoding="utf-8")

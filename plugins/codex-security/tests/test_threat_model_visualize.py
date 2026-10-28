@@ -603,7 +603,13 @@ class ControlValidation(unittest.TestCase):
         assessment = "policy denies this caller"
         html = self.build_html(assessment, "--fit-area", "800", "250")
         assets = Path(builder.__file__).parents[1] / "assets"
-        expected = ["control-effects.js", "route-paths.js", "source-roles.js", "explorer.js"]
+        expected = [
+            "control-effects.js",
+            "route-paths.js",
+            "source-roles.js",
+            "svg-layout.js",
+            "explorer.js",
+        ]
         for closing_space in ("", " \t\n"):
             with self.subTest(closing_space=repr(closing_space)):
                 document = html.replace("</script>", f"</script{closing_space}>").replace(
