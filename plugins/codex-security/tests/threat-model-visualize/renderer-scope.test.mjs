@@ -396,6 +396,30 @@ test('muted tail of a later-authored stopped edge paints below an earlier active
  }
 });
 
+test('inspected control edges preserve context and reachability in captions, arrows and paint order',()=>{
+ const r=twoStepRenderer();
+ r.run(`M.edges.push({id:'context',from:'a',to:'c',points:[[100,80],[150,200],[400,80]],label:'Context',labelX:240,labelY:180});
+ M.scenarios[0].controls.push({id:'inspect',kind:'existing',title:'Audit context',nodes:['b'],edges:['context','bc']});
+ state.control='inspect';render();`);
+ for(const blocked of [true,false]) {
+  if(!blocked)r.run("M.scenarios[0].controls=M.scenarios[0].controls.filter(c=>c.id!=='scoped');render()");
+  for(const output of r.outputs()) {
+   const highlighted=output.indexOf('data-edge-layer="highlighted"');
+   const group=id=>output.match(new RegExp(`<g data-edge="${id}"[^>]*>[\\s\\S]*?</g>`))[0];
+   const context=group('context'), later=group('bc');
+   assert.match(context,/data-path-state="context" opacity="1"/);
+   assert.match(context,/<polyline[^>]*stroke="#167765" stroke-width="3"/);
+   assert.match(context,/marker-end="url\(#arrow-/);
+   assert.match(context,/data-caption="edge:context"[\s\S]*<text[^>]*fill="#647e87"/);
+   assert.ok(output.indexOf('data-edge="context"')>highlighted);
+   assert.ok(later.includes(`data-path-state="${blocked?'unreached':'active'}" opacity="${blocked?'0.35':'1'}"`));
+   assert.equal(later.includes('marker-end='),!blocked);
+   assert.match(later,new RegExp(`data-caption="edge:bc"[\\s\\S]*<text[^>]*fill="${blocked?'#647e87':'#995122'}"`));
+   assert.equal(output.indexOf('data-edge="bc"')<highlighted,blocked);
+  }
+ }
+});
+
 test('proposed control headings, markers and cards stay concise while preserving conditional semantics',()=>{
  const r=renderer();
  r.run(`M.scenarios[0].controls=[{id:'proposal',kind:'proposed',title:'Admission policy',description:'Check the caller before admission',effect:{outcome:'blocks',basis:'hypothetical',step:1,edge:'ab',label:'Denied',reason:'Unauthorized caller denied',conditions:'Caller identity established and policy enforced',residual:'Authorized callers remain',marker:{at:.5,x:20,y:120,w:180}}}];

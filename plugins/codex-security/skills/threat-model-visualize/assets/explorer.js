@@ -216,18 +216,25 @@ function renderMap() {
   const primaryEdges = new Set(M.overviewEdges || M.edges.map(e => e.id));
   $('edge-context').hidden = !M.edges.some(e => !primaryEdges.has(e.id) && !selectedEdges.has(e.id));
   const visibleEdges = M.edges.filter(e => state.context || primaryEdges.has(e.id) || selectedEdges.has(e.id));
-  const edgeFlags = e => {
-    const index=edgesOnPath.get(e.id), stopped=!!blocker && !arrived && index===stop;
+  const edgeStates = new Map(visibleEdges.map(e => {
+    const index=edgesOnPath.get(e.id), active=activeEdges.has(e.id);
+    const controlAssociated=!!(selected?.edges?.includes(e.id) || selected?.effect?.edge===e.id);
+    const stopped=!!blocker && !arrived && index===stop;
     const unreached=routing ? routing.unreachedEdges.has(e.id) : stop>=0 && index>stop;
-    return {stopped,unreached,highlighted:stopped || (!unreached && (activeEdges.has(e.id) || selected?.edges?.includes(e.id) || selected?.effect?.edge===e.id))};
-  };
+    const highlighted=stopped || (!unreached && (active || controlAssociated));
+    const split=stopped ? ControlEffects.split(e.points,blocker.effect.marker.at) : null;
+    return [e.id,{index,active,controlAssociated,stopped,unreached,highlighted,split}];
+  }));
   const markerControls = [...(blocker ? [{c:blocker,barrier:true}] : []), ...(selected?.effect?.marker && selected.id!==blocker?.id && (selected.effect.outcome!=='blocks' || selected.effect.traffic==='continues') ? [{c:selected,barrier:false}] : [])];
   const captionItems = [
     ...markerControls.map(({c})=>({id:'control:'+c.id,kind:'control',priority:0,text:c.effect.label,size:16,weight:600,widths:[...new Set([c.effect.marker.w,Math.min(300,c.effect.marker.w+60),Math.max(160,c.effect.marker.w-40)].map(w=>Math.max(w,measureSvgText(ControlEffects.basis(c),10,700).w+24)-24))],cardWidth:c.effect.marker.w,anchor:[c.effect.marker.x+c.effect.marker.w/2,c.effect.marker.y+36]})),
-    ...visibleEdges.filter(e=>e.label).map(e=>({id:'edge:'+e.id,kind:'edge',priority:edgeFlags(e).highlighted?1:3,text:e.label,size:13,weight:400,widths:[180,140,220,100],edge:e,anchor:[e.labelX,e.labelY-4]})),
+    ...visibleEdges.filter(e=>e.label).map(e=>({id:'edge:'+e.id,kind:'edge',priority:edgeStates.get(e.id).highlighted?1:3,text:e.label,size:13,weight:400,widths:[180,140,220,100],edge:e,anchor:[e.labelX,e.labelY-4]})),
     ...(M.regions||[]).map(r=>({id:'region:'+r.id,kind:'region',priority:2,text:r.title,size:14,weight:600,widths:[...new Set([Math.max(40,r.w-24),Math.min(420,r.w+96),...[360,220,160,120,90].map(w=>Math.max(40,Math.min(w,r.w-24)))])],region:r,anchor:[r.x+12+Math.min(measureSvgText(r.title,14,600).w,r.w-24)/2,r.y+17]}))
   ];
-  const layoutEdges=visibleEdges.map(e=>({...e,layoutActive:edgeFlags(e).highlighted,layoutActivePoints:edgeFlags(e).stopped?ControlEffects.split(e.points,blocker.effect.marker.at).before:e.points}));
+  const layoutEdges=visibleEdges.map(e=>{
+    const {highlighted,split}=edgeStates.get(e.id);
+    return {...e,layoutActive:highlighted,layoutActivePoints:split ? split.before : e.points};
+  });
   const layoutKey=JSON.stringify([captionItems,M.nodes.map(n=>[n.x,n.y,n.w,n.h]),layoutEdges.map(e=>[e.id,e.points,e.layoutActive,e.layoutActivePoints]),M.canvas,typeof getComputedStyle==='function'?getComputedStyle($('map')).fontFamily:'Arial,sans-serif']);
   let layout=mapLayoutCache.get(layoutKey);
   if(!layout){
@@ -236,7 +243,10 @@ function renderMap() {
     mapLayoutCache.set(layoutKey,layout);
   }
   const layoutIssues=[...layout.values()].filter(p=>p.conflicts>0).map(p=>({id:p.id,kind:p.kind,conflicts:p.conflicts}));
-  const heads=SvgLayout.heads(visibleEdges.filter(e=>!edgeFlags(e).stopped && !edgeFlags(e).unreached),e=>edgeFlags(e).highlighted?1:0);
+  const heads=SvgLayout.heads(visibleEdges.filter(e=>{
+    const {stopped,unreached}=edgeStates.get(e.id);
+    return !stopped && !unreached;
+  }),e=>edgeStates.get(e.id).highlighted?1:0);
   const arrowId = head => 'arrow-'+String(head.size).replace('.','_');
   const markerSizes=[...new Set([...heads.values()].map(h=>h.size))];
   const defs='<defs>'+markerSizes.map(size=>`<marker id="${arrowId({size})}" markerUnits="userSpaceOnUse" viewBox="0 0 8 6" refX="8" refY="3" markerWidth="${size}" markerHeight="8" preserveAspectRatio="none" orient="auto"><path d="M0 0L8 3L0 6Z" fill="context-stroke"/></marker>`).join('')+'</defs>';
@@ -244,17 +254,15 @@ function renderMap() {
   // Visibility includes unreached paths; paint priority follows actual highlighting.
   const mutedEdges = [], highlightedEdges = [];
   visibleEdges.forEach(e => {
-    const index = edgesOnPath.get(e.id), stopped = blocker && !arrived && index === stop, unreached = routing ? routing.unreachedEdges.has(e.id) : stop >= 0 && index > stop;
-    const a = activeEdges.has(e.id), co = selected?.edges?.includes(e.id) || selected?.effect?.edge === e.id;
-    const color = co && !stopped ? controlColor(selected) : a ? '#bc541e' : '#9db2bc';
+    const {index,active,controlAssociated,stopped,unreached,highlighted,split} = edgeStates.get(e.id);
+    const color = controlAssociated && !stopped ? controlColor(selected) : active ? '#bc541e' : '#9db2bc';
     let body;
     if (stopped) {
-      const split = ControlEffects.split(e.points, blocker.effect.marker.at);
       mutedEdges.push(`<g data-edge-tail="${esc(e.id)}" data-path-state="unreached" aria-hidden="true"><polyline data-route-part="unreached" points="${pointsText(split.after)}" fill="none" stroke="#a8b6bd" stroke-width="1.6" stroke-dasharray="5 6" opacity=".5"/></g>`);
       body = `<polyline data-route-part="before" points="${pointsText(split.before)}" fill="none" stroke="#bc541e" stroke-width="3" ${e.conditional ? 'stroke-dasharray="7 5"' : ''}/>`;
-    } else body = `<polyline points="${pointsText(SvgLayout.clean(e.points))}" fill="none" stroke="${color}" stroke-width="${a && state.step >= 0 && index === state.step ? 4.5 : a || co ? 3 : 1.6}" ${e.conditional || unreached ? 'stroke-dasharray="6 5"' : ''} ${heads.get(e.id)?.visible ? `marker-end="url(#${arrowId(heads.get(e.id))})"` : ''}/>`;
-    const layer = stopped || (!unreached && (a || co)) ? highlightedEdges : mutedEdges;
-    layer.push(`<g data-edge="${esc(e.id)}" data-path-state="${stopped ? 'stopped' : unreached ? 'unreached' : a ? 'active' : 'context'}" opacity="${stopped ? 1 : unreached ? .35 : s && !a && !co ? .65 : 1}">${body}<title>${esc(e.label || e.id)}: ${esc(e.from)} → ${esc(e.to)}${heads.get(e.id)?.shared>1 ? ' · shared destination arrow' : ''}</title>${captionSvg(layout.get('edge:'+e.id),a ? '#995122' : '#647e87')}</g>`);
+    } else body = `<polyline points="${pointsText(SvgLayout.clean(e.points))}" fill="none" stroke="${color}" stroke-width="${active && state.step >= 0 && index === state.step ? 4.5 : active || controlAssociated ? 3 : 1.6}" ${e.conditional || unreached ? 'stroke-dasharray="6 5"' : ''} ${heads.get(e.id)?.visible ? `marker-end="url(#${arrowId(heads.get(e.id))})"` : ''}/>`;
+    const layer = highlighted ? highlightedEdges : mutedEdges;
+    layer.push(`<g data-edge="${esc(e.id)}" data-path-state="${stopped ? 'stopped' : unreached ? 'unreached' : active ? 'active' : 'context'}" opacity="${stopped ? 1 : unreached ? .35 : s && !active && !controlAssociated ? .65 : 1}">${body}<title>${esc(e.label || e.id)}: ${esc(e.from)} → ${esc(e.to)}${heads.get(e.id)?.shared>1 ? ' · shared destination arrow' : ''}</title>${captionSvg(layout.get('edge:'+e.id),active ? '#995122' : '#647e87')}</g>`);
   });
   const edges = `<g data-edge-layer="muted">${mutedEdges.join('')}</g><g data-edge-layer="highlighted">${highlightedEdges.join('')}</g>`;
   const nodes = M.nodes.map(n => {
