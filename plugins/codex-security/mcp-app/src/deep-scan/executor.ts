@@ -32,7 +32,13 @@ import {
   profileConfigOverrides,
 } from "../../../scripts/codex_profile.mjs";
 import { executablePathForSpawn } from "../executable-path.js";
+import { gitConfigurationEnvironment } from "../helpers/git-environment.js";
+import {
+  gitInspectionEnvironment,
+  trustedGitExecutable,
+} from "../helpers/inventory-git.js";
 import { writePrivateFile } from "./artifacts.js";
+import { createPrivateDirectory } from "../helpers/private-directory.js";
 import {
   classifyCodexWorkerError,
   codexWorkerTurnError,
@@ -104,6 +110,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       this.modelSettings.deepScanConfig === undefined
         ? undefined
         : resolve(dirname(request.promptPath), `limits-${randomUUID()}.toml`);
+    let gitEnvironmentDirectory: string | undefined;
     try {
       const parentSandbox = this.modelSettings.parentSandbox;
       if (!parentSandbox) {
@@ -111,9 +118,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           "Deep Scan cannot start a read-only worker without verified parent sandbox metadata.",
         );
       }
-      const workerProfile = workerPermissionProfile(parentSandbox);
       const originalCwd = process.cwd();
-      const childEnv = await snapshotWorkerEnvironment();
+      let childEnv = await snapshotWorkerEnvironment();
+      Object.assign(childEnv, gitConfigurationEnvironment(childEnv));
       // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
       const runtimeSettings = await (this.runtimeSettings ??=
         workerRuntimeSettings(childEnv));
@@ -127,6 +134,51 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         }
         childEnv[name] = value;
       }
+      const repository =
+        this.modelSettings.artifactContext?.repoRoot ??
+        request.workingDirectory;
+      childEnv = Object.fromEntries(
+        Object.entries(
+          await gitInspectionEnvironment(
+            childEnv,
+            trustedGitExecutable(repository, childEnv),
+            repository,
+            request.signal,
+          ),
+        ).filter((entry): entry is [string, string] => entry[1] !== undefined),
+      );
+      for (const name of Object.keys(childEnv)) {
+        if (
+          /^CODEX_SECURITY_GIT_ENVIRONMENT(?:_FILE)?$/u.test(name.toUpperCase())
+        )
+          delete childEnv[name];
+      }
+      const codexHome = childEnv.CODEX_HOME || join(homedir(), ".codex");
+      createPrivateDirectory(codexHome);
+      gitEnvironmentDirectory = await fs.mkdtemp(
+        join(codexHome, "codex-security-git-"),
+      );
+      if ((process.umask() & 0o700) !== 0)
+        await fs.chmod(gitEnvironmentDirectory, 0o700);
+      gitEnvironmentDirectory = await fs.realpath(gitEnvironmentDirectory);
+      const gitEnvironmentFile = join(
+        gitEnvironmentDirectory,
+        "environment.json",
+      );
+      await writePrivateFile(
+        gitEnvironmentFile,
+        JSON.stringify(gitConfigurationEnvironment(childEnv)),
+      );
+      if ((process.umask() & 0o600) !== 0)
+        await fs.chmod(gitEnvironmentFile, 0o600);
+      childEnv.CODEX_SECURITY_GIT_ENVIRONMENT_FILE = gitEnvironmentFile;
+      const workerProfile = workerPermissionProfile({
+        ...parentSandbox,
+        literalFilesystemDenies: [
+          ...(parentSandbox.literalFilesystemDenies ?? []),
+          gitEnvironmentDirectory,
+        ],
+      });
       if (deepConfigFile !== undefined) {
         const config = this.modelSettings.deepScanConfig!;
         // The saved run owns these limits, including after a coordinator restart.
@@ -342,6 +394,8 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         await fs.rm(includePathsFile, { force: true });
       if (deepConfigFile !== undefined)
         await fs.rm(deepConfigFile, { force: true });
+      if (gitEnvironmentDirectory !== undefined)
+        await fs.rm(gitEnvironmentDirectory, { recursive: true, force: true });
     }
   }
 
@@ -405,6 +459,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
               }
             : {}),
         },
+        env_vars: ["CODEX_SECURITY_GIT_ENVIRONMENT_FILE"],
         required: true,
         startup_timeout_sec: 180,
         tool_timeout_sec: 86_400,

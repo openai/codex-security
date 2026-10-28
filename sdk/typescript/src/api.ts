@@ -234,6 +234,8 @@ import {
   prepareCodexSecurityCredentialHome,
   preserveCodexSecurityPluginRegistration,
   pluginExecutionEnvironment,
+  gitConfigurationEnvironment,
+  gitInspectionEnvironment,
   environmentWithGit,
   pluginMetadata,
   planOutputArchive,
@@ -301,6 +303,7 @@ interface PreparedRuntime {
   bootstrapWorkspace?: string;
   configPath?: string;
   deepScanConfigDirectory?: string;
+  gitEnvironmentDirectory?: string;
   deepScanConfigPath?: string;
   providerProfile?: ProviderProfile;
   plugin: PluginInstall;
@@ -1200,7 +1203,7 @@ export class CodexSecurity {
       session.sessionConfig["approval_policy"] = "never";
       const { codex } = await this.#createSessionCodex(
         session,
-        { command: "validate" },
+        { command: "validate", signal },
         {
           CODEX_SECURITY_REPOSITORY: inputs.repository,
           CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
@@ -1364,7 +1367,7 @@ export class CodexSecurity {
       };
       const { codex } = await this.#createSessionCodex(
         session,
-        { command: "patch" },
+        { command: "patch", signal },
         {
           CODEX_SECURITY_REPOSITORY: repository,
           CODEX_SECURITY_PLUGIN_ROOT: session.runtime.plugin.pluginRoot,
@@ -1762,7 +1765,7 @@ export class CodexSecurity {
       );
       const { codex } = await this.#createSessionCodex(
         session,
-        { command: "policy" },
+        { command: "policy", signal },
         {
           CODEX_SECURITY_REPOSITORY: target.repository,
           CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
@@ -2510,7 +2513,13 @@ export class CodexSecurity {
         python,
         pluginRoot: runtime.plugin.pluginRoot,
         environment: {
-          ...environmentWithGit(git.environment, git),
+          ...(await gitInspectionEnvironment({
+            python,
+            environment: git.environment,
+            repository: repo,
+            git,
+            signal,
+          })),
           ...sqliteEnvironment,
           CODEX_SECURITY_STATE_DIR: stateDirectory,
         },
@@ -2852,7 +2861,7 @@ export class CodexSecurity {
       const { codex, environment, codexOptions } =
         await this.#createSessionCodex(
           session,
-          { command: "scan", mode },
+          { command: "scan", mode, signal },
           runtimePaths,
           options.auth,
           git,
@@ -3673,6 +3682,7 @@ export class CodexSecurity {
     }
     for (const directory of [
       runtime?.deepScanConfigDirectory,
+      runtime?.gitEnvironmentDirectory,
       runtime?.bootstrapWorkspace,
     ]) {
       if (directory === undefined) continue;
@@ -3743,7 +3753,11 @@ export class CodexSecurity {
 
   async #createSessionCodex(
     session: PreparedSession,
-    { command, mode }: { command: string; mode?: ScanMode },
+    {
+      command,
+      mode,
+      signal = this.#abortController.signal,
+    }: { command: string; mode?: ScanMode; signal?: AbortSignal },
     runtimePaths: Record<string, string>,
     auth: ScanAuthMode = "auto",
     git?: InspectedExecutable,
@@ -3848,6 +3862,31 @@ export class CodexSecurity {
       sessionConfig,
     } = session;
     const commandAuth = hasCommandAuth(sessionConfig);
+    runtime.gitEnvironmentDirectory ??= await mkdtemp(
+      join(runtimeHome, "codex-security-git-"),
+    );
+    if ((process.umask() & 0o700) !== 0)
+      await chmod(runtime.gitEnvironmentDirectory, 0o700);
+    const gitEnvironmentFile = join(
+      runtime.gitEnvironmentDirectory,
+      `${randomUUID()}.json`,
+    );
+    await writeFile(
+      gitEnvironmentFile,
+      JSON.stringify(
+        gitConfigurationEnvironment(
+          await gitInspectionEnvironment({
+            python,
+            environment: git?.environment ?? runtime.environment,
+            repository: runtimePaths["CODEX_SECURITY_REPOSITORY"]!,
+            git,
+            signal,
+          }),
+        ),
+      ),
+      { flag: "wx", mode: 0o600, signal },
+    );
+    if ((process.umask() & 0o600) !== 0) await chmod(gitEnvironmentFile, 0o600);
     const environment: ProcessEnvironment = {
       ...environmentWithGit(
         pluginExecutionEnvironment(
@@ -3869,6 +3908,7 @@ export class CodexSecurity {
         : { [externalProvider.env_key]: apiKey! }),
       CODEX_HOME: runtime.codexHome,
       ...runtimePaths,
+      CODEX_SECURITY_GIT_ENVIRONMENT_FILE: gitEnvironmentFile,
     };
     for (const name of Object.keys(environment)) {
       if (name.toUpperCase() === SAFETY_IDENTIFIER_ENV)
@@ -3878,14 +3918,18 @@ export class CodexSecurity {
       environment[SAFETY_IDENTIFIER_ENV] = session.safetyIdentifier;
     }
     const sdkCodexConfig = structuredCodexConfig(config ?? sessionConfig);
-    // This snapshot outlives a Deep Scan when the client reuses its runtime.
-    if (runtime.deepScanConfigPath !== undefined) {
+    // Private runtime snapshots outlive a scan when the client reuses its runtime.
+    if (
+      runtime.deepScanConfigPath !== undefined ||
+      runtime.gitEnvironmentDirectory !== undefined
+    ) {
       configOverrides = [
         `permissions.${SCAN_PERMISSION_PROFILE}.filesystem=${inlineToml({
           ":root": "read",
           ":workspace_roots": "write",
           [runtimeHome]: { ".": "deny" },
-          ...(runtime.deepScanConfigDirectory === undefined
+          ...(runtime.deepScanConfigDirectory === undefined &&
+          runtime.deepScanConfigPath !== undefined
             ? { [runtime.deepScanConfigPath]: { ".": "deny" } }
             : {}),
         })}`,

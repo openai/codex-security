@@ -106,6 +106,115 @@ test("diff previews stay inside the selected repository", () => {
   );
 });
 
+test.each([false, true])(
+  "diff registration and inventory inspect local objects with a missing blob=%s",
+  (missing) => {
+    const python = pythonExecutable();
+    expect(python).not.toBeNull();
+    const root = temporaryRoots.create("codex-security-diff-local-objects-");
+    const repository = join(root, "repository");
+    const origin = join(root, "origin.git");
+    mkdirSync(repository);
+    git(repository, "init", "-q");
+    writeFileSync(join(repository, "changed.py"), "value = 1\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "base");
+    const base = git(repository, "rev-parse", "HEAD");
+    writeFileSync(join(repository, "changed.py"), "value = 2\n");
+    git(repository, "commit", "-qam", "changed");
+    const head = git(repository, "rev-parse", "HEAD");
+    const blob = git(repository, "rev-parse", "HEAD:changed.py");
+    git(repository, "clone", "--bare", "--no-local", ".", origin);
+    git(repository, "config", "remote.origin.url", origin);
+    git(repository, "config", "remote.origin.promisor", "true");
+    git(repository, "config", "remote.origin.partialclonefilter", "blob:none");
+    git(repository, "config", "protocol.file.allow", "always");
+    const object = join(
+      repository,
+      ".git",
+      "objects",
+      blob.slice(0, 2),
+      blob.slice(2),
+    );
+    if (missing) rmSync(object);
+    const env = {
+      ...process.env,
+      GIT_NO_LAZY_FETCH: "0",
+      GIT_ALLOW_PROTOCOL: "file",
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    };
+    const scan = join(root, "scan");
+    mkdirSync(scan, { mode: 0o700 });
+    const registration = runNodePython(
+      python!,
+      [
+        join(PLUGIN_ROOT, "scripts", "workbench_db.py"),
+        "register-cli-scan",
+        "--repository",
+        repository,
+        "--scan-dir",
+        scan,
+        "--recipe-json",
+        JSON.stringify({
+          config: {},
+          mode: "standard",
+          repository,
+          target: { kind: "refs", paths: [], base, head },
+        }),
+      ],
+      { env },
+    );
+    expect(registration.status, registration.stderr).toBe(missing ? 1 : 0);
+    if (missing)
+      expect(registration.stderr).toContain(
+        "Unable to read committed diff blob",
+      );
+    else expect(JSON.parse(registration.stdout).scopeFileCount).toBe(1);
+    expect(existsSync(object)).toBe(!missing);
+
+    for (const command of ["generate-in-scope-files", "make-diff-rank-input"]) {
+      const inventory = command === "generate-in-scope-files";
+      const output = join(root, command);
+      const result = spawnSync(
+        nodeCommand().command,
+        [
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          command,
+          "--repo",
+          repository,
+          ...(inventory ? ["--scope", "."] : []),
+          inventory ? "--diff-base" : "--base",
+          base,
+          inventory ? "--diff-head" : "--head",
+          head,
+          "--out",
+          output,
+        ],
+        { encoding: "utf8", env },
+      );
+      if (missing) {
+        expect(result.status, result.stderr).not.toBe(0);
+        expect(result.stderr).toContain("Unable to read committed diff blob");
+      } else {
+        expect(result.status, result.stderr).toBe(0);
+        if (inventory)
+          expect(readFileSync(output, "utf8")).toBe("changed.py\n");
+        else
+          expect(JSON.parse(readFileSync(output, "utf8"))).toMatchObject({
+            path: "changed.py",
+            preview: "value = 2",
+          });
+      }
+      expect(existsSync(object)).toBe(!missing);
+    }
+    if (missing) {
+      // The configured local remote can supply the object when explicitly used.
+      git(repository, "fetch", "origin", blob);
+      expect(git(repository, "cat-file", "-p", blob)).toBe("value = 2");
+    }
+  },
+);
+
 test("preserves Unicode Git paths and legacy-encoded commit metadata", () => {
   const root = temporaryRoots.create("codex-security-diff-rank-unicode-");
   const repository = join(root, "repository-漢字");

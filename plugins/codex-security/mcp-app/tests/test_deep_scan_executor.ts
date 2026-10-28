@@ -1,4 +1,9 @@
 import {
+  assertReadOnlyWorkerPolicy,
+  workerPermissionProfileOverride,
+  withGitEnvironmentDeny,
+} from "./support/worker-permissions.ts";
+import {
   workerGitEnvironment,
   workerRuntimeEnvironment,
   workerScanEnvironment,
@@ -60,6 +65,7 @@ import { testConcurrentWorkerExecutableAliases } from "./deep_scan_executable_al
 import { testDeepScanContextSnapshots } from "./deep_scan_context_snapshot_cases.ts";
 import { workerTelemetryFixture } from "./deep_scan_worker_telemetry_fixture.ts";
 import { testWorkerCyberAccessSettings } from "./deep_scan_worker_settings_cases.ts";
+import { testWorkerGitConfiguration } from "./deep_scan_git_environment_cases.ts";
 
 const executorSource = new URL("../src/deep-scan/executor.ts", import.meta.url);
 const { bundledCodexSdkEnvironment } =
@@ -88,7 +94,12 @@ const {
   parseDeepScan,
 } = await importModule({
   define: {
-    "import.meta.url": JSON.stringify(executorSource.href),
+    "import.meta.url": JSON.stringify(
+      new URL(
+        "../../../../sdk/typescript/_bundled_plugin/mcp/server.mjs",
+        import.meta.url,
+      ).href,
+    ),
   },
   stdin: {
     // Expose the environment snapshot only for tests.
@@ -126,6 +137,17 @@ try {
     await check(t, testLargeScopeTransport);
     await check(t, testOpenAiCredentialsReachWorker);
     await check(t, testWorkerRuntimeSettings);
+    await check(
+      t,
+      () =>
+        testWorkerGitConfiguration({
+          CodexSdkWorkerExecutor,
+          parentSandbox: trustedParentSandbox,
+          withWorkerFixture,
+          workerRequest,
+        }),
+      "Git configuration",
+    );
     await check(t, testUnsupportedProviderSnapshotFailsBeforeLaunch);
     await check(
       t,
@@ -1081,7 +1103,12 @@ async function testSdkInvocationAndThreadCapture() {
             .permissions,
         ),
       ),
-      { codex_security_deep_scan_worker: deniedWorkerPermissionProfile },
+      {
+        codex_security_deep_scan_worker: withGitEnvironmentDeny(
+          deniedWorkerPermissionProfile,
+          invocation.gitEnvironmentFile,
+        ),
+      },
     );
     const preflight = await readJson(fixture.preflightMarkerPath);
     assert.deepEqual(
@@ -2059,8 +2086,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ),
               ),
               {
-                codex_security_deep_scan_worker:
+                codex_security_deep_scan_worker: withGitEnvironmentDeny(
                   workerConfigurations[index].permissionProfile,
+                  workerLaunch.environment!
+                    .CODEX_SECURITY_GIT_ENVIRONMENT_FILE!,
+                ),
               },
             );
             assert.equal(
@@ -3837,38 +3867,6 @@ async function runFixtureWorker(
     await writeFile(promptPath, `${prompt}\n`);
     return await runWorker(promptPath, workingDirectory, { kind, subagents });
   });
-}
-
-function assertReadOnlyWorkerPolicy(args: readonly string[]) {
-  assert.equal(args.includes("--sandbox"), false);
-  assert.equal(args.includes("--add-dir"), false);
-  assert.deepEqual(
-    args.filter((arg: string) => arg.startsWith("approval_policy=")),
-    ['approval_policy="never"'],
-  );
-  assert.equal(
-    args.some((arg: string) => arg.includes("network_access")),
-    false,
-  );
-  const override = workerPermissionProfileOverride(args);
-  assertConfigOverrides(args, {
-    "permissions.codex_security_deep_scan_worker.extends": ":read-only",
-    "permissions.codex_security_deep_scan_worker.filesystem.:root": "read",
-    "permissions.codex_security_deep_scan_worker.network.enabled": false,
-  });
-  assert.equal(override.includes('"write"'), false);
-}
-
-function workerPermissionProfileOverride(args: readonly string[]) {
-  assert.deepEqual(
-    args.filter((arg: string) => arg.startsWith("default_permissions=")),
-    ['default_permissions="codex_security_deep_scan_worker"'],
-  );
-  const overrides = args.filter((arg: string) =>
-    arg.startsWith("permissions.codex_security_deep_scan_worker="),
-  );
-  assert.equal(overrides.length, 1);
-  return overrides[0];
 }
 
 function assertWorkerSubagentPolicy(

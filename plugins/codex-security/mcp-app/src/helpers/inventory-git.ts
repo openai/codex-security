@@ -1,6 +1,8 @@
 import {
   environmentValue,
+  isMissingPathError,
   resolvedPathText as canonical,
+  readChunks,
 } from "./helper-files";
 import {
   spawn,
@@ -38,12 +40,24 @@ import {
   windows,
 } from "./inventory-paths";
 import { createSourceSampler } from "./source-preview";
+import { gitConfigurationEnvironment } from "./git-environment";
 
 interface ToolResult {
   status: number | null;
   signal: NodeJS.Signals | null;
   stdout: Buffer;
   stderr: string;
+}
+
+class GitFailure extends Error {
+  constructor(readonly result: ToolResult) {
+    super(
+      result.stderr.trim() ||
+        (result.signal
+          ? `Git terminated by ${result.signal}`
+          : `Git exited with status ${result.status}`),
+    );
+  }
 }
 
 const repositoryEnvironment = [
@@ -83,19 +97,27 @@ function trustedTool(
   name: "git" | "rg",
   target: string,
   rawWindowsLookup = false,
+  environment: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
+  const value = (name: string) => {
+    if (environment === process.env) return environmentValue(name);
+    const key = windows
+      ? Object.keys(environment)
+          .sort()
+          .find((key) => key.toUpperCase() === name)
+      : name;
+    return key === undefined ? undefined : environment[key];
+  };
   let protectedRoot = canonical(target);
   for (const ancestor of ancestors(protectedRoot))
     if (exists(append(ancestor, ".git"))) protectedRoot = ancestor;
-  const configured =
-    name === "git" ? environmentValue("CODEX_SECURITY_GIT") : undefined;
+  const configured = name === "git" ? value("CODEX_SECURITY_GIT") : undefined;
   if (configured === "") return undefined;
   if (configured !== undefined && !isAbsolute(configured))
     throw new Error(
       "CODEX_SECURITY_GIT must name an absolute trusted executable.",
     );
-  const searchPath =
-    environmentValue("PATH") ?? (windows ? ".;C:\\bin" : "/usr/bin:/bin");
+  const searchPath = value("PATH") ?? (windows ? ".;C:\\bin" : "/usr/bin:/bin");
   const directories =
     windows && name === "rg"
       ? windowsToolPaths(searchPath)
@@ -164,6 +186,13 @@ function trustedTool(
     return invocation;
   }
   return undefined;
+}
+
+export function trustedGitExecutable(
+  repository: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  return trustedTool("git", repository, false, environment);
 }
 
 function windowsToolPaths(searchPath: string): string[] {
@@ -285,15 +314,22 @@ function spawnTool(
   return { child, failureMarker };
 }
 
-function inheritedToolPaths(additional: string[] = []): Record<string, string> {
-  const keys = Object.keys(process.env).sort();
+function inheritedToolPaths(
+  additional: string[] = [],
+  environment: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const keys = Object.keys(environment).sort();
   const toolConfiguration = keys.filter((name) => {
     const key = windows ? name.toUpperCase() : name;
     return (
       [
         "GIT_CONFIG_GLOBAL",
         "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_NOSYSTEM",
         "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_ATTR_SOURCE",
+        "GIT_REPLACE_REF_BASE",
       ].includes(key) ||
       /^GIT_CONFIG_(?:KEY|VALUE)_\d+$/u.test(key) ||
       // Restore loader settings before exec: the tool cannot repair them after
@@ -312,23 +348,217 @@ function inheritedToolPaths(additional: string[] = []): Record<string, string> {
       const key = windows
         ? (keys.find((key) => key.toUpperCase() === name.toUpperCase()) ?? name)
         : name;
-      const value = environmentValue(key);
+      const value =
+        environment === process.env ? environmentValue(key) : environment[key];
       return value === undefined ? [] : [[name, value]];
     }),
   );
 }
 
-function gitProcess(repo: string, args: string[]) {
+type GitSetting = { key: string; value?: string };
+
+function authenticationHeader(key: string): boolean {
+  return /^http(?:\..*)?\.extraheader$/isu.test(key);
+}
+
+function commandSettings(output: Buffer): GitSetting[] {
+  const fields = paths(output),
+    settings: GitSetting[] = [];
+  for (let index = 0; index < fields.length; index += 2) {
+    if (fields[index] !== "command line:") continue;
+    const record = fields[index + 1]!,
+      separator = record.indexOf("\n");
+    // Git rejects newlines in command-setting keys. File subsection keys can
+    // contain them, so discard other scopes before decoding the record.
+    settings.push(
+      separator < 0
+        ? { key: record }
+        : {
+            key: record.slice(0, separator),
+            value: record.slice(separator + 1),
+          },
+    );
+  }
+  return settings;
+}
+
+export async function gitInspectionEnvironment(
+  environment: NodeJS.ProcessEnv,
+  gitExecutable: string | undefined,
+  repository: string,
+  signal?: AbortSignal,
+): Promise<NodeJS.ProcessEnv> {
+  const env = { ...environment, ...inheritedToolPaths([], environment) };
+  const configuration = gitConfigurationEnvironment(env);
+  if (windows)
+    for (const name of Object.keys(env))
+      if (Object.hasOwn(configuration, name.toUpperCase())) delete env[name];
+  Object.assign(env, configuration);
+  for (const name of Object.keys(env))
+    if (/^CODEX_SECURITY_GIT_ENVIRONMENT(?:_FILE)?$/iu.test(name))
+      delete env[name];
+  if (gitExecutable === undefined) {
+    for (const name of Object.keys(env))
+      if (/^GIT_CONFIG_(?:COUNT|PARAMETERS|(?:KEY|VALUE)_\d+)$/u.test(name))
+        delete env[name];
+    return env;
+  }
+  const headerIndexes = Object.keys(env).flatMap((name) => {
+    const match = /^GIT_CONFIG_KEY_(\d+)$/u.exec(name);
+    return match && authenticationHeader(env[name]!) ? [match[1]!] : [];
+  });
+  if (!headerIndexes.length && !env.GIT_CONFIG_PARAMETERS) return env;
+
+  const parserEnvironment = (
+    source: NodeJS.ProcessEnv,
+    parametersOnly = false,
+  ) => {
+    const result = { ...source };
+    for (const name of Object.keys(result)) {
+      const key = windows ? name.toUpperCase() : name;
+      if (
+        repositoryEnvironment.includes(key) ||
+        key === "GIT_CONFIG" ||
+        (parametersOnly &&
+          /^GIT_CONFIG_(?:COUNT|(?:KEY|VALUE)_\d+)$/u.test(key))
+      )
+        delete result[name];
+    }
+    result.GIT_NO_LAZY_FETCH = "1";
+    result.GIT_ALLOW_PROTOCOL = "";
+    return result;
+  };
+  const run = async (args: string[], selected: NodeJS.ProcessEnv) => {
+    const execution = spawnTool(
+      gitExecutable,
+      ["--no-pager", "-C", repository, ...args],
+      { env: selected, stdio: ["ignore", "pipe", "pipe"], signal },
+      inheritedToolPaths([], selected),
+    );
+    return requireSuccess(await collect(execution));
+  };
+  const parserArgs = [
+    "config",
+    "--null",
+    "--list",
+    "--show-origin",
+    "--no-includes",
+  ];
+  // Validate with Git before removing a setting, preserving native diagnostics
+  // for malformed counts, missing values, and malformed parameter quoting.
+  const full = commandSettings(await run(parserArgs, parserEnvironment(env)));
+  const parameters = commandSettings(
+    await run(parserArgs, parserEnvironment(env, true)),
+  );
+  const count = full.length - parameters.length;
+  const original = { ...env };
+  for (const index of headerIndexes) {
+    delete env[`GIT_CONFIG_KEY_${index}`];
+    delete env[`GIT_CONFIG_VALUE_${index}`];
+  }
+  if (
+    count > 0 &&
+    full.slice(0, count).some((setting) => authenticationHeader(setting.key)) &&
+    full
+      .slice(0, count)
+      .every(
+        (_setting, index) =>
+          original[`GIT_CONFIG_KEY_${index}`] !== undefined &&
+          original[`GIT_CONFIG_VALUE_${index}`] !== undefined,
+      )
+  ) {
+    const retained: { key: string; value: string }[] = [];
+    for (let index = 0; index < count; index++) {
+      const key = original[`GIT_CONFIG_KEY_${index}`]!,
+        value = original[`GIT_CONFIG_VALUE_${index}`]!;
+      delete env[`GIT_CONFIG_KEY_${index}`];
+      delete env[`GIT_CONFIG_VALUE_${index}`];
+      if (!authenticationHeader(key)) retained.push({ key, value });
+    }
+    env.GIT_CONFIG_COUNT = String(retained.length);
+    retained.forEach(({ key, value }, index) => {
+      env[`GIT_CONFIG_KEY_${index}`] = key;
+      env[`GIT_CONFIG_VALUE_${index}`] = value;
+    });
+  }
+  if (parameters.some((setting) => authenticationHeader(setting.key))) {
+    const selected = parserEnvironment(env, true);
+    delete selected.GIT_CONFIG_PARAMETERS;
+    const quote = async (arguments_: string[]): Promise<string> => {
+      try {
+        return decodeGitPath(
+          await run(["rev-parse", "--sq-quote", ...arguments_], selected),
+        ).trim();
+      } catch (error) {
+        const failure = error as NodeJS.ErrnoException;
+        // Native quoting can exceed argv space even when the original
+        // single PARAMETERS environment value fits.
+        if (
+          (failure.code !== "E2BIG" &&
+            failure.code !== "ENAMETOOLONG" &&
+            !(
+              failure.code === "WINDOWS_PROCESS_ERROR" && failure.errno === 206
+            )) ||
+          arguments_.length < 2
+        )
+          throw error;
+        const middle = Math.floor(arguments_.length / 2);
+        return `${await quote(arguments_.slice(0, middle))} ${await quote(arguments_.slice(middle))}`;
+      }
+    };
+    const pieces: string[] = [],
+      pending: string[] = [];
+    for (const { key, value } of parameters) {
+      if (authenticationHeader(key)) continue;
+      // Keep legacy quoting for older Git. An '=' inside the key needs the
+      // separate key/value form already accepted by the native parser.
+      if (!key.includes("=")) {
+        pending.push(value === undefined ? key : `${key}=${value}`);
+        continue;
+      }
+      if (pending.length) {
+        pieces.push(await quote(pending));
+        pending.length = 0;
+      }
+      pieces.push(
+        `${await quote([key])}=${value === undefined ? "" : await quote([value])}`,
+      );
+    }
+    if (pending.length) pieces.push(await quote(pending));
+    env.GIT_CONFIG_PARAMETERS = pieces.join(" ");
+  }
+  return env;
+}
+
+async function gitProcess(
+  repo: string,
+  args: string[],
+  caseSensitivePathspecs = false,
+  ignoreConfigFile = false,
+) {
   const command = trustedTool("git", repo);
   if (!command) return undefined;
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  const inherited = inheritedToolPaths();
+  const env = await gitInspectionEnvironment(process.env, command, repo);
+  const inherited = inheritedToolPaths([], env);
   for (const name of Object.keys(env)) {
     const key = windows ? name.toUpperCase() : name;
-    if (repositoryEnvironment.includes(key) || key === "GIT_LITERAL_PATHSPECS")
+    if (
+      repositoryEnvironment.includes(key) ||
+      (ignoreConfigFile && key === "GIT_CONFIG") ||
+      (caseSensitivePathspecs && key === "GIT_ICASE_PATHSPECS") ||
+      [
+        "GIT_LITERAL_PATHSPECS",
+        "GIT_NO_LAZY_FETCH",
+        "GIT_ALLOW_PROTOCOL",
+      ].includes(key)
+    )
       delete env[name];
   }
   env.GIT_LITERAL_PATHSPECS = "1";
+  // Local inspection must not fetch objects through a configured transport.
+  env.GIT_NO_LAZY_FETCH = "1";
+  env.GIT_ALLOW_PROTOCOL = "";
+  if (caseSensitivePathspecs) env.GIT_ICASE_PATHSPECS = "0";
   return spawnTool(
     command,
     [
@@ -422,14 +652,26 @@ async function collect({
   };
 }
 
-export async function git(repo: string, args: string[]) {
+export async function git(
+  repo: string,
+  args: string[],
+  caseSensitivePathspecs = false,
+  ignoreConfigFile = false,
+) {
   try {
-    const execution = gitProcess(repo, args);
+    const execution = await gitProcess(
+      repo,
+      args,
+      caseSensitivePathspecs,
+      ignoreConfigFile,
+    );
     if (execution) {
       execution.child.stdin!.end();
       return await collect(execution);
     }
   } catch (error) {
+    if (error instanceof GitFailure)
+      return { ...error.result, stdout: Buffer.alloc(0) };
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   return { status: 127, signal: null, stdout: Buffer.alloc(0), stderr: "" };
@@ -476,13 +718,7 @@ function paths(data: Buffer): string[] {
   return decodeGitPath(data).split("\0").filter(Boolean);
 }
 function requireSuccess(result: ToolResult): Buffer {
-  if (result.status !== 0)
-    throw new Error(
-      result.stderr.trim() ||
-        (result.signal
-          ? `Git terminated by ${result.signal}`
-          : `Git exited with status ${result.status}`),
-    );
+  if (result.status !== 0) throw new GitFailure(result);
   return result.stdout;
 }
 
@@ -563,33 +799,210 @@ export async function directoryPaths(
 export interface Change {
   path: string;
   status: string;
+  sourcePath?: string;
 }
-async function changed(repo: string, args: string[]): Promise<Change[]> {
+
+async function gitPathsOutput(
+  repo: string,
+  args: string[],
+  names: string[],
+): Promise<Buffer> {
+  if (!names.length) return Buffer.alloc(0);
+  try {
+    return requireSuccess(await git(repo, [...args, "--", ...names], true));
+  } catch (error) {
+    const failure = error as NodeJS.ErrnoException;
+    // Retry only an actual native argument-length failure, without a path cap.
+    if (
+      (failure.code !== "E2BIG" &&
+        failure.code !== "ENAMETOOLONG" &&
+        !(failure.code === "WINDOWS_PROCESS_ERROR" && failure.errno === 206)) ||
+      names.length < 2
+    )
+      throw error;
+    const middle = Math.floor(names.length / 2);
+    return Buffer.concat([
+      await gitPathsOutput(repo, args, names.slice(0, middle)),
+      await gitPathsOutput(repo, args, names.slice(middle)),
+    ]);
+  }
+}
+
+async function worktreeObjectHashes(
+  repo: string,
+  names: string[],
+): Promise<Map<string, string>> {
+  let output: Buffer;
+  try {
+    output = await gitPathsOutput(repo, ["hash-object"], names);
+  } catch (error) {
+    if (!(error instanceof GitFailure)) throw error;
+    const readable: string[] = [];
+    for (const path of names) {
+      const absolute = append(repo, path);
+      try {
+        if (linkedParent(repo, absolute) || !regular(absolute)) continue;
+        for (const _ of readChunks(absolute)) break;
+      } catch {
+        continue;
+      }
+      readable.push(path);
+    }
+    if (readable.length === names.length) throw error;
+    return worktreeObjectHashes(repo, readable);
+  }
+  const hashes = gitLine(output).split(/\r?\n/u);
+  return new Map(names.map((name, index) => [name, hashes[index]!]));
+}
+
+async function unchangedWorktreeFiles(
+  repo: string,
+  candidates: Map<string, string>,
+): Promise<Set<string>> {
+  if (!candidates.size) return new Set();
+  const replacements = new Set(
+    gitLine(
+      requireSuccess(await git(repo, ["replace", "-l", "--format=short"])),
+    )
+      .toLowerCase()
+      .split(/\r?\n/u),
+  );
+  const replaced = [...candidates.values()].some((oid) =>
+    replacements.has(oid),
+  );
+  if (
+    replaced &&
+    !("GIT_NO_REPLACE_OBJECTS" in gitConfigurationEnvironment(process.env))
+  ) {
+    const enabled = await git(
+      repo,
+      ["config", "--bool", "--get", "core.useReplaceRefs"],
+      false,
+      true,
+    );
+    if (enabled.status !== 1) requireSuccess(enabled);
+    if (enabled.status === 1 || gitLine(enabled.stdout) !== "false") {
+      // Hashes and status compare index OIDs without replacement refs.
+      // Preserve Git's selected change when its base uses a replacement.
+      candidates = new Map(
+        [...candidates].filter(([, oid]) => !replacements.has(oid)),
+      );
+    }
+  }
+  const hashes = await worktreeObjectHashes(repo, [...candidates.keys()]);
+  const unchanged = new Set(
+    [...candidates]
+      .filter(([name, oid]) => !hashes.has(name) || hashes.get(name) === oid)
+      .map(([name]) => name),
+  );
+  const remaining = [...candidates.keys()].filter(
+    (name) => !unchanged.has(name),
+  );
+  const indexed = new Map<string, string>();
+  for (const record of paths(
+    await gitPathsOutput(repo, ["ls-files", "--stage", "-z"], remaining),
+  )) {
+    const separator = record.indexOf("\t"),
+      fields = record.slice(0, separator).split(" ");
+    if (fields[2] === "0") indexed.set(record.slice(separator + 1), fields[1]!);
+  }
+  const matching = remaining.filter(
+    (name) => indexed.get(name) === candidates.get(name),
+  );
+  // Git's loaded index preserves automatic EOL rules; inspect only eligible
+  // selected paths and leave the original index untouched.
+  const status = await gitPathsOutput(
+    repo,
+    [
+      "--no-optional-locks",
+      "status",
+      "--porcelain",
+      "-z",
+      "--untracked-files=no",
+      "--ignore-submodules=all",
+      "--no-renames",
+    ],
+    matching,
+  );
+  const dirty = new Set(paths(status).map((record) => record.slice(3)));
+  for (const name of matching) if (!dirty.has(name)) unchanged.add(name);
+  return unchanged;
+}
+
+async function changed(
+  repo: string,
+  args: string[],
+  local = false,
+): Promise<Change[]> {
   const fields = paths(
     requireSuccess(
-      await git(repo, [
-        "diff",
-        "--ignore-submodules=all",
-        "--raw",
-        "-z",
-        "--diff-filter=ACMRDT",
-        ...args,
-        "--",
-      ]),
+      await git(
+        repo,
+        [
+          // Raw inspection must not refresh the full index, including excluded metadata.
+          ...(local ? ["-c", "diff.autoRefreshIndex=false"] : []),
+          ...(local ? ["--no-literal-pathspecs"] : []),
+          "diff",
+          "--ignore-submodules=all",
+          "--raw",
+          "--no-abbrev",
+          "-z",
+          "--diff-filter=ACMRDT",
+          ...args,
+          "--",
+          ...(local
+            ? [":(top,glob,exclude)**/.svn", ":(top,glob,exclude)**/.svn/**"]
+            : []),
+        ],
+        local,
+      ),
     ),
   );
   const changes: Change[] = [];
-  for (let index = 0; index < fields.length;) {
+  const candidates = new Map<string, string>();
+  let index = 0;
+  while (index < fields.length) {
     const metadata = fields[index++]!.split(" "),
       status = metadata.at(-1)![0]!;
+    const sourcePath = status === "R" ? fields[index] : undefined;
     if (status === "C" || status === "R") index++;
     const path = fields[index++]!;
     if (
+      local &&
+      status === "M" &&
+      metadata[0]!.slice(1) === metadata[1] &&
+      /^0+$/u.test(metadata[3]!)
+    ) {
+      const absolute = append(repo, path);
+      try {
+        if (!linkedParent(repo, absolute) && regular(absolute)) {
+          // Raw worktree records can reflect only stale index stat data.
+          // Normalize eligible text without opening the older base blob or
+          // making Git buffer files the inventory already excludes as binary.
+          const sampler = createSourceSampler();
+          try {
+            for (const chunk of readChunks(absolute))
+              if (!sampler.consume(chunk)) break;
+          } catch {
+            continue;
+          }
+          if (!sampler.finish()[1]) candidates.set(path, metadata[2]!);
+        }
+      } catch (error) {
+        if (!isMissingPathError(error)) throw error;
+      }
+    }
+    if (
       (status === "D" ? metadata[0]!.slice(1) : metadata[1]!).startsWith("100")
     )
-      changes.push({ path, status });
+      changes.push({
+        path,
+        status,
+        ...(sourcePath === undefined ? {} : { sourcePath }),
+      });
   }
-  return changes;
+  const unchanged = await unchangedWorktreeFiles(repo, candidates);
+  return changes.filter((change) => !unchanged.has(change.path));
 }
 export async function changedPaths(
   repo: string,
@@ -598,21 +1011,53 @@ export async function changedPaths(
   mode: string,
 ): Promise<Change[]> {
   if (mode === "revisions") return changed(repo, [`${base}..${head}`]);
-  const unstaged = await changed(repo, [base]),
-    staged = await changed(repo, ["--cached", base]);
+  const unstaged = await changed(repo, [base], true),
+    staged = await changed(repo, ["--cached", base], true);
   const result = new Map(staged.map((change) => [change.path, change]));
   for (const change of unstaged) result.set(change.path, change);
   for (const path of paths(
     requireSuccess(
       await git(repo, ["ls-files", "--others", "--exclude-standard", "-z"]),
     ),
-  ))
-    if (!path.endsWith("/")) result.set(path, { path, status: "A" });
-  return [...result.values()].filter(
-    ({ path, status }) =>
-      !path.split("/").some((part) => sourceMetadata.has(part)) &&
-      (status === "D" || regular(append(repo, path))),
-  );
+  )) {
+    if (path.endsWith("/")) continue;
+    if (path.split("/").some((part) => sourceMetadata.has(part))) continue;
+    const absolute = append(repo, path);
+    try {
+      if (!linkedParent(repo, absolute) && regular(absolute))
+        result.set(path, { path, status: "A" });
+    } catch (error) {
+      if (!isMissingPathError(error)) throw error;
+    }
+  }
+  const changes = new Map<string, Change>();
+  for (const change of result.values()) {
+    const { path, status } = change;
+    if (path.split("/").some((part) => sourceMetadata.has(part))) continue;
+    if (status === "D") {
+      changes.set(path, change);
+      continue;
+    }
+    const absolute = append(repo, path);
+    try {
+      if (linkedParent(repo, absolute)) {
+        // Git may report a modified file through a junction. Only its base blob is in scope.
+        if (status === "M") changes.set(path, { path, status: "D" });
+      } else if (regular(absolute)) {
+        changes.set(path, change);
+        continue;
+      }
+    } catch (error) {
+      if (!isMissingPathError(error)) throw error;
+    }
+    if (
+      status === "R" &&
+      change.sourcePath !== undefined &&
+      !changes.has(change.sourcePath)
+    )
+      changes.set(change.sourcePath, { path: change.sourcePath, status: "D" });
+  }
+  return [...changes.values()];
 }
 
 /** Consume each complete blob while retaining at most the preview prefix. */
@@ -623,11 +1068,9 @@ export async function blobSamples(
   if (!names.length) return [];
   const nulInput = names.some((name) => /[\r\n]/u.test(name));
   const separator = nulInput ? "\0" : "\n";
-  const child = gitProcess(repo, [
-    "cat-file",
-    "--batch",
-    ...(nulInput ? ["-z"] : []),
-  ])?.child as ChildProcessWithoutNullStreams | undefined;
+  const child = (
+    await gitProcess(repo, ["cat-file", "--batch", ...(nulInput ? ["-z"] : [])])
+  )?.child as ChildProcessWithoutNullStreams | undefined;
   if (!child) return names.map(() => undefined);
   const completion = new Promise<number>((resolve, reject) => {
     child.once("error", reject);

@@ -7,6 +7,7 @@ export PATH
 launcher_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
 server_path=$launcher_dir/../mcp/server.mjs
 if [ "${1:-}" = "--helper" ]; then
+  unset CODEX_SECURITY_GIT_ENVIRONMENT_FILE
   server_path=$launcher_dir/../mcp/helpers.mjs
 fi
 launch_node() {

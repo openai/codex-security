@@ -54,7 +54,7 @@ import {
   sep,
   win32,
 } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { pipeline } from "node:stream/promises";
 import { crc32 } from "node:zlib";
@@ -78,6 +78,7 @@ import type { JsonObject } from "./config.js";
 import { isRecord } from "./record.js";
 import {
   isWithin,
+  inspectTrustedExecutable,
   resolveTrustedExecutable,
   type InspectedExecutable,
 } from "./trusted-executable.js";
@@ -3153,8 +3154,12 @@ export function pluginExecutionEnvironment(
   python: string,
   environment: ProcessEnvironment = process.env,
 ): ProcessEnvironment {
+  const inherited = pythonUtf8Environment(environment);
+  for (const name of Object.keys(inherited)) {
+    if (isGitEnvironmentTransport(name)) delete inherited[name];
+  }
   const child = {
-    ...pythonUtf8Environment(environment),
+    ...inherited,
     PYTHON: python,
     CODEX_SECURITY_PYTHON_COMMAND: python,
     CODEX_CLI_PATH: resolveCodexCommand(environment).command,
@@ -3163,12 +3168,155 @@ export function pluginExecutionEnvironment(
   return child;
 }
 
+export function gitConfigurationEnvironment(
+  environment: ProcessEnvironment,
+): Record<string, string> {
+  const names = Object.keys(environment);
+  // Match Node's Windows child environment, including aliases set to undefined.
+  if (process.platform === "win32") names.sort();
+  const seen = new Set<string>();
+  const selected: Record<string, string> = {};
+  for (const name of names) {
+    const key = process.platform === "win32" ? name.toUpperCase() : name;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const value = environment[name];
+    if (
+      value !== undefined &&
+      /^(?:GIT_CONFIG_(?:GLOBAL|SYSTEM|NOSYSTEM|PARAMETERS|COUNT|(?:KEY|VALUE)_\d+)|GIT_ATTR_(?:SOURCE|NOSYSTEM)|GIT_NO_REPLACE_OBJECTS|GIT_REPLACE_REF_BASE|XDG_CONFIG_HOME)$/u.test(
+        key,
+      )
+    )
+      selected[key] = value;
+  }
+  return selected;
+}
+
+const GIT_INSPECTION_ENVIRONMENT_PROGRAM = String.raw`
+import json, os, signal, subprocess, sys
+from pathlib import Path
+if os.name != "nt":
+    signal.signal(signal.SIGTERM, lambda number, _frame: sys.exit(128 + number))
+sys.path.insert(0, sys.argv[1])
+from workbench_target import git_inspection_environment, _git_configuration_environment
+environment = os.environ.copy()
+environment.update(json.load(sys.stdin))
+try:
+    projected = git_inspection_environment(environment, sys.argv[3], Path(sys.argv[2]))
+except subprocess.CalledProcessError as error:
+    sys.stderr.buffer.write(error.stderr or b"")
+    raise SystemExit(error.returncode)
+print(json.dumps(_git_configuration_environment(projected)))
+`;
+
+export async function gitInspectionEnvironment(options: {
+  python: string;
+  environment: ProcessEnvironment;
+  repository: string;
+  git?: InspectedExecutable;
+  signal?: AbortSignal;
+}): Promise<ProcessEnvironment> {
+  const configuration = gitConfigurationEnvironment(options.environment);
+  const needsProjection =
+    Boolean(configuration["GIT_CONFIG_PARAMETERS"]) ||
+    Object.entries(configuration).some(
+      ([name, value]) =>
+        /^GIT_CONFIG_KEY_\d+$/u.test(name) &&
+        /^http(?:\..*)?\.extraheader$/isu.test(value),
+    );
+  const git =
+    options.git ??
+    (needsProjection
+      ? await inspectTrustedExecutable("git", options.environment, [
+          options.repository,
+          ...(await gitProtectionRoots(options.repository, options.signal)),
+        ])
+      : undefined);
+  if (git?.executable === null) {
+    return environmentWithGit(
+      Object.fromEntries(
+        Object.entries(options.environment).filter(
+          ([name]) =>
+            !/^GIT_CONFIG_(?:COUNT|PARAMETERS|(?:KEY|VALUE)_\d+)$/u.test(
+              process.platform === "win32" ? name.toUpperCase() : name,
+            ),
+        ),
+      ),
+      git,
+    );
+  }
+  if (!needsProjection) return environmentWithGit(options.environment, git);
+  const pluginRoot = await bundledPluginRoot();
+  let start: StartCodex | undefined;
+  if (process.platform === "win32") {
+    const { spawnWindowsProcess } = await import(
+      pathToFileURL(join(pluginRoot, "mcp", "windows-process.mjs")).href
+    );
+    const binary = join(
+      pluginRoot,
+      "mcp",
+      "native",
+      `win32-${process.arch}`,
+      "windows.node",
+    );
+    start = (command, args, spawnOptions) =>
+      spawnWindowsProcess(
+        binary,
+        command,
+        [...args],
+        spawnOptions,
+      ) as ChildProcessWithoutNullStreams;
+  }
+  const result = await runCodexCommand(
+    { command: options.python },
+    [
+      "-I",
+      "-X",
+      "utf8",
+      "-B",
+      "-c",
+      GIT_INSPECTION_ENVIRONMENT_PROGRAM,
+      join(pluginRoot, "scripts"),
+      options.repository,
+      git!.executable!,
+    ],
+    pluginHelperEnvironment(environmentWithGit(options.environment, git)),
+    JSON.stringify(configuration),
+    options.signal,
+    false,
+    undefined,
+    start,
+  );
+  if (!result.success)
+    throw new Error(
+      result.stderr.trim() ||
+        result.stdout.trim() ||
+        `Git configuration inspection exited with status ${result.exitCode}.`,
+    );
+  const projected = JSON.parse(result.stdout) as Record<string, string>;
+  const environment = { ...options.environment };
+  for (const name of Object.keys(environment)) {
+    const key = process.platform === "win32" ? name.toUpperCase() : name;
+    if (Object.hasOwn(configuration, key)) delete environment[name];
+  }
+  return environmentWithGit({ ...environment, ...projected }, git);
+}
+
+function isGitEnvironmentTransport(name: string): boolean {
+  return /^(?:CODEX_SECURITY_GIT_ENVIRONMENT|CODEX_SECURITY_GIT_ENVIRONMENT_FILE)$/u.test(
+    name.toUpperCase(),
+  );
+}
+
 export function environmentWithGit(
   environment: ProcessEnvironment,
   git?: InspectedExecutable,
 ): ProcessEnvironment {
-  if (git === undefined) return environment;
   const result = { ...environment };
+  for (const name of Object.keys(result)) {
+    if (isGitEnvironmentTransport(name)) delete result[name];
+  }
+  if (git === undefined) return result;
   for (const name of Object.keys(result)) {
     const normalized = name.toUpperCase();
     if (normalized === "CODEX_SECURITY_GIT" || normalized === "PATH") {
@@ -3198,6 +3346,7 @@ function pluginHelperEnvironment(
     Object.fromEntries(
       Object.entries(environment).filter(
         ([name]) =>
+          !isGitEnvironmentTransport(name) &&
           !PLUGIN_HELPER_SECRET_ENVIRONMENT_VARIABLES.has(name.toUpperCase()),
       ),
     ),
@@ -3216,12 +3365,13 @@ export async function runCodexCommand(
   signal?: AbortSignal,
   archiveHandshake = false,
   stdinPrefix?: string,
+  start: StartCodex = spawn,
 ): Promise<CodexCommandResult> {
   const cancellation = archiveHandshake ? new AbortController() : undefined;
   const abort = () => cancellation?.abort(signal?.reason);
   const commandSignal = cancellation?.signal ?? signal;
   let awaitingArchive = archiveHandshake;
-  const child = spawn(
+  const child = start(
     executablePathForSpawn(command.command),
     [...(command.args ?? []), ...args],
     {

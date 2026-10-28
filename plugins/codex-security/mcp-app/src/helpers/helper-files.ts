@@ -104,12 +104,12 @@ export function readFile(path: string | number, label?: string): Buffer {
 }
 
 export function* readChunks(path: string, label?: string): Iterable<Buffer> {
-  if (process.platform === "win32") {
-    yield readFile(path, label);
-    return;
-  }
   let descriptor: number | undefined;
   try {
+    if (process.platform === "win32") {
+      yield* windowsFileSystem(windowsBinding()).chunks(widePath(path));
+      return;
+    }
     descriptor = openSync(encodePosixPath(path), "r");
     while (true) {
       const chunk = Buffer.allocUnsafe(64 * 1024);

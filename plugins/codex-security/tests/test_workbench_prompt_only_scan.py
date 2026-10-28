@@ -488,6 +488,7 @@ def test_prompt_only_diff_scan_validates_and_persists_canonical_diff_identity(
     target = tmp_path / "target"
     head = initialize_git_repository(target)
     (target / "README.md").write_text("changed fixture\n")
+    (target / "binary.dat").write_bytes(b"\0")
     started = start_prompt_only_scan(
         state_dir,
         target,
@@ -496,6 +497,7 @@ def test_prompt_only_diff_scan_validates_and_persists_canonical_diff_identity(
         mode="diff",
         extra_args=("--diff-target-kind", "working_tree"),
     )
+    assert started["scan"]["progress"]["coverage"]["filesTotal"] == 1
     assert started["scan"]["diffTarget"]["kind"] == "working_tree"
     assert started["scan"]["diffTarget"]["baseRevision"] == head
     assert started["scan"]["diffTarget"]["headRevision"] == head

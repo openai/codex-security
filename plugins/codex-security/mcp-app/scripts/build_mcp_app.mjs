@@ -85,6 +85,14 @@ export async function buildMcpApp({ output, native = "universal" }) {
     platform: "node",
     target: "node20",
   });
+  await build({
+    bundle: true,
+    entryPoints: [resolve(root, "../native/windows-process.mts")],
+    format: "esm",
+    outfile: join(mcpDir, "windows-process.mjs"),
+    platform: "node",
+    target: "node20",
+  });
 
   async function writeRuntime(name, entryPoint) {
     const bundle = join(mcpDir, name + ".bundle.cjs");

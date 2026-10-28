@@ -89,6 +89,76 @@ def register_cli_scan(
     )
 
 
+@pytest.mark.parametrize(
+    ("kind", "expected"), [("repository", 4), ("refs", 2), ("working_tree", 3)]
+)
+def test_cli_registration_counts_the_selected_target(
+    tmp_path: Path, kind: str, expected: int
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    base = initialize_git_repository(target)
+    (target / "README.md").write_text("updated fixture\n")
+    (target / "new.py").write_text("new = True\n")
+    (target / "binary.dat").write_bytes(b"\0")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "Update fixture"], cwd=target, check=True)
+
+    (target / "README.md").unlink()
+    (target / "new.py").write_bytes(b"\0")
+    (target / "staged.py").write_text("staged = True\n")
+    subprocess.run(["git", "add", "staged.py"], cwd=target, check=True)
+    (target / "untracked.py").write_text("untracked = True\n")
+
+    scan_target = {"kind": kind, "paths": []}
+    if kind != "repository":
+        scan_target.update(base=base if kind == "refs" else "HEAD", head="HEAD")
+    registered = register_cli_scan(state_dir, target, tmp_path / "scan", scan_target=scan_target)
+    assert registered["scopeFileCount"] == expected
+    saved = get_scan(state_dir, registered["scanId"])["scan"]
+    assert saved["progress"]["coverage"]["filesTotal"] == expected
+
+
+def test_cli_registration_does_not_refresh_excluded_metadata(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    (target / ".gitattributes").write_text("**/.svn/** filter=fixture\n")
+    metadata = target / ".svn" / "source.txt"
+    metadata.parent.mkdir()
+    metadata.write_text("before\n")
+    subprocess.run(["git", "add", "-f", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "base fixture"], cwd=target, check=True)
+    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip()
+    source = target / "README.md"
+    source.write_text("updated\n")
+    subprocess.run(["git", "commit", "-qam", "head fixture"], cwd=target, check=True)
+    source.write_text("fixture\n")
+    metadata.write_text("change\n")
+    for path in (source, metadata):
+        os.utime(path, (1, 1))
+    subprocess.run(
+        ["git", "config", "filter.fixture.clean", "echo %f >> .git/filter-calls; cat"],
+        cwd=target,
+        check=True,
+    )
+    calls = target / ".git" / "filter-calls"
+    index = target / ".git" / "index"
+    before = index.read_bytes()
+
+    registered = register_cli_scan(
+        tmp_path / "state",
+        target,
+        tmp_path / "scan",
+        scan_target={"kind": "working_tree", "paths": [], "base": base, "head": "HEAD"},
+    )
+
+    assert registered["scopeFileCount"] == 1
+    assert not calls.exists()
+    assert index.read_bytes() == before
+    subprocess.run(["git", "add", "-f", ".svn/source.txt"], cwd=target, check=True)
+    assert ".svn/source.txt" in calls.read_text().splitlines()
+
+
 def _start_diff_scan_with_draft(tmp_path: Path, kind: str) -> tuple[Path, Path, dict[str, Any]]:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"

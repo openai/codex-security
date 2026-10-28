@@ -6842,6 +6842,15 @@ if __name__ == "__main__":
       CODEX_SECURITY_TARGET_DISPLAY_NAME: basename(repository),
     });
     expect(environment).not.toHaveProperty("CODEX_SECURITY_TARGET_PATHS_JSON");
+    const gitEnvironmentFile =
+      environment!["CODEX_SECURITY_GIT_ENVIRONMENT_FILE"]!;
+    expect(JSON.parse(await readFile(gitEnvironmentFile, "utf8"))).toEqual({});
+    if (process.platform !== "win32") {
+      expect((await stat(dirname(gitEnvironmentFile))).mode & 0o777).toBe(
+        0o700,
+      );
+      expect((await stat(gitEnvironmentFile)).mode & 0o777).toBe(0o600);
+    }
     const targetPathsFile = environment?.["CODEX_SECURITY_TARGET_PATHS_FILE"];
     expect(typeof targetPathsFile).toBe("string");
     if (typeof targetPathsFile !== "string")
@@ -8356,7 +8365,9 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
       const deepScanConfigDirectory = join(codexHome, "worker-config");
       await mkdir(bootstrapWorkspace);
       await mkdir(deepScanConfigDirectory, { recursive: true });
-      const prepared = {
+      const prepared: ReturnType<typeof preparedRuntime> & {
+        gitEnvironmentDirectory?: string;
+      } = {
         ...preparedRuntime(codexHome),
         bootstrapWorkspace,
         deepScanConfigDirectory,
@@ -8414,8 +8425,11 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
         expect(attempted).toEqual([
           profile.path,
           deepScanConfigDirectory,
+          prepared.gitEnvironmentDirectory!,
           bootstrapWorkspace,
         ]);
+        expect(prepared.gitEnvironmentDirectory).toBeDefined();
+        expect(existsSync(prepared.gitEnvironmentDirectory!)).toBe(false);
         expect(existsSync(profile.path)).toBe(failures.includes("profile"));
         expect(existsSync(deepScanConfigDirectory)).toBe(
           failures.includes("deep"),

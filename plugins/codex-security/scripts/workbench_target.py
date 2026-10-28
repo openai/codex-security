@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import codecs
+import errno
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -15,7 +17,7 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO, Callable
+from typing import Any, BinaryIO, Callable, NamedTuple
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -90,6 +92,8 @@ def git_blob_samples(
     *,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
+    retain_samples: bool = True,
+    check: bool = False,
 ) -> list[tuple[bytes, bool] | None]:
     """Sample ordered blobs and classify all their bytes without buffering the batch."""
     if not object_names:
@@ -109,7 +113,7 @@ def git_blob_samples(
         def read_samples() -> list[tuple[bytes, bool] | None]:
             # Closing the reader also unblocks Git if framing is invalid.
             with output:
-                return _read_git_batch_samples(output, object_names)
+                return _read_git_batch_samples(output, object_names, retain_samples=retain_samples)
 
         samples = reader.submit(read_samples)
         try:
@@ -128,15 +132,23 @@ def git_blob_samples(
             # Git may fail before producing all requested records.
             sink.close()
         if completed.returncode != 0:
+            if check:
+                completed.check_returncode()
             return [None] * len(object_names)
         try:
-            return samples.result()
+            result = samples.result()
         except ValueError:
-            return [None] * len(object_names)
+            result = [None] * len(object_names)
+        if check and None in result and completed.stderr:
+            raise SystemExit(
+                f"Unable to read committed diff blob: {object_names[result.index(None)]}\n"
+                + os.fsdecode(completed.stderr).strip()
+            )
+        return result
 
 
 def _read_git_batch_samples(
-    output: BinaryIO, object_names: list[str]
+    output: BinaryIO, object_names: list[str], *, retain_samples: bool = True
 ) -> list[tuple[bytes, bool] | None]:
     """Read the older-Git-compatible -z protocol without buffering blob bodies."""
     samples: list[tuple[bytes, bool] | None] = []
@@ -156,7 +168,11 @@ def _read_git_batch_samples(
         if size < 0:
             raise ValueError("invalid blob size")
         # Consume non-blob objects too, so subsequent records stay aligned.
-        sample = _read_git_blob_sample(output, size)
+        sample = _read_source_sample(output, size)
+        if output.read(1) != b"\n":
+            raise ValueError("missing blob terminator")
+        if not retain_samples:
+            sample = (b"", sample[1])
         samples.append(sample if fields[1] == b"blob" else None)
     return samples
 
@@ -167,7 +183,7 @@ def _is_binary_sample(data: bytes) -> bool:
     return b"\0" in data
 
 
-def _read_git_blob_sample(output: BinaryIO, size: int) -> tuple[bytes, bool]:
+def _read_source_sample(output: BinaryIO, size: int, *, drain: bool = True) -> tuple[bytes, bool]:
     read_size = 64 * 1024
     sample_size = min(size, read_size)
     sample = output.read(sample_size)
@@ -177,6 +193,8 @@ def _read_git_blob_sample(output: BinaryIO, size: int) -> tuple[bytes, bool]:
     bom = sample[:2] if sample.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)) else b""
     remaining = size - sample_size
     while remaining:
+        if binary and not drain:
+            break
         chunk_size = min(remaining, read_size)
         chunk = output.read(chunk_size)
         if len(chunk) != chunk_size:
@@ -185,8 +203,6 @@ def _read_git_blob_sample(output: BinaryIO, size: int) -> tuple[bytes, bool]:
         if not binary:
             binary = _is_binary_sample(bom + chunk) if bom else b"\0" in chunk
         remaining -= chunk_size
-    if output.read(1) != b"\n":
-        raise ValueError("missing blob terminator")
     return (b"", True) if binary else (sample, False)
 
 
@@ -258,6 +274,163 @@ def trusted_git_executable(protected_root: Path) -> str | None:
     return None
 
 
+def _git_configuration_environment(environment: dict[str, str]) -> dict[str, str]:
+    canonical = str.upper if _WINDOWS else str
+    bridge = next(
+        (name for name in environment if canonical(name) == "CODEX_SECURITY_GIT_ENVIRONMENT_FILE"),
+        None,
+    )
+    selected: dict[str, str] = {}
+    for source in (
+        json.loads(Path(environment[bridge]).read_text(encoding="utf-8"))
+        if bridge is not None
+        else {},
+        environment,
+    ):
+        for name, value in source.items():
+            key = canonical(name)
+            if isinstance(value, str) and re.fullmatch(
+                r"GIT_CONFIG_(?:GLOBAL|SYSTEM|NOSYSTEM|PARAMETERS|COUNT|(?:KEY|VALUE)_\d+)"
+                r"|GIT_ATTR_(?:SOURCE|NOSYSTEM)|GIT_NO_REPLACE_OBJECTS|GIT_REPLACE_REF_BASE|XDG_CONFIG_HOME",
+                key,
+            ):
+                selected[key] = value
+    return selected
+
+
+def git_inspection_environment(
+    environment: dict[str, str], executable: str, target: Path
+) -> dict[str, str]:
+    """Keep inline Git behavior settings without forwarding HTTP authentication."""
+    environment = environment.copy()
+    configuration = _git_configuration_environment(environment)
+    if _WINDOWS:
+        for name in tuple(environment):
+            if name.upper() in configuration:
+                del environment[name]
+    environment.update(configuration)
+    for name in tuple(environment):
+        if re.fullmatch(r"CODEX_SECURITY_GIT_ENVIRONMENT(?:_FILE)?", name, re.IGNORECASE):
+            del environment[name]
+
+    def authentication_header(key: str) -> bool:
+        return re.fullmatch(r"http(?:\..*)?\.extraheader", key, re.IGNORECASE) is not None
+
+    header_indexes = [
+        match[1]
+        for name, value in environment.items()
+        if (match := re.fullmatch(r"GIT_CONFIG_KEY_(\d+)", name)) and authentication_header(value)
+    ]
+    if not header_indexes and not environment.get("GIT_CONFIG_PARAMETERS"):
+        return environment
+
+    def parser_environment(
+        source: dict[str, str], *, parameters_only: bool = False
+    ) -> dict[str, str]:
+        selected = source.copy()
+        for name in tuple(selected):
+            key = name.upper() if _WINDOWS else name
+            if (
+                key in GIT_REPOSITORY_ENVIRONMENT
+                or key == "GIT_CONFIG"
+                or (
+                    parameters_only and re.fullmatch(r"GIT_CONFIG_(?:COUNT|(?:KEY|VALUE)_\d+)", key)
+                )
+            ):
+                del selected[name]
+        selected["GIT_NO_LAZY_FETCH"] = "1"
+        selected["GIT_ALLOW_PROTOCOL"] = ""
+        return selected
+
+    def run(args: list[str], selected: dict[str, str]) -> bytes:
+        completed = subprocess.run(
+            [executable, "--no-pager", "-C", str(target), *args],
+            env=selected,
+            capture_output=True,
+            check=False,
+        )
+        completed.check_returncode()
+        return completed.stdout
+
+    def command_settings(output: bytes) -> list[tuple[str, str | None]]:
+        fields = output.split(b"\0")
+        settings: list[tuple[str, str | None]] = []
+        for index in range(0, len(fields) - 1, 2):
+            if fields[index] != b"command line:":
+                continue
+            # Git rejects LF in command-setting keys. File subsection keys may
+            # contain it, so discard other scopes before splitting the record.
+            key, separator, value = fields[index + 1].partition(b"\n")
+            settings.append((os.fsdecode(key), os.fsdecode(value) if separator else None))
+        return settings
+
+    parser_args = ["config", "--null", "--list", "--show-origin", "--no-includes"]
+    # Validate first so removing a header cannot hide malformed native settings.
+    full = command_settings(run(parser_args, parser_environment(environment)))
+    parameters = command_settings(
+        run(parser_args, parser_environment(environment, parameters_only=True))
+    )
+    count = len(full) - len(parameters)
+    original = environment.copy()
+    for index in header_indexes:
+        environment.pop(f"GIT_CONFIG_KEY_{index}", None)
+        environment.pop(f"GIT_CONFIG_VALUE_{index}", None)
+    if (
+        count > 0
+        and any(authentication_header(key) for key, _ in full[:count])
+        and all(
+            f"GIT_CONFIG_KEY_{index}" in original and f"GIT_CONFIG_VALUE_{index}" in original
+            for index in range(count)
+        )
+    ):
+        retained: list[tuple[str, str]] = []
+        for index in range(count):
+            key, value = original[f"GIT_CONFIG_KEY_{index}"], original[f"GIT_CONFIG_VALUE_{index}"]
+            environment.pop(f"GIT_CONFIG_KEY_{index}", None)
+            environment.pop(f"GIT_CONFIG_VALUE_{index}", None)
+            if not authentication_header(key):
+                retained.append((key, value))
+        environment["GIT_CONFIG_COUNT"] = str(len(retained))
+        for index, (key, value) in enumerate(retained):
+            environment[f"GIT_CONFIG_KEY_{index}"] = key
+            environment[f"GIT_CONFIG_VALUE_{index}"] = value
+    if any(authentication_header(key) for key, _ in parameters):
+        selected = parser_environment(environment, parameters_only=True)
+        selected.pop("GIT_CONFIG_PARAMETERS", None)
+
+        def quote(arguments: list[str]) -> str:
+            try:
+                return os.fsdecode(run(["rev-parse", "--sq-quote", *arguments], selected)).strip()
+            except OSError as error:
+                # Native quoting can exceed argv space even when the original
+                # single PARAMETERS environment value fits.
+                if (error.errno != errno.E2BIG and getattr(error, "winerror", None) != 206) or len(
+                    arguments
+                ) < 2:
+                    raise
+                middle = len(arguments) // 2
+                return quote(arguments[:middle]) + " " + quote(arguments[middle:])
+
+        pieces: list[str] = []
+        pending: list[str] = []
+        for key, value in parameters:
+            if authentication_header(key):
+                continue
+            # Keep legacy quoting for older Git. An '=' inside the key needs
+            # the separate key/value form already accepted by the native parser.
+            if "=" not in key:
+                pending.append(key if value is None else f"{key}={value}")
+                continue
+            if pending:
+                pieces.append(quote(pending))
+                pending.clear()
+            pieces.append(quote([key]) + "=" + ("" if value is None else quote([value])))
+        if pending:
+            pieces.append(quote(pending))
+        environment["GIT_CONFIG_PARAMETERS"] = " ".join(pieces)
+    return environment
+
+
 def git_command(
     target: Path,
     *args: str,
@@ -266,17 +439,36 @@ def git_command(
     git_dir: Path | None = None,
     work_tree: Path | None = None,
     stdout_file: BinaryIO | None = None,
+    stdin_file: BinaryIO | None = None,
     pathspec_environment: dict[str, str] | None = None,
+    ignore_config_file: bool = False,
 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     if (git_dir is None) != (work_tree is None):
         raise ValueError("git_dir and work_tree must be provided together")
+    executable = trusted_git_executable(target)
     environment = os.environ.copy()
+    try:
+        if executable is not None:
+            environment = git_inspection_environment(environment, executable, target)
+    except subprocess.CalledProcessError as exc:
+        return subprocess.CompletedProcess(
+            exc.cmd,
+            exc.returncode,
+            "" if text else b"",
+            os.fsdecode(exc.stderr or b"") if text else exc.stderr,
+        )
+    except FileNotFoundError:
+        executable = None
     for name in GIT_REPOSITORY_ENVIRONMENT:
         environment.pop(name, None)
+    if ignore_config_file:
+        environment.pop("GIT_CONFIG", None)
     environment["GIT_LITERAL_PATHSPECS"] = "1"
     if pathspec_environment is not None:
         environment.update(pathspec_environment)
-    executable = trusted_git_executable(target)
+    # Local inspection must not fetch objects through a configured transport.
+    environment["GIT_NO_LAZY_FETCH"] = "1"
+    environment["GIT_ALLOW_PROTOCOL"] = ""
     # Repository-local config is untrusted; fsmonitor may name an executable hook.
     command = [
         executable or "git",
@@ -299,6 +491,8 @@ def git_command(
             if stdout_file is None
             else {"stdout": stdout_file, "stderr": subprocess.PIPE}
         )
+        if stdin_file is not None:
+            output_options["stdin"] = stdin_file
         return subprocess.run(
             full_command,
             check=False,
@@ -316,46 +510,186 @@ def git_command(
         return subprocess.CompletedProcess(full_command, 127, empty_output, empty_output)
 
 
-def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, str]]:
+class _GitChange(NamedTuple):
+    name: str
+    status: str
+    base_blob: str
+    head_blob: str
+    source_name: str | None = None
+
+
+def _git_paths_output(repo: Path, args: list[str], names: list[str]) -> bytes:
+    if not names:
+        return b""
+    try:
+        result = git_command(
+            repo, *args, "--", *names, text=False, pathspec_environment={"GIT_ICASE_PATHSPECS": "0"}
+        )
+    except OSError as error:
+        # Retry only an actual native argument-length failure, without a path cap.
+        if (error.errno != errno.E2BIG and getattr(error, "winerror", None) != 206) or len(
+            names
+        ) < 2:
+            raise
+        middle = len(names) // 2
+        return _git_paths_output(repo, args, names[:middle]) + _git_paths_output(
+            repo, args, names[middle:]
+        )
+    result.check_returncode()
+    return result.stdout
+
+
+def _worktree_object_hashes(repo: Path, names: list[str]) -> dict[str, bytes]:
+    try:
+        output = _git_paths_output(repo, ["hash-object"], names)
+    except subprocess.CalledProcessError:
+        readable = []
+        for name in names:
+            try:
+                if _local_diff_status(repo, repo / name, "M", {}) != "M":
+                    continue
+                with (repo / name).open("rb") as source:
+                    source.read(1)
+            except OSError:
+                continue
+            readable.append(name)
+        if len(readable) == len(names):
+            raise
+        return _worktree_object_hashes(repo, readable)
+    return dict(zip(names, output.splitlines()))
+
+
+def _unchanged_worktree_files(repo: Path, candidates: dict[str, bytes]) -> set[str]:
+    if not candidates:
+        return set()
+    replacements = git_command(repo, "replace", "-l", "--format=short", text=False)
+    replacements.check_returncode()
+    replaced = {oid.lower() for oid in replacements.stdout.splitlines()} & set(candidates.values())
+    if replaced and "GIT_NO_REPLACE_OBJECTS" not in _git_configuration_environment(os.environ):
+        enabled = git_command(
+            repo,
+            "config",
+            "--bool",
+            "--get",
+            "core.useReplaceRefs",
+            text=False,
+            ignore_config_file=True,
+        )
+        if enabled.returncode != 1:
+            enabled.check_returncode()
+        if enabled.returncode == 1 or enabled.stdout.strip() != b"false":
+            # Hashes and status compare index OIDs without replacement refs.
+            # Preserve Git's selected change when its base uses a replacement.
+            candidates = {name: oid for name, oid in candidates.items() if oid not in replaced}
+    hashes = _worktree_object_hashes(repo, list(candidates))
+    unchanged = {
+        name for name, oid in candidates.items() if name not in hashes or hashes[name] == oid
+    }
+    remaining = [name for name in candidates if name not in unchanged]
+    indexed = {}
+    for record in _git_paths_output(repo, ["ls-files", "--stage", "-z"], remaining).split(b"\0"):
+        if not record:
+            continue
+        metadata, _, name = record.partition(b"\t")
+        fields = metadata.split()
+        if fields[2] == b"0":
+            indexed[os.fsdecode(name)] = fields[1]
+    matching = [name for name in remaining if indexed.get(name) == candidates[name]]
+    # Git's loaded index preserves automatic EOL rules; inspect only eligible
+    # selected paths and leave the original index untouched.
+    status = _git_paths_output(
+        repo,
+        [
+            "--no-optional-locks",
+            "status",
+            "--porcelain",
+            "-z",
+            "--untracked-files=no",
+            "--ignore-submodules=all",
+            "--no-renames",
+        ],
+        matching,
+    )
+    dirty = {os.fsdecode(record[3:]) for record in status.split(b"\0") if record}
+    unchanged.update(set(matching) - dirty)
+    return unchanged
+
+
+def _run_git_changes(repo: Path, diff_args: list[str], *, local: bool = False) -> list[_GitChange]:
     """Return changed regular files from the selected side of each change."""
     result = git_command(
         repo,
+        # Raw inspection must not refresh the full index, including excluded metadata.
+        *(["-c", "diff.autoRefreshIndex=false"] if local else []),
+        *(["--no-literal-pathspecs"] if local else []),
         "diff",
         "--ignore-submodules=all",
         "--raw",
+        "--no-abbrev",
         "-z",
         "--diff-filter=ACMRDT",
         *diff_args,
         "--",
+        *([":(top,glob,exclude)**/.svn", ":(top,glob,exclude)**/.svn/**"] if local else []),
         text=False,
+        pathspec_environment={"GIT_ICASE_PATHSPECS": "0"} if local else None,
     )
     result.check_returncode()
     fields = result.stdout.split(b"\0")
     if fields and not fields[-1]:
         fields.pop()
 
-    changed: list[tuple[Path, str]] = []
+    changed: list[_GitChange] = []
+    candidates: dict[str, bytes] = {}
     index = 0
+    linked_prefixes: dict[str, bool] = {}
     while index < len(fields):
         metadata = fields[index].split()
         status = chr(metadata[-1][0])
         index += 1
+        source_name = os.fsdecode(fields[index]) if status == "R" else None
         if status in {"C", "R"}:
             index += 1
-        path = repo / os.fsdecode(fields[index])
+        name = os.fsdecode(fields[index])
         index += 1
         selected_mode = metadata[0].removeprefix(b":") if status == "D" else metadata[1]
         if selected_mode.startswith(b"100"):
-            changed.append((path, status))
-    return changed
+            if (
+                local
+                and status == "M"
+                and metadata[0].removeprefix(b":") == metadata[1]
+                and not metadata[3].strip(b"0")
+                and _local_diff_status(repo, repo / name, status, linked_prefixes) == status
+            ):
+                # Raw worktree records can reflect only stale index stat data.
+                # Normalize eligible text without opening the older base blob or
+                # making Git buffer files the inventory already excludes as binary.
+                try:
+                    source = (repo / name).open("rb")
+                except OSError:
+                    continue
+                with source:
+                    try:
+                        _, binary = _read_source_sample(
+                            source, os.fstat(source.fileno()).st_size, drain=False
+                        )
+                    except (OSError, ValueError):
+                        continue
+                    if not binary:
+                        candidates[name] = metadata[2]
+            changed.append(
+                _GitChange(name, status, metadata[2].decode(), metadata[3].decode(), source_name)
+            )
+    unchanged = _unchanged_worktree_files(repo, candidates)
+    return [change for change in changed if change.name not in unchanged]
 
 
-def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple[Path, str]]:
+def _git_changes(repo: Path, base: str, head: str, mode: str) -> list[_GitChange]:
     if mode == "revisions":
-        return run_git_changed_paths(repo, [f"{base}..{head}"])
+        return _run_git_changes(repo, [f"{base}..{head}"])
     if mode == "local-patch":
-        unstaged = run_git_changed_paths(repo, [base])
-        staged = run_git_changed_paths(repo, ["--cached", base])
+        unstaged = _run_git_changes(repo, [base], local=True)
+        staged = _run_git_changes(repo, ["--cached", base], local=True)
         untracked = git_command(
             repo,
             "ls-files",
@@ -365,20 +699,109 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
             text=False,
         )
         untracked.check_returncode()
-        combined = dict(staged)
-        combined.update(unstaged)
-        combined.update(
-            (repo / os.fsdecode(relative), "A")
-            for relative in untracked.stdout.split(b"\0")
-            if relative and not relative.endswith(b"/")
-        )
-        return sorted(
-            (path, status)
-            for path, status in combined.items()
-            if SOURCE_METADATA_DIRECTORIES.isdisjoint(path.relative_to(repo).parts)
-            and (status == "D" or (not path.is_symlink() and path.is_file()))
-        )
+        # Preserve Git spelling even when it is not a valid Windows filesystem path.
+        combined = {change.name: change for change in staged}
+        combined.update((change.name, change) for change in unstaged)
+        linked_prefixes: dict[str, bool] = {}
+        for relative in untracked.stdout.split(b"\0"):
+            if not relative or relative.endswith(b"/"):
+                continue
+            name = os.fsdecode(relative)
+            if not SOURCE_METADATA_DIRECTORIES.isdisjoint(PurePosixPath(name).parts):
+                continue
+            if _local_diff_status(repo, repo / name, "A", linked_prefixes) is not None:
+                combined[name] = _GitChange(name, "A", "", "")
+        changes: dict[str, _GitChange] = {}
+        for name, change in combined.items():
+            if not SOURCE_METADATA_DIRECTORIES.isdisjoint(PurePosixPath(name).parts):
+                continue
+            selected = _local_diff_status(repo, repo / name, change.status, linked_prefixes)
+            if selected is None and change.status == "R" and change.source_name is not None:
+                changes.setdefault(
+                    change.source_name,
+                    _GitChange(change.source_name, "D", change.base_blob, ""),
+                )
+            elif selected is not None:
+                changes[name] = change._replace(status=selected)
+        return sorted(changes.values())
     raise SystemExit(f"Unknown diff mode: {mode}")
+
+
+def git_changed_path_names(repo: Path, base: str, head: str, mode: str) -> list[tuple[str, str]]:
+    return [(change.name, change.status) for change in _git_changes(repo, base, head, mode)]
+
+
+def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple[Path, str]]:
+    return [
+        (repo / name, status) for name, status in git_changed_path_names(repo, base, head, mode)
+    ]
+
+
+def _local_diff_status(
+    repo: Path, path: Path, status: str, linked_prefixes: dict[str, bool]
+) -> str | None:
+    if status == "D":
+        return status
+    try:
+        if _directory_link_boundary(repo, path, linked_prefixes) != path:
+            # A junction can expose a modified base file outside the selected view.
+            return "D" if status == "M" else None
+        return status if stat.S_ISREG(path.lstat().st_mode) else None
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+
+
+def diff_scope_file_count(target: Path, diff_target: dict[str, str]) -> int:
+    """Count the text paths selected by the diff inventory for coverage."""
+    base, head = diff_target["baseRevision"], diff_target["headRevision"]
+    local = diff_target["kind"] == "working_tree"
+    try:
+        changes = _git_changes(target, base, head, "local-patch" if local else "revisions")
+    except subprocess.CalledProcessError as exc:
+        detail = os.fsdecode(exc.stderr or b"").strip() or str(exc)
+        raise SystemExit(f"could not resolve the selected Git changes: {detail}") from exc
+
+    text_paths: set[str] = set()
+    committed: dict[str, str] = {}
+    for change in changes:
+        name, status = change.name, change.status
+        if not local or status == "D":
+            committed[name] = change.base_blob if status == "D" else change.head_blob
+        else:
+            path = target / name
+            try:
+                if not path.resolve().is_relative_to(target):
+                    continue
+                with path.open("rb") as source:
+                    _, binary = _read_source_sample(
+                        source, os.fstat(source.fileno()).st_size, drain=False
+                    )
+            except (OSError, ValueError):
+                # The inventory skips unreadable working-tree files.
+                continue
+            if not binary:
+                text_paths.add(name)
+    object_ids = list(dict.fromkeys(committed.values()))
+    try:
+        samples = git_blob_samples(target, object_ids, retain_samples=False, check=True)
+    except subprocess.CalledProcessError as exc:
+        detail = os.fsdecode(exc.stderr or b"").strip() or str(exc)
+        raise SystemExit(f"could not read the selected Git blobs: {detail}") from exc
+    samples_by_id = dict(zip(object_ids, samples))
+    for change in changes:
+        name, status = change.name, change.status
+        if name not in committed:
+            continue
+        sample = samples_by_id[committed[name]]
+        if sample is None:
+            raise SystemExit(
+                f"Unable to read committed diff blob: {base if status == 'D' else head}:{name}"
+            )
+        if not sample[1]:
+            text_paths.add(name)
+    if any("\r" in name or "\n" in name for name in text_paths):
+        raise SystemExit("Git changes contain a path that cannot fit in the file inventory")
+    return len(text_paths)
 
 
 def candidate_source_lines(

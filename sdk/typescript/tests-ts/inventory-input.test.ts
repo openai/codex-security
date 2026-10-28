@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -10,6 +11,7 @@ import {
   rmSync,
   symlinkSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { delimiter, dirname, join, parse, relative, sep } from "node:path";
@@ -956,26 +958,34 @@ for (const mode of ["revisions", "local-patch"] as const) {
 }
 
 for (const location of ["outside", "repository-extra", "inside"]) {
-  for (const binary of [false, true]) {
-    test(`local diff inventory confines ${location} directory links with ${binary ? "binary" : "text"} contents`, () => {
+  for (const binaryBase of [false, true]) {
+    test(`local diff inventory confines ${location} directory links with a ${binaryBase ? "binary" : "text"} base file`, () => {
       const f = fixture();
-      const contents = binary ? Buffer.from("\0selected\n") : "selected\n";
+      const contents = binaryBase ? "selected\n" : Buffer.from("\0selected\n");
+      const baseContents = binaryBase
+        ? Buffer.from("\0base binary\n")
+        : "base text\n";
       f.write("inside/source.py", contents);
+      f.write("inside/changed.py", contents);
+      f.write("src/nested/changed.py", baseContents);
       f.write("safe.py", "before\n");
       const base = f.commit();
+      f.write("src/nested/changed.py", "changed\n");
       f.write("src/nested/source.py", "staged\n");
-      git(f.repo, "add", "src/nested/source.py");
+      git(f.repo, "add", "src/nested");
+      // Preserve the indexed modification when POSIX Git sees the directory replaced by a link.
+      git(f.repo, "update-index", "--skip-worktree", "src/nested/changed.py");
       f.write("safe.py", "after\n");
       const destination =
         location === "inside" ? join(f.repo, "inside") : join(f.root, location);
       if (location !== "inside") {
         mkdirSync(destination);
         writeFileSync(join(destination, "source.py"), contents);
+        writeFileSync(join(destination, "changed.py"), contents);
       }
       rmSync(join(f.repo, "src", "nested"), { recursive: true });
       symlinkSync(destination, join(f.repo, "src", "nested"), "junction");
 
-      const retained = location === "inside" && !binary;
       expect(
         f.success("generate-in-scope-files", [
           "--scope",
@@ -985,7 +995,7 @@ for (const location of ["outside", "repository-extra", "inside"]) {
           "--diff-mode",
           "local-patch",
         ]),
-      ).toBe(`safe.py\n${retained ? "src/nested/source.py\n" : ""}`);
+      ).toBe(`safe.py\n${binaryBase ? "" : "src/nested/changed.py\n"}`);
       expect(
         f.rows("make-diff-rank-input", [
           "--base",
@@ -995,19 +1005,195 @@ for (const location of ["outside", "repository-extra", "inside"]) {
         ]),
       ).toEqual([
         { path: "safe.py", area: "diff", preview: "after" },
-        ...(location !== "inside" || !binary
-          ? [
-              {
-                path: "src/nested/source.py",
-                area: "diff",
-                preview: retained ? "selected" : "",
-              },
-            ]
-          : []),
+        ...(binaryBase
+          ? []
+          : [{ path: "src/nested/changed.py", area: "diff", preview: "" }]),
       ]);
     });
   }
 }
+
+for (const replacement of ["missing", "directory", "junction"])
+  test(`local diff retains rename source when destination becomes ${replacement}`, () => {
+    const f = fixture();
+    f.write("old.py", "historical text\n");
+    const base = f.commit();
+    git(f.repo, "config", "diff.renames", "true");
+    git(f.repo, "mv", "old.py", "new.py");
+    git(f.repo, "update-index", "--skip-worktree", "new.py");
+    const destination = join(f.repo, "new.py");
+    rmSync(destination);
+    if (replacement === "directory") mkdirSync(destination);
+    else if (replacement === "junction") {
+      const outside = join(f.root, "outside");
+      mkdirSync(outside);
+      symlinkSync(outside, destination, "junction");
+    }
+    expect(
+      f.rows("make-diff-rank-input", ["--base", base, "--mode", "local-patch"]),
+    ).toEqual([{ path: "old.py", area: "diff", preview: "" }]);
+    expect(
+      f.success("generate-in-scope-files", [
+        "--scope",
+        ".",
+        "--diff-base",
+        base,
+        "--diff-mode",
+        "local-patch",
+      ]),
+    ).toBe("old.py\n");
+  });
+
+for (const binary of [false, true])
+  test(`local diff keeps safe ${binary ? "binary" : "text"} replacements after staged deletion`, () => {
+    const f = fixture();
+    f.write("source.py", "historical text\n");
+    const base = f.commit();
+    git(f.repo, "rm", "source.py");
+    f.write(
+      "source.py",
+      binary ? Buffer.from("\0replacement\n") : "replacement text\n",
+    );
+    expect(
+      f.rows("make-diff-rank-input", ["--base", base, "--mode", "local-patch"]),
+    ).toEqual(
+      binary
+        ? []
+        : [{ path: "source.py", area: "diff", preview: "replacement text" }],
+    );
+  });
+
+for (const location of ["inside", "outside"])
+  for (const change of [
+    "rename",
+    "rename without skip-worktree",
+    "rename leaf",
+    "recreated",
+  ])
+    for (const binaryBase of [false, true])
+      test.skipIf(process.platform === "win32" && change === "rename leaf")(
+        `local diff retains ${change} deletion below ${location} links with ${binaryBase ? "binary" : "text"} base`,
+        () => {
+          const f = fixture();
+          const rename = change.startsWith("rename");
+          const leaf = change === "rename leaf";
+          const name = rename
+            ? process.platform === "win32"
+              ? "Old.py"
+              : "Old\\file\tname.py"
+            : "dir/new.py";
+          f.write(
+            name,
+            binaryBase ? Buffer.from("\0historical\n") : "historical text\n",
+          );
+          const destination =
+            location === "inside"
+              ? join(f.repo, "inside")
+              : join(f.root, "outside");
+          mkdirSync(destination);
+          const linkedSource = join(destination, "new.py");
+          writeFileSync(
+            linkedSource,
+            binaryBase ? "foreign text\n" : Buffer.from("\0foreign\n"),
+          );
+          const base = f.commit();
+          git(f.repo, "config", "diff.renames", "true");
+          const nested = join(f.repo, leaf ? "new.py" : "dir");
+          const selectedDestination = leaf ? "new.py" : "dir/new.py";
+          if (rename) {
+            if (!leaf) mkdirSync(nested);
+            git(f.repo, "mv", name, selectedDestination);
+            if (change !== "rename without skip-worktree")
+              git(
+                f.repo,
+                "update-index",
+                "--skip-worktree",
+                selectedDestination,
+              );
+          } else git(f.repo, "rm", "dir/new.py");
+          rmSync(nested, { recursive: true, force: true });
+          const emulated =
+            change === "recreated" && process.platform !== "win32";
+          if (emulated) {
+            mkdirSync(nested);
+            copyFileSync(linkedSource, join(nested, "new.py"));
+          } else
+            symlinkSync(
+              leaf ? linkedSource : destination,
+              nested,
+              leaf ? "file" : "junction",
+            );
+          const preload = join(f.root, "observe-linked-source.cjs");
+          writeFileSync(
+            preload,
+            `
+const fs = require("node:fs");
+const forbidden = new Set(${JSON.stringify([leaf ? nested : join(nested, "new.py"), linkedSource])});
+const reject = path => {
+  if (forbidden.has(String(path))) throw new Error("opened a linked source");
+};
+const open = fs.openSync;
+fs.openSync = (path, ...args) => { reject(path); return open(path, ...args); };
+const lstat = fs.lstatSync;
+fs.lstatSync = (path, ...args) => {
+  const result = lstat(path, ...args);
+  if (${JSON.stringify(emulated)} && String(path) === ${JSON.stringify(nested)})
+    return new Proxy(result, { get(value, key) {
+      if (key === "isSymbolicLink") return () => true;
+      const member = Reflect.get(value, key);
+      return typeof member === "function" ? member.bind(value) : member;
+    }});
+  return result;
+};
+require("node:module").syncBuiltinESMExports();
+const Module = require("node:module");
+const native = Module._extensions[".node"];
+Module._extensions[".node"] = (loaded, path) => {
+  native(loaded, path);
+  if (!path.endsWith("windows.node")) return;
+  loaded.exports = new Proxy(loaded.exports, { get(value, key) {
+    const member = Reflect.get(value, key);
+    if (key !== "openWindowsFile") return member;
+    return (path, ...args) => { reject(path.toString("utf16le")); return member(path, ...args); };
+  }});
+};
+`,
+          );
+          const environment = {
+            ...f.toolEnvironment,
+            NODE_OPTIONS: `${f.toolEnvironment["NODE_OPTIONS"] ?? ""} --require ${JSON.stringify(preload)}`,
+          };
+          for (const command of [
+            "generate-in-scope-files",
+            "make-diff-rank-input",
+          ]) {
+            const inventory = command === "generate-in-scope-files";
+            const result = f.run(
+              command,
+              inventory
+                ? [
+                    "--scope",
+                    ".",
+                    "--diff-base",
+                    base,
+                    "--diff-mode",
+                    "local-patch",
+                  ]
+                : ["--base", base, "--mode", "local-patch"],
+              environment,
+            );
+            expect(result.status, result.stderr).toBe(0);
+            expect(readFileSync(f.out, "utf8")).toBe(
+              binaryBase
+                ? ""
+                : inventory
+                  ? name + "\n"
+                  : JSON.stringify({ path: name, area: "diff", preview: "" }) +
+                    "\n",
+            );
+          }
+        },
+      );
 
 test.skipIf(process.platform === "win32")(
   "local diff inventory does not open outside directory-link targets",
@@ -2470,6 +2656,8 @@ test("diff inventory accepts a base revision matching a path", () => {
 
 test("local diffs exclude SVN metadata and revision diffs retain it", () => {
   const f = fixture();
+  const filterCalls = join(f.repo, ".git", "filter-calls");
+  f.write(".gitattributes", "**/.svn/** filter=fixture\n");
   const paths = (state: string) => [
     state + ".py",
     "vendor/.svn-" + state + ".py",
@@ -2486,6 +2674,12 @@ test("local diffs exclude SVN metadata and revision diffs retain it", () => {
   }
   git(f.repo, "add", "--", ...paths("staged"));
   for (const name of paths("deleted")) rmSync(join(f.repo, name));
+  git(
+    f.repo,
+    "config",
+    "filter.fixture.clean",
+    "echo %f >> .git/filter-calls; cat",
+  );
   for (const mode of ["local-patch", "revisions"]) {
     if (mode === "revisions") f.commit();
     const expected = states
@@ -2511,6 +2705,299 @@ test("local diffs exclude SVN metadata and revision diffs retain it", () => {
         .trim()
         .split("\n"),
     ).toEqual(expected);
+    if (mode === "local-patch") expect(existsSync(filterCalls)).toBe(false);
+  }
+  expect(existsSync(filterCalls)).toBe(true);
+});
+
+for (const change of ["stat only", "mode only", "rename", "binary"])
+  test.skipIf(process.platform === "win32" && change === "mode only")(
+    `local diff inventory preserves ${change} membership with stale stat data`,
+    () => {
+      const f = fixture();
+      const name =
+        process.platform === "win32" ? "source.py" : "source\tfile.py";
+      const source = f.write(name, "source\n");
+      const unchanged = f.write("unchanged.py", "unchanged\n");
+      const base = f.commit();
+      utimesSync(unchanged, 1, 1);
+      let expected = [name];
+      if (change === "stat only") {
+        utimesSync(source, 1, 1);
+        expected = [];
+      } else if (change === "mode only") chmodSync(source, 0o755);
+      else if (change === "rename") {
+        const destination =
+          process.platform === "win32"
+            ? "renamed.py"
+            : "renamed\tfile\tname.py";
+        git(f.repo, "mv", name, destination);
+        expected = [destination];
+      } else {
+        f.write(name, Buffer.from("\0binary\n"));
+        expected = [];
+      }
+      expect(
+        f
+          .rows("make-diff-rank-input", [
+            "--base",
+            base,
+            "--mode",
+            "local-patch",
+          ])
+          .map((row) => row.path),
+      ).toEqual(expected);
+      expect(
+        f
+          .success("generate-in-scope-files", [
+            "--scope",
+            ".",
+            "--diff-base",
+            base,
+            "--diff-mode",
+            "local-patch",
+          ])
+          .trimEnd()
+          .split("\n")
+          .filter(Boolean),
+      ).toEqual(expected);
+    },
+  );
+
+for (const normalization of ["binary attribute", "eol", "clean filter"])
+  test(`local diff ignores equivalent contents with ${normalization}`, () => {
+    const f = fixture();
+    const source = f.write("source.py", "source\n");
+    f.write(
+      ".gitattributes",
+      normalization === "binary attribute"
+        ? "source.py -diff\n"
+        : normalization === "eol"
+          ? "source.py text eol=lf\n"
+          : "source.py filter=fixture\n",
+    );
+    if (normalization === "clean filter")
+      git(
+        f.repo,
+        "config",
+        "filter.fixture.clean",
+        "tr '[:upper:]' '[:lower:]'",
+      );
+    const base = f.commit();
+    if (normalization !== "binary attribute")
+      f.write("source.py", normalization === "eol" ? "source\r\n" : "SOURCE\n");
+    utimesSync(source, 1, 1);
+    const index = join(f.repo, ".git", "index"),
+      before = readFileSync(index);
+    expect(
+      f.rows("make-diff-rank-input", ["--base", base, "--mode", "local-patch"]),
+    ).toEqual([]);
+    expect(
+      f.success("generate-in-scope-files", [
+        "--scope",
+        ".",
+        "--diff-base",
+        base,
+        "--diff-mode",
+        "local-patch",
+      ]),
+    ).toBe("");
+    expect(readFileSync(index)).toEqual(before);
+  });
+
+test("local diff does not require an unselected older blob", () => {
+  const f = fixture();
+  f.write("source.py", "before\n");
+  const base = f.commit(),
+    old = git(f.repo, "rev-parse", "HEAD:source.py");
+  f.write("source.py", "after\n");
+  f.commit();
+  rmSync(join(f.repo, ".git", "objects", old.slice(0, 2), old.slice(2)));
+  expect(
+    f
+      .rows("make-diff-rank-input", ["--base", base, "--mode", "local-patch"])
+      .map((row) => row.path),
+  ).toEqual(["source.py"]);
+  expect(
+    f.success("generate-in-scope-files", [
+      "--scope",
+      ".",
+      "--diff-base",
+      base,
+      "--diff-mode",
+      "local-patch",
+    ]),
+  ).toBe("source.py\n");
+});
+
+for (const kind of ["unreadable", "fifo"])
+  test.skipIf(
+    process.platform === "win32" ||
+      (kind === "unreadable" && process.getuid?.() === 0),
+  )(`local diff skips a tracked ${kind} without aborting other files`, () => {
+    const f = fixture();
+    const source = f.write("unavailable.py", "before\n"),
+      base = f.commit();
+    if (kind === "unreadable") {
+      f.write("unavailable.py", "different sized contents\n");
+      chmodSync(source, 0);
+    } else {
+      rmSync(source);
+      const fifo = spawnSync("mkfifo", [source]);
+      expect(fifo.status, fifo.stderr.toString()).toBe(0);
+    }
+    f.write("readable.py", "readable\n");
+    try {
+      expect(
+        f
+          .rows("make-diff-rank-input", [
+            "--base",
+            base,
+            "--mode",
+            "local-patch",
+          ])
+          .map((row) => row.path),
+      ).toEqual(["readable.py"]);
+      expect(
+        f.success("generate-in-scope-files", [
+          "--scope",
+          ".",
+          "--diff-base",
+          base,
+          "--diff-mode",
+          "local-patch",
+        ]),
+      ).toBe("readable.py\n");
+    } finally {
+      if (kind === "unreadable") chmodSync(source, 0o600);
+    }
+  });
+
+test("local diff checks junction eligibility before Git clean filters", () => {
+  const f = fixture();
+  f.write(".gitattributes", "linked/source.py filter=fixture\n");
+  const source = f.write("linked/source.py", "base\n"),
+    base = f.commit(),
+    linked = dirname(source),
+    outside = join(f.root, "outside");
+  rmSync(linked, { recursive: true });
+  mkdirSync(outside);
+  writeFileSync(
+    join(outside, "source.py"),
+    "foreign different sized contents\n",
+  );
+  const preload = join(f.root, "junction.cjs");
+  if (process.platform === "win32") symlinkSync(outside, linked, "junction");
+  else {
+    mkdirSync(linked);
+    copyFileSync(join(outside, "source.py"), source);
+  }
+  writeFileSync(
+    preload,
+    `
+const fs = require("node:fs");
+const lstat = fs.lstatSync;
+fs.lstatSync = (path, ...args) => {
+  const info = lstat(path, ...args);
+  if (String(path) !== ${JSON.stringify(linked)}) return info;
+  return new Proxy(info, { get(target, key) {
+    if (key === "isSymbolicLink") return () => true;
+    const value = Reflect.get(target, key);
+    return typeof value === "function" ? value.bind(target) : value;
+  }});
+};
+require("node:module").syncBuiltinESMExports();
+`,
+  );
+  git(
+    f.repo,
+    "config",
+    "filter.fixture.clean",
+    "echo %f >> .git/filter-calls; cat",
+  );
+  const calls = join(f.repo, ".git", "filter-calls");
+  for (const command of ["generate-in-scope-files", "make-diff-rank-input"]) {
+    const result = f.run(
+      command,
+      command === "generate-in-scope-files"
+        ? ["--scope", ".", "--diff-base", base, "--diff-mode", "local-patch"]
+        : ["--base", base, "--mode", "local-patch"],
+      {
+        ...f.toolEnvironment,
+        NODE_OPTIONS: `${f.toolEnvironment["NODE_OPTIONS"] ?? ""} --require ${JSON.stringify(preload)}`,
+      },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    const content = readFileSync(f.out, "utf8");
+    expect(
+      command === "generate-in-scope-files"
+        ? content.trim()
+        : JSON.parse(content).path,
+    ).toBe("linked/source.py");
+    expect(existsSync(calls)).toBe(false);
+  }
+  git(f.repo, "add", "linked/source.py");
+  expect(readFileSync(calls, "utf8")).toContain("linked/source.py");
+});
+
+test("local diff inventory does not refresh excluded metadata for an older base", () => {
+  const f = fixture();
+  f.write(".gitattributes", "**/.svn/** filter=fixture\n");
+  const source = f.write("source.py", "base\n");
+  const metadata = f.write(".svn/source.txt", "before\n");
+  git(f.repo, "add", "-f", ".svn/source.txt");
+  const base = f.commit();
+  f.write("source.py", "head\n");
+  f.commit();
+  f.write("source.py", "base\n");
+  f.write(".svn/source.txt", "change\n");
+  for (const path of [source, metadata]) utimesSync(path, 1, 1);
+  git(
+    f.repo,
+    "config",
+    "filter.fixture.clean",
+    "echo %f >> .git/filter-calls; cat",
+  );
+  const calls = join(f.repo, ".git", "filter-calls"),
+    index = join(f.repo, ".git", "index"),
+    before = readFileSync(index);
+
+  for (const command of ["generate-in-scope-files", "make-diff-rank-input"]) {
+    f.success(
+      command,
+      command === "generate-in-scope-files"
+        ? ["--scope", ".", "--diff-base", base, "--diff-mode", "local-patch"]
+        : ["--base", base, "--mode", "local-patch"],
+    );
+    expect(existsSync(calls)).toBe(false);
+    expect(readFileSync(index)).toEqual(before);
+  }
+  git(f.repo, "add", "-f", ".svn/source.txt");
+  expect(readFileSync(calls, "utf8").split(/\r?\n/u)).toContain(
+    ".svn/source.txt",
+  );
+});
+
+test("local metadata exclusions preserve uppercase SVN paths with case folding enabled", () => {
+  const f = fixture();
+  f.write(".SVN/source.py", "before\n");
+  const base = f.commit();
+  f.write(".SVN/source.py", "after\n");
+  const env = { ...f.toolEnvironment, GIT_ICASE_PATHSPECS: "1" };
+  for (const command of ["generate-in-scope-files", "make-diff-rank-input"]) {
+    const inventory = command === "generate-in-scope-files";
+    const result = f.run(
+      command,
+      inventory
+        ? ["--scope", ".", "--diff-base", base, "--diff-mode", "local-patch"]
+        : ["--base", base, "--mode", "local-patch"],
+      env,
+    );
+    expect(result.status, result.stderr).toBe(0);
+    const content = readFileSync(f.out, "utf8");
+    expect(inventory ? content.trim() : JSON.parse(content).path).toBe(
+      ".SVN/source.py",
+    );
   }
 });
 

@@ -3,6 +3,7 @@ setlocal DisableDelayedExpansion
 
 set "CODEX_SECURITY_MCP_SCRIPT=%~dp0..\mcp\server.mjs"
 if "%~1"=="--helper" (
+  set "CODEX_SECURITY_GIT_ENVIRONMENT_FILE="
   set "CODEX_SECURITY_MCP_SCRIPT=%~dp0..\mcp\helpers.mjs"
   goto launch
 )

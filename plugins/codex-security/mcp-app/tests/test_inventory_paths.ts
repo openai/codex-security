@@ -12,8 +12,830 @@ const helperUrl = new URL(
   "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
   import.meta.url,
 );
-const { git, runTool } = await importSource("src/helpers/inventory-git.ts", {
+const {
+  git,
+  runTool,
+  changedPaths,
+  decodeGitPath,
+  encodeGitPath,
+  gitInspectionEnvironment,
+  trustedGitExecutable,
+} = await importSource("src/helpers/inventory-git.ts", {
   define: { "import.meta.url": JSON.stringify(helperUrl.href) },
+});
+
+function commandFixtureSettings(output: Buffer): string[] {
+  const fields = output.toString().split("\0"),
+    settings: string[] = [];
+  for (let index = 0; index < fields.length - 1; index += 2)
+    if (
+      fields[index] === "command line:" &&
+      fields[index + 1]!.startsWith("fixture.")
+    )
+      settings.push(fields[index + 1]!);
+  return settings;
+}
+
+test("Git bridge expands only in children and preserves enforced guards", async () => {
+  const root = fs.mkdtempSync(join(tmpdir(), "inventory-git-bridge-"));
+  const originalEnvironment = { ...process.env };
+  const originalSpawn = childProcess.spawn;
+  let childEnvironment: NodeJS.ProcessEnv | undefined;
+  childProcess.spawn = ((...args: Parameters<typeof childProcess.spawn>) => {
+    const options = args[2] as childProcess.SpawnOptions;
+    childEnvironment = options.env;
+    return originalSpawn(
+      process.execPath,
+      ["-e", "process.stdout.write('ok')"],
+      options,
+    );
+  }) as typeof childProcess.spawn;
+  syncBuiltinESMExports();
+  try {
+    process.env.CODEX_SECURITY_GIT = process.execPath;
+    const bridge = join(root, "git-environment.json");
+    fs.writeFileSync(
+      bridge,
+      JSON.stringify({
+        GIT_CONFIG_GLOBAL: "bridge-global",
+        GIT_CONFIG_SYSTEM: "bridge-system",
+        GIT_CONFIG_PARAMETERS: "bridge-parameters",
+        GIT_ATTR_SOURCE: "HEAD",
+        GIT_REPLACE_REF_BASE: "refs/fixture-replacements/",
+        GIT_DIR: "other-repository",
+        HOME: "other-home",
+        GIT_NO_LAZY_FETCH: "0",
+        GIT_ALLOW_PROTOCOL: "all",
+      }),
+    );
+    process.env.CODEX_SECURITY_GIT_ENVIRONMENT_FILE = bridge;
+    delete process.env.GIT_CONFIG_SYSTEM;
+    process.env.GIT_CONFIG_GLOBAL = "";
+    process.env.GIT_CONFIG_PARAMETERS = "";
+    process.env.GIT_ATTR_SOURCE = "";
+    process.env.GIT_REPLACE_REF_BASE = "";
+    process.env.GIT_DIR = "other-repository";
+    process.env.GIT_NO_LAZY_FETCH = "0";
+    process.env.GIT_ALLOW_PROTOCOL = "all";
+    const before = { ...process.env };
+    assert.equal((await git(root, ["status"])).status, 0);
+    assert.equal(childEnvironment?.GIT_CONFIG_GLOBAL, "");
+    assert.equal(childEnvironment?.GIT_CONFIG_SYSTEM, "bridge-system");
+    assert.equal(childEnvironment?.GIT_CONFIG_PARAMETERS, "");
+    assert.equal(childEnvironment?.GIT_ATTR_SOURCE, "");
+    assert.equal(childEnvironment?.GIT_REPLACE_REF_BASE, "");
+    assert.equal(childEnvironment?.GIT_DIR, undefined);
+    assert.equal(childEnvironment?.HOME, before.HOME);
+    assert.equal(childEnvironment?.GIT_NO_LAZY_FETCH, "1");
+    assert.equal(childEnvironment?.GIT_ALLOW_PROTOCOL, "");
+    assert.equal(
+      childEnvironment?.CODEX_SECURITY_GIT_ENVIRONMENT_FILE,
+      undefined,
+    );
+    assert.deepEqual({ ...process.env }, before);
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    for (const name of Object.keys(process.env))
+      if (!(name in originalEnvironment)) delete process.env[name];
+    Object.assign(process.env, originalEnvironment);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test(
+  "Git bridge retains raw configuration paths in the native launch path",
+  { skip: process.platform !== "linux" },
+  async () => {
+    const root = fs.mkdtempSync(join(tmpdir(), "inventory-git-raw-bridge-"));
+    const originalEnvironment = { ...process.env };
+    const config = root + "/configuration-\udcff";
+    fs.writeFileSync(
+      Buffer.concat([
+        Buffer.from(root + "/configuration-"),
+        Buffer.from([0xff]),
+      ]),
+      "[core]\nexcludesFile = selected-fixture\n",
+    );
+    try {
+      for (const name of Object.keys(process.env))
+        if (name.startsWith("GIT_CONFIG_")) delete process.env[name];
+      delete process.env.CODEX_SECURITY_GIT;
+      const bridge = join(root, "git-environment.json");
+      fs.writeFileSync(
+        bridge,
+        JSON.stringify({
+          GIT_CONFIG_GLOBAL: config,
+          GIT_CONFIG_NOSYSTEM: "1",
+        }),
+      );
+      process.env.CODEX_SECURITY_GIT_ENVIRONMENT_FILE = bridge;
+      const executable = trustedGitExecutable(root) as string | undefined;
+      assert.ok(executable);
+      const projected = await gitInspectionEnvironment(
+        process.env,
+        executable,
+        root,
+      );
+      assert.equal(projected.GIT_CONFIG_GLOBAL, config);
+      const plainConfig = join(root, "configuration-plain");
+      fs.writeFileSync(
+        plainConfig,
+        "[core]\nexcludesFile = selected-fixture\n",
+      );
+      const native = childProcess.spawnSync(
+        executable,
+        ["-C", root, "config", "--get", "core.excludesFile"],
+        {
+          env: {
+            ...process.env,
+            GIT_CONFIG_GLOBAL: plainConfig,
+            GIT_CONFIG_NOSYSTEM: "1",
+          },
+        },
+      );
+      const result = await git(root, ["config", "--get", "core.excludesFile"]);
+      assert.equal(result.status, native.status, result.stderr);
+      assert.deepEqual(result.stdout, native.stdout);
+      assert.equal(result.stderr, native.stderr.toString());
+    } finally {
+      for (const name of Object.keys(process.env))
+        if (!(name in originalEnvironment)) delete process.env[name];
+      Object.assign(process.env, originalEnvironment);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "Git retains raw replacement namespaces from bridge and explicit selectors",
+  { skip: process.platform !== "linux" },
+  async () => {
+    const root = fs.mkdtempSync(join(tmpdir(), "inventory-git-replacements-"));
+    const originalEnvironment = { ...process.env };
+    try {
+      delete process.env.CODEX_SECURITY_GIT;
+      delete process.env.CODEX_SECURITY_GIT_ENVIRONMENT_FILE;
+      delete process.env.GIT_REPLACE_REF_BASE;
+      delete process.env.GIT_NO_REPLACE_OBJECTS;
+      assert.equal((await git(root, ["init", "-q"])).status, 0);
+      const original = Buffer.from("original text\n"),
+        replacement = Buffer.from("\0binary replacement\n");
+      fs.writeFileSync(join(root, "original"), original);
+      fs.writeFileSync(join(root, "replacement"), replacement);
+      const object = async (name: string) => {
+        const result = await git(root, ["hash-object", "-w", name]);
+        assert.equal(result.status, 0, result.stderr);
+        return result.stdout.toString().trim();
+      };
+      const old = await object("original"),
+        updated = await object("replacement"),
+        prefix = "refs/fixture-\udcff/";
+      const ref = await git(root, ["update-ref", prefix + old, updated]);
+      assert.equal(ref.status, 0, ref.stderr);
+      const bridge = join(root, "git-environment.json");
+      fs.writeFileSync(
+        bridge,
+        JSON.stringify({ GIT_REPLACE_REF_BASE: prefix }),
+      );
+      process.env.CODEX_SECURITY_GIT_ENVIRONMENT_FILE = bridge;
+      const bridged = await git(root, ["cat-file", "blob", old]);
+      assert.equal(bridged.status, 0, bridged.stderr);
+      assert.deepEqual(bridged.stdout, replacement);
+      process.env.GIT_REPLACE_REF_BASE = "refs/other/";
+      const result = await git(root, ["cat-file", "blob", old]);
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(result.stdout, original);
+
+      // A JavaScript process.env assignment encodes lone surrogates. Launch the
+      // native-env control with real POSIX bytes before the helper reads them.
+      fs.writeFileSync(
+        bridge,
+        JSON.stringify({ GIT_REPLACE_REF_BASE: "refs/other/" }),
+      );
+      const probe = join(root, "raw-environment.mjs");
+      fs.writeFileSync(
+        probe,
+        `
+import { importSource } from ${JSON.stringify(new URL("./import-module.ts", import.meta.url).href)};
+const { git } = await importSource("src/helpers/inventory-git.ts", {
+  define: { "import.meta.url": ${JSON.stringify(JSON.stringify(helperUrl.href))} },
+});
+const result = await git(${JSON.stringify(root)}, ["cat-file", "blob", ${JSON.stringify(old)}]);
+if (result.status !== 0) throw new Error(result.stderr);
+process.stdout.write(result.stdout);
+`,
+      );
+      const octal = [
+        ...Buffer.concat([
+          Buffer.from("refs/fixture-"),
+          Buffer.from([0xff]),
+          Buffer.from("/"),
+        ]),
+      ]
+        .map((byte) => `\\0${byte.toString(8).padStart(3, "0")}`)
+        .join("");
+      const native = childProcess.spawnSync("/bin/sh", [
+        "-c",
+        `GIT_REPLACE_REF_BASE=$(printf '%b' '${octal}'); export GIT_REPLACE_REF_BASE; exec "$@"`,
+        "raw-selector",
+        process.execPath,
+        "--experimental-strip-types",
+        probe,
+      ]);
+      assert.equal(native.status, 0, native.stderr.toString());
+      assert.deepEqual(native.stdout, replacement);
+    } finally {
+      for (const name of Object.keys(process.env))
+        if (!(name in originalEnvironment)) delete process.env[name];
+      Object.assign(process.env, originalEnvironment);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+for (const carrier of ["indexed", "parameters"])
+  test(`Git filters keep behavior settings without ${carrier} header carriers`, async () => {
+    const root = fs.mkdtempSync(
+      join(tmpdir(), "inventory-git-filter-settings-"),
+    );
+    const originalEnvironment = { ...process.env };
+    try {
+      delete process.env.CODEX_SECURITY_GIT_ENVIRONMENT_FILE;
+      for (const name of Object.keys(process.env))
+        if (name.startsWith("GIT_CONFIG_")) delete process.env[name];
+      const setup = async (args: string[]) => {
+        const result = await git(root, args);
+        assert.equal(result.status, 0, result.stderr);
+      };
+      await setup(["init", "-q"]);
+      fs.writeFileSync(
+        join(root, ".gitattributes"),
+        "source.py filter=fixture\n",
+      );
+      fs.writeFileSync(join(root, "source.py"), "source\n");
+      await setup(["add", "."]);
+      await setup([
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.test",
+        "commit",
+        "-qm",
+        "filter settings fixture",
+      ]);
+      const marker = join(root, ".git", "filter-environment.json"),
+        filter = join(root, ".git", "filter.cjs");
+      fs.writeFileSync(
+        filter,
+        `
+const fs = require("node:fs");
+const selected = Object.fromEntries(Object.entries(process.env).filter(([name]) => name.startsWith("GIT_CONFIG_") || name.toUpperCase().startsWith("CODEX_SECURITY_GIT_ENVIRONMENT")));
+fs.writeFileSync(${JSON.stringify(marker)}, JSON.stringify(selected));
+process.stdout.write(fs.readFileSync(0).toString().toLowerCase());
+`,
+      );
+      await setup([
+        "config",
+        "filter.fixture.clean",
+        `${JSON.stringify(process.execPath.replaceAll("\\", "/"))} ${JSON.stringify(filter.replaceAll("\\", "/"))}`,
+      ]);
+      const configuration =
+        carrier === "indexed"
+          ? {
+              GIT_CONFIG_COUNT: "3",
+              GIT_CONFIG_KEY_0: "fixture.keep",
+              GIT_CONFIG_VALUE_0: "Authorization: retained behavior value",
+              GIT_CONFIG_KEY_1: "HTTP.https://synthetic.invalid/.ExtraHeader",
+              GIT_CONFIG_VALUE_1: "HEADER_ONLY_SYNTHETIC",
+              GIT_CONFIG_KEY_2: "fixture.empty",
+              GIT_CONFIG_VALUE_2: "",
+              GIT_CONFIG_KEY_999999: "http.extraHeader",
+              GIT_CONFIG_VALUE_999999: "UNUSED_HEADER_SYNTHETIC",
+            }
+          : {
+              GIT_CONFIG_PARAMETERS:
+                "'fixture.keep=Authorization: retained behavior value' 'http.extraHeader=HEADER_ONLY_SYNTHETIC' 'fixture.empty=' 'fixture.boolean'",
+            };
+      const executable = trustedGitExecutable(root) as string | undefined;
+      assert.ok(executable);
+      const native = childProcess.spawnSync(
+        executable,
+        [
+          "-C",
+          root,
+          "config",
+          "--null",
+          "--list",
+          "--show-origin",
+          "--no-includes",
+        ],
+        { env: { ...process.env, ...configuration } },
+      );
+      assert.equal(native.status, 0, native.stderr.toString());
+      const indexed = commandFixtureSettings(native.stdout).some(
+        (row) => row === "fixture.keep\nAuthorization: retained behavior value",
+      );
+      const bridge = join(root, ".git", "git-environment.json");
+      fs.writeFileSync(bridge, JSON.stringify(configuration));
+      process.env.CODEX_SECURITY_GIT_ENVIRONMENT_FILE = bridge;
+      process.env.codex_security_git_environment =
+        "OLD_INLINE_HEADER_SYNTHETIC";
+      fs.writeFileSync(join(root, "source.py"), "SOURCE\n");
+      fs.utimesSync(join(root, "source.py"), 1, 1);
+      assert.deepEqual(
+        await changedPaths(root, "HEAD", "HEAD", "local-patch"),
+        [],
+      );
+      const captured = JSON.parse(fs.readFileSync(marker, "utf8")) as Record<
+        string,
+        string
+      >;
+      assert.equal(
+        Object.keys(captured).some((name) =>
+          name.toUpperCase().startsWith("CODEX_SECURITY_GIT_ENVIRONMENT"),
+        ),
+        false,
+      );
+      assert.equal(
+        JSON.stringify(captured).includes("HEADER_ONLY_SYNTHETIC"),
+        false,
+      );
+      assert.equal(
+        JSON.stringify(captured).includes("UNUSED_HEADER_SYNTHETIC"),
+        false,
+      );
+      assert.equal(
+        JSON.stringify(captured).includes(
+          "Authorization: retained behavior value",
+        ),
+        true,
+      );
+      if (carrier === "indexed") {
+        assert.equal(
+          captured.GIT_CONFIG_COUNT,
+          indexed ? "2" : configuration.GIT_CONFIG_COUNT,
+        );
+        assert.equal(captured.GIT_CONFIG_KEY_0, "fixture.keep");
+        assert.equal(
+          captured[`GIT_CONFIG_KEY_${indexed ? 1 : 2}`],
+          "fixture.empty",
+        );
+        assert.equal(captured[`GIT_CONFIG_VALUE_${indexed ? 1 : 2}`], "");
+      }
+    } finally {
+      for (const name of Object.keys(process.env))
+        if (!(name in originalEnvironment)) delete process.env[name];
+      Object.assign(process.env, originalEnvironment);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+test("Git projection preserves parameter order, empty values, and native failures", async () => {
+  const root = fs.mkdtempSync(join(tmpdir(), "inventory-git-projection-"));
+  try {
+    const executable = trustedGitExecutable(root) as string | undefined;
+    assert.ok(executable);
+    const base: NodeJS.ProcessEnv = {
+      PATH: process.env.PATH,
+      SystemRoot: process.env.SystemRoot,
+      GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+      GIT_CONFIG_SYSTEM: process.platform === "win32" ? "NUL" : "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+    };
+    const entries = [
+      "fixture.order=first",
+      "fixture.empty=",
+      "fixture.boolean",
+      "fixture.lines=one\ntwo\n",
+      "fixture.quote=it's a \\literal",
+      "http.extraHeader=HEADER_ONLY_SYNTHETIC",
+      "HTTP.https://synthetic.invalid/.ExtraHeader=",
+      "fixture.order=last",
+    ];
+    const quoted = childProcess.spawnSync(
+      executable,
+      ["rev-parse", "--sq-quote", ...entries],
+      { cwd: root, env: base },
+    );
+    assert.equal(quoted.status, 0, quoted.stderr.toString());
+    const source = {
+      ...base,
+      GIT_CONFIG_COUNT: "4",
+      GIT_CONFIG_KEY_0: "fixture.order",
+      GIT_CONFIG_VALUE_0: "indexed-first",
+      GIT_CONFIG_KEY_1: "fixture.large.first",
+      GIT_CONFIG_VALUE_1: "x".repeat(
+        process.platform === "win32" ? 256 : 65536,
+      ),
+      GIT_CONFIG_KEY_2: "http.extraHeader",
+      GIT_CONFIG_VALUE_2: "INDEXED_HEADER_SYNTHETIC",
+      GIT_CONFIG_KEY_3: "fixture.large.last",
+      GIT_CONFIG_VALUE_3: "y".repeat(
+        process.platform === "win32" ? 256 : 65536,
+      ),
+      GIT_CONFIG_PARAMETERS: quoted.stdout.toString().trim(),
+      GIT_CONFIG: base.GIT_CONFIG_GLOBAL,
+    };
+    const args = [
+      "config",
+      "--null",
+      "--list",
+      "--show-origin",
+      "--no-includes",
+    ];
+    const original = { ...source };
+    delete original.GIT_CONFIG;
+    const native = childProcess.spawnSync(executable, args, {
+      cwd: root,
+      env: original,
+    });
+    assert.equal(native.status, 0, native.stderr.toString());
+    const nativeSettings = commandFixtureSettings(native.stdout);
+    const indexed = nativeSettings.includes("fixture.order\nindexed-first");
+    const selected = await gitInspectionEnvironment(source, executable, root);
+    // Older Git ignores COUNT; preserve its native meaning instead of enabling it.
+    assert.equal(
+      selected.GIT_CONFIG_COUNT,
+      indexed ? "3" : source.GIT_CONFIG_COUNT,
+    );
+    assert.equal(selected.GIT_CONFIG_VALUE_1, source.GIT_CONFIG_VALUE_1);
+    assert.equal(
+      Object.values(selected).includes("INDEXED_HEADER_SYNTHETIC"),
+      false,
+    );
+    const inspected = { ...selected };
+    delete inspected.GIT_CONFIG;
+    const actual = childProcess.spawnSync(executable, args, {
+      cwd: root,
+      env: inspected,
+    });
+    assert.equal(actual.status, 0, actual.stderr.toString());
+    assert.deepEqual(commandFixtureSettings(actual.stdout), nativeSettings);
+    assert.equal(
+      actual.stdout.includes(Buffer.from("HEADER_ONLY_SYNTHETIC")),
+      false,
+    );
+    assert.equal(
+      actual.stdout.includes(Buffer.from("INDEXED_HEADER_SYNTHETIC")),
+      false,
+    );
+    const benign = {
+      ...base,
+      GIT_CONFIG_PARAMETERS: "'fixture.keep=unchanged spelling'",
+    };
+    assert.deepEqual(
+      await gitInspectionEnvironment(benign, executable, root),
+      benign,
+    );
+    for (const malformed of [
+      { GIT_CONFIG_PARAMETERS: "'unterminated" },
+      {
+        GIT_CONFIG_COUNT: "bogus",
+        GIT_CONFIG_KEY_0: "http.extraHeader",
+        GIT_CONFIG_VALUE_0: "synthetic",
+      },
+      { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader" },
+      {
+        GIT_CONFIG_PARAMETERS: "'http.subsection\nname.extraHeader=synthetic'",
+      },
+      {
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "http.subsection\nname.extraHeader",
+        GIT_CONFIG_VALUE_0: "synthetic",
+      },
+    ]) {
+      const environment = { ...base, ...malformed };
+      const native: childProcess.SpawnSyncReturns<Buffer> =
+        childProcess.spawnSync(executable, args, {
+          cwd: root,
+          env: environment,
+        });
+      let projected: NodeJS.ProcessEnv;
+      try {
+        projected = await gitInspectionEnvironment(
+          environment,
+          executable,
+          root,
+        );
+      } catch (error) {
+        assert.notEqual(native.status, 0);
+        assert.equal((error as Error).message, native.stderr.toString().trim());
+        continue;
+      }
+      const actual: childProcess.SpawnSyncReturns<Buffer> =
+        childProcess.spawnSync(executable, args, {
+          cwd: root,
+          env: projected,
+        });
+      assert.equal(actual.status, native.status);
+      assert.equal(actual.stderr.toString(), native.stderr.toString());
+      if (native.status === 0) assert.deepEqual(actual.stdout, native.stdout);
+    }
+    const noGit = await gitInspectionEnvironment(source, undefined, root);
+    assert.equal(
+      Object.keys(noGit).some((name) =>
+        /^GIT_CONFIG_(?:COUNT|PARAMETERS|(?:KEY|VALUE)_\d+)$/u.test(name),
+      ),
+      false,
+    );
+    assert.equal(noGit.GIT_CONFIG_GLOBAL, base.GIT_CONFIG_GLOBAL);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const style of ["legacy", "separate"])
+  test(`Git projection preserves ${style} native parameter key boundaries`, async () => {
+    const root = fs.mkdtempSync(
+      join(tmpdir(), "inventory-git-parameter-keys-"),
+    );
+    try {
+      const executable = trustedGitExecutable(root) as string | undefined;
+      assert.ok(executable);
+      const base: NodeJS.ProcessEnv = {
+        PATH: process.env.PATH,
+        SystemRoot: process.env.SystemRoot,
+        GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+        GIT_CONFIG_SYSTEM: process.platform === "win32" ? "NUL" : "/dev/null",
+        GIT_CONFIG_NOSYSTEM: "1",
+      };
+      const raw = process.platform === "linux" ? "\udcff" : "雪",
+        valueRaw = process.platform === "linux" ? "\udcfe" : "雪",
+        subsection = style === "separate" ? "?a=b" : "plain",
+        key = `url.https://example.test/${subsection}.insteadof`;
+      const settings: [string, string | undefined][] = [
+        ["fixture.order", "first"],
+        [key, "https://other.test/"],
+        [`url.https://example.test/${subsection}.boolean`, undefined],
+        [`url.https://example.test/${subsection}.empty`, ""],
+        [
+          `url.https://raw-${raw}.test/${subsection}.insteadof`,
+          `it's ! \\literal-${valueRaw}\nvalue\n`,
+        ],
+        [key, "https://last.test/"],
+        ["http.extraHeader", "HEADER_ONLY_SYNTHETIC"],
+        ["fixture.order", "last"],
+      ];
+      const quote = async (values: string[]): Promise<string> => {
+        const result = await git(root, ["rev-parse", "--sq-quote", ...values]);
+        assert.equal(result.status, 0, result.stderr);
+        return decodeGitPath(result.stdout).trim();
+      };
+      let parameters: string;
+      if (style === "legacy")
+        parameters = await quote(
+          settings.map(([name, value]) =>
+            value === undefined ? name : `${name}=${value}`,
+          ),
+        );
+      else {
+        const pieces: string[] = [];
+        for (const [name, value] of settings)
+          pieces.push(
+            `${await quote([name])}=${value === undefined ? "" : await quote([value])}`,
+          );
+        parameters = pieces.join(" ");
+      }
+      const large = "x".repeat(process.platform === "win32" ? 256 : 65536);
+      const source: NodeJS.ProcessEnv = {
+        ...base,
+        GIT_CONFIG_COUNT: "2",
+        GIT_CONFIG_KEY_0: "fixture.large.first",
+        GIT_CONFIG_VALUE_0: large,
+        GIT_CONFIG_KEY_1: "fixture.large.last",
+        GIT_CONFIG_VALUE_1: large,
+        GIT_CONFIG_PARAMETERS: parameters,
+      };
+      const args = [
+        "config",
+        "--null",
+        "--list",
+        "--show-origin",
+        "--no-includes",
+      ];
+      const inspect = (
+        environment: NodeJS.ProcessEnv,
+      ): childProcess.SpawnSyncReturns<Buffer> => {
+        if (process.platform === "win32")
+          return childProcess.spawnSync(executable, args, {
+            cwd: root,
+            env: environment,
+          });
+        const env = { ...environment };
+        delete env.GIT_CONFIG_PARAMETERS;
+        const octal = [...encodeGitPath(environment.GIT_CONFIG_PARAMETERS!)]
+          .map((byte: number) => `\\0${byte.toString(8).padStart(3, "0")}`)
+          .join("");
+        return childProcess.spawnSync(
+          "/bin/sh",
+          [
+            "-c",
+            `value=$(printf '%b.' '${octal}'); GIT_CONFIG_PARAMETERS=\${value%.}; export GIT_CONFIG_PARAMETERS; exec "$@"`,
+            "parameter-fixture",
+            executable,
+            ...args,
+          ],
+          { cwd: root, env },
+        );
+      };
+      const native: childProcess.SpawnSyncReturns<Buffer> = inspect(source);
+      if (native.status !== 0) {
+        assert.equal(style, "separate");
+        assert.ok(
+          native.stderr.includes(
+            Buffer.from("bogus format in GIT_CONFIG_PARAMETERS"),
+          ),
+        );
+        await assert.rejects(
+          gitInspectionEnvironment(source, executable, root),
+          (error: Error) => error.message === native.stderr.toString().trim(),
+        );
+        return;
+      }
+      const projected = await gitInspectionEnvironment(
+        source,
+        executable,
+        root,
+      );
+      const actual: childProcess.SpawnSyncReturns<Buffer> = inspect(projected);
+      assert.equal(actual.status, 0, actual.stderr.toString());
+      assert.equal(
+        actual.stdout.includes(Buffer.from("HEADER_ONLY_SYNTHETIC")),
+        false,
+      );
+      assert.equal(projected.GIT_CONFIG_VALUE_0, large);
+      assert.equal(projected.GIT_CONFIG_VALUE_1, large);
+      const userSettings = (output: Buffer): string[] => {
+        const fields = decodeGitPath(output).split("\0"),
+          rows: string[] = [];
+        for (let index = 0; index < fields.length - 1; index += 2)
+          if (
+            fields[index] === "command line:" &&
+            /^(?:fixture|url)\./u.test(fields[index + 1]!)
+          )
+            rows.push(fields[index + 1]!);
+        return rows;
+      };
+      assert.deepEqual(
+        userSettings(actual.stdout),
+        userSettings(native.stdout),
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+test("Git projection handles native HTTP subsection separators", async () => {
+  const root = fs.mkdtempSync(join(tmpdir(), "inventory-git-header-keys-"));
+  try {
+    const executable = trustedGitExecutable(root) as string | undefined;
+    assert.ok(executable);
+    const base: NodeJS.ProcessEnv = {
+      PATH: process.env.PATH,
+      SystemRoot: process.env.SystemRoot,
+      GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+      GIT_CONFIG_SYSTEM: process.platform === "win32" ? "NUL" : "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+    };
+    const args = [
+      "config",
+      "--null",
+      "--list",
+      "--show-origin",
+      "--no-includes",
+    ];
+    for (const separator of ["\r", "\u2028", "\u2029"])
+      for (const carrier of ["indexed", "parameters"]) {
+        const key = `http.https://synthetic.invalid/${separator}.extraHeader`,
+          benign = `Authorization: retained${separator}behavior`;
+        let source: NodeJS.ProcessEnv;
+        if (carrier === "indexed")
+          source = {
+            ...base,
+            GIT_CONFIG_COUNT: "2",
+            GIT_CONFIG_KEY_0: key,
+            GIT_CONFIG_VALUE_0: "HEADER_ONLY_SYNTHETIC",
+            GIT_CONFIG_KEY_1: "fixture.keep",
+            GIT_CONFIG_VALUE_1: benign,
+          };
+        else {
+          const quoted: childProcess.SpawnSyncReturns<Buffer> =
+            childProcess.spawnSync(
+              executable,
+              [
+                "rev-parse",
+                "--sq-quote",
+                `${key}=HEADER_ONLY_SYNTHETIC`,
+                `fixture.keep=${benign}`,
+              ],
+              { cwd: root, env: base },
+            );
+          assert.equal(quoted.status, 0, quoted.stderr.toString());
+          source = {
+            ...base,
+            GIT_CONFIG_PARAMETERS: quoted.stdout.toString().trim(),
+          };
+        }
+        const native: childProcess.SpawnSyncReturns<Buffer> =
+          childProcess.spawnSync(executable, args, {
+            cwd: root,
+            env: source,
+          });
+        assert.equal(native.status, 0, native.stderr.toString());
+        const active = native.stdout.includes(
+          Buffer.from("HEADER_ONLY_SYNTHETIC"),
+        );
+        const projected: NodeJS.ProcessEnv = await gitInspectionEnvironment(
+          source,
+          executable,
+          root,
+        );
+        const actual: childProcess.SpawnSyncReturns<Buffer> =
+          childProcess.spawnSync(executable, args, {
+            cwd: root,
+            env: projected,
+          });
+        assert.equal(actual.status, 0, actual.stderr.toString());
+        assert.equal(
+          actual.stdout.includes(Buffer.from("HEADER_ONLY_SYNTHETIC")),
+          false,
+        );
+        assert.deepEqual(
+          commandFixtureSettings(actual.stdout),
+          commandFixtureSettings(native.stdout),
+        );
+        assert.equal(
+          Object.values(projected).some((value) =>
+            value?.includes("HEADER_ONLY_SYNTHETIC"),
+          ),
+          false,
+        );
+        assert.ok(
+          Object.values(projected).some((value) => value?.includes(benign)),
+        );
+        if (carrier === "indexed")
+          assert.equal(
+            projected.GIT_CONFIG_COUNT,
+            active ? "1" : source.GIT_CONFIG_COUNT,
+          );
+      }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Git configuration inspection cancels a blocked selected executable", async () => {
+  const root = fs.mkdtempSync(join(tmpdir(), "inventory-git-cancellation-"));
+  const originalSpawn = childProcess.spawn;
+  const controller = new AbortController();
+  let child: childProcess.ChildProcess | undefined;
+  let childSignal: AbortSignal | null | undefined;
+  let closed: Promise<void> | undefined;
+  let readyResolve!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    readyResolve = resolve;
+  });
+  childProcess.spawn = ((...args: Parameters<typeof childProcess.spawn>) => {
+    const options = args[2] as childProcess.SpawnOptions;
+    childSignal = options.signal;
+    child = originalSpawn(
+      process.execPath,
+      ["-e", "process.stdout.write('ready'); setInterval(() => {}, 1000);"],
+      options,
+    );
+    child.stdout!.once("data", readyResolve);
+    closed = new Promise((resolve) => {
+      child!.once("close", () => resolve());
+    });
+    return child;
+  }) as typeof childProcess.spawn;
+  syncBuiltinESMExports();
+  const outcome = gitInspectionEnvironment(
+    { GIT_CONFIG_PARAMETERS: "'http.extraHeader=synthetic'" },
+    process.execPath,
+    root,
+    controller.signal,
+  ).then(
+    (value: NodeJS.ProcessEnv) => ({ value, error: undefined }),
+    (error: NodeJS.ErrnoException) => ({ value: undefined, error }),
+  );
+  try {
+    await ready;
+    assert.equal(childSignal, controller.signal);
+    controller.abort();
+    const result = await outcome;
+    assert.equal(result.error?.code, "ABORT_ERR");
+    await closed;
+    assert.ok(child?.exitCode !== null || child?.signalCode !== null);
+  } finally {
+    controller.abort();
+    child?.kill();
+    await outcome;
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 for (const [name, details] of [

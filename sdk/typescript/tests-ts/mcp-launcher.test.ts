@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { git } from "./git-fixture.js";
 import {
   chmod,
   copyFile,
@@ -763,3 +764,163 @@ test.skipIf(process.platform !== "win32")(
     }
   },
 );
+
+test.each(["server", "helper"] as const)(
+  "routes private Git settings at the %s launcher boundary",
+  async (mode) => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "git-launcher-env-")),
+    );
+    try {
+      const scripts = join(root, "scripts"),
+        mcp = join(root, "mcp");
+      await mkdir(scripts);
+      await mkdir(mcp);
+      const windows = process.platform === "win32";
+      const name = `launch_codex_security_mcp${windows ? ".cmd" : ""}`;
+      const launcher = join(scripts, name);
+      await copyFile(join(PLUGIN_ROOT, "scripts", name), launcher);
+      const source = `console.log(JSON.stringify({git:process.env.GIT_CONFIG_GLOBAL,file:process.env.CODEX_SECURITY_GIT_ENVIRONMENT_FILE}));\n`;
+      for (const script of ["helpers.mjs", "server.mjs"])
+        await writeFile(join(mcp, script), source);
+      const environment = {
+        ...process.env,
+        CODEX_MCP_NODE_PATH: Bun.which("node")!,
+        GIT_CONFIG_GLOBAL: "native-selected.gitconfig",
+        CODEX_SECURITY_GIT_ENVIRONMENT_FILE: join(
+          root,
+          "private-settings.json",
+        ),
+      };
+      const args = mode === "helper" ? ["--helper", "probe"] : ["--stdio"];
+      const result = spawnSync(
+        windows ? (process.env["ComSpec"] ?? "cmd.exe") : launcher,
+        windows
+          ? ["/d", "/s", "/c", `""${launcher}" ${args.join(" ")}"`]
+          : args,
+        {
+          env: environment,
+          encoding: "utf8",
+          windowsHide: true,
+          windowsVerbatimArguments: windows,
+        },
+      );
+      expect(result.status, result.stderr || result.error?.message).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({
+        git: "native-selected.gitconfig",
+        ...(mode === "server"
+          ? { file: environment.CODEX_SECURITY_GIT_ENVIRONMENT_FILE }
+          : {}),
+      });
+      expect(environment.CODEX_SECURITY_GIT_ENVIRONMENT_FILE).toBe(
+        join(root, "private-settings.json"),
+      );
+    } finally {
+      await removeTemporaryDirectory(root);
+    }
+  },
+);
+
+test("scope helper uses shell Git settings while MCP keeps its private view", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "git-shell-scope-")),
+  );
+  try {
+    const repository = join(root, "repository"),
+      scope = join(repository, "src");
+    await mkdir(scope, { recursive: true });
+    git(repository, "init", "-q");
+    await writeFile(join(repository, ".gitignore"), "src/tracked-ignored.py\n");
+    for (const name of ["kept.py", "tracked-ignored.py"])
+      await writeFile(join(scope, name), "value = 1\n");
+    git(repository, "add", ".");
+    git(repository, "add", "-f", "src/tracked-ignored.py");
+    for (const name of ["native-only.py", "bridge-only.py"])
+      await writeFile(join(scope, name), "value = 1\n");
+    const nativeIgnore = join(root, "native-ignore"),
+      privateIgnore = join(root, "private-ignore"),
+      config = join(root, "native.gitconfig"),
+      snapshot = join(root, "private.json"),
+      scopes = join(root, "scopes.json"),
+      output = join(root, "scope.jsonl");
+    await writeFile(nativeIgnore, "src/native-only.py\n");
+    await writeFile(privateIgnore, "src/bridge-only.py\n");
+    await writeFile(
+      config,
+      `[core]\nexcludesFile = "${nativeIgnore.replaceAll("\\", "/")}"\n`,
+    );
+    await writeFile(
+      snapshot,
+      JSON.stringify({
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "core.excludesFile",
+        GIT_CONFIG_VALUE_0: privateIgnore,
+      }),
+      { mode: 0o600 },
+    );
+    await writeFile(scopes, '["src"]');
+    const environment = {
+      ...process.env,
+      CODEX_MCP_NODE_PATH: Bun.which("node")!,
+      GIT_CONFIG_GLOBAL: config,
+      CODEX_SECURITY_GIT_ENVIRONMENT_FILE: snapshot,
+    };
+    const args = [
+      "make-repo-scope-input",
+      "--repo",
+      repository,
+      "--scopes-file",
+      scopes,
+      "--out",
+      output,
+    ];
+    const windows = process.platform === "win32",
+      launcher = join(
+        PLUGIN_ROOT,
+        "scripts",
+        `launch_codex_security_mcp${windows ? ".cmd" : ""}`,
+      );
+    for (const origin of ["shell", "MCP"] as const) {
+      const result =
+        origin === "MCP"
+          ? spawnSync(
+              environment.CODEX_MCP_NODE_PATH,
+              [join(PLUGIN_ROOT, "mcp", "helpers.mjs"), ...args],
+              { env: environment, encoding: "utf8" },
+            )
+          : spawnSync(
+              windows ? (process.env["ComSpec"] ?? "cmd.exe") : launcher,
+              windows
+                ? [
+                    "/d",
+                    "/s",
+                    "/c",
+                    `""${launcher}" --helper ${args.map((value) => `"${value}"`).join(" ")}"`,
+                  ]
+                : ["--helper", ...args],
+              {
+                env: environment,
+                encoding: "utf8",
+                windowsHide: true,
+                windowsVerbatimArguments: windows,
+              },
+            );
+      expect(result.status, result.stderr || result.error?.message).toBe(0);
+      expect(
+        (await readFile(output, "utf8"))
+          .trim()
+          .split("\n")
+          .map((row) => JSON.parse(row).path),
+      ).toEqual(
+        [
+          origin === "shell" ? "src/bridge-only.py" : "src/native-only.py",
+          "src/kept.py",
+          "src/tracked-ignored.py",
+        ].sort(),
+      );
+    }
+    expect(environment.CODEX_SECURITY_GIT_ENVIRONMENT_FILE).toBe(snapshot);
+  } finally {
+    await removeTemporaryDirectory(root);
+  }
+});

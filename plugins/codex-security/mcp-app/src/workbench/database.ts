@@ -1,18 +1,10 @@
-import {
-  chmodSync,
-  lstatSync,
-  mkdirSync,
-  readlinkSync,
-  realpathSync,
-  statSync,
-} from "node:fs";
+import { chmodSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout } from "node:timers/promises";
 import { applyMigrations } from "./migrations";
 import { decodePosixBytes, encodePosixPath } from "../helpers/posix-path";
-import { windowsBinding } from "../native";
-import { widePath, windowsFileSystem } from "../../../native/windows-files.mjs";
+import { createPrivateDirectory } from "../helpers/private-directory";
 
 export function requireSqliteText(
   values: readonly (string | null | undefined)[],
@@ -21,42 +13,12 @@ export function requireSqliteText(
     throw new TypeError("SQLite text keys must contain valid Unicode.");
 }
 
-function createStateDirectory(path: string): void {
-  if (process.platform !== "win32") path = path.replace(/\/+$/u, "") || "/";
-  const nativePath =
-    process.platform === "win32" ? path : encodePosixPath(path);
-  if (statSync(nativePath, { throwIfNoEntry: false })?.isDirectory()) return;
-  const entry = lstatSync(nativePath, { throwIfNoEntry: false });
-  if (entry?.isSymbolicLink()) {
-    const target =
-      process.platform === "win32"
-        ? readlinkSync(nativePath)
-        : decodePosixBytes(readlinkSync(nativePath, { encoding: "buffer" }));
-    createStateDirectory(
-      isAbsolute(target) ? target : `${dirname(path)}${sep}${target}`,
-    );
-    return;
-  }
-  if (!entry) {
-    const parent = dirname(path);
-    if (parent !== path) createStateDirectory(parent);
-  }
-  try {
-    if (process.platform === "win32")
-      windowsFileSystem(windowsBinding()).mkdirPrivate(widePath(path));
-    else mkdirSync(nativePath, { mode: 0o700 });
-  } catch (error) {
-    if (!statSync(nativePath, { throwIfNoEntry: false })?.isDirectory())
-      throw error;
-  }
-}
-
 export async function openWorkbenchDatabase(
   databasePath: string,
   { deferred = false }: { deferred?: boolean } = {},
 ): Promise<DatabaseSync> {
   try {
-    createStateDirectory(dirname(databasePath));
+    createPrivateDirectory(dirname(databasePath));
     for (let attempt = 0; ; attempt++) {
       const database = new DatabaseSync(databasePath);
       try {

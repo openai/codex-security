@@ -3,11 +3,13 @@ from __future__ import annotations
 import difflib
 import errno
 import hashlib
+import json
 import os
 import runpy
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, cast
@@ -25,6 +27,418 @@ update_digest_field = cast(
     Callable[[Any, bytes, bytes], None], WORKBENCH_TARGET["update_digest_field"]
 )
 CASE_ALIAS = pytest.param("case", marks=pytest.mark.native_macos)
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("windows", [False, True])
+def test_git_bridge_preserves_explicit_environment_and_guards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, windows: bool
+) -> None:
+    import workbench_target
+
+    monkeypatch.setattr(workbench_target, "_WINDOWS", windows)
+    monkeypatch.setattr(workbench_target, "trusted_git_executable", lambda _target: "git")
+    captured: dict[str, Any] = {}
+
+    def run(command: list[str], **kwargs: Any):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(workbench_target.subprocess, "run", run)
+    bridge = tmp_path / "git-environment.json"
+    bridge.write_text(
+        json.dumps(
+            {
+                "GIT_CONFIG_GLOBAL": "bridge-global",
+                "GIT_CONFIG_SYSTEM": "bridge-system",
+                "GIT_CONFIG_PARAMETERS": "bridge-parameters",
+                "GIT_ATTR_SOURCE": "HEAD",
+                "GIT_ATTR_NOSYSTEM": "1",
+                "GIT_NO_REPLACE_OBJECTS": "1",
+                "GIT_REPLACE_REF_BASE": "refs/fixture-replacements/",
+                "GIT_DIR": "other-repository",
+                "HOME": "other-home",
+                "GIT_NO_LAZY_FETCH": "0",
+                "GIT_ALLOW_PROTOCOL": "all",
+            }
+        )
+    )
+    monkeypatch.setenv(
+        "codex_security_git_environment_file" if windows else "CODEX_SECURITY_GIT_ENVIRONMENT_FILE",
+        str(bridge),
+    )
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    monkeypatch.delenv("GIT_CONFIG_SYSTEM", raising=False)
+    monkeypatch.setenv("git_config_global" if windows else "GIT_CONFIG_GLOBAL", "")
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "")
+    monkeypatch.setenv("GIT_ATTR_SOURCE", "")
+    monkeypatch.delenv("GIT_ATTR_NOSYSTEM", raising=False)
+    monkeypatch.setenv("GIT_NO_REPLACE_OBJECTS", "")
+    monkeypatch.delenv("GIT_REPLACE_REF_BASE", raising=False)
+    monkeypatch.setenv("GIT_DIR", "other-repository")
+    monkeypatch.setenv("GIT_NO_LAZY_FETCH", "0")
+    monkeypatch.setenv("GIT_ALLOW_PROTOCOL", "all")
+    before = dict(os.environ)
+
+    workbench_target.git_command(tmp_path, "status", text=False)
+
+    environment = captured["env"]
+    assert environment["GIT_CONFIG_GLOBAL"] == ""
+    assert environment["GIT_CONFIG_SYSTEM"] == "bridge-system"
+    assert environment["GIT_CONFIG_PARAMETERS"] == ""
+    assert environment["GIT_ATTR_SOURCE"] == ""
+    assert environment["GIT_ATTR_NOSYSTEM"] == "1"
+    assert environment["GIT_NO_REPLACE_OBJECTS"] == ""
+    assert environment["GIT_REPLACE_REF_BASE"] == "refs/fixture-replacements/"
+    assert "GIT_DIR" not in environment
+    assert environment.get("HOME") == before.get("HOME")
+    assert environment["GIT_NO_LAZY_FETCH"] == "1"
+    assert environment["GIT_ALLOW_PROTOCOL"] == ""
+    assert dict(os.environ) == before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Raw POSIX paths use surrogate-escaped bytes")
+def test_git_bridge_keeps_configuration_file_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    configuration = tmp_path / (
+        "configuration-\udcff" if sys.platform == "linux" else "configuration"
+    )
+    configuration.mkdir()
+    (configuration / "global").write_text('[include]\npath = "relative"\n')
+    (configuration / "relative").write_text("[core]\nexcludesFile = selected-fixture\n")
+    for name in tuple(os.environ):
+        if name.startswith("GIT_CONFIG_"):
+            monkeypatch.delenv(name)
+    bridge = tmp_path / "git-environment.json"
+    bridge.write_text(
+        json.dumps({"GIT_CONFIG_GLOBAL": str(configuration / "global"), "GIT_CONFIG_NOSYSTEM": "1"})
+    )
+    monkeypatch.setenv("CODEX_SECURITY_GIT_ENVIRONMENT_FILE", str(bridge))
+
+    result = workbench_target.git_command(target, "config", "--get", "core.excludesFile", text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "selected-fixture\n"
+
+
+def test_git_environment_ignores_old_inline_bridge() -> None:
+    import workbench_target
+
+    assert (
+        workbench_target._git_configuration_environment(
+            {"CODEX_SECURITY_GIT_ENVIRONMENT": '{"GIT_CONFIG_GLOBAL":"old-inline"}'}
+        )
+        == {}
+    )
+
+
+@pytest.mark.cross_platform
+def test_git_bridge_preserves_replacement_namespace_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip()
+    (target / "source.py").write_text("selected text\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "replacement fixture"], cwd=target, check=True)
+    original = subprocess.check_output(
+        ["git", "rev-parse", "HEAD:source.py"], cwd=target, text=True
+    ).strip()
+    replacement = (
+        subprocess.check_output(
+            ["git", "hash-object", "-w", "--stdin"], cwd=target, input=b"\0binary fixture\n"
+        )
+        .decode()
+        .strip()
+    )
+    prefix = "refs/fixture-replacements/"
+    subprocess.run(["git", "update-ref", prefix + original, replacement], cwd=target, check=True)
+    bridge = tmp_path / "git-environment.json"
+    bridge.write_text(json.dumps({"GIT_REPLACE_REF_BASE": prefix}))
+    monkeypatch.setenv("CODEX_SECURITY_GIT_ENVIRONMENT_FILE", str(bridge))
+    monkeypatch.delenv("GIT_REPLACE_REF_BASE", raising=False)
+    monkeypatch.delenv("GIT_NO_REPLACE_OBJECTS", raising=False)
+    diff_target = {"kind": "range", "baseRevision": base, "headRevision": "HEAD"}
+
+    assert workbench_target.diff_scope_file_count(target, diff_target) == 0
+    monkeypatch.setenv("GIT_REPLACE_REF_BASE", "refs/other/")
+    assert workbench_target.diff_scope_file_count(target, diff_target) == 1
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("carrier", ["indexed", "parameters"])
+def test_git_filters_keep_behavior_settings_without_header_carriers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, carrier: str
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    (target / ".gitattributes").write_text("source.py filter=fixture\n")
+    source = target / "source.py"
+    source.write_bytes(b"source\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "filter settings fixture"], cwd=target, check=True)
+    marker = tmp_path / "filter-environment.json"
+    filter_script = tmp_path / "filter.py"
+    filter_script.write_text(
+        "import json, os, pathlib, sys\n"
+        "selected = {name: value for name, value in os.environ.items() if "
+        "name.startswith('GIT_CONFIG_') or name.upper().startswith('CODEX_SECURITY_GIT_ENVIRONMENT')}\n"
+        f"pathlib.Path({str(marker)!r}).write_text(json.dumps(selected))\n"
+        "sys.stdout.buffer.write(sys.stdin.buffer.read().lower())\n"
+    )
+    command = " ".join(
+        json.dumps(str(path).replace("\\", "/")) for path in (sys.executable, filter_script)
+    )
+    subprocess.run(["git", "config", "filter.fixture.clean", command], cwd=target, check=True)
+    for name in tuple(os.environ):
+        if name.startswith("GIT_CONFIG_"):
+            monkeypatch.delenv(name)
+    if carrier == "indexed":
+        configuration = {
+            "GIT_CONFIG_COUNT": "3",
+            "GIT_CONFIG_KEY_0": "fixture.keep",
+            "GIT_CONFIG_VALUE_0": "Authorization: retained behavior value",
+            "GIT_CONFIG_KEY_1": "HTTP.https://synthetic.invalid/.ExtraHeader",
+            "GIT_CONFIG_VALUE_1": "HEADER_ONLY_SYNTHETIC",
+            "GIT_CONFIG_KEY_2": "fixture.empty",
+            "GIT_CONFIG_VALUE_2": "",
+            "GIT_CONFIG_KEY_999999": "http.extraHeader",
+            "GIT_CONFIG_VALUE_999999": "UNUSED_HEADER_SYNTHETIC",
+        }
+    else:
+        configuration = {
+            "GIT_CONFIG_PARAMETERS": "'fixture.keep=Authorization: retained behavior value' "
+            "'http.extraHeader=HEADER_ONLY_SYNTHETIC' 'fixture.empty=' 'fixture.boolean'"
+        }
+    bridge = tmp_path / "git-environment.json"
+    bridge.write_text(json.dumps(configuration))
+    monkeypatch.setenv("CODEX_SECURITY_GIT_ENVIRONMENT_FILE", str(bridge))
+    monkeypatch.setenv("codex_security_git_environment", "OLD_INLINE_HEADER_SYNTHETIC")
+    source.write_bytes(b"SOURCE\n")
+    os.utime(source, (1, 1))
+
+    diff_target = {"kind": "working_tree", "baseRevision": "HEAD", "headRevision": "HEAD"}
+    assert workbench_target.diff_scope_file_count(target, diff_target) == 0
+    captured = json.loads(marker.read_text())
+    assert not any(name.upper().startswith("CODEX_SECURITY_GIT_ENVIRONMENT") for name in captured)
+    assert "HEADER_ONLY_SYNTHETIC" not in json.dumps(captured)
+    assert "UNUSED_HEADER_SYNTHETIC" not in json.dumps(captured)
+    assert "Authorization: retained behavior value" in json.dumps(captured)
+    if carrier == "indexed":
+        assert captured["GIT_CONFIG_COUNT"] == "2"
+        assert captured["GIT_CONFIG_KEY_0"] == "fixture.keep"
+        assert captured["GIT_CONFIG_KEY_1"] == "fixture.empty"
+        assert captured["GIT_CONFIG_VALUE_1"] == ""
+
+
+def test_git_projection_preserves_parameter_order_and_native_errors(tmp_path: Path) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    executable = workbench_target.trusted_git_executable(target)
+    assert executable is not None
+    environment = {
+        "PATH": os.environ["PATH"],
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    entries = [
+        "fixture.order=first",
+        "fixture.empty=",
+        "fixture.boolean",
+        "fixture.lines=one\ntwo\n",
+        "fixture.quote=it's a \\literal",
+        "http.extraHeader=HEADER_ONLY_SYNTHETIC",
+        "HTTP.https://synthetic.invalid/.ExtraHeader=",
+        "fixture.order=last",
+    ]
+    quoted = subprocess.check_output(
+        [executable, "rev-parse", "--sq-quote", *entries], cwd=target, env=environment
+    )
+    original = environment | {
+        "GIT_CONFIG_COUNT": "4",
+        "GIT_CONFIG_KEY_0": "fixture.order",
+        "GIT_CONFIG_VALUE_0": "indexed-first",
+        "GIT_CONFIG_KEY_1": "fixture.large.first",
+        "GIT_CONFIG_VALUE_1": "x" * (256 if os.name == "nt" else 65536),
+        "GIT_CONFIG_KEY_2": "http.extraHeader",
+        "GIT_CONFIG_VALUE_2": "INDEXED_HEADER_SYNTHETIC",
+        "GIT_CONFIG_KEY_3": "fixture.large.last",
+        "GIT_CONFIG_VALUE_3": "y" * (256 if os.name == "nt" else 65536),
+        "GIT_CONFIG_PARAMETERS": os.fsdecode(quoted).strip(),
+        "GIT_CONFIG": os.devnull,
+    }
+    args = [executable, "config", "--null", "--list", "--show-scope", "--no-includes"]
+    native = subprocess.check_output(
+        args, cwd=target, env={k: v for k, v in original.items() if k != "GIT_CONFIG"}
+    )
+
+    def fixture_settings(output: bytes) -> list[bytes]:
+        rows = output.split(b"\0")
+        return [
+            row
+            for scope, row in zip(rows[::2], rows[1::2])
+            if scope == b"command" and row.startswith(b"fixture.")
+        ]
+
+    native_settings = fixture_settings(native)
+    indexed = b"fixture.order\nindexed-first" in native_settings
+    selected = workbench_target.git_inspection_environment(original, executable, target)
+    # Older Git ignores COUNT; preserve its native meaning instead of enabling it.
+    assert selected["GIT_CONFIG_COUNT"] == ("3" if indexed else original["GIT_CONFIG_COUNT"])
+    assert selected["GIT_CONFIG_VALUE_1"] == original["GIT_CONFIG_VALUE_1"]
+    assert "INDEXED_HEADER_SYNTHETIC" not in selected.values()
+    actual = subprocess.check_output(
+        args, cwd=target, env={k: v for k, v in selected.items() if k != "GIT_CONFIG"}
+    )
+    assert fixture_settings(actual) == native_settings
+    assert b"HEADER_ONLY_SYNTHETIC" not in actual
+    assert b"INDEXED_HEADER_SYNTHETIC" not in actual
+    benign = environment | {"GIT_CONFIG_PARAMETERS": "'fixture.keep=unchanged spelling'"}
+    assert workbench_target.git_inspection_environment(benign, executable, target) == benign
+    for malformed in [
+        {"GIT_CONFIG_PARAMETERS": "'unterminated"},
+        {
+            "GIT_CONFIG_COUNT": "bogus",
+            "GIT_CONFIG_KEY_0": "http.extraHeader",
+            "GIT_CONFIG_VALUE_0": "synthetic",
+        },
+        {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.extraHeader"},
+        {"GIT_CONFIG_PARAMETERS": "'http.subsection\nname.extraHeader=synthetic'"},
+        {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.subsection\nname.extraHeader",
+            "GIT_CONFIG_VALUE_0": "synthetic",
+        },
+    ]:
+        source = environment | malformed
+        native = subprocess.run(args, cwd=target, env=source, capture_output=True)
+        try:
+            projected = workbench_target.git_inspection_environment(source, executable, target)
+        except subprocess.CalledProcessError as error:
+            assert error.returncode == native.returncode
+            assert error.stderr == native.stderr
+        else:
+            actual = subprocess.run(args, cwd=target, env=projected, capture_output=True)
+            assert actual.returncode == native.returncode
+            assert actual.stderr == native.stderr
+            if native.returncode == 0:
+                assert actual.stdout == native.stdout
+
+
+@pytest.mark.parametrize("parameter_style", ["legacy", "separate"])
+def test_git_projection_preserves_native_parameter_key_boundaries(
+    tmp_path: Path, parameter_style: str
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    executable = workbench_target.trusted_git_executable(target)
+    assert executable is not None
+    environment = {
+        "PATH": os.environ["PATH"],
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    raw = "\udcff" if sys.platform == "linux" else "雪"
+    value_raw = "\udcfe" if sys.platform == "linux" else "雪"
+    subsection = "?a=b" if parameter_style == "separate" else "plain"
+    key = f"url.https://example.test/{subsection}.insteadof"
+    settings = [
+        ("fixture.order", "first"),
+        (key, "https://other.test/"),
+        (f"url.https://example.test/{subsection}.boolean", None),
+        (f"url.https://example.test/{subsection}.empty", ""),
+        (
+            f"url.https://raw-{raw}.test/{subsection}.insteadof",
+            f"it's ! \\literal-{value_raw}\nvalue\n",
+        ),
+        (key, "https://last.test/"),
+        ("http.extraHeader", "HEADER_ONLY_SYNTHETIC"),
+        ("fixture.order", "last"),
+    ]
+
+    def quote(arguments: list[str]) -> str:
+        return os.fsdecode(
+            subprocess.check_output(
+                [executable, "rev-parse", "--sq-quote", *arguments], cwd=target, env=environment
+            )
+        ).strip()
+
+    parameters = (
+        " ".join(
+            quote([name]) + "=" + ("" if value is None else quote([value]))
+            for name, value in settings
+        )
+        if parameter_style == "separate"
+        else quote([name if value is None else f"{name}={value}" for name, value in settings])
+    )
+    large = "x" * (256 if os.name == "nt" else 65536)
+    source = environment | {
+        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_KEY_0": "fixture.large.first",
+        "GIT_CONFIG_VALUE_0": large,
+        "GIT_CONFIG_KEY_1": "fixture.large.last",
+        "GIT_CONFIG_VALUE_1": large,
+        "GIT_CONFIG_PARAMETERS": parameters,
+    }
+    args = [executable, "config", "--null", "--list", "--show-origin", "--no-includes"]
+    native = subprocess.run(args, cwd=target, env=source, capture_output=True)
+    if native.returncode != 0:
+        # Older Git rejects separate key/value quoting; keep that native error.
+        assert parameter_style == "separate"
+        assert b"bogus format in GIT_CONFIG_PARAMETERS" in native.stderr
+        with pytest.raises(subprocess.CalledProcessError) as raised:
+            workbench_target.git_inspection_environment(source, executable, target)
+        assert raised.value.returncode == native.returncode
+        assert raised.value.stderr == native.stderr
+        return
+
+    projected = workbench_target.git_inspection_environment(source, executable, target)
+    actual = subprocess.run(args, cwd=target, env=projected, capture_output=True)
+    assert actual.returncode == 0, actual.stderr
+    assert b"HEADER_ONLY_SYNTHETIC" not in actual.stdout
+    assert projected["GIT_CONFIG_VALUE_0"] == large
+    assert projected["GIT_CONFIG_VALUE_1"] == large
+
+    def user_settings(output: bytes) -> list[bytes]:
+        fields = output.split(b"\0")
+        return [
+            record
+            for origin, record in zip(fields[::2], fields[1::2])
+            if origin == b"command line:" and record.startswith((b"fixture.", b"url."))
+        ]
+
+    assert user_settings(actual.stdout) == user_settings(native.stdout)
+
+
+def test_missing_trusted_git_does_not_run_configuration_parser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import workbench_target
+
+    monkeypatch.setattr(workbench_target, "trusted_git_executable", lambda _target: None)
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'http.extraHeader=synthetic'")
+    monkeypatch.setattr(
+        workbench_target.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("untrusted Git ran"),
+    )
+    assert workbench_target.git_command(tmp_path, "status", text=False).returncode == 127
 
 
 @pytest.fixture(
@@ -86,6 +500,784 @@ def junction_factory(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyP
             targets[link] = target
 
     return create
+
+
+@pytest.mark.parametrize("binary_base", [False, True])
+def test_local_diff_count_uses_base_files_below_directory_links(
+    tmp_path: Path,
+    junction_factory: Callable[[Path, Path], None],
+    binary_base: bool,
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    nested = target / "src" / "nested"
+    nested.mkdir(parents=True)
+    (nested / "changed.py").write_bytes(b"\0base\n" if binary_base else b"base\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "base source"], cwd=target, check=True)
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip()
+    (nested / "changed.py").write_text("changed\n")
+    (nested / "added.py").write_text("staged\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(
+        ["git", "update-index", "--skip-worktree", "src/nested/changed.py"],
+        cwd=target,
+        check=True,
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "changed.py").write_bytes(b"outside\n" if binary_base else b"\0outside\n")
+    (outside / "added.py").write_text("outside addition\n")
+    shutil.rmtree(nested)
+    junction_factory(nested, outside)
+
+    changes = workbench_target.git_changed_paths(target, revision, revision, "local-patch")
+    assert changes == [(nested / "changed.py", "D")]
+    diff_target = {"kind": "working_tree", "baseRevision": revision, "headRevision": revision}
+    assert workbench_target.diff_scope_file_count(target, diff_target) == int(not binary_base)
+
+
+@pytest.mark.parametrize(
+    ("change", "skip_worktree"), [("rename", False), ("rename", True), ("recreated", False)]
+)
+@pytest.mark.parametrize("location", ["inside", "outside"])
+@pytest.mark.parametrize("binary_base", [False, True])
+def test_local_diff_preserves_deletions_below_directory_links(
+    tmp_path: Path,
+    junction_factory: Callable[[Path, Path], None],
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+    skip_worktree: bool,
+    location: str,
+    binary_base: bool,
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    subprocess.run(["git", "config", "diff.renames", "true"], cwd=target, check=True)
+    nested = target / "dir"
+    nested.mkdir()
+    name = ("Old.py" if os.name == "nt" else "Old\tfile.py") if change == "rename" else "dir/new.py"
+    (target / name).write_bytes(b"\0historical\n" if binary_base else b"historical text\n")
+    destination = target / "inside" if location == "inside" else tmp_path / "outside"
+    destination.mkdir()
+    linked_source = destination / "new.py"
+    linked_source.write_bytes(b"foreign text\n" if binary_base else b"\0foreign\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "historical source"], cwd=target, check=True)
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip()
+    source_blob = subprocess.check_output(
+        ["git", "rev-parse", f"HEAD:{name}"], cwd=target, text=True
+    ).strip()
+    if change == "rename":
+        subprocess.run(["git", "mv", name, "dir/new.py"], cwd=target, check=True)
+        if skip_worktree:
+            subprocess.run(
+                ["git", "update-index", "--skip-worktree", "dir/new.py"], cwd=target, check=True
+            )
+    else:
+        subprocess.run(["git", "rm", "dir/new.py"], cwd=target, check=True)
+    if nested.exists():
+        shutil.rmtree(nested)
+    junction_factory(nested, destination)
+    original_open = Path.open
+
+    def open_source(path: Path, *args: Any, **kwargs: Any):
+        assert path not in {nested / "new.py", linked_source}, "opened a linked source"
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_source)
+    changes = workbench_target._git_changes(target, revision, revision, "local-patch")
+    assert [(item.name, item.status, item.base_blob) for item in changes] == [
+        (name, "D", source_blob)
+    ]
+    diff_target = {"kind": "working_tree", "baseRevision": revision, "headRevision": revision}
+    assert workbench_target.diff_scope_file_count(target, diff_target) == int(not binary_base)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file symlinks do not require developer mode")
+@pytest.mark.parametrize("location", ["inside", "outside"])
+@pytest.mark.parametrize("binary_base", [False, True])
+def test_local_diff_preserves_rename_source_when_destination_is_a_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, location: str, binary_base: bool
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    subprocess.run(["git", "config", "diff.renames", "true"], cwd=target, check=True)
+    source = target / "Old\tfile.py"
+    source.write_bytes(b"\0historical\n" if binary_base else b"historical text\n")
+    linked_source = target / "inside.py" if location == "inside" else tmp_path / "outside.py"
+    linked_source.write_bytes(b"foreign text\n" if binary_base else b"\0foreign\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "historical source"], cwd=target, check=True)
+    source_blob = subprocess.check_output(
+        ["git", "rev-parse", "HEAD:Old\tfile.py"], cwd=target, text=True
+    ).strip()
+    subprocess.run(["git", "mv", source.name, "new.py"], cwd=target, check=True)
+    subprocess.run(["git", "update-index", "--skip-worktree", "new.py"], cwd=target, check=True)
+    destination = target / "new.py"
+    destination.unlink()
+    destination.symlink_to(linked_source)
+    original_open = Path.open
+
+    def open_source(path: Path, *args: Any, **kwargs: Any):
+        assert path not in {destination, linked_source}, "opened a linked source"
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_source)
+    changes = workbench_target._git_changes(target, "HEAD", "HEAD", "local-patch")
+    assert [(item.name, item.status, item.base_blob) for item in changes] == [
+        (source.name, "D", source_blob)
+    ]
+    diff_target = {"kind": "working_tree", "baseRevision": "HEAD", "headRevision": "HEAD"}
+    assert workbench_target.diff_scope_file_count(target, diff_target) == int(not binary_base)
+
+
+@pytest.mark.parametrize("replacement", ["missing", "directory", "junction"])
+def test_local_diff_preserves_rename_source_when_destination_is_ineligible(
+    tmp_path: Path, junction_factory: Callable[[Path, Path], None], replacement: str
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    subprocess.run(["git", "config", "diff.renames", "true"], cwd=target, check=True)
+    (target / "old.py").write_text("historical text\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "historical source"], cwd=target, check=True)
+    subprocess.run(["git", "mv", "old.py", "new.py"], cwd=target, check=True)
+    subprocess.run(["git", "update-index", "--skip-worktree", "new.py"], cwd=target, check=True)
+    destination = target / "new.py"
+    destination.unlink()
+    if replacement == "directory":
+        destination.mkdir()
+    elif replacement == "junction":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        junction_factory(destination, outside)
+
+    assert workbench_target.git_changed_path_names(target, "HEAD", "HEAD", "local-patch") == [
+        ("old.py", "D")
+    ]
+    diff_target = {"kind": "working_tree", "baseRevision": "HEAD", "headRevision": "HEAD"}
+    assert workbench_target.diff_scope_file_count(target, diff_target) == 1
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("binary", [False, True])
+def test_local_diff_safe_recreated_files_keep_working_tree_selection(
+    tmp_path: Path, binary: bool
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    source = target / "source.py"
+    source.write_text("historical text\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "historical source"], cwd=target, check=True)
+    subprocess.run(["git", "rm", "source.py"], cwd=target, check=True)
+    source.write_bytes(b"\0replacement\n" if binary else b"replacement text\n")
+
+    assert workbench_target.git_changed_path_names(target, "HEAD", "HEAD", "local-patch") == [
+        ("source.py", "A")
+    ]
+    diff_target = {"kind": "working_tree", "baseRevision": "HEAD", "headRevision": "HEAD"}
+    assert workbench_target.diff_scope_file_count(target, diff_target) == int(not binary)
+
+
+@pytest.mark.cross_platform
+def test_local_diff_count_preserves_case_only_renames(tmp_path: Path) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    subprocess.run(["git", "config", "diff.renames", "false"], cwd=target, check=True)
+    (target / "source.py").write_text("base\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "base source"], cwd=target, check=True)
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip()
+    subprocess.run(["git", "mv", "source.py", "Source.py"], cwd=target, check=True)
+    (target / "Source.py").write_text("changed\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+
+    changes = workbench_target.git_changed_paths(target, revision, revision, "local-patch")
+    assert {path.name: status for path, status in changes} == {"source.py": "D", "Source.py": "A"}
+    diff_target = {"kind": "working_tree", "baseRevision": revision, "headRevision": revision}
+    assert workbench_target.diff_scope_file_count(target, diff_target) == 2
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("kind", ["range", "working_tree"])
+@pytest.mark.parametrize("binary", [False, True])
+def test_diff_count_preserves_historical_git_path_spelling(
+    tmp_path: Path, kind: str, binary: bool
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    head = initialize_git_repository(target)
+    name = r"legacy\source.py"
+    blob = subprocess.check_output(
+        ["git", "hash-object", "-w", "--stdin"],
+        cwd=target,
+        input=b"\0historical\n" if binary else b"historical\n",
+    ).strip()
+    entries = subprocess.check_output(["git", "ls-tree", "-z", head], cwd=target)
+    # Construct the historical tree without checking out a name Windows cannot represent.
+    tree = subprocess.check_output(
+        ["git", "mktree", "-z"],
+        cwd=target,
+        input=entries + b"100644 blob " + blob + b"\t" + name.encode() + b"\0",
+    ).strip()
+    base = subprocess.check_output(
+        ["git", "commit-tree", tree.decode(), "-p", head, "-m", "historical source"],
+        cwd=target,
+        text=True,
+    ).strip()
+    mode = "local-patch" if kind == "working_tree" else "revisions"
+    assert workbench_target.git_changed_path_names(target, base, head, mode) == [(name, "D")]
+    diff_target = {"kind": kind, "baseRevision": base, "headRevision": head}
+    assert workbench_target.diff_scope_file_count(target, diff_target) == int(not binary)
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("kind", ["range", "working_tree"])
+def test_diff_count_classifies_each_selected_blob_once(
+    tmp_path: Path, kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    subprocess.run(["git", "config", "diff.renames", "false"], cwd=target, check=True)
+    contents = {"text": b"shared text\n", "binary": b"\0shared binary\n"}
+    for label, data in contents.items():
+        for index in range(2):
+            (target / f"removed-{label}-{index}").write_bytes(data)
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "base duplicate blobs"], cwd=target, check=True)
+    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip()
+    object_ids = {
+        subprocess.check_output(
+            ["git", "rev-parse", f"HEAD:removed-{label}-0"], cwd=target, text=True
+        ).strip()
+        for label in contents
+    }
+    for label, data in contents.items():
+        for index in range(2):
+            (target / f"removed-{label}-{index}").unlink()
+            (target / f"added-{label}-{index}").write_bytes(data)
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    head = base
+    if kind == "range":
+        subprocess.run(["git", "commit", "-qm", "move duplicate blobs"], cwd=target, check=True)
+        head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip()
+    sample_blobs = workbench_target.git_blob_samples
+    requests: list[list[str]] = []
+
+    def record_samples(repository: Path, names: list[str], **kwargs: Any):
+        requests.append(names)
+        return sample_blobs(repository, names, **kwargs)
+
+    monkeypatch.setattr(workbench_target, "git_blob_samples", record_samples)
+    diff_target = {"kind": kind, "baseRevision": base, "headRevision": head}
+    assert workbench_target.diff_scope_file_count(target, diff_target) == 4
+    assert len(requests) == 1
+    assert len(requests[0]) == 2
+    assert set(requests[0]) == object_ids
+
+
+def test_local_diff_count_skips_paths_outside_the_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    target.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("outside = True\n")
+    monkeypatch.setattr(
+        workbench_target,
+        "_git_changes",
+        lambda *_args: [workbench_target._GitChange(f"../{outside.name}", "A", "", "")],
+    )
+    diff_target = {"kind": "working_tree", "baseRevision": "HEAD", "headRevision": "HEAD"}
+    assert workbench_target.diff_scope_file_count(target, diff_target) == 0
+
+
+def test_local_diff_count_excludes_metadata_before_git_filters(tmp_path: Path) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    (target / ".gitattributes").write_text("**/.svn/** filter=fixture\n")
+    metadata = target / ".svn"
+    metadata.mkdir()
+    source = metadata / "source.txt"
+    source.write_text("before\n")
+    subprocess.run(["git", "add", "-f", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "metadata fixture"], cwd=target, check=True)
+    subprocess.run(
+        ["git", "config", "filter.fixture.clean", "echo %f >> .git/filter-calls; cat"],
+        cwd=target,
+        check=True,
+    )
+    source.write_text("after\n")
+    calls = target / ".git" / "filter-calls"
+    diff_target = {"kind": "working_tree", "baseRevision": "HEAD", "headRevision": "HEAD"}
+    assert workbench_target.diff_scope_file_count(target, diff_target) == 0
+    assert not calls.exists()
+    subprocess.run(["git", "add", "-f", "."], cwd=target, check=True)
+    assert calls.exists()
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("change", ["stat_only", "mode_only", "rename", "binary"])
+def test_local_diff_count_preserves_content_changes(tmp_path: Path, change: str) -> None:
+    import workbench_target
+
+    if change == "mode_only" and os.name == "nt":
+        pytest.skip("Windows does not expose executable-bit changes")
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    name = "source.py" if os.name == "nt" else "source\tfile.py"
+    source = target / name
+    source.write_text("source\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "content fixture"], cwd=target, check=True)
+    os.utime(target / "README.md", (1, 1))
+    expected = [name]
+    if change == "stat_only":
+        os.utime(source, (1, 1))
+        expected = []
+    elif change == "mode_only":
+        source.chmod(0o755)
+    elif change == "rename":
+        destination = "renamed.py" if os.name == "nt" else "renamed\tfile\tname.py"
+        subprocess.run(["git", "mv", name, destination], cwd=target, check=True)
+        expected = [destination]
+    else:
+        source.write_bytes(b"\0binary\n")
+    changes = workbench_target.git_changed_path_names(target, "HEAD", "HEAD", "local-patch")
+    assert [name for name, _status in changes] == expected
+    diff_target = {"kind": "working_tree", "baseRevision": "HEAD", "headRevision": "HEAD"}
+    assert workbench_target.diff_scope_file_count(target, diff_target) == int(
+        change in {"mode_only", "rename"}
+    )
+
+
+@pytest.mark.cross_platform
+def test_local_diff_classifies_binary_before_git_normalization(tmp_path: Path) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=target, check=True)
+    (target / ".gitattributes").write_text("asset.bin filter=fixture\n")
+    (target / "asset.bin").write_bytes(b"\0original\n")
+    sources = {
+        "source.py": b"before\n",
+        "utf16le.py": b"\xff\xfe" + "before\n".encode("utf-16-le"),
+        "utf16be.py": b"\xfe\xff" + "before\n".encode("utf-16-be"),
+    }
+    for name, contents in sources.items():
+        (target / name).write_bytes(contents)
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "binary classification fixture"], cwd=target, check=True
+    )
+    subprocess.run(["git", "config", "filter.fixture.clean", "exit 1"], cwd=target, check=True)
+    subprocess.run(["git", "config", "filter.fixture.required", "true"], cwd=target, check=True)
+    binary = b"b" * (64 * 1024) + b"\0changed\n"
+    (target / "asset.bin").write_bytes(binary)
+    (target / "source.py").write_bytes(b"after\n")
+    (target / "utf16le.py").write_bytes(b"\xff\xfe" + "after\n".encode("utf-16-le"))
+    (target / "utf16be.py").write_bytes(b"\xfe\xff" + "after\n".encode("utf-16-be"))
+
+    # Normalizing this excluded binary would fail; a late NUL still excludes it.
+    normalized = subprocess.run(
+        ["git", "hash-object", "--path=asset.bin", "--stdin"],
+        cwd=target,
+        input=binary,
+        capture_output=True,
+    )
+    assert normalized.returncode != 0
+    assert workbench_target.git_changed_path_names(target, "HEAD", "HEAD", "local-patch") == [
+        (name, "M") for name in sorted(["asset.bin", *sources])
+    ]
+    diff_target = {"kind": "working_tree", "baseRevision": "HEAD", "headRevision": "HEAD"}
+    assert workbench_target.diff_scope_file_count(target, diff_target) == len(sources)
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("normalization", ["binary_attribute", "eol", "clean_filter"])
+def test_local_diff_ignores_equivalent_normalized_contents(
+    tmp_path: Path, normalization: str
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    source = target / "source.py"
+    source.write_bytes(b"source\n")
+    attributes = {
+        "binary_attribute": "source.py -diff\n",
+        "eol": "source.py text eol=lf\n",
+        "clean_filter": "source.py filter=fixture\n",
+    }
+    (target / ".gitattributes").write_text(attributes[normalization])
+    if normalization == "clean_filter":
+        subprocess.run(
+            ["git", "config", "filter.fixture.clean", "tr '[:upper:]' '[:lower:]'"],
+            cwd=target,
+            check=True,
+        )
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "normalized fixture"], cwd=target, check=True)
+    if normalization == "eol":
+        source.write_bytes(b"source\r\n")
+    elif normalization == "clean_filter":
+        source.write_bytes(b"SOURCE\n")
+    os.utime(source, (1, 1))
+    index = target / ".git" / "index"
+    before = index.read_bytes()
+    assert workbench_target.git_changed_path_names(target, "HEAD", "HEAD", "local-patch") == []
+    diff_target = {"kind": "working_tree", "baseRevision": "HEAD", "headRevision": "HEAD"}
+    assert workbench_target.diff_scope_file_count(target, diff_target) == 0
+    assert index.read_bytes() == before
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("normalization", ["text_auto", "autocrlf", "changed_filter"])
+def test_local_diff_preserves_index_aware_eol_conversion(
+    tmp_path: Path, normalization: str
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=target, check=True)
+    source = target / "source.txt"
+    source.write_bytes(b"SOURCE\r\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "raw CRLF fixture"], cwd=target, check=True)
+    attributes = "**/.svn/** filter=probe\n"
+    if normalization == "text_auto":
+        attributes += "*.txt text=auto\n"
+    elif normalization == "changed_filter":
+        attributes += "source.txt filter=fixture\n"
+    (target / ".gitattributes").write_text(attributes)
+    metadata = target / ".svn"
+    metadata.mkdir()
+    (metadata / "source.txt").write_text("before\n")
+    subprocess.run(["git", "add", "-f", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "conversion fixture"], cwd=target, check=True)
+    if normalization == "autocrlf":
+        subprocess.run(["git", "config", "core.autocrlf", "true"], cwd=target, check=True)
+    elif normalization == "changed_filter":
+        subprocess.run(
+            ["git", "config", "filter.fixture.clean", "tr '[:upper:]' '[:lower:]'"],
+            cwd=target,
+            check=True,
+        )
+    subprocess.run(
+        ["git", "config", "filter.probe.clean", "echo %f >> .git/filter-calls; cat"],
+        cwd=target,
+        check=True,
+    )
+    (metadata / "source.txt").write_text("after\n")
+    os.utime(source, (1, 1))
+    before = (target / ".git" / "index").read_bytes()
+    expected = [("source.txt", "M")] if normalization == "changed_filter" else []
+    assert (
+        workbench_target.git_changed_path_names(target, "HEAD", "HEAD", "local-patch") == expected
+    )
+    diff_target = {"kind": "working_tree", "baseRevision": "HEAD", "headRevision": "HEAD"}
+    assert workbench_target.diff_scope_file_count(target, diff_target) == len(expected)
+    assert (target / ".git" / "index").read_bytes() == before
+    assert not (target / ".git" / "filter-calls").exists()
+
+
+@pytest.mark.cross_platform
+def test_local_diff_batches_eligible_normalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    names = [f"source-{index:03}.txt" for index in range(24)]
+    for name in names:
+        (target / name).write_text("before\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "batch fixture"], cwd=target, check=True)
+    expected = []
+    for index, name in enumerate(names):
+        if index % 3:
+            (target / name).write_text("after\n")
+            expected.append((name, "M"))
+        os.utime(target / name, (1, 1))
+    native_run = subprocess.run
+    calls: list[list[str]] = []
+
+    def traced(command: list[str], *args: Any, **kwargs: Any):
+        calls.append(command)
+        return native_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(workbench_target.subprocess, "run", traced)
+    before = (target / ".git" / "index").read_bytes()
+    assert (
+        workbench_target.git_changed_path_names(target, "HEAD", "HEAD", "local-patch") == expected
+    )
+    assert sum("hash-object" in command for command in calls) == 1
+    assert sum("ls-files" in command and "--stage" in command for command in calls) == 1
+    assert sum("status" in command for command in calls) == 1
+    assert (target / ".git" / "index").read_bytes() == before
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("operation", ["hash-object", "ls-files", "status"])
+@pytest.mark.parametrize("windows_error", [False, True])
+def test_local_diff_retries_native_argument_length_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, windows_error: bool
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    names = [f"source-{index}.txt" for index in range(3)]
+    for name in names:
+        (target / name).write_text("before\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "argument fixture"], cwd=target, check=True)
+    for name in names:
+        (target / name).write_text("after\n")
+    native_run = subprocess.run
+    failures = 0
+
+    def limited(command: list[str], *args: Any, **kwargs: Any):
+        nonlocal failures
+        if (
+            operation in command
+            and (operation != "ls-files" or "--stage" in command)
+            and len(command[command.index("--") + 1 :]) == len(names)
+        ):
+            failures += 1
+            error = OSError(errno.EINVAL if windows_error else errno.E2BIG, "argument fixture")
+            if windows_error:
+                error.winerror = 206
+            raise error
+        return native_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(workbench_target.subprocess, "run", limited)
+    before = (target / ".git" / "index").read_bytes()
+    assert workbench_target.git_changed_path_names(target, "HEAD", "HEAD", "local-patch") == [
+        (name, "M") for name in names
+    ]
+    assert failures == 1
+    assert (target / ".git" / "index").read_bytes() == before
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("failure", ["fatal", "singleton_length", "disappearing_source"])
+def test_local_diff_batch_preserves_native_failures_and_readable_peers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    names = ["gone.txt", "peer.txt"]
+    for name in names:
+        (target / name).write_text("before\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "failure fixture"], cwd=target, check=True)
+    for name in names:
+        (target / name).write_text("after\n")
+    native_run = subprocess.run
+    calls = 0
+    length_error = OSError(errno.E2BIG, "native argument fixture")
+
+    def failing(command: list[str], *args: Any, **kwargs: Any):
+        nonlocal calls
+        if "hash-object" in command:
+            calls += 1
+            if failure == "fatal":
+                return subprocess.CompletedProcess(
+                    command, 128, stdout=b"", stderr=b"native fatal fixture diagnostic\n"
+                )
+            if failure == "singleton_length":
+                raise length_error
+            if calls == 1:
+                (target / "gone.txt").unlink()
+        return native_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(workbench_target.subprocess, "run", failing)
+    if failure == "fatal":
+        with pytest.raises(subprocess.CalledProcessError) as error:
+            workbench_target.git_changed_path_names(target, "HEAD", "HEAD", "local-patch")
+        assert error.value.returncode == 128
+        assert error.value.stderr == b"native fatal fixture diagnostic\n"
+        assert calls == 1
+    elif failure == "singleton_length":
+        with pytest.raises(OSError) as error:
+            workbench_target.git_changed_path_names(target, "HEAD", "HEAD", "local-patch")
+        assert error.value is length_error
+        assert calls == 2
+    else:
+        assert workbench_target.git_changed_path_names(target, "HEAD", "HEAD", "local-patch") == [
+            ("peer.txt", "M")
+        ]
+        assert calls == 2
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("index_kind", ["symlink", "unmerged"])
+@pytest.mark.parametrize("modified", [False, True])
+def test_local_diff_normalizes_working_text_with_nonregular_or_unmerged_index(
+    tmp_path: Path, index_kind: str, modified: bool
+) -> None:
+    import workbench_target
+
+    if index_kind == "symlink" and os.name == "nt":
+        pytest.skip("Requires a POSIX symlink")
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    source = target / "source.txt"
+    source.write_text("base\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "index fixture"], cwd=target, check=True)
+    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip()
+    if index_kind == "symlink":
+        source.unlink()
+        source.symlink_to("destination")
+        subprocess.run(["git", "add", "source.txt"], cwd=target, check=True)
+        source.unlink()
+    else:
+        branch = subprocess.check_output(
+            ["git", "symbolic-ref", "--short", "HEAD"], cwd=target, text=True
+        ).strip()
+        subprocess.run(["git", "checkout", "-qb", "fixture-side"], cwd=target, check=True)
+        source.write_text("side\n")
+        subprocess.run(["git", "commit", "-qam", "side fixture"], cwd=target, check=True)
+        subprocess.run(["git", "checkout", "-q", branch], cwd=target, check=True)
+        source.write_text("main\n")
+        subprocess.run(["git", "commit", "-qam", "main fixture"], cwd=target, check=True)
+        merge = subprocess.run(
+            ["git", "merge", "fixture-side", "--no-edit"], cwd=target, capture_output=True
+        )
+        assert merge.returncode == 1
+    source.write_text("changed\n" if modified else "base\n")
+    os.utime(source, (1, 1))
+    assert workbench_target.git_changed_path_names(target, base, "HEAD", "local-patch") == (
+        [("source.txt", "M")] if modified else []
+    )
+    diff_target = {"kind": "working_tree", "baseRevision": base, "headRevision": "HEAD"}
+    assert workbench_target.diff_scope_file_count(target, diff_target) == int(modified)
+
+
+@pytest.mark.cross_platform
+def test_local_diff_does_not_require_unselected_older_blob(tmp_path: Path) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    source = target / "source.py"
+    source.write_text("before\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "base fixture"], cwd=target, check=True)
+    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip()
+    old = subprocess.check_output(
+        ["git", "rev-parse", "HEAD:source.py"], cwd=target, text=True
+    ).strip()
+    source.write_text("after\n")
+    subprocess.run(["git", "commit", "-qam", "current fixture"], cwd=target, check=True)
+    (target / ".git" / "objects" / old[:2] / old[2:]).unlink()
+
+    assert workbench_target.git_changed_path_names(target, base, "HEAD", "local-patch") == [
+        ("source.py", "M")
+    ]
+    diff_target = {"kind": "working_tree", "baseRevision": base, "headRevision": "HEAD"}
+    assert workbench_target.diff_scope_file_count(target, diff_target) == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Requires POSIX unreadable files and FIFOs")
+@pytest.mark.parametrize("kind", ["unreadable", "fifo"])
+def test_local_diff_skips_ineligible_contents_without_aborting(tmp_path: Path, kind: str) -> None:
+    import workbench_target
+
+    if kind == "unreadable" and os.getuid() == 0:
+        pytest.skip("root can read files without permission bits")
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    source = target / "unavailable.py"
+    source.write_text("before\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "unavailable fixture"], cwd=target, check=True)
+    if kind == "unreadable":
+        source.write_text("different sized contents\n")
+        source.chmod(0)
+    else:
+        source.unlink()
+        os.mkfifo(source)
+    (target / "readable.py").write_text("readable\n")
+    try:
+        assert workbench_target.git_changed_path_names(target, "HEAD", "HEAD", "local-patch") == [
+            ("readable.py", "A")
+        ]
+        diff_target = {"kind": "working_tree", "baseRevision": "HEAD", "headRevision": "HEAD"}
+        assert workbench_target.diff_scope_file_count(target, diff_target) == 1
+    finally:
+        if kind == "unreadable":
+            source.chmod(0o600)
+
+
+def test_local_diff_checks_junctions_before_running_clean_filters(
+    tmp_path: Path, junction_factory: Callable[[Path, Path], None]
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    (target / ".gitattributes").write_text("linked/source.py filter=fixture\n")
+    linked = target / "linked"
+    linked.mkdir()
+    (linked / "source.py").write_text("base\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "junction filter fixture"], cwd=target, check=True)
+    shutil.rmtree(linked)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "source.py").write_text("foreign different sized contents\n")
+    junction_factory(linked, outside)
+    subprocess.run(
+        ["git", "config", "filter.fixture.clean", "echo %f >> .git/filter-calls; cat"],
+        cwd=target,
+        check=True,
+    )
+    assert workbench_target.git_changed_path_names(target, "HEAD", "HEAD", "local-patch") == [
+        ("linked/source.py", "D")
+    ]
+    diff_target = {"kind": "working_tree", "baseRevision": "HEAD", "headRevision": "HEAD"}
+    assert workbench_target.diff_scope_file_count(target, diff_target) == 1
+    calls = target / ".git" / "filter-calls"
+    assert not calls.exists()
+    result = workbench_target.git_command(
+        target,
+        "hash-object",
+        "--path=linked/source.py",
+        "--stdin",
+        text=False,
+        input_data=b"control\n",
+    )
+    result.check_returncode()
+    assert "linked/source.py" in calls.read_text()
 
 
 @pytest.mark.parametrize(
@@ -868,8 +2060,13 @@ def test_stale_git_binding_does_not_spawn(tmp_path: Path, monkeypatch: pytest.Mo
     ("encoding", "bom"),
     [("utf-8", b""), ("utf-16-le", b"\xff\xfe"), ("utf-16-be", b"\xfe\xff")],
 )
+@pytest.mark.parametrize("retain_samples", [True, False])
 def test_git_blob_samples_match_full_file_classification_with_bounded_reads(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, encoding: str, bom: bytes
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    encoding: str,
+    bom: bytes,
+    retain_samples: bool,
 ) -> None:
     target = tmp_path / "target"
     initialize_git_repository(target)
@@ -892,7 +2089,7 @@ def test_git_blob_samples_match_full_file_classification_with_bounded_reads(
     read_batch_samples = function_globals["_read_git_batch_samples"]
     reads: list[int] = []
 
-    def require_bounded_output(output: Any, names: list[str]):
+    def require_bounded_output(output: Any, names: list[str], *, retain_samples: bool):
         assert not output.seekable()
         read = output.read
 
@@ -902,22 +2099,42 @@ def test_git_blob_samples_match_full_file_classification_with_bounded_reads(
             return read(size)
 
         output.read = bounded_read
-        return read_batch_samples(output, names)
+        return read_batch_samples(output, names, retain_samples=retain_samples)
 
     monkeypatch.setitem(function_globals, "_read_git_batch_samples", require_bounded_output)
     # Both request and response exceed pipe buffers, before the multi-megabyte binary.
     missing = ["HEAD:missing"] * 10_000
-    samples = git_blob_samples(target, [*missing, *(f"HEAD:{name}" for name in contents)])
+    samples = git_blob_samples(
+        target,
+        [*missing, *(f"HEAD:{name}" for name in contents)],
+        retain_samples=retain_samples,
+    )
 
     assert samples == [
         *([None] * len(missing)),
-        (text[: 64 * 1024], False),
+        (text[: 64 * 1024] if retain_samples else b"", False),
         (b"", True),
         (b"", True),
         (b"", False),
-        (b"after\n", False),
+        (b"after\n" if retain_samples else b"", False),
     ]
     assert max(reads) == 64 * 1024
+
+
+@pytest.mark.parametrize("binary_chunk", [0, 1, None])
+def test_local_source_classification_stops_after_binary_chunk(binary_chunk: int | None) -> None:
+    import io
+
+    chunks = [b"a" * (64 * 1024) for _ in range(4)]
+    if binary_chunk is not None:
+        chunks[binary_chunk] = b"\0" + chunks[binary_chunk][1:]
+    data = b"".join(chunks)
+    source = io.BytesIO(data)
+
+    _, binary = WORKBENCH_TARGET["_read_source_sample"](source, len(data), drain=False)
+
+    assert binary == (binary_chunk is not None)
+    assert source.tell() == (len(data) if binary_chunk is None else (binary_chunk + 1) * 64 * 1024)
 
 
 @pytest.mark.parametrize(
@@ -974,6 +2191,73 @@ def test_git_blob_samples_reject_git_failure(
     monkeypatch.setitem(git_blob_samples.__globals__, "git_command", git_command)
 
     assert git_blob_samples(tmp_path, ["HEAD:source"]) == [None]
+
+
+def test_diff_count_preserves_git_batch_failure_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    before = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip()
+    (target / "a-good.py").write_text("good\n")
+    (target / "z-broken.py").write_text("broken\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "changed sources"], cwd=target, check=True)
+    command = workbench_target.git_command
+
+    def fail_batch(*args: Any, **kwargs: Any):
+        if "cat-file" in args:
+            kwargs["stdout_file"].write(b"object blob 5\ngood\n\n")
+            return subprocess.CompletedProcess(args, 128, stderr=b"fatal: cannot read fixture blob")
+        return command(*args, **kwargs)
+
+    monkeypatch.setattr(workbench_target, "git_command", fail_batch)
+    diff_target = {"kind": "range", "baseRevision": before, "headRevision": "HEAD"}
+    with pytest.raises(SystemExit, match="fatal: cannot read fixture blob"):
+        workbench_target.diff_scope_file_count(target, diff_target)
+
+
+def test_diff_count_preserves_corrupt_blob_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import workbench_target
+
+    monkeypatch.setenv("LC_ALL", "C")
+    target = tmp_path / "target"
+    before = initialize_git_repository(target)
+    (target / "source.py").write_text("changed\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "changed source"], cwd=target, check=True)
+    blob = subprocess.check_output(
+        ["git", "rev-parse", "HEAD:source.py"], cwd=target, text=True
+    ).strip()
+    object_path = target / ".git" / "objects" / blob[:2] / blob[2:]
+    object_path.unlink()
+    object_path.write_bytes(b"")
+    diff_target = {"kind": "range", "baseRevision": before, "headRevision": "HEAD"}
+    with pytest.raises(SystemExit, match="(?s)object file.*is empty"):
+        workbench_target.diff_scope_file_count(target, diff_target)
+
+
+@pytest.mark.cross_platform
+def test_local_diff_count_keeps_uppercase_metadata_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    source = target / ".SVN" / "source.py"
+    source.parent.mkdir()
+    source.write_text("before\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "uppercase directory"], cwd=target, check=True)
+    source.write_text("after\n")
+    monkeypatch.setenv("GIT_ICASE_PATHSPECS", "1")
+    diff_target = {"kind": "working_tree", "baseRevision": "HEAD", "headRevision": "HEAD"}
+    assert workbench_target.diff_scope_file_count(target, diff_target) == 1
 
 
 def test_git_blob_samples_work_with_git_before_2_38(
@@ -1711,3 +2995,192 @@ def test_candidate_aliases_use_selected_tree_and_preserve_ambiguity(
         )
     for name in ("LINK.TS", "FOLDER"):
         assert sources[name] == {"error": "not_file" if case_insensitive else "missing"}
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize(
+    "view",
+    [
+        "default",
+        "uppercase",
+        "chain",
+        "custom",
+        "missing_original",
+        "disabled",
+        "disabled_empty",
+        "core_false",
+        "core_inline_false",
+        "config_query_scope",
+    ],
+)
+def test_local_diff_preserves_active_blob_replacements(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, view: str
+) -> None:
+    import workbench_target
+
+    for name in (
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG",
+        "CODEX_SECURITY_GIT_ENVIRONMENT_FILE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    source = target / "source.py"
+    source.write_bytes(b"value = 1\n")
+    unchanged = target / "unchanged.py"
+    unchanged.write_bytes(b"unchanged = 1\n")
+
+    def git(*args: str, input_data: bytes | None = None) -> bytes:
+        return subprocess.check_output(["git", "-C", str(target), *args], input=input_data)
+
+    git("add", ".")
+    git("commit", "-qm", "replacement fixture")
+    original = git("rev-parse", "HEAD:source.py").strip().decode()
+    replacement = git("hash-object", "-w", "--stdin", input_data=b"value = 2\n").strip().decode()
+    if view == "custom":
+        monkeypatch.setenv("GIT_REPLACE_REF_BASE", "refs/fixture-replacements/")
+    if view == "uppercase":
+        git("update-ref", f"refs/replace/{original.upper()}", replacement)
+    else:
+        git("replace", original, replacement)
+    if view == "chain":
+        last = git("hash-object", "-w", "--stdin", input_data=b"value = 3\n").strip().decode()
+        git("replace", replacement, last)
+    elif view == "missing_original":
+        (target / ".git" / "objects" / original[:2] / original[2:]).unlink()
+    elif view in {"disabled", "disabled_empty"}:
+        monkeypatch.setenv("GIT_NO_REPLACE_OBJECTS", "1" if view == "disabled" else "")
+    elif view == "core_false":
+        git("config", "core.useReplaceRefs", "false")
+    elif view == "core_inline_false":
+        monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'core.useReplaceRefs=false'")
+    elif view == "config_query_scope":
+        config = tmp_path / "command-only-config"
+        config.write_text("[core]\nuseReplaceRefs = false\n")
+        monkeypatch.setenv("GIT_CONFIG", str(config))
+    for path in (source, unchanged):
+        os.utime(path, (1, 1))
+    index = (target / ".git" / "index").read_bytes()
+    expected = view not in {"disabled", "disabled_empty", "core_false", "core_inline_false"}
+    patch = git(
+        "-c", "diff.autoRefreshIndex=false", "diff", "--no-ext-diff", "--no-textconv", "HEAD"
+    )
+    assert bool(patch) is expected
+    assert workbench_target.git_changed_path_names(target, "HEAD", "HEAD", "local-patch") == (
+        [("source.py", "M")] if expected else []
+    )
+    assert workbench_target.diff_scope_file_count(
+        target, {"kind": "working_tree", "baseRevision": "HEAD", "headRevision": "HEAD"}
+    ) == int(expected)
+    assert (target / ".git" / "index").read_bytes() == index
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Requires Linux stack and argv limits")
+def test_git_projection_quotes_native_valid_parameters_with_limited_argv(tmp_path: Path) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    executable = workbench_target.trusted_git_executable(target)
+    assert executable is not None
+    subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            """
+import os, resource, subprocess, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from workbench_target import git_inspection_environment
+executable, target = sys.argv[2], Path(sys.argv[3])
+environment = {
+    "PATH": os.environ["PATH"], "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_PARAMETERS": "'x.b' " * 18000 + "'http.extraHeader=synthetic'",
+}
+resource.setrlimit(resource.RLIMIT_STACK, (512 * 1024, resource.getrlimit(resource.RLIMIT_STACK)[1]))
+args = [executable, "-C", str(target), "config", "--null", "--list", "--show-origin", "--no-includes"]
+native = subprocess.check_output(args, env=environment)
+assert native.split(b"\\0").count(b"x.b") == 18000
+projected = git_inspection_environment(environment, executable, target)
+actual = subprocess.check_output(args, env=projected)
+assert actual.split(b"\\0").count(b"x.b") == 18000
+assert b"http.extraheader" not in actual
+environment["GIT_CONFIG_PARAMETERS"] = "'x.b' " * 17999 + "'x.b'"
+assert git_inspection_environment(environment, executable, target) == environment
+""",
+            str(Path(workbench_target.__file__).parent),
+            executable,
+            str(target),
+        ],
+        check=True,
+    )
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("failure", ["length", "windows_length", "fatal", "other_os", "singleton"])
+def test_git_projection_quote_retry_preserves_native_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "repository"
+    initialize_git_repository(target)
+    executable = workbench_target.trusted_git_executable(target)
+    assert executable is not None
+    environment = {
+        "PATH": os.environ["PATH"],
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_PARAMETERS": "'fixture.first=one' 'fixture.empty=' 'http.extraHeader=synthetic'",
+    }
+    if failure == "singleton":
+        environment["GIT_CONFIG_PARAMETERS"] = "'fixture.first=one' 'http.extraHeader=synthetic'"
+    native_run = subprocess.run
+    calls: list[int] = []
+    error = OSError(errno.EACCES if failure == "other_os" else errno.E2BIG, "native quote fixture")
+    if failure == "windows_length":
+        error = OSError(errno.EINVAL, "native quote fixture")
+        error.winerror = 206
+
+    def limited(command: list[str], *args: Any, **kwargs: Any):
+        if "--sq-quote" in command:
+            count = len(command) - command.index("--sq-quote") - 1
+            calls.append(count)
+            if failure == "fatal":
+                return subprocess.CompletedProcess(
+                    command, 128, stdout=b"", stderr=b"native quote failure\n"
+                )
+            if failure in {"other_os", "singleton"} or len(calls) == 1:
+                raise error
+        return native_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(workbench_target.subprocess, "run", limited)
+    if failure in {"length", "windows_length"}:
+        projected = workbench_target.git_inspection_environment(environment, executable, target)
+        quoted = projected["GIT_CONFIG_PARAMETERS"]
+        assert quoted.index("'fixture.first=one'") < quoted.index("'fixture.empty='")
+        assert "http.extraheader" not in quoted.lower()
+        assert calls[0] > 1
+        assert sum(calls[1:]) == calls[0]
+    elif failure == "fatal":
+        with pytest.raises(subprocess.CalledProcessError) as raised:
+            workbench_target.git_inspection_environment(environment, executable, target)
+        assert raised.value.returncode == 128
+        assert raised.value.stderr == b"native quote failure\n"
+        assert len(calls) == 1
+    else:
+        with pytest.raises(OSError) as raised:
+            workbench_target.git_inspection_environment(environment, executable, target)
+        assert raised.value is error
+        if failure == "singleton":
+            assert calls[-1] == 1
+        else:
+            assert len(calls) == 1
