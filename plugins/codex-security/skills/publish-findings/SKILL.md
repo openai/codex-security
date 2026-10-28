@@ -1,6 +1,6 @@
 ---
 name: publish-findings
-description: Disabled by default; requires user opt-in with CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Import selected Snyk Open Source findings, Semgrep Code CLI/CI reports, Endor Labs findings, GitHub code-scanning alerts or GHSA advisories, or Wiz package vulnerabilities, SAST, repository secrets, and IaC findings locally or to Codex Security Cloud after previewing the destination and evidence. Prefers native JSON; also supports Snyk plugin SCA bundles, Snyk Open Source and Semgrep Code SARIF, endorctl SARIF, saved GitHub JSON/JSONL, Wiz normalized JSONL and repository package-vulnerability CSV, and gzip; does not import workload secrets or cloud configuration, run a scan, assess findings, or synchronize triage decisions.
+description: Requires explicit opt-in with CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Preview and import supported findings from Snyk Open Source, Semgrep Code, OpenGrep, Endor Labs, GitHub, or Wiz into the local workbench or Codex Security Cloud. Use each provider's documented native JSON, SARIF, plugin bundle, JSONL or CSV format, including gzip-compressed reports.
 ---
 
 # Publish external findings
@@ -79,6 +79,10 @@ For existing findings, the official [Semgrep Guardian Codex plugin](https://docs
 Import the native report with `--provider semgrep`, a stable organization/project/branch `--source-key`, and `--source-repository-url` identifying the actual source repository. Use `--to local --repository /path/to/project` for local storage or `--to cloud --repository URL_OR_ID` for Cloud. The source URL is checked against configured local Git remotes or the Cloud destination. Preview with `--dry-run --format json` before confirming the import.
 
 Keep supplied fingerprints. Reimporting the same fingerprint after code moves updates the existing source record with the new range. If the fingerprint is absent or `requires login`, the fallback uses rule, literal path and range: movement creates a second retained record, and the earlier record remains stored. Do not infer a merge or deletion. Read the persisted evidence with `codex-security findings imported /path/to/project --format json` before assessment. Source rule, CWE, snippets, traces and status are vendor evidence, not Codex assessments. Do not infer a report revision from the current checkout. Resolve scan errors and review all exclusions before uploading; do not remove error metadata to force acceptance.
+
+## OpenGrep
+
+Import native OpenGrep JSON with `--provider opengrep`, `--source-repository-url`, and a stable OpenGrep-specific `--source-key`. Preview the destination and scan diagnostics before importing. Local and Cloud imports use the Semgrep provider and retain OpenGrep as the scanner origin.
 
 ## GitHub alerts and advisories
 

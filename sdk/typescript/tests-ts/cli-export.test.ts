@@ -22,6 +22,7 @@ import { exportEnvironment, main } from "../src/cli.js";
 import type { JsonObject } from "../src/config.js";
 import {
   CodexSecurityError,
+  exportArtifact,
   type CoverageDocument,
   type ScanManifest,
 } from "../src/index.js";
@@ -188,6 +189,55 @@ describe("CLI", () => {
     expect(exportedScanDir).toBe(scanDir);
   });
 
+  test("exports the same AVIT rows through the CLI and SDK with a reusable template", async () => {
+    const directory = await temporaryDirectory("codex-security-avit-");
+    try {
+      const scan = await copyCompletedScan(directory);
+      const sample = await readFile(
+        new URL(
+          "../../../examples/servicenow-avit-template.csv",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      const template = join(directory, "app template.csv");
+      await writeFile(template, sample);
+      const { runCli, stdout, stderr } = createCliTest(main);
+      expect(
+        await runCli(
+          [
+            "export",
+            scan,
+            "--export-format",
+            "servicenow-avit",
+            "--avit-template",
+            template,
+            "--output",
+            "-",
+          ],
+          undefined,
+        ),
+      ).toBe(0);
+      expect(stdout.text()).toContain("src/extract.py:41");
+      expect(stderr.text()).toContain("Rows with no recorded steps: 1");
+
+      const options = {
+        source: { directory: scan },
+        format: "servicenow-avit",
+        avitTemplate: template,
+      } as const;
+      const output = join(directory, "avit.csv");
+      await exportArtifact({ ...options, output });
+      expect(await readFile(output, "utf8")).toBe(stdout.text());
+      await expect(
+        exportArtifact({ ...options, output: template }),
+      ).rejects.toThrow("cannot overwrite the reusable template");
+      expect(await readFile(template, "utf8")).toBe(sample);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("reports default-source history failures once without running the exporter", async () => {
     for (const lookupFails of [false, true]) {
       const deps = dependencies({
@@ -277,7 +327,11 @@ describe("CLI", () => {
           ],
           { cwd: repository, env: environment, timeout: 30_000 },
         );
-      const selectors = [[], ["--scan", scanId.slice(0, 8)]];
+      const selectors = [
+        [],
+        ["--scan", "latest"],
+        ["--scan", scanId.slice(0, 8)],
+      ];
       for (const selector of selectors) {
         const result = await exportModel(...selector);
         expect(result.stderr).toBe("");
@@ -390,8 +444,6 @@ describe("CLI", () => {
           "scan-prov",
           "--artifact",
           "threat-model",
-          "--format",
-          "md",
           "--validate-only",
         ],
       ]);
@@ -451,6 +503,25 @@ describe("CLI", () => {
         "only support --export-format md",
       ],
       [["saved", "--export-format", "md"], "Findings exports support"],
+      [
+        ["saved", "--export-format", "servicenow-avit"],
+        "requires --avit-template",
+      ],
+      [
+        ["saved", "--export-format", "csv", "--avit-template", "app.csv"],
+        "--avit-template is only supported",
+      ],
+      [
+        [
+          "saved",
+          "--export-format",
+          "servicenow-avit",
+          "--output",
+          "-",
+          "--json",
+        ],
+        "CSV stdout cannot",
+      ],
       [
         ["saved", "--artifact", "threat-model", "--output", "-", "--json"],
         "Markdown stdout cannot",

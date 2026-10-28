@@ -14,6 +14,8 @@ export interface ExternalSourceRepository {
 
 export interface ExternalFindings {
   read: number;
+  /** Reader-retained run metadata, including diagnostics for empty reports. */
+  report?: Record<string, unknown>;
   findings: ExternalFinding[];
   excluded: {
     position: number;

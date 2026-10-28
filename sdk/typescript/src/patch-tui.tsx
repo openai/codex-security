@@ -174,6 +174,7 @@ function locationSource(
     }
 
     const source = readFileSync(path, "utf8").split(/\r?\n/u);
+    if (source.at(-1) === "") source.pop();
     const first = Math.max(0, location.startLine - 4);
     const last = Math.min(
       source.length,

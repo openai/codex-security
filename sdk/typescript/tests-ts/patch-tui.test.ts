@@ -187,6 +187,7 @@ describe("interactive patch finding browser", () => {
           'const token = "sk-proj-SYNTHETIC_KEY_123";',
         ].join("\n"),
       );
+      await writeFile(join(repository, "eof.ts"), "\r\n".repeat(10));
       const outside = join(directory, "outside.ts");
       await writeFile(outside, "OUTSIDE_PRIVATE_SOURCE");
       await symlink(outside, join(repository, "src", "outside-link.ts"));
@@ -199,6 +200,7 @@ describe("interactive patch finding browser", () => {
           endLine: 6,
           role: "sink",
         },
+        { path: "eof.ts", startLine: 10 },
         { path: "../outside.ts", startLine: 1 },
         { path: "src/outside-link.ts", startLine: 1 },
       ];
@@ -226,6 +228,8 @@ describe("interactive patch finding browser", () => {
       expect(reviewed).toContain("includeDeleted: false");
       expect(reviewed).toContain("7 │   audit.record(tenant);");
       expect(reviewed).toContain('const token = "sk-proj-SYNTHETIC_KEY_123";');
+      expect(reviewed).toContain("› 10 │");
+      expect(reviewed).not.toContain(" 11 │");
       expect(reviewed).toContain("../outside.ts:1");
       expect(reviewed).toContain("src/outside-link.ts:1");
       expect(reviewed).not.toContain("OUTSIDE_PRIVATE_SOURCE");

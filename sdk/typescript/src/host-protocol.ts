@@ -36,6 +36,7 @@ type Execute = (
   id: string,
   request: unknown,
   onProgress?: (event: unknown) => void,
+  method?: string,
 ) => Promise<unknown>;
 
 /** One bidirectional run, shared with dedupe. This transport never replays. */
@@ -216,7 +217,7 @@ export async function runHostProtocol(
       void operation
         .run(
           run.data.params,
-          (id, params, onProgress) => {
+          (id, params, onProgress, method = operation.requestMethod) => {
             if (terminalCode !== undefined || controller.signal.aborted)
               return Promise.reject(controller.signal.reason);
             if (pending)
@@ -226,7 +227,7 @@ export async function runHostProtocol(
               void send({
                 jsonrpc: "2.0",
                 id,
-                method: operation.requestMethod,
+                method,
                 params,
               }).catch(outputError);
             });

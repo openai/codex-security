@@ -5,6 +5,15 @@ import {
 } from "./external-import-contract.js";
 import type { ExternalFindings } from "./external-findings.js";
 import {
+  messageText,
+  parseNativeJsonResult,
+  position,
+  projectNativeJsonResult,
+  sourceRepositoryUrl,
+  ungatedText,
+  weaknessIds,
+} from "./native-json-findings.js";
+import {
   array,
   hasSarifExternalPropertyReferences,
   normalizeRecords,
@@ -14,7 +23,6 @@ import {
   requiredText,
   sarifRunContextForResult,
   stableId,
-  strings,
   text,
 } from "./scanner-import.js";
 
@@ -24,32 +32,7 @@ export interface SemgrepImportOptions {
 }
 
 function sourceRepository(options: SemgrepImportOptions): string {
-  const value = requiredText(
-    options?.sourceRepositoryUrl,
-    "Semgrep sourceRepositoryUrl (--source-repository-url)",
-  );
-  const url = new URL(value);
-  if (
-    !["http:", "https:"].includes(url.protocol) ||
-    url.username ||
-    url.password
-  )
-    throw new Error(
-      "Use an HTTP(S) source repository URL without credentials.",
-    );
-  return value;
-}
-
-function ungatedText(value: unknown): string | null {
-  const supplied = text(value);
-  // The current CLI emits this placeholder for gated Community Edition fields.
-  return supplied === "requires login" ? null : supplied;
-}
-
-function messageText(value: unknown): string | null {
-  if (typeof value !== "string")
-    throw new Error("Expected a Semgrep message string.");
-  return text(value);
+  return sourceRepositoryUrl(options?.sourceRepositoryUrl, "Semgrep");
 }
 
 function severity(value: unknown): string {
@@ -63,24 +46,6 @@ function severity(value: unknown): string {
     INFO: "low",
   };
   return typeof value === "string" ? (levels[value] ?? "unknown") : "unknown";
-}
-
-function weaknessIds(value: unknown): string[] {
-  const labels = typeof value === "string" ? [value] : strings(value);
-  return [
-    ...new Set(
-      labels.flatMap((label) => {
-        const match = /^(CWE-\d+)(?::|$)/u.exec(label);
-        return match ? [match[1]!] : [];
-      }),
-    ),
-  ];
-}
-
-function position(value: unknown, label: string): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1)
-    throw new Error(`${label} must be a positive integer.`);
-  return value;
 }
 
 function identity(
@@ -195,63 +160,19 @@ export function normalizeSemgrepFindings(
   const { results, paths: _paths, time: _time, ...context } = document;
   return normalizeRecords(
     array(results, "Semgrep results"),
-    (value, sourceFindingId) => {
-      const result = record(value, "Semgrep result");
-      const extra = record(result["extra"], "Semgrep extra");
-      const metadata = record(extra["metadata"] ?? {}, "Semgrep metadata");
-      const product = metadata["product"];
-      const validation = extra["validation_state"];
-      if (
-        (product != null && product !== "sast") ||
-        extra["sca_info"] != null ||
-        extra["historical_info"] != null ||
-        (validation != null && validation !== "NO_VALIDATOR")
-      )
-        throw new Error(
-          "This adapter supports Semgrep SAST; Supply Chain and Secrets reports need separate qualification.",
-        );
-      const rule = requiredText(result["check_id"], "Semgrep check_id");
-      const rawPath = requiredText(result["path"], "Semgrep path");
-      const start = record(result["start"], "Semgrep start");
-      const end = record(result["end"], "Semgrep end");
-      const line = position(start["line"], "Start line");
-      const column = position(start["col"], "Start column");
-      const endLine = position(end["line"], "End line");
-      const endColumn = position(end["col"], "End column");
-      if (endLine < line || (endLine === line && endColumn < column))
-        throw new Error("Semgrep source range ends before it starts.");
-      const path = relativePath(rawPath);
-      return {
-        source_finding_id: sourceFindingId,
-        evidence: validateExternalEvidence(
-          {
-            title: rule,
-            description: messageText(extra["message"]),
-            severity: severity(extra["severity"]),
-            locations: path ? [{ path, line }] : [],
-            details: {
-              kind: "sast",
-              repository: { url: repositoryUrl },
-              scanner_origin: "Semgrep",
-              rule: { id: rule },
-              weakness_ids: weaknessIds(metadata["cwe"]),
-              code: {
-                end_line: path ? endLine : null,
-                snippet: ungatedText(extra["lines"]),
-              },
-              source_status:
-                typeof extra["is_ignored"] === "boolean"
-                  ? extra["is_ignored"]
-                    ? "ignored"
-                    : "open"
-                  : null,
-            },
-            source_data: structuredClone({ report: context, result }),
-          },
+    (value, sourceFindingId) => ({
+      source_finding_id: sourceFindingId,
+      evidence: projectNativeJsonResult(
+        parseNativeJsonResult(value, "Semgrep"),
+        {
+          origin: "Semgrep",
+          repositoryUrl,
+          severity,
+          reportContext: context,
           target,
-        ),
-      };
-    },
+        },
+      ),
+    }),
     jsonIdentity,
     target,
   );
@@ -420,7 +341,8 @@ export function normalizeSemgrepSarif(
           {
             title: ruleId,
             description:
-              text(message["markdown"]) ?? messageText(message["text"]),
+              text(message["markdown"]) ??
+              messageText(message["text"], "Semgrep"),
             severity: mappedSeverity,
             locations: path ? [{ path, line }] : [],
             details: {

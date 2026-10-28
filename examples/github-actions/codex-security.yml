@@ -32,7 +32,7 @@ jobs:
       security-events: write
       actions: read
     env:
-      CODEX_SECURITY_VERSION: "0.7.0"
+      CODEX_SECURITY_VERSION: "0.8.0"
       BEDROCK_MODEL_ID: ${{ vars.BEDROCK_MODEL_ID }}
       # Report-only by default. Set to "high" to fail on high/critical findings.
       FAIL_ON_SEVERITY: ""

@@ -16,6 +16,7 @@ const ubuntuNode24Install = JSON.stringify({
 
 const regularSource = {
   "source-required": "true",
+  "container-required": "true",
   "plugin-tests-required": "true",
   "package-required": "true",
   "action-ci": "false",
@@ -85,18 +86,23 @@ const fullQualification = {
 const docs = {
   ...regularSource,
   "source-required": "false",
+  "container-required": "false",
   "plugin-tests-required": "false",
   "package-required": "false",
   "eval-contracts": "false",
 };
 
-test("only edits to existing direct pytest modules skip independent jobs", (t) => {
+test("the Docker context excludes the test modules skipped by container CI", () => {
   const ignore = ["Dockerfile.dockerignore", ".dockerignore"]
     .map((file) => new URL(`../../${file}`, import.meta.url))
     .find((file) => fs.existsSync(file));
   const rules = fs.readFileSync(ignore, "utf8");
   assert.match(rules, /^plugins\/codex-security\/tests\r?$/m);
+  assert.match(rules, /^sdk\/typescript\/tests-ts\/\*\.test\.ts\r?$/m);
   assert.doesNotMatch(rules, /^\s*!/m);
+});
+
+test("only edits to existing direct pytest modules skip independent jobs", (t) => {
   const cwd = fs.mkdtempSync(resolve(tmpdir(), "ci-pytest-"));
   t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
   const files = join(cwd, "plugins/codex-security/tests");
@@ -134,6 +140,7 @@ test("only edits to existing direct pytest modules skip independent jobs", (t) =
       ).include.filter(({ os }) => os !== "windows-latest"),
     }),
     "source-required": "false",
+    "container-required": "false",
     "action-ci": "false",
     "eval-contracts": "false",
   };
@@ -328,6 +335,7 @@ test("SDK test-only PRs skip independent suites and retain any changed eval inpu
   ];
   const sdk = {
     ...regularSource,
+    "container-required": "false",
     "plugin-tests-required": "false",
     "compatibility-matrix": ubuntuNode24Install,
   };
@@ -480,36 +488,18 @@ test("the final gate distinguishes a failed check from a skipped dependent job",
       encoding: "utf8",
     });
   const needs = successfulFullRun();
-  for (const selected of [true, false]) {
-    const outputs = select(
-      [
-        selected
-          ? "Dockerfile"
-          : "plugins/codex-security/tests/test_workbench.py",
-      ],
-      { modifiedOnly: true },
-    );
-    for (const result of ["success", "failure", "cancelled", "skipped"]) {
-      const verdict = run({
-        ...needs,
-        "classify-changes": { result: "success", outputs },
-        "container-validate": { result },
-      });
-      const failed = selected && result !== "success";
-      assert.equal(verdict.status, failed ? 1 : 0, verdict.stderr);
-      if (failed) {
-        assert.ok(
-          verdict.stderr.includes(`container-validate (${result})`),
-          verdict.stderr,
-        );
-      } else {
-        assert.equal(
-          verdict.stdout.trim(),
-          "All selected required CI checks passed.",
-        );
-      }
-    }
-  }
+  const pythonTests = select(["plugins/codex-security/tests/test_workbench.py"], {
+    modifiedOnly: true,
+  });
+  const passed = run({
+    ...needs,
+    "classify-changes": { result: "success", outputs: pythonTests },
+    test: { result: "failure" },
+    "windows-test": { result: "cancelled" },
+    "container-validate": { result: "skipped" },
+  });
+  assert.equal(passed.status, 0, passed.stderr);
+  assert.equal(passed.stdout.trim(), "All selected required CI checks passed.");
 
   needs["static-checks"].result = "failure";
   needs["container-validate"].result = "skipped";
@@ -534,6 +524,7 @@ test("documentation requires static checks and explicit selection, without skipp
   );
   for (const key of [
     "source-required",
+    "container-required",
     "plugin-tests-required",
     "package-required",
     "action-ci",

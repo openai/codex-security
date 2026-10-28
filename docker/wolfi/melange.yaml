@@ -1,0 +1,43 @@
+# Stage once using payload/stage.py; pass that directory as melange --source-dir.
+# build.sh supplies the signed local repository prepared from builder.lock.json.
+package:
+  name: codex-security
+  version: "0.7.0"
+  epoch: 1
+  description: Codex Security repository scanner and bundled Linux amd64 Codex runtime
+  target-architecture: [x86_64]
+  copyright:
+    - license: Apache-2.0
+  # The npm native add-ons are loaded by Node, not system SONAME providers.
+  # Their shared runtime requirements are declared explicitly below.
+  options:
+    no-provides: true
+    no-depends: true
+  dependencies:
+    runtime:
+      - busybox
+      - ca-certificates-bundle
+      - cmd:node
+      - git
+      - glibc
+      - libgcc
+      - openssh-client
+      - python3
+
+environment:
+  contents:
+    packages:
+      - busybox
+
+pipeline:
+  - name: Verify and install the locked Linux scanner payload
+    runs: |
+      set -eu
+      expected=db42f7b5b4d0bfc79975e38778ece88d02d31887a262f8a5c0e5bdfdbbe3563d
+      actual=$(gzip -dc payload.tar.gz | sha256sum)
+      test "${actual%% *}" = "$expected"
+      mkdir -p "${{targets.destdir}}"
+      tar -xzf payload.tar.gz -C "${{targets.destdir}}"
+      test -x "${{targets.destdir}}/usr/bin/codex-security"
+      test -x "${{targets.destdir}}/usr/local/bin/codex-security-entrypoint"
+      test -s "${{targets.destdir}}/usr/share/licenses/codex-security/SOURCES.json"

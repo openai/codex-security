@@ -14,6 +14,7 @@ import type {
 import {
   cloudRepositoryUrlKey,
   repositoryUrlKey,
+  validateExternalReport,
 } from "./external-import-contract.js";
 import type {
   ExternalFindingEvidence,
@@ -78,6 +79,7 @@ export interface LocalExternalImportPreview extends ExternalFindings {
 export interface LocalExternalImportResult {
   repository: string;
   read: number;
+  report?: ExternalFindings["report"];
   ready: number;
   excluded: ExternalFindings["excluded"];
   findings: StoredExternalFinding[];
@@ -489,6 +491,7 @@ export async function prepareNormalizedLocalImport(
   requireExternalImports(dependencies.environment);
   requireIdentity(options.sourceKey, "Source key");
   const current = structuredClone(input);
+  validateExternalReport(current.report);
   const identities = new Set<string>();
   for (const finding of current.findings) {
     requireIdentity(finding.source_finding_id, "Source finding id");
@@ -584,8 +587,11 @@ export async function prepareNormalizedLocalImport(
       return {
         repository,
         read: current.read,
+        ...(current.report === undefined
+          ? {}
+          : { report: structuredClone(current.report) }),
         ready: current.findings.length,
-        excluded: current.excluded,
+        excluded: structuredClone(current.excluded),
         findings: result["findings"] as unknown as StoredExternalFinding[],
         counts: result["counts"] as LocalExternalImportResult["counts"],
       };

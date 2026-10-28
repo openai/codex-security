@@ -197,9 +197,22 @@ describe("local normalized scanner findings", () => {
     expect(existsSync(disabledState)).toBe(false);
   });
 
+  test("rejects unserializable report metadata before storing findings", async () => {
+    const { repository, stateDirectory, environment } = await fixture();
+    await expect(
+      prepareNormalizedLocalImport(
+        { ...input(), report: { elapsedNs: 1n } },
+        { repository, ...source },
+        { environment },
+      ),
+    ).rejects.toThrow(/bigint/i);
+    expect(existsSync(stateDirectory)).toBe(false);
+  });
+
   test("persists sparse evidence through the native helper and reads it in a separate process", async () => {
     const { repository, stateDirectory, environment } = await fixture();
     const normalized = input();
+    normalized.report = { errors: normalized.excluded };
     const prepared = await prepareNormalizedLocalImport(
       normalized,
       { repository, ...source },
@@ -220,6 +233,13 @@ describe("local normalized scanner findings", () => {
       ready: 2,
       excluded: input().excluded,
       counts: { created: 2, updated: 0, unchanged: 0 },
+    });
+    (result.report!["errors"] as typeof normalized.excluded).pop();
+    Object.assign(result.excluded[0]!, { onSelect: () => undefined });
+    expect(await prepared.import()).toMatchObject({
+      excluded: normalized.excluded,
+      report: normalized.report,
+      counts: { created: 0, updated: 0, unchanged: 2 },
     });
     expect(existsSync(join(stateDirectory, "workbench.sqlite3"))).toBe(true);
     expect(result.findings.map((row) => row.evidence)).toEqual(

@@ -69,7 +69,11 @@ import {
   matchScanFindingsInternal,
 } from "../src/scan-comparison.js";
 import { normalizeTarget } from "../src/targets.js";
-import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
+import {
+  copyCompletedScan,
+  copyCredentialTestPlugin,
+  PLUGIN_ROOT,
+} from "./plugin-root.js";
 import {
   mockScanRegistration,
   mockWorkbench,
@@ -6166,9 +6170,10 @@ if __name__ == "__main__":
           process.platform === "win32" ? "junction" : "dir",
         );
       }
+      const sessions = new Map<string, string>();
       const client = new TestClient(
         {
-          pluginPath: PLUGIN_ROOT,
+          pluginPath: await copyCredentialTestPlugin(root),
           codexOverrides: {
             model,
             ...(provider === undefined
@@ -6221,9 +6226,12 @@ if __name__ == "__main__":
                     ? "synthetic-transient-key"
                     : undefined,
                 );
-                await writeUsageSession(codexHome, "persistent-thread", {
-                  input_tokens: 1,
-                });
+                const path = await writeUsageSession(
+                  codexHome,
+                  `persistent-thread-${sessions.size + 1}`,
+                  { input_tokens: 1 },
+                );
+                sessions.set(path, await readFile(path, "utf8"));
                 throw new Error("persistent session recorded");
               },
             }),
@@ -6242,18 +6250,10 @@ if __name__ == "__main__":
         await client.close();
       }
 
-      expect(
-        existsSync(
-          join(
-            codexHome,
-            "sessions",
-            "2026",
-            "07",
-            "26",
-            "rollout-persistent-thread.jsonl",
-          ),
-        ),
-      ).toBe(true);
+      expect(sessions.size).toBe(2);
+      for (const [path, contents] of sessions) {
+        expect(await readFile(path, "utf8")).toBe(contents);
+      }
       expect(existsSync(join(codexHome, "auth.json"))).toBe(false);
       const persistentConfigText = await readFile(
         join(codexHome, "config.toml"),
