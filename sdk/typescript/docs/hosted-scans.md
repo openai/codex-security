@@ -208,22 +208,19 @@ needs before returning that outcome. Use shared mounts or a coordinated transfer
 that preserves the supplied path bindings, not independent copies of mutable
 workbench state.
 
-For hosted path scans started by the Linux CLI with a current plugin, the
-scope helper reports the inventory path for subsequent shell calls. On
-Linux it creates a private file in the executor's bound `stateDirectory`,
-named `<scope-input-filename>.scoped-<24 lowercase hex digits>.jsonl`.
-Mount state outside the frozen checkout and captured output on the executor.
-State storage requires an executor-owned mode-`0600` file in a protected
-directory where the helper can hold a reader open across writer close. The
-binding can contain one protected symlink and may not contain `..` in the
-path or link target. Other layouts use scan output. If a later
-shell cannot read the inventory, the prompt supplies a command to regenerate
-it at the same `scoped-source-input.jsonl` path in scan output. A retry
-replaces that disposable directory entry, so the executor must be allowed
-to remove an earlier copy. The private files follow the state directory's
-lifetime and can increase the size of a transferred state tree. Hosts that
-retain long-lived state can remove the request's private files once execution
-finishes.
+For path scans with the Linux CLI and a current plugin, use the inventory
+path the scope helper reports. A Linux executor can keep the inventory in
+`stateDirectory` outside the checkout and captured output. The state binding
+may include one protected symlink and must exclude `..` from the path and
+link target. Its protected directory must support executor-owned mode-`0600`
+files and keep a reader open across writer close.
+
+Other layouts use `scoped-source-input.jsonl` in scan output. If a later
+shell loses the inventory, run the recovery command in the prompt. It may
+replace an earlier output file, so the executor needs permission to remove it.
+State transfers include private inventories named
+`<scope-input-filename>.scoped-<24 lowercase hex digits>.jsonl`. Hosts can
+remove the request's private inventories after execution finishes.
 
 Run the plugin stdio server from
 `pluginRoot/scripts/launch_codex_security_mcp --stdio` with the supplied

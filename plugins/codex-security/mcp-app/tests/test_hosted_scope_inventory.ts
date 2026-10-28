@@ -5,7 +5,7 @@ import { basename, dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { importSource } from "./import-module.ts";
 
-const { writeHostedScopeInventory: write } = (await importSource(
+const { writeHostedScopeInventory } = (await importSource(
   join(import.meta.dirname, "../src/helpers/hosted-scope-inventory.ts"),
 )) as typeof import("../src/helpers/hosted-scope-inventory.ts");
 
@@ -33,26 +33,28 @@ function fixture(t: TestContext) {
   const alias = join(base, "state-alias");
   fs.symlinkSync(parent, alias);
   const scopes = join(base, "scopes.json");
-  fs.writeFileSync(scopes, '["src"]');
-  return {
-    base,
-    parent,
-    alias,
-    scopes,
-    repo: join(base, "repo"),
-    output: join(base, "scan", "input.jsonl"),
-  };
+  const repo = join(base, "repo");
+  const output = join(base, "scan", "input.jsonl");
+  function write(
+    directory = parent,
+    { text = "inventory row\n", checkout = repo, scanOutput = output } = {},
+  ) {
+    return writeHostedScopeInventory(directory, scopes, checkout, scanOutput, [
+      Buffer.from(text),
+    ]);
+  }
+  return { base, parent, alias, repo, write };
 }
 
 test(
   "private inventories remain readable through the executor's state directory name",
   { skip: process.platform !== "linux" },
   (t) => {
-    const { base, parent, scopes, alias, repo, output } = fixture(t);
+    const { base, parent, alias, write } = fixture(t);
     const mask = process.umask(0o777);
     try {
-      const first = write(parent, scopes, repo, output, [Buffer.from("one\n")]);
-      const second = write(alias, scopes, repo, output, [Buffer.from("two\n")]);
+      const first = write(parent, { text: "one\n" });
+      const second = write(alias, { text: "two\n" });
       assert.ok(first && second && first !== second);
       for (const [path, state, expected] of [
         [first, parent, "one\n"],
@@ -81,12 +83,9 @@ test(
   "hosted scratch skips a private directory beneath a replaceable ancestor",
   { skip: process.platform !== "linux" },
   (t) => {
-    const { base, parent, scopes, repo, output } = fixture(t);
+    const { base, parent, write } = fixture(t);
     fs.chmodSync(base, 0o770);
-    assert.equal(
-      write(parent, scopes, repo, output, [Buffer.from("row")]),
-      undefined,
-    );
+    assert.equal(write(), undefined);
     assert.deepEqual(fs.readdirSync(parent), []);
   },
 );
@@ -95,11 +94,10 @@ test(
   "an alternate name for the checkout or output still excludes scratch",
   { skip: process.platform !== "linux" },
   (t) => {
-    const { base, scopes, repo, output, parent, alias } = fixture(t);
-    const row = [Buffer.from("row")];
-    assert.equal(write(parent, scopes, alias, output, row), undefined);
+    const { base, repo, parent, alias, write } = fixture(t);
+    assert.equal(write(parent, { checkout: alias }), undefined);
     assert.equal(
-      write(parent, scopes, repo, join(alias, "inventory"), row),
+      write(parent, { scanOutput: join(alias, "inventory") }),
       undefined,
     );
     fs.mkdirSync(repo, { mode: 0o700 });
@@ -107,7 +105,7 @@ test(
     fs.symlinkSync(parent, checkoutLink);
     const offered = join(base, "offered-state");
     fs.symlinkSync(checkoutLink, offered);
-    assert.equal(write(offered, scopes, repo, output, row), undefined);
+    assert.equal(write(offered), undefined);
     assert.deepEqual(fs.readdirSync(parent), []);
   },
 );
@@ -116,7 +114,7 @@ test(
   "a state alias cannot pass through a replaceable directory",
   { skip: process.platform !== "linux" },
   (t) => {
-    const { base, parent, scopes, repo, output } = fixture(t);
+    const { base, parent, write } = fixture(t);
     const shared = join(base, "shared");
     fs.mkdirSync(shared);
     fs.chmodSync(shared, 0o770);
@@ -127,10 +125,7 @@ test(
     const trailing = join(base, "trailing-link");
     fs.symlinkSync("outer-link/", trailing);
     for (const alias of [hop, nested, trailing]) {
-      assert.equal(
-        write(alias, scopes, repo, output, [Buffer.from("row")]),
-        undefined,
-      );
+      assert.equal(write(alias), undefined);
       assert.deepEqual(fs.readdirSync(parent), []);
     }
   },
@@ -140,15 +135,12 @@ test(
   "state containing a symlink followed by .. falls back",
   { skip: process.platform !== "linux" },
   (t) => {
-    const { base, parent, scopes, repo, output } = fixture(t);
+    const { base, parent, write } = fixture(t);
     const sub = join(parent, "sub");
     fs.mkdirSync(sub, { mode: 0o700 });
     const link = join(base, "link-to-sub");
     fs.symlinkSync(sub, link);
-    assert.equal(
-      write(`${link}/..`, scopes, repo, output, [Buffer.from("row")]),
-      undefined,
-    );
+    assert.equal(write(`${link}/..`), undefined);
     assert.deepEqual(fs.readdirSync(parent), ["sub"]);
   },
 );
@@ -157,13 +149,13 @@ test(
   "an already-private state file works when the mount refuses chmod",
   { skip: process.platform !== "linux" },
   (t) => {
-    const { parent, scopes, repo, output } = fixture(t);
+    const { parent, write } = fixture(t);
     const mask = process.umask(0o077);
     t.after(() => process.umask(mask));
     t.mock.method(fs, "fchmodSync", () => {
       throw Object.assign(new Error("chmod denied"), { code: "EPERM" });
     });
-    const path = write(parent, scopes, repo, output, [Buffer.from("private")]);
+    const path = write(parent, { text: "private" });
     assert.ok(path);
     assert.equal(fs.statSync(path).mode & 0o777, 0o600);
     assert.equal(fs.readFileSync(path, "utf8"), "private");
@@ -175,7 +167,7 @@ for (const unsupported of ["mode", "owner"] as const) {
     `a filesystem reporting the wrong ${unsupported} never receives inventory bytes`,
     { skip: process.platform !== "linux" },
     (t) => {
-      const { parent, scopes, repo, output } = fixture(t);
+      const { parent, write } = fixture(t);
       const fstat = fs.fstatSync;
       t.mock.method(
         fs,
@@ -191,10 +183,7 @@ for (const unsupported of ["mode", "owner"] as const) {
       );
       const chmod = t.mock.method(fs, "fchmodSync");
       const written = t.mock.method(fs, "writeFileSync");
-      assert.equal(
-        write(parent, scopes, repo, output, [Buffer.from("private")]),
-        undefined,
-      );
+      assert.equal(write(parent, { text: "private" }), undefined);
       assert.equal(chmod.mock.callCount(), 0);
       assert.equal(written.mock.callCount(), 0);
       assert.deepEqual(fs.readdirSync(parent), []);
@@ -206,8 +195,7 @@ test(
   "a partial scratch write leaves no inventory and preserves a replaced pathname",
   { skip: process.platform !== "linux" },
   (t) => {
-    const { parent, scopes, repo, output } = fixture(t);
-    const row = Buffer.from("some inventory bytes\n");
+    const { parent, write } = fixture(t);
     let replacement: string | undefined;
     const actual = fs.writeFileSync;
     const close = fs.closeSync;
@@ -240,10 +228,10 @@ test(
         throw Object.assign(new Error("scratch full"), { code: "ENOSPC" });
       },
     );
-    assert.equal(write(parent, scopes, repo, output, [row]), undefined);
+    assert.equal(write(), undefined);
     assert.deepEqual(fs.readdirSync(parent), []);
     replacement = join(parent, "moved");
-    assert.equal(write(parent, scopes, repo, output, [row]), undefined);
+    assert.equal(write(), undefined);
     assert.equal(writeRow.mock.callCount(), 2);
     assert.equal(fs.statSync(replacement).size, 0);
     const remaining = fs
@@ -257,12 +245,12 @@ test(
     t.mock.method(fs, "ftruncateSync", () => {
       throw Object.assign(new Error("truncate denied"), { code: "EPERM" });
     });
-    assert.equal(write(parent, scopes, repo, output, [row]), undefined);
+    assert.equal(write(), undefined);
     assert.equal(fs.readFileSync(scratch, "utf8"), "other file");
     fs.unlinkSync(scratch);
     replacement = undefined;
     replaceAfterClose = true;
-    assert.equal(write(parent, scopes, repo, output, [row]), undefined);
+    assert.equal(write(), undefined);
     assert.equal(linkedAtClose, false);
     assert.equal(fs.readFileSync(scratch, "utf8"), "new owner");
   },
@@ -273,7 +261,7 @@ for (const replace of [false, true]) {
     `a delayed write error removes only the failed inventory (replaced=${replace})`,
     { skip: process.platform !== "linux" },
     (t) => {
-      const { parent, scopes, repo, output } = fixture(t);
+      const { parent, write } = fixture(t);
       const close = fs.closeSync;
       const writeRow = t.mock.method(fs, "writeFileSync");
       let writerCloses = 0;
@@ -290,10 +278,7 @@ for (const replace of [false, true]) {
           code: "EDQUOT",
         });
       });
-      assert.equal(
-        write(parent, scopes, repo, output, [Buffer.from("row")]),
-        undefined,
-      );
+      assert.equal(write(), undefined);
       assert.equal(writerCloses, 1);
       const remaining = fs.readdirSync(parent);
       if (replace) {

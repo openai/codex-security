@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { PassThrough, Writable } from "node:stream";
 import { readFile, realpath, stat, symlink, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, delimiter, dirname, isAbsolute, join } from "node:path";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import {
   normalizeHostedScope,
@@ -394,7 +394,7 @@ test.each(sealedScopes)(
 
 test.skipIf(process.platform !== "linux").each([
   ["private", "completed"],
-  ["aliased", "acceptance_unknown"],
+  ["private", "acceptance_unknown"],
   ["output", "completed"],
   ["lost", "completed"],
 ] as const)(
@@ -403,73 +403,50 @@ test.skipIf(process.platform !== "linux").each([
     const input = await fixture(["service-a/nested/route [x].ts"]);
     const outputCopy = join(input.outputDirectory, "scoped-source-input.jsonl");
     let inventory = "";
-    let contents = "";
     const run: ScanExecutor["run"] = async (request) => {
-      const command = (helper: string, usesState = false) =>
-        request.prompt
-          .split("\n")
-          .find(
-            (line) =>
-              line.includes(`--helper ${helper} `) &&
-              line.includes(" --state-dir ") === usesState,
-          )!;
+      const commands = request.prompt.split("\n");
+      const [primary, recovery] = commands.filter((line) =>
+        line.includes("--helper make-hosted-repo-scope-input "),
+      );
       const environment = { ...request.runtime.environment };
-      const targets = environment["CODEX_SECURITY_TARGET_PATHS_FILE"]!;
       if (storage === "output")
         environment["CODEX_SECURITY_STATE_DIR"] =
           request.runtime.outputDirectory;
-      if (storage === "aliased") {
-        const alias = join(dirname(input.repository), "executor state alias");
-        await symlink(request.runtime.stateDirectory, alias, "dir");
-        environment["CODEX_SECURITY_STATE_DIR"] = alias;
-      }
-      const shell = (script: string, ...args: string[]) =>
-        execFileSync("/bin/sh", ["-c", script, "sh", ...args], {
+      const shell = (command: string) =>
+        execFileSync("/bin/sh", ["-c", command], {
           cwd: request.runtime.outputDirectory,
           env: environment,
           encoding: "utf8",
         });
-      const generate = (script: string) =>
-        shell(script).match(/^Wrote 2 scoped paths to (.+)$/mu)![1]!;
-      const hosted = command("make-hosted-repo-scope-input", true);
-      inventory = generate(
-        storage === "private" ? `umask 0777; ${hosted}` : hosted,
-      );
-      environment["CODEX_SECURITY_STATE_DIR"] = request.runtime.stateDirectory;
+      const generate = (command: string) =>
+        shell(command).match(/^Wrote 2 scoped paths to (.+)$/mu)![1]!;
+      inventory = generate(primary!);
       if (storage !== "output") {
         expect(await realpath(dirname(inventory))).toBe(
           await realpath(request.runtime.stateDirectory),
         );
-        const filename = basename(inventory);
-        expect(filename).toStartWith(basename(targets));
-        expect(filename.slice(basename(targets).length)).toMatch(
-          /^\.scoped-[0-9a-f]{24}\.jsonl$/u,
-        );
-        expect((await stat(inventory)).mode & 0o777).toBe(0o600);
-      } else {
-        expect(inventory).toBe(outputCopy);
       }
-      contents = shell('cat "$1"', inventory);
-      expect(parseJsonLines(contents)).toEqual([
-        { path: "service-a/index.ts" },
-        { path: "service-a/nested/route [x].ts" },
-      ]);
       if (storage === "lost") {
         await unlink(inventory);
-        inventory = generate(command("make-hosted-repo-scope-input"));
-        expect(inventory).toBe(outputCopy);
+        inventory = generate(recovery!);
       }
+      if (storage !== "private") expect(inventory).toBe(outputCopy);
       if (status === "completed") {
         await writeDraft(request);
-        shell(command("bind-repo-scopes"));
+        shell(
+          commands.find((line) => line.includes("--helper bind-repo-scopes "))!,
+        );
       }
       return receipt(request, { status });
     };
     const result = await runHostedScan(input, { executor: { run } });
     expect(result.status, JSON.stringify(result)).toBe(status);
     expect(result.execution?.sessionId).toBe("host-session");
-    expect(await readFile(inventory, "utf8")).toBe(contents);
-    if (storage === "private" || storage === "aliased")
+    expect(parseJsonLines(await readFile(inventory, "utf8"))).toEqual([
+      { path: "service-a/index.ts" },
+      { path: "service-a/nested/route [x].ts" },
+    ]);
+    if (storage === "private")
       await expect(stat(outputCopy)).rejects.toMatchObject({ code: "ENOENT" });
   },
 );

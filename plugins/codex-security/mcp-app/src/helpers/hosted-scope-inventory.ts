@@ -2,12 +2,11 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { ancestors, append, sameFile } from "./inventory-paths";
-import { normalizePath } from "./helper-files";
-import {
-  decodePosixBytes,
-  encodePosixPath,
-  resolvePosixPath,
-} from "./posix-path";
+import { mkdir, normalizePath, resolvedPathText } from "./helper-files";
+import { decodePosixBytes, encodePosixPath } from "./posix-path";
+
+const readWithoutFollowingLinks =
+  fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK;
 
 // A shared binding may use one protected alias. Use ordinary scan output
 // for more complex path layouts instead of resolving them on the executor.
@@ -54,16 +53,11 @@ export function writeHostedScopeInventory(
   if (process.platform !== "linux" || !isAbsolute(stateDirectory)) return;
   try {
     const uid = process.geteuid!();
-    const scan = decodePosixBytes(
-      resolvePosixPath(encodePosixPath(dirname(output)), false),
-    );
+    const scan = resolvedPathText(dirname(output), false);
     if (!trustedStatePath(stateDirectory, uid, repo, scan)) return;
-    const parent = decodePosixBytes(
-      resolvePosixPath(encodePosixPath(stateDirectory)),
-    );
+    const parent = resolvedPathText(stateDirectory);
     const name = `${basename(scopesFile)}.scoped-${randomBytes(12).toString("hex")}.jsonl`;
-    const path = join(parent, name);
-    const encoded = encodePosixPath(path);
+    const encoded = encodePosixPath(join(parent, name));
     const fd = fs.openSync(encoded, "wx", 0o600);
     let reader: number | undefined;
     let cleanupFd = fd;
@@ -85,8 +79,7 @@ export function writeHostedScopeInventory(
           "The state directory does not support private inventory files.",
         );
       // Keep the inode pinned if closing the writer reports a delayed error.
-      const { O_RDONLY, O_NOFOLLOW, O_NONBLOCK } = fs.constants;
-      reader = fs.openSync(encoded, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+      reader = fs.openSync(encoded, readWithoutFollowingLinks);
       const original = fs.fstatSync(fd, { bigint: true });
       const pinned = fs.fstatSync(reader, { bigint: true });
       if (pinned.dev !== original.dev || pinned.ino !== original.ino)
@@ -123,5 +116,43 @@ export function writeHostedScopeInventory(
     return append(stateDirectory, name);
   } catch {
     return undefined;
+  }
+}
+
+// Scan output can be on a mount that does not support rename.
+export function writeHostedOutput(output: string, rows: Buffer[]): void {
+  mkdir(dirname(output));
+  const path = encodePosixPath(output);
+  let writer: number;
+  try {
+    writer = fs.openSync(path, "wx");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const entry = fs.lstatSync(path);
+    if (!entry.isFile() && !entry.isSymbolicLink()) throw error;
+    // Replace only this disposable scan entry, without writing through a link.
+    fs.unlinkSync(path);
+    writer = fs.openSync(path, "wx");
+  }
+  try {
+    const file = fs.fstatSync(writer);
+    if (file.uid === process.geteuid!() && !(file.mode & 0o400)) {
+      try {
+        fs.fchmodSync(writer, (file.mode & 0o777) | 0o600);
+      } catch {
+        // Some fixed-mode mounts permit reading even when chmod is unavailable.
+      }
+    }
+    for (const row of rows) fs.writeFileSync(writer, row);
+  } finally {
+    fs.closeSync(writer);
+  }
+  // Some filesystems expose a newly written file only after the writer closes.
+  const reader = fs.openSync(path, readWithoutFollowingLinks);
+  try {
+    if (!fs.fstatSync(reader).isFile())
+      throw new Error(`--out: expected a regular file path: ${output}`);
+  } finally {
+    fs.closeSync(reader);
   }
 }

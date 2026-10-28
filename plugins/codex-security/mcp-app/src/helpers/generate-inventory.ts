@@ -5,16 +5,7 @@ import {
   resolvedPathText as canonical,
 } from "./helper-files";
 import { randomBytes } from "node:crypto";
-import {
-  closeSync,
-  constants,
-  fchmodSync,
-  fstatSync,
-  openSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { renameSync, unlinkSync } from "node:fs";
 import { dirname, isAbsolute, parse, relative, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { mkdir, readFile, writeFile } from "./helper-files";
@@ -53,7 +44,10 @@ import {
   runRipgrep,
 } from "./inventory-git";
 import { PREVIEW_BYTES, previewForBytes, sampleFile } from "./source-preview";
-import { writeHostedScopeInventory } from "./hosted-scope-inventory";
+import {
+  writeHostedOutput,
+  writeHostedScopeInventory,
+} from "./hosted-scope-inventory";
 
 export type InventoryCommand =
   | "generate-in-scope-files"
@@ -222,14 +216,6 @@ function inventoryOutput(value: string): string {
   return output;
 }
 
-function writeInventory(output: string, rows: Buffer[]): number {
-  const unique = [
-    ...new Map(rows.map((row) => [row.toString("hex"), row])).values(),
-  ].sort(Buffer.compare);
-  replaceInventory(output, unique);
-  return unique.length;
-}
-
 function replaceInventory(output: string, rows: Buffer[]): void {
   mkdir(dirname(output));
   const temporary = append(
@@ -249,47 +235,6 @@ function replaceInventory(output: string, rows: Buffer[]): void {
       if (windows) windowsFiles().unlink(Buffer.from(temporary, "utf16le"));
       else unlinkSync(fsPath(temporary));
     }
-  }
-}
-
-function writeHostedOutput(output: string, rows: Buffer[]): void {
-  mkdir(dirname(output));
-  const path = fsPath(output);
-  const create = () => openSync(path, "wx");
-  let writer: number;
-  try {
-    writer = create();
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    const entry = lstat(output);
-    if (!entry.isFile() && !entry.isSymbolicLink()) throw error;
-    // Replace only this disposable scan entry, without writing through a link.
-    unlinkSync(path);
-    writer = create();
-  }
-  try {
-    const file = fstatSync(writer);
-    if (file.uid === process.geteuid!() && !(file.mode & 0o400)) {
-      try {
-        fchmodSync(writer, (file.mode & 0o777) | 0o600);
-      } catch {
-        // Some fixed-mode mounts permit reading even when chmod is unavailable.
-      }
-    }
-    for (const row of rows) writeFileSync(writer, row);
-  } finally {
-    closeSync(writer);
-  }
-  // Some filesystems expose a newly written file only after the writer closes.
-  const reader = openSync(
-    path,
-    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-  );
-  try {
-    if (!fstatSync(reader).isFile())
-      throw new Error(`--out: expected a regular file path: ${output}`);
-  } finally {
-    closeSync(reader);
   }
 }
 
@@ -477,8 +422,15 @@ export async function generateInventory(
       }
     }
   }
-  if (inventory)
-    return { count: writeInventory(output, inventoryRows), output };
+  if (inventory) {
+    const unique = [
+      ...new Map(
+        inventoryRows.map((row) => [row.toString("hex"), row]),
+      ).values(),
+    ].sort(Buffer.compare);
+    replaceInventory(output, unique);
+    return { count: unique.length, output };
+  }
   const rows = [...rankRows.values()]
     .sort((left, right) => compare(left.path, right.path))
     .map((row) =>
@@ -516,19 +468,11 @@ export async function inventoryCommand(
 ): Promise<number> {
   const inventory = command === "generate-in-scope-files",
     diff = command === "make-diff-rank-input",
-    scoped =
-      command === "make-repo-scope-input" ||
-      command === "make-hosted-repo-scope-input";
+    scoped = !inventory && !diff;
   const required = [
     "repo",
     "out",
-    ...(inventory
-      ? ["scope"]
-      : diff
-        ? ["base"]
-        : scoped
-          ? ["scopes-file"]
-          : []),
+    inventory ? "scope" : diff ? "base" : "scopes-file",
   ];
   const optional = inventory
     ? ["diff-base", "diff-head", "diff-mode"]
