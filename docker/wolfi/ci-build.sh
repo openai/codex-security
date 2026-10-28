@@ -56,23 +56,22 @@ chmod 0755 "$tools/offline-melange"
 APKO="$tools/apko" MELANGE="$tools/offline-melange" "$recipe/build.sh" "$out"
 
 # build.sh has verified the package locks, original archive and signed checksums.
-# Load that archive, then cross-check Docker's rootfs before running the smoke test.
+# Bind the smoke test to the verified config, including its rootfs diff IDs.
 tag=$(jq -er .tag "$out/verification.json")
+config_digest=$(jq -er .config_digest "$out/verification.json")
 if docker image inspect "$tag" >/dev/null 2>&1; then die "Test image tag already exists: $tag"; fi
 docker load --input "$out/image.tar"
-layers=$(docker image inspect --format '{{json .RootFS.Layers}}' "$tag")
-python3 - "$out/image.tar" "$layers" <<'PY'
-import json, sys, tarfile
-with tarfile.open(sys.argv[1]) as archive:
-    manifest, = json.load(archive.extractfile("manifest.json"))
-    config = json.load(archive.extractfile(manifest["Config"]))
-if config["rootfs"]["diff_ids"] != json.loads(sys.argv[2]):
-    raise SystemExit("Docker's loaded rootfs differs from the verified archive")
-PY
+image_id=$(docker image inspect --format '{{.Id}}' "$tag")
+if [[ $image_id != "$config_digest" ]]; then
+  # The containerd image store returns a manifest digest as the ID; the
+  # classic store returns the config digest itself. Inspect the same local ID.
+  loaded_config=$(skopeo inspect --raw "docker-daemon:$image_id" | jq -er .config.digest)
+  [[ $loaded_config == "$config_digest" ]] || die "Docker's loaded config differs from the verified archive"
+fi
 
 # Fail if AppArmor cannot enforce the repository's profile. The smoke script
 # also applies the committed seccomp policy and disables container networking.
 sudo -n apparmor_parser --skip-cache --add "$profile"
 added_profile=true
 sudo -n grep -Fxq 'codex-security-container (enforce)' /sys/kernel/security/apparmor/profiles
-"$recipe/tests/smoke.sh" "$tag"
+"$recipe/tests/smoke.sh" "$image_id"

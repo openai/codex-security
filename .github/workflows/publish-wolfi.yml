@@ -6,6 +6,15 @@ on:
     paths:
       - .github/workflows/publish-wolfi.yml
       - docker/wolfi/**
+      - LICENSE
+      - docker/entrypoint.sh
+      - docker/git-credential.sh
+      - docker/codex-security.apparmor
+      - docker/codex-security-seccomp.json
+      - github-action/scripts/setup-ubuntu-sandbox.sh
+      - sdk/typescript/scripts/is-main.mjs
+      - sdk/typescript/scripts/package-provenance.mjs
+      - sdk/typescript/scripts/release-automation.mjs
 
 permissions: {}
 
@@ -48,12 +57,19 @@ jobs:
           version=$(jq -er '.installed_npm[] | select(.path == "node_modules/@openai/codex-security") | .version' "$out/public-components.json")
           [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           release_sha=$(git rev-parse --verify "refs/tags/npm-v$version^{commit}")
+          bash docker/wolfi/verify-npm-release.sh "$out/public-components.json" "$version" "$release_sha"
           recorded_source=$(docker run --rm --network=none --pull=never --entrypoint /usr/bin/node \
             codex-security:wolfi-amd64 -p 'require("/usr/share/licenses/codex-security/SOURCES.json").scanner_source')
           [[ $recorded_source == "https://github.com/openai/codex-security/tree/$release_sha" ]]
-          cp "$out/sbom/sbom-x86_64.spdx.json" "$candidate/sbom.spdx.json"
+          python3 docker/wolfi/release-sbom.py "$out/sbom/sbom-x86_64.spdx.json" "$out/public-components.json" "$candidate/sbom.spdx.json"
+          pdfjs=$(jq -er '.installed_npm[] | select(.path == "node_modules/pdfjs-dist") | .version' "$out/public-components.json")
+          jq -e --arg purl "pkg:npm/pdfjs-dist@$pdfjs" 'any(.packages[].externalRefs[]?; .referenceLocator == $purl)' \
+            "$candidate/sbom.spdx.json" > /dev/null
           sbom_sha=$(sha256sum "$candidate/sbom.spdx.json" | cut -d' ' -f1)
-          printf 'digest=%s\ntag=%s-wolfi-amd64\nsbom-sha=%s\n' "$digest" "$version" "$sbom_sha" >> "$GITHUB_OUTPUT"
+          revision=$(jq -er '.image_revision | numbers | select(. >= 0 and . == floor)' "$out/build-inputs.json")
+          tag=$version-wolfi-amd64
+          if [[ $revision != 0 ]]; then tag+=-r$revision; fi
+          printf 'digest=%s\ntag=%s\nsbom-sha=%s\n' "$digest" "$tag" "$sbom_sha" >> "$GITHUB_OUTPUT"
           printf 'Scanner source: %s\n\nRecipe commit: %s\n\nTested digest: %s\n' "$release_sha" "$GITHUB_SHA" "$digest" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain the tested image and SBOM for the protected job
         if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected
@@ -98,7 +114,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [[ $TAG =~ ^[0-9]+\.[0-9]+\.[0-9]+-wolfi-amd64$ && $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ $TAG =~ ^[0-9]+\.[0-9]+\.[0-9]+-wolfi-amd64(-r[1-9][0-9]*)?$ && $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]
           printf '%s  %s\n' "$SBOM_SHA" "$RUNNER_TEMP/candidate/sbom.spdx.json" | sha256sum -c -
           skopeo inspect --raw "oci:$RUNNER_TEMP/candidate/layout:wolfi" | sha256sum | cut -d' ' -f1 | grep -Fxq "${DIGEST#sha256:}"
           package=orgs/openai/packages/container/codex-security

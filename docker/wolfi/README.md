@@ -69,7 +69,9 @@ does not include a model.
 
 ## Publish the amd64 variant
 
-Changes to this recipe build and run the native smoke test on pull requests.
+Pull requests that change this recipe or its shared inputs run the native build
+and smoke test. The build also verifies that the scanner archive in the image's
+npm inventory matches the signed provenance for its upstream release tag.
 Publishing is a separate manual run. After the workflow is on protected
 `main`, a maintainer can start it with:
 
@@ -79,11 +81,16 @@ gh workflow run publish-wolfi.yml --repo openai/codex-security --ref main
 
 Approve the pending `container` deployment in GitHub Actions after the build
 and smoke test pass. The workflow publishes the tested platform digest, checks
-an anonymous pull, and attaches build provenance and the SPDX inventory. Its
-only release tag is the versioned Wolfi tag, such as
-`ghcr.io/openai/codex-security:0.7.0-wolfi-amd64`. The run summary includes
-the digest for a pinned pull. The normal release tags keep their existing
-platforms and release process.
+an anonymous pull, and attaches build provenance and an SPDX inventory covering
+OS packages, installed npm packages, and bundled native components. The run
+summary includes the digest for a pinned pull.
+
+The first Wolfi image for a scanner version uses a tag such as
+`ghcr.io/openai/codex-security:0.7.0-wolfi-amd64`. To ship a Wolfi OS fix
+without changing the scanner version, update the OS pins and increment
+`image_revision` in [build-inputs.json](build-inputs.json) in the same PR.
+Revision 1 publishes `0.7.0-wolfi-amd64-r1` and leaves the first tag in place.
+Reset the revision to 0 for a new scanner version.
 
 Retries cannot replace a versioned tag with a different digest. To retry a
 failed publication using the same build, rerun the failed job within the
