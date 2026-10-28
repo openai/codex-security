@@ -1,6 +1,6 @@
 ---
 name: publish-findings
-description: Requires explicit opt-in with CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Preview and import supported findings from Snyk Open Source, Semgrep Code, OpenGrep, Endor Labs, GitHub (including repository Dependabot alerts), or Wiz into the local workbench or Codex Security Cloud. Use each provider's documented native JSON, SARIF, plugin bundle, JSONL or CSV format, including gzip-compressed reports.
+description: Requires explicit opt-in with CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Preview and import scanner findings into the local workbench or Codex Security Cloud. Use the selected provider's documented export format.
 ---
 
 # Publish external findings
