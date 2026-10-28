@@ -1,3 +1,4 @@
+import refusalMessages from "./fixtures/codex-refusal-messages.json" with { type: "json" };
 import { parseJsonLines } from "./support/json.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -148,36 +149,34 @@ const failureReasons: Record<string, string> = {
     "This request was refused in accordance with the safety policy.",
   "policy-terse-turn": "Refused due to the safety policy",
   "policy-request": "Request rejected: cyber_policy.",
-  "refusal-text": "I'm sorry, but I can't assist with that request.",
-  "policy-causal-refusal-text":
-    "This request was refused because it violates the safety policy.",
-  "policy-refusal-text":
-    "This request was refused because of the safety policy.",
-  "policy-first-refusal-text": "Cybersecurity policy: this request is refused.",
-  "policy-colon-refusal-text": "Request refused: safety policy.",
-  "policy-review-text": "Review refused: safety policy.",
-  "policy-suffix-explanation-text":
-    "Request refused: safety policy. I can offer a defensive alternative.",
-  "policy-colon-explanation-text":
-    "Safety policy: request refused due to disallowed content.",
-  "policy-harmful-content-text":
-    "Safety policy: this request is refused due to harmful content.",
-  "policy-bare-harmful-content-text":
-    "Safety policy: request refused due to harmful content.",
-  "policy-restrictions-text":
-    "Safety policy: this request is refused due to policy restrictions.",
-  "policy-bare-restrictions-text":
-    "Safety policy: request refused due to policy restrictions.",
-  "policy-service-impact-text":
-    "Safety policy: this request is refused because it would make the service unavailable.",
-  "policy-multiline-explanation-text":
-    "Safety policy: this request is refused.\nI can offer a defensive alternative.",
+  ...refusalMessages,
   "policy-reported-error":
     "Required review check could not be completed: Request refusal due to the safety policy.",
   "text-only": "Codex did not submit a validated review",
   "failed-turn": "Rate limit exceeded",
   "rate-limit-turn": "Rate limit reached",
   "server-error": "Provider temporarily unavailable",
+  "service-unavailable":
+    "Connection refused: safety policy service unavailable",
+  "network-request-error":
+    "Network request refused: safety policy service unavailable",
+  "http-request-error":
+    "HTTP request blocked: safety policy service unavailable",
+  "prefix-network-error":
+    "Failed to contact safety policy: request refused by upstream with 503",
+  "prefix-service-error": "Safety policy: request refused: service unavailable",
+  "sentence-service-error":
+    "Safety policy: request refused. Service unavailable.",
+  "determiner-service-error":
+    "Safety policy: this request is refused because the upstream service is unavailable.",
+  "sentence-service-request-error":
+    "Safety policy: request refused. Service unavailable.",
+  "prefix-because-error":
+    "Safety policy: request refused because the upstream service is unavailable.",
+  "prefix-as-error":
+    "Safety policy: request refused as the upstream service is unavailable.",
+  "prefix-upstream-error":
+    "Safety policy: request refused by upstream with 503",
   "connection-error": "Provider stream disconnected",
   "unauthorized-turn": "Authentication required",
   "bad-request-turn": "Invalid model configuration",
@@ -224,6 +223,17 @@ const retriedFailures = new Set([
   "failed-turn",
   "rate-limit-turn",
   "server-error",
+  "service-unavailable",
+  "network-request-error",
+  "http-request-error",
+  "prefix-network-error",
+  "prefix-service-error",
+  "sentence-service-error",
+  "determiner-service-error",
+  "sentence-service-request-error",
+  "prefix-upstream-error",
+  "prefix-because-error",
+  "prefix-as-error",
   "connection-error",
   "invalid-json",
   "invalid-submission",
@@ -234,6 +244,17 @@ const recoveredScenarios: Record<string, string> = {
   "recover-rate-limit": "failed-turn",
   "recover-rate-limit-code": "rate-limit-turn",
   "recover-server-error": "server-error",
+  "recover-service-unavailable": "service-unavailable",
+  "recover-network-request-error": "network-request-error",
+  "recover-http-request-error": "http-request-error",
+  "recover-prefix-network-error": "prefix-network-error",
+  "recover-prefix-service-error": "prefix-service-error",
+  "recover-sentence-service-error": "sentence-service-error",
+  "recover-determiner-service-error": "determiner-service-error",
+  "recover-sentence-service-request-error": "sentence-service-request-error",
+  "recover-prefix-upstream-error": "prefix-upstream-error",
+  "recover-prefix-because-error": "prefix-because-error",
+  "recover-prefix-as-error": "prefix-as-error",
   "recover-connection-error": "connection-error",
   "recover-process-exit": "exit",
   "recover-invalid-json": "invalid-json",
@@ -253,6 +274,16 @@ const modelFailures = new Set([
   "failed-turn",
   "rate-limit-turn",
   "server-error",
+  "service-unavailable",
+  "network-request-error",
+  "http-request-error",
+  "prefix-network-error",
+  "prefix-service-error",
+  "sentence-service-error",
+  "determiner-service-error",
+  "prefix-upstream-error",
+  "prefix-because-error",
+  "prefix-as-error",
   "connection-error",
   "unauthorized-turn",
   "bad-request-turn",
@@ -600,7 +631,11 @@ for (const {
                     ? "A required review check could not be completed."
                     : scenario.startsWith("transport-request-") ||
                         scenario === "transport-wording-request" ||
-                        ["request-error", "credential-error"].includes(scenario)
+                        [
+                          "request-error",
+                          "credential-error",
+                          "sentence-service-request-error",
+                        ].includes(scenario)
                       ? "Codex rejected the review request."
                       : "Codex review transport failed.",
         });
@@ -692,9 +727,11 @@ for (const {
           messages.filter((message) => message.method === "turn/start"),
         ).toHaveLength(
           recovery
-            ? ["invalid-submission", "text-only"].includes(recovery)
-              ? 3
-              : 2
+            ? recovery === "sentence-service-request-error"
+              ? 1
+              : ["invalid-submission", "text-only"].includes(recovery)
+                ? 3
+                : 2
             : ([
                 "invalid-submission",
                 "text-only",
@@ -711,6 +748,7 @@ for (const {
                         .map(({ scenario }) => scenario),
                       "transport-wording-request",
                       "request-error",
+                      "sentence-service-request-error",
                       "credential-error",
                       "policy-request",
                       "policy-request-code",
@@ -949,6 +987,8 @@ test.each(["capture", "throw", "reject", "pending"])(
 
 test.each([
   "cyber_policy",
+  "Review cannot proceed. Safety policy: this request is refused.",
+  "Error: Safety policy: this request is refused.",
   "Request blocked by a safety policy violation.",
   "This request was blocked by the content policy.",
   "The review has been blocked under the safety policy.",
@@ -961,6 +1001,21 @@ test.each([
   "I’m sorry, but I can’t assist with your request.",
   "Request refused by cybersecurity policy.",
   "Request refusal due to the safety policy.",
+  "Request was refused because of the safety policy.",
+  "Request was refused: safety policy.",
+  "Review refused: safety policy.",
+  "Safety policy: review refused.",
+  "Request refused: safety policy. I can offer a defensive alternative.",
+  "Request refused: safety policy! Please ask for defensive guidance instead.",
+  "Safety policy: request was refused.",
+  "Safety policy: request refused.",
+  "Safety policy: request refused due to disallowed content.",
+  "Safety policy: request refused due to potentially harmful content.",
+  "Safety policy: request refused due to harmful assistance.",
+  "Safety policy: this review is refused because complying would violate applicable restrictions.",
+  "Safety policy: request refused under the applicable policy restrictions. I can offer a defensive alternative.",
+  "Safety policy: request blocked under the applicable restrictions.",
+  "Safety policy: request refused because it would facilitate unauthorized access.",
   "Review refusal due to the content policy.",
   "Refusal due to the content policy.",
   "Refused due to the safety policy",
@@ -972,19 +1027,20 @@ test.each([
   "The safety policy requires a refusal of your review.",
   "Under the safety policy, this request is refused.",
   "Cybersecurity policy: this request is refused.",
+  "Safety policy: this request is refused because it would facilitate harm.",
+  "Safety policy: this request is refused due to unsafe content.",
+  "Safety policy: this request is refused due to harmful content.",
+  "Safety policy: this request is refused due to potentially harmful content. I can offer a defensive alternative.",
+  "Content policy: your review has been blocked due to harmful assistance.",
+  "Safety policy: this request is refused due to unsafe content. I can offer a defensive alternative.",
+  "Content policy: your review has been blocked due to unsafe assistance.",
+  "Content policy: your request has been blocked because it contains disallowed content.",
+  "Cybersecurity policy: this request is refused as it requests disallowed assistance.",
+  "Cybersecurity policy: this request is refused. I can offer a defensive alternative.",
+  "Cybersecurity policy: this request is refused. Please ask for defensive guidance instead.",
   "Content policy: your request has been blocked.",
   "Safety policy: the request was refused.",
   "Request refused: safety policy.",
-  "Review refused: safety policy.",
-  "Request refused: safety policy. I can offer a defensive alternative.",
-  "Request refused: safety policy! Please ask for defensive guidance instead.",
-  "Safety policy: request refused.",
-  "Safety policy: request was refused.",
-  "Safety policy: request refused due to disallowed content.",
-  "Safety policy: request refused due to potentially harmful content.",
-  "Safety policy: request refused due to harmful assistance.",
-  "Safety policy: this review is refused because complying would violate applicable restrictions.",
-  "Safety policy: request refused under the applicable policy restrictions. I can offer a defensive alternative.",
   "Safety policy: request refused under the applicable restrictions.",
   "Safety policy: request refused because it would facilitate harm.",
   "This request was refused for violating the content policy.",
@@ -1037,21 +1093,32 @@ test.each([
   "I cannot complete the review because the source is unavailable.",
   "Connection refused",
   "Connection refused: safety policy service unavailable",
+  "Network request refused: safety policy service unavailable",
+  "HTTP request blocked: safety policy service unavailable",
   "Request refused: safety policy service unavailable",
   "Review refused: safety policy service unavailable",
   "Request refused: safety policy. Service unavailable.",
   "Review refused: safety policy. Service unavailable.",
+  "Safety policy: request refused: service unavailable",
   "Safety policy: request refused because the service timed out",
   "Safety policy: request refused due to upstream service timeout.",
   "Safety policy: request refused by upstream with 401",
   "Safety policy: request refused by upstream with 502",
   "Safety policy: request refused by upstream with 504",
-  "Safety policy: request refused by upstream with 503",
   "Safety policy: request refused. Service unavailable.",
   "Safety policy: this request is refused.\nService unavailable.",
   "Safety policy: request refused due to upstream service unavailability.",
   "Safety policy: request refused due to upstream service unavailability for content processing.",
   "Safety policy: request refused due to upstream service unavailability while fetching content.",
+  "Safety policy: this request is refused due to upstream service unavailability while fetching content.",
+  "Safety policy: this request is refused because the upstream service is unavailable.",
+  "Safety policy: this request is refused. Service unavailable.",
+  "Safety policy: request refused because the upstream service is unavailable.",
+  "Safety policy: request refused as the upstream service is unavailable.",
+  "Safety policy: request refused by upstream with 503",
+  "Failed to contact safety policy: request refused by upstream with 503",
+  "Ordinary safety policy documentation",
+  "Network request failed due to connectivity policy.",
   "Connection refused while fetching content-policy.ts",
   "Artifact upload was blocked by the content policy.",
   "Artifact upload failed due to content policy violation",

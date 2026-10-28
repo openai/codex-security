@@ -1004,12 +1004,12 @@ describe("CLI authentication", () => {
         expect(stderr.text()).toContain("--auth chatgpt");
         expect(stderr.text()).not.toContain("ChatGPT sign-in was not used");
         expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
-        expect(stderr.text()).not.toContain("org-private");
+        expect(stderr.text()).toContain(detail);
       }
     }
   });
 
-  test("replaces permanent stored sign-in refresh details with recovery steps", async () => {
+  test("preserves permanent stored sign-in refresh details with recovery steps", async () => {
     for (const auth of ["chatgpt", "api-key"] as const) {
       for (const detail of [
         "Your access token could not be refreshed.",
@@ -1025,7 +1025,7 @@ describe("CLI authentication", () => {
           environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_SECRET_123" },
           onRun: () => {
             throw new CodexSecurityError(
-              `Codex Exec exited with code 1: Error: ${detail} Please log out and sign in again. PRIVATE_UPSTREAM_DETAIL`,
+              `Codex Exec exited with code 1: Error: ${detail} Please log out and sign in again. SYNTHETIC_UPSTREAM_DETAIL`,
             );
           },
         });
@@ -1048,7 +1048,11 @@ describe("CLI authentication", () => {
           "npx @openai/codex-security logout', then 'npx @openai/codex-security login",
         );
         expect(stderr.text()).not.toContain("provide a valid API key");
-        expect(stderr.text()).not.toContain("PRIVATE_UPSTREAM_DETAIL");
+        expect(stderr.text()).toContain(detail);
+        expect(stderr.text()).toContain("SYNTHETIC_UPSTREAM_DETAIL");
+        expect(JSON.parse(stdout.text()).message).toContain(
+          "SYNTHETIC_UPSTREAM_DETAIL",
+        );
       }
     }
   });
@@ -1121,7 +1125,7 @@ describe("CLI authentication", () => {
       expect(stderr.text()).toContain(source);
       expect(stderr.text()).toContain("--auth chatgpt");
       expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
-      expect(stderr.text()).not.toContain("org-private");
+      expect(stderr.text()).toContain(message);
     }
   });
 

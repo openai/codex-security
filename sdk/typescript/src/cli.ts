@@ -77,6 +77,7 @@ import { parse as parseToml } from "smol-toml";
 import { parse as parseYaml } from "yaml";
 import {
   classifyConnectionFailure,
+  connectionAdviceDetail,
   CodexSecurity,
   environmentValue,
   formatEnvironmentVariableRemovalGuidance,
@@ -9180,8 +9181,8 @@ export function skillCommandFailure(
   authentication: ScanAuthentication | null = null,
 ): string {
   // Numeric statuses need an HTTP/status label; the original diagnostic is retained below.
-  const diagnosticDetail = detail.replace(/\bhttps?:\/\/[^\s"'<>]+/giu, "");
-  const classificationDetail = diagnosticDetail.replace(
+  const adviceDetail = connectionAdviceDetail(detail);
+  const classificationDetail = adviceDetail.replace(
     /(?<![\w./\\-])(?:http(?:\/\d+(?:\.\d+)?)?(?:[ \t]*(?:response(?:[ \t]+|[_-])?code|error(?:[ \t]+code)?|status(?:[ _-]?code)?|code))?|response(?:[ \t]+|[_-])?(?:code|status)|(?:(?:http\.)?response\.)?status(?:[ _-]?code)?)(?:["']?[ \t]*[:=][ \t]*|[ \t]+)["']?(401|403|429)(?![\w/\\-]|\.(?=\S))|\b(?:401|403|429)\b/giu,
     (match, status: string | undefined) => (status ? match : ""),
   );
@@ -9189,22 +9190,20 @@ export function skillCommandFailure(
   let advice: string | undefined;
   if (
     classification === "unauthorized" ||
-    /\b(?:authorizationrequired|invalid[._ -]api[._ -]key|token[._ -]expired)\b/iu.test(
-      detail,
-    )
+    /\bauthorizationrequired\b/iu.test(adviceDetail)
   ) {
     advice = authenticationFailureMessage(authentication);
   } else if (
-    /\bpermissions? to use (?:this |the )?model\b/iu.test(detail) ||
+    /\bpermissions? to use (?:this |the )?model\b/iu.test(adviceDetail) ||
     (!/\b(?:sqlite3?|database|workbench)\b/iu.test(classificationDetail) &&
-      /\bmodel[ \t]+(?:'[^'\r\n]+'|"[^"\r\n]+"|`[^`\r\n]+`)[ \t]+not[ \t]+found\b/iu.test(
-        detail,
+      /(?<![\w./\\-])model[ \t]+(?:'[^'\r\n]+'|"[^"\r\n]+"|`[^`\r\n]+`)[ \t]+not[ \t]+found(?!\.?[\w/\\-])/iu.test(
+        adviceDetail,
       )) ||
-    /\b(?:model[._ -]not[._ -]found|model[._ -]?access[._ -]?denied|access[._ -]?(?:denied[._ -]?to[._ -]?model|to[._ -]?model[._ -]?denied))\b/iu.test(
-      detail,
+    /(?<![\w./\\-])(?:model[._ -]not[._ -]found|model[._ -]?access[._ -]?denied|access[._ -]?(?:denied[._ -]?to[._ -]?model|to[._ -]?model[._ -]?denied))(?!\.?[\w/\\-])/iu.test(
+      adviceDetail,
     ) ||
     (classification === "forbidden" &&
-      /\b403\b|\bforbidden\b|\bmodel[ _-]?(?:not[ _-]?found|access)\b|\baccess.*model\b/iu.test(
+      /\b403\b|\bforbidden\b|\bmodel[ ._-]?(?:not[ ._-]?found|access)\b|\baccess.*model\b/iu.test(
         classificationDetail,
       ))
   ) {
@@ -9212,12 +9211,14 @@ export function skillCommandFailure(
   } else if (
     classification === "rate_limited" ||
     /\b(?:rate[._ -]limit(?:ed|[._ -]exceeded)?|tokens[._ -]per[._ -]minute)\b/iu.test(
-      detail,
+      adviceDetail,
     )
   ) {
     advice = "The request was rate limited. Wait and retry.";
   } else if (
-    /models?.cache|cache.*schema|supports_reasoning_summaries/iu.test(detail)
+    /models?.cache|cache.*schema|supports_reasoning_summaries/iu.test(
+      adviceDetail,
+    )
   ) {
     advice =
       "Codex could not load its model metadata. Update Codex or refresh its model cache.";
@@ -9225,8 +9226,8 @@ export function skillCommandFailure(
     classification === "network_error" ||
     classification === "timeout" ||
     (!/\b(?:sqlite3?|database|workbench)\b/iu.test(classificationDetail) &&
-      /\b(?:ECONNABORTED|timed[._ -]out|network[._ -]?error|(?:(?:network|request)[._ -]?)?timeout(?:[._ -]?error)?)\b/iu.test(
-        detail,
+      /\b(?:ECONNABORTED|network[._ -]?error|(?:(?:network|request)[._ -]?)?timeout(?:[._ -]?error)?)\b/iu.test(
+        adviceDetail,
       ))
   ) {
     advice =
@@ -10642,8 +10643,7 @@ function scanFailureMessage(
     return error instanceof IncompleteScanError
       ? diagnosticValue(error)
       : nativeRefreshRecovery;
-  const detail =
-    error instanceof IncompleteScanError ? `${diagnosticValue(error)}\n` : "";
+  const detail = `${diagnosticValue(error)}\n`;
   if (
     /\byour access token could not be refreshed(?: because your refresh token (?:has expired|was already used|was revoked))?\. Please log out and sign in again\./iu.test(
       message,

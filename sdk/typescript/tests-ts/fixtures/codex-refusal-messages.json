@@ -1,0 +1,22 @@
+{
+  "refusal-text": "I'm sorry, but I can't assist with that request.",
+  "policy-colon-refusal-text": "Request refused: safety policy.",
+  "policy-colon-explanation-text": "Safety policy: request refused due to disallowed content.",
+  "policy-harmful-content-text": "Safety policy: this request is refused due to harmful content.",
+  "policy-bare-harmful-content-text": "Safety policy: request refused due to harmful content.",
+  "policy-restrictions-text": "Safety policy: this request is refused due to policy restrictions.",
+  "policy-bare-restrictions-text": "Safety policy: request refused due to policy restrictions.",
+  "policy-service-impact-text": "Safety policy: this request is refused because it would make the service unavailable.",
+  "policy-multiline-explanation-text": "Safety policy: this request is refused.\nI can offer a defensive alternative.",
+  "policy-prefix-text": "Safety policy: request refused.",
+  "policy-review-text": "Review refused: safety policy.",
+  "policy-intro-text": "Review cannot proceed. Safety policy: this request is refused.",
+  "policy-prefix-due-text": "Safety policy: this request is refused due to disallowed content.",
+  "policy-prefix-unsafe-text": "Safety policy: this request is refused due to unsafe content.",
+  "policy-prefix-under-text": "Safety policy: your request was blocked under the applicable restrictions.",
+  "policy-suffix-text": "Request refused: safety policy.",
+  "policy-suffix-explanation-text": "Request refused: safety policy. I can offer a defensive alternative.",
+  "policy-causal-refusal-text": "This request was refused because it violates the safety policy.",
+  "policy-refusal-text": "This request was refused because of the safety policy.",
+  "policy-first-refusal-text": "Cybersecurity policy: this request is refused because it would facilitate unauthorized access."
+}

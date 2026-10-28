@@ -713,22 +713,26 @@ describe("one-shot scan events", () => {
     const onReconnect = mock();
     async function* events(): AsyncGenerator<ThreadEvent> {
       for (const message of [
-        "Reconnecting... 1/5 (ECONNRESET org-private)",
-        "Reconnecting... 2/5 (Rate limit reached for org-private. Please try again in 1.2s.)",
-        "Reconnecting... 3/5 (Rate limit reached. Please try again in 999999s.)",
-        "Reconnecting... 4/5",
-        "Reconnecting... 5/5 (429 rate limit reached org-private)",
+        "Reconnecting... 1/7 (ECONNRESET org-private)",
+        "Reconnecting... 2/7 (Rate limit reached for org-private. Please try again in 1.2s.)",
+        "Reconnecting... 3/7 (Rate limit reached. Please try again in 999999s.)",
+        "Reconnecting... 4/7",
+        "Reconnecting... 5/7 (429 rate limit reached org-private)",
+        "Reconnecting... 6/7 (error sending request for url (https://example.test/v1?error=invalid.api.key))",
+        "Reconnecting... 7/7 (error sending request for url (https://example.test/v1#model.not.found))",
       ])
         yield { type: "error", message };
       yield* completedEvents();
     }
     await runEvents(scanDir, events(), { onReconnect });
     expect(onReconnect.mock.calls).toEqual([
-      [1, 5, { reason: "network" }],
-      [2, 5, { reason: "rate_limit", retryAfterSeconds: 1.2 }],
-      [3, 5, { reason: "rate_limit" }],
-      [4, 5, undefined],
-      [5, 5, { reason: "rate_limit" }],
+      [1, 7, { reason: "network" }],
+      [2, 7, { reason: "rate_limit", retryAfterSeconds: 1.2 }],
+      [3, 7, { reason: "rate_limit" }],
+      [4, 7, undefined],
+      [5, 7, { reason: "rate_limit" }],
+      [6, 7, { reason: "network" }],
+      [7, 7, { reason: "network" }],
     ]);
   });
 
@@ -736,6 +740,7 @@ describe("one-shot scan events", () => {
     for (const message of [
       "Reconnecting... 1/5 (401 invalid API key org-private)",
       "Reconnecting... 1/5 (403 model access denied org-private)",
+      "Reconnecting... 1/5 (error sending request for url (https://example.test/v1) error=invalid.api.key)",
     ]) {
       const scanDir = join(await temporaryDirectory(), "partial-scan");
       await mkdir(scanDir, { mode: 0o700 });

@@ -437,6 +437,8 @@ describe("CodexSecurity orchestration", () => {
       "sqlite3.OperationalError: unable to open database file\nwith closing(connect()) as connection:",
       "Could not save the Codex Security scan: database connection failed",
       "Codex Security workbench: permission denied",
+      "Error loading configuration: config.toml:401:8: unclosed array, expected `]`",
+      "ENOENT: could not open /synthetic/timed.out/result.json",
     ]) {
       expect(classifyConnectionFailure(message)).toBe("unknown");
     }
@@ -450,6 +452,44 @@ describe("CodexSecurity orchestration", () => {
   });
 
   test.each([
+    ["invalid.api.key", "unauthorized"],
+    ["token.expired", "unauthorized"],
+    ["expired.token", "unauthorized"],
+    ["model.access", "forbidden"],
+    ["model.not.found", "forbidden"],
+  ] as const)(
+    "bounds diagnostic code %s without matching endpoint components",
+    (code, classification) => {
+      for (const detail of [
+        code,
+        `${code}: synthetic provider detail`,
+        `error: '${code}'`,
+        `${code}.`,
+        JSON.stringify({ error: { message: `${code}.` } }),
+        `error=${code}`,
+        `error sending request for url (https://example.test/v1) ${code}`,
+      ])
+        expect(classifyConnectionFailure(new Error(detail))).toBe(
+          classification,
+        );
+      for (const url of [
+        `https://${code}.example/v1`,
+        `https://example.test/${code}/v1`,
+        `https://example.test/${code}`,
+        `https://example.test/v1?error=${code}`,
+        `https://example.test/v1?${code}=synthetic`,
+        `https://example.test/v1#${code}`,
+        `https://example.test/v1#error=${code}`,
+      ])
+        expect(
+          classifyConnectionFailure(
+            new Error(`error sending request for url (${url})`),
+          ),
+        ).toBe("network_error");
+    },
+  );
+
+  test.each([
     ["HTTP 403 ExpiredTokenException", "unauthorized"],
     ["HTTP 403 UnrecognizedClientException", "unauthorized"],
     ["HTTP 400 IncompleteSignature", "unauthorized"],
@@ -458,8 +498,19 @@ describe("CodexSecurity orchestration", () => {
     ["HTTP 401 NotAuthorized", "forbidden"],
     ["OptInRequired", "forbidden"],
     ["ThrottlingException", "rate_limited"],
+    [
+      "Provider configured in config.toml returned 401 Unauthorized",
+      "unauthorized",
+    ],
+    ["Provider configured in config.toml returned 403 Forbidden", "forbidden"],
+    [
+      "Provider configured in config.toml returned 429 Too Many Requests",
+      "rate_limited",
+    ],
+    ["Provider configured in config.toml returned ECONNRESET", "network_error"],
+    ["Provider configured in config.toml timed out", "timeout"],
   ] as const)(
-    "classifies Bedrock error %s as %s",
+    "classifies provider error %s as %s",
     (message, classification) => {
       expect(classifyConnectionFailure(new Error(message))).toBe(
         classification,
