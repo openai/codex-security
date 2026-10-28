@@ -3572,7 +3572,7 @@ export async function main(
         sourceRepositoryUrl: optionValue("--source-repository-url")
           .optional()
           .describe(
-            "Source repository URL when required by the selected reader. Checked against the Cloud destination or configured local Git remotes.",
+            "Required for Semgrep and OpenGrep: source repository URL, checked against the Cloud destination or configured local Git remotes.",
           ),
         sourceKey: optionValue("--source-key").describe(
           "Stable vendor tenant and finding namespace; not a project selection filter.",
