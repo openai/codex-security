@@ -121,6 +121,250 @@ async function scanFixture(
   );
 }
 
+test.each(
+  [
+    null,
+    "registry+https://github.com/rust-lang/crates.io-index",
+    "registry+https://registry.example.test/index",
+  ].flatMap((source) =>
+    [false, true].map((inherited) => [source, inherited] as const),
+  ),
+)(
+  "excludes only unambiguous first-party Cargo matches and retains raw output (source-bearing twin: %p, inherited version: %p)",
+  async (source, inherited) => {
+    const { repository, output } = await setup();
+    await writeFile(
+      join(repository, "Cargo.toml"),
+      '[package]\nname="synthetic-lib"\n' +
+        (inherited
+          ? 'version.workspace=true\n[workspace.package]\nversion="1.2.0"\n'
+          : 'version="1.2.0"\n[workspace.package]\nversion="9.9.9"\n'),
+    );
+    await writeFile(
+      join(repository, "Cargo.lock"),
+      'version=4\n[[package]]\nname="synthetic-lib"\nversion="1.2.0"\n' +
+        (source === null
+          ? ""
+          : `dependencies=["synthetic-lib 1.2.0 (${source})"]\n[[package]]\nname="synthetic-lib"\nversion="1.2.0"\nsource="${source}"\n`),
+    );
+    const vulnerability = advisory("SYNTHETIC-CARGO-1");
+    vulnerability.affected[0]!.package.ecosystem = "crates.io";
+    const raw = rawOutput("Cargo.lock", [vulnerability]);
+    raw.results[0]!.packages[0]!.package.ecosystem = "crates.io";
+    if (source !== null)
+      raw.results[0]!.packages.push(
+        structuredClone(raw.results[0]!.packages[0]!),
+      );
+    const serialized = JSON.stringify(raw);
+    const result = await runOsvScan(
+      { repositoryPath: repository, outputDir: output },
+      {
+        executable: process.execPath,
+        runProcess: async (_exe, argv) => ({
+          stdout: argv[0] === "--version" ? "2.6.0" : serialized,
+          stderr: "",
+          exitCode: argv[0] === "--version" ? 0 : 1,
+        }),
+      },
+    );
+    const alternate = source === "registry+https://registry.example.test/index";
+    expect(result.coverage.firstPartyPackages).toHaveLength(
+      source === null ? 1 : 0,
+    );
+    expect(result.components).toHaveLength(source === null ? 0 : 1);
+    expect(result.matches).toHaveLength(source === null ? 0 : 1);
+    if (source !== null)
+      expect(result.matches[0]!.advisoryIds).toEqual(["SYNTHETIC-CARGO-1"]);
+    expect(result.status).toBe(alternate ? "partial" : "completed");
+    expect(result.coverage.status).toBe(alternate ? "partial" : "complete");
+    expect(result.coverage.unresolvedPackages).toBe(alternate ? 1 : 0);
+    if (alternate)
+      expect(result.coverage.limitations.join("\n")).toContain(source!);
+    expect(result.diagnostics).toEqual([]);
+    expect(await readFile(result.scanner.rawOutputPath, "utf8")).toBe(
+      serialized,
+    );
+  },
+);
+
+test.each(["missing", "external", "mismatched"] as const)(
+  "keeps inherited Cargo version unresolved without a matching same-manifest value: %s",
+  async (kind) => {
+    const { root, repository, output } = await setup();
+    if (kind === "external") {
+      await mkdir(join(root, "workspace"));
+      await writeFile(
+        join(root, "workspace", "Cargo.toml"),
+        '[workspace.package]\nversion="1.2.0"\n',
+      );
+    }
+    await writeFile(
+      join(repository, "Cargo.toml"),
+      '[package]\nname="synthetic-lib"\nversion.workspace=true\n' +
+        (kind === "external"
+          ? 'workspace="../workspace"\n'
+          : kind === "mismatched"
+            ? '[workspace.package]\nversion="1.2.1"\n'
+            : ""),
+    );
+    await writeFile(
+      join(repository, "Cargo.lock"),
+      'version=4\n[[package]]\nname="synthetic-lib"\nversion="1.2.0"\n',
+    );
+    const vulnerability = advisory("SYNTHETIC-CARGO-1");
+    vulnerability.affected[0]!.package.ecosystem = "crates.io";
+    const raw = rawOutput("Cargo.lock", [vulnerability]);
+    raw.results[0]!.packages[0]!.package.ecosystem = "crates.io";
+    const serialized = JSON.stringify(raw);
+    const result = await runOsvScan(
+      { repositoryPath: repository, outputDir: output },
+      {
+        executable: process.execPath,
+        runProcess: async (_exe, argv) => ({
+          stdout: argv[0] === "--version" ? "2.6.0" : serialized,
+          stderr: "",
+          exitCode: argv[0] === "--version" ? 0 : 1,
+        }),
+      },
+    );
+    expect(result.coverage.firstPartyPackages).toEqual([]);
+    expect(result.coverage.unresolvedPackages).toBe(1);
+    expect(result.status).toBe("partial");
+    expect(result.coverage.status).toBe("partial");
+    expect(result.components).toHaveLength(1);
+    expect(result.matches[0]!.advisoryIds).toEqual(["SYNTHETIC-CARGO-1"]);
+    expect(result.coverage.limitations.join("\n")).toContain(
+      "workspace-or-path",
+    );
+    expect(await readFile(result.scanner.rawOutputPath, "utf8")).toBe(
+      serialized,
+    );
+  },
+);
+
+test("first-party Cargo exclusion preserves other sources, names, versions, and ecosystems", async () => {
+  const { repository, output } = await setup();
+  await writeFile(
+    join(repository, "Cargo.toml"),
+    '[package]\nname="synthetic-lib"\nversion="1.2.0"\n',
+  );
+  await writeFile(
+    join(repository, "Cargo.lock"),
+    'version=4\n[[package]]\nname="synthetic-lib"\nversion="1.2.0"\n',
+  );
+  await mkdir(join(repository, "nested"));
+  await writeFile(
+    join(repository, "nested/Cargo.lock"),
+    'version=4\n[[package]]\nname="synthetic-lib"\nversion="1.2.0"\nsource="registry+https://github.com/rust-lang/crates.io-index"\n',
+  );
+  const rawSources: unknown[] = [];
+  const result = await runOsvScan(
+    { repositoryPath: repository, outputDir: output },
+    {
+      executable: process.execPath,
+      runProcess: async (_exe, argv) => {
+        if (argv[0] === "--version")
+          return { stdout: "2.6.0", stderr: "", exitCode: 0 };
+        const raw = rawOutput(argv.at(-1)!, [advisory("SYNTHETIC-CARGO-1")]);
+        const source = raw.results[0]!;
+        source.packages[0]!.package.ecosystem = "crates.io";
+        if (argv.at(-1) === join(repository, "Cargo.lock")) {
+          for (const identity of [
+            { name: "synthetic-other" },
+            { version: "1.2.1" },
+            { ecosystem: "npm" },
+          ]) {
+            const item = structuredClone(source.packages[0]!);
+            Object.assign(item.package, identity);
+            source.packages.push(item);
+          }
+        }
+        rawSources.push(source);
+        return { stdout: JSON.stringify(raw), stderr: "", exitCode: 1 };
+      },
+    },
+  );
+  expect(result.components).toHaveLength(4);
+  expect(
+    result.components.map(({ sourcePath, name, version, ecosystem }) => ({
+      sourcePath,
+      name,
+      version,
+      ecosystem,
+    })),
+  ).toEqual(
+    expect.arrayContaining([
+      {
+        sourcePath: "Cargo.lock",
+        name: "synthetic-other",
+        version: "1.2.0",
+        ecosystem: "crates.io",
+      },
+      {
+        sourcePath: "Cargo.lock",
+        name: "synthetic-lib",
+        version: "1.2.1",
+        ecosystem: "crates.io",
+      },
+      {
+        sourcePath: "Cargo.lock",
+        name: "synthetic-lib",
+        version: "1.2.0",
+        ecosystem: "npm",
+      },
+      {
+        sourcePath: "nested/Cargo.lock",
+        name: "synthetic-lib",
+        version: "1.2.0",
+        ecosystem: "crates.io",
+      },
+    ]),
+  );
+  expect(result.matches.map((match) => match.componentId).sort()).toEqual(
+    result.components.map((component) => component.id).sort(),
+  );
+  expect(result.status).toBe("completed");
+  expect(
+    JSON.parse(await readFile(result.scanner.rawOutputPath, "utf8")),
+  ).toEqual({ results: rawSources });
+});
+
+test("first-party Cargo exclusion retains malformed advisory diagnostics", async () => {
+  const { repository, output } = await setup();
+  await writeFile(
+    join(repository, "Cargo.toml"),
+    '[package]\nname="synthetic-lib"\nversion="1.2.0"\n',
+  );
+  await writeFile(
+    join(repository, "Cargo.lock"),
+    'version=4\n[[package]]\nname="synthetic-lib"\nversion="1.2.0"\n',
+  );
+  const raw = rawOutput("Cargo.lock", [{}]);
+  raw.results[0]!.packages[0]!.package.ecosystem = "crates.io";
+  const serialized = JSON.stringify(raw);
+  const result = await runOsvScan(
+    { repositoryPath: repository, outputDir: output },
+    {
+      executable: process.execPath,
+      runProcess: async (_exe, argv) => ({
+        stdout: argv[0] === "--version" ? "2.6.0" : serialized,
+        stderr: "",
+        exitCode: argv[0] === "--version" ? 0 : 1,
+      }),
+    },
+  );
+  expect(result.components).toEqual([]);
+  expect(result.matches).toEqual([]);
+  expect(result.status).not.toBe("completed");
+  expect(result.diagnostics).toContain(
+    "OSV advisory ID is missing for Cargo.lock:synthetic-lib; inspect retained raw output.",
+  );
+  expect(result.diagnostics).toContain(
+    "Cargo.lock: OSV reported findings but no advisory matches could be normalized.",
+  );
+  expect(await readFile(result.scanner.rawOutputPath, "utf8")).toBe(serialized);
+});
+
 test("matching progress counts finished invocations, including failures, independently of input selection", async () => {
   const { repository, output } = await setup();
   await mkdir(join(repository, "nested"));

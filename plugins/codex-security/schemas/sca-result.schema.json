@@ -203,6 +203,29 @@
         "unresolvedPackages": {
           "type": "integer",
           "minimum": 0
+        },
+        "firstPartyPackages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "version", "sourcePath", "manifestPath"],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              },
+              "sourcePath": {
+                "type": "string"
+              },
+              "manifestPath": {
+                "type": "string"
+              }
+            },
+            "title": "ScaFirstPartyPackage"
+          }
         }
       },
       "title": "ScaCoverage"
@@ -366,11 +389,155 @@
         "costUsd": {
           "type": ["number", "null"],
           "minimum": 0
+        },
+        "costPending": {
+          "type": "boolean",
+          "description": "Model work may have usage not included in the saved cost; cumulative spend is unverified until the attempt is checkpointed."
+        },
+        "cost": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "model",
+            "inputTokens",
+            "cachedInputTokens",
+            "cacheWriteInputTokens",
+            "outputTokens",
+            "estimatedUsd"
+          ],
+          "properties": {
+            "inputTokens": {
+              "type": "number",
+              "minimum": 0
+            },
+            "cachedInputTokens": {
+              "type": "number",
+              "minimum": 0
+            },
+            "cacheWriteInputTokens": {
+              "type": "number",
+              "minimum": 0
+            },
+            "outputTokens": {
+              "type": "number",
+              "minimum": 0
+            },
+            "estimatedUsd": {
+              "type": "number",
+              "minimum": 0
+            },
+            "model": {
+              "type": "string"
+            },
+            "cacheWriteInputTokensReported": {
+              "type": "boolean"
+            },
+            "estimatedUsdRange": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["min", "max", "context"],
+              "properties": {
+                "min": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "max": {
+                  "type": ["number", "null"],
+                  "minimum": 0
+                },
+                "context": {
+                  "const": "unknown"
+                }
+              }
+            }
+          },
+          "title": "ScaCost"
         }
       }
     },
     "outputDir": {
       "type": "string"
+    },
+    "packageContexts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "componentId",
+          "manifestPath",
+          "projectName",
+          "private",
+          "installedPath",
+          "dependencyChain",
+          "dependencyGroups",
+          "limitations"
+        ],
+        "properties": {
+          "componentId": {
+            "type": "string"
+          },
+          "manifestPath": {
+            "type": ["string", "null"]
+          },
+          "projectName": {
+            "type": ["string", "null"]
+          },
+          "private": {
+            "type": ["boolean", "null"]
+          },
+          "installedPath": {
+            "type": ["string", "null"]
+          },
+          "dependencyChain": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "version", "path"],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "title": "ScaDependencyChainEntry"
+            }
+          },
+          "dependencyGroups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "limitations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "title": "ScaPackageContext"
+      }
+    },
+    "assessmentContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceDigest", "configurationDigest"],
+      "properties": {
+        "sourceDigest": {
+          "type": "string"
+        },
+        "configurationDigest": {
+          "type": ["string", "null"]
+        }
+      },
+      "title": "ScaAssessmentContext"
     }
   },
   "title": "ScaResult",

@@ -214,7 +214,7 @@ export async function runMultiscan(
   }
   const output = await ensureOutputDirectory(requestedOutput);
   await requireSecureOutputAncestry(output);
-  const unlock = await acquireLock(output);
+  const unlock = await acquireScanOutputLock(output);
   let pluginWorkspace: string | undefined;
   let pluginRoot: Promise<string> | undefined;
   const resumePluginRoot = (): Promise<string> =>
@@ -766,20 +766,25 @@ async function appendReceipt(path: string, receipt: string): Promise<void> {
   }
 }
 
-async function acquireLock(output: string): Promise<() => Promise<void>> {
+export async function acquireScanOutputLock(
+  output: string,
+  ownerDescription = "multiscan supervisor",
+): Promise<() => Promise<void>> {
   const path = join(output, ".lock");
   const ownerPath = join(path, "owner.json");
   try {
     await mkdir(path, { mode: 0o700 });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    if (!(await lstat(path)).isDirectory())
+      throw new Error("Scan output lock must be a real directory.");
     const existing = await inspectLock(path);
     if (!existing.stale) {
-      throw new Error("A multiscan supervisor is already running.");
+      throw new Error(`A ${ownerDescription} is already running.`);
     }
     const stale = await recoverLock(output, path, existing.owner);
     try {
-      return await acquireLock(output);
+      return await acquireScanOutputLock(output, ownerDescription);
     } finally {
       await rm(stale, { recursive: true, force: true });
     }

@@ -595,10 +595,14 @@ evidence, all advisory matches, static assessments, and a Markdown report outsid
 the repository. Completed runs return `0`, including runs with advisory matches;
 partial or failed runs return `2`. Assessments never remove advisory matches.
 
-Interactive terminals show the current phase, work counts, elapsed time, time
-since the last observed event, and the current input or Codex activity. Use
-`--verbose` for timestamped milestones in redirected logs, and `--show-cost`
-for estimated model cost. Progress goes to stderr; JSON stays on stdout.
+The terminal lists matched packages, advisory severity, and candidate fixes
+before assessment. Progress goes to stderr. Use `--verbose` to record milestones
+in redirected logs or `--show-cost` to display the estimated model cost.
+
+To continue an interrupted assessment, run the same command with `--output-dir`
+set to the saved directory. With the same source and assessment settings, the
+scanner reuses the saved advisory matches and completed assessments. `--max-cost` includes the
+short-context estimate from earlier attempts. Use a new directory to start over.
 
 The SDK provides `scanDependencies()`. See the
 [dependency assessment guide](docs/cli.md#dependency-assessment-sca-mvp) for

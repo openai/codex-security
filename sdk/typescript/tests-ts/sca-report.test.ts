@@ -7,7 +7,12 @@ import {
   normalizeOsvOutput,
   runOsvScan,
 } from "../src/sca-osv.js";
-import { dependencyScanResult, saveDependencyScan } from "../src/sca.js";
+import {
+  dependencyScanResult,
+  readDependencyScan,
+  saveDependencyScan,
+} from "../src/sca.js";
+import { dependencyInventorySummary } from "../src/sca-summary.js";
 import { dependencyTriageContract } from "../src/sca-triage.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
@@ -483,13 +488,77 @@ describe("SCA report", () => {
       expect(report).toContain(`1 ${outcome}`);
   });
 
+  test.each([
+    {
+      label: "local dependency origins",
+      path: "package-lock.json",
+      content: JSON.stringify({
+        lockfileVersion: 3,
+        packages: {
+          "node_modules/synthetic-package": {
+            name: "[synthetic](https://example.test/package)",
+            version: "1.0.0",
+            resolved:
+              'file:synthetic\r\n```\r\n\r\n# Fabricated summary\r\n\r\n<img src="https://example.test/image.png">',
+          },
+        },
+      }),
+      value:
+        '[synthetic](https://example.test/package)@file:synthetic\r\n```\r\n\r\n# Fabricated summary\r\n\r\n<img src="https://example.test/image.png">',
+    },
+    {
+      label: "unsupported lockfile versions",
+      path: "package-lock.json",
+      content: JSON.stringify({
+        lockfileVersion:
+          'synthetic\n```\n\n# Fabricated summary\n\n[synthetic](https://example.test/package) <img src="https://example.test/image.png">',
+      }),
+      value:
+        'synthetic\n```\n\n# Fabricated summary\n\n[synthetic](https://example.test/package) <img src="https://example.test/image.png">',
+    },
+    {
+      label: "paths repeated in coverage and diagnostics",
+      path: "[synthetic](target)/requirements.txt",
+      content: "synthetic-package==1.0.0\n",
+      value:
+        "[synthetic](target)/requirements.txt supplies declared Python pins",
+    },
+  ])(
+    "renders discovered $label literally",
+    async ({ path, content, value }) => {
+      const repository = await temporaryDirectory("sca-report-discovery-");
+      const inputPath = join(repository, path);
+      await mkdir(dirname(inputPath), { recursive: true });
+      await writeFile(inputPath, content);
+      const { diagnostics, localReferences, ...coverage } =
+        await discoverScaInputs(repository);
+      const result = fixture();
+      Object.assign(result.coverage, coverage);
+      result.coverage.unresolvedPackages = localReferences.length;
+      result.diagnostics = diagnostics;
+      const evidence = structuredClone(result);
+      const report = renderScaReport(result);
+      expect(report).toContain(
+        /[\r\n]/u.test(value) ? JSON.stringify(value).slice(1, -1) : value,
+      );
+      const rendered = Bun.markdown.html(report);
+      expect(rendered).not.toMatch(/<(?:a|img)\b/u);
+      expect(rendered).not.toMatch(/<h[1-6]\b[^>]*>Fabricated summary/u);
+      expect(rendered).toContain("[synthetic](");
+      expect(rendered).toContain("<h2>Observed components</h2>");
+      expect(rendered).toContain("<h2>Retained evidence</h2>");
+      expect(result).toEqual(evidence);
+      expect(await readFile(inputPath, "utf8")).toBe(content);
+    },
+  );
+
   test.each([null, 0, 0.12])(
     "reports model cost %p without assuming zero",
     (cost) => {
       const result = fixture();
       result.model.costUsd = cost;
       expect(renderScaReport(result)).toContain(
-        `Model cost (USD): **${cost === null ? "unavailable" : cost}**`,
+        cost === null ? "unavailable" : `$${cost.toFixed(2)}`,
       );
     },
   );
@@ -499,6 +568,54 @@ describe("SCA report", () => {
     result.components[0]!.name = "synthetic`package";
     expect(renderScaReport(result)).toContain("`` synthetic`package ``");
   });
+
+  test.each(["\n", "\r\n", "\r"])(
+    "renders affected-package values as literal text with %p line breaks",
+    (newline) => {
+      const result = fixture();
+      const value = `synthetic\`one\`\`two${newline}\`\`\`${newline}${newline}# Fabricated summary${newline}${newline}[synthetic](https://example.test/package) <img src="https://example.test/image.png">`;
+      Object.assign(result.components[0]!, {
+        name: value,
+        version: value,
+        sourcePath: value,
+      });
+      Object.assign(result.matches[0]!, {
+        advisoryIds: [value],
+        severity: value,
+        fixedVersions: [value],
+      });
+      result.packageContexts = [
+        {
+          componentId: "component-1",
+          manifestPath: "package.json",
+          projectName: value,
+          private: true,
+          installedPath: null,
+          dependencyGroups: [],
+          dependencyChain: [{ name: value, version: value, path: "synthetic" }],
+          limitations: [],
+        },
+      ];
+      const evidence = structuredClone(result);
+      expect(dependencyInventorySummary(result)).toEqual([
+        "Matching: 1 dependency files checked; 1 advisory matches across 1 package occurrences.",
+        `${value}@${value} — ${value} (project: ${value}, private)`,
+        `  Local chain: ${value}@${value}`,
+        `  ${value} · severity ${value} · candidate fixes: ${value}`,
+      ]);
+      const summary = renderScaReport(result)
+        .split("## Affected packages\n\n")[1]!
+        .split("\n\n## ")[0]!;
+      expect(summary).toContain(JSON.stringify(value));
+      const rendered = Bun.markdown.html(summary);
+      expect(rendered).not.toMatch(/<(?:a|img|h[1-6])\b/u);
+      expect(rendered).toContain("<code>");
+      expect(rendered).toContain("synthetic`one``two");
+      expect(rendered).toContain("[synthetic](https://example.test/package)");
+      expect(rendered).toContain("&lt;img");
+      expect(result).toEqual(evidence);
+    },
+  );
 
   test("keeps multiline coverage diagnostics literal across platforms", () => {
     const result = fixture();
@@ -536,6 +653,10 @@ describe("SCA report", () => {
     async ({ field, message }) => {
       const result = fixture();
       result.outputDir = await temporaryDirectory("sca-assessment-report-");
+      result.status = "partial";
+      result.coverage.status = "partial";
+      result.coverage.limitations = ["Synthetic matching limitation."];
+      result.diagnostics = ["Synthetic scanner diagnostic."];
       addMatch(result, "later-match", "2.0.0", "SYNTHETIC-LATER-ADVISORY");
       const finding = {
         ...triage("needs_review"),
@@ -585,6 +706,10 @@ describe("SCA report", () => {
         "utf8",
       );
       const html = Bun.markdown.html(report);
+      expect(html).toContain("<h2>Coverage</h2>");
+      expect(html).toContain("Synthetic matching limitation.");
+      expect(html).toContain("<h2>Diagnostics</h2>");
+      expect(html).toContain("Synthetic scanner diagnostic.");
       expect(html).not.toContain("<h1>Synthetic assessment heading</h1>");
       expect(html).not.toContain("<!--");
       expect(html).not.toContain("<span hidden>");
@@ -1139,6 +1264,66 @@ describe("SCA update handoff", () => {
     expect(handoff.validationInstructions).toContain(
       "No project checks were supplied",
     );
+  });
+
+  test("retains observed introduction chains and their limitations in saved reports and handoffs", async () => {
+    const result = fixture();
+    result.outputDir = await temporaryDirectory("sca-context-limitations-");
+    const manyBackticks = "`x".repeat(1_000_000);
+    addMatch(result, "missing-chain", "2.0.0");
+    result.packageContexts = [
+      {
+        componentId: "component-1",
+        manifestPath: "packages/app/package.json",
+        projectName: "synthetic-app",
+        private: true,
+        installedPath: "node_modules/synthetic-package",
+        dependencyChain: [
+          { name: "synthetic-app", version: "1.0.0", path: "packages/app" },
+          {
+            name: "synthetic-introducer",
+            version: "3.0.0",
+            path: "node_modules/synthetic-introducer",
+          },
+          {
+            name: "synthetic-package",
+            version: "1.0.0",
+            path: "node_modules/synthetic-package",
+          },
+        ],
+        dependencyGroups: ["dev"],
+        limitations: [
+          "<!-- synthetic installed-source limitation",
+          manyBackticks,
+        ],
+      },
+    ];
+    await saveDependencyScan(result);
+    const saved = await readDependencyScan(result.outputDir);
+    expect(saved.packageContexts?.[0]?.limitations).toEqual(
+      result.packageContexts[0]!.limitations,
+    );
+    const handoff = createScaUpdateHandoff(saved, ["match-1", "missing-chain"]);
+    expect(handoff.findingText).toContain("synthetic-introducer");
+    expect(handoff.findingText).toContain("packages/app/package.json");
+    expect(handoff.findingText).toContain("not a complete graph");
+    for (const [text, heading] of [
+      [await readFile(join(result.outputDir, "report.md"), "utf8"), "Coverage"],
+      [handoff.findingText, "Decisions to resolve"],
+    ] as const) {
+      expect(text.includes("`` " + manyBackticks + " ``")).toBe(true);
+      const html = Bun.markdown.html(text);
+      expect(html).toContain(
+        "<code>&lt;!-- synthetic installed-source limitation</code>",
+      );
+      expect(html).toContain(`<h2>${heading}</h2>`);
+    }
+    const missing = handoff.unresolvedDecisions.filter((decision) =>
+      decision.includes("dependency chain"),
+    );
+    expect(missing).toHaveLength(1);
+    expect(missing[0]).toContain("missing-chain");
+    expect(missing[0]).not.toContain("match-1");
   });
 
   test("rejects missing selections and unknown match IDs", () => {

@@ -21,8 +21,15 @@ export interface ScaResult {
     skillDigest: string | null;
     threadId: string | null;
     costUsd: number | null;
+    /**
+     * Model work may have usage not included in the saved cost; cumulative spend is unverified until the attempt is checkpointed.
+     */
+    costPending?: boolean;
+    cost?: ScaCost;
   };
   outputDir: string;
+  packageContexts?: ScaPackageContext[];
+  assessmentContext?: ScaAssessmentContext;
 }
 export interface ScaScanner {
   name: string;
@@ -51,6 +58,7 @@ export interface ScaCoverage {
   configFiles: ScaFile[];
   limitations: string[];
   unresolvedPackages: number;
+  firstPartyPackages?: ScaFirstPartyPackage[];
 }
 export interface ScaInput {
   path: string;
@@ -75,6 +83,12 @@ export interface ScaInput {
 export interface ScaFile {
   path: string;
   sha256: string;
+}
+export interface ScaFirstPartyPackage {
+  name: string;
+  version: string;
+  sourcePath: string;
+  manifestPath: string;
 }
 export interface ScaComponent {
   id: string;
@@ -161,4 +175,38 @@ export interface TriageFinding {
   proof_gaps: string[];
   recommended_next_step: string;
   fix_finding_handoff: string | null;
+}
+export interface ScaCost {
+  inputTokens: number;
+  cachedInputTokens: number;
+  cacheWriteInputTokens: number;
+  outputTokens: number;
+  estimatedUsd: number;
+  model: string;
+  cacheWriteInputTokensReported?: boolean;
+  estimatedUsdRange?: {
+    min: number;
+    max: number | null;
+    context: "unknown";
+  };
+  [k: string]: unknown;
+}
+export interface ScaPackageContext {
+  componentId: string;
+  manifestPath: string | null;
+  projectName: string | null;
+  private: boolean | null;
+  installedPath: string | null;
+  dependencyChain: ScaDependencyChainEntry[];
+  dependencyGroups: string[];
+  limitations: string[];
+}
+export interface ScaDependencyChainEntry {
+  name: string;
+  version: string;
+  path: string;
+}
+export interface ScaAssessmentContext {
+  sourceDigest: string;
+  configurationDigest: string | null;
 }
