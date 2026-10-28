@@ -1,3 +1,5 @@
+import { z } from "zod";
+import { GHSA_ID, githubRepositoryParts } from "./github-identifiers.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import {
   type ExternalImportTarget,
@@ -27,11 +29,10 @@ export function isGitHubDependabotAlert(
 
 function webIdentity(url: string) {
   const match =
-    /^(https?):\/\/([^/?#@\\\s]+)\/([a-z0-9_.-]+)\/([a-z0-9_.-]+)\/security\/dependabot\/([1-9]\d*)$/iu.exec(
+    /^(https?):\/\/([^/?#@\\\s]+)\/([^/?#]+\/[^/?#]+)\/security\/dependabot\/([1-9]\d*)$/iu.exec(
       url,
     );
-  if (!match || match.slice(3, 5).some((part) => /^\.{1,2}$/u.test(part)))
-    return null;
+  if (!match || !githubRepositoryParts(match[3]!)) return null;
   const parsed = URL.parse(url);
   if (
     !parsed ||
@@ -39,9 +40,9 @@ function webIdentity(url: string) {
   )
     return null;
   const host = match[2]!.toLowerCase();
-  const repository = `${match[3]}/${match[4]}`.toLowerCase();
+  const repository = match[3]!.toLowerCase();
   const origin = `${parsed.protocol}//${host}`;
-  const number = match[5]!;
+  const number = match[4]!;
   const apiBase = isGitHubCloudHost(parsed.hostname)
     ? `https://api.${host}`
     : `${origin}/api/v3`;
@@ -188,22 +189,27 @@ function selectedAlerts(input: unknown) {
   return rows;
 }
 
+// Parse only the matched vulnerability projection. Keep the complete upstream alert as evidence.
+const nonblank = z.string().regex(/\S/u);
+const matchedVulnerability = z.object({
+  package: z.object({ name: nonblank, ecosystem: nonblank }),
+  vulnerable_version_range: nonblank,
+  first_patched_version: z.object({ identifier: nonblank }).nullable(),
+  severity: z.enum(["critical", "high", "medium", "low"]),
+});
+
 function evidence(alert: Record<string, unknown>, url: string) {
   const dependency = record(alert["dependency"], "Dependabot dependency");
   const advisory = record(
     alert["security_advisory"],
     "Dependabot security_advisory",
   );
-  const vulnerability = record(
-    alert["security_vulnerability"],
-    "Dependabot security_vulnerability",
-  );
-  const pkg = record(vulnerability["package"], "Dependabot matched package");
-  const name = requiredText(pkg["name"], "Dependabot package name");
-  const ecosystem = requiredText(
-    pkg["ecosystem"],
-    "Dependabot package ecosystem",
-  );
+  const {
+    package: { name, ecosystem },
+    vulnerable_version_range: range,
+    first_patched_version: patch,
+    severity,
+  } = matchedVulnerability.parse(alert["security_vulnerability"]);
   if ("package" in dependency) {
     const observed = record(
       dependency["package"],
@@ -228,12 +234,8 @@ function evidence(alert: Record<string, unknown>, url: string) {
       );
   }
   const ghsa = requiredText(advisory["ghsa_id"], "Dependabot GHSA ID");
-  if (!/^GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/iu.test(ghsa))
+  if (!GHSA_ID.test(ghsa))
     throw new Error("Dependabot security_advisory must identify a GHSA.");
-  const range = requiredText(
-    vulnerability["vulnerable_version_range"],
-    "Dependabot matched vulnerable version range",
-  );
   const affected = advisory["vulnerabilities"];
   if (
     !Array.isArray(affected) ||
@@ -262,21 +264,6 @@ function evidence(alert: Record<string, unknown>, url: string) {
     1000;
   if (!Number.isFinite(updated) || updated < 0)
     throw new Error("Dependabot updated_at must be a valid timestamp.");
-  const patch = vulnerability["first_patched_version"];
-  const fixedVersions: string[] = [];
-  if (patch !== null)
-    fixedVersions.push(
-      requiredText(
-        record(patch, "Dependabot first_patched_version")["identifier"],
-        "Dependabot patched version",
-      ),
-    );
-  const severity = requiredText(
-    vulnerability["severity"],
-    "Dependabot matched severity",
-  );
-  if (!["critical", "high", "medium", "low"].includes(severity))
-    throw new Error("Invalid Dependabot matched vulnerability severity.");
   const advisoryIds = new Set([ghsa]);
   const cve = text(advisory["cve_id"]);
   if (cve) advisoryIds.add(cve);
@@ -307,7 +294,7 @@ function evidence(alert: Record<string, unknown>, url: string) {
         ecosystem,
         manifest_path: path,
         vulnerable_version_range: range,
-        fixed_versions: fixedVersions,
+        fixed_versions: patch ? [patch.identifier] : [],
       },
     ],
     locations: path ? [{ path }] : [],

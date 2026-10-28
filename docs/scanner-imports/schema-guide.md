@@ -1,7 +1,7 @@
 # How saved scanner reports map to imported evidence
 
-This guide covers the Wiz, Endor Labs, Snyk Open Source, Semgrep Code and GitHub
-**file readers** used by `publish findings`. Acquisition produces the artifact:
+The **reader** selected by `publish findings --provider` interprets a saved
+scanner export. Acquisition produces the artifact:
 for example, `snyk test` scans a workspace, while `codex-security import github`
 retrieves selected code-scanning alerts. File ingestion reads the saved report.
 Use the mappings to decide what one record represents, whether a later export
@@ -85,8 +85,9 @@ before preparing a fresh submission.
   global disclosure has no source repository. Both can carry CVE aliases,
   affected ranges and patched versions. Neither proves installation or
   applicability. Both readers require saved collector output.
-- **GitHub Dependabot.** Native repository alerts identify the matched package,
-  manifest and vulnerable range. The embedded advisory supplies advisory IDs.
+- **GitHub Dependabot.** Use `gh api --paginate` to save native repository
+  alert pages as JSONL for the `github` reader. Each alert identifies the
+  matched package, manifest and vulnerable range. The embedded advisory supplies advisory IDs.
   Each alert number has its own history, including when several alerts cite the
   same GHSA. GitHub secret-scanning alerts remain outside the file reader.
 

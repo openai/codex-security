@@ -493,7 +493,7 @@ export async function prepareNormalizedLocalImport(
   requireIdentity(options.sourceKey, "Source key");
   const current = structuredClone(input);
   validateExternalReport(current.report);
-  const dependabotSources = new Set<string>();
+  let dependabotSource: string | undefined;
   const identities = new Set<string>();
   for (const finding of current.findings) {
     requireIdentity(finding.source_finding_id, "Source finding id");
@@ -515,12 +515,12 @@ export async function prepareNormalizedLocalImport(
       throw new CodexSecurityError(
         "The normalized repository does not match the original Dependabot alert.",
       );
-    dependabotSources.add(native);
+    if (dependabotSource && dependabotSource !== native)
+      throw new CodexSecurityError(
+        "Select Dependabot alerts from only one GitHub host and repository.",
+      );
+    dependabotSource = native;
   }
-  if (dependabotSources.size > 1)
-    throw new CodexSecurityError(
-      "Select Dependabot alerts from only one GitHub host and repository.",
-    );
   const { repository, options: workbenchOptions } = await localContext(
     options.repository,
     dependencies,
@@ -535,8 +535,11 @@ export async function prepareNormalizedLocalImport(
     if (sources.get(source.url)?.platform !== "github")
       sources.set(source.url, source);
   }
-  for (const url of dependabotSources)
-    sources.set(url, { url, platform: "github" });
+  if (dependabotSource)
+    sources.set(dependabotSource, {
+      url: dependabotSource,
+      platform: "github",
+    });
   await requireMatchingRepository(
     repository,
     options.provider,

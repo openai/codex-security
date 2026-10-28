@@ -861,9 +861,6 @@ async function preparePublicationInput(
   };
   const preview: ExternalPublicationPreview = {
     ...parsed,
-    ...(parsed.report === undefined
-      ? {}
-      : { report: structuredClone(parsed.report) }),
     findings: submissionFindings(requests),
     cloudApiUrl,
     cloudUrl: cloudFindingsUrl(environment, destination.id),
@@ -874,7 +871,7 @@ async function preparePublicationInput(
     requests,
   };
   return {
-    preview,
+    preview: structuredClone(preview),
     async publish() {
       progress({ phase: "waiting", completed: 0 });
       const result = (

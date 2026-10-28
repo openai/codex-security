@@ -1,4 +1,8 @@
 import type { Octokit } from "@octokit/core";
+import {
+  CANONICAL_GHSA_ID,
+  githubRepositoryParts,
+} from "./github-identifiers.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import { createAuthenticatedGitHub } from "./github.js";
@@ -55,11 +59,10 @@ export async function importGitHubAdvisories(
   const environment = dependencies.environment ?? process.env;
   requireExternalImports(environment);
   const repository = options.repository.trim();
-  const parts = /^([a-z0-9_.-]+)\/([a-z0-9_.-]+)$/iu.exec(repository);
-  if (!parts || parts.slice(1).some((part) => /^\.{1,2}$/u.test(part)))
+  const parts = githubRepositoryParts(repository);
+  if (!parts)
     throw new CodexSecurityError("GitHub repository must be OWNER/REPO.");
-  const owner = parts[1]!;
-  const repo = parts[2]!;
+  const [owner, repo] = parts;
   const ids = [
     ...new Set(
       (options.advisoryIds ?? []).map((id) =>
@@ -70,7 +73,7 @@ export async function importGitHubAdvisories(
       ),
     ),
   ];
-  if (ids.some((id) => !/^GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/u.test(id)))
+  if (ids.some((id) => !CANONICAL_GHSA_ID.test(id)))
     throw new CodexSecurityError(
       "GitHub advisory IDs must use GHSA-xxxx-xxxx-xxxx form.",
     );

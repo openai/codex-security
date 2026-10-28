@@ -1,5 +1,6 @@
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { hash } from "node:crypto";
+import { GHSA_ID, githubRepositoryParts } from "./github-identifiers.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import { validateExternalEvidence } from "./external-import-contract.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
@@ -19,10 +20,9 @@ function object(value: unknown): Record<string, unknown> | undefined {
 
 function repositoryName(value: unknown): string {
   const repository = text(value);
-  const parts = /^([a-z0-9_.-]+)\/([a-z0-9_.-]+)$/iu.exec(repository ?? "");
-  if (!parts || parts.slice(1).some((part) => /^\.{1,2}$/u.test(part)))
+  if (!repository || !githubRepositoryParts(repository))
     throw new Error("GitHub repository must be OWNER/REPO.");
-  return repository!;
+  return repository;
 }
 
 function sourceUrl(value: string): {
@@ -164,7 +164,7 @@ function advisoryFinding(
   if (
     !advisory ||
     !id ||
-    !/^GHSA-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/iu.test(id) ||
+    !GHSA_ID.test(id) ||
     text(advisory["ghsa_id"])?.toUpperCase() !== id.toUpperCase()
   )
     throw new Error(

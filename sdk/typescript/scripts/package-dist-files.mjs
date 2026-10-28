@@ -73,6 +73,7 @@ const distModules = [
   "github-advisories",
   "github-dependabot-findings",
   "github-findings",
+  "github-identifiers",
   "host-records-protocol",
   "index",
   "import-scan",

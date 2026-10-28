@@ -270,7 +270,21 @@ test("Dependabot publishes on the existing GitHub provider and rejects foreign r
   );
   expect(first.preview.requests[0]!.source.provider).toBe("github");
   expect(correct.posts).toHaveLength(0);
-  expect((await first.publish()).counts.created).toBe(1);
+  first.preview.requests[0]!.items[0]!.evidence.url =
+    "https://github.com/example/other/security/dependabot/1";
+  correct.state.loseResponse = true;
+  await expect(first.publish()).rejects.toThrow();
+  expect(JSON.parse(correct.posts[0]!).items[0].evidence.url).toBe(
+    input.html_url,
+  );
+  const retry = await prepareExternalPublication(
+    correct.file,
+    selection,
+    correct.deps,
+  );
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).counts.created).toBe(1);
+  expect(correct.posts[1]).toBe(correct.posts[0]);
   const replay = await prepareExternalPublication(
     correct.file,
     selection,
