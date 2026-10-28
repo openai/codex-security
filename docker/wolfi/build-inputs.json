@@ -3,6 +3,7 @@
   "wolfi_key_sha256": "f0031424cf46f7db780ce63a45f0fd6aa6f85f601e6bb3b7a91fe3d4d5b7d2cc",
   "repository": "https://packages.wolfi.dev/os",
   "local_package": "codex-security=0.7.0-r1",
+  "image_revision": 0,
   "snapshots": {
     "builder": {
       "lock_identity_sha256": "77cd79a5f9b66efc5d0f03dee78f2e24b66dc1a5acfc2454ba33e124aeb758a0"
