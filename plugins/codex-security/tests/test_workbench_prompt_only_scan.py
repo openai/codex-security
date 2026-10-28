@@ -126,7 +126,7 @@ def test_headless_standard_scan_starts_without_setup_opt_out(tmp_path: Path) -> 
 
 def test_headless_standard_scan_joins_only_the_owning_thread(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
-    target = tmp_path / "target"
+    target = tmp_path / "target-"
     target.mkdir()
     (target / "fixture.py").write_text("print('fixture')\n")
     scan_root = tmp_path / "scans"
@@ -138,6 +138,7 @@ def test_headless_standard_scan_joins_only_the_owning_thread(tmp_path: Path) -> 
     )
 
     assert first["startDisposition"] == "created"
+    assert Path(first["scan"]["scanDir"]).parent == scan_root / target.name
     assert joined["startDisposition"] == "joined"
     assert joined["scan"]["scanId"] == first["scan"]["scanId"]
     assert joined["scan"]["handoffClaimToken"] == first["scan"]["handoffClaimToken"]
