@@ -2,19 +2,17 @@ name: Publish Wolfi scanner
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - .github/workflows/publish-wolfi.yml
-      - docker/wolfi/**
-      - LICENSE
-      - docker/entrypoint.sh
-      - docker/git-credential.sh
-      - docker/codex-security.apparmor
-      - docker/codex-security-seccomp.json
-      - github-action/scripts/setup-ubuntu-sandbox.sh
-      - sdk/typescript/scripts/is-main.mjs
-      - sdk/typescript/scripts/package-provenance.mjs
-      - sdk/typescript/scripts/release-automation.mjs
+    inputs:
+      release-version:
+        description: Published scanner version receiving a Wolfi OS update.
+        type: string
+        required: true
+  workflow_call:
+    inputs:
+      artifact: {type: string, required: true}
+      digest: {type: string, required: true}
+      tag: {type: string, required: true}
+      sbom-sha: {type: string, required: true}
 
 permissions: {}
 
@@ -22,76 +20,43 @@ env:
   IMAGE: ghcr.io/openai/codex-security
 
 jobs:
-  build:
-    name: Build and smoke-test Linux amd64
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
+  os-update:
+    if: >-
+      inputs.release-version != '' && github.event_name == 'workflow_dispatch' &&
+      github.repository == 'openai/codex-security' && github.ref == 'refs/heads/main' && github.ref_protected
+    uses: ./.github/workflows/wolfi-build.yml
     permissions:
       contents: read
-    outputs:
-      artifact: ${{ steps.upload.outputs.artifact-id }}
-      digest: ${{ steps.prepare.outputs.digest }}
-      tag: ${{ steps.prepare.outputs.tag }}
-      sbom-sha: ${{ steps.prepare.outputs.sbom-sha }}
+      attestations: read
+    with:
+      release-version: ${{ inputs.release-version }}
+      os-update: true
+
+  authorize:
+    needs: os-update
+    if: needs.os-update.outputs.existing != 'true'
+    runs-on: ubuntu-24.04
+    environment: container
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "24.15.0"
-          package-manager-cache: false
-      - name: Build and test on native Linux
-        run: bash docker/wolfi/ci-build.sh "$RUNNER_TEMP/wolfi"
-      - name: Prepare the tested digest for publication
-        id: prepare
-        shell: bash
-        run: |
-          set -euo pipefail
-          out=$RUNNER_TEMP/wolfi
-          candidate=$RUNNER_TEMP/candidate
-          mkdir "$candidate"
-          digest=$(python3 docker/wolfi/to-oci.py "$out/image.tar" "$out/verification.json" "$candidate/layout")
-          skopeo inspect --raw "oci:$candidate/layout:wolfi" | sha256sum | cut -d' ' -f1 | grep -Fxq "${digest#sha256:}"
-          version=$(jq -er '.installed_npm[] | select(.path == "node_modules/@openai/codex-security") | .version' "$out/public-components.json")
-          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          release_sha=$(git rev-parse --verify "refs/tags/npm-v$version^{commit}")
-          bash docker/wolfi/verify-npm-release.sh "$out/public-components.json" "$version" "$release_sha"
-          recorded_source=$(docker run --rm --network=none --pull=never --entrypoint /usr/bin/node \
-            codex-security:wolfi-amd64 -p 'require("/usr/share/licenses/codex-security/SOURCES.json").scanner_source')
-          [[ $recorded_source == "https://github.com/openai/codex-security/tree/$release_sha" ]]
-          python3 docker/wolfi/release-sbom.py "$out/sbom/sbom-x86_64.spdx.json" "$out/public-components.json" "$candidate/sbom.spdx.json"
-          pdfjs=$(jq -er '.installed_npm[] | select(.path == "node_modules/pdfjs-dist") | .version' "$out/public-components.json")
-          jq -e --arg purl "pkg:npm/pdfjs-dist@$pdfjs" 'any(.packages[].externalRefs[]?; .referenceLocator == $purl)' \
-            "$candidate/sbom.spdx.json" > /dev/null
-          sbom_sha=$(sha256sum "$candidate/sbom.spdx.json" | cut -d' ' -f1)
-          revision=$(jq -er '.image_revision | numbers | select(. >= 0 and . == floor)' "$out/build-inputs.json")
-          tag=$version-wolfi-amd64
-          if [[ $revision != 0 ]]; then tag+=-r$revision; fi
-          printf 'digest=%s\ntag=%s\nsbom-sha=%s\n' "$digest" "$tag" "$sbom_sha" >> "$GITHUB_OUTPUT"
-          printf 'Scanner source: %s\n\nRecipe commit: %s\n\nTested digest: %s\n' "$release_sha" "$GITHUB_SHA" "$digest" >> "$GITHUB_STEP_SUMMARY"
-      - name: Retain the tested image and SBOM for the protected job
-        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected
-        id: upload
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: wolfi-amd64-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/candidate
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 7
+      - name: Record approved Wolfi OS update
+        env:
+          TAG: ${{ needs.os-update.outputs.tag }}
+          DIGEST: ${{ needs.os-update.outputs.digest }}
+        run: printf 'Approved %s at %s\n' "$TAG" "$DIGEST"
 
   publish:
-    name: Approve and publish the Wolfi variant
-    needs: build
-    if: github.event_name == 'workflow_dispatch' && github.repository == 'openai/codex-security' && github.ref == 'refs/heads/main' && github.ref_protected
+    name: Publish verified Wolfi variant
+    needs: [os-update, authorize]
+    if: >-
+      always() && !cancelled() && github.repository == 'openai/codex-security' &&
+      github.ref == 'refs/heads/main' && github.ref_protected &&
+      (needs.authorize.result == 'success' ||
+       (inputs.artifact != '' && github.workflow_ref == 'openai/codex-security/.github/workflows/node-github-release.yml@refs/heads/main'))
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    environment: container
     concurrency:
       group: publish-wolfi-amd64
-      cancel-in-progress: false
+      queue: max
     permissions:
       contents: read
       packages: write
@@ -99,13 +64,13 @@ jobs:
       id-token: write
       artifact-metadata: write
     env:
-      DIGEST: ${{ needs.build.outputs.digest }}
-      TAG: ${{ needs.build.outputs.tag }}
-      SBOM_SHA: ${{ needs.build.outputs.sbom-sha }}
+      DIGEST: ${{ inputs.digest || needs.os-update.outputs.digest }}
+      TAG: ${{ inputs.tag || needs.os-update.outputs.tag }}
+      SBOM_SHA: ${{ inputs.sbom-sha || needs.os-update.outputs.sbom-sha }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          artifact-ids: ${{ needs.build.outputs.artifact }}
+          artifact-ids: ${{ inputs.artifact || needs.os-update.outputs.artifact }}
           merge-multiple: true
           path: ${{ runner.temp }}/candidate
       - name: Check the public package, immutable tag and local artifacts
@@ -116,7 +81,10 @@ jobs:
           set -euo pipefail
           [[ $TAG =~ ^[0-9]+\.[0-9]+\.[0-9]+-wolfi-amd64(-r[1-9][0-9]*)?$ && $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]
           printf '%s  %s\n' "$SBOM_SHA" "$RUNNER_TEMP/candidate/sbom.spdx.json" | sha256sum -c -
-          skopeo inspect --raw "oci:$RUNNER_TEMP/candidate/layout:wolfi" | sha256sum | cut -d' ' -f1 | grep -Fxq "${DIGEST#sha256:}"
+          manifest=$RUNNER_TEMP/wolfi-manifest.json
+          skopeo inspect --raw "oci:$RUNNER_TEMP/candidate/layout:wolfi" > "$manifest"
+          printf '%s  %s\n' "${DIGEST#sha256:}" "$manifest" | sha256sum -c -
+          jq -e --arg tag "$TAG" '.annotations["io.openai.codex-security.release-tag"] == $tag' "$manifest" >/dev/null
           package=orgs/openai/packages/container/codex-security
           gh api "$package" | jq -e '.visibility == "public"' > /dev/null
           existing=$(gh api --paginate --slurp "$package/versions?per_page=100" |
@@ -168,4 +136,4 @@ jobs:
             skopeo copy --preserve-digests --src-no-creds "docker://$IMAGE@$DIGEST" "docker://$IMAGE:$TAG"
           fi
           skopeo inspect --no-creds --raw "docker://$IMAGE:$TAG" | sha256sum | cut -d' ' -f1 | grep -Fxq "${DIGEST#sha256:}"
-          printf 'Published \x60%s:%s\x60 at \x60%s\x60.\n' "$IMAGE" "$TAG" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Published \x60%s:%s\x60 at \x60%s\x60.\n' "$IMAGE" "$TAG" "$DIGEST" >> "$GITHUB_STEP_SUMMARY" || true

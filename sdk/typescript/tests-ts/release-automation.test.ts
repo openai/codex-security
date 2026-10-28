@@ -2848,6 +2848,18 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
 
   test.each([
     {
+      workflow: readFileSync(
+        new URL(
+          "../../../.github/workflows/container-release.yml",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+      step: "Dispatch the coordinator on protected main",
+      target: "node-github-release.yml",
+      fields: ["-f", "ref=main", "-f", "inputs[tag]=npm-v0.1.2"],
+    },
+    {
       workflow: releaseCutWorkflow,
       step: "Dispatch the protected npm release",
       target: "node-release.yml",
@@ -2875,6 +2887,12 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
       const mock = "gh() { printf '%s\\n' \"$@\" >&2; printf '12345\\n'; }";
       const env = {
         GITHUB_REPOSITORY: releaseRepository,
+        GITHUB_SERVER_URL: "https://github.com",
+        GITHUB_STEP_SUMMARY: join(
+          directories.create("release-summary-"),
+          "summary",
+        ),
+        VERSION: "0.1.2",
         RELEASE_RUN_ID: releaseRun,
         RELEASE_TAG: "npm-v0.1.2",
         GITHUB_OUTPUT: output,

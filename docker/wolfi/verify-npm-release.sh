@@ -1,21 +1,20 @@
 #!/usr/bin/env bash
-# Run from the repo root with the verified image inventory, scanner version and tagged commit.
+# Verify the release lock's scanner archive against the signed npm provenance.
 set -euo pipefail
-inventory=$1 version=$2 release_sha=$3
+lock=$1 version=$2 release_sha=$3 archive=${4:-}
 verifier=$PWD/sdk/typescript/scripts/release-automation.mjs
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
 export npm_config_registry=https://registry.npmjs.org/
-
-# npm ci checked this lock integrity while staging the image. Verify the very
-# same archive against the signed provenance of the upstream scanner release.
-integrity=$(jq -er --arg version "$version" '.installed_npm[] |
-  select(.path == "node_modules/@openai/codex-security" and .version == $version) | .integrity' "$inventory")
-cp docker/wolfi/payload/{package.json,package-lock.json} "$work/"
+integrity=$(jq -er --arg version "$version" '.packages["node_modules/@openai/codex-security"] | select(.version == $version) | .integrity' "$lock")
+cp "$lock" "$work/package-lock.json"
+jq '.packages[""]' "$lock" > "$work/package.json"
+if [[ -n $archive && $archive != /* ]]; then archive=$PWD/$archive; fi
 cd "$work"
 npm ci --omit=optional --ignore-scripts --no-audit --no-fund
-archive=$(npm pack --ignore-scripts --json "@openai/codex-security@$version" |
-  jq -er --arg integrity "$integrity" '.[0] | if .integrity == $integrity then .filename
-    else error("npm archive SHA-512 differs from the verified image inventory") end')
+if [[ -z $archive ]]; then
+  archive=$(npm pack --ignore-scripts --json "@openai/codex-security@$version" |
+    jq -er --arg integrity "$integrity" '.[0] | select(.integrity == $integrity) | .filename')
+fi
 npm audit signatures --json --include-attestations |
   node "$verifier" verify-recovered-provenance "$archive" "$version" "$release_sha" openai/codex-security

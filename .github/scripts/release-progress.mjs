@@ -80,14 +80,22 @@ export function renderProgress(
       job.name.startsWith("publish matching container /"),
   );
   const containerState = jobStatus(containerJobs, github);
+  const containerJob = (name) =>
+    containerJobs.find(
+      (job) => job.name === `publish matching container / ${name}`,
+    );
+  const containerVerification = containerJob(
+    "verify required container publications",
+  );
+  // Historical runs skipped promotion after verifying an existing image.
   const containerFinished =
     github?.conclusion === "success" ||
-    containerJobs.some(
-      (job) =>
-        job.name ===
-          "publish matching container / promote-verified-and-attested-release" &&
-        job.status === "completed",
-    );
+    (containerVerification
+      ? containerVerification.conclusion === "success"
+      : github?.status === "completed" &&
+        containerJob("source")?.conclusion === "success" &&
+        containerJob("promote-verified-and-attested-release")?.status ===
+          "completed");
   const complete = github?.conclusion === "success";
   return [
     marker,

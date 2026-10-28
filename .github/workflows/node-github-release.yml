@@ -36,6 +36,8 @@ jobs:
       integrity: ${{ steps.artifact.outputs.integrity }}
       has-action: ${{ steps.action.outputs.present }}
       has-container: ${{ steps.container.outputs.present }}
+      has-wolfi: ${{ steps.container.outputs.wolfi }}
+      release-tarball-artifact: ${{ steps.container-tarball.outputs.artifact-id }}
 
     steps:
       - name: Checkout release automation
@@ -372,9 +374,22 @@ jobs:
           if [[ "$RELEASE_VERSION" =~ ^0\.[0-4]\. ]]; then
             exit 0
           fi
-          if git cat-file -e "$RELEASE_SHA:Dockerfile" 2>/dev/null; then
-            echo 'present=true' >> "$GITHUB_OUTPUT"
+          git cat-file -e "$RELEASE_SHA:Dockerfile" 2>/dev/null || exit 0
+          echo 'present=true' >> "$GITHUB_OUTPUT"
+          if git cat-file -e "$RELEASE_SHA:.github/workflows/wolfi-build.yml" 2>/dev/null; then
+            echo 'wolfi=true' >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Save the verified scanner archive for both container builds
+        id: container-tarball
+        if: steps.container.outputs.wolfi == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: container-scanner-tarball-${{ github.run_attempt }}
+          path: ${{ steps.artifact.outputs.archive }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
 
       - name: Resolve published release history
         id: history
@@ -715,18 +730,24 @@ jobs:
 
   container:
     name: publish matching container
-    needs: [release, installed]
-    if: needs.release.outputs.has-container == 'true'
+    needs: [release, installed, action-verify, action]
+    if: >-
+      !cancelled() && needs.release.result == 'success' && needs.installed.result == 'success' &&
+      needs.release.outputs.has-container == 'true' &&
+      (needs.release.outputs.has-wolfi != 'true' || needs.action.result == 'success')
     permissions:
       contents: read
       packages: write
       attestations: write
       artifact-metadata: write
       id-token: write
-    uses: ./.github/workflows/container-release.yml
+    uses: ./.github/workflows/container-publish.yml
     with:
       release-sha: ${{ needs.release.outputs.sha }}
       release-version: ${{ needs.release.outputs.version }}
+      release-integrity: ${{ needs.release.outputs.integrity }}
+      release-tarball-artifact: ${{ needs.release.outputs.release-tarball-artifact }}
+      runtime-lock-artifact: ${{ needs.action-verify.outputs.runtime-lock-artifact }}
 
   complete:
     name: release status
@@ -740,11 +761,15 @@ jobs:
       HAS_ACTION: ${{ needs.release.outputs.has-action }}
       CONTAINER_RESULT: ${{ needs.container.result }}
       HAS_CONTAINER: ${{ needs.release.outputs.has-container }}
+      HAS_WOLFI: ${{ needs.release.outputs.has-wolfi }}
+      DEBIAN_DIGEST: ${{ needs.container.outputs.debian-digest }}
+      WOLFI_DIGEST: ${{ needs.container.outputs.wolfi-digest }}
     steps:
       - name: Summarize release channels
         continue-on-error: true
         env:
           RELEASE_VERSION: ${{ needs.release.outputs.version }}
+          RELEASE_SHA: ${{ needs.release.outputs.sha }}
         run: |
           {
             printf '## Release publication status\n\n'
@@ -753,7 +778,28 @@ jobs:
             printf '| Published package installation checks | %s |\n' "$INSTALL_RESULT"
             printf '| GitHub Action release | %s |\n' "$ACTION_RESULT"
             printf '| GitHub Marketplace | Not checked; publish and verify separately |\n'
-            printf '| Container image | %s |\n\n' "$CONTAINER_RESULT"
+            printf '| Container image | %s |\n' "$CONTAINER_RESULT"
+            if [[ -n "$DEBIAN_DIGEST" ]]; then printf '| Debian `%s` | `%s` |\n' "$RELEASE_VERSION" "$DEBIAN_DIGEST"; fi
+            if [[ -n "$WOLFI_DIGEST" ]]; then printf '| Wolfi `%s-wolfi-amd64` | `%s` |\n' "$RELEASE_VERSION" "$WOLFI_DIGEST"; fi
+            echo
+            if [[ -n "$DEBIAN_DIGEST" ]]; then
+              repo="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+              printf '[Release source](%s/tree/%s) | [Container guide](%s/blob/%s/docker/README.md)\n\n' "$repo" "$RELEASE_SHA" "$repo" "$RELEASE_SHA"
+              printf '```bash\n'
+              for digest in "$DEBIAN_DIGEST" "$WOLFI_DIGEST"; do
+                if [[ -n "$digest" ]]; then
+                  ref="ghcr.io/$GITHUB_REPOSITORY@$digest"
+                  printf 'docker pull %s\ngh attestation verify oci://%s --repo %s' "$ref" "$ref" "$GITHUB_REPOSITORY"
+                  if [[ -n "$WOLFI_DIGEST" ]]; then
+                    signer=container-publish
+                    if [[ $digest == "$WOLFI_DIGEST" ]]; then signer=publish-wolfi; fi
+                    printf ' --cert-identity %s/.github/workflows/%s.yml@refs/heads/main --source-ref refs/heads/main' "$repo" "$signer"
+                  fi
+                  printf '\n'
+                fi
+              done
+              printf '```\n\n'
+            fi
             if [[ "$HAS_ACTION" == true && "$ACTION_RESULT" == success ]]; then
               printf 'Marketplace: [edit the Action release](%s/%s/releases/edit/action-v%s) to publish or verify its listing.\n\n' \
                 "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$RELEASE_VERSION"
@@ -771,4 +817,8 @@ jobs:
           fi
           if [[ "$HAS_CONTAINER" == true ]]; then
             test "$CONTAINER_RESULT" = success
+          fi
+          if [[ "$HAS_WOLFI" == true ]]; then
+            test -n "$DEBIAN_DIGEST"
+            test -n "$WOLFI_DIGEST"
           fi

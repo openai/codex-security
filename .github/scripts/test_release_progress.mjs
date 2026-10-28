@@ -311,6 +311,9 @@ test("completed prerequisites do not claim that later checks or Action publicati
       "node-github-release": [
         job("verify matching Action"),
         job("publish matching container / source"),
+        job(
+          "publish matching container / promote-verified-and-attested-release",
+        ),
       ],
     },
     false,
@@ -318,6 +321,31 @@ test("completed prerequisites do not claim that later checks or Action publicati
   assert.match(body, /Release verification \| Running/u);
   assert.match(body, /GitHub Action \| Waiting to publish/u);
   assert.match(body, /Container image \| Running/u);
+});
+
+test("keeps the published container result on a historical failed release", () => {
+  for (const promotion of ["skipped", "success"]) {
+    const body = renderProgress(
+      {
+        "node-github-release": run(3, "node-github-release", {
+          status: "completed",
+          conclusion: "failure",
+        }),
+      },
+      {
+        "node-github-release": [
+          job("publish matching container / source"),
+          job(
+            "publish matching container / promote-verified-and-attested-release",
+            promotion,
+          ),
+          job("publish matching Action", "failure"),
+        ],
+      },
+      false,
+    );
+    assert.match(body, /Container image \| Passed/u);
+  }
 });
 
 test("observer follows protected approval through completion without workflow events", async () => {
