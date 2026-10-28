@@ -2782,6 +2782,49 @@ test("aligns component columns by terminal width and retains trailing cost", asy
   dashboard.stop();
 });
 
+test("aligns component costs with the cost header", async () => {
+  const stderr = capture(true);
+  const dashboard = createDashboard(
+    { ...stderr.stream, columns: 160, rows: 24 },
+    { presentation: "components", showCost: true },
+  );
+  dashboard.start();
+  dashboard.setComponents(
+    ["priced", "unpriced"].map((name) => ({
+      id: name,
+      name,
+      paths: ["src"],
+      status: "pending",
+      outputDir: `/synthetic/results/${name}`,
+    })),
+  );
+  dashboard.recordComponentEvent({
+    componentId: "priced",
+    type: "cost",
+    value: {
+      model: "synthetic-model",
+      inputTokens: 1,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 1,
+      estimatedUsd: 1,
+      estimatedUsdRange: { min: 1, max: 1, context: "unknown" },
+    },
+  });
+  await Promise.resolve();
+  const frame = stripVTControlCharacters(
+    stderr.text().split("\u001B[H").at(-1)!,
+  );
+  const [header, priced, unpriced] = frame
+    .split("\n")
+    .filter((line) => line.includes("Cost") || line.includes("Queued"));
+  const column = (row: string, text: string) =>
+    stringWidth(row.slice(0, row.lastIndexOf(text)));
+  expect(column(priced!, "$1.00")).toBe(column(header!, "Cost"));
+  expect(column(unpriced!, "—")).toBe(column(header!, "Cost"));
+  dashboard.stop();
+});
+
 test.each([16, 25, 120])(
   "preserves markup after clipped prefixes at width %i",
   (columns) => {
