@@ -1267,7 +1267,7 @@ describe("CLI workbench", () => {
     });
   });
 
-  test("unions overlapping confirmed identities before later matching batches", async () => {
+  test("carries confirmed groups into compatible matching batches", async () => {
     const first = { occurrenceId: "first", findingId: "identity-a" };
     const second = { occurrenceId: "second", findingId: "identity-b" };
     const third = { occurrenceId: "third", findingId: "identity-c" };
@@ -1287,7 +1287,7 @@ describe("CLI workbench", () => {
             args[0] === "list-unmatched-scan-pairs"
               ? {
                   repository: "/current/repository",
-                  scanCount: 4,
+                  scanCount: 6,
                   unavailableScans: 0,
                   skippedPairs: 0,
                   batches: [
@@ -1306,6 +1306,17 @@ describe("CLI workbench", () => {
                         { scanId: "second-scan", findings: [second] },
                       ],
                       knownFindingGroups: existingGroups,
+                    },
+                    {
+                      afterScanId: "replacement-after",
+                      afterFindings: [{ ...third, occurrenceId: "new-third" }],
+                      beforeScans: [
+                        {
+                          scanId: "replacement-before",
+                          findings: [{ ...first, occurrenceId: "new-first" }],
+                        },
+                      ],
+                      excludedScanIds: ["first-scan", "third-scan"],
                     },
                   ],
                 }
@@ -1329,10 +1340,11 @@ describe("CLI workbench", () => {
         }),
       ),
     ).toBe(0);
-    expect(matchedInputs).toHaveLength(2);
+    expect(matchedInputs).toHaveLength(3);
     expect(matchedInputs[1]!.knownFindingGroups).toEqual([
       [first.findingId, second.findingId, third.findingId, fourth.findingId],
     ]);
+    expect(matchedInputs[2]!.knownFindingGroups).toBeUndefined();
   });
 
   test("saves empty comparisons without starting Codex", async () => {

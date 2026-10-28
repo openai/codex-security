@@ -499,7 +499,7 @@ def test_relations_follow_confirmed_identities_and_read_a_page_in_bulk(
     assert set(scoped) == {"left-0"}
     (relation,) = scoped["left-0"]
     assert (relation["occurrenceId"], relation["scanId"]) == ("right-0", "two")
-    assert len(queries) <= 3
+    assert len(queries) <= 4
     queries.clear()
     assert history.finding_relations(db, "one", []) == {}
     assert queries == []
@@ -511,7 +511,7 @@ def test_relations_follow_confirmed_identities_and_read_a_page_in_bulk(
     link(db, "recurring-left", "bridge")
     link(db, "right-0", "bridge")
     link(db, "foreign-a", "foreign-b")
-    assert set(history._confirmed_finding_aliases(db, ["left-0"])) == {
+    assert set(history._confirmed_finding_aliases(db, ["left-0"], set())) == {
         "left-identity-0",
         "right-identity-0",
         "bridge-identity",
@@ -530,7 +530,7 @@ def test_relations_follow_confirmed_identities_and_read_a_page_in_bulk(
     assert {
         left: [relation["occurrenceId"] for relation in rows] for left, rows in page.items()
     } == {f"left-{i}": [f"right-{i}"] for i in range(1, 11)}
-    assert len(queries) <= 3
+    assert len(queries) <= 4
     queries.clear()
     rows = history._rows_for_ids(
         db,

@@ -506,10 +506,10 @@ setInterval(() => {}, 1000);
 
 test.each(
   (["server", "helper"] as const).flatMap((mode) =>
-    ["none", "LOCALAPPDATA", "XDG_CACHE_HOME", "USERPROFILE"].map((cache) => ({
-      mode,
-      cache,
-    })),
+    (process.platform === "win32"
+      ? ["none", "LOCALAPPDATA", "XDG_CACHE_HOME", "USERPROFILE"]
+      : ["none", "XDG_CACHE_HOME"]
+    ).map((cache) => ({ mode, cache })),
   ),
 )(
   "starts the packaged $mode with managed Node before $cache cache and an empty PATH",
@@ -559,7 +559,7 @@ test.each(
                 "cua_node",
                 "fixture",
                 "bin",
-                "node.exe",
+                process.platform === "win32" ? "node.exe" : "node",
               ]
             : [
                 ...(cache === "USERPROFILE" ? [".cache"] : []),
@@ -568,7 +568,7 @@ test.each(
                 "dependencies",
                 "node",
                 "bin",
-                "node.exe",
+                process.platform === "win32" ? "node.exe" : "node",
               ]),
         );
         await mkdir(dirname(cacheNode), { recursive: true });

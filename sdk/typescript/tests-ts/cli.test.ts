@@ -1281,6 +1281,15 @@ describe("CLI", () => {
             })
           ).status,
         ).toBe(0);
+        expect(
+          (
+            await runCommand(
+              "git",
+              ["-C", repository, "config", "core.hooksPath", ".git/hooks"],
+              { timeout: 10000 },
+            )
+          ).status,
+        ).toBe(0);
         Object.defineProperty(process, "execPath", {
           ...originalExecPath,
           value: executable,

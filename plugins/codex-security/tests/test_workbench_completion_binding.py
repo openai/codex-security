@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import os
 import shutil
 import sqlite3
 import subprocess
@@ -27,6 +26,7 @@ from workbench_test_support import (
     run_workbench,
     save_workspace,
     scan_command,
+    set_fixture_mtime,
     source_plugin_version,
     stable_target_id,
     start_delivered_scan,
@@ -946,16 +946,16 @@ def test_rejected_completion_restores_parent_head_before_corrected_retry(
             },
         },
     )
-    os.utime(independent, ns=(50, 50))
+    set_fixture_mtime(independent, 50)
     head_path = scan_dir / "checkpoint-head.json"
     if existing_head:
         checkpoint = write_checkpoint(
             scan_dir / "checkpoints",
             saved_results._parent_scan_draft(scan_id, manifest["scan"], findings, coverage),
         )
-        os.utime(checkpoint, ns=(100, 100))
+        set_fixture_mtime(checkpoint, 100)
         head_path.write_text(json.dumps({"checkpoint": checkpoint.name}, indent=3))
-        os.utime(head_path, ns=(100, 100))
+        set_fixture_mtime(head_path, 100)
         saved_results._capture_saved_source(scan_dir, "checkpoint-head.json", scan_id)
 
     def head_state():
@@ -981,7 +981,8 @@ def test_rejected_completion_restores_parent_head_before_corrected_retry(
     manifest_path.write_text(json.dumps(manifest))
     coverage_path.write_text(json.dumps(coverage))
     for path in (manifest_path, findings_path, coverage_path):
-        os.utime(path, ns=(200, 200))
+        set_fixture_mtime(path, 200)
+    original_findings_mtime = findings_path.stat().st_mtime_ns
     original_documents = {
         path: path.read_bytes() for path in (manifest_path, findings_path, coverage_path)
     }
@@ -1001,13 +1002,13 @@ def test_rejected_completion_restores_parent_head_before_corrected_retry(
     if defect == "target":
         del manifest["scan"]["target"]["remote"]
         manifest_path.write_text(json.dumps(manifest))
-        os.utime(manifest_path, ns=(300, 300))
+        set_fixture_mtime(manifest_path, 300)
     coverage["deferred"] = []
     coverage["resolvedDeferred"] = [{"id": "review", "reason": "Review completed."}]
 
     coverage_path.write_text(json.dumps(coverage))
-    os.utime(coverage_path, ns=(300, 300))
-    assert findings_path.stat().st_mtime_ns == 200
+    set_fixture_mtime(coverage_path, 300)
+    assert findings_path.stat().st_mtime_ns == original_findings_mtime
     completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"

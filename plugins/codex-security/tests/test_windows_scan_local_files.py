@@ -107,10 +107,10 @@ def test_native_windows_backend_rejects_symlink_ancestor(tmp_path: Path) -> None
 def test_native_copy_junction_retains_raw_target_and_cleanup(
     tmp_path: Path, dangling: bool
 ) -> None:
-    target = tmp_path / "Mixed-Case-日本語"
+    target = tmp_path / "Mixed-Case-日本語&R"
     target.mkdir()
-    source = tmp_path / "source"
-    subprocess.run(["cmd", "/c", "mklink", "/J", str(source), str(target)], check=True)
+    source = tmp_path / "source&junction"
+    subprocess.run(f'cmd /d /s /c "mklink /J "{source}" "{target}""', check=True)
     if dangling:
         target.rmdir()
     else:
@@ -131,10 +131,10 @@ def test_native_copy_junction_retains_raw_target_and_cleanup(
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Win32 junction APIs")
 def test_native_copy_junction_rejects_nonempty_destination(tmp_path: Path) -> None:
-    target = tmp_path / "outside"
+    target = tmp_path / "outside&target"
     target.mkdir()
-    source = tmp_path / "source"
-    subprocess.run(["cmd", "/c", "mklink", "/J", str(source), str(target)], check=True)
+    source = tmp_path / "source&junction"
+    subprocess.run(f'cmd /d /s /c "mklink /J "{source}" "{target}""', check=True)
     destination = tmp_path / "destination"
     destination.mkdir()
     (destination / "keep.txt").write_text("placeholder contents\n")

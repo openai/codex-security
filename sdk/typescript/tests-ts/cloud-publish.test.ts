@@ -240,6 +240,9 @@ describe("Cloud publication", () => {
     const { environment } = await fixture();
     const preview = await publishFindingsCsvToCloud(path, { dryRun: true });
     const findings = preview.findings!;
+    expect(
+      (await publishFindingsCsvToCloud(path, { dryRun: true })).findings,
+    ).toEqual(findings);
     expect(new Set(findings.map((finding) => finding.findingId)).size).toBe(2);
     expect(new Set(findings.map((finding) => finding.occurrenceId)).size).toBe(
       2,

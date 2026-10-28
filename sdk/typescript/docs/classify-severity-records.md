@@ -61,6 +61,8 @@ each with a unique request ID and params containing `requestId`, `stage: "severi
 an output JSON `schema`. The host must authorize the requested model and effort,
 create a fresh independent review context, preserve the instruction/data boundary,
 and disable tools, repository access, browsing, and source inspection.
+The `effort` string is forwarded unchanged, including provider-specific values;
+the host and selected model validate which values they support.
 A managed-agent host can execute this request directly in its existing session
 infrastructure; it does not need a repository checkout. The CLI does not provide
 credentials, create sessions, or select an authentication fallback.

@@ -32,6 +32,13 @@ SNAPSHOT_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "snapshot_sq
 PLUGIN_MANIFEST = Path(__file__).resolve().parents[1] / ".codex-plugin" / "plugin.json"
 
 
+def set_fixture_mtime(path: Path, order: int) -> int:
+    """Keep ordered fixture observations seconds apart on coarse filesystems."""
+    modified = (1_700_000_000 + order) * 1_000_000_000
+    os.utime(path, ns=(modified, modified))
+    return path.stat().st_mtime_ns
+
+
 def load_script(name: str, *, module_name: str | None = None) -> ModuleType:
     script = SCRIPT.parent / f"{name}.py"
     spec = importlib.util.spec_from_file_location(module_name or name, script)

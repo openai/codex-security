@@ -99,6 +99,8 @@ EXPECTED_MIGRATIONS = [
     (55, "retain undelivered headless deep scan results"),
     (56, "recover unfinished legacy headless deep scans"),
     (57, "freeze stopped scan checkpoint selections"),
+    (58, "save scan target Git positions"),
+    (59, "save scan Git repository identities"),
 ]
 
 
@@ -1849,6 +1851,34 @@ def test_workbench_repairs_shadowed_capability_preflight_migration(
             "SELECT COUNT(*) FROM sqlite_master "
             "WHERE type = 'index' AND name = 'workspaces_by_thread_and_updated_at'"
         ).fetchone() == (1,)
+
+
+def test_upgrade_preserves_pre_release_scan_git_identity(tmp_path: Path) -> None:
+    database = tmp_path / "workbench.sqlite3"
+    migrations = SCHEMA.MIGRATIONS
+    with sqlite3.connect(database) as connection:
+        create_migration_history(connection)
+        apply_historical_migrations(
+            connection,
+            (*migrations[:53], (54, *migrations[57][1:]), (55, *migrations[58][1:])),
+            "2026-07-01T00:00:00Z",
+        )
+
+    run_workbench(tmp_path, "database-info")
+
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT version, name FROM schema_migrations ORDER BY version"
+            ).fetchall()
+            == EXPECTED_MIGRATIONS
+        )
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(scans)")}
+        assert {
+            "retained_checkpoint_heads_json",
+            "target_git_prefix",
+            "target_git_identity_json",
+        } <= columns
 
 
 def test_workbench_upgrades_stable_scan_target_identity_migration(tmp_path: Path) -> None:

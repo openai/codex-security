@@ -364,13 +364,14 @@ def test_scan_list_probes_requested_repository_once(
     connection, targets = indexed_collections
     history = workbench_api["scan_history"]
     probes = []
-    git_output = history.git_output
+    git_globals = history.git_output.__globals__
+    git_command = git_globals["git_command"]
 
-    def record_git_output(target, *arguments):
+    def record_git_command(target, *arguments, **options):
         probes.append((target, arguments))
-        return git_output(target, *arguments)
+        return git_command(target, *arguments, **options)
 
-    monkeypatch.setattr(history, "git_output", record_git_output)
+    monkeypatch.setitem(git_globals, "git_command", record_git_command)
     result = history.list_scans(connection, query_args(repository=str(targets[0]), limit=1))
 
     assert [scan["scanId"] for scan in result["scans"]] == [SCAN_IDS[0]]

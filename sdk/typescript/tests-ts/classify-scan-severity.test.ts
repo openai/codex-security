@@ -997,28 +997,7 @@ test("migrates existing databases without changing findings and reads older stat
 
 test("classifying another scan preserves both recurring-finding assessments", async () => {
   const first = await fixture();
-  const second = await fixture();
-  const manifestPath = join(second.scanDirectory, "scan-manifest.json");
-  const manifest = JSON.parse(
-    await readFile(manifestPath, "utf8"),
-  ) as ScanManifest;
-  manifest.scan.id = "scan_example_002";
-  for (const file of ["findings.json", "coverage.json"]) {
-    const path = join(second.scanDirectory, file);
-    const document = JSON.parse(await readFile(path, "utf8"));
-    document.scanId = manifest.scan.id;
-    if (file === "findings.json") {
-      for (const finding of document.findings as Finding[]) {
-        finding.occurrenceId = `occ_${sha256([manifest.scan.id, finding.fingerprints.primary].join("\0")).slice(0, 24)}`;
-      }
-    }
-    await writeFile(path, JSON.stringify(document));
-  }
-  for (const artifact of manifest.scan.artifacts)
-    artifact.sha256 = sha256(
-      await readFile(join(second.scanDirectory, artifact.path)),
-    );
-  await writeFile(manifestPath, JSON.stringify(manifest));
+  const second = await fixture("scan_example_002");
   const { codex, calls } = recordingClassifier();
   const options = {
     environment: first.environment,

@@ -80,7 +80,7 @@ def junction_factory(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyP
         if native:
             if link.exists():
                 link.rmdir()
-            subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], check=True)
+            subprocess.run(f'cmd /d /s /c "mklink /J "{link}" "{target}""', check=True)
         else:
             shutil.copytree(target, link, dirs_exist_ok=True)
             targets[link] = target
@@ -332,7 +332,7 @@ def test_reviewed_patch_does_not_copy_through_indexed_directory_links(
     outside.mkdir()
     (outside / "file.txt").write_text("original outside contents\n")
     if link_kind == "junction":
-        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)], check=True)
+        subprocess.run(f'cmd /d /s /c "mklink /J "{link}" "{outside}""', check=True)
     else:
         link_target = (
             "../" * (4 if nested else 3) + "outside" if link_kind == "relative" else str(outside)
@@ -515,7 +515,7 @@ def test_native_reviewed_patch_preserves_indexed_junction_spelling(tmp_path: Pat
     outside.mkdir()
     (outside / "file.txt").write_text("external contents\n")
     junction = source / "linked"
-    subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(outside)], check=True)
+    subprocess.run(f'cmd /d /s /c "mklink /J "{junction}" "{outside}""', check=True)
     (source / "app.txt").write_text("before\n")
     subprocess.run(["git", "add", "."], cwd=source, check=True)
     junction.rename(source / "Linked")
@@ -1632,7 +1632,7 @@ def test_deleted_candidate_sources_keep_base_blob_when_path_is_recreated(
         (outside / "private.txt").write_text("Synthetic unrelated content.\n")
         if os.name == "nt":
             subprocess.run(
-                ["cmd", "/c", "mklink", "/J", str(source), str(outside)],
+                f'cmd /d /s /c "mklink /J "{source}" "{outside}""',
                 check=True,
                 capture_output=True,
             )

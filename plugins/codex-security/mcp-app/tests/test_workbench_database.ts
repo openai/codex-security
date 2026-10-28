@@ -283,30 +283,13 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
           originalCheckpointMigration,
         );
       }
-      assert.equal(
+      assert.deepEqual(
         reopened
-          .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
-          .get()?.count,
-        migrations.length,
+          .prepare("SELECT version FROM schema_migrations ORDER BY version")
+          .all()
+          .map(({ version }) => version),
+        migrations.map(({ version }) => version),
       );
-      assert.equal(
-        reopened
-          .prepare("SELECT MAX(version) AS version FROM schema_migrations")
-          .get()?.version,
-        57,
-      );
-      for (const { version } of migrations.filter(
-        (item) => item.version >= 43,
-      )) {
-        assert.equal(
-          reopened
-            .prepare(
-              "SELECT COUNT(*) AS count FROM schema_migrations WHERE version = ?",
-            )
-            .get(version)?.count,
-          1,
-        );
-      }
       assert.deepEqual(reopened.prepare("PRAGMA foreign_key_check").all(), []);
       assert.equal(
         reopened

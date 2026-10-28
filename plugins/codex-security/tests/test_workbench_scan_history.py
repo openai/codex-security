@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -149,6 +150,7 @@ def save_scan_matches(
     after: dict[str, Any],
     *matches: dict[str, Any],
     uncertain: tuple[dict[str, Any], ...] = (),
+    related: tuple[dict[str, Any], ...] = (),
 ) -> dict[str, Any]:
     return run_workbench(
         state_dir,
@@ -158,7 +160,7 @@ def save_scan_matches(
         "--after-scan-id",
         after["scanId"],
         "--matches-json",
-        json.dumps({"matches": matches, "uncertain": uncertain}),
+        json.dumps({"matches": matches, "uncertain": uncertain, "related": related}),
     )
 
 
@@ -1129,6 +1131,262 @@ def test_scan_comparison_matches_equivalent_findings_across_standard_and_deep_sc
     assert uncertain["summary"]["unknown"] == 0
 
 
+def create_scan_with_finding_locations(
+    state_dir: Path, root: Path, repository: Path, findings: list[tuple[str, str]]
+) -> dict[str, Any]:
+    scan = create_cli_scan(state_dir, root, repository, complete=False)
+    scan_dir = Path(scan["scanDir"])
+    write_completed_contract(scan_dir, scan["scanId"], repository)
+    findings_path = scan_dir / "findings.json"
+    document = json.loads(findings_path.read_text())
+    template = document["findings"][0]
+    document["findings"] = []
+    for anchor, path in findings:
+        finding = copy.deepcopy(template)
+        finding["identity"]["anchor"] = anchor
+        for location in finding["locations"]:
+            location["path"] = path
+        document["findings"].append(finding)
+    findings_path.write_text(json.dumps(document))
+    subprocess.run([sys.executable, str(FINALIZER), "--scan-dir", str(scan_dir)], check=True)
+    run_workbench(state_dir, "complete-scan", "--scan-id", scan["scanId"])
+    return scan
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("through_history", [False, True])
+def test_equivalent_locations_preserve_confirmed_groups(
+    tmp_path: Path, reverse: bool, through_history: bool
+) -> None:
+    state_dir = tmp_path / "state"
+    root = tmp_path / "results"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    before = create_scan_with_finding_locations(
+        state_dir, root, repository, [("original-control", "src/extract.py")]
+    )
+    after = create_scan_with_finding_locations(
+        state_dir,
+        root,
+        repository,
+        [("moved-control", "src/helper.py"), ("independent-control", "src/extract.py")],
+    )
+    if reverse:
+        before, after = after, before
+    inputs = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")[
+        "matchingInputs"
+    ]
+    by_anchor = {
+        finding["identity"]["anchor"]: finding["occurrenceId"]
+        for side in inputs.values()
+        for finding in side
+    }
+    previous, current = by_anchor["original-control"], by_anchor["moved-control"]
+    if reverse:
+        previous, current = current, previous
+    if through_history:
+        middle = create_cli_scan(
+            state_dir,
+            root,
+            repository,
+            identity_anchor="historical-control",
+            relative_path="src/history.py",
+        )
+        middle_id = compare_scan_pair(state_dir, before, middle, "--include-matching-inputs")[
+            "matchingInputs"
+        ]["after"][0]["occurrenceId"]
+        save_scan_matches(state_dir, before, middle, confirmed_match(previous, middle_id))
+        save_scan_matches(state_dir, middle, after, confirmed_match(middle_id, current))
+        compared = compare_scan_pair(state_dir, before, after)
+    else:
+        compared = save_scan_matches(state_dir, before, after, confirmed_match(previous, current))
+    assert compared["summary"] == {
+        "new": 0 if reverse else 1,
+        "persisting": 1,
+        "resolved": 0,
+        "not_observed": 1 if reverse else 0,
+        "reopened": 0,
+        "unknown": 0,
+    }
+    persisting = next(
+        finding for finding in compared["findings"] if finding["status"] == "persisting"
+    )
+    assert persisting["beforeOccurrenceId"] == previous
+    assert persisting["afterOccurrenceId"] == current
+    assert compare_scan_pair(state_dir, before, after) == compared
+
+
+@pytest.mark.parametrize(
+    ("alias_shape", "history"),
+    [("none", None), ("endpoints", None), ("chain", None), ("branch", None)]
+    + [
+        (shape, direction)
+        for shape in ("none", "chain", "branch")
+        for direction in ("forward", "reverse")
+    ],
+)
+def test_equivalent_locations_preserve_related_findings(
+    tmp_path: Path, alias_shape: str, history: str | None
+) -> None:
+    state_dir = tmp_path / "state"
+    root = tmp_path / "results"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    before_specs = [("member-control", "src/extract.py")]
+    after_specs = [("symlink-control", "src/extract.py")]
+    alias_groups = []
+    related_anchors = ("member-control", "symlink-control")
+    if alias_shape == "endpoints":
+        before_specs.append(("member-alias", "src/member.py"))
+        after_specs.append(("symlink-alias", "src/symlink.py"))
+        alias_groups = [
+            ("before", [anchor for anchor, _ in before_specs]),
+            ("after", [anchor for anchor, _ in after_specs]),
+        ]
+        related_anchors = ("member-alias", "symlink-alias")
+    elif alias_shape == "branch":
+        before_specs.append(("member-alias", "src/member.py"))
+        after_specs.append(("independent-member", "src/member.py"))
+        alias_groups = [("before", [anchor for anchor, _ in before_specs])]
+    elif alias_shape == "chain":
+        # Three location links could bridge the related endpoints through two alias groups.
+        before_specs.extend(
+            [("middle-before-one", "src/middle.py"), ("middle-before-two", "src/symlink.py")]
+        )
+        after_specs = [
+            ("middle-after-one", "src/extract.py"),
+            ("middle-after-two", "src/middle.py"),
+            ("symlink-control", "src/symlink.py"),
+        ]
+        alias_groups = [
+            ("before", ["middle-before-one", "middle-before-two"]),
+            ("after", ["middle-after-one", "middle-after-two"]),
+        ]
+    before_specs.append(("independent-before", "src/independent.py"))
+    after_specs.append(("independent-after", "src/independent.py"))
+    before = create_scan_with_finding_locations(state_dir, root, repository, before_specs)
+    related_scan = (
+        create_cli_scan(
+            state_dir,
+            root,
+            repository,
+            identity_anchor="historical-distinct-root",
+            relative_path="src/related-history.py",
+        )
+        if history
+        else None
+    )
+    after = create_scan_with_finding_locations(state_dir, root, repository, after_specs)
+    inputs = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")[
+        "matchingInputs"
+    ]
+    by_anchor = {
+        finding["identity"]["anchor"]: finding["occurrenceId"]
+        for side in inputs.values()
+        for finding in side
+    }
+    for side, anchors in alias_groups:
+        scan = before if side == "before" else after
+        historical = create_cli_scan(
+            state_dir,
+            root,
+            repository,
+            identity_anchor=f"historical-{side}",
+            relative_path="src/history.py",
+        )
+        historical_id = compare_scan_pair(state_dir, scan, historical, "--include-matching-inputs")[
+            "matchingInputs"
+        ]["after"][0]["occurrenceId"]
+        save_scan_matches(
+            state_dir,
+            scan,
+            historical,
+            confirmed_match([by_anchor[anchor] for anchor in anchors], historical_id),
+        )
+    related = {
+        "beforeOccurrenceId": by_anchor[related_anchors[0]],
+        "afterOccurrenceId": by_anchor[related_anchors[1]],
+        "reason": "Member-name validation and existing-symlink traversal need different fixes.",
+    }
+    if related_scan is None:
+        compared = save_scan_matches(state_dir, before, after, related=(related,))
+    else:
+        historical_id = compare_scan_pair(
+            state_dir, before, related_scan, "--include-matching-inputs"
+        )["matchingInputs"]["after"][0]["occurrenceId"]
+        if history == "reverse":
+            save_scan_matches(
+                state_dir,
+                related_scan,
+                before,
+                related=(
+                    {
+                        **related,
+                        "beforeOccurrenceId": historical_id,
+                        "afterOccurrenceId": related["beforeOccurrenceId"],
+                    },
+                ),
+            )
+        else:
+            save_scan_matches(
+                state_dir,
+                before,
+                related_scan,
+                related=(
+                    {
+                        **related,
+                        "afterOccurrenceId": historical_id,
+                    },
+                ),
+            )
+        save_scan_matches(
+            state_dir,
+            related_scan,
+            after,
+            confirmed_match(historical_id, related["afterOccurrenceId"]),
+        )
+        if history == "reverse":
+            before, after = after, before
+        compared = compare_scan_pair(state_dir, before, after)
+    assert compared["summary"] == {
+        "new": (0 if history == "reverse" else 1)
+        if alias_shape == "branch"
+        else (2 if alias_shape == "chain" else 1),
+        "persisting": 2 if alias_shape == "branch" else 1,
+        "resolved": 0,
+        "not_observed": (1 if history == "reverse" else 0)
+        if alias_shape == "branch"
+        else (2 if alias_shape == "chain" else 1),
+        "reopened": 0,
+        "unknown": 0,
+    }
+    independent = [by_anchor["independent-before"], by_anchor["independent-after"]]
+    if history == "reverse":
+        independent.reverse()
+    persisting = next(
+        item for item in compared["findings"] if item.get("beforeOccurrenceId") == independent[0]
+    )
+    assert persisting["status"] == "persisting"
+    assert persisting["afterOccurrenceId"] == independent[1]
+    if alias_shape == "branch":
+        group_side, member_side = (
+            ("after", "before") if history == "reverse" else ("before", "after")
+        )
+        shared = next(item for item in compared["findings"] if f"{group_side}OccurrenceIds" in item)
+        assert shared["status"] == "persisting"
+        assert set(shared[f"{group_side}OccurrenceIds"]) == {
+            by_anchor["member-control"],
+            by_anchor["member-alias"],
+        }
+        assert shared[f"{member_side}OccurrenceId"] == by_anchor["independent-member"]
+    if history is None:
+        assert len(compared["related"]) == 1
+        assert all(compared["related"][0][key] == value for key, value in related.items())
+    else:
+        assert "related" not in compared
+    assert compare_scan_pair(state_dir, before, after) == compared
+
+
 @pytest.mark.parametrize(
     ("before_instance", "after_instance"),
     [("first-entry", "second-entry"), ("first-entry", None), (None, "second-entry")],
@@ -1224,6 +1482,51 @@ def test_list_unmatched_scan_pairs_groups_pending_pairs_and_skips_saved_results(
         [first["scanId"]],
         [first["scanId"], second["scanId"]],
     ]
+
+
+def test_list_unmatched_scan_pairs_skips_incompatible_replaced_repositories(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    subprocess.run(
+        ["git", "-C", str(repository), "remote", "add", "origin", "https://example.test/first.git"],
+        check=True,
+    )
+    results = tmp_path / "results"
+    create_cli_scan(state_dir, results, repository, target_revision=revision)
+    saved_repository = tmp_path / "saved-repository"
+    repository.rename(saved_repository)
+    subprocess.run(["git", "clone", "-q", str(saved_repository), str(repository)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "remote",
+            "set-url",
+            "origin",
+            "https://example.test/second.git",
+        ],
+        check=True,
+    )
+    before, after = (
+        create_cli_scan(state_dir, results, repository, target_revision=revision) for _ in range(2)
+    )
+
+    pending = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(repository))
+    assert pending["scanCount"] == 3
+    assert pending["unavailableScans"] == 0
+    assert pending["skippedPairs"] == 0
+    assert [batch["afterScanId"] for batch in pending["batches"]] == [after["scanId"]]
+    assert [scan["scanId"] for scan in pending["batches"][0]["beforeScans"]] == [before["scanId"]]
+
+    save_scan_matches(state_dir, before, after)
+    cached = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(repository))
+    assert cached == {**pending, "batches": [], "skippedPairs": 1}
+    forced = run_workbench(
+        state_dir, "list-unmatched-scan-pairs", "--repository", str(repository), "--force"
+    )
+    assert forced == pending
 
 
 @pytest.mark.parametrize(
@@ -1500,10 +1803,10 @@ def test_explicit_comparison_uses_chronological_matching_cutoff(
 
     history = load_script("workbench_scan_history")
 
-    def unexpected_git_lookup(*_args: Any) -> str:
+    def unexpected_git_lookup(*_args: Any, **_kwargs: Any) -> str:
         raise AssertionError("Future scans must not trigger repository discovery")
 
-    monkeypatch.setattr(history, "git_output", unexpected_git_lookup)
+    monkeypatch.setitem(history.git_output.__globals__, "git_command", unexpected_git_lookup)
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert list(connection.iterdump()) == original
         connection.row_factory = sqlite3.Row
@@ -1724,6 +2027,98 @@ def test_semantic_scan_comparison_rejects_cross_target_scans(tmp_path: Path) -> 
         assert "same repository target" in rejected["stderr"]
 
 
+@pytest.mark.parametrize(
+    ("before_origin", "after_origin", "same_repository"),
+    [
+        ("alice@example.test:project.git", "bob@example.test:project.git", False),
+        ("alice@example.test:project.git", "alice@EXAMPLE.test:project", True),
+        ("Alice@example.test:project.git", "alice@example.test:project.git", False),
+        ("alice@example.test:project.git", "alice@example.test:/project.git", False),
+        ("ssh://alice@example.test/~/project.git", "ssh://bob@example.test/~/project.git", False),
+        ("alice@example.test:/project.git", "bob@example.test:/project.git", True),
+        ("ssh://alice@example.test/project.git", "bob@example.test:/project.git", True),
+        ("alice@example.test:~owner/project.git", "bob@example.test:~owner/project.git", True),
+        ("git@github.com:example/project.git", "https://github.com/example/project", True),
+        ("git@gitlab.com:example/project.git", "https://gitlab.com/example/project", True),
+        ("git@bitbucket.org:example/project.git", "https://bitbucket.org/example/project", True),
+        ("git@example.test:project.git", "https://example.test/project.git", False),
+        ("git@github.com:example/project.git", "alice@github.com:example/project.git", False),
+        (
+            "git@gitlab.com:example/project.git",
+            "ssh://git@gitlab.com:2222/example/project.git",
+            False,
+        ),
+    ],
+)
+def test_scan_comparison_preserves_ssh_repository_identity(
+    tmp_path: Path, before_origin: str, after_origin: str, same_repository: bool
+) -> None:
+    state_dir = tmp_path / "state"
+    before_repository = tmp_path / "before"
+    after_repository = tmp_path / "after"
+    initialize_git_repository(before_repository)
+    (before_repository / "src").mkdir()
+    (before_repository / "src" / "extract.py").write_text("destination.write_bytes(entry.read())\n")
+    subprocess.run(["git", "-C", str(before_repository), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(before_repository), "commit", "-qm", "Add reviewed source"], check=True
+    )
+    revision = subprocess.check_output(
+        ["git", "-C", str(before_repository), "rev-parse", "HEAD"], text=True
+    ).strip()
+    subprocess.run(
+        ["git", "clone", "-q", str(before_repository), str(after_repository)], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(before_repository), "remote", "add", "origin", before_origin], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(after_repository), "remote", "set-url", "origin", after_origin],
+        check=True,
+    )
+    before = create_cli_scan(
+        state_dir,
+        tmp_path / "before-results",
+        before_repository,
+        target_revision=revision,
+        identity_anchor="before-origin-fixture",
+    )
+    after = create_cli_scan(
+        state_dir,
+        tmp_path / "after-results",
+        after_repository,
+        target_revision=revision,
+        identity_anchor="after-origin-fixture",
+    )
+    listed = run_workbench(state_dir, "list-scans", "--repository", str(after_repository))
+    assert len(listed["scans"]) == (2 if same_repository else 1)
+    if same_repository:
+        compared = compare_scan_pair(state_dir, before, after)
+        assert compared["summary"]["persisting"] == 1
+        saved = save_scan_matches(state_dir, before, after)
+        assert saved["summary"]["persisting"] == 1
+        assert compare_scan_pair(state_dir, before, after, "--require-matches") == saved
+    else:
+        for command, arguments in (
+            ("compare-scans", ()),
+            ("save-scan-comparison", ("--matches-json", '{"matches":[],"uncertain":[]}')),
+        ):
+            rejected = run_workbench(
+                state_dir,
+                command,
+                "--before-scan-id",
+                before["scanId"],
+                "--after-scan-id",
+                after["scanId"],
+                *arguments,
+                check=False,
+            )
+            assert rejected["returncode"] != 0
+            assert "same repository target" in rejected["stderr"]
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            assert connection.execute("SELECT COUNT(*) FROM scan_comparisons").fetchone() == (0,)
+
+
 def test_semantic_scan_comparison_accepts_linked_git_worktrees(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
@@ -1762,6 +2157,635 @@ def test_semantic_scan_comparison_accepts_linked_git_worktrees(tmp_path: Path) -
     assert saved["summary"]["persisting"] == 1
 
 
+def replace_history_repository(repository: Path, origin: str) -> None:
+    previous_identity = (repository / ".git").stat()
+    retained = repository.with_name("retained-repository")
+    repository.rename(retained)
+    subprocess.run(["git", "clone", "-q", str(retained), str(repository)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "remote", "set-url", "origin", origin], check=True
+    )
+    current_identity = (repository / ".git").stat()
+    # Keep the old directory alive so inode reuse cannot make the fixture ambiguous.
+    assert (previous_identity.st_dev, previous_identity.st_ino) != (
+        current_identity.st_dev,
+        current_identity.st_ino,
+    )
+
+
+HISTORY_ORIGIN = "https://example.test/original.git"
+
+
+@pytest.fixture
+def git_finding_history(tmp_path: Path):
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    origin = HISTORY_ORIGIN
+    subprocess.run(["git", "-C", str(repository), "remote", "add", "origin", origin], check=True)
+
+    def scan(anchor: str, location: str) -> dict[str, Any]:
+        return create_cli_scan(
+            state_dir,
+            tmp_path / "scans",
+            repository,
+            target_revision=revision,
+            identity_anchor=anchor,
+            relative_path=location,
+        )
+
+    return state_dir, repository, scan
+
+
+@pytest.mark.parametrize(
+    ("change", "confirmed"),
+    [
+        ("replacement", True),
+        ("same-repository", True),
+        ("same-origin-clone", True),
+        ("remote-edit", True),
+        ("replacement", False),
+        ("legacy", True),
+    ],
+)
+def test_finding_history_scopes_saved_aliases_to_repository_identity(
+    git_finding_history, monkeypatch: pytest.MonkeyPatch, change: str, confirmed: bool
+) -> None:
+    state_dir, repository, scan = git_finding_history
+    old = [scan("control-a", "src/old-a.py"), scan("control-b", "src/old-b.py")]
+    old_findings = [get_scan(state_dir, item["scanId"])["scan"]["findings"][0] for item in old]
+    if confirmed:
+        save_scan_matches(
+            state_dir,
+            *old,
+            confirmed_match(old_findings[0]["occurrenceId"], old_findings[1]["occurrenceId"]),
+        )
+    set_triage(
+        state_dir,
+        old_findings[0]["occurrenceId"],
+        "closed",
+        "--close-reason",
+        "false_positive",
+        "--note",
+        "Synthetic triage fixture.",
+    )
+    if change in {"replacement", "same-origin-clone"}:
+        replace_history_repository(
+            repository,
+            "https://example.test/replacement.git" if change == "replacement" else HISTORY_ORIGIN,
+        )
+    elif change == "remote-edit":
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "remote",
+                "set-url",
+                "origin",
+                "https://example.test/changed.git",
+            ],
+            check=True,
+        )
+    current = [scan("control-a", "src/new-a.py"), scan("control-b", "src/new-b.py")]
+    if change == "legacy":
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            connection.execute("UPDATE scans SET target_git_identity_json = NULL")
+    eligible = change != "replacement"
+    direct = compare_scan_pair(state_dir, old[0], current[0], check=False)
+    assert (direct["returncode"] == 0) == eligible
+    if not eligible:
+        assert "same repository target" in direct["stderr"]
+    shown = [get_scan(state_dir, item["scanId"])["scan"]["findings"][0] for item in current]
+    assert [item["findingId"] for item in shown] == [item["findingId"] for item in old_findings]
+    assert shown[0]["findingId"] != shown[1]["findingId"]
+    assert all(item["triage"]["status"] == "open" for item in shown)
+    old_ids = {item["scanId"] for item in old}
+    for finding in shown:
+        historical_ids = {item["scanId"] for item in finding.get("matches", [])}
+        assert bool(historical_ids & old_ids) == eligible
+        assert bool(set(finding.get("knownScanIds", [])) & old_ids) == eligible
+        if not eligible:
+            assert "matches" not in finding
+            assert "knownSince" not in finding
+            assert "knownScanIds" not in finding
+    compared = compare_scan_pair(state_dir, *current, "--include-matching-inputs")
+    assert compared["summary"]["persisting"] == int(eligible and confirmed)
+    groups = [sorted(item["findingId"] for item in old_findings)] if eligible and confirmed else []
+    assert compared["matchingInputs"].get("knownFindingGroups", []) == groups
+    plan = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(repository))
+    batch = next(item for item in plan["batches"] if item["afterScanId"] == current[1]["scanId"])
+    assert batch.get("knownFindingGroups", []) == groups
+    assert set(batch.get("excludedScanIds", [])) == (set() if eligible else old_ids)
+    if not eligible:
+        assert [item["scanId"] for item in batch["beforeScans"]] == [current[0]["scanId"]]
+    if change == "legacy":
+        workbench = load_script("workbench_db")
+
+        def unexpected_git_lookup(*_args: Any, **_kwargs: Any) -> str:
+            raise AssertionError("Saved legacy groups must not require repository discovery")
+
+        monkeypatch.setitem(
+            workbench.scan_history.git_output.__globals__, "git_command", unexpected_git_lookup
+        )
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            connection.row_factory = sqlite3.Row
+            assert (
+                workbench.scan_history.list_unmatched_scan_pairs(
+                    connection,
+                    Namespace(repository=str(repository), force=False),
+                    backfill_finding_details=workbench.backfill_legacy_finding_details,
+                    read_coverage=workbench.coverage_for_comparison,
+                )
+                == plan
+            )
+
+
+@pytest.mark.parametrize(
+    ("replacement", "related", "mixed_neighbor"),
+    [(True, True, False), (False, True, False), (True, False, False), (False, True, True)],
+)
+def test_finding_history_scopes_related_location_veto_to_repository_identity(
+    git_finding_history, replacement: bool, related: bool, mixed_neighbor: bool
+) -> None:
+    state_dir, repository, scan = git_finding_history
+    old = [scan("control-a", "src/old-a.py")]
+    if mixed_neighbor:
+        replace_history_repository(repository, "https://example.test/original.git")
+    old.append(scan("control-b", "src/old-b.py"))
+    if related:
+        findings = [get_scan(state_dir, item["scanId"])["scan"]["findings"][0] for item in old]
+        save_scan_matches(
+            state_dir,
+            *old,
+            related=(
+                {
+                    "beforeOccurrenceId": findings[0]["occurrenceId"],
+                    "afterOccurrenceId": findings[1]["occurrenceId"],
+                    "reason": "Different root causes.",
+                },
+            ),
+        )
+    if mixed_neighbor:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "remote",
+                "set-url",
+                "origin",
+                "https://example.test/changed.git",
+            ],
+            check=True,
+        )
+    elif replacement:
+        replace_history_repository(repository, "https://example.test/replacement.git")
+    current = [scan("control-a", "src/current.py"), scan("control-b", "src/current.py")]
+    direct = compare_scan_pair(state_dir, old[0], current[0], check=False)
+    assert (direct["returncode"] == 0) == (not replacement and not mixed_neighbor)
+    if mixed_neighbor:
+        assert compare_scan_pair(state_dir, old[1], current[1], check=False)["returncode"] == 0
+    compared = compare_scan_pair(state_dir, *current)
+    expected = int(replacement or mixed_neighbor or not related)
+    assert compared["summary"]["persisting"] == expected
+    assert compared["summary"]["new"] == compared["summary"]["not_observed"] == 1 - expected
+
+
+@pytest.mark.parametrize("replacement", [True, False])
+def test_finding_history_scopes_transitive_aliases_to_repository_identity(
+    git_finding_history, replacement: bool
+) -> None:
+    state_dir, repository, scan = git_finding_history
+    old = [scan("control-a", "src/old-a.py"), scan("control-bridge", "src/old-x.py")]
+    old_findings = [get_scan(state_dir, item["scanId"])["scan"]["findings"][0] for item in old]
+    save_scan_matches(
+        state_dir,
+        *old,
+        confirmed_match(old_findings[0]["occurrenceId"], old_findings[1]["occurrenceId"]),
+    )
+    if replacement:
+        replace_history_repository(repository, "https://example.test/replacement.git")
+    current = [
+        scan("control-a", "src/current-a.py"),
+        scan("control-bridge", "src/current-x.py"),
+        scan("control-b", "src/current-b.py"),
+    ]
+    findings = [get_scan(state_dir, item["scanId"])["scan"]["findings"][0] for item in current]
+    save_scan_matches(
+        state_dir,
+        current[1],
+        current[2],
+        confirmed_match(findings[1]["occurrenceId"], findings[2]["occurrenceId"]),
+    )
+    direct = compare_scan_pair(state_dir, old[0], current[0], check=False)
+    assert (direct["returncode"] == 0) == (not replacement)
+    compared = compare_scan_pair(state_dir, current[0], current[2], "--include-matching-inputs")
+    assert compared["summary"]["persisting"] == int(not replacement)
+    groups = compared["matchingInputs"]["knownFindingGroups"]
+    expected_findings = findings[1:] if replacement else findings
+    assert groups == [sorted(item["findingId"] for item in expected_findings)]
+    first = get_scan(state_dir, current[0]["scanId"])["scan"]["findings"][0]
+    bridge = get_scan(state_dir, current[1]["scanId"])["scan"]["findings"][0]
+    if replacement:
+        assert "matches" not in first
+        assert {item["scanId"] for item in bridge["matches"]} == {current[2]["scanId"]}
+    else:
+        assert current[2]["scanId"] in {item["scanId"] for item in first["matches"]}
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "different-origin",
+        "retained-directory",
+        "same-origin",
+        "remote-edit",
+        "recreated-subdirectory",
+    ],
+)
+def test_scan_comparison_checks_saved_identity_when_target_path_is_reused(
+    tmp_path: Path, change: str
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    target = repository
+    if change == "recreated-subdirectory":
+        target = repository / "selected"
+        (target / "src").mkdir(parents=True)
+        (target / "src" / "extract.py").write_text("destination.write_bytes(entry.read())\n")
+        subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(repository), "commit", "-qm", "Add nested target fixture"],
+            check=True,
+        )
+        revision = subprocess.check_output(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+        ).strip()
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/first.git",
+        ],
+        check=True,
+    )
+    before = create_cli_scan(
+        state_dir, tmp_path / "before-results", target, target_revision=revision
+    )
+    git_inode = (repository / ".git").stat().st_ino
+    if change == "recreated-subdirectory":
+        saved_target = tmp_path / "saved-target"
+        target.rename(saved_target)
+        shutil.copytree(saved_target, target)
+    elif change != "remote-edit":
+        saved_repository = tmp_path / "saved-repository"
+        if change == "retained-directory":
+            saved_repository.mkdir()
+            for child in repository.iterdir():
+                child.rename(saved_repository / child.name)
+        else:
+            repository.rename(saved_repository)
+        subprocess.run(["git", "clone", "-q", str(saved_repository), str(repository)], check=True)
+    origin = "first" if change == "same-origin" else "second"
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "remote",
+            "set-url",
+            "origin",
+            f"git@github.com:example/{origin}",
+        ],
+        check=True,
+    )
+    after = create_cli_scan(
+        state_dir,
+        tmp_path / "after-results",
+        target,
+        target_revision=revision,
+        identity_anchor="replacement-repository-control",
+    )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        saved = [
+            connection.execute("SELECT * FROM scans WHERE id = ?", (scan["scanId"],)).fetchone()
+            for scan in (before, after)
+        ]
+    for field in (
+        "target_id",
+        "target_path",
+        "target_revision",
+        "target_snapshot_digest",
+        "target_git_prefix",
+    ):
+        assert saved[0][field] == saved[1][field]
+    identities = [json.loads(scan["target_git_identity_json"]) for scan in saved]
+    assert identities[0]["commonDirectory"] == identities[1]["commonDirectory"]
+    assert (identities[0]["origin"] == identities[1]["origin"]) == (change == "same-origin")
+    assert (saved[0]["target_inode"] == saved[1]["target_inode"]) == (
+        change in {"remote-edit", "retained-directory"}
+    )
+    assert ((repository / ".git").stat().st_ino == git_inode) == (
+        change in {"remote-edit", "recreated-subdirectory"}
+    )
+
+    if change in {"different-origin", "retained-directory"}:
+        compared = compare_scan_pair(state_dir, before, after, check=False)
+        assert compared["returncode"] != 0, compared
+        assert "same repository target" in compared["stderr"]
+    else:
+        compared = compare_scan_pair(state_dir, before, after)
+        assert compared["summary"]["persisting"] == 1
+
+
+def test_scan_comparison_keeps_distinct_repositories_after_target_replacement(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+    before_repository = tmp_path / "before"
+    after_repository = tmp_path / "after"
+    revision = initialize_git_repository(before_repository)
+    subprocess.run(
+        ["git", "clone", "-q", str(before_repository), str(after_repository)], check=True
+    )
+    subprocess.run(["git", "-C", str(after_repository), "remote", "remove", "origin"], check=True)
+    for repository, origin in (
+        (before_repository, "https://github.com/example/first.git"),
+        (after_repository, "https://github.com/example/second.git"),
+    ):
+        subprocess.run(
+            ["git", "-C", str(repository), "remote", "add", "origin", origin], check=True
+        )
+    before = create_cli_scan(
+        state_dir, tmp_path / "before-results", before_repository, target_revision=revision
+    )
+    after = create_cli_scan(
+        state_dir,
+        tmp_path / "after-results",
+        after_repository,
+        target_revision=revision,
+        identity_anchor="separate-repository-control",
+    )
+    rejected = compare_scan_pair(state_dir, before, after, check=False)
+    assert rejected["returncode"] != 0
+    assert "same repository target" in rejected["stderr"]
+
+    before_repository.rename(tmp_path / "before-saved")
+    if os.name == "nt":
+        subprocess.run(
+            f'cmd /d /s /c "mklink /J "{before_repository}" "{after_repository}""',
+            check=True,
+        )
+    else:
+        before_repository.symlink_to(after_repository, target_is_directory=True)
+    rejected = compare_scan_pair(state_dir, before, after, check=False)
+    assert rejected["returncode"] != 0
+    assert "same repository target" in rejected["stderr"]
+
+
+@pytest.mark.parametrize("checkout_kind", ["worktree", "clone"])
+def test_scan_comparison_keeps_saved_repository_identity(
+    tmp_path: Path, checkout_kind: str
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    other = tmp_path / "other"
+    revision = initialize_git_repository(repository)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/shared.git",
+        ],
+        check=True,
+    )
+    if checkout_kind == "worktree":
+        subprocess.run(
+            ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(other)],
+            check=True,
+        )
+    else:
+        subprocess.run(["git", "clone", "-q", str(repository), str(other)], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(other),
+                "remote",
+                "set-url",
+                "origin",
+                "git@github.com:example/shared",
+            ],
+            check=True,
+        )
+    before = create_cli_scan(
+        state_dir, tmp_path / "before-results", repository, target_revision=revision
+    )
+    after = create_cli_scan(
+        state_dir,
+        tmp_path / "after-results",
+        other,
+        target_revision=revision,
+        identity_anchor="corresponding-repository-control",
+    )
+    assert compare_scan_pair(state_dir, before, after)["summary"]["persisting"] == 1
+
+    repository.rename(tmp_path / "repository-saved")
+    initialize_git_repository(repository)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/unrelated.git",
+        ],
+        check=True,
+    )
+    compared = compare_scan_pair(state_dir, before, after)
+    assert compared["summary"]["persisting"] == 1
+    assert compared["summary"]["new"] == compared["summary"]["not_observed"] == 0
+
+
+@pytest.mark.parametrize("legacy_identity", ["missing-snapshot", "missing-directory-identity"])
+def test_legacy_git_identity_preserves_saved_matches_without_inference(
+    tmp_path: Path, legacy_identity: str
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    before = create_cli_scan(
+        state_dir, tmp_path / "before-results", repository, target_revision=revision
+    )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        if legacy_identity == "missing-snapshot":
+            connection.execute("ALTER TABLE scans DROP COLUMN target_git_identity_json")
+            connection.execute(
+                "DELETE FROM schema_migrations WHERE name = 'save scan Git repository identities'"
+            )
+        else:
+            identity = json.loads(
+                connection.execute(
+                    "SELECT target_git_identity_json FROM scans WHERE id = ?", (before["scanId"],)
+                ).fetchone()[0]
+            )
+            identity.pop("commonDirectoryIdentity")
+            connection.execute(
+                "UPDATE scans SET target_git_identity_json = ? WHERE id = ?",
+                (json.dumps(identity), before["scanId"]),
+            )
+    after = create_cli_scan(
+        state_dir,
+        tmp_path / "after-results",
+        repository,
+        target_revision=revision,
+        identity_anchor="legacy-repository-control",
+    )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        old_identity = connection.execute(
+            "SELECT target_git_identity_json FROM scans WHERE id = ?", (before["scanId"],)
+        ).fetchone()[0]
+        if legacy_identity == "missing-snapshot":
+            assert old_identity is None
+        else:
+            assert "commonDirectoryIdentity" not in json.loads(old_identity)
+        saved_identity = connection.execute(
+            "SELECT target_git_identity_json FROM scans WHERE id = ?", (after["scanId"],)
+        ).fetchone()[0]
+        assert json.loads(saved_identity)["commonDirectory"] == str(repository / ".git")
+        assert json.loads(saved_identity)["commonDirectoryIdentity"] is not None
+    compared = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")
+    assert compared["summary"]["persisting"] == 0
+    assert compared["summary"]["new"] == compared["summary"]["not_observed"] == 1
+    saved = save_scan_matches(
+        state_dir,
+        before,
+        after,
+        confirmed_match(
+            compared["matchingInputs"]["before"][0]["occurrenceId"],
+            compared["matchingInputs"]["after"][0]["occurrenceId"],
+        ),
+    )
+    assert saved["summary"]["persisting"] == 1
+    assert get_scan(state_dir, before["scanId"])["scan"]["scanId"] == before["scanId"]
+
+
+@pytest.mark.parametrize("checkout_kind", ["same", "worktree", "clone"])
+def test_equivalent_locations_require_same_git_target_prefix(
+    tmp_path: Path, checkout_kind: str
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    initialize_git_repository(repository)
+    for name in ("first", "second"):
+        source = repository / name / "src"
+        source.mkdir(parents=True)
+        (source / "extract.py").write_text("destination.write_bytes(entry.read())\n")
+    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "-qm", "Add target fixtures"], check=True
+    )
+    revision = subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+    ).strip()
+    other = repository
+    if checkout_kind != "same":
+        other = tmp_path / "other-checkout"
+        if checkout_kind == "worktree":
+            subprocess.run(
+                ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(other)],
+                check=True,
+            )
+        else:
+            subprocess.run(["git", "clone", "-q", str(repository), str(other)], check=True)
+            for checkout in (repository, other):
+                subprocess.run(
+                    ["git", "-C", str(checkout), "remote", "remove", "origin"],
+                    check=False,
+                    capture_output=True,
+                )
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(checkout),
+                        "remote",
+                        "add",
+                        "origin",
+                        "https://github.com/example/project.git",
+                    ],
+                    check=True,
+                )
+    before = create_cli_scan(
+        state_dir, tmp_path / "before-results", repository / "first", target_revision=revision
+    )
+    after = create_cli_scan(
+        state_dir,
+        tmp_path / "after-results",
+        other / "second",
+        target_revision=revision,
+        identity_anchor="other-control",
+    )
+    compared = compare_scan_pair(state_dir, before, after)
+    assert compared["summary"]["persisting"] == 0
+    assert compared["summary"]["new"] == compared["summary"]["not_observed"] == 1
+    corresponding = create_cli_scan(
+        state_dir,
+        tmp_path / "corresponding-results",
+        other / "first",
+        target_revision=revision,
+        identity_anchor="renamed-control",
+    )
+    compared = compare_scan_pair(state_dir, before, corresponding)
+    assert compared["summary"]["persisting"] == 1
+    assert compared["summary"]["new"] == compared["summary"]["not_observed"] == 0
+
+    # Saved positions must not change when a former target becomes a directory link.
+    original_target = repository / "first"
+    original_target.rename(repository / "first-saved")
+    if os.name == "nt":
+        subprocess.run(
+            f'cmd /d /s /c "mklink /J "{original_target}" "{repository / "second"}""',
+            check=True,
+        )
+    else:
+        original_target.symlink_to(repository / "second", target_is_directory=True)
+    compared = compare_scan_pair(state_dir, before, after)
+    assert compared["summary"]["persisting"] == 0
+    assert compared["summary"]["new"] == compared["summary"]["not_observed"] == 1
+    assert compare_scan_pair(state_dir, before, corresponding)["summary"]["persisting"] == 1
+
+    if checkout_kind == "same":
+        # Legacy rows cannot reconstruct a trustworthy scan-time position.
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            connection.execute("UPDATE scans SET target_git_prefix = NULL")
+        compared = compare_scan_pair(state_dir, before, corresponding, "--include-matching-inputs")
+        assert compared["summary"]["persisting"] == 0
+        saved = save_scan_matches(
+            state_dir,
+            before,
+            corresponding,
+            confirmed_match(
+                compared["matchingInputs"]["before"][0]["occurrenceId"],
+                compared["matchingInputs"]["after"][0]["occurrenceId"],
+            ),
+        )
+        assert saved["summary"]["persisting"] == 1
+
+
 def test_semantic_scan_comparison_accepts_matching_git_origins(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     before_repository = tmp_path / "before"
@@ -1792,6 +2816,9 @@ def test_semantic_scan_comparison_accepts_matching_git_origins(tmp_path: Path) -
     after = create_cli_scan(
         state_dir, tmp_path / "after-results", after_repository, target_revision=after_revision
     )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        for (identity_json,) in connection.execute("SELECT target_git_identity_json FROM scans"):
+            assert json.loads(identity_json)["origin"] == ["github.com", "example/project"]
     for target in (before_repository, after_repository):
         pending = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(target))
         assert pending["scanCount"] == 2

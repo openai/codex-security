@@ -87,6 +87,7 @@ export interface ScanMatchingBatch {
   afterFindings: readonly Finding[];
   beforeScans: { scanId: string; findings: readonly Finding[] }[];
   knownFindingGroups?: readonly (readonly string[])[];
+  excludedScanIds?: readonly string[];
 }
 
 export interface ScanComparisonProgress {
@@ -953,13 +954,14 @@ export function comparisonForScan(
   };
 }
 
+export function findingIdsByOccurrence(input: ScanComparisonInput) {
+  return new Map([...input.before, ...input.after].flatMap(findingIdEntry));
+}
+
 export function comparisonFindingGroups(
-  input: ScanComparisonInput,
+  findingIds: ReadonlyMap<string, string>,
   comparison: ScanComparisonResult,
 ): string[][] {
-  const findingIds = new Map(
-    [...input.before, ...input.after].flatMap(findingIdEntry),
-  );
   return comparison.matches.flatMap((match) => {
     const ids = [
       ...new Set(

@@ -32,6 +32,7 @@ from workbench_test_support import (
     saved_discovery_worker,
     saved_draft,
     scan_command,
+    set_fixture_mtime,
     upsert_deep_worker,
     worker_paths,
     workspace_command,
@@ -168,8 +169,8 @@ def test_stopped_model_selection_survives_publication_retry(
     else:
         result_path.write_text("{incomplete")
     if head_available and result_state == "complete":
-        os.utime(result_path, ns=(1_000_000_000, 1_000_000_000))
-        os.utime(head_path, ns=(2_000_000_000, 2_000_000_000))
+        set_fixture_mtime(result_path, 100)
+        set_fixture_mtime(head_path, 200)
     expected_model = {**json.loads(selected.read_text())["threatModel"], "origin": "recovered"}
 
     wrapper = tmp_path / "fail_model_publication.py"
@@ -280,7 +281,7 @@ def test_scan_reads_require_explicit_late_result_recovery(tmp_path: Path) -> Non
         result_path.parent / "attempts" / "attempt-01" / "checkpoints", late
     )
     manifest_path = scan_dir / "scan-manifest.json"
-    published_after_checkpoint = late_path.stat().st_mtime_ns + 1_000_000
+    published_after_checkpoint = late_path.stat().st_mtime_ns + 4_000_000_000
     os.utime(manifest_path, ns=(published_after_checkpoint, published_after_checkpoint))
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         workspace_id = connection.execute(
@@ -1378,8 +1379,8 @@ def test_stopped_rejection_recovers_malformed_parent_surfaces(
         )
         head = scan_dir / "checkpoint-head.json"
         head.write_text(json.dumps({"checkpoint": parent_checkpoint.name}))
-        os.utime(head, ns=(200, 200))
-        os.utime(scan_dir / "coverage.json", ns=(200, 200))
+        set_fixture_mtime(head, 200)
+        set_fixture_mtime(scan_dir / "coverage.json", 200)
     current = json.loads(result_path.read_text())
     checkpoint = copy.deepcopy(current)
     checkpoint["complete"] = False
@@ -1495,7 +1496,7 @@ def test_stopped_findings_cannot_enter_remediation(tmp_path: Path) -> None:
 @pytest.mark.parametrize("explicit_complete", [True, False], ids=["explicit", "default"])
 @pytest.mark.parametrize(
     "head_time",
-    [3_000_000_000, 2_000_000_000, 1_000_000_000],
+    [300, 200, 100],
     ids=["newer-head", "tied-head", "newer-result"],
 )
 def test_complete_worker_model_uses_latest_terminal_source(
@@ -1513,9 +1514,9 @@ def test_complete_worker_model_uses_latest_terminal_source(
     head_path.write_text(json.dumps({"checkpoint": head.name}))
     # Timestamp ordering represents an interruption between head and result publication,
     # or a successfully replaced result whose older head remains available.
-    os.utime(result_path, ns=(2_000_000_000, 2_000_000_000))
-    newer_head = head_time >= 2_000_000_000
-    os.utime(head_path, ns=(head_time, head_time))
+    set_fixture_mtime(result_path, 200)
+    newer_head = head_time >= 200
+    set_fixture_mtime(head_path, head_time)
 
     scan_command(
         state_dir,
@@ -1568,8 +1569,8 @@ def test_complete_worker_supersedes_obsolete_checkpoint_coverage(tmp_path: Path)
 
     # This accepted checkpoint predates the successful result; a newer head reopens work.
     for path in (head, result_path.parent / "checkpoint-head.json"):
-        os.utime(path, ns=(100, 100))
-    os.utime(result_path, ns=(200, 200))
+        set_fixture_mtime(path, 100)
+    set_fixture_mtime(result_path, 200)
 
     fail_deep_scan(state_dir, codex_home, scan_id, message="Stopped after the worker completed.")
 
@@ -1611,8 +1612,8 @@ def test_complete_partial_parent_supersedes_obsolete_checkpoint_questions(
         },
     )
 
-    os.utime(checkpoint, (1, 1))
-    os.utime(coverage_path, (2, 2))
+    set_fixture_mtime(checkpoint, 100)
+    set_fixture_mtime(coverage_path, 200)
 
     fail_deep_scan(
         state_dir, codex_home, scan_id, message="Stopped after the final partial parent draft."
@@ -2333,9 +2334,9 @@ def test_recovery_retains_generic_closures_without_a_canonical_write(
             "deferred": [{**pending_closeout, "id": closure["id"]}, unresolved, candidate],
         }
         (scan_dir / "coverage.json").write_text(json.dumps(canonical_coverage))
-        os.utime(scan_dir / "coverage.json", ns=(100, 100))
+        set_fixture_mtime(scan_dir / "coverage.json", 100)
     original = write_checkpoint(scan_dir / "checkpoints", initial)
-    os.utime(original, ns=(100, 100))
+    set_fixture_mtime(original, 100)
     original_bytes = original.read_bytes()
     terminal = write_checkpoint(
         scan_dir / "checkpoints",
@@ -2349,9 +2350,9 @@ def test_recovery_retains_generic_closures_without_a_canonical_write(
             },
         },
     )
-    os.utime(terminal, ns=(200, 200))
+    set_fixture_mtime(terminal, 200)
     if canonical_state == "reopened":
-        os.utime(scan_dir / "coverage.json", ns=(300, 300))
+        set_fixture_mtime(scan_dir / "coverage.json", 300)
     if canonical_state == "checkpoint_reopened":
         # A matching checkpoint can be a newer observation of reopened work.
         # Recovery must preserve its existing time when snapshotting the parent.
@@ -2362,7 +2363,7 @@ def test_recovery_retains_generic_closures_without_a_canonical_write(
             scan_dir / "checkpoints" / f"{hashlib.sha256(payload).hexdigest()}.json"
         )
         existing_checkpoint.write_bytes(payload)
-        os.utime(existing_checkpoint, ns=(300, 300))
+        existing_checkpoint_time = set_fixture_mtime(existing_checkpoint, 300)
     binding = saved_binding()
     result = workbench_saved_results.merge_saved_results(
         scan_dir, scan_id, binding, [], [], stopped=True, reason="interrupted"
@@ -2379,7 +2380,7 @@ def test_recovery_retains_generic_closures_without_a_canonical_write(
 
     assert original.read_bytes() == original_bytes
     if canonical_state == "checkpoint_reopened":
-        assert existing_checkpoint.stat().st_mtime_ns == 300
+        assert existing_checkpoint.stat().st_mtime_ns == existing_checkpoint_time
     if canonical_state == "terminal":
         # Publication can fail after snapshotting the old canonical state. A later
         # recovery may have only that frozen checkpoint set left to work with.
@@ -2418,7 +2419,7 @@ def test_recovered_generic_closure_cannot_close_another_workers_same_id(
             scan_id, deferred=[{"id": "shared-review", "reason": f"Pending in {worker_id}."}]
         )
         pending = write_checkpoint(output / "checkpoints", draft)
-        os.utime(pending, ns=(100, 100))
+        set_fixture_mtime(pending, 100)
         if worker_id == "worker-one":
             # Recover the accepted final checkpoint after an interrupted result write.
             terminal = write_checkpoint(
@@ -2435,7 +2436,7 @@ def test_recovered_generic_closure_cannot_close_another_workers_same_id(
                     },
                 },
             )
-            os.utime(terminal, ns=(closure_time, closure_time))
+            set_fixture_mtime(terminal, closure_time)
         else:
             (output / "result.json").write_text(json.dumps(draft))
     binding = saved_binding("deep_repository")
@@ -2485,7 +2486,7 @@ def test_recovery_keeps_latest_generic_closure_reason(tmp_path: Path, canonical_
     )
     (scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
     (scan_dir / "coverage.json").write_text(json.dumps(coverage))
-    os.utime(scan_dir / "coverage.json", ns=(canonical_time, canonical_time))
+    set_fixture_mtime(scan_dir / "coverage.json", canonical_time)
     previous = write_checkpoint(
         scan_dir / "checkpoints",
         {
@@ -2498,7 +2499,7 @@ def test_recovery_keeps_latest_generic_closure_reason(tmp_path: Path, canonical_
             },
         },
     )
-    os.utime(previous, ns=(200, 200))
+    set_fixture_mtime(previous, 200)
     binding = saved_binding()
     result = workbench_saved_results.merge_saved_results(
         scan_dir, scan_id, binding, [], [], stopped=True, reason="interrupted"
@@ -2527,7 +2528,7 @@ def test_recovery_rejects_closures_that_would_discard_saved_evidence(
     coverage = saved_coverage(deferred=[pending])
     draft = {"scanId": scan_id, "complete": False, "findings": [], "coverage": coverage}
     original = write_checkpoint(scan_dir / "checkpoints", draft)
-    os.utime(original, ns=(100, 100))
+    set_fixture_mtime(original, 100)
     original_bytes = original.read_bytes()
     closure = {"id": pending["id"], "reason": "Review closed."}
     closures = [closure]
@@ -2549,7 +2550,7 @@ def test_recovery_rejects_closures_that_would_discard_saved_evidence(
             },
         },
     )
-    os.utime(terminal, ns=(200, 200))
+    set_fixture_mtime(terminal, 200)
     binding = {
         "scanId": scan_id,
         "startedAt": "2026-01-01T00:00:00Z",
@@ -2604,7 +2605,7 @@ def test_recovery_restores_work_reopened_after_parent_closure(
     (scan_dir / "scan-manifest.json").write_text(json.dumps({"scan": {"complete": True}}))
     (scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
     (scan_dir / "coverage.json").write_text(json.dumps(coverage))
-    os.utime(scan_dir / "coverage.json", ns=(100, 100))
+    set_fixture_mtime(scan_dir / "coverage.json", 100)
     pending = {"id": closure["id"], "reason": "New source evidence needs review."}
     reopened = write_checkpoint(
         scan_dir / "checkpoints",
@@ -2619,7 +2620,7 @@ def test_recovery_restores_work_reopened_after_parent_closure(
             },
         },
     )
-    os.utime(reopened, ns=(200, 200))
+    set_fixture_mtime(reopened, 200)
     binding = saved_binding()
     documents = workbench_saved_results.merge_saved_results(
         scan_dir, scan_id, binding, [], [], stopped=True, reason="interrupted"
@@ -2662,14 +2663,14 @@ def test_recovery_uses_frozen_worker_head_for_identical_reclosure(
             },
         },
     )
-    os.utime(closed, ns=(100, 100))
+    closed_time = set_fixture_mtime(closed, 100)
     reopened = write_checkpoint(attempt / "checkpoints", draft)
-    os.utime(reopened, ns=(200, 200))
+    set_fixture_mtime(reopened, 200)
     (attempt / "result.json").write_text(json.dumps(draft))
-    os.utime(attempt / "result.json", ns=(200, 200))
+    set_fixture_mtime(attempt / "result.json", 200)
     head = attempt / "checkpoint-head.json"
     head.write_text(json.dumps({"checkpoint": closed.name}))
-    os.utime(head, ns=(300, 300))
+    set_fixture_mtime(head, 300)
     if layout != "current":
         current = (
             draft
@@ -2677,7 +2678,7 @@ def test_recovery_uses_frozen_worker_head_for_identical_reclosure(
             else {**draft, "coverage": {**coverage, "deferred": []}}
         )
         (output / "result.json").write_text(json.dumps(current))
-        os.utime(output / "result.json", ns=(300, 300))
+        set_fixture_mtime(output / "result.json", 300)
     workers = [saved_discovery_worker(output, "worker-one", 1 if layout == "current" else 2)]
     if layout == "legacy_attempt_reopens":
         workers[0]["attempt"] = 0
@@ -2689,7 +2690,7 @@ def test_recovery_uses_frozen_worker_head_for_identical_reclosure(
     assert (pending in documents[2]["deferred"]) is layout.endswith("attempt_reopens")
     frozen = documents[0]["scan"]["preservedSources"]
     head_path = next(path for path in frozen if "/checkpoint-heads/" in path)
-    assert closed.stat().st_mtime_ns == 100
+    assert closed.stat().st_mtime_ns == closed_time
     replay = workbench_saved_results.merge_saved_results(
         scan_dir,
         scan_id,
@@ -2704,7 +2705,7 @@ def test_recovery_uses_frozen_worker_head_for_identical_reclosure(
     assert replay[2] == documents[2]
     for checkpoint in (reopened, closed):
         head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-        os.utime(head, ns=(400, 400))
+        set_fixture_mtime(head, 400)
         replay = workbench_saved_results.merge_saved_results(
             scan_dir,
             scan_id,
@@ -2752,12 +2753,12 @@ def test_recovery_keeps_worker_pending_saved_before_head_update(
     }
     draft = {"scanId": scan_id, "complete": True, "findings": [], "coverage": coverage}
     closed = write_checkpoint(output / "checkpoints", draft)
-    os.utime(closed, ns=(100, 100))
+    set_fixture_mtime(closed, 100)
     (output / "result.json").write_text(json.dumps(draft))
-    os.utime(output / "result.json", ns=(200, 200))
+    set_fixture_mtime(output / "result.json", 200)
     head = output / "checkpoint-head.json"
     head.write_text(json.dumps({"checkpoint": closed.name}))
-    os.utime(head, ns=(200, 200))
+    set_fixture_mtime(head, 200)
     pending = {"id": "review-closeout", "reason": "New evidence needs review."}
     reopened = write_checkpoint(
         output / "checkpoints",
@@ -2770,7 +2771,7 @@ def test_recovery_keeps_worker_pending_saved_before_head_update(
             },
         },
     )
-    os.utime(reopened, ns=(pending_modified, pending_modified))
+    set_fixture_mtime(reopened, pending_modified)
     workers = [saved_discovery_worker(output, "worker-one", 1)]
     binding = saved_binding("deep_repository")
     documents = workbench_saved_results.merge_saved_results(
@@ -2818,7 +2819,7 @@ def write_saved_parent(scan_dir: Path, draft: dict, modified: int) -> None:
     )
     (scan_dir / "findings.json").write_text(json.dumps({"findings": draft["findings"]}))
     (scan_dir / "coverage.json").write_text(json.dumps(draft["coverage"]))
-    os.utime(scan_dir / "coverage.json", ns=(modified, modified))
+    set_fixture_mtime(scan_dir / "coverage.json", modified)
 
 
 @pytest.mark.parametrize("reopened", [False, True])
@@ -2832,9 +2833,9 @@ def test_frozen_parent_retains_identical_latest_observation(
     original = tmp_path / "checkpoints" / f"{hashlib.sha256(payload).hexdigest()}.json"
     original.parent.mkdir()
     original.write_bytes(payload)
-    os.utime(original, ns=(100, 100))
+    original_time = set_fixture_mtime(original, 100)
     checkpoint = write_checkpoint(original.parent, middle)
-    os.utime(checkpoint, ns=(200, 200))
+    set_fixture_mtime(checkpoint, 200)
     write_saved_parent(tmp_path, latest, 300)
     first = module.merge_saved_results(
         tmp_path, pending["scanId"], binding, [], [], stopped=True, reason="interrupted"
@@ -2850,7 +2851,7 @@ def test_frozen_parent_retains_identical_latest_observation(
     assert (pending["coverage"]["deferred"][0] in replay[2]["deferred"]) is reopened
     assert replay[2].get("resolvedDeferred", []) == first[2].get("resolvedDeferred", [])
     assert original.read_bytes() == payload
-    assert original.stat().st_mtime_ns == 100
+    assert original.stat().st_mtime_ns == original_time
 
 
 @pytest.mark.parametrize(
@@ -2899,18 +2900,18 @@ def test_recovery_applies_surface_update_with_generic_closure(
     workers = []
     if layout.startswith("worker"):
         (output / "result.json").write_text(json.dumps(pending))
-        os.utime(output / "result.json", ns=(100, 100))
+        set_fixture_mtime(output / "result.json", 100)
         workers = [saved_discovery_worker(output, "worker", 1)]
     else:
         pending["complete"] = layout in {"terminal_parent", "reopened_parent"}
         write_saved_parent(tmp_path, pending, 100)
     checkpoint = write_checkpoint(output / "checkpoints", pending)
-    os.utime(checkpoint, ns=(100, 100))
+    set_fixture_mtime(checkpoint, 100)
     terminal_draft = copy.deepcopy(closed)
     if layout == "mixed_manifest":
         terminal_draft["coverage"]["surfaces"][0].pop("receiptRefs")
     terminal = write_checkpoint(output / "checkpoints", terminal_draft)
-    os.utime(terminal, ns=(200, 200))
+    set_fixture_mtime(terminal, 200)
     if layout == "worker_idless_other_surface":
         other = copy.deepcopy(pending)
         other["coverage"]["surfaces"] = [
@@ -2919,7 +2920,7 @@ def test_recovery_applies_surface_update_with_generic_closure(
         remaining = {"id": "other-review", "reason": "Independent review remains."}
         other["coverage"]["deferred"] = [remaining]
         checkpoint = write_checkpoint(output / "checkpoints", other)
-        os.utime(checkpoint, ns=(300, 300))
+        set_fixture_mtime(checkpoint, 300)
     if layout == "mixed_manifest":
         canonical = {**closed, "complete": False}
         write_saved_parent(tmp_path, canonical, 300)
@@ -2966,7 +2967,7 @@ def test_reopened_candidate_respects_current_outcome(
         candidate["id"] = "pending-review"
     for draft, modified in ((closed, 100), (pending, 200)):
         checkpoint = write_checkpoint(tmp_path / "checkpoints", draft)
-        os.utime(checkpoint, ns=(modified, modified))
+        set_fixture_mtime(checkpoint, modified)
     terminal = copy.deepcopy(closed)
     terminal["coverage"].pop("resolvedDeferred")
     terminal["coverage"]["surfaces"] = [
@@ -3046,12 +3047,12 @@ def test_worker_closure_preserves_ambiguous_legacy_surface_ids(
     result_path.write_text(json.dumps(pending))
     original = write_checkpoint(output / "checkpoints", pending)
     for path in (result_path, original):
-        os.utime(path, ns=(100, 100))
+        set_fixture_mtime(path, 100)
     terminal = write_checkpoint(output / "checkpoints", closed)
-    os.utime(terminal, ns=(200, 200))
+    set_fixture_mtime(terminal, 200)
     head = output / "checkpoint-head.json"
     head.write_text(json.dumps({"checkpoint": terminal.name}))
-    os.utime(head, ns=(200, 200))
+    set_fixture_mtime(head, 200)
     original_bytes = {path: path.read_bytes() for path in (result_path, original, terminal, head)}
     workers = [saved_discovery_worker(output, "worker", 1)]
 
@@ -3084,10 +3085,10 @@ def test_parent_closure_cannot_discard_reopened_worker_same_id(
     output = tmp_path / "worker"
     output.mkdir()
     (output / "result.json").write_text(json.dumps(closed))
-    os.utime(output / "result.json", ns=(100, 100))
+    set_fixture_mtime(output / "result.json", 100)
     for draft, modified in ((closed, 100), (pending, 200)):
         checkpoint = write_checkpoint(output / "checkpoints", draft)
-        os.utime(checkpoint, ns=(modified, modified))
+        set_fixture_mtime(checkpoint, modified)
     workers = [saved_discovery_worker(output, "worker", 1)]
     first = module.merge_saved_results(
         tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
@@ -3102,14 +3103,14 @@ def test_parent_head_preserves_newer_and_frozen_observations(
 ) -> None:
     module, pending, closed, binding = generic_review_recovery
     closed_checkpoint = write_checkpoint(tmp_path / "checkpoints", closed)
-    os.utime(closed_checkpoint, ns=(100, 100))
+    set_fixture_mtime(closed_checkpoint, 100)
     pending_checkpoint = write_checkpoint(tmp_path / "checkpoints", pending)
-    os.utime(pending_checkpoint, ns=(300, 300))
+    set_fixture_mtime(pending_checkpoint, 300)
     head = tmp_path / "checkpoint-head.json"
     selected = pending_checkpoint if layout == "newer_head" else closed_checkpoint
     head.write_text(json.dumps({"checkpoint": selected.name}))
     head_time = 400 if layout == "newer_head" else 200
-    os.utime(head, ns=(head_time, head_time))
+    stored_head_time = set_fixture_mtime(head, head_time)
     original_head = head.read_bytes()
     write_saved_parent(tmp_path, closed, 350 if layout.startswith("legacy") else 100)
     frozen = None
@@ -3150,7 +3151,7 @@ def test_parent_head_preserves_newer_and_frozen_observations(
     assert (pending["coverage"]["deferred"][0] in replay[2]["deferred"]) is expected_pending
     if layout != "legacy_parent":
         assert head.read_bytes() == original_head
-        assert head.stat().st_mtime_ns == head_time
+        assert head.stat().st_mtime_ns == stored_head_time
 
 
 @pytest.mark.parametrize("later", ["shared_pending", "candidate", "ambiguous", "other_worker"])
@@ -3169,7 +3170,7 @@ def test_generic_surface_recovery_preserves_unresolved_evidence(
     closed["coverage"]["surfaces"] = [{**old_surface, "disposition": "no_issue_found"}]
     for draft, modified in ((pending, 100), (closed, 200)):
         checkpoint = write_checkpoint(tmp_path / "checkpoints", draft)
-        os.utime(checkpoint, ns=(modified, modified))
+        set_fixture_mtime(checkpoint, modified)
     latest = copy.deepcopy(closed)
     latest["coverage"]["surfaces"] = [old_surface]
     workers = []
@@ -3197,7 +3198,7 @@ def test_generic_surface_recovery_preserves_unresolved_evidence(
         workers = [saved_discovery_worker(output, "worker", 1)]
     if later != "other_worker":
         checkpoint = write_checkpoint(tmp_path / "checkpoints", latest)
-        os.utime(checkpoint, ns=(300, 300))
+        set_fixture_mtime(checkpoint, 300)
     result = module.merge_saved_results(
         tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
     )
@@ -3235,9 +3236,9 @@ def test_worker_head_candidate_outcome_respects_newer_pending(
     observations = [(closed, 100)] if prior_closure else []
     for draft, modified in [*observations, (pending, pending_time)]:
         checkpoint = write_checkpoint(output / "checkpoints", draft)
-        os.utime(checkpoint, ns=(modified, modified))
+        set_fixture_mtime(checkpoint, modified)
     (output / "result.json").write_text(json.dumps(pending))
-    os.utime(output / "result.json", ns=(200, 200))
+    set_fixture_mtime(output / "result.json", 200)
     terminal = copy.deepcopy(closed)
     terminal["coverage"].pop("resolvedDeferred")
     terminal["coverage"]["surfaces"] = [
@@ -3250,10 +3251,10 @@ def test_worker_head_candidate_outcome_respects_newer_pending(
         }
     ]
     selected = write_checkpoint(output / "checkpoints", terminal)
-    os.utime(selected, ns=(150, 150))
+    set_fixture_mtime(selected, 150)
     head = output / "checkpoint-head.json"
     head.write_text(json.dumps({"checkpoint": selected.name}))
-    os.utime(head, ns=(300, 300))
+    set_fixture_mtime(head, 300)
     workers = [saved_discovery_worker(output, "worker", 1)]
     first = module.merge_saved_results(
         tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
@@ -3278,7 +3279,7 @@ def test_frozen_parent_keeps_unrelated_candidate_outcome(
     }
     pending["coverage"]["deferred"].append(candidate)
     checkpoint = write_checkpoint(tmp_path / "checkpoints", pending)
-    os.utime(checkpoint, ns=(100, 100))
+    set_fixture_mtime(checkpoint, 100)
     closed["coverage"]["surfaces"] = [
         {
             "id": "candidate-outcome",
@@ -3321,12 +3322,12 @@ def test_equal_time_parent_and_head_preserve_pending_on_replay(
     old = tmp_path / "checkpoints" / f"{hashlib.sha256(payload).hexdigest()}.json"
     old.parent.mkdir()
     old.write_bytes(payload)
-    os.utime(old, ns=(100, 100))
+    old_time = set_fixture_mtime(old, 100)
     checkpoint = write_checkpoint(old.parent, previous)
-    os.utime(checkpoint, ns=(100, 100))
+    set_fixture_mtime(checkpoint, 100)
     head = tmp_path / "checkpoint-head.json"
     head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-    os.utime(head, ns=(200, 200))
+    set_fixture_mtime(head, 200)
     write_saved_parent(tmp_path, canonical, 200)
     first = module.merge_saved_results(
         tmp_path, pending["scanId"], binding, [], [], stopped=True, reason="interrupted"
@@ -3338,7 +3339,7 @@ def test_equal_time_parent_and_head_preserve_pending_on_replay(
     )
     assert replay is not None
     assert pending["coverage"]["deferred"][0] in replay[2]["deferred"]
-    assert old.stat().st_mtime_ns == 100
+    assert old.stat().st_mtime_ns == old_time
     assert other in first[2]["deferred"] and other in replay[2]["deferred"]
 
     assert not replay[2].get("resolvedDeferred")
@@ -3377,9 +3378,9 @@ def test_selected_candidate_outcome_keeps_its_evidence(
     observations = [(closed, 100)] if prior_closure else []
     for draft, modified in [*observations, (pending, 200)]:
         checkpoint = write_checkpoint(output / "checkpoints", draft)
-        os.utime(checkpoint, ns=(modified, modified))
+        set_fixture_mtime(checkpoint, modified)
     (output / "result.json").write_text(json.dumps(pending))
-    os.utime(output / "result.json", ns=(200, 200))
+    set_fixture_mtime(output / "result.json", 200)
     terminal = copy.deepcopy(closed)
     terminal["coverage"].pop("resolvedDeferred")
     rejection = {
@@ -3409,10 +3410,10 @@ def test_selected_candidate_outcome_keeps_its_evidence(
         other_finding["identity"]["anchor"] = "another-entry-point"
         terminal["findings"] = [finding, other_finding]
     selected = write_checkpoint(output / "checkpoints", terminal)
-    os.utime(selected, ns=(300, 300))
+    set_fixture_mtime(selected, 300)
     head = output / "checkpoint-head.json"
     head.write_text(json.dumps({"checkpoint": selected.name}))
-    os.utime(head, ns=(300, 300))
+    set_fixture_mtime(head, 300)
     workers = [saved_discovery_worker(output, "worker", 1)]
     if not stopped:
         parent = copy.deepcopy(closed)
@@ -3454,13 +3455,13 @@ def test_interrupted_worker_reopening_preserves_candidate_identity(
             {**candidate, "id": "other-pending-review", "reason": "Another caller remains."}
         )
     (output / "result.json").write_text(json.dumps(closed))
-    os.utime(output / "result.json", ns=(100, 100))
+    set_fixture_mtime(output / "result.json", 100)
     for draft, modified in ((closed, 100), (pending, 200)):
         checkpoint = write_checkpoint(output / "checkpoints", draft)
-        os.utime(checkpoint, ns=(modified, modified))
+        set_fixture_mtime(checkpoint, modified)
     head = output / "checkpoint-head.json"
     head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-    os.utime(head, ns=(200, 200))
+    set_fixture_mtime(head, 200)
     workers = [saved_discovery_worker(output, "worker", 1)]
     result = module.merge_saved_results(
         tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
