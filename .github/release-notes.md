@@ -9,6 +9,7 @@
 - publish a versioned Wolfi amd64 scanner ([#2091](https://github.com/openai/codex-security/pull/2091))
 - share scanner report file decoding ([#2113](https://github.com/openai/codex-security/pull/2113))
 - keep hosted path inventories outside captured scan output ([#2110](https://github.com/openai/codex-security/pull/2110))
+- bump the codex group across 3 directories with 2 updates ([#2107](https://github.com/openai/codex-security/pull/2107))
 
 <!-- release-section: highlights:end -->
 
