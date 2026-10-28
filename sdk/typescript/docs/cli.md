@@ -1007,8 +1007,9 @@ directory.
 
 ### Progress and cost
 
-Interactive scans show full-screen progress. CI, redirected output, `--headless`,
-and `--verbose` use plain status lines. Results go to stdout; progress and
+Interactive scans show full-screen progress. The dashboard title uses the resolved
+directory name, so `scan .` shows the current directory's name. CI, redirected output,
+`--headless`, and `--verbose` use plain status lines. Results go to stdout; progress and
 diagnostics go to stderr. Press `d` in the dashboard for details, then `a` for
 all sources, `m` for the main scan, or `1`–`9` for a worker.
 

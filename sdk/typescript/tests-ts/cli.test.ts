@@ -2654,6 +2654,34 @@ describe("CLI", () => {
     expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
   });
 
+  test.each([
+    [undefined, "repository"],
+    [".", "repository"],
+    ["./", "repository"],
+    ["..", "workspace"],
+    ["./child", "child"],
+    ["./child/.", "child"],
+    ["./child/..", "repository"],
+    ["~/example-project/.", "example-project"],
+  ] as const)(
+    "shows the resolved directory name in the scan title for %p",
+    async (repository, name) => {
+      const { stderr, runCli } = createCliTest(main, { stderr: true });
+      expect(
+        await runCli(
+          ["scan", ...(repository === undefined ? [] : [repository])],
+          dependencies({
+            currentDirectory: resolve("/workspace/repository"),
+            environment: { NO_COLOR: "1" },
+          }),
+        ),
+      ).toBe(0);
+      expect(stripVTControlCharacters(stderr.text())).toContain(
+        `CODEX SECURITY  ·  ${name}  ·  `,
+      );
+    },
+  );
+
   test("keeps terminal scans in one live dashboard", async () => {
     const { stderr, runCli } = createCliTest(main, { stderr: true });
 
