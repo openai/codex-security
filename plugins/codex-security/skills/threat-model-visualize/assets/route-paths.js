@@ -38,7 +38,7 @@
       if (!before) reachable.delete(owner);
     }
     // Keep occurrence state separate: another branch may use the same edge.
-    for (const branch of route.branches || []) branchStates.push({branch, active:false});
+    for (const branch of route.branches || []) branchStates.push({branch, active:false, reached:0});
     // A later-listed branch may reach an earlier branch's origin. Revisit active
     // branches when an independent path reaches a prerequisite node. Each pass
     // only adds reachability, so even cyclic paths converge.
@@ -57,22 +57,34 @@
           (reachable.has(start) || prerequisiteNodes.has(start)) &&
             (branch.afterStep === undefined || stopIndex < 0 || branch.afterStep < stop + 1);
         if (!active) continue;
-        if (!state.active) { state.active = true; changed = true; }
         // A dependency's reply remains visible without enabling the denied
         // owner's other work. Independent earlier paths may still reach it.
-        const dependency = prerequisite || (branch.beforeStep === undefined && !reachable.has(start));
-        const reached = dependency ? prerequisiteNodes : reachable;
+        let dependency = prerequisite || (branch.beforeStep === undefined && !reachable.has(start));
+        let reached = 0;
         for (const id of branch.edges) {
           const edge = edges.get(id);
+          // Only an explicit beforeStep chain may continue predecision work
+          // after returning to the owner. Otherwise stop at its denied arrival.
+          if (branch.beforeStep === undefined) {
+            if (edge.from === owner && !reachable.has(owner)) break;
+            if (reachable.has(edge.from)) dependency = false;
+          }
+          const nodes = dependency ? prerequisiteNodes : reachable;
           for (const node of [edge.from, edge.to]) {
-            if (!(dependency && node === owner) && !reached.has(node)) {
-              reached.add(node); changed = true;
+            if (!(dependency && node === owner) && !nodes.has(node)) {
+              nodes.add(node); changed = true;
             }
           }
+          reached += 1;
         }
+        if (reached > state.reached) { state.reached = reached; changed = true; }
+        state.active = state.reached === branch.edges.length;
       }
     }
-    for (const {branch, active} of branchStates) add(branch.edges, active);
+    for (const {branch, reached} of branchStates) {
+      add(branch.edges.slice(0, reached), true);
+      add(branch.edges.slice(reached), false);
+    }
     for (const id of activeNodes) unreachedNodes.delete(id);
     for (const id of activeEdges) unreachedEdges.delete(id);
     return {route, activeEdges, activeNodes, unreachedEdges, unreachedNodes, focusNodes, branchStates};

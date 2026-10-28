@@ -274,13 +274,14 @@ function branchEvidence(routing, scenario) {
   if (!routing?.branchStates.length) return '';
   const edges = new Map(M.edges.map(edge => [edge.id, edge]));
   const nodes = new Map(M.nodes.map(node => [node.id, node]));
-  return `<details class="branch-evidence"><summary>Branch evidence · ${routing.branchStates.length}</summary>${routing.branchStates.map(({branch, active}, index) => {
+  return `<details class="branch-evidence"><summary>Branch evidence · ${routing.branchStates.length}</summary>${routing.branchStates.map(({branch, active, reached}, index) => {
     const chain = branch.edges.map(id => edges.get(id));
     const path = [chain[0].from, ...chain.map(edge => edge.to)].map(id => nodes.get(id).title).join(' → ');
     const step = branch.beforeStep ?? branch.afterStep;
     const timing = step === undefined ? 'No occurrence order supplied.' :
       `${branch.beforeStep === undefined ? 'After successful' : 'Before'} step ${step}: ${scenario.steps[step - 1].title}.`;
-    return `<section data-route-branch="${index}" data-path-state="${active ? 'active' : 'unreached'}"><h3>${esc(path)}</h3><p>${active ? 'Active in this view.' : 'Not reached in this view.'} ${esc(timing)}</p>${refs(branch.evidence)}</section>`;
+    const reach = active ? 'Active in this view.' : reached ? `Partially reached in this view (${reached} of ${chain.length} connections).` : 'Not reached in this view.';
+    return `<section data-route-branch="${index}" data-path-state="${active ? 'active' : reached ? 'partial' : 'unreached'}"><h3>${esc(path)}</h3><p>${reach} ${esc(timing)}</p>${refs(branch.evidence)}</section>`;
   }).join('')}</details>`;
 }
 function renderTrace(s) {
@@ -297,7 +298,7 @@ function renderTrace(s) {
   }).join('')}</div>`;
   const stepText = state.step >= 0 ? `<div class="step-description">${state.step === stop ? esc(blocker.effect.reason) : esc(s.steps[state.step].description)}</div>` : '';
   const rating = (s.priority ? ' · ' + esc(s.priority) + ' review priority' : '') +
-    (s.severity && !s.status.toLowerCase().includes(s.severity.toLowerCase()) ? ' · ' + esc(s.severity) + ' severity' : '');
+    (s.severity ? ' · ' + esc(s.severity) + ' severity' : '');
   return `<span class="badge">${esc(s.status)}${rating}</span><h2 class="trace-title">${esc(s.title)}</h2>${tabs}${state.tab === 'controls' ? renderControls(s) : `${sourceContext(s)}${routing}<p>${applicableControls().some(c => c.effect?.outcome === 'blocks' && c.effect.traffic === 'continues') ? '<strong>Assessment context:</strong> ' : ''}${esc(s.summary)}</p>${blocker ? effectCard(blocker, true) : ''}${blocker && continuing.length ? '<p>A separate barrier may stop the flow before another effect occurs.</p>' : ''}${continuing.map(c => effectCard(c, true)).join('')}${steps}${stepText}${!s.steps.length ? `<p>${esc(s.pathNote || 'Affected components only; an ordered path is not established.')}</p>` : ''}`}${context}`;
 }
 function render() {

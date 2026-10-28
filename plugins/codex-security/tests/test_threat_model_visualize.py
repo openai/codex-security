@@ -276,7 +276,12 @@ class ControlValidation(unittest.TestCase):
                     target = inputs[input_name]
                     output = target if alias == "direct" else folder / "output.html"
                     if alias == "symlink":
-                        output.symlink_to(target)
+                        try:
+                            output.symlink_to(target)
+                        except OSError as error:
+                            self.skipTest(
+                                f"creating a symbolic link requires host support: {error}"
+                            )
                     elif alias == "hardlink":
                         output.hardlink_to(target)
                     result = subprocess.run(

@@ -125,6 +125,17 @@ test('branch evidence reports occurrence reach independently of shared edge high
  assert.match(trace,/data-route-branch="1" data-path-state="unreached"/);
  assert.match(trace,/data-evidence="early"/);
  assert.match(trace,/data-evidence="decision"/);
+ r.run(`M.scenarios[0].controls[0].effect.arrival=true;
+ M.edges.push({id:'reply',from:'c',to:'b',points:[[400,65],[300,65]],label:'Policy reply',labelX:350,labelY:80},
+  {id:'write',from:'b',to:'d',points:[[300,75],[600,75]],label:'Write',labelX:450,labelY:95});
+ M.scenarios[0].routes[0].branches=[{edges:['decision-auth'],beforeStep:1,evidence:['decision']},
+  {edges:['reply','write'],evidence:['decision']}];render();`);
+ assert.match(r.elements.get('trace').innerHTML,/data-route-branch="1" data-path-state="partial"/);
+ assert.match(r.elements.get('trace').innerHTML,/Partially reached in this view \(1 of 2 connections\)/);
+ for (const output of r.outputs()) {
+  assert.match(output,/data-edge="reply" data-path-state="active"/);
+  assert.match(output,/data-edge="write" data-path-state="unreached"/);
+ }
 });
 test('scenario selection retains primary architecture beneath the route and barrier, including SVG',()=>{
  const r=renderer();
@@ -485,4 +496,6 @@ test('review priority does not hide a supplied severity',()=>{
  trace=r.elements.get('trace').innerHTML;
  assert.match(trace,/critical severity/);
  assert.doesNotMatch(trace,/review priority/);
+ r.run("Object.assign(M.scenarios[0],{status:'High confidence hypothesis',severity:'high'});render()");
+ assert.match(r.elements.get('trace').innerHTML,/High confidence hypothesis · high severity/);
 });
