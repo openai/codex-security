@@ -12,6 +12,7 @@
 - bump the codex group across 3 directories with 2 updates ([#2107](https://github.com/openai/codex-security/pull/2107))
 - flag published documentation updates in pull requests ([#2093](https://github.com/openai/codex-security/pull/2093))
 - ingest GitHub Dependabot repository alerts ([#2096](https://github.com/openai/codex-security/pull/2096))
+- reject hosted receipts for changed sealed files ([#2105](https://github.com/openai/codex-security/pull/2105))
 
 <!-- release-section: highlights:end -->
 

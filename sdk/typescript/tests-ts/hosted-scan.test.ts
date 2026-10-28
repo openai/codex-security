@@ -1,8 +1,15 @@
 import { execFileSync, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { createHash } from "node:crypto";
+import { hash } from "node:crypto";
 import { PassThrough, Writable } from "node:stream";
-import { readFile, realpath, stat, symlink, unlink } from "node:fs/promises";
+import {
+  appendFile,
+  readFile,
+  realpath,
+  stat,
+  symlink,
+  unlink,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
@@ -151,7 +158,10 @@ async function fixture(
   };
 }
 
-async function writeDraft(request: ScanExecutionRequest) {
+async function writeDraft(
+  request: ScanExecutionRequest,
+  receiptRefs: string[] = [],
+) {
   const directory = request.runtime.outputDirectory;
   const reviewState = {
     inventoryStrategy:
@@ -161,7 +171,7 @@ async function writeDraft(request: ScanExecutionRequest) {
         id: "fixture",
         label: "Synthetic scope fixture",
         disposition: "no_issue_found",
-        receiptRefs: [],
+        receiptRefs,
         notes: "Synthetic test only.",
       },
     ],
@@ -185,6 +195,7 @@ async function writeDraft(request: ScanExecutionRequest) {
   };
   for (const [name, document] of Object.entries(documents))
     await writeJson(join(directory, name), document);
+  return reviewState;
 }
 
 function receipt(
@@ -379,9 +390,7 @@ test.each(sealedScopes)(
     if (normalized.length > 1) expect(report).not.toContain("service-c");
     for (const artifact of result.artifacts) {
       const data = await readFile(join(result.outputDirectory, artifact.path));
-      expect(artifact.sha256).toBe(
-        createHash("sha256").update(data).digest("hex"),
-      );
+      expect(artifact.sha256).toBe(hash("sha256", data));
       expect(artifact.bytes).toBe(data.byteLength);
     }
     const artifactPaths = result.artifacts.map((artifact) => artifact.path);
@@ -667,6 +676,81 @@ test("sealed review with follow-up diagnostics remains completed", async () => {
   expect(result.artifacts.map((artifact) => artifact.path)).not.toContain(
     "coverage.json",
   );
+});
+
+test.each(["scan-manifest.json", "findings.json", "artifacts/evidence.txt"])(
+  "changed bytes in %s cannot produce a completed hosted receipt",
+  async (path) => {
+    const original = CodexSecurity.prototype.run;
+    using _swap = spyOn(CodexSecurity.prototype, "run").mockImplementation(
+      async function (this: CodexSecurity, ...args) {
+        const validated = await original.apply(this, args);
+        await appendFile(join(validated.scanDir, path), "\n");
+        return validated;
+      },
+    );
+    const result = await runHostedScan(await fixture(), {
+      executor: {
+        async run(request) {
+          const evidence = "artifacts/evidence.txt";
+          writeSource(
+            request.runtime.outputDirectory,
+            evidence,
+            "scan evidence",
+          );
+          await writeDraft(request, [evidence]);
+          return receipt(request);
+        },
+      },
+    });
+    expect(result.status).toBe("failed");
+    expect(result.artifacts).toEqual([]);
+    expect(result).toHaveProperty(
+      "error",
+      `The sealed file ${path} changed before the hosted receipt was created.`,
+    );
+  },
+);
+
+test("hosted receipts hash MCP checkpoints as written", async () => {
+  const { saveScanDraftCheckpoint } = await import(
+    new URL(
+      "../../../plugins/codex-security/mcp-app/src/artifact-scan-draft.ts",
+      import.meta.url,
+    ).href
+  );
+  const input = await fixture();
+  const result = await runHostedScan(input, {
+    executor: {
+      async run(request) {
+        const reviewState = await writeDraft(request);
+        await saveScanDraftCheckpoint(
+          {
+            root: request.runtime.outputDirectory,
+            repoRoot: request.repository,
+            layout: "scan",
+          },
+          { scanId: request.scanId, findings: [], reviewState },
+        );
+        return receipt(request);
+      },
+    },
+  });
+  expect(result.status).toBe("completed");
+  const manifest = await readJson<{
+    scan: { preservedSources: Record<string, string> };
+  }>(join(input.outputDirectory, "scan-manifest.json"));
+  const checkpoint = result.artifacts.find(
+    ({ path, sha256 }) =>
+      path.startsWith("checkpoints/") &&
+      Object.hasOwn(manifest.scan.preservedSources, path) &&
+      sha256 !== manifest.scan.preservedSources[path],
+  );
+  expect(checkpoint).toBeDefined();
+  const contents = await readFile(
+    join(input.outputDirectory, checkpoint!.path),
+  );
+  expect(checkpoint!.sha256).toBe(hash("sha256", contents));
 });
 
 test("a changed checkout cannot produce accepted completed output", async () => {
