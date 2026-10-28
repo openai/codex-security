@@ -31,7 +31,7 @@ import { VERSION } from "../src/version.js";
 import {
   forceTerminatePublicationProcesses,
   publishScanInternal,
-  terminatePublicationProcessGroup,
+  signalChildProcessGroup,
   type PublicationCodexResult,
   type PublishScanDependencies,
   type PublishScanOptions,
@@ -3200,7 +3200,7 @@ describe("connected Linear publication", () => {
       const child = spawn(process.execPath, ["-e", "process.stdin.resume()"]);
       const closed = once(child, "close");
       try {
-        terminatePublicationProcessGroup(child, "SIGTERM");
+        signalChildProcessGroup(child, "SIGTERM");
       } finally {
         child.stdin.end();
       }

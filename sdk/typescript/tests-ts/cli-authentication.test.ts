@@ -1874,6 +1874,7 @@ describe("skill authentication", () => {
         await stderr.run(
           [command, "Synthetic issue", "--auth", "api-key"],
           dependencies({
+            manualCodexPreparation: true,
             onCodex: (_args, output, environment, input) =>
               runCodexSkillCommand(
                 ["-e", 'throw new Error("must not launch")'],
@@ -2009,6 +2010,7 @@ describe("skill authentication", () => {
           dependencies({
             environment,
             currentDirectory: repository,
+            manualCodexPreparation: true,
             onCodex: (args, output, environment, input) =>
               runCodexSkillCommand(
                 [
@@ -2364,6 +2366,7 @@ if (basename(process.argv[1] ?? "") === "login" && process.argv[2] === "status")
               CODEX_HOME: ambientHome,
               CODEX_SECURITY_STATE_DIR: join(repository, "state"),
             },
+            manualCodexPreparation: true,
             onCodex: (_args, output, environment) => {
               if (output === undefined)
                 throw new Error("Missing model-command output");

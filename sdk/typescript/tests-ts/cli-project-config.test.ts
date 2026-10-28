@@ -1446,10 +1446,13 @@ test.each(["yaml", "toon", "json"])(
         dependencies({ currentDirectory: root }),
       ),
     ).toBe(2);
-    const message =
-      format === "json"
-        ? JSON.parse(stderr.text().replace(/^codex-security: /u, "")).message
-        : stderr.text();
-    expect(message).toContain(missing);
+    const diagnostic = stderr.text();
+    if (format === "json") {
+      const prefix = "codex-security: ";
+      expect(diagnostic).toStartWith(prefix);
+      expect(JSON.parse(diagnostic.slice(prefix.length)).message).toContain(
+        missing,
+      );
+    } else expect(diagnostic).toContain(missing);
   },
 );

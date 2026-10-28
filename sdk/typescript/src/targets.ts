@@ -334,13 +334,15 @@ export async function gitMetadataDirectories(
   return [...roots, ...(await gitObjectDirectories(roots, signal, options))];
 }
 
-function gitAlternatePaths(contents: Buffer): string[] {
+export function gitAlternatePathBytes(
+  contents: Buffer,
+  separator = "\n",
+): Buffer[] {
   const text = contents.toString("latin1").split("\0", 1)[0]!;
-  const paths: string[] = [];
-  const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  const paths: Buffer[] = [];
   for (let offset = 0; offset < text.length;) {
-    const newline = text.indexOf("\n", offset);
-    let end = newline === -1 ? text.length : newline;
+    const next = text.indexOf(separator, offset);
+    let end = next === -1 ? text.length : next;
     let path = text.slice(offset, end);
     if (path.startsWith("#")) path = "";
     const quoted = /^"(?:[^"\\]|\\[\s\S])*"/u.exec(text.slice(offset))?.[0];
@@ -374,18 +376,23 @@ function gitAlternatePaths(contents: Buffer): string[] {
         // Git treats malformed quoting as an unquoted pathname.
       }
     }
-    if (path !== "") {
-      try {
-        paths.push(utf8.decode(Buffer.from(path, "latin1")));
-      } catch (error) {
-        throw new InvalidTargetError("Git object-store paths must use UTF-8.", {
-          cause: error,
-        });
-      }
-    }
+    if (path !== "") paths.push(Buffer.from(path, "latin1"));
     offset = end + 1;
   }
   return paths;
+}
+
+function gitAlternatePaths(contents: Buffer): string[] {
+  const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  return gitAlternatePathBytes(contents).map((path) => {
+    try {
+      return utf8.decode(path);
+    } catch (error) {
+      throw new InvalidTargetError("Git object-store paths must use UTF-8.", {
+        cause: error,
+      });
+    }
+  });
 }
 
 export async function gitObjectDirectories(

@@ -114,6 +114,11 @@ jobs:
         run: |
           pnpm --dir sdk/typescript install --frozen-lockfile
           pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+      - name: Set up Linux test tools and sandbox
+        if: runner.os == 'Linux'
+        run: |
+          bash github-action/scripts/setup-ubuntu-sandbox.sh
+          .github/scripts/install-ripgrep.sh
       - &prepare-windows-test-root
         name: Prepare private Windows test root
         if: runner.os == 'Windows'
@@ -122,9 +127,6 @@ jobs:
         run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
       - name: Build bundled plugin
         run: pnpm --dir sdk/typescript run build:plugin
-      - name: Install ripgrep
-        if: runner.os == 'Linux'
-        run: .github/scripts/install-ripgrep.sh
       - name: Test shard layout
         working-directory: sdk/typescript
         env: &test-temp

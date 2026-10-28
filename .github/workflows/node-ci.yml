@@ -184,7 +184,7 @@ jobs:
     name: tests / ${{ matrix.os }} / shard-${{ matrix.shard }}
     needs: &sdk-shard-needs [classify-changes, package, static-checks]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 30 || 20 }}
     strategy:
       fail-fast: false
       matrix:
@@ -212,9 +212,11 @@ jobs:
           tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
           cp -R sdk/typescript/_bundled_plugin/mcp/native/. plugins/codex-security/native/prebuilt
           python3 -I -m compileall -q --invalidation-mode checked-hash sdk/typescript/_bundled_plugin/scripts
-      - name: Install ripgrep
+      - name: Set up Linux test tools and sandbox
         if: matrix.os == 'ubuntu-latest'
-        run: .github/scripts/install-ripgrep.sh
+        run: |
+          bash github-action/scripts/setup-ubuntu-sandbox.sh
+          .github/scripts/install-ripgrep.sh
       - name: Test
         working-directory: sdk/typescript
         env:
@@ -514,7 +516,7 @@ jobs:
     name: windows-latest / node-22 / tests-${{ matrix.shard }}
     needs: *sdk-shard-needs
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:

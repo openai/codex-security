@@ -1,0 +1,100 @@
+import { afterEach, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { runGitRepositoryCommand, runWorkflow } from "./cli-patch-fixtures.js";
+
+const fixtures = createTemporaryDirectories(true);
+afterEach(fixtures.cleanup);
+
+test.each(["GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"] as const)(
+  "patch probes nested placeholders independently of selected-root %s",
+  async (setting) => {
+    const root = await fixtures.create("patch-probe-environment-");
+    const support = await fixtures.create("patch-probe-administration-");
+    const globalConfig = join(support, "global-config");
+    await writeFile(globalConfig, "");
+    const environment = {
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: globalConfig,
+      LC_ALL: "C",
+    };
+    const git = (args: string[], overrides: NodeJS.ProcessEnv = {}) =>
+      execFileSync("git", args, {
+        cwd: root,
+        env: { ...process.env, ...environment, ...overrides },
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+    git(["init", "--initial-branch=main"]);
+    git(["config", "user.name", "Synthetic User"]);
+    git(["config", "user.email", "synthetic@example.test"]);
+    const marker = join(root, "source", ".git");
+    await mkdir(marker, { recursive: true });
+    const markerHead = "ref: refs/heads/main\n";
+    await writeFile(join(marker, "HEAD"), markerHead);
+    if (setting === "GIT_OBJECT_DIRECTORY") await mkdir(join(marker, "refs"));
+    const source = join(root, "source", "app.ts");
+    await writeFile(source, "before\n");
+    git(["add", "source/app.ts"]);
+    git(["commit", "-m", "Synthetic environment baseline"]);
+    const head = git(["rev-parse", "HEAD"]);
+    const index = await readFile(join(root, ".git", "index"));
+    const selectedPath =
+      setting === "GIT_COMMON_DIR"
+        ? join(root, ".git")
+        : join(support, "selected-objects");
+    if (setting === "GIT_OBJECT_DIRECTORY") {
+      await rename(join(root, ".git", "objects"), selectedPath);
+    }
+    const selectedEnvironment: NodeJS.ProcessEnv = {
+      ...environment,
+      [setting]: selectedPath,
+    };
+    if (setting === "GIT_OBJECT_DIRECTORY")
+      expect(() => git(["rev-parse", "HEAD"])).toThrow();
+    expect(git(["rev-parse", "HEAD"], selectedEnvironment)).toBe(head);
+    expect(() => git(["rev-parse", "--resolve-git-dir", marker])).toThrow();
+    expect(
+      resolve(
+        git(["rev-parse", "--resolve-git-dir", marker], selectedEnvironment),
+      ),
+    ).toBe(marker);
+
+    let launches = 0;
+    let rootCommands = 0;
+    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+      currentDirectory: root,
+      environment: selectedEnvironment,
+      onRepositoryCommand: (command, args, cwd, options) => {
+        const effectiveEnvironment = {
+          ...selectedEnvironment,
+          ...options?.environment,
+        };
+        if (!args.includes("--resolve-git-dir") && !args.includes("-C")) {
+          expect(effectiveEnvironment[setting]).toBe(selectedPath);
+          rootCommands++;
+        }
+        return runGitRepositoryCommand(command, args, cwd, {
+          ...options,
+          environment: effectiveEnvironment,
+        });
+      },
+      onCodex: async (_args, output) => {
+        launches++;
+        await writeFile(source, "after\n");
+        output?.stdout.write("Synthetic patch complete.\n");
+        return 0;
+      },
+    });
+
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(launches).toBe(1);
+    expect(rootCommands).toBeGreaterThan(0);
+    expect(await readFile(source, "utf8")).toBe("after\n");
+    expect(await readFile(join(marker, "HEAD"), "utf8")).toBe(markerHead);
+    expect(git(["rev-parse", "HEAD"], selectedEnvironment)).toBe(head);
+    expect(await readFile(join(root, ".git", "index"))).toEqual(index);
+  },
+);

@@ -66,6 +66,7 @@ export async function runProviderSkill(
         SYNTHETIC_PROVIDER_LOG: log,
         SYNTHETIC_SKILL_COMMAND: command,
       },
+      manualCodexPreparation: true,
       onCodex: async (args, output, environment, input) => {
         if (!Array.isArray(overrides) && output !== undefined)
           output = { ...output, codexOverrides: overrides as JsonObject };

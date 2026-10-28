@@ -1070,10 +1070,16 @@ async function openCheckedScanFile(
 
 export async function sameCheckedFileDevice(
   file: FileHandle,
-  checked: { path: string; metadata: Pick<Stats | BigIntStats, "dev" | "ino"> },
+  checked: {
+    path: string | Buffer;
+    metadata: Pick<Stats | BigIntStats, "dev" | "ino">;
+  },
   opened: Pick<Stats | BigIntStats, "dev" | "ino">,
   platform: NodeJS.Platform = process.platform,
-  openReference: (path: string, flags: number) => Promise<FileHandle> = open,
+  openReference: (
+    path: string | Buffer,
+    flags: number,
+  ) => Promise<FileHandle> = open,
 ): Promise<boolean> {
   if (opened.ino !== checked.metadata.ino) return false;
   if (opened.dev === checked.metadata.dev) return true;

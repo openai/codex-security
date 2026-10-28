@@ -213,12 +213,13 @@ export function dependencies(
     onClose?: () => void | Promise<void>;
     onValidate?: (options: ValidationOptions) => Promise<ValidationResult>;
     onCodex?: OnCodex;
+    manualCodexPreparation?: boolean;
     linearClient?: MainDependencies["linearClient"];
     importGitHubAlerts?: MainDependencies["importGitHubAlerts"];
     importGitHubAdvisories?: MainDependencies["importGitHubAdvisories"];
     onRepositoryCommand?: (
       ...arguments_: Parameters<MainDependencies["runRepositoryCommand"]>
-    ) => string | Promise<string>;
+    ) => string | undefined | Promise<string | undefined>;
     onWorkbench?: (
       args: readonly string[],
       input?: string,
@@ -294,14 +295,34 @@ export function dependencies(
       signals.remove(signal, listener),
     writeSynchronously: (stream, value) => stream.write(value),
     forceExit: () => {},
-    runCodex: async (...args) => (await options.onCodex?.(...args)) ?? 0,
-    runRepositoryCommand: async (command, args, repository, commandOptions) =>
-      (await options.onRepositoryCommand?.(
+    runCodex: async (...args) => {
+      // Simple model doubles are ready immediately; native fixtures own preparation.
+      if (!options.manualCodexPreparation)
+        await args[1]?.appServer?.onBeforeTurn?.();
+      return (await options.onCodex?.(...args)) ?? 0;
+    },
+    runRepositoryCommand: async (command, args, repository, commandOptions) => {
+      const overridden = await options.onRepositoryCommand?.(
         command,
         args,
         repository,
         commandOptions,
-      )) ?? (args.includes("--name-only") ? "src/finding-1.ts\0" : ""),
+      );
+      if (overridden !== undefined) return overridden;
+      const output =
+        command === "gh" && args[0] === "pr" && args[1] === "list"
+          ? "[]"
+          : args.includes("--name-only")
+            ? (
+                options.result?.findings.findings.flatMap((finding) =>
+                  finding.locations.map((location) => location.path),
+                ) ?? ["src/finding-1.ts"]
+              ).join("\0") + "\0"
+            : "";
+      return commandOptions?.encoding === "base64"
+        ? Buffer.from(output).toString("base64")
+        : output;
+    },
     ...(options.linearClient === undefined
       ? {}
       : { linearClient: options.linearClient }),

@@ -484,12 +484,12 @@ describe("TypeScript package skeleton", () => {
       (step) => step.name === "Test shard layout",
     );
     const ripgrep = runner.steps!.find(
-      (step) => step.name === "Install ripgrep",
+      (step) => step.name === "Set up Linux test tools and sandbox",
     );
     expect(ripgrep).toMatchObject({
       if: "runner.os == 'Linux'",
       run: ci.jobs["test"]!.steps!.find(
-        (step) => step.name === "Install ripgrep",
+        (step) => step.name === "Set up Linux test tools and sandbox",
       )?.run,
     });
     expect(runner.steps!.indexOf(ripgrep!)).toBeLessThan(
