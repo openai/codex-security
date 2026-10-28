@@ -21,6 +21,8 @@ import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
 import { deepScanOptions, type DeepScanSources } from "./deep-config.js";
 import {
   DEFAULT_DECISIONS_CUTOFF,
+  DEFAULT_EVENT_BATCH_SIZE,
+  DEFAULT_EVENT_MAX_WAIT_SECONDS,
   projectConfigJsonSchema,
   type ProjectConfigInput,
   type ProjectScope,
@@ -59,6 +61,12 @@ export function projectReviewEventSettings(
   settings: NonNullable<ProjectConfigInput["review_events"]>,
 ) {
   return {
+    ...(settings.batch_size === undefined
+      ? {}
+      : { batchSize: settings.batch_size }),
+    ...(settings.max_wait_seconds === undefined
+      ? {}
+      : { maxWaitSeconds: settings.max_wait_seconds }),
     screenWithDecisions: settings.screen_with_decisions,
     decisionsCutoff: settings.decisions_cutoff,
   };
@@ -228,6 +236,8 @@ export function projectConfigStarter(
     "# limits:",
     "#   max_cost_usd_per_scan: 10 # Optional limit per scan attempt.",
     "# review_events:",
+    `#   batch_size: ${DEFAULT_EVENT_BATCH_SIZE}`,
+    `#   max_wait_seconds: ${DEFAULT_EVENT_MAX_WAIT_SECONDS}`,
     "#   screen_with_decisions: false",
     `#   decisions_cutoff: ${DEFAULT_DECISIONS_CUTOFF}`,
     "# policy:",

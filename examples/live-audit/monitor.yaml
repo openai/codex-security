@@ -1,0 +1,5 @@
+review_events:
+  screen_with_decisions: false
+  decisions_cutoff: 0.95
+  batch_size: 2
+  max_wait_seconds: 600

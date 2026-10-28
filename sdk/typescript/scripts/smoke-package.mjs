@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { once } from "node:events";
+import { createInterface } from "node:readline";
+import { spawn, spawnSync } from "node:child_process";
 import {
   chmod,
   cp,
@@ -478,6 +480,47 @@ try {
     true,
     "Installed package must contain its declared CLI launcher.",
   );
+
+  // A response must arrive before EOF. Empty groups exercise the installed
+  // launcher, transport and windowing without credentials or a model request.
+  const live = spawn(
+    process.execPath,
+    [launcher, "review-events", "--live", "--batch-size", "2"],
+    {
+      cwd: consumer,
+      stdio: ["pipe", "pipe", "inherit"],
+      timeout: PACKAGE_SMOKE_TIMEOUT_MS,
+    },
+  );
+  const exited = once(live, "close");
+  const lines = createInterface({ input: live.stdout })[Symbol.asyncIterator]();
+  const record = JSON.stringify({
+    schemaVersion: 1,
+    source: "example",
+    groups: [],
+  });
+  try {
+    live.stdin.write(record + "\n" + record + "\n");
+    assert.deepEqual(JSON.parse((await lines.next()).value), {
+      schemaVersion: 1,
+      source: "example",
+      groups: [],
+      firstLine: 1,
+      lastLine: 2,
+    });
+    live.stdin.end(record);
+    assert.deepEqual(JSON.parse((await lines.next()).value), {
+      schemaVersion: 1,
+      source: "example",
+      groups: [],
+      firstLine: 3,
+      lastLine: 3,
+    });
+    assert.equal((await lines.next()).done, true);
+    assert.deepEqual(await exited, [0, null]);
+  } finally {
+    if (live.exitCode === null && live.signalCode === null) live.kill();
+  }
 
   const shim = join(
     consumer,

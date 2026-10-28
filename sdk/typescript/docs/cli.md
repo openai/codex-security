@@ -1897,7 +1897,9 @@ custom JSON events remain accepted for compatibility. Their original citation ru
 remain: CloudTrail `eventID`, OCSF `metadata.uid` (or a hash of recursively key-sorted
 JSON when absent), and legacy `id`. JSONL describes transport, not an event schema.
 
-By default each nonempty group gets one read-only Codex review. With `--screen-with-decisions`, the command sends that group's evidence and service context to the OpenAI Decisions API using `OPENAI_API_KEY`. This is an additional API call even when full reviews use a different Codex provider. The v1 screen uses `gpt-6-luna` and skips Codex only for a `routine` choice whose confidence meets or exceeds the cutoff. Set `--decisions-cutoff` to a number from 0 to 1 (default 0.95). Setting the cutoff alone leaves screening off. Uncertain or suspicious activity goes to Codex with the same evidence. Empty groups make no model calls.
+By default each nonempty group gets one read-only Codex review using your configured Codex authentication, including a ChatGPT sign-in. **Decisions screening requires an OpenAI API key in `OPENAI_API_KEY`.** Signing in to Codex with ChatGPT alone cannot authenticate the Decisions API call. This applies to both single-batch and live reviews.
+
+With `--screen-with-decisions`, the command sends each group's evidence and service context to the OpenAI Decisions API in a separate call, even when full reviews use a different Codex provider. The v1 screen uses `gpt-6-luna` and skips Codex only for a `routine` choice whose confidence meets or exceeds the cutoff. Set `--decisions-cutoff` to a number from 0 to 1 (default 0.95). Setting the cutoff alone leaves screening off. Uncertain or suspicious activity goes to Codex with the same evidence. Empty groups make no model calls.
 
 For repeated reviews, select a trusted project file with `-c FILE` or `CODEX_SECURITY_PROJECT_CONFIG`. Explicit CLI options take precedence over the file.
 
@@ -1931,6 +1933,46 @@ const result = await reviewSecurityEvents(batch, {
 ```
 
 To reuse a YAML file in the SDK, pass `(await loadProjectConfig("review.yaml")).reviewEvents` as the options argument. An explicit `decisionsCutoff` after spreading those options overrides the file.
+
+### Follow a stream
+
+Use `--live` to read UTF-8 CEF records, one per line, or JSONL on stdin. Each JSONL line can contain a CEF string, an array of CEF strings, or a version 1 batch. LF and CRLF are accepted; extension newlines stay escaped. JSONL is transport, not an event schema. Each output line is a review with two additional fields, `firstLine` and `lastLine`, the inclusive one-based input lines covered by that result. Live output always uses JSONL. The command starts emitting while the producer is still connected.
+
+```sh
+tail -n 0 -F review-batches.jsonl |
+  codex-security review-events --live --batch-size 10 --max-wait-seconds 600
+```
+
+Flush after `--batch-size` records (positive integer, default 10) or `--max-wait-seconds` seconds from the first pending record (positive number, default 600), whichever comes first. Set 900 for a 15-minute window or 1 for `--batch-size` to review each line immediately. A source or service-context change flushes the prior window. Compatible lines combine events with the same group ID, preserving source order and distinct groups. Identical event IDs with identical evidence count once within a group, and new evidence takes precedence over historical copies. Conflicting copies fail the window.
+
+The timer starts with the first pending input, and idle input makes no model calls. The wait controls collection time. A reviewer or output consumer can add latency. EOF flushes a partial window. An invalid record or model error ends the stream with a diagnostic on stderr and a nonzero exit status. An interrupt cancels the pending review. Previously emitted windows remain available. A replayable collector can map line positions to its own cursor, persist a result before acknowledging its last line, and replay the unacknowledged suffix after a restart. Line numbering starts over on each invocation.
+
+```yaml
+review_events:
+  batch_size: 10
+  max_wait_seconds: 600
+  screen_with_decisions: true
+  decisions_cutoff: 0.98
+```
+
+```ts
+import {
+  loadProjectConfig,
+  monitorSecurityEvents,
+} from "@openai/codex-security";
+
+const { reviewEvents } = await loadProjectConfig("monitor.yaml");
+for await (const review of monitorSecurityEvents(batches, {
+  ...reviewEvents,
+  batchSize: 10,
+  maxWaitSeconds: 600,
+  signal,
+})) {
+  await saveWindow(review);
+}
+```
+
+The SDK pulls from an `AsyncIterable<SecurityEventInput>`. Use the same abort signal in a producer that can block on I/O. See the [runnable CEF examples](https://github.com/openai/codex-security/tree/main/examples/live-audit) for direct native CEF input and a static JSONL history example. No collector is included.
 
 ## Classify finding severity
 

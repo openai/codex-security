@@ -53,6 +53,7 @@ import {
   Readable,
   Writable as NodeWritable,
 } from "node:stream";
+import { monitorSecurityEventsInternal } from "./monitor-events.js";
 import { text as readStreamText } from "node:stream/consumers";
 import {
   reviewSecurityEventsInternal,
@@ -418,6 +419,30 @@ const DUPLICATE_SIGNAL_WINDOW_MS = 500;
 const PUBLICATION_GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, {
   granularity: "grapheme",
 });
+
+// Consume only as much stdin as the reviewer requests. A transport chunk can
+// contain several records or just part of a multibyte character.
+async function* readLiveEventLines(input: Readable): AsyncGenerator<unknown> {
+  let partial = "";
+  let line = 0;
+  function parse(value: string): unknown {
+    line++;
+    try {
+      return parseSecurityEventInputText(value.replace(/\r$/, ""));
+    } catch (cause) {
+      throw new CodexSecurityError(
+        `Live input line ${line}: ${errorMessage(cause)}`,
+        { cause },
+      );
+    }
+  }
+  for await (const chunk of input.setEncoding("utf8")) {
+    const parts = (partial + chunk).split("\n");
+    partial = parts.pop()!;
+    for (const part of parts) yield parse(part);
+  }
+  if (partial) yield parse(partial);
+}
 
 type Writable = Pick<NodeJS.WriteStream, "write"> & {
   on?(event: "error", listener: (error: Error) => void): unknown;
@@ -2032,7 +2057,7 @@ export async function main(
   let exitCode = 0;
   let frameworkExit: number | undefined;
   const frameworkCapture = captureOutput();
-  let rawExportOutput = false;
+  let wroteRawOutput = false;
   let streamedLogs: Awaited<ReturnType<typeof readSavedScanLogs>> | undefined;
   let renderedOutput: string | undefined;
   let structuredError = false;
@@ -4661,6 +4686,14 @@ export async function main(
       mcp: false,
       alias: { config: "c" },
       options: z.object({
+        live: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Continuously review CEF lines or JSONL batches and write JSONL results.",
+          ),
+        batchSize: ReviewEventSettingsSchema.shape.batch_size,
+        maxWaitSeconds: ReviewEventSettingsSchema.shape.max_wait_seconds,
         config: PROJECT_CONFIG_OPTION,
         screenWithDecisions:
           ReviewEventSettingsSchema.shape.screen_with_decisions,
@@ -4671,10 +4704,12 @@ export async function main(
           "Reasoning effort for full event reviews.",
         ).shape,
       }),
-      output: securityEventReviewSchema,
+      output: securityEventReviewSchema.optional(),
       async run({ options }) {
         const controller = new AbortController();
         const removeSignals = listenForAbort(dependencies, controller);
+        const input = dependencies.recordsInput ?? process.stdin;
+        const outputFailed = (error: Error) => controller.abort(error);
         try {
           const project = await selectedProjectConfig(
             options.config,
@@ -4683,38 +4718,77 @@ export async function main(
           const settings = projectReviewEventSettings(
             project?.input.review_events ?? {},
           );
-          const input = parseSecurityEventInputText(
-            await readStreamText(
-              addAbortSignal(
-                controller.signal,
-                dependencies.recordsInput ?? process.stdin,
-              ),
+          const reviewOptions = {
+            screenWithDecisions:
+              options.screenWithDecisions ?? settings.screenWithDecisions,
+            decisionsCutoff:
+              options.decisionsCutoff ?? settings.decisionsCutoff,
+            cyberAccessProgram: options.cyberAccessProgram,
+            model: options.model,
+            reasoningEffort: options.effort,
+            environment: dependencies.environment,
+            signal: controller.signal,
+          };
+          const review =
+            dependencies.reviewSecurityEvents ?? reviewSecurityEventsInternal;
+          if (options.live) {
+            wroteRawOutput = true;
+            output.on?.("error", outputFailed);
+            const results = monitorSecurityEventsInternal(
+              readLiveEventLines(addAbortSignal(controller.signal, input)),
+              {
+                ...reviewOptions,
+                batchSize: options.batchSize ?? settings.batchSize,
+                maxWaitSeconds:
+                  options.maxWaitSeconds ?? settings.maxWaitSeconds,
+              },
+              "cli",
+              review,
+            );
+            for await (const result of results) {
+              const line = JSON.stringify(result) + "\n";
+              if (output instanceof NodeWritable) {
+                await abortable(
+                  () =>
+                    new Promise<void>((resolve, reject) =>
+                      output.write(line, (err) =>
+                        err ? reject(err) : resolve(),
+                      ),
+                    ),
+                  controller.signal,
+                );
+              } else {
+                output.write(line);
+              }
+            }
+            return;
+          }
+          if (
+            options.batchSize !== undefined ||
+            options.maxWaitSeconds !== undefined
+          ) {
+            throw new CodexSecurityError(
+              "--batch-size and --max-wait-seconds require --live.",
+            );
+          }
+          return await review(
+            parseSecurityEventInputText(
+              await readStreamText(addAbortSignal(controller.signal, input)),
             ),
-          );
-          return await (
-            dependencies.reviewSecurityEvents ?? reviewSecurityEventsInternal
-          )(
-            input,
-            {
-              screenWithDecisions:
-                options.screenWithDecisions ?? settings.screenWithDecisions,
-              decisionsCutoff:
-                options.decisionsCutoff ?? settings.decisionsCutoff,
-              cyberAccessProgram: options.cyberAccessProgram,
-              model: options.model,
-              reasoningEffort: options.effort,
-              environment: dependencies.environment,
-              signal: controller.signal,
-            },
+            reviewOptions,
             "cli",
           );
         } catch (error) {
           exitCode = interruptedExitCode(controller.signal) ?? 2;
           errorOutput.write(
-            `codex-security: ${controller.signal.aborted ? "Event review canceled." : diagnosticValue(error)}\n`,
+            `codex-security: ${interruptedExitCode(controller.signal) !== undefined ? "Event review canceled." : diagnosticValue(controller.signal.reason ?? error)}\n`,
           );
           throw error;
         } finally {
+          if (options.live) {
+            output.off?.("error", outputFailed);
+            input.destroy();
+          }
           removeSignals();
         }
       },
@@ -5640,7 +5714,7 @@ export async function main(
           },
         ),
       async run({ args, options }) {
-        rawExportOutput = options.output === "-";
+        wroteRawOutput = options.output === "-";
         try {
           const currentDirectory = dependencies.currentDirectory();
           if (args.scanDir !== undefined && options.scan !== undefined) {
@@ -7157,7 +7231,7 @@ export async function main(
       return 2;
     }
   }
-  if (rawExportOutput) return exitCode;
+  if (wroteRawOutput) return exitCode;
   if (
     frameworkOutput.length === 0 &&
     streamedLogs === undefined &&

@@ -40,6 +40,7 @@ import {
   runComponentScans,
   resolveProjectConfig,
   reviewSecurityEvents,
+  monitorSecurityEvents,
   suggestOwners,
   type OwnerFinding,
   type OwnerSuggestion,
@@ -81,6 +82,18 @@ export async function reviewEvents(
     ...settings,
     decisionsCutoff: 0.98,
     cyberAccessProgram: "daybreak_blue",
+  });
+}
+
+export async function* monitor(
+  batches: AsyncIterable<SecurityEventBatch>,
+  file: string,
+) {
+  const settings = (await loadProjectConfig(file)).reviewEvents;
+  yield* monitorSecurityEvents(batches, {
+    ...settings,
+    batchSize: 10,
+    maxWaitSeconds: 600,
   });
 }
 

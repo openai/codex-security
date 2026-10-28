@@ -142,10 +142,18 @@ supported scan types, cost-limit behavior, and the saved report.
 
 `review-events` reads the `review_events` section of the selected file.
 `screen_with_decisions` enables the optional first pass and defaults to `false`.
+Enabling it requires an OpenAI API key in the `OPENAI_API_KEY` environment
+variable, even if you are already signed in to Codex with ChatGPT.
 `decisions_cutoff` accepts a confidence from 0 to 1 and defaults to 0.95.
 The corresponding CLI flags are `--screen-with-decisions` and `--decisions-cutoff`.
 `loadProjectConfig()` exposes both values as `reviewEvents.screenWithDecisions` and
 `reviewEvents.decisionsCutoff` when the section is present.
+
+For live review, set `review_events.batch_size` (default 10 input records) and
+`review_events.max_wait_seconds` (default 600 seconds). The first threshold
+reached flushes the pending window. CLI options `--batch-size` and
+`--max-wait-seconds` override the file with `review-events --live`. SDK callers
+receive `batchSize` and `maxWaitSeconds` in the same `reviewEvents` object.
 
 Patching, PR creation, publication, post-scan prompt files, and machine-specific
 plugin or Python selection remain explicit CLI/SDK inputs.
