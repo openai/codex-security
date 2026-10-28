@@ -68,6 +68,7 @@ def register_cli_scan(
     scan_dir: Path,
     *,
     scan_target: dict[str, Any] | None = None,
+    custom_validation: bool = False,
 ) -> dict[str, Any]:
     scan_dir.mkdir(mode=0o700)
     return run_workbench(
@@ -84,6 +85,7 @@ def register_cli_scan(
                 "mode": "standard",
                 "repository": str(target),
                 "target": scan_target or {"kind": "repository", "paths": []},
+                **({"validationMode": "custom"} if custom_validation else {}),
             }
         ),
     )
@@ -1179,6 +1181,157 @@ def test_completion_rejects_malformed_finding_identity(tmp_path: Path, field: st
     assert "stable lowercase" in rejected["stderr"]
     assert get_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "running"
     assert findings_path.read_bytes() == original
+
+
+@pytest.mark.parametrize("deep", [False, True])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "codeEvidence",
+        "rootCause",
+        "attackPath.dataflow",
+        "validation.method",
+        "validation.summary",
+        "validation.evidenceRefs",
+    ],
+)
+def test_completion_requires_evidence_and_keeps_the_scan_repairable(
+    tmp_path: Path, deep: bool, field: str
+) -> None:
+    start = _start_deep_scan_with_draft_findings if deep else _start_scan_with_draft_findings
+    state_dir, scan_id, scan_dir = start(tmp_path)
+    findings_path = scan_dir / "findings.json"
+    complete = findings_path.read_bytes()
+    document = json.loads(complete)
+    owner = document["findings"][0]
+    *parents, key = field.split(".")
+    for parent in parents:
+        owner = owner[parent]
+    owner.pop(key)
+    if field == "codeEvidence":
+        for section in ("rootCause", "validation", "attackPath"):
+            document["findings"][0][section].pop("evidenceRefs", None)
+    findings_path.write_text(json.dumps(document))
+    names = ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    before = {name: (scan_dir / name).read_bytes() for name in names}
+
+    rejected = scan_command(state_dir, "complete-scan", scan_id, check=False)
+
+    assert rejected["returncode"] != 0
+    assert "repair the finding records" in rejected["stderr"]
+    assert field.removesuffix(".evidenceRefs") in rejected["stderr"]
+    assert get_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "running"
+    assert {name: (scan_dir / name).read_bytes() for name in names} == before
+
+    findings_path.write_bytes(complete)
+    result = scan_command(state_dir, "complete-scan", scan_id)
+    assert result["scan"]["progress"]["status"] == "complete"
+    assert result["scan"]["findingCount"] == 1
+
+
+def _discovery_draft(state_dir: Path, scan_dir: Path) -> dict[str, Any]:
+    return {
+        "manifest": json.loads((scan_dir / "scan-manifest.json").read_text()),
+        "findings": json.loads((scan_dir / "findings.json").read_text()),
+        "reviewState": read_review_state(state_dir, scan_dir),
+    }
+
+
+@pytest.mark.parametrize("field", ["codeEvidence", "rootCause", "attackPath", "validation"])
+@pytest.mark.parametrize("explicit_complete", [False, True])
+def test_discovery_handoff_requires_evidence_before_acceptance(
+    tmp_path: Path, field: str, explicit_complete: bool
+) -> None:
+    state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
+    documents = _discovery_draft(state_dir, scan_dir)
+    scan = documents["manifest"]["scan"]
+    scan["scope"]["validationMode"] = "custom_pending"
+    scan["complete"] = False
+    finding = documents["findings"]["findings"][0]
+    saved = finding.pop(field)
+    drafts = scan_dir / "drafts"
+    drafts.mkdir(exist_ok=True)
+    staged = drafts / f"{uuid.uuid4()}.json"
+    staged.write_text(json.dumps(documents))
+    args = ("write-scan-draft", "--scan-id", scan_id, "--draft-path", str(staged))
+    assert run_workbench(state_dir, *args)["status"] == "draft_written"
+    names = ("scan-manifest.json", "findings.json", "checkpoint-head.json")
+    before = {name: (scan_dir / name).read_bytes() for name in names}
+
+    if explicit_complete:
+        scan["complete"] = True
+    else:
+        scan.pop("complete")
+    staged.write_text(json.dumps(documents))
+    rejected = run_workbench(state_dir, *args, check=False)
+    assert rejected["returncode"] != 0
+    assert field in rejected["stderr"]
+    assert {name: (scan_dir / name).read_bytes() for name in names} == before
+    assert get_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "running"
+
+    finding[field] = saved
+    staged.write_text(json.dumps(documents))
+    assert run_workbench(state_dir, *args)["status"] == "draft_written"
+    assert "sealedAt" not in json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]
+
+
+@pytest.mark.parametrize(
+    ("recipe", "custom_pending", "accepted"),
+    [
+        ("standard", True, False),
+        ("diff", True, False),
+        ("custom", False, False),
+        ("custom", True, True),
+    ],
+)
+def test_sdk_discovery_handoff_uses_registered_validation_mode(
+    tmp_path: Path, recipe: str, custom_pending: bool, accepted: bool
+) -> None:
+    if recipe == "diff":
+        state_dir, _, scan = _start_diff_scan_with_draft(tmp_path, "range")
+        scan_dir = Path(scan["scanDir"])
+    else:
+        target = tmp_path / "target"
+        target.mkdir()
+        state_dir, scan_dir = tmp_path / "state", tmp_path / "scan"
+        scan = register_cli_scan(state_dir, target, scan_dir, custom_validation=recipe == "custom")
+        write_completed_contract(scan_dir, scan["scanId"], target)
+
+    draft = _discovery_draft(state_dir, scan_dir)
+    if custom_pending:
+        draft["manifest"]["scan"]["scope"]["validationMode"] = "custom_pending"
+    del draft["findings"]["findings"][0]["validation"]
+    staged = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
+    staged.parent.mkdir(exist_ok=True)
+    staged.write_text(json.dumps(draft))
+    result = run_workbench(
+        state_dir,
+        "write-scan-draft",
+        "--scan-id",
+        scan["scanId"],
+        "--draft-path",
+        str(staged),
+        check=False,
+    )
+    assert (result["returncode"] == 0) is accepted, result["stderr"]
+    if not accepted:
+        assert "validation" in result["stderr"]
+
+
+def test_stopped_scan_preserves_findings_with_incomplete_evidence(tmp_path: Path) -> None:
+    state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    finding = document["findings"][0]
+    for key in ("codeEvidence", "rootCause", "validation", "attackPath"):
+        finding.pop(key)
+    path.write_text(json.dumps(document))
+
+    fail_scan(state_dir, scan_id, "Review stopped before source proof was recorded.")
+
+    assert get_scan(state_dir, scan_id)["scan"]["findingCount"] == 1
+    retained = json.loads(path.read_text())["findings"][0]
+    assert all(retained[key] == value for key, value in finding.items())
 
 
 def test_completion_rejects_canonical_finding_without_identity(tmp_path: Path) -> None:

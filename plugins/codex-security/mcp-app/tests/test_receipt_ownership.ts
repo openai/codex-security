@@ -19,7 +19,12 @@ import {
   fixtureRun,
   runCoordinator,
 } from "./deep_scan_coordinator_fixture.ts";
-import { finding, scanId, workerDraft } from "./scan-draft-fixture.ts";
+import {
+  completedFindingEvidence,
+  finding,
+  scanId,
+  workerDraft,
+} from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
 const { readDeepReductionSources } = await importSource(
@@ -552,14 +557,21 @@ for (const fileScope of [false, true])
               ref,
               "Unrelated local evidence\n",
             );
-          await saveScanDraftCheckpoint(
-            {
-              ...request.artifactContext,
-              scanId: fixture.run.scanId,
-              repoRoot: fixture.run.targetPath,
-            },
-            legacy.checkpoint,
+          const context = {
+            ...request.artifactContext,
+            scanId: fixture.run.scanId,
+            repoRoot: fixture.run.targetPath,
+          };
+          await saveScanDraftCheckpoint(context, legacy.checkpoint);
+          const retained = legacy.result.findings[0];
+          Object.assign(
+            retained,
+            completedFindingEvidence(retained.locations[0].path),
           );
+          await saveScanDraftCheckpoint(context, {
+            ...legacy.checkpoint,
+            findings: [retained, ...legacy.checkpoint.findings.slice(1)],
+          });
           await writeFile(
             path.join(request.workingDirectory, "result.json"),
             JSON.stringify(legacy.result),

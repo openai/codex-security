@@ -11,6 +11,7 @@ import {
 import {
   aggregateSourceCoverage,
   deepReductionToScanDraft,
+  validateCompletedFindingEvidence,
   validateDiscoveryArtifacts,
   validateReducerArtifacts,
   type DeepReductionInput,
@@ -723,7 +724,23 @@ export class DeepScanCoordinator {
   private async runScheduler(): Promise<SchedulerResult> {
     const config = this.state.config;
     const active = new Map<string, Promise<DiscoveryOutcome>>();
-    const recovered = await this.recoverAcceptedDiscoveries();
+    // A selected report keeps its original cutoff while evidence is repaired,
+    // including if the coordinator restarts after committing the repair.
+    const selectedReason = this.state.manifestPath
+      ? this.state.terminalReason
+      : undefined;
+    const omittedWorkerIds =
+      selectedReason === "saturated"
+        ? (this.state.persistedWorkers ?? [])
+            .filter(
+              (worker) =>
+                worker.kind === "discovery" && worker.mergeState === "buffered",
+            )
+            .map((worker) => worker.id)
+        : [];
+    const recovered = await this.recoverAcceptedDiscoveries(
+      new Set(omittedWorkerIds),
+    );
     const accepted = new Map(recovered.map((worker) => [worker.id, worker]));
     let reducerInputs: AcceptedDiscovery[] = [];
     const mergedIds = new Set(
@@ -734,9 +751,9 @@ export class DeepScanCoordinator {
         )
         .map((worker) => worker.id),
     );
-    const omittedWorkerIds: string[] = [];
     const recoveredReducers = await this.recoverCompletedReducers(recovered);
     let latestResult = recoveredReducers.result;
+    let repairPending = needsEvidenceRepair(latestResult);
     let buffer: AcceptedDiscovery[] = recovered.filter(
       (worker) => !mergedIds.has(worker.id),
     );
@@ -770,7 +787,9 @@ export class DeepScanCoordinator {
           workerLabelSequence(basename(dirname(worker.promptPath)), "dedup"),
         ),
     ].reduce((maximum, value) => (value > maximum ? value : maximum), 0n);
-    let stopReason: DeepScanTerminalReason | undefined;
+    let stopReason: DeepScanTerminalReason | undefined = repairPending
+      ? undefined
+      : selectedReason;
     let lastReplaceableFailure:
       Extract<DiscoveryOutcome, { status: "failed" }> | undefined;
 
@@ -778,7 +797,12 @@ export class DeepScanCoordinator {
     let reducerFailures = persistedReducerFailureStreak(
       this.state.persistedWorkers ?? [],
     );
-    if (this.state.consecutiveErrors >= errorLimit) {
+    // Saturation already accepted the report despite surplus discovery failures.
+    // Evidence-only repair must not reopen that discovery stopping decision.
+    if (
+      selectedReason !== "saturated" &&
+      this.state.consecutiveErrors >= errorLimit
+    ) {
       const failure = latestPersistedReplaceableFailure(
         this.state.persistedWorkers ?? [],
       );
@@ -800,6 +824,8 @@ export class DeepScanCoordinator {
       );
     }
     if (
+      !stopReason &&
+      !repairPending &&
       !this.discoveryDeadlineReached &&
       previousReducerResultPath &&
       this.state.noNewStreak >= config.stopAfterNoNew &&
@@ -906,6 +932,7 @@ export class DeepScanCoordinator {
       if (settlements.length === 0) {
         while (
           !reducer &&
+          !repairPending &&
           !this.discoveryDeadlineReached &&
           (!previousReducerResultPath ||
             this.state.noNewStreak < config.stopAfterNoNew) &&
@@ -926,12 +953,13 @@ export class DeepScanCoordinator {
 
         if (
           !reducer &&
-          this.reducerReady(
-            buffer,
-            previousReducerResultPath,
-            active.size,
-            dispatched,
-          )
+          (repairPending ||
+            this.reducerReady(
+              buffer,
+              previousReducerResultPath,
+              active.size,
+              dispatched,
+            ))
         ) {
           const consumed = [...buffer].sort(compareCompletionSequence);
           reducerInputs = consumed;
@@ -943,6 +971,9 @@ export class DeepScanCoordinator {
               label: `dedup-${String(reducerSequence).padStart(4, "0")}`,
               consumed,
               previousReducerResultPath,
+              repairEvidence:
+                repairPending ||
+                consumed.some((worker) => needsEvidenceRepair(worker.result)),
               previousSourceCoverage: latestResult?.sourceCoverage,
             }),
           );
@@ -1043,7 +1074,10 @@ export class DeepScanCoordinator {
       if (!this.canceled && !this.externallyFailed) this.state = outcome.run;
       previousReducerResultPath = outcome.resultPath;
       latestResult = outcome.result;
-      if (
+      repairPending = false;
+      if (selectedReason) {
+        stopReason = selectedReason;
+      } else if (
         !this.discoveryDeadlineReached &&
         outcome.run.noNewStreak >= config.stopAfterNoNew &&
         buffer.length === 0
@@ -1079,10 +1113,16 @@ export class DeepScanCoordinator {
     };
   }
 
-  private async recoverAcceptedDiscoveries(): Promise<AcceptedDiscovery[]> {
+  private async recoverAcceptedDiscoveries(
+    omitted: Set<string>,
+  ): Promise<AcceptedDiscovery[]> {
     const recovered: AcceptedDiscovery[] = [];
     for (const worker of this.state.persistedWorkers ?? []) {
-      if (worker.kind !== "discovery" || worker.status !== "succeeded")
+      if (
+        worker.kind !== "discovery" ||
+        worker.status !== "succeeded" ||
+        omitted.has(worker.id)
+      )
         continue;
       if (!worker.resultManifestPath || !worker.completionSequence) {
         throw new Error(
@@ -1094,6 +1134,7 @@ export class DeepScanCoordinator {
         worker.resultManifestPath,
         this.state.scanId,
         this.state,
+        false, // Already accepted by the previous coordinator; repair before publication.
       );
       recovered.push({
         id: worker.id,
@@ -1141,7 +1182,10 @@ export class DeepScanCoordinator {
       const consumed = inputs
         .filter((input) => input.dedupWorkerId === worker.id)
         .map((input) => discoveryIds.has(input.discoveryWorkerId));
-      if (consumed.length === 0 || consumed.some((value) => !value)) {
+      if (
+        (!resultPath && consumed.length === 0) ||
+        consumed.some((value) => !value)
+      ) {
         throw new Error(
           `Completed reducer ${worker.id} has incomplete persisted inputs.`,
         );
@@ -1153,6 +1197,7 @@ export class DeepScanCoordinator {
           resultPath: worker.resultManifestPath,
           reducerId: worker.id,
           previousReducerResultPath: resultPath,
+          requireCompleteEvidence: false,
         },
         this.state.scanId,
       );
@@ -1173,6 +1218,7 @@ export class DeepScanCoordinator {
         filePaths: this.state.filePaths,
         deepReducer: {
           scanRoot: this.artifacts.scanDir,
+          previousReducerResultPath: resultPath,
           claimedWorkers: accepted.map((source) => ({
             id: source.id,
             resultPath: source.resultPath,
@@ -1226,6 +1272,16 @@ export class DeepScanCoordinator {
       count,
       completed: count,
     });
+  }
+}
+
+function needsEvidenceRepair(result: DeepReductionInput | undefined): boolean {
+  if (!result) return false;
+  try {
+    validateCompletedFindingEvidence(result.findings);
+    return false;
+  } catch {
+    return true;
   }
 }
 

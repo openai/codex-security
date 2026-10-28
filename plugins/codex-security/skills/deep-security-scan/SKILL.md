@@ -50,7 +50,7 @@ After an ended turn or host timeout, rejoin with the same scan ID and token. If 
 
 When the coordinator returns `completion`, the host has sealed the artifacts and generated `report.md`. Read measured usage from `completion.scan.usage`. Do not call completion again, submit another semantic draft, rerun worker phases, or write the report yourself.
 
-If completion fails, surface its exact error. Preserve the accepted aggregate and handoff claim. A later continuation can rejoin the same scan to retry finalization. On explicit cancellation, call `cancel_codex_security_scan` and do not accept subsequent scan progress as success.
+If completion requests evidence repairs, continue the same scan. Report the exact error for other failures. Preserve the accepted aggregate and handoff claim. A later continuation can rejoin the same scan to retry finalization. On explicit cancellation, call `cancel_codex_security_scan` and do not accept subsequent scan progress as success.
 
 Return the report and canonical artifact links after completion succeeds and `report.md` exists. Report usage according to `../../references/final-report.md`. Distinguish an empty finding set after completed review from a time limit reached before any source review finished.
 

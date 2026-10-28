@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { dirname, posix, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { JsonObject } from "../types.js";
-import { asRecord } from "../record.js";
+import { asRecord, isNonEmptyString } from "../record.js";
 import type { AcceptedDiscovery } from "./worker-runner.js";
 import { artifactSourcePath, type ArtifactContext } from "../artifact-io.js";
 import {
@@ -147,6 +147,7 @@ export async function validateDiscoveryArtifacts(
     ArtifactContext,
     "scope" | "includePaths" | "filePaths"
   > = {},
+  requireCompleteEvidence = true,
 ): Promise<ScanDraftInput> {
   await requireRegularFile(resultPath, artifacts.workersRoot);
   const root = dirname(resultPath);
@@ -171,6 +172,8 @@ export async function validateDiscoveryArtifacts(
     throw new Error(
       "Standard scan worker wrote only a checkpoint; its audit is not complete.",
     );
+  if (requireCompleteEvidence)
+    validateCompletedFindingEvidence(result.findings);
   validateRetainedCoverage(result.reviewState);
   const receiptPaths = new Map<string, string>();
   for (const row of result.reviewState.surfaces as JsonObject[]) {
@@ -204,6 +207,7 @@ export async function validateReducerArtifacts(
     reducerId: string;
     previousReducerResultPath?: string;
     sources?: DeepReductionSources;
+    requireCompleteEvidence?: boolean;
   },
   expectedScanId?: string,
 ): Promise<ReducerArtifactValidation> {
@@ -244,14 +248,19 @@ export async function validateReducerArtifacts(
       input.sources.discoveries,
       input.sources.previous,
     );
+  } else {
+    validateRetainedFindings(result, [], previous);
+  }
+  if (input.requireCompleteEvidence !== false)
+    validateCompletedFindingEvidence(result.findings);
+
+  if (input.sources) {
     const persisted = deepReductionForPersistence(result);
     await saveScanDraftCheckpoint(
       { root: artifactDir, repoRoot: artifacts.scanDir, layout: "reducer" },
       persisted,
     );
     await writeJsonAtomic(resultPath, persisted);
-  } else {
-    validateRetainedFindings(result, [], previous);
   }
   const assignments = previousFindingAssignments(result, previous);
   return {
@@ -259,6 +268,51 @@ export async function validateReducerArtifacts(
     newFindings: result.findings.filter((finding) => !assignments.has(finding))
       .length,
   };
+}
+
+/** Match the finalizer's evidence gate while worker validation can still retry. */
+export function validateCompletedFindingEvidence(findings: JsonObject[]): void {
+  for (const [index, finding] of findings.entries()) {
+    const requireText = (value: unknown, field: string) => {
+      if (!isNonEmptyString(value))
+        throw new Error(
+          `findings[${index}].${field}: include the supporting analysis before completing the worker.`,
+        );
+    };
+    if (
+      !Array.isArray(finding.codeEvidence) ||
+      finding.codeEvidence.length === 0
+    )
+      throw new Error(
+        `findings[${index}].codeEvidence: include the source snippets used as proof.`,
+      );
+    requireText(
+      asRecord(finding.rootCause)?.summary ?? finding.rootCause,
+      "rootCause",
+    );
+    const dataflow = asRecord(finding.attackPath)?.dataflow;
+    const flow = asRecord(dataflow);
+    if (flow) {
+      if (!flow.summary) {
+        requireText(flow.source, "attackPath.dataflow.source");
+        requireText(flow.sink, "attackPath.dataflow.sink");
+      }
+    } else {
+      requireText(dataflow, "attackPath.dataflow");
+    }
+    const validation = asRecord(finding.validation);
+    requireText(validation?.method, "validation.method");
+    if (!validation?.result)
+      requireText(validation?.summary, "validation.summary");
+    const hasEvidence = [validation?.evidence, validation?.evidenceRefs].some(
+      (value) =>
+        Array.isArray(value) ? value.length > 0 : isNonEmptyString(value),
+    );
+    if (!hasEvidence)
+      throw new Error(
+        `findings[${index}].validation: include observed evidence or evidenceRefs to the source proof.`,
+      );
+  }
 }
 
 /** Reconcile a reducer output against the immutable inputs captured before dispatch. */

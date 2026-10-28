@@ -303,10 +303,12 @@ export class WorkbenchDeepScanStore {
     workerIds: string[];
     promptPath: string;
     artifactDir: string;
+    repairEvidence?: boolean;
   }): Promise<void> {
     await this.enqueueWrite(
       workbenchArgs("claim-deep-scan-dedup", {
         scanId: input.scanId,
+        checkTarget: input.repairEvidence,
         workerId: input.id,
         promptPath: input.promptPath,
         artifactDir: input.artifactDir,

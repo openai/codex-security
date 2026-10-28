@@ -72,6 +72,7 @@ export interface ReducerRequest {
   label: string;
   consumed: AcceptedDiscovery[];
   previousReducerResultPath?: string;
+  repairEvidence?: boolean;
   previousSourceCoverage?: DeepReductionInput["sourceCoverage"];
 }
 
@@ -249,9 +250,19 @@ export class DeepScanWorkerRunner {
     const resultPath = join(artifactDir, "result.json");
     await fs.mkdir(artifactDir, { recursive: true });
     const workerIds = consumed.map((worker) => worker.id);
-    const basePrompt = renderDedupPrompt(reducerLabel, workerIds);
+    const basePrompt = renderDedupPrompt(
+      reducerLabel,
+      workerIds,
+      request.repairEvidence
+        ? {
+            targetPath: run.targetPath,
+            includePaths: run.includePaths ?? [run.scope],
+          }
+        : undefined,
+    );
     await writePrivateFile(promptPath, basePrompt);
     await this.options.store.claimDedup({
+      repairEvidence: request.repairEvidence,
       id: reducerId,
       scanId: run.scanId,
       workerIds,

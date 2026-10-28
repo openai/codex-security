@@ -639,6 +639,11 @@ def _require_current_deep_publication(
             raise SystemExit("Deep Scan is terminal; drafts cannot replace its publication.")
         return
 
+    if publication["resultPath"] != selected_reducer_result_path(connection, scan_id):
+        raise SystemExit("Deep Scan aggregate belongs to a superseded publication selection.")
+
+
+def selected_reducer_result_path(connection: Any, scan_id: str) -> str | None:
     # Match the durable reducer sequence used by coordinator recovery.
     def reducer_order(worker: Any) -> tuple[int, str]:
         match = re.fullmatch(r"dedup-([0-9]+)", Path(worker["prompt_path"]).parent.name)
@@ -657,9 +662,7 @@ def _require_current_deep_publication(
         key=reducer_order,
         default=None,
     )
-    selected_result = reducer["result_manifest_path"] if reducer is not None else None
-    if publication["resultPath"] != selected_result:
-        raise SystemExit("Deep Scan aggregate belongs to a superseded publication selection.")
+    return reducer["result_manifest_path"] if reducer is not None else None
 
 
 if __name__ == "__main__":

@@ -31,6 +31,8 @@ from workbench.retained_records import (
     _finding_identity,
     _finding_key,
     _identity_candidate,
+    _legacy_identity_key,
+    _record_deadline_sources,
     _recover_preserved_worker_coverage,
     _recover_preserved_worker_source,
     _retained_findings,
@@ -48,6 +50,7 @@ from workbench.retained_records import (
 )
 from workbench.saved_coverage import (
     _coverage_rows,
+    _DeadlineFindingSource,
     _has_candidate_metadata,
     _inherit_coverage_sources,
     _merge_tied_parent_observations,
@@ -55,6 +58,7 @@ from workbench.saved_coverage import (
     _project_worker_closure,
     _projected_worker_closure_sources,
     _resolved_deferred_rows,
+    _worker_source_directory,
     prepare_saved_coverage_projection,
 )
 from workbench.saved_sources import (
@@ -88,6 +92,11 @@ from workbench_target import committed_diff_snapshot_digest
 from workbench_validation import javascript_utf8, path_within_scope
 
 
+def _projected_candidate_id(prefix: str, candidate_id: str) -> str:
+    digest = hashlib.sha256(javascript_utf8(candidate_id)).hexdigest()
+    return f"{prefix}-candidate-{digest}"
+
+
 def merge_saved_results(
     scan_dir: Path,
     scan_id: str,
@@ -112,6 +121,7 @@ def merge_saved_results(
     project_worker_coverage: bool = False,
     created_paths: set[str] | None = None,
     current_contract: bool = False,
+    deadline_sources: dict[tuple[str, bytes], _DeadlineFindingSource] | None = None,
     recovery_snapshot_error: _CheckpointSnapshotError | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     """Read only bound parent/worker files; return an unsealed loss-preserving union."""
@@ -344,6 +354,7 @@ def merge_saved_results(
             latest_reducer = None
 
     discarded_by_source: dict[str, list[str]] = {}
+    source_indexes = {} if deadline_sources is not None else None
     pending = deque(paths.items())
     while pending:
         relative, worker_id = pending.popleft()
@@ -379,6 +390,7 @@ def merge_saved_results(
                     next(worker for worker in workers if worker["id"] == worker_id),
                     draft,
                     warnings,
+                    source_indexes,
                 )
                 if discarded:
                     discarded_by_source[relative] = discarded
@@ -445,10 +457,7 @@ def merge_saved_results(
     for relative, _, worker_id in sources:
         if worker_id not in headed_workers:
             continue
-        directory = Path(relative).parent
-        if directory.name == "checkpoints":
-            directory = directory.parent
-        _, attempt = worker_attempts.get(directory.as_posix(), (worker_id, 0))
+        _, attempt = worker_attempts.get(_worker_source_directory(relative), (worker_id, 0))
         source_order[relative] = (attempt, source_order[relative][1])
     selected_observations: dict[str, tuple[int, int]] = {}
     authoritative_heads: set[str] = set()
@@ -608,8 +617,7 @@ def merge_saved_results(
             if key in item:
                 result["provenance"][name] = item[key]
         if isinstance(item.get("candidateId"), str):
-            candidate_digest = hashlib.sha256(javascript_utf8(item["candidateId"])).hexdigest()
-            result["candidateId"] = f"{prefix}-candidate-{candidate_digest}"
+            result["candidateId"] = _projected_candidate_id(prefix, item["candidateId"])
         if field == "surfaces":
             original = source_rows[index - 1] if isinstance(source_rows, list) else item
             result["id"] = surface_id(original, index)
@@ -757,6 +765,12 @@ def merge_saved_results(
         parent,
         source_order,
         project_worker_coverage=project_worker_coverage,
+        worker_attempts=worker_attempts,
+        unchanged_sources={
+            path
+            for path, digest in parent_preserved_sources.items()
+            if source_digests.get(path) == digest
+        },
         preserve_canonical_parent=preserve_canonical_parent,
         receipt_resolver=lambda relative, row, owner: resolve_coverage_receipts(
             scan_dir, row, workers_by_id[owner], relative
@@ -822,11 +836,8 @@ def merge_saved_results(
             return item
         worker_id, relative, _, index, source = origin
         if relative not in accepted_sources:
-            directory = Path(relative).parent
-            if directory.name == "checkpoints":
-                directory = directory.parent
             worker = workers_by_id.get(worker_id)
-            if worker is None or worker_attempts.get(directory.as_posix(), (None, None)) != (
+            if worker is None or worker_attempts.get(_worker_source_directory(relative)) != (
                 worker_id,
                 worker["attempt"],
             ):
@@ -1200,28 +1211,13 @@ def merge_saved_results(
     legacy_identities: dict[str, dict[str, Any] | None] = {}
     legacy_identity_sources: set[str] = set()
 
-    def legacy_identity_key(finding: dict[str, Any], owner: str | None) -> str:
-        content = _finding_content(finding)
-        locations = content.get("locations")
-        if isinstance(locations, list):
-            content["locations"] = sorted(
-                [
-                    {**row, "endLine": row.get("endLine", row.get("startLine"))}
-                    if isinstance(row, dict)
-                    else row
-                    for row in locations
-                ],
-                key=_encoded,
-            )
-        return _digest([owner, _identity_candidate(finding), content])
-
     def restore_legacy_identity(
         finding: Any, normalized: Any = None, *, allow_synthesis: bool = True
     ) -> None:
         if isinstance(finding, dict) and "identity" not in finding:
             provenance = finding.get("provenance")
             owner = provenance.get("workerId") if isinstance(provenance, dict) else None
-            key = legacy_identity_key(finding, owner)
+            key = _legacy_identity_key(finding, owner)
             identity = legacy_identities.get(key)
             if identity is not None:
                 finding["identity"] = copy.deepcopy(identity)
@@ -1283,7 +1279,7 @@ def merge_saved_results(
                 saved_owner = (
                     provenance.get("workerId", owner) if isinstance(provenance, dict) else owner
                 )
-                key = legacy_identity_key(saved, saved_owner)
+                key = _legacy_identity_key(saved, saved_owner)
                 if "identity" in saved:
                     legacy_identity_sources.add(key)
                 if not isinstance(identity, dict) or not valid_finding(saved):
@@ -3182,6 +3178,16 @@ def merge_saved_results(
                     break
                 suffix += 1
         identities.setdefault(key, []).append((variant, group, identity.get("instance")))
+    if deadline_sources is not None:
+        _record_deadline_sources(
+            deadline_sources,
+            findings,
+            retained_groups,
+            surface_ids_by_source,
+            source_indexes,
+            workers_by_id,
+            worker_attempts,
+        )
     coverage.pop("completeness", None)
     if stopped:
         if not isinstance(coverage.get("deferred"), list):

@@ -682,6 +682,29 @@ export function standardScanDraft(
             },
             taxonomy: { category: "sql-injection", cwe: ["CWE-89"] },
             locations: [{ path: "fixture.py", startLine: 1, endLine: 1 }],
+            codeEvidence: [
+              {
+                id: "query-sink",
+                label: "Query sink",
+                path: "fixture.py",
+                startLine: 1,
+                code: "connection.execute(query)",
+                explanation: "The query is passed directly to SQL execution.",
+              },
+            ],
+            rootCause: {
+              summary:
+                "The query uses request-controlled text without parameterization.",
+            },
+            attackPath: {
+              dataflow: "Request input reaches the query execution sink.",
+            },
+            validation: {
+              method: "Static source inspection",
+              summary: "The query execution uses unparameterized input.",
+              evidence:
+                "The query argument is passed directly to connection.execute.",
+            },
             remediation: "Use a parameterized query.",
             provenance: {
               source: "local_plugin",

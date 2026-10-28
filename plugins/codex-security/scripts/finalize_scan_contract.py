@@ -2147,6 +2147,37 @@ def _validate_current_findings(findings: dict[str, Any], schema_dir: Path) -> No
         _validate_schema_node(authored, finding_schema, f"findings.findings[{index}]")
 
 
+def _validate_finding_evidence(
+    finding: dict[str, Any], index: int = 0, *, source_only: bool = False
+) -> None:
+    context = f"findings.findings[{index}]"
+    if not _require_list(finding, "codeEvidence", context):
+        raise ContractError(f"{context}.codeEvidence: include the source snippets used as proof")
+    root_cause = finding.get("rootCause")
+    if isinstance(root_cause, dict):
+        _require_str(root_cause, "summary", f"{context}.rootCause")
+    else:
+        _require_str(finding, "rootCause", context)
+    attack_path = _require_dict(finding, "attackPath", context)
+    dataflow = attack_path.get("dataflow")
+    if isinstance(dataflow, dict):
+        if not dataflow.get("summary"):
+            _require_str(dataflow, "source", f"{context}.attackPath.dataflow")
+            _require_str(dataflow, "sink", f"{context}.attackPath.dataflow")
+    else:
+        _require_str(attack_path, "dataflow", f"{context}.attackPath")
+    if source_only:
+        return
+    validation = _require_dict(finding, "validation", context)
+    _require_str(validation, "method", f"{context}.validation")
+    if not validation.get("result"):
+        _require_str(validation, "summary", f"{context}.validation")
+    if not any(validation.get(key) for key in ("evidence", "evidenceRefs")):
+        raise ContractError(
+            f"{context}.validation: include observed evidence or evidenceRefs to the source proof"
+        )
+
+
 def _filter_unknown_legacy_evidence_refs(section: dict[str, Any], evidence_ids: set[str]) -> None:
     for refs_field in ("evidenceRefs", "evidence_refs"):
         refs = section.get(refs_field)
@@ -3121,6 +3152,7 @@ def _prepare_scan_finalization(
     completion_binding: dict[str, Any] | None = None,
     recover_unsealed: bool = False,
     allow_missing_writeups: bool = False,
+    require_complete_evidence: bool = True,
     draft_documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
     finding_scope: list[tuple[str, bool]] | None = None,
 ) -> PreparedScanFinalization:
@@ -3206,6 +3238,9 @@ def _prepare_scan_finalization(
             _populate_unsealed_finding_identities(manifest, findings)
             _validate_findings(manifest, findings)
             _validate_current_findings(findings, schema_dir)
+            if require_complete_evidence and not (completion_binding or {}).get("imported"):
+                for index, finding in enumerate(findings["findings"]):
+                    _validate_finding_evidence(finding, index)
         except ContractError as exc:
             raise RecoverableContractError(
                 "Scan result contains invalid findings; repair the finding records "

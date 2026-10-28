@@ -123,8 +123,8 @@ def test_current_publication_replays_without_changing_checkpoint_or_worker_state
     result = add_worker(workbench_db, scan)
     with workbench_db:
         workbench_db.execute(
-            "UPDATE deep_scan_runs SET coordinator_generation = ?, status = 'running' "
-            "WHERE scan_id = ?",
+            "UPDATE deep_scan_runs SET coordinator_generation = ?, status = 'running', "
+            "phase = 'reducing', terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
             (generation or 1, scan.scan_id),
         )
         workbench_db.execute(

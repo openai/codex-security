@@ -1,3 +1,4 @@
+import { completedFindingEvidence } from "./scan-draft-fixture.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -46,6 +47,11 @@ const findingFor = (candidateId: string): FixtureFinding => ({
   locations: [{ path: "src/example.py", startLine: 1 }],
   remediation: "Complete the review.",
   provenance: { source: "local_plugin", candidateId },
+});
+
+const withCompletedEvidence = (finding: FixtureFinding) => ({
+  ...finding,
+  ...completedFindingEvidence(finding.locations[0]!.path),
 });
 
 // Finding reconciliation is shared by failed and canceled scans. Exercise both
@@ -246,7 +252,10 @@ for (const layout of ["standard", "diff", "worker"] as const) {
   test(`${layout}: distinct candidates at one location survive draft merging`, async (t) => {
     const f = await fixture(t, layout);
     for (const candidate of ["first", "second", "third"])
-      await f.write({ ...f.draft(), findings: [findingFor(candidate)] });
+      await f.write({
+        ...f.draft(),
+        findings: [withCompletedEvidence(findingFor(candidate))],
+      });
     await f.write(f.draft({}, true));
     const saved = JSON.parse(
       await readFile(
@@ -2453,7 +2462,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         }),
       );
       const reported = {
-        ...old,
+        ...withCompletedEvidence(old),
         provenance: { source: "local_plugin", candidateId: "review" },
       };
       const input = { ...f.draft({}, true), findings: [reported] };
@@ -2538,9 +2547,10 @@ for (const additional of ["none", "surface", "task", "completed-surface"]) {
       ],
     });
     await f.write(progress);
+    const finding = findingFor("candidate-review");
     await f.write({
       ...f.draft({}, true),
-      findings: [findingFor("candidate-review")],
+      findings: [withCompletedEvidence(finding)],
     });
     const { importSource } = await import("./import-module.ts");
     const { validateDiscoveryArtifacts } = await importSource(

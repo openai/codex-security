@@ -6,7 +6,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from finalize_scan_contract import (
     ContractError,
@@ -16,6 +16,18 @@ from finalize_scan_contract import (
     _validate_resolved_deferred,
     _validate_schema_node,
 )
+
+
+class _DeadlineFindingSource(NamedTuple):
+    path: str
+    index: int
+    attempt: int
+    surfaces: set[str]
+
+
+def _worker_source_directory(relative: str) -> str:
+    directory = Path(relative).parent
+    return (directory.parent if directory.name == "checkpoints" else directory).as_posix()
 
 
 def _has_candidate_metadata(row: dict[str, Any]) -> bool:
@@ -728,6 +740,62 @@ class SavedCoverageProjection:
         return fallback_surfaces
 
 
+def _restore_deferred_surface_inputs(parent, sources, worker_attempts, unchanged_sources):
+    """Reapply a deadline decision to the same evidence after a publication rollback."""
+    from workbench.saved_sources import _digest
+
+    coverage = parent["reviewState"]
+    followups = {
+        row["id"]: row
+        for row in _coverage_rows(coverage, "surfaces")
+        if isinstance(row, dict)
+        and row.get("disposition") == "needs_follow_up"
+        and isinstance(row.get("id"), str)
+    }
+    linked = {}
+    for task in _deferred_rows(coverage):
+        if not isinstance(task, dict) or not isinstance(owner := task.get("workerId"), str):
+            continue
+        provenance = task.get("provenance")
+        if (
+            not str(task.get("id", "")).startswith(f"{owner}/discarded-")
+            or not isinstance(provenance, dict)
+            or provenance.get("workerId") != owner
+            or not isinstance(provenance.get("attempt"), int)
+            or not isinstance(task.get("surfaceIds"), list)
+        ):
+            continue
+        for surface_id in task["surfaceIds"]:
+            if isinstance(surface_id, str) and surface_id in followups:
+                linked.setdefault((owner, provenance["attempt"]), {})[surface_id] = followups[
+                    surface_id
+                ]
+    if not linked:
+        return
+    for relative, draft, owner in sources:
+        if relative not in unchanged_sources:
+            continue
+        mirrors = linked.get(worker_attempts.get(_worker_source_directory(relative)))
+        if not mirrors or owner is None:
+            continue
+        for row in _coverage_rows(draft["reviewState"], "surfaces"):
+            if (
+                not isinstance(row, dict)
+                or not isinstance(row.get("disposition"), str)
+                or row["disposition"] in ("needs_follow_up", "rejected", "not_applicable")
+            ):
+                continue
+            source = _project_worker_coverage_row(row, owner, "surfaces")
+            identity = source["id"]
+            if not isinstance(identity, str):
+                continue
+            # A previous finish may already have disambiguated a reused worker-local ID.
+            for key in (identity, f"{identity}-{_digest(source)[:16]}"):
+                mirror = mirrors.get(key)
+                if mirror == {**source, "id": key, "disposition": "needs_follow_up"}:
+                    mirror["disposition"] = source["disposition"]
+
+
 def prepare_saved_coverage_projection(
     sources,
     parent,
@@ -735,9 +803,13 @@ def prepare_saved_coverage_projection(
     *,
     project_worker_coverage,
     receipt_resolver,
+    worker_attempts,
+    unchanged_sources,
     preserve_canonical_parent=False,
 ):
     if preserve_canonical_parent:
+        if parent is not None and unchanged_sources:
+            _restore_deferred_surface_inputs(parent, sources, worker_attempts, unchanged_sources)
         return SavedCoverageProjection(False, [], sources)
     # Older parent publications use worker/id identities. Reconcile those copies
     # against their bound sources before projecting accepted attempt provenance.
@@ -799,10 +871,9 @@ def _project_worker_closure(
     worker_attempts: dict[str, tuple[str, int]],
     source_order: dict[str, tuple[int, int]],
 ) -> dict[str, Any]:
-    directory = Path(relative).parent
-    if directory.name == "checkpoints":
-        directory = directory.parent
-    _, attempt = worker_attempts.get(directory.as_posix(), (owner, source_order[relative][0]))
+    _, attempt = worker_attempts.get(
+        _worker_source_directory(relative), (owner, source_order[relative][0])
+    )
     return {
         "id": f"{owner}-attempt-{attempt}-resolved-{closure['id']}",
         "reason": closure["reason"],

@@ -36,6 +36,23 @@ def test_invalid_optional_context_does_not_block_findings_or_frozen_replay(
         "confidence": {"level": "high", "rationale": "Synthetic fixture evidence."},
         "taxonomy": {"category": "other", "cwe": []},
         "locations": [{"path": "fixture.py", "startLine": 1}],
+        "codeEvidence": [
+            {
+                "id": "synthetic-output",
+                "label": "Synthetic output flow",
+                "path": "fixture.py",
+                "startLine": 1,
+                "code": "emit(payload)",
+                "explanation": "The synthetic handler emits the supplied input directly.",
+            }
+        ],
+        "rootCause": {"summary": "The synthetic handler does not validate the supplied input."},
+        "attackPath": {"dataflow": "supplied input -> payload -> emit"},
+        "validation": {
+            "method": "Static source inspection",
+            "summary": "The synthetic source shows the direct input-to-output flow.",
+            "evidenceRefs": ["synthetic-output"],
+        },
         "remediation": "Apply the synthetic correction.",
         "provenance": {"source": "local_plugin"},
     }

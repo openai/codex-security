@@ -34,7 +34,8 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         scan.pop("artifacts")
         scan["scope"]["includePaths"] = ["src/"]
         scan["target"]["snapshotDigest"] = "codex-security-snapshot/v1:sha256:" + "0" * 64
-        self.findings = json.loads((EXAMPLE_DIR / "findings.json").read_text(encoding="utf-8"))
+        findings_path = EXAMPLE_DIR.parent / "completed-scan" / "findings.json"
+        self.findings = json.loads(findings_path.read_text(encoding="utf-8"))
         self.finding = self.findings["findings"][0]
         for field in (
             "findingId",
@@ -1578,7 +1579,11 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
     def test_finalize_accepts_current_text_or_object_report_semantics(self) -> None:
         finding = self.findings["findings"][0]
         finding["rootCause"] = "The extraction destination is not contained."
-        finding["validation"] = {"evidence": "A traversal input escapes the destination."}
+        finding["validation"] = {
+            "method": "source review",
+            "result": "The extraction destination is not constrained.",
+            "evidence": "A traversal input escapes the destination.",
+        }
         finding["attackPath"] = {"dataflow": "archive entry -> filesystem write"}
         self.write_scan()
 
@@ -1592,6 +1597,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
     @pytest.mark.cross_platform
     def test_finalize_renders_embedded_evidence_with_null_end_line(self) -> None:
         self.findings["findings"][0]["validation"] = {
+            **self.findings["findings"][0]["validation"],
             "codeEvidence": [
                 {
                     "label": "Source control",
@@ -1600,7 +1606,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
                     "endLine": None,
                     "code": "handle(request)",
                 }
-            ]
+            ],
         }
         self.write_scan()
 
@@ -2161,6 +2167,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
 
     @pytest.mark.cross_platform
     def test_stopped_recovery_ranks_legacy_and_canonical_code_evidence_equally(self) -> None:
+        self.finding.pop("codeEvidence")
         canonical_evidence = {
             "id": "canonical-source",
             "label": "Canonical source",

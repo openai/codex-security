@@ -1,5 +1,9 @@
 import { readJson, writeJsonLine as writeResult } from "./support/json.ts";
-import { finding, scanId, workerDraft as draft } from "./scan-draft-fixture.ts";
+import {
+  completedFinding as finding,
+  scanId,
+  workerDraft as draft,
+} from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import {
@@ -40,6 +44,7 @@ const {
 const otherScanId = "12c17317-9594-49e0-b06a-d72fd7e14bba";
 const root = await temporaryDirectory("deep-scan-artifact-validation-", true);
 try {
+  await testDiscoveryCompletionEvidence(root);
   await testDiscoveryValidation(root);
   await testDiscoveryReceipts(root);
   for (const includeValidCheckpoint of [false, true])
@@ -79,6 +84,52 @@ try {
 }
 
 console.log("deep scan artifact validation tests passed");
+
+async function testDiscoveryCompletionEvidence(root: string) {
+  for (const field of [
+    "codeEvidence",
+    "rootCause",
+    "attackPath.dataflow",
+    "validation.method",
+    "validation.summary",
+    "validation.evidence",
+  ]) {
+    const incomplete: JsonObject = finding("evidence", "handler.py");
+    const keys = field.split(".");
+    let owner = incomplete;
+    for (const key of keys.slice(0, -1)) owner = owner[key] as JsonObject;
+    delete owner[keys.at(-1)!];
+    const worker = await createWorker(
+      path.join(root, `missing-${field}`),
+      "first",
+      draft([incomplete]),
+    );
+    await assert.rejects(
+      validateDiscoveryArtifacts(worker.artifacts, worker.resultPath, scanId),
+      (error: Error) =>
+        error.message.includes(
+          field === "validation.evidence" ? "validation" : field,
+        ),
+      `${field} must be repaired before accepting a completed worker`,
+    );
+  }
+  const supported = {
+    ...finding("representations", "handler.py"),
+    rootCause: { summary: "The output is not encoded." },
+    attackPath: { dataflow: { source: "request input", sink: "HTML output" } },
+    validation: {
+      method: "Static source inspection",
+      result: "The output is reachable.",
+      evidenceRefs: ["request-output"],
+    },
+  };
+  const worker = await createWorker(
+    path.join(root, "evidence-representations"),
+    "first",
+    draft([supported]),
+  );
+  await validateDiscoveryArtifacts(worker.artifacts, worker.resultPath, scanId);
+}
 
 function testResolvedDeferredPublication() {
   const source = {

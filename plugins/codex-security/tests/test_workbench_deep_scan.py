@@ -1151,6 +1151,7 @@ def test_reducer_claim_updates_review_pass_once_and_projects_consolidation(
     prompt_path, artifact_dir, _ = worker_paths(scan_dir, "dedup-1")
     claim_args = (
         "claim-deep-scan-dedup",
+        "--check-target",
         "--scan-id",
         scan_id,
         "--worker-id",
@@ -1165,6 +1166,14 @@ def test_reducer_claim_updates_review_pass_once_and_projects_consolidation(
         second_worker_id,
     )
 
+    changed = target / "changed.py"
+    changed.write_text("changed = True")
+    rejected = run_workbench(
+        state_dir, *claim_args, check=False, environment=deep_environment(codex_home)
+    )
+    assert rejected["returncode"] != 0
+    assert "Scan target contents changed" in rejected["stderr"]
+    changed.unlink()
     for _ in range(2):
         run_workbench(state_dir, *claim_args, environment=deep_environment(codex_home))
         progress = get_scan(state_dir, scan_id)["scan"]["progress"]

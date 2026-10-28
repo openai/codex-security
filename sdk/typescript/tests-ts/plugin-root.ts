@@ -10,6 +10,8 @@ import {
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { brotliDecompressSync } from "node:zlib";
+import type { FindingsDocument } from "../src/models.js";
+import { readJson } from "./support/json.js";
 
 const bundledPlugin = new URL("../_bundled_plugin/", import.meta.url);
 const hasMonorepoSdk = existsSync(
@@ -61,6 +63,12 @@ export function loadBundledRuntime(): Promise<string> {
     .then((parts) =>
       brotliDecompressSync(Buffer.concat(parts)).toString("utf8"),
     ));
+}
+
+export function readCompletedFindingsFixture(): Promise<FindingsDocument> {
+  return readJson(
+    join(PLUGIN_ROOT, "examples", "completed-scan", "findings.json"),
+  );
 }
 
 export const copyCompletedScanFixture = (destination: string) =>

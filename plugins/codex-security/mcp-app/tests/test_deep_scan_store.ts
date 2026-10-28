@@ -581,8 +581,10 @@ async function testPersistenceRetriesRemainInsideTheWriteQueue() {
   const calls: string[] = [];
   const store = new WorkbenchDeepScanStore(async (args: string[]) => {
     calls.push(args[0]);
-    if (args[0] === "claim-deep-scan-dedup" && calls.length === 1) {
-      throw new Error("sqlite3.OperationalError: database is locked");
+    if (args[0] === "claim-deep-scan-dedup") {
+      assert.ok(args.includes("--check-target"));
+      if (calls.length === 1)
+        throw new Error("sqlite3.OperationalError: database is locked");
     }
     return {};
   });
@@ -591,6 +593,7 @@ async function testPersistenceRetriesRemainInsideTheWriteQueue() {
     id: randomUUID(),
     scanId,
     workerIds: [randomUUID()],
+    repairEvidence: true,
     promptPath: "/fixture/reducer/prompt.md",
     artifactDir: "/fixture/reducer/output",
   });

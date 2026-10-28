@@ -22,8 +22,10 @@ Use `schemas/tools/scan-draft.schema.json` for new drafts and `finding-detail-fi
 - An evidence-supported lowercase vulnerability-family `ruleId`, `taxonomy.category`, known `taxonomy.cwe` values (or `[]`), and genuine `provenance.source`. Use `local_plugin` only for findings this plugin discovered; preserve worker/source provenance and candidate identity.
 - Verified source locations, including the broken control or sink and materially affected entry points or concrete implementations. Preserve independently vulnerable instances. Group observations only when they share the broken control and remediation, not merely a CWE.
 - A concise summary, root cause, validation basis, attacker dataflow and reachability, calibrated severity and confidence, counterevidence, and practical remediation. Classify by the primary broken control; describe secondary impacts without inventing additional vulnerabilities.
-- Nonempty exact snippets in `codeEvidence` when supplied, with valid evidence references. Retain the analysis and code that establish the claim rather than repeating a location table in prose.
+- For each new completed finding, include exact source snippets in `codeEvidence`, the root cause, attacker dataflow, and the validation method, result, and supporting evidence. Static source inspection can supply that proof. Link evidence references to the supplied snippets.
 - `severity.changeConditions` as one nonempty string when present; combine multiple attack-path change conditions into that string. Keep `remediation` a string; `remediationTests` and `preventiveControls` are arrays of strings.
+
+Partial checkpoints, stopped scans, source-report imports, and historical sealed reports retain their available evidence.
 
 Use `scope` for reviewed context, artifacts, runtime/test status, validation mode, and limitations. Preserve the completed canonical `threatModel`, including source citations and uncertainty; do not reconstruct it from the final findings. A supplied or completed Markdown model is retained as `{ "format": "markdown", "content": "<exact model text>" }`. A historical context file can supply missing content but must not replace a newer canonical model.
 
@@ -53,6 +55,8 @@ Detailed vulnerability writeups and hardening proposals are derived, unsealed ou
 ## Errors And Recovery
 
 An MCP `-32602` or `isError: true` input-validation rejection makes no draft write. Correct the rejected fields in the same draft, preserving valid evidence and pending work, then resubmit. Do not repeat an unchanged failing request or blindly retry an ambiguous transport/write failure.
+
+When completion names repairable evidence gaps, follow its instructions on the same scan. Preserve the findings, add the missing evidence, then retry completion.
 
 For a required phase, artifact, or completion failure, preserve and report the actual diagnostic. Resolve a recoverable cause when the tool's state makes retry safe; do not claim a final report, a no-findings conclusion, or a successful structured result while completion remains unresolved. Preserve the durable scan for continuation rather than canceling or failing it merely because assembly is blocked. Do not resubmit an accepted final draft or repeat successful completion.
 

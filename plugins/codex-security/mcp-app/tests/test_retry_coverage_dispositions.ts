@@ -5,7 +5,7 @@ import {
   publishCoverageFixture,
   readFixtureCoverage,
 } from "./deep_scan_coverage_fixture.ts";
-import { finding } from "./scan-draft-fixture.ts";
+import { completedFinding } from "./scan-draft-fixture.ts";
 import { readJson } from "./support/json.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
@@ -70,7 +70,7 @@ for (const resume of [false, true]) {
         const findings = cases
           .filter(({ disposition }) => disposition === "reported")
           .map(({ candidateId }) => ({
-            ...finding(candidateId, "source.py"),
+            ...completedFinding(candidateId, "source.py"),
             provenance: { source: "local_plugin", candidateId },
           }));
         const { scanDir } = await publishCoverageFixture(root, "partial", {

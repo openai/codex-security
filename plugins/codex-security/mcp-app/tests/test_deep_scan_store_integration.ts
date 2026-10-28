@@ -1,6 +1,9 @@
 import { readJson, writeJsonLine } from "./support/json.ts";
 import { readFixtureCoverage } from "./deep_scan_coverage_fixture.ts";
-import { finding } from "./scan-draft-fixture.ts";
+import {
+  completedFinding as finding,
+  finding as checkpointFinding,
+} from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { mock } from "node:test";
@@ -833,6 +836,12 @@ connection.rollback()`,
         );
       }
     }
+    const empty = await createWorkerFixture(run, "empty-reducer", "dedup");
+    await assert.rejects(
+      store.claimDedup({ ...empty, workerIds: [] }),
+      /first Deep Scan dedup requires two/,
+      "an empty reduction requires a previously accepted aggregate",
+    );
     const reducer = await createWorkerFixture(run, "dedup-0001", "dedup");
     await writeJsonLine(reducer.resultPath, {
       schemaVersion: 1,
@@ -882,6 +891,44 @@ connection.rollback()`,
     assert.equal(
       await readFile(stagedCandidateLedgerPath, "utf8"),
       '{"candidate_id":"replacement"}\n',
+    );
+
+    // An older accepted aggregate can be repaired without spending discovery
+    // budget or claiming the discoveries that already belong to that aggregate.
+    const priorBytes = await readFile(reducer.resultPath, "utf8");
+    const failedRepair = await createWorkerFixture(run, "dedup-0002", "dedup");
+    await store.claimDedup({ ...failedRepair, workerIds: [] });
+    await store.updateWorker({ ...failedRepair, status: "running" });
+    await store.updateWorker({
+      ...failedRepair,
+      status: "failed",
+      error: "Repair attempt did not complete.",
+    });
+    const repair = await createWorkerFixture(run, "dedup-0003", "dedup");
+    await writeFile(repair.resultPath, priorBytes);
+    await store.claimDedup({ ...repair, workerIds: [] });
+    await store.updateWorker({ ...repair, status: "running" });
+    const afterRepair = await store.commitDedup({
+      id: repair.id,
+      scanId: run.scanId,
+      newFindings: 0,
+      resultManifestPath: repair.resultPath,
+    });
+    assert.equal(afterRepair.dispatchedCount, afterCommit.dispatchedCount);
+    assert.equal(afterRepair.noNewStreak, afterCommit.noNewStreak);
+    assert.equal(await readFile(reducer.resultPath, "utf8"), priorBytes);
+    for (const workerId of [first.id, second.id])
+      assert.equal(
+        afterRepair.persistedWorkers.find(
+          (worker: { id: string }) => worker.id === workerId,
+        )?.mergeState,
+        "merged",
+      );
+    assert.equal(
+      afterRepair.persistedDedupInputs.some(
+        (input: { dedupWorkerId: string }) => input.dedupWorkerId === repair.id,
+      ),
+      false,
     );
 
     const acceptedLate = await store.updateWorker({
@@ -1238,7 +1285,7 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
           "pending-review",
           "Worker did not finish reviewing this source.",
         ),
-        findings: [finding(label, "fixture.py")],
+        findings: [checkpointFinding(label, "fixture.py")],
       };
       if (label === "valid" || label === "second-valid") {
         if (label === "valid") {
@@ -1505,7 +1552,15 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       await readFile(path.join(run.scanDir, "scan-manifest.json"), "utf8"),
       beforeReplay,
     );
-    await runWorkbench(["complete-scan", "--scan-id", run.scanId]);
+    // Preserving unfinished worker evidence must not claim a successful audit.
+    await assert.rejects(
+      runWorkbench(["complete-scan", "--scan-id", run.scanId]),
+      /repair the finding records.*codeEvidence/,
+    );
+    assert.equal(
+      await readFile(path.join(run.scanDir, "scan-manifest.json"), "utf8"),
+      beforeReplay,
+    );
     assert.deepEqual(
       (await readFixtureCoverage(run.scanDir)).surfaces,
       coverage.surfaces,
@@ -1514,8 +1569,6 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       (await readFixtureCoverage(run.scanDir)).deferred,
       coverage.deferred,
     );
-    const sealed = await readJson(run.scanDir, "scan-manifest.json");
-    assert.equal(typeof sealed.scan.sealedAt, "string");
     assert.deepEqual(
       (await readJson(run.scanDir, "findings.json")).findings,
       recovered.findings,

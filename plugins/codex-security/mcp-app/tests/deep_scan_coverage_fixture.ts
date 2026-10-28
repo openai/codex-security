@@ -113,6 +113,14 @@ const {
   },
   loader: { ".md": "text" },
 })) as FixtureRuntime;
+
+export {
+  createScanArtifactContext,
+  DeepScanCoordinator,
+  recordCodexSecurityScanDraftViaWorkbench,
+  WorkbenchDeepScanStore,
+};
+
 export async function publishReceiptFixture(options: CoverageFixtureOptions) {
   const root = await temporaryDirectory("retry-coverage-receipts-");
   try {

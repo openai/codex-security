@@ -4,6 +4,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { completedFindingEvidence } from "./scan-draft-fixture.ts";
 import { importSource } from "./import-module.ts";
 import { readFixtureCoverage } from "./deep_scan_coverage_fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
@@ -30,7 +31,7 @@ for (const newerTask of [false, true]) {
       await mkdir(scanDir, { mode: 0o700 });
       await writeFile(
         path.join(target, "src/example.py"),
-        "# Synthetic source\n",
+        "def render(request): return request.value\n",
       );
       const environment = {
         ...process.env,
@@ -65,6 +66,7 @@ for (const newerTask of [false, true]) {
         requireRunning: true,
       });
       const finding = {
+        ...completedFindingEvidence("src/example.py"),
         ruleId: "fixture.review",
         identity: { anchor: "synthetic-review" },
         title: "Synthetic review finding",

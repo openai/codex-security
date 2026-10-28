@@ -65,9 +65,8 @@ def test_deep_scan_deadlines_on_python310(monkeypatch, created_at, timestamp, re
     deep = importlib.import_module("deep_scan_workbench")
     monkeypatch.setattr(deep, "datetime", Python310DateTime)
     monkeypatch.setattr(deep, "_dependencies", SimpleNamespace(now=lambda: timestamp))
-    assert (
-        deep.deep_scan_deadline_reached({"created_at": created_at, "max_time_hours": 1}) is reached
-    )
+    run = {"created_at": created_at, "completed_at": None, "max_time_hours": 1}
+    assert deep.deep_scan_deadline_reached(run) is reached
 
 
 @pytest.mark.parametrize(

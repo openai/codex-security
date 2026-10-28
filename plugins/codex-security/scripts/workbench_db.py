@@ -535,6 +535,10 @@ def workbench_completion_binding(
         "scope": scope,
         "coverageMode": expected_coverage_mode(scan),
     }
+    if scan["recipe_json"] is not None:
+        recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+        binding["imported"] = isinstance(recipe.get("import"), dict)
+        binding["customValidation"] = recipe.get("validationMode") == "custom"
     return scan_history.preserve_sealed_completion(binding, manifest)
 
 

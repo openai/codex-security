@@ -15,12 +15,12 @@ history = load_script("workbench_scan_history")
 @pytest.mark.parametrize("unfinished", [False, True])
 def test_results_without_coverage_file(tmp_path: Path, unfinished: bool) -> None:
     scan_dir = (tmp_path / "scan").resolve()
-    example = Path(__file__).resolve().parents[1] / "examples" / "legacy-completed-scan"
+    example = Path(__file__).resolve().parents[1] / "examples" / "completed-scan"
     shutil.copytree(example, scan_dir)
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
-    state = json.loads((scan_dir / "coverage.json").read_text())
     scan = manifest["scan"]
-    for key in ("coverageRef", "artifacts", "sealedAt"):
+    state = finalizer.review_state(scan)
+    for key in ("artifacts", "sealedAt"):
         scan.pop(key)
     state["explicitExclusions"] = [{"pattern": "vendor", "reason": "External code"}]
     state["openQuestions"] = ["Which runtime controls apply?"]
@@ -37,10 +37,8 @@ def test_results_without_coverage_file(tmp_path: Path, unfinished: bool) -> None
     if unfinished:
         state["completeness"] = "partial"
         state["deferred"] = [{"id": "task-1", "reason": "Check the background worker"}]
-    scan["mode"] = state["mode"]
     scan["reviewState"] = state
     (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
-    (scan_dir / "coverage.json").unlink()
 
     finalizer.finalize_scan(scan_dir)
     result = validator.validate_contract(scan_dir)

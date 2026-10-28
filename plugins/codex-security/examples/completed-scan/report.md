@@ -59,13 +59,25 @@ No explicit canonical threat-model summary was recorded.
 
 An attacker-controlled path reaches a filesystem write without containment validation.
 
+#### Root Cause
+
+The extractor joins the entry name to the output directory without checking whether the destination stays inside it.
+
 #### Validation
 
-Direct source trace reaches the filesystem write without a containment check. Validation details were not recorded separately.
+An archive entry can select a path outside the extraction root.
+
+Validation method: source review
+
+Evidence:
+- The untrusted entry name reaches the filesystem write without normalization or a containment check.
+
+Limitations:
+- The extraction route was not exercised dynamically.
 
 #### Dataflow
 
-The canonical finding records the affected path at src/extract.py:41-44, but no expanded source-to-sink narrative was recorded.
+archive entry name -\> joined destination path -\> filesystem write outside the extraction root
 
 #### Reachability
 

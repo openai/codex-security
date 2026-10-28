@@ -5,7 +5,7 @@
       {
         "mediaType": "application/json",
         "path": "findings.json",
-        "sha256": "fea40b4d1f0b92090f1c0a06f43fa03da5bdf4e7f8bdf8e8a7953ae626600d5b"
+        "sha256": "95cf41223efa0b25b4be0924c908625eb594176c50521670a94bb931ed5ca60a"
       }
     ],
     "completedAt": "2026-05-31T18:09:00Z",

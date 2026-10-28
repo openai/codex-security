@@ -5,8 +5,10 @@ import json
 import os
 import sqlite3
 from argparse import Namespace
+from datetime import datetime, timedelta
 
 import pytest
+from test_deep_scan_publication_authority import stage_publication
 from test_deep_scan_successful_publication import (
     add_worker,
     assert_published_aggregate,
@@ -60,12 +62,13 @@ def saturated_scan(publication_scan, workbench_db):
     return scan
 
 
-def finish(workbench_api, connection, scan, *, terminal_reason="saturated"):
+def finish(workbench_api, connection, scan, *, terminal_reason="saturated", generation=None):
     return workbench_api["deep_scan"].finish_deep_scan(
         connection,
         Namespace(
             scan_id=scan.scan_id,
             terminal_reason=terminal_reason,
+            coordinator_generation=generation,
             manifest_path=str(scan.scan_dir / "scan-manifest.json"),
             staged_manifest_path=None,
             omitted_worker_id=[],
@@ -670,10 +673,178 @@ def test_rejected_deadline_publication_does_not_leave_parent_observations(
         assert any(item["reason"] == pending["reason"] for item in coverage["deferred"])
 
 
+def test_count_capped_repair_after_deadline_preserves_original_cutoff(
+    workbench_api, workbench_db, saturated_scan, monkeypatch
+):
+    scan = saturated_scan
+    deep = workbench_api["deep_scan"]
+    _, output = canceled_discovery_output(workbench_db, scan)
+    write_checkpoint(
+        output / "checkpoints",
+        saved_draft(scan.scan_id, deferred=[{"id": "surplus", "reason": "Unfinished review."}]),
+    )
+    owner = "count-cap-owner"
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET max_discovery_runs = 2, discovery_runs_dispatched = 2, "
+            "max_time_hours = 1 WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+        workbench_db.execute(
+            "UPDATE scans SET deep_scan_owner_thread_id = ? WHERE id = ?", (owner, scan.scan_id)
+        )
+    selected = finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    selected_at = selected["completedAt"]
+    coverage = read_review_state(workbench_db, scan.scan_dir)
+    findings_path = scan.scan_dir / "findings.json"
+    complete_findings = findings_path.read_bytes()
+    sparse = json.loads(complete_findings)
+    sparse["findings"][0].pop("validation")
+    findings_path.write_text(json.dumps(sparse))
+    selection_time = datetime.fromisoformat(selected_at.replace("Z", "+00:00"))
+    later = (selection_time + timedelta(hours=2)).isoformat()
+    monkeypatch.setattr(deep.dependencies(), "now", lambda: later)
+    claimed = deep.claim_deep_scan_coordinator(
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, thread_id=owner, claim_token=None, coordinator_generation=None
+        ),
+    )
+    assert claimed["deepScan"]["completedAt"] is None
+    findings_path.write_bytes(complete_findings)
+    repaired = finish(
+        workbench_api,
+        workbench_db,
+        scan,
+        terminal_reason="capped",
+        generation=claimed["deepScan"]["coordinatorGeneration"],
+    )
+    assert read_review_state(workbench_db, scan.scan_dir) == coverage
+    assert repaired["completedAt"] == selected_at
+
+
+@pytest.mark.parametrize("checkpoint", ["late", "complete", "sparse"])
+def test_evidence_repair_preserves_selected_deadline_findings(
+    workbench_api, workbench_db, deadline_scan, checkpoint, monkeypatch
+):
+    scan = deadline_scan
+    sparse = checkpoint == "sparse"
+    worker_id, output = canceled_discovery_output(workbench_db, scan, attempt=2 if sparse else 1)
+    worker_finding = copy.deepcopy(scan.findings[0])
+    worker_finding.update(
+        identity={"anchor": "separate-canceled-review"}, provenance={"source": "local_plugin"}
+    )
+    if sparse:
+        del worker_finding["validation"]
+        output = output.parent / "attempts" / "attempt-1"
+    surface = {"id": "entry", "label": "Worker review", "disposition": "reported"}
+    draft = saved_draft(scan.scan_id, findings=[worker_finding], surfaces=[surface])
+    if checkpoint != "late":
+        source = write_checkpoint(output / "checkpoints", draft)
+    owner = "selected-report-owner"
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE scans SET deep_scan_owner_thread_id = ? WHERE id = ?", (owner, scan.scan_id)
+        )
+    with monkeypatch.context() as legacy:
+        if sparse:
+            # Earlier versions selected canceled worker findings before checking their proof.
+            legacy.setattr(
+                workbench_api["saved_results"],
+                "_defer_incomplete_deadline_findings",
+                lambda *args: None,
+            )
+        selected = finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    if checkpoint == "late":
+        source = write_checkpoint(output / "checkpoints", draft)
+    elif sparse:
+        # Later evidence for the same worker must not change the selected attempt.
+        corrected = {**worker_finding, "validation": scan.findings[0]["validation"]}
+        write_checkpoint(
+            output.parent.parent / "output" / "checkpoints",
+            saved_draft(scan.scan_id, findings=[corrected], surfaces=[surface]),
+        )
+    original_checkpoint = source.read_bytes()
+    findings_path = scan.scan_dir / "findings.json"
+    original = json.loads(findings_path.read_text())
+    identities = [row["identity"] for row in original["findings"]]
+    assert len(identities) == 1 + (checkpoint != "late")
+    if sparse:
+        assert "validation" not in original["findings"][1]
+        identities = identities[:1]
+        monkeypatch.setattr(
+            workbench_api["deep_scan"],
+            "require_scan_target_unchanged",
+            lambda scan: pytest.fail("Host-only deadline repair inspected the target checkout."),
+        )
+    else:
+        original["findings"][0].pop("validation")
+        findings_path.write_text(json.dumps(original))
+    coverage = read_review_state(workbench_db, scan.scan_dir)
+
+    claim = workbench_api["deep_scan"].claim_deep_scan_coordinator(
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, thread_id=owner, claim_token=None, coordinator_generation=None
+        ),
+    )
+    generation = claim["deepScan"]["coordinatorGeneration"]
+    reducer_path = workbench_db.execute(
+        "SELECT result_manifest_path FROM deep_scan_workers WHERE id = ?", (scan.reducer_id,)
+    ).fetchone()[0]
+    publication = stage_publication(
+        scan, generation=generation, result_path=reducer_path, title=scan.findings[0]["title"]
+    )
+    for _ in range(2 if sparse else 1):
+        workbench_api["saved_results"].write_scan_draft(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, publication
+        )
+    assert [
+        row["identity"] for row in json.loads(findings_path.read_text())["findings"]
+    ] == identities
+    repaired = finish(
+        workbench_api, workbench_db, scan, terminal_reason="capped", generation=generation
+    )
+    assert repaired["completedAt"] == selected["completedAt"]
+    completed = complete(workbench_api, workbench_db, scan)
+    assert completed["progress"]["status"] == "complete"
+    rows = json.loads(findings_path.read_text())["findings"]
+    assert [row["identity"] for row in rows] == identities
+    assert rows[0]["validation"] == scan.findings[0]["validation"]
+    sealed_coverage = read_review_state(workbench_db, scan.scan_dir)
+    if sparse:
+        selected_surface = next(
+            row for row in coverage["surfaces"] if row.get("workerId") == worker_id
+        )
+        repaired_surface = next(
+            row for row in sealed_coverage["surfaces"] if row["id"] == selected_surface["id"]
+        )
+        assert selected_surface["disposition"] == "reported"
+        assert repaired_surface == {**selected_surface, "disposition": "needs_follow_up"}
+        deferred = sealed_coverage["deferred"][-1]
+        assert deferred["workerId"] == worker_id
+        assert deferred["surfaceIds"] == [selected_surface["id"]]
+        assert deferred["provenance"]["attempt"] == 1
+        assert "validation" in deferred["reason"]
+        assert completed["warnings"].count(deferred["reason"]) == 1
+        assert sealed_coverage["deferred"][:-1] == coverage["deferred"]
+    else:
+        assert sealed_coverage["surfaces"] == coverage["surfaces"]
+        assert sealed_coverage["deferred"] == coverage["deferred"]
+    assert source.read_bytes() == original_checkpoint
+
+
+@pytest.mark.parametrize("sparse_finding", [False, True])
 def test_zero_accepted_deadline_preserves_worker_checkpoint_links_and_receipts(
-    workbench_api, workbench_db, publication_scan
+    workbench_api, workbench_db, publication_scan, sparse_finding
 ):
     scan = publication_scan()
+    findings = json.loads(json.dumps(scan.findings)) if sparse_finding else []
+    for finding in findings:
+        for field in ("codeEvidence", "rootCause", "validation", "attackPath"):
+            finding.pop(field, None)
+    # Only worker checkpoints contribute to this unfinished parent.
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
     workers = {}
     originals = {}
     for name in ("first", "second"):
@@ -697,6 +868,7 @@ def test_zero_accepted_deadline_preserves_worker_checkpoint_links_and_receipts(
             saved_draft(
                 scan.scan_id,
                 complete=False,
+                findings=findings if name == "first" else [],
                 surfaces=[
                     {
                         "id": "api",
@@ -725,6 +897,25 @@ def test_zero_accepted_deadline_preserves_worker_checkpoint_links_and_receipts(
 
     assert finished["status"] == "succeeded"
     assert finished["completionSequence"] == 0
+    assert "evidenceRepairRequired" not in finished
+    saved_paths = [
+        scan.scan_dir / name
+        for name in ("scan-manifest.json", "findings.json", "checkpoint-head.json")
+    ]
+    saved_bytes = [path.read_bytes() for path in saved_paths]
+    owner = "deadline-owner"
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE scans SET deep_scan_owner_thread_id = ? WHERE id = ?", (owner, scan.scan_id)
+        )
+    with pytest.raises(SystemExit, match="Only a running"):
+        workbench_api["deep_scan"].claim_deep_scan_coordinator(
+            workbench_db,
+            Namespace(
+                scan_id=scan.scan_id, thread_id=owner, claim_token=None, coordinator_generation=None
+            ),
+        )
+    assert [path.read_bytes() for path in saved_paths] == saved_bytes
     coverage = read_review_state(workbench_db, scan.scan_dir)
     assert {row["id"] for row in coverage["surfaces"]} == {
         f"{worker_id}/api" for worker_id in workers
@@ -737,3 +928,13 @@ def test_zero_accepted_deadline_preserves_worker_checkpoint_links_and_receipts(
         assert task["id"] == f"{worker_id}/review"
         assert task["surfaceIds"] == [surface["id"]]
     assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+    retained = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    assert len(retained) == len(findings)
+    if sparse_finding:
+        assert all(
+            field not in retained[0]
+            for field in ("codeEvidence", "rootCause", "validation", "attackPath")
+        )
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
+    assert "sealedAt" not in manifest

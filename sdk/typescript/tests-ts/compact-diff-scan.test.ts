@@ -408,7 +408,9 @@ describe("compact diff scan", () => {
     git(repository, "commit", "-qm", "base");
     const baseRevision = git(repository, "rev-parse", "HEAD");
     rmSync(join(repository, "src", "guard.py"));
-    writeSource(repository, "src/handler.py", "value = 2\n");
+    const archiveWrite =
+      "destination = output_dir / entry.name\ndestination.write_bytes(entry.content)";
+    writeSource(repository, "src/handler.py", `value = 2\n${archiveWrite}\n`);
     git(repository, "add", ".");
     git(repository, "commit", "-qm", "changed");
     const headRevision = git(repository, "rev-parse", "HEAD");
@@ -555,7 +557,31 @@ describe("compact diff scan", () => {
           rationale: "Source evidence establishes reachability.",
         },
         taxonomy: { category: "path-traversal", cwe: ["CWE-22"] },
-        locations: [{ path: "src/handler.py", startLine: 1 }],
+        locations: [{ path: "src/handler.py", startLine: 2, endLine: 3 }],
+        codeEvidence: [
+          {
+            id: "archive-write",
+            label: "Unchecked archive destination",
+            path: "src/handler.py",
+            startLine: 2,
+            endLine: 3,
+            code: archiveWrite,
+            explanation:
+              "The entry name reaches the write without containment.",
+          },
+        ],
+        rootCause: "The extractor does not check the joined destination path.",
+        validation: {
+          method: "source review",
+          summary: "An archive entry can escape the extraction root.",
+          evidence: [
+            "The write uses the entry name without a containment check.",
+          ],
+        },
+        attackPath: {
+          dataflow:
+            "archive entry name -> destination path -> filesystem write",
+        },
         remediation: "Validate each output path before writing.",
         provenance: { source: "local_plugin" },
       };
