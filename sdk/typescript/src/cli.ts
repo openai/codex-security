@@ -1264,6 +1264,7 @@ interface CliDependencies {
   exportFindings(
     arguments_: ArtifactExportArguments,
     output?: Writable,
+    diagnostics?: Writable,
   ): Promise<string | Uint8Array | undefined>;
   runCodex(
     args: readonly string[],
@@ -5545,18 +5546,23 @@ export async function main(
           scan: optionValue("--scan")
             .optional()
             .describe(
-              "Saved scan ID or unique prefix; cannot be combined with a result directory.",
+              "Saved scan ID, unique prefix, or latest completed scan ('latest').",
             ),
           exportFormat: z
-            .enum(["csv", "json", "sarif", "md"])
+            .enum(["csv", "json", "sarif", "md", "servicenow-avit"])
             .optional()
             .describe(
-              "Findings: csv, json, or sarif (default); threat-model: md (default).",
+              "Findings: csv, json, servicenow-avit, or sarif (default). Threat models use md.",
+            ),
+          avitTemplate: optionValue("--avit-template")
+            .optional()
+            .describe(
+              "Per-application CSV template required for servicenow-avit exports.",
             ),
           output: optionValue("--output")
             .optional()
             .describe(
-              "FILE or '-' for stdout (default: results.sarif, findings.json, findings.csv, or threatmodel.md).",
+              "FILE or '-' for stdout (default: results.sarif, findings.json, findings.csv, servicenow-avit.csv, or threatmodel.md).",
             ),
           sourceRoot: optionValue("--source-root")
             .optional()
@@ -5590,6 +5596,7 @@ export async function main(
           const format = resolveArtifactFormat(
             options.artifact,
             options.exportFormat,
+            options.avitTemplate,
           );
           const sourceRoot =
             options.sourceRoot === undefined
@@ -5601,16 +5608,20 @@ export async function main(
               : [currentDirectory, sourceRoot];
           let scanDir = args.scanDir;
           if (scanDir === undefined) {
-            const scanId =
-              options.scan ??
-              (
-                await latestScans(1, "complete", options.python, protectedRoot)
-              )?.[0]?.scanId;
+            let scanId = options.scan;
+            if (!scanId || scanId === "latest") {
+              const scans = await latestScans(
+                1,
+                "complete",
+                options.python,
+                protectedRoot,
+              );
+              scanId = scans?.[0]?.scanId;
+            }
             if (scanId === undefined) return;
             scanDir = await resolveSavedArtifactDirectory(
               scanId,
               options.artifact,
-              format,
               (args) =>
                 dependencies.runWorkbench(
                   args,
@@ -5621,33 +5632,34 @@ export async function main(
                 ),
             );
           }
-          const arguments_: ArtifactExportArguments = {
-            scanDir: resolveCliPath(currentDirectory, scanDir),
-            artifact: options.artifact,
-            format,
-            output:
-              options.output === "-"
-                ? "-"
-                : resolveCliPath(
-                    currentDirectory,
-                    options.output ?? EXPORT_DEFAULT_OUTPUTS[format],
-                  ),
-            sourceRoot,
-            pythonPath: options.python,
-          };
+          const destination = options.output ?? EXPORT_DEFAULT_OUTPUTS[format];
+          const outputPath =
+            destination === "-"
+              ? "-"
+              : resolveCliPath(currentDirectory, destination);
           const prepared = await resolveArtifactExportOutput(
-            arguments_,
-            dependencies.currentDirectory(),
+            {
+              scanDir: resolveCliPath(currentDirectory, scanDir),
+              artifact: options.artifact,
+              format,
+              output: outputPath,
+              sourceRoot,
+              avitTemplate: options.avitTemplate,
+              pythonPath: options.python,
+            },
+            currentDirectory,
           );
-          const contents = await dependencies.exportFindings(prepared, output);
-          if (arguments_.output === "-") {
+          const contents = await dependencies.exportFindings(
+            prepared,
+            output,
+            errorOutput,
+          );
+          if (outputPath === "-") {
             if (contents !== undefined) {
               await writeCliOutput(output, Buffer.from(contents));
             }
           } else {
-            errorOutput.write(
-              `${arguments_.format.toUpperCase()}: ${arguments_.output}\n`,
-            );
+            errorOutput.write(`${format.toUpperCase()}: ${outputPath}\n`);
           }
           exitCode = 0;
         } catch (error) {
@@ -6726,41 +6738,30 @@ export async function main(
     ) {
       return `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`;
     }
-    if (
-      command === "export" &&
-      structuredOutput &&
-      argv.some(
-        (value, index) =>
-          value === "--output=-" ||
-          (value === "--output" && argv[index + 1] === "-"),
-      ) &&
-      argv.some(
-        (value, index) =>
-          value === "--export-format=csv" ||
-          value === "--exportFormat=csv" ||
-          ((value === "--export-format" || value === "--exportFormat") &&
-            argv[index + 1] === "csv"),
-      )
-    ) {
-      return "CSV stdout cannot be combined with JSON output; write CSV to a file or omit --json.";
-    }
-    if (
-      command === "export" &&
-      structuredOutput &&
-      argv.some(
-        (value, index) =>
-          value === "--output=-" ||
-          (value === "--output" && argv[index + 1] === "-"),
-      ) &&
-      argv.some(
-        (value, index) =>
-          value === "--artifact=threat-model" ||
-          (value === "--artifact" && argv[index + 1] === "threat-model") ||
-          value === "--export-format=md" ||
-          (value === "--export-format" && argv[index + 1] === "md"),
-      )
-    ) {
-      return "Markdown stdout cannot be combined with JSON output; write Markdown to a file or omit --json.";
+    if (command === "export" && structuredOutput) {
+      const hasValue = (flag: string, value: string) =>
+        argv.some(
+          (arg, index) =>
+            arg === `${flag}=${value}` ||
+            (arg === flag && argv[index + 1] === value),
+        );
+      if (hasValue("--output", "-")) {
+        if (
+          ["csv", "servicenow-avit"].some(
+            (format) =>
+              hasValue("--export-format", format) ||
+              hasValue("--exportFormat", format),
+          )
+        ) {
+          return "CSV stdout cannot be combined with JSON output; write CSV to a file or omit --json.";
+        }
+        if (
+          hasValue("--artifact", "threat-model") ||
+          hasValue("--export-format", "md")
+        ) {
+          return "Markdown stdout cannot be combined with JSON output; write Markdown to a file or omit --json.";
+        }
+      }
     }
     if (command === "scan" && !argv.includes("--schema")) {
       if (
@@ -7745,7 +7746,6 @@ async function readSavedFindings(
   const directory = await resolveSavedArtifactDirectory(
     scanId,
     "findings",
-    "json",
     workbench,
   );
   const { findings } = await loadContract(directory, {
