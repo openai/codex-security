@@ -199,6 +199,26 @@ test('later branch stays unreached behind a denied action and is restored with e
  for (const output of r.outputs())
   assert.match(output,/data-edge="work" data-path-state="active"/);
 });
+test('prerequisite reachability is independent of branch order in the map, evidence and SVG',()=>{
+ const r=twoStepRenderer();
+ r.run(`M.nodes.push({id:'d',title:'Store',x:600,y:20,w:80,h:60});
+ M.edges.push({id:'cd',from:'c',to:'d',points:[[500,50],[600,50]],label:'Read',labelX:550,labelY:40},
+ {id:'ac',from:'a',to:'c',points:[[50,80],[50,100],[450,100],[450,80]],label:'Preflight',labelX:250,labelY:100});
+ const s=M.scenarios[0];
+ s.routes[0].branches=[{edges:['cd']},{edges:['ac'],beforeStep:2}];
+ Object.assign(s.controls[0].effect,{step:2,edge:'bc'});render();`);
+ for (let order=0;order<2;order++) {
+  for (const output of r.outputs()) {
+   assert.match(output,/data-edge="bc" data-path-state="stopped"/);
+   assert.match(output,/data-edge="ac" data-path-state="active"/);
+   assert.match(output,/data-edge="cd" data-path-state="active"/);
+   assert.match(output,/data-node="d"[^>]*data-path-state="active"/);
+  }
+  assert.match(r.elements.get('trace').innerHTML,/data-route-branch="0" data-path-state="active"/);
+  assert.match(r.elements.get('trace').innerHTML,/data-route-branch="1" data-path-state="active"/);
+  r.run('M.scenarios[0].routes[0].branches.reverse();render()');
+ }
+});
 test('arrival keeps incoming delivery and owner visible, stops navigation, and exports the same decision',()=>{
  const r=twoStepRenderer();
  r.run(`M.scenarios[0].controls[0].effect.arrival=true;

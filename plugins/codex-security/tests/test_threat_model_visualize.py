@@ -21,9 +21,19 @@ spec.loader.exec_module(builder)
 class ControlValidation(unittest.TestCase):
     def setUp(self):
         self.model = {
+            "brand": "Synthetic assessment",
+            "title": "Policy boundary",
+            "subtitle": "Synthetic request path",
+            "snapshotLabel": "Test fixture",
+            "mapTitle": "Request flow",
+            "mapDescription": "One caller and two components.",
+            "overviewTitle": "Architecture",
+            "overview": "Requests pass from a through b to c.",
+            "evidenceBoundary": "Synthetic assessment evidence.",
+            "footer": "Test fixture",
             "canvas": {"width": 800, "height": 500},
             "nodes": [
-                {"id": name, "x": i * 200, "y": 100, "w": 100, "h": 60}
+                {"id": name, "title": name, "x": i * 200, "y": 100, "w": 100, "h": 60}
                 for i, name in enumerate("abc")
             ],
             "edges": [
@@ -31,24 +41,30 @@ class ControlValidation(unittest.TestCase):
                     "id": edge,
                     "from": a,
                     "to": b,
+                    "label": edge,
                     "points": [[100 + i * 200, 130], [200 + i * 200, 130]],
                     "labelX": 150 + i * 200,
                     "labelY": 120,
                 }
                 for i, (edge, a, b) in enumerate([("ab", "a", "b"), ("bc", "b", "c")])
             ],
-            "evidence": [{"id": "ev", "quote": "policy denies this caller"}],
+            "evidence": [{"id": "ev", "label": "Policy", "quote": "policy denies this caller"}],
             "scenarios": [
                 {
                     "id": "H1",
+                    "title": "Denied caller",
+                    "status": "Hypothesis",
+                    "summary": "The supplied policy denies this caller.",
                     "steps": [
-                        {"from": "a", "to": "b", "edge": "ab"},
-                        {"from": "b", "to": "c", "edge": "bc"},
+                        {"title": "Request", "from": "a", "to": "b", "edge": "ab"},
+                        {"title": "Forward", "from": "b", "to": "c", "edge": "bc"},
                     ],
                     "controls": [
                         {
                             "id": "c1",
                             "kind": "existing",
+                            "title": "Caller policy",
+                            "description": "Deny the selected caller.",
                             "evidence": ["ev"],
                             "effect": {
                                 "outcome": "blocks",
@@ -112,6 +128,9 @@ class ControlValidation(unittest.TestCase):
 
     def test_valid_and_legacy_models(self):
         self.check()
+        self.model["nodes"][0]["subtitle"] = None
+        self.model["edges"][0]["label"] = None
+        self.check()  # Optional captions may be omitted without breaking the renderer.
         del self.model["scenarios"][0]["controls"][0]["effect"]
         self.check()
 
@@ -138,30 +157,58 @@ class ControlValidation(unittest.TestCase):
             self.model["metadata"] = good
             self.check()
 
-    def test_builder_rejects_observed_metadata_object_before_writing_html(self):
-        with tempfile.TemporaryDirectory() as folder:
-            folder = Path(folder)
-            model_file, assessment, output = (
-                folder / "model.json",
-                folder / "assessment.md",
-                folder / "output.html",
-            )
-            assessment.write_text("policy denies this caller")
-            self.model["metadata"] = {"fidelity": "simple"}
-            model_file.write_text(json.dumps(self.model))
-            command = [
-                sys.executable,
-                str(Path(builder.__file__)),
-                str(model_file),
-                "--assessment",
-                str(assessment),
-                "--output",
-                str(output),
-            ]
-            result = subprocess.run(command, text=True, capture_output=True)
-            self.assertEqual(result.returncode, 2)
-            self.assertIn("metadata must be an array", result.stderr)
-            self.assertFalse(output.exists())
+    def test_builder_rejects_unrenderable_fields_before_writing_html(self):
+        missing = object()
+        cases = [
+            (("metadata",), {"fidelity": "simple"}, "metadata must be an array"),
+            (("nodes", 0, "title"), missing, "a.title must be a string"),
+            (
+                ("regions",),
+                [{"id": "boundary", "x": 0, "y": 0, "w": 600, "h": 200}],
+                "boundary.title must be a string",
+            ),
+            (("nodes", 0, "subtitle"), {"text": "Caller"}, "a.subtitle must be a string"),
+            (("edges", 0, "label"), {"text": "Request"}, "ab.label must be a string"),
+            *[
+                (path + ("evidence",), {"ev": True}, "evidence must be an array of string IDs")
+                for path in (("nodes", 0), ("scenarios", 0), ("scenarios", 0, "controls", 0))
+            ],
+        ]
+        for path, value, message in cases:
+            with self.subTest(path=path), tempfile.TemporaryDirectory() as folder:
+                folder = Path(folder)
+                model = copy.deepcopy(self.model)
+                target = model
+                for key in path[:-1]:
+                    target = target[key]
+                if value is missing:
+                    del target[path[-1]]
+                else:
+                    target[path[-1]] = value
+                model_file, assessment, output = (
+                    folder / "model.json",
+                    folder / "assessment.md",
+                    folder / "output.html",
+                )
+                assessment.write_text("policy denies this caller", encoding="utf-8")
+                model_file.write_text(json.dumps(model), encoding="utf-8")
+                original_model = model_file.read_bytes()
+                original_assessment = assessment.read_bytes()
+                command = [
+                    sys.executable,
+                    str(Path(builder.__file__)),
+                    str(model_file),
+                    "--assessment",
+                    str(assessment),
+                    "--output",
+                    str(output),
+                ]
+                result = subprocess.run(command, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(message, result.stderr)
+                self.assertFalse(output.exists())
+                self.assertEqual(model_file.read_bytes(), original_model)
+                self.assertEqual(assessment.read_bytes(), original_assessment)
 
     def test_overview_edges_require_unique_resolved_ids(self):
         self.model["overviewEdges"] = ["ab"]
@@ -299,7 +346,9 @@ class ControlValidation(unittest.TestCase):
 
     def test_unattached_dependency_rejected(self):
         s = self.routed()
-        self.model["nodes"].extend([{"id": n, "x": 0, "y": 0, "w": 20, "h": 20} for n in "xy"])
+        self.model["nodes"].extend(
+            [{"id": n, "title": n, "x": 0, "y": 0, "w": 20, "h": 20} for n in "xy"]
+        )
         self.model["edges"].append(
             {
                 "id": "xy",
@@ -317,7 +366,7 @@ class ControlValidation(unittest.TestCase):
     def test_prerequisite_branch_must_identify_its_decision(self):
         s = self.routed()
         self.effect()["arrival"] = True
-        self.model["nodes"].append({"id": "d", "x": 0, "y": 0, "w": 20, "h": 20})
+        self.model["nodes"].append({"id": "d", "title": "d", "x": 0, "y": 0, "w": 20, "h": 20})
         self.model["edges"].append(
             {
                 "id": "bd",
@@ -395,7 +444,7 @@ class ControlValidation(unittest.TestCase):
 
     def test_later_branch_guard_requires_one_unambiguous_step(self):
         s = self.routed()
-        self.model["nodes"].append({"id": "d", "x": 0, "y": 0, "w": 20, "h": 20})
+        self.model["nodes"].append({"id": "d", "title": "d", "x": 0, "y": 0, "w": 20, "h": 20})
         self.model["edges"].append(
             {
                 "id": "bd",
@@ -563,7 +612,7 @@ class ControlValidation(unittest.TestCase):
 
     def test_prerequisite_on_a_revisited_decision_node_is_valid(self):
         s = self.routed()
-        self.model["nodes"].append({"id": "d", "x": 0, "y": 0, "w": 20, "h": 20})
+        self.model["nodes"].append({"id": "d", "title": "d", "x": 0, "y": 0, "w": 20, "h": 20})
         self.model["edges"].extend(
             [
                 {"id": i, "from": a, "to": b, "points": [[0, 0], [20, 0]], "labelX": 0, "labelY": 0}

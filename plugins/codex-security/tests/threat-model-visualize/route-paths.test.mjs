@@ -53,11 +53,37 @@ test('a decision retains its explicit prerequisite without enabling other work f
   ]}]};
   const m={edges:[...model.edges,{id:'api-write',from:'api',to:'other-store'},
     {id:'auth-return',from:'identity',to:'api'}]};
-  const r=RoutePaths.resolve(m,s,'java',0,true);
-  assert(r.activeEdges.has('api-auth') && r.activeEdges.has('sessions'));
-  assert(r.activeNodes.has('api') && r.activeNodes.has('identity'));
-  assert(r.unreachedEdges.has('api-write') && r.unreachedEdges.has('db'));
-  assert(!r.activeEdges.has('api-write') && !r.activeNodes.has('other-store'));
+  for (const branches of [s.routes[0].branches, [...s.routes[0].branches].reverse()]) {
+    s.routes[0].branches=branches;
+    const r=RoutePaths.resolve(m,s,'java',0,true);
+    assert(r.activeEdges.has('api-auth') && r.activeEdges.has('sessions'));
+    assert(r.activeNodes.has('api') && r.activeNodes.has('identity'));
+    assert(r.unreachedEdges.has('api-write') && r.unreachedEdges.has('db'));
+    assert(!r.activeEdges.has('api-write') && !r.activeNodes.has('other-store'));
+    const denied=RoutePaths.resolve(m,s,'java',0);
+    assert(!denied.activeEdges.has('api-auth') && !denied.activeEdges.has('sessions'));
+  }
+});
+test('a branch reached through another branch is independent of array order',()=>{
+  const m={edges:[['ab','a','b'],['bc','b','c'],['cd','c','d'],['ac','a','c']]
+    .map(([id,from,to])=>({id,from,to}))};
+  for (const timing of [{},{beforeStep:2},{afterStep:1}]) {
+    const branches=[{edges:['cd']},{edges:['ac'],...timing}];
+    for (const order of [branches,[...branches].reverse()]) {
+      const s={steps:[{edge:'ab'},{edge:'bc'}],routes:[{id:'r',edges:['ab','bc'],branches:order}]};
+      const before=JSON.stringify(s), r=RoutePaths.resolve(m,s,'r',1);
+      assert.deepEqual([...r.activeNodes].sort(),['a','b','c','d']);
+      assert(r.activeEdges.has('cd') && !r.unreachedEdges.has('cd'));
+      assert(!r.unreachedNodes.has('d'));
+      assert.deepEqual(Array.from(r.branchStates,item=>item.active),[true,true]);
+      if (timing.beforeStep || timing.afterStep) {
+        const earlier=RoutePaths.resolve(m,s,'r',0);
+        assert(!earlier.activeEdges.has('ac') && !earlier.activeEdges.has('cd'));
+        assert.deepEqual(Array.from(earlier.branchStates,item=>item.active),[false,false]);
+      }
+      assert.equal(JSON.stringify(s),before);
+    }
+  }
 });
 test('a prerequisite at the stopped destination requires arrival and restores with the route',()=>{
   const s={...scenario,routes:[{...scenario.routes[0],branches:[

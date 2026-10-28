@@ -37,25 +37,33 @@
         edges.get(id).from === owner || edges.get(id).to === owner);
       if (!before) reachable.delete(owner);
     }
-    for (const branch of route.branches || []) {
-      const start = edges.get(branch.edges[0]).from;
-      const decisionEdge = branch.beforeStep === undefined ? null : scenario.steps[branch.beforeStep - 1]?.edge;
-      const decisionIndex = decisionEdge ? route.edges.indexOf(decisionEdge) : -1;
-      const prerequisite = stopIndex >= 0 && branch.beforeStep === stop + 1 &&
-        start === edges.get(stopEdge).to;
-      // An annotated branch belongs to a particular decision occurrence, not
-      // an earlier visit to the same node on a looping or response route.
-      const actionEdge = branch.afterStep === undefined ? null : scenario.steps[branch.afterStep - 1]?.edge;
-      const actionIndex = actionEdge ? route.edges.indexOf(actionEdge) : -1;
-      const active = branch.beforeStep !== undefined ?
-        decisionIndex >= 0 && (stopIndex < 0 || decisionIndex <= stopIndex) &&
-          (!prerequisite || arrival) :
-        branch.afterStep !== undefined ? reachable.has(start) && actionIndex >= 0 &&
-          (stopIndex < 0 || actionIndex < stopIndex) : reachable.has(start);
-      // Keep occurrence state separate: another branch may use the same edge.
-      branchStates.push({branch, active});
-      add(branch.edges, active);
-      if (active) {
+    // Keep occurrence state separate: another branch may use the same edge.
+    for (const branch of route.branches || []) branchStates.push({branch, active:false});
+    // A later-listed branch may reach an earlier branch's origin. Each pass
+    // activates previously inactive branches, so even cyclic paths converge.
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const state of branchStates) {
+        if (state.active) continue;
+        const {branch} = state;
+        const start = edges.get(branch.edges[0]).from;
+        const decisionEdge = branch.beforeStep === undefined ? null : scenario.steps[branch.beforeStep - 1]?.edge;
+        const decisionIndex = decisionEdge ? route.edges.indexOf(decisionEdge) : -1;
+        const prerequisite = stopIndex >= 0 && branch.beforeStep === stop + 1 &&
+          start === edges.get(stopEdge).to;
+        // An annotated branch belongs to a particular decision occurrence, not
+        // an earlier visit to the same node on a looping or response route.
+        const actionEdge = branch.afterStep === undefined ? null : scenario.steps[branch.afterStep - 1]?.edge;
+        const actionIndex = actionEdge ? route.edges.indexOf(actionEdge) : -1;
+        const active = branch.beforeStep !== undefined ?
+          decisionIndex >= 0 && (stopIndex < 0 || decisionIndex <= stopIndex) &&
+            (!prerequisite || arrival) :
+          branch.afterStep !== undefined ? reachable.has(start) && actionIndex >= 0 &&
+            (stopIndex < 0 || actionIndex < stopIndex) : reachable.has(start);
+        if (!active) continue;
+        state.active = true;
+        changed = true;
         for (const id of branch.edges) {
           const edge = edges.get(id);
           if (!(prerequisite && edge.from === start)) reachable.add(edge.from);
@@ -63,6 +71,7 @@
         }
       }
     }
+    for (const {branch, active} of branchStates) add(branch.edges, active);
     for (const id of activeNodes) unreachedNodes.delete(id);
     for (const id of activeEdges) unreachedEdges.delete(id);
     return {route, activeEdges, activeNodes, unreachedEdges, unreachedNodes, focusNodes, branchStates};

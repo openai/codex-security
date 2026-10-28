@@ -53,7 +53,12 @@ def validate(model, assessment):
         for k in ("x", "y", "w", "h"):
             number(item[k], f"{item['id']}.{k}")
         require(item["w"] > 0 and item["h"] > 0, f"{item['id']}: dimensions must be positive")
+        require(isinstance(item.get("title"), str), f"{item['id']}.title must be a string")
     for e in edges.values():
+        require(
+            e.get("label") is None or isinstance(e["label"], str),
+            f"{e['id']}.label must be a string when supplied",
+        )
         require(e["from"] in nodes and e["to"] in nodes, f"{e['id']}: unresolved endpoint")
         require(len(e["points"]) >= 2, f"{e['id']}: at least two route points required")
         for point in e["points"]:
@@ -72,10 +77,19 @@ def validate(model, assessment):
         )
 
     def refs(item):
-        for ref in item.get("evidence", []):
+        values = item.get("evidence", [])
+        require(
+            isinstance(values, list) and all(isinstance(ref, str) for ref in values),
+            f"{item['id']}: evidence must be an array of string IDs",
+        )
+        for ref in values:
             require(ref in evidence, f"{item['id']}: unresolved evidence {ref}")
 
     for n in nodes.values():
+        require(
+            n.get("subtitle") is None or isinstance(n["subtitle"], str),
+            f"{n['id']}.subtitle must be a string when supplied",
+        )
         refs(n)
 
     def source_roles(items, label, participant=False, routes=()):
