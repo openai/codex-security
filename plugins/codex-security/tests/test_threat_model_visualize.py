@@ -4,11 +4,11 @@ import copy
 import hashlib
 import importlib.util
 import json
-import re
 import subprocess
 import sys
 import tempfile
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location(
@@ -16,6 +16,30 @@ spec = importlib.util.spec_from_file_location(
 )
 builder = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(builder)
+
+
+class EmbeddedHtml(HTMLParser):
+    """Extract script and style bodies while preserving their exact contents."""
+
+    def __init__(self, html):
+        super().__init__(convert_charrefs=False)
+        self.elements = []
+        self.current = None
+        self.feed(html)
+        self.close()
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style"):
+            self.current = (tag, dict(attrs), [])
+
+    def handle_data(self, data):
+        if self.current is not None:
+            self.current[2].append(data)
+
+    def handle_endtag(self, tag):
+        if self.current is not None and tag == self.current[0]:
+            self.elements.append((*self.current[:2], "".join(self.current[2])))
+            self.current = None
 
 
 class ControlValidation(unittest.TestCase):
@@ -120,11 +144,15 @@ class ControlValidation(unittest.TestCase):
             return output.read_text(encoding="utf-8")
 
     def embedded_data(self, html, element_id):
-        match = re.search(
-            rf'<script id="{element_id}" type="application/json">(.*?)</script>', html, re.S
-        )
-        self.assertIsNotNone(match)
-        return json.loads(match.group(1))
+        values = [
+            code
+            for tag, attrs, code in EmbeddedHtml(html).elements
+            if tag == "script"
+            and attrs.get("id") == element_id
+            and (attrs.get("type") or "").lower() == "application/json"
+        ]
+        self.assertEqual(len(values), 1)
+        return json.loads(values[0])
 
     def test_valid_and_legacy_models(self):
         self.check()
@@ -508,24 +536,34 @@ class ControlValidation(unittest.TestCase):
 
     def test_builder_embeds_new_contract_and_assessment_in_standalone_html(self):
         self.effect()["traffic"] = "continues"
-        html = self.build_html("policy denies this caller", "--fit-area", "800", "250")
+        assessment = "policy denies this caller"
+        html = self.build_html(assessment, "--fit-area", "800", "250")
         assets = Path(builder.__file__).parents[1] / "assets"
-        scripts = [
-            code
-            for attrs, code in re.findall(r"<script\b([^>]*)>(.*?)</script>", html, re.S | re.I)
-            if "application/json" not in attrs.lower()
-        ]
         expected = ["control-effects.js", "route-paths.js", "source-roles.js", "explorer.js"]
-        self.assertEqual(
-            [script.strip() for script in scripts],
-            [(assets / name).read_text(encoding="utf-8").strip() for name in expected],
-        )
-        style = re.search(r"<style\b[^>]*>(.*?)</style>", html, re.S | re.I)
-        self.assertIsNotNone(style)
-        self.assertEqual(
-            style.group(1).strip(), (assets / "explorer.css").read_text(encoding="utf-8").strip()
-        )
-        self.assertNotRegex(html, re.compile(r"<script\b[^>]*\bsrc\s*=", re.I))
+        for closing_space in ("", " \t\n"):
+            with self.subTest(closing_space=repr(closing_space)):
+                document = html.replace("</script>", f"</script{closing_space}>").replace(
+                    "</style>", f"</style{closing_space}>"
+                )
+                elements = EmbeddedHtml(document).elements
+                scripts = [
+                    code
+                    for tag, attrs, code in elements
+                    if tag == "script" and (attrs.get("type") or "").lower() != "application/json"
+                ]
+                self.assertEqual(
+                    [script.strip() for script in scripts],
+                    [(assets / name).read_text(encoding="utf-8").strip() for name in expected],
+                )
+                self.assertEqual(
+                    [code.strip() for tag, _, code in elements if tag == "style"],
+                    [(assets / "explorer.css").read_text(encoding="utf-8").strip()],
+                )
+                self.assertFalse(
+                    any(tag == "script" and "src" in attrs for tag, attrs, _ in elements)
+                )
+                self.assertEqual(self.embedded_data(document, "model-data"), self.model)
+                self.assertEqual(self.embedded_data(document, "assessment-data"), assessment)
 
     def test_template_tokens_in_input_are_preserved_without_resubstitution(self):
         tokens = "__MODEL_JSON__ __ASSESSMENT_JSON__ __EXPLORER_JS__ __EXPLORER_CSS__"
