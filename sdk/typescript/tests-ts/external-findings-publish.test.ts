@@ -39,6 +39,7 @@ import type {
 } from "../src/external-import-models.js";
 import { main } from "../src/cli.js";
 import { dependencies } from "./cli-fixtures.js";
+import { githubDependabotAlert } from "./support/github-dependabot-fixtures.js";
 import {
   importedAlert,
   importedAdvisory,
@@ -252,6 +253,103 @@ test("a Wiz Raw Event export explains the finding-report path before contacting 
     }),
   ).rejects.toThrow("scan metadata rather than vulnerability records");
   expect(contactedCloud).toBe(false);
+});
+
+test("Dependabot publishes on the existing GitHub provider and rejects foreign repositories before POST", async () => {
+  const input = { ...githubDependabotAlert(), source: "extra" };
+  const correct = await fixture([input]);
+  const selection = {
+    ...options,
+    provider: "github" as const,
+    sourceKey: "github.com/example/project/dependabot",
+  };
+  const first = await prepareExternalPublication(
+    correct.file,
+    selection,
+    correct.deps,
+  );
+  expect(first.preview.requests[0]!.source.provider).toBe("github");
+  expect(correct.posts).toHaveLength(0);
+  first.preview.requests[0]!.items[0]!.evidence.url =
+    "https://github.com/example/other/security/dependabot/1";
+  correct.state.loseResponse = true;
+  await expect(first.publish()).rejects.toThrow();
+  expect(JSON.parse(correct.posts[0]!).items[0].evidence.url).toBe(
+    input.html_url,
+  );
+  const retry = await prepareExternalPublication(
+    correct.file,
+    selection,
+    correct.deps,
+  );
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).counts.created).toBe(1);
+  expect(correct.posts[1]).toBe(correct.posts[0]);
+  const replay = await prepareExternalPublication(
+    correct.file,
+    selection,
+    correct.deps,
+  );
+  expect((await replay.publish()).counts.unchanged).toBe(1);
+  const foreign = await fixture([input], "https://github.com/example/other");
+  await expect(
+    prepareExternalPublication(foreign.file, selection, foreign.deps),
+  ).rejects.toThrow(/does not match/i);
+  const native = await readGitHubFindings(correct.file);
+  await expect(
+    prepareNormalizedExternalPublication(native, selection, foreign.deps),
+  ).rejects.toThrow(/does not match/i);
+  const projected = structuredClone(native);
+  delete projected.findings[0]!.evidence.source_data;
+  await expect(
+    prepareNormalizedExternalPublication(projected, selection, foreign.deps),
+  ).rejects.toThrow(/does not match/i);
+  expect(
+    (
+      await prepareNormalizedExternalPublication(
+        projected,
+        selection,
+        correct.deps,
+      )
+    ).preview.requests,
+  ).toHaveLength(1);
+  projected.findings[0]!.evidence.url = input.url;
+  projected.findings[0]!.evidence.source_data = {
+    security_vulnerability: input.security_vulnerability,
+  };
+  projected.findings[0]!.source_finding_id = "alert-1";
+  const compatible = await prepareNormalizedExternalPublication(
+    projected,
+    selection,
+    correct.deps,
+  );
+  expect((await compatible.publish()).counts.created).toBe(1);
+  expect(
+    (
+      await (
+        await prepareNormalizedExternalPublication(
+          projected,
+          selection,
+          correct.deps,
+        )
+      ).publish()
+    ).counts.unchanged,
+  ).toBe(1);
+  await expect(
+    prepareNormalizedExternalPublication(projected, selection, foreign.deps),
+  ).rejects.toThrow(/does not match/i);
+  const conflicting = structuredClone(native);
+  conflicting.findings[0]!.evidence.url = githubDependabotAlert(2).html_url;
+  await expect(
+    prepareNormalizedExternalPublication(conflicting, selection, correct.deps),
+  ).rejects.toThrow(/alert URL/i);
+  const relabeled = structuredClone(native);
+  relabeled.findings[0]!.source_finding_id =
+    "github.com/example/other/dependabot/2";
+  await expect(
+    prepareNormalizedExternalPublication(relabeled, selection, foreign.deps),
+  ).rejects.toThrow(/source finding ID/i);
+  expect(foreign.posts).toHaveLength(0);
 });
 
 async function fixture(
