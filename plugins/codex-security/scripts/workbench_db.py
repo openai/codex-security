@@ -3248,10 +3248,8 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
         scan_dir
     ):
         raise SystemExit("Scan directory must be an existing canonical non-symlink directory.")
-    # Re-check privacy so a shared parent cannot be used to substitute forged artifacts.
+    # Re-check ownership and parents so the scan directory cannot be substituted.
     if os.name != "nt":
-        if stat.S_IMODE(metadata.st_mode) & 0o077:
-            raise SystemExit("Scan directory must not be accessible to other users (chmod 700).")
         geteuid = getattr(os, "geteuid", None)
         effective_uid = geteuid() if geteuid is not None else None
         if effective_uid is not None and metadata.st_uid != effective_uid:

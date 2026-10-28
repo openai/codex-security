@@ -174,8 +174,8 @@ try {
 
 Omitting `outputDir` saves results in the private Codex Security state directory.
 To choose another location, use a new or empty directory outside the scanned
-repository and its enclosing Git worktree. On macOS and Linux, an existing output
-directory must be private to you (`chmod 700`).
+repository and its enclosing Git worktree. Existing output directories keep their
+permissions; newly created directories are private to you by default.
 
 ### Read results
 
