@@ -4,30 +4,14 @@
 
 ## Highlights
 
-- bump taiki-e/install-action from 2.87.29 to 2.87.30 ([#2108](https://github.com/openai/codex-security/pull/2108))
-- allow existing scan output directory permissions ([#2120](https://github.com/openai/codex-security/pull/2120))
-- resolve dependency alerts ([#2084](https://github.com/openai/codex-security/pull/2084))
-- track Amazon Inspector repository vulnerabilities ([#2097](https://github.com/openai/codex-security/pull/2097))
-- bump actions/setup-python from 7.0.0 to 7.1.0 ([#2106](https://github.com/openai/codex-security/pull/2106))
-- bump @hono/node-server from 2.1.1 to 2.1.5 in /plugins/codex-security/mcp-app ([#2123](https://github.com/openai/codex-security/pull/2123))
-- add a threat-model explorer ([#2112](https://github.com/openai/codex-security/pull/2112))
-- explain how to verify a committed diff scan inventory ([#2122](https://github.com/openai/codex-security/pull/2122))
-- show saved review progress in the component table ([#2111](https://github.com/openai/codex-security/pull/2111))
-- release Debian and Wolfi from the verified scanner package ([#2116](https://github.com/openai/codex-security/pull/2116))
-- check RUNNER\_TEMP before resolving it ([#2125](https://github.com/openai/codex-security/pull/2125))
-- document exact dependency pins ([#2126](https://github.com/openai/codex-security/pull/2126))
-- keep login URLs when OSC sequences end with ST ([#2124](https://github.com/openai/codex-security/pull/2124))
-- ship explorer references as standalone vector images ([#2128](https://github.com/openai/codex-security/pull/2128))
-- add published docs to the release checklist ([#2094](https://github.com/openai/codex-security/pull/2094))
-- bump actions/attest from 4.2.1 to 4.2.2 ([#2131](https://github.com/openai/codex-security/pull/2131))
-- bump @linear/sdk from 98.0.0 to 99.0.0 in /sdk/typescript ([#2132](https://github.com/openai/codex-security/pull/2132))
-- bump napi from 3.14.2 to 3.15.0 in /plugins/codex-security/native ([#2130](https://github.com/openai/codex-security/pull/2130))
-- bump napi-derive from 3.6.12 to 3.6.13 in /plugins/codex-security/native ([#2129](https://github.com/openai/codex-security/pull/2129))
-- resolve directory names in scan titles ([#2121](https://github.com/openai/codex-security/pull/2121))
-- sort interactive findings by severity ([#2135](https://github.com/openai/codex-security/pull/2135))
-- simplify scanner imports and SDK test setup ([#2136](https://github.com/openai/codex-security/pull/2136))
-- simplify workbench and Deep Scan processing ([#2137](https://github.com/openai/codex-security/pull/2137))
-- correct rejected decisions in the open records review ([#2139](https://github.com/openai/codex-security/pull/2139))
+Codex Security 0.8.2 adds threat-model explorers and Amazon Inspector imports, and improves scan progress and finding review.
+
+- **Threat-model explorers.** Turn an existing threat model into a shareable HTML explorer with interactive architecture, scenarios, controls, and source evidence. Export HTML or SVG from the bundled skill.
+- **Amazon Inspector imports.** With external imports enabled, import a complete Inspector Code Security repository findings export while retaining each finding's identity across imports. See the [Inspector import guide](https://github.com/openai/codex-security/blob/npm-v0.8.2/docs/scanner-imports/inspector.md).
+- **Dedupe corrections.** Hosted reviewers can correct rejected decisions in the original open review when the host supports pending-call validation.
+- **Interactive scans.** Finding review shows critical findings first, followed by high, medium, and low severity. Component tables show saved review progress, and scan titles resolve relative directory names.
+- **Output directories.** Existing scan output directories keep their permissions across scans, saved-result reads, and resume. Newly created directories remain private by default.
+- **Container releases.** The release workflow builds Debian and Wolfi images from the same verified scanner package and frozen runtime dependency lock. See the [container guide](https://github.com/openai/codex-security/blob/npm-v0.8.2/docker/README.md).
 
 <!-- release-section: highlights:end -->
 
@@ -35,6 +19,8 @@
 
 ## Upgrade notes
 
-No additional migration steps are documented for this release.
+No migration is required for existing CLI workflows. Hosted integrations that opt into pending-call validation must keep the original review session open until they handle the CLI's feedback; existing hosts can continue returning final results.
+
+Inspector imports remain opt-in. Cloud publication requires a connected GitHub repository and a deployment that accepts the Inspector provider. The import guide describes repository matching and complete-export requirements.
 
 <!-- release-section: upgrades:end -->
