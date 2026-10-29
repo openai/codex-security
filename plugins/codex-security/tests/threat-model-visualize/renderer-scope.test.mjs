@@ -48,10 +48,11 @@ function twoStepRenderer() {
  return r;
 }
 test('source and route changes clear stale controls from the view, hash and export',()=>{
- for(const [selection,caption] of [["state.source='two'",/Threat source: C/],["state.route='other'",/Documented flow: Other flow/]]) {
+ for(const [selection,caption] of [[{source:'two'},/Threat source: C/],[{route:'other'},/Documented flow: Other flow/]]) {
   const r=renderer();
   assert.match(r.elements.get('map').innerHTML,/data-barrier="true"/);
-  r.run(`${selection};state.tab='controls';render()`);
+  Object.assign(r.run('state'),selection);
+  r.run("state.tab='controls';render()");
   for(const output of [...r.outputs(),r.elements.get('trace').innerHTML])
    assert.doesNotMatch(output,/Role denied|Scoped barrier|data-barrier="true"/);
   assert.doesNotMatch(r.location.hash,/control=|preview=/);
@@ -480,7 +481,8 @@ test('control cards retain their full label and basis when resized and exported'
 test('SVG export retains dimensions and fonts while clearing only the clone transform',()=>{
  const r=renderer();
  const identifier='W'.repeat(100);
- r.run(`globalThis.getComputedStyle=()=>({fontFamily:'Inter, system-ui, sans-serif'});M.title=${JSON.stringify(identifier)};state.scenario=null;render();state.x=30;state.zoom=2;transform()`);
+ r.run('M').title=identifier;
+ r.run("globalThis.getComputedStyle=()=>({fontFamily:'Inter, system-ui, sans-serif'});state.scenario=null;render();state.x=30;state.zoom=2;transform()");
  const viewport=r.elements.get('viewport'), transform=viewport.getAttribute('transform');
  r.run('exportMapSvg()');
  const exported=r.exported, height=Number(exported.getAttribute('height'));
@@ -491,8 +493,9 @@ test('SVG export retains dimensions and fonts while clearing only the clone tran
  assert.match(exported.getAttribute('style'),/font-family:Inter, system-ui, sans-serif/);
  const footerLines=[...exported.innerHTML.matchAll(/<text x="20"[^>]*font-size="14"[^>]*>([^<]*)<\/text>/g)].map(match=>match[1]);
  assert.equal(footerLines.filter(line=>/^W+$/.test(line)).join(''),identifier);
+ const measureSvgText=r.run('measureSvgText');
  for(const line of footerLines) {
-  const width=r.run(`measureSvgText(${JSON.stringify(line)},14).w`);
+  const width=measureSvgText(line,14).w;
   assert.ok(width<=700-40,`exported footer exceeds its margins at width ${width}`);
  }
  assert.equal(exported.querySelector('#viewport').getAttribute('transform'),null);
@@ -506,9 +509,10 @@ test('markerless control exports retain their evidence qualification',()=>{
   ['does-not-block','verified','VERIFIED · SUPPLIED EVIDENCE']
  ]) {
   const r=renderer();
-  r.run(`const e=M.scenarios[0].controls[0].effect;
-   e.outcome=${JSON.stringify(outcome)};e.basis=${JSON.stringify(basis)};
-   delete e.marker;state.tab='controls';render();`);
+  const effect=r.run('M.scenarios[0].controls[0].effect');
+  Object.assign(effect,{outcome,basis});
+  delete effect.marker;
+  r.run("state.tab='controls';render()");
   assert.ok(r.elements.get('trace').innerHTML.includes(qualification));
   assert.ok(r.run('exportMapSvg()').includes(qualification),`${outcome}: export retains ${basis}`);
  }
