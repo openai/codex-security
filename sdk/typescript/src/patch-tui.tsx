@@ -4,6 +4,7 @@ import { stripVTControlCharacters } from "node:util";
 import { Box, Text, render, useApp, useInput, useStdout } from "ink";
 import { useMemo, useRef, useState } from "react";
 import type { Finding, FindingCodeEvidence } from "./models.js";
+import { SCAN_SEVERITIES } from "./scan-settings.js";
 
 const SEVERITY_COLORS = {
   critical: "redBright",
@@ -372,8 +373,8 @@ export function PatchTui({
     () =>
       [...inputFindings].sort(
         (left, right) =>
-          SEVERITIES.indexOf(left.severity.level as PatchSeverity) -
-          SEVERITIES.indexOf(right.severity.level as PatchSeverity),
+          SCAN_SEVERITIES.indexOf(left.severity.level) -
+          SCAN_SEVERITIES.indexOf(right.severity.level),
       ),
     [inputFindings],
   );
