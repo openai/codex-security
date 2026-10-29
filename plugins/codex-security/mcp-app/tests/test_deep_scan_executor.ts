@@ -4069,6 +4069,8 @@ function testUsageLimitClassification() {
     "You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.",
     "You’ve hit your usage limit. Try again later.",
     "You’ve hit your usage limit for the selected model. Switch to another model to continue.",
+    "Error running remote compact task: Quota exceeded. Check your plan and billing details.",
+    "Error running remote compact task: You’ve hit your usage limit. Try again later.",
   ]) {
     const error = codexWorkerTurnError(message);
     assert.ok(error instanceof DeepScanNonRetryableError);
@@ -4077,6 +4079,7 @@ function testUsageLimitClassification() {
   for (const message of [
     "429 Too Many Requests",
     "Command failed: Quota exceeded. Check your plan and billing details.",
+    "Error running remote compact task: stream disconnected before completion: synthetic reset",
   ]) {
     const error = codexWorkerTurnError(message);
     assert.equal(error.name, "Error");
