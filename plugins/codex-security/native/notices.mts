@@ -37,8 +37,8 @@ const packages = metadata.packages
 const napiLicense = new Set([
   "napi@3.15.0",
   "napi-build@2.6.0",
-  "napi-derive@3.6.12",
-  "napi-derive-backend@6.1.5",
+  "napi-derive@3.6.13",
+  "napi-derive-backend@6.1.6",
   "napi-sys@3.4.1",
 ]);
 const notices: string[] = [];
