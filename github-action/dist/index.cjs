@@ -99554,8 +99554,8 @@ async function runAction(actionRoot, overrides = {}) {
       if (!inputs.dryRun && credentials.provider !== "amazon-bedrock" && (!credentials.apiKey || /[\r\n\u0000]/.test(credentials.apiKey))) {
         throw new Error(credentials.provider === "openai" ? "Set CODEX_SECURITY_API_KEY in Actions secrets (or Dependabot secrets for Dependabot runs) and pass it as OPENAI_API_KEY to this step. No scan was started." : `Pass ${API_KEY_ENVIRONMENT_VARIABLES[credentials.provider]} from Actions secrets to this step. No scan was started.`);
       }
-      tempRoot = await (0, import_promises10.realpath)(process.env.RUNNER_TEMP ?? "");
       if (!process.env.RUNNER_TEMP) throw new Error("RUNNER_TEMP is required.");
+      tempRoot = await (0, import_promises10.realpath)(process.env.RUNNER_TEMP);
       info(`Preparing Codex Security ${SUPPORTED_CLI_VERSION}. Scope: ${inputs.scope}; mode: ${inputs.mode}; effort: ${inputs.effort}.`);
       const preparationStarted = performance.now();
       let timer = heartbeat("CLI preparation", preparationStarted);
