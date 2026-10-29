@@ -18,6 +18,7 @@
 - document exact dependency pins ([#2126](https://github.com/openai/codex-security/pull/2126))
 - keep login URLs when OSC sequences end with ST ([#2124](https://github.com/openai/codex-security/pull/2124))
 - ship explorer references as standalone vector images ([#2128](https://github.com/openai/codex-security/pull/2128))
+- add published docs to the release checklist ([#2094](https://github.com/openai/codex-security/pull/2094))
 
 <!-- release-section: highlights:end -->
 
