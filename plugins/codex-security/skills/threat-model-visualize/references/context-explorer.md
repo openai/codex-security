@@ -16,4 +16,6 @@ The shell measures SVG text, wraps complete captions and tries bounded nearby po
 
 Inspect actual overview and selected states at desktop widths; mobile usability is a bonus. Favor easy-to-follow connectors over eliminating every crossing. Resolve label collisions, preserve clear stopping markers and readable titles, and repack unused space. A successful build, zoom control or clear layout diagnostic does not prove legibility or correct endpoints. Treat unresolved `#map[data-layout-status="unresolved"]` / `data-layout-issues` entries, text/component overlap and obscured arrowheads as QA failures to resolve before publishing, using better authored spacing when bounded placement is insufficient. A minor connector crossing alone is not a failure. Check component text containment and any conditional stop and its restored state; leave unsupported responses, sequence and deployment behavior unknown.
 
-[Overview](../assets/context-reference-overview.png) and [selected path](../assets/context-reference-path.png) illustrate the workbench hierarchy, not a required topology or evidence.
+[Overview](../assets/context-reference-overview.svg) and [selected path](../assets/context-reference-path.svg) illustrate the workbench hierarchy, not a required topology or evidence.
+
+Open either reference in an SVG-capable viewer. For a PNG-only viewer, use a local SVG renderer. For example, from the skill directory, run `rsvg-convert assets/context-reference-overview.svg -o /path/to/workspace/overview.png`. Use `assets/context-reference-path.svg` for the selected path.

@@ -3,11 +3,8 @@ import { brotliDecompressSync } from "node:zlib";
 
 export const MAX_EXPANDED_ASSET_BYTES = 32 * 1024 * 1024;
 
-const PUBLIC_PNG_SHA256 = new Set([
-  "9b9c2b09b2fa064611fb62307d321d5c2ea70cf0789f7ce34cdb0fc0d9190b3a", // logo
-  "5656b77b2794178ccbfbc162e449b8d269351a90284ee41bca25189fb529ac90", // context overview
-  "d73d369bb50117fd3a6d085ca6be45e6a26192b28f87f69eaddd48894fbbe727", // context path
-]);
+const PUBLIC_LOGO_SHA256 =
+  "9b9c2b09b2fa064611fb62307d321d5c2ea70cf0789f7ce34cdb0fc0d9190b3a";
 
 const internalMarker =
   /(?:internal\.api\.openai\.org|gateway\.[a-z0-9.-]*internal|\.openai\.org|openai\.firewall\.socket\.dev|socket\x2dfirewall\x2dregistry|openai\.(?:enterprise\.)?slack\.com|app\.slack\.com\/client|(?:app\.notion\.com\/p|notion\.so)\/openai|linear\.app\/openai|(?:github\.com[:/]|api\.github\.com\/repos\/|raw\.githubusercontent\.com\/)openai\/openai(?:\.git)?(?![a-z0-9_-])|LicenseRef\x2dProprietary|\/Users\/|\/home\/dev-user|flow\.apps\.openai\.org|(?<![a-z0-9_-])go\/[a-z0-9_-]+)/iu;
@@ -34,7 +31,7 @@ export function assertPublicPackageContents(
       assertPublicBrotli(bytes, path);
     } else if (/\.png$/iu.test(path)) {
       if (
-        !PUBLIC_PNG_SHA256.has(createHash("sha256").update(bytes).digest("hex"))
+        createHash("sha256").update(bytes).digest("hex") !== PUBLIC_LOGO_SHA256
       )
         throw new Error(
           `npm tarball contains an unexpected PNG asset: ${path}.`,
