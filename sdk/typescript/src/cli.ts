@@ -9522,7 +9522,7 @@ async function executeScan(
     );
     if (progress.interactive && !arguments_.dryRun && !verbose) {
       dashboard = new ScanDashboard(errorOutput, {
-        repository,
+        repository: resolveCliPath(directory, repository),
         mode: arguments_.mode,
         showCost,
         model: scanModelConfiguration(await mergedCodexConfig(config)),

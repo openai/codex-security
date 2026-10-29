@@ -23,6 +23,7 @@
 - bump @linear/sdk from 98.0.0 to 99.0.0 in /sdk/typescript ([#2132](https://github.com/openai/codex-security/pull/2132))
 - bump napi from 3.14.2 to 3.15.0 in /plugins/codex-security/native ([#2130](https://github.com/openai/codex-security/pull/2130))
 - bump napi-derive from 3.6.12 to 3.6.13 in /plugins/codex-security/native ([#2129](https://github.com/openai/codex-security/pull/2129))
+- resolve directory names in scan titles ([#2121](https://github.com/openai/codex-security/pull/2121))
 
 <!-- release-section: highlights:end -->
 
