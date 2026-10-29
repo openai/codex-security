@@ -56,29 +56,23 @@ describe("npm package public contents", () => {
     },
   );
 
-  test.each([
-    "assets/logo.png",
-    "skills/threat-model-visualize/assets/context-reference-overview.png",
-    "skills/threat-model-visualize/assets/context-reference-path.png",
-  ])(
-    "checks the approved PNG digest before exempting binary contents (%s)",
-    (path) => {
-      const approved = readFileSync(
-        new URL(`../../../plugins/codex-security/${path}`, import.meta.url),
-      );
-      const archivePath = `package/_bundled_plugin/${path}`;
-      expect(() =>
-        assertPublicPackageContents(new Map([[archivePath, approved]])),
-      ).not.toThrow();
-      const stored = Buffer.concat([
-        approved,
-        Buffer.from("\0go/synthetic-reference\0"),
-      ]);
-      expect(() =>
-        assertPublicPackageContents(new Map([[archivePath, stored]])),
-      ).toThrow("npm tarball contains an unexpected PNG asset");
-    },
-  );
+  test("checks the approved PNG digest before exempting binary contents", () => {
+    const approved = readFileSync(
+      new URL(
+        "../../../plugins/codex-security/assets/logo.png",
+        import.meta.url,
+      ),
+    );
+    expect(() =>
+      assertPublicPackageContents(new Map([["package/logo.png", approved]])),
+    ).not.toThrow();
+    const changed = Buffer.from(approved);
+    const last = changed.length - 1;
+    changed.writeUInt8(changed.readUInt8(last) ^ 1, last);
+    expect(() =>
+      assertPublicPackageContents(new Map([["package/logo.png", changed]])),
+    ).toThrow("npm tarball contains an unexpected PNG asset");
+  });
 
   test("keeps the expanded Brotli size bound", () => {
     const bytes = brotliCompressSync(Buffer.alloc(32 * 1024 * 1024 + 1));

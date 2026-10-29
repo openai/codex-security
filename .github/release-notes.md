@@ -17,6 +17,7 @@
 - check RUNNER\_TEMP before resolving it ([#2125](https://github.com/openai/codex-security/pull/2125))
 - document exact dependency pins ([#2126](https://github.com/openai/codex-security/pull/2126))
 - keep login URLs when OSC sequences end with ST ([#2124](https://github.com/openai/codex-security/pull/2124))
+- ship explorer references as standalone vector images ([#2128](https://github.com/openai/codex-security/pull/2128))
 
 <!-- release-section: highlights:end -->
 
