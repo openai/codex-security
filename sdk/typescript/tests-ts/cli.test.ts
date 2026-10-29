@@ -891,7 +891,12 @@ describe("CLI", () => {
       FIREWORKS_CODEX_PROVIDER,
     ],
     ["MiniMax", "minimax", "MiniMax-M3.1-Flash", MINIMAX_CODEX_PROVIDER],
-    ["MiniMax China", "minimax-cn", "MiniMax-M3.1-Flash", MINIMAX_CN_CODEX_PROVIDER],
+    [
+      "MiniMax China",
+      "minimax-cn",
+      "MiniMax-M3.1-Flash",
+      MINIMAX_CN_CODEX_PROVIDER,
+    ],
     ["MiniMax M3", "minimax", "MiniMax-M3", MINIMAX_CODEX_PROVIDER],
   ] as const)(
     "routes bulk scans through %s",
@@ -2505,14 +2510,14 @@ describe("CLI", () => {
       "MiniMax",
       "minimax",
       "MiniMax-M3",
-      "MiniMax-M2.7",
+      "MiniMax-M3.1-Flash",
       MINIMAX_CODEX_PROVIDER,
     ],
     [
       "MiniMax China",
       "minimax-cn",
       "MiniMax-M3",
-      "MiniMax-M2.7",
+      "MiniMax-M3.1-Flash",
       MINIMAX_CN_CODEX_PROVIDER,
     ],
   ] as const)(

@@ -128,7 +128,7 @@ test.each([
 });
 
 describe("scan cost", () => {
-  test.each(["MiniMax-M3", "MiniMax-M2.7"])(
+  test.each(["MiniMax-M3", "MiniMax-M3.1-Flash"])(
     "keeps %s estimates unavailable without regional pricing",
     (model) => {
       expect(

@@ -328,7 +328,7 @@ const EXTERNAL_PROVIDER_CASES = [
     "MiniMax China",
     "minimax-cn",
     "MINIMAX_API_KEY",
-    "MiniMax-M2.7",
+    "MiniMax-M3.1-Flash",
     MINIMAX_CN_CODEX_PROVIDER,
   ],
 ] as const;
@@ -1138,7 +1138,7 @@ describe("CodexSecurity orchestration", () => {
   ] as const)(
     "rejects unpriced %s budgets before model work",
     async (provider, providerConfig) => {
-      for (const model of ["MiniMax-M3", "MiniMax-M2.7"]) {
+      for (const model of ["MiniMax-M3", "MiniMax-M3.1-Flash"]) {
         const { repository, codexHome, scanDir } = await scanDirectories();
         const prepareRuntime = mock(async () => preparedRuntime(codexHome));
         const createCodex = mock(throwing("model must not start"));

@@ -1177,7 +1177,7 @@ test.each(
           base_url:
             provider === "minimax"
               ? "https://api.minimax.io/v1"
-              : "https://api.minimax.cn/v1",
+              : "https://api.minimaxi.com/v1",
           wire_api: "responses",
           ...(nativeForm === "openai" || nativeForm === "native-preset-key"
             ? { requires_openai_auth: true }

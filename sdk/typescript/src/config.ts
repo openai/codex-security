@@ -46,7 +46,7 @@ export const MINIMAX_CODEX_PROVIDER = {
 export const MINIMAX_CN_CODEX_PROVIDER = {
   ...MINIMAX_CODEX_PROVIDER,
   name: "MiniMax China",
-  base_url: "https://api.minimax.cn/v1",
+  base_url: "https://api.minimaxi.com/v1",
 } as const satisfies JsonObject;
 
 export const EXTERNAL_CODEX_PROVIDERS = {
@@ -287,9 +287,16 @@ export async function mergedCodexConfig(
     }
   }
   const defaults: JsonObject = structuredClone(DEFAULT_CODEX_CONFIG);
-  if (scanModelProvider(overrides) === "amazon-bedrock") {
+  const modelProvider = scanModelProvider(overrides);
+  if (modelProvider === "amazon-bedrock") {
     // Bedrock models can reject reasoning.summary before the scan starts.
     defaults["model_reasoning_summary"] = "none";
+  }
+  if (
+    (modelProvider === "minimax" || modelProvider === "minimax-cn") &&
+    scanModel(overrides) === "MiniMax-M3.1-Flash"
+  ) {
+    defaults["model_reasoning_effort"] = "max";
   }
   return deepMerge(defaults, overrides);
 }

@@ -21,7 +21,6 @@ const selections = [
   ["minimax-cn", "MiniMax-M3.1-Flash"],
   ["minimax", "MiniMax-M3"],
   ["minimax-cn", "MiniMax-M3"],
-  ["minimax", "MiniMax-M2.7"],
 ] as const;
 
 test.each(selections)(
@@ -77,7 +76,7 @@ test.each(selections)(
     expect(preset.base_url).toBe(
       provider === "minimax"
         ? "https://api.minimax.io/v1"
-        : "https://api.minimax.cn/v1",
+        : "https://api.minimaxi.com/v1",
     );
     const requests: {
       method: string;
@@ -185,7 +184,9 @@ test.each(selections)(
       );
       expect(turn.finalResponse).toBe("Synthetic response.");
       expect(selected.reasoningEffort).toBe(
-        DEFAULT_CODEX_CONFIG["model_reasoning_effort"],
+        model === "MiniMax-M3.1-Flash"
+          ? "max"
+          : (DEFAULT_CODEX_CONFIG["model_reasoning_effort"] as string),
       );
       expect(requests).toHaveLength(1);
       expect(requests[0]).toMatchObject({

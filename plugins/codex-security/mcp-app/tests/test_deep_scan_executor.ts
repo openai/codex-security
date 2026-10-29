@@ -1347,7 +1347,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         // Omitted settings preserve the model and effort in the Codex home.
         {},
         { model: "MiniMax-M3", reasoningEffort: "high" },
-        { model: "MiniMax-M2.7", reasoningEffort: "medium" },
+        { model: "MiniMax-M3.1-Flash", reasoningEffort: "medium" },
         { model: "synthetic-openrouter-model", reasoningEffort: "high" },
         { model: "synthetic-fireworks-model", reasoningEffort: "high" },
       ];
@@ -1441,7 +1441,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                     base_url:
                       index === 6
                         ? "https://api.minimax.io/v1"
-                        : "https://api.minimax.cn/v1",
+                        : "https://api.minimaxi.com/v1",
                     wire_api: "responses",
                     request_max_retries: 5,
                     stream_max_retries: 4,
