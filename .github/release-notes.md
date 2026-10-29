@@ -25,6 +25,7 @@
 - bump napi-derive from 3.6.12 to 3.6.13 in /plugins/codex-security/native ([#2129](https://github.com/openai/codex-security/pull/2129))
 - resolve directory names in scan titles ([#2121](https://github.com/openai/codex-security/pull/2121))
 - sort interactive findings by severity ([#2135](https://github.com/openai/codex-security/pull/2135))
+- simplify scanner imports and SDK test setup ([#2136](https://github.com/openai/codex-security/pull/2136))
 
 <!-- release-section: highlights:end -->
 
