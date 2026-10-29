@@ -75,8 +75,8 @@ test("keeps container validation available to forks and publication upstream-onl
   expect(release.jobs["source"]?.if).toBe(
     "github.workflow_ref == 'openai/codex-security/.github/workflows/node-github-release.yml@refs/heads/main'",
   );
-  expect(release.jobs["authorize"]?.needs).toContain("source");
-  expect(release.jobs["manifest"]?.needs).toContain("authorize");
+  expect(release.jobs["preflight"]?.needs).toContain("source");
+  expect(release.jobs["manifest"]?.needs).toContain("preflight");
 });
 
 test("stages the verified scanner archive and retains its locked dependencies", () => {
