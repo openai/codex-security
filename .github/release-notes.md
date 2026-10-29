@@ -15,6 +15,7 @@
 - show saved review progress in the component table ([#2111](https://github.com/openai/codex-security/pull/2111))
 - release Debian and Wolfi from the verified scanner package ([#2116](https://github.com/openai/codex-security/pull/2116))
 - check RUNNER\_TEMP before resolving it ([#2125](https://github.com/openai/codex-security/pull/2125))
+- document exact dependency pins ([#2126](https://github.com/openai/codex-security/pull/2126))
 
 <!-- release-section: highlights:end -->
 
