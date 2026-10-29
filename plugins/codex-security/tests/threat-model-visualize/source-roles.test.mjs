@@ -46,13 +46,11 @@ test('unordered source relationships replace each dimension independently, inclu
   assert.deepEqual(a.relatedNodes,['helper-a']);
   assert.deepEqual(a.relatedEdges,[]);
   assert(!a.relatedNodes.includes('origin-not-related'));
-  assert(a.sourceSpecific);
   const b=roles.resolve(model,s,null,'b');
   assert.deepEqual(b.relatedNodes,[]);
   assert.deepEqual(b.relatedEdges,['shared']);
   const old=roles.resolve(model,s,null,'legacy');
   assert.deepEqual(old.relatedNodes,['legacy']);
   assert.deepEqual(old.relatedEdges,['shared']);
-  assert(!old.sourceSpecific);
   assert.equal(JSON.stringify(s),before);
 });

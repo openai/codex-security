@@ -155,7 +155,6 @@
     "skills/threat-model-visualize/assets/route-paths.js",
     "skills/threat-model-visualize/assets/source-roles.js",
     "skills/threat-model-visualize/assets/svg-layout.js",
-    "skills/threat-model-visualize/references/assessment-preparation.md",
     "skills/threat-model-visualize/references/context-explorer.md",
     "skills/threat-model-visualize/references/view-model.md",
     "skills/threat-model-visualize/scripts/build_explorer.py",

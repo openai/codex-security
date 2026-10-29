@@ -113,7 +113,7 @@ class ControlValidation(unittest.TestCase):
     def effect(self):
         return self.model["scenarios"][0]["controls"][0]["effect"]
 
-    def build_html(self, assessment, *extra_args):
+    def build_html(self, assessment, *, error=None, existing_html=None):
         with tempfile.TemporaryDirectory() as folder:
             folder = Path(folder)
             model_file, source, output = (
@@ -123,8 +123,10 @@ class ControlValidation(unittest.TestCase):
             )
             model_file.write_text(json.dumps(self.model, ensure_ascii=False), encoding="utf-8")
             source.write_bytes(assessment.encode("utf-8"))
+            if existing_html is not None:
+                output.write_text(existing_html, encoding="utf-8")
             original_model = model_file.read_bytes()
-            subprocess.run(
+            result = subprocess.run(
                 [
                     sys.executable,
                     str(Path(builder.__file__)),
@@ -133,14 +135,19 @@ class ControlValidation(unittest.TestCase):
                     str(source),
                     "--output",
                     str(output),
-                    *extra_args,
                 ],
                 text=True,
                 capture_output=True,
-                check=True,
             )
             self.assertEqual(model_file.read_bytes(), original_model)
             self.assertEqual(source.read_bytes(), assessment.encode("utf-8"))
+            if error:
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(error, result.stderr)
+                actual = output.read_text(encoding="utf-8") if output.exists() else None
+                self.assertEqual(actual, existing_html)
+                return None
+            self.assertEqual(result.returncode, 0, result.stderr)
             return output.read_text(encoding="utf-8")
 
     def embedded_data(self, html, element_id):
@@ -161,6 +168,24 @@ class ControlValidation(unittest.TestCase):
         self.check()  # Optional captions may be omitted without breaking the renderer.
         del self.model["scenarios"][0]["controls"][0]["effect"]
         self.check()
+
+    def test_missing_required_arrays_preserve_existing_output(self):
+        minimal = dict(self.model, edges=[], scenarios=[], evidence=[])
+        self.check(minimal)
+        for field in ("nodes", "edges", "scenarios", "evidence"):
+            invalid = minimal.copy()
+            del invalid[field]
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(ValueError, f"{field} must be a list"),
+            ):
+                self.check(invalid)
+        del self.model["scenarios"]
+        self.build_html(
+            "policy denies this caller",
+            error="scenarios must be a list",
+            existing_html="<html>Previous explorer</html>",
+        )
 
     def test_metadata_requires_array_of_label_value_strings(self):
         # The observed round-one object reaches JS .map and prevents initialization.
@@ -223,8 +248,7 @@ class ControlValidation(unittest.TestCase):
             ),
         ]
         for path, value, message in cases:
-            with self.subTest(path=path), tempfile.TemporaryDirectory() as folder:
-                folder = Path(folder)
+            with self.subTest(path=path):
                 model = copy.deepcopy(self.model)
                 target = model
                 for key in path[:-1]:
@@ -233,30 +257,11 @@ class ControlValidation(unittest.TestCase):
                     del target[path[-1]]
                 else:
                     target[path[-1]] = value
-                model_file, assessment, output = (
-                    folder / "model.json",
-                    folder / "assessment.md",
-                    folder / "output.html",
-                )
-                assessment.write_text("policy denies this caller", encoding="utf-8")
-                model_file.write_text(json.dumps(model), encoding="utf-8")
-                original_model = model_file.read_bytes()
-                original_assessment = assessment.read_bytes()
-                command = [
-                    sys.executable,
-                    str(Path(builder.__file__)),
-                    str(model_file),
-                    "--assessment",
-                    str(assessment),
-                    "--output",
-                    str(output),
-                ]
-                result = subprocess.run(command, text=True, capture_output=True)
-                self.assertEqual(result.returncode, 2)
-                self.assertIn(message, result.stderr)
-                self.assertFalse(output.exists())
-                self.assertEqual(model_file.read_bytes(), original_model)
-                self.assertEqual(assessment.read_bytes(), original_assessment)
+                with self.assertRaisesRegex(ValueError, message):
+                    self.check(model)
+
+        self.model["nodes"][0]["title"] = None
+        self.build_html("policy denies this caller", error="a.title must be a string")
 
     def test_builder_rejects_output_aliasing_either_input(self):
         for input_name in ("model", "assessment"):
@@ -320,6 +325,8 @@ class ControlValidation(unittest.TestCase):
             (("scenarios", 0, "steps", 0, "to"), "c", "step edge does not connect"),
             (effect + ("step",), 2, "must match"),
             (effect + ("edge",), "missing", "unresolved effect edge"),
+            (marker, None, "blocking needs a step and marker"),
+            (marker, [], "marker must be an object"),
             *[
                 ((key,), self.model[key] + [self.model[key][0]], "duplicate IDs")
                 for key in ("nodes", "edges", "scenarios", "evidence")
@@ -330,9 +337,7 @@ class ControlValidation(unittest.TestCase):
             ],
         ]
         for path, value, message in cases:
-            with self.subTest(
-                path=path, value="duplicate ID" if isinstance(value, list) else value
-            ):
+            with self.subTest(path=path, value=message if len(path) == 1 else value):
                 model = copy.deepcopy(self.model)
                 target = model
                 for key in path[:-1]:
@@ -344,6 +349,8 @@ class ControlValidation(unittest.TestCase):
         for x, y in ((0, 0), (560, 428)):
             self.effect()["marker"].update(x=x, y=y)
             self.check()
+        self.effect().update(outcome="detects", marker=None)
+        self.check()
 
     def test_unknown_effect_is_not_a_block(self):
         self.effect()["basis"] = "unverified"
@@ -562,17 +569,23 @@ class ControlValidation(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot have both"):
             self.check()
 
-    def test_layout_diagnostic_estimates_both_axes_and_warns_on_labels(self):
-        node = self.model["nodes"][0]
-        node.update(title="A long title that will not fit", subtitle="Short")
-        result = builder.layout_diagnostic(self.model, (800, 250))
-        self.assertIn("a.title", result)
-        self.assertIn("two-axis fit 0.500", result)
-        self.assertIn("8.5/7.0/6.5 CSS px", result)
-        node["subtitle"] = None  # Legacy models may omit a visible caption.
-        builder.layout_diagnostic(self.model)
-        with self.assertRaisesRegex(ValueError, "positive and finite"):
-            builder.layout_diagnostic(self.model, (800, float("nan")))
+    def test_connector_warnings_distinguish_bent_legs_and_node_interiors(self):
+        ab, bc = self.model["edges"]
+        ab["points"] = [[100, 130], [100, 130], [150, 127], [150, 150], [200, 152]]
+        bc["points"] = [[300, 130], [380, 130], [420, 130], [420, 160]]
+        self.assertEqual(
+            list(builder.connector_warnings(self.model)),
+            [
+                "ab: diagonal source leg meets an axis-aligned segment. Check the adjacent bend.",
+                "ab: diagonal destination leg meets an axis-aligned segment. Check the adjacent bend.",
+                "bc: enters node c. Route outside its box.",
+            ],
+        )
+        # Two direct diagonals cross in the gap, touching the boxes only at their ports.
+        ab["points"] = [[100, 100], [200, 160]]
+        self.model["nodes"][2].update(x=0, y=200)
+        bc["points"] = [[200, 100], [100, 200]]
+        self.assertEqual(list(builder.connector_warnings(self.model)), [])
 
     def test_block_traffic_and_arrival_are_explicit_and_compatible(self):
         effect = self.effect()
@@ -601,7 +614,7 @@ class ControlValidation(unittest.TestCase):
     def test_builder_embeds_new_contract_and_assessment_in_standalone_html(self):
         self.effect()["traffic"] = "continues"
         assessment = "policy denies this caller"
-        html = self.build_html(assessment, "--fit-area", "800", "250")
+        html = self.build_html(assessment)
         assets = Path(builder.__file__).parents[1] / "assets"
         expected = [
             "control-effects.js",

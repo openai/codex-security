@@ -21,10 +21,12 @@ const ControlEffects = (() => {
 
   function resolve(scenario, proposal, context = {}) {
     const controls = active(scenario, proposal, context);
-    // Earlier barriers win. At the same transition, retain the existing control.
+    // Compare step, then receipt: a prearrival block prevents an arrival check.
+    // Existing controls win only when both barriers act at the same point.
     const blocker = controls.filter(c => c.effect.outcome === 'blocks' &&
       c.effect.traffic !== 'continues' && c.effect.basis !== 'unverified' && Number.isInteger(c.effect.step))
       .sort((a, b) => a.effect.step - b.effect.step ||
+        Number(a.effect.arrival === true) - Number(b.effect.arrival === true) ||
         Number(a.kind === 'proposed') - Number(b.kind === 'proposed'))[0] || null;
     return { controls, blocker, stop: blocker ? blocker.effect.step - 1 : -1 };
   }

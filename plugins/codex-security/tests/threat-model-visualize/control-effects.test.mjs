@@ -12,10 +12,23 @@ test('existing controls apply by default; proposals require selection and do not
  assert.equal(engine.resolve(s,null).stop,-1);
  assert.equal(JSON.stringify(s),before);
 });
-test('first block wins; an equal-step proposal cannot displace an existing control',()=>{
- const s={controls:[control('later','blocks',3),control('proposed','blocks',2,'proposed','hypothetical'),control('existing','blocks',2)]};
+test('first block wins by step and arrival; existing controls win a true tie',()=>{
+ const proposed=control('proposed','blocks',2,'proposed','hypothetical');
+ const existing=control('existing','blocks',2,'existing','declared',{arrival:true});
+ const s={controls:[control('later','blocks',3),proposed,existing]};
+ assert.equal(engine.resolve(s,null).blocker.id,'existing');
+ assert.equal(engine.resolve(s,'proposed').blocker.id,'proposed');
+ existing.effect.arrival=false;
  assert.equal(engine.resolve(s,'proposed').blocker.id,'existing');
- s.controls.push(control('earlier','blocks',1));
+ proposed.effect.arrival=true;
+ assert.equal(engine.resolve(s,'proposed').blocker.id,'existing');
+ existing.effect.arrival=true;
+ assert.equal(engine.resolve(s,'proposed').blocker.id,'existing');
+ s.controls.push(control('network','blocks',2,'existing','declared',{arrival:false}));
+ assert.equal(engine.resolve(s,null).blocker.id,'network');
+ s.controls.reverse();
+ assert.equal(engine.resolve(s,null).blocker.id,'network');
+ s.controls.push(control('earlier','blocks',1,'existing','declared',{arrival:true}));
  assert.equal(engine.resolve(s,'proposed').blocker.id,'earlier');
 });
 test('a prevented consequence with continuing traffic never wins a stop, even before a later barrier',()=>{

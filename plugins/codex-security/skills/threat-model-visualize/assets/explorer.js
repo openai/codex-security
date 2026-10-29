@@ -66,14 +66,13 @@ function hash() {
 function readHash() {
   const q = new URLSearchParams(location.hash.slice(1));
   state.scenario = M.scenarios.some(s => s.id === q.get('scenario')) ? q.get('scenario') : null;
-  const s = hypothesis(), control = (s?.controls || []).find(c => c.id === q.get('control'));
-  state.route = s?.routes?.find(r => r.id === q.get('route'))?.id || s?.routes?.[0]?.id || null;
-  state.source = s?.sources?.find(source => source.id === q.get('source'))?.id || null;
+  const s = hypothesis();
+  state.route = q.get('route');
+  state.source = q.get('source');
   state.step = s && Number.isInteger(Number(q.get('step'))) && Number(q.get('step')) > 0 ? Math.min(s.steps.length - 1, Number(q.get('step')) - 1) : -1;
   state.node = M.nodes.some(n => n.id === q.get('node')) ? q.get('node') : null;
-  state.control = control?.id || null;
-  const proposal = q.get('preview') || (control?.kind === 'proposed' ? control.id : null);
-  state.proposal = s?.controls?.some(c => c.kind === 'proposed' && c.id === proposal) ? proposal : null;
+  state.control = q.get('control');
+  state.proposal = q.get('preview') || state.control;
   state.tab = q.get('panel') === 'controls' ? 'controls' : 'path';
   state.context = Array.isArray(M.overviewEdges) && q.get('context') === '1';
   render();
@@ -115,7 +114,7 @@ function renderControls(s) {
 function sourceContext(s) {
   const {sources, allSources, selected} = sourceState();
   if (!sources.length) return s.sourceNote || s.sources?.length ? `<p class="source-gap">${esc(s.sourceNote || 'No supplied starting position is mapped to this documented flow.')}</p>` : '';
-  const selector = selected && allSources.length > 1 ? `<label class="source-choice-label" for="source-select">Alternative starting positions · choose one</label><select id="source-select">${allSources.map(source => `<option value="${esc(source.id)}" ${source.id === selected.id ? 'selected' : ''}>${esc(source.label)}</option>`).join('')}</select><p class="source-gap">These are alternative starting positions. ${sourceState().sourceSpecific ? 'Highlighted relationships are supplied for this source.' : 'Relationship highlights retain the scenario set unless a documented flow is selected.'}</p>` : '';
+  const selector = selected && allSources.length > 1 ? `<label class="source-choice-label" for="source-select">Alternative starting positions · choose one</label><select id="source-select">${allSources.map(source => `<option value="${esc(source.id)}" ${source.id === selected.id ? 'selected' : ''}>${esc(source.label)}</option>`).join('')}</select><p class="source-gap">These are alternative starting positions. ${selected.relatedEdges ? 'Highlighted relationships are supplied for this source.' : 'Relationship highlights retain the scenario set unless a documented flow is selected.'}</p>` : '';
   return `<section class="source-context" aria-label="Threat sources">${selector}${sources.map(source => {
     const p = SourceRoles.palette[source.kind];
     return `<details class="source-card" data-source-id="${esc(source.id)}" style="--source-fill:${p.fill};--source-ink:${p.ink}"><summary><small>${esc(p.label)} · ${source.basis === 'scenario-assumption' ? 'assumed' : source.basis === 'assessment-observed' ? 'source-observed' : 'uncertain'}</small><strong>${esc(source.label)}</strong>${source.node === null ? '<span class="source-unmapped">Source not mapped to a component in this view</span>' : ''}</summary><p>${esc(source.description)}</p><p><strong>Starting authority:</strong> ${esc(source.authority)}</p><p>${esc(SourceRoles.basis[source.basis])}. Scenario status remains ${esc(s.status)}.</p>${refs(source.evidence)}</details>`;
@@ -179,15 +178,6 @@ function renderInspector() {
   if (!n) return;
   const role = sourceState().nodes.get(n.id);
   $('inspector').innerHTML = `<button class="close" id="close-inspector">Close</button><div class="eyebrow">COMPONENT</div><h2>${esc(n.title)}</h2>${role ? `<p class="source-inspect" style="--source-fill:${role.fill};--source-ink:${role.ink}"><strong>${esc(role.label)}</strong>${role.items.map(item => `<br>${esc(item.label)}${item.authority ? `: ${esc(item.authority)}` : ''}`).join('')}</p>${refs([...new Set(role.items.flatMap(item => item.evidence))])}` : ''}<p>${esc(n.description)}</p>${s ? `<p><strong>${esc(s.id)} remains selected.</strong> ${esc(s.prerequisites)}</p>` : ''}${refs(n.evidence)}`;
-}
-function wrap(value, length) {
-  const lines = [''];
-  for (const word of String(value).split(/\s+/)) {
-    const i = lines.length - 1;
-    if (lines[i] && lines[i].length + word.length + 1 > length) lines.push(word);
-    else lines[i] += (lines[i] ? ' ' : '') + word;
-  }
-  return lines;
 }
 function markerSvg(c, isBarrier, placement) {
   const e = c.effect, marker = e?.marker;
@@ -359,14 +349,14 @@ function exportMapSvg() {
     s && !routeState() && !s.steps.length ? 'Amber fill: related components; order unestablished · orange outline: scenario focus · teal: existing control · purple: proposed control' : 'Amber fill: on selected route · normal outline: transit · orange outline: scenario focus · teal: existing control · purple: proposed control',
     [...new Set([...sourceState().nodes.values()].map(role => role.kind))].length ? 'Role fills: ' + [...new Set([...sourceState().nodes.values()].map(role => role.kind))].map(kind => `${SourceRoles.palette[kind].colorName}: ${SourceRoles.palette[kind].label}`).join(' · ') : '',
     ...sourceState().sources.map(source => `Threat source: ${source.label} (${SourceRoles.palette[source.kind].label}; ${SourceRoles.basis[source.basis]}${source.node === null ? '; not mapped on diagram' : ''}). Starting authority: ${source.authority}`),
-    routeState() ? `Documented flow: ${routeState().route.label}` : s && !s.steps.length ? (sourceState().sourceSpecific ? 'Related components: supplied for selected starting position; order unestablished.' : 'Related components: shared scenario set; order unestablished.') : '',
+    routeState() ? `Documented flow: ${routeState().route.label}` : s && !s.steps.length ? (sourceState().selected?.relatedNodes ? 'Related components: supplied for selected starting position; order unestablished.' : 'Related components: shared scenario set; order unestablished.') : '',
     s && applicableControls().some(item => item.effect?.outcome === 'blocks' && item.effect.traffic === 'continues') ? `Assessment context: ${s.summary}` : '',
     selectedControl()?.nodes?.length ? `C badge: selected control locus for ${selectedControl().title}; not proof of enforcement.` : '',
     blocker ? `${qualifiedCaption(blocker)}: ${blocker.effect.label}. ${blocker.effect.conditions} ${blocker.effect.residual}` : '',
     ...controls.filter(item => item.effect.outcome === 'blocks' && item.effect.traffic === 'continues').map(item => `${qualifiedCaption(item)}: ${item.effect.label}. ${item.effect.conditions} ${item.effect.residual}${blocker ? ' A separate barrier may stop the flow before this effect occurs.' : ''}`),
     c && c.id !== blocker?.id && !controls.some(item => item.id === c.id && item.effect.traffic === 'continues') ? `${qualifiedCaption(c)}: ${c.title}${c.effect ? `. ${c.effect.conditions} ${c.effect.residual}` : ''}` : '',
     !blocker && !c ? M.exportNote || 'Assessment evidence; no runtime validation implied.' : ''];
-  const lines = foot.filter(Boolean).flatMap(line => wrap(line, Math.floor((M.canvas.width - 40) / 7.5)));
+  const lines = foot.filter(Boolean).flatMap(line => SvgLayout.lines(line, M.canvas.width - 40, 14, 400, measureSvgText));
   const height = lines.length * 22 + 30;
   clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg'); clone.setAttribute('viewBox', `0 0 ${M.canvas.width} ${M.canvas.height + height}`); clone.setAttribute('width', M.canvas.width); clone.setAttribute('height', M.canvas.height + height); clone.setAttribute('style', `font-family:${typeof getComputedStyle === 'function' ? getComputedStyle($('map')).fontFamily : 'Arial,sans-serif'};background:#fbfcfb`);
   clone.insertAdjacentHTML('beforeend', `<rect x="0" y="${esc(M.canvas.height)}" width="${esc(M.canvas.width)}" height="${height}" fill="#fbfcfb"/>${lines.map((line, i) => `<text x="20" y="${esc(M.canvas.height + 25 + i * 22)}" font-size="14" fill="#49616b">${esc(line)}</text>`).join('')}`);

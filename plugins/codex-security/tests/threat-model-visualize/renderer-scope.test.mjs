@@ -326,6 +326,14 @@ test('actual renderer respects unordered empty edge overrides and exports relati
  assert.match(r.elements.get('map').innerHTML,/data-node="a"[^>]*data-path-state="context"/);
  assert.match(r.elements.get('map').innerHTML,/data-node="c"[^>]*data-path-state="active"/);
  assert.match(r.run('exportMapSvg()'),/supplied for selected starting position; order unestablished/);
+ r.run("delete M.scenarios[1].sources[1].relatedEdges;render()");
+ assert.match(r.elements.get('map').innerHTML,/data-edge="ab" data-path-state="active"/);
+ assert.match(r.elements.get('trace').innerHTML,/Relationship highlights retain the scenario set/);
+ assert.match(r.run('exportMapSvg()'),/supplied for selected starting position; order unestablished/);
+ r.run("delete M.scenarios[1].sources[0].relatedNodes;state.source='one';render()");
+ assert.match(r.elements.get('map').innerHTML,/data-edge="ab" data-path-state="context"/);
+ assert.match(r.elements.get('trace').innerHTML,/relationships are supplied for this source/i);
+ assert.match(r.run('exportMapSvg()'),/Related components: shared scenario set; order unestablished/);
  assert.doesNotMatch(r.location.hash,/route=/);
 });
 
@@ -471,7 +479,8 @@ test('control cards retain their full label and basis when resized and exported'
 
 test('SVG export retains dimensions and fonts while clearing only the clone transform',()=>{
  const r=renderer();
- r.run("globalThis.getComputedStyle=()=>({fontFamily:'Inter, system-ui, sans-serif'});state.x=30;state.zoom=2;transform()");
+ const identifier='W'.repeat(100);
+ r.run(`globalThis.getComputedStyle=()=>({fontFamily:'Inter, system-ui, sans-serif'});M.title=${JSON.stringify(identifier)};state.scenario=null;render();state.x=30;state.zoom=2;transform()`);
  const viewport=r.elements.get('viewport'), transform=viewport.getAttribute('transform');
  r.run('exportMapSvg()');
  const exported=r.exported, height=Number(exported.getAttribute('height'));
@@ -480,6 +489,12 @@ test('SVG export retains dimensions and fonts while clearing only the clone tran
  assert.ok(height>400,'export includes space for the assessment annotations');
  assert.equal(exported.getAttribute('viewBox'),`0 0 700 ${height}`);
  assert.match(exported.getAttribute('style'),/font-family:Inter, system-ui, sans-serif/);
+ const footerLines=[...exported.innerHTML.matchAll(/<text x="20"[^>]*font-size="14"[^>]*>([^<]*)<\/text>/g)].map(match=>match[1]);
+ assert.equal(footerLines.filter(line=>/^W+$/.test(line)).join(''),identifier);
+ for(const line of footerLines) {
+  const width=r.run(`measureSvgText(${JSON.stringify(line)},14).w`);
+  assert.ok(width<=700-40,`exported footer exceeds its margins at width ${width}`);
+ }
  assert.equal(exported.querySelector('#viewport').getAttribute('transform'),null);
  assert.equal(viewport.getAttribute('transform'),transform,'export leaves the live view intact');
 });

@@ -37,8 +37,7 @@
     // Explicit source sets describe relationships only; never derive reach from roles.
     const relatedNodes = selected?.relatedNodes ?? scenario?.affectedNodes ?? [];
     const relatedEdges = selected?.relatedEdges ?? scenario?.affectedEdges ?? [];
-    const sourceSpecific = !!selected && ('relatedNodes' in selected || 'relatedEdges' in selected);
-    return {sources, allSources, selected, nodes, relatedNodes, relatedEdges, sourceSpecific};
+    return {sources, allSources, selected, nodes, relatedNodes, relatedEdges};
   }
   const api = {resolve, palette, basis};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

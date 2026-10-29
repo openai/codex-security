@@ -65,19 +65,23 @@ test('a decision retains its explicit prerequisite without enabling other work f
   }
 });
 test('prerequisite replies do not reactivate a denied owner across branch boundaries',()=>{
-  const m={edges:[['request','caller','gateway'],['forward','gateway','service'],
-    ['call','gateway','policy'],['reply','policy','gateway'],['write','gateway','store'],
+  const m={edges:[['transit','caller','relay'],['request','relay','gateway'],['forward','gateway','service'],
+    ['call','gateway','policy'],['reply','policy','gateway'],['via','policy','relay'],['back','relay','gateway'],
+    ['write','gateway','store'],
     ['earlier','caller','gateway'],['independent','caller','policy']]
     .map(([id,from,to])=>({id,from,to}))};
-  for (const {grouping,branches,orders,predecisionWrite=false} of [
+  const routeEdges=['transit','request','forward'];
+  for (const {grouping,branches,orders,reply=['reply'],predecisionWrite=false} of [
     {grouping:'reply and write',branches:[{edges:['call'],beforeStep:1},{edges:['reply','write']}],orders:[[0,1]]},
     {grouping:'split',branches:[{edges:['call'],beforeStep:1},{edges:['reply']},{edges:['write']}],orders:[[0,1,2],[0,2,1],[2,0,1]]},
     {grouping:'call and reply',branches:[{edges:['call','reply'],beforeStep:1},{edges:['write']}],orders:[[0,1],[1,0]]},
+    {grouping:'grouped relay reply',reply:['via','back'],branches:[{edges:['call','via','back'],beforeStep:1},{edges:['write']}],orders:[[0,1],[1,0]]},
+    {grouping:'split relay reply',reply:['via','back'],branches:[{edges:['call'],beforeStep:1},{edges:['via','back']},{edges:['write']}],orders:[[0,1,2],[2,0,1]]},
     {grouping:'explicit predecision write',branches:[{edges:['call','reply','write'],beforeStep:1}],orders:[[0]],predecisionWrite:true}
   ]) {
     for (const order of orders) {
       for (const earlier of [false,true]) {
-        const s={steps:[{edge:'request'}],routes:[{id:'r',edges:['request','forward'],
+        const s={steps:[{edge:'request'}],routes:[{id:'r',edges:routeEdges,
           branches:[...order.map(i=>branches[i]),...(earlier?[{edges:['earlier'],beforeStep:1}]:[])]}]};
         for (const stop of [0,-1]) {
           const r=RoutePaths.resolve(m,s,'r',stop,true), write=stop<0 || earlier || predecisionWrite;
@@ -85,7 +89,7 @@ test('prerequisite replies do not reactivate a denied owner across branch bounda
           assert.equal(r.activeEdges.has('write'),write,context);
           assert.equal(r.unreachedEdges.has('write'),!write,context);
           assert.equal(r.activeNodes.has('store'),write,context);
-          assert(r.activeNodes.has('gateway') && r.activeEdges.has('call') && r.activeEdges.has('reply'));
+          assert(r.activeNodes.has('gateway') && r.activeEdges.has('call') && reply.every(id=>r.activeEdges.has(id)),context);
           assert.equal(r.activeEdges.has('forward'),stop<0,context);
           const writeBranch=r.branchStates.find(({branch})=>branch.edges.includes('write'));
           assert.equal(writeBranch.active,write,context);
@@ -96,7 +100,7 @@ test('prerequisite replies do not reactivate a denied owner across branch bounda
   }
   // The reply is first reached by the prerequisite, then by an independent path.
   for (const replies of [[{edges:['reply']},{edges:['write']}],[{edges:['reply','write']}]]) {
-    const s={steps:[{edge:'request'}],routes:[{id:'r',edges:['request','forward'],branches:[
+    const s={steps:[{edge:'request'}],routes:[{id:'r',edges:routeEdges,branches:[
       {edges:['call'],beforeStep:1},...replies,{edges:['independent'],beforeStep:1}
     ]}]};
     assert(RoutePaths.resolve(m,s,'r',0,true).activeEdges.has('write'));

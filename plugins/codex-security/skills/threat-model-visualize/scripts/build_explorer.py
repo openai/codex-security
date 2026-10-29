@@ -16,8 +16,8 @@ def require(condition, message):
 
 
 def validate(model, assessment):
-    def indexed(key):
-        items = model.get(key, [])
+    def indexed(key, default=None):
+        items = model.get(key, default)
         require(isinstance(items, list), f"{key} must be a list")
         ids = [item.get("id") for item in items]
         require(all(isinstance(i, str) and i for i in ids), f"{key}: nonempty string IDs required")
@@ -27,7 +27,7 @@ def validate(model, assessment):
     nodes, edges, scenarios, evidence = (
         indexed(k) for k in ("nodes", "edges", "scenarios", "evidence")
     )
-    regions = indexed("regions")
+    regions = indexed("regions", [])
     require(nodes, "At least one node is required")
     if "metadata" in model:
         metadata = model["metadata"]
@@ -404,9 +404,10 @@ def validate(model, assessment):
                 require(
                     effect["basis"] != "unverified", f"{c['id']}: unverified effect cannot block"
                 )
+            marker = effect.get("marker")
             if effect["outcome"] == "blocks" and effect.get("traffic", "stops") == "stops":
                 require(
-                    "step" in effect and "marker" in effect,
+                    "step" in effect and marker is not None,
                     f"{c['id']}: blocking needs a step and marker",
                 )
                 require(
@@ -429,8 +430,8 @@ def validate(model, assessment):
                                 ),
                                 f"{c['id']}: beforeStep branch at the stopping decision destination requires arrival:true",
                             )
-            marker = effect.get("marker")
             if marker is not None:
+                require(isinstance(marker, dict), f"{c['id']}: marker must be an object")
                 require("edge" in effect, f"{c['id']}: marker needs an effect edge")
                 for field in ("at", "x", "y", "w"):
                     number(marker.get(field), f"{c['id']}.marker.{field}")
@@ -485,50 +486,31 @@ def embedded(value):
     )
 
 
-def layout_diagnostic(model, area=None):
-    """Heuristic only: no font shaping, browser layout or collision detection."""
-    lines = [
-        (
-            "Layout estimate (not browser measurements): label width ≈ 0.6 × font size × character count; "
-            "node text has 10 units padding on each side. Glyphs and fonts vary."
-        )
-    ]
-    risks = []
-    for node in model["nodes"]:
-        for field, size in (("title", 17), ("subtitle", 14)):
-            value = node.get(field)
-            label = "" if value is None else str(value)
-            estimate = len(label) * size * 0.6
-            available = max(0, node["w"] - 20)
-            if estimate > available:
-                risks.append(f"{node['id']}.{field} ({estimate:.0f} > {available:.0f} units)")
-    lines.append(
-        "Possible node label overflow: "
-        + (
-            ", ".join(risks[:12]) + (f" (+{len(risks) - 12} more)" if len(risks) > 12 else "")
-            if risks
-            else "none estimated"
-        )
-    )
-    if area:
-        width, height = area
-        require(
-            all(math.isfinite(v) and v > 0 for v in area), "fit area must be positive and finite"
-        )
-        scale = min(width / model["canvas"]["width"], height / model["canvas"]["height"])
-        lines.append(
-            f"Assumed diagram area {width:g} × {height:g} CSS px; two-axis fit {scale:.3f}; "
-            f"estimated title/subtitle/connector {17 * scale:.1f}/{14 * scale:.1f}/{13 * scale:.1f} CSS px "
-            "(11 px target for each)."
-        )
-    else:
-        lines.append(
-            "Supply --fit-area WIDTH HEIGHT using the actual diagram area to estimate fitted text size."
-        )
-    lines.append(
-        "Inspect actual rendered text and selected views; estimates do not test readability or collisions."
-    )
-    return "\n".join(lines)
+def enters_node(start, end, node):
+    """Intersect the segment's parameter interval with the open box on each axis."""
+    enter, leave = 0, 1
+    for a, b, low, size in zip(start, end, (node["x"], node["y"]), (node["w"], node["h"])):
+        high = low + size
+        if a == b:
+            if not low < a < high:
+                return False
+        else:
+            first, last = sorted(((low - a) / (b - a), (high - a) / (b - a)))
+            enter, leave = max(enter, first), min(leave, last)
+    return enter < leave
+
+
+def connector_warnings(model):
+    for edge in model["edges"]:
+        segments = [(a, b) for a, b in pairwise(edge["points"]) if a != b]
+        diagonal = [a[0] != b[0] and a[1] != b[1] for a, b in segments]
+        if len(segments) > 1:
+            for index, neighbor, port in ((0, 1, "source"), (-1, -2, "destination")):
+                if diagonal[index] and not diagonal[neighbor]:
+                    yield f"{edge['id']}: diagonal {port} leg meets an axis-aligned segment. Check the adjacent bend."
+        for node in model["nodes"]:
+            if any(enters_node(a, b, node) for a, b in segments):
+                yield f"{edge['id']}: enters node {node['id']}. Route outside its box."
 
 
 def main():
@@ -536,13 +518,6 @@ def main():
     parser.add_argument("model", type=Path)
     parser.add_argument("--assessment", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument(
-        "--fit-area",
-        type=float,
-        nargs=2,
-        metavar=("WIDTH", "HEIGHT"),
-        help="assumed diagram area in CSS pixels for a two-axis fit estimate",
-    )
     args = parser.parse_args()
     try:
         model = json.loads(args.model.read_text(encoding="utf-8"))
@@ -553,7 +528,6 @@ def main():
                 "output must not overwrite the model or assessment input",
             )
         validate(model, assessment)
-        diagnostic = layout_diagnostic(model, args.fit_area)
         assets = Path(__file__).resolve().parents[1] / "assets"
         template = (assets / "explorer.html").read_text(encoding="utf-8")
         replacements = {
@@ -580,7 +554,8 @@ def main():
         print(
             f"Built {args.output} ({len(model['nodes'])} nodes, {len(model['scenarios'])} scenarios)"
         )
-        print(diagnostic)
+        for warning in connector_warnings(model):
+            print(f"Connector warning: {warning}")
     except (OSError, ValueError, KeyError, TypeError) as exc:
         parser.exit(2, f"Build error: {exc}\n")
 
