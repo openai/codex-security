@@ -8,6 +8,7 @@
 - allow existing scan output directory permissions ([#2120](https://github.com/openai/codex-security/pull/2120))
 - resolve dependency alerts ([#2084](https://github.com/openai/codex-security/pull/2084))
 - track Amazon Inspector repository vulnerabilities ([#2097](https://github.com/openai/codex-security/pull/2097))
+- bump actions/setup-python from 7.0.0 to 7.1.0 ([#2106](https://github.com/openai/codex-security/pull/2106))
 
 <!-- release-section: highlights:end -->
 
