@@ -70,6 +70,24 @@ scan. See [scan output](../sdk/typescript/docs/cli.md#scan-options-and-output)
 and [SDK results](../sdk/typescript/README.md#read-results) for the saved fields
 and failure output.
 
+### Check a revision-range scan for missing files
+
+If your scan retained `artifacts/02_discovery/in_scope_files.txt`, open it in
+the saved results directory. It lists the paths selected for discovery. For a
+scan between two commits, find `baseRevision` and `headRevision` under
+`scan.target` in the saved `scan-manifest.json`. In your Git client, compare
+the two commit trees directly (`base..head`). A three-dot PR comparison uses
+the merge base and can show different files when the commits have diverged.
+Current diff scans select regular text files regardless of extension. Git can
+also list changes to binary files, symlinks, and submodules.
+
+Plugin 0.1.32 could omit changed Perl files (`.cgi`, `.pl`, `.pm`, and `.t`).
+CLI 0.3.0 was the first release to bundle the fix. To repeat the scan with
+that version or later, use a clean, full checkout at the original head.
+Select the same two commits from your repository,
+passing the base to `--diff` and the head to `--head`. See the
+[CLI quick start](../README.md#quick-start).
+
 ## Give an agent CLI guidance
 
 The full plugin, generated CLI skills, and CLI MCP registration serve different
