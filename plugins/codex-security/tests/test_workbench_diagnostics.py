@@ -8,6 +8,7 @@ import pytest
 from workbench_test_support import (
     begin_deep_scan,
     create_saved_workspace,
+    empty_target_paths,
     fail_scan,
     get_deep_scan,
     get_scan,
@@ -24,9 +25,7 @@ LEGACY_ERROR = "Saved diagnostic. " * 100 + "\n...[truncated; sha256:" + "0" * 6
 
 @pytest.fixture
 def deep_scan(tmp_path: Path):
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     environment = {"CODEX_HOME": str(tmp_path / "codex-home")}
     started = begin_deep_scan(
         state_dir,
@@ -44,9 +43,7 @@ def deep_scan(tmp_path: Path):
 def test_scan_failure_keeps_complete_diagnostic_and_existing_terminal_value(
     tmp_path: Path, message: str
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_saved_workspace(state_dir, target)
     started = start_delivered_scan(
         state_dir,
