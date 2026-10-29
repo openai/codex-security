@@ -378,7 +378,7 @@
       "additionalProperties": false,
       "properties": {
         "provider": {
-          "enum": ["wiz", "endor", "snyk", "github", "semgrep"],
+          "enum": ["wiz", "endor", "snyk", "github", "semgrep", "inspector"],
           "title": "Provider",
           "type": "string"
         },

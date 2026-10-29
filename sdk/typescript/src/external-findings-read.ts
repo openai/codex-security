@@ -11,6 +11,7 @@ import { readSemgrepFindings } from "./semgrep-findings.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
+import { readInspectorFindings } from "./inspector-findings.js";
 import { isGitHubCloudHost } from "./git-remote.js";
 import { isRecord } from "./record.js";
 import { readVendorFindingsForPublication } from "./wiz-findings.js";
@@ -24,6 +25,7 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   opengrep: "semgrep",
   endor: "endor",
   github: "github",
+  inspector: "inspector",
 } as const satisfies Record<string, Provider>;
 
 export type ExternalFindingsReader = keyof typeof EXTERNAL_FINDINGS_PROVIDERS;
@@ -36,6 +38,7 @@ export const EXTERNAL_FINDINGS_READERS = Object.keys(
 export interface ExternalFindingsReaderOptions {
   provider: ExternalFindingsReader;
   sourceRepositoryUrl?: string;
+  inspectorProjectMap?: ReadonlyMap<string, string>;
 }
 
 /** @internal Shared parser output, including immutable Cloud retry projections. */
@@ -112,6 +115,18 @@ export async function readExternalFindings(
   }
   if (options.provider === "github")
     return { findings: await readGitHubFindings(path, target) };
+  if (options.provider === "inspector") {
+    const url = options.sourceRepositoryUrl ?? "";
+    return {
+      findings: await readInspectorFindings(
+        path,
+        url,
+        target,
+        options.inspectorProjectMap,
+      ),
+      sourceRepositories: [{ url }],
+    };
+  }
   const publication = await readVendorFindingsForPublication(path, target);
   // Raw package exports keep repository-branch URLs in retained source data.
   const sourceRepositories = publication.current.findings.flatMap(

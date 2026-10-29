@@ -28,6 +28,7 @@ const distModules = [
   "external-findings-import",
   "external-findings-read",
   "scanner-import",
+  "inspector-findings",
   "snyk-findings",
   "semgrep-findings",
   "native-json-findings",

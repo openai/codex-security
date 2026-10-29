@@ -332,6 +332,10 @@ export {
   type OpenGrepImportOptions,
 } from "./opengrep-findings.js";
 export {
+  normalizeInspectorFindings,
+  readInspectorFindings,
+} from "./inspector-findings.js";
+export {
   normalizeSnykFindingsExport,
   normalizeSnykJson,
   normalizeSnykSarif,
