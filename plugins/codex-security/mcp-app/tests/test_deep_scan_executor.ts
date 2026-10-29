@@ -122,10 +122,14 @@ try {
     }
   });
 
+  await test(
+    "Deep worker runtime settings at the child-process boundary",
+    testWorkerRuntimeSettings,
+  );
+
   await test("Deep worker runtime settings", async (t) => {
     await check(t, testLargeScopeTransport);
     await check(t, testOpenAiCredentialsReachWorker);
-    await check(t, testWorkerRuntimeSettings);
     await check(t, testUnsupportedProviderSnapshotFailsBeforeLaunch);
     await check(
       t,
