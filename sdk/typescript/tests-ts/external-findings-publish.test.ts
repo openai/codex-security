@@ -1,3 +1,23 @@
+import {
+  snykJson,
+  snykPluginExport,
+  snykSarif,
+} from "./support/snyk-import-fixtures.js";
+import {
+  opengrepJson,
+  opengrepTraceJson,
+} from "./support/opengrep-import-fixtures.js";
+import {
+  normalizeSnykFindingsExport,
+  normalizeSnykSarif,
+  snykRepositoryUrls,
+} from "../src/snyk-findings.js";
+import {
+  semgrepJson,
+  semgrepSarif,
+} from "./support/semgrep-import-fixtures.js";
+import { endorFinding, endorSarif } from "./support/endor-import-fixtures.js";
+import { normalizeEndorFindings } from "../src/endor-findings.js";
 import { createServer, type ServerResponse } from "node:http";
 import { execFile } from "node:child_process";
 import { hash } from "node:crypto";
@@ -25,7 +45,6 @@ import {
   type ExternalPublicationProgress,
   type PreparedExternalPublication,
 } from "../src/external-findings-publish.js";
-import { snykRepositoryUrls } from "../src/snyk-findings.js";
 import { readGitHubFindings } from "../src/github-findings.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
 import {
@@ -162,7 +181,6 @@ test("concurrent external publications enforce opt-in and provider options befor
 
 for (const provider of ["wiz", "snyk"] as const) {
   test(`${provider} publication rechecks the selected Cloud opt-in after reading`, async () => {
-    const { snykSarif } = await import("./support/snyk-import-fixtures.js");
     const f =
       provider === "snyk" ? await fixture(snykSarif()) : await fixture();
     let credentialReads = 0;
@@ -2768,8 +2786,6 @@ test("interrupted CLI output preserves acknowledged batches and resumes only unf
 });
 
 test("readback retry preserves acknowledged findings and scanner diagnostics", async () => {
-  const { opengrepJson } =
-    await import("./support/opengrep-import-fixtures.js");
   const input = opengrepJson();
   const f = await fixture(input);
   f.state.brokenReadback = true;
@@ -3469,8 +3485,6 @@ test("normalized SDK publication rejects unserializable report metadata before u
 });
 
 test("publication JSON retains native Error messages and scanner diagnostics", async () => {
-  const { opengrepJson } =
-    await import("./support/opengrep-import-fixtures.js");
   const scannerErrors = opengrepJson().errors;
   const error = new Error("Scanner rule timed out.");
   const nested = {
@@ -3604,7 +3618,6 @@ test.each([
 );
 
 test("Snyk SARIF publish, replay and changed evidence preserve Cloud identity", async () => {
-  const { snykSarif } = await import("./support/snyk-import-fixtures.js");
   const input = snykSarif();
   const f = await fixture(input);
   const settings = {
@@ -3634,53 +3647,70 @@ test("Snyk SARIF publish, replay and changed evidence preserve Cloud identity", 
   expect(updated.version).toBe(2);
 });
 
-test("Snyk CLI dry run selects its adapter without writing an import", async () => {
-  const { snykSarif } = await import("./support/snyk-import-fixtures.js");
-  const f = await fixture(snykSarif());
-  const command = [...f.command, "--dry-run"];
-  command[command.indexOf("--provider") + 1] = "snyk";
-  const cli = createCliTest(main);
-  expect(await cli.runCli(command, f.cliDeps)).toBe(0);
-  expect(f.posts).toHaveLength(0);
-});
-
-test.each([
-  { uris: ["https://github.com/other/project"] },
-  {
-    uris: [
-      "https://github.com/example/project",
-      "https://github.com/other/project",
-    ],
-  },
-  { uris: ["https://github.com:443/example/project"] },
-])(
-  "Snyk source repository provenance binds both publication entrypoints: %p",
-  async ({ uris }) => {
-    const { snykSarif } = await import("./support/snyk-import-fixtures.js");
-    const { normalizeSnykSarif } = await import("../src/snyk-findings.js");
-    const input: any = snykSarif();
-    input.runs[0].versionControlProvenance = uris.map((repositoryUri) => ({
-      repositoryUri,
-    }));
-    const f = await fixture(input);
-    const selected = { ...options, provider: "snyk" as const };
-    await expect(
-      prepareExternalPublication(f.file, selected, f.deps),
-    ).rejects.toThrow("does not match the selected Cloud repository");
-    await expect(
-      prepareNormalizedExternalPublication(
-        normalizeSnykSarif(input),
-        selected,
-        f.deps,
-      ),
-    ).rejects.toThrow("does not match the selected Cloud repository");
+for (const [provider, report, normalize, dryRunTitle] of [
+  [
+    "snyk",
+    snykSarif,
+    normalizeSnykSarif,
+    "Snyk CLI dry run selects its adapter without writing an import",
+  ],
+  [
+    "endor",
+    endorSarif,
+    normalizeEndorFindings,
+    "Endor CLI dry-run recognizes SARIF without writing imports",
+  ],
+] as const) {
+  test(dryRunTitle, async () => {
+    const f = await fixture(report());
+    const command = [...f.command, "--dry-run"];
+    command[command.indexOf("--provider") + 1] = provider;
+    const cli = createCliTest(main);
+    expect(await cli.runCli(command, f.cliDeps)).toBe(0);
     expect(f.posts).toHaveLength(0);
-    expect(f.reports.size).toBe(0);
-  },
-);
+  });
+
+  test.each([
+    { uris: ["https://github.com/other/project"] },
+    {
+      uris: [
+        "https://github.com/example/project",
+        "https://github.com/other/project",
+      ],
+    },
+    { uris: ["https://github.com:443/example/project"] },
+  ])(
+    `${provider === "snyk" ? "Snyk" : "Endor"} source repository provenance binds both publication entrypoints: %p`,
+    async ({ uris }) => {
+      const original = report();
+      const input = {
+        ...original,
+        runs: original.runs.map((run) => ({
+          ...run,
+          versionControlProvenance: uris.map((repositoryUri) => ({
+            repositoryUri,
+          })),
+        })),
+      };
+      const f = await fixture(input);
+      const selected = { ...options, provider };
+      await expect(
+        prepareExternalPublication(f.file, selected, f.deps),
+      ).rejects.toThrow("does not match the selected Cloud repository");
+      await expect(
+        prepareNormalizedExternalPublication(
+          normalize(input),
+          selected,
+          f.deps,
+        ),
+      ).rejects.toThrow("does not match the selected Cloud repository");
+      expect(f.posts).toHaveLength(0);
+      expect(f.reports.size).toBe(0);
+    },
+  );
+}
 
 test("Snyk source repository binding is rechecked for a fresh import after completion", async () => {
-  const { snykSarif } = await import("./support/snyk-import-fixtures.js");
   const input: any = snykSarif();
   input.runs[0].versionControlProvenance = [
     {
@@ -3724,10 +3754,6 @@ async function snykRepositoryEvidence(
   format: "plugin" | "SARIF",
   repository: string,
 ) {
-  const { snykPluginExport, snykSarif } =
-    await import("./support/snyk-import-fixtures.js");
-  const { normalizeSnykFindingsExport, normalizeSnykSarif } =
-    await import("../src/snyk-findings.js");
   if (format === "plugin") {
     const input = snykPluginExport();
     input.collection.target.repository = repository;
@@ -3988,7 +4014,6 @@ test.each([
 );
 
 test("native Snyk JSON publishes selected dependency occurrences and replays their evidence", async () => {
-  const { snykJson } = await import("./support/snyk-import-fixtures.js");
   const input = snykJson();
   const f = await fixture(input);
   const selected = {
@@ -4013,8 +4038,6 @@ test("native Snyk JSON publishes selected dependency occurrences and replays the
 });
 
 test("Semgrep publication preserves identity across JSON and SARIF with explicit repository provenance", async () => {
-  const { semgrepJson, semgrepSarif } =
-    await import("./support/semgrep-import-fixtures.js");
   const f = await fixture(semgrepJson());
   const settings = {
     ...options,
@@ -4054,8 +4077,6 @@ test("Semgrep publication preserves identity across JSON and SARIF with explicit
 });
 
 test("OpenGrep publication retains grouped evidence through Cloud readback and replay", async () => {
-  const { opengrepTraceJson } =
-    await import("./support/opengrep-import-fixtures.js");
   const input = opengrepTraceJson();
   const { results, ...report } = input;
   const f = await fixture(input);
@@ -4126,8 +4147,6 @@ test("OpenGrep publication retains grouped evidence through Cloud readback and r
 });
 
 test("empty OpenGrep Cloud imports retain scanner diagnostics without uploading", async () => {
-  const { opengrepJson } =
-    await import("./support/opengrep-import-fixtures.js");
   const input = opengrepJson();
   input.results = [];
   const f = await fixture(input);
@@ -4146,8 +4165,6 @@ test("empty OpenGrep Cloud imports retain scanner diagnostics without uploading"
 });
 
 test("OpenGrep CLI Cloud preview forwards source provenance without uploading", async () => {
-  const { opengrepJson } =
-    await import("./support/opengrep-import-fixtures.js");
   const input = opengrepJson();
   const f = await fixture(input);
   const command = [
@@ -4180,8 +4197,6 @@ test("OpenGrep CLI Cloud preview forwards source provenance without uploading", 
 });
 
 test("Semgrep native percent paths retain CE records through JSON-to-SARIF publication", async () => {
-  const { semgrepJson, semgrepSarif } =
-    await import("./support/semgrep-import-fixtures.js");
   const paths = [
     "src/my file.ts",
     "src/my%20file.ts",
@@ -4241,7 +4256,6 @@ test("Semgrep native percent paths retain CE records through JSON-to-SARIF publi
 });
 
 test("Semgrep publication retains unsupported SARIF bases without repository locations", async () => {
-  const { semgrepSarif } = await import("./support/semgrep-import-fixtures.js");
   const input: any = semgrepSarif();
   const run = input.runs[0];
   run.results[0].locations[0].physicalLocation.artifactLocation.uriBaseId =
@@ -4290,7 +4304,6 @@ test("Semgrep publication retains unsupported SARIF bases without repository loc
 });
 
 test("Semgrep refuses missing source identity and a conflicting Cloud destination without uploads", async () => {
-  const { semgrepJson } = await import("./support/semgrep-import-fixtures.js");
   const f = await fixture(semgrepJson());
   await expect(
     prepareExternalPublication(
@@ -4314,7 +4327,6 @@ test("Semgrep refuses missing source identity and a conflicting Cloud destinatio
 });
 
 test("Semgrep CLI dry-run preserves explicit source repository and does not upload", async () => {
-  const { semgrepJson } = await import("./support/semgrep-import-fixtures.js");
   const f = await fixture(semgrepJson());
   const command = [
     ...f.command,
@@ -4329,8 +4341,6 @@ test("Semgrep CLI dry-run preserves explicit source repository and does not uplo
 });
 
 test("Endor JSON and SARIF reuse UUID identity through Cloud publication", async () => {
-  const { endorFinding, endorSarif } =
-    await import("./support/endor-import-fixtures.js");
   const input = endorFinding();
   const f = await fixture(input);
   const settings = {
@@ -4364,53 +4374,7 @@ test("Endor JSON and SARIF reuse UUID identity through Cloud publication", async
     result: sarif.runs[0]!.results[0],
   });
 });
-test("Endor CLI dry-run recognizes SARIF without writing imports", async () => {
-  const { endorSarif } = await import("./support/endor-import-fixtures.js");
-  const f = await fixture(endorSarif());
-  const command = [...f.command, "--dry-run"];
-  command[command.indexOf("--provider") + 1] = "endor";
-  const cli = createCliTest(main);
-  expect(await cli.runCli(command, f.cliDeps)).toBe(0);
-  expect(f.posts).toHaveLength(0);
-});
-
-test.each([
-  { uris: ["https://github.com/other/project"] },
-  {
-    uris: [
-      "https://github.com/example/project",
-      "https://github.com/other/project",
-    ],
-  },
-  { uris: ["https://github.com:443/example/project"] },
-])(
-  "Endor source repository provenance binds both publication entrypoints: %p",
-  async ({ uris }) => {
-    const { endorSarif } = await import("./support/endor-import-fixtures.js");
-    const { normalizeEndorFindings } = await import("../src/endor-findings.js");
-    const input: any = endorSarif();
-    input.runs[0].versionControlProvenance = uris.map((repositoryUri) => ({
-      repositoryUri,
-    }));
-    const f = await fixture(input);
-    const selected = { ...options, provider: "endor" as const };
-    await expect(
-      prepareExternalPublication(f.file, selected, f.deps),
-    ).rejects.toThrow("does not match the selected Cloud repository");
-    await expect(
-      prepareNormalizedExternalPublication(
-        normalizeEndorFindings(input),
-        selected,
-        f.deps,
-      ),
-    ).rejects.toThrow("does not match the selected Cloud repository");
-    expect(f.posts).toHaveLength(0);
-    expect(f.reports.size).toBe(0);
-  },
-);
-
 test("Endor source repository binding preserves immutable requests across a repository rename", async () => {
-  const { endorSarif } = await import("./support/endor-import-fixtures.js");
   const input: any = endorSarif();
   input.runs[0].versionControlProvenance = [
     {

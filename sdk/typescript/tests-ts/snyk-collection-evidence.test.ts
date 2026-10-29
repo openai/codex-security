@@ -21,64 +21,58 @@ test("plugin imports version collection evidence without changing occurrence ide
   }
   const scan = bundle.collection.scans[0]!;
   scan.issueCount = 3;
-  const fixture = await localFindingsFixture({
+  await using fixture = await localFindingsFixture({
     remote: bundle.collection.target.repository,
   });
-  try {
-    const path = join(fixture.root, "snyk.json");
-    const options = {
-      repository: fixture.repository,
-      provider: "snyk" as const,
-      sourceKey: "example/plugin-sca",
-    };
-    const dependencies = { environment: fixture.environment };
-    const importBundle = async () => {
-      await writeFile(path, JSON.stringify(bundle));
-      const prepared = await prepareLocalExternalImport(
-        path,
-        options,
-        dependencies,
-      );
-      const result = await prepared.import();
-      const { findings, ...context } = bundle;
-      expect(result.excluded).toEqual([]);
-      expect(result.findings.map((row) => row.evidence.source_data)).toEqual(
-        findings.map((finding) => ({ ...context, finding })),
-      );
-      return result;
-    };
+  const path = join(fixture.root, "snyk.json");
+  const options = {
+    repository: fixture.repository,
+    provider: "snyk" as const,
+    sourceKey: "example/plugin-sca",
+  };
+  const dependencies = { environment: fixture.environment };
+  const importBundle = async () => {
+    await writeFile(path, JSON.stringify(bundle));
+    const prepared = await prepareLocalExternalImport(
+      path,
+      options,
+      dependencies,
+    );
+    const result = await prepared.import();
+    const { findings, ...context } = bundle;
+    expect(result.excluded).toEqual([]);
+    expect(result.findings.map((row) => row.evidence.source_data)).toEqual(
+      findings.map((finding) => ({ ...context, finding })),
+    );
+    return result;
+  };
 
-    const created = await importBundle();
-    expect(created.counts).toEqual({ created: 3, updated: 0, unchanged: 0 });
+  const created = await importBundle();
+  expect(created.counts).toEqual({ created: 3, updated: 0, unchanged: 0 });
 
-    bundle.findings.pop();
-    first.nativeRecord.unknownField = "Revised vendor detail";
-    expect((await importBundle()).counts).toEqual({
-      created: 0,
-      updated: 1,
-      unchanged: 1,
-    });
+  bundle.findings.pop();
+  first.nativeRecord.unknownField = "Revised vendor detail";
+  expect((await importBundle()).counts).toEqual({
+    created: 0,
+    updated: 1,
+    unchanged: 1,
+  });
 
-    scan.issueCount = 2;
-    expect((await importBundle()).counts).toEqual({
-      created: 0,
-      updated: 2,
-      unchanged: 0,
-    });
+  scan.issueCount = 2;
+  expect((await importBundle()).counts).toEqual({
+    created: 0,
+    updated: 2,
+    unchanged: 0,
+  });
 
-    const stored = await listLocalExternalFindings(options, dependencies);
-    expect(
-      Object.fromEntries(
-        stored.map((row) => [row.sourceFindingId, row.version]),
-      ),
-    ).toEqual({
-      [created.findings[0]!.sourceFindingId]: 3,
-      [created.findings[1]!.sourceFindingId]: 2,
-      [created.findings[2]!.sourceFindingId]: 1,
-    });
-  } finally {
-    await fixture.dispose();
-  }
+  const stored = await listLocalExternalFindings(options, dependencies);
+  expect(
+    Object.fromEntries(stored.map((row) => [row.sourceFindingId, row.version])),
+  ).toEqual({
+    [created.findings[0]!.sourceFindingId]: 3,
+    [created.findings[1]!.sourceFindingId]: 2,
+    [created.findings[2]!.sourceFindingId]: 1,
+  });
 });
 
 test("native JSON retains one advisory count across distinct dependency paths", () => {
