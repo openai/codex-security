@@ -2436,7 +2436,8 @@ Acquire code-scanning findings with the existing `import github` collector and
 save its complete JSON output. In Codex, the official
 [GitHub Codex plugin](https://github.com/openai/plugins/tree/main/plugins/github)
 can help select the repository, alert numbers and ref through GitHub's MCP
-server. Pass that selection to the collector. For Dependabot, use
+server. Pass that selection to the collector. For Dependabot, use a token with
+**Dependabot alerts: read** and follow
 the [repository alert export guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/github-dependabot.md)
 to save the native REST records from one repository and preview them with
 `--provider github`. For GHSA disclosures, use the
@@ -2466,7 +2467,7 @@ the default branch. MCP list calls are paginated separately. Code-scanning
 imports require the saved collector output, which includes the selected instance.
 
 The importer uses GitHub CLI authentication (`gh auth login`) and `GH_HOST`;
-the plugin's connection does not sign in `gh`. Reading alerts requires
+the plugin's connection does not sign in `gh`. Reading code-scanning alerts requires
 [code-scanning access](https://docs.github.com/en/rest/code-scanning/code-scanning#list-code-scanning-alerts-for-a-repository):
 **Code scanning alerts: read** for a fine-grained token, or `security_events` for
 a classic token (`public_repo` is sufficient for public repositories). The source
