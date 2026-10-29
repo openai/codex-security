@@ -16,6 +16,7 @@ import pytest
 from workbench_test_support import (
     create_saved_workspace,
     create_workspace,
+    empty_target_paths,
     empty_target_scan,
     fail_scan,
     get_scan,
@@ -44,9 +45,7 @@ def _start_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Path]:
 
 
 def _start_deep_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Path]:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(
         state_dir, target, thread_id="thread-completion-binding", mode="deep"
     )
@@ -392,9 +391,7 @@ def test_cli_scan_completes_when_draft_omits_registered_scope(
 
 
 def test_prepared_completion_does_not_publish_scan_before_acceptance(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     scan_dir = tmp_path / "scan"
     registered = register_cli_scan(state_dir, target, scan_dir)
     scan_id = str(registered["scanId"])
@@ -477,9 +474,7 @@ def test_incompatible_sealed_deep_scan_remains_recoverable(tmp_path: Path) -> No
 
 
 def test_rejected_prepared_completion_can_be_marked_failed(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     scan_dir = tmp_path / "scan"
     registered = register_cli_scan(state_dir, target, scan_dir)
     scan_id = str(registered["scanId"])
