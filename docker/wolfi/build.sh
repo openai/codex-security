@@ -9,7 +9,7 @@ Requires Linux with an x86_64-capable melange/bubblewrap runner, melange 0.61.1,
 apko 1.4.13, Python 3.9+, OpenSSL, and npm 11 for payload staging.
 APKO and MELANGE optionally name the installed tool executables.
 STAGED_PAYLOAD optionally names an absolute path to an already staged payload
-matching the hash in melange.yaml. All OS packages come from packages.wolfi.dev.
+matching the payload_sha256 in build-inputs.json. All OS packages come from packages.wolfi.dev.
 Each run generates a new local signing key and removes the private key at exit.
 EOF
 }
@@ -39,6 +39,14 @@ cp "$root"/{wolfi-signing.rsa.pub,builder.yaml,apko.yaml,melange.yaml,build-inpu
 (cd "$scratch"; "$melange" keygen melange.rsa)
 cp "$scratch/melange.rsa.pub" .
 stamp=2026-10-26T11:30:14Z
+if [[ -n ${SCANNER_TARBALL:-} ]]; then
+  : "${SCANNER_SHA:?}" "${SCANNER_VERSION:?}" "${SCANNER_RUNTIME_LOCK:?}"
+  if [[ -n ${STAGED_PAYLOAD:-} ]]; then
+    [[ ${BASE_PAYLOAD_SHA:-} =~ ^[0-9a-f]{64}$ ]] || die 'OS updates require the original scanner payload hash'
+  fi
+  [[ $SCANNER_SHA =~ ^[0-9a-f]{40}$ && $SCANNER_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'Invalid scanner release'
+  stamp=$(git -C "$root" show -s --format=%cI "$SCANNER_SHA")
+fi
 # Authenticate the upstream indexes with the reviewed Wolfi key.
 python3 -c 'import hashlib, json, pathlib, sys
 actual = hashlib.sha256(pathlib.Path("wolfi-signing.rsa.pub").read_bytes()).hexdigest()
@@ -81,6 +89,37 @@ if [[ -n ${STAGED_PAYLOAD:-} ]]; then
 else
   python3 "$root/payload/stage.py" "$out/src"
 fi
+# Render only the scanner-specific fields. The reviewed OS locks stay fixed.
+python3 - "$root" <<'RECIPE'
+import gzip, hashlib, json, os, subprocess, sys
+from pathlib import Path
+inputs_path = Path("build-inputs.json")
+inputs = json.loads(inputs_path.read_text())
+if os.environ.get("SCANNER_TARBALL"):
+    version = os.environ["SCANNER_VERSION"]
+    epoch = inputs["local_package"].rsplit("-r", 1)[1]
+    inputs["local_package"] = f"codex-security={version}-r{epoch}"
+    if os.environ.get("STAGED_PAYLOAD"):
+        inputs["payload_sha256"] = os.environ["BASE_PAYLOAD_SHA"]
+    else:
+        digest = hashlib.sha256()
+        with gzip.open("src/payload.tar.gz", "rb") as data:
+            for chunk in iter(lambda: data.read(1024 * 1024), b""):
+                digest.update(chunk)
+        inputs["payload_sha256"] = digest.hexdigest()
+    inputs_path.write_text(json.dumps(inputs, indent=2) + "\n")
+    revision = subprocess.check_output(["git", "-C", sys.argv[1], "rev-parse", "HEAD"], text=True).strip()
+    tag = os.environ.get("SCANNER_RELEASE_TAG", f"{version}-wolfi-amd64")
+    recipe = f'org.opencontainers.image.revision: "{revision}"\n  io.openai.codex-security.release-tag: "{tag}"'
+else:
+    version = inputs["local_package"].split("=")[1].split("-r")[0]
+    recipe = ""
+for path in (Path("melange.yaml"), Path("apko.yaml")):
+    path.write_text(path.read_text().replace("@SCANNER_VERSION@", version)
+                   .replace("@LOCAL_PACKAGE@", inputs["local_package"])
+                   .replace("@PAYLOAD_SHA256@", inputs["payload_sha256"])
+                   .replace("# @RECIPE_REVISION@", recipe))
+RECIPE
 pins=$(python3 -c 'import json; print(",".join(p["name"]+"="+p["version"] for p in json.load(open("builder.lock.json"))["contents"]["packages"]))')
 "$melange" build melange.yaml --source-dir "$out/src" --arch x86_64 --runner bubblewrap \
   --signing-key "$scratch/melange.rsa" --generate-index --out-dir "$out/packages" \

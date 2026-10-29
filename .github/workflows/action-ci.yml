@@ -73,7 +73,7 @@ jobs:
       - name: Test Action release contracts
         if: inputs.sdk-contracts
         working-directory: sdk/typescript
-        run: bun test --timeout 30000 tests-ts/action-release-workflow.test.ts
+        run: bun test --timeout 30000 tests-ts/action-release-workflow.test.ts tests-ts/codex-dependency-pins.test.ts
       - name: Install the pinned CLI for integration tests
         run: npm ci --prefix runtime --ignore-scripts --no-audit --no-fund
       - name: Published CLI result and SARIF compatibility (no model calls)

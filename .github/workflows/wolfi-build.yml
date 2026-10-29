@@ -1,0 +1,203 @@
+name: Build Wolfi scanner
+
+on:
+  workflow_call:
+    inputs:
+      release-version: {type: string, required: true}
+      release-sha: {type: string}
+      release-integrity: {type: string}
+      release-tarball-artifact: {type: string}
+      runtime-lock-artifact: {type: string}
+      os-update: {type: boolean, default: false}
+    outputs:
+      artifact: {value: "${{ jobs.build.outputs.artifact }}"}
+      digest: {value: "${{ jobs.build.outputs.digest }}"}
+      tag: {value: "${{ jobs.build.outputs.tag }}"}
+      sbom-sha: {value: "${{ jobs.build.outputs.sbom-sha }}"}
+      existing: {value: "${{ jobs.build.outputs.existing }}"}
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - Dockerfile.dockerignore
+      - .github/workflows/container-validate.yml
+      - docker/verify-container-sandbox.sh
+      - .github/workflows/publish-wolfi.yml
+      - .github/workflows/wolfi-build.yml
+      - docker/wolfi/**
+      - LICENSE
+      - docker/prepare-release-package.mjs
+      - docker/entrypoint.sh
+      - docker/git-credential.sh
+      - docker/codex-security.apparmor
+      - docker/codex-security-seccomp.json
+      - github-action/scripts/setup-ubuntu-sandbox.sh
+      - sdk/typescript/scripts/is-main.mjs
+      - sdk/typescript/scripts/package-provenance.mjs
+      - sdk/typescript/scripts/release-automation.mjs
+
+permissions:
+  contents: read
+
+jobs:
+  fixture:
+    name: Verify the PR scanner fixture
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      artifact: ${{ steps.fixture.outputs.artifact-id }}
+      version: ${{ steps.known.outputs.version }}
+      sha: ${{ steps.known.outputs.sha }}
+      integrity: ${{ steps.known.outputs.integrity }}
+    steps:
+      - &checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - &setup-node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.15.0"
+          package-manager-cache: false
+      - name: Exercise release staging on a known published scanner
+        id: known
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '.image_revision | numbers | . >= 0 and . == floor' docker/wolfi/build-inputs.json > /dev/null
+          fixture=$RUNNER_TEMP/scanner-fixture
+          mkdir "$fixture"
+          cp docker/wolfi/payload/package-lock.json "$fixture/"
+          lock=$fixture/package-lock.json
+          version=$(jq -er '.packages["node_modules/@openai/codex-security"].version' "$lock")
+          git fetch --no-tags https://github.com/openai/codex-security.git "+refs/tags/npm-v$version:refs/tags/npm-v$version"
+          sha=$(git rev-parse --verify "refs/tags/npm-v$version^{commit}")
+          archive=$fixture/$(npm pack --ignore-scripts --silent --pack-destination "$fixture" \
+            --registry=https://registry.npmjs.org "@openai/codex-security@$version")
+          bash docker/wolfi/verify-npm-release.sh "$lock" "$version" "$sha" "$archive"
+          integrity=$(jq -er '.packages["node_modules/@openai/codex-security"].integrity' "$lock")
+          mv "$archive" "$fixture/scanner.tgz"
+          printf 'version=%s\nsha=%s\nintegrity=%s\n' "$version" "$sha" "$integrity" >> "$GITHUB_OUTPUT"
+      - name: Share the verified scanner fixture
+        id: fixture
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verified-scanner-fixture-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/scanner-fixture
+          if-no-files-found: error
+          retention-days: 1
+
+  build:
+    name: Build and smoke-test Linux amd64
+    needs: fixture
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.fixture.result == 'success') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      attestations: read
+    outputs:
+      artifact: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.prepare.outputs.digest || steps.release.outputs.digest }}
+      tag: ${{ steps.release.outputs.tag }}
+      existing: ${{ steps.release.outputs.existing }}
+      sbom-sha: ${{ steps.prepare.outputs.sbom-sha }}
+    steps:
+      - *checkout
+      - *setup-node
+      - name: Download the verified npm archive
+        if: needs.fixture.outputs.artifact != '' || inputs.release-tarball-artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.fixture.outputs.artifact || inputs.release-tarball-artifact }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/scanner
+      - name: Download the verified runtime lock
+        if: inputs.runtime-lock-artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ inputs.runtime-lock-artifact }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/scanner
+      - name: Use the verified PR fixture
+        if: github.event_name == 'pull_request'
+        env:
+          VERSION: ${{ needs.fixture.outputs.version }}
+          SHA: ${{ needs.fixture.outputs.sha }}
+          INTEGRITY: ${{ needs.fixture.outputs.integrity }}
+        run: |
+          # The Wolfi build uses the scanner commit's timestamp even on forks without upstream tags.
+          git cat-file -e "$SHA^{commit}" || git fetch --no-tags https://github.com/openai/codex-security.git "$SHA"
+          printf 'SCANNER_TARBALL=%s\nSCANNER_RUNTIME_LOCK=%s\nSCANNER_VERSION=%s\nSCANNER_SHA=%s\nSCANNER_INTEGRITY=%s\n' \
+            "$RUNNER_TEMP/scanner/scanner.tgz" "$RUNNER_TEMP/scanner/package-lock.json" "$VERSION" "$SHA" "$INTEGRITY" >> "$GITHUB_ENV"
+      - name: Resolve immutable release inputs
+        if: inputs.release-version != ''
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.release-version }}
+          RELEASE_SHA: ${{ inputs.release-sha }}
+          RELEASE_INTEGRITY: ${{ inputs.release-integrity }}
+          OS_UPDATE: ${{ inputs.os-update }}
+        run: bash docker/wolfi/resolve-release.sh
+      - name: Build and test on native Linux
+        if: steps.release.outputs.existing != 'true'
+        run: bash docker/wolfi/ci-build.sh "$RUNNER_TEMP/wolfi"
+      - name: Prepare the tested digest for publication
+        if: steps.release.outputs.existing != 'true'
+        id: prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=$RUNNER_TEMP/wolfi
+          if [[ $GITHUB_EVENT_NAME == pull_request ]]; then
+            expected=$(jq -er .payload_sha256 docker/wolfi/build-inputs.json)
+            jq -e --arg sha "$expected" '.payload_sha256 == $sha' "$out/build-inputs.json" >/dev/null
+          fi
+          candidate=$RUNNER_TEMP/candidate
+          mkdir "$candidate"
+          digest=$(python3 docker/wolfi/to-oci.py "$out/image.tar" "$out/verification.json" "$candidate/layout")
+          manifest=$RUNNER_TEMP/wolfi-manifest.json
+          skopeo inspect --raw "oci:$candidate/layout:wolfi" > "$manifest"
+          printf '%s  %s\n' "${digest#sha256:}" "$manifest" | sha256sum -c -
+          jq -e --arg tag "${SCANNER_RELEASE_TAG:-$SCANNER_VERSION-wolfi-amd64}" \
+            '.annotations["io.openai.codex-security.release-tag"] == $tag' "$manifest" >/dev/null
+          version=$(jq -er '.installed_npm[] | select(.path == "node_modules/@openai/codex-security") | .version' "$out/public-components.json")
+          [[ $version == "$SCANNER_VERSION" ]]
+          jq -e --arg sri "$SCANNER_INTEGRITY" 'any(.installed_npm[]; .path == "node_modules/@openai/codex-security" and .integrity == $sri)' "$out/public-components.json" >/dev/null
+          docker run --rm --network=none --pull=never --entrypoint /usr/bin/node codex-security:wolfi-amd64 \
+            -p 'require("/usr/share/licenses/codex-security/SOURCES.json").scanner_source' | grep -Fxq "https://github.com/openai/codex-security/tree/$SCANNER_SHA"
+          if [[ -f "$RUNNER_TEMP/scanner/base-sources.json" ]]; then
+            docker run --rm --network=none --pull=never --entrypoint cat codex-security:wolfi-amd64 \
+              /usr/share/licenses/codex-security/SOURCES.json | cmp - "$RUNNER_TEMP/scanner/base-sources.json"
+            if [[ -n ${BASE_PAYLOAD_SHA:-} ]]; then
+              jq -e --arg sha "$BASE_PAYLOAD_SHA" '.payload_sha256 == $sha' "$out/build-inputs.json" >/dev/null
+            fi
+          fi
+          python3 docker/wolfi/release-sbom.py "$out/sbom/sbom-x86_64.spdx.json" "$out/public-components.json" "$candidate/sbom.spdx.json"
+          pdfjs=$(jq -er '.installed_npm[] | select(.path == "node_modules/pdfjs-dist") | .version' "$out/public-components.json")
+          jq -e --arg purl "pkg:npm/pdfjs-dist@$pdfjs" 'any(.packages[].externalRefs[]?; .referenceLocator == $purl)' "$candidate/sbom.spdx.json" >/dev/null
+          printf 'digest=%s\nsbom-sha=%s\n' "$digest" "$(sha256sum "$candidate/sbom.spdx.json" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          printf 'Scanner source: %s\n\nRecipe commit: %s\n\nWolfi digest: %s\n' "$SCANNER_SHA" "$(git rev-parse HEAD)" "$digest" >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Retain the tested image and SBOM for the protected job
+        if: inputs.release-version != '' && steps.release.outputs.existing != 'true'
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wolfi-amd64-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  debian-pr:
+    name: Smoke-test the Debian release target
+    if: github.event_name == 'pull_request'
+    needs: fixture
+    uses: ./.github/workflows/container-validate.yml
+    with:
+      release-version: ${{ needs.fixture.outputs.version }}
+      release-integrity: ${{ needs.fixture.outputs.integrity }}
+      release-tarball-artifact: ${{ needs.fixture.outputs.artifact }}

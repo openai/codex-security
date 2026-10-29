@@ -222,7 +222,7 @@ test("source CI opts in to native artifact reuse", () => {
   expect(workflow("node-ci").jobs["native"]?.with?.["reuse-verified"]).toBe(
     true,
   );
-  for (const caller of ["node-release", "container-release", "container-ci"]) {
+  for (const caller of ["node-release", "container-publish", "container-ci"]) {
     expect(
       workflow(caller).jobs["native"]?.with?.["reuse-verified"],
     ).toBeUndefined();

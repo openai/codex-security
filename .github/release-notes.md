@@ -13,6 +13,7 @@
 - add a threat-model explorer ([#2112](https://github.com/openai/codex-security/pull/2112))
 - explain how to verify a committed diff scan inventory ([#2122](https://github.com/openai/codex-security/pull/2122))
 - show saved review progress in the component table ([#2111](https://github.com/openai/codex-security/pull/2111))
+- release Debian and Wolfi from the verified scanner package ([#2116](https://github.com/openai/codex-security/pull/2116))
 
 <!-- release-section: highlights:end -->
 

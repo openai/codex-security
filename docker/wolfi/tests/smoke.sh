@@ -27,7 +27,9 @@ flags=(--rm --pull=never --network=none --read-only --cap-drop=ALL
 help=$(docker run "${flags[@]}" "$image")
 [[ $help == *'Usage: codex-security'* ]]
 version=$(docker run "${flags[@]}" "$image" --version)
-[[ $version == 0.7.0 ]]
+expected=${SCANNER_VERSION:-$(docker run "${flags[@]}" --entrypoint /usr/bin/node "$image" \
+  -p 'require("/usr/lib/codex-security/node_modules/@openai/codex-security/package.json").version')}
+[[ $version == "$expected" ]]
 status=0
 reason=$(docker run "${flags[@]}" "$image" bulk-scan 2>&1) || status=$?
 [[ $status == 2 && $reason == *'bulk-scan requires a repository CSV'* ]]
