@@ -379,15 +379,14 @@ def validate(model, assessment):
                         effect["edge"] in scoped,
                         f"{c['id']}: effect edge is outside this scenario",
                     )
-                if effect.get("traffic") == "continues" and routes:
-                    for route in applicable_routes(c, routes, s.get("sources", [])):
-                        route_edges = set(route["edges"]) | {
-                            edge for branch in route.get("branches", []) for edge in branch["edges"]
-                        }
-                        require(
-                            effect["edge"] in route_edges,
-                            f"{c['id']}: continuing effect edge must occur in each applicable route",
-                        )
+                for route in applicable_routes(c, routes, s.get("sources", [])):
+                    route_edges = set(route["edges"]) | {
+                        edge for branch in route.get("branches", []) for edge in branch["edges"]
+                    }
+                    require(
+                        effect["edge"] in route_edges,
+                        f"{c['id']}: effect edge must occur in each applicable route",
+                    )
             if "step" in effect:
                 step = effect["step"]
                 require(

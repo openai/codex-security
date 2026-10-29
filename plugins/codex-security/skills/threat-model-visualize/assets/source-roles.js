@@ -37,7 +37,9 @@
     // Explicit source sets describe relationships only; never derive reach from roles.
     const relatedNodes = selected?.relatedNodes ?? scenario?.affectedNodes ?? [];
     const relatedEdges = selected?.relatedEdges ?? scenario?.affectedEdges ?? [];
-    return {sources, allSources, selected, nodes, relatedNodes, relatedEdges};
+    const jointRequirement = scenario?.sourceMode === 'combined' && sources.length > 1
+      ? 'All listed starting positions are required together.' : '';
+    return {sources, allSources, selected, nodes, relatedNodes, relatedEdges, jointRequirement};
   }
   const api = {resolve, palette, basis};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

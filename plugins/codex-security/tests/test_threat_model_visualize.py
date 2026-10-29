@@ -690,7 +690,7 @@ class ControlValidation(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Assessment SHA256 mismatch"):
             builder.validate(self.model, assessment)
 
-    def test_continuing_effect_honors_source_and_route_intersection(self):
+    def test_effect_edge_honors_source_and_route_intersection(self):
         s = self.routed()
         s["routes"].append(
             {"id": "other", "label": "Other path", "edges": ["ab", "bc"], "evidence": ["ev"]}
@@ -730,6 +730,14 @@ class ControlValidation(unittest.TestCase):
         source.pop("routeIds")
         with self.assertRaisesRegex(ValueError, "each applicable route"):
             self.check()
+
+        # A detector attached to an edge only runs on routes that use it.
+        self.effect().pop("traffic")
+        self.effect()["outcome"] = "detects"
+        with self.assertRaisesRegex(ValueError, "each applicable route"):
+            self.check()
+        control["routeIds"] = ["r"]
+        self.check()
 
     def test_prerequisite_on_a_revisited_decision_node_is_valid(self):
         s = self.routed()
