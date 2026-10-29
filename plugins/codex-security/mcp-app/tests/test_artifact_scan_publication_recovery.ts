@@ -533,30 +533,28 @@ for (const parentState of ["absent", "partial", "terminal"] as const) {
         attempt: 1,
       });
     }
-    const reducer = await importSource("../src/artifact-deep-reducer.ts", {
-      absWorkingDir: import.meta.dirname,
-    });
     const root = path.join(
       recovered.root,
-      "artifacts/deep_discovery/dedup/reducer-1/output",
+      "artifacts/deep_discovery/dedup/iteration-1",
     );
     await mkdir(root, { recursive: true });
-    const receipt = await reducer.recordCodexSecurityDeepReduction(
-      {
-        root,
-        repoRoot: recovered.root,
+    const source = rows[0];
+    await writeFile(
+      path.join(root, "result.json"),
+      JSON.stringify({
         scanId: recovered.context.scanId,
-        layout: "reducer",
-        deepReducer: {
-          scanRoot: recovered.root,
-          claimedWorkers: [
-            { id: workers[0].id, resultPath: workers[0].result_manifest_path },
-          ],
-        },
-      },
-      { scanId: recovered.context.scanId, complete: true, findings: [rows[0]] },
+        findings: [
+          {
+            ...source,
+            provenance: {
+              ...source.provenance,
+              sourceFindingIds: ["worker-1:0"],
+              sourceFindings: [{ id: "worker-1:0", finding: source }],
+            },
+          },
+        ],
+      }),
     );
-    assert.deepEqual(receipt.consumedWorkerIds, ["worker-1"]);
     await dateDraftFiles(root, 103);
     workers.push({
       id: "reducer-1",

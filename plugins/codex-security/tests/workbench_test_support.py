@@ -330,54 +330,71 @@ def upsert_deep_worker(
     )
 
 
-def claim_deep_scan_dedup(
+def read_fixture_deep_scan(state_dir: Path, scan_id: str, environment: dict[str, str] | None):
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as db:
+        owner = db.execute(
+            """SELECT COALESCE(scans.deep_scan_owner_thread_id, workspaces.thread_id)
+               FROM scans JOIN workspaces ON scans.workspace_id = workspaces.id WHERE scans.id = ?""",
+            (scan_id,),
+        ).fetchone()[0]
+    return get_deep_scan(state_dir, scan_id, owner, environment=environment)
+
+
+def seed_legacy_reducer(
     state_dir: Path,
     scan_id: str,
     worker_id: str,
     prompt_path: str,
     artifact_dir: str,
-    *extra: str,
-    check: bool = True,
+    *args: str,
     environment: dict[str, str] | None = None,
 ) -> dict[str, object]:
-    return scan_command(
-        state_dir,
-        "claim-deep-scan-dedup",
-        scan_id,
-        "--worker-id",
-        worker_id,
-        "--prompt-path",
-        prompt_path,
-        "--artifact-dir",
-        artifact_dir,
-        *extra,
-        check=check,
-        environment=environment,
-    )
+    """Recreate a pre-loop database row for tests of archived scan recovery."""
+    ids = [args[i + 1] for i, value in enumerate(args) if value == "--input-worker-id"]
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as db:
+        db.execute(
+            """INSERT INTO deep_scan_workers
+               (id, scan_id, kind, status, prompt_path, artifact_dir, created_at, updated_at)
+               VALUES (?, ?, 'dedup', 'queued', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)""",
+            (worker_id, scan_id, prompt_path, artifact_dir),
+        )
+        for i, source in enumerate(ids):
+            db.execute(
+                "INSERT INTO deep_scan_dedup_inputs VALUES (?, ?, ?, ?)",
+                (scan_id, worker_id, source, i),
+            )
+            db.execute(
+                "UPDATE deep_scan_workers SET merge_state = 'merging' WHERE id = ?", (source,)
+            )
+    return read_fixture_deep_scan(state_dir, scan_id, environment)
 
 
-def commit_deep_dedup(
+def seal_legacy_reducer(
     state_dir: Path,
     scan_id: str,
     worker_id: str,
-    result_manifest_path: str,
-    new_findings_count: str,
-    *extra: str,
-    **options: Any,
+    result: str,
+    new_count: str,
+    *args: str,
+    environment: dict[str, str] | None = None,
 ) -> dict[str, object]:
-    return scan_command(
-        state_dir,
-        "commit-deep-scan-dedup",
-        scan_id,
-        "--worker-id",
-        worker_id,
-        "--result-manifest-path",
-        result_manifest_path,
-        "--new-findings-count",
-        new_findings_count,
-        *extra,
-        **options,
-    )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as db:
+        db.execute(
+            """UPDATE deep_scan_workers SET status = 'succeeded', result_manifest_path = ?,
+               completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+            (result, worker_id),
+        )
+        inputs = db.execute(
+            """UPDATE deep_scan_workers SET merge_state = 'merged' WHERE id IN
+               (SELECT discovery_worker_id FROM deep_scan_dedup_inputs WHERE dedup_worker_id = ?)""",
+            (worker_id,),
+        ).rowcount
+        db.execute(
+            """UPDATE deep_scan_runs SET consecutive_no_new =
+               CASE WHEN ? > 0 THEN 0 ELSE consecutive_no_new + ? END, phase = 'discovery' WHERE scan_id = ?""",
+            (int(new_count), inputs, scan_id),
+        )
+    return read_fixture_deep_scan(state_dir, scan_id, environment)
 
 
 def finish_deep_scan(

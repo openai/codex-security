@@ -4,7 +4,6 @@ import {
   canonicalDirectory,
   defined,
   type ArtifactContext,
-  type DeepReducerContext,
 } from "./src/artifact-context.js";
 import { CODEX_SANDBOX_STATE_META_CAPABILITY } from "./src/deep-scan/parent-sandbox.js";
 import { registerCompactWorkerArtifactTools } from "./src/server/compact-artifact-tools.js";
@@ -17,21 +16,11 @@ export async function createCodexSecurityArtifactWriterServer(
 ): Promise<McpServer> {
   const root = requiredEnvironment(environment, "CODEX_SECURITY_ARTIFACT_ROOT");
   const repoRoot = requiredEnvironment(environment, "CODEX_SECURITY_REPO_ROOT");
-  const layout = environment.CODEX_SECURITY_ARTIFACT_LAYOUT ?? "worker";
-  if (layout !== "worker" && layout !== "reducer") {
-    throw new Error(
-      "CODEX_SECURITY_ARTIFACT_LAYOUT must be worker or reducer.",
-    );
-  }
-
-  const deepReducer = environment.CODEX_SECURITY_REDUCER_CONTEXT_JSON
-    ? parseReducerContext(environment.CODEX_SECURITY_REDUCER_CONTEXT_JSON)
-    : undefined;
-
-  if ((layout === "reducer") !== (deepReducer !== undefined)) {
-    throw new Error(
-      "A reducer worker requires exactly its coordinator-bound reducer context.",
-    );
+  if (
+    environment.CODEX_SECURITY_ARTIFACT_LAYOUT &&
+    environment.CODEX_SECURITY_ARTIFACT_LAYOUT !== "worker"
+  ) {
+    throw new Error("The artifact writer requires a Standard scan worker.");
   }
 
   /**
@@ -75,14 +64,13 @@ export async function createCodexSecurityArtifactWriterServer(
       repoRoot,
       "Codex Security worker target root",
     ),
-    layout,
+    layout: "worker",
     ...defined("scanId", scanId),
     ...defined("scope", scope),
     ...defined("includePaths", includePaths as string[] | undefined),
     ...defined("filePaths", filePaths as string[] | undefined),
     ...defined("pluginRoot", pluginRoot),
     ...defined("pythonCommand", pythonCommand),
-    ...defined("deepReducer", deepReducer),
   }))();
   const server = new McpServer(
     { name: "codex-security-artifacts", version: MCP_APP_VERSION },
@@ -105,28 +93,4 @@ function requiredEnvironment(
     throw new Error(`${name} must be bound by the Codex Security coordinator.`);
   }
   return value;
-}
-
-function parseReducerContext(value: string): DeepReducerContext {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(value);
-  } catch (error) {
-    throw new Error(
-      "The coordinator-bound Deep reducer context is not valid JSON.",
-      {
-        cause: error,
-      },
-    );
-  }
-  if (
-    !isRecord(parsed) ||
-    typeof parsed.scanRoot !== "string" ||
-    !Array.isArray(parsed.claimedWorkers)
-  ) {
-    throw new Error(
-      "The coordinator-bound Deep reducer context is incomplete.",
-    );
-  }
-  return parsed as unknown as DeepReducerContext;
 }

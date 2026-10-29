@@ -221,7 +221,7 @@ export async function prepareCliDeepScanSession(
  */
 export async function preflightDeepScanWorkerPermissionProfile(
   options: DeepScanPermissionProfilePreflightOptions,
-): Promise<{ useOpenAiApiKey: boolean }> {
+): Promise<{ useOpenAiApiKey: boolean; mcpServerNames: string[] }> {
   return withPreflightClient(options, async (client) => {
     const configResponse = await client.request("config/read", {
       cwd: options.cwd,
@@ -244,11 +244,13 @@ export async function preflightDeepScanWorkerPermissionProfile(
       catalogEntry,
       requirementsResponse,
     );
+    const config = record(configResponse.config);
+    const mcpServerNames = Object.keys(record(config?.mcp_servers) ?? {});
     if (
       !options.allowOpenAiApiKeyFallback ||
-      record(configResponse.config)?.forced_login_method === "chatgpt"
+      config?.forced_login_method === "chatgpt"
     ) {
-      return { useOpenAiApiKey: false };
+      return { useOpenAiApiKey: false, mcpServerNames };
     }
     // Reuse Codex's selected credential store, including keyring, instead of
     // interpreting auth.json here. Custom provider auth is loaded privately by exec.
@@ -256,6 +258,7 @@ export async function preflightDeepScanWorkerPermissionProfile(
       refreshToken: false,
     });
     return {
+      mcpServerNames,
       useOpenAiApiKey:
         account.requiresOpenaiAuth === true && account.account === null,
     };

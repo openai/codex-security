@@ -532,7 +532,7 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
           return JSON.parse(next.value!);
         };
         const worker = async (
-          kind: "discovery" | "dedup",
+          kind: "discovery" | "compare",
           resumeThreadId?: string,
         ) => {
           child.stdin.write(JSON.stringify({ kind, resumeThreadId }) + "\n");
@@ -559,12 +559,10 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
             expect(baseline.daybreakFeatures).toEqual(
               workerRuntime["features"],
             );
-          const reducer = await worker("dedup");
-          expect(reducer).toMatchObject({ ...baseline, resumed: false });
-          const previousThreads = {
-            discovery: threadId,
-            dedup: reducer.threadId,
-          };
+          expect(await worker("compare")).toMatchObject({
+            ...baseline,
+            resumed: false,
+          });
           const features =
             settings === "omitted" ? undefined : disabledDaybreakFeatures;
           await writeCodexConfig(join(ambientHome, "config.toml"), {
@@ -575,16 +573,19 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
             daybreak: true,
             ...(features === undefined ? {} : { daybreakFeatures: features }),
           });
-          for (const kind of ["discovery", "dedup"] as const) {
-            for (const resume of [false, true]) {
-              const receipt = await worker(
-                kind,
-                resume ? previousThreads[kind] : undefined,
-              );
-              expect(receipt).toMatchObject({ ...baseline, resumed: resume });
-              if (resume) expect(receipt.threadId).toBe(previousThreads[kind]);
-            }
-          }
+          expect(await worker("discovery")).toMatchObject({
+            ...baseline,
+            resumed: false,
+          });
+          expect(await worker("discovery", threadId)).toMatchObject({
+            ...baseline,
+            resumed: true,
+            threadId,
+          });
+          expect(await worker("compare")).toMatchObject({
+            ...baseline,
+            resumed: false,
+          });
         } finally {
           lines.close();
           child.stdin.end();

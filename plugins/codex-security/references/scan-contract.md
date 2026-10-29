@@ -110,11 +110,11 @@ Use CWE taxonomy separately. Do not include file names, line numbers, scan IDs, 
 
 New scans publish `scan-manifest.json` and `findings.json`. The manifest owns scan identity, mode, and configured scope. `scan.review` contains only `excludedPaths`, used when comparing scans. These values do not measure the percentage of files read.
 
-A Deep parent retains the configured paths and notes from accepted reviews. Worker IDs distinguish each review's surfaces and deferred items; receipt references point to the original evidence. Findings reduction does not clear pending review work. If the discovery deadline arrives before a review finishes, the host preserves valid checkpoint findings and pending work with the deadline reason. See [stopped-result recovery](#stopped-result-recovery).
+A Deep parent retains the configured paths and notes from accepted reviews. Worker IDs distinguish each review's surfaces and deferred items. Receipt references point to the original evidence. Merging duplicate findings preserves pending review work. If the discovery deadline arrives before a review finishes, the host preserves valid checkpoint findings and pending work with the deadline reason. See [stopped-result recovery](#stopped-result-recovery).
 
 For file-authored drafts, put `reviewState` inside `scan` in the unsealed manifest. Finalization preserves recovery details in checkpoints and replaces the draft state with the small `scan.review` summary. For tool-authored drafts, pass `reviewState` to `record_codex_security_scan_draft`.
 
-Deep reducers work on findings and do not need review state. Deep workers retain their own checkpoints. Comparison uses the later scan's execution status, configured scope, and additional exclusions before classifying an absent finding as resolved.
+Comparison uses the later scan's execution status, configured scope and additional exclusions before classifying an absent finding as resolved.
 
 - scan mode and inventory strategy
 - included and excluded paths

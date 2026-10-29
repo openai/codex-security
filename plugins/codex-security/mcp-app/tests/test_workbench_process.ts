@@ -164,16 +164,16 @@ def main():
     ];
     const result = await executeParser(
       process.env.PYTHON?.trim() || "python3",
-      workbenchArgs("claim-deep-scan-dedup", {
+      workbenchArgs("record-deep-scan-iteration", {
         scanId: randomUUID(),
         workerId: randomUUID(),
-        promptPath: "--prompt.md",
-        artifactDir: "",
+        resultManifestPath: "--result.json",
+        noNewStreak: 1,
+        consecutiveErrors: 0,
         inputWorkerId: workerIds,
       }),
     );
-    assert.equal(result.prompt_path, "--prompt.md");
-    assert.equal(result.artifact_dir, "");
+    assert.equal(result.result_manifest_path, "--result.json");
     assert.deepEqual(result.input_worker_id, workerIds);
   } finally {
     await rm(root, { recursive: true, force: true });

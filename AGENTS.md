@@ -39,7 +39,7 @@ node --test .github/scripts/test_check_plugin_source_compatibility.mjs
 
 When changing runtime settings, authentication, environment forwarding,
 permissions, or executable selection, trace the change through Deep Scan
-discovery and reducer workers, including resumed workers. Extend the worker
+discovery workers, including resumed workers. Extend the worker
 launch tests to verify inherited values and intentional overrides at the
 child-process boundary. Keep per-scan settings isolated from concurrent scans.
 

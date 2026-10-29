@@ -14,7 +14,6 @@ import {
   isStaleCoordinatorGenerationError,
 } from "./errors.js";
 import type {
-  DedupCommit,
   DeepScanCoordinatorClaim,
   DeepScanCoordinatorLeaseInput,
   DeepScanRunState,
@@ -111,8 +110,7 @@ class DeepScanPersistenceError extends Error {
 
 const RETRYABLE_PERSISTENCE_COMMANDS = new Set([
   "upsert-deep-scan-worker",
-  "claim-deep-scan-dedup",
-  "commit-deep-scan-dedup",
+  "record-deep-scan-iteration",
   "finish-deep-scan",
   "record-deep-scan-publication-failure",
 ]);
@@ -297,35 +295,24 @@ export class WorkbenchDeepScanStore {
     return parseWorker(result, update.id);
   }
 
-  async claimDedup(input: {
-    id: string;
+  async recordIteration(input: {
     scanId: string;
+    id: string;
     workerIds: string[];
-    promptPath: string;
-    artifactDir: string;
-  }): Promise<void> {
-    await this.enqueueWrite(
-      workbenchArgs("claim-deep-scan-dedup", {
-        scanId: input.scanId,
-        workerId: input.id,
-        promptPath: input.promptPath,
-        artifactDir: input.artifactDir,
-        coordinatorGeneration: this.coordinatorGeneration(input.scanId),
-        inputWorkerId: input.workerIds,
-      }),
-    );
-  }
-
-  async commitDedup(commit: DedupCommit): Promise<DeepScanRunState> {
+    resultPath: string;
+    noNewStreak: number;
+    consecutiveErrors: number;
+  }): Promise<DeepScanRunState> {
     return parseDeepScan(
       await this.enqueueWrite(
-        workbenchArgs("commit-deep-scan-dedup", {
-          scanId: commit.scanId,
-          workerId: commit.id,
-          coordinatorGeneration: this.coordinatorGeneration(commit.scanId),
-          resultManifestPath: commit.resultManifestPath,
-          candidateLedgerPath: commit.candidateLedgerPath || undefined,
-          newFindingsCount: commit.newFindings,
+        workbenchArgs("record-deep-scan-iteration", {
+          scanId: input.scanId,
+          workerId: input.id,
+          inputWorkerId: input.workerIds,
+          resultManifestPath: input.resultPath,
+          noNewStreak: input.noNewStreak,
+          consecutiveErrors: input.consecutiveErrors,
+          coordinatorGeneration: this.coordinatorGeneration(input.scanId),
         }),
       ),
     );

@@ -54,14 +54,9 @@ class ScanContractExamplesTest(unittest.TestCase):
             with self.subTest(schema=schema_path.name):
                 Draft202012Validator.check_schema(read_json(schema_path))
 
-    def test_deep_reducer_schema_accepts_standard_findings_without_coverage(self) -> None:
+    def test_standard_draft_requires_review_state(self) -> None:
         common_schema = read_json(SCHEMA_DIR / "definitions" / "artifact-common.schema.json")
         scan_draft_schema = read_json(SCHEMA_DIR / "tools" / "scan-draft.schema.json")
-        reducer_schema = read_json(SCHEMA_DIR / "tools" / "deep-reducer.schema.json")
-        reduction_input = reducer_schema["$defs"]["reductionInput"]
-        self.assertNotIn("reviewState", reduction_input["properties"])
-        self.assertEqual(set(reduction_input["required"]), {"scanId", "findings"})
-        self.assertFalse(reduction_input["additionalProperties"])
         registry = Registry().with_resources(
             (schema["$id"], Resource.from_contents(schema))
             for schema in (common_schema, scan_draft_schema)
@@ -86,29 +81,10 @@ class ScanContractExamplesTest(unittest.TestCase):
             "explicitExclusions": [{"pattern": "docs/", "reason": "Documentation only."}],
         }
 
-        Draft202012Validator.check_schema(reducer_schema)
-        validator = Draft202012Validator(
-            reducer_schema,
-            registry=registry,
-            format_checker=FormatChecker(),
-        )
         request = {
             "scanId": "7fc17317-9594-49e0-b06a-d72fd7e14bba",
             "findings": [finding],
         }
-
-        validator.validate(request)
-        validator.validate(
-            {
-                **request,
-                "complete": True,
-                "handoffClaimToken": "2ea75b4f-f9b2-49b4-a5a9-2a8de8ca9047",
-                "scope": {"summary": "HTTP responses"},
-                "threatModel": {"summary": "Untrusted requests reach responses."},
-            }
-        )
-        validator.validate({**request, "findings": []})
-        self.assertFalse(validator.is_valid({**request, "reviewState": coverage}))
 
         standard_validator = Draft202012Validator(
             scan_draft_schema, registry=registry, format_checker=FormatChecker()
@@ -134,16 +110,6 @@ class ScanContractExamplesTest(unittest.TestCase):
                         }
                     )
                 )
-        for extra_field in (
-            "source_worker_id",
-            "unknown_field",
-            "resultPath",
-            "consumedWorkerIds",
-            "schemaVersion",
-        ):
-            with self.subTest(extra_field=extra_field):
-                self.assertFalse(validator.is_valid({**request, extra_field: "not allowed"}))
-
         for missing_field in (
             "ruleId",
             "title",
@@ -159,21 +125,11 @@ class ScanContractExamplesTest(unittest.TestCase):
                 incomplete_finding = {
                     field: value for field, value in finding.items() if field != missing_field
                 }
-                self.assertFalse(validator.is_valid({**request, "findings": [incomplete_finding]}))
                 self.assertFalse(
                     standard_validator.is_valid(
                         {**standard_request, "findings": [incomplete_finding]}
                     )
                 )
-
-        for missing_field in ("scanId", "findings"):
-            with self.subTest(missing_field=missing_field):
-                self.assertFalse(
-                    validator.is_valid(
-                        {field: value for field, value in request.items() if field != missing_field}
-                    )
-                )
-        self.assertFalse(validator.is_valid({"candidates": [], "merges": []}))
 
     def test_manifest_identifies_and_hashes_the_example_documents(self) -> None:
         scan = self.manifest["scan"]

@@ -285,12 +285,12 @@ For a custom `pluginPath`, check [custom plugin compatibility](#custom-plugins).
 
 To enable Daybreak on Codex 0.163.0 or later, set `codexOverrides.daybreak: true`.
 The toggle defaults off; an explicit `false` keeps it off. The setting reaches
-Deep Scan discovery and reducer workers, including resumed workers. Scans use
+Deep Scan discovery workers, including resumed workers. Scans use
 isolated configuration, so a desktop toggle or personal Codex configuration does
 not configure an SDK scan. See [Daybreak opt-in](docs/cli.md#daybreak-opt-in) for
 CLI, project-file, and direct plugin configuration.
 
-Deep Scan discovery, reducer, and resumed workers inherit per-scan provider,
+Deep Scan workers, including resumed workers, inherit per-scan provider,
 authentication, environment, and executable settings with read-only permissions.
 
 Scans use an isolated Codex configuration. See

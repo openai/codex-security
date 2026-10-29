@@ -31,6 +31,21 @@ import workbench_saved_results as saved
 from workbench import saved_sources
 
 
+def test_latest_iteration_uses_its_number_when_completion_times_tie() -> None:
+    def iteration(label: str, worker_id: str) -> dict[str, str]:
+        return {
+            "kind": "dedup",
+            "status": "succeeded",
+            "id": worker_id,
+            "completed_at": "2026-10-27T00:00:00Z",
+            "result_manifest_path": f"/scan/dedup/{label}/output/result.json",
+        }
+
+    previous = iteration("dedup-0009", "z")
+    latest = iteration("dedup-0010", "a")
+    assert saved_sources._latest_iteration([latest, previous]) == latest
+
+
 def call_workbench(monkeypatch, state, codex_home, *args):
     with open(os.devnull) as stdin, monkeypatch.context() as patch:
         patch.setenv("CODEX_HOME", str(codex_home))

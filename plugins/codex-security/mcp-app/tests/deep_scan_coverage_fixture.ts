@@ -16,8 +16,7 @@ type FixtureRuntime = typeof import("../src/deep-scan/artifacts.js") &
   typeof import("../src/deep-scan/coordinator.js") &
   typeof import("../src/deep-scan/store.js") &
   typeof import("../src/artifact-context.js") &
-  typeof import("../src/artifact-scan-draft.js") &
-  typeof import("../src/artifact-deep-reducer.js");
+  typeof import("../src/artifact-scan-draft.js");
 
 interface CoverageFixtureOptions {
   resume?: boolean;
@@ -98,7 +97,6 @@ const {
   createScanArtifactContext,
   recordCodexSecurityScanDraftViaWorkbench,
   recordCodexSecurityWorkerScanDraft,
-  recordCodexSecurityDeepReduction,
 } = (await importModule({
   stdin: {
     contents: [
@@ -107,7 +105,6 @@ const {
       'export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";',
       'export { createScanArtifactContext } from "./src/artifact-context.ts";',
       'export { getCodexSecurityCompletedScan, recordCodexSecurityWorkerScanDraft, recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.ts";',
-      'export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts";',
     ].join("\n"),
     resolveDir: path.join(pluginRoot, "mcp-app"),
   },
@@ -852,13 +849,6 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     await mkdir(artifactDir, { recursive: true });
     await writeFile(promptPath, "Synthetic reducer prompt.\n");
     const id = randomUUID();
-    await store.claimDedup({
-      id,
-      scanId: run.scanId,
-      workerIds: workers.map((worker) => worker.id),
-      artifactDir,
-      promptPath,
-    });
     const resultManifestPath = path.join(artifactDir, "result.json");
     // Legacy accepted reducers omitted coverage entirely.
     const findings = retryFindings?.flat() ?? [];
@@ -870,11 +860,13 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       resultManifestPath,
       await readFile(resultManifestPath, "utf8"),
     );
-    await store.commitDedup({
+    await store.recordIteration({
       id,
       scanId: run.scanId,
-      newFindings: findings.length,
-      resultManifestPath,
+      workerIds: workers.map((w) => w.id),
+      resultPath: resultManifestPath,
+      noNewStreak: findings.length ? 0 : workers.length,
+      consecutiveErrors: 0,
     });
     run = await store.get(run.scanId, threadId);
   }
@@ -911,15 +903,6 @@ runpy.run_path(sys.argv[0], run_name="__main__")
           request.artifactContext.root,
           index,
           !(extraReceiptRetry && index === 0 && discoveryCalls === 2),
-        );
-      } else {
-        await recordCodexSecurityDeepReduction(
-          {
-            ...request.artifactContext,
-            repoRoot: targetPath,
-            scanId: run.scanId,
-          },
-          { scanId: run.scanId, findings: retryFindings?.flat() ?? [] },
         );
       }
       return { threadId: thread, finalResponse: "Audit finished." };
@@ -987,23 +970,6 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       false,
       "v1 reducers remain readable by earlier binaries",
     );
-    if (!rawSources.has(worker.resultManifestPath)) {
-      for (const name of await readdir(
-        path.join(worker.artifactDir, "checkpoints"),
-      )) {
-        const checkpoint = JSON.parse(
-          await readFile(
-            path.join(worker.artifactDir, "checkpoints", name),
-            "utf8",
-          ),
-        );
-        assert.equal(
-          Object.hasOwn(checkpoint, "sourceCoverage"),
-          false,
-          "v1 checkpoints remain readable by earlier binaries",
-        );
-      }
-    }
   }
   if (stopBeforeDraft) {
     const recovered = await runWorkbench([

@@ -125,9 +125,6 @@ from workbench.saved_sources import (
     _digest as _digest,
 )
 from workbench.saved_sources import (
-    _latest_successful_reducer as _latest_successful_reducer,
-)
-from workbench.saved_sources import (
     _parent_publication_ancestors as _parent_publication_ancestors,
 )
 from workbench.saved_sources import (

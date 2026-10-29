@@ -340,7 +340,8 @@ export async function testWorkerCyberAccessSettings({
         { method: "thread/read", threadId: testCase.parentTurn!.threadId },
       ]);
     }
-    for (const kind of ["discovery", "dedup"] as const) {
+    {
+      const kind = "discovery";
       for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
         launches.length = 0;
         await Promise.all(

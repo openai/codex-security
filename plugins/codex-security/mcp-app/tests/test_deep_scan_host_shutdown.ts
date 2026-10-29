@@ -168,7 +168,6 @@ try {
         await Promise.allSettled(handlers);
         assert.equal(registry.get(fixture.run.scanId), undefined);
         assert.equal(executor.discoveryCalls, 0);
-        assert.equal(executor.dedupCalls, 0);
         assert.deepEqual(store.workerUpdates, []);
         assert.deepEqual(store.finishCalls, []);
         assert.deepEqual(store.failureMessages, []);

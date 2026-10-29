@@ -925,7 +925,7 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Start or Join Codex Security Deep Scan",
       description:
-        "Run or rejoin independent Standard security scans and semantically merge their validated findings. Pass scanId and its handoffClaimToken to resume, or targetPath to start headlessly. The coordinator finalizes the parent even if this caller detaches. For an SDK-registered scan it returns the aggregate to the SDK for finalization. Follow the returned instructions for the authoritative scanId, scanDir, and manifestPath.",
+        "Run or rejoin independent Standard security scans and return their deduplicated findings. Pass scanId and its handoffClaimToken to resume, or targetPath to start headlessly. The coordinator finalizes the parent even if this caller detaches. For an SDK-registered scan it returns the aggregate to the SDK for finalization. Follow the returned instructions for the authoritative scanId, scanDir, and manifestPath.",
       inputSchema: startDeepScanSchema,
       annotations: writingAnnotations,
       _meta: modelActionMeta,
@@ -1002,7 +1002,14 @@ export function createCodexSecurityServer(): McpServer {
               typeof turnId === "string" ? turnId : undefined,
             ),
           ]);
-          return deepScanTerminalResult(run, completion);
+          // Full findings and workspace history can exceed the host's tool-result limit.
+          const { progress, reportAvailable } = completion.scan as {
+            progress: { status: string };
+            reportAvailable: boolean;
+          };
+          return deepScanTerminalResult(run, {
+            scan: { progress: { status: progress.status }, reportAvailable },
+          });
         } catch (error) {
           logDeepScanEvent({
             event: "coordinator_completion_failed",
@@ -2244,7 +2251,9 @@ function deepScanTerminalResult(
         scanId: run.scanId,
         scanDir: run.scanDir,
         manifestPath: run.manifestPath,
-        ...(completion === undefined ? {} : { completion }),
+        ...(completion === undefined
+          ? {}
+          : { completion, reportPath: resolve(run.scanDir, "report.md") }),
         instructions,
       },
       instructions,

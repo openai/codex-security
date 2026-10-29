@@ -15,7 +15,7 @@ function bundledFunction(runtime: string, name: string): string {
   return source;
 }
 
-test("advertises distinct Standard worker and Deep reducer contracts", async () => {
+test("advertises the Standard worker contract for Deep Scan", async () => {
   const runtime = await loadBundledRuntime();
   const method =
     /  compactArtifactServer\(request, includePathsFile\) \{[\s\S]*?\n  \}/u.exec(
@@ -41,85 +41,68 @@ test("advertises distinct Standard worker and Deep reducer contracts", async () 
   mkdirSync(scanRoot);
 
   try {
-    for (const layout of ["worker", "reducer"] as const) {
-      const artifactRoot = join(scanRoot, layout);
-      mkdirSync(artifactRoot);
-      const servers = compactArtifactServer.call(
-        {
-          modelSettings: {
-            artifactContext: {
-              pluginRoot: PLUGIN_ROOT,
-              repoRoot,
-              scanId: "test-scan",
-            },
-          },
-        },
-        {
-          kind: layout === "reducer" ? "dedup" : "discovery",
+    const layout = "worker";
+    const artifactRoot = join(scanRoot, layout);
+    mkdirSync(artifactRoot);
+    const servers = compactArtifactServer.call(
+      {
+        modelSettings: {
           artifactContext: {
-            root: artifactRoot,
-            layout,
-            ...(layout === "reducer"
-              ? { deepReducer: { scanRoot, claimedWorkers: [] } }
-              : {}),
+            pluginRoot: PLUGIN_ROOT,
+            repoRoot,
+            scanId: "test-scan",
           },
         },
-      );
-      expect(Object.keys(servers)).toEqual(["cs_artifacts"]);
-      const server = servers["cs_artifacts"]!;
-      const child = Bun.spawn({
-        cmd: [node!, ...server.args],
-        env: { ...process.env, ...server.env },
-        stdin: Buffer.from(
-          [
-            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"codex-security-test","version":"1.0.0"}}}',
-            '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}',
-            '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}',
-            "",
-          ].join("\n"),
-        ),
-        stdout: "pipe",
-        stderr: "pipe",
-        timeout: 30_000,
-      });
-      const { status, stdout, stderr } = await readSubprocess(child);
-      expect(status, stderr).toBe(0);
-      const response = parseJsonLines<{ id?: number; result?: unknown }>(
-        stdout,
-      ).find((message) => message.id === 2)?.result as
-        | {
-            tools: Array<{
-              name: string;
-              inputSchema: { properties: Record<string, unknown> };
-            }>;
-          }
-        | undefined;
-      expect(response).toBeDefined();
-      expect(response!.tools.length).toBeGreaterThan(0);
-      for (const tool of response!.tools) {
-        expect(`mcp__cs_artifacts__${tool.name}`.length).toBeLessThanOrEqual(
-          64,
-        );
-      }
-      const recordTool = response!.tools.find(
-        (tool) =>
-          tool.name ===
-          (layout === "reducer"
-            ? "record_codex_security_deep_reduction"
-            : "record_codex_security_scan_draft"),
-      );
-      expect(recordTool).toBeDefined();
-      expect(recordTool!.inputSchema.properties).toHaveProperty("findings");
-      expect(recordTool!.inputSchema.properties).toHaveProperty("scope");
-      if (layout === "reducer")
-        expect(recordTool!.inputSchema.properties).not.toHaveProperty(
-          "reviewState",
-        );
-      else
-        expect(recordTool!.inputSchema.properties).toHaveProperty(
-          "reviewState",
-        );
+      },
+      {
+        kind: "discovery",
+        artifactContext: {
+          root: artifactRoot,
+          layout,
+        },
+      },
+    );
+    expect(Object.keys(servers)).toEqual(["cs_artifacts"]);
+    const server = servers["cs_artifacts"]!;
+    const child = Bun.spawn({
+      cmd: [node!, ...server.args],
+      env: { ...process.env, ...server.env },
+      stdin: Buffer.from(
+        [
+          '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"codex-security-test","version":"1.0.0"}}}',
+          '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}',
+          '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}',
+          "",
+        ].join("\n"),
+      ),
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 30_000,
+    });
+    const { status, stdout, stderr } = await readSubprocess(child);
+    expect(status, stderr).toBe(0);
+    const response = parseJsonLines<{ id?: number; result?: unknown }>(
+      stdout,
+    ).find((message) => message.id === 2)?.result as
+      | {
+          tools: Array<{
+            name: string;
+            inputSchema: { properties: Record<string, unknown> };
+          }>;
+        }
+      | undefined;
+    expect(response).toBeDefined();
+    expect(response!.tools.length).toBeGreaterThan(0);
+    for (const tool of response!.tools) {
+      expect(`mcp__cs_artifacts__${tool.name}`.length).toBeLessThanOrEqual(64);
     }
+    const recordTool = response!.tools.find(
+      (tool) => tool.name === "record_codex_security_scan_draft",
+    );
+    expect(recordTool).toBeDefined();
+    expect(recordTool!.inputSchema.properties).toHaveProperty("findings");
+    expect(recordTool!.inputSchema.properties).toHaveProperty("scope");
+    expect(recordTool!.inputSchema.properties).toHaveProperty("reviewState");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -149,7 +132,7 @@ test("preserves owned worker tool failure diagnostics", async () => {
   for (const fixture of [
     {
       server: "cs_artifacts",
-      tool: "record_codex_security_deep_reduction",
+      tool: "record_codex_security_scan_draft",
       result: { isError: true, content: [{ type: "text", text: detail }] },
       error: null,
       message: detail,
@@ -191,7 +174,7 @@ test("preserves owned worker tool failure diagnostics", async () => {
     type: "mcp_tool_call",
     status: "failed",
     server: "unrelated_server",
-    tool: "record_codex_security_deep_reduction",
+    tool: "record_codex_security_scan_draft",
     result: { isError: true },
     error: { message: "Synthetic unrelated transport failure" },
   });
@@ -205,7 +188,7 @@ test("preserves owned worker tool failure diagnostics", async () => {
   ]);
 });
 
-test("resumes only when the exact Standard worker or reducer result is missing", async () => {
+test("resumes only when the exact Standard worker result is missing", async () => {
   const runtime = await loadBundledRuntime();
   const source = bundledFunction(runtime, "isMissingWorkerResult");
   const pathImport = /\(0, (import_node_path\d+)\.join\)/u.exec(source)?.[1];
@@ -214,7 +197,7 @@ test("resumes only when the exact Standard worker or reducer result is missing",
     pathImport!,
     `${source}\nreturn isMissingWorkerResult;`,
   )({ join }) as (error: Error, artifactDirectory: string) => boolean;
-  const artifactDirectory = join(tmpdir(), "codex-security-reducer-artifacts");
+  const artifactDirectory = join(tmpdir(), "codex-security-worker-artifacts");
   const missingResult = Object.assign(new Error("result missing"), {
     code: "ENOENT",
     path: join(artifactDirectory, "result.json"),
@@ -252,14 +235,4 @@ test("resumes only when the exact Standard worker or reducer result is missing",
   )() as (attempt: number) => string;
   expect(standardContinuation(1)).toContain("record_codex_security_scan_draft");
   expect(standardContinuation(1)).toMatch(/retry.*until it succeeds/iu);
-
-  const continuation = new Function(
-    [
-      bundledFunction(runtime, "reducerInputRecoveryInstructions"),
-      bundledFunction(runtime, "reducerCompletionContinuation"),
-      "return reducerCompletionContinuation;",
-    ].join("\n"),
-  )() as (attempt: number) => string;
-  expect(continuation(1)).toContain("record_codex_security_deep_reduction");
-  expect(continuation(1)).toMatch(/retry.*until it succeeds/iu);
 });

@@ -69,7 +69,7 @@ from workbench.saved_sources import (
     _frozen_checkpoint_heads,
     _frozen_source_times,
     _is_source_order_snapshot,
-    _latest_successful_reducer,
+    _latest_iteration,
     _model_capture,
     _parent_publication_ancestors,
     _read_saved_parent_result,
@@ -254,7 +254,7 @@ def merge_saved_results(
     reducer_paths: set[str] = set()
     current_results: set[str] = set()
     reducer_outputs: list[tuple[Any, str, list[str], int]] = []
-    reducer = _latest_successful_reducer(workers)
+    reducer = _latest_iteration(workers)
     latest_reducer: str | None = None
     if reducer is not None:
         try:

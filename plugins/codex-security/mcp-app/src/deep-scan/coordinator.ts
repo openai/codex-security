@@ -1,19 +1,24 @@
 /// <reference lib="es2023.array" />
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { basename, dirname, join } from "node:path";
-import { readDeepReductionSources } from "../artifact-deep-reducer.js";
+import { basename, dirname, join, relative, sep } from "node:path";
+import { mergeBatch } from "./iteration.js";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   createDeepScanArtifacts,
   ensureDeepScanDirectories,
+  readJsonObject,
+  requireRegularFile,
+  writeJsonAtomic,
 } from "./artifacts.js";
 import {
-  aggregateSourceCoverage,
-  deepReductionToScanDraft,
+  persistedScanUnion,
+  parseScanUnion,
+  addScanCoverage,
+  parseStoredScanDraft,
+  scanUnionToDraft,
   validateDiscoveryArtifacts,
-  validateReducerArtifacts,
-  type DeepReductionInput,
+  type ScanUnion,
 } from "./artifact-validation.js";
 import {
   scanDraftInputSchema,
@@ -23,11 +28,7 @@ import {
 } from "../artifact-scan-draft.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
 import { DeepScanWorkerRunner } from "./worker-runner.js";
-import type {
-  AcceptedDiscovery,
-  DedupOutcome,
-  DiscoveryOutcome,
-} from "./worker-runner.js";
+import type { AcceptedDiscovery, DiscoveryOutcome } from "./worker-runner.js";
 import {
   confirmedOwnershipChange,
   errorNameWithCode,
@@ -51,18 +52,10 @@ const RETRY_DELAYS_MS = [60_000, 180_000, 540_000] as const;
 const COORDINATOR_HEARTBEAT_INTERVAL_MS = 5_000;
 const DEFAULT_DISCOVERY_TIMEOUT_HOURS = 96;
 
-type SchedulerOutcome = DiscoveryOutcome | DedupOutcome;
-
-type SchedulerSettlement =
-  | { status: "fulfilled"; outcome: SchedulerOutcome }
-  | { status: "rejected"; error: unknown };
-
-interface SchedulerResult {
+interface LoopResult {
   reason: DeepScanTerminalReason;
-  omittedWorkerIds: string[];
-  result?: DeepReductionInput;
+  result?: ScanUnion;
   resultPath?: string;
-  discoveries: AcceptedDiscovery[];
 }
 
 export interface ParentScanState {
@@ -98,7 +91,7 @@ export interface CoordinatorOptions {
 
 export { DeepScanNonRetryableError } from "./errors.js";
 
-/** Runs setup, keeps the discovery/reducer queue moving, and closes the scan. */
+/** Runs independent Standard scans and publishes their union. */
 export class DeepScanCoordinator {
   private readonly abortController = new AbortController();
   private readonly discoveryAbortController = new AbortController();
@@ -107,10 +100,8 @@ export class DeepScanCoordinator {
   private readonly clock: DeepScanClock;
   private readonly log: DeepScanLogger;
   private readonly artifacts: DeepScanArtifacts;
-  private readonly workers: DeepScanWorkerRunner;
   private readonly discoveryWorkers: DeepScanWorkerRunner;
   private readonly terminalResult: PromiseWithResolvers<DeepScanRunState>;
-  private readonly schedulerWork = new Set<Promise<unknown>>();
   private heartbeatTimeout: ReturnType<typeof setTimeout> | undefined;
   private discoveryTimeout: ReturnType<typeof setTimeout> | undefined;
   private ownershipCheck: Promise<boolean> | undefined;
@@ -155,10 +146,6 @@ export class DeepScanCoordinator {
       ConstructorParameters<typeof DeepScanWorkerRunner>[0],
       "signal"
     >;
-    this.workers = new DeepScanWorkerRunner({
-      ...workerOptions,
-      signal: this.abortController.signal,
-    });
     this.discoveryWorkers = new DeepScanWorkerRunner({
       ...workerOptions,
       signal: this.discoveryAbortController.signal,
@@ -366,10 +353,10 @@ export class DeepScanCoordinator {
       if (this.canceled || this.externallyFailed) return;
 
       this.setupComplete = true;
-      const schedulerResult = await this.runScheduler();
+      const loopResult = await this.runIterations();
       if (this.canceled || this.externallyFailed) return;
-      const draft = schedulerResult.result
-        ? deepReductionToScanDraft(schedulerResult.result)
+      const draft = loopResult.result
+        ? scanUnionToDraft(loopResult.result)
         : scanDraftInputSchema.parse({
             scanId: this.state.scanId,
             findings: [],
@@ -400,22 +387,22 @@ export class DeepScanCoordinator {
         this.publicationAbortController.signal,
         {
           coordinatorGeneration: this.state.coordinatorGeneration,
-          resultPath: schedulerResult.resultPath ?? null,
+          resultPath: loopResult.resultPath ?? null,
         },
       );
       if (this.canceled || this.externallyFailed) return;
       const completed = await this.options.store.finish({
         scanId: this.state.scanId,
-        reason: schedulerResult.reason,
+        reason: loopResult.reason,
         manifestPath: join(this.state.scanDir, "scan-manifest.json"),
-        omittedWorkerIds: schedulerResult.omittedWorkerIds,
+        omittedWorkerIds: [],
       });
       if (this.canceled || this.externallyFailed) return;
       this.state = completed;
       this.log({
         event: "coordinator_terminal",
         scanId: this.state.scanId,
-        reason: schedulerResult.reason,
+        reason: loopResult.reason,
       });
     } catch (error) {
       if (this.canceled || this.externallyFailed) {
@@ -439,7 +426,6 @@ export class DeepScanCoordinator {
         });
       }
       this.abortController.abort(message);
-      await this.settleSchedulerWork();
       if (this.canceled || this.externallyFailed) return;
       try {
         const failed = await this.options.store.fail(
@@ -479,7 +465,6 @@ export class DeepScanCoordinator {
     } finally {
       // A worker can finish an atomic draft write while cancellation is being
       // persisted. Publish saved output only after every local writer settles.
-      await this.settleSchedulerWork();
       await this.ownershipCheck;
       this.cancellationReady.resolve();
       if (this.options.onStopped && this.options.threadId) {
@@ -715,368 +700,238 @@ export class DeepScanCoordinator {
     return true;
   }
 
-  /**
-   * Refill discovery between reductions so a slow reducer cannot build an
-   * unchecked backlog. One reducer claims the FIFO buffer. Discoveries that
-   * finish during reduction wait for the next one.
-   */
-  private async runScheduler(): Promise<SchedulerResult> {
-    const config = this.state.config;
-    const active = new Map<string, Promise<DiscoveryOutcome>>();
-    const recovered = await this.recoverAcceptedDiscoveries();
-    const accepted = new Map(recovered.map((worker) => [worker.id, worker]));
-    let reducerInputs: AcceptedDiscovery[] = [];
-    const mergedIds = new Set(
-      (this.state.persistedWorkers ?? [])
-        .filter(
-          (worker) =>
-            worker.kind === "discovery" && worker.mergeState === "merged",
-        )
-        .map((worker) => worker.id),
+  private async runIterations(): Promise<LoopResult> {
+    const { scanId, config } = this.state;
+    const signal = this.abortController.signal;
+    const accepted = await this.recoverAcceptedDiscoveries();
+    let acceptedCount = accepted.length;
+    const persisted = this.state.persistedWorkers ?? [];
+    const merged = new Set(
+      persisted.filter((w) => w.mergeState === "merged").map((w) => w.id),
     );
-    const omittedWorkerIds: string[] = [];
-    const recoveredReducers = await this.recoverCompletedReducers(recovered);
-    let latestResult = recoveredReducers.result;
-    let buffer: AcceptedDiscovery[] = recovered.filter(
-      (worker) => !mergedIds.has(worker.id),
+    let batch = accepted.filter((w) => !merged.has(w.id));
+    const checkpointNumber = (resultPath: string) =>
+      workerLabelSequence(
+        relative(this.artifacts.dedupRoot, resultPath).split(sep)[0]!,
+        "dedup",
+      );
+    let resultPath = persisted
+      .flatMap((worker) =>
+        worker.kind === "dedup" &&
+        worker.status === "succeeded" &&
+        worker.resultManifestPath
+          ? [worker.resultManifestPath]
+          : [],
+      )
+      .sort((a, b) => Number(checkpointNumber(b) - checkpointNumber(a)))[0];
+    const result = await this.restoreUnion(
+      resultPath,
+      accepted.filter((w) => merged.has(w.id)),
     );
-    let reducer: Promise<DedupOutcome> | undefined;
-    let previousReducerResultPath = recoveredReducers.resultPath;
+    const scanLabel = await nextWorkerLabel(
+      this.artifacts.workersRoot,
+      "discovery",
+    );
+    const checkpointLabel = await nextWorkerLabel(
+      this.artifacts.dedupRoot,
+      "dedup",
+    );
     let dispatched = this.state.dispatchedCount;
-    const [discoveryLabels, reducerLabels] = await Promise.all([
-      fs.readdir(this.artifacts.workersRoot),
-      fs.readdir(this.artifacts.dedupRoot),
-    ]);
-    let workerSequence = [
-      BigInt(dispatched),
-      ...discoveryLabels.map((label) =>
-        workerLabelSequence(label, "discovery"),
-      ),
-      ...(this.state.persistedWorkers ?? [])
-        .filter((worker) => worker.kind === "discovery")
-        .map((worker) =>
-          workerLabelSequence(
-            basename(dirname(worker.promptPath)),
-            "discovery",
-          ),
-        ),
-    ].reduce((maximum, value) => (value > maximum ? value : maximum), 0n);
-    let reducerSequence = [
-      0n,
-      ...reducerLabels.map((label) => workerLabelSequence(label, "dedup")),
-      ...(this.state.persistedWorkers ?? [])
-        .filter((worker) => worker.kind === "dedup")
-        .map((worker) =>
-          workerLabelSequence(basename(dirname(worker.promptPath)), "dedup"),
-        ),
-    ].reduce((maximum, value) => (value > maximum ? value : maximum), 0n);
-    let stopReason: DeepScanTerminalReason | undefined;
-    let lastReplaceableFailure:
-      Extract<DiscoveryOutcome, { status: "failed" }> | undefined;
-
-    const errorLimit = config.stopAfterConsecutiveErrors;
-    let reducerFailures = persistedReducerFailureStreak(
-      this.state.persistedWorkers ?? [],
-    );
-    if (this.state.consecutiveErrors >= errorLimit) {
-      const failure = latestPersistedReplaceableFailure(
-        this.state.persistedWorkers ?? [],
+    let streak = this.state.noNewStreak;
+    let errors = this.state.consecutiveErrors;
+    if (batch.length) {
+      // SQLite recorded in finish order. Restore the streak in dispatch order.
+      const lastSuccess = discoverySequence(
+        dirname(accepted.at(-1)!.resultPath),
       );
-      throw discoveryErrorLimitError(
-        this.state.consecutiveErrors,
-        errorLimit,
-        failure?.kind ?? "transient_error",
-        failure?.message ?? "persisted failure evidence is unavailable",
-      );
+      errors = persisted.filter(
+        (worker) =>
+          discoverySequence(worker.artifactDir) > lastSuccess &&
+          persistedReplaceableFailure(worker),
+      ).length;
     }
-    if (reducerFailures >= errorLimit) {
-      const failure = (this.state.persistedWorkers ?? []).findLast(
-        (worker) => worker.kind === "dedup" && worker.status === "failed",
-      );
-      throw reducerErrorLimitError(
-        reducerFailures,
-        errorLimit,
-        failure?.error ?? "persisted reducer failure evidence is unavailable",
-      );
-    }
-    if (
-      !this.discoveryDeadlineReached &&
-      previousReducerResultPath &&
-      this.state.noNewStreak >= config.stopAfterNoNew &&
-      buffer.length === 0
-    ) {
-      stopReason = "saturated";
-    }
-
-    // Each worker or reducer appends one entry. Reading this FIFO preserves real
-    // completion order; rebuilding Promise.race from fulfilled promises could
-    // otherwise let discoveries repeatedly jump ahead of a finished reducer.
-    const settlements: SchedulerSettlement[] = [];
-    let wakeScheduler: (() => void) | undefined;
-    const observe = (promise: Promise<SchedulerOutcome>): void => {
-      void promise.then(
-        (outcome) => {
-          settlements.push({ status: "fulfilled", outcome });
-          wakeScheduler?.();
-          wakeScheduler = undefined;
-        },
-        (error: unknown) => {
-          settlements.push({ status: "rejected", error });
-          wakeScheduler?.();
-          wakeScheduler = undefined;
-        },
-      );
-    };
-    const nextSettlement = async (): Promise<SchedulerSettlement> => {
-      if (settlements.length === 0) {
-        await new Promise<void>((resolvePromise) => {
-          wakeScheduler = resolvePromise;
-        });
-      }
-      return settlements.shift()!;
-    };
-    const reconcileRemainingDiscoveries = async (): Promise<
-      unknown | undefined
-    > => {
-      const results = await Promise.allSettled([...active.values()]);
-      let firstFailure: unknown | undefined;
-      for (const result of results) {
-        if (result.status === "rejected") {
-          if (confirmedOwnershipChange(result.reason, this.state.scanId))
-            throw result.reason;
-          firstFailure ??= result.reason;
-          continue;
-        }
-        const outcome = result.value;
-        if (outcome.status === "failed") {
-          if (!outcome.replaceableFailureKind) firstFailure ??= outcome.error;
-        } else if (outcome.status === "succeeded") {
-          omittedWorkerIds.push(outcome.worker.id);
-        }
-      }
-      return firstFailure;
-    };
-    const reconcileReducerSettlement = async (): Promise<
-      unknown | undefined
-    > => {
-      if (!reducer) return undefined;
-      const [result] = await Promise.allSettled([reducer]);
-      if (result.status === "rejected") return result.reason;
-      const outcome = result.value;
-      if ("status" in outcome) return outcome.error;
-      if (!this.canceled && !this.externallyFailed) this.state = outcome.run;
-      return undefined;
-    };
-
-    const settleFailure = async (error: unknown): Promise<never> => {
-      this.abortController.abort(errorMessage(error));
-      const reducerFailure = await reconcileReducerSettlement();
-      const discoveries = await Promise.allSettled([...active.values()]);
-      // SDK iterator cleanup can let a later generic rejection settle first.
-      // Inspect every active worker's result before discarding confirmed ownership.
-      const failures = [
-        error,
-        reducerFailure,
-        ...discoveries.flatMap((result) =>
-          result.status === "rejected" ? [result.reason] : [],
-        ),
-      ];
-      throw (
-        failures.find((failure) =>
-          confirmedOwnershipChange(failure, this.state.scanId),
-        ) ?? error
-      );
-    };
-
+    let failure = latestPersistedReplaceableFailure(persisted);
     await this.options.store.updateProgress({
-      scanId: this.state.scanId,
+      scanId,
       phase: "discovery",
       handoffClaimToken: this.options.handoffClaimToken,
     });
-    this.logProgress(accepted.size);
 
-    while (!stopReason) {
-      if (this.abortController.signal.aborted) {
-        await Promise.allSettled([
-          ...active.values(),
-          ...(reducer ? [reducer] : []),
-        ]);
-        throw abortError(this.abortController.signal.reason);
-      }
-      if (settlements.length === 0) {
-        while (
-          !reducer &&
-          !this.discoveryDeadlineReached &&
-          (!previousReducerResultPath ||
-            this.state.noNewStreak < config.stopAfterNoNew) &&
-          active.size < config.workers &&
-          dispatched < config.maxDiscoveryRuns
-        ) {
-          dispatched += 1;
-          workerSequence += 1n;
-          const workerLabel = `discovery-${String(workerSequence).padStart(4, "0")}`;
-          const workerId = randomUUID();
-          const workerPromise = this.trackSchedulerWork(
-            this.discoveryWorkers.runDiscoveryWorker(workerId, workerLabel),
-          );
-          active.set(workerId, workerPromise);
-          observe(workerPromise);
-          this.state = { ...this.state, dispatchedCount: dispatched };
+    for (;;) {
+      signal.throwIfAborted();
+      if (batch.length) {
+        // Newly dispatched scans arrive in launch order. Recovery uses the same labels.
+        for (const count of await this.mergeAcceptedBatch(result, batch)) {
+          streak = count ? 0 : streak + 1;
         }
-
-        if (
-          !reducer &&
-          this.reducerReady(
-            buffer,
-            previousReducerResultPath,
-            active.size,
-            dispatched,
-          )
-        ) {
-          const consumed = [...buffer].sort(compareCompletionSequence);
-          reducerInputs = consumed;
-          buffer = [];
-          reducerSequence += 1n;
-          reducer = this.trackSchedulerWork(
-            this.workers.runReducer({
-              id: randomUUID(),
-              label: `dedup-${String(reducerSequence).padStart(4, "0")}`,
-              consumed,
-              previousReducerResultPath,
-              previousSourceCoverage: latestResult?.sourceCoverage,
-            }),
-          );
-          observe(reducer);
-        }
-      }
-
-      if (active.size === 0 && !reducer) {
-        if (buffer.length > 0) continue;
-        if (!previousReducerResultPath && lastReplaceableFailure) {
-          throw new Error(
-            "Deep Scan reached its configured discovery limit without accepting a " +
-              "complete discovery; last failure " +
-              `(${lastReplaceableFailure.replaceableFailureKind}): ` +
-              lastReplaceableFailure.error.message,
-            { cause: lastReplaceableFailure.error },
-          );
-        }
-        stopReason = "capped";
-        break;
-      }
-
-      const settlement = await nextSettlement();
-      if (settlement.status === "rejected") {
-        return await settleFailure(settlement.error);
-      }
-      const outcome = settlement.outcome;
-      if (outcome.type === "discovery") {
-        active.delete(
-          outcome.status === "succeeded" ? outcome.worker.id : outcome.workerId,
+        resultPath = join(
+          this.artifacts.dedupRoot,
+          checkpointLabel(),
+          "output",
+          "result.json",
         );
-        if (outcome.status === "failed") {
-          if (outcome.replaceableFailureKind) {
-            lastReplaceableFailure = outcome;
-            const consecutiveErrors =
-              outcome.consecutiveErrors ??
-              (this.state.consecutiveErrors ?? 0) + 1;
-            this.state = { ...this.state, consecutiveErrors };
-            this.log({
-              event: "discovery_worker_replaced",
-              scanId: this.state.scanId,
-              workerId: outcome.workerId,
-              reason: outcome.replaceableFailureKind,
-              count: consecutiveErrors,
-            });
-            if (consecutiveErrors < errorLimit) continue;
-            const thresholdError = discoveryErrorLimitError(
-              consecutiveErrors,
-              errorLimit,
-              outcome.replaceableFailureKind,
-              outcome.error.message,
-              outcome.error,
-            );
-            return await settleFailure(thresholdError);
-          }
-          return await settleFailure(outcome.error);
-        }
-        if (outcome.status === "canceled") {
-          if (
-            !this.abortController.signal.aborted &&
-            !this.discoveryAbortController.signal.aborted
-          ) {
-            throw new Error(
-              `Discovery worker ${outcome.workerId} was canceled unexpectedly.`,
-            );
-          }
-          continue;
-        }
-        accepted.set(outcome.worker.id, outcome.worker);
-        this.state = { ...this.state, consecutiveErrors: 0 };
-        buffer.push(outcome.worker);
-        this.logProgress(accepted.size);
-        continue;
-      }
-
-      reducer = undefined;
-      if ("status" in outcome) {
-        buffer = [...outcome.consumed, ...buffer];
-        reducerFailures += 1;
-        this.log({
-          event: "dedup_worker_replaced",
-          scanId: this.state.scanId,
-          workerId: outcome.id,
-          reason: errorKind(outcome.error),
-          count: reducerFailures,
+        await writeJsonAtomic(resultPath, persistedScanUnion(result));
+        const saved = await this.options.store.recordIteration({
+          id: randomUUID(),
+          scanId,
+          workerIds: batch.map((w) => w.id),
+          resultPath,
+          noNewStreak: streak,
+          consecutiveErrors: errors,
         });
-        if (reducerFailures < errorLimit) continue;
-        const thresholdError = reducerErrorLimitError(
-          reducerFailures,
-          errorLimit,
-          outcome.error.message,
-          outcome.error,
+        signal.throwIfAborted();
+        this.state = saved;
+        this.logProgress(acceptedCount);
+      }
+      if (errors >= config.stopAfterConsecutiveErrors && failure) {
+        throw discoveryErrorLimitError(
+          errors,
+          config.stopAfterConsecutiveErrors,
+          failure.kind,
+          failure.message,
         );
-        return await settleFailure(thresholdError);
       }
-      reducerFailures = 0;
-      for (const worker of reducerInputs) mergedIds.add(worker.id);
-      if (!this.canceled && !this.externallyFailed) this.state = outcome.run;
-      previousReducerResultPath = outcome.resultPath;
-      latestResult = outcome.result;
       if (
-        !this.discoveryDeadlineReached &&
-        outcome.run.noNewStreak >= config.stopAfterNoNew &&
-        buffer.length === 0
+        this.discoveryDeadlineReached ||
+        streak >= config.stopAfterNoNew ||
+        dispatched >= config.maxDiscoveryRuns
       ) {
-        stopReason = "saturated";
-        this.abortController.abort("deep_scan_saturated");
+        if (!resultPath && !this.discoveryDeadlineReached) {
+          throw new Error(
+            "Deep Scan reached its configured discovery limit without accepting a complete discovery" +
+              (failure
+                ? `; last failure (${failure.kind}): ${failure.message}`
+                : "."),
+          );
+        }
+        const reason =
+          !this.discoveryDeadlineReached && streak >= config.stopAfterNoNew
+            ? "saturated"
+            : "capped";
+        return { reason, result: resultPath ? result : undefined, resultPath };
+      }
+
+      const count = Math.min(
+        config.workers,
+        config.maxDiscoveryRuns - dispatched,
+      );
+      dispatched += count;
+      this.state = { ...this.state, dispatchedCount: dispatched };
+      const previousFindings = result.findings.map(
+        ({ title, locations: [site] }) =>
+          `${site.path}:${site.startLine} ${title}`,
+      );
+      const outcomes = await this.scanBatch(count, scanLabel, previousFindings);
+      signal.throwIfAborted();
+      batch = [];
+      for (const outcome of outcomes) {
+        if (outcome.status === "succeeded") {
+          errors = 0;
+          batch.push(outcome.worker);
+          acceptedCount++;
+        } else if (outcome.status === "failed") {
+          if (!outcome.replaceableFailureKind) throw outcome.error;
+          errors++;
+          failure = {
+            kind: outcome.replaceableFailureKind,
+            message: outcome.error.message,
+          };
+          this.log({
+            event: "discovery_worker_replaced",
+            scanId,
+            workerId: outcome.workerId,
+            reason: failure.kind,
+          });
+        } else if (!this.discoveryDeadlineReached) {
+          throw new Error(
+            `Discovery worker ${outcome.workerId} was canceled unexpectedly.`,
+          );
+        }
       }
     }
+  }
 
-    // Convergence cancels active workers, but their promises must settle before
-    // the manifest records which results completed and which were canceled.
-    const lateFailure = await reconcileRemainingDiscoveries();
+  private mergeAcceptedBatch(result: ScanUnion, batch: AcceptedDiscovery[]) {
+    return mergeBatch(
+      result,
+      batch,
+      this.artifacts.scanDir,
+      (prompt, schema) => {
+        const { executor } = this.options;
+        if (!executor.compareFindings)
+          throw new Error("No Deep Scan finding comparison executor");
+        return executor.compareFindings(
+          prompt,
+          this.artifacts.deepRoot,
+          this.discoveryAbortController.signal,
+          schema,
+        );
+      },
+      (error) => {
+        this.abortController.signal.throwIfAborted();
+        this.log({
+          event: "finding_comparison_failed",
+          scanId: this.state.scanId,
+          reason: errorMessage(error),
+        });
+      },
+    );
+  }
 
-    // Once Deep reaches saturation, late worker errors cannot fail the scan.
-    if (lateFailure && stopReason !== "saturated") throw lateFailure;
-
-    if (
-      !previousReducerResultPath &&
-      !(this.discoveryDeadlineReached && accepted.size === 0)
-    ) {
-      throw new Error(
-        "Deep Scan ended without a successfully reduced Standard scan.",
-      );
+  private async restoreUnion(
+    resultPath: string | undefined,
+    merged: AcceptedDiscovery[],
+  ): Promise<ScanUnion> {
+    if (!resultPath) {
+      if (merged.length)
+        throw new Error("Deep Scan is missing its saved iteration result.");
+      return { scanId: this.state.scanId, findings: [] };
     }
-    return {
-      reason: stopReason,
-      omittedWorkerIds: [...new Set(omittedWorkerIds)],
-      result: latestResult,
-      resultPath: previousReducerResultPath,
-      discoveries: [...accepted.values()].filter((worker) =>
-        mergedIds.has(worker.id),
-      ),
-    };
+    await requireRegularFile(resultPath, this.artifacts.dedupRoot);
+    const result = parseStoredScanDraft(
+      await readJsonObject(resultPath),
+      "Saved Deep Scan iteration",
+      this.state.scanId,
+      parseScanUnion,
+    );
+    for (const worker of merged)
+      addScanCoverage(result, worker, this.artifacts.scanDir);
+    return result;
+  }
+
+  private async scanBatch(
+    count: number,
+    nextLabel: () => string,
+    previousFindings: string[],
+  ): Promise<DiscoveryOutcome[]> {
+    const scans = Array.from({ length: count }, async () => {
+      try {
+        const outcome = await this.discoveryWorkers.runDiscoveryWorker(
+          randomUUID(),
+          nextLabel(),
+          previousFindings,
+        );
+        if (outcome.status === "failed" && !outcome.replaceableFailureKind)
+          throw outcome.error;
+        return outcome;
+      } catch (error) {
+        this.abortController.abort(error);
+        throw error;
+      }
+    });
+    // Wait for sibling cleanup before publishing a failure or starting another batch.
+    const settled = await Promise.allSettled(scans);
+    for (const scan of settled) {
+      if (
+        scan.status === "rejected" &&
+        confirmedOwnershipChange(scan.reason, this.state.scanId)
+      )
+        throw scan.reason;
+    }
+    return settled.map((scan) => {
+      if (scan.status === "rejected") throw scan.reason;
+      return scan.value;
+    });
   }
 
   private async recoverAcceptedDiscoveries(): Promise<AcceptedDiscovery[]> {
@@ -1099,124 +954,15 @@ export class DeepScanCoordinator {
         id: worker.id,
         resultPath: worker.resultManifestPath,
         result,
-        completionSequence: worker.completionSequence,
         attempt: worker.attempt,
       });
     }
-    return recovered.sort(compareCompletionSequence);
-  }
-
-  private async recoverCompletedReducers(
-    discoveries: AcceptedDiscovery[],
-  ): Promise<{ resultPath?: string; result?: DeepReductionInput }> {
-    const discoveryIds = new Set(discoveries.map((worker) => worker.id));
-    const inputs = this.state.persistedDedupInputs ?? [];
-    let resultPath: string | undefined;
-    let latestResult: DeepReductionInput | undefined;
-    const completedReducers = (this.state.persistedWorkers ?? [])
-      .filter(
-        (worker) => worker.kind === "dedup" && worker.status === "succeeded",
-      )
-      .sort((left, right) => {
-        const leftSequence = workerLabelSequence(
-          basename(dirname(left.promptPath)),
-          "dedup",
-        );
-        const rightSequence = workerLabelSequence(
-          basename(dirname(right.promptPath)),
-          "dedup",
-        );
-        return leftSequence < rightSequence
-          ? -1
-          : leftSequence > rightSequence
-            ? 1
-            : left.id.localeCompare(right.id);
-      });
-    for (const worker of completedReducers) {
-      if (!worker.resultManifestPath) {
-        throw new Error(
-          `Completed reducer ${worker.id} has no persisted result manifest.`,
-        );
-      }
-      const consumed = inputs
-        .filter((input) => input.dedupWorkerId === worker.id)
-        .map((input) => discoveryIds.has(input.discoveryWorkerId));
-      if (consumed.length === 0 || consumed.some((value) => !value)) {
-        throw new Error(
-          `Completed reducer ${worker.id} has incomplete persisted inputs.`,
-        );
-      }
-      const { result } = await validateReducerArtifacts(
-        {
-          artifacts: this.artifacts,
-          artifactDir: worker.artifactDir,
-          resultPath: worker.resultManifestPath,
-          reducerId: worker.id,
-          previousReducerResultPath: resultPath,
-        },
-        this.state.scanId,
-      );
-      const accepted = discoveries.filter((source) =>
-        inputs.some(
-          (input) =>
-            input.dedupWorkerId === worker.id &&
-            input.discoveryWorkerId === source.id,
-        ),
-      );
-      const sources = await readDeepReductionSources({
-        root: worker.artifactDir,
-        repoRoot: this.state.targetPath,
-        scanId: this.state.scanId,
-        layout: "reducer",
-        scope: this.state.scope,
-        includePaths: this.state.includePaths,
-        filePaths: this.state.filePaths,
-        deepReducer: {
-          scanRoot: this.artifacts.scanDir,
-          claimedWorkers: accepted.map((source) => ({
-            id: source.id,
-            resultPath: source.resultPath,
-            attempt: source.attempt,
-          })),
-        },
-      });
-      result.sourceCoverage = aggregateSourceCoverage(
-        sources.discoveries,
-        latestResult ?? null,
-      );
-      latestResult = result;
-      resultPath = worker.resultManifestPath;
-    }
-    return { resultPath, result: latestResult };
-  }
-
-  private reducerReady(
-    buffer: AcceptedDiscovery[],
-    previousReducerResultPath: string | undefined,
-    activeCount: number,
-    dispatched: number,
-  ): boolean {
-    if (buffer.length === 0) return false;
-    // Two independent discoveries establish the first semantic reduction. A
-    // later reduction or a final worker at the configured cap may stand alone.
-    if (previousReducerResultPath) return true;
-    if (buffer.length >= 2) return true;
-    return (
-      activeCount === 0 &&
-      (dispatched >= this.state.config.maxDiscoveryRuns ||
-        this.discoveryDeadlineReached)
+    return recovered.sort((a, b) =>
+      Number(
+        discoverySequence(dirname(a.resultPath)) -
+          discoverySequence(dirname(b.resultPath)),
+      ),
     );
-  }
-
-  private trackSchedulerWork<T>(promise: Promise<T>): Promise<T> {
-    this.schedulerWork.add(promise);
-    const cleanup = () => this.schedulerWork.delete(promise);
-    void promise.then(cleanup, cleanup);
-    return promise;
-  }
-
-  private async settleSchedulerWork(): Promise<void> {
-    await Promise.allSettled([...this.schedulerWork]);
   }
 
   private logProgress(count: number): void {
@@ -1240,14 +986,15 @@ const systemClock: DeepScanClock = {
   },
 };
 
-function compareCompletionSequence(
-  left: AcceptedDiscovery,
-  right: AcceptedDiscovery,
-): number {
-  return (
-    left.completionSequence - right.completionSequence ||
-    left.id.localeCompare(right.id)
-  );
+async function nextWorkerLabel(
+  root: string,
+  kind: "dedup" | "discovery",
+): Promise<() => string> {
+  let last = (await fs.readdir(root)).reduce((n, name) => {
+    const sequence = workerLabelSequence(name, kind);
+    return sequence > n ? sequence : n;
+  }, 0n);
+  return () => `${kind}-${String(++last).padStart(4, "0")}`;
 }
 
 function workerLabelSequence(
@@ -1262,6 +1009,10 @@ function cloneState(state: DeepScanRunState): DeepScanRunState {
   return { ...state, config: { ...state.config } };
 }
 
+function discoverySequence(artifactDir: string): bigint {
+  return workerLabelSequence(basename(dirname(artifactDir)), "discovery");
+}
+
 function latestPersistedReplaceableFailure(
   workers: PersistedDeepScanWorker[],
 ): { kind: DeepScanReplaceableFailureKind; message: string } | undefined {
@@ -1270,18 +1021,6 @@ function latestPersistedReplaceableFailure(
     if (failure) return failure;
   }
   return undefined;
-}
-
-function persistedReducerFailureStreak(
-  workers: PersistedDeepScanWorker[],
-): number {
-  let consecutiveFailures = 0;
-  for (const worker of workers) {
-    if (worker.kind !== "dedup") continue;
-    if (worker.status === "succeeded") consecutiveFailures = 0;
-    else if (worker.status === "failed") consecutiveFailures += 1;
-  }
-  return consecutiveFailures;
 }
 
 function persistedReplaceableFailure(
@@ -1317,18 +1056,6 @@ function discoveryErrorLimitError(
   const detail =
     `Deep Scan stopped after ${count} consecutive unsuccessful discovery workers ` +
     `(limit: ${limit}); last failure (${kind}): ${message}`;
-  return cause ? new Error(detail, { cause }) : new Error(detail);
-}
-
-function reducerErrorLimitError(
-  count: number,
-  limit: number,
-  message: string,
-  cause?: Error,
-): Error {
-  const detail =
-    `Deep Scan stopped after ${count} consecutive unsuccessful reducer workers ` +
-    `(limit: ${limit}); last failure: ${message}`;
   return cause ? new Error(detail, { cause }) : new Error(detail);
 }
 

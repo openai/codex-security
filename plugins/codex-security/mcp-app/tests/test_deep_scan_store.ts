@@ -444,22 +444,29 @@ async function testCanonicalCommitProtocol() {
     "/fixture/scans/run/artifacts/deep_discovery/dedup/result.json";
   const runWorkbench = mock.fn(async (args: string[]) => stateResult(scanId));
   const store = new WorkbenchDeepScanStore(runWorkbench);
-  await store.commitDedup({
+  const workerId = randomUUID();
+  await store.recordIteration({
     id: reducerId,
     scanId,
-    newFindings: 1,
-    resultManifestPath,
+    workerIds: [workerId],
+    resultPath: resultManifestPath,
+    noNewStreak: 2,
+    consecutiveErrors: 0,
   });
   assert.deepEqual(runWorkbench.mock.calls.at(-1)?.arguments[0], [
-    "commit-deep-scan-dedup",
+    "record-deep-scan-iteration",
     "--scan-id",
     scanId,
     "--worker-id",
     reducerId,
+    "--input-worker-id",
+    workerId,
     "--result-manifest-path",
     resultManifestPath,
-    "--new-findings-count",
-    "1",
+    "--no-new-streak",
+    "2",
+    "--consecutive-errors",
+    "0",
   ]);
 }
 
@@ -581,25 +588,30 @@ async function testPersistenceRetriesRemainInsideTheWriteQueue() {
   const calls: string[] = [];
   const store = new WorkbenchDeepScanStore(async (args: string[]) => {
     calls.push(args[0]);
-    if (args[0] === "claim-deep-scan-dedup" && calls.length === 1) {
+    if (args[0] === "record-deep-scan-iteration" && calls.length === 1) {
       throw new Error("sqlite3.OperationalError: database is locked");
     }
-    return {};
+    return stateResult(scanId);
   });
 
-  const claim = store.claimDedup({
+  const claim = store.recordIteration({
     id: randomUUID(),
     scanId,
     workerIds: [randomUUID()],
-    promptPath: "/fixture/reducer/prompt.md",
-    artifactDir: "/fixture/reducer/output",
+    resultPath: "/fixture/iteration/result.json",
+    noNewStreak: 0,
+    consecutiveErrors: 0,
   });
   const progress = store.updateProgress({ scanId, phase: "discovery" });
   await Promise.all([claim, progress]);
 
   assert.deepEqual(
     calls,
-    ["claim-deep-scan-dedup", "claim-deep-scan-dedup", "update-progress"],
+    [
+      "record-deep-scan-iteration",
+      "record-deep-scan-iteration",
+      "update-progress",
+    ],
     "later mutations must not interleave with an idempotent persistence replay",
   );
 }
@@ -622,23 +634,24 @@ async function testPersistenceRetryExhaustionPreservesDiagnostics() {
   const originalConsoleError = console.error;
   const store = new WorkbenchDeepScanStore(async (args: string[]) => {
     calls.push([...args]);
-    if (args[0] === "claim-deep-scan-dedup") throw originalFailure;
+    if (args[0] === "record-deep-scan-iteration") throw originalFailure;
     return {};
   });
   console.error = (event) => events.push(event);
 
   try {
     await assert.rejects(
-      store.claimDedup({
+      store.recordIteration({
         id: reducerId,
         scanId,
         workerIds: [randomUUID()],
-        promptPath: "/fixture/reducer/prompt.md",
-        artifactDir: "/fixture/reducer/output",
+        resultPath: "/fixture/iteration/result.json",
+        noNewStreak: 0,
+        consecutiveErrors: 0,
       }),
       (error: Error & Record<string, unknown>) => {
         assert.equal(error.name, "DeepScanPersistenceError");
-        assert.equal(error.operation, "claim-deep-scan-dedup");
+        assert.equal(error.operation, "record-deep-scan-iteration");
         assert.equal(error.scanId, scanId);
         assert.equal(error.workerId, reducerId);
         assert.equal(error.attempts, 3);
@@ -672,7 +685,7 @@ async function testPersistenceRetryExhaustionPreservesDiagnostics() {
   );
   const event = JSON.parse(events[0]);
   assert.equal(event.event, "persistence_retry_exhausted");
-  assert.equal(event.operation, "claim-deep-scan-dedup");
+  assert.equal(event.operation, "record-deep-scan-iteration");
   assert.equal(event.scanId, scanId);
   assert.equal(event.workerId, reducerId);
   assert.equal(event.attempts, 3);
@@ -850,26 +863,16 @@ function idempotentPersistenceScenarios() {
         store.updateWorker({ ...mutation, scanId, ...update }),
     })),
     {
-      operation: "claim-deep-scan-dedup",
-      result: {},
+      operation: "record-deep-scan-iteration",
+      result: stateResult(scanId),
       invoke: (store: Store) =>
-        store.claimDedup({
+        store.recordIteration({
           id: reducerId,
           scanId,
           workerIds: [workerId],
-          promptPath: "/fixture/reducer/prompt.md",
-          artifactDir: "/fixture/reducer/output",
-        }),
-    },
-    {
-      operation: "commit-deep-scan-dedup",
-      result: stateResult(scanId),
-      invoke: (store: Store) =>
-        store.commitDedup({
-          id: reducerId,
-          scanId,
-          newFindings: 1,
-          resultManifestPath: "/fixture/reducer/output/result.json",
+          resultPath: mutation.promptPath,
+          noNewStreak: 1,
+          consecutiveErrors: 0,
         }),
     },
     {

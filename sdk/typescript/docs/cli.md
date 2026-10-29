@@ -141,7 +141,7 @@ In the SDK, use `new CodexSecurity({ codexOverrides: { daybreak: true } })`.
 In project files, set `daybreak: true` inside the `codex` mapping. Use `false`
 to explicitly turn it off.
 The setting carries through saved scan recipes, resumed scans, Deep Scan
-discovery and reducer workers, and `scan --patch`. Standalone `validate`,
+discovery workers, and `scan --patch`. Standalone `validate`,
 `patch`, and `verify-fix` accept the same `--codex daybreak=true` override.
 Threads created by these commands retain the setting when resumed in Codex.
 Scans use isolated configuration, so set it on the CLI, SDK client, or project
@@ -151,8 +151,7 @@ For the plugin inside Codex, use the desktop Daybreak toggle or `/daybreak` in
 an interactive CLI session. For headless Codex, use `codex exec -c daybreak=true`
 or set top-level `daybreak = true` in the configuration loaded by the runner.
 Deep Scan inherits the active turn's effective access program from its saved
-Codex session, including an explicit Standard selection. Discovery and reducer
-workers retain that selection when resumed. If the host does not supply a
+Codex session, including an explicit Standard selection. Discovery workers retain that selection when resumed. If the host does not supply a
 persisted turn context, workers use their runner configuration; CLI and SDK scans
 use the explicit scan settings above.
 
@@ -179,7 +178,7 @@ codex-security scan /path/to/repository \
 In the SDK, select your model through `codexOverrides.model` and pass
 `auth: "api-key"` and `cyberAccessProgram: "daybreak_blue"` in the scan options.
 Use `--mode deep` in the CLI or `mode: "deep"` in SDK scan options for Deep Scan.
-The selection reaches discovery and reducer workers, including resumed workers. See [Select a Cyber access program](#select-a-cyber-access-program)
+The selection reaches discovery workers, including resumed workers. See [Select a Cyber access program](#select-a-cyber-access-program)
 for configuration precedence and the API-key feature setting.
 
 The previously documented `gpt-daybreak-blue-latest` alias is
@@ -812,11 +811,16 @@ codex-security scan . --mode deep --workers 2 --subagents 0 \
   --stop-after-no-new 3 --max-discovery-runs 10 --max-time 90
 ```
 
-For `scan --mode deep`, `--workers` controls discovery concurrency and
-`--subagents` controls subagents per worker. `--stop-after-no-new`,
-`--max-discovery-runs`, and `--max-time` stop discovery by novelty, count,
-or duration. At the deadline, discovery stops; the scan then combines and returns
-completed findings.
+Deep Scan repeats Standard scans in batches of up to `--workers`, with
+`--subagents` per scan. It merges each completed batch in launch order.
+It uses source locations, cited code and weakness descriptions to match repeated
+findings. Each group keeps its first description, all reported locations, and
+the original observations. Later batches receive the titles and primary
+locations of retained findings so workers can investigate other reachable paths.
+`--stop-after-no-new` counts consecutive
+completed scans that added no findings. `--max-discovery-runs` caps the total
+number started, including failures. `--max-time` stops discovery and returns
+the findings from completed scans.
 
 For TypeScript, see the [SDK Deep Scan example](../README.md#configure-deep-scans).
 
@@ -926,7 +930,7 @@ starts or outcomes, or make another provider's traffic visible to OpenAI.
 
 Disable Codex usage analytics and built-in metrics with
 `--codex 'analytics.enabled=false'`. The setting carries into `scan --patch`,
-patch-risk assessment, and Deep Scan discovery and reducer workers, including
+patch-risk assessment, and Deep Scan discovery workers, including
 resumed workers. Selected-profile settings take precedence over root settings.
 Explicit OpenTelemetry settings also carry into scan patches and Deep Scan
 workers, including exporter choices and prompt-logging controls.

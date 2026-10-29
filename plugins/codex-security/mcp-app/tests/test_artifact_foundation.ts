@@ -275,30 +275,6 @@ async function testWorkerStandardLayout() {
   );
   assert.equal(context.layout, "worker");
   assert.equal(context.scope, ".");
-
-  await assert.rejects(
-    writerApi.createCodexSecurityArtifactWriterServer({
-      ...environment,
-      CODEX_SECURITY_REDUCER_CONTEXT_JSON: JSON.stringify({
-        scanRoot: root,
-        claimedWorkers: [],
-      }),
-    }),
-    /coordinator-bound reducer context/,
-  );
-  const { context: reducer } =
-    await writerApi.createCodexSecurityArtifactWriterServer({
-      ...environment,
-      CODEX_SECURITY_ARTIFACT_LAYOUT: "reducer",
-      CODEX_SECURITY_REDUCER_CONTEXT_JSON: JSON.stringify({
-        scanRoot: root,
-        claimedWorkers: [
-          { id: "worker-1", resultPath: path.join(root, "worker-result.json") },
-        ],
-      }),
-    });
-  assert.equal(reducer.layout, "reducer");
-  assert.equal(reducer.deepReducer.claimedWorkers[0].id, "worker-1");
 }
 
 async function testAtomicReplacementAfterInterruptedWriter() {

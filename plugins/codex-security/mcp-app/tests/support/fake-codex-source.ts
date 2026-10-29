@@ -38,7 +38,7 @@ ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
         }
         result = { thread: { id: message.params.threadId, path: join(process.env.CODEX_HOME, message.params.threadId + '.jsonl') } };
       } else if (message.method === 'config/read') {
-        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: preflightProfile } }, origins: {}, layers: null };
+        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: preflightProfile }, mcp_servers: { 'fixture.catalog': { command: 'node' } } }, origins: {}, layers: null };
       } else if (message.method === 'permissionProfile/list') {
         result = { data: [{ id: 'codex_security_deep_scan_worker', description: null, allowed: preflightAllowed }], nextCursor: null };
       } else if (message.method === 'account/read') {
@@ -114,11 +114,14 @@ if (stdin.includes('INCOMPLETE_STREAM')) { console.log(JSON.stringify({ type: 'e
 if (stdin.includes('BWRAP_NAMESPACE_FAILURE')) console.log(JSON.stringify({ type: 'item.completed', item: { id: 'command-1', type: 'command_execution', command: 'super-secret-command', aggregated_output: 'private source text\\nbwrap: Creating new namespace failed: nesting depth or /proc/sys/user/max_user_namespaces exceeded (ENOSPC)', exit_code: 1, status: 'failed' } }));
 if (stdin.includes('ARTIFACT_TOOL_')) {
   const server = stdin.includes('FOREIGN_ARTIFACT_TOOL_') ? 'untrusted_server' : stdin.includes('LEGACY_OWNED_ARTIFACT_TOOL_') ? 'codex_security_artifacts' : 'cs_artifacts';
-  const tool = stdin.includes('ADDITIONAL_OWNED_ARTIFACT_TOOL_') ? 'additional_codex_security_worker_tool' : stdin.includes('DISCOVERY_OWNED_ARTIFACT_TOOL_') ? 'record_codex_security_discovery_candidates' : 'record_codex_security_deep_reduction';
+  const tool = stdin.includes('ADDITIONAL_OWNED_ARTIFACT_TOOL_') ? 'additional_codex_security_worker_tool' : stdin.includes('DISCOVERY_OWNED_ARTIFACT_TOOL_') ? 'record_codex_security_discovery_candidates' : 'record_codex_security_scan_draft';
   const item = { id: 'mcp-1', type: 'mcp_tool_call', server, tool, arguments: { secret: 'Bearer synthetic-secret', source: 'private source text' }, result: stdin.includes('REJECTED') ? { content: [{ type: 'text', text: 'private output sk-proj-synthetic-secret' }] } : null, error: stdin.includes('TRANSPORT_FAILED') ? { message: '--provider-error transport closed sk-proj-synthetic-secret /private/customer/path' } : null, status: 'failed' };
   console.log(JSON.stringify({ type: 'item.completed', item }));
 }
-console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: 'fixture final response' } }));
+const schemaIndex = process.argv.indexOf('--output-schema');
+const schema = schemaIndex < 0 ? undefined : JSON.parse(readFileSync(process.argv[schemaIndex + 1], 'utf8'));
+const text = schema?.properties?.reviews ? '{"reviews":[]}' : schema?.properties?.defects ? JSON.stringify({defects: [{operation: 'Check ownership', failure: 'foreign object', path: 'fixture.py', reports: [{id: 0, evidence: 0}]}], uncertain: []}) : 'fixture final response';
+console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text } }));
 console.log(JSON.stringify({ type: 'turn.completed', usage: stdin.includes('NULL_USAGE') ? null : { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));
 if (stdin.includes('COMPLETE_THEN_HANG')) { setInterval(() => {}, 1_000); await new Promise(() => {}); }
 }

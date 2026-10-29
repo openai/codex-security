@@ -76,7 +76,7 @@ function runOwnershipProbe(probe: OwnershipProbe): Record<string, unknown> {
   >;
 }
 
-test("recovers an interrupted publication when the filesystem rejects hardlinks", async () => {
+test("recovers a legacy publication copied without hardlinks", async () => {
   const root = await temporaryDirectories.create(
     "codex-security-deep-copy-recovery-",
   );
@@ -87,7 +87,7 @@ test("recovers an interrupted publication when the filesystem rejects hardlinks"
   const result = runPython(python!, [
     "-c",
     [
-      "import errno, json, sqlite3, sys",
+      "import json, shutil, sqlite3, sys",
       "from pathlib import Path",
       "sys.path.insert(0, sys.argv[1])",
       "import deep_scan_workbench as deep_scan",
@@ -99,13 +99,10 @@ test("recovers an interrupted publication when the filesystem rejects hardlinks"
       "ledger.parent.mkdir(parents=True)",
       "snapshot.parent.mkdir(parents=True)",
       "ledger.write_text('old ledger\\n', encoding='utf-8')",
-      "def reject_hardlink(source, destination):",
-      "    raise OSError(errno.ENOTSUP, 'hardlinks are unavailable')",
-      "deep_scan.os.link = reject_hardlink",
-      "deep_scan.create_publication_copy(ledger, backup)",
+      "shutil.copyfile(ledger, backup)",
       "snapshot.write_text('new ledger\\n', encoding='utf-8')",
       "ledger.unlink()",
-      "deep_scan.create_publication_copy(snapshot, ledger)",
+      "shutil.copyfile(snapshot, ledger)",
       "assert ledger.read_bytes() == snapshot.read_bytes()",
       "connection = sqlite3.connect(':memory:')",
       "connection.row_factory = sqlite3.Row",
@@ -1042,294 +1039,6 @@ describe("deep scan workbench ownership", () => {
     const report = await readFile(join(scanDir, "report.md"), "utf8");
     expect(report).toContain("No findings were reported.");
     expect(report).toContain(reason);
-  });
-
-  test("requeues a failed reducer's inputs and preserves findings at the discovery deadline", async () => {
-    const root = await temporaryDirectories.create(
-      "codex-security-deep-reducer-recovery-",
-    );
-    const repository = join(root, "repository");
-    const stateDir = join(root, "state");
-    const codexHome = join(root, "codex-home");
-    const configDir = join(codexHome, "codex-security");
-    await mkdir(repository);
-    await mkdir(configDir, { recursive: true });
-    await writeFile(join(repository, "source.py"), "# source fixture\n");
-    await writeFile(
-      join(configDir, "config.toml"),
-      "[deep_scan]\nworkers = 3\nmax_discovery_runs = 6\nmax_time_hours = 0.5\n",
-    );
-
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-    const command = workbenchCommand(python, stateDir, codexHome);
-    const state = (result: Record<string, unknown>) =>
-      result["deepScan"] as Record<string, unknown>;
-    const initial = state(
-      command([
-        "begin-deep-scan",
-        "--thread-id",
-        "thread-deep-scan",
-        "--target-path",
-        repository,
-        "--scope",
-        ".",
-        "--scan-root",
-        join(root, "scans"),
-        "--available-parallelism",
-        "4",
-      ]),
-    );
-    const scanId = initial["scanId"] as string;
-    const scanDir = initial["scanDir"] as string;
-    expect(initial["config"]).toMatchObject({
-      maxDiscoveryRuns: 6,
-      maxTimeHours: 0.5,
-    });
-    const discoveryDir = join(scanDir, "artifacts", "02_discovery");
-    const ledgerPath = join(discoveryDir, "candidate_ledger.jsonl");
-    const existingFinding = '{"candidate":"previously committed"}\n';
-    await mkdir(discoveryDir, { recursive: true });
-    await writeFile(join(discoveryDir, "in_scope_files.txt"), "source.py\n");
-    await writeFile(ledgerPath, existingFinding);
-
-    const workerPaths = async (workerId: string) => {
-      const artifactDir = join(
-        scanDir,
-        "artifacts",
-        "deep_discovery",
-        workerId,
-      );
-      const promptPath = join(artifactDir, "prompt.md");
-      const resultPath = join(artifactDir, "result.json");
-      await mkdir(artifactDir, { recursive: true });
-      await writeFile(promptPath, "Review the source.\n");
-      return { artifactDir, promptPath, resultPath };
-    };
-    const discoveryIds = [
-      "10000000-0000-4000-8000-000000000001",
-      "10000000-0000-4000-8000-000000000002",
-      "10000000-0000-4000-8000-000000000003",
-      "10000000-0000-4000-8000-000000000004",
-      "10000000-0000-4000-8000-000000000005",
-    ];
-    for (const workerId of discoveryIds) {
-      const paths = await workerPaths(workerId);
-      const args = [
-        "upsert-deep-scan-worker",
-        "--scan-id",
-        scanId,
-        "--worker-id",
-        workerId,
-        "--kind",
-        "discovery",
-        "--prompt-path",
-        paths.promptPath,
-        "--artifact-dir",
-        paths.artifactDir,
-        "--attempt",
-        "1",
-      ];
-      command([...args, "--status", "running"]);
-      await writeFile(paths.resultPath, "{}\n");
-      command([
-        ...args,
-        "--status",
-        "succeeded",
-        "--result-manifest-path",
-        paths.resultPath,
-      ]);
-    }
-
-    const startReducer = async (workerId: string, inputIds: string[]) => {
-      const paths = await workerPaths(workerId);
-      command([
-        "claim-deep-scan-dedup",
-        "--scan-id",
-        scanId,
-        "--worker-id",
-        workerId,
-        "--prompt-path",
-        paths.promptPath,
-        "--artifact-dir",
-        paths.artifactDir,
-        ...inputIds.flatMap((inputId) => ["--input-worker-id", inputId]),
-      ]);
-      const args = [
-        "upsert-deep-scan-worker",
-        "--scan-id",
-        scanId,
-        "--worker-id",
-        workerId,
-        "--kind",
-        "dedup",
-        "--prompt-path",
-        paths.promptPath,
-        "--artifact-dir",
-        paths.artifactDir,
-        "--attempt",
-        "1",
-      ];
-      command([...args, "--status", "running"]);
-      return { args, ...paths };
-    };
-    const commitReducer = async (
-      workerId: string,
-      resultPath: string,
-      newFindingsCount: number,
-    ) => {
-      await writeFile(resultPath, "{}\n");
-      return state(
-        command([
-          "commit-deep-scan-dedup",
-          "--scan-id",
-          scanId,
-          "--worker-id",
-          workerId,
-          "--result-manifest-path",
-          resultPath,
-          "--new-findings-count",
-          String(newFindingsCount),
-        ]),
-      );
-    };
-    const previousReducerId = "20000000-0000-4000-8000-000000000001";
-    const previous = await startReducer(
-      previousReducerId,
-      discoveryIds.slice(0, 2),
-    );
-    await commitReducer(previousReducerId, previous.resultPath, 1);
-
-    const failedReducerId = "20000000-0000-4000-8000-000000000002";
-    const claimedInputs = discoveryIds.slice(2, 4);
-    const failedReducer = await startReducer(failedReducerId, claimedInputs);
-    const failureArgs = [
-      ...failedReducer.args,
-      "--status",
-      "failed",
-      "--error-message",
-      "reducer exhausted its attempts",
-    ];
-    const failed = state(command(failureArgs));
-    const workersById = (result: Record<string, unknown>) =>
-      new Map(
-        (result["workers"] as Record<string, unknown>[]).map((worker) => [
-          worker["id"] as string,
-          worker,
-        ]),
-      );
-    const failedWorkers = workersById(failed);
-    expect(failed).toMatchObject({
-      status: "running",
-      phase: "discovery",
-      dispatchedCount: 5,
-      consecutiveErrors: 0,
-    });
-    for (const workerId of discoveryIds.slice(0, 2)) {
-      expect(failedWorkers.get(workerId)).toMatchObject({
-        status: "succeeded",
-        mergeState: "merged",
-      });
-    }
-    for (const workerId of discoveryIds.slice(2)) {
-      expect(failedWorkers.get(workerId)).toMatchObject({
-        status: "succeeded",
-        mergeState: "buffered",
-      });
-    }
-    expect(failedWorkers.get(failedReducerId)).toMatchObject({
-      status: "failed",
-      error: "reducer exhausted its attempts",
-    });
-    expect(await readFile(ledgerPath, "utf8")).toBe(existingFinding);
-
-    const replacementReducerId = "20000000-0000-4000-8000-000000000003";
-    const replacementInputs = discoveryIds.slice(2);
-    const replacement = await startReducer(
-      replacementReducerId,
-      replacementInputs,
-    );
-    const replayed = state(command(failureArgs));
-    expect(replayed["phase"]).toBe("reducing");
-    for (const workerId of replacementInputs) {
-      expect(workersById(replayed).get(workerId)?.["mergeState"]).toBe(
-        "merging",
-      );
-    }
-
-    const committed = await commitReducer(
-      replacementReducerId,
-      replacement.resultPath,
-      0,
-    );
-    for (const workerId of discoveryIds) {
-      expect(workersById(committed).get(workerId)?.["mergeState"]).toBe(
-        "merged",
-      );
-    }
-    expect(workersById(committed).get(failedReducerId)?.["status"]).toBe(
-      "failed",
-    );
-    expect(await readFile(ledgerPath, "utf8")).toBe(existingFinding);
-
-    const manifestPath = join(scanDir, "coordinator-manifest.json");
-    await writeFile(manifestPath, "{}\n");
-    const premature = runPython(
-      python!,
-      [
-        join(PLUGIN_ROOT, "scripts", "workbench_db.py"),
-        "finish-deep-scan",
-        "--scan-id",
-        scanId,
-        "--terminal-reason",
-        "capped",
-        "--manifest-path",
-        manifestPath,
-      ],
-      {
-        env: {
-          ...process.env,
-          CODEX_SECURITY_STATE_DIR: stateDir,
-          CODEX_HOME: codexHome,
-        },
-      },
-    );
-    expect(premature.exitCode).not.toBe(0);
-    expect(new TextDecoder().decode(premature.stderr)).toContain(
-      "before reaching its configured maximum",
-    );
-    expect(await readFile(ledgerPath, "utf8")).toBe(existingFinding);
-
-    const expire = runPython(python!, [
-      "-c",
-      [
-        "import sqlite3, sys",
-        "connection = sqlite3.connect(sys.argv[1])",
-        "connection.execute('UPDATE deep_scan_runs SET created_at = ? WHERE scan_id = ?', ('2000-01-01T00:00:00+00:00', sys.argv[2]))",
-        "connection.commit()",
-      ].join("\n"),
-      join(stateDir, "workbench.sqlite3"),
-      scanId,
-    ]);
-    expect(expire.exitCode, new TextDecoder().decode(expire.stderr)).toBe(0);
-
-    const completed = state(
-      command([
-        "finish-deep-scan",
-        "--scan-id",
-        scanId,
-        "--terminal-reason",
-        "capped",
-        "--manifest-path",
-        manifestPath,
-      ]),
-    );
-    expect(completed).toMatchObject({
-      status: "succeeded",
-      terminalReason: "capped",
-      consecutiveErrors: 0,
-    });
-    expect(await readFile(ledgerPath, "utf8")).toBe(existingFinding);
   });
 });
 
