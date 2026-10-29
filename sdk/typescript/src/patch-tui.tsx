@@ -362,12 +362,21 @@ function FindingDetailLine({
 
 export function PatchTui({
   repository,
-  findings,
+  findings: inputFindings,
   onComplete,
   color = process.env["NO_COLOR"] === undefined,
 }: PatchTuiProps): React.JSX.Element {
   const { exit } = useApp();
   const { stdout } = useStdout();
+  const findings = useMemo(
+    () =>
+      [...inputFindings].sort(
+        (left, right) =>
+          SEVERITIES.indexOf(left.severity.level as PatchSeverity) -
+          SEVERITIES.indexOf(right.severity.level as PatchSeverity),
+      ),
+    [inputFindings],
+  );
   const [pane, setPane] = useState<"findings" | "details">("findings");
   const [focused, setFocused] = useState(0);
   const focusedFinding = useRef(focused);
