@@ -20,6 +20,7 @@
 - ship explorer references as standalone vector images ([#2128](https://github.com/openai/codex-security/pull/2128))
 - add published docs to the release checklist ([#2094](https://github.com/openai/codex-security/pull/2094))
 - bump actions/attest from 4.2.1 to 4.2.2 ([#2131](https://github.com/openai/codex-security/pull/2131))
+- bump @linear/sdk from 98.0.0 to 99.0.0 in /sdk/typescript ([#2132](https://github.com/openai/codex-security/pull/2132))
 
 <!-- release-section: highlights:end -->
 
