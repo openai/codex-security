@@ -767,7 +767,7 @@ describe("Cloud publication", () => {
         environment,
         fetch: fetchMock,
       }),
-    ).rejects.toThrow("Cloud publication was not confirmed");
+    ).rejects.toThrow("synthetic-access-token");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 

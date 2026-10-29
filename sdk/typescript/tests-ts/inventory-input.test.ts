@@ -1164,6 +1164,18 @@ require("node:module").syncBuiltinESMExports();
   },
 );
 
+test("diff ranking retains Git diagnostics and escapes terminal controls", () => {
+  const f = fixture();
+  f.write("source");
+  f.commit();
+  const revision = "missing-café-\u009b\u2028\u2029";
+  const result = f.run("make-diff-rank-input", ["--base", revision]);
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("Git diff failed with exit code");
+  expect(result.stderr).toContain("missing-café-\\u009b\\u2028\\u2029");
+  expect(result.stderr).not.toContain(revision);
+});
+
 test("failed inventory generation preserves the existing file", () => {
   const f = fixture();
   f.write("source");
@@ -1172,6 +1184,14 @@ test("failed inventory generation preserves the existing file", () => {
     ["--scope", "missing"],
     ["--scope", ".."],
     ["--scope", ".", "--diff-base", "missing-revision"],
+    [
+      "--scope",
+      ".",
+      "--diff-base",
+      "missing-revision",
+      "--diff-mode",
+      "local-patch",
+    ],
   ]) {
     expect(f.run("generate-in-scope-files", args).status).toBe(2);
     expect(readFileSync(f.out, "utf8")).toBe("previous\n");

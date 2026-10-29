@@ -504,7 +504,7 @@ async function requireCheckedScanFile(
       throw error;
     }
     throw new ContractValidationError(
-      `${context}: expected a file inside the scan directory.`,
+      `${context}: expected a file inside the scan directory: ${errorMessage(error)}`,
       {
         cause: error,
       },

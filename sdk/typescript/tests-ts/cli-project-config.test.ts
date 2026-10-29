@@ -1352,7 +1352,7 @@ test.each([
         ["scans", "rerun", "saved", "--json", "--full-output"],
         dependencies({
           currentDirectory: input.repository,
-          onWorkbench: async () => ({ recipe }),
+          onWorkbench: async () => ({ recipe, scanId: "saved" }),
           onRun,
         }),
       ),

@@ -565,19 +565,28 @@ export interface Change {
   status: string;
 }
 async function changed(repo: string, args: string[]): Promise<Change[]> {
-  const fields = paths(
-    requireSuccess(
-      await git(repo, [
-        "diff",
-        "--ignore-submodules=all",
-        "--raw",
-        "-z",
-        "--diff-filter=ACMRDT",
-        ...args,
-        "--",
-      ]),
-    ),
-  );
+  const result = await git(repo, [
+    "diff",
+    "--ignore-submodules=all",
+    "--raw",
+    "-z",
+    "--diff-filter=ACMRDT",
+    ...args,
+    "--",
+  ]);
+  if (result.status !== 0 && result.stderr.trim()) {
+    const detail = result.stderr
+      .trim()
+      .replace(
+        /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/gu,
+        (control) =>
+          `\\u${control.charCodeAt(0).toString(16).padStart(4, "0")}`,
+      );
+    throw new Error(
+      `Git diff failed with ${result.signal ?? `exit code ${result.status}`}: ${detail}`,
+    );
+  }
+  const fields = paths(requireSuccess(result));
   const changes: Change[] = [];
   for (let index = 0; index < fields.length;) {
     const metadata = fields[index++]!.split(" "),

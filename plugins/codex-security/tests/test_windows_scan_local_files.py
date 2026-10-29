@@ -166,9 +166,9 @@ def test_native_directory_change_after_probe_remains_a_path_error(
     name = "_canonical_scan_directory" if os.name == "nt" else "_require_scan_directory"
     original = getattr(owner, name)
 
-    def replace_after_probe(path):
+    def replace_after_probe(path, *args):
         nonlocal mutated
-        result = original(path)
+        result = original(path, *args)
         if path == scan_dir and not mutated:
             mutated = True
             target.rename(moved)

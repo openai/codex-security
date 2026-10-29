@@ -56,7 +56,7 @@ import {
   promisify,
   stripVTControlCharacters,
 } from "node:util";
-import { Cli, z } from "incur";
+import { Cli, Formatter, z } from "incur";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import { formatCliHelp } from "./cli-help.js";
 import { formatCoverageScope } from "./coverage-presentation.js";
@@ -1102,6 +1102,7 @@ interface ScanArguments extends ResolvedScanSettings {
 
 interface ScanOutcome {
   exitCode: number;
+  patchReviewCanceled?: true;
   data?: Record<string, unknown>;
   error?: string;
 }
@@ -2025,7 +2026,12 @@ export async function main(
   let renderedOutput: string | undefined;
   let structuredError = false;
   let failedResultOutput:
-    { format: "json" | "jsonl"; code?: string; message: string } | undefined;
+    | {
+        format: "json" | "jsonl" | "toon" | "yaml";
+        code?: string;
+        message: string;
+      }
+    | undefined;
   let filteredScanFailure:
     { format: string; data: Record<string, unknown> } | undefined;
   const finishScan = (
@@ -2042,7 +2048,10 @@ export async function main(
     if (outcome.error === undefined || outcome.data !== undefined) {
       if (
         outcome.error !== undefined &&
-        (format === "json" || format === "jsonl") &&
+        (format === "json" ||
+          format === "jsonl" ||
+          format === "toon" ||
+          format === "yaml") &&
         argv.includes("--full-output")
       ) {
         failedResultOutput = { format, message: outcome.error };
@@ -2062,6 +2071,22 @@ export async function main(
       return incurError({ code, message, exitCode });
     }
     return incurError({ code, message: outcome.error, exitCode });
+  };
+  const finishScanCommand: typeof finishScan = (
+    outcome,
+    format,
+    incurError,
+    code,
+  ) => {
+    if (
+      (outcome.error === undefined || outcome.patchReviewCanceled) &&
+      format === "toon" &&
+      !argv.some((argument) => OUTPUT_OPTION.test(argument))
+    ) {
+      exitCode = outcome.exitCode;
+      return;
+    }
+    return finishScan(outcome, format, incurError, code);
   };
   const runImport = (options: ImportScanOptions) =>
     withTerminalErrorsHandled(errorOutput, () =>
@@ -2585,7 +2610,7 @@ export async function main(
     })
     .command("resume", {
       description: "Resume an interrupted Deep Scan in its original session.",
-      hint: "Execution failures in full-output JSON or JSONL use ok: false and keep available scan results under data.",
+      hint: "Execution failures keep available scan results under data in failed full-output JSON, JSONL, YAML, or TOON envelopes.",
       mcp: false,
       args: z.object({
         scanId: z.string().min(1).describe("Interrupted Deep Scan identifier."),
@@ -2599,6 +2624,13 @@ export async function main(
       }),
       output: scanOutputSchema("SCAN_FAILED", "SCAN_RESUME_UNAVAILABLE"),
       async run({ args, error: incurError, format, options }) {
+        if (format === "md") {
+          errorOutput.write(
+            "codex-security: Markdown output is not supported for scan results.\n",
+          );
+          exitCode = 2;
+          return;
+        }
         let scanArguments: ScanArguments;
         try {
           const saved = await dependencies.runWorkbench(
@@ -2642,7 +2674,7 @@ export async function main(
         } catch (error) {
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
-          return finishScan(
+          return finishScanCommand(
             { exitCode: 2, error: message },
             format,
             incurError,
@@ -2651,15 +2683,23 @@ export async function main(
         }
         scanArguments.includeFailureResults =
           argv.includes("--full-output") &&
-          (format === "json" || format === "jsonl");
-        const outcome = await runScan(scanArguments, errorOutput, dependencies);
-        return finishScan(outcome, format, incurError);
+          (format === "json" ||
+            format === "jsonl" ||
+            format === "yaml" ||
+            format === "toon");
+        const outcome = await runScan(
+          scanArguments,
+          errorOutput,
+          dependencies,
+          format !== "json" && format !== "jsonl",
+        );
+        return finishScanCommand(outcome, format, incurError);
       },
     })
     .command("rerun", {
       description:
         "Start a new scan using saved settings and current checkout/context files.",
-      hint: "Execution failures in full-output JSON or JSONL use ok: false and keep available scan results under data.",
+      hint: "Execution failures keep available scan results under data in failed full-output JSON, JSONL, YAML, or TOON envelopes.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -2707,7 +2747,7 @@ export async function main(
           const message = errorMessage(error);
           if (exitCode === 0)
             errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
-          return finishScan(
+          return finishScanCommand(
             { exitCode: 2, error: message },
             format,
             incurError,
@@ -2755,7 +2795,7 @@ export async function main(
               format: importFormat,
               parentScanId,
             });
-            return finishScan(
+            return finishScanCommand(
               outcome,
               format,
               incurError,
@@ -2792,7 +2832,7 @@ export async function main(
         } catch (error) {
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
-          return finishScan(
+          return finishScanCommand(
             { exitCode: 2, error: message },
             format,
             incurError,
@@ -2801,14 +2841,17 @@ export async function main(
         }
         scanArguments.includeFailureResults =
           argv.includes("--full-output") &&
-          (format === "json" || format === "jsonl");
+          (format === "json" ||
+            format === "jsonl" ||
+            format === "yaml" ||
+            format === "toon");
         const outcome = await runScan(
           scanArguments,
           errorOutput,
           dependencies,
           format !== "json" && format !== "jsonl",
         );
-        return finishScan(outcome, format, incurError);
+        return finishScanCommand(outcome, format, incurError);
       },
     })
     .command("match", {
@@ -4508,7 +4551,10 @@ export async function main(
               mock: options.mock,
               includeFailureResults:
                 argv.includes("--full-output") &&
-                (format === "json" || format === "jsonl"),
+                (format === "json" ||
+                  format === "jsonl" ||
+                  format === "yaml" ||
+                  format === "toon"),
             },
             errorOutput,
             dependencies,
@@ -4520,16 +4566,9 @@ export async function main(
           outcome = { exitCode: 2, error: message };
         }
 
-        if (
-          outcome.error === undefined &&
-          !options.dryRun &&
-          format === "toon" &&
-          !argv.some((argument) => OUTPUT_OPTION.test(argument))
-        ) {
-          exitCode = outcome.exitCode;
-          return;
-        }
-        return finishScan(outcome, format, incurError);
+        return options.dryRun
+          ? finishScan(outcome, format, incurError)
+          : finishScanCommand(outcome, format, incurError);
       },
     })
     .command("install-hook", {
@@ -7131,7 +7170,27 @@ export async function main(
             streamedLogs,
             frameworkOutput ? JSON.parse(frameworkOutput).cta : undefined,
           );
-    if (failedResultOutput !== undefined) {
+    if (
+      failedResultOutput?.format === "toon" ||
+      failedResultOutput?.format === "yaml"
+    ) {
+      const success = Formatter.format({ ok: true }, failedResultOutput.format);
+      const prefix = success.endsWith("\n") ? success : `${success}\n`;
+      // Keep Incur's rendered data, metadata, and output controls intact.
+      if (frameworkOutput.startsWith(prefix)) {
+        const failure = Formatter.format(
+          {
+            ok: false,
+            error: {
+              code: failedResultOutput.code ?? "SCAN_FAILED",
+              message: failedResultOutput.message,
+            },
+          },
+          failedResultOutput.format,
+        );
+        frameworkOutput = `${failure}${failure.endsWith("\n") ? "" : "\n"}${frameworkOutput.slice(prefix.length)}`;
+      }
+    } else if (failedResultOutput !== undefined) {
       const envelope: JsonValue = JSON.parse(frameworkOutput);
       // Token-count output is a number, not a full-output envelope.
       if (isJsonObject(envelope) && envelope["ok"] === true) {
@@ -9141,14 +9200,60 @@ export function skillCommandFailure(
   detail: string,
   authentication: ScanAuthentication | null = null,
 ): string {
+  // Numeric statuses need an HTTP/status label; the original diagnostic is retained below.
+  const diagnosticDetail = detail.replace(/\bhttps?:\/\/[^\s"'<>]+/giu, "");
+  const classificationDetail = diagnosticDetail.replace(
+    /(?<![\w./\\-])(?:http(?:\/\d+(?:\.\d+)?)?(?:[ \t]*(?:response(?:[ \t]+|[_-])?code|error(?:[ \t]+code)?|status(?:[ _-]?code)?|code))?|response(?:[ \t]+|[_-])?(?:code|status)|(?:(?:http\.)?response\.)?status(?:[ _-]?code)?)(?:["']?[ \t]*[:=][ \t]*|[ \t]+)["']?(401|403|429)(?![\w/\\-]|\.(?=\S))|\b(?:401|403|429)\b/giu,
+    (match, status: string | undefined) => (status ? match : ""),
+  );
+  const classification = classifyConnectionFailure(classificationDetail);
+  let advice: string | undefined;
   if (
-    /401|invalid.api.key|token.expired|unauthori[sz]ed|authorizationrequired/iu.test(
+    classification === "unauthorized" ||
+    /\b(?:authorizationrequired|invalid[._ -]api[._ -]key|token[._ -]expired)\b/iu.test(
       detail,
     )
   ) {
-    return `${detail}\n${authenticationFailureMessage(authentication)}`;
+    advice = authenticationFailureMessage(authentication);
+  } else if (
+    /\bpermissions? to use (?:this |the )?model\b/iu.test(detail) ||
+    (!/\b(?:sqlite3?|database|workbench)\b/iu.test(classificationDetail) &&
+      /\bmodel[ \t]+(?:'[^'\r\n]+'|"[^"\r\n]+"|`[^`\r\n]+`)[ \t]+not[ \t]+found\b/iu.test(
+        detail,
+      )) ||
+    /\b(?:model[._ -]not[._ -]found|model[._ -]?access[._ -]?denied|access[._ -]?(?:denied[._ -]?to[._ -]?model|to[._ -]?model[._ -]?denied))\b/iu.test(
+      detail,
+    ) ||
+    (classification === "forbidden" &&
+      /\b403\b|\bforbidden\b|\bmodel[ _-]?(?:not[ _-]?found|access)\b|\baccess.*model\b/iu.test(
+        classificationDetail,
+      ))
+  ) {
+    advice = "The selected model is unavailable for the current credentials.";
+  } else if (
+    classification === "rate_limited" ||
+    /\b(?:rate[._ -]limit(?:ed|[._ -]exceeded)?|tokens[._ -]per[._ -]minute)\b/iu.test(
+      detail,
+    )
+  ) {
+    advice = "The request was rate limited. Wait and retry.";
+  } else if (
+    /models?.cache|cache.*schema|supports_reasoning_summaries/iu.test(detail)
+  ) {
+    advice =
+      "Codex could not load its model metadata. Update Codex or refresh its model cache.";
+  } else if (
+    classification === "network_error" ||
+    classification === "timeout" ||
+    (!/\b(?:sqlite3?|database|workbench)\b/iu.test(classificationDetail) &&
+      /\b(?:ECONNABORTED|timed[._ -]out|network[._ -]?error|(?:(?:network|request)[._ -]?)?timeout(?:[._ -]?error)?)\b/iu.test(
+        detail,
+      ))
+  ) {
+    advice =
+      "Codex could not connect to the model service. Check the network and retry.";
   }
-  return detail || `${command} failed with exit code ${status}.`;
+  return `${command} failed with exit code ${status}.${advice ? ` ${advice}` : ""}${detail ? `\n${detail}` : ""}`;
 }
 
 function incurErrorMessage(output: string): string {
@@ -10058,6 +10163,8 @@ async function executeScan(
       }
     }
   } catch (error) {
+    if (error instanceof Error && error.name === "ExitPromptError")
+      requestedSignal ??= "SIGINT";
     failed = true;
     failure = error;
   } finally {
@@ -10294,34 +10401,43 @@ async function executeScan(
     ? (arguments_.patchSeverity ?? "low")
     : undefined;
   let patchSelection: PatchSelection | null = null;
-  if (
-    !arguments_.mock &&
-    actionableFindings.length > 0 &&
-    arguments_.patchSeverity === undefined &&
-    progress?.interactive === true &&
-    (dependencies.patchEditor !== undefined || process.stdin.isTTY === true)
-  ) {
-    const confirmed =
-      arguments_.patch ||
-      (await (
-        dependencies.confirmPatchReview ??
-        createTerminalPrompt(errorOutput).confirm
-      )("Review and patch these findings?"));
-    if (confirmed) {
-      const selectPatches =
-        dependencies.patchEditor ??
-        (async (target: string, candidates: readonly Finding[]) => {
-          const { runPatchTui } = await import("./patch-tui.js");
-          return runPatchTui(target, candidates, {
-            stdout: errorOutput as NodeJS.WriteStream,
-            color:
-              dependencies.environment["NO_COLOR"] === undefined &&
-              dependencies.environment["TERM"] !== "dumb",
+  try {
+    if (
+      !arguments_.mock &&
+      actionableFindings.length > 0 &&
+      arguments_.patchSeverity === undefined &&
+      progress?.interactive === true &&
+      (dependencies.patchEditor !== undefined || process.stdin.isTTY === true)
+    ) {
+      const confirmed =
+        arguments_.patch ||
+        (await (
+          dependencies.confirmPatchReview ??
+          createTerminalPrompt(errorOutput).confirm
+        )("Review and patch these findings?"));
+      if (confirmed) {
+        const selectPatches =
+          dependencies.patchEditor ??
+          (async (target: string, candidates: readonly Finding[]) => {
+            const { runPatchTui } = await import("./patch-tui.js");
+            return runPatchTui(target, candidates, {
+              stdout: errorOutput as NodeJS.WriteStream,
+              color:
+                dependencies.environment["NO_COLOR"] === undefined &&
+                dependencies.environment["TERM"] !== "dumb",
+            });
           });
-        });
-      patchSelection = await selectPatches(repository, actionableFindings);
-      patchThreshold = patchSelection?.severity;
+        patchSelection = await selectPatches(repository, actionableFindings);
+        patchThreshold = patchSelection?.severity;
+      }
     }
+  } catch (error) {
+    if (!(error instanceof Error && error.name === "ExitPromptError"))
+      throw error;
+    const message =
+      "Patch review canceled by Ctrl-C. Saved scan results were kept.";
+    errorOutput.write(`codex-security: ${message}\n`);
+    return { ...finishResult(130, message), patchReviewCanceled: true };
   }
 
   let patches: FindingPatch[] = [];
@@ -10428,8 +10544,12 @@ const LOCAL_SYSCALL_CODES = new Set([
   "EXDEV",
 ]);
 
-function isLocalScanFailure(error: unknown): boolean {
-  if (error instanceof IncompleteScanError) error = error.cause;
+function isLocalScanFailure(
+  error: unknown,
+  seen = new Set<unknown>(),
+): boolean {
+  if (seen.has(error)) return false;
+  seen.add(error);
   if (
     error instanceof InvalidTargetError ||
     error instanceof OutputDirectoryError ||
@@ -10440,11 +10560,12 @@ function isLocalScanFailure(error: unknown): boolean {
     return true;
   }
   return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    typeof (error as { code: unknown }).code === "string" &&
-    LOCAL_SYSCALL_CODES.has((error as { code: string }).code)
+    (typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      typeof (error as { code: unknown }).code === "string" &&
+      LOCAL_SYSCALL_CODES.has((error as { code: string }).code)) ||
+    (error instanceof Error && isLocalScanFailure(error.cause, seen))
   );
 }
 
@@ -10564,6 +10685,11 @@ function scanFailureMessage(
       if (authentication?.method === "command") {
         return `${detail}The configured Codex provider denied access. Check the command credentials and provider permissions.`;
       }
+      if (
+        authentication?.method === "stored_credentials" &&
+        authentication.credentialType === "api_key"
+      )
+        return `${detail}The stored API key cannot access the configured model. Use an API key with model access.`;
       return authentication?.method === "api_key"
         ? `${detail}The API key from ${authentication.source} cannot access the configured model. ` +
             "Retry with '--auth chatgpt' or use an API key with model access."
