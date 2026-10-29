@@ -23,6 +23,7 @@ to investigate records together, not instructions to merge them.
 | [Wiz package JSON or detailed CSV](../../sdk/typescript/docs/cli.md#package-vulnerability-inputs); CSV requires `CloudPlatform=GitHub` and `CloudProviderURL` for a GitHub repository `/tree/<ref>` | Vendor occurrence `id` (CSV: `ID`), not the CVE                                                                                                         | Tenant and finding family                  |
 | [Wiz named repository collections](../../sdk/typescript/docs/cli.md#sast-repository-secrets-and-iac-inputs)                                                                                         | `sast:<id>`, `secret:<id>`, `iac:<id>`                                                                                                                  | Tenant and finding family                  |
 | [Endor Finding JSON or endorctl SARIF](endor.md)                                                                                                                                                    | Finding `uuid` or SARIF `properties["finding-uuid"]`                                                                                                    | Namespace, project and context             |
+| [Amazon Inspector Code Security ListFindings JSON](inspector.md)                                                                                                                                    | Full Inspector finding ARN                                                                                                                              | AWS account, Region and repository project |
 | [Snyk Open Source CLI JSON, plugin v1 or SARIF](snyk.md)                                                                                                                                            | CLI: manager, manifest, advisory, package/version and dependency path; plugin: supplied composite; SARIF: advisory, manifest set and project when known | Repository, branch, scan target and format |
 | [Semgrep Code CLI/CI JSON or SARIF](semgrep.md)                                                                                                                                                     | Fingerprint; otherwise rule, literal path and start/end lines and columns                                                                               | Organization, project and branch           |
 | [GitHub Dependabot repository REST alerts](github-dependabot.md)                                                                                                                                    | Host, repository and alert number                                                                                                                       | Host, repository and Dependabot family     |
@@ -55,6 +56,11 @@ before preparing a fresh submission.
   normalized JSONL: supply the reviewed `source_finding_id` and `evidence`,
   retaining the raw row. The reader does not infer a mapping for other CSV
   profiles.
+- **Amazon Inspector.** Supply a complete export for one repository project.
+  A matching native URL or the operator's full project ARN mapping establishes
+  the Git host. Local import and Cloud replay check the destination again.
+  Each finding ARN identifies one occurrence. Duplicate ARNs exclude all
+  colliding rows. Package and code evidence retain the native finding.
 - **Endor Labs:** Prefer a complete native Finding, array or `list.objects`.
   `spec.level`, dependency paths/versions, advisory aliases, source SHA and
   primary SAST/AI SAST locations map when present. The project UUID does not
@@ -78,6 +84,8 @@ before preparing a fresh submission.
   Critical from High; both become diagnostic `error`, mapped to High, in Semgrep
   SARIF. Inspect the selected result for trace/fix details. Platform/MCP
   envelopes and general Supply Chain/Secrets feeds are not Code CLI or SARIF exports.
+- **OpenGrep.** Use native JSON and supply `--source-repository-url`. The
+  [OpenGrep guide](opengrep.md) covers export and occurrence identity.
 - **GitHub:** For code scanning, the selected instance supplies path/range, ref
   and commit. The rule's `security_severity_level` supplies severity; diagnostic
   `error` alone means `unknown`. An alert-wide dismissal takes precedence over

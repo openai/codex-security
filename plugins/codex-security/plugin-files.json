@@ -136,6 +136,8 @@
     "skills/publish-findings/SKILL.md",
     "skills/publish-findings/agents/openai.yaml",
     "skills/publish-findings/references/wiz-import.md",
+    "skills/resolve-dependency-alert/SKILL.md",
+    "skills/resolve-dependency-alert/agents/openai.yaml",
     "skills/security-diff-scan/SKILL.md",
     "skills/security-diff-scan/agents/openai.yaml",
     "skills/security-scan/SKILL.md",

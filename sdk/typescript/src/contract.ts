@@ -25,7 +25,7 @@ import type {
   ScanManifest,
 } from "./models.js";
 import {
-  requirePrivateOutputDirectory,
+  requireOutputDirectoryOwnership,
   requireSecureOutputAncestry,
 } from "./runtime.js";
 import type { NormalizedTarget, ScanMode } from "./targets.js";
@@ -724,16 +724,13 @@ async function requireScanRoot(
       throw new Error("not a directory");
     }
     try {
-      requirePrivateOutputDirectory(
-        { mode: Number(returned.mode), uid: Number(returned.uid) },
-        canonical,
-      );
+      requireOutputDirectoryOwnership({ uid: Number(returned.uid) }, canonical);
       await requireSecureOutputAncestry(canonical);
     } catch (error) {
       throw new ContractValidationError(
         error instanceof Error
           ? error.message
-          : "Scan directory must remain private to the current user.",
+          : "Scan directory must remain owned by the current user.",
         { cause: error },
       );
     }
@@ -762,10 +759,7 @@ async function verifyScanRoot(
     ) {
       throw new Error("scan directory changed while reading");
     }
-    requirePrivateOutputDirectory(
-      { mode: Number(current.mode), uid: Number(current.uid) },
-      root.path,
-    );
+    requireOutputDirectoryOwnership({ uid: Number(current.uid) }, root.path);
     await requireSecureOutputAncestry(root.path);
   } catch (error) {
     throwIfAborted(signal);

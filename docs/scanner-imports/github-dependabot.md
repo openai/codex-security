@@ -57,5 +57,8 @@ identities, affected packages, or ranges, and requires repository-relative
 manifest paths.
 
 Read local evidence with `codex-security findings imported ./project --format json`.
+To trace the affected package and evaluate an upgrade in Codex, use
+[`$resolve-dependency-alert`](../../plugins/codex-security/skills/resolve-dependency-alert/SKILL.md)
+with the saved alert and the checkout.
 See the [GitHub Dependabot alerts endpoint](https://docs.github.com/en/rest/dependabot/alerts#list-dependabot-alerts-for-a-repository)
 and the [GitHub CLI pagination options](https://cli.github.com/manual/gh_api).
