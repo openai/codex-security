@@ -27,6 +27,7 @@
 - sort interactive findings by severity ([#2135](https://github.com/openai/codex-security/pull/2135))
 - simplify scanner imports and SDK test setup ([#2136](https://github.com/openai/codex-security/pull/2136))
 - simplify workbench and Deep Scan processing ([#2137](https://github.com/openai/codex-security/pull/2137))
+- correct rejected decisions in the open records review ([#2139](https://github.com/openai/codex-security/pull/2139))
 
 <!-- release-section: highlights:end -->
 
