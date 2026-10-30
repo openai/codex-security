@@ -88,6 +88,73 @@ def register_cli_scan(
     )
 
 
+@pytest.mark.parametrize(
+    ("kind", "expected"), [("repository", 4), ("refs", 2), ("working_tree", 3)]
+)
+def test_cli_registration_counts_the_selected_target(
+    tmp_path: Path, kind: str, expected: int
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    base = initialize_git_repository(target)
+    (target / "README.md").write_text("updated fixture\n")
+    (target / "new.py").write_text("new = True\n")
+    (target / "binary.dat").write_bytes(b"\0")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "Update fixture"], cwd=target, check=True)
+
+    (target / "README.md").unlink()
+    (target / "new.py").write_bytes(b"\0")
+    (target / "staged.py").write_text("staged = True\n")
+    subprocess.run(["git", "add", "staged.py"], cwd=target, check=True)
+    (target / "untracked.py").write_text("untracked = True\n")
+
+    scan_target = {"kind": kind, "paths": []}
+    if kind != "repository":
+        scan_target.update(base=base if kind == "refs" else "HEAD", head="HEAD")
+    registered = register_cli_scan(state_dir, target, tmp_path / "scan", scan_target=scan_target)
+    assert registered["scopeFileCount"] == expected
+    saved = get_scan(state_dir, registered["scanId"])["scan"]
+    assert saved["progress"]["coverage"]["filesTotal"] == expected
+
+
+def test_diff_registration_uses_only_local_git_objects(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    base = initialize_git_repository(target)
+    (target / "changed.py").write_text("changed = True\n")
+
+    def git(*args: str) -> str:
+        return subprocess.check_output(["git", "-C", str(target), *args], text=True).strip()
+
+    git("add", "changed.py")
+    git("commit", "-qm", "Add changed file")
+    oid = git("rev-parse", "HEAD:changed.py")
+    remote = tmp_path / "remote.git"
+    git("clone", "--bare", "--no-local", str(target), str(remote))
+    git("-C", str(remote), "config", "uploadpack.allowFilter", "true")
+    git("remote", "add", "origin", remote.as_uri())
+    git("config", "remote.origin.promisor", "true")
+    git("config", "remote.origin.partialCloneFilter", "blob:none")
+    missing = target / ".git" / "objects" / oid[:2] / oid[2:]
+    missing.unlink()
+
+    with pytest.raises(subprocess.CalledProcessError) as failure:
+        register_cli_scan(
+            tmp_path / "state",
+            target,
+            tmp_path / "scan",
+            scan_target={"kind": "refs", "paths": [], "base": base, "head": "HEAD"},
+        )
+    assert "Unable to read committed diff blob" in failure.value.stderr
+    assert (
+        subprocess.run(
+            ["git", "-C", str(target), "cat-file", "-e", oid],
+            env={**os.environ, "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": ""},
+        ).returncode
+        != 0
+    )
+
+
 def _start_diff_scan_with_draft(tmp_path: Path, kind: str) -> tuple[Path, Path, dict[str, Any]]:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"

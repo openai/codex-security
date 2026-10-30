@@ -865,6 +865,140 @@ def test_stale_git_binding_does_not_spawn(tmp_path: Path, monkeypatch: pytest.Mo
 
 
 @pytest.mark.parametrize(
+    ("encoding", "bom"),
+    [("utf-8", b""), ("utf-16-le", b"\xff\xfe"), ("utf-16-be", b"\xfe\xff")],
+)
+def test_git_blob_binary_flags_match_full_file_classification_with_bounded_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, encoding: str, bom: bytes
+) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    # The UTF-16 surrogate pair crosses the first 64 KiB sample boundary.
+    text = bom + ("a" * 32766 + "😀" + "b" * 32768).encode(encoding)
+    contents = {
+        "text.bin": text + (b"\0" if bom else b""),
+        "binary-tail.bin": text + "\0".encode(encoding),
+        "binary-head.bin": b"\0" + text * 32,
+        "empty.bin": b"",
+        "after.txt": b"after\n",
+    }
+    for name, content in contents.items():
+        (target / name).write_bytes(content)
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "source samples"], cwd=target, check=True)
+
+    git_blob_binary_flags = WORKBENCH_TARGET["git_blob_binary_flags"]
+    function_globals = git_blob_binary_flags.__globals__
+    read_batch_samples = function_globals["_read_git_batch_flags"]
+    reads: list[int] = []
+
+    def require_bounded_output(output: Any, names: list[str]):
+        assert not output.seekable()
+        read = output.read
+
+        def bounded_read(size: int = -1) -> bytes:
+            assert 0 <= size <= 64 * 1024
+            reads.append(size)
+            return read(size)
+
+        output.read = bounded_read
+        return read_batch_samples(output, names)
+
+    monkeypatch.setitem(function_globals, "_read_git_batch_flags", require_bounded_output)
+    # Both request and response exceed pipe buffers, before the multi-megabyte binary.
+    missing = ["HEAD:missing"] * 10_000
+    samples = git_blob_binary_flags(target, [*missing, *(f"HEAD:{name}" for name in contents)])
+
+    assert samples == [
+        *([None] * len(missing)),
+        False,
+        True,
+        True,
+        False,
+        False,
+    ]
+    assert max(reads) == 64 * 1024
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        b"missing terminator",
+        b"object blob invalid\n",
+        b"object blob -1\n",
+        b"object blob 4\nabc",
+        b"object blob 4\nabcd!",
+        b"object blob invalid\n" + b"x" * (4 * 1024 * 1024),
+        b"object blob 131072\n" + b"x" * (64 * 1024 + 1),
+    ],
+    ids=[
+        "unterminated-header",
+        "invalid-size",
+        "negative-size",
+        "short-body",
+        "invalid-terminator",
+        "large-invalid-header",
+        "truncated-large-body",
+    ],
+)
+def test_git_blob_binary_flags_reject_incomplete_framing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output: bytes
+) -> None:
+    git_blob_binary_flags = WORKBENCH_TARGET["git_blob_binary_flags"]
+
+    def git_command(*args: Any, **kwargs: Any):
+        remaining = memoryview(output)
+        try:
+            while remaining:
+                written = os.write(kwargs["stdout_file"].fileno(), remaining)
+                remaining = remaining[written:]
+        except BrokenPipeError:
+            return subprocess.CompletedProcess(args, 1)
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setitem(git_blob_binary_flags.__globals__, "git_command", git_command)
+
+    assert git_blob_binary_flags(tmp_path, ["HEAD:source"]) == [None]
+
+
+@pytest.mark.parametrize("output", [b"", b"object blob 4\ntext\n"])
+def test_git_blob_binary_flags_reject_git_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output: bytes
+) -> None:
+    git_blob_binary_flags = WORKBENCH_TARGET["git_blob_binary_flags"]
+
+    def git_command(*args: Any, **kwargs: Any):
+        kwargs["stdout_file"].write(output)
+        return subprocess.CompletedProcess(args, 1)
+
+    monkeypatch.setitem(git_blob_binary_flags.__globals__, "git_command", git_command)
+
+    assert git_blob_binary_flags(tmp_path, ["HEAD:source"]) == [None]
+
+
+def test_git_blob_binary_flags_work_with_git_before_2_38(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    git_blob_binary_flags = WORKBENCH_TARGET["git_blob_binary_flags"]
+    git_command = git_blob_binary_flags.__globals__["git_command"]
+
+    def git_before_2_38(*args: Any, **kwargs: Any):
+        # Git before 2.38 rejects cat-file -z with a usage error.
+        if "-z" in args:
+            return subprocess.CompletedProcess(args, 129)
+        return git_command(*args, **kwargs)
+
+    monkeypatch.setitem(git_blob_binary_flags.__globals__, "git_command", git_before_2_38)
+
+    assert git_blob_binary_flags(target, ["HEAD:README.md", "HEAD:missing"]) == [
+        False,
+        None,
+    ]
+
+
+@pytest.mark.parametrize(
     ("log_encoding", "subject"),
     [
         ("UTF-8", "docs: \u65e5\u672c\u8a9e \ud55c\uad6d\uc5b4 \U0001f527"),
