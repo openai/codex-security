@@ -185,6 +185,41 @@ describe("Codex authentication process boundary", () => {
     expect(observeSucceeded).toHaveBeenCalled();
   });
 
+  test.each([
+    ["Open https://[2001:db8::1].", "https://[2001:db8::1]"],
+    [
+      "Open [https://auth.example.test/device]",
+      "https://auth.example.test/device",
+    ],
+    ["Open [https://[2001:db8::]]", "https://[2001:db8::]"],
+    [
+      "Open [https://auth.example.test/device.]",
+      "https://auth.example.test/device",
+    ],
+    ["Open [https://[2001:db8::3].]", "https://[2001:db8::3]"],
+    [
+      "Open [https://[2001:db8::4]/device?challenge=ABCD.]",
+      "https://[2001:db8::4]/device?challenge=ABCD",
+    ],
+    ["Open [https://[2001:db8::5]:8443]", "https://[2001:db8::5]:8443"],
+    ["Open [https://[::1]]", null],
+    ["Open [https://[::ffff:127.0.0.1]]", null],
+    ["Open http://[2001:db8::1]", null],
+  ] as const)(
+    "distinguishes IPv6 host brackets from surrounding punctuation: %s",
+    async (output, expected) => {
+      const handle = new CodexLoginHandle(
+        nodeCommand(),
+        ["-e", "console.error(process.argv[1])", output],
+        {},
+        () => {},
+      );
+
+      await expect(handle.wait()).resolves.toMatchObject({ success: true });
+      expect(handle.verificationUrl).toBe(expected);
+    },
+  );
+
   test.each(["sync", "async"])(
     "rejects wait when required login completion fails: %s",
     async (mode) => {

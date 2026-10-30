@@ -9,7 +9,7 @@ overrides:
   promptfoo@0.124.1>@hono/node-server: 2.1.5
   '@openai/codex': 0.166.0
   '@openai/codex-sdk': 0.166.0
-  '@opencode-ai/sdk': 1.19.3
+  '@opencode-ai/sdk': 1.19.4
   ibm-cloud-sdk-core@5.6.0>axios: 1.20.0
   get-uri@8.0.1>basic-ftp: 6.2.1
 
@@ -21,8 +21,8 @@ importers:
         specifier: 0.166.0
         version: 0.166.0
       '@opencode-ai/sdk':
-        specifier: 1.19.3
-        version: 1.19.3
+        specifier: 1.19.4
+        version: 1.19.4
       promptfoo:
         specifier: 0.124.1
         version: 0.124.1(@aws-sdk/credential-provider-node@3.972.83)(@aws-sdk/credential-providers@3.1136.0)(@cfworker/json-schema@4.1.1)(@huggingface/transformers@4.3.0(@types/node@25.9.1))(@ibm-cloud/watsonx-ai@1.7.16)(@langfuse/client@5.11.0(@opentelemetry/api@1.9.1))(@openai/agents@0.11.8(@aws-sdk/credential-provider-node@3.972.83)(@cfworker/json-schema@4.1.1)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.6.7))(@slack/web-api@8.1.1)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.7.3)(@types/json-schema@7.0.15)(@types/node@25.9.1)(ibm-cloud-sdk-core@5.6.0)(pg@8.23.0)(playwright-extra@4.3.6(playwright-core@1.63.0)(playwright@1.63.0))(playwright@1.63.0)(socks@2.8.10)
@@ -1115,8 +1115,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@opencode-ai/sdk@1.19.3':
-    resolution: {integrity: sha512-G63bZD2r6plqgjFdenWVj3HBFWmLQSVuG9CXMQuTjakzA5aL6wFLmI23Biz5ESE4lQQ08UTHcY2N4NOShJFb2w==}
+  '@opencode-ai/sdk@1.19.4':
+    resolution: {integrity: sha512-3Wuc4t8gEuWKHbX1Na9oDK6PgOveid70l4Ks5RCjRIo2RcP8FQN3NS6Mg3XWc2+WiUfpfrmvBWlh5u1zeQfDQw==}
 
   '@opentelemetry/api-logs@0.222.0':
     resolution: {integrity: sha512-9mb1If+IF6u0ZVXkHQ6ogEae5HwA6ajIVUgpSDQyRASxft6BSXHvBvPooRle3yFN/fKnCdSOnuu0OC3PLcF6+g==}
@@ -4614,7 +4614,7 @@ snapshots:
   '@openai/codex@0.166.0-win32-x64':
     optional: true
 
-  '@opencode-ai/sdk@1.19.3':
+  '@opencode-ai/sdk@1.19.4':
     dependencies:
       cross-spawn: 7.0.6
 
@@ -6508,7 +6508,7 @@ snapshots:
       '@modelcontextprotocol/server-filesystem': 2026.8.31(@cfworker/json-schema@4.1.1)(zod@4.6.7)
       '@openai/agents': 0.11.8(@aws-sdk/credential-provider-node@3.972.83)(@cfworker/json-schema@4.1.1)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.6.7)
       '@openai/codex-sdk': 0.166.0
-      '@opencode-ai/sdk': 1.19.3
+      '@opencode-ai/sdk': 1.19.4
       '@slack/web-api': 8.1.1
       '@smithy/node-http-handler': 4.12.1
       google-auth-library: 11.2.0
