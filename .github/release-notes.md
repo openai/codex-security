@@ -11,6 +11,7 @@
 - explain package provenance ([#361](https://github.com/openai/codex-security/pull/361))
 - speed up plugin setup and defer CLI prompts ([#2146](https://github.com/openai/codex-security/pull/2146))
 - track Black Duck SCA project-version vulnerabilities ([#2098](https://github.com/openai/codex-security/pull/2098))
+- avoid claiming output was kept after scan failures ([#359](https://github.com/openai/codex-security/pull/359))
 
 <!-- release-section: highlights:end -->
 
