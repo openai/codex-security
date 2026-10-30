@@ -257,6 +257,58 @@ test("Black Duck binds normalized summaries to native findings and comparable re
   await prepareWiz([projected, second], [source, other]);
 });
 
+test.each(["typed evidence", "reader reference"] as const)(
+  "Black Duck keeps an imported Windows drive path distinct in %s without checkout remotes",
+  async (claim) => {
+    await using f = await localFindingsFixture();
+    const report = normalizeBlackDuckFindings(
+      [blackDuckBomRow()],
+      "https://c/team/repo",
+      "local",
+    );
+    const drive = "C:/team/repo";
+    if (claim === "typed evidence")
+      report.findings[0]!.evidence.details = {
+        kind: "sast",
+        repository: { url: drive },
+      };
+    await expect(
+      prepareNormalizedLocalImport(
+        report,
+        {
+          provider: "blackduck",
+          sourceKey: "example",
+          repository: f.repository,
+        },
+        {
+          environment: f.environment,
+          sourceRepositories:
+            claim === "reader reference" ? [{ url: drive }] : [],
+        },
+      ),
+    ).rejects.toThrow(
+      claim === "typed evidence"
+        ? /retained scanner repository/i
+        : /same project version/,
+    );
+  },
+);
+
+test("a projected Endor row keeps imported Windows drive provenance distinct without checkout remotes", async () => {
+  await using f = await localFindingsFixture();
+  const finding = projection("https://c/team/repo");
+  finding.evidence.source_data!["runContext"] = {
+    versionControlProvenance: [{ repositoryUri: "C:/team/repo" }],
+  };
+  await expect(
+    prepareNormalizedLocalImport(
+      { read: 1, findings: [finding], excluded: [] },
+      { provider: "endor", sourceKey: "example", repository: f.repository },
+      { environment: f.environment },
+    ),
+  ).rejects.toThrow(/retained scanner repository/i);
+});
+
 function projection(url: string): ExternalFinding {
   return {
     source_finding_id: "blackduck-bom:" + "a".repeat(64),

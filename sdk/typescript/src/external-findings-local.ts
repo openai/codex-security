@@ -273,6 +273,14 @@ function remoteRepository(
   };
 }
 
+function scannerRepository(
+  value: string,
+  provider: Provider,
+): RemoteRepositoryIdentity {
+  if (windowsDrivePath.test(value)) return { key: value };
+  return remoteRepository(value, provider, true) ?? { key: value };
+}
+
 function matchingRemote(
   left: RemoteRepositoryIdentity,
   right: RemoteRepositoryIdentity,
@@ -1010,7 +1018,7 @@ export async function prepareLocalImport(
     true,
   );
   const identify = (url: string) =>
-    remoteRepository(url, platformFor({ url }), true) ?? { key: url };
+    scannerRepository(url, platformFor({ url }));
   // A hint from an independent reader applies across projected rows. A native
   // GitHub asset in one row only identifies the platform of that row's claims.
   const operatorPlatform = localRepositoryPlatform(
@@ -1056,12 +1064,7 @@ export async function prepareLocalImport(
             : operatorPlatform({ url: claim });
       if (
         !sameScannerRepositories(
-          claims.map(
-            (claim) =>
-              remoteRepository(claim, rowPlatform(claim), true) ?? {
-                key: claim,
-              },
-          ),
+          claims.map((claim) => scannerRepository(claim, rowPlatform(claim))),
         )
       )
         throw new CodexSecurityError(

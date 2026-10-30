@@ -956,20 +956,20 @@ async function preparePublicationInput(
     findings: ExternalFindings["findings"],
     targetUrl: string,
     description = "selected Cloud repository",
-    retry = false,
+    mode: "source" | "fresh" | "retry" = "source",
   ) {
     const check = (
       url: string | null | undefined,
       id?: string,
       alias = false,
     ) => requireRepository(url, targetUrl, id, alias, description, true);
-    // Historical checkpoints already fixed the provider and request bytes.
-    // Recheck any projected source against the destination discovered for this retry.
-    const replay = retry && options.provider !== "blackduck";
+    // Source claims must agree before checkpoint lookup, but historical
+    // checkpoints already fixed the provider and immutable request bytes.
+    const replay = mode !== "fresh" && options.provider !== "blackduck";
     const repositories = replay
       ? undefined
       : blackDuckReportRepositories(options.provider, findings, "cloud");
-    if (!retry || options.provider === "veracode") {
+    if (mode === "fresh" || options.provider === "veracode") {
       for (const [id, source] of veracodeReportRepositories(
         options.provider,
         findings,
@@ -990,7 +990,7 @@ async function preparePublicationInput(
       );
       if (binding) check(binding.url, binding.findingId);
     }
-    if (!replay && snyk?.project) {
+    if (mode !== "retry" && snyk?.project) {
       check(snyk.project.url);
       check(snyk.project.nativeUrl);
     }
@@ -1000,6 +1000,7 @@ async function preparePublicationInput(
         ? repositories.get(id)?.url
         : projectedBlackDuckRepositoryUrl(finding, "cloud");
       if (
+        mode === "retry" &&
         replay &&
         !projected &&
         options.provider !== "inspector" &&
@@ -1045,15 +1046,20 @@ async function preparePublicationInput(
     }
   }
   if (!saved) {
+    checkRepositories(
+      parsed.findings,
+      reportSource || destination.url,
+      reportSource ? "source report repository" : undefined,
+      "fresh",
+    );
     if (reportSource) requireRepository(reportSource, destination.url);
-    else checkRepositories(parsed.findings, destination.url);
   } else {
-    checkRepositories(parsed.findings, destination.url, undefined, true);
+    checkRepositories(parsed.findings, destination.url, undefined, "retry");
     checkRepositories(
       submissionFindings(saved.requests),
       destination.url,
       undefined,
-      true,
+      "retry",
     );
   }
 

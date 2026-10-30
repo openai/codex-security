@@ -1264,6 +1264,18 @@ test.each([
       "d0ba21fbe6c5927206db937694c98f69ad59e33fc390cae6eb6bd01249b5ca10.pending.json",
   },
   {
+    ...savedBlackDuckEvidence,
+    selected: { ...options, provider: "snyk" as const },
+    filename:
+      "a20e6682b16ea3ab47b44223b064c20039e63a5ed936cc59d11bc72965dc0c80.pending.json",
+  },
+  {
+    ...savedBlackDuckEvidence,
+    selected: { ...options, provider: "semgrep" as const },
+    filename:
+      "8db1f2dd99febd5e239b7f746c9053139ce7abe56ae6cc77ddbc95a0f9c17433.pending.json",
+  },
+  {
     selected: { ...options, provider: "github" as const },
     data: savedDependabotData,
     requiredProvider: "blackduck",
@@ -1309,12 +1321,24 @@ test.each([
           : { ...row.evidence, source_data: data },
       ),
     };
-    const input = { read: 1, excluded: [], findings: [finding] };
+    const hosted =
+      selected.provider === "snyk" || selected.provider === "semgrep";
+    const sourceRepositoryUrl = f.state.repositoryUrl;
+    const input = {
+      read: 1,
+      excluded: [],
+      findings: [finding],
+      ...(hosted && { sourceRepositoryUrl }),
+    };
     const prepare = () =>
-      prepareNormalizedExternalPublication(input, selected, {
-        ...f.deps,
-        environment,
-      });
+      prepareNormalizedExternalPublication(
+        input,
+        {
+          ...selected,
+          ...(hosted && { repository: f.state.repositoryUrl }),
+        },
+        { ...f.deps, environment },
+      );
 
     // The previous publisher accepted this opaque evidence. Keep its checkpoint
     // filename and digests so this exercises recovery across the provider change.
@@ -1357,8 +1381,20 @@ test.each([
     }
     const retry = await prepare();
     expect(retry.preview.resumed).toBe(true);
-    expect((await retry.publish()).counts.created).toBe(1);
-    expect(f.posts.map((body) => JSON.parse(body))).toEqual([request]);
+    if (hosted) {
+      f.state.loseResponse = true;
+      await expect(retry.publish()).rejects.toThrow("resume the saved request");
+      f.state.repositoryUrl += "-renamed";
+      const renamed = await prepare();
+      expect(renamed.preview.resumed).toBe(true);
+      expect((await renamed.publish()).counts.created).toBe(1);
+      expect(f.posts).toHaveLength(2);
+      f.state.repositoryUrl = sourceRepositoryUrl;
+    } else {
+      expect((await retry.publish()).counts.created).toBe(1);
+      expect(f.posts).toHaveLength(1);
+    }
+    expect([...new Set(f.posts)]).toEqual([JSON.stringify(request)]);
     await expect(prepare()).rejects.toThrow(
       `requires the ${requiredProvider} provider`,
     );
