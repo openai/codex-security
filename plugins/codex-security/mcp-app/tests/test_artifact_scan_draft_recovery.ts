@@ -2644,7 +2644,10 @@ for (const complete of [false, true]) {
       );
       await rm(destination);
       await f.write(f.draft({}, true));
-      assert.deepEqual((await f.read()).deferred, submitted.reviewState.deferred);
+      assert.deepEqual(
+        (await f.read()).deferred,
+        submitted.reviewState.deferred,
+      );
     });
   }
 }
@@ -3857,7 +3860,10 @@ for (const layout of ["worker", "standard"] as const) {
           ).size,
           3,
         );
-        assert.deepEqual((await f.read()).surfaces, result.reviewState.surfaces);
+        assert.deepEqual(
+          (await f.read()).surfaces,
+          result.reviewState.surfaces,
+        );
         assert.deepEqual(
           (await f.write(f.draft())).reviewState.surfaces,
           result.reviewState.surfaces,
