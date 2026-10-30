@@ -17,6 +17,7 @@
 - avoid duplicate plugin setup inspection and defer CLI YAML ([#2149](https://github.com/openai/codex-security/pull/2149))
 - accept UTF-8 BOMs in scan inputs and calibration datasets ([#2151](https://github.com/openai/codex-security/pull/2151))
 - preserve IPv6 verification URL brackets ([#232](https://github.com/openai/codex-security/pull/232))
+- bump the third-party group across 2 directories with 2 updates ([#2157](https://github.com/openai/codex-security/pull/2157))
 
 <!-- release-section: highlights:end -->
 
