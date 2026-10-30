@@ -1982,7 +1982,10 @@ test("CLI requires an explicitly selected API key before automatic planning", as
 test("CLI forwards scan settings and accepts legacy scope notes", async () => {
   const paths = await fixture();
   const planFile = join(paths.root, "plan.json");
-  await writeFile(planFile, JSON.stringify({ components: [components[0]] }));
+  await writeFile(
+    planFile,
+    `\uFEFF${JSON.stringify({ components: [components[0]] })}`,
+  );
   const signals = new FakeSignals();
   const createSecurity = mock((_value: unknown) => {
     return client(run)();
