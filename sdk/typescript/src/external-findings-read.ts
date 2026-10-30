@@ -12,6 +12,7 @@ import { readOpenGrepFindings } from "./opengrep-findings.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
+import { readVeracodeFindings } from "./veracode-findings.js";
 import { readBlackDuckFindings } from "./blackduck-findings.js";
 import { readInspectorFindings } from "./inspector-findings.js";
 import { isRecord } from "./record.js";
@@ -31,6 +32,7 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   github: "github",
   inspector: "inspector",
   blackduck: "blackduck",
+  veracode: "veracode",
 } as const satisfies Record<string, Provider>;
 
 export type ExternalFindingsReader = keyof typeof EXTERNAL_FINDINGS_PROVIDERS;
@@ -134,18 +136,21 @@ export async function readExternalFindings(
   }
   if (options.provider === "github")
     return { findings: await readGitHubFindings(path, target) };
-  if (options.provider === "inspector" || options.provider === "blackduck") {
+  if (
+    options.provider === "inspector" ||
+    options.provider === "blackduck" ||
+    options.provider === "veracode"
+  ) {
     const url = options.sourceRepositoryUrl ?? "";
-    const findings =
-      options.provider === "inspector"
-        ? await readInspectorFindings(
-            path,
-            url,
-            target,
-            options.inspectorProjectMap,
-          )
-        : await readBlackDuckFindings(path, url, target);
-    return { findings, sourceRepositories: [{ url }] };
+    const read = {
+      inspector: readInspectorFindings,
+      blackduck: readBlackDuckFindings,
+      veracode: readVeracodeFindings,
+    }[options.provider];
+    return {
+      findings: await read(path, url, target, options.inspectorProjectMap),
+      sourceRepositories: [{ url }],
+    };
   }
   const publication = await readVendorFindingsForPublication(path, target);
   const sourceRepositories = publication.current.findings.flatMap((finding) =>

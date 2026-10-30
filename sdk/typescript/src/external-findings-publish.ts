@@ -40,6 +40,7 @@ import {
   blackDuckReportRepositories,
   projectedBlackDuckRepositoryUrl,
 } from "./blackduck-findings.js";
+import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import {
   snapshotImportOptions,
@@ -758,7 +759,19 @@ async function preparePublicationInput(
     const repositories = replay
       ? undefined
       : blackDuckReportRepositories(options.provider, findings, "cloud");
-    if (!replay || options.provider === "inspector") {
+    if (!saved || options.provider === "veracode") {
+      for (const [id, source] of veracodeReportRepositories(
+        options.provider,
+        findings,
+        "cloud",
+      ))
+        requireDestination(id, source.url);
+    }
+    if (
+      !replay ||
+      options.provider === "inspector" ||
+      options.provider === "veracode"
+    ) {
       const binding = inspectorReportRepository(
         options.provider,
         findings,
@@ -772,7 +785,13 @@ async function preparePublicationInput(
       const projected = repositories
         ? repositories.get(id)?.url
         : projectedBlackDuckRepositoryUrl(finding, "cloud");
-      if (replay && !projected && options.provider !== "inspector") continue;
+      if (
+        replay &&
+        !projected &&
+        options.provider !== "inspector" &&
+        options.provider !== "veracode"
+      )
+        continue;
       const urls = [
         projected,
         evidence.details?.repository?.url,

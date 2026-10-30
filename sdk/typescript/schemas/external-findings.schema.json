@@ -385,7 +385,8 @@
             "github",
             "semgrep",
             "inspector",
-            "blackduck"
+            "blackduck",
+            "veracode"
           ],
           "title": "Provider",
           "type": "string"

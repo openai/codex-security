@@ -28,6 +28,7 @@ import {
   projectedBlackDuckRepositoryUrl,
 } from "./blackduck-findings.js";
 import { isGitHubCloudHost, parseGitRemote } from "./git-remote.js";
+import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import { isRecord } from "./record.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
@@ -276,7 +277,7 @@ function localRepositoryPlatform(
   };
 }
 
-function sameBlackDuckRepositories(
+function sameScannerRepositories(
   remotes: Iterable<RemoteRepositoryIdentity>,
 ): boolean {
   let known: RemoteRepositoryIdentity | undefined;
@@ -539,7 +540,10 @@ async function requireMatchingRepository(
     const urls = await readGit(["remote", "get-url", "--all", "--", name]);
     remotes.push(...urls.split(/\r?\n/u));
   }
-  const boundProvider = provider === "inspector" || provider === "blackduck";
+  const boundProvider =
+    provider === "inspector" ||
+    provider === "blackduck" ||
+    provider === "veracode";
   const loosePlatformFor = localRepositoryPlatform(provider, sources, false);
   for (const source of sources) {
     const bound = boundProvider || strictSources.has(source.url);
@@ -721,12 +725,22 @@ export async function prepareLocalImport(
     readerSources,
     true,
   );
+  const sameRepositories = (urls: Iterable<string>) =>
+    sameScannerRepositories(Array.from(urls, identify));
   const bound = blackDuckReportRepositories(
     options.provider,
     current.findings,
     "local",
-    (urls) => sameBlackDuckRepositories(Array.from(urls, identify)),
+    sameRepositories,
   );
+  for (const source of veracodeReportRepositories(
+    options.provider,
+    current.findings,
+    "local",
+    sameRepositories,
+  ).values()) {
+    sources.set(source.url, source);
+  }
   const strictSources = new Map<string, Provider>();
   const known = new Set<string>(parsedSources.map(({ url }) => url));
   for (const finding of current.findings) {
@@ -748,7 +762,7 @@ export async function prepareLocalImport(
             ? "github"
             : operatorPlatform({ url: claim });
       if (
-        !sameBlackDuckRepositories(
+        !sameScannerRepositories(
           claims.map(
             (claim) =>
               remoteRepository(claim, rowPlatform(claim), true) ?? {
@@ -780,7 +794,7 @@ export async function prepareLocalImport(
       .filter((remote) => !represented.has(JSON.stringify(remote)));
     for (const [key, group] of Map.groupBy(aliases, (remote) => remote.key)) {
       const candidates = byKey.get(key);
-      if (!candidates || !sameBlackDuckRepositories([...candidates, ...group]))
+      if (!candidates || !sameScannerRepositories([...candidates, ...group]))
         throw new CodexSecurityError(
           "Reader repository does not match a source in the normalized findings.",
         );
@@ -816,7 +830,7 @@ export async function prepareLocalImport(
     options.provider === "blackduck" &&
     current.findings.length &&
     sources.size > 1 &&
-    !sameBlackDuckRepositories(Array.from(sources.keys(), identify))
+    !sameScannerRepositories(Array.from(sources.keys(), identify))
   )
     throw new CodexSecurityError(
       "Black Duck occurrences must belong to the same project version and source repository.",

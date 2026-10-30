@@ -3,15 +3,9 @@ import { CodexSecurityError } from "./errors.js";
 import type { Provider } from "./external-import-models.js";
 import {
   type ExternalImportTarget,
-  cloudRepositoryUrlKey,
-  repositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";
-import type {
-  ExternalFinding,
-  ExternalFindings,
-  ExternalSourceRepository,
-} from "./external-findings.js";
+import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
 import { canonicalJson, isRecord } from "./record.js";
 import {
   array,
@@ -23,7 +17,10 @@ import {
   text,
 } from "./scanner-import.js";
 import { FailureSeveritySchema } from "./scan-settings.js";
-import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
+import {
+  declaredScannerRepositoryUrl,
+  repositoryScopeValidator,
+} from "./scanner-repository-url.js";
 
 const format = "blackduck-bom-6";
 const componentVersionPath = /^components\/[^/]+\/versions\/[^/]+$/u;
@@ -57,7 +54,7 @@ function retainedRepository(
   provider: Provider,
   finding: ExternalFinding,
   target: ExternalImportTarget,
-): { url: string; projectVersion?: string } | undefined {
+): { url: string; scope?: string } | undefined {
   const {
     source_finding_id: id,
     evidence: { source_data: data },
@@ -99,54 +96,13 @@ function retainedRepository(
     throw new Error(
       "Black Duck source finding ID contradicts the retained native occurrence.",
     );
-  return { url, projectVersion };
+  return { url, scope: projectVersion };
 }
 
-export function blackDuckReportRepositories(
-  provider: Provider,
-  findings: readonly ExternalFinding[],
-  target: ExternalImportTarget,
-  sameRepositories: (urls: Iterable<string>) => boolean = (urls) =>
-    new Set(
-      Array.from(
-        urls,
-        target === "cloud" ? cloudRepositoryUrlKey : repositoryUrlKey,
-      ),
-    ).size <= 1,
-): Map<string, ExternalSourceRepository> {
-  const repositories = new Map<string, ExternalSourceRepository>();
-  const projects = new Set<string>();
-  const sources = new Set<string>();
-  for (const finding of findings) {
-    const { source_finding_id: id, evidence } = finding;
-    const retained = retainedRepository(provider, finding, target);
-    const declared = evidence.details?.repository?.url;
-    if (declared) sources.add(declared);
-    if (!retained) continue;
-    sources.add(retained.url);
-    if (
-      declared &&
-      declared !== retained.url &&
-      !sameRepositories([declared, retained.url])
-    )
-      throw new Error(
-        "Retained scanner repository does not match the normalized evidence repository.",
-      );
-    if (retained.projectVersion) projects.add(retained.projectVersion);
-    repositories.set(id, { url: retained.url });
-  }
-  if (provider !== "blackduck") return repositories;
-  if (
-    projects.size > 1 ||
-    ((target === "local" || projects.size > 0) &&
-      sources.size > 1 &&
-      !sameRepositories(sources))
-  )
-    throw new Error(
-      "Black Duck occurrences must belong to the same project version and source repository.",
-    );
-  return repositories;
-}
+export const blackDuckReportRepositories = repositoryScopeValidator(
+  { provider: "blackduck", label: "Black Duck", scope: "project version" },
+  retainedRepository,
+);
 
 function parseApiResource(href: string | null) {
   const url = href && URL.parse(href);

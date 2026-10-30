@@ -71,6 +71,11 @@ import {
   inspectorRepositoryUrl,
 } from "./support/inspector-import-fixtures.js";
 import { normalizeBlackDuckFindings } from "../src/blackduck-findings.js";
+import { normalizeVeracodeFindings } from "../src/veracode-findings.js";
+import {
+  veracodePolicyPage,
+  veracodePolicyRow,
+} from "./support/veracode-import-fixtures.js";
 import {
   blackDuckBomReport,
   blackDuckBomRow,
@@ -213,6 +218,7 @@ for (const provider of ["wiz", "snyk"] as const) {
 test("Wiz's gzip JSON report retains finding identity, evidence and repository locations", async () => {
   const report = {
     id: "vendor-report-1",
+    row: veracodePolicyRow(),
     name: "CVE-2026-0001",
     detailedName: "example-package",
     version: "1.2.3",
@@ -234,7 +240,7 @@ test("Wiz's gzip JSON report retains finding identity, evidence and repository l
   await writeFile(
     f.file,
     gzipSync(
-      [report, { ...report, id: "vendor-report-2" }]
+      [report, { ...report, id: `veracode-static-policy:${"a".repeat(64)}` }]
         .map((record) => JSON.stringify(record))
         .join("\n"),
     ),
@@ -1216,27 +1222,60 @@ test("a normalized Inspector retry checks its typed repository without native ev
   expect(f.posts).toHaveLength(1);
 });
 
+const savedBlackDuckEvidence = {
+  data: { format: "blackduck-bom-6" },
+  requiredProvider: "blackduck",
+  digest: "d3001de83673b0f42b1d1d42cb19ea546869d41ed99504ca213b303267bb1346",
+};
+
+const savedDependabotData = {
+  ...githubDependabotAlert(),
+  sourceRepositoryUrl: "https://github.com/example/different",
+};
+
 test.each([
-  ["wiz", "2dfdb44c2c7494f4eed20e59244df967598fc3a284589ec2f6c3a24bfff7b2d0"],
-  [
-    "inspector",
-    "d0ba21fbe6c5927206db937694c98f69ad59e33fc390cae6eb6bd01249b5ca10",
-  ],
-  [
-    "github",
-    "2dc327e13b7b9548e828b0fe3193988a26c53c9c956b364c69990abdb418c298",
-  ],
-] as const)(
-  "checks a saved %s request from before Black Duck provider checks",
-  async (provider, checkpointKey) => {
+  {
+    ...savedBlackDuckEvidence,
+    selected: options,
+    filename:
+      "2dfdb44c2c7494f4eed20e59244df967598fc3a284589ec2f6c3a24bfff7b2d0.pending.json",
+  },
+  {
+    ...savedBlackDuckEvidence,
+    selected: { ...options, provider: "inspector" as const },
+    filename:
+      "d0ba21fbe6c5927206db937694c98f69ad59e33fc390cae6eb6bd01249b5ca10.pending.json",
+  },
+  {
+    selected: { ...options, provider: "github" as const },
+    data: savedDependabotData,
+    requiredProvider: "blackduck",
+    filename:
+      "2dc327e13b7b9548e828b0fe3193988a26c53c9c956b364c69990abdb418c298.pending.json",
+    digest: "abe417c10599f27dc9adc599465af29f693069deaca7942f79c952871216070e",
+  },
+  {
+    selected: { ...options, provider: "inspector" as const },
+    data: {
+      sourceRepositoryUrl: inspectorRepositoryUrl,
+      applicationUrl: veracodePolicyPage()._links.application.href,
+      row: veracodePolicyRow(),
+    },
+    requiredProvider: "veracode",
+    filename:
+      "7d21ed6ce9acbc4bf00c5c7d7ed02b8e7937e92efa796e6218d57273eb9ce2f4.pending.json",
+    digest: "13b472f7b050ef94705eed1fb4487b206386130f988d3ee6f87824f02f4d79f0",
+  },
+])(
+  "checks a saved $selected.provider request from before $requiredProvider checks",
+  async ({ selected, data, requiredProvider, filename, digest }) => {
     const f = await fixture();
-    const settings = { ...options, provider };
     const environment: NodeJS.ProcessEnv = { ...f.environment };
     // These persisted keys came from the default deployment.
     delete environment["CODEX_SECURITY_CLOUD_BASE_URL"];
     delete environment["CODEX_SECURITY_CLOUD_WEB_URL"];
-    const alert = provider === "github" ? githubDependabotAlert() : undefined;
-    const other = "https://github.com/example/different";
+    const alert =
+      selected.provider === "github" ? savedDependabotData : undefined;
     const row = normalized();
     const finding = {
       source_finding_id: alert
@@ -1248,14 +1287,14 @@ test.each([
               title: "Dependabot alert",
               severity: "high",
               url: alert.html_url,
-              source_data: { ...alert, sourceRepositoryUrl: other },
+              source_data: data,
             }
-          : { ...row.evidence, source_data: { format: "blackduck-bom-6" } },
+          : { ...row.evidence, source_data: data },
       ),
     };
     const input = { read: 1, excluded: [], findings: [finding] };
     const prepare = () =>
-      prepareNormalizedExternalPublication(input, settings, {
+      prepareNormalizedExternalPublication(input, selected, {
         ...f.deps,
         environment,
       });
@@ -1266,23 +1305,20 @@ test.each([
       f.environment.CODEX_SECURITY_STATE_DIR,
       "external-finding-publications",
     );
-    const digest = alert
-      ? "abe417c10599f27dc9adc599465af29f693069deaca7942f79c952871216070e"
-      : "d3001de83673b0f42b1d1d42cb19ea546869d41ed99504ca213b303267bb1346";
     const request = {
       request_id: "efbc3c2e-0462-4411-89aa-9ced1d34223c",
       repository: {
-        id: options.repository,
+        id: selected.repository,
         repo_connector_id: "github",
         environment_id: f.state.environmentId,
         reset_marker: f.state.marker,
       },
-      source: { provider, source_key: options.sourceKey },
+      source: { provider: selected.provider, source_key: selected.sourceKey },
       items: [{ client_id: "item-1", ...finding, expected_version: 0 }],
     };
     await mkdir(directory, { recursive: true, mode: 0o700 });
     await writeFile(
-      join(directory, `${checkpointKey}.pending.json`),
+      join(directory, filename),
       JSON.stringify({
         accountId: "synthetic-account",
         requests: [request],
@@ -1295,7 +1331,7 @@ test.each([
       // The original publisher selected the alert's repository. Changing the
       // catalog to match the projection must not permit replay to another repo.
       const originalRepository = f.state.repositoryUrl;
-      f.state.repositoryUrl = other;
+      f.state.repositoryUrl = alert.sourceRepositoryUrl;
       await expect(prepare()).rejects.toThrow(
         `belongs to "${originalRepository}"`,
       );
@@ -1306,7 +1342,9 @@ test.each([
     expect(retry.preview.resumed).toBe(true);
     expect((await retry.publish()).counts.created).toBe(1);
     expect(f.posts.map((body) => JSON.parse(body))).toEqual([request]);
-    await expect(prepare()).rejects.toThrow("requires the blackduck provider");
+    await expect(prepare()).rejects.toThrow(
+      `requires the ${requiredProvider} provider`,
+    );
   },
 );
 
@@ -1473,6 +1511,101 @@ test("Black Duck Cloud replay preserves package occurrence and rejects a differe
   expect(resumed.preview.resumed).toBe(true);
   await resumed.publish();
   expect(correct.posts.slice(-2)).toEqual([expected, expected]);
+});
+
+test("Veracode Cloud replays an application policy issue and rejects a foreign destination before POST", async () => {
+  const page = veracodePolicyPage([veracodePolicyRow(1)]);
+  const correct = await fixture([page]);
+  const selected = {
+    ...options,
+    provider: "veracode" as const,
+    sourceRepositoryUrl: "https://github.com/example/project",
+    sourceKey: "veracode/example/static",
+  };
+  const prepare = () =>
+    prepareExternalPublication(correct.file, selected, correct.deps);
+  const first = await prepare();
+  expect(first.preview.requests[0]!.source.provider).toBe("veracode");
+  await expect(
+    prepareNormalizedExternalPublication(
+      normalizeVeracodeFindings(page, selected.sourceRepositoryUrl),
+      { ...selected, provider: "wiz" },
+      correct.deps,
+    ),
+  ).rejects.toThrow(/requires the veracode provider/i);
+  for (const row of [
+    { ...veracodePolicyRow(), context_type: "SANDBOX" },
+    { ...veracodePolicyRow(), scan_type: "DYNAMIC" },
+  ]) {
+    const input = normalizeVeracodeFindings(page, selected.sourceRepositoryUrl);
+    input.findings[0]!.source_finding_id = "sdk-id";
+    input.findings[0]!.evidence.source_data!["row"] = row;
+    await expect(
+      prepareNormalizedExternalPublication(input, selected, correct.deps),
+    ).rejects.toThrow(/context|STATIC/);
+  }
+  const partial = normalizeVeracodeFindings(page, selected.sourceRepositoryUrl);
+  const finding = partial.findings[0]!;
+  delete finding.evidence.source_data!["applicationUrl"];
+  const foreignUrl = "https://github.com/example/other";
+  const foreign = await fixture(undefined, foreignUrl);
+  finding.evidence.details!.repository!.url = foreignUrl;
+  for (const id of [finding.source_finding_id, "sdk-id"]) {
+    finding.source_finding_id = id;
+    await expect(
+      prepareNormalizedExternalPublication(
+        partial,
+        { ...selected, provider: "wiz" },
+        foreign.deps,
+      ),
+    ).rejects.toThrow(/requires the veracode provider/i);
+  }
+  finding.evidence.details!.repository!.url = selected.sourceRepositoryUrl;
+  await expect(
+    prepareNormalizedExternalPublication(partial, selected, correct.deps),
+  ).rejects.toThrow(/retained application/i);
+  finding.evidence.source_data = {
+    sourceRepositoryUrl: selected.sourceRepositoryUrl,
+    applicationUrl:
+      "https://scanner.example.test/appsec/v1/applications/dashboard",
+    row: { status: "ready" },
+  };
+  expect(
+    (
+      await prepareNormalizedExternalPublication(
+        partial,
+        { ...selected, provider: "wiz" },
+        correct.deps,
+      )
+    ).preview.findings,
+  ).toHaveLength(1);
+  const mixed = normalizeVeracodeFindings(page, selected.sourceRepositoryUrl);
+  const sdkFinding = structuredClone(mixed.findings[0]!);
+  sdkFinding.source_finding_id = "sdk-id";
+  delete sdkFinding.evidence.source_data;
+  sdkFinding.evidence.details!.repository!.url =
+    "https://github.com/example/other";
+  mixed.findings.push(sdkFinding);
+  mixed.read++;
+  await expect(
+    prepareNormalizedExternalPublication(mixed, selected, correct.deps),
+  ).rejects.toThrow(/does not match/);
+  expect(correct.posts).toHaveLength(0);
+  first.preview.requests[0]!.items[0]!.evidence.source_data![
+    "sourceRepositoryUrl"
+  ] = "https://github.com/example/other";
+  correct.state.loseResponse = true;
+  await expect(first.publish()).rejects.toThrow("resume the saved request");
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).counts.created).toBe(1);
+  expect(correct.posts[1]).toBe(correct.posts[0]);
+  expect((await (await prepare()).publish()).counts.unchanged).toBe(1);
+  const other = await fixture([page], "https://github.com/example/other");
+  await expect(
+    prepareExternalPublication(other.file, selected, other.deps),
+  ).rejects.toThrow(/does not match/i);
+  expect(other.posts).toHaveLength(0);
 });
 
 test("CLI preview and rejected confirmation never POST or persist an upload", async () => {
