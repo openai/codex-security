@@ -80,6 +80,28 @@ export function localFindingRepositories(
   return [];
 }
 
+/** Original run provenance survives a normalized caller dropping typed repository details. */
+export function semgrepSarifRepositories({
+  evidence,
+}: ExternalFinding): ExternalSourceRepository[] {
+  const data = evidence.source_data;
+  const document = data?.["documentContext"];
+  if (!isRecord(document) || document["version"] !== "2.1.0") return [];
+  const context = data?.["runContext"];
+  const references = isRecord(context)
+    ? context["versionControlProvenance"]
+    : undefined;
+  return Array.isArray(references)
+    ? references.flatMap((reference) =>
+        isRecord(reference) &&
+        typeof reference["repositoryUri"] === "string" &&
+        reference["repositoryUri"].trim()
+          ? [{ url: reference["repositoryUri"] }]
+          : [],
+      )
+    : [];
+}
+
 /** @internal Read vendor evidence for the local and Cloud import entrypoints. */
 export async function readExternalFindings(
   path: string,
@@ -121,21 +143,9 @@ export async function readExternalFindings(
       target,
     );
     if (semgrepPlatformReportRepository(findings)) return { findings };
-    const sourceRepositories = findings.findings.flatMap(({ evidence }) => {
-      const context = evidence.source_data?.["runContext"];
-      const references = isRecord(context)
-        ? context["versionControlProvenance"]
-        : undefined;
-      return Array.isArray(references)
-        ? references.flatMap((reference) =>
-            isRecord(reference) &&
-            typeof reference["repositoryUri"] === "string" &&
-            reference["repositoryUri"].trim()
-              ? [{ url: reference["repositoryUri"] }]
-              : [],
-          )
-        : [];
-    });
+    const sourceRepositories = findings.findings.flatMap(
+      semgrepSarifRepositories,
+    );
     return { findings, sourceRepositories };
   }
   if (options.provider === "github")

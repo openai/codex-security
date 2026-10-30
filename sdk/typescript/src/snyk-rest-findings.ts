@@ -947,8 +947,6 @@ export function normalizeSnykIssues(
   target: ExternalImportTarget = "local",
   references: readonly ExternalSourceRepository[] = [],
 ): SnykIssuesFindings {
-  if (target !== "local")
-    throw new Error("Snyk REST issues currently support local import only.");
   const wire = record(input, "Snyk REST Issues export");
   const document = readSnykRestDocument(wire);
   const { source, context, repository } = savedContext(document, references);
@@ -1059,6 +1057,7 @@ export function snykRestImportRepository(
   provider: Provider,
   urls: Iterable<string> = [],
   trustedSources: readonly ExternalSourceRepository[] = [],
+  allowOpaqueLegacyRows = false,
 ): RepositoryBinding | undefined {
   const project =
     "snykRestContext" in input
@@ -1071,7 +1070,14 @@ export function snykRestImportRepository(
       : undefined;
   const bindings = input.findings
     .filter(isSnykRestFinding)
-    .map((finding) => snykRestFindingRepository(finding, trustedSources));
+    .flatMap((finding) => {
+      try {
+        return [snykRestFindingRepository(finding, trustedSources)];
+      } catch (error) {
+        if (!allowOpaqueLegacyRows) throw error;
+        return [];
+      }
+    });
   const selected = project?.scope ?? bindings[0]?.scope;
   if (selected) {
     for (const { scope } of bindings) {

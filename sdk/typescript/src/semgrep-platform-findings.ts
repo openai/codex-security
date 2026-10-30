@@ -1,4 +1,5 @@
 import {
+  DEFAULT_CLOUD_STRING_BYTES,
   validateExternalEvidence,
   type ExternalImportTarget,
 } from "./external-import-contract.js";
@@ -817,6 +818,16 @@ export function semgrepPlatformFindingBinding(
   const row = parseSemgrepResponse(
     requiredText(data["semgrepPlatformFindingJson"], "Semgrep finding JSON"),
   );
+  const other = data["finding"];
+  if (
+    (legacy && Object.hasOwn(data, "finding")) ||
+    (isRecord(other) && isLegacyId(other["id"]))
+  ) {
+    const restored = restoreLegacyHostedNumbers(data)["finding"];
+    const originalRow = parseSemgrepResponse(JSON.stringify(restored));
+    if (JSON.stringify(originalRow) !== JSON.stringify(row))
+      throw new Error("The retained Semgrep finding representations disagree.");
+  }
   const selectable = checkSemgrepPlatformRow(
     row,
     scope,
@@ -886,7 +897,7 @@ export function semgrepPlatformFindingBinding(
   };
 }
 
-/** Normalize a saved selection or a scoped Platform project export for local replay. */
+/** Normalize a saved selection or Platform project export. The default target is local. */
 export function normalizeSemgrepPlatformFindings(
   report: unknown,
   options: string | Partial<SemgrepImportOptions> = {},
@@ -895,8 +906,6 @@ export function normalizeSemgrepPlatformFindings(
     ? (options.sourceRepositories ?? [])
     : [],
 ) {
-  if (target !== "local")
-    throw new Error("Semgrep Platform findings require a local import.");
   const declaredUrl =
     typeof options === "string" ? options : options.sourceRepositoryUrl;
   const saved = record(report, "Semgrep Platform report");
@@ -913,7 +922,20 @@ export function normalizeSemgrepPlatformFindings(
     ? upgradeSemgrepPlatformReport(
         saved,
         declaredUrl,
-        referenceRepositoryKey(references),
+        target === "cloud"
+          ? (url) => {
+              // The Cloud catalog distinguishes an explicit port in the native URL or mapping.
+              const { platform } = semgrepPlatformRepositoryReference(
+                url,
+                references,
+              );
+              return hostedRepositoryUrlKey(
+                url,
+                platform === "github",
+                platform === "gitlab",
+              );
+            }
+          : referenceRepositoryKey(references),
         references,
       )
     : saved;
@@ -1087,9 +1109,17 @@ function normalizePlatformRows(
           namedOnly,
         ),
       };
-      const messageTitle =
+      let messageTitle =
         description ??
         (legacy ? null : `Semgrep finding ${readId(finding["id"])}`);
+      if (
+        target === "cloud" &&
+        description &&
+        Buffer.byteLength(description) > DEFAULT_CLOUD_STRING_BYTES
+      ) {
+        const id = finding["id"];
+        messageTitle = `Semgrep finding ${text(id) ?? readId(id)}`;
+      }
       if (scope.product === "sca") {
         const dependency = record(
           finding["found_dependency"] ?? {},

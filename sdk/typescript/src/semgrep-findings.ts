@@ -402,12 +402,9 @@ export function normalizeSemgrepSarif(
   );
 }
 
-export async function readSemgrepFindings(
-  path: string,
-  options: Partial<SemgrepImportOptions> = {},
-  target: ExternalImportTarget = "cloud",
-): Promise<ExternalFindings> {
-  const report = await readScannerJson(path, (json) => {
+/** @internal Read the original file before resolving repository provenance. */
+export async function readSemgrepReport(path: string): Promise<unknown> {
+  return readScannerJson(path, (json) => {
     // Pick a parser before allocating the findings array. Verify the root:
     // the member can be nested in a native report or escaped in a Platform one.
     const parser = /"format"\s*:\s*"semgrep-platform-findings\/v[12]"/u.test(
@@ -424,5 +421,16 @@ export async function readSemgrepFindings(
         : JSON.parse;
     return parser === requiredParser ? parsed : requiredParser(json);
   });
-  return normalizeSemgrepFindings(report, options, target);
+}
+
+export async function readSemgrepFindings(
+  path: string,
+  options: Partial<SemgrepImportOptions> = {},
+  target: ExternalImportTarget = "cloud",
+): Promise<ExternalFindings> {
+  return normalizeSemgrepFindings(
+    await readSemgrepReport(path),
+    options,
+    target,
+  );
 }

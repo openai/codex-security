@@ -522,17 +522,28 @@ export function normalizeSnykJson(
   );
 }
 
+/** @internal Keep the native JSON snapshot for catalog-bound file publication. */
+export function readSnykReport(path: string): Promise<unknown> {
+  return readScannerJson(path, parseSnykReport);
+}
+
 export async function readSnykFindings(
   path: string,
   target: ExternalImportTarget = "cloud",
   references: readonly ExternalSourceRepository[] = [],
 ): Promise<ExternalFindings> {
-  const input = await readScannerJson(path, parseSnykReport);
+  return normalizeSnykFile(await readSnykReport(path), target, references);
+}
+
+/** @internal Dispatch a parsed Snyk file using the same rules as readSnykFindings. */
+export async function normalizeSnykFile(
+  input: unknown,
+  target: ExternalImportTarget,
+  references: readonly ExternalSourceRepository[],
+): Promise<ExternalFindings> {
   if (Array.isArray(input)) return normalizeSnykJson(input, target);
   const document = record(input, "Snyk findings");
   if (isSnykRestFormat(document["format"])) {
-    if (target !== "local")
-      throw new Error("Snyk REST issues currently support local import only.");
     const { normalizeSnykIssues } = await import("./snyk-rest-findings.js");
     return normalizeSnykIssues(
       document["format"] === SNYK_REST_ISSUES_V1

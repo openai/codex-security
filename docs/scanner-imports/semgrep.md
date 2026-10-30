@@ -8,7 +8,7 @@ Prefer native **Semgrep Code/SAST CLI or CI JSON** for this reader. It preserves
 the scanner's original severity and source evidence. Self-contained SARIF 2.1.0
 is a compatibility path. Both formats may be plain or gzip-compressed.
 
-For local import of selected existing Code findings, see [Existing Platform findings](#existing-platform-findings).
+To import selected existing Code findings, see [Existing Platform findings](#existing-platform-findings).
 
 To produce JSON locally, run the following from the source repository root with
 your selected SAST rules. This runs a new scan; it does not retrieve earlier
@@ -117,6 +117,18 @@ When passing normalized findings to the SDK, keep each generated Semgrep
 caller-managed identity, use an opaque ID of your own. The generated Semgrep ID
 requires the original scoped evidence on every import.
 
+To publish the selection to Cloud, use the same file and source key:
+
+```sh
+codex-security publish findings selected.json --to cloud --provider semgrep \
+  --repository https://github.com/example/project --source-key example/project/release/platform --dry-run
+```
+
+Use the same Cloud command for a collected backlog. The publisher checks the
+original project's repository against the authorized destination, including
+Supply Chain findings with no typed repository field. After reviewing the
+preview, repeat without `--dry-run`.
+
 ## Collect a Platform project and branch
 
 With a Web API token in `SEMGREP_APP_TOKEN`, collect all findings returned for a
@@ -157,7 +169,7 @@ report=$(mktemp ./semgrep-backlog.XXXXXX) &&
 Use `--semgrep-product sca` for Supply Chain or `ai_sast` for AI-powered
 detection. The default is `sast`. Use `--source-repository-url` on collection
 when the project has no repository URL. Save the complete output from a successful
-command; the local importer checks the recorded finding count and repository/ref
+command. The importer checks the recorded finding count and repository/ref
 claims. It retains each original finding as JSON text so large IDs survive replay. The reader also accepts saved v1 project exports with native object rows and decimal type witnesses.
 Supply Chain findings include native package versions, matching fix recommendations
 and advisory IDs when Semgrep supplies them. With the same source key, importing identical Code findings that qualify for individual

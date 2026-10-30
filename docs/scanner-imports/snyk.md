@@ -50,13 +50,30 @@ and product, even when an SDK reader omits the report header.
 
 For private source-control hosts, use the same repository URL as the checkout.
 SDK callers that have independently verified a GitHub Enterprise or GitLab
-repository can pass its canonical HTTPS URL and platform to the local importer.
+repository can pass its canonical HTTPS URL and platform to local or Cloud
+preparation. Cloud checks that source against the selected repository.
 This allows that repository's standard SSH clone URL and `.git` suffix. For
 example, a GitLab repository uses
 `sourceRepositories: [{ url: sourceRepositoryUrl, platform: "gitlab" }]`
 in the SDK dependencies. Use `platform: "github"` for GitHub Enterprise.
 When reading the saved file directly, pass the same verified sources as the
 third argument to `readSnykFindings(path, "local", sourceRepositories)`.
+
+To preview the saved issues in Cloud, use the same source key and an authorized repository:
+
+```sh
+codex-security publish findings snyk-issues.json --to cloud --provider snyk \
+  --source-key ORG_ID/PROJECT_ID --repository https://github.com/example/project --dry-run
+```
+
+Review the preview and repeat without `--dry-run` to publish. The original Snyk
+project must match the selected Cloud repository. If Cloud accepted a request
+but the response was lost, repeat the same command to resume the saved request.
+
+For a new normalized SDK import, keep the original Snyk issue and project
+evidence alongside its generated finding ID. If you build a projection without
+that evidence, supply your own stable finding ID and the source repository URL.
+An already approved, pending request resumes with its saved evidence.
 
 ## Fresh Open Source scans
 

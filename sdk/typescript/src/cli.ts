@@ -4123,7 +4123,7 @@ export async function main(
     imports.command("snyk", {
       description:
         "Read Snyk Open Source or Code issues for one monitored project.",
-      hint: "Requires SNYK_TOKEN. Save complete --format json output and import it with publish findings --to local --provider snyk.",
+      hint: "Requires SNYK_TOKEN. Save the complete --format json output. Use publish findings --provider snyk with --to local or --to cloud.",
       destructive: false,
       mcp: false,
       args: z.object({
@@ -4183,7 +4183,7 @@ export async function main(
     });
     imports.command("semgrep", {
       description: "Read Semgrep Platform findings for one project and ref.",
-      hint: "Requires SEMGREP_APP_TOKEN with Web API access. Save complete --format json output and import it with publish findings --to local --provider semgrep.",
+      hint: "Requires SEMGREP_APP_TOKEN with Web API access. Save the complete --format json output. Use publish findings --provider semgrep with --to local or --to cloud.",
       destructive: false,
       mcp: false,
       args: z.object({

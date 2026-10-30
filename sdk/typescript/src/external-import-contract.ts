@@ -25,6 +25,7 @@ const localSchema = JSON.parse(
     key === "maxLength" || key === "maxItems" ? undefined : value,
   ),
 ) as typeof schema;
+export const DEFAULT_CLOUD_STRING_BYTES = 512;
 const STRING_BYTE_LIMITS: Readonly<Record<string, number>> = {
   description: 65536,
   snippet: 65536,
@@ -85,7 +86,7 @@ function validateModelStrings(
         throw new Error(
           `${field} must be nonempty and contain no NUL characters.`,
         );
-      const limit = STRING_BYTE_LIMITS[field] ?? 512;
+      const limit = STRING_BYTE_LIMITS[field] ?? DEFAULT_CLOUD_STRING_BYTES;
       if (target === "cloud" && Buffer.byteLength(value) > limit)
         throw new Error(
           `${field} exceeds its Cloud limit of ${limit} UTF-8 bytes.`,

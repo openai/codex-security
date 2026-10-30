@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { semgrepJson } from "./support/semgrep-import-fixtures.js";
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
-import { prepareNormalizedExternalPublication } from "../src/external-findings-publish.js";
 import { cloudRepositoryUrlKey } from "../src/external-import-contract.js";
 import { isolatedGitReportFixture as localReportFixture } from "./external-findings-local-helpers.js";
 import {
@@ -29,6 +28,19 @@ const code = {
   repository: { url },
   rule: { name: "fixture.rule" },
 };
+
+test("Cloud shortens a long v1 message title using its original textual ID", () => {
+  const description = "é".repeat(257);
+  const report = {
+    ...scope,
+    format: "semgrep-platform-findings/v1",
+    findingCount: 1,
+    findings: [{ id: "1.3e1", rule_message: description }],
+  };
+  expect(
+    normalizeSemgrepFindings(report, {}, "cloud").findings[0]?.evidence,
+  ).toMatchObject({ title: "Semgrep finding 1.3e1", description });
+});
 
 test.each(["sast", "ai_sast", "sca"])(
   "v1 %s requires the original title sources",
@@ -571,74 +583,21 @@ test("the retained repository witness stays stable when the API returns rows in 
   expect(project([byUrl, byId])).toEqual(first);
 });
 
-test("unmarked legacy native IDs identify a URL-less Semgrep project without claiming generic Wiz records", async () => {
-  const options = {
-    provider: "wiz" as const,
-    sourceKey: "demo/topic",
-    repository: url,
-  };
-  const dependencies = {
-    environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
-    credentials: async () => {
-      throw new Error("Reached Cloud credential lookup");
+test("legacy rows with a generic format retain their repository for the Semgrep provider", () => {
+  const finding = {
+    source_finding_id: "opaque",
+    evidence: {
+      title: "Example",
+      severity: "low" as const,
+      branch: scope.ref,
+      details: { kind: "sast" as const, repository: { url } },
+      source_data: { ...scope, format: "normalized/v1", finding: { id: 12 } },
     },
   };
-  const report = (
-    id: string | number | null,
-    projectUrl: string | null,
-    format?: string,
-  ) => ({
-    read: 1,
-    excluded: [],
-    findings: [
-      {
-        source_finding_id: "opaque",
-        evidence: {
-          title: "Example",
-          severity: "low" as const,
-          source_data: {
-            ...scope,
-            ...(format && { format }),
-            project: { ...scope.project, id: 10, url: projectUrl },
-            finding: { id },
-          },
-        },
-      },
-    ],
-  });
-  await expect(
-    prepareNormalizedExternalPublication(
-      report("1.2e1", null),
-      options,
-      dependencies,
-    ),
-  ).rejects.toThrow("local import");
-  await expect(
-    prepareNormalizedExternalPublication(
-      report(null, null),
-      { ...options, provider: "semgrep" },
-      dependencies,
-    ),
-  ).rejects.toThrow("local import");
-  await expect(
-    prepareNormalizedExternalPublication(
-      report(12, url, "normalized/v1"),
-      { ...options, provider: "semgrep" },
-      dependencies,
-    ),
-  ).rejects.toThrow("local import");
-  const branded = report(12, url, "wiz-findings/v1");
-  expect(
-    semgrepPlatformFindingRepository(branded.findings[0]!, "wiz"),
-  ).toBeUndefined();
-  await expect(
-    prepareNormalizedExternalPublication(branded, options, dependencies),
-  ).rejects.toThrow("Reached Cloud credential lookup");
-  const generic = report("WIZ-1", url);
-  await expect(
-    prepareNormalizedExternalPublication(generic, options, dependencies),
-  ).rejects.toThrow("Reached Cloud credential lookup");
+  expect(semgrepPlatformFindingRepository(finding, "semgrep")).toBe(url);
+  expect(semgrepPlatformFindingRepository(finding, "wiz")).toBeUndefined();
 });
+
 test("v2 files require exact counts and string project IDs", async () => {
   const dir = await mkdtemp(join(tmpdir(), "semgrep-v2-controls-"));
   const path = join(dir, "report.json");

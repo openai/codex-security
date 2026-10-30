@@ -8,7 +8,10 @@ import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import { prepareNormalizedExternalPublication } from "../src/external-findings-publish.js";
 import { normalizeSemgrepFindings } from "../src/semgrep-findings.js";
-import { selectSemgrepPlatformFindings } from "../src/semgrep-platform-findings.js";
+import {
+  normalizeSemgrepPlatformFindings,
+  selectSemgrepPlatformFindings,
+} from "../src/semgrep-platform-findings.js";
 import { localReportFixture as reportFixture } from "./external-findings-local-helpers.js";
 
 function localReportFixture(remote?: string) {
@@ -95,6 +98,28 @@ test("rechecks decimal native IDs when other evidence uses scientific notation",
   expect((await (await fixture.prepare()).import()).counts.unchanged).toBe(1);
 });
 
+test("Semgrep message titles stay intact by default and fall back above 512 Cloud bytes", () => {
+  const exact = "é".repeat(256);
+  const message = exact + "!";
+  expect(
+    normalizeSemgrepPlatformFindings(
+      selectRow({ rule: { message: exact } }),
+      {},
+      "cloud",
+    ).findings[0]?.evidence.title,
+  ).toBe(exact);
+  const report = selectRow({ rule: { message } });
+  expect(
+    normalizeSemgrepPlatformFindings(report).findings[0]?.evidence.title,
+  ).toBe(message);
+  expect(
+    normalizeSemgrepPlatformFindings(report, {}, "cloud").findings[0]?.evidence,
+  ).toMatchObject({
+    title: "Semgrep finding 8",
+    description: message,
+  });
+});
+
 test("two selected Platform SAST IDs from separate pages replay unchanged in SQLite", async () => {
   const report = selection([
     page("8"),
@@ -157,9 +182,10 @@ test("two selected Platform SAST IDs from separate pages replay unchanged in SQL
     unchanged: 2,
   });
   expect(await fixture.read()).toEqual(saved);
-  expect(() =>
-    normalizeSemgrepFindings(report, { sourceRepositoryUrl: url }, "cloud"),
-  ).toThrow("local import");
+  expect(
+    normalizeSemgrepFindings(report, { sourceRepositoryUrl: url }, "cloud")
+      .findings,
+  ).toHaveLength(2);
 });
 
 test("native IDs and source URLs can identify a row with an empty display name", () => {
@@ -640,20 +666,14 @@ test("direct SDK imports respect the native source even with a caller-selected I
   const fetch = mock(async () => {
     throw new Error("Unexpected Cloud request");
   });
-  await expect(
-    prepareNormalizedExternalPublication(normalized, options, {
-      ...deps,
-      fetch,
-    }),
-  ).rejects.toThrow("local import");
   const oversized = structuredClone(normalized);
-  oversized.findings[0]!.evidence.title = "a".repeat(256 * 1024);
+  oversized.findings[0]!.evidence.title = "é".repeat(256) + "!";
   await expect(
     prepareNormalizedExternalPublication(oversized, options, {
       ...deps,
       fetch,
     }),
-  ).rejects.toThrow("local import");
+  ).rejects.toThrow(/title.*512/);
   expect(fetch).not.toHaveBeenCalled();
 
   const row = normalized.findings[0]!;
@@ -679,12 +699,6 @@ test("direct SDK imports respect the native source even with a caller-selected I
   await expect(
     prepareNormalizedLocalImport(normalized, genericOptions, deps),
   ).rejects.toThrow("semgrep provider");
-  await expect(
-    prepareNormalizedExternalPublication(normalized, genericOptions, {
-      ...deps,
-      fetch,
-    }),
-  ).rejects.toThrow("local import");
   const data = row.evidence.source_data!;
   const original = data[rawFindingKey] as string;
   data[rawFindingKey] = JSON.stringify({
@@ -705,12 +719,6 @@ test("direct SDK imports respect the native source even with a caller-selected I
     await expect(
       prepareNormalizedLocalImport(normalized, options, deps),
     ).rejects.toThrow(/Semgrep/i);
-    await expect(
-      prepareNormalizedExternalPublication(normalized, options, {
-        ...deps,
-        fetch,
-      }),
-    ).rejects.toThrow("local import");
   };
   delete data["deployment"];
   await rejectIncomplete();
@@ -724,7 +732,6 @@ test("direct SDK imports respect the native source even with a caller-selected I
     else delete row.evidence.source_data;
     await rejectIncomplete();
   }
-  expect(fetch).not.toHaveBeenCalled();
 
   const source_data = {
     findingJson: "{}",
@@ -749,7 +756,6 @@ test("direct SDK imports respect the native source even with a caller-selected I
   await expect(
     prepareNormalizedExternalPublication(generic, genericOptions, {
       ...deps,
-      fetch,
       credentials,
     }),
   ).rejects.toThrow("Reached Cloud credentials");

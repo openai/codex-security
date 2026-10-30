@@ -88,7 +88,7 @@ before preparing a fresh submission.
   Critical from High; both become diagnostic `error`, mapped to High, in Semgrep
   SARIF. Inspect the selected result for trace/fix details. Platform/MCP
   envelopes and general Supply Chain/Secrets feeds are not Code CLI or SARIF exports.
-- **Semgrep Platform findings.** The local reader binds each native finding ID to its deployment, project ID, ref and product. Individually selected Code findings and complete Code collections share the same identity. See the [Semgrep Platform examples](semgrep.md#existing-platform-findings).
+- **Semgrep Platform findings.** The local and Cloud readers bind each native finding ID to its deployment, project ID, ref and product. Individually selected Code findings and complete Code collections share the same identity. See the [Semgrep Platform examples](semgrep.md#existing-platform-findings).
 - **OpenGrep.** Use native JSON and supply `--source-repository-url`. The
   [OpenGrep guide](opengrep.md) covers export and occurrence identity.
 - **GitHub:** For code scanning, the selected instance supplies path/range, ref
@@ -188,6 +188,23 @@ recover:
   approved command with unchanged input, source key, destination and endpoint to
   resume its saved requests. This also applies if the initial request was saved
   but persisting a later receipt failed.
+  Older SDK checkpoints saved the destination repository ID without the catalog
+  URL. After a repository rename, retry those requests with the original
+  normalized findings and report metadata, omitting supplemental source
+  repository declarations. A new declaration needs a matching current catalog
+  entry or a URL recorded when the request was approved.
+- If the publisher identifies a pending hosted Semgrep or Snyk request from
+  an earlier SDK, finish it with the SDK build and input that created it.
+  A request staged with the older hosted repository binding holds other
+  selections for the same deployment, account, repository, connector, provider
+  and source key. For normalized requests with only the original v1 evidence,
+  this applies to the same finding IDs. For normalized SDK input, retain any
+  optional `report` metadata and custom per-finding fields. Older requests can
+  include those fields in the checkpoint filename and omit them from the saved
+  request. When the publisher cannot establish the deployment of an older
+  hosted request, resume it on the original deployment with the full input.
+  A repository reset retires an identified pending request and requires a
+  fresh approval.
 - **No resumable checkpoint:** a repository reset retires the old request, and
   an initial checkpoint-write failure may leave no request to resume. Inspect
   the destination and correct the error; run a fresh `--dry-run` and get fresh
