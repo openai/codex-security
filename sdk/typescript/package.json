@@ -105,7 +105,7 @@
   },
   "devDependencies": {
     "@stryker-mutator/core": "10.0.0",
-    "@types/bun": "1.4.3",
+    "@types/bun": "1.4.4",
     "@types/node": "26.6.5",
     "@types/papaparse": "5.5.2",
     "@types/react": "19.3.0",
