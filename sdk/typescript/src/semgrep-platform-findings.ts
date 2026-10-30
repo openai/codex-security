@@ -58,7 +58,9 @@ function canonicalNumber(token: string): string {
     /^(-?)(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/iu.exec(token)!;
   const significant = (integer + fraction).replace(/^0+/u, "");
   if (!significant) return "0";
-  const digits = significant.replace(/0+$/u, "");
+  let end = significant.length;
+  while (significant[end - 1] === "0") end--;
+  const digits = significant.slice(0, end);
   const point = BigInt(exponent) + BigInt(significant.length - fraction.length);
   // Use the same fixed/scientific notation thresholds as JSON.stringify.
   if (point > -6n && point <= 21n) {
@@ -112,11 +114,14 @@ export function parseSemgrepResponse(json: string): Record<string, unknown> {
 }
 
 function platformId(value: unknown): string | undefined {
-  const id = wireJson.isRawJSON(value)
-    ? value.rawJSON
-    : typeof value === "number" && Number.isSafeInteger(value)
-      ? String(value)
-      : value;
+  let id = value;
+  if (wireJson.isRawJSON(value)) {
+    const token = value.rawJSON;
+    // Keep positive integer literals as digits even outside the ordinary notation range.
+    id = /^[1-9][0-9]*$/u.test(token) ? token : canonicalNumber(token);
+  } else if (typeof value === "number" && Number.isSafeInteger(value)) {
+    id = String(value);
+  }
   return typeof id === "string" && /^[1-9][0-9]*$/u.test(id) ? id : undefined;
 }
 
@@ -234,14 +239,15 @@ function checkRow(
   const urlPathName =
     rowName !== null &&
     (rowName === projectPath || rowName + ".git" === projectPath);
+  const nameParts = rowName?.split("/") ?? [];
   const qualifiedName =
-    rowName !== null &&
-    /^[^/]+(?:\/[^/]+)+$/u.test(rowName) &&
+    nameParts.length > 1 &&
+    nameParts.every((part) => part && part !== "." && part !== "..") &&
     (rowName === fullName || urlPathName);
   const matchedName =
     rowName === fullName ||
     rowName === fullName.split("/").at(-1) ||
-    (urlPathName && fullName === rowName.split("/").at(-1));
+    urlPathName;
   if (
     finding["ref"] !== scope.ref ||
     (repositoryId !== undefined && repositoryId !== scope.project.id) ||
@@ -256,7 +262,8 @@ function checkRow(
   for (const product of [finding["issue_type"], finding["product"]]) {
     if (
       product != null &&
-      !["sast", "code"].includes(String(product).toLowerCase())
+      (typeof product !== "string" ||
+        !["sast", "code"].includes(product.toLowerCase()))
     )
       throw new Error("Select Semgrep Code (SAST) findings.");
   }
@@ -312,7 +319,7 @@ function selectedRows(
     const value = selected.get(id);
     if (!value)
       throw new Error(
-        `Selected Semgrep finding ${id} was not present in the supplied pages.`,
+        `Selected Semgrep finding ${id} is missing from the supplied pages.`,
       );
     return value;
   });
@@ -347,7 +354,19 @@ export function normalizeSelectedSemgrepPlatformFindings(
     "local",
   );
   const { scope, rows } = selectedRows(options, (scope) => {
-    if (!/^refs\/[^/]+(?:\/[^/]+)*$/u.test(scope.ref))
+    // git-check-ref-format distinguishes literal branch/tag names from revision expressions.
+    const refParts = scope.ref.split("/");
+    if (
+      refParts[0] !== "refs" ||
+      refParts.length < 2 ||
+      refParts.some(
+        (part) => !part || part.startsWith(".") || part.endsWith(".lock"),
+      ) ||
+      scope.ref.endsWith(".") ||
+      scope.ref.includes("..") ||
+      scope.ref.includes("@{") ||
+      /[\u0000-\u0020\u007f~^:?*\[\\]/u.test(scope.ref)
+    )
       throw new Error(
         "Use a fully qualified Semgrep ref such as refs/heads/topic.",
       );
@@ -465,13 +484,12 @@ export function normalizeSemgrepPlatformSelection(
 
 function stringifySemgrepFinding(finding: Record<string, unknown>): string {
   return JSON.stringify(finding, function (this: unknown, key, value: unknown) {
-    // Native occurrence and repository IDs must stay unsigned decimal tokens on replay.
-    if (
-      !wireJson.isRawJSON(value) ||
-      (key === "id" && (this === finding || this === finding["repository"]))
-    )
-      return value;
-    return wireJson.rawJSON(canonicalNumber(value.rawJSON));
+    if (!wireJson.isRawJSON(value)) return value;
+    const nativeId =
+      key === "id" && (this === finding || this === finding["repository"]);
+    return wireJson.rawJSON(
+      nativeId ? semgrepPlatformId(value) : canonicalNumber(value.rawJSON),
+    );
   });
 }
 
