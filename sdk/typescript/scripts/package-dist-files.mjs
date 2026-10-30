@@ -144,6 +144,7 @@ const distModules = [
   "server/sqlite-store",
   "server/storage",
   "targets",
+  "terminal-columns",
   "thread-source",
   "timestamps",
   "trusted-executable",
