@@ -1,6 +1,8 @@
 # Scoped source input
 
-When the host supplies a target-paths file without a prepared inventory, run the following helper or use the [Windows command](#windows-scoped-input).
+Use a prepared inventory when supplied. If the host supplies an inventory command, run it as given. For `make-hosted-repo-scope-input`, use the path it reports. Run the supplied recovery command only if that path is missing or unreadable in a later shell.
+
+When the host supplies only a target-paths file, run the following helper or use the [Windows command](#windows-scoped-input).
 
 ```text
 <plugin_dir>/scripts/launch_codex_security_mcp --helper make-repo-scope-input --repo <repo_root> --scopes-file <target_paths_file> --out <scan_dir>/scoped-source-input.jsonl

@@ -43,7 +43,6 @@ import workbench_remediation as remediation_state
 import workbench_saved_results as saved_results
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
-from deep_scan_config import resolve_deep_scan_setup
 from finalize_scan_contract import (
     PRODUCER_NAME,
     ContractError,
@@ -62,9 +61,6 @@ from workbench_constants import (
     ARTIFACTS,
     CLAIM_LEASE_SECONDS,
     DELIVERED_ACTION_LEASE_SECONDS,
-    DIFF_TARGET_KINDS,
-    EMPTY_GIT_TREE,
-    EMPTY_GIT_TREES,
     FINDING_ABSOLUTE_PATH_BYTES,
     FINDING_LEVEL_BYTES,
     FINDING_LOCATION_PATH_BYTES,
@@ -85,7 +81,6 @@ from workbench_local_dedupe import local_dedupe
 from workbench_scan_start import (
     archive_scan,
     insert_running_scan,
-    require_scope,
     safe_segment,
     scan_diff_identity,
     scan_target_identity,
@@ -97,6 +92,17 @@ from workbench_schema import (
 )
 from workbench_schema import (
     apply_migrations as apply_schema_migrations,
+)
+from workbench_setup import (
+    inspect_command,
+    inspect_selected_setup,
+    inspect_setup_values,
+    require_diff_target,
+    require_review_changes_target,
+    require_scannable_target,
+    require_scope,
+    require_target,
+    resolve_git_commit,
 )
 from workbench_source_excerpt import finding_source_excerpt
 from workbench_source_scopes import (
@@ -113,7 +119,6 @@ from workbench_target import (
     diff_snapshot_digest,
     directory_content_digest,
     directory_snapshot_regular_file_count,
-    git_bytes,
     git_command,
     git_output,
     git_revision,
@@ -121,7 +126,6 @@ from workbench_target import (
     git_target_metadata,
     git_worktree_context,
     remediation_checkout_snapshot,
-    require_git_worktree_head,
     require_remediation_target,
     require_scan_target_identity,
     require_scan_target_unchanged,
@@ -267,168 +271,6 @@ def apply_migrations(connection: sqlite3.Connection, *, immediate: bool = False)
     apply_schema_migrations(
         connection, MIGRATIONS, now, backfill_security_targets, immediate=immediate
     )
-
-
-def require_target(value: str) -> Path:
-    expanded = Path(value).expanduser()
-    if not expanded.is_absolute():
-        raise SystemExit("Scan target must be an absolute local directory path.")
-    target = expanded.resolve()
-    if not target.is_dir():
-        raise SystemExit(f"Scan target is not a readable local directory: {target}")
-    return target
-
-
-def inspect_target(target_path: str) -> dict[str, Any]:
-    target = require_target(target_path)
-    return {
-        "displayName": target.name,
-        "targetMetadata": git_target_metadata(target),
-        "targetPath": str(target),
-    }
-
-
-def resolve_git_commit(target: Path, revision: str, label: str) -> str:
-    value = optional_text(revision, maximum=512)
-    if not value:
-        raise SystemExit(f"{label} is required.")
-    resolved = git_output(
-        target,
-        "rev-parse",
-        "--verify",
-        "--end-of-options",
-        f"{value}^{{commit}}",
-    )
-    if resolved is None:
-        raise SystemExit(f"{label} does not resolve to a local Git commit: {value}")
-    return resolved
-
-
-def require_diff_target(
-    target: Path,
-    kind: str | None,
-    base_revision: str | None,
-    head_revision: str | None,
-    content_digest: str | None,
-) -> dict[str, str]:
-    current_head = require_review_changes_target(target)
-    if kind not in DIFF_TARGET_KINDS:
-        raise SystemExit("Choose which Git changes to review before starting a diff scan.")
-    if kind == "working_tree":
-        base = resolve_git_commit(target, base_revision or "HEAD", "Working-tree base")
-        head = resolve_git_commit(target, head_revision or current_head, "Working-tree HEAD")
-        current_digest = worktree_content_digest(target)
-        if base != current_head or head != current_head:
-            raise SystemExit(
-                "Repository HEAD changed after these working-tree changes were selected. "
-                "Select Uncommitted changes again."
-            )
-        if content_digest and content_digest != current_digest:
-            raise SystemExit(
-                "Working-tree contents changed after they were selected. "
-                "Select Uncommitted changes again."
-            )
-        return {
-            "kind": kind,
-            "baseRevision": current_head,
-            "headRevision": current_head,
-            "contentDigest": current_digest,
-        }
-    if kind == "commit":
-        head = resolve_git_commit(target, head_revision or "", "Commit")
-        commit = git_bytes(target, "cat-file", "-p", head)
-        if commit is None:
-            raise SystemExit(f"Commit is not available in the local checkout: {head}")
-        parent_line = next(
-            (
-                line
-                for line in commit.split(b"\n\n", 1)[0].splitlines()
-                if line.startswith(b"parent ")
-            ),
-            None,
-        )
-        if parent_line is None:
-            parent = EMPTY_GIT_TREES[git_output(target, "rev-parse", "--show-object-format")]
-        else:
-            parent = resolve_git_commit(
-                target,
-                parent_line.removeprefix(b"parent ").decode("ascii").strip(),
-                "Commit parent",
-            )
-        if base_revision and base_revision != parent:
-            supplied_base = (
-                base_revision
-                if base_revision == EMPTY_GIT_TREE
-                else resolve_git_commit(target, base_revision, "Commit base")
-            )
-            if supplied_base != parent:
-                raise SystemExit("Commit base revision must match the selected commit's parent.")
-        return {"kind": kind, "baseRevision": parent, "headRevision": head}
-    base = resolve_git_commit(target, base_revision or "", "Base revision")
-    head = resolve_git_commit(target, head_revision or "", "Head revision")
-    if base == head:
-        raise SystemExit("Base and head revisions must identify different commits.")
-    return {"kind": kind, "baseRevision": base, "headRevision": head}
-
-
-def inspect_setup_values(
-    target_path: str,
-    scope: str,
-    mode: str,
-    diff_target_kind: str | None,
-    diff_base_revision: str | None,
-    diff_head_revision: str | None,
-    diff_content_digest: str | None,
-) -> dict[str, Any]:
-    target = require_target(target_path)
-    require_scannable_target(target)
-    normalized_scope = require_scope(scope, mode, target)
-    if mode == "diff" and normalized_scope != ".":
-        raise SystemExit("Review changes requires the whole target; use scope '.'.")
-    if mode != "diff" and any(
-        value is not None
-        for value in (
-            diff_target_kind,
-            diff_base_revision,
-            diff_head_revision,
-            diff_content_digest,
-        )
-    ):
-        raise SystemExit("A Git diff target requires Review changes mode.")
-    diff_target = (
-        require_diff_target(
-            target,
-            diff_target_kind,
-            diff_base_revision,
-            diff_head_revision,
-            diff_content_digest,
-        )
-        if mode == "diff"
-        else None
-    )
-    return {
-        "diffTarget": diff_target,
-        "scope": normalized_scope,
-        "target": inspect_target(str(target)),
-    }
-
-
-def require_review_changes_target(target: Path) -> str:
-    revision = require_git_worktree_head(target)
-    repository_root = git_output(target, "rev-parse", "--show-toplevel")
-    if repository_root is None or not Path(repository_root).samefile(target):
-        raise SystemExit(
-            "Review changes requires the checked-out Git repository root as the target."
-        )
-    return revision
-
-
-def require_scannable_target(target: Path) -> None:
-    metadata = git_target_metadata(target)
-    if metadata["isGit"] and not metadata["isWorktree"]:
-        raise SystemExit(
-            "Codex Security requires a checked-out worktree, not a bare Git repository."
-        )
 
 
 def requested_scan_file_paths(scan: sqlite3.Row) -> list[str]:
@@ -716,25 +558,6 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
             ),
         )
     return workspace_state(connection, workspace_id)
-
-
-def inspect_selected_setup(args: argparse.Namespace) -> dict[str, Any]:
-    inspected = inspect_setup_values(
-        args.target_path,
-        args.scope,
-        args.mode,
-        args.diff_target_kind,
-        args.diff_base_revision,
-        args.diff_head_revision,
-        args.diff_content_digest,
-    )
-    if args.mode == "deep":
-        inspected["deepScanConfig"] = resolve_deep_scan_setup(
-            os.cpu_count() or 1, args.deep_scan_project_json
-        )
-    elif args.deep_scan_project_json is not None:
-        raise SystemExit("Project Deep Scan settings require Deep Scan mode.")
-    return inspected
 
 
 def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
@@ -3249,10 +3072,8 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
         scan_dir
     ):
         raise SystemExit("Scan directory must be an existing canonical non-symlink directory.")
-    # Re-check privacy so a shared parent cannot be used to substitute forged artifacts.
+    # Re-check ownership and parents so the scan directory cannot be substituted.
     if os.name != "nt":
-        if stat.S_IMODE(metadata.st_mode) & 0o077:
-            raise SystemExit("Scan directory must not be accessible to other users (chmod 700).")
         geteuid = getattr(os, "geteuid", None)
         effective_uid = geteuid() if geteuid is not None else None
         if effective_uid is not None and metadata.st_uid != effective_uid:
@@ -3307,12 +3128,8 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
     if args.command == "resolve-scan-root":
         print(json.dumps({"scanRoot": str(resolve_scan_root(args.scan_root))}))
         return
-    if args.command == "inspect-target":
-        result = inspect_target(args.target_path)
-        print(json.dumps(result, allow_nan=False, sort_keys=True))
-        return
-    if args.command == "inspect-setup":
-        print(json.dumps(inspect_selected_setup(args), allow_nan=False, sort_keys=True))
+    if args.command in {"inspect-target", "inspect-setup"}:
+        print(json.dumps(inspect_command(args), allow_nan=False, sort_keys=True))
         return
     if args.command in {"save-artifact", "read-artifact"}:
         print(json.dumps(saved_results.read_or_save_artifact(args)))

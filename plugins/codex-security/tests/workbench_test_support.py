@@ -726,10 +726,14 @@ def start_saved_scan(state_dir: Path, target: Path, scan_root: Path) -> tuple[st
     return start_workspace_scan(state_dir, str(saved["id"]), scan_root)
 
 
-def empty_target_scan(tmp_path: Path) -> tuple[Path, Path, str, Path]:
-    state_dir = tmp_path / "state"
+def empty_target_paths(tmp_path: Path) -> tuple[Path, Path]:
     target = tmp_path / "target"
     target.mkdir()
+    return tmp_path / "state", target
+
+
+def empty_target_scan(tmp_path: Path) -> tuple[Path, Path, str, Path]:
+    state_dir, target = empty_target_paths(tmp_path)
     scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     return state_dir, target, scan_id, scan_dir
 

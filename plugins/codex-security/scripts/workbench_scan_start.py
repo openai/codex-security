@@ -31,35 +31,14 @@ from workbench_validation import optional_text
 
 
 def safe_segment(value: str) -> str:
-    return re.sub(r"[^\w.-]", "-", value).strip("-") or "scan"
+    segment = re.sub(r"[^\w.-]", "-", value)
+    if segment != value:
+        segment = segment.strip("-")
+    return segment or "scan"
 
 
 def compact_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-
-def require_scope(scope: str, mode: str, target: Path) -> str:
-    value = scope if scope.strip() else "."
-    requested_scope = Path(value)
-    if "\\" in value and (os.name != "nt" or not requested_scope.is_absolute()):
-        raise SystemExit("Scan scope must use repository-relative POSIX paths.")
-    if ".." in requested_scope.parts:
-        raise SystemExit("Scan scope must stay inside the scanned target.")
-    try:
-        resolved_scope = (
-            requested_scope if requested_scope.is_absolute() else target / requested_scope
-        ).resolve()
-        relative_scope = resolved_scope.relative_to(target)
-    except (RuntimeError, ValueError) as exc:
-        raise SystemExit("Scan scope must stay inside the scanned target.") from exc
-    normalized = relative_scope.as_posix() or "."
-    if not normalized.strip():
-        normalized = "./" + normalized
-    if mode == "deep" and normalized != ".":
-        raise SystemExit("Deep Scan is repository-wide and cannot use a scoped path.")
-    if not resolved_scope.is_dir():
-        raise SystemExit("Scan scope must reference an existing directory inside the target.")
-    return normalized
 
 
 def starting_policy(mode: str, target: Path, scopes: list[str]) -> dict[str, list[str]]:

@@ -725,14 +725,19 @@ describe("canonical scan contract", () => {
     ).rejects.toMatchObject({ name: "AbortError" });
   });
 
-  test.skipIf(process.platform === "win32")(
-    "rejects a scan directory that is no longer private to the current user",
-    async () => {
+  test.skipIf(process.platform === "win32").each([0o755, 0o775])(
+    "reads a scan directory with mode %o without changing its permissions",
+    async (mode) => {
       const scanDir = await copyExample();
-      await chmod(scanDir, 0o755);
+      await chmod(scanDir, mode);
       await expect(
         loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-      ).rejects.toThrow("must not be accessible to other users");
+      ).resolves.toBeDefined();
+      const exported = pythonExport(scanDir);
+      expect(exported.exitCode, new TextDecoder().decode(exported.stderr)).toBe(
+        0,
+      );
+      expect((await lstat(scanDir)).mode & 0o777).toBe(mode);
     },
   );
 

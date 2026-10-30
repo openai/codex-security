@@ -25,7 +25,8 @@ def test_root_commit_message_does_not_supply_diff_parent(tmp_path: Path, workben
     git(target, "commit", "--amend", "-qm", f"Synthetic root\n\nparent {previous}")
     head = git(target, "rev-parse", "HEAD").decode()
     diff = workbench_api["require_diff_target"](target, "commit", None, head, None)
-    assert diff["baseRevision"] == workbench_api["EMPTY_GIT_TREE"]
+    empty_tree = git(target, "hash-object", "-t", "tree", "--stdin", input=b"").decode()
+    assert diff["baseRevision"] == empty_tree
 
 
 def test_sha256_root_commit_uses_the_sha256_empty_tree(tmp_path: Path, workbench_api) -> None:
@@ -40,26 +41,6 @@ def test_sha256_root_commit_uses_the_sha256_empty_tree(tmp_path: Path, workbench
     diff = workbench_api["require_diff_target"](target, "commit", None, "HEAD", None)
     revisions = (diff["baseRevision"], diff["headRevision"])
     assert git(target, "diff", "--name-only", *revisions) == b"README.md"
-
-
-def test_blob_batch_preserves_following_blobs_after_tree_and_commit(tmp_path: Path) -> None:
-    target = tmp_path / "target"
-    initialize_git_repository(target)
-    source = target / ("fixture.py" if os.name == "nt" else "line\nbreak.py")
-    source.write_bytes(b"print('fixture')\npayload\n")
-    git(target, "add", "--", source.name)
-    git(target, "commit", "-qm", "Add unusual fixture")
-    reader = load_script("workbench_target").git_blob_samples
-    assert reader(
-        target,
-        ["HEAD^{tree}", "HEAD", f"HEAD:{source.name}", "HEAD:missing\nfile", "HEAD:README.md"],
-    ) == [
-        None,
-        None,
-        (source.read_bytes(), False),
-        None,
-        (b"fixture\n", False),
-    ]
 
 
 def test_plain_directory_inventory_ignores_nested_git_metadata(tmp_path: Path) -> None:

@@ -10,6 +10,7 @@ from typing import Any
 from workbench_test_support import (
     cancel_remediation_request,
     claim_remediation_resend,
+    empty_target_paths,
     mark_remediation_delivered,
     request_remediation,
     request_remediation_action,
@@ -38,9 +39,7 @@ def update_remediation(
 
 
 def test_failed_remediation_steps_can_retry_or_regenerate(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     source = target / "source.txt"
     source.write_text("vulnerable\n")
     scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")

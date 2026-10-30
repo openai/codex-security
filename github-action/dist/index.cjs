@@ -99399,7 +99399,9 @@ async function uploadReports(reports, inputs, tempRoot) {
 // src/reporting.ts
 function plain(value, limit) {
   const text = value.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, "");
-  return text.slice(0, limit);
+  const prefix2 = text.slice(0, limit);
+  const codePoint = text.codePointAt(prefix2.length - 1);
+  return codePoint !== void 0 && codePoint > 65535 ? prefix2.slice(0, -1) : prefix2;
 }
 function html(value) {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/@/g, "&#64;").replace(/\r/g, "&#13;").replace(/\n/g, "&#10;").replace(/[\\`*_\[\]~]/g, (character) => `&#${character.charCodeAt(0)};`);
@@ -99554,8 +99556,8 @@ async function runAction(actionRoot, overrides = {}) {
       if (!inputs.dryRun && credentials.provider !== "amazon-bedrock" && (!credentials.apiKey || /[\r\n\u0000]/.test(credentials.apiKey))) {
         throw new Error(credentials.provider === "openai" ? "Set CODEX_SECURITY_API_KEY in Actions secrets (or Dependabot secrets for Dependabot runs) and pass it as OPENAI_API_KEY to this step. No scan was started." : `Pass ${API_KEY_ENVIRONMENT_VARIABLES[credentials.provider]} from Actions secrets to this step. No scan was started.`);
       }
-      tempRoot = await (0, import_promises10.realpath)(process.env.RUNNER_TEMP ?? "");
       if (!process.env.RUNNER_TEMP) throw new Error("RUNNER_TEMP is required.");
+      tempRoot = await (0, import_promises10.realpath)(process.env.RUNNER_TEMP);
       info(`Preparing Codex Security ${SUPPORTED_CLI_VERSION}. Scope: ${inputs.scope}; mode: ${inputs.mode}; effort: ${inputs.effort}.`);
       const preparationStarted = performance.now();
       let timer = heartbeat("CLI preparation", preparationStarted);

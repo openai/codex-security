@@ -1,11 +1,13 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  chmod,
   cp,
   mkdir,
   readFile,
   rename,
   rm,
+  stat,
   symlink,
   writeFile,
   type FileHandle,
@@ -458,8 +460,9 @@ describe("custom validation", () => {
     },
   );
 
-  test("applies dispositions and assessments without changing source identity", async () => {
+  test("applies dispositions and assessments without changing source identity or output permissions", async () => {
     const f = await fixture(4);
+    if (process.platform !== "win32") await chmod(f.scanDir, 0o755);
     const output = result(
       "reportable",
       "suppressed",
@@ -514,6 +517,8 @@ describe("custom validation", () => {
         return JSON.stringify(output);
       },
     });
+    if (process.platform !== "win32")
+      expect((await stat(f.scanDir)).mode & 0o777).toBe(0o755);
     const findings = await json<FindingsDocument>(
       join(f.scanDir, "findings.json"),
     );

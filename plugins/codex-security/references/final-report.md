@@ -35,7 +35,7 @@ Standard and diff drafts use `{ surfaces, explicitExclusions, deferred }`. Give 
 
 Preserve each saved deferred `id` or `candidateId`, use each deferred ID only once, and reuse IDs from the zero-based input row in `assignedSurfaces` or `assignedDeferred`. Full review state is saved in the draft manifest and retained checkpoints, or in the bound worker’s `result.json`. Close a generic saved task in the final Standard or diff draft with `reviewState.resolvedDeferred: [{ id, reason }]`; keep unfinished tasks deferred and update linked surfaces by ID. Candidate-linked tasks close through findings or terminal dispositions. Deep parents cannot close worker tasks; original checkpoints remain unchanged.
 
-The workbench derives target/scope metadata, inventory strategy, finding identities/fingerprints, and IDs for new surfaces. Review notes do not measure file coverage; do not add reviewed-surface tables or file-coverage claims to the report. Do not put those workbench-owned fields or top-level receipt references into semantic draft arguments. SDK-authored canonical files still follow `scan-contract.md` and the SDK's supplied metadata.
+The workbench assigns IDs to new surfaces and derives a finding's `identity` when omitted. Review notes do not measure file coverage; do not add reviewed-surface tables or file-coverage claims to the report. Omit host-owned target/scope metadata, `reviewState.inventoryStrategy`, `reviewState.receiptRefs`, and each active finding's `findingId`, `occurrenceId` and `fingerprints` from semantic drafts. SDK-authored canonical files follow `scan-contract.md` and the SDK's supplied metadata.
 
 For compact diff candidates, map recorded outcomes in this order:
 
@@ -57,6 +57,16 @@ An MCP `-32602` or `isError: true` input-validation rejection makes no draft wri
 For a required phase, artifact, or completion failure, preserve and report the actual diagnostic. Resolve a recoverable cause when the tool's state makes retry safe; do not claim a final report, a no-findings conclusion, or a successful structured result while completion remains unresolved. Preserve the durable scan for continuation rather than canceling or failing it merely because assembly is blocked. Do not resubmit an accepted final draft or repeat successful completion.
 
 On explicit cancellation, stop additional model work. Use retained results and exports, distinguishing validated findings from pending candidates and recording incomplete scope. A stopped scan with no findings is not a clean-scan conclusion.
+
+### Historical findings and coverage in workbench Standard and diff drafts
+
+The plugins bundled in `npm-v0.1.32` through `npm-v0.6.0` preserve the saved `identity` of an unambiguously matched finding when a revision omits it. Supplying a different anchor can leave both findings active. These releases have no supported operation to supersede the old identity. In 0.1.32, updating a surface by its generated ID can also leave both dispositions active if the original checkpoint omitted the ID.
+
+On builds containing `e6c7b28` (after `npm-v0.6.0`), first establish the corrected `identity` from independent evidence. Use this procedure only if no checkpoint has already saved the corrected identity alongside the original. If both identities are active, leave the scan unsealed and report the conflict. [Finding recovery change #1310](https://github.com/openai/codex-security/pull/1310)
+
+Submit the revision with its corrected identity through `record_codex_security_scan_draft` with `complete: false`. Put each distinct prior version directly in the revision's `provenance.previousFindings` array. Copy the full saved finding, including its identity, evidence and provenance, omitting only its own `provenance.previousFindings`. The workbench restores nested history for each unambiguous match. Before submitting the final draft, verify in `findings.json` and `coverage.json` that only the corrected identity is active for this finding, its prior versions are in its history, and other findings and independently pending work are intact.
+
+A finding or a `rejected` or `not_applicable` disposition for the same candidate can resolve a `needs_follow_up` surface. Since `npm-v0.2.0`, `coverage.resolvedDeferred` closes generic tasks by saved ID and reason. Omission alone does not retire a surface or explicit exclusion. There is no general operation to remove either entry by request or to migrate a copy of a 0.1.32 scan for these corrections. If the required correction is unsupported or still absent from the saved result, leave the scan unsealed, preserve its checkpoints and outstanding work, and report which entry still needs correction.
 
 ## Response
 

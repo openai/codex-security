@@ -69,7 +69,11 @@ import {
   matchScanFindingsInternal,
 } from "../src/scan-comparison.js";
 import { normalizeTarget } from "../src/targets.js";
-import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
+import {
+  copyCompletedScan,
+  copyCredentialTestPlugin,
+  PLUGIN_ROOT,
+} from "./plugin-root.js";
 import {
   mockScanRegistration,
   mockWorkbench,
@@ -5455,7 +5459,11 @@ if __name__ == "__main__":
             cost: { estimatedUsd: 0.0036 },
           });
         else if (scenario === "canceled")
-          await expect(scan).rejects.toBeInstanceOf(ScanInterruptedError);
+          await expect(scan).rejects.toMatchObject({
+            name: ScanInterruptedError.name,
+            message: `Codex Security scan was interrupted; output directory: ${scanDir}.`,
+            scanDir,
+          });
         else
           await expect(scan).rejects.toMatchObject({
             name: ScanCostLimitExceededError.name,
@@ -5566,7 +5574,7 @@ if __name__ == "__main__":
       "fail-scan",
       "--scan-id",
       "scan_example_001",
-      `--message=Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at ${scanDir}.`,
+      `--message=Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); scan output directory: ${scanDir}.`,
       "--cost-json",
       JSON.stringify(cost),
     ]);
@@ -5683,7 +5691,7 @@ if __name__ == "__main__":
           expect(recovered.threadId).toBe("scan-thread");
           expect(recovered.cost?.estimatedUsd).toBe(0.00488);
           expect(warnings).toEqual([
-            `Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at ${scanDir}.`,
+            `Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); scan output directory: ${scanDir}.`,
           ]);
           expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
           expect(
@@ -6170,9 +6178,10 @@ if __name__ == "__main__":
           process.platform === "win32" ? "junction" : "dir",
         );
       }
+      const sessions = new Map<string, string>();
       const client = new TestClient(
         {
-          pluginPath: PLUGIN_ROOT,
+          pluginPath: await copyCredentialTestPlugin(root),
           codexOverrides: {
             model,
             ...(provider === undefined
@@ -6225,9 +6234,12 @@ if __name__ == "__main__":
                     ? "synthetic-transient-key"
                     : undefined,
                 );
-                await writeUsageSession(codexHome, "persistent-thread", {
-                  input_tokens: 1,
-                });
+                const path = await writeUsageSession(
+                  codexHome,
+                  `persistent-thread-${sessions.size + 1}`,
+                  { input_tokens: 1 },
+                );
+                sessions.set(path, await readFile(path, "utf8"));
                 throw new Error("persistent session recorded");
               },
             }),
@@ -6246,18 +6258,10 @@ if __name__ == "__main__":
         await client.close();
       }
 
-      expect(
-        existsSync(
-          join(
-            codexHome,
-            "sessions",
-            "2026",
-            "07",
-            "26",
-            "rollout-persistent-thread.jsonl",
-          ),
-        ),
-      ).toBe(true);
+      expect(sessions.size).toBe(2);
+      for (const [path, contents] of sessions) {
+        expect(await readFile(path, "utf8")).toBe(contents);
+      }
       expect(existsSync(join(codexHome, "auth.json"))).toBe(false);
       const persistentConfigText = await readFile(
         join(codexHome, "config.toml"),

@@ -8,7 +8,6 @@ from pathlib import Path
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import deep_scan_workbench as deep_scan
 from workbench_constants import (
     DIFF_TARGET_KINDS,
     EXPORT_FORMATS,
@@ -30,7 +29,7 @@ def add_user_context(parser: argparse.ArgumentParser, *, required: bool = False)
     context.add_argument("--user-context-stdin", action="store_true")
 
 
-def parse_args(description: str) -> argparse.Namespace:
+def parse_args(description: str, *, inspection_only: bool = False) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=description)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -81,6 +80,14 @@ def parse_args(description: str) -> argparse.Namespace:
         diff_parser.add_argument("--diff-base-revision")
         diff_parser.add_argument("--diff-head-revision")
         diff_parser.add_argument("--diff-content-digest")
+
+    if inspection_only:
+        # Unknown arguments use the full parser below for its normal usage diagnostic.
+        args, unknown = parser.parse_known_args()
+        if not unknown:
+            return args
+
+    import deep_scan_workbench as deep_scan
 
     start_headless_standard_scan = add_command(
         "start-headless-standard-scan", "--thread-id", "--target-path", "--scope"

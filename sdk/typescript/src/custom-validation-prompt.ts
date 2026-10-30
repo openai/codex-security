@@ -8,11 +8,18 @@ import { PLUGIN_NAME } from "./runtime.js";
 // Review this adapter when the bundled workflows change. Never silently run
 // the ordinary validation sequence with a custom-validation request.
 const SOURCES = {
-  "references/core-scan.md":
+  "references/core-scan.md": [
     "226e229a4459fdf0508606323a85f770f175f2c76b8c3336ec27a2ad4fb54ed6",
-  "skills/security-diff-scan/SKILL.md":
+    "7690b6c854de07ff15984f6d2c25ddfa1f6ae65f65876cadf2f904054b4f0679",
+  ],
+  "skills/security-scan/SKILL.md": [
+    "b6a69658d48fff6979d6690e95d2096da236bb7e51b96ebb4f92102a9863d66c",
+    "99cfcbbaa9d5b0450881ec752a116888b05b7fe21ea7af28fd22d088882dcd46",
+  ],
+  "skills/security-diff-scan/SKILL.md": [
     "09232fd5d96cfed2a5bdccd176c09b7e9ca53ebd7ac136d283bec884fde94b0d",
-} as const;
+  ],
+};
 
 const DISABLED_TOOLS = [
   "start_codex_security_standard_scan",
@@ -31,12 +38,47 @@ async function source(pluginRoot: string, name: keyof typeof SOURCES) {
     "\r\n",
     "\n",
   );
-  if (createHash("sha256").update(text).digest("hex") !== SOURCES[name]) {
+  const digest = createHash("sha256").update(text).digest("hex");
+  if (!SOURCES[name].includes(digest)) {
     throw new IncompleteScanError(
       `Custom validation is incompatible with the installed plugin workflow (${name}). Update the SDK and plugin together. Default validation was not started.`,
     );
   }
   return text;
+}
+
+function step(text: string, number: number): string {
+  return text.match(new RegExp(`^${number}\\. (.+)$`, "m"))![1]!;
+}
+
+async function legacyDiscoveryPrompt(pluginRoot: string, core: string) {
+  const skill = await source(pluginRoot, "skills/security-scan/SKILL.md");
+  const discovery = core
+    .replace(
+      /^7\. .+$/m,
+      "7. Retain the combined source-backed candidates and their existing evidence. The SDK will run independent final validation in a separate turn.",
+    )
+    .replace(
+      /^Keep discovery, validation, and attack-path reasoning.+$/m,
+      "Keep source-evidence and counterevidence checks within discovery. Do not run an independent final validation pass or invoke separate phase skills.",
+    )
+    .replace(
+      "reconcile their evidence and submit the result;",
+      "reconcile their evidence and preserve provisional candidates through the SDK-owned discovery handoff;",
+    );
+  return [
+    skill.slice(
+      skill.indexOf("## Host And Setup"),
+      skill.indexOf("## Workflow"),
+    ),
+    "## Discovery workflow",
+    `1. ${step(skill, 1)}`,
+    "2. Perform the embedded core discovery workflow below. Do not reload the ordinary core-scan.md or top-level security-scan skill.",
+    `3. ${step(skill, 3).slice(step(skill, 3).indexOf("For an SDK-owned scan with a bound semantic draft tool,"))}`,
+    `4. ${HANDOFF}`,
+    "## Embedded core discovery workflow",
+    discovery,
+  ].join("\n\n");
 }
 
 export async function customDiscoveryPrompt(
@@ -45,12 +87,14 @@ export async function customDiscoveryPrompt(
 ): Promise<string> {
   let workflow: string;
   if (skillName === "security-scan") {
-    await source(pluginRoot, "references/core-scan.md");
-    workflow = [
-      "Use <plugin_dir>/references/core-scan.md for source discovery. This caller supplies the validation handoff: the SDK runs independent final validation in a separate turn. Check source evidence and counterevidence now, but do not run the default validation pass.",
-      "Keep any supplied investigation time allowance unchanged. Only for an explicit time request with no existing allowance, render <plugin_dir>/references/investigation-time-budget.md once before source review.",
-      HANDOFF,
-    ].join("\n\n");
+    const core = await source(pluginRoot, "references/core-scan.md");
+    workflow = core.includes("## Baseline Auditor Prompt")
+      ? await legacyDiscoveryPrompt(pluginRoot, core)
+      : [
+          "Use <plugin_dir>/references/core-scan.md for source discovery. This caller supplies the validation handoff: the SDK runs independent final validation in a separate turn. Check source evidence and counterevidence now, but do not run the default validation pass.",
+          "Keep any supplied investigation time allowance unchanged. Only for an explicit time request with no existing allowance, render <plugin_dir>/references/investigation-time-budget.md once before source review.",
+          HANDOFF,
+        ].join("\n\n");
   } else if (skillName === "security-diff-scan") {
     const skill = await source(
       pluginRoot,

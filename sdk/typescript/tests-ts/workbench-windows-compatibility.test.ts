@@ -28,7 +28,7 @@ test("normalizes absolute Windows scopes without accepting escapes", () => {
       "from pathlib import PureWindowsPath",
       "from types import SimpleNamespace",
       "sys.path.insert(0, sys.argv[1])",
-      "import workbench_scan_start as workbench",
+      "import workbench_setup as workbench",
       "class WindowsPath(PureWindowsPath):",
       "    def resolve(self): return self",
       "    def is_dir(self): return True",

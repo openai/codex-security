@@ -201,6 +201,12 @@ test("rule references use original indexes and ignore unrelated duplicate or mis
   expect(output.excluded).toEqual([]);
   expect(output.findings[0]!.evidence.source_data).toMatchObject({ rule });
   expect(report).toEqual(original);
+
+  // JavaScript SDK callers can leave empty slots before and after a referenced rule.
+  const rules = report.runs[0]!.tool.driver.rules;
+  delete rules[0];
+  rules.length += 1;
+  expect(normalizeSnykSarif(report)).toEqual(output);
 });
 
 test("every ambiguous duplicate is excluded instead of keeping an arbitrary project", () => {
