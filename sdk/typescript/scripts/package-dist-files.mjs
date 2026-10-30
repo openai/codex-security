@@ -78,6 +78,7 @@ const distModules = [
   "github-dependabot-findings",
   "github-findings",
   "github-identifiers",
+  "hackerone-reports",
   "host-records-protocol",
   "index",
   "import-scan",
