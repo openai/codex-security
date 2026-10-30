@@ -48,6 +48,7 @@ import {
 import { parseJsonLines, readJson, writeJson } from "./support/json.js";
 import { rejecting } from "./support/errors.js";
 import { writeSource } from "./support/shell.js";
+import { rubricConfigResponse } from "./support/rubric-config.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures("hosted-scan-");
 afterEach(cleanup);
@@ -124,59 +125,12 @@ test("executor mutations cannot change the rubric in the hosted receipt", async 
   expect(result.severityRubric).toEqual(input.severityRubric);
 });
 
-test.each([undefined, "0", "1"])(
-  "hosted scans resolve the default using selected remote policy setting %p",
-  async (enabled) => {
-    const policy = { markdown: "# Remote severity policy\n", revision: 13 };
-    const fetch = spyOn(globalThis, "fetch").mockResolvedValue(
-      Response.json({
-        hash_used: "sha256",
-        dynamic_configs: {
-          [hash("sha256", "codex_security_default_severity_rubric", "base64")]:
-            { value: policy },
-        },
-      }),
-    );
-    try {
-      const input = await fixture();
-      delete input.severityRubric;
-      const executor = draftExecutor();
-      const result = await runHostedScan(input, {
-        executor,
-        environment:
-          enabled === undefined
-            ? {}
-            : { CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: enabled },
-      });
-      const expected =
-        enabled === "1"
-          ? {
-              ...policy,
-              sha256: hash("sha256", policy.markdown),
-            }
-          : rubricSource.bundledSeverityRubric;
-      expect(result.status).toBe("completed");
-      expect(result.severityRubric).toEqual(expected);
-      expect(executor.run.mock.calls[0]?.[0].severityRubric).toEqual(expected);
-      expect(fetch).toHaveBeenCalledTimes(enabled === "1" ? 1 : 0);
-    } finally {
-      fetch.mockRestore();
-    }
-  },
-);
-
 test.each(["0", "1"])(
   "CLI hosted protocol uses selected remote policy setting %p",
   async (enabled) => {
     const policy = { markdown: "# Remote severity policy\n", revision: 14 };
     const fetch = spyOn(globalThis, "fetch").mockResolvedValue(
-      Response.json({
-        hash_used: "sha256",
-        dynamic_configs: {
-          [hash("sha256", "codex_security_default_severity_rubric", "base64")]:
-            { value: policy },
-        },
-      }),
+      rubricConfigResponse(policy),
     );
     const stream = new PassThrough();
     const responses: unknown[] = [];

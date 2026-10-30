@@ -5,10 +5,7 @@ import {
   getDefaultSeverityRubric,
   severityRubricSchema,
 } from "../src/severity-rubric.js";
-
-const key = createHash("sha256")
-  .update("codex_security_default_severity_rubric")
-  .digest("base64");
+import { rubricConfigResponse } from "./support/rubric-config.js";
 
 const enabledEnvironment = {
   CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: "1",
@@ -23,13 +20,6 @@ afterEach(() => {
   else
     process.env["CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC"] = previousOptIn;
 });
-
-function response(value: unknown, hash = "sha256") {
-  return Response.json({
-    hash_used: hash,
-    dynamic_configs: { [key]: { value } },
-  });
-}
 
 test("uses the bundled policy by default without a request or timeout", async () => {
   delete process.env["CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC"];
@@ -63,7 +53,7 @@ test.each([undefined, "", "0", "false", "true", " 1", "1 "])(
 test("concurrent operations keep their opt-in and selected policies isolated", async () => {
   const config = { markdown: "# Selected remote policy", revision: 9 };
   const request = spyOn(globalThis, "fetch").mockResolvedValue(
-    response(config),
+    rubricConfigResponse(config),
   );
   const [enabled, disabled] = await Promise.all([
     getDefaultSeverityRubric({ environment: enabledEnvironment }),
@@ -97,7 +87,7 @@ test("resolves the shared config without account credentials and refreshes each 
     revision: 8,
   };
   const request = spyOn(globalThis, "fetch").mockResolvedValue(
-    response(config),
+    rubricConfigResponse(config),
   );
   const first = await getDefaultSeverityRubric({
     environment: enabledEnvironment,
@@ -107,15 +97,14 @@ test("resolves the shared config without account credentials and refreshes each 
     sha256: createHash("sha256").update(config.markdown).digest("hex"),
   });
   const [url, init] = request.mock.calls[0]!;
-  expect(url).toBe("https://ab.chatgpt.com/v1/initialize");
+  expect(url).toBe("https://ab.chatgpt.com/v1/get_config");
   expect(init?.headers).not.toHaveProperty("Authorization");
   expect(JSON.parse(init!.body as string)).toEqual({
-    user: {},
-    hashAlgorithm: "sha256",
-    statsigMetadata: { sdkType: "js-client", sdkVersion: "0.0.0" },
+    configName: "codex_security_default_severity_rubric",
+    statsigMetadata: { exposureLoggingDisabled: true },
   });
   expect(init?.redirect).toBe("error");
-  request.mockResolvedValue(response({ ...config, revision: 9 }));
+  request.mockResolvedValue(rubricConfigResponse({ ...config, revision: 9 }));
   expect(
     (await getDefaultSeverityRubric({ environment: enabledEnvironment }))
       .revision,
@@ -137,7 +126,7 @@ test.each([
   { markdown: "Policy", revision: "1" },
   { markdown: "Policy", revision: 1, extra: true },
 ])("invalid config %j uses the bundled SDK policy", async (config) => {
-  spyOn(globalThis, "fetch").mockResolvedValue(response(config));
+  spyOn(globalThis, "fetch").mockResolvedValue(rubricConfigResponse(config));
   expect(
     await getDefaultSeverityRubric({ environment: enabledEnvironment }),
   ).toEqual(bundledSeverityRubric);
@@ -145,24 +134,27 @@ test.each([
 
 test("oversized UTF-8 Markdown uses the bundled policy", async () => {
   spyOn(globalThis, "fetch").mockResolvedValue(
-    response({ markdown: "😀".repeat(196_608 / 4 + 1), revision: 1 }),
+    rubricConfigResponse({
+      markdown: "😀".repeat(196_608 / 4 + 1),
+      revision: 1,
+    }),
   );
   expect(
     await getDefaultSeverityRubric({ environment: enabledEnvironment }),
   ).toEqual(bundledSeverityRubric);
 });
 
-test.each(["missing", "wrong-hash", "json", "http", "network", "timeout"])(
+test.each(["missing", "wrong-name", "json", "http", "network", "timeout"])(
   "%s runtime failure preserves the bundled default",
   async (scenario) => {
     const request = spyOn(globalThis, "fetch");
-    if (scenario === "missing")
+    if (scenario === "missing") request.mockResolvedValue(Response.json({}));
+    if (scenario === "wrong-name")
       request.mockResolvedValue(
-        Response.json({ hash_used: "sha256", dynamic_configs: {} }),
-      );
-    if (scenario === "wrong-hash")
-      request.mockResolvedValue(
-        response({ markdown: "Policy", revision: 1 }, "djb2"),
+        rubricConfigResponse(
+          { markdown: "Policy", revision: 3 },
+          "unrelated_config",
+        ),
       );
     if (scenario === "json")
       request.mockResolvedValue(new Response("not JSON"));
@@ -195,6 +187,54 @@ test("caller cancellation rejects instead of silently selecting a fallback", asy
     }),
   ).rejects.toBe(reason);
 });
+
+test("an unrelated response field cannot invalidate the requested rubric", async () => {
+  const value = { markdown: "# Selected rubric", revision: 14 };
+  spyOn(globalThis, "fetch").mockResolvedValue(
+    Response.json({
+      name: "codex_security_default_severity_rubric",
+      value,
+      dynamic_configs: { unrelated: null },
+    }),
+  );
+  expect(
+    await getDefaultSeverityRubric({ environment: enabledEnvironment }),
+  ).toMatchObject(value);
+});
+
+test.each(["read", "cleanup"])(
+  "caller cancellation during response %s preserves its reason",
+  async (phase) => {
+    const controller = new AbortController();
+    const reason = new Error("Caller stopped");
+    const value = { markdown: "# Selected rubric", revision: 14 };
+    const response =
+      phase === "read"
+        ? rubricConfigResponse(value)
+        : new Response(
+            new ReadableStream({
+              cancel() {
+                controller.abort(reason);
+              },
+            }),
+            { status: 503 },
+          );
+    if (phase === "read") {
+      const json = response.json.bind(response);
+      spyOn(response, "json").mockImplementation(async () => {
+        controller.abort(reason);
+        return json();
+      });
+    }
+    spyOn(globalThis, "fetch").mockResolvedValue(response);
+    await expect(
+      getDefaultSeverityRubric({
+        environment: enabledEnvironment,
+        signal: controller.signal,
+      }),
+    ).rejects.toBe(reason);
+  },
+);
 
 test("explicit snapshots require the exact Markdown hash", () => {
   expect(severityRubricSchema.parse(bundledSeverityRubric)).toEqual(

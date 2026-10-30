@@ -1894,13 +1894,14 @@ report snapshots and delegates model execution to the host.
 
 For saved findings, use exactly one of `--scan` (ID, prefix, or `latest`) and `--scan-dir`.
 Omitting `--rubric` uses the
-[bundled severity rubric](https://github.com/openai/codex-security/blob/main/sdk/typescript/src/default-severity-rubric.ts).
+[bundled severity rubric](https://github.com/openai/codex-security/blob/main/plugins/codex-security/references/default-severity-rubric.md).
 New scans use the same default. Remote rubric fetching is off by default.
 Set `CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC=1`
 to opt in to the shared default from Statsig; unset it or set it to `0` to disable
-fetching. Only the exact value `1` enables it. Each opted-in operation makes one
-request to `https://ab.chatgpt.com/v1/initialize` without account credentials or
-finding data, with a three-second timeout. Missing, invalid, or unavailable
+fetching. Only the exact value `1` enables it. Each opted-in operation requests
+`codex_security_default_severity_rubric` from `https://ab.chatgpt.com/v1/get_config`
+with exposure logging disabled and a three-second timeout. The request contains
+no account credentials or finding data. Missing, invalid, or unavailable
 configuration uses the bundled rubric.
 The selected policy stays fixed throughout that scan or classification; saved
 scan resumes and reruns retain their original snapshot. SDK `ScanOptions.severityRubric`

@@ -9,45 +9,12 @@ import {
 } from "../src/classify-severity-records.js";
 import { main } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+import { rubricConfigResponse } from "./support/rubric-config.js";
 
 afterEach(() => mock.restore());
 
 const hash = (value: string) =>
   createHash("sha256").update(value, "utf8").digest("hex");
-
-test("canonical classification freezes the shared default and respects explicit rubric bindings", async () => {
-  const policy = { ...rubricSource.bundledSeverityRubric, revision: 7 };
-  const resolve = spyOn(
-    rubricSource,
-    "getDefaultSeverityRubric",
-  ).mockResolvedValue(policy);
-  const environment = { CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: "1" };
-  const data: ClassifySeverityRecordsInput = input();
-  delete data.rubric;
-  const result = await classifySeverityRecords(data, {
-    environment,
-    reviewRunner: {
-      async run(request) {
-        expect(JSON.parse(request.prompt).rubric).toEqual([policy.markdown]);
-        resolve.mockResolvedValue({ ...policy, revision: 8 });
-        return answer(request);
-      },
-    },
-  });
-  expect(resolve).toHaveBeenCalledTimes(1);
-  expect(resolve.mock.calls[0]?.[0]?.environment).toBe(environment);
-  expect(result.rubric).toEqual({ revision: 7, sha256: policy.sha256 });
-  resolve.mockClear();
-  await classifySeverityRecords(input(), {
-    environment,
-    reviewRunner: {
-      async run(request) {
-        return answer(request);
-      },
-    },
-  });
-  expect(resolve).not.toHaveBeenCalled();
-});
 
 function input(): ClassifySeverityRecordsInput & {
   rubric: NonNullable<ClassifySeverityRecordsInput["rubric"]>;
@@ -146,8 +113,12 @@ test.each([
   "version",
   "unsafe-revision",
 ])("rejects %s before any host work", async (scenario) => {
-  const data = input();
-  if (scenario === "rubric-hash") data.rubric.markdown += " ";
+  const data: ClassifySeverityRecordsInput = input();
+  if (scenario === "rubric-hash") data.rubric!.markdown += " ";
+  else delete data.rubric;
+  const fetch = spyOn(globalThis, "fetch").mockResolvedValue(
+    rubricConfigResponse({ markdown: "# Remote policy", revision: 8 }),
+  );
   if (scenario === "finding-hash") data.records[0]!.findingJson += " ";
   if (scenario === "duplicate") data.records.push(data.records[0]!);
   if (scenario === "version") (data as { version: number }).version = 2;
@@ -164,6 +135,7 @@ test.each([
   let calls = 0;
   await expect(
     classifySeverityRecords(data, {
+      environment: { CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: "1" },
       reviewRunner: {
         async run() {
           calls++;
@@ -172,6 +144,7 @@ test.each([
       },
     }),
   ).rejects.toThrow();
+  expect(fetch).not.toHaveBeenCalled();
   expect(calls).toBe(0);
 });
 
@@ -293,14 +266,7 @@ test.each([
   async (scenario) => {
     const policy = { markdown: "# Remote severity policy\n", revision: 11 };
     const fetch = spyOn(globalThis, "fetch").mockResolvedValue(
-      Response.json({
-        hash_used: "sha256",
-        dynamic_configs: {
-          [createHash("sha256")
-            .update("codex_security_default_severity_rubric")
-            .digest("base64")]: { value: policy },
-        },
-      }),
+      rubricConfigResponse(policy),
     );
     const stream = new PassThrough();
     const messages: any[] = [];
@@ -432,12 +398,18 @@ test("records mode is discoverable and rejects saved-scan flags", async () => {
   ).toBe(2);
 });
 
-test("empty records probe version 1 without host execution", async () => {
-  const data = input();
+test("empty records resolve the default binding without host execution", async () => {
+  const data: ClassifySeverityRecordsInput = input();
+  delete data.rubric;
   data.records = [];
+  const policy = { markdown: "# Remote severity policy", revision: 16 };
+  const fetch = spyOn(globalThis, "fetch").mockResolvedValue(
+    rubricConfigResponse(policy),
+  );
   let calls = 0;
   expect(
     await classifySeverityRecords(data, {
+      environment: { CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: "1" },
       reviewRunner: {
         async run() {
           calls++;
@@ -449,9 +421,10 @@ test("empty records probe version 1 without host execution", async () => {
     version: 1,
     classificationRuns: 3,
     status: "completed",
-    rubric: { revision: data.rubric.revision, sha256: data.rubric.sha256 },
+    rubric: { revision: policy.revision, sha256: hash(policy.markdown) },
     assessments: [],
   });
+  expect(fetch).toHaveBeenCalledTimes(1);
   expect(calls).toBe(0);
 });
 
@@ -546,14 +519,7 @@ test.each([undefined, "0", "1"])(
   async (enabled) => {
     const policy = { markdown: "# Remote severity policy\n", revision: 12 };
     const fetch = spyOn(globalThis, "fetch").mockResolvedValue(
-      Response.json({
-        hash_used: "sha256",
-        dynamic_configs: {
-          [createHash("sha256")
-            .update("codex_security_default_severity_rubric")
-            .digest("base64")]: { value: policy },
-        },
-      }),
+      rubricConfigResponse(policy),
     );
     const expected =
       enabled === "1" ? policy : rubricSource.bundledSeverityRubric;

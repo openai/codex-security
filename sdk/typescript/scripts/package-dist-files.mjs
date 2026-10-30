@@ -134,7 +134,6 @@ const distModules = [
   "deduplication/local",
   "deduplication/finding-schema",
   "deduplication/records",
-  "deduplication/records-protocol",
   "deduplication/review",
   "saved-scan",
   "saved-scan-bootstrap",

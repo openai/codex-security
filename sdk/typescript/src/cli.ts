@@ -129,16 +129,10 @@ import {
 import { DEFAULT_DEDUPE_CONCURRENCY } from "./deduplication/deduplication.js";
 import { savedScanWorkbench } from "./saved-scan-bootstrap.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
-import { runRecordsProtocol } from "./deduplication/records-protocol.js";
 import { runHostRecordsProtocol } from "./host-records-protocol.js";
-import {
-  classifySeverityRecords,
-  type ClassifySeverityRecordsInput,
-} from "./classify-severity-records.js";
 import { runHostedScanProtocol } from "./hosted-scan-protocol.js";
 import { severityRubricSchema } from "./severity-rubric.js";
 import { runHostedRemediationProtocol } from "./hosted-remediation-protocol.js";
-import { runValidationRecordsProtocol } from "./validation-records.js";
 import {
   FindingPatchSchema as findingPatchSchema,
   parseFindingVerifications,
@@ -1931,13 +1925,16 @@ export async function main(
       : argv[0] === "verify-fix"
         ? "verify"
         : undefined;
+  const recordsCommand =
+    argv[0] === "dedupe" ||
+    argv[0] === "validate" ||
+    argv[0] === "classify-severity"
+      ? argv[0]
+      : undefined;
   const hostedCommand =
     argv[0] === "scan" || remediationOperation !== undefined;
   if (
-    (((argv[0] === "dedupe" ||
-      argv[0] === "validate" ||
-      argv[0] === "classify-severity") &&
-      argv.includes("--records")) ||
+    ((recordsCommand !== undefined && argv.includes("--records")) ||
       (hostedCommand &&
         argv.some((arg) => arg === "--host" || arg.startsWith("--host=")))) &&
     !argv.includes("--help") &&
@@ -1975,44 +1972,25 @@ export async function main(
     const removeSignals = listenForAbort(dependencies, controller);
     let exitCode: number;
     try {
-      const runProtocol =
-        argv[0] === "validate"
-          ? runValidationRecordsProtocol
-          : runRecordsProtocol;
+      const input = dependencies.recordsInput ?? process.stdin;
       const code =
-        argv[0] === "classify-severity"
-          ? await runHostRecordsProtocol(
-              dependencies.recordsInput ?? process.stdin,
-              output,
-              (value, options) =>
-                classifySeverityRecords(value as ClassifySeverityRecordsInput, {
-                  ...options,
-                  classificationRuns,
-                  environment: dependencies.environment,
-                }),
-              controller.signal,
-            )
+        recordsCommand !== undefined
+          ? await runHostRecordsProtocol(recordsCommand, input, output, {
+              signal: controller.signal,
+              classificationRuns,
+              environment: dependencies.environment,
+            })
           : remediationOperation !== undefined
             ? await runHostedRemediationProtocol(
-                dependencies.recordsInput ?? process.stdin,
+                input,
                 output,
                 controller.signal,
                 remediationOperation,
               )
-            : argv[0] === "scan"
-              ? await runHostedScanProtocol(
-                  dependencies.recordsInput ?? process.stdin,
-                  output,
-                  {
-                    signal: controller.signal,
-                    environment: dependencies.environment,
-                  },
-                )
-              : await runProtocol(
-                  dependencies.recordsInput ?? process.stdin,
-                  output,
-                  controller.signal,
-                );
+            : await runHostedScanProtocol(input, output, {
+                signal: controller.signal,
+                environment: dependencies.environment,
+              });
       exitCode =
         controller.signal.reason === "SIGINT"
           ? 130
@@ -5510,7 +5488,6 @@ export async function main(
                     try {
                       return await security.run(recipe.repository!, {
                         ...pickScanSettings(recipe),
-                        severityRubric: recipe.severityRubric,
                         knowledgeBaseSnapshot: prompts.knowledgeBaseSnapshot,
                         resumeScanId: scan.scanId,
                         outputDir: scanDir,
@@ -7387,9 +7364,10 @@ async function prepareScanArgumentsFromRecipe(
   }
   const safetyIdentifier = recipe["safetyIdentifier"];
   const postScanPrompt = recipe["postScanPrompt"];
-  const severityRubric = severityRubricSchema
-    .optional()
-    .parse(recipe["severityRubric"]);
+  const severityRubric =
+    operation === "rerun"
+      ? severityRubricSchema.optional().parse(recipe["severityRubric"])
+      : undefined;
   if (
     (safetyIdentifier !== undefined && typeof safetyIdentifier !== "string") ||
     (postScanPrompt !== undefined && typeof postScanPrompt !== "string")

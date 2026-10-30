@@ -138,7 +138,6 @@ export async function classifySeverityRecords(
     .default(3)
     .parse(options.classificationRuns);
   const data = classifySeverityRecordsInputSchema.parse(structuredClone(input));
-  const rubric = data.rubric ?? (await getDefaultSeverityRubric(options));
   const ids = new Set<string>();
   for (const record of data.records) {
     if (ids.has(record.id))
@@ -152,6 +151,7 @@ export async function classifySeverityRecords(
         "The report findingId must equal its canonical record ID.",
       );
   }
+  const rubric = data.rubric ?? (await getDefaultSeverityRubric(options));
   const binding: RecordsResultBinding = {
     classificationRuns,
     version: 1,

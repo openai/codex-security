@@ -753,18 +753,14 @@ export class CodexSecurity {
       );
     options = {
       ...options,
-      ...(options.severityRubric === undefined
-        ? {}
-        : {
-            severityRubric: severityRubricSchema.parse(
-              structuredClone(options.severityRubric),
-            ),
-          }),
+      severityRubric: severityRubricSchema
+        .optional()
+        .parse(options.severityRubric),
     };
     return await this.#trackOperation(() =>
       options.workflowId === undefined
-        ? this.#run(repository, { ...options })
-        : this.#runWorkflow(repository, { ...options }, options.workflowId),
+        ? this.#run(repository, options)
+        : this.#runWorkflow(repository, options, options.workflowId),
     );
   }
 
@@ -825,7 +821,7 @@ export class CodexSecurity {
       let metadata = state.stages.scan.result as ScanMetadata | undefined;
       let completed = state.stages.scan.status === "completed";
       if (!completed) {
-        const scan = await workflow.registeredScan(state.scanId);
+        const { scan, recipe } = await workflow.registeredScan(state.scanId);
         completed =
           (scan["progress"] as JsonObject | undefined)?.["status"] ===
           "complete";
@@ -834,6 +830,11 @@ export class CodexSecurity {
             threadId: (scan["continuationThreadId"] as string) ?? "",
             turnResult: { status: "completed" },
           };
+        else if (isRecord(recipe) && recipe["severityRubric"] !== undefined)
+          options.severityRubric = restoreSeverityRubric(
+            recipe["severityRubric"],
+            options.severityRubric,
+          );
       }
       if (completed) {
         const contract = await loadContract(state.scanDir, {
@@ -2077,14 +2078,14 @@ export class CodexSecurity {
       } = inputs;
       options = { ...options, ...prompts };
       let severityRubric =
-        options.severityRubric === undefined
-          ? options.resumeScanId === undefined
-            ? await getDefaultSeverityRubric({
-                signal,
-                environment: this.#dependencies.environment,
-              })
-            : undefined
-          : options.severityRubric;
+        this.#dependencies.hostedScan?.context.severityRubric ??
+        options.severityRubric ??
+        (options.resumeScanId === undefined
+          ? await getDefaultSeverityRubric({
+              signal,
+              environment: this.#dependencies.environment,
+            })
+          : undefined);
       checkOpen();
       let temporaryRoot: string | undefined;
       if (
@@ -2605,17 +2606,10 @@ export class CodexSecurity {
           expectation.pluginVersion = registration["sealedProducerVersion"];
         }
         const savedInputs = savedRecipe["scanInputs"];
-        const savedRubric = severityRubricSchema
-          .optional()
-          .parse(savedRecipe["severityRubric"]);
-        if (
-          severityRubric !== undefined &&
-          !isDeepStrictEqual(severityRubric, savedRubric)
-        )
-          throw new CodexSecurityError(
-            "The supplied severity rubric differs from this scan's saved policy. Resume with the original rubric or start a new scan.",
-          );
-        severityRubric = savedRubric;
+        severityRubric = restoreSeverityRubric(
+          savedRecipe["severityRubric"],
+          severityRubric,
+        );
         if (
           isRecord(savedInputs) &&
           workflowDigest(savedInputs["knowledgeBase"]) !==
@@ -5255,6 +5249,18 @@ function trustedAccessWarning(
     ? "Trusted Access for Cyber for your API organization"
     : "your Trusted Access for Cyber status";
   return `Some cybersecurity requests or findings may be refused because ${access} could not be verified. Check ${apiOrganization ? "your organization's access" : "your access"} or apply at ${applicationUrl}.`;
+}
+
+function restoreSeverityRubric(
+  value: unknown,
+  supplied: SeverityRubricSnapshot | undefined,
+): SeverityRubricSnapshot | undefined {
+  const saved = severityRubricSchema.optional().parse(value);
+  if (supplied !== undefined && !isDeepStrictEqual(supplied, saved))
+    throw new CodexSecurityError(
+      "The supplied severity rubric differs from this scan's saved policy. Resume with the original rubric or start a new scan.",
+    );
+  return saved;
 }
 
 function scanPrompt(

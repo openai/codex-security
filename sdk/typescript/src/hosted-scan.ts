@@ -269,7 +269,6 @@ export async function runHostedScan(
       mode: "standard",
       outputDir: outputDirectory,
       signal: options.signal,
-      severityRubric: context.severityRubric,
       ownerSuggestions: input.ownerSuggestions,
       onOutputDirReady(path) {
         outputDirectory = path;

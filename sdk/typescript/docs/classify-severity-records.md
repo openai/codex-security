@@ -25,7 +25,7 @@ Send one newline-delimited JSON-RPC request with `method: "run"` and these param
 ```
 
 The `rubric` field is optional. Omitting it uses the
-[bundled severity rubric](https://github.com/openai/codex-security/blob/main/sdk/typescript/src/default-severity-rubric.ts)
+[bundled severity rubric](https://github.com/openai/codex-security/blob/main/plugins/codex-security/references/default-severity-rubric.md)
 at revision `1`, without fetching rubric configuration by default. To opt in to the shared
 Statsig default, set `CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC=1` in the CLI
 environment or SDK options' `environment`. Unset it or use `0` to disable fetching;

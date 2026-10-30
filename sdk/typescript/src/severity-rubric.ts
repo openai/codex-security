@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { hash } from "node:crypto";
 import { z } from "zod";
 import { defaultSeverityRubric } from "./default-severity-rubric.js";
 
@@ -22,25 +22,30 @@ const rubricConfigSchema = rubricFields.extend({
     "Remote rubric must be within the shared 196608-byte UTF-8 limit, without binary control characters or unpaired surrogates.",
   ),
 });
+const configResponseSchema = z.object({
+  name: z.literal(configName),
+  value: rubricConfigSchema,
+});
 
 export const severityRubricSchema = rubricFields
   .extend({ sha256: z.string().regex(/^[a-f0-9]{64}$/u) })
   .refine(
-    (value) =>
-      createHash("sha256").update(value.markdown, "utf8").digest("hex") ===
-      value.sha256,
+    (value) => hash("sha256", value.markdown) === value.sha256,
     "Rubric SHA-256 does not match its exact UTF-8 Markdown.",
   );
 
 export type SeverityRubricSnapshot = z.infer<typeof severityRubricSchema>;
 
-export const bundledSeverityRubric: SeverityRubricSnapshot = Object.freeze({
-  markdown: defaultSeverityRubric,
-  revision: 1,
-  sha256: createHash("sha256")
-    .update(defaultSeverityRubric, "utf8")
-    .digest("hex"),
-});
+function rubricSnapshot({
+  markdown,
+  revision,
+}: z.infer<typeof rubricFields>): SeverityRubricSnapshot {
+  return { markdown, revision, sha256: hash("sha256", markdown) };
+}
+
+export const bundledSeverityRubric = Object.freeze(
+  rubricSnapshot({ markdown: defaultSeverityRubric, revision: 1 }),
+);
 
 /** Resolve once per operation; callers retain this snapshot for retries and workers. */
 export async function getDefaultSeverityRubric({
@@ -55,51 +60,31 @@ export async function getDefaultSeverityRubric({
     return { ...bundledSeverityRubric };
   const timeout = AbortSignal.timeout(3_000);
   try {
-    const response = await fetch("https://ab.chatgpt.com/v1/initialize", {
+    const response = await fetch("https://ab.chatgpt.com/v1/get_config", {
       method: "POST",
       headers: {
         "statsig-api-key": publicClientKey,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        user: {},
-        hashAlgorithm: "sha256",
-        statsigMetadata: { sdkType: "js-client", sdkVersion: "0.0.0" },
+        configName,
+        statsigMetadata: { exposureLoggingDisabled: true },
       }),
       redirect: "error",
       signal:
         signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
     });
-    if (response.ok) {
-      const payload = z
-        .object({
-          hash_used: z.literal("sha256"),
-          dynamic_configs: z.record(
-            z.string(),
-            z.object({ value: z.unknown() }),
-          ),
-        })
-        .parse(await response.json());
-      signal?.throwIfAborted();
-      const key = createHash("sha256").update(configName).digest("base64");
-      const config = rubricConfigSchema.safeParse(
-        payload.dynamic_configs[key]?.value,
-      );
-      if (config.success)
-        return {
-          ...config.data,
-          sha256: createHash("sha256")
-            .update(config.data.markdown, "utf8")
-            .digest("hex"),
-        };
-    } else {
+    if (!response.ok) {
       await response.body?.cancel();
+      return { ...bundledSeverityRubric };
     }
+    const { value } = configResponseSchema.parse(await response.json());
+    return rubricSnapshot(value);
   } catch {
+    return { ...bundledSeverityRubric };
+  } finally {
     signal?.throwIfAborted();
   }
-  signal?.throwIfAborted();
-  return { ...bundledSeverityRubric };
 }
 
 export function severityRubricInstructions(

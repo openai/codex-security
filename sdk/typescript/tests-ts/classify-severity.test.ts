@@ -14,6 +14,7 @@ import {
   type ClassifySeverityOptions,
   type SeverityClassificationFinding,
 } from "../src/classify-severity.js";
+import { rubricConfigResponse } from "./support/rubric-config.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
@@ -81,14 +82,8 @@ test.each([
   "classification honors the selected environment and explicit policy: %j",
   async ({ optIn, custom }) => {
     const config = { markdown: "# Remote classification policy", revision: 9 };
-    const key = createHash("sha256")
-      .update("codex_security_default_severity_rubric")
-      .digest("base64");
     const request = spyOn(globalThis, "fetch").mockResolvedValue(
-      Response.json({
-        hash_used: "sha256",
-        dynamic_configs: { [key]: { value: config } },
-      }),
+      rubricConfigResponse(config),
     );
     const customPolicy = "Use this explicit classification policy.";
     const { codex, calls } = fakeCodex(assessed);
@@ -119,32 +114,6 @@ test.each([
       ]);
   },
 );
-
-test("reclassification freezes one shared default across independent reviews", async () => {
-  const policy = { ...rubricSource.bundledSeverityRubric, revision: 7 };
-  const resolve = spyOn(
-    rubricSource,
-    "getDefaultSeverityRubric",
-  ).mockResolvedValue(policy);
-  const { codex, calls } = fakeCodex(() => {
-    resolve.mockResolvedValue({
-      ...policy,
-      markdown: "A later policy",
-      revision: 8,
-    });
-    return assessed;
-  });
-  await classifySeverity([finding], { codex, environment: {} });
-  expect(resolve).toHaveBeenCalledTimes(1);
-  for (const call of calls)
-    expect(JSON.parse(call.prompt.split("\n\n").at(-1)!).rubric).toEqual([
-      policy.markdown,
-    ]);
-  resolve.mockClear();
-  const rubricPath = await document("Explicit classification policy");
-  await classifySeverity([finding], { codex, environment: {}, rubricPath });
-  expect(resolve).not.toHaveBeenCalled();
-});
 
 test("rubric directories retain the ordered document digest without a revision", async () => {
   const directory = await temporaryDirectory();

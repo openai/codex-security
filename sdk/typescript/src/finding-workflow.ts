@@ -159,9 +159,9 @@ export class FindingWorkflow {
     }
   }
 
-  async registeredScan(scanId: string): Promise<JsonObject> {
-    const context = await this.call(["get-scan", "--scan-id", scanId]);
-    return context["scan"] as JsonObject;
+  async registeredScan(scanId: string) {
+    const { scan, recipe } = await this.call(["get-scan", "--scan-id", scanId]);
+    return { scan: scan as JsonObject, recipe };
   }
 
   async sourceSnapshot(

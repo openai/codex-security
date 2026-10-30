@@ -15,7 +15,6 @@ import type { CodexSdkWorkerExecutor as WorkerExecutor } from "../src/deep-scan/
 import type {
   CodexWorkerRequest,
   DeepScanWorkerKind,
-  DeepScanRunState,
 } from "../src/deep-scan/types.js";
 
 export async function testDeepScanContextSnapshots({
@@ -51,20 +50,13 @@ export async function testDeepScanContextSnapshots({
   // Concurrent children record their input in their own working directories.
   await writeFile(
     fixture.executablePath,
-    (await readFile(fixture.executablePath, "utf8"))
-      .replace(
-        "process.env.FAKE_CODEX_MARKER",
-        "process.argv[process.argv.indexOf('--cd') + 1] + '/invocation.json'",
-      )
-      .replace(
-        "'RUNNER_TRACKING_ID'",
-        "'RUNNER_TRACKING_ID', 'CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC'",
-      ),
+    (await readFile(fixture.executablePath, "utf8")).replace(
+      "process.env.FAKE_CODEX_MARKER",
+      "process.argv[process.argv.indexOf('--cd') + 1] + '/invocation.json'",
+    ),
   );
   const previousPath = process.env.CODEX_CLI_PATH;
   const previousDeepConfig = process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
-  const rubricSetting = "CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC";
-  const previousRubricSetting = process.env[rubricSetting];
   process.env.CODEX_CLI_PATH = fixture.executablePath;
   const environment = {
     ...process.env,
@@ -72,42 +64,19 @@ export async function testDeepScanContextSnapshots({
     CODEX_SECURITY_STATE_DIR: path.join(fixture.root, "state"),
   };
   try {
-    const contexts: {
-      userContext?: string;
-      severityRubric?: DeepScanRunState["severityRubric"];
-      initialRemoteRubricSetting?: "1" | "0";
-    }[] = [{ userContext: "Review authentication only." }, {}];
-    for (const { initialRemoteRubricSetting, markdown, revision } of [
-      {
-        initialRemoteRubricSetting: "1",
-        markdown: "# Hosted policy\n",
-        revision: 17,
-      },
-      {
-        initialRemoteRubricSetting: "0",
-        markdown: "# Bundled policy\n",
-        revision: 1,
-      },
-    ] as const) {
-      contexts.push({
-        userContext: "Instructions edited before the first worker starts.",
-        severityRubric: {
-          markdown,
-          revision,
-          sha256: createHash("sha256").update(markdown).digest("hex"),
-        },
-        initialRemoteRubricSetting,
-      });
-    }
+    const markdown = "# Saved policy\n";
+    const policy = {
+      markdown,
+      revision: 17,
+      sha256: createHash("sha256").update(markdown).digest("hex"),
+    };
     const targetPath = path.join(fixture.root, "target");
     await mkdir(targetPath);
     await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
     const outcomes = await Promise.allSettled(
-      contexts.map(
-        async (
-          { userContext, severityRubric, initialRemoteRubricSetting },
-          index,
-        ) => {
+      ["Review authentication only.", undefined].map(
+        async (userContext, index) => {
+          const severityRubric = userContext === undefined ? undefined : policy;
           const deepConfig = path.join(fixture.root, `deep-${index}.toml`);
           const maxTimeHours = 1.5 + index;
           await writeFile(deepConfig, `[deep_scan]\nmax_time_hours = 48\n`);
@@ -211,7 +180,6 @@ export async function testDeepScanContextSnapshots({
               argv: string[];
               stdin: string;
               deepConfig: string;
-              runtimeEnvironment: Record<string, string | undefined>;
             };
           }[] = [];
           let sdk = new CodexSdkWorkerExecutor({
@@ -221,12 +189,6 @@ export async function testDeepScanContextSnapshots({
           const executor = {
             async run(request: CodexWorkerRequest) {
               process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH = deepConfig;
-              if (initialRemoteRubricSetting !== undefined)
-                process.env[rubricSetting] = request.resumeThreadId
-                  ? initialRemoteRubricSetting
-                  : initialRemoteRubricSetting === "1"
-                    ? "0"
-                    : "1";
               const result = await sdk.run(request);
               invocations.push({
                 kind: request.kind,
@@ -324,16 +286,6 @@ export async function testDeepScanContextSnapshots({
             const resumed = invocations[offset + 1]!;
             assert.equal(fresh.invocation.argv.includes("resume"), false);
             assert.equal(resumed.invocation.argv.includes("resume"), true);
-            if (initialRemoteRubricSetting !== undefined) {
-              assert.equal(
-                fresh.invocation.runtimeEnvironment[rubricSetting],
-                initialRemoteRubricSetting === "1" ? "0" : "1",
-              );
-              assert.equal(
-                resumed.invocation.runtimeEnvironment[rubricSetting],
-                initialRemoteRubricSetting,
-              );
-            }
             for (const { invocation } of [fresh, resumed]) {
               assert.deepEqual(
                 { ...(parseToml(invocation.deepConfig).deep_scan as object) },
@@ -397,8 +349,6 @@ export async function testDeepScanContextSnapshots({
       if (outcome.status === "rejected") throw outcome.reason;
     }
   } finally {
-    if (previousRubricSetting === undefined) delete process.env[rubricSetting];
-    else process.env[rubricSetting] = previousRubricSetting;
     if (previousPath === undefined) delete process.env.CODEX_CLI_PATH;
     else process.env.CODEX_CLI_PATH = previousPath;
     if (previousDeepConfig === undefined)

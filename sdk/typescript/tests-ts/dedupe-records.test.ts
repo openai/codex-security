@@ -16,8 +16,7 @@ import {
   type DeduplicateRecordsInput,
 } from "../src/deduplication/records.js";
 import type { DeduplicationReviewRequest } from "../src/deduplication/review.js";
-import { runRecordsProtocol } from "../src/deduplication/records-protocol.js";
-import { runValidationRecordsProtocol } from "../src/validation-records.js";
+import { runHostRecordsProtocol } from "../src/host-records-protocol.js";
 import { main } from "../src/cli.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -479,7 +478,7 @@ test.each(["corrected", "still-invalid", "release-failed"])(
         );
       }
     });
-    const done = runRecordsProtocol(host.stream, host.output);
+    const done = runHostRecordsProtocol("dedupe", host.stream, host.output);
     host.send({ ...run, params });
     expect(await done).toBe(outcome === "corrected" ? 0 : 1);
     expect(originals).toHaveLength(outcome === "release-failed" ? 1 : 2);
@@ -513,7 +512,7 @@ test("a review that did not advertise pending submissions rejects the envelope f
       result: { verdict: "example" },
     });
   });
-  const done = runValidationRecordsProtocol(host.stream, host.output);
+  const done = runHostRecordsProtocol("validate", host.stream, host.output);
   host.send({
     ...run,
     params: {
@@ -540,7 +539,7 @@ test("raw tool arguments cannot reopen a legacy host's finished review", async (
       },
     });
   });
-  const done = runRecordsProtocol(host.stream, host.output);
+  const done = runHostRecordsProtocol("dedupe", host.stream, host.output);
   host.send(run);
   expect(await done).toBe(1);
   expect(host.messages.map((m) => m.method)).toEqual(["review.run", undefined]);
@@ -570,7 +569,7 @@ test.each([false, true])(
           : answer(original.params);
       send({ jsonrpc: "2.0", id: message.id, result });
     });
-    const done = runRecordsProtocol(host.stream, host.output);
+    const done = runHostRecordsProtocol("dedupe", host.stream, host.output);
     host.send(run);
     expect(await done).toBe(missingAgain ? 1 : 0);
     const originals = host.messages.filter((m) => m.method === "review.run");
@@ -682,7 +681,7 @@ test.each([
         },
       });
   });
-  const done = runRecordsProtocol(host.stream, host.output);
+  const done = runHostRecordsProtocol("dedupe", host.stream, host.output);
   host.send(run);
   expect(await done).toBe(scenario === "host-error" ? 1 : 2);
   expect(
@@ -808,7 +807,11 @@ test("real CLI pipes exit after a fake-host run without local Codex or state wri
 
 test("disconnect before run and a broken output pipe terminate cleanly", async () => {
   const host = fakeHost(() => {});
-  const disconnected = runRecordsProtocol(host.stream, host.output);
+  const disconnected = runHostRecordsProtocol(
+    "dedupe",
+    host.stream,
+    host.output,
+  );
   host.stream.end();
   expect(await disconnected).toBe(2);
   expect(host.messages).toMatchObject([{ id: null, error: { code: -32000 } }]);
@@ -818,7 +821,7 @@ test("disconnect before run and a broken output pipe terminate cleanly", async (
       callback(new Error("Broken pipe"));
     },
   });
-  const failed = runRecordsProtocol(input, output);
+  const failed = runHostRecordsProtocol("dedupe", input, output);
   input.write(`${JSON.stringify(run)}\n`);
   expect(await failed).toBe(2);
   input.destroy();
@@ -840,7 +843,7 @@ test("a disconnect while flushing the final result does not send a second respon
       setImmediate(callback);
     },
   });
-  const done = runRecordsProtocol(inputStream, output);
+  const done = runHostRecordsProtocol("dedupe", inputStream, output);
   inputStream.write(`${JSON.stringify({ ...run, params: emptyRecords })}\n`);
   expect(await done).toBe(0);
   expect(messages).toMatchObject([
@@ -887,7 +890,9 @@ for (const trigger of ["signal", "notification"]) {
         output.destroy();
         inputStream.destroy();
       });
-      const done = runRecordsProtocol(inputStream, output, controller.signal);
+      const done = runHostRecordsProtocol("dedupe", inputStream, output, {
+        signal: controller.signal,
+      });
       inputStream.write(`${JSON.stringify({ ...run, params })}\n`);
       const flush = await writing.promise;
       const signal = operation?.mock.calls[0]?.[2];
