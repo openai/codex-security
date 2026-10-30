@@ -831,9 +831,8 @@ export class CodexSecurity {
             turnResult: { status: "completed" },
           };
         else if (isRecord(recipe) && recipe["severityRubric"] !== undefined)
-          options.severityRubric = restoreSeverityRubric(
+          options.severityRubric = severityRubricSchema.parse(
             recipe["severityRubric"],
-            options.severityRubric,
           );
       }
       if (completed) {
@@ -2606,10 +2605,9 @@ export class CodexSecurity {
           expectation.pluginVersion = registration["sealedProducerVersion"];
         }
         const savedInputs = savedRecipe["scanInputs"];
-        severityRubric = restoreSeverityRubric(
-          savedRecipe["severityRubric"],
-          severityRubric,
-        );
+        severityRubric = severityRubricSchema
+          .optional()
+          .parse(savedRecipe["severityRubric"]);
         if (
           isRecord(savedInputs) &&
           workflowDigest(savedInputs["knowledgeBase"]) !==
@@ -5249,18 +5247,6 @@ function trustedAccessWarning(
     ? "Trusted Access for Cyber for your API organization"
     : "your Trusted Access for Cyber status";
   return `Some cybersecurity requests or findings may be refused because ${access} could not be verified. Check ${apiOrganization ? "your organization's access" : "your access"} or apply at ${applicationUrl}.`;
-}
-
-function restoreSeverityRubric(
-  value: unknown,
-  supplied: SeverityRubricSnapshot | undefined,
-): SeverityRubricSnapshot | undefined {
-  const saved = severityRubricSchema.optional().parse(value);
-  if (supplied !== undefined && !isDeepStrictEqual(supplied, saved))
-    throw new CodexSecurityError(
-      "The supplied severity rubric differs from this scan's saved policy. Resume with the original rubric or start a new scan.",
-    );
-  return saved;
 }
 
 function scanPrompt(

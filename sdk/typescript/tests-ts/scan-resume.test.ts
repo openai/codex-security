@@ -1022,23 +1022,6 @@ test.each(["chatgpt", "api-key"] as const)(
   },
 );
 
-test("SDK resume rejects an explicit rubric that differs from the saved recipe", async () => {
-  const f = await interruptedScan("deep", false, {
-    severityRubric: bundledSeverityRubric,
-  });
-  await using client = resumeDependencies(f, () => {
-    throw new Error("Unexpected inference");
-  }).createSecurity({});
-  await expect(
-    client.run(f.repository, {
-      mode: "deep",
-      outputDir: f.scanDir,
-      resumeScanId: f.scanId,
-      severityRubric: { ...bundledSeverityRubric, revision: 17 },
-    }),
-  ).rejects.toThrow("severity rubric differs from this scan's saved policy");
-});
-
 test.each([
   ["chatgpt", false],
   ["api-key", false],
