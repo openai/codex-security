@@ -196,3 +196,12 @@ test("historical reducer validation reads overflow without rewriting the artifac
   assert.equal(await readFile(f.resultPath, "utf8"), wire(input));
   assert.deepEqual(await readdir(f.output), ["result.json"]);
 });
+
+test("reference retention copies historical payloads without treating them as fresh model output", async (t) => {
+  const f = await fixture(t, "mcp", "previous");
+  await f.write({ scanId, findings: [], retainedFindingRefs: ["previous:0"] });
+  for (const saved of await storedDrafts(f.output)) {
+    assert.equal(saved.findings[0].extensions.measurement, null);
+    assert.equal(saved.threatModel.measurement, null);
+  }
+});

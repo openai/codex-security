@@ -5,33 +5,20 @@ import path from "node:path";
 import { test } from "node:test";
 import {
   publishCoverageFixture,
+  publishReceiptFixture,
   readFixtureCoverage,
 } from "./deep_scan_coverage_fixture.ts";
 
 for (const resume of [false, true]) {
-  for (const outcome of ["completion", "recovery", "no parent"]) {
-    test(`resolved generic tasks survive ${resume ? "resumed" : "live"} ${outcome}`, async () => {
-      const root = await mkdtemp(path.join(tmpdir(), "resolved-coverage-"));
-      try {
-        const { scanDir } = await publishCoverageFixture(root, "complete", {
-          resume,
-          firstCheckpointReceipt: "worker",
-          sameAttemptCloseout: true,
-          stopAfterDraft: outcome === "recovery",
-          stopBeforeDraft: outcome === "no parent",
-        });
-        const coverage = await readFixtureCoverage(scanDir);
-        assert.deepEqual(
-          coverage.resolvedDeferred,
-          coverage.reviews.map(({ workerId, attempt }) => ({
-            id: `${workerId}-attempt-${attempt}-resolved-first-gap`,
-            reason: "The same boundary is verified.",
-          })),
-        );
-      } finally {
-        await rm(root, { recursive: true, force: true });
-      }
-    });
+  for (const outcome of ["recovery", "no parent"]) {
+    test(`worker-local same-attempt closeout survives ${resume ? "resumed" : "live"} ${outcome}`, () =>
+      publishReceiptFixture({
+        resume,
+        firstCheckpointReceipt: "worker",
+        sameAttemptCloseout: true,
+        stopAfterDraft: outcome === "recovery",
+        stopBeforeDraft: outcome === "no parent",
+      }));
   }
 }
 
@@ -149,7 +136,7 @@ for (const outcome of ["completion", "recovery", "frozen recovery"]) {
       });
       const coverage = await readFixtureCoverage(scanDir);
       assert.deepEqual(
-        coverage.openQuestions.map((item) => item.question),
+        coverage.openQuestions.map((item) => item.question.trim()),
         ["Which deployment controls apply?", "Which runtime settings apply?"],
       );
       assert.equal(

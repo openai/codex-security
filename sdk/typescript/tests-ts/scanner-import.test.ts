@@ -1,9 +1,83 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { gunzipSync, gzipSync } from "node:zlib";
 import {
   hasSarifExternalPropertyReferences,
+  readScannerJson,
+  readScannerText,
   relativePath,
   sarifRunContextForResult,
 } from "../src/scanner-import.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
+
+const reports = createTemporaryDirectories();
+afterEach(reports.cleanup);
+
+async function failure(operation: () => unknown): Promise<Error> {
+  try {
+    await operation();
+  } catch (error) {
+    if (error instanceof Error) return error;
+    throw error;
+  }
+  throw new Error("Expected the operation to fail");
+}
+
+test("scanner readers detect gzip by content and preserve BOM handling", async () => {
+  const path = join(await reports.create("scanner-report-"), "report");
+  await writeFile(path, gzipSync('\uFEFF\uFEFF"λ"'));
+  expect(await readScannerText(path)).toBe('\uFEFF"λ"');
+  expect(await readScannerJson(path)).toBe("λ");
+});
+
+test("scanner readers propagate filesystem and gzip errors", async () => {
+  const path = join(await reports.create("scanner-report-"), "missing");
+  const missing = await failure(() => readFile(path));
+  for (const read of [readScannerText, readScannerJson]) {
+    await expect(read(path)).rejects.toMatchObject({
+      code: "ENOENT",
+      message: missing.message,
+    });
+  }
+
+  const truncated = Buffer.from([0x1f, 0x8b]);
+  await writeFile(path, truncated);
+  const gzip = await failure(() => gunzipSync(truncated));
+  for (const read of [readScannerText, readScannerJson]) {
+    await expect(read(path)).rejects.toMatchObject({
+      code: "Z_BUF_ERROR",
+      message: gzip.message,
+    });
+  }
+});
+
+test("scanner readers preserve UTF-8 and JSON parse diagnostics", async () => {
+  const path = join(await reports.create("scanner-report-"), "report");
+  const invalid = Uint8Array.of(0xff);
+  await writeFile(path, gzipSync(invalid));
+  const utf8 = await failure(() =>
+    new TextDecoder("utf-8", { fatal: true }).decode(invalid),
+  );
+  await expect(readScannerText(path)).rejects.toMatchObject({
+    name: "TypeError",
+    message: utf8.message,
+  });
+  await expect(readScannerJson(path)).rejects.toMatchObject({
+    name: "CodexSecurityError",
+    message: `Scanner report is not valid UTF-8. ${utf8.message}`,
+    cause: { name: "TypeError", message: utf8.message },
+  });
+
+  await writeFile(path, "{");
+  expect(await readScannerText(path)).toBe("{");
+  const syntax = await failure(() => JSON.parse("{"));
+  await expect(readScannerJson(path)).rejects.toMatchObject({
+    name: "CodexSecurityError",
+    message: `Scanner JSON could not be parsed. ${syntax.message}`,
+    cause: { name: "SyntaxError", message: syntax.message },
+  });
+});
 
 test("scanner repository paths retain colons outside Windows drive prefixes", () => {
   expect(relativePath("schema:prod.json")).toBe("schema:prod.json");

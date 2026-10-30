@@ -9,7 +9,7 @@ import { collectReports, uploadReports } from './artifacts.js';
 import { resultSummary, emitAnnotations, plain, resultTitle } from './reporting.js';
 
 export const OUTPUT_NAMES = [
-  'sarif-path', 'json-path', 'coverage-path', 'results-directory', 'scan-status', 'skip-reason',
+  'sarif-path', 'json-path', 'manifest-path', 'coverage-path', 'results-directory', 'scan-status', 'skip-reason',
   'policy-status', 'report-status', 'exit-code', 'scanned-sha', 'analysis-ref', 'sarif-upload-ready',
   'critical-count', 'high-count', 'medium-count', 'low-count', 'informational-count', 'estimated-cost',
 ] as const;
@@ -30,7 +30,7 @@ async function context(): Promise<EventContext> {
 }
 function outputs(result: ScanResults, target: Target, exitCode: number): void {
   const values: Record<string, string | number | boolean> = {
-    'sarif-path': result.paths.sarifPath, 'json-path': result.paths.jsonPath, 'coverage-path': result.paths.coveragePath,
+    'sarif-path': result.paths.sarifPath, 'json-path': result.paths.jsonPath, 'coverage-path': result.paths.coveragePath, 'manifest-path': result.paths.manifestPath,
     'results-directory': result.paths.resultsDirectory, 'scan-status': result.scanStatus, 'policy-status': result.policyStatus,
     'report-status': result.reportStatus, 'exit-code': exitCode, 'scanned-sha': target.scannedSha,
     'analysis-ref': target.analysisRef, 'sarif-upload-ready': result.sarifUploadReady,
@@ -84,8 +84,8 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
           ? 'Set CODEX_SECURITY_API_KEY in Actions secrets (or Dependabot secrets for Dependabot runs) and pass it as OPENAI_API_KEY to this step. No scan was started.'
           : `Pass ${API_KEY_ENVIRONMENT_VARIABLES[credentials.provider]} from Actions secrets to this step. No scan was started.`);
       }
-      tempRoot = await realpath(process.env.RUNNER_TEMP ?? '');
       if (!process.env.RUNNER_TEMP) throw new Error('RUNNER_TEMP is required.');
+      tempRoot = await realpath(process.env.RUNNER_TEMP);
       core.info(`Preparing Codex Security ${SUPPORTED_CLI_VERSION}. Scope: ${inputs.scope}; mode: ${inputs.mode}; effort: ${inputs.effort}.`);
       const preparationStarted = performance.now();
       let timer = heartbeat('CLI preparation', preparationStarted);

@@ -50,10 +50,8 @@ from finalize_scan_contract import (
     _prepare_scan_finalization,
     _write_prepared_scan_finalization,
     finalize_scan,
-    finding_candidate_id,
     manifest_is_sealed,
     open_scan_local_file_descriptor,
-    write_scan_local_bytes,
 )
 from finding_preview import bounded_finding_details
 from workbench import handoff
@@ -63,9 +61,6 @@ from workbench_constants import (
     ARTIFACTS,
     CLAIM_LEASE_SECONDS,
     DELIVERED_ACTION_LEASE_SECONDS,
-    DIFF_TARGET_KINDS,
-    EMPTY_GIT_TREE,
-    EMPTY_GIT_TREES,
     FINDING_ABSOLUTE_PATH_BYTES,
     FINDING_LEVEL_BYTES,
     FINDING_LOCATION_PATH_BYTES,
@@ -96,6 +91,17 @@ from workbench_schema import (
 from workbench_schema import (
     apply_migrations as apply_schema_migrations,
 )
+from workbench_setup import (
+    inspect_command,
+    inspect_selected_setup,
+    inspect_setup_values,
+    require_diff_target,
+    require_review_changes_target,
+    require_scannable_target,
+    require_scope,
+    require_target,
+    resolve_git_commit,
+)
 from workbench_source_excerpt import finding_source_excerpt
 from workbench_source_scopes import (
     capture_source_scopes,
@@ -111,7 +117,6 @@ from workbench_target import (
     diff_snapshot_digest,
     directory_content_digest,
     directory_snapshot_regular_file_count,
-    git_bytes,
     git_command,
     git_output,
     git_revision,
@@ -119,7 +124,6 @@ from workbench_target import (
     git_target_metadata,
     git_worktree_context,
     remediation_checkout_snapshot,
-    require_git_worktree_head,
     require_remediation_target,
     require_scan_target_identity,
     require_scan_target_unchanged,
@@ -265,168 +269,6 @@ def apply_migrations(connection: sqlite3.Connection, *, immediate: bool = False)
     apply_schema_migrations(
         connection, MIGRATIONS, now, backfill_security_targets, immediate=immediate
     )
-
-
-def require_target(value: str) -> Path:
-    expanded = Path(value).expanduser()
-    if not expanded.is_absolute():
-        raise SystemExit("Scan target must be an absolute local directory path.")
-    target = expanded.resolve()
-    if not target.is_dir():
-        raise SystemExit(f"Scan target is not a readable local directory: {target}")
-    return target
-
-
-def inspect_target(target_path: str) -> dict[str, Any]:
-    target = require_target(target_path)
-    return {
-        "displayName": target.name,
-        "targetMetadata": git_target_metadata(target),
-        "targetPath": str(target),
-    }
-
-
-def resolve_git_commit(target: Path, revision: str, label: str) -> str:
-    value = optional_text(revision, maximum=512)
-    if not value:
-        raise SystemExit(f"{label} is required.")
-    resolved = git_output(
-        target,
-        "rev-parse",
-        "--verify",
-        "--end-of-options",
-        f"{value}^{{commit}}",
-    )
-    if resolved is None:
-        raise SystemExit(f"{label} does not resolve to a local Git commit: {value}")
-    return resolved
-
-
-def require_diff_target(
-    target: Path,
-    kind: str | None,
-    base_revision: str | None,
-    head_revision: str | None,
-    content_digest: str | None,
-) -> dict[str, str]:
-    current_head = require_review_changes_target(target)
-    if kind not in DIFF_TARGET_KINDS:
-        raise SystemExit("Choose which Git changes to review before starting a diff scan.")
-    if kind == "working_tree":
-        base = resolve_git_commit(target, base_revision or "HEAD", "Working-tree base")
-        head = resolve_git_commit(target, head_revision or current_head, "Working-tree HEAD")
-        current_digest = worktree_content_digest(target)
-        if base != current_head or head != current_head:
-            raise SystemExit(
-                "Repository HEAD changed after these working-tree changes were selected. "
-                "Select Uncommitted changes again."
-            )
-        if content_digest and content_digest != current_digest:
-            raise SystemExit(
-                "Working-tree contents changed after they were selected. "
-                "Select Uncommitted changes again."
-            )
-        return {
-            "kind": kind,
-            "baseRevision": current_head,
-            "headRevision": current_head,
-            "contentDigest": current_digest,
-        }
-    if kind == "commit":
-        head = resolve_git_commit(target, head_revision or "", "Commit")
-        commit = git_bytes(target, "cat-file", "-p", head)
-        if commit is None:
-            raise SystemExit(f"Commit is not available in the local checkout: {head}")
-        parent_line = next(
-            (
-                line
-                for line in commit.split(b"\n\n", 1)[0].splitlines()
-                if line.startswith(b"parent ")
-            ),
-            None,
-        )
-        if parent_line is None:
-            parent = EMPTY_GIT_TREES[git_output(target, "rev-parse", "--show-object-format")]
-        else:
-            parent = resolve_git_commit(
-                target,
-                parent_line.removeprefix(b"parent ").decode("ascii").strip(),
-                "Commit parent",
-            )
-        if base_revision and base_revision != parent:
-            supplied_base = (
-                base_revision
-                if base_revision == EMPTY_GIT_TREE
-                else resolve_git_commit(target, base_revision, "Commit base")
-            )
-            if supplied_base != parent:
-                raise SystemExit("Commit base revision must match the selected commit's parent.")
-        return {"kind": kind, "baseRevision": parent, "headRevision": head}
-    base = resolve_git_commit(target, base_revision or "", "Base revision")
-    head = resolve_git_commit(target, head_revision or "", "Head revision")
-    if base == head:
-        raise SystemExit("Base and head revisions must identify different commits.")
-    return {"kind": kind, "baseRevision": base, "headRevision": head}
-
-
-def inspect_setup_values(
-    target_path: str,
-    scope: str,
-    mode: str,
-    diff_target_kind: str | None,
-    diff_base_revision: str | None,
-    diff_head_revision: str | None,
-    diff_content_digest: str | None,
-) -> dict[str, Any]:
-    target = require_target(target_path)
-    require_scannable_target(target)
-    normalized_scope = require_scope(scope, mode, target)
-    if mode == "diff" and normalized_scope != ".":
-        raise SystemExit("Review changes requires the whole target; use scope '.'.")
-    if mode != "diff" and any(
-        value is not None
-        for value in (
-            diff_target_kind,
-            diff_base_revision,
-            diff_head_revision,
-            diff_content_digest,
-        )
-    ):
-        raise SystemExit("A Git diff target requires Review changes mode.")
-    diff_target = (
-        require_diff_target(
-            target,
-            diff_target_kind,
-            diff_base_revision,
-            diff_head_revision,
-            diff_content_digest,
-        )
-        if mode == "diff"
-        else None
-    )
-    return {
-        "diffTarget": diff_target,
-        "scope": normalized_scope,
-        "target": inspect_target(str(target)),
-    }
-
-
-def require_review_changes_target(target: Path) -> str:
-    revision = require_git_worktree_head(target)
-    repository_root = git_output(target, "rev-parse", "--show-toplevel")
-    if repository_root is None or not Path(repository_root).samefile(target):
-        raise SystemExit(
-            "Review changes requires the checked-out Git repository root as the target."
-        )
-    return revision
-
-
-def require_scannable_target(target: Path) -> None:
-    metadata = git_target_metadata(target)
-    if metadata["isGit"] and not metadata["isWorktree"]:
-        raise SystemExit(
-            "Codex Security requires a checked-out worktree, not a bare Git repository."
-        )
 
 
 def requested_scan_file_paths(scan: sqlite3.Row) -> list[str]:
@@ -609,30 +451,6 @@ def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None
             raise SystemExit("scan-manifest.json scope must stay inside the workbench scan scope.")
 
 
-def require_scope(scope: str, mode: str, target: Path) -> str:
-    value = scope if scope.strip() else "."
-    requested_scope = Path(value)
-    if "\\" in value and (os.name != "nt" or not requested_scope.is_absolute()):
-        raise SystemExit("Scan scope must use repository-relative POSIX paths.")
-    if ".." in requested_scope.parts:
-        raise SystemExit("Scan scope must stay inside the scanned target.")
-    try:
-        resolved_scope = (
-            requested_scope if requested_scope.is_absolute() else target / requested_scope
-        ).resolve()
-        relative_scope = resolved_scope.relative_to(target)
-    except (RuntimeError, ValueError) as exc:
-        raise SystemExit("Scan scope must stay inside the scanned target.") from exc
-    normalized = relative_scope.as_posix() or "."
-    if not normalized.strip():
-        normalized = "./" + normalized
-    if mode == "deep" and normalized != ".":
-        raise SystemExit("Deep Scan is repository-wide and cannot use a scoped path.")
-    if not resolved_scope.is_dir():
-        raise SystemExit("Scan scope must reference an existing directory inside the target.")
-    return normalized
-
-
 def require_workspace(connection: sqlite3.Connection, workspace_id: str) -> sqlite3.Row:
     workspace_id = require_uuid(workspace_id, "workspace-id")
     row = connection.execute("SELECT * FROM workspaces WHERE id = ?", (workspace_id,)).fetchone()
@@ -744,15 +562,7 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
     workspace = require_workspace(connection, args.workspace_id)
     if workspace["active_scan_id"]:
         raise SystemExit("This workspace already has a scan. Open a new workspace to change setup.")
-    inspected = inspect_setup_values(
-        args.target_path,
-        args.scope,
-        args.mode,
-        args.diff_target_kind,
-        args.diff_base_revision,
-        args.diff_head_revision,
-        args.diff_content_digest,
-    )
+    inspected = inspect_selected_setup(args)
     target = Path(inspected["target"]["targetPath"])
     scope = inspected["scope"]
     target_path = str(target)
@@ -777,7 +587,7 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
             SET target_id = ?, target_path = ?, target_title = ?, target_summary = ?, default_scope = ?,
                 default_mode = ?, user_context = ?, diff_target_kind = ?,
                 diff_base_revision = ?, diff_head_revision = ?, diff_content_digest = ?,
-                submitted = 1, updated_at = ?
+                deep_scan_config_json = ?, submitted = 1, updated_at = ?
             WHERE id = ? AND active_scan_id IS NULL
             """,
             (
@@ -789,6 +599,7 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
                 args.mode,
                 user_context_argument(args),
                 *scan_diff_identity(diff_target or None),
+                json.dumps(inspected["deepScanConfig"]) if "deepScanConfig" in inspected else None,
                 timestamp,
                 workspace["id"],
             ),
@@ -1341,151 +1152,9 @@ def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[
 
 
 def budget_exhausted_draft(
-    scan: sqlite3.Row,
-    scan_dir: Path,
-    candidates: list[dict[str, Any]],
-    warning: str,
+    scan: sqlite3.Row, scan_dir: Path, candidates: list[dict[str, Any]], warning: str
 ) -> None:
-    documents: dict[str, dict[str, Any]] = {}
-    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
-        path = artifact_path(scan_dir, name, required=False)
-        if path is not None:
-            documents[name] = read_json_object(path)
-    if documents and len(documents) != 3:
-        raise SystemExit("Budget-exhausted scan contains an incomplete canonical scan draft.")
-
-    if documents:
-        manifest = documents["scan-manifest.json"]
-        findings = documents["findings.json"]
-        coverage = documents["coverage.json"]
-        if not isinstance(manifest.get("scan"), dict) or not isinstance(
-            findings.get("findings"), list
-        ):
-            raise SystemExit("Budget-exhausted scan contains an invalid canonical scan draft.")
-        for key in ("surfaces", "explicitExclusions", "deferred"):
-            if not isinstance(coverage.get(key), list):
-                raise SystemExit("Budget-exhausted scan contains invalid canonical coverage.")
-        if manifest_is_sealed(manifest["scan"]):
-            raise SystemExit("Budget-exhausted scan cannot replace an already sealed scan draft.")
-    else:
-        contract = scan_contract(scan)
-        target_contract = contract["target"]
-        target: dict[str, Any] = {
-            "kind": target_contract["allowedKinds"][0],
-            "targetId": target_contract["targetId"],
-            "displayName": target_contract["displayName"],
-        }
-        if scan["target_revision"] != "unversioned":
-            target["revision"] = scan["target_revision"]
-        if "requiredSnapshotDigest" in target_contract:
-            target["snapshotDigest"] = target_contract["requiredSnapshotDigest"]
-        manifest = {
-            "scan": {
-                "target": target,
-                "scope": {"limitations": [warning]},
-            }
-        }
-        findings = {"findings": []}
-        coverage = {
-            "inventoryStrategy": (
-                "scoped_path" if expected_coverage_mode(scan) == "scoped_path" else "repository"
-            ),
-            "surfaces": [],
-            "explicitExclusions": [],
-            "deferred": [],
-        }
-
-    findings_by_candidate = {
-        candidate_id
-        for finding in findings["findings"]
-        if isinstance(finding, dict)
-        and isinstance(candidate_id := finding_candidate_id(finding), str)
-    }
-    existing_deferred = {
-        item.get("candidateId", item.get("id"))
-        for item in coverage["deferred"]
-        if isinstance(item, dict) and isinstance(item.get("candidateId", item.get("id")), str)
-    }
-    existing_surfaces = {
-        item.get("id")
-        for item in coverage["surfaces"]
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
-    }
-    for candidate in candidates:
-        candidate_id = candidate["candidate_id"]
-        if candidate_id in findings_by_candidate or candidate_id in existing_deferred:
-            continue
-        paths = list(dict.fromkeys(location["path"] for location in candidate["locations"]))
-        surface_id = f"candidate-{candidate_id}"
-        validation = candidate.get("validation")
-        validation = validation.get("disposition") if isinstance(validation, dict) else None
-        attack = candidate.get("attack_path")
-        attack = attack.get("decision") if isinstance(attack, dict) else None
-        disposition = (
-            "needs_follow_up"
-            if validation == "deferred" or attack == "deferred"
-            else "not_applicable"
-            if validation == "not_applicable"
-            else "rejected"
-            if validation == "suppressed" or attack == "ignore"
-            else "needs_follow_up"
-        )
-        if surface_id not in existing_surfaces:
-            coverage["surfaces"].append(
-                {
-                    "id": surface_id,
-                    "label": candidate["summary"],
-                    "disposition": disposition,
-                    "notes": candidate["evidence"],
-                    "receiptRefs": [],
-                }
-            )
-            existing_surfaces.add(surface_id)
-        if disposition != "needs_follow_up":
-            continue
-        coverage["deferred"].append(
-            {
-                "id": candidate_id,
-                "candidateId": candidate_id,
-                "reason": (
-                    "Validation was deferred because the scan reached its cost limit: "
-                    f"{candidate['summary']}. Evidence: {candidate['evidence']}"
-                ),
-                "paths": paths,
-                "surfaceIds": [surface_id],
-            }
-        )
-    if not any(
-        isinstance(item, dict)
-        and isinstance(reason := item.get("reason"), str)
-        and (
-            reason == "Validation was deferred because the scan reached its cost limit."
-            or reason.startswith(
-                "Validation was deferred because the scan reached its cost limit: "
-            )
-        )
-        for item in coverage["deferred"]
-    ):
-        coverage["deferred"].append(
-            {
-                "id": "scan-cost-limit",
-                "reason": "Validation was deferred because the scan reached its cost limit.",
-            }
-        )
-    coverage.pop("completeness", None)
-    for name, payload in (
-        ("findings.json", findings),
-        ("coverage.json", coverage),
-        ("scan-manifest.json", manifest),
-    ):
-        try:
-            write_scan_local_bytes(
-                scan_dir,
-                name,
-                (json.dumps(payload, allow_nan=False, indent=2, sort_keys=True) + "\n").encode(),
-            )
-        except (ContractError, OSError, TypeError, ValueError) as exc:
-            raise SystemExit(f"Budget-exhausted scan draft could not be saved: {exc}") from exc
+    saved_results.budget_exhausted_draft(sys.modules[__name__], scan, scan_dir, candidates, warning)
 
 
 def complete_scan_locked(
@@ -1538,7 +1207,6 @@ def complete_scan_locked(
         for file_name in (
             ARTIFACTS["manifest"],
             ARTIFACTS["findings"],
-            ARTIFACTS["coverage"],
         ):
             try:
                 (scan_dir / file_name).lstat()
@@ -1599,9 +1267,9 @@ def complete_scan_locked(
             )
         warnings.extend(warning for warning in prepared.warnings if warning not in warnings)
         add_warning()
-        if prepared.warnings:
-            # Save the explanation before publication removes the broken reference,
-            # so a retry after failed publication retains it.
+        if warnings != json.loads(scan["completion_warnings_json"]):
+            # Persist all observed warnings before output writes can fail, so
+            # stopped-result publication and retries retain those diagnostics.
             with connection:
                 connection.execute(
                     "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",
@@ -2675,6 +2343,11 @@ def workspace_state(
         "mode": workspace["default_mode"],
         "scope": workspace["default_scope"],
         "setup": {"submitted": bool(workspace["submitted"])},
+        **(
+            {"deepScanConfig": json.loads(workspace["deep_scan_config_json"])}
+            if workspace["deep_scan_config_json"] is not None
+            else {}
+        ),
         "setupValidation": {"error": None, "valid": bool(workspace["submitted"])},
         "targetPath": workspace["target_path"],
         "targetSummary": workspace["target_summary"],
@@ -3374,10 +3047,8 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
         scan_dir
     ):
         raise SystemExit("Scan directory must be an existing canonical non-symlink directory.")
-    # Re-check privacy so a shared parent cannot be used to substitute forged artifacts.
+    # Re-check ownership and parents so the scan directory cannot be substituted.
     if os.name != "nt":
-        if stat.S_IMODE(metadata.st_mode) & 0o077:
-            raise SystemExit("Scan directory must not be accessible to other users (chmod 700).")
         geteuid = getattr(os, "geteuid", None)
         effective_uid = geteuid() if geteuid is not None else None
         if effective_uid is not None and metadata.st_uid != effective_uid:
@@ -3432,21 +3103,8 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
     if args.command == "resolve-scan-root":
         print(json.dumps({"scanRoot": str(resolve_scan_root(args.scan_root))}))
         return
-    if args.command == "inspect-target":
-        result = inspect_target(args.target_path)
-        print(json.dumps(result, allow_nan=False, sort_keys=True))
-        return
-    if args.command == "inspect-setup":
-        result = inspect_setup_values(
-            args.target_path,
-            args.scope,
-            args.mode,
-            args.diff_target_kind,
-            args.diff_base_revision,
-            args.diff_head_revision,
-            args.diff_content_digest,
-        )
-        print(json.dumps(result, allow_nan=False, sort_keys=True))
+    if args.command in {"inspect-target", "inspect-setup"}:
+        print(json.dumps(inspect_command(args), allow_nan=False, sort_keys=True))
         return
     if args.command in {"save-artifact", "read-artifact"}:
         print(json.dumps(saved_results.read_or_save_artifact(args)))
@@ -3464,6 +3122,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             "save-workspace": save_workspace,
             "start-scan": start_scan,
             "begin-deep-scan": deep_scan.begin_deep_scan,
+            "acknowledge-deep-scan-result": deep_scan.acknowledge_deep_scan_result,
             "get-deep-scan": deep_scan.get_deep_scan,
             "claim-deep-scan-coordinator": deep_scan.claim_deep_scan_coordinator,
             "upsert-deep-scan-worker": deep_scan.upsert_deep_scan_worker,

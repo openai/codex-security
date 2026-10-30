@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sqlite3
+import stat
 import threading
 import uuid
 from pathlib import Path
@@ -36,15 +37,20 @@ def register_scan(
     )
 
 
+@pytest.mark.parametrize("output_mode", [0o700, 0o755, 0o775])
 def test_archived_output_preserves_old_scan_and_allows_fresh_registration(
     tmp_path: Path,
+    output_mode: int,
 ) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
     scan_dir = tmp_path / "scan"
     repository.mkdir()
-    scan_dir.mkdir(mode=0o700)
+    scan_dir.mkdir(mode=output_mode)
+    scan_dir.chmod(output_mode)
     previous = register_scan(state_dir, repository, scan_dir)
+    if os.name != "nt":
+        assert stat.S_IMODE(scan_dir.stat().st_mode) == output_mode
     fail_scan(state_dir, str(previous["scanId"]), "The previous scan was interrupted.")
     (scan_dir / "previous.txt").write_text("keep the previous scan\n")
     report_path = scan_dir / "report.md"
@@ -61,7 +67,8 @@ def test_archived_output_preserves_old_scan_and_allows_fresh_registration(
         )
     archived_scan_dir = tmp_path / "scan.previous-test"
     scan_dir.rename(archived_scan_dir)
-    scan_dir.mkdir(mode=0o700)
+    scan_dir.mkdir(mode=output_mode)
+    scan_dir.chmod(output_mode)
 
     current = register_scan(
         state_dir,
@@ -74,7 +81,12 @@ def test_archived_output_preserves_old_scan_and_allows_fresh_registration(
 
     assert current["scanId"] != previous["scanId"]
     assert current["scanDir"] == str(scan_dir)
+    assert current["archivedScanDir"] == str(archived_scan_dir)
+    assert (archived_scan_dir / "report.md").read_text() == "# Previous scan\n"
     assert (archived_scan_dir / "previous.txt").read_text() == "keep the previous scan\n"
+    if os.name != "nt":
+        assert stat.S_IMODE(scan_dir.stat().st_mode) == output_mode
+        assert stat.S_IMODE(archived_scan_dir.stat().st_mode) == output_mode
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute(
             "SELECT scan_dir, status FROM scans WHERE id = ?",
@@ -90,12 +102,14 @@ def test_archived_output_preserves_old_scan_and_allows_fresh_registration(
         ).fetchone() == (str(archived_scan_dir / "report.md"),)
 
 
-def test_empty_failed_scan_can_be_archived_and_reused(tmp_path: Path) -> None:
+@pytest.mark.parametrize("output_mode", [0o700, 0o755, 0o775])
+def test_empty_failed_scan_can_be_archived_and_reused(tmp_path: Path, output_mode: int) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
     scan_dir = tmp_path / "scan"
     repository.mkdir()
-    scan_dir.mkdir(mode=0o700)
+    scan_dir.mkdir(mode=output_mode)
+    scan_dir.chmod(output_mode)
     previous = register_scan(state_dir, repository, scan_dir)
     fail_scan(
         state_dir, str(previous["scanId"]), "The previous scan failed before writing artifacts."
@@ -114,6 +128,9 @@ def test_empty_failed_scan_can_be_archived_and_reused(tmp_path: Path) -> None:
     assert archived_scan_dir.is_dir()
     assert not any(archived_scan_dir.iterdir())
     assert current["scanDir"] == str(scan_dir)
+    if os.name != "nt":
+        assert stat.S_IMODE(archived_scan_dir.stat().st_mode) == output_mode
+        assert stat.S_IMODE(scan_dir.stat().st_mode) == 0o700
 
 
 def test_archive_requires_previous_directory_when_artifacts_exist(tmp_path: Path) -> None:
@@ -227,31 +244,15 @@ def test_archive_cannot_move_the_active_workbench_database(
             if state_subdirectory == "aliased-state-child":
                 state_dir /= "child"
     previous = register_scan(state_dir, repository, previous_dir)
+    (previous_dir / "report.md").write_text("saved report")
     (scan_dir / "previous.txt").write_text("keep existing output")
 
-    rejected = run_workbench(
-        state_dir,
-        "register-cli-scan",
-        "--repository",
-        str(repository),
-        "--scan-dir",
-        str(scan_dir),
-        "--recipe-json",
-        json.dumps(
-            {
-                "config": {},
-                "mode": "standard",
-                "repository": str(repository),
-                "target": {"kind": "repository", "paths": []},
-            }
-        ),
-        "--archive-existing",
-        check=False,
-    )
+    rejected = register_scan(state_dir, repository, scan_dir, "--archive-existing", check=False)
 
     assert rejected["returncode"] != 0
     assert "workbench state or active database" in str(rejected["stderr"])
     assert (scan_dir / "previous.txt").read_text() == "keep existing output"
+    assert (previous_dir / "report.md").read_text() == "saved report"
     assert not list(tmp_path.glob("scan.previous-*"))
     saved = run_workbench(state_dir, "get-scan", "--scan-id", str(previous["scanId"]))
     assert saved["scan"]["scanId"] == previous["scanId"]

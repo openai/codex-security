@@ -2,7 +2,7 @@ import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
 import { existsSync } from "node:fs";
 import { getEventListeners } from "node:events";
 import { setImmediate as nextTurn } from "node:timers/promises";
-import { readFile, writeFile, mkdir, chmod } from "node:fs/promises";
+import { readFile, writeFile, mkdir, chmod, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import {
@@ -29,6 +29,7 @@ import { screeningPairSlot } from "../src/deduplication/deduplication-reviewer.j
 import { rejecting } from "./support/errors.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import type { Finding } from "../src/models.js";
+import type { JsonObject } from "../src/config.js";
 import type { CodexReview } from "../src/deduplication/codex-review.js";
 import { comparisonEnvironment } from "../src/scan-comparison.js";
 import { reviewSettingsDigest } from "../src/deduplication/checkpointed-review.js";
@@ -330,101 +331,160 @@ test("saved-scan dedupe uses configured Codex models and efforts for both review
   ]);
 });
 
-test.each(["environment", "configuration"])(
-  "workflow ignores native SQLite writes but detects source changes (%s)",
-  async (selection) => {
-    const f = await fixture();
-    const sqliteHome = join(f.repository, "runtime", "native");
-    await mkdir(f.environment.CODEX_HOME, { recursive: true });
-    if (selection === "configuration")
-      await writeFile(
-        join(f.environment.CODEX_HOME, "config.toml"),
-        `sqlite_home = ${JSON.stringify(sqliteHome)}\n`,
-      );
-    await writeFile(join(f.repository, "source.py"), "original source\n");
-    await writeFile(join(f.repository, ".gitignore"), "runtime/\nsource.py\n");
-    const anchor = f.document.findings[0]!;
-    await f.store.insert(
-      [
-        {
-          finding: {
-            ...anchor,
-            findingId: "csf_neighbor",
-            fingerprints: { ...anchor.fingerprints, primary: "neighbor" },
-          },
-          embedding: { model: EMBEDDING_MODEL, vector },
+test("workflow ignores native SQLite writes on replay but detects source changes", async () => {
+  const f = await fixture();
+  let sqliteHome = join(f.repository, "runtime", "from-config");
+  const configPath = join(f.environment.CODEX_HOME, "config.toml");
+  await mkdir(f.environment.CODEX_HOME, { recursive: true });
+  await writeFile(configPath, `sqlite_home = ${JSON.stringify(sqliteHome)}\n`);
+  await writeFile(join(f.repository, "source.py"), "original source\n");
+  await writeFile(join(f.repository, ".gitignore"), "runtime/\nsource.py\n");
+  const anchor = f.document.findings[0]!;
+  await f.store.insert(
+    [
+      {
+        finding: {
+          ...anchor,
+          findingId: "csf_neighbor",
+          fingerprints: { ...anchor.fingerprints, primary: "neighbor" },
         },
-      ],
-      f.targetId,
-    );
-    const environment = {
-      ...f.environment,
-      OPENAI_API_KEY: "synthetic-review-key",
-      ...(selection === "environment" ? { CODEX_SQLITE_HOME: sqliteHome } : {}),
-    };
-    let calls = 0;
-    let mutateSource = false;
-    let loseAcknowledgement = true;
-    const options = {
-      repository: f.repository,
-      workflowId: `native-state-${selection}`,
-      embedding: f.embedding,
-    };
-    const dependencies = {
-      environment,
-      runWorkbench: async (args: readonly string[], input?: string) => {
-        const result = await runWorkbench(f.options, args, input);
-        if (args[0] === "store-dedupe-groups" && loseAcknowledgement) {
-          loseAcknowledgement = false;
-          throw new Error("Lost native-state group acknowledgement");
-        }
-        return result;
+        embedding: { model: EMBEDDING_MODEL, vector },
       },
-      reviewRunner: {
-        async run<T>(review: CodexReview<T>): Promise<T> {
-          calls++;
-          await mkdir(sqliteHome, { recursive: true });
+    ],
+    f.targetId,
+  );
+  const environment = {
+    ...f.environment,
+    OPENAI_API_KEY: "synthetic-review-key",
+  };
+  const snapshotPaths: unknown[] = [];
+  let calls = 0;
+  let mutateSource = false;
+  let loseAcknowledgement = true;
+  const options = {
+    repository: f.repository,
+    workflowId: "native-state",
+    embedding: f.embedding,
+  };
+  const dependencies = {
+    environment,
+    runWorkbench: async (args: readonly string[], input?: string) => {
+      if (args[0] === "finding-workflow") {
+        const { action, privateStatePaths } = JSON.parse(input!);
+        if (action === "source") snapshotPaths.push(privateStatePaths);
+      }
+      const result = await runWorkbench(f.options, args, input);
+      if (args[0] === "store-dedupe-groups" && loseAcknowledgement) {
+        loseAcknowledgement = false;
+        throw new Error("Lost native-state group acknowledgement");
+      }
+      return result;
+    },
+    reviewRunner: {
+      async run<T>(review: CodexReview<T>): Promise<T> {
+        calls++;
+        await mkdir(sqliteHome, { recursive: true });
+        await writeFile(
+          join(sqliteHome, "state_5.sqlite"),
+          `synthetic native state ${calls}`,
+        );
+        if (mutateSource && review.stage === "screening")
           await writeFile(
-            join(sqliteHome, "state_5.sqlite"),
-            `synthetic native state ${calls}`,
+            join(sqliteHome, "state_5.sqlite-wal"),
+            "review WAL activity",
           );
-          if (mutateSource)
-            await writeFile(
-              join(f.repository, "source.py"),
-              "changed source\n",
-            );
-          const decision = { decision: "SAME", rationale: "Same control" };
-          return review.validate(
-            review.stage === "screening"
-              ? { decisions: { "pair-1": decision } }
-              : decision,
-          );
-        },
+        if (mutateSource && review.stage === "pair-review")
+          await writeFile(join(f.repository, "source.py"), "changed source\n");
+        const decision = { decision: "SAME", rationale: "Same control" };
+        return review.validate(
+          review.stage === "screening"
+            ? { decisions: { "pair-1": decision } }
+            : decision,
+        );
       },
-    };
-    await expect(
-      deduplicateScanDirectoryInternal(f.scanDir, options, dependencies),
-    ).rejects.toThrow("Lost native-state group acknowledgement");
-    expect(calls).toBe(2);
-    await writeFile(
-      join(sqliteHome, "state_5.sqlite-wal"),
-      "later native activity",
-    );
-    expect(
-      (await deduplicateScanDirectoryInternal(f.scanDir, options, dependencies))
-        .deduplicationStatus,
-    ).toBe("completed");
-    expect(calls).toBe(2);
-    mutateSource = true;
-    await expect(
-      deduplicateScanDirectoryInternal(
-        f.scanDir,
-        { ...options, workflowId: `${options.workflowId}-source-change` },
-        dependencies,
-      ),
-    ).rejects.toThrow("Source changed during deduplication");
-  },
-);
+    },
+  };
+  await expect(
+    deduplicateScanDirectoryInternal(f.scanDir, options, dependencies),
+  ).rejects.toThrow("Lost native-state group acknowledgement");
+  expect(calls).toBe(2);
+  expect(snapshotPaths).toContainEqual([sqliteHome]);
+  snapshotPaths.length = 0;
+  await writeFile(
+    join(sqliteHome, "state_5.sqlite-wal"),
+    "later native activity",
+  );
+  expect(
+    (await deduplicateScanDirectoryInternal(f.scanDir, options, dependencies))
+      .deduplicationStatus,
+  ).toBe("completed");
+  expect(calls).toBe(2);
+  expect(snapshotPaths).toContainEqual([sqliteHome]);
+  await unlink(configPath);
+  sqliteHome = join(f.repository, "runtime", "from-environment");
+  mutateSource = true;
+  await expect(
+    deduplicateScanDirectoryInternal(
+      f.scanDir,
+      { ...options, workflowId: `${options.workflowId}-source-change` },
+      {
+        ...dependencies,
+        environment: { ...environment, CODEX_SQLITE_HOME: sqliteHome },
+      },
+    ),
+  ).rejects.toThrow("Source changed during deduplication");
+  expect(snapshotPaths).toContainEqual([sqliteHome]);
+  // Screening wrote native state; the pair review then changed repository source.
+  expect(calls).toBe(4);
+});
+
+// A fresh workflow with one cached neighbor lets provider cases observe the
+// actual review and checkpoint requests without starting a workbench process.
+function freshProviderReviewResponse(
+  action: string,
+  repository: string,
+  finding: Finding,
+  neighbor: Finding,
+): JsonObject {
+  switch (action) {
+    case "prepare":
+      return {
+        cacheKeys: {
+          [finding.findingId]: "anchor",
+          [neighbor.findingId]: "neighbor",
+        },
+        findingsToEmbed: [],
+      };
+    case "neighbors":
+      return JSON.parse(
+        JSON.stringify({ finding, potentialDuplicates: [neighbor] }),
+      );
+    case "begin":
+    case "get":
+      return { workflow: { stages: { dedupe: { status: "running" } } } };
+    case "source":
+      return {
+        source: {
+          repository,
+          revision: "unversioned",
+          refsDigest: sha256(""),
+          // Workbench source snapshot of the fixture's empty repository.
+          content:
+            "codex-security-snapshot/v1:sha256:75886c9285f7b38118ac1acf8d567d6ae3308d694babd55d09436d65620f2b1e",
+        },
+      };
+    case "get-review":
+      return { review: null };
+    case "bind":
+    case "complete":
+    case "save-review":
+    case "prepare-dedupe":
+    case "commit":
+      return {};
+    default:
+      throw new Error(`Unexpected provider review request: ${action}`);
+  }
+}
 
 test.each([
   "stored-login",
@@ -468,19 +528,17 @@ test.each([
         : 'model = "stored-model"\nmodel_reasoning_effort = "high"\n',
     );
     const anchor = f.document.findings[0]!;
-    await f.store.insert(
-      [
-        {
-          finding: {
-            ...anchor,
-            findingId: "csf_neighbor",
-            fingerprints: { ...anchor.fingerprints, primary: "neighbor" },
-          },
-          embedding: { model: EMBEDDING_MODEL, vector },
-        },
-      ],
-      f.targetId,
-    );
+    const neighbor = {
+      ...anchor,
+      findingId: "csf_neighbor",
+      fingerprints: { ...anchor.fingerprints, primary: "neighbor" },
+    };
+    const useDatabase = selection === "stored-login";
+    if (useDatabase)
+      await f.store.insert(
+        [{ finding: neighbor, embedding: { model: EMBEDDING_MODEL, vector } }],
+        f.targetId,
+      );
     const environment = {
       ...f.environment,
       ...(selection === "environment-key"
@@ -494,17 +552,23 @@ test.each([
     }));
     const calls: string[][] = [];
     let selectedEnvironment: NodeJS.ProcessEnv = environment;
-    const bindings: {
-      model: string;
-      effort: string;
-      settingsDigest: string;
+    const workflowId = `effective-${selection}`;
+    const checkpoints: {
+      key: string;
+      result: unknown;
+      binding: {
+        stage: string;
+        model: string;
+        effort: string;
+        settingsDigest: string;
+      };
     }[] = [];
     await deduplicateScanDirectoryInternal(
       f.scanDir,
       {
         repository: f.repository,
         embedding: f.embedding,
-        workflowId: `effective-${selection}`,
+        workflowId,
       },
       {
         environment,
@@ -518,9 +582,16 @@ test.each([
           return selectedEnvironment as Record<string, string>;
         },
         runWorkbench: async (args, input) => {
-          const payload = input ? JSON.parse(input) : {};
-          if (payload.action === "save-review") bindings.push(payload.binding);
-          return runWorkbench(f.options, args, input);
+          const payload = JSON.parse(input!);
+          if (payload.action === "save-review") checkpoints.push(payload);
+          return useDatabase
+            ? runWorkbench(f.options, args, input)
+            : freshProviderReviewResponse(
+                payload.action,
+                f.repository,
+                anchor,
+                neighbor,
+              );
         },
         reviewRunner: {
           async run<T>(review: CodexReview<T>): Promise<T> {
@@ -541,25 +612,31 @@ test.each([
         },
       },
     );
-    const settings =
+    const { model, effort } =
       selection === "stored-login"
-        ? ["stored-model", "high"]
-        : ["ambient-model", "medium"];
+        ? { model: "stored-model", effort: "high" }
+        : { model: "ambient-model", effort: "medium" };
     expect(calls).toEqual([
-      ["screening", ...settings],
-      ["pair-review", ...settings],
-    ]);
-    expect(bindings.map(({ model, effort }) => [model, effort])).toEqual([
-      settings,
-      settings,
+      ["screening", model, effort],
+      ["pair-review", model, effort],
     ]);
     const digest = await reviewSettingsDigest(selectedEnvironment, {
-      model: settings[0]!,
-      model_reasoning_effort: settings[1]!,
+      model,
+      model_reasoning_effort: effort,
     });
-    expect(bindings.every((binding) => binding.settingsDigest === digest)).toBe(
-      true,
+    expect(checkpoints.map(({ binding }) => binding)).toMatchObject(
+      ["screening", "pair-review"].map((stage) => ({
+        stage,
+        model,
+        effort,
+        settingsDigest: digest,
+      })),
     );
+    if (useDatabase) {
+      const workflow = new FindingWorkflow(workflowId, environment);
+      for (const { key, result } of checkpoints)
+        expect(await workflow.getReview(key)).toEqual(result);
+    }
     expect(accountStatus).toHaveBeenCalledTimes(
       ["stored-login", "managed-defaults"].includes(selection) ? 1 : 0,
     );

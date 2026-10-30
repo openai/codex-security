@@ -12,6 +12,8 @@ export function updateTestTimings(
   const samples = new Map<string, number[]>();
   for (const report of reports) {
     const totals = new Map<string, number>();
+    let sawTestcase = false;
+    let current: { file: string; seconds: number } | undefined;
     const parser = new SaxesParser({ xmlns: false });
     parser.on("opentag", ({ name, attributes }) => {
       if (
@@ -24,7 +26,9 @@ export function updateTestTimings(
           "Use successful JUnit reports to refresh test timings.",
         );
       }
+      if (name === "skipped") current = undefined;
       if (name !== "testcase") return;
+      sawTestcase = true;
       const file = attributes["file"]?.replaceAll("\\", "/").split("/").at(-1);
       const seconds = Number(attributes["time"] ?? 0);
       if (!file || !Number.isFinite(seconds) || seconds < 0) {
@@ -32,10 +36,16 @@ export function updateTestTimings(
           "JUnit testcase needs a file and a nonnegative duration.",
         );
       }
+      current = { file, seconds };
+    });
+    parser.on("closetag", ({ name }) => {
+      if (name !== "testcase" || !current) return;
+      const { file, seconds } = current;
       totals.set(file, (totals.get(file) ?? 0) + seconds);
+      current = undefined;
     });
     parser.write(report).close();
-    if (!totals.size) throw new Error("JUnit report contains no test cases.");
+    if (!sawTestcase) throw new Error("JUnit report contains no test cases.");
     for (const [file, seconds] of totals) {
       const values = samples.get(file) ?? [];
       values.push(seconds);

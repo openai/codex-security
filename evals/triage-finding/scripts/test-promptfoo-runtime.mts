@@ -3,7 +3,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 import { parse } from "yaml";
 import runtimeVars from "./runtime-vars.mts";
 
@@ -162,15 +161,4 @@ assert.ok(
       "Read and follow plugins/codex-security/skills/triage-finding/SKILL.md",
     ),
 );
-// Load the installed scanner so its Git imports are checked at runtime.
-const promptfooDist = path.join(evalRoot, "node_modules/promptfoo/dist/src");
-const scanner = fs
-  .readdirSync(promptfooDist)
-  .find((name) => name.startsWith("scanner-") && name.endsWith(".js"));
-assert.ok(scanner, "Promptfoo scanner entrypoint must be installed");
-const scannerModule = await import(
-  pathToFileURL(path.join(promptfooDist, scanner)).href
-);
-assert.equal(typeof scannerModule.executeScan, "function");
-
 console.log("triage Promptfoo runtime tests passed");

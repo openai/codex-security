@@ -787,6 +787,10 @@ def build_report_markdown(
     manifest: dict[str, Any], findings_document: dict[str, Any], coverage: dict[str, Any]
 ) -> str:
     scan = manifest["scan"]
+    if "review" in scan and "coverageRef" not in scan:
+        from review_state import review_state
+
+        coverage = review_state(scan)
     target = scan["target"]
     scope = scan["scope"]
     threat_model = scan.get("threatModel") if isinstance(scan.get("threatModel"), dict) else {}
@@ -832,7 +836,6 @@ def build_report_markdown(
         "",
         f"- Scan mode: {coverage['mode']}",
         *_target_scope_lines(target),
-        f"- Inventory strategy: {coverage['inventoryStrategy']}",
         f"- Included paths: {', '.join(include_paths) or 'none'}",
         f"- Excluded paths: {', '.join(exclude_paths) or 'none'}",
     ]
@@ -874,7 +877,7 @@ def build_report_markdown(
             *summary_count_lines,
             f"| Validation mode | {_cell(scope.get('validationMode', 'not recorded'))} |",
             "",
-            "Canonical artifacts: `scan-manifest.json`, `findings.json`, and `coverage.json`. This report is a deterministic projection of those files.",
+            "Canonical artifacts: `scan-manifest.json` and `findings.json`. This report is a deterministic projection of those files.",
             "",
             "## Threat Model",
             "",

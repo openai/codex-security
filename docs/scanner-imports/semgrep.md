@@ -1,5 +1,9 @@
 # Import Semgrep Code findings
 
+Vendor finding import and readback require `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`.
+See the [opt-in instructions](../../sdk/typescript/docs/cli.md#import-vendor-findings-locally)
+and [how saved scanner reports map to imported evidence](schema-guide.md).
+
 Prefer native **Semgrep Code/SAST CLI or CI JSON** for this reader. It preserves
 the scanner's original severity and source evidence. Self-contained SARIF 2.1.0
 is a compatibility path. Both formats may be plain or gzip-compressed.
@@ -79,10 +83,10 @@ trace and fix evidence. Its Critical and High ratings both become diagnostic
 Original evidence stays in `source_data`, and source state stays separate from a
 Codex assessment.
 
-Both local and Cloud file imports currently apply the shared Cloud evidence
-bounds, including a maximum JSON depth of 20. Deeply nested native taint traces
-can exceed that bound and are excluded with a reason in the preview. The reader
-preserves accepted source evidence without flattening or truncating traces.
+Cloud imports apply the service's evidence limits, including a maximum JSON
+depth of 20. A deeply nested taint trace can exceed that bound and be excluded
+with a reason in the Cloud preview. Local storage does not impose the Cloud
+size or depth limits. Neither path flattens or truncates accepted traces.
 
 Keep the supplied JSON `extra.fingerprint` or SARIF `matchBasedId/v1`
 fingerprint. If a later report supplies the same fingerprint after the code

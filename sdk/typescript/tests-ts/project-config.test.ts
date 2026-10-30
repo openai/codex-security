@@ -249,7 +249,7 @@ describe("project configuration input contract", () => {
     ).toEqual(DEFAULT_DEEP_SCAN_SETTINGS);
   });
 
-  test("YAML and JSON load the same literal data without adding defaults", async () => {
+  test("YAML, JSON, and BOM-prefixed JSON load literal data without adding defaults", async () => {
     const root = await temporaryDirectory();
     const yaml = join(root, "scan.yaml");
     const json = join(root, "scan.json");
@@ -264,6 +264,10 @@ describe("project configuration input contract", () => {
     await writeFile(json, JSON.stringify(input));
     expect((await readProjectConfig(yaml)).input).toEqual(input);
     expect((await readProjectConfig(json)).input).toEqual(input);
+
+    const marked = { codex: { synthetic_setting: "preserve\uFEFFthis" } };
+    await writeFile(json, `\uFEFF${JSON.stringify(marked)}`);
+    expect((await readProjectConfig(json)).input).toEqual(marked);
   });
 
   test.each([

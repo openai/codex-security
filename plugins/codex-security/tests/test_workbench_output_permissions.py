@@ -6,7 +6,7 @@ import uuid
 from pathlib import Path
 
 import pytest
-from workbench_test_support import create_saved_workspace, run_workbench
+from workbench_test_support import create_saved_workspace, empty_target_paths, run_workbench
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX directory permissions")
 
@@ -44,9 +44,7 @@ def start_scan_with_permissive_umask(
     tmp_path: Path, scan_root: Path | None, entrypoint: tuple[str, str]
 ) -> Path:
     command, result_key = entrypoint
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "fixture.py").write_text("print('fixture')\n")
     if command == "start-scan":
         workspace = create_saved_workspace(state_dir, target)

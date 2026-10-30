@@ -13,6 +13,7 @@ import {
   normalizeSnykFindingsExport,
   prepareNormalizedExternalPublication,
   type ExternalFindings,
+  type FindingImportRequest,
   type ExternalPublicationOptions,
   type NormalizedExternalPublicationOptions,
   type ExternalPublicationResult,
@@ -305,8 +306,11 @@ export async function externalPublication(
 ): Promise<ExternalPublicationResult> {
   const fromFile = await prepareExternalPublication(file, options);
   fromFile.preview.requests[0]?.source.provider satisfies
-    "wiz" | "endor" | "snyk" | "github" | "semgrep" | undefined;
-  const prepared = await prepareNormalizedExternalPublication(input, options);
+    FindingImportRequest["source"]["provider"] | undefined;
+  const prepared = await prepareNormalizedExternalPublication(input, {
+    ...options,
+    provider: fromFile.preview.source.provider,
+  });
   return prepared.publish();
 }
 

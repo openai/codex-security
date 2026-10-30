@@ -1,3 +1,4 @@
+import { forwardExternalImportSetting } from "./external-imports-feature.js";
 import { executablePathForSpawn } from "./executable-path.js";
 export { executablePathForSpawn } from "./executable-path.js";
 import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
@@ -381,12 +382,17 @@ export async function requirePrivateCredentialHome(
   await requirePrivateDirectory(metadata, path, "credential home", options);
 }
 
-export async function requirePrivatePolicyOutputDirectory(
+export async function preparePolicyOutputDirectory(
   path: string,
   options: Parameters<typeof requirePrivateDirectory>[3] = {},
 ): Promise<void> {
+  const metadata = await lstat(path);
+  if ((options.platform ?? process.platform) !== "win32") {
+    requireOutputDirectoryOwnership(metadata, path);
+    return;
+  }
   await requirePrivateDirectory(
-    await lstat(path),
+    metadata,
     path,
     "policy output directory",
     options,
@@ -1793,7 +1799,7 @@ export async function validateOutputDir(
       if (!archiveExisting && (await readdir(path)).length !== 0) {
         throw new OutputDirectoryNotEmptyError(path);
       }
-      requirePrivateOutputDirectory(metadata, path);
+      requireOutputDirectoryOwnership(metadata, path);
       await requireSecureOutputAncestry(path);
       const canonical = await realpath(path);
       requireModelSafeOutputDir(canonical);
@@ -2159,7 +2165,7 @@ export async function validatePreparedOutputDir(
       `Scan output directory must be empty: ${path}`,
     );
   }
-  requirePrivateOutputDirectory(metadata, path);
+  requireOutputDirectoryOwnership(metadata, path);
   await requireSecureOutputAncestry(canonical);
   return canonical;
 }
@@ -2175,6 +2181,15 @@ export function requirePrivateOutputDirectory(
       `Scan output directory must not be accessible to other users (chmod 700): ${path}`,
     );
   }
+  requireOutputDirectoryOwnership(metadata, path, effectiveUid);
+}
+
+export function requireOutputDirectoryOwnership(
+  metadata: Pick<Stats, "uid">,
+  path: string,
+  effectiveUid = process.geteuid?.(),
+): void {
+  if (process.platform === "win32") return;
   if (effectiveUid !== undefined && metadata.uid !== effectiveUid) {
     throw new OutputDirectoryError(
       `Scan output directory must be owned by the current user: ${path}`,
@@ -2182,7 +2197,7 @@ export function requirePrivateOutputDirectory(
   }
 }
 
-/** Reject shared parents whose owner can rename or replace private scan output. */
+/** Reject shared parents whose owner can rename or replace scan output. */
 export async function requireSecureOutputAncestry(
   path: string,
   effectiveUid = process.geteuid?.(),
@@ -3160,12 +3175,14 @@ export function pluginExecutionEnvironment(
   python: string,
   environment: ProcessEnvironment = process.env,
 ): ProcessEnvironment {
-  return {
+  const child = {
     ...pythonUtf8Environment(environment),
     PYTHON: python,
     CODEX_SECURITY_PYTHON_COMMAND: python,
     CODEX_CLI_PATH: resolveCodexCommand(environment).command,
   };
+  forwardExternalImportSetting(environment, child);
+  return child;
 }
 
 export function environmentWithGit(

@@ -435,7 +435,7 @@ describe("scan history renderer", () => {
       "model=gpt-5.6-sol",
       'features={"goals":true,"multi_agent_v2":{"enabled":true}}',
       'trusted_paths=["src","packages/core"]',
-      "COVERAGE",
+      "REVIEW",
       "12 of 15 reviewed",
       "9 files",
       "ARTIFACTS",

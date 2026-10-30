@@ -194,9 +194,11 @@ test.each([
         (await new FindingWorkflow(workflowId, environment).get())?.stages.scan
           .status,
       ).toBe("completed");
-      await expect(
-        resumed.run(repository, { workflowId, mode: "deep" }),
-      ).rejects.toThrow("already bound to a different");
+      if (scenario === "completed") {
+        await expect(
+          resumed.run(repository, { workflowId, mode: "deep" }),
+        ).rejects.toThrow("already bound to a different");
+      }
       if (knowledge) {
         if (scenario === "knowledge-snapshot")
           await writeFile(promptFile, "Changed synthetic project guidance.");

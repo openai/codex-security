@@ -1,26 +1,70 @@
 import { execFileSync } from "node:child_process";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { checkoutBase } from "./verify-pr-source.mjs";
 
 const documentation =
   /^(?:README\.md|CONTRIBUTING\.md|CODE_OF_CONDUCT\.md|docs\/.*\.md|github-action\/README\.md|docker\/README\.md)$/;
 const ordinarySource =
   /^(?:sdk\/typescript\/(?:src|tests-ts)|plugins\/codex-security\/mcp-app\/(?:src|tests))\/.*\.ts$/;
+const pythonTest = /^plugins\/codex-security\/tests\/test_[^/]*\.py$/;
+const sdkTest = /^sdk\/typescript\/tests-ts\/[^/]+\.test\.ts$/;
+const actionFiles =
+  /^(?:action\.yml|github-action\/(?:README\.md|(?:runtime\/)?package(?:-lock)?\.json|dist\/(?:index|post)\.cjs|(?:src|scripts|tests)\/[^/]+\.(?:mjs|ts)))$/;
+const evalFiles =
+  /^evals\/(?:standard-time-budget\/(?:[^/]+\.mts|experiment\.json|README\.md)|triage-finding\/(?:package\.json|pnpm-lock\.yaml|README\.md|(?:assertions|scripts)\/[^/]+\.mts))$/;
 
-export function selectChecks(paths, { event, baseChanged = false }) {
-  // Only known documentation and TypeScript source paths can narrow qualification.
-  const full =
-    event !== "pull_request" ||
-    baseChanged ||
-    paths.length === 0 ||
+const packageManifest = JSON.parse(
+  readFileSync(
+    new URL("../../sdk/typescript/package.json", import.meta.url),
+    "utf8",
+  ),
+);
+const packagedDocs = new Set(
+  packageManifest.files
+    .filter((file) => file.endsWith(".md"))
+    .map((file) => `sdk/typescript/${file}`),
+);
+const isDocumentation = (path) =>
+  documentation.test(path) || packagedDocs.has(path);
+
+function scopeFor(paths, { event, baseChanged, modifiedOnly }) {
+  if (event !== "pull_request" || baseChanged || !paths.length) return "full";
+  if (modifiedOnly && paths.every((path) => pythonTest.test(path)))
+    return "python-tests";
+  if (paths.every((path) => isDocumentation(path) || path === "RELEASING.md")) {
+    // The Action profile already builds the package and installs it on Node 24.
+    // Select the separate Action job from its own inputs below.
+    return paths.some((path) => packagedDocs.has(path)) ? "action" : "docs";
+  }
+  if (paths.every((path) => actionFiles.test(path))) return "action";
+  if (paths.every((path) => evalFiles.test(path))) return "evals";
+  if (paths.every((path) => ordinarySource.test(path) || isDocumentation(path)))
+    return "source";
+  return "full";
+}
+
+export function selectChecks(paths, options) {
+  const scope = scopeFor(paths, options);
+  const full = scope === "full" || scope === "python-tests";
+  const source = full || scope === "source";
+  const sdkTestsOnly =
+    scope === "source" && paths.every((path) => sdkTest.test(path));
+  const sourceBeyondSdkTests = source && !sdkTestsOnly;
+  const action =
+    full ||
     paths.some(
-      (path) => !documentation.test(path) && !ordinarySource.test(path),
+      (path) =>
+        actionFiles.test(path) || path === "sdk/typescript/src/git-remote.ts",
     );
-  const source = full || !paths.every((path) => documentation.test(path));
   const compatibility = ["22.13.0", "24.0.0", "24", "26.0.0", "26"]
     .filter((version) => full || version !== "26")
     .map((version) => ({ os: "ubuntu-latest", node: version }));
   compatibility.push({ os: "macos-latest", node: "22.13.0" });
+  if (scope !== "python-tests") {
+    compatibility.push({ os: "windows-latest", node: "22.13.0" });
+    if (full) compatibility.push({ os: "windows-latest", node: "24" });
+  }
   const pythonMatrix = [
     ...["3.10", "3.12", "3.14"]
       .filter((version) => full || version === "3.12")
@@ -40,16 +84,33 @@ export function selectChecks(paths, { event, baseChanged = false }) {
       markers: "cross_platform or native_windows",
     },
   ];
-  return {
+  const selected = {
     "source-required": String(source),
+    "container-required": String(
+      sourceBeyondSdkTests && scope !== "python-tests",
+    ),
+    "plugin-tests-required": String(sourceBeyondSdkTests),
+    "package-required": String(source || scope === "action"),
+    "action-ci": String(action),
+    "eval-contracts": String(
+      sourceBeyondSdkTests ||
+        scope === "evals" ||
+        paths.includes("sdk/typescript/tests-ts/codex-dependency-pins.test.ts"),
+    ),
     "workflow-quality": String(full),
-    "container-validate": String(source),
-    "compatibility-matrix": JSON.stringify({ include: compatibility }),
-    "python-matrix": JSON.stringify({ include: pythonMatrix }),
-    "windows-node-matrix": JSON.stringify({
-      node: full ? ["22.13.0", "24"] : ["22.13.0"],
+    "compatibility-matrix": JSON.stringify({
+      include:
+        scope === "action" || sdkTestsOnly
+          ? [{ os: "ubuntu-latest", node: "24" }]
+          : compatibility,
     }),
+    "python-matrix": JSON.stringify({ include: pythonMatrix }),
   };
+  if (scope === "python-tests") {
+    for (const name of ["source-required", "action-ci", "eval-contracts"])
+      selected[name] = "false";
+  }
+  return selected;
 }
 
 if (
@@ -58,17 +119,32 @@ if (
 ) {
   const event = process.env.EVENT_NAME;
   const baseChanged = process.env.BASE_CHANGED === "true";
-  const paths =
+  if (event === "pull_request" && baseChanged) {
+    const { changes, pull_request: pr } = JSON.parse(
+      readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"),
+    );
+    // Ordinary edits already proved their live target before falling back to full checks.
+    if (changes?.base) {
+      const base = checkoutBase(pr, process.env.GITHUB_SHA);
+      if (base !== pr.base.sha)
+        throw new Error(
+          `Stale test merge. Requested ${pr.base.ref} at ${pr.base.sha}, checked out base ${base} with head ${pr.head.sha}. Start a fresh pull request event after the merge ref updates.`,
+        );
+    }
+  }
+  const changes =
     event === "pull_request" && !baseChanged
       ? execFileSync(
           "git",
-          ["diff", "--no-renames", "--name-only", "-z", "HEAD^1", "HEAD"],
+          ["diff", "--no-renames", "--name-status", "-z", "HEAD^1", "HEAD"],
           { encoding: "utf8" },
         )
           .split("\0")
           .filter(Boolean)
       : [];
-  const selected = selectChecks(paths, { event, baseChanged });
+  const paths = changes.filter((_, i) => i % 2);
+  const modifiedOnly = changes.every((field, i) => i % 2 || field === "M");
+  const selected = selectChecks(paths, { event, baseChanged, modifiedOnly });
   appendFileSync(
     process.env.GITHUB_OUTPUT,
     Object.entries(selected)

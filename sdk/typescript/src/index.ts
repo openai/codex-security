@@ -19,11 +19,7 @@ export type {
   RemediationExecutionEvent,
 } from "./hosted-remediation.js";
 export { runHostedRemediationProtocol } from "./hosted-remediation-protocol.js";
-export type {
-  FindingPatch,
-  FindingVerification,
-  FindingVerificationCheck,
-} from "./remediation.js";
+export type { FindingPatch, FindingVerification } from "./remediation.js";
 export {
   runHostedScan,
   HostedScanInputSchema,
@@ -88,7 +84,14 @@ export type {
   ComponentPlanningOptions,
 } from "./component-plan.js";
 export { estimateScanCost } from "./cost.js";
-export type { ScanCost, ScanSessionEvent, ScanWorkerEvent } from "./cost.js";
+export type {
+  ScanAccountRateLimit,
+  ScanAccountRateLimitWindow,
+  ScanCost,
+  ScanSessionEvent,
+  ScanUsageObservation,
+  ScanWorkerEvent,
+} from "./cost.js";
 export type { ScanTokenUsage } from "./cost-model.js";
 export type { DeepScanProgress } from "./scan-progress.js";
 export type { CustomValidationResult } from "./custom-validation.js";
@@ -246,6 +249,7 @@ export {
   readGitHubFindings,
 } from "./github-findings.js";
 export { importGitHubAdvisories } from "./github-advisories.js";
+export { normalizeGitHubDependabotAlerts } from "./github-dependabot-findings.js";
 export type {
   GitHubAdvisoryImportOptions,
   ImportedGitHubAdvisory,
@@ -322,6 +326,23 @@ export type {
 } from "./validation-records.js";
 
 export { prepareLocalExternalImport } from "./external-findings-import.js";
+export {
+  normalizeOpenGrepFindings,
+  readOpenGrepFindings,
+  type OpenGrepImportOptions,
+} from "./opengrep-findings.js";
+export {
+  normalizeVeracodeFindings,
+  readVeracodeFindings,
+} from "./veracode-findings.js";
+export {
+  normalizeBlackDuckFindings,
+  readBlackDuckFindings,
+} from "./blackduck-findings.js";
+export {
+  normalizeInspectorFindings,
+  readInspectorFindings,
+} from "./inspector-findings.js";
 export {
   normalizeSnykFindingsExport,
   normalizeSnykJson,

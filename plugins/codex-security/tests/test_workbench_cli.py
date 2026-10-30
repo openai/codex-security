@@ -12,42 +12,7 @@ from workbench_test_support import SCRIPT, run_workbench
 
 WORKSPACE_ID = "00000000-0000-4000-8000-000000000001"
 SCAN_ID = "00000000-0000-4000-8000-000000000002"
-CONTEXT_COMMANDS = [
-    ["create-workspace", "--workspace-id", WORKSPACE_ID],
-    [
-        "save-workspace",
-        "--workspace-id",
-        WORKSPACE_ID,
-        "--target-path",
-        ".",
-        "--scope",
-        ".",
-        "--mode",
-        "standard",
-    ],
-    [
-        "start-prompt-only-scan",
-        "--thread-id",
-        "thread-context",
-        "--target-path",
-        ".",
-        "--scope",
-        ".",
-        "--mode",
-        "standard",
-    ],
-    [
-        "start-headless-standard-scan",
-        "--thread-id",
-        "thread-context",
-        "--target-path",
-        ".",
-        "--scope",
-        ".",
-    ],
-    ["begin-deep-scan", "--thread-id", "thread-context", "--target-path", "."],
-    ["update-scan-context", "--scan-id", SCAN_ID, "--workspace-id", WORKSPACE_ID],
-]
+CREATE_WORKSPACE = ["create-workspace", "--workspace-id", WORKSPACE_ID]
 STDIN_FLAGS = [
     ["--user-context-stdin"],
     ["--user-context-s"],
@@ -56,13 +21,12 @@ STDIN_FLAGS = [
 ]
 
 
-@pytest.mark.parametrize("command", CONTEXT_COMMANDS, ids=lambda args: args[0])
 @pytest.mark.parametrize("flags", STDIN_FLAGS)
 @pytest.mark.parametrize("payload", [b"", "  first\r\nsecond\rcafé  ".encode()])
-def test_context_stdin_is_resolved_once(workbench_api, monkeypatch, command, flags, payload):
+def test_context_stdin_is_resolved_once(workbench_api, monkeypatch, flags, payload):
     stdin = Mock(buffer=Mock(read=Mock(return_value=payload)))
     monkeypatch.setattr(sys, "stdin", stdin)
-    monkeypatch.setattr(sys, "argv", ["workbench_db.py", *command, *flags])
+    monkeypatch.setattr(sys, "argv", ["workbench_db.py", *CREATE_WORKSPACE, *flags])
 
     args = workbench_api["parse_args"]("workbench")
 
@@ -74,7 +38,6 @@ def test_context_stdin_is_resolved_once(workbench_api, monkeypatch, command, fla
     stdin.read.assert_not_called()
 
 
-@pytest.mark.parametrize("command", CONTEXT_COMMANDS, ids=lambda args: args[0])
 @pytest.mark.parametrize(
     "flags",
     [
@@ -85,9 +48,10 @@ def test_context_stdin_is_resolved_once(workbench_api, monkeypatch, command, fla
         ["--user-context=inline", "--user-context-s", "--user-context-stdin"],
     ],
 )
-def test_context_conflicts_do_not_read_stdin(workbench_api, monkeypatch, capsys, command, flags):
+def test_context_conflicts_do_not_read_stdin(workbench_api, monkeypatch, capsys, flags):
     stdin = Mock()
     monkeypatch.setattr(sys, "stdin", stdin)
+    command = ["update-scan-context", "--scan-id", SCAN_ID, "--workspace-id", WORKSPACE_ID]
     monkeypatch.setattr(sys, "argv", ["workbench_db.py", *command, *flags])
 
     with pytest.raises(SystemExit) as error:
@@ -106,7 +70,7 @@ def test_context_stdin_is_not_read_before_argument_parsing(
     stdin = Mock()
     monkeypatch.setattr(sys, "stdin", stdin)
     monkeypatch.setattr(
-        sys, "argv", ["workbench_db.py", *CONTEXT_COMMANDS[0], "--user-context-stdin", option]
+        sys, "argv", ["workbench_db.py", *CREATE_WORKSPACE, "--user-context-stdin", option]
     )
 
     with pytest.raises(SystemExit) as error:
@@ -116,7 +80,13 @@ def test_context_stdin_is_not_read_before_argument_parsing(
     stdin.buffer.read.assert_not_called()
 
 
-@pytest.mark.parametrize("command", CONTEXT_COMMANDS, ids=lambda args: args[0])
+# These two commands declare their option groups separately. All other commands
+# use the shared workbench declaration exercised by the parser tests above.
+@pytest.mark.parametrize(
+    "command",
+    [CREATE_WORKSPACE, ["begin-deep-scan", "--thread-id", "thread-context", "--target-path", "."]],
+    ids=lambda args: args[0],
+)
 @pytest.mark.parametrize(
     "flags, payload, diagnostic",
     [
@@ -143,7 +113,7 @@ def test_invalid_context_does_not_allocate_database(tmp_path, command, flags, pa
 def test_context_read_failure_precedes_database_connection(workbench_api, monkeypatch):
     stdin = Mock(buffer=Mock(read=Mock(side_effect=ValueError("read of closed file"))))
     monkeypatch.setattr(sys, "stdin", stdin)
-    monkeypatch.setattr(sys, "argv", ["workbench_db.py", *CONTEXT_COMMANDS[0], "--user-context-s"])
+    monkeypatch.setattr(sys, "argv", ["workbench_db.py", *CREATE_WORKSPACE, "--user-context-s"])
     connect = Mock()
     monkeypatch.setitem(workbench_api["main"].__globals__, "connect", connect)
 
