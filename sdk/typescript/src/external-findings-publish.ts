@@ -32,9 +32,14 @@ import {
 } from "./external-findings-read.js";
 import { canonicalJson } from "./record.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
+import { wizFindingRepository } from "./wiz-findings.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import { snykRepositoryUrls } from "./snyk-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
+import {
+  blackDuckReportRepositories,
+  projectedBlackDuckRepositoryUrl,
+} from "./blackduck-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import {
   snapshotImportOptions,
@@ -738,14 +743,6 @@ async function preparePublicationInput(
     );
 
   function checkRepositories(findings: ExternalFindings["findings"]) {
-    // Validated non-Inspector checkpoints retain their original provider and repository ID.
-    if (saved && options.provider !== "inspector") return;
-    const binding = inspectorReportRepository(
-      options.provider,
-      findings,
-      "cloud",
-      inspectorProjectMap,
-    );
     function requireDestination(id: string, url: string | null | undefined) {
       if (
         url &&
@@ -755,12 +752,35 @@ async function preparePublicationInput(
           `Finding ${JSON.stringify(id)} belongs to ${JSON.stringify(url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
         );
     }
-    if (binding) requireDestination(binding.findingId, binding.url);
+    // Historical checkpoints already fixed the provider and request bytes.
+    // Recheck any projected source against the destination discovered for this retry.
+    const replay = saved && options.provider !== "blackduck";
+    const repositories = replay
+      ? undefined
+      : blackDuckReportRepositories(options.provider, findings, "cloud");
+    if (!replay || options.provider === "inspector") {
+      const binding = inspectorReportRepository(
+        options.provider,
+        findings,
+        "cloud",
+        inspectorProjectMap,
+      );
+      if (binding) requireDestination(binding.findingId, binding.url);
+    }
     for (const finding of findings) {
       const { source_finding_id: id, evidence } = finding;
+      const projected = repositories
+        ? repositories.get(id)?.url
+        : projectedBlackDuckRepositoryUrl(finding, "cloud");
+      if (replay && !projected && options.provider !== "inspector") continue;
       const urls = [
+        projected,
         evidence.details?.repository?.url,
-        ...(options.provider === "wiz" ? [wizCsvRepositoryUrl(evidence)] : []),
+        options.provider === "wiz"
+          ? projected
+            ? wizFindingRepository(evidence, "cloud")?.url
+            : wizCsvRepositoryUrl(evidence)
+          : undefined,
         ...(options.provider === "snyk"
           ? snykRepositoryUrls(evidence.source_data, {
               cloudRepositoryUrl: destination.url,
