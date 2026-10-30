@@ -1263,6 +1263,10 @@ describe("custom validation", () => {
     expect(standard).toContain("retain the model in an early");
     expect(standard).toContain("`followup_task`");
     expect(standard).toContain("`send_message`");
+    expect(standard).toContain(
+      "[default severity rubric](<plugin_dir>/references/default-severity-rubric.md)",
+    );
+    expect(standard).toContain("the severity rubric selected for this scan");
     expect(standard).not.toContain("undefined");
     expect(standard).not.toContain(
       "Independently validate each unique finding",
