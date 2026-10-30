@@ -31,7 +31,10 @@ import {
 import { gitMarkerRoot, normalizeRepository } from "./targets.js";
 import { errorMessage } from "./errors.js";
 import { canonicalJson } from "./record.js";
-import { validateExternalReport } from "./external-import-contract.js";
+import {
+  repositoryUrlKey,
+  validateExternalReport,
+} from "./external-import-contract.js";
 import { notify } from "./value.js";
 
 interface SonarImportOptions {
@@ -97,9 +100,13 @@ export async function prepareSonarImport(
   const repository =
     (await gitMarkerRoot(options.cwd, signal, "nearest")) ??
     (await normalizeRepository(options.cwd, signal));
+  const selectedPath =
+    options.capture && resolveConfigPath(options.cwd, options.capture);
+  // Resolve directory aliases while keeping the evidence and approval digests
+  // in the filename selected by the caller.
   const input =
-    options.capture &&
-    (await realpath(resolveConfigPath(options.cwd, options.capture)));
+    selectedPath &&
+    join(await realpath(dirname(selectedPath)), basename(selectedPath));
   const raw = input
     ? await readScannerJson(input)
     : await (dependencies.collect ?? collectSonarIssues)({
@@ -155,7 +162,19 @@ export async function prepareSonarImport(
     });
   }
   const evidenceDigest = hash("sha256", JSON.stringify(report));
-  const checkout = hash("sha256", repository);
+  // Only a retained selection for this evidence and checkout can restore a manual SSH mapping.
+  const mappedCheckout = (url: string) =>
+    hash("sha256", canonicalJson([repository, repositoryUrlKey(url)]));
+  const retainedSource =
+    report.repositoryUrl &&
+    retained?.[1] === evidenceDigest &&
+    retained[2] === mappedCheckout(report.repositoryUrl)
+      ? report.repositoryUrl
+      : undefined;
+  const sourceRepositoryUrl = options.sourceRepositoryUrl ?? retainedSource;
+  const checkout = sourceRepositoryUrl
+    ? mappedCheckout(sourceRepositoryUrl)
+    : hash("sha256", repository);
   const localCapture = join(root, `${evidenceDigest}.${checkout}.json`);
   if (
     options.to === "local" &&
@@ -199,7 +218,7 @@ export async function prepareSonarImport(
     const source = { provider: "sonar", sourceKey } as const;
     const local = await prepareLocalImport(
       findings,
-      { repository, ...source },
+      { repository, ...source, sourceRepositoryUrl },
       { environment, signal },
       [{ url: repositoryUrl }],
     );

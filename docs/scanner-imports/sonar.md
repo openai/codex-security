@@ -44,6 +44,11 @@ repository binding, verify its Git URL in Sonar and retry the preview with
 `import sonar CAPTURE --source-repository-url GIT_URL --dry-run --format json`
 using the reported capture path. Check the target and selection before importing.
 
+If the checkout uses an SSH host alias, supply the project's verified HTTPS URL
+with `--source-repository-url` so the importer can compare the repository path.
+The saved preview remembers that mapping for this checkout. SDK callers can
+pass the same URL as `sourceRepositoryUrl` when preparing a local import.
+
 The preview saves a private copy even when the input is a file. Use the path
 it returns in `capture` to import the reviewed evidence into the local
 workbench. Use the preview's `repository` path to read the findings back:

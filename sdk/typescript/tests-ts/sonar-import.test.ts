@@ -5,12 +5,16 @@ import {
   copyFile,
   mkdir,
   readFile,
+  rm,
   stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { prepareSonarImport } from "../src/sonar-import.js";
+import { prepareLocalExternalImport } from "../src/external-findings-import.js";
+import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
+import { normalizeSonarFindings } from "../src/sonar-findings.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 import { sonarGitTestEnvironment } from "./support/sonar-import-fixtures.js";
 
@@ -95,6 +99,16 @@ test("preview snapshots caller-owned evidence and rejects changes to the retaine
       deps,
     ),
   ).rejects.toThrow("saved Sonar capture has changed");
+  if (process.platform !== "win32") {
+    await rm(info.capture);
+    await symlink(changed.info.capture, info.capture);
+    await expect(
+      prepareSonarImport(
+        { ...selection, capture: info.capture, yes: true, dryRun: false },
+        deps,
+      ),
+    ).rejects.toThrow("saved Sonar capture has changed");
+  }
 });
 
 test("confirming a local preview in another checkout requires previewing that checkout", async () => {
@@ -124,7 +138,15 @@ test("confirming a local preview in another checkout requires previewing that ch
     },
   };
   await expect(
-    prepareSonarImport({ ...moved, yes: true, dryRun: false }, newState),
+    prepareSonarImport(
+      {
+        ...previewOptions,
+        capture: preview.info.capture,
+        yes: true,
+        dryRun: false,
+      },
+      newState,
+    ),
   ).rejects.toThrow("has not been reviewed for this checkout");
   const renewed = await prepareSonarImport(moved, first.deps);
   expect(renewed.info.capture).not.toBe(preview.info.capture);
@@ -278,6 +300,21 @@ test("Cloud confirmation verifies the retained evidence, account and assigned en
   );
   const alternate = await prepareSonarImport(selection, deps);
   expect(alternate.info.capture).not.toBe(preview.info.capture);
+  if (process.platform !== "win32") {
+    const outsideAlias = join(selection.cwd, basename(preview.info.capture));
+    await rm(outsideAlias);
+    await symlink(alternate.info.capture, outsideAlias);
+    await expect(
+      prepareSonarImport({ ...confirm, capture: outsideAlias }, deps),
+    ).rejects.toThrow("--to cloud --dry-run");
+
+    // Replacing the reviewed entry itself cannot select a different account's approval.
+    await rm(preview.info.capture);
+    await symlink(alternate.info.capture, preview.info.capture);
+    expect((await prepareSonarImport(confirm, deps)).cloudError).toContain(
+      "--to cloud --dry-run",
+    );
+  }
   account = "account-a";
   environmentId = "env-b";
   expect((await prepareSonarImport(confirm, deps)).cloudError).toContain(
@@ -288,6 +325,77 @@ test("Cloud confirmation verifies the retained evidence, account and assigned en
   expect(await readFile(preview.info.capture, "utf8")).toBe(
     await readFile(alternate.info.capture, "utf8"),
   );
+  f.git("remote", "set-url", "origin", "git@work:example/project.git");
+  const manual = await prepareSonarImport(
+    { ...selection, sourceRepositoryUrl: repositoryUrl },
+    deps,
+  );
+  expect(
+    (
+      await prepareSonarImport(
+        { ...confirm, capture: manual.info.capture },
+        deps,
+      )
+    ).cloud,
+  ).toBeDefined();
+});
+
+test("only an explicit Sonar source can map a checkout's SSH alias", async () => {
+  await using directory = await scopedTemporaryDirectory("sonar-ssh-alias-");
+  const { git, report, options, deps } = await fixture(directory.path);
+  git(
+    "remote",
+    "set-url",
+    "origin",
+    "https://git.example.invalid/example/project.git",
+  );
+  git(
+    "remote",
+    "add",
+    "upstream",
+    "git@git.example.invalid:example/project.git",
+  );
+  const selected = { ...options, to: "local" } as const;
+  const source = {
+    repository: options.cwd,
+    provider: "sonar",
+    sourceKey: "example",
+  } as const;
+  const normalized = normalizeSonarFindings(report, "", "local");
+  const mismatch = "does not match a configured remote";
+  await expect(
+    prepareNormalizedLocalImport(normalized, source, deps),
+  ).rejects.toThrow(mismatch);
+  await expect(
+    prepareLocalExternalImport(options.capture, source, deps),
+  ).rejects.toThrow(mismatch);
+  const manual = { ...source, sourceRepositoryUrl: repositoryUrl };
+  expect(
+    (await prepareLocalExternalImport(options.capture, manual, deps))
+      .matchesRepositoryRemote,
+  ).toBe(false);
+  const captures: string[] = [];
+  await expect(
+    prepareSonarImport(selected, {
+      ...deps,
+      onCapture: (path) => captures.push(path),
+    }),
+  ).rejects.toThrow(mismatch);
+  expect(captures).toHaveLength(1);
+  await expect(
+    prepareSonarImport({ ...selected, capture: captures[0] }, deps),
+  ).rejects.toThrow(mismatch);
+  const preview = await prepareSonarImport(
+    { ...selected, capture: captures[0], sourceRepositoryUrl: repositoryUrl },
+    deps,
+  );
+  expect(preview.info.capture).not.toBe(captures[0]);
+  const replay = await prepareSonarImport(
+    { ...selected, capture: preview.info.capture, dryRun: false, yes: true },
+    deps,
+  );
+  expect(replay.info.capture).toBe(preview.info.capture);
+  expect(replay.local.read).toBe(1);
 });
 
 test("replays a manually bound capture using the native branch as its identity", async () => {

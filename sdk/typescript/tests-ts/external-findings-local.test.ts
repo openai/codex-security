@@ -1615,10 +1615,6 @@ describe("local normalized scanner findings", () => {
   });
 
   test.each([
-    [
-      "git@git.example.invalid:team/project.git",
-      "https://git.example.invalid/team/project",
-    ],
     ["git@github-work:team/project.git", "https://github.com/team/project"],
     [
       "git@git.work.example:team/project.git",
@@ -1639,36 +1635,56 @@ describe("local normalized scanner findings", () => {
         ["-C", repository, "remote", "add", "upstream", upstream],
         { env: environment },
       );
-      const prepare = (sourceUrl: string) =>
+      const prepare = (sourceUrl: string, sourceRepositoryUrl?: string) =>
         prepareNormalizedLocalImport(
           input(),
-          { repository, ...source, provider: "sonar" },
+          { repository, ...source, provider: "sonar", sourceRepositoryUrl },
           { environment, sourceRepositories: [{ url: sourceUrl }] },
         );
-      expect((await prepare(url)).matchesRepositoryRemote).toBe(false);
-      await expect(prepare(url + "-other")).rejects.toThrow(
+      await expect(prepare(url)).rejects.toThrow(
+        "does not match a configured remote",
+      );
+      await expect(prepare(url, url + "-other")).rejects.toThrow(
+        "does not match a configured remote",
+      );
+      expect((await prepare(url, url)).matchesRepositoryRemote).toBe(false);
+      await expect(prepare(url + "-other", url + "-other")).rejects.toThrow(
         "does not match a configured remote",
       );
     },
   );
 
-  test("a recognized Sonar SSH host cannot be remapped to another provider", async () => {
-    const { repository, environment } = await fixture({
-      remote: "git@gitlab.com:team/project.git",
-    });
-    await expect(
-      prepareNormalizedLocalImport(
-        input(),
-        { repository, ...source, provider: "sonar" },
-        {
-          environment,
-          sourceRepositories: [{ url: "https://github.com/team/project" }],
-        },
-      ),
-    ).rejects.toThrow("does not match a configured remote");
-  });
+  test.each([
+    "git@gitlab.com:team/project.git",
+    "ssh://gitlab.com/team/project.git",
+  ])(
+    "a recognized Sonar SSH host cannot be remapped to another provider: %s",
+    async (remote) => {
+      const { repository, environment } = await fixture({
+        remote,
+      });
+      await expect(
+        prepareNormalizedLocalImport(
+          input(),
+          {
+            repository,
+            ...source,
+            provider: "sonar",
+            sourceRepositoryUrl: "https://github.com/team/project",
+          },
+          {
+            environment,
+            sourceRepositories: [{ url: "https://github.com/team/project" }],
+          },
+        ),
+      ).rejects.toThrow("does not match a configured remote");
+    },
+  );
 
-  test("a different project on a custom SSH remote contradicts the Sonar source", async () => {
+  test.each([
+    "https://git.example.invalid/team/project",
+    "git@git.example.invalid:team/project.git",
+  ])("a custom SSH remote must match the claimed project: %s", async (url) => {
     const { repository, environment } = await fixture({
       remote: "git@git.example.invalid:team/other.git",
     });
@@ -1678,12 +1694,31 @@ describe("local normalized scanner findings", () => {
         { repository, ...source, provider: "sonar" },
         {
           environment,
-          sourceRepositories: [
-            { url: "https://git.example.invalid/team/project" },
-          ],
+          sourceRepositories: [{ url }],
         },
       ),
     ).rejects.toThrow("does not match a configured remote");
+    execFileSync(
+      "git",
+      [
+        "-C",
+        repository,
+        "remote",
+        "set-url",
+        "origin",
+        "git@git.example.invalid:team/project.git",
+      ],
+      { env: environment },
+    );
+    expect(
+      (
+        await prepareNormalizedLocalImport(
+          input(),
+          { repository, ...source, provider: "sonar" },
+          { environment, sourceRepositories: [{ url }] },
+        )
+      ).matchesRepositoryRemote,
+    ).toBe(false);
   });
 
   test.each([

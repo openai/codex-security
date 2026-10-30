@@ -80,6 +80,8 @@ export interface NormalizedLocalImportOptions {
   provider: Provider;
   /** Stable scanner organization/project/branch namespace across imports. */
   sourceKey: string;
+  /** Explicitly verified Sonar repository when a checkout uses an SSH host alias. */
+  sourceRepositoryUrl?: string;
   /** Full Inspector project ARNs mapped to independently verified repository URLs. */
   inspectorProjectMap?: ReadonlyMap<string, string>;
 }
@@ -142,6 +144,14 @@ interface RemoteRepositoryIdentity {
   homeRelative?: boolean;
 }
 
+function sonarHostedGit(hostname: string) {
+  return (
+    isGitHubCloudHost(hostname) ||
+    hostname === "gitlab.com" ||
+    hostname === "bitbucket.org"
+  );
+}
+
 function remoteRepository(
   value: string,
   provider: Provider,
@@ -177,7 +187,13 @@ function remoteRepository(
   let hostname = githubSshOverHttps ? "github.com" : url.hostname;
   // An unresolved SSH name can be a local Host alias. Only substitute the
   // supplied hostname when checking the path of an unverified manual mapping.
-  if (possibleSshHost && ssh) hostname = possibleSshHost;
+  if (
+    possibleSshHost &&
+    ssh &&
+    !sonarHostedGit(hostname.toLowerCase()) &&
+    !["ssh.github.com", "ssh.dev.azure.com"].includes(hostname.toLowerCase())
+  )
+    hostname = possibleSshHost;
   const port =
     githubSshOverHttps || url.port === gitTransportPorts[url.protocol]
       ? ""
@@ -280,6 +296,8 @@ export function sonarRepositoryForRemote(origin: string): string | undefined {
     const remote = parseGitRemote(origin);
     if (!remote) return;
     const { url } = remote;
+    // Git dispatches remote helpers by the literal scheme, while URL lowercases it.
+    if (!remote.scpStyle && !origin.startsWith(url.protocol + "//")) return;
     // Git passes literal SSH paths to upload-pack. URL.pathname collapses dot segments.
     const path = remote.scpStyle
       ? remote.path
@@ -295,8 +313,7 @@ export function sonarRepositoryForRemote(origin: string): string | undefined {
       isGitSsh(url.protocol) &&
       url.username === "git" &&
       (!url.port || url.port === "22") &&
-      (isGitHubCloudHost(hostname) ||
-        ["gitlab.com", "bitbucket.org"].includes(hostname))
+      sonarHostedGit(hostname)
     ) {
       candidate = `https://${hostname}/${path}`;
     } else {
@@ -579,6 +596,7 @@ async function requireMatchingRepository(
   protectedRoots: WorkbenchCommandOptions["protectedRoot"],
   environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
+  sourceRepositoryUrl?: string,
 ): Promise<boolean> {
   if (sources.length === 0) return false;
   if (!(await hasGitMetadata(repository, signal))) return false;
@@ -677,6 +695,10 @@ async function requireMatchingRepository(
     else if (!/[\s\\\p{Cc}?#]/u.test(remote)) unverified.push(remote);
   }
   let allSourcesMatched = true;
+  const manualSource =
+    provider === "sonar" && sourceRepositoryUrl
+      ? declaredScannerRepositoryUrl(sourceRepositoryUrl, "Sonar", "local")
+      : undefined;
   for (const source of sources) {
     const bound = boundProvider || strictSources.has(source.url);
     const platform = bound
@@ -690,14 +712,17 @@ async function requireMatchingRepository(
     allSourcesMatched = false;
     // A custom SSH upstream can agree with a manual mapping even when a
     // recognized HTTPS remote points at a fork. It cannot prove a Cloud binding.
+    const selected =
+      manualSource &&
+      repositoryUrlKey(source.url) === repositoryUrlKey(manualSource)
+        ? new URL(manualSource)
+        : undefined;
     const possibleSshHost =
-      target && unverified.length ? URL.parse(source.url)?.hostname : undefined;
-    const configured = possibleSshHost
-      ? unverified.flatMap(
-          (remote) =>
-            remoteRepository(remote, platform, bound, possibleSshHost) ?? [],
-        )
-      : [];
+      selected?.protocol === "https:" ? selected.hostname : undefined;
+    const configured = unverified.flatMap(
+      (remote) =>
+        remoteRepository(remote, platform, bound, possibleSshHost) ?? [],
+    );
     if (target && configured.some((remote) => matchingRemote(remote, target)))
       continue;
     if (targets.length || configured.length)
@@ -1027,6 +1052,7 @@ export async function prepareLocalImport(
     workbenchOptions.protectedRoot,
     workbenchOptions.environment,
     dependencies.signal,
+    options.sourceRepositoryUrl,
   );
   dependencies.signal?.throwIfAborted();
   const preview = {
