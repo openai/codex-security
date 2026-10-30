@@ -396,13 +396,23 @@ and JSON on stdin. For example, `request.json` selects the existing database:
 Use an absolute Windows path on Windows. The retained helper commands accept
 these `payload` fields:
 
-| Command                     | Payload                                                                                                 |
-| --------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `store-findings`            | `entries` containing finding and embedding records; optional `repositoryId`.                            |
-| `list-stored-findings`      | Positive integer `limit` and non-negative integer `offset`.                                             |
-| `find-potential-duplicates` | `findingId` and `scope`: either `{ "repositoryId": "REPOSITORY_ID" }` or `{ "allRepositories": true }`. |
-| `store-dedupe-groups`       | `groups`, an array of finding-ID arrays.                                                                |
-| `list-dedupe-groups`        | `findingId`.                                                                                            |
+| Command                     | Payload                                                                                                                                                                                     |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `store-findings`            | `entries` containing finding and embedding records; optional `repositoryId`.                                                                                                                |
+| `list-stored-findings`      | Positive integer `limit` and non-negative integer `offset`.                                                                                                                                 |
+| `find-potential-duplicates` | `findingId` and `scope`: either `{ "repositoryId": "REPOSITORY_ID" }` or `{ "allRepositories": true }`.                                                                                     |
+| `store-dedupe-groups`       | `groups`, an array of finding-ID arrays.                                                                                                                                                    |
+| `list-dedupe-groups`        | `findingId`.                                                                                                                                                                                |
+| `local-dedupe`              | `action: "prepare"` with `findings`, `repositoryPath`, `anchorRepositoryId`, optional `repositoryId`, and `space`; or `action: "embed"` with `entries`, `space`, `model`, and `dimensions`. |
+
+Local embedding preparation and cache writes now use the bundled Node helper
+instead of `workbench_db.py local-dedupe`. Each embed entry contains `findingId`,
+the preparation response's `cacheKey`, and an `embedding` with `model` and
+`vector`. Preparation returns `cacheKeys` and `findingsToEmbed`; embedding returns
+an empty object. These operations use Node even when `PYTHON` is configured.
+Explicitly selected external plugins retain their Python workbench route.
+Saved-scan lookup and export still require Python, so the complete saved-scan
+deduplication workflow continues to need it.
 
 Retained scan commands such as `workbench_db.py list-findings` keep their existing
 interface.
