@@ -1597,22 +1597,25 @@ describe("local normalized scanner findings", () => {
     },
   );
 
-  test("a newline inside one Git remote URL cannot establish a repository match", async () => {
-    const url = "https://github.com/example/project";
-    const { repository, environment } = await fixture({
-      remote: url + "\nhttps://github.com/other/repo",
-    });
-    await expect(
-      prepareNormalizedLocalImport(
-        input(),
-        { repository, ...source, provider: "sonar" },
-        {
-          environment,
-          sourceRepositories: [{ url }],
-        },
-      ),
-    ).rejects.toThrow("remote URL contains a line break");
-  });
+  test.each(["\nhttps://github.com/other/repo", "\r"])(
+    "a line break in the primary Git URL cannot establish a repository match: %j",
+    async (suffix) => {
+      const url = "https://github.com/example/project";
+      const { repository, environment } = await fixture({
+        remote: url + suffix,
+      });
+      await expect(
+        prepareNormalizedLocalImport(
+          input(),
+          { repository, ...source, provider: "sonar" },
+          {
+            environment,
+            sourceRepositories: [{ url }],
+          },
+        ),
+      ).rejects.toThrow("remote URL contains a line break");
+    },
+  );
 
   test.each([
     ["git@github-work:team/project.git", "https://github.com/team/project"],
@@ -1656,6 +1659,8 @@ describe("local normalized scanner findings", () => {
 
   test.each([
     ["git@gitlab.com.:team/project.git", "https://gitlab.com/team/project"],
+    ["git@gitlab.com.:team/project.git", "https://gitlab.com./team/project"],
+    ["git@work:team/project.git", "https://gitlab.com./team/project"],
     [
       "ssh://git@ssh.github.com.:443/team/project.git",
       "https://github.com/team/project",

@@ -820,9 +820,14 @@ export async function gitOutput(
       maxBuffer: Infinity,
     },
   );
-  return typeof stdout === "string"
-    ? stdout.replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "")
-    : stdout;
+  if (typeof stdout !== "string") return stdout;
+  // Git writes remote URLs to binary stdout even on Windows. Only the final LF
+  // is a delimiter; a preceding CR belongs to the configured URL.
+  const remoteUrl = args[0] === "remote" && args[1] === "get-url";
+  return stdout.replace(
+    process.platform === "win32" && !remoteUrl ? /\r?\n$/u : /\n$/u,
+    "",
+  );
 }
 
 export async function gitMarkerRoot(

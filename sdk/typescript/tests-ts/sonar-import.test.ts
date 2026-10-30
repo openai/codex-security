@@ -6,6 +6,7 @@ import {
   link,
   mkdir,
   open,
+  readdir,
   readFile,
   rm,
   stat,
@@ -274,7 +275,7 @@ test("live import passes the expected repository to the collector before saving 
   await using directory = await scopedTemporaryDirectory(
     "sonar-expected-source-",
   );
-  const { options, deps } = await fixture(directory.path);
+  const { options, deps, report } = await fixture(directory.path);
   let source: string | undefined;
   await expect(
     prepareSonarImport(
@@ -297,6 +298,18 @@ test("live import passes the expected repository to the collector before saving 
   expect(
     await stat(deps.environment.CODEX_SECURITY_STATE_DIR).catch(() => null),
   ).toBeNull();
+  const success = await prepareSonarImport(
+    {
+      ...options,
+      capture: undefined,
+      to: "local",
+      sourceRepositoryUrl: repositoryUrl,
+    },
+    { ...deps, collect: async () => parseSonarCapture(report) },
+  );
+  expect(await readdir(dirname(success.info.capture))).toEqual([
+    basename(success.info.capture),
+  ]);
 });
 
 test("Cloud confirmation verifies the retained evidence, account and assigned environment", async () => {

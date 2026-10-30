@@ -31,11 +31,7 @@ import {
   requireOutputOutsideRepositories,
   workbenchEnvironment,
 } from "./runtime.js";
-import {
-  gitMarkerRoot,
-  normalizeRepository,
-  nullIfMissingPath,
-} from "./targets.js";
+import { gitMarkerRoot, normalizeRepository } from "./targets.js";
 import { errorMessage } from "./errors.js";
 import { canonicalJson } from "./record.js";
 import {
@@ -92,9 +88,7 @@ async function readCapture(input: string) {
     try {
       // Use the same open file for its bytes and its retained evidence name.
       // An unlinked descriptor is still readable, even if its name is reused.
-      const name = await readlink(`/proc/self/fd/${file.fd}`).catch(
-        nullIfMissingPath,
-      );
+      const name = await readlink(`/proc/self/fd/${file.fd}`).catch(() => null);
       if (name !== null) {
         let path = name;
         const deletedSuffix = " (deleted)";
@@ -111,6 +105,8 @@ async function readCapture(input: string) {
         }
         return { path, raw: await readScannerJson(file) };
       }
+      if ((await file.stat()).nlink === 0)
+        return { path: input, raw: await readScannerJson(file) };
     } finally {
       await file.close();
     }
@@ -224,18 +220,19 @@ export async function prepareSonarImport(
       ? report.repositoryUrl
       : undefined);
   if (mappedUrl) {
-    // A completed live selection can be replayed after a Git configuration
-    // error, without giving the recovery file a reviewed checkout identity.
-    const recovery = !input ? join(root, `${evidenceDigest}.json`) : undefined;
-    if (recovery) await writeAtomicJson(recovery, report);
     fetchRemotes = await configuredFetchRemotes(
       repository,
       "sonar",
       protectedRoots,
       workbenchEnvironment(environment),
       signal,
-    ).catch((error: unknown) => {
-      if (recovery) notify(() => dependencies.onCapture?.(recovery));
+    ).catch(async (error: unknown) => {
+      // Preserve a completed live selection without marking it reviewed.
+      if (!input) {
+        const recovery = join(root, `${evidenceDigest}.json`);
+        await writeAtomicJson(recovery, report);
+        notify(() => dependencies.onCapture?.(recovery));
+      }
       throw error;
     });
     const mapped = hash(

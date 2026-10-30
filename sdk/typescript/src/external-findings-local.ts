@@ -152,6 +152,14 @@ function sonarHostedGit(hostname: string) {
   );
 }
 
+function sonarHostedHostname(hostname: string) {
+  const name = hostname.toLowerCase().replace(/\.$/u, "");
+  return sonarHostedGit(name) ||
+    ["ssh.github.com", "ssh.dev.azure.com", "dev.azure.com"].includes(name)
+    ? name
+    : undefined;
+}
+
 function remoteRepository(
   value: string,
   provider: Provider,
@@ -183,16 +191,14 @@ function remoteRepository(
   const { url, path, scpStyle } = remote;
   const ssh = isGitSsh(url.protocol);
   const protocol = url.protocol === "http:" ? "http:" : "https:";
-  const sshHostname = url.hostname.toLowerCase().replace(/\.$/u, "");
-  const hostedSsh =
-    sonarHostedGit(sshHostname) ||
-    ["ssh.github.com", "ssh.dev.azure.com"].includes(sshHostname);
-  if (provider === "sonar" && ssh && hostedSsh) url.hostname = sshHostname;
+  const hosted = provider === "sonar" && sonarHostedHostname(url.hostname);
+  if (hosted) url.hostname = hosted;
   const githubSshOverHttps = isGitHubSshOverHttps(url);
   let hostname = githubSshOverHttps ? "github.com" : url.hostname;
   // An unresolved SSH name can be a local Host alias. Only substitute the
   // supplied hostname when checking the path of an unverified manual mapping.
-  if (possibleSshHost && ssh && !hostedSsh) hostname = possibleSshHost;
+  if (possibleSshHost && ssh && (!hosted || hosted === "dev.azure.com"))
+    hostname = sonarHostedHostname(possibleSshHost) ?? possibleSshHost;
   const port =
     githubSshOverHttps || url.port === gitTransportPorts[url.protocol]
       ? ""
