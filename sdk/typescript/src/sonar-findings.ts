@@ -89,6 +89,16 @@ function mergeSonarScope(
     throw new Error("The Sonar export mixes branch and pull request results.");
 }
 
+function requireConsistentSonarRef(
+  scope: SonarScope,
+  hasUnscopedIssue: boolean,
+) {
+  if (hasUnscopedIssue && (scope.branch || scope.pullRequest))
+    throw new Error(
+      "The Sonar export mixes issues with a named ref and issues without a ref.",
+    );
+}
+
 /** Normalized Sonar reports and their individual issues retain the source repository. */
 export function sonarRepositoryUrls(
   provider: Provider,
@@ -97,8 +107,7 @@ export function sonarRepositoryUrls(
   target: ExternalImportTarget,
 ): Set<string> {
   const urls = new Set<string>();
-  const scope: SonarScope = {};
-  function add(data: NativeRecord | undefined) {
+  function add(data: NativeRecord | undefined, scope: SonarScope) {
     if (data?.["format"] !== sonarFormat) return;
     if (provider !== "sonar")
       throw new Error("Retained Sonar evidence requires the sonar provider.");
@@ -107,13 +116,17 @@ export function sonarRepositoryUrls(
       declaredScannerRepositoryUrl(data["repositoryUrl"], "Sonar", target),
     );
   }
-  add(report);
+  const reportScope: SonarScope = {};
+  add(report, reportScope);
+  const scope = { ...reportScope };
+  let hasUnscopedIssue = false;
   for (const { evidence, source_finding_id } of findings) {
     const data = evidence.source_data;
-    add(data ?? undefined);
+    const rowScope = { ...reportScope };
+    add(data ?? undefined, rowScope);
     if (data?.["format"] === sonarFormat && data["issue"] !== undefined) {
       const issue = record(data["issue"], "Retained Sonar issue");
-      mergeSonarScope(scope, issue, issueScopeFields);
+      mergeSonarScope(rowScope, issue, issueScopeFields);
       if (
         requiredText(issue["key"], "Retained Sonar issue key") !==
         source_finding_id
@@ -122,7 +135,10 @@ export function sonarRepositoryUrls(
           "The normalized finding ID does not match the retained Sonar issue key.",
         );
     }
+    mergeSonarScope(scope, rowScope);
+    if (!rowScope.branch && !rowScope.pullRequest) hasUnscopedIssue = true;
   }
+  requireConsistentSonarRef(scope, hasUnscopedIssue);
   if (
     scope.branch &&
     findings.some(
@@ -321,15 +337,10 @@ export function normalizeSonarFindings(
     requiredText(issue["project"], "Sonar issue project");
     mergeSonarIssueScope(scope, issue);
   }
-  if (
-    !capture?.branch &&
-    !capture?.pullRequest &&
-    hasUnscopedIssue &&
-    (scope.branch || scope.pullRequest)
-  )
-    throw new Error(
-      "The Sonar export mixes issues with a named ref and issues without a ref.",
-    );
+  requireConsistentSonarRef(
+    scope,
+    !capture?.branch && !capture?.pullRequest && hasUnscopedIssue,
+  );
   const context = {
     format: sonarFormat,
     ...(capture?.projectBase !== undefined && {

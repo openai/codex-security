@@ -9,7 +9,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { prepareSonarImport } from "../src/sonar-import.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 import { sonarGitTestEnvironment } from "./support/sonar-import-fixtures.js";
@@ -86,9 +86,14 @@ test("preview snapshots caller-owned evidence and rejects changes to the retaine
   );
   const changed = await prepareSonarImport(selection, deps);
   expect(changed.info.capture).not.toBe(info.capture);
+  const alias = join(directory.path, "capture-alias");
+  await symlink(dirname(info.capture), alias, "junction");
   await copyFile(options.capture, info.capture);
   await expect(
-    prepareSonarImport({ ...selection, capture: info.capture }, deps),
+    prepareSonarImport(
+      { ...selection, capture: join(alias, basename(info.capture)) },
+      deps,
+    ),
   ).rejects.toThrow("saved Sonar capture has changed");
 });
 
@@ -102,13 +107,24 @@ test("confirming a local preview in another checkout requires previewing that ch
     dryRun: true,
   } as const;
   const preview = await prepareSonarImport(previewOptions, first.deps);
+  const alias = join(directory.path, "capture-alias");
+  await symlink(dirname(preview.info.capture), alias, "junction");
   const moved = {
     ...previewOptions,
     cwd: second.options.cwd,
-    capture: preview.info.capture,
+    capture: join(alias, basename(preview.info.capture)),
   };
   await expect(
     prepareSonarImport({ ...moved, yes: true, dryRun: false }, first.deps),
+  ).rejects.toThrow("has not been reviewed for this checkout");
+  const newState = {
+    environment: {
+      ...second.deps.environment,
+      CODEX_SECURITY_STATE_DIR: join(directory.path, "other-state"),
+    },
+  };
+  await expect(
+    prepareSonarImport({ ...moved, yes: true, dryRun: false }, newState),
   ).rejects.toThrow("has not been reviewed for this checkout");
   const renewed = await prepareSonarImport(moved, first.deps);
   expect(renewed.info.capture).not.toBe(preview.info.capture);
@@ -117,6 +133,31 @@ test("confirming a local preview in another checkout requires previewing that ch
     first.deps,
   );
   expect((await confirmed.import()).local.counts.created).toBe(1);
+});
+
+test("a portable capture supports interactive review but requires the returned local preview path with --yes", async () => {
+  await using directory = await scopedTemporaryDirectory(
+    "sonar-portable-replay-",
+  );
+  const { options, deps } = await fixture(directory.path);
+  const selection = { ...options, to: "local", dryRun: false } as const;
+  await expect(
+    prepareSonarImport({ ...selection, yes: true }, deps),
+  ).rejects.toThrow("has not been reviewed for this checkout");
+  const interactive = await prepareSonarImport(selection, deps);
+  expect(interactive.local.findings).toHaveLength(1);
+  expect(interactive.info.capture).not.toBe(options.capture);
+  const callerPath = join(directory.path, "reviewed");
+  await symlink(dirname(interactive.info.capture), callerPath, "junction");
+  const confirmed = await prepareSonarImport(
+    {
+      ...selection,
+      yes: true,
+      capture: join(callerPath, basename(interactive.info.capture)),
+    },
+    deps,
+  );
+  expect(confirmed.info.capture).toBe(interactive.info.capture);
 });
 
 test("live import passes the expected repository to the collector before saving evidence", async () => {
@@ -208,9 +249,11 @@ test("Cloud confirmation verifies the retained evidence, account and assigned en
   };
   const preview = await prepareSonarImport(selection, deps);
   expect(preview.cloudError).toBeUndefined();
+  const alias = join(directory.path, "cloud-capture-alias");
+  await symlink(dirname(preview.info.capture), alias, "junction");
   const confirm = {
     ...selection,
-    capture: preview.info.capture,
+    capture: join(alias, basename(preview.info.capture)),
     yes: true,
     dryRun: false,
   };

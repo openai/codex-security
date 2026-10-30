@@ -1614,6 +1614,60 @@ describe("local normalized scanner findings", () => {
     ).rejects.toThrow("remote URL contains a line break");
   });
 
+  test.each([
+    [
+      "git@git.example.invalid:team/project.git",
+      "https://git.example.invalid/team/project",
+    ],
+    ["git@github-work:team/project.git", "https://github.com/team/project"],
+    [
+      "git@git.work.example:team/project.git",
+      "https://github.com/team/project",
+    ],
+    [
+      "ssh://git@github-work/team/project.git",
+      "https://github.com/team/project",
+    ],
+  ])(
+    "allows a manual Sonar mapping for %s alongside an HTTPS fork",
+    async (upstream, url) => {
+      const { repository, environment } = await fixture({
+        remote: "https://fork.example.invalid/team/project.git",
+      });
+      execFileSync(
+        "git",
+        ["-C", repository, "remote", "add", "upstream", upstream],
+        { env: environment },
+      );
+      const prepare = (sourceUrl: string) =>
+        prepareNormalizedLocalImport(
+          input(),
+          { repository, ...source, provider: "sonar" },
+          { environment, sourceRepositories: [{ url: sourceUrl }] },
+        );
+      expect((await prepare(url)).matchesRepositoryRemote).toBe(false);
+      await expect(prepare(url + "-other")).rejects.toThrow(
+        "does not match a configured remote",
+      );
+    },
+  );
+
+  test("a recognized Sonar SSH host cannot be remapped to another provider", async () => {
+    const { repository, environment } = await fixture({
+      remote: "git@gitlab.com:team/project.git",
+    });
+    await expect(
+      prepareNormalizedLocalImport(
+        input(),
+        { repository, ...source, provider: "sonar" },
+        {
+          environment,
+          sourceRepositories: [{ url: "https://github.com/team/project" }],
+        },
+      ),
+    ).rejects.toThrow("does not match a configured remote");
+  });
+
   test("a different project on a custom SSH remote contradicts the Sonar source", async () => {
     const { repository, environment } = await fixture({
       remote: "git@git.example.invalid:team/other.git",

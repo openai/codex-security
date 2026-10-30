@@ -840,7 +840,15 @@ async function preparePublicationInput(
   }
   checkRepositories(parsed.findings, parsed.report);
   // A retry sends its saved projection, which may differ from today's reader.
-  if (saved) checkRepositories(submissionFindings(saved.requests));
+  if (saved) {
+    // A common Sonar ref can supply missing row refs. Only use the report
+    // associated with the input digest in the saved checkpoint.
+    const report =
+      saved.inputProjection?.inputDigest === inputDigest
+        ? parsed.report
+        : undefined;
+    checkRepositories(submissionFindings(saved.requests), report);
+  }
 
   let requests = saved?.requests;
   if (!requests) {

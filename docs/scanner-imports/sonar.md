@@ -53,8 +53,8 @@ codex-security import sonar "/path/from/capture.json" --yes
 codex-security findings imported "/checkout/from/preview" --format json
 ```
 
-To import the capture in another checkout, preview it there with `--dry-run`
-and confirm using the new capture path.
+For a portable capture, or if you change the checkout or Codex Security state
+directory, run `--dry-run` there first and pass the returned path to `--yes`.
 
 Codex Security keeps each Sonar issue key and its native evidence, including
 reported file ranges and available data-flow traces. For monorepos, Codex

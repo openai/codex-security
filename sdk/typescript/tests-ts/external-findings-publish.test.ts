@@ -828,8 +828,24 @@ test("normalized Sonar publication checks retained bindings on preview and retry
     },
   };
   const rows = { read: 1, findings: [finding], excluded: [] };
+  const named = {
+    source_finding_id: "issue-2",
+    evidence: {
+      ...finding.evidence,
+      branch: "main",
+      source_data: { ...context, branch: "main", issue: { key: "issue-2" } },
+    },
+  };
+  const selection = { read: 2, findings: [finding, named], excluded: [] };
   const prepare = () =>
-    prepareNormalizedExternalPublication(rows, selected, f.deps);
+    prepareNormalizedExternalPublication(
+      { ...selection, report: { ...context, branch: "main" } },
+      selected,
+      f.deps,
+    );
+  await expect(
+    prepareNormalizedExternalPublication(selection, selected, f.deps),
+  ).rejects.toThrow("without a ref");
   await expect(
     prepareNormalizedExternalPublication(
       {
@@ -857,6 +873,13 @@ test("normalized Sonar publication checks retained bindings on preview and retry
   await expect((await prepare()).publish()).rejects.toThrow(
     "resume the saved request",
   );
+  await expect(
+    prepareNormalizedExternalPublication(
+      { ...selection, report: { ...context, branch: "other" } },
+      selected,
+      f.deps,
+    ),
+  ).rejects.toThrow("conflicting branch");
   f.state.repositoryUrl = foreign;
   await expect(prepare()).rejects.toThrow(
     "does not match the selected Cloud repository",

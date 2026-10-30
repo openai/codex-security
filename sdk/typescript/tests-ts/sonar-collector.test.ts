@@ -760,6 +760,18 @@ test.each([
   ],
   ["git@GitHub.com:Team/Service.git", "https://github.com/Team/Service"],
   [
+    "git+ssh://git@github.com/team/service.git",
+    "https://github.com/team/service",
+  ],
+  [
+    "ssh+git://git@gitlab.com:22/team/service.git",
+    "https://gitlab.com/team/service",
+  ],
+  [
+    "git+ssh://git@ssh.dev.azure.com:22/v3/Org/Project/Repo",
+    "https://dev.azure.com/Org/Project/_git/Repo",
+  ],
+  [
     "git@SSH.dev.azure.com:v3/Org/Project/Repo",
     "https://dev.azure.com/Org/Project/_git/Repo",
   ],
@@ -792,6 +804,11 @@ test("rejects ambiguous Git transport and credential-bearing query strings befor
     "https://example.invalid/team/service.git?access_token=synthetic",
     "https://example.invalid/team/old/../service.git",
     "ssh://git@github.com/team/old/../service.git",
+    "ssh+git://git@github.com/team/old/../service.git",
+    "git+ssh://git@github.com:2222/team/service.git",
+    "git+ssh://other@github.com/team/service.git",
+    "git+ssh://git:synthetic@github.com/team/service.git",
+    "git@github-work:team/service.git",
     "ssh://git@github.com/team/old/%2e%2e/service.git",
     "ssh://git@github.com%2f/team/service.git",
     "git@github.com:team/%73ervice.git",

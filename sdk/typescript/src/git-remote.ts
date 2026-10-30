@@ -31,9 +31,13 @@ export function isGitHubCloudHost(host: string): boolean {
   return host === "github.com" || host.endsWith(".ghe.com");
 }
 
+export function isGitSsh(protocol: string): boolean {
+  return ["ssh:", "git+ssh:", "ssh+git:"].includes(protocol);
+}
+
 export function isGitHubSshOverHttps(url: URL): boolean {
   return (
-    ["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol) &&
+    isGitSsh(url.protocol) &&
     url.hostname.toLowerCase() === "ssh.github.com" &&
     url.port === "443"
   );
@@ -42,7 +46,7 @@ export function isGitHubSshOverHttps(url: URL): boolean {
 /** Azure Repos uses different hosts and paths for the same SSH and HTTPS repository. */
 export function azureReposHttpsUrl(url: URL, path: string): string | undefined {
   if (
-    url.protocol !== "ssh:" ||
+    !isGitSsh(url.protocol) ||
     url.hostname.toLowerCase() !== "ssh.dev.azure.com" ||
     url.username !== "git" ||
     url.password ||

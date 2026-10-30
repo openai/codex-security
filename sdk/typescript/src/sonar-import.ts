@@ -1,5 +1,5 @@
 import { hash } from "node:crypto";
-import { lstat } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { resolveConfigPath } from "./config-path.js";
 import { collectSonarIssues } from "./sonar-collector.js";
@@ -98,7 +98,8 @@ export async function prepareSonarImport(
     (await gitMarkerRoot(options.cwd, signal, "nearest")) ??
     (await normalizeRepository(options.cwd, signal));
   const input =
-    options.capture && resolveConfigPath(options.cwd, options.capture);
+    options.capture &&
+    (await realpath(resolveConfigPath(options.cwd, options.capture)));
   const raw = input
     ? await readScannerJson(input)
     : await (dependencies.collect ?? collectSonarIssues)({
@@ -160,8 +161,8 @@ export async function prepareSonarImport(
     options.to === "local" &&
     options.yes &&
     !options.dryRun &&
-    retained &&
-    retained[2] !== checkout
+    input &&
+    (retained?.[1] !== evidenceDigest || retained[2] !== checkout)
   ) {
     throw new Error(
       "This Sonar capture has not been reviewed for this checkout. Run import sonar with this capture and --dry-run here, then confirm the returned capture.",

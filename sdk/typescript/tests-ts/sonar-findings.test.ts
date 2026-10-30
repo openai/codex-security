@@ -6,6 +6,7 @@ import { prepareNormalizedLocalImport } from "../src/external-findings-local.js"
 import {
   normalizeSonarFindings,
   readSonarFindings,
+  sonarRepositoryUrls,
 } from "../src/sonar-findings.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 import { sonarGitTestEnvironment } from "./support/sonar-import-fixtures.js";
@@ -303,6 +304,40 @@ test("normalized local imports verify both report and issue bindings against the
   await expect(
     prepareNormalizedLocalImport(rows, options, deps),
   ).rejects.toThrow("retained Sonar repository");
+});
+
+test("normalized Sonar rows share a ref only when each row or a common report supplies it", () => {
+  for (const target of ["local", "cloud"] as const) {
+    const unscoped = normalizeSonarFindings(
+      page([issue("unscoped")]),
+      repository,
+      target,
+    );
+    for (const ref of [{ branch: "release" }, { pullRequest: "23" }]) {
+      const named = normalizeSonarFindings(
+        page([{ ...issue("named"), ...ref }]),
+        repository,
+        target,
+      );
+      for (const findings of [
+        [...unscoped.findings, ...named.findings],
+        [...named.findings, ...unscoped.findings],
+      ]) {
+        expect(() =>
+          sonarRepositoryUrls("sonar", findings, undefined, target),
+        ).toThrow("without a ref");
+        expect(() =>
+          sonarRepositoryUrls("sonar", findings, unscoped.report, target),
+        ).toThrow("without a ref");
+        expect(
+          sonarRepositoryUrls("sonar", findings, named.report, target),
+        ).toEqual(new Set([repository]));
+      }
+    }
+    expect(
+      sonarRepositoryUrls("sonar", unscoped.findings, undefined, target),
+    ).toEqual(new Set([repository]));
+  }
 });
 
 test("maps native component paths relative to a verified monorepo project base", () => {

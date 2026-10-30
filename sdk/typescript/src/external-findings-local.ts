@@ -31,6 +31,7 @@ import {
   azureReposHttpsUrl,
   isGitHubCloudHost,
   isGitHubSshOverHttps,
+  isGitSsh,
   parseGitRemote,
 } from "./git-remote.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
@@ -145,6 +146,7 @@ function remoteRepository(
   value: string,
   provider: Provider,
   bound: boolean,
+  possibleSshHost?: string,
 ): RemoteRepositoryIdentity | undefined {
   if (/^[A-Za-z]:[\\/]/u.test(value)) return undefined;
   const transport = bound
@@ -169,10 +171,13 @@ function remoteRepository(
   if (!remote || !Object.hasOwn(gitTransportPorts, remote.url.protocol))
     return undefined;
   const { url, path, scpStyle } = remote;
-  const ssh = url.protocol.includes("ssh");
+  const ssh = isGitSsh(url.protocol);
   const protocol = url.protocol === "http:" ? "http:" : "https:";
   const githubSshOverHttps = isGitHubSshOverHttps(url);
-  const hostname = githubSshOverHttps ? "github.com" : url.hostname;
+  let hostname = githubSshOverHttps ? "github.com" : url.hostname;
+  // An unresolved SSH name can be a local Host alias. Only substitute the
+  // supplied hostname when checking the path of an unverified manual mapping.
+  if (possibleSshHost && ssh) hostname = possibleSshHost;
   const port =
     githubSshOverHttps || url.port === gitTransportPorts[url.protocol]
       ? ""
@@ -287,7 +292,7 @@ export function sonarRepositoryForRemote(origin: string): string | undefined {
     } else if (url.username === "git" && isGitHubSshOverHttps(url)) {
       candidate = `https://github.com/${path}`;
     } else if (
-      url.protocol === "ssh:" &&
+      isGitSsh(url.protocol) &&
       url.username === "git" &&
       (!url.port || url.port === "22") &&
       (isGitHubCloudHost(hostname) ||
@@ -305,6 +310,7 @@ export function sonarRepositoryForRemote(origin: string): string | undefined {
     );
     const candidateRemote = remoteRepository(origin, "sonar", true);
     const target = remoteRepository(source, "sonar", true);
+    if (isGitSsh(url.protocol) && candidateRemote?.account !== "git") return;
     return candidateRemote && target && matchingRemote(candidateRemote, target)
       ? source
       : undefined;
@@ -662,10 +668,14 @@ async function requireMatchingRepository(
     provider === "blackduck" ||
     provider === "veracode";
   const loosePlatformFor = localRepositoryPlatform(provider, sources, false);
-  const comparable =
-    provider === "sonar"
-      ? remotes.flatMap((remote) => sonarRepositoryForRemote(remote) ?? [])
-      : remotes;
+  const comparable: string[] = [];
+  const unverified: string[] = [];
+  for (const remote of remotes) {
+    const verified =
+      provider === "sonar" ? sonarRepositoryForRemote(remote) : remote;
+    if (verified) comparable.push(verified);
+    else if (!/[\s\\\p{Cc}?#]/u.test(remote)) unverified.push(remote);
+  }
   let allSourcesMatched = true;
   for (const source of sources) {
     const bound = boundProvider || strictSources.has(source.url);
@@ -675,24 +685,22 @@ async function requireMatchingRepository(
     const identity = (url: string) => remoteRepository(url, platform, bound);
     const targets = comparable.flatMap((remote) => identity(remote) ?? []);
     const target = identity(source.url);
-    if (!targets.length) {
-      allSourcesMatched = false;
-      // An unrecognized transport cannot prove an HTTPS binding, but a different
-      // repository on a custom SSH host can still contradict the report.
-      const configured =
-        provider === "sonar"
-          ? remotes
-              .filter((remote) => !/[\s\\\p{Cc}?#]/u.test(remote))
-              .flatMap((remote) => identity(remote) ?? [])
-          : [];
-      if (
-        !target ||
-        !configured.length ||
-        configured.some((remote) => matchingRemote(remote, target))
-      )
-        continue;
-    }
-    if (!target || !targets.some((remote) => matchingRemote(remote, target)))
+    if (target && targets.some((remote) => matchingRemote(remote, target)))
+      continue;
+    allSourcesMatched = false;
+    // A custom SSH upstream can agree with a manual mapping even when a
+    // recognized HTTPS remote points at a fork. It cannot prove a Cloud binding.
+    const possibleSshHost =
+      target && unverified.length ? URL.parse(source.url)?.hostname : undefined;
+    const configured = possibleSshHost
+      ? unverified.flatMap(
+          (remote) =>
+            remoteRepository(remote, platform, bound, possibleSshHost) ?? [],
+        )
+      : [];
+    if (target && configured.some((remote) => matchingRemote(remote, target)))
+      continue;
+    if (targets.length || configured.length)
       throw new CodexSecurityError(
         `Imported repository ${JSON.stringify(source.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
       );
