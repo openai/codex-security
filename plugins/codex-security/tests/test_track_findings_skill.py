@@ -18,6 +18,9 @@ class TrackFindingsSkillTest(unittest.TestCase):
         app_ids = [apps[name].get("id") for name in ("linear", "github", "atlassian")]
         self.assertTrue(all(isinstance(app_id, str) and app_id for app_id in app_ids))
         self.assertEqual(len(set(app_ids)), len(app_ids))
+        for name in ("linear", "github", "atlassian"):
+            with self.subTest(app=name):
+                self.assertIs(apps[name].get("required"), False)
         self.assertEqual(apps["atlassian"]["capabilities"], ["read", "write"])
         self.assertEqual(apps["atlassian"]["id"], "asdk_app_6a83901dde988191b3f3cefdcc19acfa")
 
