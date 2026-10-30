@@ -85,7 +85,7 @@ def save_worker(root: Path, module, worker_id: str, drafts: list[dict], result: 
     return saved_discovery_worker(output, worker_id, 1)
 
 
-def recover(root: Path, module, workers, frozen=None, *, preserve_reduction=False):
+def recover(root: Path, module, workers, frozen=None, *, preserve_reduction=False, exact_file=None):
     binding = {
         "status": "interrupted",
         "allowedTargetKinds": ["git_revision"],
@@ -95,8 +95,8 @@ def recover(root: Path, module, workers, frozen=None, *, preserve_reduction=Fals
             "displayName": "test",
             "revision": "head",
         },
-        "scope": {"includePaths": ["."], "excludePaths": []},
-        "coverageMode": "deep_repository",
+        "scope": {"includePaths": [exact_file or "."], "excludePaths": []},
+        "coverageMode": "scoped_path" if exact_file else "deep_repository",
     }
     result = module.merge_saved_results(
         root,
@@ -110,6 +110,7 @@ def recover(root: Path, module, workers, frozen=None, *, preserve_reduction=Fals
         preserve_canonical_parent=preserve_reduction,
         current_contract=preserve_reduction,
         scan_mode="deep" if preserve_reduction else None,
+        finding_scope=[(exact_file, True)] if exact_file else None,
     )
     assert result is not None
     return result
@@ -993,15 +994,23 @@ def test_legacy_summary_stays_pending_after_an_explicit_closure(
     assert replay[2] == first[2]
 
 
-@pytest.mark.parametrize("same_title", [False, True])
+@pytest.fixture
+def saved_report():
+    return saved_finding("First review", summary="Retain the saved result.")
+
+
+@pytest.mark.parametrize(
+    ("same_title", "id_field"),
+    [(False, "candidateId"), (True, "candidateId"), (True, "reportId"), (True, "ledgerRowId")],
+)
 def test_worker_local_candidates_remain_distinct_on_frozen_recovery(
-    tmp_path, saved_results, same_title
+    tmp_path, saved_results, saved_report, same_title, id_field
 ):
-    finding = saved_finding(
-        "First review",
-        summary="Retain the saved result.",
-        provenance={"source": "local_plugin", "candidateId": "candidate-1"},
-    )
+    finding = saved_report
+    if id_field == "candidateId":
+        finding["provenance"][id_field] = "candidate-1"
+    else:
+        finding.update(identity={"anchor": "shared"}, extensions={id_field: "local-report"})
     workers = [
         save_worker(
             tmp_path,
@@ -1023,6 +1032,85 @@ def test_worker_local_candidates_remain_distinct_on_frozen_recovery(
         assert {row["provenance"]["workerId"] for row in rows} == {"reviewer-a", "reviewer-b"}
         assert len({json.dumps(row["identity"], sort_keys=True) for row in rows}) == 2
     assert documents[1] == replay[1]
+
+
+@pytest.mark.parametrize("owned", [False, True], ids=["unowned-parent", "worker-revision"])
+def test_published_anchor_stays_with_its_observation(tmp_path, saved_results, saved_report, owned):
+    parent = {**saved_report, "identity": {"anchor": "published"}}
+    first = {
+        **parent,
+        "title": "First worker",
+        "locations": [{"path": "src/one.py", "startLine": 2}],
+    }
+    second = {
+        **parent,
+        "title": "Second worker",
+        "locations": [{"path": "src/two.py", "startLine": 3}],
+    }
+    if owned:
+        parent["provenance"] = {**parent["provenance"], "workerId": "first", "candidateId": "one"}
+        first["provenance"] = {**first["provenance"], "candidateId": "one"}
+        first.pop("identity")
+        second["provenance"] = {**second["provenance"], "candidateId": "two"}
+    write_saved_parent(tmp_path, saved_draft("identity-scan", findings=[parent]), 100)
+    workers = [
+        save_worker(
+            tmp_path, saved_results, owner, [], saved_draft("identity-scan", findings=[row])
+        )
+        for owner, row in [("first", first), ("second", second)]
+    ]
+    docs = recover(tmp_path, saved_results, workers)
+    frozen = recover(tmp_path, saved_results, workers, docs[0]["scan"]["preservedSources"])
+    assert docs[1] == frozen[1]
+    rows = frozen[1]["findings"]
+    assigned = {row["title"]: row["identity"] for row in rows}
+    assert len(rows) == len(assigned) == (2 if owned else 3)
+    assert assigned[first["title"] if owned else parent["title"]] == parent["identity"]
+    assert len({json.dumps(identity, sort_keys=True) for identity in assigned.values()}) == len(
+        rows
+    )
+
+
+@pytest.mark.parametrize("excluded_report", ["other", "selected", None])
+def test_scoped_worker_revision_uses_its_report_identity(
+    tmp_path, saved_results, saved_report, excluded_report
+):
+    path = "src/example.py"
+    parent = {
+        **saved_report,
+        "identity": {"anchor": "shared"},
+        "extensions": {"reportId": "selected"},
+        "provenance": {**saved_report["provenance"], "workerId": "first", "candidateId": "shared"},
+    }
+    current = {
+        **parent,
+        "title": "Revised work",
+        "locations": [{"path": path, "startLine": 2}],
+        "provenance": {**saved_report["provenance"], "candidateId": "shared"},
+    }
+    excluded = {
+        **current,
+        "title": "Excluded work",
+        "locations": [{"path": "elsewhere.py", "startLine": 1}],
+        "extensions": {"reportId": excluded_report} if excluded_report else {},
+    }
+    write_saved_parent(tmp_path, saved_draft("identity-scan", findings=[parent]), 100)
+    worker = save_worker(
+        tmp_path,
+        saved_results,
+        "first",
+        [],
+        saved_draft("identity-scan", findings=[current, excluded]),
+    )
+    documents = recover(tmp_path, saved_results, [worker], exact_file=path)
+    frozen = recover(
+        tmp_path, saved_results, [worker], documents[0]["scan"]["preservedSources"], exact_file=path
+    )
+    assert documents[1] == frozen[1]
+    titles = [row["title"] for row in frozen[1]["findings"]]
+    assert titles == (
+        [current["title"]] if excluded_report == "other" else [parent["title"], current["title"]]
+    )
 
 
 @pytest.mark.cross_platform

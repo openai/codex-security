@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import re
 import unicodedata
 from collections import Counter
@@ -21,9 +22,10 @@ from finalize_scan_contract import (
     _validate_schema_node,
     finding_candidate_id,
 )
-from workbench.saved_coverage import _coverage_rows, _saved_coverage_id
+from workbench.saved_coverage import _coverage_rows, _has_candidate_metadata, _saved_coverage_id
 from workbench.saved_sources import _digest, _encoded
-from workbench_coverage_receipts import resolve_coverage_receipts
+from workbench_coverage_receipts import _deferred_candidate_id, resolve_coverage_receipts
+from workbench_validation import javascript_utf8
 
 _FINDING_IDENTITY_SCHEMA = _read_json(
     Path(__file__).resolve().parents[2] / "schemas" / "findings.schema.json"
@@ -625,3 +627,214 @@ def _competing_rejection_receipts(outcomes, all_sources, source_surface_receipts
     ):
         return {ref for spellings in receipt_spellings.values() for ref in spellings}
     return set()
+
+
+def _project_missing_record(
+    field: str,
+    item: dict[str, Any],
+    index: int,
+    worker: Any,
+    source: dict[str, Any],
+    *,
+    receipts_resolved: bool = False,
+    inferred_coverage_ids,
+    projection_origins,
+    coverage_receipts,
+    retained_coverage_record,
+    coverage,
+    projected_coverage,
+    accepted_surfaces,
+    reconciled_surface_ids,
+    accepted_coverage_sources,
+    project_missing_record,
+    canonical_coverage_record,
+) -> dict[str, Any]:
+    # Retain projectDiscoveryCoverage worker ownership.
+    prefix = f"{worker['id']}-attempt-{worker['attempt']}"
+
+    def accepted_positions(surface: dict[str, Any]) -> list[int]:
+        return [
+            position
+            for position, accepted in accepted_surfaces.get((worker["id"], surface["id"]), [])
+            if canonical_coverage_record("surfaces", accepted)
+            == canonical_coverage_record("surfaces", surface)
+        ]
+
+    def surface_id(surface: dict[str, Any], offset: int) -> str:
+        source_id = surface.get("id")
+        if id(source) not in accepted_coverage_sources and isinstance(source_id, str):
+            positions = accepted_positions(surface)
+            if len(positions) == 1:
+                offset = positions[0]
+            elif not positions:
+                return f"{prefix}-surface-{offset}-{_digest(surface)[:16]}"
+        return f"{prefix}-surface-{offset}"
+
+    result = copy.deepcopy(item)
+    provenance = result.get("provenance")
+    if not isinstance(provenance, dict):
+        provenance = {}
+    for key in ("workerId", "attempt", "sourceId", "candidateId"):
+        provenance.pop(key, None)
+    provenance.update(workerId=worker["id"], attempt=worker["attempt"])
+    result["provenance"] = provenance
+    source_rows = source.get(field, [])
+    inferred_id = (
+        isinstance(source_rows, list)
+        and index <= len(source_rows)
+        and id(source_rows[index - 1]) in inferred_coverage_ids
+    )
+    for key, name in (("id", "sourceId"), ("candidateId", "candidateId")):
+        if key == "id" and inferred_id:
+            continue
+        if key in item:
+            result["provenance"][name] = item[key]
+    if isinstance(item.get("candidateId"), str):
+        candidate_digest = hashlib.sha256(javascript_utf8(item["candidateId"])).hexdigest()
+        result["candidateId"] = f"{prefix}-candidate-{candidate_digest}"
+    if field == "surfaces":
+        original = source_rows[index - 1] if isinstance(source_rows, list) else item
+        result["id"] = surface_id(original, index)
+        if not receipts_resolved and (origin := projection_origins.get(id(original))):
+            result["receiptRefs"] = coverage_receipts(result, worker, origin[1])
+        previous = retained_coverage_record("surfaces", result)
+        if previous is not None and isinstance(previous.get("id"), str):
+            result["id"] = previous["id"]
+        else:
+            surfaces = coverage.get("surfaces", [])
+            if any(
+                isinstance(row, dict) and row.get("id") == result["id"]
+                for row in (surfaces if isinstance(surfaces, list) else [])
+            ):
+                result["id"] = f"{result['id']}-{_digest(result)[:16]}"
+    elif field == "deferred":
+        result["id"] = f"{prefix}-deferred-{index}"
+        if isinstance(item.get("surfaceIds"), list):
+            surface_ids: dict[str, str] = {}
+            surfaces = projected_coverage.get("surfaces", [])
+            for surface in surfaces if isinstance(surfaces, list) else []:
+                if not isinstance(surface, dict) or not isinstance(surface.get("id"), str):
+                    continue
+                provenance = surface.get("provenance", {})
+                if (
+                    isinstance(provenance, dict)
+                    and provenance.get("workerId") == worker["id"]
+                    and provenance.get("attempt") == worker["attempt"]
+                    and isinstance(provenance.get("sourceId"), str)
+                ):
+                    surface_ids.setdefault(provenance["sourceId"], surface["id"])
+            surfaces = source.get("surfaces", [])
+            source_surface_ids: dict[str, tuple[int, dict[str, Any]]] = {}
+            for offset, surface in enumerate(surfaces if isinstance(surfaces, list) else [], 1):
+                if isinstance(surface, dict) and isinstance(surface.get("id"), str):
+                    source_surface_ids.setdefault(surface["id"], (offset, surface))
+            for (owner, source_id), accepted in accepted_surfaces.items():
+                if owner == worker["id"] and accepted:
+                    source_surface_ids.setdefault(source_id, accepted[0])
+            for source_id, (offset, surface) in source_surface_ids.items():
+                if source_id not in item["surfaceIds"]:
+                    continue
+                if (worker["id"], source_id) in reconciled_surface_ids:
+                    surface_ids[source_id] = reconciled_surface_ids[(worker["id"], source_id)]
+                    continue
+                projected_id = surface_id(surface, offset)
+                if id(source) in accepted_coverage_sources or accepted_positions(surface):
+                    origin = projection_origins.get(id(surface))
+                    projected = project_missing_record(
+                        "surfaces", surface, offset, worker, origin[4] if origin else source
+                    )
+                    if origin := projection_origins.get(id(surface)):
+                        projected["receiptRefs"] = coverage_receipts(projected, worker, origin[1])
+                    projected_id = projected["id"]
+                    previous = retained_coverage_record("surfaces", projected)
+                    if previous is not None and isinstance(previous.get("id"), str):
+                        projected_id = previous["id"]
+                surface_ids[source_id] = projected_id
+            result["surfaceIds"] = [
+                surface_ids.get(value, value) if isinstance(value, str) else value
+                for value in item["surfaceIds"]
+            ]
+    return result
+
+
+def _coverage_row_is_retained(
+    field: str,
+    item: Any,
+    worker_id: str | None,
+    selection: tuple[bool, set[str], bool, bool, bool],
+    *,
+    resolved,
+    ambiguous_deferred,
+    coverage_candidate,
+) -> bool:
+    (
+        selected_coverage_superseded,
+        selected_candidates,
+        superseded,
+        retain_pending,
+        coverage_superseded,
+    ) = selection
+    # A selected terminal checkpoint replaces ordinary coverage, while
+    # candidate evidence and pending tasks retain their own reconciliation.
+    if (
+        selected_coverage_superseded
+        and field != "deferred"
+        and not (isinstance(item, dict) and _has_candidate_metadata(item))
+    ):
+        return False
+    # A selected outcome must retain its evidence even if its result write failed.
+    if coverage_superseded and not (
+        isinstance(item, dict)
+        and (
+            (field == "deferred" and retain_pending)
+            or (
+                isinstance(item.get("candidateId"), str)
+                and item["candidateId"] in selected_candidates
+                and item.get("disposition") == resolved.get((worker_id, item["candidateId"]))
+            )
+        )
+    ):
+        return False
+    if (
+        isinstance(item, dict)
+        and isinstance(
+            identity := _deferred_candidate_id(item, worker_id, ambiguous_deferred)
+            if field == "deferred"
+            else item.get("candidateId"),
+            str,
+        )
+        and (coverage_candidate(worker_id, item) or (worker_id, identity)) in resolved
+        and (field == "deferred" or item.get("disposition") == "needs_follow_up")
+    ):
+        return False
+    return True
+
+
+def _recovered_model(
+    relative: str,
+    draft: dict[str, Any],
+    owner: str | None,
+    *,
+    model_checks,
+    warnings,
+) -> dict[str, Any] | None:
+    if relative not in model_checks:
+        model = copy.deepcopy(draft.get("threatModel"))
+        if isinstance(model, dict) and owner is not None:
+            model["origin"] = "recovered"
+        schema = _read_json(
+            Path(__file__).resolve().parents[2] / "schemas/scan-manifest.schema.json"
+        )
+        try:
+            _require_safe_json_value(model, f"Saved threat model {relative}")
+            _validate_schema_node(
+                model,
+                schema["properties"]["scan"]["properties"]["threatModel"],
+                f"Saved threat model {relative}",
+                schema,
+            )
+        except ContractError as exc:
+            warnings.append(f"Skipped malformed saved threat model {relative}: {exc}")
+            model = None
+        model_checks[relative] = model
+    return model_checks[relative]

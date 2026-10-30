@@ -80,6 +80,7 @@
     "scripts/validate_tracking_source.py",
     "scripts/windows_scan_local_files.py",
     "scripts/workbench/__init__.py",
+    "scripts/workbench/finding_identity.py",
     "scripts/workbench/handoff.py",
     "scripts/workbench/retained_coverage.py",
     "scripts/workbench/retained_records.py",

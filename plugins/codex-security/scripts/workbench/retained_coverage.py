@@ -15,36 +15,45 @@ from finalize_scan_contract import (
     _finding_strength,
     _read_json,
     _recover_unsealed_findings,
-    _require_safe_json_value,
     _validate_schema_node,
     finding_candidate_id,
     write_scan_local_bytes,
 )
 from review_state import uses_legacy_review
-from workbench.retained_records import (
+from workbench.finding_identity import (
     _append_previous_finding,
+    _distinct_report_rows,
+    _ensure_finding_identities,
+    _finding_content,
+    _finding_key,
+    _historical_content,
+    _identity_candidate,
+    _legacy_identity_key,
+    _report_ids,
+    _retained_findings,
+    _retained_source_findings,
+    _same_published_finding,
+    _semantic_identity_key,
+    bind_saved_candidate_identities,
+    same_raw_finding,
+    same_raw_value,
+)
+from workbench.retained_records import (
     _competing_rejection_receipts,
     _conflicting_outcome_receipts,
-    _ensure_finding_identities,
+    _coverage_row_is_retained,
     _ensure_finding_identity,
-    _finding_content,
     _finding_identity,
-    _finding_key,
-    _identity_candidate,
+    _project_missing_record,
     _recover_preserved_worker_coverage,
     _recover_preserved_worker_source,
-    _retained_findings,
+    _recovered_model,
     _saved_candidate_outcomes,
-    _semantic_identity_key,
     _worker_candidate_key,
     contains_raw_value,
-    distinct_reports,
-    identifiers,
     raw_owner,
     raw_scope,
     same_raw_content,
-    same_raw_finding,
-    same_raw_value,
 )
 from workbench.saved_coverage import (
     _coverage_rows,
@@ -85,7 +94,7 @@ from workbench_coverage_receipts import (
     retain_recorded_receipt_ownership,
 )
 from workbench_target import committed_diff_snapshot_digest
-from workbench_validation import javascript_utf8, path_within_scope
+from workbench_validation import path_within_scope
 
 
 def merge_saved_results(
@@ -567,114 +576,25 @@ def merge_saved_results(
         *,
         receipts_resolved: bool = False,
     ) -> dict[str, Any]:
-        # Retain projectDiscoveryCoverage worker ownership.
-        prefix = f"{worker['id']}-attempt-{worker['attempt']}"
-
-        def accepted_positions(surface: dict[str, Any]) -> list[int]:
-            return [
-                position
-                for position, accepted in accepted_surfaces.get((worker["id"], surface["id"]), [])
-                if canonical_coverage_record("surfaces", accepted)
-                == canonical_coverage_record("surfaces", surface)
-            ]
-
-        def surface_id(surface: dict[str, Any], offset: int) -> str:
-            source_id = surface.get("id")
-            if id(source) not in accepted_coverage_sources and isinstance(source_id, str):
-                positions = accepted_positions(surface)
-                if len(positions) == 1:
-                    offset = positions[0]
-                elif not positions:
-                    return f"{prefix}-surface-{offset}-{_digest(surface)[:16]}"
-            return f"{prefix}-surface-{offset}"
-
-        result = copy.deepcopy(item)
-        provenance = result.get("provenance")
-        if not isinstance(provenance, dict):
-            provenance = {}
-        for key in ("workerId", "attempt", "sourceId", "candidateId"):
-            provenance.pop(key, None)
-        provenance.update(workerId=worker["id"], attempt=worker["attempt"])
-        result["provenance"] = provenance
-        source_rows = source.get(field, [])
-        inferred_id = (
-            isinstance(source_rows, list)
-            and index <= len(source_rows)
-            and id(source_rows[index - 1]) in inferred_coverage_ids
+        return _project_missing_record(
+            field,
+            item,
+            index,
+            worker,
+            source,
+            receipts_resolved=receipts_resolved,
+            inferred_coverage_ids=inferred_coverage_ids,
+            projection_origins=projection_origins,
+            coverage_receipts=coverage_receipts,
+            retained_coverage_record=retained_coverage_record,
+            coverage=coverage,
+            projected_coverage=projected_coverage,
+            accepted_surfaces=accepted_surfaces,
+            reconciled_surface_ids=reconciled_surface_ids,
+            accepted_coverage_sources=accepted_coverage_sources,
+            project_missing_record=project_missing_record,
+            canonical_coverage_record=canonical_coverage_record,
         )
-        for key, name in (("id", "sourceId"), ("candidateId", "candidateId")):
-            if key == "id" and inferred_id:
-                continue
-            if key in item:
-                result["provenance"][name] = item[key]
-        if isinstance(item.get("candidateId"), str):
-            candidate_digest = hashlib.sha256(javascript_utf8(item["candidateId"])).hexdigest()
-            result["candidateId"] = f"{prefix}-candidate-{candidate_digest}"
-        if field == "surfaces":
-            original = source_rows[index - 1] if isinstance(source_rows, list) else item
-            result["id"] = surface_id(original, index)
-            if not receipts_resolved and (origin := projection_origins.get(id(original))):
-                result["receiptRefs"] = coverage_receipts(result, worker, origin[1])
-            previous = retained_coverage_record("surfaces", result)
-            if previous is not None and isinstance(previous.get("id"), str):
-                result["id"] = previous["id"]
-            else:
-                surfaces = coverage.get("surfaces", [])
-                if any(
-                    isinstance(row, dict) and row.get("id") == result["id"]
-                    for row in (surfaces if isinstance(surfaces, list) else [])
-                ):
-                    result["id"] = f"{result['id']}-{_digest(result)[:16]}"
-        elif field == "deferred":
-            result["id"] = f"{prefix}-deferred-{index}"
-            if isinstance(item.get("surfaceIds"), list):
-                surface_ids: dict[str, str] = {}
-                surfaces = projected_coverage.get("surfaces", [])
-                for surface in surfaces if isinstance(surfaces, list) else []:
-                    if not isinstance(surface, dict) or not isinstance(surface.get("id"), str):
-                        continue
-                    provenance = surface.get("provenance", {})
-                    if (
-                        isinstance(provenance, dict)
-                        and provenance.get("workerId") == worker["id"]
-                        and provenance.get("attempt") == worker["attempt"]
-                        and isinstance(provenance.get("sourceId"), str)
-                    ):
-                        surface_ids.setdefault(provenance["sourceId"], surface["id"])
-                surfaces = source.get("surfaces", [])
-                source_surface_ids: dict[str, tuple[int, dict[str, Any]]] = {}
-                for offset, surface in enumerate(surfaces if isinstance(surfaces, list) else [], 1):
-                    if isinstance(surface, dict) and isinstance(surface.get("id"), str):
-                        source_surface_ids.setdefault(surface["id"], (offset, surface))
-                for (owner, source_id), accepted in accepted_surfaces.items():
-                    if owner == worker["id"] and accepted:
-                        source_surface_ids.setdefault(source_id, accepted[0])
-                for source_id, (offset, surface) in source_surface_ids.items():
-                    if source_id not in item["surfaceIds"]:
-                        continue
-                    if (worker["id"], source_id) in reconciled_surface_ids:
-                        surface_ids[source_id] = reconciled_surface_ids[(worker["id"], source_id)]
-                        continue
-                    projected_id = surface_id(surface, offset)
-                    if id(source) in accepted_coverage_sources or accepted_positions(surface):
-                        origin = projection_origins.get(id(surface))
-                        projected = project_missing_record(
-                            "surfaces", surface, offset, worker, origin[4] if origin else source
-                        )
-                        if origin := projection_origins.get(id(surface)):
-                            projected["receiptRefs"] = coverage_receipts(
-                                projected, worker, origin[1]
-                            )
-                        projected_id = projected["id"]
-                        previous = retained_coverage_record("surfaces", projected)
-                        if previous is not None and isinstance(previous.get("id"), str):
-                            projected_id = previous["id"]
-                    surface_ids[source_id] = projected_id
-                result["surfaceIds"] = [
-                    surface_ids.get(value, value) if isinstance(value, str) else value
-                    for value in item["surfaceIds"]
-                ]
-        return result
 
     workers_by_id = {worker["id"]: worker for worker in workers}
     latest_reducer_key = (
@@ -720,7 +640,19 @@ def merge_saved_results(
             elif modified == parent_modified and _parent_observation_content(
                 draft
             ) != _parent_observation_content(parent):
-                parent = _merge_tied_parent_observations(parent, draft)
+                merged = _merge_tied_parent_observations(parent, draft)
+                if parent_is_canonical and not stopped:
+                    # Strict completion must still see duplicates in the submitted parent.
+                    identities = [
+                        _semantic_identity_key(finding)
+                        for finding in parent["findings"]
+                        if isinstance(finding, dict) and isinstance(finding.get("identity"), dict)
+                    ]
+                    if len(identities) != len(set(identities)):
+                        merged["findings"] = parent["findings"]
+                        parent = merged
+                        continue
+                parent = merged
                 parent_is_canonical = False
     # A reducer supplies findings but cannot supersede saved parent coverage.
     saved_parent = parent
@@ -980,26 +912,13 @@ def merge_saved_results(
     def recovered_model(
         relative: str, draft: dict[str, Any], owner: str | None
     ) -> dict[str, Any] | None:
-        if relative not in model_checks:
-            model = copy.deepcopy(draft.get("threatModel"))
-            if isinstance(model, dict) and owner is not None:
-                model["origin"] = "recovered"
-            schema = _read_json(
-                Path(__file__).resolve().parents[2] / "schemas/scan-manifest.schema.json"
-            )
-            try:
-                _require_safe_json_value(model, f"Saved threat model {relative}")
-                _validate_schema_node(
-                    model,
-                    schema["properties"]["scan"]["properties"]["threatModel"],
-                    f"Saved threat model {relative}",
-                    schema,
-                )
-            except ContractError as exc:
-                warnings.append(f"Skipped malformed saved threat model {relative}: {exc}")
-                model = None
-            model_checks[relative] = model
-        return model_checks[relative]
+        return _recovered_model(
+            relative,
+            draft,
+            owner,
+            model_checks=model_checks,
+            warnings=warnings,
+        )
 
     parent_model = (
         recovered_model(parent_model_source or "parent", parent, None)
@@ -1185,11 +1104,13 @@ def merge_saved_results(
                     retained_surface_rows.update(id(original) for original in originals)
 
     findings: list[dict[str, Any]] = []
+    candidate_observations = {}
+    published_identity_positions = set()
     finding_positions: dict[str, tuple[int, dict[str, Any] | None]] = {}
     canonical_finding_keys: set[str] = set()
-    represented: dict[str, str | None] = {}
+    represented: dict[tuple[str | None, str], str | None] = {}
     represented_candidates: dict[tuple[str, str, Any, Any, Any], str | None] = {}
-    represented_history: dict[str, set[str]] = {}
+    represented_history: dict[tuple[str | None, str], set[str]] = {}
     represented_candidate_history: dict[tuple[str, str, Any, Any, Any], set[str]] = {}
     rejected_history: dict[tuple[str, str], list[dict[str, Any]]] = {}
     stopped_parent_seal = bool(
@@ -1200,28 +1121,13 @@ def merge_saved_results(
     legacy_identities: dict[str, dict[str, Any] | None] = {}
     legacy_identity_sources: set[str] = set()
 
-    def legacy_identity_key(finding: dict[str, Any], owner: str | None) -> str:
-        content = _finding_content(finding)
-        locations = content.get("locations")
-        if isinstance(locations, list):
-            content["locations"] = sorted(
-                [
-                    {**row, "endLine": row.get("endLine", row.get("startLine"))}
-                    if isinstance(row, dict)
-                    else row
-                    for row in locations
-                ],
-                key=_encoded,
-            )
-        return _digest([owner, _identity_candidate(finding), content])
-
     def restore_legacy_identity(
         finding: Any, normalized: Any = None, *, allow_synthesis: bool = True
     ) -> None:
         if isinstance(finding, dict) and "identity" not in finding:
             provenance = finding.get("provenance")
             owner = provenance.get("workerId") if isinstance(provenance, dict) else None
-            key = legacy_identity_key(finding, owner)
+            key = _legacy_identity_key(finding, owner)
             identity = legacy_identities.get(key)
             if identity is not None:
                 finding["identity"] = copy.deepcopy(identity)
@@ -1250,6 +1156,11 @@ def merge_saved_results(
             )
             for location in locations
         )
+
+    def retained_finding_scope(relative: str, finding: dict[str, Any]) -> bool:
+        return (
+            relative == "parent" and parent_is_canonical and finding_scope is None
+        ) or finding_within_scope(finding)
 
     valid_findings: dict[bytes, bool] = {}
 
@@ -1283,7 +1194,7 @@ def merge_saved_results(
                 saved_owner = (
                     provenance.get("workerId", owner) if isinstance(provenance, dict) else owner
                 )
-                key = legacy_identity_key(saved, saved_owner)
+                key = _legacy_identity_key(saved, saved_owner)
                 if "identity" in saved:
                     legacy_identity_sources.add(key)
                 if not isinstance(identity, dict) or not valid_finding(saved):
@@ -1666,19 +1577,27 @@ def merge_saved_results(
         return resolved, ordered_outcomes
 
     resolved, ordered_outcomes = select_outcomes(set())
+
+    def history_key(value, owner, digest):
+        key = _finding_key(value)
+        return (owner, key) if digest in represented_history.get((owner, key), ()) else (None, key)
+
     # Only the current parent may claim that another worker finding was absorbed.
     # A superseded checkpoint must not suppress a newer independent result.
     if parent:
         for finding in parent["findings"]:
-            if valid_finding(finding):
+            if valid_finding(finding) and retained_finding_scope("parent", finding):
                 canonical = copy.deepcopy(finding)
                 restore_legacy_identity(canonical)
                 canonical_key = _finding_key(canonical)
-                for retained in _retained_findings(finding):
-                    retained_key = _finding_key(retained)
+                for retained, owner in _retained_source_findings(finding, workers_by_id):
+                    retained_key = (
+                        owner if finding_candidate_id(retained) else None,
+                        _finding_key(retained),
+                    )
                     if retained is not finding:
                         represented_history.setdefault(retained_key, set()).add(
-                            _digest(_finding_content(retained))
+                            _historical_content(retained)
                         )
                     previous_key = represented.get(retained_key)
                     if retained_key not in represented:
@@ -1706,7 +1625,7 @@ def merge_saved_results(
                                 # that worker-local identity ambiguous.
                                 represented_candidates[candidate_key] = None
                             represented_candidate_history.setdefault(candidate_key, set()).add(
-                                _digest(_finding_content(original["finding"]))
+                                _historical_content(original["finding"])
                             )
     selected_terminal_orders: dict[str | None, tuple[int, int]] = {}
     for relative, draft, worker_id in sources:
@@ -1766,6 +1685,13 @@ def merge_saved_results(
     row_groups: dict[tuple[str, int], dict[str, Any]] = {}
     published_groups: list[dict[str, Any]] = []
 
+    def distinct_reports(left: dict[str, Any] | None, right: dict[str, Any] | None) -> bool:
+        return (
+            left is not None
+            and right is not None
+            and _distinct_report_rows(left["latest"], right["latest"])
+        )
+
     def same_owner(left: str | None, right: str | None) -> bool:
         # Canonical recovery needs identity or recorded lineage to absorb worker evidence.
         return left == right or (not preserve_canonical_parent and (left is None or right is None))
@@ -1803,27 +1729,7 @@ def merge_saved_results(
     projected_parents = [draft for relative, draft, _ in all_sources if relative in projected_paths]
 
     def same_published_finding(left: dict[str, Any], right: dict[str, Any]) -> bool:
-        if not valid_finding(left) or not valid_finding(right):
-            return False
-        return (
-            same_raw_value(_finding_content(left), _finding_content(right))
-            and (
-                "identity" not in left
-                or same_raw_value(_finding_identity(left), _finding_identity(right))
-            )
-            and same_raw_value(
-                {
-                    key: value
-                    for key, value in left.get("provenance", {}).items()
-                    if key not in ("previousFindings", "preservedIdentity")
-                },
-                {
-                    key: value
-                    for key, value in right.get("provenance", {}).items()
-                    if key not in ("previousFindings", "preservedIdentity")
-                },
-            )
-        )
+        return _same_published_finding(left, right, valid_finding=valid_finding)
 
     def represented_by_parent(values: list[dict[str, Any]], draft: dict[str, Any]) -> bool:
         remaining = [row for row in draft["findings"] if isinstance(row, dict)]
@@ -1967,6 +1873,47 @@ def merge_saved_results(
     finding_sources = [
         source for source in all_sources if not precedes_terminal_parent(source[0], source[2])
     ]
+    candidate_reports = {}
+    ambiguous_scoped_identities = set()
+    for relative, draft, source_owner in finding_sources:
+        visibility = {}
+        for finding in draft["findings"]:
+            if not valid_finding(finding):
+                continue
+            candidate = _identity_candidate(finding)
+            if source_owner and candidate and retained_finding_scope(relative, finding):
+                reports = candidate_reports.setdefault((raw_scope(finding), candidate), {})
+                reports.setdefault(source_owner, []).append(finding)
+            if finding_scope is None or not isinstance(finding.get("identity"), dict):
+                continue
+            key = (
+                raw_owner(finding, source_owner),
+                _semantic_identity_key(finding, _finding_identity(finding)),
+                candidate,
+            )
+            in_scope = finding_within_scope(finding)
+            reports = visibility.setdefault(key, ({}, {}))
+            report_ids = _report_ids(finding)
+            for other_ids, other in reports[not in_scope].items():
+                if same_raw_finding(finding, other):
+                    ambiguous_scoped_identities.add((*key, report_ids))
+                    ambiguous_scoped_identities.add((*key, other_ids))
+            reports[in_scope][report_ids] = finding
+
+    def unambiguous_owner(value, owner, group):
+        if owner == group["owner"]:
+            return True
+        reports = candidate_reports.get((raw_scope(value), finding_candidate_id(value)), {})
+        if len(reports) < 2:
+            return True
+        parent = value if owner is None else group["latest"]
+        worker = group["owner"] if owner is None else owner
+        return {
+            registered
+            for registered, rows in reports.items()
+            if any(not _distinct_report_rows(parent, row) for row in rows)
+        } == {worker}
+
     # Publication chronology spans workers; attempt numbers only order one worker's revisions.
     for source in sorted(finding_sources, key=lambda item: finding_source_order(item)[2:]):
         relative, draft, source_owner = source
@@ -1975,7 +1922,7 @@ def merge_saved_results(
             for sibling in draft["findings"]
             if isinstance(sibling, dict)
             and isinstance(sibling.get("identity"), dict)
-            and ((relative == "parent" and parent_is_canonical) or finding_within_scope(sibling))
+            and retained_finding_scope(relative, sibling)
         )
         pending = []
         for index, value in enumerate(draft["findings"]):
@@ -1983,16 +1930,29 @@ def merge_saved_results(
                 not isinstance(value, dict)
                 or replaced_parent_finding(relative, source_owner, value)
                 or not valid_finding(value)
-                or (
-                    not (relative == "parent" and parent_is_canonical)
-                    and not finding_within_scope(value)
-                )
+                or not retained_finding_scope(relative, value)
             ):
                 continue
             owner = raw_owner(value, source_owner)
             scope = raw_scope(value)
             candidate = finding_candidate_id(value)
-            scopes = [scope, (scope[0], candidate)] if candidate else [scope]
+            scopes = [scope]
+            authored_identity = _finding_identity(value)
+            identity = _semantic_identity_key(value, authored_identity)
+            report_ids = _report_ids(value)
+            unqualified_worker_anchor = False
+            scoped_identity = owner, identity, _identity_candidate(value), report_ids
+            if scoped_identity not in ambiguous_scoped_identities:
+                if candidate:
+                    scopes.append((scope[0], candidate))
+                elif (
+                    isinstance(value.get("identity"), dict)
+                    and explicit_identity_counts[identity] == 1
+                ):
+                    scopes.append((owner, identity, report_ids))
+                    unqualified_worker_anchor = (
+                        source_owner is not None and not authored_identity.get("instance")
+                    )
             publication_identity = (
                 _finding_identity(
                     value if "identity" in value else terminal_findings[relative][index]
@@ -2006,8 +1966,14 @@ def merge_saved_results(
                     key: group
                     for saved_scope in scopes
                     for key, group in logical_rows.get(saved_scope, {}).items()
+                    # Two worker checkpoints can reuse a bare anchor at different sites.
+                    # A parent or reducer observation can still tie them to a reviewed finding.
+                    if not unqualified_worker_anchor
+                    or saved_scope == scope
+                    or None in group["observations"]
                 }.values()
                 if same_owner(owner, group["owner"])
+                and unambiguous_owner(value, owner, group)
                 and (
                     publication_identity is None
                     or group["identity"] is None
@@ -2021,7 +1987,16 @@ def merge_saved_results(
                     or _semantic_identity_key(value, group["identity"])
                     == _semantic_identity_key(value, _finding_identity(value))
                 )
-                and all(same_raw_finding(value, previous) for previous in group["rows"])
+                and all(
+                    same_raw_finding(
+                        value,
+                        previous,
+                        allow_relabel=owner == group["owner"]
+                        and explicit_identity_counts[identity] == 1
+                        and source_order[relative] > source_order[group["latest_source"][0]],
+                    )
+                    for previous in group["rows"]
+                )
             ]
             ranked = []
             for group in matches:
@@ -2041,7 +2016,7 @@ def merge_saved_results(
                     owner == group["owner"]
                     and same_raw_content(value, latest)
                     and _identity_candidate(value) == _identity_candidate(latest)
-                    and identifiers(value) == identifiers(latest)
+                    and _report_ids(value) == _report_ids(latest)
                 ):
                     rank = 3
                 elif any(same_raw_content(value, previous) for previous in group["rows"]):
@@ -2052,7 +2027,7 @@ def merge_saved_results(
                     and all(
                         previous is None or current == previous
                         for current, previous in zip(
-                            identifiers(value), identifiers(latest), strict=True
+                            _report_ids(value), _report_ids(latest), strict=True
                         )
                     )
                 ):
@@ -2132,13 +2107,13 @@ def merge_saved_results(
                 _finding_strength(previous[1]),
             ):
                 observations[source_owner] = (source, value)
-                match["latest"] = max(
+                match["latest_source"], match["latest"] = max(
                     observations.values(),
                     key=lambda observation: (
                         finding_source_order(observation[0]),
                         _finding_strength(observation[1]),
                     ),
-                )[1]
+                )
             if relative in terminal_findings:
                 match["identity"] = copy.deepcopy(
                     _finding_identity(
@@ -2191,18 +2166,21 @@ def merge_saved_results(
     for groups in logical_rows.values():
         for group in groups.values():
             destinations = set()
+            historical = set()
             for value in group["rows"]:
-                history_key = _finding_key(value)
-                if _digest(_finding_content(value)) in represented_history.get(history_key, set()):
-                    destinations.add(represented.get(history_key))
+                digest = _historical_content(value)
+                recorded = history_key(value, group["owner"], digest)
+                if digest in represented_history.get(recorded, set()):
+                    destinations.add(represented.get(recorded))
+                    historical.add(digest)
                 elif group["owner"] and (candidate_id := finding_candidate_id(value)):
                     candidate_key = _worker_candidate_key(group["owner"], candidate_id, value)
-                    if _digest(_finding_content(value)) in represented_candidate_history.get(
-                        candidate_key, set()
-                    ):
+                    if digest in represented_candidate_history.get(candidate_key, set()):
                         destinations.add(represented_candidates[candidate_key])
+                        historical.add(digest)
             if len(destinations) == 1 and None not in destinations:
                 group["parent_key"] = destinations.pop()
+                group["parent_history"] = historical
 
     generated_worker_findings: list[dict[str, Any]] = []
 
@@ -2307,47 +2285,15 @@ def merge_saved_results(
         worker_id: str | None,
         selection: tuple[bool, set[str], bool, bool, bool],
     ) -> bool:
-        (
-            selected_coverage_superseded,
-            selected_candidates,
-            superseded,
-            retain_pending,
-            coverage_superseded,
-        ) = selection
-        # A selected terminal checkpoint replaces ordinary coverage, while
-        # candidate evidence and pending tasks retain their own reconciliation.
-        if (
-            selected_coverage_superseded
-            and field != "deferred"
-            and not (isinstance(item, dict) and _has_candidate_metadata(item))
-        ):
-            return False
-        # A selected outcome must retain its evidence even if its result write failed.
-        if coverage_superseded and not (
-            isinstance(item, dict)
-            and (
-                (field == "deferred" and retain_pending)
-                or (
-                    isinstance(item.get("candidateId"), str)
-                    and item["candidateId"] in selected_candidates
-                    and item.get("disposition") == resolved.get((worker_id, item["candidateId"]))
-                )
-            )
-        ):
-            return False
-        if (
-            isinstance(item, dict)
-            and isinstance(
-                identity := _deferred_candidate_id(item, worker_id, ambiguous_deferred)
-                if field == "deferred"
-                else item.get("candidateId"),
-                str,
-            )
-            and (coverage_candidate(worker_id, item) or (worker_id, identity)) in resolved
-            and (field == "deferred" or item.get("disposition") == "needs_follow_up")
-        ):
-            return False
-        return True
+        return _coverage_row_is_retained(
+            field,
+            item,
+            worker_id,
+            selection,
+            resolved=resolved,
+            ambiguous_deferred=ambiguous_deferred,
+            coverage_candidate=coverage_candidate,
+        )
 
     def source_surface_receipts(relative: str, row: dict[str, Any]) -> Any:
         worker = workers_by_id.get(source_owners.get(relative))
@@ -2416,6 +2362,8 @@ def merge_saved_results(
             ):
                 continue
             if relative == "parent" and parent_is_canonical:
+                if valid_finding(value) and not retained_finding_scope(relative, value):
+                    continue
                 finding = copy.deepcopy(value)
                 group = row_groups.get((relative, index))
                 restore_legacy_identity(
@@ -2437,9 +2385,14 @@ def merge_saved_results(
                     rejected_history.setdefault((owner, candidate_id), []).append(finding)
                     continue
                 if valid_finding(finding):
+                    if "identity" in value:
+                        published_identity_positions.add(len(findings))
+                    if stopped:
+                        candidate_observations[len(findings)] = (relative, value, None)
                     key = _finding_key(finding)
                     if group is not None:
                         key = group.setdefault("merge_key", key)
+                        key = group.get("parent_key", key)
                     finding_positions.setdefault(key, (len(findings), group))
                     if preserve_canonical_parent:
                         canonical_finding_keys.add(key)
@@ -2448,7 +2401,28 @@ def merge_saved_results(
             if (
                 relative != "parent"
                 and parent
-                and value in parent["findings"]
+                and (
+                    value in parent["findings"]
+                    or (
+                        relative in parent_sources
+                        and any(
+                            same_published_finding(value, saved)
+                            and (
+                                (alias := _finding_identity(value)) is None
+                                or same_raw_value(alias, _finding_identity(saved))
+                            )
+                            and isinstance(
+                                earlier := value["provenance"].get("previousFindings", []), list
+                            )
+                            and isinstance(
+                                history := saved["provenance"].get("previousFindings"), list
+                            )
+                            and history
+                            and all(entry in history for entry in earlier)
+                            for saved in parent["findings"]
+                        )
+                    )
+                )
                 and not precedes_terminal_parent("parent", None)
                 and not replaced_parent_finding("parent", None, value)
             ):
@@ -2526,16 +2500,18 @@ def merge_saved_results(
                 key = group.get("parent_key", key)
             represented_by_parent = False
             if relative != "parent":
-                history_key = _finding_key(value)
+                digest = _historical_content(value)
+                represented_by_parent = group is not None and digest in group.get(
+                    "parent_history", ()
+                )
+                recorded = history_key(value, worker_id, digest)
                 # A singleton key is not evidence that a new batch sibling was
                 # absorbed. Only recorded content may reuse that historical edge.
-                if _digest(_finding_content(value)) not in represented_history.get(
-                    history_key, set()
-                ):
-                    history_key = key
-                if history_key in represented:
-                    mapped_key = represented[history_key]
-                    historical_contents = represented_history.get(history_key, set())
+                if digest not in represented_history.get(recorded, set()):
+                    recorded = (None, key)
+                if recorded in represented:
+                    mapped_key = represented[recorded]
+                    historical_contents = represented_history.get(recorded, set())
                 elif worker_id and candidate_id:
                     candidate_key = _worker_candidate_key(worker_id, candidate_id, finding)
                     mapped_key = represented_candidates.get(candidate_key)
@@ -2545,7 +2521,7 @@ def merge_saved_results(
                     historical_contents = set()
                 if mapped_key is not None:
                     key = mapped_key
-                    represented_by_parent = _digest(_finding_content(value)) in historical_contents
+                    represented_by_parent |= digest in historical_contents
             if key in finding_positions:
                 position, retained_group = finding_positions[key]
                 retained = findings[position]
@@ -3140,19 +3116,49 @@ def merge_saved_results(
     ]
     _ensure_finding_identities(identity_order)
 
+    bound_owners = {}
+    if stopped:
+        for position, group in finding_positions.values():
+            if group is not None and position not in candidate_observations:
+                relative, _, worker_id = group["latest_source"]
+                # A selected worker checkpoint preserves the batch's separate finding rows.
+                if worker_id not in headed_workers and not (
+                    scan_mode == "deep" and relative in terminal_findings
+                ):
+                    candidate_observations[position] = (relative, group["latest"], group["owner"])
+        for pos, (source, raw, owner) in candidate_observations.items():
+            if "identity" not in raw:
+                key = _legacy_identity_key(raw, raw["provenance"].get("workerId", owner))
+                if (identity := legacy_identities.get(key)) is not None:
+                    candidate_observations[pos] = (source, {**raw, "identity": identity}, owner)
+        bound_owners = bind_saved_candidate_identities(findings, candidate_observations)
+
     identities: dict[bytes, list[tuple[str, dict[str, Any] | None, str | None]]] = {}
     retained_groups = {
         position: group for position, group in finding_positions.values() if group is not None
     }
     reserved_identities = {_semantic_identity_key(finding) for finding in identity_order}
-    for position, finding in enumerate(findings):
+    # A restored historical anchor may coincide with a sibling's authored identity.
+    positions = sorted(
+        range(len(findings)),
+        key=lambda position: (
+            position not in published_identity_positions,
+            position in retained_groups and "identity" not in retained_groups[position]["latest"],
+        ),
+    )
+    for position in positions:
+        finding = findings[position]
         if not valid_finding(finding):
             continue
         identity = finding.get("identity")
         if not isinstance(identity, dict):
             continue
         key = _semantic_identity_key(finding)
-        variant = _finding_key(finding)
+        variant = _finding_key(
+            finding,
+            bound_owners.get(position),
+            include_candidate=stopped or position not in published_identity_positions,
+        )
         group = retained_groups.get(position)
         previous = next(
             (
