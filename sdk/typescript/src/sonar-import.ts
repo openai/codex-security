@@ -30,11 +30,7 @@ import {
   requireOutputOutsideRepositories,
   workbenchEnvironment,
 } from "./runtime.js";
-import {
-  gitMarkerRoot,
-  normalizeRepository,
-  nullIfMissingPath,
-} from "./targets.js";
+import { gitMarkerRoot, normalizeRepository } from "./targets.js";
 import { errorMessage } from "./errors.js";
 import { canonicalJson } from "./record.js";
 import {
@@ -113,14 +109,13 @@ export async function prepareSonarImport(
   const input =
     selectedPath &&
     join(await realpath(dirname(selectedPath)), basename(selectedPath));
-  // A regular-file descriptor can stay readable after its pathname is unlinked.
-  // Read the selected input, using its resolved name only to check evidence digests.
+  // An unlinked file is readable through its descriptor alone. For named files,
+  // read the same resolved target whose retained evidence digest we check.
+  const stats = input ? await stat(input) : undefined;
   const sourcePath =
-    input && (await stat(input)).isFile()
-      ? ((await realpath(input).catch(nullIfMissingPath)) ?? input)
-      : input;
-  const raw = input
-    ? await readScannerJson(input)
+    input && stats?.isFile() && stats.nlink > 0 ? await realpath(input) : input;
+  const raw = sourcePath
+    ? await readScannerJson(sourcePath)
     : await (dependencies.collect ?? collectSonarIssues)({
         cwd: options.cwd,
         project: options.project,
