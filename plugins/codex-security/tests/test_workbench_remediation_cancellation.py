@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from workbench_test_support import (
     cancel_remediation_request,
+    empty_target_paths,
     mark_remediation_delivered,
     request_remediation,
     request_remediation_action,
@@ -23,9 +24,7 @@ from workbench_test_support import (
 def test_cancel_finding_remediation_request_restores_previous_state(
     tmp_path: Path, verification_started: bool
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     source = target / "source.txt"
     source.write_text("vulnerable\n")
     scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")

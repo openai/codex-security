@@ -16,6 +16,7 @@ import {
 import {
   array,
   hasSarifExternalPropertyReferences,
+  indexSarifRules,
   normalizeRecords,
   readScannerJson,
   record,
@@ -160,19 +161,14 @@ export function normalizeSemgrepFindings(
   const { results, paths: _paths, time: _time, ...context } = document;
   return normalizeRecords(
     array(results, "Semgrep results"),
-    (value, sourceFindingId) => ({
-      source_finding_id: sourceFindingId,
-      evidence: projectNativeJsonResult(
-        parseNativeJsonResult(value, "Semgrep"),
-        {
-          origin: "Semgrep",
-          repositoryUrl,
-          severity,
-          reportContext: context,
-          target,
-        },
-      ),
-    }),
+    (value) =>
+      projectNativeJsonResult(parseNativeJsonResult(value, "Semgrep"), {
+        origin: "Semgrep",
+        repositoryUrl,
+        severity,
+        reportContext: context,
+        target,
+      }),
     jsonIdentity,
     target,
   );
@@ -234,14 +230,7 @@ export function normalizeSemgrepSarif(
     const rules = array(driver["rules"] ?? [], "Semgrep rules").map((r) =>
       record(r, "Semgrep rule"),
     );
-    const rulesById = new Map<
-      unknown,
-      { rule: Record<string, unknown>; index: number } | null
-    >();
-    for (const [index, rule] of rules.entries()) {
-      const id = rule["id"];
-      rulesById.set(id, rulesById.has(id) ? null : { rule, index });
-    }
+    const rulesById = indexSarifRules(rules);
     const { runs: _runs, ...documentContext } = document;
     const { results: _results, tool: _tool, ...runContext } = run;
     const { rules: _rules, ...driverContext } = driver;
@@ -258,7 +247,7 @@ export function normalizeSemgrepSarif(
   });
   return normalizeRecords(
     entries,
-    ({ result: value, rulesById, hasRules, ...context }, sourceFindingId) => {
+    ({ result: value, rulesById, hasRules, ...context }) => {
       const result = record(value, "Semgrep result");
       const properties = record(
         result["properties"] ?? {},
@@ -335,56 +324,53 @@ export function normalizeSemgrepSarif(
         /^[a-z][a-z\d+.-]*:/iu.test(artifact["uri"]);
       const path =
         rawPath === null || absoluteUri ? null : relativePath(rawPath);
-      return {
-        source_finding_id: sourceFindingId,
-        evidence: validateExternalEvidence(
-          {
-            title: ruleId,
-            description:
-              text(message["markdown"]) ??
-              messageText(message["text"], "Semgrep"),
-            severity: mappedSeverity,
-            locations: path ? [{ path, line }] : [],
-            details: {
-              kind: "sast",
-              repository: { url: repositoryUrl },
-              scanner_origin: "Semgrep",
-              rule: { id: ruleId },
-              weakness_ids: weaknessIds(
-                record(rule?.["properties"] ?? {}, "Rule properties")["tags"],
+      return validateExternalEvidence(
+        {
+          title: ruleId,
+          description:
+            text(message["markdown"]) ??
+            messageText(message["text"], "Semgrep"),
+          severity: mappedSeverity,
+          locations: path ? [{ path, line }] : [],
+          details: {
+            kind: "sast",
+            repository: { url: repositoryUrl },
+            scanner_origin: "Semgrep",
+            rule: { id: ruleId },
+            weakness_ids: weaknessIds(
+              record(rule?.["properties"] ?? {}, "Rule properties")["tags"],
+            ),
+            code: {
+              end_line: path ? endLine : null,
+              snippet: ungatedText(
+                record(region["snippet"] ?? {}, "Snippet")["text"],
               ),
-              code: {
-                end_line: path ? endLine : null,
-                snippet: ungatedText(
-                  record(region["snippet"] ?? {}, "Snippet")["text"],
-                ),
-              },
-              source_status:
-                Array.isArray(result["suppressions"]) &&
-                result["suppressions"].some((value) => {
-                  const status = record(value, "Suppression")["status"];
-                  return status === undefined || status === "accepted";
-                })
-                  ? "suppressed"
-                  : null,
             },
-            source_data: structuredClone({
-              ...context,
-              runContext: sarifRunContextForResult(
-                context.runContext,
-                result,
-                rule,
-                context.driverContext,
-                context.toolContext,
-                context.documentContext,
-              ),
-              ...(rule ? { rule } : {}),
-              result,
-            }),
+            source_status:
+              Array.isArray(result["suppressions"]) &&
+              result["suppressions"].some((value) => {
+                const status = record(value, "Suppression")["status"];
+                return status === undefined || status === "accepted";
+              })
+                ? "suppressed"
+                : null,
           },
-          target,
-        ),
-      };
+          source_data: structuredClone({
+            ...context,
+            runContext: sarifRunContextForResult(
+              context.runContext,
+              result,
+              rule,
+              context.driverContext,
+              context.toolContext,
+              context.documentContext,
+            ),
+            ...(rule ? { rule } : {}),
+            result,
+          }),
+        },
+        target,
+      );
     },
     ({ result, runContext }) => sarifIdentity(result, runContext),
     target,

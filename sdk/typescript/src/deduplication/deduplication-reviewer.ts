@@ -86,7 +86,9 @@ export function validateScreening(
     submitted.length !== required.length ||
     required.some((slot) => !Object.hasOwn(result.decisions, slot))
   ) {
-    throw new Error("Submit exactly the assigned screening pair slots.");
+    throw new Error(
+      `Submit exactly the assigned screening pair slots: ${required.join(", ")}.`,
+    );
   }
   return result;
 }

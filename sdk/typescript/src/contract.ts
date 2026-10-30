@@ -36,6 +36,12 @@ export interface LoadedContract {
   review: NonNullable<ScanManifest["scan"]["review"]>;
 }
 
+// Hosted receipts compare reread files with the bytes that passed validation.
+export const validatedFileDigests = new WeakMap<
+  ScanManifest,
+  ReadonlyMap<string, string>
+>();
+
 export class ContractSchemaError extends ContractValidationError {}
 
 type LoadContractOptions = {
@@ -92,7 +98,11 @@ export async function loadContractWithScanDirectory(
       pluginRoot: options.pluginRoot,
       expectedScanId: options.expectedScanId,
       signal: options.signal,
-    })) as { contract: LoadedContract; scanDirectory: string };
+    })) as {
+      contract: LoadedContract;
+      scanDirectory: string;
+      fileDigests: ReadonlyMap<string, string>;
+    };
     if (options.expectation !== undefined)
       validateExpectation(
         result.contract.manifest,
@@ -100,7 +110,11 @@ export async function loadContractWithScanDirectory(
         options.expectation,
         options.workbenchValidated === true,
       );
-    return result;
+    validatedFileDigests.set(result.contract.manifest, result.fileDigests);
+    return {
+      contract: result.contract,
+      scanDirectory: result.scanDirectory,
+    };
   }, options.signal);
 }
 

@@ -68,7 +68,11 @@ export async function loadSealedContract(
     // Preserve the existing readers' admission rules without changing public SDK options.
     profile?: ContractProfile;
   } = {},
-): Promise<{ contract: LoadedSealedContract; scanDirectory: string }> {
+): Promise<{
+  contract: LoadedSealedContract;
+  scanDirectory: string;
+  fileDigests: ReadonlyMap<string, string>;
+}> {
   const profile = options.profile ?? "sdk";
   const validators = await loadContractValidators(
     options.pluginRoot ??
@@ -88,13 +92,13 @@ export async function loadSealedContract(
     profile,
   );
   try {
-    const documentDigests = new Map<string, string>();
+    const fileDigests = new Map<string, string>();
     const payloads: Record<string, unknown> = {};
     const manifestFile = "scan-manifest.json";
     const rawManifest = await readScanJson(
       scanRoot,
       manifestFile,
-      documentDigests,
+      fileDigests,
       options.signal,
     );
     payloads[manifestFile] = rawManifest;
@@ -106,7 +110,7 @@ export async function loadSealedContract(
       payloads[filename] = await readScanJson(
         scanRoot,
         filename,
-        documentDigests,
+        fileDigests,
         options.signal,
       );
     }
@@ -204,7 +208,7 @@ export async function loadSealedContract(
       manifest,
       findings,
       coverage,
-      documentDigests,
+      fileDigests,
       options.signal,
     );
     if (profile === "tracking")
@@ -213,6 +217,7 @@ export async function loadSealedContract(
     return {
       contract: { mode, manifest, findings, review },
       scanDirectory: scanRoot.path,
+      fileDigests,
     };
   } finally {
     scanRoot.reader.close();
@@ -544,7 +549,7 @@ async function validateSeal(
   manifest: ScanManifest,
   findings: FindingsDocument,
   coverage: CoverageDocument | undefined,
-  documentDigests: ReadonlyMap<string, string>,
+  fileDigests: Map<string, string>,
   signal?: AbortSignal,
 ): Promise<void> {
   const scan = manifest.scan;
@@ -573,13 +578,14 @@ async function validateSeal(
     artifactPaths.add(normalized);
     artifactCollisionKeys.add(collisionKey);
     const digest =
-      documentDigests.get(normalized) ??
+      fileDigests.get(normalized) ??
       (await sha256ScanFile(root, normalized, context, signal));
     if (digest !== artifact.sha256) {
       throw new ContractValidationError(
         `${context}: sealed artifact changed or is missing.`,
       );
     }
+    fileDigests.set(artifact.path, digest);
   }
 
   const requireSealedReference = (reference: unknown, context: string) => {
@@ -695,12 +701,12 @@ async function requireScanRoot(
     }
     if (profile === "sdk") {
       try {
-        await requirePrivateScanRoot(path);
+        await requireOwnedScanRoot(path);
       } catch (error) {
         throw new ContractValidationError(
           error instanceof Error
             ? error.message
-            : "Scan directory must remain private to the current user.",
+            : "Scan directory must remain owned by the current user.",
           { cause: error },
         );
       }
@@ -736,7 +742,7 @@ async function verifyScanRoot(
 ): Promise<void> {
   try {
     throwIfAborted(signal);
-    if (root.profile === "sdk") await requirePrivateScanRoot(root.path);
+    if (root.profile === "sdk") await requireOwnedScanRoot(root.path);
     root.reader.verify();
     throwIfAborted(signal);
   } catch (error) {
@@ -748,14 +754,10 @@ async function verifyScanRoot(
   }
 }
 
-async function requirePrivateScanRoot(path: string): Promise<void> {
+async function requireOwnedScanRoot(path: string): Promise<void> {
   if (process.platform === "win32") return;
   const effectiveUid = process.geteuid?.();
   const metadata = await lstat(encodePosixPath(path));
-  if ((metadata.mode & 0o077) !== 0)
-    throw new ContractValidationError(
-      `Scan output directory must not be accessible to other users (chmod 700): ${path}`,
-    );
   if (effectiveUid !== undefined && metadata.uid !== effectiveUid)
     throw new ContractValidationError(
       `Scan output directory must be owned by the current user: ${path}`,
@@ -855,11 +857,11 @@ async function readHeldFile(
 async function readScanJson(
   root: ScanRoot,
   relativePath: keyof typeof DOCUMENTS,
-  documentDigests: Map<string, string>,
+  fileDigests: Map<string, string>,
   signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   const bytes = await readHeldFile(root, relativePath, relativePath, signal);
-  documentDigests.set(relativePath, hash("sha256", bytes));
+  fileDigests.set(relativePath, hash("sha256", bytes));
   return parseJson(
     root.profile === "tracking" ? relativePath : join(root.path, relativePath),
     bytes,

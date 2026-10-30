@@ -63,59 +63,65 @@ function provisionalPaths(schema: Record<string, unknown>) {
 }
 
 // Canonical files can retain fields that the compact tool input does not accept.
-const canonicalScanDraftInputSchema = fileScanDraftInputSchema.extend({
-  scope: canonicalFieldSchema({
-    ...scanManifestDocument.properties.scan.properties.scope,
-    $defs: scanManifestDocument.$defs,
-    required:
-      z.toJSONSchema(draftDefinitions.scope, { io: "input" }).required ?? [],
-  }).optional(),
-  threatModel: canonicalFieldSchema({
-    ...scanManifestDocument.properties.scan.properties.threatModel,
-    $defs: scanManifestDocument.$defs,
-  }).optional(),
-  findings: canonicalFieldSchema({
-    ...findingsDocument.properties.findings,
-    $defs: findingsDocument.$defs,
-    items: {
-      ...findingsDocument.properties.findings.items,
-      required: z.toJSONSchema(draftDefinitions.finding, { io: "input" })
-        .required,
-    },
-  }),
-  reviewState: draftDefinitions.reviewState.extend({
-    surfaces: canonicalFieldSchema({
-      ...coverageDocument.properties.surfaces,
-      items: {
-        ...coverageDocument.properties.surfaces.items,
-        required: z.toJSONSchema(draftDefinitions.surface, { io: "input" })
-          .required,
-      },
-    }),
-    deferred: canonicalFieldSchema({
-      ...coverageDocument.properties.deferred,
-      items: {
-        ...coverageDocument.properties.deferred.items,
-        properties: {
-          ...deferredFields,
-          paths: provisionalPaths(deferredFields.paths),
+const canonicalScanDraftInputSchema = z.lazy(
+  () =>
+    fileScanDraftInputSchema.extend({
+      scope: canonicalFieldSchema({
+        ...scanManifestDocument.properties.scan.properties.scope,
+        $defs: scanManifestDocument.$defs,
+        required:
+          z.toJSONSchema(draftDefinitions.scope, { io: "input" }).required ??
+          [],
+      }).optional(),
+      threatModel: canonicalFieldSchema({
+        ...scanManifestDocument.properties.scan.properties.threatModel,
+        $defs: scanManifestDocument.$defs,
+      }).optional(),
+      findings: canonicalFieldSchema({
+        ...findingsDocument.properties.findings,
+        $defs: findingsDocument.$defs,
+        items: {
+          ...findingsDocument.properties.findings.items,
+          required: z.toJSONSchema(draftDefinitions.finding, { io: "input" })
+            .required,
         },
-        required: z.toJSONSchema(
-          draftDefinitions.reviewState.shape.deferred.element,
-          { io: "input" },
-        ).required,
-      },
-    }),
-    openQuestions: z
-      .array(
-        z.union([
-          z.string(),
-          canonicalFieldSchema(coverageDocument.properties.openQuestions.items),
-        ]),
-      )
-      .optional(),
-  }),
-}) as z.ZodType<ScanDraftInput>;
+      }),
+      reviewState: draftDefinitions.reviewState.extend({
+        surfaces: canonicalFieldSchema({
+          ...coverageDocument.properties.surfaces,
+          items: {
+            ...coverageDocument.properties.surfaces.items,
+            required: z.toJSONSchema(draftDefinitions.surface, { io: "input" })
+              .required,
+          },
+        }),
+        deferred: canonicalFieldSchema({
+          ...coverageDocument.properties.deferred,
+          items: {
+            ...coverageDocument.properties.deferred.items,
+            properties: {
+              ...deferredFields,
+              paths: provisionalPaths(deferredFields.paths),
+            },
+            required: z.toJSONSchema(
+              draftDefinitions.reviewState.shape.deferred.element,
+              { io: "input" },
+            ).required,
+          },
+        }),
+        openQuestions: z
+          .array(
+            z.union([
+              z.string(),
+              canonicalFieldSchema(
+                coverageDocument.properties.openQuestions.items,
+              ),
+            ]),
+          )
+          .optional(),
+      }),
+    }) as z.ZodType<ScanDraftInput>,
+);
 
 export interface ScanDraftResult {
   scanId: string;

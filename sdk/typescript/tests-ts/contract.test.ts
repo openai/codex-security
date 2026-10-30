@@ -16,7 +16,12 @@ import {
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test, mock, spyOn } from "bun:test";
 import { ContractValidationError, loadContract } from "../src/index.js";
-import { readScanFile, sameCheckedFileDevice } from "../src/contract.js";
+import {
+  loadContractWithScanDirectory,
+  readScanFile,
+  sameCheckedFileDevice,
+  validatedFileDigests,
+} from "../src/contract.js";
 import type { NormalizedTarget, ScanExpectation } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runPython } from "./support/python-probe.js";
@@ -454,7 +459,15 @@ describe("canonical scan contract", () => {
     await writeJson(findingsPath, findings);
     await reseal(scanDir);
 
-    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    const originalBytes = await readFile(findingsPath);
+    const result = await loadContractWithScanDirectory(scanDir, {
+      pluginRoot: PLUGIN_ROOT,
+    });
+    expect(Object.keys(result).sort()).toEqual(["contract", "scanDirectory"]);
+    const loaded = result.contract;
+    expect(
+      validatedFileDigests.get(loaded.manifest)?.get("findings.json"),
+    ).toBe(sha256(originalBytes));
     expect(loaded.findings.findings[0]?.code_evidence?.[0]?.id).toBe(
       "legacy-source",
     );
@@ -668,14 +681,19 @@ describe("canonical scan contract", () => {
     ).rejects.toMatchObject({ name: "AbortError" });
   });
 
-  test.skipIf(process.platform === "win32")(
-    "rejects a scan directory that is no longer private to the current user",
-    async () => {
+  test.skipIf(process.platform === "win32").each([0o755, 0o775])(
+    "reads a scan directory with mode %o without changing its permissions",
+    async (mode) => {
       const scanDir = await copyExample();
-      await chmod(scanDir, 0o755);
+      await chmod(scanDir, mode);
       await expect(
         loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-      ).rejects.toThrow("must not be accessible to other users");
+      ).resolves.toBeDefined();
+      const exported = pythonExport(scanDir);
+      expect(exported.exitCode, new TextDecoder().decode(exported.stderr)).toBe(
+        0,
+      );
+      expect((await lstat(scanDir)).mode & 0o777).toBe(mode);
     },
   );
 

@@ -19,7 +19,6 @@ import {
   normalizeCandidateBatch,
   normalizeCandidatesCommand,
 } from "./src/helpers/normalize-candidates";
-import { validatePatchRiskAssessmentCommand } from "./src/helpers/validate-patch-risk-assessment";
 import { validateTrackingSourceCommand } from "./src/helpers/validate-tracking-source.js";
 import { deepReviewInputCommand } from "./src/helpers/deep-review-input";
 import { inventoryCommand } from "./src/helpers/generate-inventory";
@@ -95,6 +94,7 @@ function runHelper(): void {
   if (
     command === "generate-in-scope-files" ||
     command === "make-repo-scope-input" ||
+    command === "make-hosted-repo-scope-input" ||
     command === "make-diff-rank-input"
   ) {
     void inventoryCommand(command, args).then((code) => {
@@ -105,7 +105,11 @@ function runHelper(): void {
   } else if (command === "normalize-candidates") {
     process.exitCode = normalizeCandidatesCommand(args, posixHome);
   } else if (command === "validate-patch-risk-assessment") {
-    process.exitCode = validatePatchRiskAssessmentCommand(args);
+    void import("./src/helpers/validate-patch-risk-assessment").then(
+      ({ validatePatchRiskAssessmentCommand }) => {
+        process.exitCode = validatePatchRiskAssessmentCommand(args);
+      },
+    );
   } else if (command === "validate-tracking-source") {
     void validateTrackingSourceCommand(args, posixHome).then((status) => {
       process.exitCode = status;

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { reseal } from "./support/sealed-scan.js";
 import { chmod, mkdir, readFile, realpath, symlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -39,14 +39,20 @@ async function copyExample(): Promise<string> {
   return scanDirectory;
 }
 
-async function reseal(scanDirectory: string): Promise<void> {
+async function issueDescription(scanDirectory: string) {
+  const { issues } = await prepareScanPublication(
+    scanDirectory,
+    publicationOptions(scanDirectory),
+  );
+  return issues[0]!.description;
+}
+
+async function useRevisionTarget(scanDirectory: string) {
   const manifestPath = join(scanDirectory, "scan-manifest.json");
   const manifest = await readJson<ScanManifest>(manifestPath);
-  for (const artifact of manifest.scan.artifacts) {
-    artifact.sha256 = createHash("sha256")
-      .update(await readFile(join(scanDirectory, artifact.path)))
-      .digest("hex");
-  }
+  manifest.scan.target.kind = "git_revision";
+  manifest.scan.target.revision = "0123456789abcdef0123456789abcdef01234567";
+  delete manifest.scan.target.snapshotDigest;
   await writeJson(manifestPath, manifest);
 }
 
@@ -164,12 +170,7 @@ describe("scan publication preparation", () => {
     await writeJson(findingsPath, findings);
     await reseal(scanDirectory);
 
-    const { description } = (
-      await prepareScanPublication(
-        scanDirectory,
-        publicationOptions(scanDirectory),
-      )
-    ).issues[0]!;
+    const description = await issueDescription(scanDirectory);
 
     const metadata = description.indexOf("**Scan ID:**");
     for (const text of [
@@ -227,12 +228,7 @@ describe("scan publication preparation", () => {
       await writeJson(coveragePath, coverage);
       await reseal(scanDirectory);
 
-      const { description } = (
-        await prepareScanPublication(
-          scanDirectory,
-          publicationOptions(scanDirectory),
-        )
-      ).issues[0]!;
+      const description = await issueDescription(scanDirectory);
 
       expect(description).toContain(`**Scan mode:** ${expectedMode}`);
       expect(description).not.toContain("**Scan mode:** unknown");
@@ -309,12 +305,7 @@ describe("scan publication preparation", () => {
     await writeJson(findingsPath, findings);
     await reseal(scanDirectory);
 
-    const { description } = (
-      await prepareScanPublication(
-        scanDirectory,
-        publicationOptions(scanDirectory),
-      )
-    ).issues[0]!;
+    const description = await issueDescription(scanDirectory);
 
     expect(description).toContain("**Root control:** `src/archive.py:12`");
     expect(description).toContain(
@@ -342,19 +333,9 @@ describe("scan publication preparation", () => {
 
   test("only links source locations for a full immutable GitHub revision", async () => {
     const scanDirectory = await copyExample();
-    const manifestPath = join(scanDirectory, "scan-manifest.json");
-    const manifest = await readJson<ScanManifest>(manifestPath);
-    manifest.scan.target.kind = "git_revision";
-    manifest.scan.target.revision = "0123456789abcdef0123456789abcdef01234567";
-    delete manifest.scan.target.snapshotDigest;
-    await writeJson(manifestPath, manifest);
+    await useRevisionTarget(scanDirectory);
 
-    const { description } = (
-      await prepareScanPublication(
-        scanDirectory,
-        publicationOptions(scanDirectory),
-      )
-    ).issues[0]!;
+    const description = await issueDescription(scanDirectory);
 
     expect(description).toContain(
       "https://github.com/example/repo/blob/0123456789abcdef0123456789abcdef01234567/src/extract.py#L41-L44",
@@ -445,12 +426,7 @@ describe("scan publication preparation", () => {
       await writeJson(findingsPath, findings);
       await reseal(scanDirectory);
       const saved = await readFile(findingsPath, "utf8");
-      const { description } = (
-        await prepareScanPublication(
-          scanDirectory,
-          publicationOptions(scanDirectory),
-        )
-      ).issues[0]!;
+      const description = await issueDescription(scanDirectory);
       for (const text of present) expect(description).toContain(text);
       for (const text of absent) expect(description).not.toContain(text);
       expect(await readFile(findingsPath, "utf8")).toBe(saved);
@@ -515,20 +491,10 @@ describe("scan publication preparation", () => {
       },
     ];
     await writeJson(findingsPath, findings);
-    const manifestPath = join(scanDirectory, "scan-manifest.json");
-    const manifest = await readJson<ScanManifest>(manifestPath);
-    manifest.scan.target.kind = "git_revision";
-    manifest.scan.target.revision = "0123456789abcdef0123456789abcdef01234567";
-    delete manifest.scan.target.snapshotDigest;
-    await writeJson(manifestPath, manifest);
+    await useRevisionTarget(scanDirectory);
     await reseal(scanDirectory);
     const saved = await readFile(findingsPath, "utf8");
-    const { description } = (
-      await prepareScanPublication(
-        scanDirectory,
-        publicationOptions(scanDirectory),
-      )
-    ).issues[0]!;
+    const description = await issueDescription(scanDirectory);
     for (const snippet of [
       "canonical_source()",
       "second_canonical_source()",
@@ -610,12 +576,7 @@ describe("scan publication preparation", () => {
     await reseal(scanDirectory);
     const saved = await readFile(findingsPath, "utf8");
 
-    const { description } = (
-      await prepareScanPublication(
-        scanDirectory,
-        publicationOptions(scanDirectory),
-      )
-    ).issues[0]!;
+    const description = await issueDescription(scanDirectory);
 
     const snippets = [
       "canonical_source()",
@@ -697,21 +658,11 @@ describe("scan publication preparation", () => {
       },
     ];
     await writeJson(findingsPath, findings);
-    const manifestPath = join(scanDirectory, "scan-manifest.json");
-    const manifest = await readJson<ScanManifest>(manifestPath);
-    manifest.scan.target.kind = "git_revision";
-    manifest.scan.target.revision = "0123456789abcdef0123456789abcdef01234567";
-    delete manifest.scan.target.snapshotDigest;
-    await writeJson(manifestPath, manifest);
+    await useRevisionTarget(scanDirectory);
     await reseal(scanDirectory);
     const saved = await readFile(findingsPath, "utf8");
 
-    const { description } = (
-      await prepareScanPublication(
-        scanDirectory,
-        publicationOptions(scanDirectory),
-      )
-    ).issues[0]!;
+    const description = await issueDescription(scanDirectory);
 
     expect(description).toContain("src/canonical-nested.py#L20-L24)");
     expect(description).toContain("[``app/api/`id`/route.ts:7``]");
@@ -751,12 +702,7 @@ describe("scan publication preparation", () => {
     await reseal(scanDirectory);
     const saved = await readFile(findingsPath, "utf8");
 
-    const { description } = (
-      await prepareScanPublication(
-        scanDirectory,
-        publicationOptions(scanDirectory),
-      )
-    ).issues[0]!;
+    const description = await issueDescription(scanDirectory);
 
     let previous = -1;
     for (const section of [
@@ -808,21 +754,11 @@ describe("scan publication preparation", () => {
       },
     ];
     await writeJson(findingsPath, findings);
-    const manifestPath = join(scanDirectory, "scan-manifest.json");
-    const manifest = await readJson<ScanManifest>(manifestPath);
-    manifest.scan.target.kind = "git_revision";
-    manifest.scan.target.revision = "0123456789abcdef0123456789abcdef01234567";
-    delete manifest.scan.target.snapshotDigest;
-    await writeJson(manifestPath, manifest);
+    await useRevisionTarget(scanDirectory);
     await reseal(scanDirectory);
     const saved = await readFile(findingsPath, "utf8");
 
-    const { description } = (
-      await prepareScanPublication(
-        scanDirectory,
-        publicationOptions(scanDirectory),
-      )
-    ).issues[0]!;
+    const description = await issueDescription(scanDirectory);
 
     expect(description).toContain("`src/string.py:12 additional context`");
     expect(description).toContain("`` `src/quoted.py:12` ``");
@@ -843,12 +779,7 @@ describe("scan publication preparation", () => {
     delete manifest.scan.target.snapshotDigest;
     await writeJson(manifestPath, manifest);
 
-    const { description } = (
-      await prepareScanPublication(
-        scanDirectory,
-        publicationOptions(scanDirectory),
-      )
-    ).issues[0]!;
+    const description = await issueDescription(scanDirectory);
 
     expect(description).toContain("**Remote:** ssh://github.com/example/repo");
     expect(description).toContain("**Sink:** `src/extract.py:41-44`");
@@ -882,12 +813,7 @@ describe("scan publication preparation", () => {
 
   test("preserves evidence snippets for valid paths without safe source links", async () => {
     const scanDirectory = await copyExample();
-    const manifestPath = join(scanDirectory, "scan-manifest.json");
-    const manifest = await readJson<ScanManifest>(manifestPath);
-    manifest.scan.target.kind = "git_revision";
-    manifest.scan.target.revision = "0123456789abcdef0123456789abcdef01234567";
-    delete manifest.scan.target.snapshotDigest;
-    await writeJson(manifestPath, manifest);
+    await useRevisionTarget(scanDirectory);
 
     const findingsPath = join(scanDirectory, "findings.json");
     const findings = await readJson<FindingsDocument>(findingsPath);
@@ -917,12 +843,7 @@ describe("scan publication preparation", () => {
     await writeJson(findingsPath, findings);
     await reseal(scanDirectory);
 
-    const { description } = (
-      await prepareScanPublication(
-        scanDirectory,
-        publicationOptions(scanDirectory),
-      )
-    ).issues[0]!;
+    const description = await issueDescription(scanDirectory);
 
     expect(description).toContain(
       "https://github.com/example/repo/blob/0123456789abcdef0123456789abcdef01234567/src/extract.py#L41-L44",
