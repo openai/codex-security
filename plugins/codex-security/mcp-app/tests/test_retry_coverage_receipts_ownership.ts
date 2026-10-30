@@ -133,3 +133,10 @@ for (const resume of [false, true]) {
       }));
   }
 }
+
+test("nested local receipt copies remain distinct from new work after a third attempt and recovery", () =>
+  publishReceiptFixture({
+    receiptRetry: true,
+    extraReceiptRetry: true,
+    stopAfterDraft: true,
+  }));

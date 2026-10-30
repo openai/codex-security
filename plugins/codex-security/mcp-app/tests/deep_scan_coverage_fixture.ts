@@ -17,14 +17,17 @@ type FixtureRuntime = typeof import("../src/deep-scan/artifacts.js") &
   typeof import("../src/deep-scan/store.js") &
   typeof import("../src/artifact-context.js") &
   typeof import("../src/artifact-scan-draft.js") &
-  typeof import("../src/artifact-deep-reducer.js");
+  typeof import("../src/artifact-deep-reducer.js") &
+  typeof import("../src/deep-scan/artifact-validation.js");
 
 interface CoverageFixtureOptions {
+  workflowVersion?: "deep-scan-mcp/v1" | "deep-security-scan/v2";
   resume?: boolean;
   continueAfterResume?: boolean;
   stopAfterDraft?: boolean;
   stopBeforeDraft?: boolean;
   receiptRetry?: boolean;
+  streamRetry?: boolean;
   firstCheckpointReceipt?: "shared" | "worker";
   sameAttemptCloseout?: boolean;
   extraReceiptRetry?: boolean;
@@ -99,6 +102,7 @@ const {
   recordCodexSecurityScanDraftViaWorkbench,
   recordCodexSecurityWorkerScanDraft,
   recordCodexSecurityDeepReduction,
+  parseDeepReduction,
 } = (await importModule({
   stdin: {
     contents: [
@@ -108,6 +112,7 @@ const {
       'export { createScanArtifactContext } from "./src/artifact-context.ts";',
       'export { getCodexSecurityCompletedScan, recordCodexSecurityWorkerScanDraft, recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.ts";',
       'export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts";',
+      'export { parseDeepReduction } from "./src/deep-scan/artifact-validation.ts";',
     ].join("\n"),
     resolveDir: path.join(pluginRoot, "mcp-app"),
   },
@@ -131,11 +136,13 @@ export async function publishCoverageFixture(
   root: string,
   completeness: string,
   {
+    workflowVersion,
     resume = false,
     continueAfterResume = false,
     stopAfterDraft = false,
     stopBeforeDraft = false,
     receiptRetry = false,
+    streamRetry = false,
     firstCheckpointReceipt,
     sameAttemptCloseout = false,
     extraReceiptRetry = false,
@@ -177,7 +184,13 @@ export async function publishCoverageFixture(
   const workbenchAbort = new AbortController();
   const runWorkbench = async (args: string[]) => {
     const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
-    const command = [workbenchPath, ...args];
+    const commandArgs = [...args];
+    if (workflowVersion && args[0] === "begin-deep-scan") {
+      const versionIndex = commandArgs.indexOf("--workflow-version");
+      assert.ok(versionIndex >= 0);
+      commandArgs[versionIndex + 1] = workflowVersion;
+    }
+    const command = [workbenchPath, ...commandArgs];
     if (interruptPublication && args[0] === "fail-scan") {
       command.unshift(
         "-c",
@@ -203,7 +216,11 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         CODEX_SECURITY_STATE_DIR: path.join(root, "state"),
       },
     });
-    return JSON.parse(stdout);
+    const result = JSON.parse(stdout);
+    if (workflowVersion && result.deepScan) {
+      assert.equal(result.deepScan.workflowVersion, workflowVersion);
+    }
+    return result;
   };
   const store = new WorkbenchDeepScanStore(runWorkbench);
   let run = await store.begin({
@@ -786,6 +803,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     run = await store.get(run.scanId, threadId);
   }
   let discoveryCalls = 0;
+  let interruptedThread: string | undefined;
   const executor = {
     async run(request: CodexWorkerRequest) {
       assert.equal(
@@ -809,10 +827,19 @@ runpy.run_path(sys.argv[0], run_name="__main__")
           if (receiptRetry || (retryCoverage && index === 0)) {
             await writeReceiptAttempt(request.artifactContext.root);
           }
+          if (streamRetry) {
+            interruptedThread = thread;
+            throw new Error(
+              "stream disconnected before completion: websocket closed by server before response.completed",
+            );
+          }
           return {
             threadId: thread,
             finalResponse: "Continue the unfinished audit.",
           };
+        }
+        if (streamRetry && index === 0 && discoveryCalls === 2) {
+          assert.equal(request.resumeThreadId, interruptedThread);
         }
         await writeDiscovery(
           request.artifactContext.root,
@@ -892,8 +919,9 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     assert.equal(
       Object.hasOwn(result, "sourceCoverage"),
       false,
-      "v1 reducers remain readable by earlier binaries",
+      "reducers remain readable by earlier binaries",
     );
+    parseDeepReduction(result);
     if (!rawSources.has(worker.resultManifestPath)) {
       for (const name of await readdir(
         path.join(worker.artifactDir, "checkpoints"),
@@ -907,8 +935,9 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         assert.equal(
           Object.hasOwn(checkpoint, "sourceCoverage"),
           false,
-          "v1 checkpoints remain readable by earlier binaries",
+          "checkpoints remain readable by earlier binaries",
         );
+        parseDeepReduction(checkpoint);
       }
     }
   }
@@ -1134,7 +1163,9 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       else
         assert.match(
           ref,
-          /\/(?:attempts|archived-receipts)\/attempt-01\/artifacts\/prior\.txt$/,
+          streamRetry
+            ? /\/(?:output|(?:attempts|archived-receipts)\/attempt-01)\/artifacts\/prior\.txt$/
+            : /\/(?:attempts|archived-receipts)\/attempt-01\/artifacts\/prior\.txt$/,
         );
       assert.equal(
         await readFile(path.join(run.scanDir, ref), "utf8"),

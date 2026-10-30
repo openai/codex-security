@@ -538,6 +538,8 @@ export class DeepScanWorkerRunner {
             });
           }
         }
+        if (resumableThreadId && input.kind === "discovery")
+          await this.archiveWorkerAttempt(input.artifactDir, attempt, true);
         const delayMs = Math.ceil(
           this.options.retryDelaysMs[attempt - 1] *
             (1 + 0.3 * this.options.random()),
@@ -562,15 +564,32 @@ export class DeepScanWorkerRunner {
     }
   }
 
-  private async archiveWorkerAttempt(artifactDir: string, attempt: number) {
-    await archiveDirectory(
-      artifactDir,
-      join(
-        dirname(artifactDir),
-        "attempts",
-        `attempt-${String(attempt).padStart(2, "0")}`,
-      ),
+  private async archiveWorkerAttempt(
+    artifactDir: string,
+    attempt: number,
+    resuming = false,
+  ) {
+    const attemptRoot = join(
+      dirname(artifactDir),
+      "attempts",
+      `attempt-${String(attempt).padStart(2, "0")}`,
     );
+    if (resuming) {
+      // Keep the conversation's files while preserving their host attempt.
+      await fs.cp(artifactDir, attemptRoot, {
+        recursive: true,
+        preserveTimestamps: true,
+        verbatimSymlinks: true,
+        filter: async (source) => {
+          const entry = await fs.lstat(source);
+          return (
+            entry.isFile() || entry.isDirectory() || entry.isSymbolicLink()
+          );
+        },
+      });
+    } else {
+      await archiveDirectory(artifactDir, attemptRoot);
+    }
   }
 
   private async cancelAttempt(

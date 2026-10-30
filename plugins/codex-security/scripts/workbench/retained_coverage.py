@@ -47,14 +47,17 @@ from workbench.retained_records import (
     same_raw_value,
 )
 from workbench.saved_coverage import (
+    SavedCoverageOrigins,
     _coverage_rows,
     _has_candidate_metadata,
+    _infer_saved_coverage_ids,
     _inherit_coverage_sources,
     _merge_tied_parent_observations,
     _parent_observation_content,
     _project_worker_closure,
     _projected_worker_closure_sources,
     _resolved_deferred_rows,
+    add_review,
     prepare_saved_coverage_projection,
 )
 from workbench.saved_sources import (
@@ -567,7 +570,7 @@ def merge_saved_results(
         *,
         receipts_resolved: bool = False,
     ) -> dict[str, Any]:
-        # Retain projectDiscoveryCoverage worker ownership.
+        attempt = coverage_origins.attempt(field, index, worker, source)
         prefix = f"{worker['id']}-attempt-{worker['attempt']}"
 
         def accepted_positions(surface: dict[str, Any]) -> list[int]:
@@ -594,7 +597,7 @@ def merge_saved_results(
             provenance = {}
         for key in ("workerId", "attempt", "sourceId", "candidateId"):
             provenance.pop(key, None)
-        provenance.update(workerId=worker["id"], attempt=worker["attempt"])
+        provenance.update(workerId=worker["id"], attempt=attempt)
         result["provenance"] = provenance
         source_rows = source.get(field, [])
         inferred_id = (
@@ -602,6 +605,11 @@ def merge_saved_results(
             and index <= len(source_rows)
             and id(source_rows[index - 1]) in inferred_coverage_ids
         )
+        retained = coverage_origins.retained_record(
+            field, item, index, worker, source, coverage, reviewed_attempts, inferred_id
+        )
+        if retained is not None and (field != "deferred" or "surfaceIds" not in item):
+            return copy.deepcopy(retained)
         for key, name in (("id", "sourceId"), ("candidateId", "candidateId")):
             if key == "id" and inferred_id:
                 continue
@@ -637,7 +645,7 @@ def merge_saved_results(
                     if (
                         isinstance(provenance, dict)
                         and provenance.get("workerId") == worker["id"]
-                        and provenance.get("attempt") == worker["attempt"]
+                        and provenance.get("attempt") == attempt
                         and isinstance(provenance.get("sourceId"), str)
                     ):
                         surface_ids.setdefault(provenance["sourceId"], surface["id"])
@@ -661,10 +669,6 @@ def merge_saved_results(
                         projected = project_missing_record(
                             "surfaces", surface, offset, worker, origin[4] if origin else source
                         )
-                        if origin := projection_origins.get(id(surface)):
-                            projected["receiptRefs"] = coverage_receipts(
-                                projected, worker, origin[1]
-                            )
                         projected_id = projected["id"]
                         previous = retained_coverage_record("surfaces", projected)
                         if previous is not None and isinstance(previous.get("id"), str):
@@ -674,6 +678,8 @@ def merge_saved_results(
                     surface_ids.get(value, value) if isinstance(value, str) else value
                     for value in item["surfaceIds"]
                 ]
+                if retained is not None:
+                    return coverage_origins.relink_deferred(retained, result["surfaceIds"])
         return result
 
     workers_by_id = {worker["id"]: worker for worker in workers}
@@ -796,16 +802,17 @@ def merge_saved_results(
             draft["reviewState"]["openQuestions"] = [
                 {"question": item.strip()} if isinstance(item, str) else item for item in questions
             ]
+    coverage_origins = SavedCoverageOrigins(
+        sources,
+        worker_attempts,
+        lambda relative, row, owner: coverage_receipts(row, workers_by_id[owner], relative),
+        scan_dir,
+    )
     projection_origins = {
         id(item): (worker_id, relative, field, index, draft["reviewState"])
         for relative, draft, worker_id in sources
         for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions")
-        for index, item in enumerate(
-            draft["reviewState"].get(field, [])
-            if isinstance(draft["reviewState"].get(field, []), list)
-            else [],
-            1,
-        )
+        for index, item in enumerate(_coverage_rows(draft["reviewState"], field), 1)
         if isinstance(item, dict)
     }
 
@@ -853,55 +860,13 @@ def merge_saved_results(
                     }
                 return item
         worker = workers_by_id[worker_id]
-        result = project_missing_record(
+        return project_missing_record(
             field, item, index, worker, source, receipts_resolved=receipts_resolved
         )
-        if field == "surfaces" and not receipts_resolved:
-            result["receiptRefs"] = coverage_receipts(result, worker, relative)
-        return result
 
     all_sources = ([("parent", parent, None)] if parent else []) + sources
     source_owners = {relative: owner for relative, _, owner in all_sources}
-    inferred_coverage_ids: set[int] = set()
-    # Older checkpoints can omit IDs already assigned in their published output.
-    for field in ("deferred", "surfaces"):
-        named_rows: dict[str | None, list[dict[str, Any]]] = {}
-        for _, draft, owner in all_sources:
-            named_rows.setdefault(owner, []).extend(
-                row
-                for row in _coverage_rows(draft["reviewState"], field)
-                if isinstance(row, dict) and isinstance(row.get("id"), str)
-            )
-        for _, draft, owner in all_sources:
-            rows = _coverage_rows(draft["reviewState"], field)
-            reserved = {
-                row["id"]
-                for row in rows
-                if isinstance(row, dict) and isinstance(row.get("id"), str)
-            }
-            for row in rows:
-                if not isinstance(row, dict) or "id" in row:
-                    continue
-                if field == "deferred" and _has_candidate_metadata(row):
-                    continue
-                content = {"receiptRefs": [], **row} if field == "surfaces" else row
-                identity = next(
-                    (
-                        named["id"]
-                        for named in named_rows[owner]
-                        if named["id"] not in reserved
-                        and {
-                            **({"receiptRefs": []} if field == "surfaces" else {}),
-                            **{key: value for key, value in named.items() if key != "id"},
-                        }
-                        == content
-                    ),
-                    None,
-                )
-                if identity is not None:
-                    inferred_coverage_ids.add(id(row))
-                    row["id"] = identity
-                    reserved.add(identity)
+    inferred_coverage_ids = _infer_saved_coverage_ids(all_sources)
 
     # A discarded local surface must not fall back to another source's reused ID.
     surface_ids_by_source: dict[tuple[str, str], list[str]] = {
@@ -1343,8 +1308,6 @@ def merge_saved_results(
                 ):
                     accepted_pending_candidates.add((worker_id, worker["attempt"], candidate_id))
                 projected = project_missing_record(field, row, index, worker, draft["reviewState"])
-                if field == "surfaces":
-                    projected["receiptRefs"] = coverage_receipts(projected, worker, relative)
                 key = projection_key(field, projected)
                 projected_sources[key] = (worker_id, row, source_order[relative])
 
@@ -1557,10 +1520,24 @@ def merge_saved_results(
                 and (owner, row) not in reopened_rows
             ):
                 reopened_rows.append((owner, row))
+
+    def render_worker_closure(relative, owner, closure):
+        worker = workers_by_id.get(owner)
+        canonical = projected_coverage if parent_is_canonical else {}
+        if projection.is_reviewed_worker(canonical, worker):
+            retained = coverage_origins.retained_closure(
+                closure,
+                worker,
+                drafts_by_path[relative]["reviewState"],
+                canonical,
+                reviewed_attempts,
+            )
+            if retained is not None:
+                return retained
+        return _project_worker_closure(relative, owner, closure, worker_attempts, source_order)
+
     retained_closures = [
-        closure
-        if owner is None
-        else _project_worker_closure(relative, owner, closure, worker_attempts, source_order)
+        closure if owner is None else render_worker_closure(relative, owner, closure)
         for (owner, _), (_, closure, relative) in closed_deferred.items()
     ]
     coverage.pop("resolvedDeferred", None)
@@ -2633,6 +2610,8 @@ def merge_saved_results(
         initial_surface_rows = retained_surface_rows
         initial_ids = surface_ids_by_source
         initial_projection = projection
+        initial_reviewed_attempts = reviewed_attempts.copy()
+        initial_relinked = coverage_origins.relinked_deferred.copy()
         output_warnings = warnings
 
     def retain_surface_links(owner, row):
@@ -2672,6 +2651,8 @@ def merge_saved_results(
             retained_surface_rows = initial_surface_rows.copy()
             surface_ids_by_source = {key: ids.copy() for key, ids in initial_ids.items()}
             reconciled_surface_ids.clear()
+            reviewed_attempts = initial_reviewed_attempts.copy()
+            coverage_origins.relinked_deferred = initial_relinked.copy()
             projection = type(initial_projection)(
                 initial_projection.project_worker_coverage,
                 initial_projection.legacy_surface_links,
@@ -2792,13 +2773,33 @@ def merge_saved_results(
         if isinstance(coverage.get("surfaces"), list):
             for relative, owner, source_surface, surface in surface_updates:
                 original_surface = surface
-                # Generic updates already resolve each receipt at its saved source.
+                canonical = projected_coverage if parent_is_canonical else {}
+                worker = workers_by_id.get(owner)
+                published = None
+                source_owner, original_source = record_source("surfaces", owner, source_surface)
+                if (
+                    worker is not None
+                    and source_owner == owner
+                    and (origin := projection_origins.get(id(original_source)))
+                ):
+                    published = coverage_origins.retained_record(
+                        "surfaces",
+                        original_source,
+                        origin[3],
+                        worker,
+                        origin[4],
+                        canonical,
+                        reviewed_attempts,
+                        id(original_source) in inferred_coverage_ids,
+                    )
+                # Bind the unmodified occurrence before applying its repaired receipt union.
                 surface = projection.repair_reviewed_surface(
                     coverage,
-                    projected_coverage if parent_is_canonical else {},
-                    workers_by_id.get(owner),
+                    canonical,
+                    worker,
                     source_surface,
                     surface,
+                    published=published,
                 ) or project_record("surfaces", surface, source_surface, receipts_resolved=True)
                 reconciled_surface_ids[record_key("surfaces", owner, source_surface)] = surface[
                     "id"
@@ -2965,20 +2966,7 @@ def merge_saved_results(
                 continue
             if project_coverage:
                 reviewed_attempts.add((worker_id, worker["attempt"]))
-                reviews = coverage.setdefault("reviews", [])
-                if isinstance(reviews, list) and not any(
-                    isinstance(review, dict)
-                    and review.get("workerId") == worker_id
-                    and review.get("attempt") == worker["attempt"]
-                    for review in reviews
-                ):
-                    reviews.append(
-                        {
-                            "workerId": worker_id,
-                            "attempt": worker["attempt"],
-                            "completeness": draft["reviewState"].get("completeness", "partial"),
-                        }
-                    )
+                add_review(coverage, worker_id, worker["attempt"], draft["reviewState"])
             for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions", "reviews"):
                 if field == "reviews" and (
                     worker_id is not None or field not in draft["reviewState"]
@@ -3042,13 +3030,15 @@ def merge_saved_results(
                             else project_record(field, item, source_item)
                         )
                         projected_row = item is not original_item
+                    if field == "deferred":
+                        item = coverage_origins.updated_deferred(item)
                     if field == "surfaces" and isinstance(item, dict):
                         item = {**item, "receiptRefs": item.get("receiptRefs", [])}
                     if (
                         field == "surfaces"
                         and worker is not None
                         and isinstance(item, dict)
-                        and (project_coverage or not projected_row)
+                        and not projected_row
                     ):
                         item = copy.deepcopy(item)
                         item["receiptRefs"] = coverage_receipts(item, worker, relative)
@@ -3075,7 +3065,7 @@ def merge_saved_results(
                             if field == "surfaces":
                                 retained_surface_rows.add(id(source_item))
                             continue
-                    retain_coverage_row(
+                    retained = retain_coverage_row(
                         output,
                         item,
                         worker_id,
@@ -3083,6 +3073,16 @@ def merge_saved_results(
                         source_item,
                         projected_row or project_coverage,
                     )
+                    if project_coverage:
+                        coverage_origins.retain_review(
+                            coverage,
+                            field,
+                            index,
+                            worker,
+                            draft["reviewState"],
+                            retained,
+                            reviewed_attempts,
+                        )
 
         projection.finalize(
             coverage,

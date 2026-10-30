@@ -333,6 +333,8 @@ export function projectDiscoveryCoverage(
   worker: { id: string; attempt?: number },
   artifactPrefix: string,
   scanReceiptRefs: ReadonlyMap<number, ReadonlySet<string>> = new Map(),
+  archived: { attempt: number; coverage: ScanDraftInput["reviewState"] }[] = [],
+  receiptDigests: ReadonlyMap<string, string> = new Map(),
 ): ScanDraftInput["reviewState"] {
   const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;
   const provenance = {
@@ -340,6 +342,15 @@ export function projectDiscoveryCoverage(
     ...(worker.attempt === undefined ? {} : { attempt: worker.attempt }),
   };
   const prefix = `${worker.id}-attempt-${worker.attempt ?? "unknown"}`;
+  const reviews = [provenance];
+  const history = [...archived].sort(
+    (left, right) => left.attempt - right.attempt,
+  );
+  // Each occurrence in one snapshot can account for only one current record.
+  const matchedRows = new Map<
+    string,
+    Map<(typeof history)[number], Set<number>>
+  >();
   const surfaces = coverage.surfaces;
   const surfaceIds = new Map<unknown, string>();
   for (const [index, surface] of surfaces.entries()) {
@@ -347,7 +358,35 @@ export function projectDiscoveryCoverage(
       surfaceIds.set(surface.id, `${prefix}-surface-${index + 1}`);
     }
   }
-  const project = <T extends Record<string, unknown>>(item: T): T => {
+  const project = <T extends Record<string, unknown>>(
+    field: string,
+    item: T,
+  ): T => {
+    const matchedHistory = matchedRows.get(field) ?? new Map();
+    matchedRows.set(field, matchedHistory);
+    let origin = provenance;
+    for (const saved of history) {
+      const matched = matchedHistory.get(saved) ?? new Set<number>();
+      const rows = (saved.coverage[field] as unknown[] | undefined) ?? [];
+      const index = rows.findIndex(
+        (row, index) =>
+          !matched.has(index) &&
+          matchesSavedCoverageSource(
+            field,
+            item,
+            row,
+            artifactPrefix,
+            receiptDigests,
+          ),
+      );
+      if (index < 0) continue;
+      matched.add(index);
+      matchedHistory.set(saved, matched);
+      if (origin === provenance)
+        origin = { workerId: worker.id, attempt: saved.attempt };
+    }
+    if (!reviews.some((review) => review.attempt === origin.attempt))
+      reviews.push(origin);
     const result = structuredClone(item);
     const descriptions = result.provenance;
     const projected =
@@ -367,7 +406,7 @@ export function projectDiscoveryCoverage(
     Object.assign(result, {
       provenance: {
         ...projected,
-        ...provenance,
+        ...origin,
         ...(item.id === undefined ? {} : { sourceId: item.id }),
         ...(item.candidateId === undefined
           ? {}
@@ -382,9 +421,9 @@ export function projectDiscoveryCoverage(
     return result;
   };
   return {
-    reviews: [provenance],
+    reviews,
     surfaces: surfaces.map((surface, index) => ({
-      ...project(surface),
+      ...project("surfaces", surface),
       id: `${prefix}-surface-${index + 1}`,
       receiptRefs: ((surface.receiptRefs as string[] | undefined) ?? [])
         .map((ref) => posix.normalize(ref))
@@ -396,9 +435,11 @@ export function projectDiscoveryCoverage(
             : `${artifactPrefix}/${ref}`,
         ),
     })),
-    explicitExclusions: coverage.explicitExclusions.map(project),
+    explicitExclusions: coverage.explicitExclusions.map((item) =>
+      project("explicitExclusions", item),
+    ),
     deferred: coverage.deferred.map((item, index) => ({
-      ...project(item),
+      ...project("deferred", item),
       id: `${prefix}-deferred-${index + 1}`,
       ...(item.surfaceIds === undefined
         ? {}
@@ -411,19 +452,89 @@ export function projectDiscoveryCoverage(
     ...(coverage.resolvedDeferred === undefined
       ? {}
       : {
-          resolvedDeferred: coverage.resolvedDeferred.map(({ id, reason }) => ({
-            id: `${prefix}-resolved-${id}`,
-            reason,
-          })),
+          resolvedDeferred: coverage.resolvedDeferred.map((item) => {
+            const projected = project("resolvedDeferred", item);
+            const origin = (projected as Record<string, unknown>)
+              .provenance as Record<string, unknown>;
+            return {
+              id: `${worker.id}-attempt-${origin.attempt ?? "unknown"}-resolved-${item.id}`,
+              reason: item.reason,
+            };
+          }),
         }),
     ...(coverage.openQuestions === undefined
       ? {}
       : {
           openQuestions: coverage.openQuestions.map((question) =>
-            project(typeof question === "string" ? { question } : question),
+            project(
+              "openQuestions",
+              typeof question === "string" ? { question } : question,
+            ),
           ),
         }),
   };
+}
+
+/** Compare accepted content and readable receipt bytes, never authored origin claims. */
+function matchesSavedCoverageSource(
+  field: string,
+  item: Record<string, unknown>,
+  saved: unknown,
+  artifactPrefix: string,
+  receiptDigests: ReadonlyMap<string, string>,
+): boolean {
+  const original =
+    typeof saved === "string" ? { question: saved } : structuredClone(saved);
+  const current = structuredClone(item);
+  if (
+    typeof original !== "object" ||
+    original === null ||
+    Array.isArray(original)
+  )
+    return false;
+  const previous = original as Record<string, unknown>;
+  if (previous.id === undefined) delete current.id;
+  if (field === "surfaces") {
+    const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;
+    for (const row of [previous, current]) {
+      const provenance = row.provenance as Record<string, unknown> | undefined;
+      const sharedRefs = provenance?.scanReceiptRefs as string[] | undefined;
+      row.receiptRefs = [
+        ...new Set(
+          ((row.receiptRefs as string[] | undefined) ?? []).map((ref) => {
+            ref = posix.normalize(ref);
+            const shared = sharedRefs?.includes(ref) ?? false;
+            const digest = receiptDigests.get(JSON.stringify([shared, ref]));
+            let path = ref;
+            // Without readable bytes, only the exact accepted reference can match.
+            if (digest !== undefined && !shared) {
+              if (path.startsWith(`${artifactPrefix}/`))
+                path = path.slice(artifactPrefix.length + 1);
+              else if (path.startsWith(archivePrefix)) {
+                const archived = path.slice(archivePrefix.length);
+                if (/^attempt-[0-9]+\//u.test(archived))
+                  path = archived.slice(archived.indexOf("/") + 1);
+              }
+              while (
+                /^artifacts\/archived-receipts\/attempt-[0-9]+\//u.test(path)
+              ) {
+                path = path.replace(
+                  /^artifacts\/archived-receipts\/attempt-[0-9]+\//u,
+                  "",
+                );
+              }
+            }
+            return JSON.stringify([shared, path, digest]);
+          }),
+        ),
+      ];
+      if (provenance) {
+        delete provenance.scanReceiptRefs;
+        if (Object.keys(provenance).length === 0) delete row.provenance;
+      }
+    }
+  }
+  return isDeepStrictEqual(previous, current);
 }
 
 function findingSourceIds(finding: Record<string, unknown>): string[] {
