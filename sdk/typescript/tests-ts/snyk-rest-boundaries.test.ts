@@ -8,6 +8,53 @@ import {
   snykRestFixture,
 } from "./support/snyk-rest-fixtures.js";
 
+test("a generic Snyk reader can import findings with an SSH repository URL", async () => {
+  const target = { repository: snykOptions.sourceRepositoryUrl };
+  const report = {
+    read: 1,
+    findings: [
+      {
+        source_finding_id: "reader-id",
+        evidence: {
+          title: "Reader finding",
+          severity: "high" as const,
+          source_data: {
+            format: "snyk-findings-export/v1",
+            collection: { target },
+          },
+        },
+      },
+    ],
+    excluded: [],
+    sourceRepositoryUrl: "git@github.com:example/repository.git",
+  };
+  await using fixture = await snykLocalFixture({
+    remote: snykOptions.sourceRepositoryUrl,
+  });
+  const prepare = (checkout = fixture) =>
+    prepareNormalizedLocalImport(
+      report,
+      {
+        provider: "snyk",
+        sourceKey: checkout.sourceKey,
+        repository: checkout.repository,
+      },
+      { environment: checkout.environment },
+    );
+  const first = await prepare();
+  expect((await first.import()).counts.created).toBe(1);
+  const second = await prepare();
+  expect((await second.import()).counts.unchanged).toBe(1);
+  await using other = await snykLocalFixture({
+    remote: "git@github.com:example/other.git",
+  });
+  await expect(prepare(other)).rejects.toThrow(
+    "does not match a configured remote",
+  );
+  target.repository = "https://github.com/example/other";
+  await expect(prepare()).rejects.toThrow("Snyk reader's repository");
+});
+
 test("normalized Snyk REST Open Source rows cannot publish to Cloud", async () => {
   const report = snykRestFixture("open-source");
   const normalized = normalizeSnykIssues(report);
@@ -256,6 +303,29 @@ test("a reader may use its own IDs for sparse Snyk projections, while the native
   await expect(prepare()).rejects.toThrow(/snyk-rest/);
   row.source_finding_id = "custom-issue";
   expect((await prepare()).preview.findings).toHaveLength(1);
+  const otherId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  for (const claim of [
+    {
+      projectId: otherId,
+      sourceRepositoryUrl: "https://github.com/example/unrelated",
+    },
+    { projectId: otherId },
+    { organizationId: otherId },
+    { apiOrigin: "https://api.au.snyk.io" },
+    { product: "code" },
+    { sourceRepositoryUrl: "https://github.com/example/unrelated" },
+  ]) {
+    row.evidence.source_data = claim;
+    await expect(
+      prepare().then((prepared) => prepared.import()),
+    ).rejects.toThrow(/Snyk project/);
+  }
+  expect(await f.read()).toBeEmpty();
+  row.evidence.source_data = {
+    projectId: snykOptions.projectId,
+    sourceRepositoryUrl: report.sourceRepositoryUrl + ".git",
+  };
+  expect((await prepare()).preview.findings).toHaveLength(1);
   report.sourceRepositoryUrl = "https://github.com/example/other";
   await expect(prepare()).rejects.toThrow("original Snyk project");
 });
@@ -304,6 +374,39 @@ test("retagged original Snyk records remain scoped without a matching source ID 
         environment: f.environment,
       }),
     ).rejects.toThrow(/Snyk|snyk-rest/);
+  }
+  const mismatched = { ...legacy.project, id: snykOptions.organizationId };
+  for (const resources of [
+    { project: mismatched, issue: legacy.issue, target: null },
+    {
+      projectJson: JSON.stringify(mismatched),
+      issueJson: original["issueJson"],
+      targetJson: "null",
+    },
+    {
+      projectJson: JSON.stringify(mismatched),
+      snykRestIssueKey: original["snykRestIssueKey"],
+      targetJson: "null",
+    },
+  ]) {
+    row.evidence.source_data = {
+      ...snykOptions,
+      apiVersion: original["apiVersion"],
+      ...resources,
+    };
+    await expect(
+      prepareNormalizedExternalPublication(projected, opts, {
+        environment: f.environment,
+        credentials,
+      }),
+    ).rejects.toThrow("local import");
+    await expect(
+      prepareNormalizedLocalImport(projected, opts, {
+        environment: f.environment,
+      }),
+    ).rejects.toThrow(
+      "snykRestIssueKey" in resources ? /Snyk/ : /different project/,
+    );
   }
   for (const missing of ["issueJson", "projectJson"]) {
     row.evidence.source_data = { ...original, format: "reader/v1" };

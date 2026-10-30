@@ -27,6 +27,7 @@ codex-security publish findings snyk-issues.json --to local --provider snyk \
 
 Confirm the preview, then repeat the publish command without `--dry-run`.
 Collection reads open and resolved issues across all pages, including ignored issues.
+For Open Source it requests package vulnerabilities. For Code it requests code issues.
 The SDK's `collectSnykIssues` defaults to Open Source and returns the same report.
 Pass independently verified `sourceRepositories` in its dependencies when a private
 CLI- or API-monitored project uses an SSH target. The reader
@@ -38,9 +39,9 @@ coordinate and its reported start line when available. The finding’s
 and projects monitored through the CLI or API.
 
 Use the same source key on later imports. The issue key within the API
-origin, organization, project and product identifies the finding. Replaying
-a saved v1 or v2 report leaves an existing version unchanged. A new v2
-capture of a previously imported v1 issue updates the evidence on that row.
+origin, organization, project and product identifies the finding. Replaying the
+same evidence leaves the version unchanged. Importing a different capture for
+that issue updates the same row, even if the capture is older.
 
 When selecting a subset in the SDK, keep the report’s `snykRestContext` and
 each selected finding’s `source_data`. The importer verifies the original

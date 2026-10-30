@@ -21,6 +21,7 @@ import { requireExternalImports } from "./external-imports-feature.js";
 import { isGitHubCloudHost } from "./git-remote.js";
 import {
   gitPathToHttpPath,
+  ambiguousGitIpHost,
   gitServiceHostname,
   gitTransportBytes,
   hostedRepositoryMatches,
@@ -287,7 +288,12 @@ export function snykRestRepositoryMatches(
   remote: string,
 ): boolean {
   const candidate = scmUrl(binding, remote);
-  if (!candidate) return false;
+  if (
+    !candidate ||
+    ambiguousGitIpHost(candidate) ||
+    ambiguousGitIpHost(binding.url)
+  )
+    return false;
   const key = (url: string) =>
     hostedRepositoryUrlKey(url, binding.platform === "github", binding.gitlab);
   return key(binding.url) === key(candidate);
@@ -465,47 +471,42 @@ function checkTargetRelationships(
   selected: Scope,
   origin: string,
 ) {
-  if (target["relationships"] !== undefined) {
-    const relationships = record(
-      target["relationships"],
-      "Snyk target relationships",
+  if (target["relationships"] === undefined) return;
+  const relationships = record(
+    target["relationships"],
+    "Snyk target relationships",
+  );
+  if (relationships["organization"] !== undefined)
+    checkOrganization(relationships, selected, true);
+  if (relationships["integration"] === undefined) return;
+  const linkage = record(
+    relationships["integration"],
+    "Snyk integration relationship",
+  )["data"];
+  if (linkage === null && !scmOrigins.has(origin)) return;
+  const integration = record(linkage, "Snyk integration linkage");
+  if (integration["type"] !== "integration")
+    throw new Error("Expected a Snyk integration resource.");
+  const attributes = integration["attributes"];
+  // The Targets API allows a null ID on an expanded integration.
+  if (attributes === undefined || integration["id"] !== null)
+    uuid(integration["id"], "Snyk integration ID");
+  if (attributes === undefined) return;
+  const type = requiredText(
+    record(attributes, "Snyk integration attributes")["integration_type"],
+    "Snyk integration type",
+  );
+  if (
+    scmOrigins.has(origin) &&
+    (!scmOrigins.has(type) || origin.split("-")[0] !== type.split("-")[0])
+  )
+    throw new Error(
+      `Snyk target integration ${type} must be a supported SCM integration for the project's ${origin} origin.`,
     );
-    if (relationships["organization"] !== undefined)
-      checkOrganization(relationships, selected, true);
-    if (relationships["integration"] !== undefined) {
-      const integration = relationship(relationships, "integration");
-      if (integration["attributes"] === undefined) {
-        // Saved JSON:API linkage may identify the integration without expanding it.
-        resourceId(integration, "integration");
-      } else {
-        const attributes = record(
-          integration["attributes"],
-          "Snyk integration attributes",
-        );
-        const type = requiredText(
-          attributes["integration_type"],
-          "Snyk integration type",
-        );
-        if (
-          scmOrigins.has(origin) &&
-          (!scmOrigins.has(type) || origin.split("-")[0] !== type.split("-")[0])
-        )
-          throw new Error(
-            `Snyk target integration ${type} must be a supported SCM integration for the project's ${origin} origin.`,
-          );
-      }
-    }
-  }
 }
 
-function nextCursor(links: unknown, endpoint: URL) {
-  if (links === undefined) return null;
-  const next = record(links, "Snyk issue page links")["next"];
-  if (next === null || next === undefined) return null;
-  const href = requiredText(
-    isRecord(next) ? next["href"] : next,
-    "Snyk next page link",
-  );
+function pageLinkCursor(link: unknown, endpoint: URL, label: string) {
+  const href = requiredText(isRecord(link) ? link["href"] : link, label);
   const url = new URL(
     href.startsWith("/orgs/") ? `/rest${href}` : href,
     endpoint,
@@ -517,16 +518,32 @@ function nextCursor(links: unknown, endpoint: URL) {
     url.password ||
     url.hash
   )
-    throw new Error("Snyk next page link leaves the selected Issues endpoint.");
+    throw new Error(`${label} leaves the selected Issues endpoint.`);
   for (const [key, value] of url.searchParams) {
     if (
       url.searchParams.getAll(key).length !== 1 ||
       (key !== "starting_after" && endpoint.searchParams.get(key) !== value)
     )
-      throw new Error("Snyk next page link changes the selected Issues query.");
+      throw new Error(`${label} changes the selected Issues query.`);
   }
+  return url.searchParams.get("starting_after");
+}
+
+function nextCursor(value: unknown, endpoint: URL, current: string | null) {
+  if (value === undefined) return null;
+  if (hostedNumberToken(value) !== undefined)
+    throw new Error("Snyk issue page links must be an object.");
+  const links = record(value, "Snyk issue page links");
+  if (current === null && links["prev"] != null)
+    throw new Error("The first Snyk issue page has a previous page link.");
+  if (
+    links["self"] != null &&
+    pageLinkCursor(links["self"], endpoint, "Snyk self page link") !== current
+  )
+    throw new Error("Snyk self page link does not match the requested cursor.");
+  if (links["next"] == null) return null;
   return requiredText(
-    url.searchParams.get("starting_after"),
+    pageLinkCursor(links["next"], endpoint, "Snyk next page link"),
     "Snyk next page starting_after cursor",
   );
 }
@@ -555,11 +572,10 @@ function selectedIssue(issue: Resource, selected: Scope) {
 }
 
 function snykIssueId(
-  issue: Resource,
+  attributes: Resource,
   source: Scope,
   retainedKey?: unknown,
 ): string {
-  const { attributes } = selectedIssue(issue, source);
   const key = requiredText(attributes["key"], "Snyk issue key");
   if (retainedKey !== undefined && retainedKey !== key)
     throw new Error(
@@ -579,11 +595,12 @@ function issuePage(
   selected: Scope,
   url: URL,
   seen: Set<string>,
+  current: string | null,
 ) {
   const issues = array(response["data"], "Snyk issue page data").map((value) =>
     scopedIssue(value, selected),
   );
-  const next = nextCursor(response["links"], url);
+  const next = nextCursor(response["links"], url, current);
   if (next !== null) {
     if (seen.has(next))
       throw new Error("Snyk Issues pagination repeated a cursor.");
@@ -640,7 +657,7 @@ export async function collectSnykIssues(
     if (startingAfter !== null)
       url.searchParams.set("starting_after", startingAfter);
     const response = await get(url, "Snyk issue page");
-    const page = issuePage(response, selected, base, cursors);
+    const page = issuePage(response, selected, base, cursors, startingAfter);
     for (const issue of page.issues) {
       const { id } = selectedIssue(issue, selected);
       if (issueIds.has(id))
@@ -719,7 +736,7 @@ function savedContext(
   };
 }
 
-/** Identify linked native resources independently of the projection's ID, vendor label or scope. */
+/** Identify the native resource shapes before validating their IDs and monitor scope. */
 function linkedSnykResources(
   data: Resource,
   json: boolean,
@@ -737,8 +754,16 @@ function linkedSnykResources(
   const hasProject = "project" + suffix in data;
   if (retainedKey && hasProject) {
     try {
-      projectContext(original("project"), scope(data, data["apiOrigin"]));
-      return true;
+      const project = original("project");
+      const attributes = project["attributes"];
+      if (
+        project["type"] === "project" &&
+        "id" in project &&
+        isRecord(attributes) &&
+        "origin" in attributes &&
+        "type" in attributes
+      )
+        return true;
     } catch {
       // An independently linked issue may still survive a malformed project projection.
     }
@@ -747,19 +772,20 @@ function linkedSnykResources(
     return false;
   try {
     const issue = original("issue");
-    resourceId(issue, "issue");
     const attributes = record(issue["attributes"], "Snyk issue attributes");
     if (
-      attributes["type"] !== issueTypes.code &&
-      attributes["type"] !== issueTypes["open-source"]
+      issue["type"] !== "issue" ||
+      !("id" in issue) ||
+      !("key" in attributes) ||
+      (attributes["type"] !== issueTypes.code &&
+        attributes["type"] !== issueTypes["open-source"])
     )
       return false;
-    requiredText(attributes["key"], "Snyk issue key");
     const links = record(issue["relationships"], "Snyk issue relationships");
-    resourceId(relationship(links, "organization"), "organization");
-    const projectId = resourceId(relationship(links, "scan_item"), "project");
     return (
-      retainedKey || projectId === resourceId(original("project"), "project")
+      relationship(links, "organization")["type"] === "organization" &&
+      relationship(links, "scan_item")["type"] === "project" &&
+      (retainedKey || original("project")["type"] === "project")
     );
   } catch {
     return false;
@@ -807,7 +833,7 @@ export function snykRestFindingRepository(
   );
   if (
     snykIssueId(
-      scopedIssue(issue, source),
+      selectedIssue(scopedIssue(issue, source), source).attributes,
       source,
       retained["snykRestIssueKey"],
     ) !== finding.source_finding_id
@@ -846,6 +872,7 @@ function readIssues(document: Resource, selected: Scope) {
       selected,
       url,
       seen,
+      cursor,
     );
     cursor = parsed.next;
     return parsed.issues;
@@ -1036,10 +1063,9 @@ export function normalizeSnykIssues(
       );
     },
     ({ issue }) => {
-      const findingId = snykIssueId(issue, source);
-      const id = resourceId(issue, "issue");
+      const { id, attributes } = selectedIssue(issue, source);
       resourceCounts.set(id, (resourceCounts.get(id) ?? 0) + 1);
-      return findingId;
+      return snykIssueId(attributes, source);
     },
     target,
   );
@@ -1073,27 +1099,9 @@ export function snykRestImportRepository(
     .filter(isSnykRestFinding)
     .map((finding) => snykRestFindingRepository(finding, trustedSources));
   const selected = project?.scope ?? bindings[0]?.scope;
-  if (selected) {
-    for (const { scope } of bindings) {
-      if (
-        scope.apiOrigin !== selected.apiOrigin ||
-        scope.organizationId !== selected.organizationId ||
-        scope.projectId !== selected.projectId ||
-        scope.product !== selected.product
-      )
-        throw new Error(
-          "The normalized finding does not match the retained Snyk project scope.",
-        );
-    }
-  }
   if (project) bindings.push(project);
-  if (
-    !bindings.length &&
-    (provider !== "snyk" ||
-      (input.sourceRepositoryUrl === undefined &&
-        input.sourceRepositoryPlatform === undefined))
-  )
-    return;
+  const sourceBinding = bindings[0];
+  if (!sourceBinding) return;
   if (provider !== "snyk")
     throw new Error("Use the snyk provider for Snyk REST issues.");
 
@@ -1103,6 +1111,24 @@ export function snykRestImportRepository(
   if (input.sourceRepositoryUrl !== undefined)
     claims.add(input.sourceRepositoryUrl);
   for (const { evidence } of input.findings) {
+    if (selected && evidence.source_data) {
+      const { sourceRepositoryUrl, ...fields } = evidence.source_data;
+      const supplied = { ...selected, ...fields };
+      const row = scope(supplied, supplied.apiOrigin);
+      if (
+        row.apiOrigin !== selected.apiOrigin ||
+        row.organizationId !== selected.organizationId ||
+        row.projectId !== selected.projectId ||
+        row.product !== selected.product
+      )
+        throw new Error(
+          "The normalized finding does not match the retained Snyk project scope.",
+        );
+      if (sourceRepositoryUrl !== undefined)
+        claims.add(
+          requiredText(sourceRepositoryUrl, "Snyk source repository URL"),
+        );
+    }
     const typed = evidence.details?.repository?.url;
     if (typed) claims.add(typed);
     for (const native of snykRepositoryUrls(evidence.source_data, {
@@ -1111,15 +1137,9 @@ export function snykRestImportRepository(
       claims.add(native);
   }
   for (const url of urls) claims.add(url);
-  const first =
-    bindings[0]?.url ??
-    input.sourceRepositoryUrl ??
-    [...claims].find((url) => /^https?:\/\//iu.test(url));
-  if (!first && !claims.size) return;
-  const url = hostedRepositoryUrl(first, "Snyk source repository");
   // Saved SCM metadata can contradict a caller's mapping but cannot establish one.
   const source = trustedScmBinding(
-    url,
+    sourceBinding.url,
     trustedSources,
     input.sourceRepositoryPlatform !== "other" &&
       bindings.every(

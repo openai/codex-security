@@ -58,6 +58,51 @@ test("a saved target accepts unexpanded integration linkage and checks a supplie
   ).toThrow("project's github origin");
 });
 
+test("CLI and API targets can have empty integration linkage", async () => {
+  for (const origin of ["cli", "api"]) {
+    const project = snykProject();
+    project.data.attributes.origin = origin;
+    Object.assign(project.data.relationships.target.data, {
+      relationships: { integration: { data: null } },
+    });
+    const saved = await capture(project, { data: [snykIssue(false)] });
+    expect(normalizeSnykIssues(saved).findings).toHaveLength(1);
+  }
+});
+
+test("expanded integrations carry their own resource type and nullable UUID", async () => {
+  const project = snykProject();
+  const target = project.data.relationships.target.data;
+  const original = {
+    type: "integration",
+    id: "88888888-8888-4888-8888-888888888888",
+    attributes: { integration_type: "github" },
+  };
+  for (const [identity, error] of [
+    [{ type: "project" }, "integration resource"],
+    [{ type: undefined }, "integration resource"],
+    [{ id: "invalid" }, "integration ID"],
+    [{ id: undefined }, "integration ID"],
+    [{ id: null }, undefined],
+  ] as const) {
+    Object.assign(target, {
+      relationships: { integration: { data: { ...original, ...identity } } },
+    });
+    const collecting = capture(project, { data: [snykIssue(false)] });
+    const saved = {
+      ...snykRestFixture("open-source"),
+      projectJson: JSON.stringify(project.data),
+    };
+    if (error) {
+      await expect(collecting).rejects.toThrow(error);
+      expect(() => normalizeSnykIssues(saved)).toThrow(error);
+    } else {
+      expect((await collecting).complete).toBe(true);
+      expect(normalizeSnykIssues(saved).findings).toHaveLength(1);
+    }
+  }
+});
+
 test("a cross-product issue fails collection but remains an exclusion when reading a saved report", async () => {
   const data = [snykIssue(false), snykIssue(true)];
   await expect(capture(snykProject(), { data })).rejects.toThrow(

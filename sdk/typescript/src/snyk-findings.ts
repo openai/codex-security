@@ -10,6 +10,7 @@ import {
   parseSnykReport,
   SNYK_REST_ISSUES_V1,
 } from "./snyk-rest-v1.js";
+import type { SnykIssuesFindings } from "./snyk-rest-findings.js";
 import { isRecord } from "./record.js";
 import {
   array,
@@ -526,7 +527,7 @@ export async function readSnykFindings(
   path: string,
   target: ExternalImportTarget = "cloud",
   references: readonly ExternalSourceRepository[] = [],
-): Promise<ExternalFindings> {
+): Promise<ExternalFindings & Partial<SnykIssuesFindings>> {
   const input = await readScannerJson(path, parseSnykReport);
   if (Array.isArray(input)) return normalizeSnykJson(input, target);
   const document = record(input, "Snyk findings");
