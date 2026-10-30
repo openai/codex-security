@@ -3,7 +3,7 @@ import { parseJson } from "./value.js";
 
 const MAX_ACTIVITY_PATHS = 8;
 const MAX_PROSE_CHARACTERS = 1_000;
-const SHELL_TOKEN = /"(?:\\.|[^"\\])*"|'[^']*'|[^\s|;&<>]+/gu;
+const SHELL_TOKEN = /"(?:\\.|[^"\\])*"|'[^']*'|(?:\\\\|\\[ \t]|[^\s|;&<>])+/gu;
 
 export type ScanActivityStatus = "running" | "completed" | "failed";
 
@@ -377,8 +377,12 @@ function commandRepositoryPaths(command: string, repository: string): string[] {
   for (const token of command.match(SHELL_TOKEN) ?? []) {
     let value = token;
     const singleQuoted = value.startsWith("'") && value.endsWith("'");
-    if ((value.startsWith('"') && value.endsWith('"')) || singleQuoted) {
+    const doubleQuoted = value.startsWith('"') && value.endsWith('"');
+    if (doubleQuoted || singleQuoted) {
       value = value.slice(1, -1);
+    } else {
+      // POSIX shell escapes keep spaces inside an unquoted argument.
+      value = value.replaceAll(/\\([ \t])/gu, "$1");
     }
     value = value.replaceAll('\\"', '"').replaceAll("\\", "/");
     if (process.platform === "win32" && !singleQuoted) {
