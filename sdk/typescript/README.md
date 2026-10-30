@@ -679,6 +679,12 @@ use `ExternalPublicationOptions` for their supported formats. Both resolve the C
 calling `publish()`. Imported evidence remains not assessed by Codex, and saved
 requests and receipts support retries after interruption.
 
+If there is no upload to prepare, both SDK methods throw
+`NoPublishableFindingsError` before Cloud discovery. Its `selection` contains
+`read`, `findings`, every `excluded` record, and any scanner metadata in
+`report`. For a zero-record report, inspect scanner diagnostics before treating
+the selection as empty. An empty import leaves previously imported findings open.
+
 Prefer each provider's supported native JSON for local and Cloud imports. Keep
 the same acquisition format for repeat imports: SARIF and CSV are compatibility
 options where supported, and changing formats can change record identities or

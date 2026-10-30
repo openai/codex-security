@@ -119,6 +119,17 @@ test.each([
   },
 );
 
+test("a zero-result Semgrep report must retain its errors array", () => {
+  const { errors, ...input } = semgrepJson();
+  expect(normalizeSemgrepFindings(input).findings).toHaveLength(1);
+  expect(() => normalizeSemgrepFindings({ ...input, results: [] })).toThrow(
+    "errors array",
+  );
+  expect(normalizeSemgrepFindings({ ...input, results: [], errors }).read).toBe(
+    0,
+  );
+});
+
 test("failed scans and unrelated SARIF producers fail before publishing partial results", () => {
   const input: any = semgrepJson();
   input.errors = [{ message: "Scan incomplete" }];

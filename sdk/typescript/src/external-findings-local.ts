@@ -8,6 +8,9 @@ import {
   requireExternalImports,
 } from "./external-imports-feature.js";
 import {
+  hasNoExternalRecords,
+  hasScannerDiagnostics,
+  NoPublishableFindingsError,
   snapshotImportOptions,
   type ExternalFindings,
   type ExternalSourceRepository,
@@ -693,6 +696,24 @@ export async function prepareLocalImport(
     preview,
     async import() {
       dependencies.signal?.throwIfAborted();
+      const summary = {
+        repository,
+        read: current.read,
+        ...(current.report === undefined
+          ? {}
+          : { report: structuredClone(current.report) }),
+        ready: current.findings.length,
+        excluded: structuredClone(current.excluded),
+      };
+      if (hasNoExternalRecords(current)) {
+        if (hasScannerDiagnostics(current))
+          throw new NoPublishableFindingsError(structuredClone(current));
+        return {
+          ...summary,
+          findings: [],
+          counts: { created: 0, updated: 0, unchanged: 0 },
+        };
+      }
       const protectedRoot = [
         ...new Set([
           ...workbenchOptions.protectedRoot,
@@ -727,13 +748,7 @@ export async function prepareLocalImport(
         );
       }, dependencies.signal);
       return {
-        repository,
-        read: current.read,
-        ...(current.report === undefined
-          ? {}
-          : { report: structuredClone(current.report) }),
-        ready: current.findings.length,
-        excluded: structuredClone(current.excluded),
+        ...summary,
         findings: result["findings"] as unknown as StoredExternalFinding[],
         counts: result["counts"] as LocalExternalImportResult["counts"],
       };

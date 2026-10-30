@@ -109,6 +109,7 @@ import { parseImportedFindings } from "./findings-import.js";
 import { publishScanToCustom } from "./custom-publish.js";
 import {
   ExternalPublicationError,
+  NoPublishableFindingsError,
   prepareExternalPublication,
   type ExternalPublicationProgress,
   type ExternalPublicationResult,
@@ -120,8 +121,15 @@ import {
   externalImportsEnabled,
 } from "./external-imports-feature.js";
 import { listLocalExternalFindings } from "./external-findings-local.js";
-import { EXTERNAL_FINDINGS_READERS } from "./external-findings-read.js";
-import type { ExternalFindings } from "./external-findings.js";
+import {
+  EXTERNAL_FINDINGS_PROVIDERS,
+  EXTERNAL_FINDINGS_READERS,
+} from "./external-findings-read.js";
+import {
+  hasNoExternalRecords,
+  isEmptyExternalReport,
+  type ExternalFindings,
+} from "./external-findings.js";
 import {
   publishPatchReview,
   resolvePatchReviewPublisher,
@@ -3619,6 +3627,24 @@ export async function main(
             format === "toon" &&
             !formatExplicit &&
             !argv.some((argument) => OUTPUT_OPTION.test(argument));
+          const emptyReportDisplay = ({
+            read,
+            report,
+          }: Pick<ExternalFindings, "read" | "report">) =>
+            !machineFormat && read === 0 && report
+              ? { report: terminalReportValue(report) }
+              : {};
+          const showExclusions = (excluded: ExternalFindings["excluded"]) => {
+            const sample = excluded.slice(0, 5);
+            for (const item of sample)
+              writeDiagnostic(
+                `Excluded item ${item.position}: ${diagnosticValue(item.reason)}\n`,
+              );
+            if (sample.length < excluded.length)
+              writeDiagnostic(
+                `Showing ${sample.length} of ${excluded.length} exclusions. Use --format json for every position and reason.\n`,
+              );
+          };
           const confirmImport = async (
             preview: ExternalFindings,
             showPreview: () => void,
@@ -3718,10 +3744,7 @@ export async function main(
                 writeDiagnostic(
                   `Local repository: ${diagnosticValue(preview.repository)}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}\n`,
                 );
-                for (const excluded of preview.excluded)
-                  writeDiagnostic(
-                    `Excluded item ${excluded.position}: ${diagnosticValue(excluded.reason)}\n`,
-                  );
+                showExclusions(preview.excluded);
                 for (const finding of preview.findings.slice(0, 5))
                   writeDiagnostic(
                     `  ${diagnosticValue(finding.source_finding_id)} [${finding.evidence.severity}] ${diagnosticValue(finding.evidence.title)}\n`,
@@ -3734,7 +3757,18 @@ export async function main(
               if (options.dryRun) {
                 if (humanSummary)
                   renderedOutput = "Dry run complete. No findings stored.\n";
-                return { ...preview, dryRun: true };
+                return {
+                  ...preview,
+                  ...emptyReportDisplay(preview),
+                  dryRun: true,
+                };
+              }
+              if (hasNoExternalRecords(preview)) {
+                const result = await prepared.import();
+                if (humanSummary)
+                  renderedOutput =
+                    "The report contains no findings. Nothing was stored.\n";
+                return { ...result, ...emptyReportDisplay(result) };
               }
               if (!(await confirmImport(preview, showPreview))) {
                 if (humanSummary) renderedOutput = "No findings stored.\n";
@@ -3767,10 +3801,7 @@ export async function main(
                 writeDiagnostic(
                   `Cloud app: ${diagnosticValue(preview.cloudUrl)}\n`,
                 );
-              for (const excluded of preview.excluded)
-                writeDiagnostic(
-                  `Excluded item ${excluded.position}: ${diagnosticValue(excluded.reason)}\n`,
-                );
+              showExclusions(preview.excluded);
               writeDiagnostic(
                 `Evidence file: ${diagnosticValue(resolveCliPath(dependencies.currentDirectory(), args.file))}\nImported evidence remains not assessed by Codex.\n`,
               );
@@ -3813,6 +3844,33 @@ export async function main(
               writeDiagnostic(renderExternalPublicationSummary(result));
             return { ...result };
           } catch (error) {
+            const selection =
+              error instanceof NoPublishableFindingsError
+                ? error.selection
+                : undefined;
+            if (
+              selection &&
+              isEmptyExternalReport(selection) &&
+              !controller.signal.aborted
+            ) {
+              const message =
+                "The report contains no findings. Nothing was uploaded; the Cloud destination was not checked.\n";
+              if (humanSummary) renderedOutput = message;
+              else if (!structured) writeDiagnostic(message);
+              return {
+                ...selection,
+                ...emptyReportDisplay(selection),
+                status: "empty",
+                published: false,
+                ready: 0,
+                repository: options.repository,
+                source: {
+                  provider: EXTERNAL_FINDINGS_PROVIDERS[options.provider],
+                  source_key: options.sourceKey,
+                },
+                ...(options.dryRun ? { dryRun: true } : {}),
+              };
+            }
             if (argv.includes("--full-output") && machineFormat)
               failedResultOutput = {
                 format,
@@ -3828,10 +3886,21 @@ export async function main(
                 renderedOutput = renderExternalPublicationSummary(error.result);
               return { ...error.result };
             }
-            const failure = { status: "failed", error: diagnosticValue(error) };
+            if (selection && !machineFormat) showExclusions(selection.excluded);
+            const failure = {
+              status: "failed",
+              error: diagnosticValue(error),
+              ...(machineFormat &&
+                selection && {
+                  read: selection.read,
+                  ready: 0,
+                  excluded: selection.excluded,
+                  ...(selection.report && { report: selection.report }),
+                }),
+            };
             if (
               machineFormat &&
-              !argv.includes("--full-output") &&
+              (!argv.includes("--full-output") || selection !== undefined) &&
               argv.some((argument) => /^--filter-output(?:=|$)/u.test(argument))
             )
               filteredScanFailure = { format, data: failure };
@@ -7066,11 +7135,13 @@ export async function main(
   } finally {
     updateController.abort();
   }
+  let frameworkOutput = frameworkCapture.text();
   if (filteredScanFailure !== undefined) {
     // Success-field filters do not apply to diagnostics. Reuse Incur's format
     // and token controls without running the saved scan a second time.
     const failureOutput = captureOutput();
     const failureArguments = ["render", "--format", filteredScanFailure.format];
+    if (failedResultOutput) failureArguments.push("--full-output");
     for (let index = 0; index < argv.length; index += 1) {
       const argument = argv[index]!;
       if (!/^--token-(?:count|limit|offset)(?:=|$)/u.test(argument)) continue;
@@ -7092,9 +7163,26 @@ export async function main(
         stdout: failureOutput.stream.write,
         exit: () => undefined,
       });
-    renderedOutput = failureOutput.text();
+    if (failedResultOutput) {
+      const previous: JsonValue = JSON.parse(frameworkOutput);
+      frameworkOutput = failureOutput.text();
+      const unfiltered: JsonValue = JSON.parse(frameworkOutput);
+      if (
+        isJsonObject(previous) &&
+        isJsonObject(previous["meta"]) &&
+        isJsonObject(unfiltered) &&
+        isJsonObject(unfiltered["meta"])
+      )
+        frameworkOutput = JSON.stringify({
+          ...previous,
+          data: unfiltered["data"],
+          meta: {
+            ...previous["meta"],
+            nextOffset: unfiltered["meta"]["nextOffset"],
+          },
+        });
+    } else renderedOutput = failureOutput.text();
   }
-  let frameworkOutput = frameworkCapture.text();
   if (notice !== undefined) {
     try {
       errorOutput.write(formatUpdateNotice(notice));
@@ -9175,6 +9263,19 @@ type VerboseDiagnosticValue = string | number | boolean | null | undefined;
 
 function diagnosticLines(value: unknown): string {
   return errorMessage(value).split("\n").map(diagnosticValue).join("\n");
+}
+
+function terminalReportValue(value: unknown): unknown {
+  if (typeof value === "string") return diagnosticValue(value);
+  if (Array.isArray(value)) return value.map(terminalReportValue);
+  if (isJsonObject(value))
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        diagnosticValue(key),
+        terminalReportValue(item),
+      ]),
+    );
+  return value;
 }
 
 function diagnosticValue(value: unknown): string {

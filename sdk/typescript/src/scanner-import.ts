@@ -17,6 +17,51 @@ export function array(value: unknown, label: string): unknown[] {
   return value;
 }
 
+export function optionalArray(value: unknown, label: string): unknown[] {
+  return value === undefined ? [] : array(value, label);
+}
+
+export function successfulSarifInvocations(
+  run: Record<string, unknown>,
+  producer: string,
+): Record<string, unknown>[] {
+  function validateInvocation(value: unknown): Record<string, unknown> {
+    const invocation = record(value, `${producer} invocation`);
+    const successful = invocation["executionSuccessful"];
+    if (typeof successful !== "boolean")
+      throw new Error(
+        `${producer} SARIF executionSuccessful must be a boolean.`,
+      );
+    for (const property of [
+      "toolExecutionNotifications",
+      "toolConfigurationNotifications",
+    ]) {
+      const notifications = optionalArray(
+        invocation[property],
+        `${producer} ${property}`,
+      );
+      for (const entry of notifications) {
+        const notification = record(entry, `${producer} notification`);
+        if (notification["level"] === "error")
+          throw new Error(
+            `${producer} SARIF contains scan error notifications: ${JSON.stringify(notification)}`,
+          );
+      }
+    }
+    if (!successful)
+      throw new Error(`${producer} SARIF contains an unsuccessful invocation.`);
+    return invocation;
+  }
+  if (run["conversion"] !== undefined) {
+    const conversion = record(run["conversion"], `${producer} conversion`);
+    if (conversion["invocation"] !== undefined)
+      validateInvocation(conversion["invocation"]);
+  }
+  return optionalArray(run["invocations"], `${producer} invocations`).map(
+    validateInvocation,
+  );
+}
+
 export function text(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
 }
@@ -25,6 +70,27 @@ export function requiredText(value: unknown, label: string): string {
   const result = text(value);
   if (!result) throw new Error(`${label} must be nonempty text.`);
   return result;
+}
+
+/** SARIF repository claims must be checked even when a run has no results. */
+export function sarifRepositoryUrls(
+  run: unknown,
+  producer: "Endor" | "Semgrep" | "Snyk",
+): string[] {
+  if (run == null) return [];
+  return array(
+    record(run, `${producer} run context`)["versionControlProvenance"] ?? [],
+    `${producer} version control provenance`,
+  ).flatMap((entry) => {
+    const uri = record(entry, `${producer} repository provenance`)[
+      "repositoryUri"
+    ];
+    const url =
+      producer === "Semgrep"
+        ? text(uri)
+        : requiredText(uri, `${producer} repository URI`);
+    return url === null ? [] : [url];
+  });
 }
 
 export function strings(value: unknown): string[] {
@@ -52,28 +118,32 @@ export function stableId(prefix: string, fields: unknown[]): string {
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
 const gunzipAsync = promisify(gunzip);
 
-async function readScannerBytes(path: string): Promise<Buffer> {
+async function readScannerBytes(path: string) {
   const bytes = await readFile(path);
-  return bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipAsync(bytes) : bytes;
+  const gzip = bytes[0] === 0x1f && bytes[1] === 0x8b;
+  return { gzip, bytes: gzip ? await gunzipAsync(bytes) : bytes };
 }
 
 export async function readScannerText(path: string): Promise<string> {
-  return strictUtf8.decode(await readScannerBytes(path));
+  const { bytes, gzip } = await readScannerBytes(path);
+  const contents = strictUtf8.decode(bytes);
+  if (!gzip && /\.gz$/iu.test(path) && !contents.trim())
+    throw new Error("The report is blank and contains no gzip stream.");
+  return contents;
 }
 
-export function parseJsonOrJsonl(contents: string): unknown {
+export function parseJsonOrJsonl(contents: string, path: string): unknown {
   try {
     return JSON.parse(contents);
-  } catch {
-    return contents
-      .split(/\r?\n/u)
-      .filter((line) => line.trim())
-      .map((line) => JSON.parse(line));
+  } catch (error) {
+    const lines = contents.split(/\r?\n/u).filter((line) => line.trim());
+    if (!lines.length && /\.(?:json|csv)(?:\.gz)?$/iu.test(path)) throw error;
+    return lines.map((line) => JSON.parse(line));
   }
 }
 
 export async function readScannerJson(path: string): Promise<unknown> {
-  const bytes = await readScannerBytes(path);
+  const { bytes } = await readScannerBytes(path);
   let decoded: string;
   try {
     decoded = strictUtf8.decode(bytes);

@@ -101,9 +101,9 @@ can omit those details otherwise.
 
 Publication status describes import processing and acknowledged records, not
 scanner coverage. A `complete` publication does not resolve scan diagnostics or
-establish a clean security result. Cloud publication requires at least one
-supported finding; an empty report can still be previewed locally with its
-metadata. Review exclusions before approving either destination.
+establish a clean security result. A report with no records or diagnostics exits successfully without uploading.
+If an empty report carries diagnostics, the local preview retains them and
+the import reports them as a failure. Review exclusions before approving either destination.
 
 ## Assess an imported finding locally
 

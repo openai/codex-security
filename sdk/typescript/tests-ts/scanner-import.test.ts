@@ -8,6 +8,7 @@ import {
   readScannerText,
   relativePath,
   sarifRunContextForResult,
+  successfulSarifInvocations,
 } from "../src/scanner-import.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
@@ -77,6 +78,52 @@ test("scanner readers preserve UTF-8 and JSON parse diagnostics", async () => {
     message: `Scanner JSON could not be parsed. ${syntax.message}`,
     cause: { name: "SyntaxError", message: syntax.message },
   });
+});
+
+test.each(["toolExecutionNotifications", "toolConfigurationNotifications"])(
+  "SARIF %s warnings preserve a successful invocation",
+  (property) => {
+    const invocation = {
+      executionSuccessful: true,
+      [property]: [
+        { level: "warning", message: { text: "Synthetic scan warning" } },
+        { level: "note", message: { text: "Synthetic scan note" } },
+      ],
+    };
+    const run = { invocations: [invocation], conversion: { invocation } };
+    expect(successfulSarifInvocations(run, "Example")).toEqual([invocation]);
+  },
+);
+
+test("malformed SARIF notifications cannot hide a scanner error", () => {
+  for (const [notifications, message] of [
+    [{ level: "error" }, "must be an array"],
+    [[null], "must be an object"],
+  ] as const) {
+    const invocation = {
+      executionSuccessful: true,
+      toolConfigurationNotifications: notifications,
+    };
+    const run = { invocations: [invocation] };
+    expect(() => successfulSarifInvocations(run, "Example")).toThrow(message);
+  }
+});
+
+test("SARIF validates converter failures separately from scanner invocations", () => {
+  const converted = (invocation: unknown) =>
+    successfulSarifInvocations({ conversion: { invocation } }, "Example");
+  expect(() => converted({ executionSuccessful: false })).toThrow(
+    "unsuccessful invocation",
+  );
+  const failedConversion = {
+    toolExecutionNotifications: [
+      { level: "error", message: { text: "Synthetic conversion failure" } },
+    ],
+  };
+  for (const executionSuccessful of [true, false])
+    expect(() =>
+      converted({ ...failedConversion, executionSuccessful }),
+    ).toThrow("Synthetic conversion failure");
 });
 
 test("scanner repository paths retain colons outside Windows drive prefixes", () => {

@@ -207,6 +207,7 @@ export type {
 export type { FindingEmbedder } from "./server/embeddings.js";
 export {
   ExternalPublicationError,
+  NoPublishableFindingsError,
   prepareExternalPublication,
   prepareNormalizedExternalPublication,
 } from "./external-findings-publish.js";

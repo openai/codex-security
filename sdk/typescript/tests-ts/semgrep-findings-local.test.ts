@@ -314,6 +314,12 @@ test.each([
       await expect(
         prepareLocalExternalImport(file, options, dependencies),
       ).rejects.toThrow("does not match");
+      const empty = sarifWithRepositories([sourceRepositoryUrl, originalUrl]);
+      empty.runs[0]!.results.length = 0;
+      await writeFile(file, JSON.stringify(empty));
+      await expect(
+        prepareLocalExternalImport(file, options, dependencies),
+      ).rejects.toThrow("does not match");
       await expect(access(database)).rejects.toThrow();
       await writeReport(sourceRepositoryUrl);
     }

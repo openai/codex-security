@@ -89,6 +89,14 @@ test.each(["plugin", "SARIF"] as const)(
           };
     await fixture.writeJson(input);
     await expect(fixture.prepare()).rejects.toThrow(/repository/iu);
+    if ("findings" in input) {
+      input.findings.length = 0;
+      input.collection.scans[0]!.issueCount = 0;
+    } else input.runs[0]!.results.length = 0;
+    await fixture.writeJson(input);
+    await expect(fixture.prepare()).rejects.toThrow(
+      "does not match a configured remote",
+    );
     expect(await fixture.read()).toEqual([]);
   },
 );

@@ -1362,7 +1362,8 @@ exports.
 ## Import Endor Labs findings
 
 For local or Cloud import, prefer complete native Finding JSON from authenticated
-`endorctl`, scoped to one project and context. Omit `--field-mask` and use
+`endorctl`, scoped to one project and context. The `list.objects` field holds
+an array of findings. An empty `endorctl` response can omit the field. Omit `--field-mask` and use
 `--list-all` to finish pagination:
 
 ```sh
@@ -1563,11 +1564,10 @@ then rerun without
 reviewed input for scripts or the plugin. Without a terminal or `--yes`, no upload
 occurs. Existing source findings keep their Cloud environment; new findings use
 the repository’s current authorized default. Preview shows the environments that
-will receive the selected findings. The terminal preview summarizes severities,
-shows up to five finding IDs and titles, and identifies the evidence file and
-exclusions. `--dry-run --format json` retains all normalized findings and complete
-evidence for inspection. A prompt explicitly includes any records that will be
-skipped.
+will receive the selected findings. The terminal preview shows up to five finding
+IDs and five exclusions. Use `--dry-run --format json` for every normalized
+finding, original evidence, and exclusion reason. A prompt includes the number
+of records that will be skipped.
 
 #### Package vulnerability inputs
 
@@ -1746,10 +1746,24 @@ Results distinguish completion from partial or interrupted work:
 
 | Status        | Exit code | Meaning                                                                                            |
 | ------------- | --------- | -------------------------------------------------------------------------------------------------- |
+| `empty`       | 0         | The reader found no records and no exclusions. No Cloud destination was checked or changed.        |
 | `complete`    | 0         | All selected records were acknowledged and their source records read back.                         |
 | `partial`     | 1         | The import finished, but some records were excluded locally or rejected by Cloud.                  |
 | `interrupted` | 2         | Upload, verification, or receipt persistence stopped; acknowledged work is included in the result. |
 | `failed`      | 2         | Preparation failed before uploading; structured output includes the error.                         |
+
+A recognized zero-record report is a no-op, with or without `--dry-run` or
+`--yes`. It does not require a Cloud login, confirm that the repository exists,
+or close findings from a previous import. With `--to local` the checkout is
+still checked, but no workbench database is created and all counts are zero.
+An unreadable or unsuccessful scan is not an empty import. If every record is
+excluded from Cloud, the command fails; JSON and JSONL include the full
+`excluded` array with each record's position, source ID if known, and reason.
+SARIF imports read results from scanner runs. A log with an empty `runs` array
+has no selected results, even if it contains an unreferenced pool of external
+properties. Every run must include a results array. Failed execution, error
+notifications, and malformed result collections stop the import. An empty Snyk plugin bundle must show a
+successful Open Source (SCA) scan.
 
 For finding imports, `--full-output` requires `--format json` or `--format jsonl`.
 Failed and interrupted imports set the envelope's `ok` to `false`, with
@@ -1762,7 +1776,10 @@ Ctrl-C and SIGTERM retain exit codes 130 and 143. Interrupted JSON output preser
 `unacknowledged`. A lost response can mean unacknowledged findings were accepted;
 resume the saved submission rather than treating them as never uploaded. When
 available, `savedSubmission` identifies the checkpoint to resume by repeating the
-same command. Review `error` before retrying; a repository reset retires the old
+same command. If a newer CLI rejects an older scanner report during parsing,
+resume the saved submission with the CLI version that prepared it. Use the
+original file, state directory, account, and destination so the retry sends the
+approved request. Review `error` before retrying; a repository reset retires the old
 submission and requires fresh approval. Correct local exclusions or final source
 conflicts before preparing a new submission.
 

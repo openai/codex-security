@@ -3,13 +3,18 @@ import type {
   ExternalPublicationInput,
   ExternalSourceRepository,
 } from "./external-findings.js";
+import { hasNoExternalRecords } from "./external-findings.js";
+import { readScannerJson, sarifRepositoryUrls } from "./scanner-import.js";
 import type { Provider } from "./external-import-models.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
-import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
-import { readSemgrepFindings } from "./semgrep-findings.js";
+import { normalizeSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
+import { normalizeSemgrepFindings } from "./semgrep-findings.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
-import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
+import {
+  normalizeEndorFindings,
+  endorRepositoryUrls,
+} from "./endor-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
 import { readInspectorFindings } from "./inspector-findings.js";
 import { isGitHubCloudHost } from "./git-remote.js";
@@ -66,51 +71,60 @@ export async function readExternalFindings(
       sourceRepositories: [{ url: sourceRepositoryUrl }],
     };
   }
-  if (options.provider === "snyk") {
-    const findings = await readSnykFindings(path, target);
-    return {
-      findings,
-      sourceRepositories: findings.findings.flatMap(({ evidence }) =>
+  if (
+    options.provider === "snyk" ||
+    options.provider === "semgrep" ||
+    options.provider === "endor"
+  ) {
+    const input = await readScannerJson(path);
+    let findings: ExternalFindings;
+    let repositoryUrls: string[];
+    if (options.provider === "snyk") {
+      findings = normalizeSnykFindings(input, target);
+      repositoryUrls = findings.findings.flatMap(({ evidence }) =>
         snykRepositoryUrls(evidence.source_data, {
           normalizeGitRemote: false,
-        }).map((url) => ({ url })),
-      ),
-    };
-  }
-  if (options.provider === "semgrep") {
-    const findings = await readSemgrepFindings(
-      path,
-      {
-        sourceRepositoryUrl: options.sourceRepositoryUrl ?? "",
-      },
-      target,
-    );
-    const sourceRepositories = findings.findings.flatMap(({ evidence }) => {
-      const context = evidence.source_data?.["runContext"];
-      const references = isRecord(context)
-        ? context["versionControlProvenance"]
-        : undefined;
-      return Array.isArray(references)
-        ? references.flatMap((reference) =>
-            isRecord(reference) &&
-            typeof reference["repositoryUri"] === "string" &&
-            reference["repositoryUri"].trim()
-              ? [{ url: reference["repositoryUri"] }]
-              : [],
-          )
-        : [];
-    });
-    return { findings, sourceRepositories };
-  }
-  if (options.provider === "endor") {
-    const parsed = await readEndorFindings(path, target);
+        }),
+      );
+    } else if (options.provider === "endor") {
+      findings = normalizeEndorFindings(input, target);
+      repositoryUrls = findings.findings.flatMap(({ evidence }) =>
+        endorRepositoryUrls(evidence.source_data),
+      );
+    } else {
+      findings = normalizeSemgrepFindings(
+        input,
+        { sourceRepositoryUrl: options.sourceRepositoryUrl ?? "" },
+        target,
+      );
+      repositoryUrls = findings.findings.flatMap(({ evidence }) =>
+        sarifRepositoryUrls(evidence.source_data?.["runContext"], "Semgrep"),
+      );
+    }
+    if (
+      target === "local" &&
+      hasNoExternalRecords(findings) &&
+      isRecord(input)
+    ) {
+      if (
+        options.provider === "snyk" &&
+        input["format"] === "snyk-findings-export/v1"
+      )
+        repositoryUrls = snykRepositoryUrls(input, {
+          normalizeGitRemote: false,
+        });
+      else if (input["version"] === "2.1.0" && Array.isArray(input["runs"])) {
+        const producer = (
+          { endor: "Endor", snyk: "Snyk", semgrep: "Semgrep" } as const
+        )[options.provider];
+        repositoryUrls = input["runs"].flatMap((run) =>
+          sarifRepositoryUrls(run, producer),
+        );
+      }
+    }
     return {
-      findings: parsed,
-      sourceRepositories: parsed.findings.flatMap((finding) =>
-        endorRepositoryUrls(finding.evidence.source_data).map((url) => ({
-          url,
-        })),
-      ),
+      findings,
+      sourceRepositories: repositoryUrls.map((url) => ({ url })),
     };
   }
   if (options.provider === "github")

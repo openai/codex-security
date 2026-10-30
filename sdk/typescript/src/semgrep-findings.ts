@@ -18,12 +18,15 @@ import {
   hasSarifExternalPropertyReferences,
   indexSarifRules,
   normalizeRecords,
+  optionalArray,
   readScannerJson,
   record,
   relativePath,
   requiredText,
+  sarifRepositoryUrls,
   sarifRunContextForResult,
   stableId,
+  successfulSarifInvocations,
   text,
 } from "./scanner-import.js";
 
@@ -154,13 +157,16 @@ export function normalizeSemgrepFindings(
     return normalizeSemgrepSarif(document, options, target);
   const repositoryUrl = sourceRepository(options);
   requiredText(document["version"], "Semgrep version");
-  if (array(document["errors"] ?? [], "Semgrep errors").length)
+  const { results, paths: _paths, time: _time, ...context } = document;
+  const rows = array(results, "Semgrep results");
+  if (!rows.length && document["errors"] === undefined)
+    throw new Error("An empty Semgrep report must include its errors array.");
+  if (optionalArray(document["errors"], "Semgrep errors").length)
     throw new Error(
       "The Semgrep report contains scan errors; supply a successful report before importing findings.",
     );
-  const { results, paths: _paths, time: _time, ...context } = document;
   return normalizeRecords(
-    array(results, "Semgrep results"),
+    rows,
     (value) =>
       projectNativeJsonResult(parseNativeJsonResult(value, "Semgrep"), {
         origin: "Semgrep",
@@ -185,15 +191,8 @@ export function normalizeSemgrepSarif(
     throw new Error("Expected Semgrep SARIF 2.1.0.");
   const entries = array(document["runs"], "SARIF runs").flatMap((value) => {
     const run = record(value, "SARIF run");
-    for (const entry of array(
-      run["versionControlProvenance"] ?? [],
-      "Version control provenance",
-    )) {
-      const declared = text(
-        record(entry, "Repository provenance")["repositoryUri"],
-      );
+    for (const declared of sarifRepositoryUrls(run, "Semgrep")) {
       if (
-        declared &&
         cloudRepositoryUrlKey(declared) !== cloudRepositoryUrlKey(repositoryUrl)
       )
         throw new Error(
@@ -212,16 +211,10 @@ export function normalizeSemgrepSarif(
       hasSarifExternalPropertyReferences(run["externalPropertyFileReferences"])
     )
       throw new Error("Use a self-contained Semgrep SARIF report.");
-    for (const invocation of array(
-      run["invocations"] ?? [],
-      "Semgrep invocations",
-    )) {
-      const details = record(invocation, "Semgrep invocation");
-      if (details["executionSuccessful"] === false)
-        throw new Error("Semgrep SARIF contains an unsuccessful invocation.");
+    for (const details of successfulSarifInvocations(run, "Semgrep")) {
       if (
-        array(
-          details["toolExecutionNotifications"] ?? [],
+        optionalArray(
+          details["toolExecutionNotifications"],
           "Semgrep scan notifications",
         ).length
       )
@@ -235,7 +228,7 @@ export function normalizeSemgrepSarif(
     const { results: _results, tool: _tool, ...runContext } = run;
     const { rules: _rules, ...driverContext } = driver;
     const { driver: _driver, ...toolContext } = tool;
-    return array(run["results"] ?? [], "Semgrep results").map((result) => ({
+    return array(run["results"], "Semgrep results").map((result) => ({
       result,
       rulesById,
       hasRules: rules.length > 0,

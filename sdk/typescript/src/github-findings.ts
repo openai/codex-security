@@ -327,7 +327,7 @@ export async function readGitHubFindings(
   target: ExternalImportTarget = "cloud",
 ): Promise<ExternalFindings> {
   try {
-    const payload = parseJsonOrJsonl(await readScannerText(path));
+    const payload = parseJsonOrJsonl(await readScannerText(path), path);
     const rows = Array.isArray(payload) ? payload : [payload];
     if (
       (rows.length > 0 && rows.every(Array.isArray)) ||

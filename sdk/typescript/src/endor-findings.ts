@@ -7,29 +7,23 @@ import {
   hasSarifExternalPropertyReferences,
   indexSarifRules,
   normalizeRecords,
+  optionalArray,
   readScannerJson,
   record,
   relativePath,
   requiredText,
+  sarifRepositoryUrls,
   sarifRunContextForResult,
   strings,
+  successfulSarifInvocations,
   text,
 } from "./scanner-import.js";
 
 /** @internal Repository claims retained in the adapter's original SARIF context. */
 export function endorRepositoryUrls(sourceData: unknown): string[] {
-  if (!isRecord(sourceData)) return [];
-  const run = sourceData["runContext"];
-  if (run == null) return [];
-  return array(
-    record(run, "Endor run context")["versionControlProvenance"] ?? [],
-    "Endor version control provenance",
-  ).map((entry) =>
-    requiredText(
-      record(entry, "Endor repository provenance")["repositoryUri"],
-      "Endor repository URI",
-    ),
-  );
+  return isRecord(sourceData)
+    ? sarifRepositoryUrls(sourceData["runContext"], "Endor")
+    : [];
 }
 
 /** Saved Endor Finding objects, an array, or an unmasked ListFindingsResponse. */
@@ -45,20 +39,50 @@ export function normalizeEndorFindings(
   if (list) {
     const response = record(list["response"] ?? {}, "Endor list response");
     const token = response["next_page_token"];
+    const nextPageId = response["next_page_id"];
+    if (nextPageId != null && typeof nextPageId !== "string")
+      throw new Error("Endor next_page_id must be a string.");
     if (
-      text(response["next_page_id"]) ||
+      text(nextPageId) ||
       (token != null && token !== 0 && token !== "0" && token !== "")
     ) {
       throw new Error(
         "The Endor list response has another page. Supply a complete export or an explicitly selected array.",
       );
     }
+    // Endor can omit the empty repeated objects field, leaving only pagination.
+    if (
+      list["objects"] === undefined &&
+      (Object.keys(list).some((key) => key !== "response") ||
+        Object.keys(response).some(
+          (key) => key !== "next_page_id" && key !== "next_page_token",
+        ))
+    )
+      throw new Error("Expected Endor list.objects in the finding export.");
   }
   const values = list
-    ? array(list["objects"] ?? [], "Endor list.objects")
+    ? optionalArray(list["objects"], "Endor list.objects")
     : Array.isArray(input)
       ? input
       : [input];
+  if (list && values.length === 0) {
+    const count = record(
+      root?.["count_response"] ?? {},
+      "Endor count response",
+    )["count"];
+    const groups = record(
+      root?.["group_response"] ?? {},
+      "Endor group response",
+    )["groups"];
+    if (
+      ((typeof count === "number" || typeof count === "string") &&
+        Number(count) > 0) ||
+      (groups != null && Object.keys(record(groups, "Endor groups")).length > 0)
+    )
+      throw new Error(
+        "The Endor report contains a summary without finding objects. Supply the complete finding export.",
+      );
+  }
   return normalizeRecords(
     values,
     (value) => {
@@ -190,6 +214,7 @@ export function normalizeEndorSarif(
     throw new Error("Expected Endor SARIF 2.1.0.");
   const entries = array(document["runs"], "SARIF runs").flatMap((value) => {
     const run = record(value, "SARIF run");
+    successfulSarifInvocations(run, "Endor");
     const tool = record(run["tool"], "SARIF tool");
     const driver = record(tool["driver"], "SARIF driver");
     if (driver["name"] !== "endorctl")
@@ -206,7 +231,7 @@ export function normalizeEndorSarif(
     const { results: _results, tool: _tool, ...runContext } = run;
     const { rules: _rules, ...driverContext } = driver;
     const { driver: _driver, ...toolContext } = tool;
-    return array(run["results"] ?? [], "Endor results").map((result) => ({
+    return array(run["results"], "Endor results").map((result) => ({
       result,
       rulesById,
       documentContext,

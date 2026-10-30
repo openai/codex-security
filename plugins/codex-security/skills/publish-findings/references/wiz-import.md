@@ -54,6 +54,7 @@ For Cloud publication, read the structured result even when the process exits no
 
 | Status        | Exit code | Meaning                                                                              |
 | ------------- | --------- | ------------------------------------------------------------------------------------ |
+| `empty`       | 0         | The report contained no records. No Cloud destination was checked or changed.        |
 | `complete`    | 0         | All selected records were acknowledged and read back.                                |
 | `partial`     | 1         | Local exclusions or final item failures remain.                                      |
 | `interrupted` | 2         | Upload, verification, or receipt persistence stopped; acknowledged work is retained. |

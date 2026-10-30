@@ -37,6 +37,8 @@ import { snykRepositoryUrls } from "./snyk-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import {
+  NoPublishableFindingsError,
+  reportForJson,
   snapshotImportOptions,
   type ExternalFindings,
   type ExternalPublicationInput,
@@ -57,6 +59,8 @@ import type {
   ImportRepository,
   SourceReportSummary,
 } from "./external-import-models.js";
+
+export { NoPublishableFindingsError } from "./external-findings.js";
 
 const MAX_REQUEST_BYTES = 5 * 1024 * 1024;
 
@@ -210,15 +214,6 @@ async function readOptionalFile(path: string): Promise<string | undefined> {
     if (error.code === "ENOENT") return undefined;
     throw error;
   });
-}
-
-function reportForJson(report: ExternalFindings["report"]) {
-  const errors = report?.["errors"];
-  if (!Array.isArray(errors)) return report;
-  const json = JSON.stringify(errors, (_key, entry: unknown) =>
-    entry instanceof Error ? { message: entry.message } : entry,
-  );
-  return { ...report, errors: JSON.parse(json) as unknown[] };
 }
 
 async function writeAtomicJson(path: string, value: unknown): Promise<void> {
@@ -450,15 +445,12 @@ async function preparePublicationInput(
     currentIdentity,
     legacyIdentity,
   } = input;
-  if (parsed.findings.length === 0) {
-    const diagnostics = reportForJson(parsed.report)?.["errors"];
-    throw new CodexSecurityError(
-      `No supported findings are ready to publish. ${parsed.excluded.map((item) => `Item ${item.position}: ${item.reason}`).join(" ")}${Array.isArray(diagnostics) && diagnostics.length ? ` Scanner diagnostics: ${JSON.stringify(diagnostics)}` : ""}`,
-    );
-  }
-  progress({ phase: "discovering", completed: 0 });
   const environment = dependencies.environment ?? process.env;
+  dependencies.signal?.throwIfAborted();
   requireExternalImports(environment);
+  if (parsed.findings.length === 0)
+    throw new NoPublishableFindingsError(parsed);
+  progress({ phase: "discovering", completed: 0 });
   const apiBaseUrl = cloudBaseUrl(environment);
   const cloudApiUrl = `${apiBaseUrl}/external`;
   // Validate the configured return destination before authentication or uploads.

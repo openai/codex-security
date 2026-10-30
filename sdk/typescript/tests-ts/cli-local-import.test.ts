@@ -114,6 +114,74 @@ async function fixture() {
   return { root, repository, file, record, state, deps, command };
 }
 
+test("a zero-record local import skips confirmation and does not initialize the workbench", async () => {
+  const f = await fixture();
+  await writeFile(f.file, "[]");
+  const cli = createCliTest(main);
+  const code = await cli.runCli(f.command, f.deps);
+  expect(code, cli.stderr.text()).toBe(0);
+  expect(JSON.parse(cli.stdout.text())).toMatchObject({
+    repository: f.repository,
+    read: 0,
+    ready: 0,
+    findings: [],
+    excluded: [],
+    counts: { created: 0, updated: 0, unchanged: 0 },
+  });
+  await expect(readdir(f.state)).rejects.toThrow("ENOENT");
+});
+
+test.each(["local", "cloud"])(
+  "zero-record OpenGrep imports to %s preserve scanner diagnostics",
+  async (destination) => {
+    const f = await fixture();
+    const command = [
+      ...f.command,
+      "--source-repository-url",
+      "https://github.com/example/project",
+    ];
+    command[command.indexOf("--provider") + 1] = "opengrep";
+    command[command.indexOf("--to") + 1] = destination;
+    if (destination === "cloud")
+      command[command.indexOf("--repository") + 1] = "example/project";
+    const input = { ...opengrepJson(), results: [] };
+    await writeFile(f.file, JSON.stringify(input));
+    const failed = createCliTest(main);
+    expect(await failed.runCli(command, f.deps)).toBe(2);
+    expect(JSON.parse(failed.stdout.text())).toMatchObject({
+      error: expect.stringContaining(input.errors[0]!.message),
+      report: { errors: input.errors, paths: input.paths },
+    });
+
+    const path = "src/example\u001b[2J\u009b.ts";
+    const paths = { scanned: [path] };
+    await writeFile(f.file, JSON.stringify({ ...input, errors: [], paths }));
+    const clean = createCliTest(main);
+    expect(await clean.runCli(command, f.deps)).toBe(0);
+    expect(JSON.parse(clean.stdout.text())).toMatchObject({
+      read: 0,
+      ready: 0,
+      report: { errors: [], paths },
+    });
+    for (const format of ["md", "toon", "jsonl"]) {
+      const arguments_ = [...command];
+      arguments_[arguments_.indexOf("--format") + 1] = format;
+      for (const flags of [[], ["--dry-run"]]) {
+        const cli = createCliTest(main);
+        expect(await cli.runCli([...arguments_, ...flags], f.deps)).toBe(0);
+        if (format === "jsonl")
+          expect(JSON.parse(cli.stdout.text()).report.paths).toEqual(paths);
+        else {
+          expect(cli.stdout.text()).toContain("src/example");
+          expect(cli.stdout.text()).not.toContain("\u001b");
+          expect(cli.stdout.text()).not.toContain("\u009b");
+        }
+      }
+    }
+    await expect(readdir(f.state)).rejects.toThrow("ENOENT");
+  },
+);
+
 test("local preview and declined confirmation do not create database state or use Cloud", async () => {
   const f = await fixture();
   const preview = createCliTest(main);

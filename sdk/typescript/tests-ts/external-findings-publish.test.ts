@@ -39,6 +39,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import {
   ExternalPublicationError,
+  NoPublishableFindingsError,
   prepareExternalPublication,
   prepareNormalizedExternalPublication,
   type ExternalPublicationOptions,
@@ -661,6 +662,388 @@ async function fixture(
     command,
   };
 }
+
+test("a zero-record report needs no Cloud account, destination lookup, confirmation, or submission", async () => {
+  const f = await fixture([]);
+  await rm(f.environment.CODEX_HOME, { recursive: true });
+  let requests = 0;
+  const deps = {
+    ...f.cliDeps,
+    cloudFetch: async () => {
+      requests++;
+      throw new Error("Unexpected Cloud request");
+    },
+  };
+  for (const flags of [[], ["--dry-run"], ["--yes", "--full-output"]]) {
+    const cli = createCliTest(main);
+    expect(await cli.runCli([...f.command, ...flags], deps)).toBe(0);
+    const output = JSON.parse(cli.stdout.text());
+    const selection = flags.includes("--full-output") ? output.data : output;
+    if (flags.includes("--full-output")) expect(output.ok).toBe(true);
+    expect(selection).toMatchObject({
+      status: "empty",
+      published: false,
+      read: 0,
+      ready: 0,
+      findings: [],
+      excluded: [],
+    });
+    expect(selection.dryRun).toBe(flags.includes("--dry-run") || undefined);
+    expect(selection).not.toHaveProperty("destination");
+    expect(selection).not.toHaveProperty("accountId");
+  }
+  expect(requests).toBe(0);
+  await expect(readdir(f.environment.CODEX_SECURITY_STATE_DIR)).rejects.toThrow(
+    "ENOENT",
+  );
+});
+
+test("an entirely excluded report fails with all positions intact and a short diagnostic", async () => {
+  const f = await fixture(
+    Array.from({ length: 500 }, (_, index) =>
+      normalized(`id-${index}`, "unsupported"),
+    ),
+  );
+  await rm(f.environment.CODEX_HOME, { recursive: true });
+  const cli = createCliTest(main);
+  expect(
+    await cli.runCli([...f.command, "--dry-run", "--full-output"], f.cliDeps),
+  ).toBe(2);
+  const output = JSON.parse(cli.stdout.text());
+  expect(output).toMatchObject({
+    ok: false,
+    error: { code: "IMPORT_FAILED" },
+    data: { status: "failed", read: 500, ready: 0 },
+  });
+  expect(
+    output.data.excluded.map((row: { position: number }) => row.position),
+  ).toEqual(Array.from({ length: 500 }, (_, index) => index + 1));
+  expect(output.data.excluded.at(-1)).toMatchObject({
+    source_finding_id: "id-499",
+    reason: expect.any(String),
+  });
+  expect(cli.stderr.text()).not.toContain("Item 500");
+  expect(output.error.message).not.toContain("Item 500");
+  const terminal = createCliTest(main);
+  expect(
+    await terminal.runCli([...f.command.slice(0, -2), "--yes"], f.cliDeps),
+  ).toBe(2);
+  expect(terminal.stderr.text()).toContain("Excluded item 1:");
+  expect(terminal.stderr.text()).toContain("Showing 5 of 500 exclusions");
+  expect(terminal.stderr.text()).not.toContain("Excluded item 6:");
+  for (const format of ["json", "jsonl"]) {
+    const filtered = createCliTest(main);
+    const command = [
+      ...f.command.slice(0, -2),
+      "--format",
+      format,
+      "--full-output",
+      "--filter-output=findings",
+    ];
+    expect(await filtered.runCli(command, f.cliDeps)).toBe(2);
+    const fullFailure = JSON.parse(filtered.stdout.text());
+    expect(fullFailure.data.excluded).toEqual(output.data.excluded);
+    expect(fullFailure.meta.command).toBe("publish findings");
+    const limited = createCliTest(main);
+    expect(
+      await limited.runCli([...command, "--token-limit=5"], f.cliDeps),
+    ).toBe(2);
+    expect(JSON.parse(limited.stdout.text())).toMatchObject({
+      ok: false,
+      data: expect.any(String),
+      meta: { nextOffset: 5 },
+    });
+  }
+  expect(f.posts).toHaveLength(0);
+});
+
+test("excluded record IDs stay intact in JSON and out of terminal markup", async () => {
+  const id = "id-\x1b[2Jexample";
+  const f = await fixture([normalized(id, "unsupported")]);
+  for (const format of ["md", "json", "jsonl"]) {
+    const cli = createCliTest(main);
+    expect(
+      await cli.runCli([...f.command.slice(0, -1), format], f.cliDeps),
+    ).toBe(2);
+    expect(cli.stdout.text()).not.toContain("\x1b[");
+    expect(cli.stderr.text()).not.toContain("\x1b[");
+    if (format !== "md")
+      expect(JSON.parse(cli.stdout.text()).excluded[0].source_finding_id).toBe(
+        id,
+      );
+  }
+});
+
+test("normalized SDK callers can distinguish an empty report from exclusions without authenticating", async () => {
+  for (const selection of [
+    { read: 0, findings: [], excluded: [] },
+    {
+      read: 1,
+      findings: [],
+      excluded: [
+        { position: 1, source_finding_id: null, reason: "Not an occurrence" },
+      ],
+    },
+  ]) {
+    try {
+      await prepareNormalizedExternalPublication(selection, options, {
+        environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+        credentials: async () => {
+          throw new Error("Unexpected credential read");
+        },
+      });
+      throw new Error("Unexpected upload preparation");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NoPublishableFindingsError);
+      expect((error as NoPublishableFindingsError).selection).toEqual(
+        selection,
+      );
+    }
+  }
+});
+
+test("a failed scanner run is not an empty successful import", async () => {
+  const f = await fixture({
+    version: "1.100.0",
+    results: [],
+    errors: [{ message: "example scan error" }],
+  });
+  const command = f.command.map((argument) =>
+    argument === "wiz" ? "semgrep" : argument,
+  );
+  const cli = createCliTest(main);
+  expect(
+    await cli.runCli(
+      [
+        ...command,
+        "--source-repository-url",
+        "https://github.com/example/project",
+        "--yes",
+      ],
+      f.cliDeps,
+    ),
+  ).toBe(2);
+  expect(JSON.parse(cli.stdout.text())).toMatchObject({
+    status: "failed",
+    error: expect.stringContaining("scan errors"),
+  });
+  expect(f.posts).toHaveLength(0);
+});
+
+test("failed or malformed vendor collections never report a successful empty import", async () => {
+  const { snykSarif, snykPluginExport, snykJson } =
+    await import("./support/snyk-import-fixtures.js");
+  const { endorSarif } = await import("./support/endor-import-fixtures.js");
+  const { semgrepSarif } = await import("./support/semgrep-import-fixtures.js");
+  const f = await fixture();
+  await rm(f.environment.CODEX_HOME, { recursive: true });
+  const plugin = snykPluginExport();
+  const badPlugin = (outcome: string) => ({
+    ...plugin,
+    findings: [],
+    collection: {
+      ...plugin.collection,
+      scans: [
+        {
+          category: "sca",
+          outcome,
+          error: "Synthetic diagnostic",
+          issueCount: 0,
+        },
+      ],
+    },
+  });
+  const cases: [string, unknown, string][] = [
+    ...[
+      ["snyk", snykSarif()],
+      ["endor", endorSarif()],
+      ["semgrep", semgrepSarif()],
+    ].flatMap(([provider, report]) => {
+      const doc = report as ReturnType<typeof snykSarif>;
+      const invocationCases = [
+        [{ executionSuccessful: false }, "unsuccessful invocation"],
+        [{ exitCode: 2 }, "executionSuccessful must be a boolean"],
+        ...["toolExecutionNotifications", "toolConfigurationNotifications"].map(
+          (property) => [
+            {
+              executionSuccessful: true,
+              [property]: [
+                { level: "error", message: { text: "Synthetic scan error" } },
+              ],
+            },
+            "scan error notifications",
+          ],
+        ),
+      ].map(
+        ([invocation, reason]) =>
+          [
+            provider,
+            {
+              ...doc,
+              runs: [
+                { ...doc.runs[0], results: [], invocations: [invocation] },
+              ],
+            },
+            reason,
+          ] as [string, unknown, string],
+      );
+      return [
+        ...invocationCases,
+        [
+          provider,
+          { ...doc, runs: [{ ...doc.runs[0], results: undefined }] },
+          "must be an array",
+        ],
+      ] as [string, unknown, string][];
+    }),
+    ...["failed", "denied", "unavailable", "not_requested"].map(
+      (outcome) =>
+        ["snyk", badPlugin(outcome), outcome] as [string, unknown, string],
+    ),
+    ["snyk", { ...plugin, findings: [] }, "reported issues"],
+    [
+      "snyk",
+      { ...snykJson(), ok: false, uniqueCount: 1, vulnerabilities: [] },
+      "reported issues",
+    ],
+    ...[undefined, 0].map(
+      (uniqueCount) =>
+        [
+          "snyk",
+          { ...snykJson(), ok: false, uniqueCount, vulnerabilities: [] },
+          "reported issues",
+        ] as [string, unknown, string],
+    ),
+    [
+      "snyk",
+      {
+        ...plugin,
+        findings: [],
+        collection: {
+          ...plugin.collection,
+          scans: [{ category: "sca", outcome: "succeeded", issueCount: "3" }],
+        },
+      },
+      "nonnegative integer",
+    ],
+    [
+      "snyk",
+      {
+        ...plugin,
+        findings: [],
+        collection: { target: plugin.collection.target },
+      },
+      "successful SCA scan",
+    ],
+    ["endor", { list: { objects: null } }, "must be an array"],
+    [
+      "semgrep",
+      {
+        ...semgrepSarif(),
+        runs: [{ ...semgrepSarif().runs[0], results: null }],
+      },
+      "must be an array",
+    ],
+    [
+      "wiz",
+      {
+        data: {
+          vulnerabilityFindings: { nodes: [] },
+          sastFindings: [{ id: "known-record" }],
+        },
+      },
+      "sastFindings must be an object",
+    ],
+  ];
+  for (const [provider, report, diagnostic] of cases) {
+    await writeFile(f.file, JSON.stringify(report));
+    const command = f.command.map((argument) =>
+      argument === "wiz" ? provider : argument,
+    );
+    const cli = createCliTest(main);
+    expect(
+      await cli.runCli(
+        [
+          ...command,
+          "--source-repository-url",
+          "https://github.com/example/project",
+          "--yes",
+        ],
+        f.cliDeps,
+      ),
+    ).toBe(2);
+    expect(JSON.parse(cli.stdout.text()), provider).toMatchObject({
+      status: "failed",
+      error: expect.stringContaining(diagnostic),
+    });
+  }
+  await writeFile(
+    f.file,
+    JSON.stringify({
+      ...plugin,
+      findings: [],
+      collection: {
+        ...plugin.collection,
+        completeness: {
+          collection: "partial",
+          analysis: "Code denied; SCA succeeded",
+        },
+        scans: [
+          { category: "sca", outcome: "succeeded", issueCount: 0 },
+          { category: "code", outcome: "denied", error: "Code scan denied" },
+        ],
+      },
+    }),
+  );
+  const cleanSca = createCliTest(main);
+  expect(
+    await cleanSca.runCli(
+      f.command.map((argument) => (argument === "wiz" ? "snyk" : argument)),
+      f.cliDeps,
+    ),
+  ).toBe(0);
+  expect(JSON.parse(cleanSca.stdout.text())).toMatchObject({
+    status: "empty",
+    report: {
+      collection: {
+        completeness: { collection: "partial" },
+        scans: [
+          { category: "sca", outcome: "succeeded" },
+          { category: "code", outcome: "denied", error: "Code scan denied" },
+        ],
+      },
+    },
+  });
+  const unsupported = plugin.findings[0]!;
+  await writeFile(
+    f.file,
+    JSON.stringify({
+      ...badPlugin("not_requested"),
+      findings: [
+        {
+          ...unsupported,
+          originatingScanner: "snyk-code",
+          category: "code_issue",
+          observation: { ...unsupported.observation, scan: "code" },
+        },
+      ],
+    }),
+  );
+  const onlyCode = createCliTest(main);
+  expect(
+    await onlyCode.runCli(
+      f.command.map((argument) => (argument === "wiz" ? "snyk" : argument)),
+      f.cliDeps,
+    ),
+  ).toBe(2);
+  expect(JSON.parse(onlyCode.stdout.text())).toMatchObject({
+    read: 1,
+    ready: 0,
+    excluded: [
+      { position: 1, reason: expect.stringContaining("Only Snyk Open Source") },
+    ],
+  });
+});
 
 test("Wiz occurrence mapping preserves original evidence without inventing repository provenance", async () => {
   const record = {

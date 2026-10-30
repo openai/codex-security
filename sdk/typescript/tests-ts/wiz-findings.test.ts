@@ -352,6 +352,23 @@ test("workload secrets and cloud configuration remain visible exclusions in a mi
   ]);
 });
 
+test("an empty Wiz export cannot report a positive finding count", async () => {
+  const page = { nodes: [], totalCount: 20, pageInfo: { hasNextPage: false } };
+  await expect(parse({ data: { sastFindings: page } })).rejects.toThrow(
+    "sastFindings.totalCount",
+  );
+  expect(
+    (await parse({ data: { sastFindings: { ...page, totalCount: 0 } } })).read,
+  ).toBe(0);
+  expect(
+    (
+      await parse({
+        data: { sastFindings: page, iacFindings: { nodes: [iac] } },
+      })
+    ).read,
+  ).toBe(1);
+});
+
 test("GraphQL errors, unfinished finding pages, and unfinished inventory stop parsing", async () => {
   await expect(
     parse({

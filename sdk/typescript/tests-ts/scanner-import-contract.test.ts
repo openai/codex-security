@@ -1,5 +1,6 @@
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { gzipSync } from "node:zlib";
 import { expect, test } from "bun:test";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import { listLocalExternalFindings } from "../src/external-findings-local.js";
@@ -133,6 +134,36 @@ test.each(cases)(
         excluded: [],
         findings: [{ source_finding_id: sourceFindingId, evidence }],
       });
+    } finally {
+      await removeTemporaryDirectory(root);
+    }
+  },
+);
+
+test.each(["github", "wiz"] as const)(
+  "%s distinguishes a missing report from an empty JSON Lines export",
+  async (provider) => {
+    const root = await temporaryDirectory("scanner-import-contract-");
+    try {
+      for (const [name, data] of [
+        ["report.json", ""],
+        ["report.csv.gz", gzipSync(" \n")],
+        ["report.jsonl.gz", ""],
+        ["report.jsonl.gz", " \n"],
+      ] as const) {
+        const path = join(root, name);
+        await writeFile(path, data);
+        await expect(
+          readExternalFindings(path, { provider }),
+        ).rejects.toThrow();
+      }
+      for (const name of ["selection", "selection.jsonl.gz"]) {
+        const path = join(root, name);
+        await writeFile(path, name.endsWith(".gz") ? gzipSync("") : "");
+        expect(
+          (await readExternalFindings(path, { provider })).findings,
+        ).toEqual({ read: 0, findings: [], excluded: [] });
+      }
     } finally {
       await removeTemporaryDirectory(root);
     }

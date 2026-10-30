@@ -49,14 +49,12 @@ export async function prepareLocalExternalImport(
           "SARIF source repository does not match the declared source repository URL.",
         );
     }
+    sourceRepositories = [{ url: source }, ...sourceRepositories];
     if (knownGitHub)
-      sourceRepositories = [
-        { url: source, platform: "github" },
-        ...sourceRepositories.map((reference) => ({
-          ...reference,
-          platform: "github" as const,
-        })),
-      ];
+      sourceRepositories = sourceRepositories.map((reference) => ({
+        ...reference,
+        platform: "github",
+      }));
   }
   const { environment, ...workbench } = dependencies;
   return prepareLocalImport(parsed.findings, normalizedOptions, {

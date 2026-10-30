@@ -433,6 +433,19 @@ test("plugin finding identity ignores scan timestamps and preserves separate occ
   expect(duplicate.excluded).toHaveLength(2);
 });
 
+test("empty plugin bundles cannot omit issues counted by another successful scan", () => {
+  const input = snykPluginExport();
+  input.findings = [];
+  input.collection.scans[0]!.issueCount = 0;
+  input.collection.scans.push({
+    category: "code",
+    tool: "snyk_code_scan",
+    outcome: "succeeded",
+    issueCount: 2,
+  });
+  expect(() => normalizeSnykFindingsExport(input)).toThrow("reported issues");
+});
+
 test("mixed plugin bundles explicitly exclude other products and licenses", () => {
   const input = snykPluginExport();
   for (const [scanner, category, scan] of [

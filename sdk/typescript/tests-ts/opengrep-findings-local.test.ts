@@ -110,11 +110,16 @@ test("empty OpenGrep local imports retain scanner diagnostics without creating f
     excluded: [],
     report,
   });
-  expect(await prepared.import()).toMatchObject({
+  await expect(prepared.import()).rejects.toMatchObject({
+    selection: { report },
+    message: expect.stringContaining(input.errors[0]!.message),
+  });
+  await fixture.writeJson({ ...input, errors: [] });
+  expect(await (await fixture.prepare()).import()).toMatchObject({
     read: 0,
     ready: 0,
     findings: [],
-    report,
+    report: { ...report, errors: [] },
     counts: { created: 0, updated: 0, unchanged: 0 },
   });
   expect(await fixture.read()).toEqual([]);
