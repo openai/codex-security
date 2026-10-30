@@ -5,10 +5,14 @@ import { CodexSecurityError, errorMessage } from "./errors.js";
 import {
   boundSonarWorktree,
   sonarRepositoryForRemote,
+  sonarCheckoutMatchesSource,
   localGitProtectionRoots,
 } from "./external-findings-local.js";
 import { repositoryUrlKey } from "./external-import-contract.js";
-import { requireExternalImports } from "./external-imports-feature.js";
+import {
+  forwardExternalImportSetting,
+  requireExternalImports,
+} from "./external-imports-feature.js";
 import { isRecord } from "./record.js";
 import { array, record, relativePath, requiredText } from "./scanner-import.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
@@ -171,6 +175,28 @@ async function projectFromOrigin(
   return undefined;
 }
 
+async function verifySelectedProject(
+  sonar: SonarCommand,
+  selected: string,
+  organization: string,
+) {
+  const result = await sonar([
+    "api",
+    "get",
+    `/api/components/show?${new URLSearchParams({ component: selected })}`,
+  ]);
+  const component = result["component"];
+  if (
+    !isRecord(component) ||
+    component["key"] !== selected ||
+    component["organization"] !== organization ||
+    component["qualifier"] !== "TRK"
+  )
+    throw new CodexSecurityError(
+      "Sonar could not verify the selected project in the signed-in organization. Check --sonar-project and 'sonar auth status'.",
+    );
+}
+
 async function resolveProject(
   sonar: SonarCommand,
   organization: string,
@@ -202,7 +228,8 @@ async function resolveProject(
     }
     if (component?.["key"] === selected) {
       const alm = component["alm"];
-      if (isRecord(alm) && alm["url"])
+      if (isRecord(alm) && alm["url"]) {
+        await verifySelectedProject(sonar, selected, organization);
         return {
           project: selected,
           repositoryUrl: declaredScannerRepositoryUrl(
@@ -211,7 +238,12 @@ async function resolveProject(
             "local",
           ),
         };
-      if (typeof component["id"] === "string") selectedId = component["id"];
+      }
+      if (
+        component["organization"] === organization &&
+        typeof component["id"] === "string"
+      )
+        selectedId = component["id"];
     }
   }
   if (origin !== undefined) {
@@ -233,8 +265,60 @@ async function resolveProject(
         );
     }
   }
-  if (selected !== undefined) return { project: selected };
+  if (selected !== undefined) {
+    await verifySelectedProject(sonar, selected, organization);
+    return { project: selected };
+  }
   throw new CodexSecurityError(selectProjectHint);
+}
+
+async function activeSonarConnection(sonar: SonarCommand) {
+  const auth = await sonar(["auth", "status", "--format", "json"]);
+  if (auth["status"] !== "connected")
+    throw new CodexSecurityError(
+      `Sonar CLI is not connected (${String(auth["status"])}). Run 'sonar auth login'.`,
+    );
+  const url = URL.parse(requiredText(auth["server"], "Sonar server"));
+  const server = url?.origin;
+  if (
+    !server ||
+    url?.href !== server + "/" ||
+    !["https://sonarcloud.io", "https://sonarqube.us"].includes(server) ||
+    !auth["org"]
+  )
+    throw new CodexSecurityError(
+      "Connect the Sonar CLI to a SonarQube Cloud organization with 'sonar auth login'.",
+    );
+  const organization = requiredText(auth["org"], "Sonar organization");
+  return { server, organization };
+}
+
+async function latestAnalysisBase(
+  sonar: SonarCommand,
+  project: string,
+  branch: string,
+  signal?: AbortSignal,
+) {
+  try {
+    const metadata = await sonar([
+      "api",
+      "get",
+      `/api/project_analyses/search?${new URLSearchParams({ project, branch, ps: "1" })}`,
+    ]);
+    const analysis = array(metadata["analyses"], "Sonar analyses")[0];
+    if (
+      !isRecord(analysis) ||
+      typeof analysis["key"] !== "string" ||
+      !analysis["key"].trim()
+    )
+      return;
+    const base = analysis["relativePathFromScmRoot"];
+    const path = base === "" || base === "." ? "" : relativePath(base);
+    if (path !== null) return { key: analysis["key"], path };
+  } catch {
+    signal?.throwIfAborted();
+  }
+  return undefined;
 }
 
 function exactIssueBatches(
@@ -269,12 +353,13 @@ export async function collectSonarIssues(
   options: SonarCollectionOptions,
   runSonar?: SonarCommand,
 ): Promise<SonarCapture> {
-  options = {
-    ...options,
-    cwd: resolve(options.cwd),
-    environment: { ...(options.environment ?? process.env) },
-  };
-  requireExternalImports(options.environment);
+  const suppliedEnvironment = options.environment ?? process.env;
+  requireExternalImports(suppliedEnvironment);
+  const environment: NodeJS.ProcessEnv = Object.create(null);
+  for (const name in suppliedEnvironment)
+    environment[name] = suppliedEnvironment[name];
+  forwardExternalImportSetting(suppliedEnvironment, environment);
+  options = { ...options, cwd: resolve(options.cwd), environment };
   options.signal?.throwIfAborted();
   const { pullRequest } = options;
   let { branch } = options;
@@ -298,11 +383,10 @@ export async function collectSonarIssues(
         "Provide individual, nonempty Sonar issue keys.",
       );
   }
-  const environment = options.environment ?? process.env;
   if (options.project?.includes(","))
     throw new CodexSecurityError("Select one Sonar project key.");
-  const protectedRoots = [options.cwd, process.cwd()];
-  for (const root of new Set(protectedRoots)) {
+  const protectedRoots = [options.cwd];
+  for (const root of new Set([options.cwd, process.cwd()])) {
     protectedRoots.push(
       ...(await localGitProtectionRoots(root, environment, options.signal)),
     );
@@ -330,23 +414,7 @@ export async function collectSonarIssues(
   if (options.project === undefined && origin === undefined)
     throw new CodexSecurityError(selectProjectHint);
   const sonar = runSonar ?? (await sonarCommand(options, protectedRoots));
-  const auth = await sonar(["auth", "status", "--format", "json"]);
-  if (auth["status"] !== "connected")
-    throw new CodexSecurityError(
-      `Sonar CLI is not connected (${String(auth["status"])}). Run 'sonar auth login'.`,
-    );
-  const server = requiredText(auth["server"], "Sonar server").replace(
-    /\/$/u,
-    "",
-  );
-  if (
-    !["https://sonarcloud.io", "https://sonarqube.us"].includes(server) ||
-    !auth["org"]
-  )
-    throw new CodexSecurityError(
-      "Connect the Sonar CLI to a SonarQube Cloud organization with 'sonar auth login'.",
-    );
-  const organization = requiredText(auth["org"], "Sonar organization");
+  const { server, organization } = await activeSonarConnection(sonar);
   const { project, repositoryUrl } = await resolveProject(
     sonar,
     organization,
@@ -375,6 +443,29 @@ export async function collectSonarIssues(
         "Sonar did not return its main branch. Select the source branch with --sonar-branch.",
       );
     branch = main["name"];
+  }
+  let analysis;
+  if (branch !== undefined && repositoryUrl !== undefined) {
+    const matched =
+      (origin &&
+        repositoryUrlKey(origin) === repositoryUrlKey(repositoryUrl)) ||
+      (await sonarCheckoutMatchesSource(
+        options.cwd,
+        repositoryUrl,
+        protectedRoots,
+        environment,
+        options.signal,
+      ).catch(() => {
+        options.signal?.throwIfAborted();
+        return false;
+      }));
+    if (matched)
+      analysis = await latestAnalysisBase(
+        sonar,
+        project,
+        branch,
+        options.signal,
+      );
   }
   const query = new URLSearchParams({
     organization,
@@ -443,30 +534,20 @@ export async function collectSonarIssues(
     throw new CodexSecurityError(
       `Selected Sonar security issues were not returned for this project and ref: ${[...missing].join(", ")}.`,
     );
-  let projectBase: string | undefined;
-  if (
-    origin &&
-    repositoryUrl &&
-    repositoryUrlKey(origin) === repositoryUrlKey(repositoryUrl) &&
-    branch !== undefined
-  ) {
-    // Only the analysis can place native paths within a bound repository.
-    try {
-      const metadata = await sonar([
-        "api",
-        "get",
-        `/api/project_analyses/search?${new URLSearchParams({ project, branch, ps: "1" })}`,
-      ]);
-      const analysis = array(metadata["analyses"], "Sonar analyses")[0];
-      const base = isRecord(analysis)
-        ? analysis["relativePathFromScmRoot"]
-        : undefined;
-      projectBase =
-        base === "" || base === "." ? "" : (relativePath(base) ?? undefined);
-    } catch {
-      options.signal?.throwIfAborted();
-    }
-  }
+  // Keep native paths when a newer analysis may have changed their repository base during collection.
+  const latest =
+    analysis && branch !== undefined
+      ? await latestAnalysisBase(sonar, project, branch, options.signal)
+      : undefined;
+  const projectBase =
+    analysis && latest?.key === analysis.key && latest.path === analysis.path
+      ? analysis.path
+      : undefined;
+  const active = await activeSonarConnection(sonar);
+  if (active.server !== server || active.organization !== organization)
+    throw new CodexSecurityError(
+      "The active Sonar connection changed during collection. Select the intended connection and collect again.",
+    );
   return {
     format: "sonar-issues/v1",
     server,

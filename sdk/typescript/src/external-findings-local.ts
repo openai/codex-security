@@ -580,8 +580,12 @@ async function requireMatchingRepository(
     ...(typeof protectedRoots === "string"
       ? [protectedRoots]
       : (protectedRoots ?? [])),
-    await abortable(() => canonicalConfigPath(process.cwd()), signal),
   ];
+  // The Sonar caller includes the discovered Git roots for both checkouts.
+  if (provider !== "sonar")
+    gitProtectedRoots.push(
+      await abortable(() => canonicalConfigPath(process.cwd()), signal),
+    );
   if (
     provider === "sonar" &&
     !(await boundSonarWorktree(
@@ -650,11 +654,7 @@ async function requireMatchingRepository(
           "A configured Git remote URL contains a line break. Configure each fetch URL as a separate Git value.",
         );
     }
-    remotes.push(
-      ...(provider === "sonar"
-        ? values.flatMap((value) => sonarRepositoryForRemote(value) ?? [])
-        : values),
-    );
+    remotes.push(...values);
   }
   const boundProvider =
     provider === "sonar" ||
@@ -662,6 +662,10 @@ async function requireMatchingRepository(
     provider === "blackduck" ||
     provider === "veracode";
   const loosePlatformFor = localRepositoryPlatform(provider, sources, false);
+  const comparable =
+    provider === "sonar"
+      ? remotes.flatMap((remote) => sonarRepositoryForRemote(remote) ?? [])
+      : remotes;
   let allSourcesMatched = true;
   for (const source of sources) {
     const bound = boundProvider || strictSources.has(source.url);
@@ -669,18 +673,50 @@ async function requireMatchingRepository(
       ? (strictSources.get(source.url) ?? strictPlatformFor(source))
       : loosePlatformFor(source);
     const identity = (url: string) => remoteRepository(url, platform, bound);
-    const targets = remotes.flatMap((remote) => identity(remote) ?? []);
+    const targets = comparable.flatMap((remote) => identity(remote) ?? []);
+    const target = identity(source.url);
     if (!targets.length) {
       allSourcesMatched = false;
-      continue;
+      // An unrecognized transport cannot prove an HTTPS binding, but a different
+      // repository on a custom SSH host can still contradict the report.
+      const configured =
+        provider === "sonar"
+          ? remotes
+              .filter((remote) => !/[\s\\\p{Cc}?#]/u.test(remote))
+              .flatMap((remote) => identity(remote) ?? [])
+          : [];
+      if (
+        !target ||
+        !configured.length ||
+        configured.some((remote) => matchingRemote(remote, target))
+      )
+        continue;
     }
-    const target = identity(source.url);
     if (!target || !targets.some((remote) => matchingRemote(remote, target)))
       throw new CodexSecurityError(
         `Imported repository ${JSON.stringify(source.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
       );
   }
   return allSourcesMatched;
+}
+
+export function sonarCheckoutMatchesSource(
+  repository: string,
+  url: string,
+  protectedRoots: readonly string[],
+  environment: NodeJS.ProcessEnv,
+  signal?: AbortSignal,
+) {
+  return requireMatchingRepository(
+    repository,
+    "sonar",
+    [{ url }],
+    new Map(),
+    () => "sonar",
+    [...protectedRoots],
+    environment,
+    signal,
+  );
 }
 
 async function localContext(

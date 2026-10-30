@@ -1614,6 +1614,24 @@ describe("local normalized scanner findings", () => {
     ).rejects.toThrow("remote URL contains a line break");
   });
 
+  test("a different project on a custom SSH remote contradicts the Sonar source", async () => {
+    const { repository, environment } = await fixture({
+      remote: "git@git.example.invalid:team/other.git",
+    });
+    await expect(
+      prepareNormalizedLocalImport(
+        input(),
+        { repository, ...source, provider: "sonar" },
+        {
+          environment,
+          sourceRepositories: [
+            { url: "https://git.example.invalid/team/project" },
+          ],
+        },
+      ),
+    ).rejects.toThrow("does not match a configured remote");
+  });
+
   test.each([
     [
       "ftp://example.invalid/team/project",

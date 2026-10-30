@@ -17,6 +17,7 @@ import {
   semgrepSarif,
 } from "./support/semgrep-import-fixtures.js";
 import { endorFinding, endorSarif } from "./support/endor-import-fixtures.js";
+import { sonarGitTestEnvironment } from "./support/sonar-import-fixtures.js";
 import { normalizeEndorFindings } from "../src/endor-findings.js";
 import { createServer, type ServerResponse } from "node:http";
 import { execFile } from "node:child_process";
@@ -714,9 +715,12 @@ test("Sonar replays the selected evidence locally and to Cloud without signing i
   const f = await fixture(source, repo);
   const checkout = join(f.root, "checkout");
   const git = promisify(execFile);
-  await git("git", ["init", "--quiet", checkout]);
-  await git("git", ["-C", checkout, "remote", "add", "origin", repo]);
-  const deps = { ...f.cliDeps, currentDirectory: () => checkout };
+  const environment = sonarGitTestEnvironment(f.cliDeps.environment);
+  await git("git", ["init", "--quiet", checkout], { env: environment });
+  await git("git", ["-C", checkout, "remote", "add", "origin", repo], {
+    env: environment,
+  });
+  const deps = { ...f.cliDeps, environment, currentDirectory: () => checkout };
   const first = createCliTest(main);
   const previewExit = await first.runCli(
     [

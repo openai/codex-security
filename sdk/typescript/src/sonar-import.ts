@@ -154,10 +154,26 @@ export async function prepareSonarImport(
     });
   }
   const evidenceDigest = hash("sha256", JSON.stringify(report));
+  const checkout = hash("sha256", repository);
+  const localCapture = join(root, `${evidenceDigest}.${checkout}.json`);
+  if (
+    options.to === "local" &&
+    options.yes &&
+    !options.dryRun &&
+    retained &&
+    retained[2] !== checkout
+  ) {
+    throw new Error(
+      "This Sonar capture has not been reviewed for this checkout. Run import sonar with this capture and --dry-run here, then confirm the returned capture.",
+    );
+  }
   let capture =
-    input && retained?.[1] === evidenceDigest
+    options.to === "cloud" &&
+    input &&
+    retained?.[1] === evidenceDigest &&
+    retained?.[2] === checkout
       ? input
-      : join(root, evidenceDigest + ".json");
+      : localCapture;
   if (capture !== input) await writeAtomicJson(capture, report);
   try {
     const repositoryUrl = report.repositoryUrl ?? options.sourceRepositoryUrl;
@@ -189,7 +205,6 @@ export async function prepareSonarImport(
     let cloud: PreparedExternalPublication | undefined;
     let cloudError: string | undefined;
     if (options.to === "cloud" && local.preview.read > 0) {
-      const checkout = hash("sha256", repository);
       const reviewedCheckout =
         retained?.[2] === checkout && Boolean(retained?.[3]);
       const reviewError =

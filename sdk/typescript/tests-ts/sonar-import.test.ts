@@ -12,15 +12,14 @@ import {
 import { basename, join } from "node:path";
 import { prepareSonarImport } from "../src/sonar-import.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
+import { sonarGitTestEnvironment } from "./support/sonar-import-fixtures.js";
 
 const repositoryUrl = "https://github.com/example/project";
 
 async function fixture(root: string, name = "checkout") {
   const checkout = join(root, name);
   const environment = {
-    ...process.env,
-    GIT_CONFIG_GLOBAL: join(root, "gitconfig"),
-    GIT_CONFIG_NOSYSTEM: "1",
+    ...sonarGitTestEnvironment(),
     CODEX_HOME: join(root, "codex"),
     CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
     CODEX_SECURITY_STATE_DIR: join(root, "state"),
@@ -91,6 +90,33 @@ test("preview snapshots caller-owned evidence and rejects changes to the retaine
   await expect(
     prepareSonarImport({ ...selection, capture: info.capture }, deps),
   ).rejects.toThrow("saved Sonar capture has changed");
+});
+
+test("confirming a local preview in another checkout requires previewing that checkout", async () => {
+  await using directory = await scopedTemporaryDirectory("sonar-local-review-");
+  const first = await fixture(directory.path);
+  const second = await fixture(directory.path, "second-checkout");
+  const previewOptions = {
+    ...first.options,
+    to: "local",
+    dryRun: true,
+  } as const;
+  const preview = await prepareSonarImport(previewOptions, first.deps);
+  const moved = {
+    ...previewOptions,
+    cwd: second.options.cwd,
+    capture: preview.info.capture,
+  };
+  await expect(
+    prepareSonarImport({ ...moved, yes: true, dryRun: false }, first.deps),
+  ).rejects.toThrow("has not been reviewed for this checkout");
+  const renewed = await prepareSonarImport(moved, first.deps);
+  expect(renewed.info.capture).not.toBe(preview.info.capture);
+  const confirmed = await prepareSonarImport(
+    { ...moved, capture: renewed.info.capture, yes: true, dryRun: false },
+    first.deps,
+  );
+  expect((await confirmed.import()).local.counts.created).toBe(1);
 });
 
 test("live import passes the expected repository to the collector before saving evidence", async () => {

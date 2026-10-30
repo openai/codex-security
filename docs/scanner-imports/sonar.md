@@ -3,6 +3,7 @@
 Import the open security issues for a SonarQube Cloud project or the issues
 you selected in the SonarQube plugin for Codex. The live import uses the
 authenticated `sonar` CLI to read findings from the project's Issues view.
+Keep the same Sonar server and organization selected until the fetch finishes.
 A live fetch saves a capture so you can review and publish the same records later.
 
 ## Start in Codex
@@ -51,6 +52,9 @@ workbench. Use the preview's `repository` path to read the findings back:
 codex-security import sonar "/path/from/capture.json" --yes
 codex-security findings imported "/checkout/from/preview" --format json
 ```
+
+To import the capture in another checkout, preview it there with `--dry-run`
+and confirm using the new capture path.
 
 Codex Security keeps each Sonar issue key and its native evidence, including
 reported file ranges and available data-flow traces. For monorepos, Codex

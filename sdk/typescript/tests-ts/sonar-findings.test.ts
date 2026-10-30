@@ -8,6 +8,7 @@ import {
   readSonarFindings,
 } from "../src/sonar-findings.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
+import { sonarGitTestEnvironment } from "./support/sonar-import-fixtures.js";
 
 const project = "team:application";
 const repository = "https://vcs.example.test/team/application";
@@ -231,23 +232,22 @@ test("normalized local imports verify both report and issue bindings against the
   await using tmp = await scopedTemporaryDirectory("sonar-binding-");
   const checkout = join(tmp.path, "checkout");
   await mkdir(checkout);
-  execFileSync("git", ["init", "--quiet", checkout]);
+  const environment = {
+    ...sonarGitTestEnvironment(),
+    CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
+    CODEX_SECURITY_STATE_DIR: join(tmp.path, "state"),
+  };
   const foreign = repository + "-other";
   const git = (...args: string[]) =>
-    execFileSync("git", ["-C", checkout, ...args]);
+    execFileSync("git", ["-C", checkout, ...args], { env: environment });
+  git("init", "--quiet");
   git("remote", "add", "origin", foreign);
   const options = {
     repository: checkout,
     provider: "sonar",
     sourceKey: project,
   } as const;
-  const deps = {
-    environment: {
-      ...process.env,
-      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
-      CODEX_SECURITY_STATE_DIR: join(tmp.path, "state"),
-    },
-  };
+  const deps = { environment };
   const { report, ...rows } = normalizeSonarFindings(
     capture([page([issue()])]),
     repository,

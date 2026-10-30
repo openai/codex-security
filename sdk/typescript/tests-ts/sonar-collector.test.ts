@@ -10,10 +10,14 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { devNull, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { collectSonarIssues } from "../src/sonar-collector.js";
-import { readSonarFindings } from "../src/sonar-findings.js";
+import {
+  normalizeSonarFindings,
+  readSonarFindings,
+} from "../src/sonar-findings.js";
+import { sonarGitTestEnvironment } from "./support/sonar-import-fixtures.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -28,10 +32,8 @@ const project = "example:service";
 const repositoryUrl = "https://example.invalid/team/service";
 const auth = { status: "connected", org: organization, server };
 const environment = {
-  ...process.env,
+  ...sonarGitTestEnvironment(),
   CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
-  GIT_CONFIG_GLOBAL: devNull,
-  GIT_CONFIG_NOSYSTEM: "1",
 };
 
 function git(...args: string[]) {
@@ -61,6 +63,8 @@ function page(key: string, index = 1, total = 1) {
       {
         project,
         key,
+        component: project + ":source.ts",
+        type: "VULNERABILITY",
         rule: "test:S1",
         flows: [
           {
@@ -85,11 +89,14 @@ function sonarSession(options: {
     | ((query: URLSearchParams) => Record<string, unknown>);
   bindings?: Record<string, unknown>[];
   navigationDenied?: boolean;
+  connection?: () => typeof auth;
   navigation?: Record<string, unknown>;
+  shownComponent?: Record<string, unknown> | Error;
   components?: Record<string, unknown>[];
   componentsById?: Record<string, Record<string, unknown>[]>;
   repositoryUrl?: string;
-  analyses?: Record<string, unknown>[] | Error;
+  analyses?:
+    Record<string, unknown>[] | Error | (() => Record<string, unknown>[]);
 }) {
   const commands: string[][] = [];
   const queries: URLSearchParams[] = [];
@@ -98,7 +105,7 @@ function sonarSession(options: {
     queries,
     run: async (args: string[]): Promise<Record<string, unknown>> => {
       commands.push(args);
-      if (args[0] === "auth") return auth;
+      if (args[0] === "auth") return options.connection?.() ?? auth;
       expect(args.slice(0, 2)).toEqual(["api", "get"]);
       const url = new URL(args[2]!, server);
       if (url.pathname === "/api/project_branches/list")
@@ -114,8 +121,21 @@ function sonarSession(options: {
         return {
           key: project,
           id: "p-1",
+          organization,
           badgeToken: "synthetic badge metadata",
           ...options.navigation,
+        };
+      }
+      if (url.pathname === "/api/components/show") {
+        expect(url.searchParams.get("component")).toBe(project);
+        if (options.shownComponent instanceof Error)
+          throw options.shownComponent;
+        return {
+          component: options.shownComponent ?? {
+            key: project,
+            organization,
+            qualifier: "TRK",
+          },
         };
       }
       if (url.pathname === "/dop-translation/project-bindings") {
@@ -135,6 +155,8 @@ function sonarSession(options: {
       }
       if (url.pathname === "/api/project_analyses/search") {
         if (options.analyses instanceof Error) throw options.analyses;
+        if (typeof options.analyses === "function")
+          return { analyses: options.analyses() };
         return { analyses: options.analyses ?? [] };
       }
       expect(url.pathname).toBe("/api/issues/search");
@@ -151,7 +173,7 @@ test("uses the signed-in CLI and a verified checkout binding, retaining all secu
   const cwd = await checkout();
   const session = sonarSession({
     pages,
-    analyses: [{ relativePathFromScmRoot: "" }],
+    analyses: [{ key: "analysis", relativePathFromScmRoot: "" }],
   });
   const branch = "release/space & plus+";
   const capture = await collectSonarIssues(
@@ -192,7 +214,9 @@ test("collects the exact issue keys and PR selected in the plugin handoff", asyn
   const issueKeys = ["A", "B"];
   const session = sonarSession({
     pages: [page("A", 1, 2), page("B", 2, 2)],
-    analyses: [{ relativePathFromScmRoot: "packages/main-branch" }],
+    analyses: [
+      { key: "analysis", relativePathFromScmRoot: "packages/main-branch" },
+    ],
   });
   const capture = await collectSonarIssues(
     { cwd, project, pullRequest: "35", issueKeys, environment },
@@ -447,9 +471,44 @@ test("uses the explicit project in token-only sessions and claims only a matchin
     expect(capture.repositoryUrl).toBe(
       resolvedProject === project ? repositoryUrl : undefined,
     );
+    expect(
+      session.commands.some((args) =>
+        args[2]?.startsWith("/api/components/show?"),
+      ),
+    ).toBe(resolvedProject !== project);
     expect(session.queries.map((query) => query.get("componentKeys"))).toEqual([
       project,
     ]);
+  }
+});
+
+test("an empty search cannot validate an unbound project without Browse access in the active organization", async () => {
+  const cwd = await checkout();
+  for (const shownComponent of [
+    { key: "other", organization, qualifier: "TRK" },
+    { key: project, organization: "other", qualifier: "TRK" },
+    { key: project, organization, qualifier: "FIL" },
+    new Error("Browse denied"),
+  ]) {
+    const session = sonarSession({
+      pages: [
+        { issues: [], paging: { pageIndex: 1, pageSize: 100, total: 0 } },
+      ],
+      navigationDenied:
+        shownComponent instanceof Error || shownComponent.qualifier !== "FIL",
+      bindings: [],
+      shownComponent,
+    });
+    await expect(
+      collectSonarIssues(
+        { cwd, project, sourceRepositoryUrl: repositoryUrl, environment },
+        session.run,
+      ),
+    ).rejects.toThrow(/selected project|Browse denied/);
+    expect(session.commands.flat().join(" ")).not.toContain(
+      "/api/project_branches/list",
+    );
+    expect(session.queries).toEqual([]);
   }
 });
 
@@ -563,13 +622,25 @@ test("guides disconnected users to sign in and honors cancellation before openin
   ).rejects.toThrow("cancel collection");
 });
 
-test("requires the external import opt-in before invoking Sonar", async () => {
+test("honors the SDK caller's inherited opt-in and explicit non-enumerable opt-out before invoking Sonar", async () => {
+  const cwd = await checkout();
+  const allowed = sonarSession({ pages: [page("A")] });
+  const capture = await collectSonarIssues(
+    { cwd, environment: Object.create(environment) },
+    allowed.run,
+  );
+  expect(capture.repositoryUrl).toBe(repositoryUrl);
   const session = sonarSession({ pages: [] });
+  const denied = Object.defineProperty(
+    { codex_security_enable_external_imports: "1" },
+    "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
+    { value: "0" },
+  );
   await expect(
     collectSonarIssues(
       {
         cwd: ".",
-        environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "0" },
+        environment: denied,
       },
       session.run,
     ),
@@ -577,12 +648,43 @@ test("requires the external import opt-in before invoking Sonar", async () => {
   expect(session.commands).toEqual([]);
 });
 
+test("canonical Cloud endpoints are accepted and connection changes during issue search discard the capture", async () => {
+  const cwd = await checkout();
+  for (const [initialServer, final] of [
+    ["https://SONARCLOUD.IO:443", { ...auth, server: "https://sonarcloud.io" }],
+    ["https://SONARQUBE.US:443/", auth],
+    [server, { ...auth, org: "other" }],
+    [server, { ...auth, server: "https://sonarcloud.io" }],
+  ] as const) {
+    let active: typeof auth = { ...auth, server: initialServer };
+    const session = sonarSession({
+      connection: () => active,
+      pages: () => {
+        active = final;
+        return page("A");
+      },
+    });
+    const result = collectSonarIssues(
+      { cwd, branch: "trunk", environment },
+      session.run,
+    );
+    if (initialServer === server)
+      await expect(result).rejects.toThrow("connection changed");
+    else expect((await result).server).toBe(final.server);
+    expect(session.queries).toHaveLength(1);
+  }
+});
+
 test("projects paths only from the selected branch's recorded analysis base", async () => {
   const cwd = await checkout();
   const branch = "release/service";
   for (const [analyses, expected] of [
-    [[{ relativePathFromScmRoot: "packages/service" }], "packages/service"],
-    [[{ relativePathFromScmRoot: "../outside" }], undefined],
+    [
+      [{ key: "analysis", relativePathFromScmRoot: "packages/service" }],
+      "packages/service",
+    ],
+    [[{ relativePathFromScmRoot: "packages/service" }], undefined],
+    [[{ key: "analysis", relativePathFromScmRoot: "../outside" }], undefined],
     [[{}], undefined],
     [new Error("Analysis metadata unavailable"), undefined],
   ] as Array<[Record<string, unknown>[] | Error, string | undefined]>) {
@@ -602,6 +704,53 @@ test("projects paths only from the selected branch's recorded analysis base", as
     expect(capture.projectBase).toBe(expected);
     expect(capture.pages[0]).toEqual(page("A"));
   }
+});
+
+test("preserves native paths without projecting a changed analysis or base during pagination", async () => {
+  const cwd = await checkout();
+  const first = { key: "first", relativePathFromScmRoot: "packages/one" };
+  for (const next of [
+    { ...first, key: "next" },
+    { ...first, relativePathFromScmRoot: "packages/two" },
+  ]) {
+    let active = first;
+    const session = sonarSession({
+      analyses: () => [active],
+      pages: (query) => {
+        active = next;
+        const index = Number(query.get("p"));
+        return page("issue-" + index, index, 2);
+      },
+    });
+    const capture = await collectSonarIssues(
+      { cwd, branch: "main", environment },
+      session.run,
+    );
+    expect(capture.projectBase).toBeUndefined();
+    expect(capture.pages).toEqual([
+      page("issue-1", 1, 2),
+      page("issue-2", 2, 2),
+    ]);
+  }
+});
+
+test("a fork with a matching upstream projects the selected project's stable analysis paths", async () => {
+  const cwd = await checkout();
+  git("-C", cwd, "remote", "rename", "origin", "upstream");
+  git("-C", cwd, "remote", "add", "origin", repositoryUrl + "-fork");
+  const session = sonarSession({
+    navigation: { alm: { url: repositoryUrl } },
+    analyses: [{ key: "stable", relativePathFromScmRoot: "packages/service" }],
+    pages: [page("A")],
+  });
+  const capture = await collectSonarIssues(
+    { cwd, project, branch: "main", environment },
+    session.run,
+  );
+  const { findings } = normalizeSonarFindings(capture, repositoryUrl, "local");
+  expect(findings[0]?.evidence.locations).toMatchObject([
+    { path: "packages/service/source.ts" },
+  ]);
 });
 
 test.each([
@@ -659,15 +808,15 @@ test("rejects ambiguous Git transport and credential-bearing query strings befor
 });
 
 test.skipIf(process.platform === "win32")(
-  "Sonar's child Git cannot resolve an external symlink into the checkout",
+  "Sonar installed under a non-repository home runs without following a child Git symlink into the checkout",
   async () => {
     const cwd = await checkout();
     const root = await realpath(await mkdtemp(join(tmpdir(), "sonar tools ")));
     roots.push(root);
-    const bin = join(root, "bin"),
+    const bin = join(root, ".local", "share", "sonarqube-cli", "bin"),
       aliases = join(root, "aliases"),
       marker = join(root, "executed");
-    await Promise.all([mkdir(bin), mkdir(aliases)]);
+    await Promise.all([mkdir(bin, { recursive: true }), mkdir(aliases)]);
     await writeFile(
       join(cwd, "git"),
       '#!/bin/sh\ntouch "$SONAR_CHILD_MARKER"\n',
@@ -683,18 +832,24 @@ printf '{"status":"token_missing"}'
 `,
       { mode: 0o700 },
     );
-    await expect(
-      collectSonarIssues({
-        cwd,
-        project,
-        environment: {
-          ...environment,
-          PATH: [aliases, bin, process.env["PATH"]].join(delimiter),
-          SONAR_CHILD_MARKER: marker,
-          SONAR_TOKEN: "synthetic",
-        },
-      }),
-    ).rejects.toThrow("sonar auth login");
+    const current = spyOn(process, "cwd").mockReturnValue(root);
+    try {
+      await expect(
+        collectSonarIssues({
+          cwd,
+          project,
+          environment: {
+            ...environment,
+            HOME: root,
+            PATH: [aliases, bin, process.env["PATH"]].join(delimiter),
+            SONAR_CHILD_MARKER: marker,
+            SONAR_TOKEN: "synthetic",
+          },
+        }),
+      ).rejects.toThrow("sonar auth login");
+    } finally {
+      current.mockRestore();
+    }
     await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
   },
 );
