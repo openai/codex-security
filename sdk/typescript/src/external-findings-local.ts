@@ -782,7 +782,6 @@ export async function prepareLocalImport(
       throw new CodexSecurityError(
         "The Semgrep report repository does not match the native finding's project.",
       );
-    sources.set(source.url, source);
     hostedSources.set(source.url, source);
   }
   if (semgrepPlatformRepositoryUrl)
