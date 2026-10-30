@@ -349,13 +349,17 @@ export {
   normalizeSnykSarif,
   readSnykFindings,
 } from "./snyk-findings.js";
-export { normalizeSelectedSemgrepPlatformFindings } from "./semgrep-platform-findings.js";
 export {
   normalizeSemgrepFindings,
   normalizeSemgrepSarif,
   readSemgrepFindings,
   type SemgrepImportOptions,
 } from "./semgrep-findings.js";
+export {
+  normalizeSelectedSemgrepPlatformFindings,
+  selectSemgrepPlatformFindings,
+  type SemgrepPlatformSelection,
+} from "./semgrep-platform-findings.js";
 export {
   normalizeEndorFindings,
   normalizeEndorSarif,

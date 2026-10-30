@@ -757,7 +757,7 @@ reports carry this platform in their repository inventory. If you export only th
 normalized finding rows to JSONL, supply that metadata separately; the original
 finding evidence does not include the surrounding inventory.
 
-See [Semgrep Code imports](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md) for native CLI/CI JSON, SARIF compatibility, and local or Cloud imports. The SDK also supports selected Platform SAST finding IDs from scoped Web API responses through `normalizeSelectedSemgrepPlatformFindings`.
+See [Semgrep Code imports](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md) for native CLI/CI JSON, SARIF compatibility, and local or Cloud imports. The SDK also supports selected Platform SAST finding IDs from scoped Web API responses through `normalizeSelectedSemgrepPlatformFindings`. To save a selection for the local CLI, use `selectSemgrepPlatformFindings`.
 
 ## Findings storage and deduplication
 

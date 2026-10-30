@@ -88,6 +88,8 @@ before preparing a fresh submission.
   Critical from High; both become diagnostic `error`, mapped to High, in Semgrep
   SARIF. Inspect the selected result for trace/fix details. Platform/MCP
   envelopes and general Supply Chain/Secrets feeds are not Code CLI or SARIF exports.
+- **Selected Semgrep Platform findings.** The local reader binds each native SAST
+  ID to its deployment, project ID and ref. See the [selection example](semgrep.md#existing-platform-findings).
 - **OpenGrep.** Use native JSON and supply `--source-repository-url`. The
   [OpenGrep guide](opengrep.md) covers export and occurrence identity.
 - **GitHub:** For code scanning, the selected instance supplies path/range, ref

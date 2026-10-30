@@ -84,6 +84,7 @@ export async function readExternalFindings(
   path: string,
   options: ExternalFindingsReaderOptions,
   target: ExternalImportTarget = "cloud",
+  references: readonly ExternalSourceRepository[] = [],
 ): Promise<ReadExternalFindings> {
   if (options.provider === "opengrep") {
     const sourceRepositoryUrl = options.sourceRepositoryUrl ?? "";
@@ -114,6 +115,7 @@ export async function readExternalFindings(
       path,
       {
         sourceRepositoryUrl: options.sourceRepositoryUrl ?? "",
+        sourceRepositories: references,
       },
       target,
     );

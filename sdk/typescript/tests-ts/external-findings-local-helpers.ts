@@ -11,22 +11,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 /** Real Git checkout and separate state, shared by normalized and vendor import tests. */
-export async function localFindingsFixture(options: { remote?: string } = {}) {
+type Checkout = { remote?: string; environment?: NodeJS.ProcessEnv };
+
+export async function localFindingsFixture(options: Checkout = {}) {
+  const environment = options.environment ?? process.env;
   const root = await mkdtemp(
     join(await realpath(tmpdir()), "codex-security-external-local-"),
   );
   const repository = join(root, "repository");
   await mkdir(repository);
-  execFileSync("git", ["init", "--quiet", repository]);
+  execFileSync("git", ["init", "--quiet", repository], { env: environment });
   if (options.remote !== undefined)
-    execFileSync("git", [
-      "-C",
-      repository,
-      "remote",
-      "add",
-      "origin",
-      options.remote,
-    ]);
+    execFileSync(
+      "git",
+      ["-C", repository, "remote", "add", "origin", options.remote],
+      { env: environment },
+    );
   const stateDirectory = join(root, "state");
   const dispose = () => rm(root, { recursive: true, force: true });
   return {
@@ -35,7 +35,7 @@ export async function localFindingsFixture(options: { remote?: string } = {}) {
     stateDirectory,
     environment: {
       ...Object.fromEntries(
-        Object.entries(process.env).filter(
+        Object.entries(environment).filter(
           ([name]) =>
             name.toUpperCase() !== "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
         ),
@@ -51,7 +51,7 @@ export async function localFindingsFixture(options: { remote?: string } = {}) {
 export async function localReportFixture(
   filename: string,
   source: Omit<ExternalPublicationOptions, "repository">,
-  checkout: { remote?: string } = {},
+  checkout: Checkout = {},
 ) {
   const fixture = await localFindingsFixture(checkout);
   const file = join(fixture.root, filename);

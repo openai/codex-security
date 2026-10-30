@@ -1,6 +1,12 @@
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { isNumberObject } from "node:util/types";
+import {
+  semgrepReferenceMatches,
+  semgrepSelectionRepository,
+} from "./semgrep-platform-findings.js";
+import { hostedRepositoryMatches } from "./hosted-git-repository.js";
+import { readHostedGitRemotes } from "./hosted-git-remotes.js";
 import { environmentEntry } from "./auth.js";
 import { CodexSecurityError } from "./errors.js";
 import {
@@ -486,12 +492,13 @@ async function requireMatchingRepository(
   provider: Provider,
   sources: readonly ExternalSourceRepository[],
   strictSources: ReadonlyMap<string, Provider>,
-  strictPlatformFor: (source: ExternalSourceRepository) => Provider,
+  hostedSources: ReadonlyMap<string, ExternalSourceRepository>,
+  platformFor: (source: ExternalSourceRepository, bound: boolean) => Provider,
   protectedRoots: WorkbenchCommandOptions["protectedRoot"],
   environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
 ): Promise<void> {
-  if (sources.length === 0) return;
+  if (sources.length === 0 && hostedSources.size === 0) return;
   if (!(await hasGitMetadata(repository, signal))) return;
   const gitProtectedRoots = [
     ...(typeof protectedRoots === "string"
@@ -499,6 +506,22 @@ async function requireMatchingRepository(
       : (protectedRoots ?? [])),
     await abortable(() => canonicalConfigPath(process.cwd()), signal),
   ];
+  if (hostedSources.size > 0) {
+    const remotes = await readHostedGitRemotes(
+      repository,
+      gitProtectedRoots,
+      environment,
+      signal,
+    );
+    if (remotes) {
+      for (const source of hostedSources.values())
+        if (!remotes.some((remote) => hostedRepositoryMatches(source, remote)))
+          throw new CodexSecurityError(
+            `Imported repository ${JSON.stringify(source.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
+          );
+    }
+    if (!sources.length) return;
+  }
   const readGit = (args: readonly string[]) =>
     abortable(
       () =>
@@ -544,12 +567,10 @@ async function requireMatchingRepository(
     provider === "inspector" ||
     provider === "blackduck" ||
     provider === "veracode";
-  const loosePlatformFor = localRepositoryPlatform(provider, sources, false);
   for (const source of sources) {
     const bound = boundProvider || strictSources.has(source.url);
-    const platform = bound
-      ? (strictSources.get(source.url) ?? strictPlatformFor(source))
-      : loosePlatformFor(source);
+    const platform =
+      strictSources.get(source.url) ?? platformFor(source, bound);
     const identity = (url: string) => remoteRepository(url, platform, bound);
     const targets = remotes.flatMap((remote) => identity(remote) ?? []);
     if (!targets.length) continue;
@@ -742,11 +763,21 @@ export async function prepareLocalImport(
     sources.set(source.url, source);
   }
   const strictSources = new Map<string, Provider>();
+  const hostedSources = new Map<string, ExternalSourceRepository>();
   const known = new Set<string>(parsedSources.map(({ url }) => url));
+  let hasOrdinaryRows = false;
   for (const finding of current.findings) {
+    const semgrep = semgrepSelectionRepository(finding, readerSources);
+    if (semgrep && options.provider !== "semgrep")
+      throw new CodexSecurityError(
+        "Use the semgrep provider for Semgrep Platform selections.",
+      );
+    if (semgrep) hostedSources.set(semgrep.url, semgrep);
+    else hasOrdinaryRows = true;
     const { evidence, source_finding_id: id } = finding;
     const url = evidence.details?.repository?.url;
-    if (url) sources.set(url, { url });
+    // A selected row's projected URL was already verified against its hosted source.
+    if (url && !semgrep) sources.set(url, { url });
     const retained = bound.get(id);
     const native = nativeSources.get(finding) ?? [];
     if (retained) {
@@ -786,7 +817,9 @@ export async function prepareLocalImport(
   }
   if (mixed) {
     // A caller reference with no matching row spelling can still be a Git alias.
-    const rows = [...sources.keys(), ...known].map(identify);
+    const rows = [...sources.keys(), ...hostedSources.keys(), ...known].map(
+      identify,
+    );
     const byKey = Map.groupBy(rows, (remote) => remote.key);
     const represented = new Set(rows.map((remote) => JSON.stringify(remote)));
     const aliases = readerSources
@@ -809,7 +842,8 @@ export async function prepareLocalImport(
         strictSources.set(source.url, platformFor(source));
   }
   if (inspector) {
-    const platform = inspector.platform ?? options.provider;
+    const platform =
+      inspector.platform === "github" ? "github" : options.provider;
     const native = remoteRepository(inspector.url, platform, true);
     for (const url of sources.keys()) {
       if (!native || remoteRepository(url, platform, true)?.key !== native.key)
@@ -818,7 +852,31 @@ export async function prepareLocalImport(
         );
     }
   }
+  // Native projects are covered by trusted references independently of ordinary rows.
+  // Keep ordinary references on the generic checkout path, including in mixed reports.
+  const hosted = Array.from(hostedSources.values());
+  const isHostedReference = (ref: ExternalSourceRepository) =>
+    hosted.some((source) => semgrepReferenceMatches(source, ref.url));
+  if (
+    readerSources.length &&
+    hosted.length &&
+    ((!hasOrdinaryRows && !readerSources.every(isHostedReference)) ||
+      hosted.some(
+        (source) =>
+          !readerSources.some((ref) =>
+            semgrepReferenceMatches(source, ref.url),
+          ),
+      ))
+  )
+    throw new CodexSecurityError(
+      "The reader's source repository does not match the selected Semgrep project.",
+    );
+  const hostedReferences: ExternalSourceRepository[] = [];
   for (const source of [...(inspector ? [inspector] : []), ...references]) {
+    if (isHostedReference(source)) {
+      hostedReferences.push(source);
+      continue;
+    }
     // A reader's platform must not loosen an operator-supplied Inspector map.
     if (sources.get(source.url)?.platform !== "github")
       sources.set(
@@ -840,12 +898,20 @@ export async function prepareLocalImport(
       url: dependabotSource,
       platform: "github",
     });
+  const ordinarySources = [...sources.values()];
+  // A reader can identify the VCS for both a hosted project and an ordinary row.
+  const loosePlatformFor = localRepositoryPlatform(
+    options.provider,
+    [...ordinarySources, ...hostedReferences],
+    false,
+  );
   await requireMatchingRepository(
     repository,
     options.provider,
-    [...sources.values()],
+    ordinarySources,
     strictSources,
-    platformFor,
+    hostedSources,
+    (source, bound) => (bound ? platformFor(source) : loosePlatformFor(source)),
     workbenchOptions.protectedRoot,
     workbenchOptions.environment,
     dependencies.signal,

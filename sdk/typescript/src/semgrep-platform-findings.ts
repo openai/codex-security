@@ -1,5 +1,18 @@
-import { validateExternalEvidence } from "./external-import-contract.js";
-import type { ExternalFindings } from "./external-findings.js";
+import {
+  validateExternalEvidence,
+  type ExternalImportTarget,
+} from "./external-import-contract.js";
+import type {
+  ExternalFinding,
+  ExternalFindings,
+  ExternalSourceRepository,
+} from "./external-findings.js";
+import {
+  gitServiceHostname,
+  hostedRepositoryMatches,
+  hostedRepositoryUrlKey,
+} from "./hosted-git-repository.js";
+import { isGitHubCloudHost } from "./git-remote.js";
 import { isRecord } from "./record.js";
 import { position, weaknessIds } from "./native-json-findings.js";
 import {
@@ -12,6 +25,21 @@ import {
   text,
 } from "./scanner-import.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
+
+export const semgrepSelectionFormat = "semgrep-platform-selection/v1";
+
+export interface SemgrepPlatformScope {
+  deployment: string;
+  project: { id: string; name: string; url: string };
+  ref: string;
+  product: "sast";
+}
+
+export interface SemgrepPlatformSelection extends SemgrepPlatformScope {
+  format: typeof semgrepSelectionFormat;
+  /** Each native finding is JSON text so numbers retain their exact wire values through replay. */
+  findings: string[];
+}
 
 // Node 22 supports JSON source text and raw values. The SDK targets the ES2022 type library.
 const wireJson = JSON as JSON & {
@@ -62,7 +90,7 @@ function sourceLine(value: unknown): number | null {
 }
 
 /** Keep original number tokens, including adjacent int64 IDs above Number.MAX_SAFE_INTEGER. */
-function parseSemgrepResponse(json: string): Record<string, unknown> {
+export function parseSemgrepResponse(json: string): Record<string, unknown> {
   return responseRecord(
     JSON.parse(
       json.replace(/^\uFEFF/u, ""),
@@ -92,62 +120,183 @@ function platformId(value: unknown): string | undefined {
   return typeof id === "string" && /^[1-9][0-9]*$/u.test(id) ? id : undefined;
 }
 
-function requiredPlatformId(value: unknown): string {
+export function semgrepPlatformId(value: unknown): string {
   const id = platformId(value);
   if (!id) throw new Error("Expected an exact, positive Semgrep Platform ID.");
   return id;
 }
 
-/** Select SAST findings from operator-supplied Web API responses for local SDK import. */
-export function normalizeSelectedSemgrepPlatformFindings(options: {
-  deployment: string;
-  ref: string;
-  /** Independently supplied by the operator for the selected local checkout. */
-  sourceRepositoryUrl: string;
-  projectResponse: string;
-  findingsResponses: Iterable<string>;
-  findingIds: readonly string[];
-}): ExternalFindings {
-  const native = responseRecord(
-    parseSemgrepResponse(options.projectResponse)["project"],
-    "Semgrep project",
-  );
-  const scope = {
-    deployment: requiredText(options.deployment, "Semgrep deployment"),
+function scopeOf(
+  deployment: unknown,
+  project: unknown,
+  ref: unknown,
+): SemgrepPlatformScope {
+  const row = responseRecord(project, "Semgrep project");
+  return {
+    deployment: requiredText(deployment, "Semgrep deployment"),
     project: {
-      id: requiredPlatformId(native["id"]),
-      name: requiredText(native["name"], "Semgrep project name"),
+      id: semgrepPlatformId(row["id"]),
+      name: requiredText(row["name"], "Semgrep project name"),
       url: declaredScannerRepositoryUrl(
-        options.sourceRepositoryUrl,
-        "Semgrep",
+        row["url"],
+        "Semgrep Platform",
         "local",
       ),
     },
-    ref: requiredText(options.ref, "Semgrep ref"),
+    ref: requiredText(ref, "Semgrep ref"),
     product: "sast",
   };
-  if (!/^refs\/[^/]+(?:\/[^/]+)*$/u.test(scope.ref))
-    throw new Error(
-      "Use a fully qualified Semgrep ref such as refs/heads/topic.",
+}
+
+/** Readers may pass the SCM web link from the project response or its equivalent Git transport. */
+export function semgrepReferenceMatches(
+  source: ExternalSourceRepository,
+  url: string,
+): boolean {
+  if (hostedRepositoryMatches(source, url)) return true;
+  try {
+    // Serialize only a valid repository link. Git checkout URLs retain their original bytes.
+    const link = declaredScannerRepositoryUrl(url, "Semgrep", "local");
+    return hostedRepositoryMatches(source, new URL(link).href);
+  } catch {
+    return false;
+  }
+}
+
+function repositoryContext(
+  scope: SemgrepPlatformScope,
+  references: readonly ExternalSourceRepository[] = [],
+) {
+  // Apply HTTP serialization to native HTTP URLs only. Git's SSH port has its own meaning.
+  const http = (value: string) => URL.parse(value)?.href ?? value;
+  const projectUrl = http(scope.project.url);
+  const source: ExternalSourceRepository = { url: projectUrl };
+  const nativeHost = gitServiceHostname(new URL(projectUrl).hostname);
+  if (isGitHubCloudHost(nativeHost)) source.platform = "github";
+  else {
+    const hint = references.find(
+      ({ url, platform }) =>
+        platform && semgrepReferenceMatches({ url: projectUrl, platform }, url),
     );
-  if (native["url"] !== scope.project.url)
+    if (hint?.platform) source.platform = hint.platform;
+  }
+  const github = source.platform === "github";
+  return {
+    source,
+    key: (url: string) =>
+      hostedRepositoryUrlKey(http(url), github, source.platform === "gitlab"),
+    name: (value: string) => (github ? value.toLowerCase() : value),
+  };
+}
+
+function selectionRepository(
+  scope: SemgrepPlatformScope,
+  references: readonly ExternalSourceRepository[] = [],
+) {
+  const repository = repositoryContext(scope, references);
+  if (
+    !references.every(({ url }) =>
+      semgrepReferenceMatches(repository.source, url),
+    )
+  )
     throw new Error(
-      "Selected Semgrep project does not match the operator's source repository URL.",
+      "The reader's source repository does not match the selected Semgrep project.",
     );
-  const wanted = new Set(options.findingIds.map(requiredPlatformId));
+  return repository;
+}
+
+function checkRow(
+  finding: Record<string, unknown>,
+  scope: SemgrepPlatformScope,
+  repository: Pick<ReturnType<typeof repositoryContext>, "name" | "key">,
+) {
+  semgrepPlatformId(finding["id"]);
+  const repo = responseRecord(
+    finding["repository"],
+    "Semgrep finding repository",
+  );
+  const repositoryId =
+    repo["id"] == null ? undefined : semgrepPlatformId(repo["id"]);
+  const url =
+    repo["url"] == null
+      ? null
+      : declaredScannerRepositoryUrl(repo["url"], "Semgrep finding", "local");
+  const fullName = repository.name(scope.project.name);
+  const name = repo["name"];
+  const rowName = typeof name === "string" ? repository.name(name) : null;
+  // Source URLs were checked segment-by-segment before matching display names.
+  const projectPath = repository.name(
+    decodeURIComponent(new URL(scope.project.url).pathname).replace(
+      /^\/|\/$/gu,
+      "",
+    ),
+  );
+  const urlPathName =
+    rowName !== null &&
+    (rowName === projectPath || rowName + ".git" === projectPath);
+  const qualifiedName =
+    rowName !== null &&
+    /^[^/]+(?:\/[^/]+)+$/u.test(rowName) &&
+    (rowName === fullName || urlPathName);
+  const matchedName =
+    rowName === fullName ||
+    rowName === fullName.split("/").at(-1) ||
+    (urlPathName && fullName === rowName.split("/").at(-1));
+  if (
+    finding["ref"] !== scope.ref ||
+    (repositoryId !== undefined && repositoryId !== scope.project.id) ||
+    (repositoryId === undefined && name != null && !matchedName) ||
+    (url !== null
+      ? repository.key(url) !== repository.key(scope.project.url)
+      : repositoryId === undefined || !qualifiedName)
+  )
+    throw new Error(
+      "Semgrep finding does not belong to the selected project and ref.",
+    );
+  for (const product of [finding["issue_type"], finding["product"]]) {
+    if (
+      product != null &&
+      !["sast", "code"].includes(String(product).toLowerCase())
+    )
+      throw new Error("Select Semgrep Code (SAST) findings.");
+  }
+  if (
+    finding["found_dependency"] != null ||
+    finding["vulnerability_identifier"] != null
+  )
+    throw new Error("Select Semgrep Code (SAST) findings.");
+}
+
+interface SemgrepSelectionInput {
+  deployment: string;
+  ref: string;
+  projectResponse: string;
+  findingsResponses: Iterable<string>;
+  findingIds: readonly string[];
+}
+
+function selectedRows(
+  options: SemgrepSelectionInput,
+  repositoryFor: (
+    scope: SemgrepPlatformScope,
+  ) => Pick<ReturnType<typeof repositoryContext>, "name" | "key">,
+) {
+  const scope = scopeOf(
+    options.deployment,
+    parseSemgrepResponse(options.projectResponse)["project"],
+    options.ref,
+  );
+  const repository = repositoryFor(scope);
+  const wanted = new Set(options.findingIds.map(semgrepPlatformId));
   if (!wanted.size) throw new Error("Select at least one Semgrep finding ID.");
   const selected = new Map<string, Record<string, unknown>>();
   const pages =
     typeof options.findingsResponses === "string"
       ? [options.findingsResponses]
       : options.findingsResponses;
-  const projectPath = new URL(scope.project.url).pathname.replace(
-    /^\/|\/$/gu,
-    "",
-  );
-  for (const response of pages) {
+  for (const page of pages) {
     for (const finding of array(
-      parseSemgrepResponse(response)["findings"],
+      parseSemgrepResponse(page)["findings"],
       "Semgrep findings",
     )) {
       if (!isRecord(finding)) continue;
@@ -155,58 +304,182 @@ export function normalizeSelectedSemgrepPlatformFindings(options: {
       if (!id || !wanted.has(id)) continue;
       if (selected.has(id))
         throw new Error(`Duplicate selected Semgrep finding ${id}.`);
-      const repo = responseRecord(
-        finding["repository"],
-        "Semgrep finding repository",
-      );
-      const repositoryId =
-        repo["id"] == null ? undefined : requiredPlatformId(repo["id"]);
-      const url = repo["url"];
-      const name = repo["name"];
-      const fullName = scope.project.name;
-      const urlPathName =
-        typeof name === "string" &&
-        (name === projectPath || name + ".git" === projectPath);
-      const qualifiedName =
-        typeof name === "string" &&
-        /^[^/]+(?:\/[^/]+)+$/u.test(name) &&
-        (name === fullName || urlPathName);
-      const matchesName =
-        name === fullName ||
-        name === fullName.split("/").at(-1) ||
-        (urlPathName && fullName === name.split("/").at(-1));
-      if (
-        finding["ref"] !== scope.ref ||
-        (repositoryId !== undefined && repositoryId !== scope.project.id) ||
-        (repositoryId === undefined && name != null && !matchesName) ||
-        (url != null
-          ? url !== scope.project.url
-          : repositoryId === undefined || !qualifiedName)
-      )
-        throw new Error(
-          "Selected Semgrep finding does not belong to the selected project and ref.",
-        );
-      if (
-        [finding["issue_type"], finding["product"]].some(
-          (product) =>
-            product != null &&
-            !["sast", "code"].includes(String(product).toLowerCase()),
-        ) ||
-        finding["found_dependency"] != null ||
-        finding["vulnerability_identifier"] != null
-      )
-        throw new Error("Select Semgrep Code (SAST) findings.");
+      checkRow(finding, scope, repository);
       selected.set(id, finding);
     }
   }
   const rows = Array.from(wanted, (id) => {
-    const found = selected.get(id);
-    if (!found) throw new Error(`Selected Semgrep finding ${id} is missing.`);
-    return found;
+    const value = selected.get(id);
+    if (!value)
+      throw new Error(
+        `Selected Semgrep finding ${id} was not present in the supplied pages.`,
+      );
+    return value;
   });
-  // Older Platform imports hash safe integers as numbers, and larger IDs as strings.
+  return { scope, rows };
+}
+
+/** Select existing SAST findings from native Web API responses for one project and ref. */
+export function selectSemgrepPlatformFindings(
+  options: SemgrepSelectionInput & {
+    sourceRepositories?: readonly ExternalSourceRepository[];
+  },
+): SemgrepPlatformSelection {
+  const { scope, rows } = selectedRows(options, (scope) =>
+    selectionRepository(scope, options.sourceRepositories),
+  );
+  return {
+    format: semgrepSelectionFormat,
+    ...scope,
+    findings: rows.map((row) => JSON.stringify(row)),
+  };
+}
+
+/** Select SAST findings using the operator's exact, independently supplied HTTP(S) spelling. */
+export function normalizeSelectedSemgrepPlatformFindings(
+  options: SemgrepSelectionInput & {
+    sourceRepositoryUrl: string;
+  },
+): ExternalFindings {
+  const url = declaredScannerRepositoryUrl(
+    options.sourceRepositoryUrl,
+    "Semgrep",
+    "local",
+  );
+  const { scope, rows } = selectedRows(options, (scope) => {
+    if (!/^refs\/[^/]+(?:\/[^/]+)*$/u.test(scope.ref))
+      throw new Error(
+        "Use a fully qualified Semgrep ref such as refs/heads/topic.",
+      );
+    if (scope.project.url !== url)
+      throw new Error(
+        "Selected Semgrep project does not match the operator's source repository URL.",
+      );
+    const exact = (value: string) => value;
+    return { key: exact, name: exact };
+  });
+  return normalizeSelectionRows(rows, scope, "local");
+}
+
+function sourceId(
+  scope: SemgrepPlatformScope,
+  finding: Record<string, unknown>,
+) {
+  // Keep the same tuple for a selected import and a subsequent scoped Platform collection.
   const exact = (id: string) =>
     Number.isSafeInteger(Number(id)) ? Number(id) : id;
+  return stableId("semgrep-platform", [
+    scope.deployment,
+    exact(scope.project.id),
+    scope.product,
+    scope.ref,
+    exact(semgrepPlatformId(finding["id"])),
+  ]);
+}
+
+function readScope(input: Record<string, unknown>) {
+  if (input["product"] !== "sast")
+    throw new Error("Select Semgrep Code (SAST) findings.");
+  const project = record(input["project"], "Semgrep project");
+  // The selector emits decimal strings; ordinary file JSON parsing would round numeric IDs.
+  requiredText(project["id"], "Semgrep selected project ID");
+  return scopeOf(input["deployment"], project, input["ref"]);
+}
+
+const generatedId = /^semgrep-platform:[0-9a-f]{64}$/u;
+
+/** Recognize retained Platform evidence after an SDK caller projects away wrapper fields. */
+export function isSemgrepSelectionEvidence(finding: ExternalFinding): boolean {
+  const data = finding.evidence.source_data;
+  return (
+    generatedId.test(finding.source_finding_id) ||
+    data?.["format"] === semgrepSelectionFormat ||
+    (data != null && Object.hasOwn(data, "semgrepPlatformFindingJson"))
+  );
+}
+
+/** Recheck the source repository when an SDK caller supplies normalized evidence directly. */
+export function semgrepSelectionRepository(
+  finding: ExternalFinding,
+  references: readonly ExternalSourceRepository[] = [],
+): ExternalSourceRepository | undefined {
+  if (!isSemgrepSelectionEvidence(finding)) return;
+  const data = record(
+    finding.evidence.source_data,
+    "Semgrep Platform source data",
+  );
+  const scope = readScope(data);
+  const row = parseSemgrepResponse(
+    requiredText(data["semgrepPlatformFindingJson"], "Semgrep finding JSON"),
+  );
+  const repository = repositoryContext(scope, references);
+  checkRow(row, scope, repository);
+  if (
+    generatedId.test(finding.source_finding_id) &&
+    finding.source_finding_id !== sourceId(scope, row)
+  )
+    throw new Error(
+      "The generated Semgrep finding ID does not match its native occurrence.",
+    );
+  const claimed = finding.evidence.details?.repository?.url;
+  if (
+    finding.evidence.branch !== scope.ref ||
+    !claimed ||
+    repository.key(
+      declaredScannerRepositoryUrl(claimed, "Semgrep", "local"),
+    ) !== repository.key(scope.project.url)
+  )
+    throw new Error(
+      "The normalized finding does not match its original Semgrep repository and ref.",
+    );
+  return repository.source;
+}
+
+export function normalizeSemgrepPlatformSelection(
+  input: Record<string, unknown>,
+  declaredUrl?: string,
+  target: ExternalImportTarget = "local",
+  references: readonly ExternalSourceRepository[] = [],
+) {
+  const scope = readScope(input);
+  const repository = selectionRepository(scope, references);
+  if (
+    declaredUrl &&
+    repository.key(
+      declaredScannerRepositoryUrl(declaredUrl, "Semgrep", "local"),
+    ) !== repository.key(scope.project.url)
+  )
+    throw new Error(
+      "Semgrep project does not match the declared source repository URL.",
+    );
+  const rows = array(input["findings"], "Semgrep selected findings").map(
+    (value) => {
+      const raw = requiredText(value, "Semgrep finding JSON");
+      const finding = parseSemgrepResponse(raw);
+      checkRow(finding, scope, repository);
+      return finding;
+    },
+  );
+  return normalizeSelectionRows(rows, scope, target);
+}
+
+function stringifySemgrepFinding(finding: Record<string, unknown>): string {
+  return JSON.stringify(finding, function (this: unknown, key, value: unknown) {
+    // Native occurrence and repository IDs must stay unsigned decimal tokens on replay.
+    if (
+      !wireJson.isRawJSON(value) ||
+      (key === "id" && (this === finding || this === finding["repository"]))
+    )
+      return value;
+    return wireJson.rawJSON(canonicalNumber(value.rawJSON));
+  });
+}
+
+function normalizeSelectionRows(
+  rows: Record<string, unknown>[],
+  scope: SemgrepPlatformScope,
+  target: ExternalImportTarget,
+) {
   return normalizeRecords(
     rows,
     (finding) => {
@@ -231,7 +504,7 @@ export function normalizeSelectedSemgrepPlatformFindings(options: {
           title:
             name ??
             description ??
-            `Semgrep finding ${requiredPlatformId(finding["id"])}`,
+            `Semgrep finding ${semgrepPlatformId(finding["id"])}`,
           description,
           severity: text(finding["severity"])?.toLowerCase() ?? "unknown",
           locations: path ? [{ path, line: startLine }] : [],
@@ -249,29 +522,16 @@ export function normalizeSelectedSemgrepPlatformFindings(options: {
             },
           },
           source_data: {
-            format: "semgrep-platform-selection/v1",
+            format: semgrepSelectionFormat,
             ...scope,
             project: { ...scope.project },
-            semgrepPlatformFindingJson: JSON.stringify(
-              finding,
-              (_key, value: unknown) =>
-                wireJson.isRawJSON(value)
-                  ? wireJson.rawJSON(canonicalNumber(value.rawJSON))
-                  : value,
-            ),
+            semgrepPlatformFindingJson: stringifySemgrepFinding(finding),
           },
         },
-        "local",
+        target,
       );
     },
-    (finding) =>
-      stableId("semgrep-platform", [
-        scope.deployment,
-        exact(scope.project.id),
-        scope.product,
-        scope.ref,
-        exact(requiredPlatformId(finding["id"])),
-      ]),
-    "local",
+    (finding) => sourceId(scope, finding),
+    target,
   );
 }

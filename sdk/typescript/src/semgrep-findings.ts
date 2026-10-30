@@ -1,9 +1,16 @@
+import {
+  normalizeSemgrepPlatformSelection,
+  semgrepSelectionFormat,
+} from "./semgrep-platform-findings.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import {
   cloudRepositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";
-import type { ExternalFindings } from "./external-findings.js";
+import type {
+  ExternalFindings,
+  ExternalSourceRepository,
+} from "./external-findings.js";
 import {
   messageText,
   parseNativeJsonResult,
@@ -28,6 +35,8 @@ import {
 } from "./scanner-import.js";
 
 export interface SemgrepImportOptions {
+  /** Independent source references from the SDK reader. */
+  sourceRepositories?: readonly ExternalSourceRepository[];
   /** Source repository declared by the caller; never inferred from the destination. */
   sourceRepositoryUrl: string;
 }
@@ -150,6 +159,16 @@ export function normalizeSemgrepFindings(
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
   const document = record(input, "Semgrep report");
+  if (document["format"] === semgrepSelectionFormat) {
+    if (target !== "local")
+      throw new Error("Semgrep Platform selections require a local import.");
+    return normalizeSemgrepPlatformSelection(
+      document,
+      options?.sourceRepositoryUrl,
+      target,
+      options?.sourceRepositories,
+    );
+  }
   if (document["version"] === "2.1.0" && document["runs"] !== undefined)
     return normalizeSemgrepSarif(document, options, target);
   const repositoryUrl = sourceRepository(options);

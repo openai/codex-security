@@ -11,7 +11,7 @@ export interface ExternalFinding {
 /** Repository provenance retained by a reader outside the published evidence. */
 export interface ExternalSourceRepository {
   url: string;
-  platform?: "github";
+  platform?: "github" | "gitlab";
 }
 
 export function snapshotSourceRepositories(
