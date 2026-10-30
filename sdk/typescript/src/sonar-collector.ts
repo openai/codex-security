@@ -1,7 +1,11 @@
 import { execFile as execFileCallback } from "node:child_process";
+import { dirname } from "node:path";
 import { promisify } from "node:util";
 import { CodexSecurityError, errorMessage } from "./errors.js";
-import { localGitProtectionRoots } from "./external-findings-local.js";
+import {
+  gitRemoteMatchesSource,
+  localGitProtectionRoots,
+} from "./external-findings-local.js";
 import { repositoryUrlKey } from "./external-import-contract.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import {
@@ -14,7 +18,10 @@ import { array, record, relativePath, requiredText } from "./scanner-import.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 import { completeSonarPages, type SonarCapture } from "./sonar-findings.js";
 import { gitOutput } from "./targets.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
+import {
+  inspectTrustedExecutable,
+  resolveTrustedExecutable,
+} from "./trusted-executable.js";
 import { isSafeNonNegativeInteger } from "./value.js";
 
 const execFile = promisify(execFileCallback);
@@ -35,7 +42,7 @@ async function sonarCommand(
   options: SonarCollectionOptions,
   protectedRoots: string[],
 ): Promise<SonarCommand> {
-  const { cwd, environment = process.env, signal } = options;
+  const { environment = process.env, signal } = options;
   const trusted = await resolveTrustedExecutable(
     "sonar",
     environment,
@@ -46,13 +53,19 @@ async function sonarCommand(
       "Install the SonarQube CLI (sonar) and run 'sonar auth login', or import a saved Sonar export.",
     );
   }
+  const git = await inspectTrustedExecutable(
+    "git",
+    trusted.environment,
+    protectedRoots,
+  );
   return async (args) => {
     signal?.throwIfAborted();
     let stdout: string;
     try {
       ({ stdout } = await execFile(trusted.executable, args, {
-        cwd,
-        env: trusted.environment,
+        // Authentication and raw API calls use the signed-in connection independently of checkout configuration.
+        cwd: dirname(trusted.executable),
+        env: git.environment,
         signal,
         maxBuffer: Infinity,
       }));
@@ -91,10 +104,15 @@ async function checkoutOrigin(
       protectedRoots,
       options.environment,
     );
-    if (/[\r\n]/u.test(origin)) return;
+    if (/[\s\\\p{Cc}?#]/u.test(origin)) return;
     const remote = parseGitRemote(origin);
-    if (!remote || remote.url.search || remote.url.hash) return;
-    const { url, path } = remote;
+    if (!remote) return;
+    const { url } = remote;
+    // Git passes literal SSH paths to upload-pack. URL.pathname collapses dot segments.
+    const path = remote.scpStyle
+      ? remote.path
+      : /^[^:/]+:\/\/[^/]+\/(.+)$/u.exec(origin)?.[1];
+    if (!path) return;
     let base: string;
     if (url.protocol === "http:" || url.protocol === "https:") {
       base = url.origin;
@@ -111,141 +129,124 @@ async function checkoutOrigin(
     } else {
       return;
     }
-    return declaredScannerRepositoryUrl(
+    const source = declaredScannerRepositoryUrl(
       `${base}/${path.replace(/\.git$/iu, "")}`,
       "Sonar",
       "local",
     );
+    return gitRemoteMatchesSource(origin, source, "sonar") ? source : undefined;
   } catch {
     options.signal?.throwIfAborted();
     return undefined;
   }
 }
 
-async function discoverProject(
+const selectProjectHint =
+  "Select the Sonar project with --sonar-project KEY. The checkout's Git origin must identify one project in the signed-in Sonar organization for automatic discovery.";
+
+async function projectFromOrigin(
   sonar: SonarCommand,
-  server: string,
+  origin: string,
   organization: string,
-): Promise<string> {
-  const links = await sonar(["link", "list"]);
-  const projects = array(links["projects"], "Sonar project links").map(
-    (entry) => record(entry, "Sonar project link"),
+  selected?: string,
+  selectedId?: string,
+): Promise<string | undefined> {
+  const response = await sonar([
+    "api",
+    "get",
+    `/dop-translation/project-bindings?${new URLSearchParams({ url: origin })}`,
+  ]);
+  const bindings = array(response["bindings"], "Sonar repository bindings");
+  if (selectedId !== undefined) {
+    return bindings.some(
+      (item) => isRecord(item) && item["projectId"] === selectedId,
+    )
+      ? selected
+      : undefined;
+  }
+  if (bindings.length !== 1) return;
+  const id = requiredText(
+    record(bindings[0], "Sonar repository binding")["projectId"],
+    "Sonar bound project ID",
   );
-  const paging = links["paging"];
+  if (id.includes(",")) return;
+  const result = await sonar([
+    "api",
+    "get",
+    `/api/components/search_projects?${new URLSearchParams({ projectIds: id, organization })}`,
+  ]);
+  const components = array(result["components"], "Sonar bound projects");
+  const component = components.length === 1 ? components[0] : undefined;
   if (
-    projects.length !== 1 ||
-    (isRecord(paging) && paging["hasNextPage"] === true)
-  ) {
-    const candidates = projects
-      .map((project) => project["projectKey"])
-      .join(", ");
-    throw new CodexSecurityError(
-      `Select a Sonar project with --sonar-project KEY.${candidates ? ` Linked projects: ${candidates}.` : " No unique project is linked to this checkout."}`,
-    );
-  }
-  const project = projects[0]!;
-  if (
-    (project["serverUrl"] !== server &&
-      project["serverUrl"] !== server + "/") ||
-    (project["organization"] && project["organization"] !== organization)
-  ) {
-    throw new CodexSecurityError(
-      "The linked project uses another Sonar connection. Switch to its server and organization with 'sonar auth login'.",
-    );
-  }
-  return requiredText(project["projectKey"], "Linked Sonar project key");
+    !isRecord(component) ||
+    (component["id"] !== undefined && component["id"] !== id) ||
+    (component["organization"] !== undefined &&
+      component["organization"] !== organization)
+  )
+    return;
+  const project = requiredText(component["key"], "Sonar bound project key");
+  return selected === undefined || selected === project ? project : undefined;
 }
 
-/** Use a Sonar binding before attributing findings to the checkout's Git origin. */
-async function repositoryBinding(
+async function resolveProject(
   sonar: SonarCommand,
-  project: string,
   organization: string,
   origin: string | undefined,
+  selected: string | undefined,
   signal?: AbortSignal,
-): Promise<{
-  repositoryUrl?: string;
-  matchesCheckout: boolean;
-  diagnostic?: string;
-}> {
-  let componentId: string | undefined;
-  let navigationError: string | undefined;
-  try {
-    const component = await sonar([
-      "api",
-      "get",
-      `/api/navigation/component?${new URLSearchParams({ component: project, organization })}`,
-    ]);
-    if (
-      (component["key"] && component["key"] !== project) ||
-      (component["organization"] && component["organization"] !== organization)
-    )
-      return { matchesCheckout: false };
-    const alm = component["alm"];
-    const repositoryUrl =
-      isRecord(alm) && alm["url"]
-        ? declaredScannerRepositoryUrl(alm["url"], "Sonar", "local")
-        : undefined;
-    if (repositoryUrl) {
-      return {
-        repositoryUrl,
-        matchesCheckout: Boolean(
-          origin &&
-          repositoryUrlKey(origin) === repositoryUrlKey(repositoryUrl),
-        ),
-      };
+): Promise<{ project: string; repositoryUrl?: string }> {
+  let selectedId: string | undefined;
+  if (selected !== undefined) {
+    // The handoff or user has already selected this project.
+    try {
+      const component = await sonar([
+        "api",
+        "get",
+        `/api/navigation/component?${new URLSearchParams({ component: selected, organization })}`,
+      ]);
+      if (
+        component["key"] !== selected ||
+        (component["organization"] &&
+          component["organization"] !== organization)
+      )
+        return { project: selected };
+      const alm = component["alm"];
+      if (isRecord(alm) && alm["url"])
+        return {
+          project: selected,
+          repositoryUrl: declaredScannerRepositoryUrl(
+            alm["url"],
+            "Sonar",
+            "local",
+          ),
+        };
+      if (typeof component["id"] === "string") selectedId = component["id"];
+    } catch {
+      // Some token sessions cannot read browser navigation metadata.
+      signal?.throwIfAborted();
     }
-    if (typeof component["id"] === "string") componentId = component["id"];
-  } catch (error) {
-    signal?.throwIfAborted();
-    navigationError = errorMessage(error);
   }
-  if (!origin) return { matchesCheckout: false, diagnostic: navigationError };
-  try {
-    const response = await sonar([
-      "api",
-      "get",
-      `/dop-translation/project-bindings?${new URLSearchParams({ url: origin })}`,
-    ]);
-    const ids = array(response["bindings"], "Sonar project bindings").flatMap(
-      (binding) =>
-        isRecord(binding) && typeof binding["projectId"] === "string"
-          ? [binding["projectId"]]
-          : [],
-    );
-    let matches = componentId !== undefined && ids.includes(componentId);
-    if (componentId === undefined) {
-      // Token sessions can read the CLI's binding lookup even when navigation requires a browser session.
-      for (const id of ids) {
-        const result = await sonar([
-          "api",
-          "get",
-          `/api/components/search_projects?${new URLSearchParams({ projectIds: id, organization })}`,
-        ]);
-        if (
-          array(result["components"], "Sonar bound projects").some(
-            (item) => isRecord(item) && item["key"] === project,
-          )
-        ) {
-          matches = true;
-          break;
-        }
-      }
+  if (origin !== undefined) {
+    try {
+      const project = await projectFromOrigin(
+        sonar,
+        origin,
+        organization,
+        selected,
+        selectedId,
+      );
+      if (project !== undefined) return { project, repositoryUrl: origin };
+    } catch (error) {
+      signal?.throwIfAborted();
+      if (selected === undefined)
+        throw new CodexSecurityError(
+          `${selectProjectHint}\n${errorMessage(error)}`,
+          { cause: error },
+        );
     }
-    return {
-      repositoryUrl: matches ? origin : undefined,
-      matchesCheckout: matches,
-      diagnostic: matches ? undefined : navigationError,
-    };
-  } catch (error) {
-    signal?.throwIfAborted();
-    return {
-      matchesCheckout: false,
-      diagnostic: [navigationError, errorMessage(error)]
-        .filter(Boolean)
-        .join("\n"),
-    };
   }
+  if (selected !== undefined) return { project: selected };
+  throw new CodexSecurityError(selectProjectHint);
 }
 
 /** Fetch native SonarQube Cloud evidence through the developer's existing CLI session. */
@@ -276,12 +277,17 @@ export async function collectSonarIssues(
       );
   }
   const environment = options.environment ?? process.env;
+  if (options.project?.includes(","))
+    throw new CodexSecurityError("Select one Sonar project key.");
   const protectedRoots = [options.cwd, process.cwd()];
   for (const root of new Set(protectedRoots)) {
     protectedRoots.push(
       ...(await localGitProtectionRoots(root, environment, options.signal)),
     );
   }
+  const origin = await checkoutOrigin(options, protectedRoots);
+  if (options.project === undefined && origin === undefined)
+    throw new CodexSecurityError(selectProjectHint);
   const sonar = runSonar ?? (await sonarCommand(options, protectedRoots));
   const auth = await sonar(["auth", "status", "--format", "json"]);
   if (auth["status"] !== "connected")
@@ -300,22 +306,15 @@ export async function collectSonarIssues(
       "Connect the Sonar CLI to a SonarQube Cloud organization with 'sonar auth login'.",
     );
   const organization = requiredText(auth["org"], "Sonar organization");
-  const project =
-    options.project ?? (await discoverProject(sonar, server, organization));
-  if (project.includes(","))
-    throw new CodexSecurityError("Select one Sonar project key.");
-  const binding = await repositoryBinding(
+  const { project, repositoryUrl } = await resolveProject(
     sonar,
-    project,
     organization,
-    await checkoutOrigin(options, protectedRoots),
+    origin,
+    options.project,
     options.signal,
   );
-  if (options.project === undefined && !binding.matchesCheckout) {
-    throw new CodexSecurityError(
-      `Sonar could not verify that linked project ${JSON.stringify(project)} belongs to this checkout's origin. Rerun with --sonar-project KEY to confirm the source project.${binding.diagnostic ? `\n${binding.diagnostic}` : ""}`,
-    );
-  }
+  if (project.includes(","))
+    throw new CodexSecurityError("Select one Sonar project key.");
   if (branch === undefined && pullRequest === undefined) {
     const response = await sonar([
       "api",
@@ -385,8 +384,13 @@ export async function collectSonarIssues(
       `Selected Sonar security issues were not returned for this project and ref: ${[...missing].join(", ")}.`,
     );
   let projectBase: string | undefined;
-  if (binding.matchesCheckout && branch !== undefined) {
-    // A Git-discovered link anchors at the checkout root even for a nested analysis.
+  if (
+    origin &&
+    repositoryUrl &&
+    repositoryUrlKey(origin) === repositoryUrlKey(repositoryUrl) &&
+    branch !== undefined
+  ) {
+    // Only the analysis can place native paths within a bound repository.
     try {
       const metadata = await sonar([
         "api",
@@ -410,7 +414,7 @@ export async function collectSonarIssues(
     project,
     branch,
     pullRequest,
-    repositoryUrl: binding.repositoryUrl,
+    repositoryUrl,
     projectBase,
     pages,
   };

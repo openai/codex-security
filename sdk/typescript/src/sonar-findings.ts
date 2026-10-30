@@ -80,7 +80,20 @@ export function sonarRepositoryUrls(
     );
   }
   add(report);
-  for (const { evidence } of findings) add(evidence.source_data ?? undefined);
+  for (const { evidence, source_finding_id } of findings) {
+    const data = evidence.source_data;
+    add(data ?? undefined);
+    if (data?.["format"] === sonarFormat && data["issue"] !== undefined) {
+      const issue = record(data["issue"], "Retained Sonar issue");
+      if (
+        requiredText(issue["key"], "Retained Sonar issue key") !==
+        source_finding_id
+      )
+        throw new Error(
+          "The normalized finding ID does not match the retained Sonar issue key.",
+        );
+    }
+  }
   return urls;
 }
 
@@ -242,6 +255,9 @@ export function normalizeSonarFindings(
     branch: capture?.branch,
     pullRequest: capture?.pullRequest,
   };
+  const hasUnscopedIssue = rows.some(
+    ({ issue }) => !text(issue["branch"]) && !text(issue["pullRequest"]),
+  );
   for (const { issue } of rows) {
     requiredText(issue["project"], "Sonar issue project");
     for (const field of [
@@ -263,6 +279,15 @@ export function normalizeSonarFindings(
         "The Sonar export mixes branch and pull request results.",
       );
   }
+  if (
+    !capture?.branch &&
+    !capture?.pullRequest &&
+    hasUnscopedIssue &&
+    (scope.branch || scope.pullRequest)
+  )
+    throw new Error(
+      "The Sonar export mixes issues with a named ref and issues without a ref.",
+    );
   const context = {
     format: sonarFormat,
     ...(capture && { server: capture.server }),

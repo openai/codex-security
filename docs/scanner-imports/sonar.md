@@ -33,18 +33,21 @@ codex-security import sonar --sonar-project example_project --sonar-branch main 
 For a pull request, replace `--sonar-branch main` with, for example,
 `--sonar-pull-request 42`. With neither ref option, the collector reads the
 project's main branch. Omit the issue options to collect open security
-issues for the selected project and ref. If Sonar cannot supply the project's
+issues for the selected project and ref. You can omit `--sonar-project` when
+Sonar binds the checkout's Git origin to exactly one project in the signed-in
+organization. For a monorepo with several Sonar projects, pass the project key
+you want to import. If Sonar cannot supply the project's
 repository binding, verify its Git URL in Sonar and retry the preview with
 `import sonar CAPTURE --source-repository-url GIT_URL --dry-run --format json`
 using the reported capture path. Check the target and selection before importing.
 
 The preview saves a private copy even when the input is a file. Use the path
 it returns in `capture` to import the reviewed evidence into the local
-workbench, then read it back:
+workbench. Use the preview's `repository` path to read the findings back:
 
 ```sh
 codex-security import sonar "/path/from/capture.json" --yes
-codex-security findings imported . --format json
+codex-security findings imported "/checkout/from/preview" --format json
 ```
 
 Codex Security keeps each Sonar issue key and its native evidence, including

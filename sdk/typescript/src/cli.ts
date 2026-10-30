@@ -4154,6 +4154,21 @@ export async function main(
               };
           };
           try {
+            if (
+              importsEnabled &&
+              argv.includes("--full-output") &&
+              format !== "json" &&
+              format !== "jsonl"
+            ) {
+              structuredError = true;
+              exitCode = 2;
+              return incurError({
+                code: "INVALID_ARGUMENTS",
+                message:
+                  "Sonar imports support --full-output with --format json or --format jsonl. Choose one of those formats or omit --full-output.",
+                exitCode,
+              });
+            }
             const prepared = await prepareSonarImport(
               {
                 cwd: dependencies.currentDirectory(),

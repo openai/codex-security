@@ -10,6 +10,7 @@ import {
 } from "./external-findings-local.js";
 import {
   ExternalPublicationError,
+  externalPublicationStateDirectory,
   prepareNormalizedExternalPublication,
   writeAtomicJson,
   type ExternalPublicationDependencies,
@@ -29,6 +30,7 @@ import {
 import { gitMarkerRoot, normalizeRepository } from "./targets.js";
 import { errorMessage } from "./errors.js";
 import { canonicalJson } from "./record.js";
+import { validateExternalReport } from "./external-import-contract.js";
 
 interface SonarImportOptions {
   cwd: string;
@@ -106,6 +108,7 @@ export async function prepareSonarImport(
         signal,
       });
   let report = parseSonarCapture(raw);
+  validateExternalReport(report);
   const state = await canonicalConfigPath(
     codexSecurityStateDirectory(environment),
   );
@@ -128,7 +131,9 @@ export async function prepareSonarImport(
   );
   const retained =
     input && dirname(input) === root
-      ? /^([a-f0-9]{64})(?:\.([a-f0-9]{64}))?\.json$/u.exec(basename(input))
+      ? /^([a-f0-9]{64})(?:\.([a-f0-9]{64})(?:\.([a-f0-9]{64}))?)?\.json$/u.exec(
+          basename(input),
+        )
       : undefined;
   if (retained && hash("sha256", JSON.stringify(raw)) !== retained[1])
     throw new Error(
@@ -180,16 +185,27 @@ export async function prepareSonarImport(
   let cloud: PreparedExternalPublication | undefined;
   let cloudError: string | undefined;
   if (options.to === "cloud" && local.preview.read > 0) {
+    const checkout = hash("sha256", repository);
+    const reviewedCheckout =
+      retained?.[2] === checkout && Boolean(retained?.[3]);
+    const reviewError =
+      "Cloud publication requires the reviewed capture for this checkout, account, repository and environment. Run import sonar with this capture and --to cloud --dry-run, then pass the returned capture path with --to cloud --yes.";
+    if (options.yes && !options.dryRun && !reviewedCheckout)
+      throw new Error(reviewError);
     try {
+      requireOutputOutsideRepositories(
+        protectedRoots,
+        await canonicalConfigPath(
+          externalPublicationStateDirectory(environment),
+        ),
+        "runtime",
+      );
       const confirmedRepository =
         local.matchesRepositoryRemote || options.sourceRepositoryUrl;
       const bindingError =
         "This checkout has no matching Git remote. Verify the Sonar project's repository and pass --source-repository-url to preview Cloud publication.";
-      if (!confirmedRepository && !retained?.[2]) throw new Error(bindingError);
-      const reviewError =
-        "Cloud publication requires the reviewed capture for this checkout, account, repository and environment. Run import sonar with this capture and --to cloud --dry-run, then pass the returned capture path with --to cloud --yes.";
-      if (options.yes && !options.dryRun && !retained?.[2])
-        throw new Error(reviewError);
+      if (!confirmedRepository && !reviewedCheckout)
+        throw new Error(bindingError);
       const prepared = await prepareNormalizedExternalPublication(
         normalizeSonarFindings(
           report,
@@ -200,7 +216,10 @@ export async function prepareSonarImport(
         dependencies,
       );
       const review = cloudReviewDigest(prepared.preview, repository);
-      const reviewedCapture = join(root, `${evidenceDigest}.${review}.json`);
+      const reviewedCapture = join(
+        root,
+        `${evidenceDigest}.${checkout}.${review}.json`,
+      );
       if (input !== reviewedCapture) {
         if (!confirmedRepository) throw new Error(bindingError);
         if (options.yes && !options.dryRun) throw new Error(reviewError);

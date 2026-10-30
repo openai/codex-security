@@ -169,9 +169,13 @@ test("Cloud confirmation verifies the retained evidence, account and assigned en
   reportVersion = 0;
   const copy = join(selection.cwd, basename(confirm.capture));
   await copyFile(confirm.capture, copy);
-  expect(
-    (await prepareSonarImport({ ...confirm, capture: copy }, deps)).cloudError,
-  ).toContain("--to cloud --dry-run");
+  await expect(
+    prepareSonarImport({ ...confirm, capture: copy }, deps),
+  ).rejects.toThrow("--to cloud --dry-run");
+  const second = await fixture(directory.path, "second");
+  await expect(
+    prepareSonarImport({ ...confirm, cwd: second.options.cwd }, deps),
+  ).rejects.toThrow("--to cloud --dry-run");
   account = "account-b";
   expect((await prepareSonarImport(confirm, deps)).cloudError).toContain(
     "--to cloud --dry-run",
@@ -251,6 +255,46 @@ test("a dry run cannot create the capture directory inside a checkout or its lin
     prepareSonarImport({ ...selected, cwd: other }, deps),
   ).rejects.toThrow();
   expect(await stat(state).catch(() => null)).toBeNull();
+});
+
+test("rejects a Cloud checkpoint directory inside the checkout before contacting Cloud", async () => {
+  await using directory = await scopedTemporaryDirectory("sonar-checkpoints-");
+  const { options, deps } = await fixture(
+    directory.path,
+    "external-finding-publications",
+  );
+  deps.environment.CODEX_SECURITY_STATE_DIR = directory.path;
+  const result = await prepareSonarImport(
+    { ...options, to: "cloud" },
+    {
+      ...deps,
+      credentials: async () => {
+        throw new Error("Unexpected Cloud call");
+      },
+    },
+  );
+  expect(result.cloudError).toContain(options.cwd);
+  expect(result.cloud).toBeUndefined();
+});
+
+test("rejects a non-finite native JSON number before snapshotting a capture", async () => {
+  await using directory = await scopedTemporaryDirectory(
+    "sonar-numeric-evidence-",
+  );
+  const { report, options, deps } = await fixture(directory.path);
+  await writeFile(
+    options.capture,
+    JSON.stringify(report).replace(
+      '"Reviewed evidence"',
+      '"Reviewed evidence","value":1e400',
+    ),
+  );
+  await expect(
+    prepareSonarImport({ ...options, to: "local" }, deps),
+  ).rejects.toThrow("finite JSON numbers");
+  expect(
+    await stat(deps.environment.CODEX_SECURITY_STATE_DIR).catch(() => null),
+  ).toBeNull();
 });
 
 test.skipIf(process.platform === "win32")(

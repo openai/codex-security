@@ -2453,6 +2453,8 @@ security issues from the active Sonar CLI connection. For issues selected in
 the SonarQube plugin, pass each issue key with `--sonar-issue`, its project
 with `--sonar-project`, and its branch or PR with `--sonar-branch` or
 `--sonar-pull-request`. The plugin and terminal use the same Sonar login.
+When you omit `--sonar-project`, Sonar must bind the checkout's Git origin to
+one project in that login's organization.
 
 ```sh
 codex-security import sonar --sonar-project example_project --sonar-branch main \
@@ -2464,7 +2466,9 @@ codex-security import sonar "/path/from/capture.json" --yes
 The default destination is the local workbench. For both local import and
 Cloud publication, preview with `--to cloud` and confirm with the exact
 `capture` path from the successful Cloud preview and `--to cloud --yes`.
-If the destination changes, preview again. You can publish a local import later
+If the checkout or Cloud destination changes, preview again. For a structured
+success or error envelope, use `--full-output` with `--format json` or
+`--format jsonl`. You can publish a local import later
 without reconnecting to Sonar. See [Sonar import and replay](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/sonar.md)
 for authentication, repository mapping, and native JSON input.
 

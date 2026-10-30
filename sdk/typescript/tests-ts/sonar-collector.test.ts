@@ -6,6 +6,8 @@ import {
   mkdtemp,
   realpath,
   rm,
+  symlink,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -24,7 +26,6 @@ const organization = "example";
 const project = "example:service";
 const repositoryUrl = "https://example.invalid/team/service";
 const auth = { status: "connected", org: organization, server };
-const link = { projectKey: project, organization, serverUrl: server };
 const environment = {
   ...process.env,
   CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
@@ -73,10 +74,9 @@ function page(key: string, index = 1, total = 1) {
 
 function sonarSession(options: {
   pages: Record<string, unknown>[];
-  links?: Record<string, unknown>[];
-  boundProjectId?: string;
+  bindings?: Record<string, unknown>[];
   navigationDenied?: boolean;
-  resolvedProject?: string;
+  components?: Record<string, unknown>[];
   repositoryUrl?: string;
   analyses?: Record<string, unknown>[] | Error;
 }) {
@@ -88,7 +88,7 @@ function sonarSession(options: {
     run: async (args: string[]): Promise<Record<string, unknown>> => {
       commands.push(args);
       if (args[0] === "auth") return auth;
-      if (args[0] === "link") return { projects: options.links ?? [link] };
+      expect(args.slice(0, 2)).toEqual(["api", "get"]);
       const url = new URL(args[2]!, server);
       if (url.pathname === "/api/project_branches/list")
         return {
@@ -110,14 +110,16 @@ function sonarSession(options: {
         expect(url.searchParams.get("url")).toBe(
           options.repositoryUrl ?? repositoryUrl,
         );
-        return { bindings: [{ projectId: options.boundProjectId ?? "p-1" }] };
+        return { bindings: options.bindings ?? [{ projectId: "p-1" }] };
       }
       if (url.pathname === "/api/components/search_projects") {
-        expect(url.searchParams.get("projectIds")).toBe(
-          options.boundProjectId ?? "p-1",
-        );
+        expect(url.searchParams.get("projectIds")).toBe("p-1");
         expect(url.searchParams.get("organization")).toBe(organization);
-        return { components: [{ key: options.resolvedProject ?? project }] };
+        return {
+          components: options.components ?? [
+            { key: project, id: "p-1", organization },
+          ],
+        };
       }
       if (url.pathname === "/api/project_analyses/search") {
         if (options.analyses instanceof Error) throw options.analyses;
@@ -135,7 +137,6 @@ test("uses the signed-in CLI and a verified checkout binding, retaining all secu
   const cwd = await checkout();
   const session = sonarSession({
     pages,
-    links: [{ ...link, projectRoot: cwd }],
     analyses: [{ relativePathFromScmRoot: "" }],
   });
   const branch = "release/space & plus+";
@@ -144,7 +145,12 @@ test("uses the signed-in CLI and a verified checkout binding, retaining all secu
     session.run,
   );
   expect(session.commands[0]).toEqual(["auth", "status", "--format", "json"]);
-  expect(session.commands[1]).toEqual(["link", "list"]);
+  expect(session.commands[1]).toEqual([
+    "api",
+    "get",
+    `/dop-translation/project-bindings?${new URLSearchParams({ url: repositoryUrl })}`,
+  ]);
+  expect(session.commands.flat().join(" ")).not.toContain("synthetic-user");
   expect(capture).toMatchObject({
     format: "sonar-issues/v1",
     server,
@@ -220,21 +226,25 @@ test("an omitted ref and the explicit Sonar main branch produce identical captur
   ]);
 });
 
-test("verifies a token-only session through the Sonar CLI's remote binding lookup", async () => {
+test("uses the explicit project in token-only sessions and claims only a matching binding", async () => {
   const cwd = await checkout();
   for (const resolvedProject of [project, "other"]) {
     const session = sonarSession({
       pages: [page("A")],
       navigationDenied: true,
-      resolvedProject,
+      components: [{ key: resolvedProject }],
     });
-    const request = collectSonarIssues({ cwd, environment }, session.run);
-    if (resolvedProject === project)
-      expect((await request).repositoryUrl).toBe(repositoryUrl);
-    else {
-      await expect(request).rejects.toThrow("could not verify");
-      expect(session.queries).toHaveLength(0);
-    }
+    const capture = await collectSonarIssues(
+      { cwd, project, environment },
+      session.run,
+    );
+    expect(capture.project).toBe(project);
+    expect(capture.repositoryUrl).toBe(
+      resolvedProject === project ? repositoryUrl : undefined,
+    );
+    expect(session.queries.map((query) => query.get("componentKeys"))).toEqual([
+      project,
+    ]);
   }
 });
 
@@ -257,16 +267,21 @@ test("cannot save a partial or overlapping Sonar search as a complete capture", 
 test("asks for a project before fetching findings from an ambiguous or unverified checkout", async () => {
   const cwd = await checkout();
   for (const options of [
-    { links: [link, { ...link, projectKey: "example:other" }] },
-    { links: [{ ...link, serverUrl: "https://sonarcloud.io" }] },
-    { links: [{ ...link, organization: "unrelated" }] },
-    { boundProjectId: "another-project" },
+    { bindings: [] },
+    { bindings: [{ projectId: "p-1" }, { projectId: "p-2" }] },
+    { components: [] },
+    { components: [{ key: project }, { key: "unrelated" }] },
+    { components: [{ key: project, organization: "unrelated" }] },
+    { components: [{ key: project, id: "p-2" }] },
   ]) {
     const session = sonarSession({ ...options, pages: [] });
     await expect(
       collectSonarIssues({ cwd, environment }, session.run),
-    ).rejects.toThrow(/--sonar-project|another Sonar connection/);
+    ).rejects.toThrow("--sonar-project");
     expect(session.queries).toHaveLength(0);
+    expect(session.commands.flat().join(" ")).not.toContain(
+      "/api/navigation/component",
+    );
   }
 });
 
@@ -317,7 +332,6 @@ test("projects paths only from the selected branch's recorded analysis base", as
   ] as Array<[Record<string, unknown>[] | Error, string | undefined]>) {
     const session = sonarSession({
       pages: [page("A")],
-      links: [{ ...link, projectRoot: cwd }],
       analyses,
     });
     const capture = await collectSonarIssues(
@@ -349,6 +363,70 @@ test("verifies the GitHub SSH-over-443 origin using its HTTPS repository binding
   const capture = await collectSonarIssues({ cwd, environment }, session.run);
   expect(capture.repositoryUrl).toBe(source);
 });
+
+test("rejects ambiguous Git transport and credential-bearing query strings before Sonar discovery", async () => {
+  const cwd = await checkout();
+  await writeFile(
+    join(cwd, "sonar-project.properties"),
+    "sonar.projectKey=unselected\n",
+  );
+  for (const origin of [
+    "https://example.invalid/team/service.git?access_token=synthetic",
+    "https://example.invalid/team/old/../service.git",
+    "ssh://git@github.com/team/old/../service.git",
+    "ssh://git@github.com/team/old/%2e%2e/service.git",
+    "ssh://git@github.com%2f/team/service.git",
+    "git@github.com:team/%73ervice.git",
+  ]) {
+    execFileSync("git", ["-C", cwd, "remote", "set-url", "origin", origin]);
+    const session = sonarSession({ pages: [] });
+    await expect(
+      collectSonarIssues({ cwd, environment }, session.run),
+    ).rejects.toThrow("--sonar-project");
+    expect(session.commands).toEqual([]);
+  }
+});
+
+test.skipIf(process.platform === "win32")(
+  "Sonar's child Git cannot resolve an external symlink into the checkout",
+  async () => {
+    const cwd = await checkout();
+    const root = await realpath(await mkdtemp(join(tmpdir(), "sonar tools ")));
+    roots.push(root);
+    const bin = join(root, "bin"),
+      aliases = join(root, "aliases"),
+      marker = join(root, "executed");
+    await Promise.all([mkdir(bin), mkdir(aliases)]);
+    await writeFile(
+      join(cwd, "git"),
+      '#!/bin/sh\ntouch "$SONAR_CHILD_MARKER"\n',
+      { mode: 0o700 },
+    );
+    await symlink(join(cwd, "git"), join(aliases, "git"));
+    await writeFile(
+      join(bin, "sonar"),
+      `#!/bin/sh
+test "$SONAR_TOKEN" = "synthetic" || exit 1
+git --version >/dev/null || exit 1
+printf '{"status":"token_missing"}'
+`,
+      { mode: 0o700 },
+    );
+    await expect(
+      collectSonarIssues({
+        cwd,
+        project,
+        environment: {
+          ...environment,
+          PATH: [aliases, bin, process.env["PATH"]].join(delimiter),
+          SONAR_CHILD_MARKER: marker,
+          SONAR_TOKEN: "synthetic",
+        },
+      }),
+    ).rejects.toThrow("sonar auth login");
+    await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  },
+);
 
 test.each(["checkout", "metadata"])(
   "excludes Git in a separate caller %s from the SDK lookup",

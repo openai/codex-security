@@ -228,6 +228,15 @@ function reportForJson(report: ExternalFindings["report"]) {
   return { ...report, errors: JSON.parse(json) as unknown[] };
 }
 
+export function externalPublicationStateDirectory(
+  environment: NodeJS.ProcessEnv,
+): string {
+  return join(
+    codexSecurityStateDirectory(environment),
+    "external-finding-publications",
+  );
+}
+
 export async function writeAtomicJson(
   path: string,
   value: unknown,
@@ -547,10 +556,7 @@ async function preparePublicationInput(
     );
   const destination = destinations[0]!;
   const source = { provider: options.provider, source_key: options.sourceKey };
-  const state = join(
-    codexSecurityStateDirectory(environment),
-    "external-finding-publications",
-  );
+  const state = externalPublicationStateDirectory(environment);
   const checkpointIdentity = [
     // Keep existing production checkpoints readable; other deployments must
     // never share a saved request or receipt with the production default.

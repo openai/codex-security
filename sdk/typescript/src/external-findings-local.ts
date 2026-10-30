@@ -257,6 +257,17 @@ function matchingRemote(
   );
 }
 
+/** Use the same literal Git transport semantics as source-bound local imports. */
+export function gitRemoteMatchesSource(
+  remote: string,
+  source: string,
+  provider: Provider,
+): boolean {
+  const candidate = remoteRepository(remote, provider, true);
+  const target = remoteRepository(source, provider, true);
+  return Boolean(candidate && target && matchingRemote(candidate, target));
+}
+
 function localRepositoryPlatform(
   provider: Provider,
   sources: readonly ExternalSourceRepository[],

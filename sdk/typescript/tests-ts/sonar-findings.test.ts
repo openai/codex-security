@@ -193,6 +193,13 @@ test("rejects missing, overlapping, or changed pages before importing any record
 });
 
 test("validates the repository binding and native project or ref before attributing evidence", () => {
+  const mixed = page([
+    issue("main"),
+    { ...issue("feature"), branch: "feature" },
+  ]);
+  expect(() => normalizeSonarFindings(mixed, repository)).toThrow(
+    "without a ref",
+  );
   expect(() =>
     normalizeSonarFindings(capture([page([issue()])]), repository + "-other"),
   ).toThrow("does not match");
@@ -263,6 +270,12 @@ test("normalized local imports verify both report and issue bindings against the
   await expect(
     prepareNormalizedLocalImport(rows, { ...options, provider: "wiz" }, deps),
   ).rejects.toThrow("requires the sonar provider");
+  const id = finding.source_finding_id;
+  finding.source_finding_id = "different-issue";
+  await expect(
+    prepareNormalizedLocalImport(rows, options, deps),
+  ).rejects.toThrow("retained Sonar issue key");
+  finding.source_finding_id = id;
   finding.evidence.details = { kind: "sast", repository: { url: foreign } };
   await expect(
     prepareNormalizedLocalImport(rows, options, deps),

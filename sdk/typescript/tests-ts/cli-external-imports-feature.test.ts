@@ -217,6 +217,27 @@ test("a closed diagnostic pipe preserves the Sonar error envelope", async () => 
   expect(JSON.parse(stdout.text()).error.code).toBe("SONAR_IMPORT_FAILED");
 });
 
+test("rejects unsupported Sonar full-output formats before collecting findings", async () => {
+  const collectSonarIssues = mock(async (): Promise<never> => {
+    throw new Error("Unexpected collection");
+  });
+  const cli = createCliTest(main);
+  const deps = {
+    ...dependencies({
+      environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+    }),
+    collectSonarIssues,
+  };
+  expect(
+    await cli.runCli(
+      ["import", "sonar", "--yes", "--full-output", "--format", "yaml"],
+      deps,
+    ),
+  ).toBe(2);
+  expect(cli.stdout.text()).toContain("INVALID_ARGUMENTS");
+  expect(collectSonarIssues).not.toHaveBeenCalled();
+});
+
 const installedSkills =
   "installed skills preserve import errors and collector output";
 test(installedSkills, async () => {
