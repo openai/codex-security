@@ -374,12 +374,19 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
             for relative in untracked.stdout.split(b"\0")
             if relative and not relative.endswith(b"/")
         )
-        return sorted(
-            (path, status)
-            for path, status in combined.items()
-            if SOURCE_METADATA_DIRECTORIES.isdisjoint(path.relative_to(repo).parts)
-            and (status == "D" or (not path.is_symlink() and path.is_file()))
-        )
+        selected = []
+        linked_prefixes: dict[str, bool] = {}
+        for path, status in combined.items():
+            if not SOURCE_METADATA_DIRECTORIES.isdisjoint(path.relative_to(repo).parts):
+                continue
+            try:
+                if status == "M" and _directory_link_boundary(repo, path, linked_prefixes) != path:
+                    selected.append((path, "D"))
+                elif status == "D" or (not path.is_symlink() and path.is_file()):
+                    selected.append((path, status))
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+        return sorted(selected)
     raise SystemExit(f"Unknown diff mode: {mode}")
 
 
@@ -478,7 +485,14 @@ def candidate_source_lines(
         source: dict[str, Any] = {"path": name}
         if raw in location_set:
             if name not in counts:
-                blob = git_command(target, "cat-file", "blob", f"{revision}:{name}", text=False)
+                blob = git_command(
+                    target,
+                    "cat-file",
+                    "blob",
+                    f"{revision}:{name}",
+                    text=False,
+                    environment_overrides=LOCAL_GIT_OBJECTS,
+                )
                 blob.check_returncode()
                 data = blob.stdout
                 counts[name] = len(re.split(rb"\r\n|[\r\n]", data)) - int(
