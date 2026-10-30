@@ -413,7 +413,7 @@ function initialPullBody(template) {
     Changes:
       "Update the package version and draft release notes. The version header and PR title are maintained by automation. Edit the marked note sections in `.github/release-notes.md`; edited or deleted sections become human-owned. New suggestions appear in subsequent bot comments. The PR description is never regenerated.",
     Testing:
-      "The updater does not run package tests. Check required CI and Codex review on the current head before merging. Request a final Codex review if the last review targets an older head. Record any additional checks here.",
+      "The updater does not run package tests. Before merging, verify required CI in the **Checks** tab and Codex review on the current commit. Request a final review if Codex last reviewed an older commit. Post later manual test results in a PR comment or review with the tested commit SHA. Editing the description to update status can trigger CI.",
     "Risk and rollout":
       "Merging this PR starts the existing CI and protected release process. Review migration details and complete the public disclosure review before merging.",
   };
@@ -854,6 +854,7 @@ export function createGitHubClient(
       ? "https://api.github.com/graphql"
       : `${apiRoot}${path}`;
     for (let retry = 0; ; retry += 1) {
+      const retryDelay = 1000 * 2 ** retry;
       let response;
       try {
         response = await fetcher(url, {
@@ -871,16 +872,26 @@ export function createGitHubClient(
         }
       } catch (error) {
         if (!read || retry >= 2 || error instanceof SyntaxError) throw error;
-        await sleep(1000 * 2 ** retry);
+        await sleep(retryDelay);
         continue;
       }
-      if (read && retry < 2 && [500, 502, 503, 504].includes(response.status)) {
+      const retryAfter = response.headers.get("retry-after");
+      const minimumDelay = /^\d+$/u.test(retryAfter ?? "")
+        ? Number(retryAfter) * 1000
+        : Date.parse(retryAfter ?? "") - Date.now() || 0;
+      if (
+        read &&
+        retry < 2 &&
+        [500, 502, 503, 504].includes(response.status) &&
+        minimumDelay <= retryDelay
+      ) {
         await response.body?.cancel().catch(() => undefined);
-        await sleep(1000 * 2 ** retry);
+        await sleep(retryDelay);
         continue;
       }
       const error = new Error(
-        `GitHub ${method} ${path} failed with HTTP ${response.status}.`,
+        `GitHub ${method} ${path} failed with HTTP ${response.status}.` +
+          (retryAfter ? ` Retry-After: ${retryAfter}.` : ""),
       );
       error.status = response.status;
       throw error;

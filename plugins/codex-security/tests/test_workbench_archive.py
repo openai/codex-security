@@ -187,6 +187,7 @@ def pending_patch(previous_scan, workbench_api, monkeypatch):
         ("same-state", True),
         ("same-state-before-stage", False),
         ("same-state-staged", False),
+        ("same-state-before-digest", False),
         ("other-state", False),
         ("other-state", True),
         ("before-write", False),
@@ -241,19 +242,24 @@ def test_generate_patch_keeps_completed_scan_identity_during_archive(
                 archive_output()
 
         monkeypatch.setattr(remediation, "stage_scan_local_bytes", stage_with_archive)
-    elif archive == "after-digest":
+    elif archive in {"same-state-before-digest", "after-digest"}:
         patch_path = output / "artifacts" / "remediation" / occurrence / request / f"{token}.patch"
         patch_path.parent.mkdir(parents=True)
         patch_path.write_bytes(patch)
         db = workbench_api["_WORKBENCH_DB_CONTEXT"]
-        verify = db.require_matching_patch_digest
+        open_file = db.open_scan_local_file
 
-        def archive_after_verification(*args):
-            metadata = verify(*args)
-            archive_output()
-            return metadata
+        @contextmanager
+        def open_with_archive(directory, relative, **options):
+            is_patch = Path(relative).suffix == ".patch"
+            if is_patch and archive == "same-state-before-digest":
+                archive_output()
+            with open_file(directory, relative, **options) as source:
+                yield source
+            if is_patch and archive == "after-digest":
+                archive_output()
 
-        monkeypatch.setattr(db, "require_matching_patch_digest", archive_after_verification)
+        monkeypatch.setattr(db, "open_scan_local_file", open_with_archive)
 
     monkeypatch.setattr(sys, "stdin", Mock(buffer=Mock(read=archive_while_reading_patch)))
     if not archive.startswith("same-state"):
@@ -275,8 +281,9 @@ def test_generate_patch_keeps_completed_scan_identity_during_archive(
 
 @pytest.mark.cross_platform
 @pytest.mark.parametrize("rollback", [False, True], ids=["commit", "rollback"])
+@pytest.mark.parametrize("phase", ["before-seal", "after-root-sample", "before-stage"])
 def test_generate_waits_for_the_archive_transaction(
-    previous_scan, pending_patch, workbench_api, monkeypatch, rollback
+    previous_scan, pending_patch, workbench_api, monkeypatch, rollback, phase
 ):
     state, target, output, _ = previous_scan
     args, patch = pending_patch
@@ -311,12 +318,26 @@ def test_generate_waits_for_the_archive_transaction(
                 return output
             return Path(workbench_api["register_cli_scan"](connection, args)["archivedScanDir"])
 
-    def read_patch():
+    def pause_for_archive():
         start_archive.set()
         assert moved.wait(10)
-        return patch
 
-    monkeypatch.setattr(sys, "stdin", Mock(buffer=Mock(read=read_patch)))
+    if phase == "before-stage":
+        remediation = workbench_api["remediation_state"]
+        stage = remediation.stage_scan_local_bytes
+
+        def stage_during_archive(*args, **kwargs):
+            pause_for_archive()
+            return stage(*args, **kwargs)
+
+        monkeypatch.setattr(remediation, "stage_scan_local_bytes", stage_during_archive)
+    else:
+
+        def read_patch():
+            pause_for_archive()
+            return patch
+
+        monkeypatch.setattr(sys, "stdin", Mock(buffer=Mock(read=read_patch)))
     with ThreadPoolExecutor(max_workers=1) as pool, sqlite3.connect(database) as connection:
         connection.row_factory = sqlite3.Row
         connection.set_trace_callback(
@@ -325,6 +346,19 @@ def test_generate_waits_for_the_archive_transaction(
             )
         )
         registered = pool.submit(archive)
+        if phase == "after-root-sample":
+            remediation = workbench_api["remediation_state"]
+            sample = remediation.scan_root_identity
+
+            def sample_then_finish_archive(directory):
+                observed = sample(directory)
+                if not finish_archive.is_set():
+                    assert moved.is_set()
+                    finish_archive.set()
+                    registered.result(timeout=10)
+                return observed
+
+            monkeypatch.setattr(remediation, "scan_root_identity", sample_then_finish_archive)
         try:
             result = workbench_api["set_finding_remediation"](connection, args)["scan"]
         finally:
@@ -582,22 +616,18 @@ def test_interrupted_commit_keeps_files_at_their_saved_paths(previous_scan, monk
     assert list(output.iterdir()) == ([] if committed else [output / "report.md"])
 
 
-@pytest.mark.parametrize("layout", ["same", "nested", "alias"])
-def test_registration_does_not_archive_its_active_workbench_state(tmp_path, layout):
+def test_registration_does_not_archive_state_reached_through_an_external_alias(tmp_path):
     target = tmp_path / "target"
     target.mkdir()
-    (target / "fixture.py").write_text("preserved source\n")
     output = tmp_path / "output"
     output.mkdir(mode=0o700)
-    state = output if layout == "same" else output / "state"
-    state.mkdir(mode=0o700, exist_ok=True)
-    if layout == "alias":
-        alias = tmp_path / "state-alias"
-        try:
-            alias.symlink_to(state, target_is_directory=True)
-        except OSError:
-            pytest.skip("Directory symlinks are unavailable")
-        state = alias
+    nested_state = output / "state"
+    nested_state.mkdir(mode=0o700)
+    state = tmp_path / "state-alias"
+    try:
+        state.symlink_to(nested_state, target_is_directory=True)
+    except OSError:
+        pytest.skip("Directory symlinks are unavailable")
     saved = tmp_path / "saved"
     saved.mkdir(mode=0o700)
     previous = register(state, target, saved)

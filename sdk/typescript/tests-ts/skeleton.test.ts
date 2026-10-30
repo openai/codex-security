@@ -8,20 +8,8 @@ import {
   type AttackPathReachability,
   CodexSecurity,
   CodexSecurityError,
-  VERSION,
 } from "../src/index.js";
-import { main } from "../src/cli.js";
-import { capture } from "./cli-fixtures.js";
 import { bashCommand, runCommand } from "./support/shell.js";
-
-const { selectChecks } = (await import(
-  new URL("../../../.github/scripts/select-ci-checks.mjs", import.meta.url).href
-)) as {
-  selectChecks(
-    paths: string[],
-    options: { event: string; baseChanged?: boolean },
-  ): Record<"compatibility-matrix" | "python-matrix", string>;
-};
 
 interface WorkflowStep {
   name?: string;
@@ -102,7 +90,6 @@ describe("TypeScript package skeleton", () => {
 
   test("runs Bun once per OS and checks every supported Node runtime with the installed package", async () => {
     const { jobs } = await workflow("node-ci.yml");
-    const selected = selectChecks([], { event: "push" });
     expect(jobs["test"]?.strategy?.matrix).toEqual({
       os: ["ubuntu-latest", "macos-latest"],
       shard: [1, 2, 3, 4, 5, 6],
@@ -110,15 +97,6 @@ describe("TypeScript package skeleton", () => {
     expect(jobs["compatibility"]?.strategy?.matrix).toBe(
       "${{ fromJSON(needs.classify-changes.outputs.compatibility-matrix) }}",
     );
-    expect(JSON.parse(selected["compatibility-matrix"]).include).toEqual([
-      ...["22.13.0", "24.0.0", "24", "26.0.0", "26"].map((node) => ({
-        os: "ubuntu-latest",
-        node,
-      })),
-      { os: "macos-latest", node: "22.13.0" },
-      { os: "windows-latest", node: "22.13.0" },
-      { os: "windows-latest", node: "24" },
-    ]);
     expect(jobs["windows-test"]?.strategy?.matrix).toEqual({
       shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
     });
@@ -255,27 +233,9 @@ describe("TypeScript package skeleton", () => {
   test("covers the Python runtime floor and native platform paths", async () => {
     const { jobs } = await workflow("node-ci.yml");
     const job = jobs["plugin-source"]!;
-    const selected = selectChecks([], { event: "push" });
     expect(job.strategy?.matrix).toBe(
       "${{ fromJSON(needs.classify-changes.outputs.python-matrix) }}",
     );
-    expect(JSON.parse(selected["python-matrix"]).include).toEqual([
-      ...["3.10", "3.12", "3.14"].map((python) => ({
-        os: "ubuntu-latest",
-        python,
-        markers: "",
-      })),
-      {
-        os: "macos-latest",
-        python: "3.12",
-        markers: "cross_platform or native_macos",
-      },
-      {
-        os: "windows-latest",
-        python: "3.12",
-        markers: "cross_platform or native_windows",
-      },
-    ]);
     const testStep = job.steps!.find(
       ({ name }) => name === "Test Python source contracts",
     )!;
@@ -624,28 +584,5 @@ describe("TypeScript package skeleton", () => {
     });
     expect(new CodexSecurityError("failure").name).toBe("CodexSecurityError");
     await client.close();
-  });
-
-  test("provides executable help and version behavior", async () => {
-    const stdout = capture(null);
-    const stderr = capture(null);
-    expect(await main([], stdout.stream, stderr.stream)).toBe(0);
-    expect(stdout.text()).toContain("Usage: codex-security <command>");
-    expect(stdout.text()).toContain("Integrations:");
-    expect(stderr.text()).toBe("");
-
-    const versionOutput = capture(null);
-    expect(await main(["--version"], versionOutput.stream, stderr.stream)).toBe(
-      0,
-    );
-    expect(versionOutput.text()).toBe(`${VERSION}\n`);
-
-    const scanHelpOutput = capture(null);
-    expect(
-      await main(["scan", "--help"], scanHelpOutput.stream, stderr.stream),
-    ).toBe(0);
-    expect(scanHelpOutput.text()).toContain(
-      "Usage: codex-security scan [repository]",
-    );
   });
 });

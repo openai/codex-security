@@ -457,13 +457,17 @@ def _canonical_scan_directory(scan_dir: Path) -> tuple[Path, tuple[int, int]]:
 
 
 def _open_directory(
-    path: Path, *, missing_ok: bool = False, missing_is_path_error: bool = True
+    path: Path,
+    *,
+    missing_ok: bool = False,
+    missing_is_path_error: bool = True,
+    movable: bool = False,
 ) -> _OwnedHandle | None:
     try:
         handle = _create_file(
             path,
             access=_FILE_READ_ATTRIBUTES,
-            share=_FILE_SHARE_READ | _FILE_SHARE_WRITE,
+            share=_FILE_SHARE_READ | _FILE_SHARE_WRITE | (_FILE_SHARE_DELETE if movable else 0),
             disposition=_OPEN_EXISTING,
             flags=_FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
             missing_ok=missing_ok,
@@ -802,7 +806,18 @@ def _stage_metadata(
         try:
             if close_writer:
                 handle.close()
-            return os.fstat(descriptor), file_change_time(descriptor)
+            try:
+                return os.fstat(descriptor), file_change_time(descriptor)
+            except BaseException:
+                if close_writer:
+                    # The observer still identifies the staged file after the writer closed.
+                    cleanup = _ReOpenFile(
+                        raw, _DELETE, _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE, 0
+                    )
+                    if cleanup and cleanup != _INVALID_HANDLE_VALUE:
+                        with _OwnedHandle(cleanup), contextlib.suppress(OSError):
+                            _mark_handle_for_deletion(cleanup)
+                raise
         finally:
             os.close(descriptor)
 
@@ -815,20 +830,25 @@ def stage_write(
     *,
     expected_root_identity: tuple[int, int] | None = None,
     replace_existing: bool = False,
-    cleanup_root: Callable[[], Path | None] | None = None,
 ) -> Iterator[Callable[..., tuple[os.stat_result, int]]]:
-    """Flush a patch, then release every handle so the registered scan can move."""
+    """Flush a patch and keep only a movable handle to its root across admission."""
+    if expected_root_identity is None:
+        root = scan_dir.lstat()
+        expected_root_identity = (root.st_dev, root.st_ino)
     with _locked_parent(
         scan_dir, relative_path, create=True, expected_root_identity=expected_root_identity
     ) as (parent, leaf):
-        if expected_root_identity is None:
-            root = scan_dir.lstat()
-            expected_root_identity = (root.st_dev, root.st_ino)
         destination = parent / leaf
         if _validate_existing_output(destination) and not replace_existing:
             raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(destination))
-        with _written_temp(destination, payload) as (temp, writer):
-            staged, change_time = _stage_metadata(writer, close_writer=True)
+        root_handle = _open_directory(scan_dir, movable=True)
+        assert root_handle is not None
+        try:
+            with _written_temp(destination, payload) as (temp, writer):
+                staged, change_time = _stage_metadata(writer, close_writer=True)
+        except BaseException:
+            root_handle.close()
+            raise
 
     location = scan_dir
     published = False
@@ -870,17 +890,27 @@ def stage_write(
             _verify_regular_file(handle.value, destination)
             return _stage_metadata(handle)
 
-    try:
-        yield publish
-    finally:
-        if not published:
-            # A concurrent archive may move the scan before admission reaches publish().
-            if cleanup_root is not None:
-                location = cleanup_root() or location
-            # Delete only the same staged file below the original scan root identity.
-            with contextlib.suppress(OSError), open_stage() as (handle, _):
-                assert handle.value is not None
-                _mark_handle_for_deletion(handle.value)
+    with root_handle:
+        try:
+            yield publish
+        finally:
+            if not published:
+                # A different workbench database may own the archive move.
+                assert root_handle.value is not None
+                with contextlib.suppress(OSError):
+                    location = Path(_final_path(root_handle.value))
+                    while True:
+                        try:
+                            with open_stage() as (handle, _):
+                                assert handle.value is not None
+                                _mark_handle_for_deletion(handle.value)
+                            break
+                        except OSError:
+                            # A move can land between locating the root and fixing its parents.
+                            moved_to = Path(_final_path(root_handle.value))
+                            if moved_to == location:
+                                break
+                            location = moved_to
 
 
 def atomic_write(

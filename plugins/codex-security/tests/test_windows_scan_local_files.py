@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+import argparse
 import errno
 import os
 import shutil
 import sqlite3
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from threading import Event
 
 import pytest
 from test_deep_scan_publication_authority import emulate_windows_atomic_write
-from test_workbench_archive import register
+from test_workbench_archive import recipe, register
 from test_workbench_remediation_retry import pending_generation as pending_generation
 from workbench_test_support import load_script
 
@@ -166,8 +169,9 @@ def test_staged_patch_is_visible_only_after_publication(tmp_path, monkeypatch, o
             assert not list(scan_dir.iterdir())
 
 
+@pytest.mark.parametrize("other_state", [False, True])
 def test_canceled_generation_removes_its_staged_patch_after_archive(
-    pending_generation, workbench_api, tmp_path, monkeypatch
+    pending_generation, workbench_api, tmp_path, monkeypatch, other_state
 ):
     database, scan_dir, _, args, _ = pending_generation
     remediation = workbench_api["remediation_state"]
@@ -187,7 +191,10 @@ def test_canceled_generation_removes_its_staged_patch_after_archive(
                 emulation.setattr(backend, "_create_directory", Path.mkdir)
             with stage(*stage_args, **options) as publish:
                 registered = register(
-                    database.parent, tmp_path / "target", scan_dir, "--archive-existing"
+                    tmp_path / "other-state" if other_state else database.parent,
+                    tmp_path / "target",
+                    scan_dir,
+                    "--archive-existing",
                 )
                 archived = Path(registered["archivedScanDir"])
                 (temp,) = archived.rglob("*.tmp")
@@ -207,6 +214,92 @@ def test_canceled_generation_removes_its_staged_patch_after_archive(
     assert not list(archived.rglob("*.tmp"))
     assert not list(archived.rglob("*.patch"))
     assert replacement.read_bytes() == b"new scan's file"
+
+
+def test_staging_metadata_failure_removes_the_flushed_file(tmp_path, monkeypatch):
+    with ExitStack() as files:
+        backend = WINDOWS_FILES
+        if os.name != "nt":
+            backend = emulate_windows_atomic_write(
+                monkeypatch, load_script("finalize_scan_contract"), files
+            )
+
+        def fail_metadata(_):
+            raise OSError(errno.EIO, "metadata unavailable")
+
+        monkeypatch.setattr(backend, "file_change_time", fail_metadata)
+        with pytest.raises(OSError, match="metadata unavailable"):
+            with backend.stage_write(tmp_path, "reviewed.patch", b"reviewed bytes"):
+                pytest.fail("staging should have failed")
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Win32 archive sharing semantics")
+@pytest.mark.parametrize("timeout", [5, 0], ids=["retry", "no-wait"])
+def test_archive_contention_during_windows_patch_write(
+    pending_generation, workbench_api, tmp_path, monkeypatch, timeout
+):
+    database, scan_dir, _, args, patch = pending_generation
+    backend = sys.modules["windows_scan_local_files"]
+    write_all = backend._write_all
+    rename = Path.rename
+    writing, rename_denied = Event(), Event()
+
+    def write_while_archiving(handle, data):
+        if data == patch:
+            writing.set()
+            assert rename_denied.wait(10)
+            # A different writer can commit before the patch releases its open handles.
+            with sqlite3.connect(database) as other:
+                other.execute("BEGIN IMMEDIATE")
+                other.execute("CREATE TABLE unrelated_write (value INTEGER)")
+        return write_all(handle, data)
+
+    def observe_rename(source, destination):
+        try:
+            return rename(source, destination)
+        except PermissionError as exc:
+            if source == scan_dir and exc.winerror in {5, 32}:
+                rename_denied.set()
+            raise
+
+    def archive():
+        assert writing.wait(10)
+        target = tmp_path / "target"
+        registration = argparse.Namespace(
+            repository=str(target),
+            scan_dir=str(scan_dir),
+            archive_existing=True,
+            archived_scan_dir=None,
+            recipe_json=recipe(target),
+            recipe_json_stdin=False,
+            registration_json_stdin=False,
+            parent_scan_id=None,
+        )
+        with sqlite3.connect(database, timeout=timeout) as connection:
+            connection.row_factory = sqlite3.Row
+            return Path(
+                workbench_api["register_cli_scan"](connection, registration)["archivedScanDir"]
+            )
+
+    monkeypatch.setattr(backend, "_write_all", write_while_archiving)
+    monkeypatch.setattr(Path, "rename", observe_rename)
+    with ThreadPoolExecutor(max_workers=1) as pool, sqlite3.connect(database) as connection:
+        future = pool.submit(archive)
+        connection.row_factory = sqlite3.Row
+        result = workbench_api["set_finding_remediation"](connection, args)
+        if timeout:
+            archived = future.result(timeout=10)
+        else:
+            with pytest.raises(PermissionError) as denied:
+                future.result(timeout=10)
+            assert denied.value.winerror in {5, 32}
+            assert not list(scan_dir.parent.glob(f"{scan_dir.name}.previous-*"))
+            archived = scan_dir
+    recorded = result["scan"]["findings"][0]["remediationState"]["patchPath"]
+    assert (archived / recorded).read_bytes() == patch
+    if timeout:
+        assert not (scan_dir / recorded).exists()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Win32 reparse-point behavior")

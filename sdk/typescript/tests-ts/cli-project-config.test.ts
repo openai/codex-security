@@ -1,5 +1,4 @@
 import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
-import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, expect, test, mock } from "bun:test";
@@ -19,6 +18,7 @@ import {
 } from "../src/config.js";
 import type { ProjectConfigInput } from "../src/project-config-schema.js";
 import { readProjectConfig } from "../src/project-config.js";
+import { git } from "./git-fixture.js";
 import { dependencies, fakeResult, fakeSecurity } from "./cli-fixtures.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { copyCompletedScanFixture } from "./plugin-root.js";
@@ -62,26 +62,16 @@ async function bulkInventory(
   input: Awaited<ReturnType<typeof fixture>>,
   rowModes: readonly string[],
 ) {
-  execFileSync("git", ["init", "-q", input.repository]);
-  execFileSync("git", [
-    "-C",
+  git(input.repository, "init", "-q");
+  git(
     input.repository,
-    "-c",
-    "user.name=Test",
-    "-c",
-    "user.email=test@example.test",
-    "-c",
-    "commit.gpgsign=false",
     "commit",
+    "--no-gpg-sign",
     "--allow-empty",
     "-qm",
     "fixture",
-  ]);
-  const revision = execFileSync(
-    "git",
-    ["-C", input.repository, "rev-parse", "HEAD"],
-    { encoding: "utf8" },
-  ).trim();
+  );
+  const revision = git(input.repository, "rev-parse", "HEAD");
   const csv = join(input.root, "repositories.csv");
   await writeFile(
     csv,
@@ -505,30 +495,11 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
     join(input.repository, "lib", "index.ts"),
     "export const value = 2;\n",
   );
-  for (const args of [
-    ["init", "-q", input.repository],
-    ["-C", input.repository, "config", "--local", "core.autocrlf", "false"],
-    ["-C", input.repository, "add", "."],
-    [
-      "-C",
-      input.repository,
-      "-c",
-      "user.name=Test",
-      "-c",
-      "user.email=test@example.test",
-      "-c",
-      "commit.gpgsign=false",
-      "commit",
-      "-qm",
-      "fixture",
-    ],
-  ])
-    execFileSync("git", args);
-  const revision = execFileSync(
-    "git",
-    ["-C", input.repository, "rev-parse", "HEAD"],
-    { encoding: "utf8" },
-  ).trim();
+  git(input.repository, "init", "-q");
+  git(input.repository, "config", "--local", "core.autocrlf", "false");
+  git(input.repository, "add", ".");
+  git(input.repository, "commit", "--no-gpg-sign", "-qm", "fixture");
+  const revision = git(input.repository, "rev-parse", "HEAD");
   const csv = join(input.root, "repositories.csv");
   await writeFile(
     csv,

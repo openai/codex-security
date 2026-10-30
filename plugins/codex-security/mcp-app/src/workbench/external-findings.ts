@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
+import { hash } from "node:crypto";
 import { isAbsolute } from "node:path";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
 import {
   object,
@@ -48,6 +48,10 @@ function requireRepository(repository: unknown): asserts repository is string {
     throw new TypeError("repository must be an absolute local path.");
 }
 
+function parseEvidence(json: string): StoredExternalFinding["evidence"] {
+  return parseJson(json) as StoredExternalFinding["evidence"];
+}
+
 function fromRow(row: Record<string, unknown>): StoredExternalFinding {
   return {
     id: String(row.id),
@@ -55,7 +59,7 @@ function fromRow(row: Record<string, unknown>): StoredExternalFinding {
     provider: String(row.provider),
     sourceKey: String(row.source_key),
     sourceFindingId: String(row.source_finding_id),
-    evidence: parseJson(String(row.evidence_json)) as Record<string, unknown>,
+    evidence: parseEvidence(String(row.evidence_json)),
     assessment: { state: "not_assessed" },
     version: Number(row.version),
     createdAt: String(row.created_at),
@@ -77,6 +81,8 @@ export function storeExternalFindings(
   requireSqliteText([timestamp]);
   if (!Array.isArray(input.findings))
     throw new TypeError("findings must be an array.");
+  const counts = { created: 0, updated: 0, unchanged: 0 };
+  if (input.findings.length === 0) return { findings: [], counts };
 
   // Validate and serialize the complete batch before taking the write lock.
   const sourceIds = new Set<string>();
@@ -98,7 +104,7 @@ export function storeExternalFindings(
       finding.source_finding_id,
     ];
     return {
-      id: `ext_${createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`,
+      id: `ext_${hash("sha256", JSON.stringify(identity))}`,
       sourceFindingId: finding.source_finding_id,
       evidenceJson,
     };
@@ -108,21 +114,17 @@ export function storeExternalFindings(
     const stored = database.prepare(
       "SELECT * FROM external_source_reports WHERE id = ?",
     );
-    const insert = database.prepare(
-      `INSERT INTO external_source_reports
-        (id, repository, provider, source_key, source_finding_id,
-         evidence_json, version, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`,
-    );
-    const update = database.prepare(
-      `UPDATE external_source_reports
-       SET evidence_json = ?, version = version + 1, updated_at = ?
-       WHERE id = ?`,
-    );
-    const counts = { created: 0, updated: 0, unchanged: 0 };
+    let insert: StatementSync | undefined;
+    let update: StatementSync | undefined;
     const findings = entries.map((entry) => {
       const previous = stored.get(entry.id);
       if (!previous) {
+        insert ??= database.prepare(
+          `INSERT INTO external_source_reports
+           (id, repository, provider, source_key, source_finding_id,
+            evidence_json, version, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+        );
         insert.run(
           entry.id,
           input.repository,
@@ -134,18 +136,29 @@ export function storeExternalFindings(
           timestamp,
         );
         counts.created++;
-      } else if (
-        isDeepStrictEqual(
-          parseJson(String(previous.evidence_json)),
-          parseJson(entry.evidenceJson),
-        )
-      ) {
-        counts.unchanged++;
-      } else {
-        update.run(entry.evidenceJson, timestamp, entry.id);
-        counts.updated++;
+        return fromRow(stored.get(entry.id)!);
       }
-      return fromRow(stored.get(entry.id)!);
+      const finding = fromRow(previous);
+      if (previous.evidence_json !== entry.evidenceJson) {
+        const evidence = parseEvidence(entry.evidenceJson);
+        if (!isDeepStrictEqual(finding.evidence, evidence)) {
+          update ??= database.prepare(
+            `UPDATE external_source_reports
+             SET evidence_json = ?, version = version + 1, updated_at = ?
+             WHERE id = ? RETURNING version, updated_at`,
+          );
+          const row = update.get(entry.evidenceJson, timestamp, entry.id)!;
+          counts.updated++;
+          return {
+            ...finding,
+            evidence,
+            version: Number(row.version),
+            updatedAt: String(row.updated_at),
+          };
+        }
+      }
+      counts.unchanged++;
+      return finding;
     });
     return { findings, counts };
   });

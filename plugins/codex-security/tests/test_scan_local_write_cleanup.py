@@ -134,8 +134,11 @@ def test_new_patch_on_a_filesystem_without_hardlinks(tmp_path, monkeypatch, outc
         def unavailable(source, _destination, *, src_dir_fd, **_kwargs):
             nonlocal staged
             # Hold the flushed inode so a direct copy cannot reuse its inode number.
-            staged = os.open(source, os.O_RDONLY, dir_fd=src_dir_fd)
-            files.callback(os.close, staged)
+            staged = files.enter_context(
+                open(
+                    source, "rb", opener=lambda name, flags: os.open(name, flags, dir_fd=src_dir_fd)
+                )
+            )
             if outcome == "link-out-of-space":
                 raise OSError(errno.ENOSPC, "hardlink failed for a storage error")
             if outcome == "collision":
@@ -149,7 +152,7 @@ def test_new_patch_on_a_filesystem_without_hardlinks(tmp_path, monkeypatch, outc
             FINALIZER.write_scan_local_bytes(
                 tmp_path, destination.name, patch, replace_existing=False
             )
-            assert os.path.samestat(os.fstat(staged), destination.stat())
+            assert os.path.samestat(os.fstat(staged.fileno()), destination.stat())
             assert destination.read_bytes() == patch
         else:
             with pytest.raises(OSError) as failed:

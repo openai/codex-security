@@ -34,6 +34,7 @@ jobs:
       source-run: ${{ steps.proof.outputs.source-run }}
       edit-attempt: ${{ steps.proof.outputs.edit-attempt }}
       source-required: ${{ steps.scope.outputs.source-required }}
+      container-required: ${{ steps.scope.outputs.container-required }}
       plugin-tests-required: ${{ steps.scope.outputs.plugin-tests-required }}
       package-required: ${{ steps.scope.outputs.package-required }}
       action-ci: ${{ steps.scope.outputs.action-ci }}
@@ -138,7 +139,7 @@ jobs:
 
   container-validate:
     needs: [classify-changes, native, static-checks]
-    if: needs.classify-changes.outputs.source-required == 'true'
+    if: needs.classify-changes.outputs.container-required == 'true'
     uses: ./.github/workflows/container-validate.yml
 
   package:
@@ -210,6 +211,7 @@ jobs:
         run: |
           tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
           cp -R sdk/typescript/_bundled_plugin/mcp/native/. plugins/codex-security/native/prebuilt
+          python3 -I -m compileall -q --invalidation-mode checked-hash sdk/typescript/_bundled_plugin/scripts
       - name: Install ripgrep
         if: matrix.os == 'ubuntu-latest'
         run: .github/scripts/install-ripgrep.sh
@@ -249,7 +251,7 @@ jobs:
       - *checkout-repository
       - name: Set up Python on Windows
         if: runner.os == 'Windows'
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: Set up Node.js
@@ -375,7 +377,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
       - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python }}
           cache: pip
@@ -447,11 +449,9 @@ jobs:
             evals/triage-finding/pnpm-lock.yaml
       - &set-up-python
         name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - name: Install ripgrep
-        run: .github/scripts/install-ripgrep.sh
       - name: Set up eval dependencies and host runtime
         run: |
           pnpm --dir sdk/typescript install --frozen-lockfile

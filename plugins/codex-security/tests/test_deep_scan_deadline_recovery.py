@@ -23,7 +23,7 @@ from test_deep_scan_stop_conditions import (
 from test_deep_scan_stop_conditions import (
     saturated_scan as saturated_scan,
 )
-from workbench_test_support import saved_draft, write_checkpoint
+from workbench_test_support import read_review_state, saved_draft, write_checkpoint
 
 
 def worker_finding(scan, anchor):
@@ -69,7 +69,7 @@ def test_deadline_completion_preserves_existing_tasks_and_recovered_findings(
         workbench_db.execute("SELECT status FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()[0]
         == "complete"
     )
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert task in coverage[task_state]
     if task_state == "resolvedDeferred":
         assert coverage[task_state] == [task]
@@ -139,7 +139,7 @@ def test_discarded_worker_finding_leaves_its_review_pending(
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
     completed = complete(workbench_api, workbench_db, scan)
 
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert canonical in coverage["surfaces"]
     surface = next(row for row in coverage["surfaces"] if row.get("workerId") == worker_id)
     assert surface["disposition"] == "needs_follow_up"
@@ -196,7 +196,7 @@ def test_terminal_worker_authority_requires_valid_findings(
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert any(row["title"] == previous["title"] for row in findings) == invalid_terminal
     assert any(row["title"] == sibling["title"] for row in findings)
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert not any(row["reason"] == "Review pending." for row in coverage["deferred"])
     assert {path: path.read_bytes() for path in original} == original
 
@@ -232,7 +232,7 @@ def test_malformed_worker_finding_preserves_a_valid_sibling_outcome(
 
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert all(row["title"] != earlier["title"] for row in findings)
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert (
         next(row for row in coverage["surfaces"] if row.get("workerId") == worker_id)["disposition"]
         == "rejected"
@@ -397,7 +397,7 @@ def test_deadline_recovery_is_idempotent_after_crash_before_commit(
     )
     connection.close()
     interrupt_finish_before_commit(workbench_api, database, scan)
-    before = json.loads((scan.scan_dir / "coverage.json").read_text())
+    before = read_review_state(workbench_db, scan.scan_dir)
     findings_before = json.loads((scan.scan_dir / "findings.json").read_text())
     assert len([row for row in before["surfaces"] if row.get("workerId") == worker_id]) == len(
         surfaces
@@ -416,7 +416,7 @@ def test_deadline_recovery_is_idempotent_after_crash_before_commit(
         finish(workbench_api, connection, scan, terminal_reason="capped")
         complete(workbench_api, connection, scan)
 
-    after = json.loads((scan.scan_dir / "coverage.json").read_text())
+    after = read_review_state(workbench_db, scan.scan_dir)
     findings_after = json.loads((scan.scan_dir / "findings.json").read_text())
     for document in (findings_before, findings_after):
         for finding in document["findings"]:
@@ -478,7 +478,7 @@ def test_deadline_rejection_history_is_stable_across_repeated_crashes(
     publications = []
     for _ in range(3):
         interrupt_finish_before_commit(workbench_api, database, scan)
-        publications.append(json.loads((scan.scan_dir / "coverage.json").read_text()))
+        publications.append(read_review_state(workbench_db, scan.scan_dir))
         with sqlite3.connect(database) as connection:
             assert (
                 connection.execute(
@@ -490,7 +490,7 @@ def test_deadline_rejection_history_is_stable_across_repeated_crashes(
         connection.row_factory = sqlite3.Row
         finish(workbench_api, connection, scan, terminal_reason="capped")
         complete(workbench_api, connection, scan)
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert all(publication == coverage for publication in publications)
     surfaces = [row for row in coverage["surfaces"] if row.get("workerId") == worker_id]
     assert {row["label"] for row in surfaces} == {row["label"] for row in outcomes}

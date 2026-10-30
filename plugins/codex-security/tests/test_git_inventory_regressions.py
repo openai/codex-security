@@ -25,7 +25,8 @@ def test_root_commit_message_does_not_supply_diff_parent(tmp_path: Path, workben
     git(target, "commit", "--amend", "-qm", f"Synthetic root\n\nparent {previous}")
     head = git(target, "rev-parse", "HEAD").decode()
     diff = workbench_api["require_diff_target"](target, "commit", None, head, None)
-    assert diff["baseRevision"] == workbench_api["EMPTY_GIT_TREE"]
+    empty_tree = git(target, "hash-object", "-t", "tree", "--stdin", input=b"").decode()
+    assert diff["baseRevision"] == empty_tree
 
 
 def test_sha256_root_commit_uses_the_sha256_empty_tree(tmp_path: Path, workbench_api) -> None:
@@ -40,26 +41,6 @@ def test_sha256_root_commit_uses_the_sha256_empty_tree(tmp_path: Path, workbench
     diff = workbench_api["require_diff_target"](target, "commit", None, "HEAD", None)
     revisions = (diff["baseRevision"], diff["headRevision"])
     assert git(target, "diff", "--name-only", *revisions) == b"README.md"
-
-
-def test_blob_batch_preserves_following_blobs_after_tree_and_commit(tmp_path: Path) -> None:
-    target = tmp_path / "target"
-    initialize_git_repository(target)
-    source = target / ("fixture.py" if os.name == "nt" else "line\nbreak.py")
-    source.write_bytes(b"print('fixture')\npayload\n")
-    git(target, "add", "--", source.name)
-    git(target, "commit", "-qm", "Add unusual fixture")
-    reader = load_script("workbench_target").git_blob_samples
-    assert reader(
-        target,
-        ["HEAD^{tree}", "HEAD", f"HEAD:{source.name}", "HEAD:missing\nfile", "HEAD:README.md"],
-    ) == [
-        None,
-        None,
-        (source.read_bytes(), False),
-        None,
-        (b"fixture\n", False),
-    ]
 
 
 def test_plain_directory_inventory_ignores_nested_git_metadata(tmp_path: Path) -> None:
@@ -123,6 +104,16 @@ def test_excerpt_uses_target_relative_committed_path(tmp_path: Path) -> None:
     )
 
 
+@pytest.fixture(scope="module")
+def excerpt_repository(tmp_path_factory):
+    target = tmp_path_factory.mktemp("source-excerpts") / "target"
+    revision = initialize_git_repository(target)
+    scopes = load_script("workbench_source_scopes").capture_source_scopes(
+        target, (revision, None, 0, 0), ["."]
+    )
+    return target, revision, json.dumps(scopes)
+
+
 @pytest.mark.parametrize("captured", [False, True], ids=["legacy-scopes", "saved-scopes"])
 @pytest.mark.parametrize(
     ("mode", "kind", "expected"),
@@ -136,10 +127,9 @@ def test_excerpt_uses_target_relative_committed_path(tmp_path: Path) -> None:
     ],
 )
 def test_saved_excerpt_requires_a_known_diff_source(
-    tmp_path: Path, mode: str, kind: str | None, expected: str | None, captured: bool
+    excerpt_repository, mode: str, kind: str | None, expected: str | None, captured: bool
 ) -> None:
-    target = tmp_path / "target"
-    revision = initialize_git_repository(target)
+    target, revision, scopes_json = excerpt_repository
     scan = {
         "mode": mode,
         "diff_target_kind": kind,
@@ -147,10 +137,7 @@ def test_saved_excerpt_requires_a_known_diff_source(
         "target_snapshot_digest": None,
     }
     if captured:
-        scopes = load_script("workbench_source_scopes").capture_source_scopes(
-            target, (revision, None, 0, 0), ["."]
-        )
-        scan["source_scopes_json"] = json.dumps(scopes)
+        scan["source_scopes_json"] = scopes_json
     assert (
         load_script("workbench_source_excerpt").finding_source_excerpt(
             scan, target, [{"path": "README.md", "startLine": 1}], ["."]

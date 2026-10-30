@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -39,6 +40,75 @@ def load_script(name: str, *, module_name: str | None = None) -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def read_review_state(state_dir: Path | sqlite3.Connection, scan_dir: Path) -> dict[str, Any]:
+    """Reconstruct internal review state from the retained publication inputs."""
+    review = load_script("review_state")
+
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+    summary = manifest["scan"]
+    if review.uses_legacy_review(summary):
+        return json.loads((scan_dir / "coverage.json").read_text())
+    if "reviewState" in summary:
+        return review.review_state(summary)
+    if "preservedSources" not in summary:
+        head = json.loads((scan_dir / "checkpoint-head.json").read_text())
+        checkpoint = json.loads((scan_dir / "checkpoints" / head["checkpoint"]).read_text())
+        return review.review_state({**summary, "reviewState": checkpoint["reviewState"]})
+    db = load_script("workbench_db")
+    saved = load_script("workbench_saved_results")
+    with (
+        nullcontext(state_dir)
+        if isinstance(state_dir, sqlite3.Connection)
+        else sqlite3.connect(state_dir / "workbench.sqlite3")
+    ) as connection:
+        connection.row_factory = sqlite3.Row
+        scan = connection.execute("SELECT * FROM scans WHERE id = ?", (summary["id"],)).fetchone()
+        workers = connection.execute(
+            "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
+            (summary["id"],),
+        ).fetchall()
+    if summary["status"] == "completed" and scan["mode"] == "deep":
+        # Deep completion saves the accepted parent aggregate before sealing,
+        # including deadline recovery's validated records and pending tasks.
+        head = json.loads((scan_dir / "checkpoint-head.json").read_text())
+        checkpoint = json.loads((scan_dir / "checkpoints" / head["checkpoint"]).read_text())
+        return review.review_state({**summary, "reviewState": checkpoint["reviewState"]})
+    binding = db.workbench_completion_binding(scan, summary["completedAt"], manifest)
+    # This read-only helper reconstructs bookkeeping rather than reusing a sealed publication.
+    binding["status"] = "inspect-retained-review"
+    documents = saved.merge_saved_results(
+        scan_dir,
+        summary["id"],
+        binding,
+        workers,
+        [],
+        stopped=summary["status"] != "completed",
+        reason=(
+            f"Scan {summary['status']}; saved findings and pending review were preserved. {scan['failure_message'] or ''}"
+        ).strip(),
+        frozen_source_digests=summary["preservedSources"],
+        checkpoint_heads=summary.get("preservedCheckpointHeads", {}).copy(),
+        scan_mode=scan["mode"],
+        finding_scope=db.requested_finding_scope(scan) if scan["mode"] == "deep" else None,
+        project_worker_coverage=scan["mode"] == "deep",
+    )
+    assert documents is not None
+    binding["status"] = summary["status"]
+    return (
+        load_script("finalize_scan_contract")
+        ._prepare_scan_finalization(
+            scan_dir,
+            expected_coverage_mode=db.expected_coverage_mode(scan),
+            completion_binding=binding,
+            draft_documents=documents,
+            recover_unsealed=True,
+            allow_missing_writeups=summary["status"] == "completed",
+            finding_scope=db.requested_finding_scope(scan) if scan["mode"] == "deep" else None,
+        )
+        .coverage
+    )
 
 
 def source_plugin_version() -> str:
@@ -658,10 +728,14 @@ def start_saved_scan(state_dir: Path, target: Path, scan_root: Path) -> tuple[st
     return start_workspace_scan(state_dir, str(saved["id"]), scan_root)
 
 
-def empty_target_scan(tmp_path: Path) -> tuple[Path, Path, str, Path]:
-    state_dir = tmp_path / "state"
+def empty_target_paths(tmp_path: Path) -> tuple[Path, Path]:
     target = tmp_path / "target"
     target.mkdir()
+    return tmp_path / "state", target
+
+
+def empty_target_scan(tmp_path: Path) -> tuple[Path, Path, str, Path]:
+    state_dir, target = empty_target_paths(tmp_path)
     scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     return state_dir, target, scan_id, scan_dir
 
@@ -949,6 +1023,17 @@ class ScanFixtureTestCase(TestCase):
         path = self.scan_dir / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    def rewrite_sealed_artifact(self, relative_path: str, payload: object) -> None:
+        self.write_json(relative_path, payload)
+        manifest = self.read_json("scan-manifest.json")
+        for artifact in manifest["scan"]["artifacts"]:
+            if artifact["path"] == relative_path:
+                artifact["sha256"] = self.sha256_file(relative_path)
+                break
+        else:
+            raise AssertionError(f"missing sealed artifact: {relative_path}")
+        self.write_json("scan-manifest.json", manifest)
 
     def sha256_file(self, name: str) -> str:
         return hashlib.sha256((self.scan_dir / name).read_bytes()).hexdigest()

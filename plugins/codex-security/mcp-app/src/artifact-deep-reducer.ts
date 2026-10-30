@@ -77,7 +77,7 @@ export async function readDeepReductionSources(
           const provenance = finding.provenance as Record<string, unknown>;
           provenance.sourceFindingIds = [`${worker.id}:${index}`];
         }
-        const { coverage, ...reduction } = result;
+        const { reviewState: coverage, ...reduction } = result;
         const scanReceiptRefs = new Map<number, ReadonlySet<string>>();
         for (const [index, surface] of (
           coverage.surfaces as Record<string, unknown>[]

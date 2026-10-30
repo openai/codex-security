@@ -35,7 +35,9 @@ export async function createReducerPagingFixture(
 
   const freshHtml = finding("reflected-html", {
     title: "Request text reaches an HTML response without encoding",
-    summary: paddedSummary(fixtureLimitBytes / 2),
+    summary: paddedSummary(
+      Math.floor(fixtureLimitBytes / (mode === "model" ? 2 : 3)),
+    ),
     remediation: "HTML-encode request text at the response rendering boundary.",
   });
   const freshArchive = finding("archive-path", {
@@ -98,7 +100,7 @@ export async function createReducerPagingFixture(
   const previousPath = path.join(previousRoot, "result.json");
   await writeJson(workerPath, {
     ...result,
-    coverage: workerDraft([]).coverage,
+    reviewState: workerDraft([]).reviewState,
   });
   await writeJson(previousPath, previous);
 

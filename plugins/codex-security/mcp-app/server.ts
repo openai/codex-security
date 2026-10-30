@@ -7,7 +7,8 @@ import {
 import type { JsonObject } from "./src/types.js";
 import { isRecord as isJsonObject } from "./src/record.js";
 import { randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { realpath, stat } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { resolvePythonCommand } from "./src/python_command.js";
@@ -843,6 +844,7 @@ export function createCodexSecurityServer(): McpServer {
       const selected = await deepScanProjectSetup(
         targetPath,
         projectConfigPath,
+        "preview",
       );
       const setup = await runWorkbench([
         "inspect-setup",
@@ -884,6 +886,7 @@ export function createCodexSecurityServer(): McpServer {
       const selected = await deepScanProjectSetup(
         targetPath,
         projectConfigPath,
+        "save",
       );
       return workspaceResult(
         (await runWorkbench(
@@ -1607,7 +1610,7 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Complete Codex Security Scan",
       description:
-        "Finalization only: validate and seal already-authored scan-manifest.json, findings.json, and coverage.json, generate report.md, index findings, and mark the scan complete. For an app-backed running scan, scan-manifest.json is an unsealed draft and must omit scan.sealedAt and scan.artifacts; this tool supplies the exact workbench timestamps, seal, artifact digests, and derived finding identities. Call only after those canonical files exist; this tool does not create missing artifacts or run skipped phases. If it fails, surface the exact error and stop the current response without retrying completion or returning a final, no-findings, structured, or benchmark response.",
+        "Finalization only: validate and seal already-authored scan-manifest.json and findings.json, generate report.md, index findings, and mark the scan complete. For an app-backed running scan, scan-manifest.json is an unsealed draft and must omit scan.sealedAt and scan.artifacts; this tool supplies the exact workbench timestamps, seal, artifact digests, and derived finding identities. Call only after those canonical files exist; this tool does not create missing artifacts or run skipped phases. If it fails, surface the exact error and stop the current response without retrying completion or returning a final, no-findings, structured, or benchmark response.",
       inputSchema: completeScanSchema,
       annotations: writingAnnotations,
       _meta: modelActionMeta,
@@ -2029,22 +2032,51 @@ async function startHeadlessStandardScan(
 
 async function deepScanProjectSetup(
   targetPath: string,
-  projectConfigPath?: string,
+  projectConfigPath: string | undefined,
+  action: "preview" | "save",
 ) {
   if (projectConfigPath === undefined) return { targetPath };
+  const inspectWithSetup =
+    action === "preview" && (await isCanonicalDirectory(targetPath));
+  if (!inspectWithSetup) targetPath = await inspectProjectTarget(targetPath);
+  try {
+    const project = await readDeepScanProjectConfig(
+      projectConfigPath,
+      targetPath,
+    );
+    return { targetPath, projectConfigJson: JSON.stringify(project) };
+  } catch (error) {
+    // Target or Git errors take precedence over an invalid project file.
+    if (inspectWithSetup) await inspectProjectTarget(targetPath);
+    throw error;
+  }
+}
+
+async function isCanonicalDirectory(targetPath: string): Promise<boolean> {
+  // Leave home expansion, UNC paths and drive-relative paths to the workbench.
+  if (
+    process.platform === "win32"
+      ? !/^[A-Za-z]:[/\\]/.test(targetPath)
+      : !isAbsolute(targetPath)
+  )
+    return false;
+  try {
+    return (
+      (await realpath(targetPath)) === targetPath &&
+      (await stat(targetPath)).isDirectory()
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function inspectProjectTarget(targetPath: string): Promise<string> {
   const inspected = await runWorkbench(
     workbenchArgs("inspect-target", { targetPath }),
   );
   if (typeof inspected.targetPath !== "string")
     throw new Error("Missing scan target path.");
-  const project = await readDeepScanProjectConfig(
-    projectConfigPath,
-    inspected.targetPath,
-  );
-  return {
-    targetPath: inspected.targetPath,
-    projectConfigJson: JSON.stringify(project),
-  };
+  return inspected.targetPath;
 }
 
 function wholeTargetScope(
@@ -2233,7 +2265,7 @@ function deepScanTerminalResult(
     if (!run.manifestPath) return undefined;
     const instructions = run.sdkOwnsCompletion
       ? `Deep Scan ${run.scanId} aggregated its validated findings under ${run.scanDir}. End this turn with the returned scanId and manifestPath. The SDK owns finalization and report generation after the turn ends.`
-      : `Deep Scan ${run.scanId} completed. The coordinator validated and sealed scan-manifest.json, findings.json, and coverage.json and generated report.md under ${run.scanDir}. Independent Standard scans have already performed validation and attack-path analysis. Use the returned authoritative scanId, scanDir, and manifestPath. Do not call complete_codex_security_scan again, rerun worker phases, list candidates, submit another draft, or start a replacement scan. Report the completed results and link the generated report.`;
+      : `Deep Scan ${run.scanId} completed. The coordinator validated and sealed scan-manifest.json and findings.json and generated report.md under ${run.scanDir}. Independent Standard scans have already performed validation and attack-path analysis. Use the returned authoritative scanId, scanDir, and manifestPath. Do not call complete_codex_security_scan again, rerun worker phases, list candidates, submit another draft, or start a replacement scan. Report the completed results and link the generated report.`;
     return scanActionResult(
       {
         scanId: run.scanId,

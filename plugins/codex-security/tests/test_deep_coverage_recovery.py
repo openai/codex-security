@@ -1156,7 +1156,7 @@ def test_current_receipt_spelling_precedes_historical_receipts(
         }
 
     old = {
-        "coverage": {
+        "reviewState": {
             "surfaces": [
                 surface("reader", "needs_follow_up", "review.md"),
                 surface("writer", "needs_follow_up", "Review.md"),
@@ -1164,7 +1164,7 @@ def test_current_receipt_spelling_precedes_historical_receipts(
         }
     }
     current = {
-        "coverage": {
+        "reviewState": {
             "surfaces": [
                 surface("reader", "no_issue_found", "new-review.md"),
                 surface("writer", "no_issue_found", "Review.md"),
@@ -1173,7 +1173,7 @@ def test_current_receipt_spelling_precedes_historical_receipts(
     }
     if reverse_surfaces:
         for draft in (old, current):
-            draft["coverage"]["surfaces"].reverse()
+            draft["reviewState"]["surfaces"].reverse()
     sources = [("old", old, "first"), ("current", current, "first")]
     if reverse_sources:
         sources.reverse()

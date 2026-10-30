@@ -56379,7 +56379,7 @@ async function analyzeResults(options) {
       result.errors.push(value.message);
       return result;
     }
-    if (!value?.manifest?.scan?.target || !Array.isArray(value?.findings?.findings) || !value?.coverage)
+    if (!value?.manifest?.scan?.target || !Array.isArray(value?.findings?.findings) || !(value?.review ?? value?.coverage))
       throw new Error();
   } catch {
     result.errors.push("CLI did not return a usable JSON scan result. See the CLI diagnostics.");
@@ -56423,7 +56423,7 @@ async function analyzeResults(options) {
     resultsDirectory: options.resultsDirectory,
     manifestPath: (0, import_node_path5.join)(options.resultsDirectory, "scan-manifest.json"),
     jsonPath: (0, import_node_path5.join)(options.resultsDirectory, "findings.json"),
-    coveragePath: (0, import_node_path5.join)(options.resultsDirectory, "coverage.json"),
+    coveragePath: value.coverage ? (0, import_node_path5.join)(options.resultsDirectory, "coverage.json") : "",
     sarifPath: ""
   };
   const warnings = value.warnings ?? [];
@@ -99399,7 +99399,9 @@ async function uploadReports(reports, inputs, tempRoot) {
 // src/reporting.ts
 function plain(value, limit) {
   const text = value.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, "");
-  return text.slice(0, limit);
+  const prefix2 = text.slice(0, limit);
+  const codePoint = text.codePointAt(prefix2.length - 1);
+  return codePoint !== void 0 && codePoint > 65535 ? prefix2.slice(0, -1) : prefix2;
 }
 function html(value) {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/@/g, "&#64;").replace(/\r/g, "&#13;").replace(/\n/g, "&#10;").replace(/[\\`*_\[\]~]/g, (character) => `&#${character.charCodeAt(0)};`);
@@ -99440,7 +99442,7 @@ function resultSummary(result, inputs, target) {
 <pre>${esc(finding.summary, 1200)}</pre>`);
   }
   if (result.findings.length > 30) parts.push(`${result.findings.length - 30} additional findings are available in the JSON/SARIF reports.`);
-  parts.push("Use the action outputs for full JSON, coverage, and SARIF. Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.");
+  parts.push("Use the action outputs for full JSON and SARIF. Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.");
   return Buffer.from(parts.join("\n\n")).subarray(0, 58e3).toString("utf8").replace(/\uFFFD$/, "");
 }
 function emitAnnotations(result) {
@@ -99461,6 +99463,7 @@ function emitAnnotations(result) {
 var OUTPUT_NAMES = [
   "sarif-path",
   "json-path",
+  "manifest-path",
   "coverage-path",
   "results-directory",
   "scan-status",
@@ -99497,6 +99500,7 @@ function outputs(result, target, exitCode) {
     "sarif-path": result.paths.sarifPath,
     "json-path": result.paths.jsonPath,
     "coverage-path": result.paths.coveragePath,
+    "manifest-path": result.paths.manifestPath,
     "results-directory": result.paths.resultsDirectory,
     "scan-status": result.scanStatus,
     "policy-status": result.policyStatus,
@@ -99552,8 +99556,8 @@ async function runAction(actionRoot, overrides = {}) {
       if (!inputs.dryRun && credentials.provider !== "amazon-bedrock" && (!credentials.apiKey || /[\r\n\u0000]/.test(credentials.apiKey))) {
         throw new Error(credentials.provider === "openai" ? "Set CODEX_SECURITY_API_KEY in Actions secrets (or Dependabot secrets for Dependabot runs) and pass it as OPENAI_API_KEY to this step. No scan was started." : `Pass ${API_KEY_ENVIRONMENT_VARIABLES[credentials.provider]} from Actions secrets to this step. No scan was started.`);
       }
-      tempRoot = await (0, import_promises10.realpath)(process.env.RUNNER_TEMP ?? "");
       if (!process.env.RUNNER_TEMP) throw new Error("RUNNER_TEMP is required.");
+      tempRoot = await (0, import_promises10.realpath)(process.env.RUNNER_TEMP);
       info(`Preparing Codex Security ${SUPPORTED_CLI_VERSION}. Scope: ${inputs.scope}; mode: ${inputs.mode}; effort: ${inputs.effort}.`);
       const preparationStarted = performance.now();
       let timer = heartbeat("CLI preparation", preparationStarted);

@@ -20,6 +20,7 @@ from finalize_scan_contract import (
     finding_candidate_id,
     write_scan_local_bytes,
 )
+from review_state import uses_legacy_review
 from workbench.retained_records import (
     _append_previous_finding,
     _competing_rejection_receipts,
@@ -172,8 +173,13 @@ def merge_saved_results(
     ):
         try:
             parent_manifest, parent = _read_saved_parent_result(scan_dir, scan_id)
-            # Without an accepted head, file-authored coverage is a full replacement.
-            parent_modified = (scan_dir / "coverage.json").lstat().st_mtime_ns
+            # Without an accepted head, a file-authored draft is a full replacement.
+            parent_file = (
+                "coverage.json"
+                if uses_legacy_review(parent_manifest["scan"])
+                else "scan-manifest.json"
+            )
+            parent_modified = (scan_dir / parent_file).lstat().st_mtime_ns
             parent_is_canonical = True
         except (ContractError, OSError, ValueError) as exc:
             if not stopped:
@@ -192,7 +198,11 @@ def merge_saved_results(
                 # A partial tool publication must not outrank its accepted head.
                 parent_modified = min(
                     (scan_dir / name).lstat().st_mtime_ns
-                    for name in ("findings.json", "coverage.json", "scan-manifest.json")
+                    for name in (
+                        "findings.json",
+                        "scan-manifest.json",
+                        *(["coverage.json"] if uses_legacy_review(parent_scan) else []),
+                    )
                 )
             if not parent_scan.get("sealedAt") or allow_frozen_legacy_parent:
                 payload = _encoded(parent)
@@ -374,7 +384,7 @@ def merge_saved_results(
                     discarded_by_source[relative] = discarded
             # Recovery expects coverage, but reducer results only contain findings
             # and context. Add an empty value after hashing the original result.
-            sources.append((relative, {"coverage": {}, **draft}, worker_id))
+            sources.append((relative, {"reviewState": {}, **draft}, worker_id))
             if frozen_source_digests is None:
                 pending.extend(
                     receipt_checkpoints(
@@ -521,7 +531,7 @@ def merge_saved_results(
                 parent_model_source = relative
                 parent_is_canonical = draft.get("canonicalParent") is True
                 break
-    projected_coverage = parent["coverage"] if parent else {}
+    projected_coverage = parent["reviewState"] if parent else {}
     # V1 persists the review projection in the parent, without reducer sourceCoverage.
 
     coverage_receipts = partial(resolve_coverage_receipts, scan_dir)
@@ -719,7 +729,7 @@ def merge_saved_results(
         parent = drafts_by_path[latest_reducer]
         parent_model_source = latest_reducer
 
-    projected_coverage = saved_parent["coverage"] if saved_parent else {}
+    projected_coverage = saved_parent["reviewState"] if saved_parent else {}
     reviews = projected_coverage.get("reviews")
     reviewed_attempts = {
         (review.get("workerId"), review.get("attempt"))
@@ -767,13 +777,13 @@ def merge_saved_results(
         return retained
 
     accepted_coverage_sources = {
-        id(draft["coverage"]) for relative, draft, _ in sources if relative in accepted_sources
+        id(draft["reviewState"]) for relative, draft, _ in sources if relative in accepted_sources
     }
     accepted_surfaces: dict[tuple[str, str], list[tuple[int, dict[str, Any]]]] = {}
     for relative, draft, worker_id in sources:
         if relative not in accepted_sources:
             continue
-        surfaces = draft["coverage"].get("surfaces", [])
+        surfaces = draft["reviewState"].get("surfaces", [])
         for index, surface in enumerate(surfaces if isinstance(surfaces, list) else [], 1):
             if isinstance(surface, dict) and isinstance(surface.get("id"), str):
                 accepted_surfaces.setdefault((worker_id, surface["id"]), []).append(
@@ -781,18 +791,18 @@ def merge_saved_results(
                 )
 
     for _, draft, _ in sources:
-        questions = draft["coverage"].get("openQuestions")
+        questions = draft["reviewState"].get("openQuestions")
         if isinstance(questions, list):
-            draft["coverage"]["openQuestions"] = [
+            draft["reviewState"]["openQuestions"] = [
                 {"question": item.strip()} if isinstance(item, str) else item for item in questions
             ]
     projection_origins = {
-        id(item): (worker_id, relative, field, index, draft["coverage"])
+        id(item): (worker_id, relative, field, index, draft["reviewState"])
         for relative, draft, worker_id in sources
         for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions")
         for index, item in enumerate(
-            draft["coverage"].get(field, [])
-            if isinstance(draft["coverage"].get(field, []), list)
+            draft["reviewState"].get(field, [])
+            if isinstance(draft["reviewState"].get(field, []), list)
             else [],
             1,
         )
@@ -825,7 +835,7 @@ def merge_saved_results(
             # accepted worker's surface namespace.
             accepted = next(
                 (
-                    (path, draft["coverage"])
+                    (path, draft["reviewState"])
                     for path, draft, owner in sources
                     if owner == worker_id and path in accepted_sources
                 ),
@@ -859,11 +869,11 @@ def merge_saved_results(
         for _, draft, owner in all_sources:
             named_rows.setdefault(owner, []).extend(
                 row
-                for row in _coverage_rows(draft["coverage"], field)
+                for row in _coverage_rows(draft["reviewState"], field)
                 if isinstance(row, dict) and isinstance(row.get("id"), str)
             )
         for _, draft, owner in all_sources:
-            rows = _coverage_rows(draft["coverage"], field)
+            rows = _coverage_rows(draft["reviewState"], field)
             reserved = {
                 row["id"]
                 for row in rows
@@ -898,8 +908,8 @@ def merge_saved_results(
         (relative, row["id"]): []
         for relative, draft, _ in all_sources
         for row in (
-            draft["coverage"].get("surfaces", [])
-            if isinstance(draft["coverage"].get("surfaces"), list)
+            draft["reviewState"].get("surfaces", [])
+            if isinstance(draft["reviewState"].get("surfaces"), list)
             else []
         )
         if isinstance(row, dict) and isinstance(row.get("id"), str)
@@ -951,7 +961,7 @@ def merge_saved_results(
     )
     if allow_frozen_legacy_parent:
         manifest["scan"]["target"] = target
-    for key in ("sealedAt", "artifacts"):
+    for key in ("sealedAt", "artifacts", "coverageRef"):
         manifest["scan"].pop(key, None)
     manifest["scan"]["preservedSources"] = source_digests
     manifest["scan"]["preservedCheckpointHeads"] = checkpoint_heads
@@ -1120,8 +1130,8 @@ def merge_saved_results(
         if selected_model_source is not None:
             selected_model_source[:] = [] if model is None else [frozen_model_source]
     coverage = (
-        copy.deepcopy(parent["coverage"])
-        if parent and parent["coverage"]
+        copy.deepcopy(parent["reviewState"])
+        if parent and parent["reviewState"]
         else {
             "mode": binding["coverageMode"],
             "inventoryStrategy": "diff"
@@ -1145,7 +1155,7 @@ def merge_saved_results(
         {
             id(item)
             for parent_coverage in (
-                (coverage, parent["coverage"]) if preserve_canonical_parent else (coverage,)
+                (coverage, parent["reviewState"]) if preserve_canonical_parent else (coverage,)
             )
             for field in ("surfaces", "explicitExclusions", "deferred")
             for item in _coverage_rows(parent_coverage, field)
@@ -1159,7 +1169,7 @@ def merge_saved_results(
     retained_surface_rows: set[int] = set()
     for relative, draft, _ in all_sources:
         for field in ("surfaces", "deferred"):
-            rows = draft["coverage"].get(field)
+            rows = draft["reviewState"].get(field)
             for row in rows if isinstance(rows, list) else []:
                 if isinstance(row, dict):
                     paths_for_row = coverage_sources.setdefault(id(row), (row, []))[1]
@@ -1167,7 +1177,7 @@ def merge_saved_results(
                         paths_for_row.append(relative)
     if parent:
         for field in ("surfaces", "deferred"):
-            rows, originals = coverage.get(field), parent["coverage"].get(field)
+            rows, originals = coverage.get(field), parent["reviewState"].get(field)
             if isinstance(rows, list) and isinstance(originals, list):
                 for row, original in zip(rows, originals):
                     _inherit_coverage_sources(row, [original], coverage_sources)
@@ -1320,7 +1330,7 @@ def merge_saved_results(
             if isinstance(finding, dict) and valid_finding(finding)
         }
         for field in ("surfaces", "deferred", "explicitExclusions"):
-            rows = draft["coverage"].get(field, [])
+            rows = draft["reviewState"].get(field, [])
             for index, row in enumerate(rows if isinstance(rows, list) else [], 1):
                 if not isinstance(row, dict):
                     continue
@@ -1332,7 +1342,7 @@ def merge_saved_results(
                     < source_order[relative]
                 ):
                     accepted_pending_candidates.add((worker_id, worker["attempt"], candidate_id))
-                projected = project_missing_record(field, row, index, worker, draft["coverage"])
+                projected = project_missing_record(field, row, index, worker, draft["reviewState"])
                 if field == "surfaces":
                     projected["receiptRefs"] = coverage_receipts(projected, worker, relative)
                 key = projection_key(field, projected)
@@ -1398,7 +1408,7 @@ def merge_saved_results(
         return order
 
     deferred_rows = {
-        relative: _coverage_rows(draft["coverage"], "deferred")
+        relative: _coverage_rows(draft["reviewState"], "deferred")
         for relative, draft, _ in all_sources
     }
     # Accepted heads can replace equal tasks before they reach output coalescing.
@@ -1443,7 +1453,7 @@ def merge_saved_results(
 
     pending_surface_orders: dict[tuple[str | None, str], tuple[int, int]] = {}
     for relative, draft, owner in all_sources:
-        surfaces = draft["coverage"].get("surfaces", [])
+        surfaces = draft["reviewState"].get("surfaces", [])
         for surface in surfaces if isinstance(surfaces, list) else []:
             if (
                 isinstance(surface, dict)
@@ -1787,7 +1797,7 @@ def merge_saved_results(
             relative == "parent"
             or relative == parent_context.get("canonical")
             # The semantic tool schema forbids this host-owned projection field.
-            or draft["coverage"].get("mode") == binding["coverageMode"]
+            or draft["reviewState"].get("mode") == binding["coverageMode"]
         )
     }
     projected_parents = [draft for relative, draft, _ in all_sources if relative in projected_paths]
@@ -2368,7 +2378,7 @@ def merge_saved_results(
     }
     for _, draft, owner in all_sources:
         by_id: dict[str, dict[str, Any]] = {}
-        for surface in _coverage_rows(draft["coverage"], "surfaces"):
+        for surface in _coverage_rows(draft["reviewState"], "surfaces"):
             if not isinstance(surface, dict) or not isinstance(identity := surface.get("id"), str):
                 continue
             if identity in by_id and surface != by_id[identity]:
@@ -2717,7 +2727,7 @@ def merge_saved_results(
         for owner, row in prospective_tasks:
             retain_surface_links(owner, row)
         if parent and isinstance(coverage.get("deferred"), list):
-            previous = parent["coverage"].get("deferred", [])
+            previous = parent["reviewState"].get("deferred", [])
             removed_parent = (
                 [row for row in previous if id(row) in replaced_deferred]
                 if isinstance(previous, list)
@@ -2775,7 +2785,7 @@ def merge_saved_results(
         }
         for field, replaced in replaced_rows.items():
             if parent and isinstance(coverage.get(field), list):
-                previous = parent["coverage"].get(field, [])
+                previous = parent["reviewState"].get(field, [])
                 if isinstance(previous, list):
                     removed_parent = [row for row in previous if id(row) in replaced]
                     coverage[field] = [row for row in coverage[field] if row not in removed_parent]
@@ -2832,7 +2842,7 @@ def merge_saved_results(
                     pending, item, owner, "deferred", original_item, item is not original_item
                 )
         for _, draft, owner in all_sources:
-            for surface in _coverage_rows(draft["coverage"], "surfaces"):
+            for surface in _coverage_rows(draft["reviewState"], "surfaces"):
                 if (
                     isinstance(surface, dict)
                     and ambiguous_pending_surface(surface, owner)
@@ -2966,11 +2976,13 @@ def merge_saved_results(
                         {
                             "workerId": worker_id,
                             "attempt": worker["attempt"],
-                            "completeness": draft["coverage"].get("completeness", "partial"),
+                            "completeness": draft["reviewState"].get("completeness", "partial"),
                         }
                     )
             for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions", "reviews"):
-                if field == "reviews" and (worker_id is not None or field not in draft["coverage"]):
+                if field == "reviews" and (
+                    worker_id is not None or field not in draft["reviewState"]
+                ):
                     continue
                 if coverage_superseded and field not in {
                     "surfaces",
@@ -2978,7 +2990,7 @@ def merge_saved_results(
                     "deferred",
                 }:
                     continue
-                items = draft["coverage"].get(field, [])
+                items = draft["reviewState"].get(field, [])
                 if field == "deferred":
                     items = deferred_rows[relative]
                 if not isinstance(items, list):
@@ -3025,7 +3037,7 @@ def merge_saved_results(
                     if isinstance(item, dict):
                         original_item = item
                         item = (
-                            project_missing_record(field, item, index, worker, draft["coverage"])
+                            project_missing_record(field, item, index, worker, draft["reviewState"])
                             if project_coverage
                             else project_record(field, item, source_item)
                         )

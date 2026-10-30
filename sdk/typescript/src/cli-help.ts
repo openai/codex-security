@@ -83,6 +83,7 @@ const VALUE_LABELS: Record<string, string> = {
   "scan-dir": "path",
   "plugin-path": "path",
   "source-root": "path",
+  "avit-template": "file",
   python: "path",
   codex: "key=value",
   "max-cost": "usd",

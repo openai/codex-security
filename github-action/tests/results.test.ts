@@ -34,6 +34,7 @@ function change(options: ResultOptions, update: (value: any) => void): void {
 
 test('adapts a synthetic CLI JSON result into findings, counts and report outputs', async (t) => {
   const opts = await fixture(t);
+  change(opts, (value) => { value.findings.findings[0].title = 'Title from the CLI result'; });
   const result = await analyzeResults(opts);
   assert.deepEqual(result.errors, []);
   assert.equal(result.scanStatus, 'completed');
@@ -44,6 +45,7 @@ test('adapts a synthetic CLI JSON result into findings, counts and report output
   assert.deepEqual(result.usage, { input_tokens: 1200, cached_input_tokens: 200, output_tokens: 50 });
   assert.equal(result.estimatedCost, 0.125);
   assert.deepEqual(result.estimatedCostRange, { min: 0.125, max: 0.25, context: 'unknown' });
+  assert.equal(result.findings[0]?.title, 'Title from the CLI result');
   assert.equal(result.findings[0]?.path, 'src/extract.py');
   assert.equal(result.findings[0]?.startLine, 41);
   assert.equal(result.paths.jsonPath, join(opts.resultsDirectory, 'findings.json'));
@@ -60,14 +62,6 @@ test('token usage remains available for unpriced models and distinguishes missin
     assert.equal(result.estimatedCost, undefined);
     assert.equal(result.estimatedCostRange, undefined);
   }
-});
-
-test('uses the structured CLI findings instead of reparsing report documents', async (t) => {
-  const opts = await fixture(t);
-  change(opts, (value) => { value.findings.findings[0].title = 'Title from the CLI result'; });
-  const result = await analyzeResults(opts);
-  assert.equal(result.scanStatus, 'completed');
-  assert.equal(result.findings[0]?.title, 'Title from the CLI result');
 });
 
 test('annotations prefer the root control over an earlier entry point', async (t) => {
@@ -123,6 +117,7 @@ test('operational exits and signal termination cannot turn complete output into 
     assert.equal(result.policyStatus, 'not-evaluated');
     assert.equal(result.sarifUploadReady, false);
     assert.equal(result.findings.length, 1);
+    assert.equal(result.counts?.high, 1);
   }
 });
 
@@ -302,12 +297,10 @@ test('SARIF publication rejects external references and encoded traversal paths'
 });
 
 
-test('valid empty and retained findings distinguish zero counts from unavailable results', async (t) => {
+test('valid empty findings have zero counts', async (t) => {
   const opts = await fixture(t);
   change(opts, (value) => { value.findings.findings = []; });
   assert.deepEqual((await analyzeResults(opts)).counts, {critical: 0, high: 0, medium: 0, low: 0, informational: 0});
-  const retained = await fixture(t);
-  assert.equal((await analyzeResults({...retained, exitCode: 2})).counts?.high, 1);
 });
 
 test('accepted relative path spellings preserve completed findings and SARIF', async (t) => {
@@ -351,3 +344,21 @@ test('SARIF preparation never rewrites linked report files', async (t) => {
   assert.equal((await analyzeResults(opts)).sarifUploadReady, false);
   assert.deepEqual(await readFile(target), before);
 });
+
+for (const status of ['completed', 'failed'] as const) {
+  test(`reads scan status ${status} without a coverage file`, async (t) => {
+    const options = await fixture(t)
+    await rm(join(options.resultsDirectory, 'coverage.json'))
+    change(options, (value) => {
+      delete value.coverage
+      delete value.manifest.scan.coverageRef
+      value.manifest.scan.status = status
+      value.review = value.manifest.scan.review = { excludedPaths: [] }
+    })
+    const result = await analyzeResults(options)
+    assert.equal(result.scanStatus, status)
+    assert.equal(result.paths.coveragePath, '')
+    assert.equal(result.paths.manifestPath, join(options.resultsDirectory, 'scan-manifest.json'))
+    assert.equal(result.errors.length, status === 'completed' ? 0 : 1)
+  });
+}

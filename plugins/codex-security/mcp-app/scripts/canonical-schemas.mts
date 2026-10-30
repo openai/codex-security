@@ -184,6 +184,16 @@ for (const schema of [markdown, scope])
     additionalProperties: true,
   });
 
+const scanMode = z.enum([
+  "repository",
+  "scoped_path",
+  "diff",
+  "commit",
+  "branch_diff",
+  "working_tree",
+  "deep_repository",
+]);
+
 const scanManifest = z.looseObject({
   documentType: z.literal("codex-security.scan-manifest"),
   schemaVersion: z.literal("1.0"),
@@ -211,7 +221,10 @@ const scanManifest = z.looseObject({
       hardening: z
         .looseObject({ portfolioPath: z.literal("hardening/hardening.md") })
         .optional(),
-      coverageRef: z.literal("coverage.json"),
+      coverageRef: z.literal("coverage.json").optional(),
+      mode: scanMode.optional(),
+      review: z.looseObject({ excludedPaths: strings }).optional(),
+      reviewState: z.record(z.string(), z.unknown()).optional(),
       findingsRef: z.literal("findings.json"),
       artifacts: z
         .array(
@@ -226,19 +239,38 @@ const scanManifest = z.looseObject({
         .min(1),
     })
     .meta({
-      allOf: ["findings.json", "coverage.json"].map((path) => ({
-        properties: {
-          artifacts: {
-            contains: {
-              type: "object",
-              required: ["path"],
-              properties: { path: { const: path } },
+      allOf: [
+        {
+          properties: {
+            artifacts: {
+              contains: {
+                type: "object",
+                required: ["path"],
+                properties: { path: { const: "findings.json" } },
+              },
+              minContains: 1,
+              maxContains: 1,
             },
-            minContains: 1,
-            maxContains: 1,
           },
         },
-      })),
+        {
+          if: { required: ["coverageRef"] },
+          then: {
+            properties: {
+              artifacts: {
+                contains: {
+                  type: "object",
+                  required: ["path"],
+                  properties: { path: { const: "coverage.json" } },
+                },
+                minContains: 1,
+                maxContains: 1,
+              },
+            },
+          },
+          else: { required: ["mode", "review"] },
+        },
+      ],
     }),
 });
 
@@ -259,15 +291,7 @@ const coverageDocument = z.looseObject({
   documentType: z.literal("codex-security.coverage"),
   schemaVersion: z.literal("1.0"),
   scanId: text,
-  mode: z.enum([
-    "repository",
-    "scoped_path",
-    "diff",
-    "commit",
-    "branch_diff",
-    "working_tree",
-    "deep_repository",
-  ]),
+  mode: scanMode,
   inventoryStrategy: z.enum([
     "repository",
     "scoped_path",

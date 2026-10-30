@@ -14,12 +14,11 @@ import json
 import math
 import os
 import re
-import secrets
 import stat
 import struct
 import sys
 from collections.abc import Callable, Iterator
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple, TextIO
@@ -28,7 +27,13 @@ from urllib.parse import quote, urlsplit
 # Keep sibling helpers importable when Python starts in isolated mode.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import report_projection
+import servicenow_avit
 import threat_model_projection
+from posix_scan_local_files import (
+    descriptor_relative_writes_available as _descriptor_relative_writes_available,
+)
+from posix_scan_local_files import managed_fd, stage_write
+from review_state import checkpoint_review_state, review_state, review_summary
 
 SCHEMA_VERSION = "1.0"
 PRODUCER_NAME = "codex-security-plugin"
@@ -79,6 +84,7 @@ SOURCE_READ_CHUNK_SIZE = 64 * 1024
 MAX_JSON_INTEGER = (1 << 53) - 1
 EXPORT_PATHS = {
     "csv": "exports/findings.csv",
+    "servicenow-avit": "exports/servicenow-avit.csv",
     "json": "exports/findings.json",
     "sarif": "exports/results.sarif",
 }
@@ -499,15 +505,6 @@ def _is_windows() -> bool:
     return os.name == "nt"
 
 
-def _descriptor_relative_writes_available() -> bool:
-    # os.replace accepts src_dir_fd/dst_dir_fd wherever descriptor-relative
-    # os.rename is supported, but Python lists only os.rename in supports_dir_fd.
-    required_operations = (os.mkdir, os.open, os.rename, os.stat, os.unlink)
-    return hasattr(os, "O_NOFOLLOW") and all(
-        operation in os.supports_dir_fd for operation in required_operations
-    )
-
-
 def _windows_scan_local_files() -> Any:
     """Load the Win32 backend and shared stream comparison lazily."""
     import windows_scan_local_files
@@ -560,11 +557,18 @@ def scan_root_identity(scan_dir: Path) -> tuple[Path, tuple[int, int]]:
 
 
 def _open_scan_local_directory(
-    root_fd: int, parts: tuple[str, ...], *, create: bool, owner_read_write: bool = False
+    root_fd: int,
+    parts: tuple[str, ...],
+    *,
+    create: bool,
+    owner_read_write: bool = False,
+    sync_parents: bool = False,
 ) -> int:
     descriptor = os.dup(root_fd)
     try:
         for part in parts:
+            if sync_parents:
+                os.fsync(descriptor)
             if create:
                 try:
                     os.mkdir(part, mode=0o700, dir_fd=descriptor)
@@ -853,10 +857,8 @@ def stage_scan_local_bytes(
     expected_root_identity: tuple[int, int] | None = None,
     owner_read_write: bool = False,
     replace_existing: bool = False,
-    cleanup_root: Callable[[], Path | None] | None = None,
 ) -> Iterator[Callable[..., tuple[os.stat_result, int]]]:
     scan_dir, relative_path = _scan_local_write_path(scan_dir, relative_path, external_name)
-    path = scan_dir / relative_path
     if not _descriptor_relative_writes_available():
         if not _is_windows():
             raise ContractError("scan-local output requires descriptor-relative file operations")
@@ -868,14 +870,10 @@ def stage_scan_local_bytes(
                 payload,
                 expected_root_identity=expected_root_identity,
                 replace_existing=replace_existing,
-                cleanup_root=cleanup_root,
             ) as publish:
                 yield publish
         return
-    root_fd: int | None = None
-    parent_fd: int | None = None
-    try:
-        root_fd = _open_verified_scan_directory(scan_dir, expected_root_identity)
+    with managed_fd(_open_verified_scan_directory(scan_dir, expected_root_identity)) as root_fd:
         parts = PurePosixPath(relative_path).parts
         try:
             parent_fd = _open_scan_local_directory(
@@ -885,96 +883,34 @@ def stage_scan_local_bytes(
             raise _scan_local_directory_error(
                 f"{relative_path}: expected a path inside the scan directory", exc
             ) from exc
-        # Stage through the held parent so a replacement path cannot redirect the write.
-        try:
-            metadata = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            pass
-        else:
-            if not replace_existing:
-                raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), relative_path)
-            if not stat.S_ISREG(metadata.st_mode):
-                raise ContractError(f"{relative_path}: expected a regular non-symlink file")
-            try:
-                existing_fd = os.open(
-                    parts[-1],
-                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
-                    dir_fd=parent_fd,
-                )
-            except OSError as exc:
-                if exc.errno not in {errno.ENOENT, errno.EACCES, errno.EPERM}:
-                    raise
-            else:
-                try:
-                    opened = os.fstat(existing_fd)
-                    if not stat.S_ISREG(opened.st_mode):
-                        raise ContractError(f"{relative_path}: expected a regular non-symlink file")
-                    if (opened.st_dev, opened.st_ino) != (
-                        metadata.st_dev,
-                        metadata.st_ino,
-                    ):
-                        raise ContractError(f"{relative_path}: changed while it was being opened")
-                    if expected_root_identity is not None and opened.st_size == len(payload):
-                        try:
-                            with os.fdopen(existing_fd, "rb") as handle:
-                                existing_fd = -1
-                                if _windows_scan_local_files().stream_matches_payload(
-                                    handle, payload
-                                ):
-                                    yield lambda _directory=None: (opened, opened.st_ctime_ns)
-                                    return
-                        except OSError:
-                            # A failed content comparison still allows an atomic replacement.
-                            pass
-                finally:
-                    if existing_fd >= 0:
-                        os.close(existing_fd)
-        candidate = f".{path.name}.{secrets.token_hex(8)}.tmp"
-        from posix_scan_local_files import publish_new_file, stage_file
 
-        with stage_file(parent_fd, candidate, payload, owner_read_write) as staged_fd:
-            staged = os.fstat(staged_fd)
+        with managed_fd(parent_fd):
 
-            def publish(directory: Path | None = None) -> tuple[os.stat_result, int]:
-                if directory is not None:
-                    # Admission can follow an archive while the staged parent stays open.
-                    root = os.fstat(root_fd)
-                    with ExitStack() as admitted:
-                        current = _open_verified_scan_directory(
-                            directory, (root.st_dev, root.st_ino)
-                        )
-                        admitted.callback(os.close, current)
-                        parent = _open_scan_local_directory(current, parts[:-1], create=False)
-                        admitted.callback(os.close, parent)
-                        if not os.path.samestat(os.fstat(parent_fd), os.fstat(parent)):
-                            raise ContractError(
-                                f"{relative_path}: parent changed before publication"
-                            )
-                if replace_existing:
-                    os.replace(candidate, parts[-1], src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-                    return staged, staged.st_ctime_ns
-                named = os.stat(candidate, dir_fd=parent_fd, follow_symlinks=False)
-                if not os.path.samestat(staged, named) or staged.st_ctime_ns != named.st_ctime_ns:
-                    raise ContractError(f"{relative_path}: staged file changed before publication")
-                publish_new_file(parent_fd, candidate, parts[-1])
-                published = os.fstat(staged_fd)
-                if (staged.st_size, staged.st_mtime_ns) != (
-                    published.st_size,
-                    published.st_mtime_ns,
+            def check_parent(directory: Path) -> None:
+                # Admission can follow an archive while the staged parent stays open.
+                root = os.fstat(root_fd)
+                with (
+                    managed_fd(
+                        _open_verified_scan_directory(directory, (root.st_dev, root.st_ino))
+                    ) as current,
+                    managed_fd(
+                        _open_scan_local_directory(current, parts[:-1], create=False)
+                    ) as parent,
                 ):
-                    raise ContractError(
-                        f"{relative_path}: staged contents changed during publication"
-                    )
-                return published, published.st_ctime_ns
+                    if not os.path.samestat(os.fstat(parent_fd), os.fstat(parent)):
+                        raise ContractError(f"{relative_path}: parent changed before publication")
 
-            yield publish
-    finally:
-        try:
-            if parent_fd is not None:
-                os.close(parent_fd)
-        finally:
-            if root_fd is not None:
-                os.close(root_fd)
+            with stage_write(
+                parent_fd,
+                relative_path,
+                payload,
+                owner_read_write=owner_read_write,
+                replace_existing=replace_existing,
+                compare_existing=expected_root_identity is not None,
+                check_parent=check_parent,
+                contract_error=ContractError,
+            ) as publish:
+                yield publish
 
 
 def _remove_scan_local_file_if_exists(scan_dir: Path, relative_path: str) -> None:
@@ -1566,8 +1502,9 @@ def _populate_unsealed_manifest_envelope(
     scan["status"] = (
         completion_binding.get("status", "completed") if completion_binding else "completed"
     )
-    scan["coverageRef"] = "coverage.json"
     scan["findingsRef"] = "findings.json"
+    if "coverageRef" in scan:
+        scan["coverageRef"] = "coverage.json"
     if completion_binding is None:
         started_at = os.environ.get("CODEX_SECURITY_STARTED_AT")
         if started_at is not None:
@@ -1980,7 +1917,7 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
         artifact_collision_keys.add(collision_key)
         _require_str(artifact, "sha256", context)
         _require_str(artifact, "mediaType", context)
-    for required_path in ("findings.json", "coverage.json"):
+    for required_path in ("findings.json", *(["coverage.json"] if "coverageRef" in scan else [])):
         if required_path not in artifact_paths:
             raise ContractError(
                 f"manifest.scan.artifacts: missing required artifact: {required_path}"
@@ -2404,6 +2341,9 @@ def _validate_canonical_schemas_before_projection(
         {"path": "findings.json", "sha256": "0" * 64, "mediaType": "application/json"},
         {"path": "coverage.json", "sha256": "0" * 64, "mediaType": "application/json"},
     ]
+    if "coverageRef" not in provisional_scan:
+        provisional_scan["mode"] = coverage["mode"]
+        provisional_scan["review"] = review_summary(coverage)
     validate_against_schema(provisional_manifest, schema_dir / "scan-manifest.schema.json")
     validate_against_schema(findings, schema_dir / "findings.schema.json")
     validate_against_schema(coverage, schema_dir / "coverage.schema.json")
@@ -2414,6 +2354,8 @@ def _validate_contract_refs(scan: dict[str, Any]) -> None:
         ("coverageRef", "coverage.json"),
         ("findingsRef", "findings.json"),
     ):
+        if field == "coverageRef" and field not in scan:
+            continue
         actual = _require_str(scan, field, "manifest.scan")
         if actual != expected:
             raise ContractError(f"manifest.scan.{field}: expected {expected!r}")
@@ -2892,17 +2834,15 @@ def _read_sealed_artifacts(
     findings, findings_bytes = _read_scan_local_json_bytes(
         scan_dir, scan["findingsRef"], scan["findingsRef"]
     )
-    coverage, coverage_bytes = _read_scan_local_json_bytes(
-        scan_dir, scan["coverageRef"], scan["coverageRef"]
-    )
-    _validate_existing_seal(
-        scan_dir,
-        scan,
-        artifact_contents={
-            scan["findingsRef"]: findings_bytes,
-            scan["coverageRef"]: coverage_bytes,
-        },
-    )
+    contents = {scan["findingsRef"]: findings_bytes}
+    if "coverageRef" in scan:
+        coverage, coverage_bytes = _read_scan_local_json_bytes(
+            scan_dir, scan["coverageRef"], scan["coverageRef"]
+        )
+        contents[scan["coverageRef"]] = coverage_bytes
+    else:
+        coverage = review_state(scan)
+    _validate_existing_seal(scan_dir, scan, artifact_contents=contents)
     return findings, coverage, findings_bytes
 
 
@@ -3071,11 +3011,21 @@ def build_csv_projection(findings: dict[str, Any], coverage: dict[str, Any]) -> 
     return output.getvalue().encode("utf-8")
 
 
+def _avit_fields(finding: dict[str, Any]) -> dict[str, str]:
+    attack_path = dict(finding.get("attackPath") or {})
+    _normalize_legacy_string_list_fields(attack_path, ("steps",))
+    steps = "\n".join(attack_path.get("steps", []))
+    return servicenow_avit.finding_fields(
+        finding, _sarif_primary_location(finding), csv_cell(steps)
+    )
+
+
 def build_findings_export(
     scan_dir: Path,
     export_format: str,
     source_root: Path | None = None,
     schema_dir: Path | None = None,
+    avit_template: Path | None = None,
 ) -> bytes:
     if export_format not in EXPORT_PATHS:
         raise ContractError(f"unsupported export format: {export_format}")
@@ -3088,6 +3038,13 @@ def build_findings_export(
     )
     if export_format == "json":
         return findings_bytes
+    if export_format == "servicenow-avit":
+        if avit_template is None:
+            raise ContractError("--export-format servicenow-avit requires --avit-template")
+        try:
+            return servicenow_avit.render(avit_template, map(_avit_fields, findings["findings"]))
+        except ValueError as exc:
+            raise ContractError(str(exc)) from exc
     return build_csv_projection(findings, coverage)
 
 
@@ -3232,6 +3189,14 @@ def _prepare_scan_finalization(
     if scan.get("sealedAt") is None and scan.get("artifacts") == []:
         del scan["artifacts"]
     was_sealed = manifest_is_sealed(scan)
+    if (
+        not was_sealed
+        and "review" not in scan
+        and "reviewState" not in scan
+        and draft_documents is None
+        and (scan_dir / "coverage.json").exists()
+    ):
+        scan["coverageRef"] = "coverage.json"
     if not was_sealed:
         _populate_unsealed_manifest_envelope(manifest, scan, completion_binding)
     _validate_contract_refs(scan)
@@ -3239,9 +3204,13 @@ def _prepare_scan_finalization(
         findings, findings_input_bytes = _read_scan_local_json_bytes(
             scan_dir, scan["findingsRef"], scan["findingsRef"]
         )
-        coverage, coverage_input_bytes = _read_scan_local_json_bytes(
-            scan_dir, scan["coverageRef"], scan["coverageRef"]
-        )
+        if "coverageRef" in scan:
+            coverage, coverage_input_bytes = _read_scan_local_json_bytes(
+                scan_dir, scan["coverageRef"], scan["coverageRef"]
+            )
+        else:
+            coverage = review_state(scan)
+            coverage_input_bytes = _json_bytes(coverage)
     else:
         findings, coverage = copy.deepcopy(draft_documents[1:])
         findings_input_bytes, coverage_input_bytes = _json_bytes(findings), _json_bytes(coverage)
@@ -3273,7 +3242,7 @@ def _prepare_scan_finalization(
         scan,
         artifact_contents={
             scan["findingsRef"]: findings_input_bytes,
-            scan["coverageRef"]: coverage_input_bytes,
+            **({scan["coverageRef"]: coverage_input_bytes} if "coverageRef" in scan else {}),
         },
     )
     scan["sealedAt"] = _require_str(scan, "completedAt", "manifest.scan")
@@ -3355,11 +3324,19 @@ def _prepare_scan_finalization(
     else:
         findings_bytes = _contract_json_bytes("findings.json", findings)
         coverage_bytes = _contract_json_bytes("coverage.json", coverage)
+        if "coverageRef" not in scan:
+            scan["mode"] = coverage["mode"]
+            scan["review"] = review_summary(coverage)
+            scan.pop("reviewState", None)
         report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
         _validate_scan_local_output_path(scan_dir, scan_dir / "report.md", "report.md")
         scan["artifacts"] = [
             _artifact_record(scan_dir, "findings.json", "application/json", findings_bytes),
-            _artifact_record(scan_dir, "coverage.json", "application/json", coverage_bytes),
+            *(
+                [_artifact_record(scan_dir, "coverage.json", "application/json", coverage_bytes)]
+                if "coverageRef" in scan
+                else []
+            ),
             *[
                 _artifact_record(scan_dir, ref, "application/octet-stream")
                 for ref in _supplementary_artifact_refs(scan, coverage)
@@ -3410,7 +3387,23 @@ def _write_prepared_scan_finalization(
                 prepared.manifest, prepared.schema_dir / "scan-manifest.schema.json"
             )
         _write_scan_local_json(scan_dir, "findings.json", prepared.findings)
-        _write_scan_local_json(scan_dir, "coverage.json", prepared.coverage)
+        if "coverageRef" in scan:
+            _write_scan_local_json(scan_dir, "coverage.json", prepared.coverage)
+        elif "preservedSources" not in scan and not (scan_dir / "checkpoint-head.json").exists():
+            checkpoint = {
+                "scanId": scan["id"],
+                "complete": scan["status"] == "completed",
+                "scope": scan["scope"],
+                "findings": prepared.findings["findings"],
+                "reviewState": checkpoint_review_state(prepared.coverage),
+                **({"threatModel": scan["threatModel"]} if "threatModel" in scan else {}),
+            }
+            contents = _json_bytes(checkpoint)
+            name = hashlib.sha256(contents).hexdigest() + ".json"
+            write_scan_local_bytes(scan_dir, "checkpoints/" + name, contents)
+            _write_scan_local_json(scan_dir, "checkpoint-head.json", {"checkpoint": name})
+    if not prepared.was_sealed and "coverageRef" not in scan:
+        _remove_scan_local_file_if_exists(scan_dir, "coverage.json")
     sealed_paths = (
         [artifact["path"] for artifact in scan["artifacts"]] if prepared.was_sealed else []
     )
@@ -3465,6 +3458,7 @@ def main() -> int:
         "--export-artifact", choices=("findings", "threat-model"), default="findings"
     )
     parser.add_argument("--export-format", choices=[*sorted(EXPORT_PATHS), "md"])
+    parser.add_argument("--avit-template", type=Path)
     parser.add_argument("--export-output", type=Path)
     parser.add_argument("--export-metadata", action="store_true")
     parser.add_argument("--describe-threat-model", action="store_true")
@@ -3472,6 +3466,18 @@ def main() -> int:
     args = parser.parse_args()
     try:
         args.scan_dir = args.scan_dir.resolve()
+        if args.avit_template is not None:
+            if args.export_format != "servicenow-avit":
+                parser.error(
+                    "--avit-template is only supported with --export-format servicenow-avit"
+                )
+            if (
+                args.export_output
+                and args.export_output.exists()
+                and args.avit_template.exists()
+                and args.export_output.samefile(args.avit_template)
+            ):
+                parser.error("AVIT export output cannot overwrite the reusable template")
         if args.describe_threat_model:
             sys.stdout.buffer.write(
                 _json_bytes(describe_threat_model(args.scan_dir, args.schema_dir))
@@ -3506,7 +3512,11 @@ def main() -> int:
                 description, contents = saved
             else:
                 contents = build_findings_export(
-                    args.scan_dir, args.export_format, args.source_root, args.schema_dir
+                    args.scan_dir,
+                    args.export_format,
+                    args.source_root,
+                    args.schema_dir,
+                    avit_template=args.avit_template,
                 )
             if args.export_output is None:
                 sys.stdout.buffer.write(contents)

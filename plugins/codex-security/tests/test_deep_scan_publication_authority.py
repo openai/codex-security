@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 from test_deep_scan_successful_publication import add_worker, complete
 from test_deep_scan_successful_publication import publication_scan as publication_scan
+from workbench_test_support import read_review_state
 
 
 def stage_publication(scan, *, generation, result_path, title, complete=True):
@@ -214,19 +215,13 @@ def test_legacy_terminal_aggregate_survives_a_late_partial_draft_after_write_fai
     assert complete(workbench_api, workbench_db, scan)["progress"]["status"] == "complete"
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert [finding["title"] for finding in findings] == [scan.findings[0]["title"]]
-    assert (
-        json.loads((scan.scan_dir / "coverage.json").read_text())["deferred"]
-        == scan.coverage["deferred"]
-    )
+    assert read_review_state(workbench_db, scan.scan_dir)["deferred"] == scan.coverage["deferred"]
 
 
 @pytest.mark.parametrize(
     "failure",
-    ["validation", "findings.json", "coverage.json", "scan-manifest.json"]
-    + [
-        f"windows-emulated:{name}"
-        for name in ("findings.json", "coverage.json", "scan-manifest.json")
-    ],
+    ["validation", "findings.json", "scan-manifest.json"]
+    + [f"windows-emulated:{name}" for name in ("findings.json", "scan-manifest.json")],
 )
 def test_failed_publication_does_not_acknowledge_staged_input(
     workbench_api, workbench_db, publication_scan, monkeypatch, failure
@@ -283,6 +278,7 @@ def emulate_windows_atomic_write(monkeypatch, finalizer, files, *, reparse_point
     backend = finalizer._windows_scan_local_files()
     paths = {}
     streams = {}
+    movable_directories = {}
     pending_deletions = set()
     next_directory_handle = -1
 
@@ -302,6 +298,8 @@ def emulate_windows_atomic_write(monkeypatch, finalizer, files, *, reparse_point
                 stream.close()
                 raise
         paths[descriptor] = path
+        if path.is_dir() and kwargs["share"] & backend._FILE_SHARE_DELETE:
+            movable_directories[descriptor] = path.stat()
         return backend._OwnedHandle(descriptor)
 
     def rename_handle(handle, destination, replace_existing):
@@ -313,8 +311,10 @@ def emulate_windows_atomic_write(monkeypatch, finalizer, files, *, reparse_point
         paths[handle] = destination
 
     def close_handle(handle):
-        if handle >= 0:
-            streams[handle].close()
+        if handle in streams:
+            streams.pop(handle).close()
+        elif handle >= 0:
+            os.close(handle)
         if handle in pending_deletions:
             pending_deletions.remove(handle)
             paths[handle].unlink()
@@ -333,7 +333,9 @@ def emulate_windows_atomic_write(monkeypatch, finalizer, files, *, reparse_point
     monkeypatch.setattr(backend, "_create_file", create_file)
 
     def reopen_file(handle, *_):
-        return os.open(paths[handle], os.O_RDONLY) if handle < 0 else os.dup(handle)
+        fd = os.open(paths[handle], os.O_RDONLY) if handle < 0 else os.dup(handle)
+        paths[fd] = paths[handle]
+        return fd
 
     monkeypatch.setattr(backend, "_ReOpenFile", reopen_file, raising=False)
     monkeypatch.setattr(backend, "file_change_time", lambda fd: os.fstat(fd).st_ctime_ns)
@@ -352,7 +354,16 @@ def emulate_windows_atomic_write(monkeypatch, finalizer, files, *, reparse_point
     monkeypatch.setattr(
         backend, "_GetFileType", lambda handle: backend._FILE_TYPE_DISK, raising=False
     )
-    monkeypatch.setattr(backend, "_final_path", lambda handle, **kwargs: str(paths[handle]))
+
+    def final_path(handle, **kwargs):
+        path = paths[handle]
+        if handle in movable_directories:
+            for sibling in path.parent.iterdir():
+                if os.path.samestat(movable_directories[handle], sibling.lstat()):
+                    return str(sibling)
+        return str(path)
+
+    monkeypatch.setattr(backend, "_final_path", final_path)
     monkeypatch.setattr(backend, "_write_all", os.write)
     monkeypatch.setattr(backend, "_rename_handle", rename_handle)
     monkeypatch.setattr(backend, "_mark_handle_for_deletion", pending_deletions.add)
@@ -402,6 +413,14 @@ def test_receipt_io_failure_preserves_successful_publication(
     saved._populate_unsealed_artifact_envelope(
         draft["manifest"], draft["findings"], draft["coverage"], binding
     )
+    from review_state import checkpoint_review_state, review_summary
+
+    draft["manifest"]["scan"].pop("coverageRef", None)
+    draft["manifest"]["scan"].update(
+        mode=draft["coverage"]["mode"],
+        review=review_summary(draft["coverage"]),
+        reviewState=checkpoint_review_state(draft["coverage"]),
+    )
     staged = {path: path.read_bytes() for path in (scan.scan_dir / "drafts").iterdir()}
     saved_results = workbench_api["saved_results"]
     original_write = saved_results.write_scan_local_bytes
@@ -410,10 +429,9 @@ def test_receipt_io_failure_preserves_successful_publication(
 
     def fail_receipt(filename):
         failures.append(filename)
-        # The fault occurs only after all three canonical files have been published.
+        # The fault occurs only after both canonical files have been published.
         for name, document in (
             ("findings.json", draft["findings"]),
-            ("coverage.json", draft["coverage"]),
             ("scan-manifest.json", draft["manifest"]),
         ):
             assert json.loads((scan.scan_dir / name).read_text()) == document
