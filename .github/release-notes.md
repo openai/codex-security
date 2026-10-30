@@ -18,6 +18,7 @@
 - accept UTF-8 BOMs in scan inputs and calibration datasets ([#2151](https://github.com/openai/codex-security/pull/2151))
 - preserve IPv6 verification URL brackets ([#232](https://github.com/openai/codex-security/pull/232))
 - bump the third-party group across 2 directories with 2 updates ([#2157](https://github.com/openai/codex-security/pull/2157))
+- bump ruff from 0.17.1 to 0.17.2 in /plugins/codex-security ([#2153](https://github.com/openai/codex-security/pull/2153))
 
 <!-- release-section: highlights:end -->
 
