@@ -62,6 +62,24 @@ Install the package locally in your TypeScript project:
 npm install @openai/codex-security
 ```
 
+### Package and plugin versions
+
+For bug reports, run `npx @openai/codex-security info --json` in the project
+where the SDK is installed, or `codex-security info --json` for a global install.
+Include the npm version (`cliVersion` and `sdkVersion`), bundled plugin manifest
+version (`bundledPluginVersion`), and Codex runtime and SDK pins (`codexVersion`
+and `codexSdkVersion`). If you used a marketplace plugin, a plugin supplied by
+path, or a custom Codex executable, include its version separately.
+
+For example, `npm view @openai/codex-security@0.1.5 gitHead dist.integrity`
+shows the registry's source commit and tarball digest. Compare `gitHead` with
+the commit for tag `npm-v0.1.5`. `npm pack @openai/codex-security@0.1.5` downloads
+the archive, including `package/_bundled_plugin/.codex-plugin/plugin.json`.
+
+The [release workflow](https://github.com/openai/codex-security/blob/main/.github/workflows/node-github-release.yml)
+verifies the signed attestation that binds the tarball to the tagged commit.
+For `0.1.0` and `0.1.1`, npm omits `gitHead`. Use the commit from the verified attestation.
+
 ## Authentication
 
 Sign in with ChatGPT:

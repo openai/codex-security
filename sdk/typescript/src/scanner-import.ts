@@ -173,10 +173,23 @@ export function sarifRunContextForResult(
   return context;
 }
 
+/** Duplicate IDs cannot identify a single rule in this run. */
+export function indexSarifRules(rules: Record<string, unknown>[]) {
+  const byId = new Map<
+    unknown,
+    { rule: Record<string, unknown>; index: number } | null
+  >();
+  for (const [index, rule] of rules.entries()) {
+    const id = rule["id"];
+    byId.set(id, byId.has(id) ? null : { rule, index });
+  }
+  return byId;
+}
+
 /** Exclude every colliding record: choosing the first could overwrite another occurrence. */
 export function normalizeRecords<T>(
   records: T[],
-  normalize: (record: T, id: string) => ExternalFinding,
+  projectEvidence: (record: T, id: string) => ExternalFinding["evidence"],
   identify: (record: T) => string,
   target: "local" | "cloud" = "cloud",
 ): ExternalFindings {
@@ -221,10 +234,10 @@ export function normalizeRecords<T>(
       continue;
     }
     try {
-      const finding = normalize(value, id);
-      if (finding.source_finding_id !== id)
-        throw new Error("Finding identity changed during normalization.");
-      result.findings.push(finding);
+      result.findings.push({
+        source_finding_id: id,
+        evidence: projectEvidence(value, id),
+      });
     } catch (error) {
       result.excluded.push({
         position,

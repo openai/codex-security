@@ -12,6 +12,10 @@ on:
         description: Successful node-release run to use for backfill
         required: false
         type: string
+      refresh-wolfi-recipe:
+        description: Use the current main Wolfi recipe when building a missing image.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -34,6 +38,7 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       sha: ${{ steps.release.outputs.sha }}
       integrity: ${{ steps.artifact.outputs.integrity }}
+      combined-approval: ${{ steps.artifact.outputs.combined-approval }}
       has-action: ${{ steps.action.outputs.present }}
       has-container: ${{ steps.container.outputs.present }}
       has-wolfi: ${{ steps.container.outputs.wolfi }}
@@ -147,11 +152,12 @@ jobs:
           for ((attempt = 1; attempt <= 30; attempt++)); do
             run_fields="$(
               gh api "repos/$GITHUB_REPOSITORY/actions/runs/$release_run" \
-                --jq '[.name, .status, (.conclusion // "pending"), .head_sha, .head_branch] | @tsv'
+                --jq '[.path, .event, .status, (.conclusion // "pending"), .head_sha, .head_branch] | @tsv'
             )"
-            IFS=$'\t' read -r run_name run_status run_conclusion run_sha run_tag <<< "$run_fields"
+            IFS=$'\t' read -r run_path run_event run_status run_conclusion run_sha run_tag <<< "$run_fields"
 
-            if [[ "$run_name" != "node-release" ||
+            if [[ "${run_path%%@*}" != ".github/workflows/node-release.yml" ||
+                  ( "$run_event" != push && "$run_event" != workflow_dispatch ) ||
                   "$run_sha" != "$release_sha" ||
                   "$run_tag" != "$release_tag" ]]; then
               echo "The release run must successfully publish the exact tagged commit." >&2
@@ -292,12 +298,11 @@ jobs:
             echo "Verified npm provenance for the resolved release run."
           else
             recovery_conclusion="$(
-              gh api \
-                "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_RUN_ID/jobs?per_page=100" \
-                --paginate \
-                --jq '.jobs[] | select(.name == "publish") | .steps[] | select(.name == "Verify recovered npm release provenance") | .conclusion'
+              gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_RUN_ID/jobs?per_page=100" --paginate \
+                --jq '.jobs[] | select(.conclusion == "success" and (.name == "publish" or .name == "Verify existing npm release"))
+                  | .steps[] | select(.name == "Verify recovered npm release provenance") | .conclusion'
             )"
-            if [[ "$recovery_conclusion" != "success" ]]; then
+            if [[ "$recovery_conclusion" != success ]]; then
               echo "Signed npm provenance must identify the resolved successful release run." >&2
               exit 1
             fi
@@ -325,10 +330,10 @@ jobs:
             original_run_fields="$(
               gh api \
                 "repos/$GITHUB_REPOSITORY/actions/runs/$original_run_id" \
-                --jq '[.name, .status, .head_sha, .head_branch] | @tsv'
+                --jq '[.path, .status, .head_sha, .head_branch] | @tsv'
             )"
-            IFS=$'\t' read -r original_name original_status original_sha original_tag <<< "$original_run_fields"
-            if [[ "$original_name" != "node-release" ||
+            IFS=$'\t' read -r original_path original_status original_sha original_tag <<< "$original_run_fields"
+            if [[ "${original_path%%@*}" != ".github/workflows/node-release.yml" ||
                   "$original_status" != "completed" ||
                   "$original_sha" != "$RELEASE_SHA" ||
                   "$original_tag" != "$RELEASE_TAG" ]]; then
@@ -353,6 +358,15 @@ jobs:
 
           printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
           printf 'integrity=%s\n' "$(jq -r '."dist.integrity" // .dist.integrity' <<< "$metadata")" >> "$GITHUB_OUTPUT"
+          # Only the attempt identified by signed npm provenance can authorize
+          # images. If its job record is unavailable, request container review.
+          signing_attempt=$(jq -er '.runAttempt' <<< "$verified_provenance")
+          if combined_publisher="$(
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$verified_run_id/attempts/$signing_attempt/jobs?per_page=100" --paginate \
+              --jq '.jobs[] | select(.name == "Publish npm and container images") | .conclusion'
+          )" && [[ "$combined_publisher" == success ]]; then
+            echo 'combined-approval=true' >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Detect Action release source
         id: action
@@ -743,6 +757,8 @@ jobs:
       id-token: write
     uses: ./.github/workflows/container-publish.yml
     with:
+      combined-approval: ${{ needs.release.outputs.combined-approval == 'true' }}
+      refresh-wolfi-recipe: ${{ inputs.refresh-wolfi-recipe }}
       release-sha: ${{ needs.release.outputs.sha }}
       release-version: ${{ needs.release.outputs.version }}
       release-integrity: ${{ needs.release.outputs.integrity }}

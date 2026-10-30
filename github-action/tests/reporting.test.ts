@@ -10,6 +10,16 @@ test('credential-shaped text and encodings remain in diagnostics',()=>{
     assert.equal(plain(text),text);
   }
 });
+test('truncation drops only the first half of a split surrogate pair', () => {
+  const prefix = 'a'.repeat(199);
+  assert.equal(plain(prefix + '😀', 200), prefix);
+  assert.equal(plain(prefix + '😀', 201), prefix + '😀');
+
+  const unpaired = prefix + '\uD83D';
+  assert.equal(plain(unpaired), unpaired);
+  assert.equal(plain(unpaired, 200), unpaired);
+  assert.equal(plain(unpaired + 'x', 200), unpaired);
+});
 test('finding titles and messages cannot become Markdown links, images or raw HTML',()=>{
   const result = {scanStatus:'completed',policyStatus:'passed',reportStatus:'ready',counts:{critical:0,high:1,medium:0,low:0,informational:0},errors:[],
     findings:[{severity:'high',title:'![click](https://example.invalid) <img src=x> @someone',summary:'</pre><script>bad</script>',path:'src/app.ts',startLine:1}]} as unknown as ScanResults;

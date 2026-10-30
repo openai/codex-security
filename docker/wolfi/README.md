@@ -69,11 +69,12 @@ does not include a model.
 ## Publish the amd64 variant
 
 For a scanner release, `container-publish` supplies the same verified npm tarball
-and runtime lock used for Debian. The builder records the scanner commit from
-`npm-vX.Y.Z` and the recipe commit from protected `main`. One protected
-`container` approval covers both images after the native tests pass. The Wolfi publisher verifies an anonymous
-pull and attests build provenance and the SPDX inventory before promoting
-`ghcr.io/openai/codex-security:X.Y.Z-wolfi-amd64`.
+and runtime lock used for Debian. The scanner and Wolfi recipe both come from
+`npm-vX.Y.Z`. One `npm` deployment approval authorizes the package and both
+container images. The Wolfi publisher verifies an anonymous pull and attests
+build provenance and the SPDX inventory before promoting
+`ghcr.io/openai/codex-security:X.Y.Z-wolfi-amd64`. To recover a missing image
+using refreshed OS pins, follow the [container backfill instructions](../README.md#publishing).
 
 ### Wolfi-only OS updates
 

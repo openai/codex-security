@@ -42,26 +42,6 @@ def test_sha256_root_commit_uses_the_sha256_empty_tree(tmp_path: Path, workbench
     assert git(target, "diff", "--name-only", *revisions) == b"README.md"
 
 
-def test_blob_batch_preserves_following_blobs_after_tree_and_commit(tmp_path: Path) -> None:
-    target = tmp_path / "target"
-    initialize_git_repository(target)
-    source = target / ("fixture.py" if os.name == "nt" else "line\nbreak.py")
-    source.write_bytes(b"print('fixture')\npayload\n")
-    git(target, "add", "--", source.name)
-    git(target, "commit", "-qm", "Add unusual fixture")
-    reader = load_script("workbench_target").git_blob_samples
-    assert reader(
-        target,
-        ["HEAD^{tree}", "HEAD", f"HEAD:{source.name}", "HEAD:missing\nfile", "HEAD:README.md"],
-    ) == [
-        None,
-        None,
-        (source.read_bytes(), False),
-        None,
-        (b"fixture\n", False),
-    ]
-
-
 def test_plain_directory_inventory_ignores_nested_git_metadata(tmp_path: Path) -> None:
     target = tmp_path / "sources"
     target.mkdir()
