@@ -33,36 +33,6 @@ const publishLocal = [
   "--yes",
 ];
 
-for (const value of [undefined, "", "0", "true"]) {
-  test(`external commands are absent from discovery without opt-in (${String(value)})`, async () => {
-    const environment = { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: value };
-    for (const [group, command] of commands) {
-      const cli = createCliTest(main);
-      expect(
-        await cli.runCli([group!, "--help"], dependencies({ environment })),
-      ).toBe(0);
-      expect(cli.stdout.text()).not.toMatch(
-        new RegExp(`^\\s+${command}\\s`, "m"),
-      );
-      const schema = createCliTest(main);
-      expect(
-        await schema.runCli(
-          [group!, command!, "--schema"],
-          dependencies({ environment }),
-        ),
-      ).not.toBe(0);
-    }
-    const github = createCliTest(main);
-    expect(
-      await github.runCli(
-        ["import", "github", "--help"],
-        dependencies({ environment }),
-      ),
-    ).toBe(0);
-    expect(github.stdout.text()).not.toContain("publish findings");
-  });
-}
-
 test("disabled commands distinguish discovery requests from filter values", async () => {
   const deps = dependencies({ environment: {} });
   for (const flag of ["--schema", "--llms-full", "--help"]) {
@@ -309,15 +279,13 @@ test("opt-in exposes the commands per invocation without affecting concurrent di
         expect(
           new RegExp(`^\\s+${command}\\s`, "m").test(cli.stdout.text()),
         ).toBe(enabled);
-        if (enabled) {
-          const help = createCliTest(main);
-          expect(
-            await help.runCli(
-              [group!, command!, "--schema"],
-              dependencies({ environment }),
-            ),
-          ).toBe(0);
-        }
+        const schema = createCliTest(main);
+        const status = await schema.runCli(
+          [group!, command!, "--schema"],
+          dependencies({ environment }),
+        );
+        if (enabled) expect(status).toBe(0);
+        else expect(status).not.toBe(0);
       }
     }),
   );
@@ -340,5 +308,7 @@ test("established scan publishing, status, scan import, and GitHub collection st
     expect(cli.stdout.text()).toContain(
       `Usage: codex-security ${command.join(" ")} `,
     );
+    if (command[0] === "import" && command[1] === "github")
+      expect(cli.stdout.text()).not.toContain("publish findings");
   }
 });

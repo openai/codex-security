@@ -117,6 +117,7 @@ test("native reuse hashes committed inputs with Git alone across platforms", () 
     ]) {
       write(`.github/scripts/${script}.mjs`, "// CI only\n");
     }
+    write(".github/scripts/test_check_plugin_source_compatibility.mts", "");
     write("plugins/codex-security/mcp-app/tests/support/new.ts", "fixture\n");
     commit();
     expect(key("2026-43", 4, fingerprint)).toBe("week=202643");
@@ -221,7 +222,7 @@ test("source CI opts in to native artifact reuse", () => {
   expect(workflow("node-ci").jobs["native"]?.with?.["reuse-verified"]).toBe(
     true,
   );
-  for (const caller of ["node-release", "container-release", "container-ci"]) {
+  for (const caller of ["node-release", "container-publish", "container-ci"]) {
     expect(
       workflow(caller).jobs["native"]?.with?.["reuse-verified"],
     ).toBeUndefined();

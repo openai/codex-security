@@ -3,7 +3,8 @@ import { readdir, utimes } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import type { draftFixture } from "./scan-draft-recovery-fixture.ts";
+import type { TestContext } from "node:test";
+import { fixture, type draftFixture } from "./scan-draft-recovery-fixture.ts";
 
 const execFileAsync = promisify(execFile);
 export type FixtureFinding = Record<string, unknown> & {
@@ -36,14 +37,52 @@ export const finding = (
   ...metadata,
 });
 
+type RecoveryOptions = {
+  workers?: Record<string, unknown>[];
+  details?: boolean;
+  replay?: boolean;
+  provenanceDetails?: boolean;
+  source?: "saved" | "published";
+};
+
+export async function recoveryPair(
+  t: TestContext,
+  layout: Parameters<typeof fixture>[1],
+) {
+  const normal = await fixture(t, layout);
+  const recovered = await fixture(t, layout);
+  return {
+    normal,
+    recovered,
+    recover: (options?: RecoveryOptions) =>
+      recoverAndFinalize(normal, recovered, options),
+  };
+}
+
+export const savedWorker = (
+  root: string,
+  id = "reviewer",
+  status: "canceled" | "succeeded" = "canceled",
+) => ({
+  id,
+  kind: "discovery",
+  status,
+  artifact_dir: root,
+  result_manifest_path:
+    status === "succeeded" ? path.join(root, "result.json") : null,
+  attempt: 1,
+});
+
 export async function recoverAndFinalize(
   normal: DraftFixture,
   recovered: DraftFixture,
-  workers: Record<string, unknown>[] = [],
-  details = false,
-  replay = false,
-  provenanceDetails = false,
-  source: "saved" | "published" = "saved",
+  {
+    workers = [],
+    details = false,
+    replay = false,
+    provenanceDetails = false,
+    source = "saved",
+  }: RecoveryOptions = {},
 ): Promise<{
   normal: RecoveredFinding[];
   recovered: RecoveredFinding[];

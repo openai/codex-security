@@ -2735,52 +2735,80 @@ function failingDashboardOutput(output: string[]) {
   };
 }
 
-test("aligns component columns by terminal width and retains trailing cost", async () => {
-  const stderr = capture(true);
-  const dashboard = createDashboard(
-    { ...stderr.stream, columns: 160, rows: 24 },
-    { presentation: "components", showCost: true },
-  );
-  const receipts: ComponentReceipt[] = [
-    "a".repeat(74),
-    "界".repeat(37),
-    "e\u0301".repeat(37),
-  ].map((name, index) => ({
-    id: String(index),
-    name,
-    paths: ["src"],
-    status: "pending",
-    outputDir: `/synthetic/results/${index}`,
-  }));
-  dashboard.start();
-  dashboard.setComponents(receipts);
-  for (const receipt of receipts)
-    dashboard.recordComponentEvent({
-      componentId: receipt.id,
-      type: "cost",
-      value: {
-        model: "synthetic-model",
-        inputTokens: 1,
-        cachedInputTokens: 0,
-        cacheWriteInputTokens: 0,
-        outputTokens: 1,
-        estimatedUsd: 1,
-        estimatedUsdRange: { min: 1, max: 1, context: "unknown" },
-      },
-    });
-  await Promise.resolve();
-  const frame = stripVTControlCharacters(
-    stderr.text().split("\u001B[H").at(-1)!,
-  );
-  const rows = frame.split("\n").filter((line) => line.includes("Queued"));
-  expect(rows).toHaveLength(3);
-  for (const row of rows) expect(row).toContain("$1.00");
-  expect(
-    new Set(rows.map((row) => stringWidth(row.slice(0, row.indexOf("$1.00")))))
-      .size,
-  ).toBe(1);
-  dashboard.stop();
-});
+test.each([80, 160])(
+  "fits component progress at %i columns",
+  async (columns) => {
+    const stderr = capture(true);
+    const dashboard = createDashboard(
+      { ...stderr.stream, columns, rows: 24 },
+      { presentation: "components", showCost: true },
+    );
+    const receipts: ComponentReceipt[] = [
+      "a".repeat(74),
+      "界".repeat(37),
+      "e\u0301".repeat(37),
+    ].map((name, index) => ({
+      id: String(index),
+      name,
+      paths: ["src"],
+      status: "pending",
+      outputDir: `/synthetic/results/${index}`,
+    }));
+    dashboard.start();
+    dashboard.setComponents(receipts);
+    for (const [index, receipt] of receipts.entries()) {
+      if (index < 2) {
+        dashboard.updateComponent({ ...receipt, status: "started" });
+        dashboard.recordComponentEvent({
+          componentId: receipt.id,
+          type: "progress",
+          value: {
+            phase: "attack_path",
+            filesCompleted: 2,
+            filesTotal: 8,
+            ...(index === 1 && {
+              reviewItems: { completed: 1_234, total: 12_345 },
+            }),
+          },
+        });
+      }
+      dashboard.recordComponentEvent({
+        componentId: receipt.id,
+        type: "cost",
+        value: {
+          model: "synthetic-model",
+          inputTokens: 1,
+          cachedInputTokens: 0,
+          cacheWriteInputTokens: 0,
+          outputTokens: 1,
+          estimatedUsd: 1,
+          estimatedUsdRange: { min: 1, max: 12.34, context: "unknown" },
+        },
+      });
+    }
+    await Promise.resolve();
+    const frame = stripVTControlCharacters(
+      stderr.text().split("\u001B[H").at(-1)!,
+    );
+    const lines = frame.split("\n");
+    const header = lines.findIndex((line) =>
+      /Status\s+Progress\s+Findings\s+Cost/u.test(line),
+    );
+    expect(header).toBeGreaterThanOrEqual(0);
+    const rows = lines.slice(header + 1, header + 4);
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toContain("2/8 files");
+    expect(rows[1]).toContain("1,234/12,345 reviews");
+    expect(rows[2]).toMatch(/Queued\s+—\s+—\s+\$1\.00/u);
+    for (const row of rows) expect(row).toContain("$1.00–$12.34");
+    expect(
+      new Set(
+        rows.map((row) => stringWidth(row.slice(0, row.indexOf("$1.00")))),
+      ).size,
+    ).toBe(1);
+    dashboard.stop();
+  },
+);
 
 test.each([16, 25, 120])(
   "preserves markup after clipped prefixes at width %i",

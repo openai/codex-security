@@ -144,11 +144,6 @@
     "darwin": 5,
     "win32": 3.9
   },
-  "attack-path-tool-name.test.ts": {
-    "linux": 0.2,
-    "darwin": 0.2,
-    "win32": 0.2
-  },
   "auth-status-concurrency.test.ts": {
     "linux": 1.9,
     "darwin": 1.8,
@@ -524,20 +519,10 @@
     "darwin": 8.9,
     "win32": 11.2
   },
-  "deep-scan-parent-denials.test.ts": {
-    "linux": 0.1,
-    "darwin": 0.1,
-    "win32": 0.1
-  },
   "deep-scan-reducer-recovery.test.ts": {
     "linux": 0.4,
     "darwin": 0.5,
     "win32": 0.6
-  },
-  "deep-scan-windows-executable.test.ts": {
-    "linux": 0.1,
-    "darwin": 0.1,
-    "win32": 0.1
   },
   "deep-scan-workbench.test.ts": {
     "linux": 21,
@@ -739,11 +724,6 @@
     "darwin": 3.2,
     "win32": 8.6
   },
-  "linear-comment-pagination.test.ts": {
-    "linux": 0.1,
-    "darwin": 0.1,
-    "win32": 0.1
-  },
   "linear-pagination.test.ts": {
     "linux": 0.1,
     "darwin": 0.1,
@@ -849,11 +829,6 @@
     "darwin": 0.1,
     "win32": 0.2
   },
-  "prompt-only-start-timeout.test.ts": {
-    "linux": 0.1,
-    "darwin": 0.1,
-    "win32": 0.1
-  },
   "provider-profile.test.ts": {
     "linux": 1.8,
     "darwin": 3.3,
@@ -898,11 +873,6 @@
     "linux": 4.8,
     "darwin": 11.7,
     "win32": 24.6
-  },
-  "release-cut-workflow.test.ts": {
-    "linux": 0.1,
-    "darwin": 0.1,
-    "win32": 0.1
   },
   "release-pr.test.ts": {
     "linux": 6.1,

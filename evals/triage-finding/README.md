@@ -94,6 +94,8 @@ pnpm --dir evals/triage-finding run calibration:generate --output artifacts/cali
 
 The optional exporter retains `--dataset`, `--output`, `--repo-root`, `--case`, and `--variant`. Its default output remains `tests/calibration-oss.yaml`; generated YAML is not needed to run the suite.
 
+The exporter and hydrator accept UTF-8 JSON datasets with or without a leading byte-order mark.
+
 Hydrate the local OSS checkouts:
 
 ```bash

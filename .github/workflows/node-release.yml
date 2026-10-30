@@ -303,7 +303,7 @@ jobs:
 
   publish:
     if: github.repository == 'openai/codex-security'
-    name: publish
+    name: ${{ needs.verify.outputs.mode == 'recover' && 'Verify existing npm release' || 'Publish npm and container images' }}
     needs: [verify, test]
     runs-on: ubuntu-latest
     environment: npm

@@ -709,16 +709,17 @@ describe("patch risk assessment contract", () => {
     try {
       const original =
         JSON.stringify(assessment(), null, 2).replaceAll("\n", "\r\n") + "\r\n";
+      const marked = "\uFEFF" + original;
       for (const name of ["assessment with spaces.json", "-1", "- item", "-"]) {
         const path = join(outside, name);
-        await writeFile(path, original);
+        await writeFile(path, marked);
         const result = validateText("not stdin", outside, [
           name.startsWith("-") ? `./${name}` : name,
         ]);
         expect(result.status, result.stderr).toBe(0);
         expect(result.stdout).toBe("");
         expect(result.stderr).toBe("");
-        expect(await readFile(path, "utf8")).toBe(original);
+        expect(await readFile(path, "utf8")).toBe(marked);
         expect(validateText("", outside, ["--", name]).status).toBe(
           name === "-" ? 1 : 0,
         );
