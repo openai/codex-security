@@ -1,0 +1,523 @@
+import { expect, test } from "bun:test";
+import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
+import {
+  collectSnykIssues,
+  normalizeSnykIssues,
+  type CollectSnykIssuesOptions,
+} from "../src/snyk-rest-findings.js";
+import {
+  createAndReplayFinding,
+  updateStoredFinding,
+} from "./external-findings-local-helpers.js";
+
+import {
+  snykLocalFixture,
+  snykOptions as options,
+  snykProject as project,
+  snykRestFixture,
+  snykIssue as issue,
+} from "./support/snyk-rest-fixtures.js";
+
+const environment = {
+  CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
+  SNYK_TOKEN: "test-token",
+};
+
+function transport(...responses: unknown[]) {
+  const calls: URL[] = [];
+  return {
+    calls,
+    collect(
+      selected: CollectSnykIssuesOptions = options,
+      env: NodeJS.ProcessEnv = environment,
+    ) {
+      return collectSnykIssues(selected, {
+        environment: env,
+        fetch: async (url, init) => {
+          calls.push(url);
+          expect(init.redirect).toBe("error");
+          expect(new Headers(init.headers).get("authorization")).toBe(
+            "token test-token",
+          );
+          if (responses.length === 0) throw new Error("Unexpected request");
+          return Response.json(responses.shift());
+        },
+      });
+    },
+  };
+}
+
+test.each(["open-source", "code"] as const)(
+  "Snyk %s follows scoped pagination, saves original evidence, and replays unchanged in SQLite",
+  async (product) => {
+    const code = product === "code";
+    const asset = project(code ? "sast" : "npm");
+    const record = issue(code);
+    const path = `/rest/orgs/${options.organizationId}/issues`;
+    const cursor = "next+/=";
+    const api = transport(
+      asset,
+      {
+        data: [],
+        links: { next: `?starting_after=${encodeURIComponent(cursor)}` },
+      },
+      { data: [record] },
+    );
+    const report = await api.collect({ ...options, product });
+    expect(api.calls.map((url) => url.pathname)).toEqual([
+      `/rest/orgs/${options.organizationId}/projects/${options.projectId}`,
+      path,
+      path,
+    ]);
+    for (const url of api.calls.slice(1)) {
+      expect(url.origin).toBe(options.apiOrigin);
+      expect(Object.fromEntries(url.searchParams)).toMatchObject({
+        "scan_item.type": "project",
+        "scan_item.id": options.projectId,
+        type: record.attributes.type,
+        status: "open,resolved",
+      });
+      expect(url.searchParams.get("include_code_flows")).toBe(
+        code ? "true" : null,
+      );
+    }
+    expect(api.calls[2]!.searchParams.get("starting_after")).toBe(cursor);
+    await using f = await snykLocalFixture({
+      remote: options.sourceRepositoryUrl,
+    });
+    await f.writeJson(report);
+    const stored = await createAndReplayFinding(f);
+    const retained = stored.evidence.source_data!;
+    expect(JSON.parse(retained["issueJson"] as string)).toEqual(record);
+    expect(JSON.parse(retained["projectJson"] as string)).toEqual(asset.data);
+    if (code) {
+      expect(stored.evidence).toMatchObject({
+        locations: [{ path: "src/app.ts", line: 3 }],
+        code_revision: "abc123",
+        details: { kind: "sast", rule: { id: "sample-rule" } },
+      });
+    } else {
+      expect(stored.evidence.packages).toMatchObject([
+        {
+          name: "example-lib",
+          installed_version: "1.0.0",
+          manifest_path: "app/package.json",
+        },
+      ]);
+    }
+  },
+);
+
+test.each([
+  ["uat", "api.eu.snyk.io"],
+  ["sat", "https://api.eu.snyk.io"],
+])(
+  "an explicit regional Snyk %s token only reaches its own API",
+  async (kind, host) => {
+    const payload = Buffer.from(JSON.stringify({ h: host })).toString(
+      "base64url",
+    );
+    const token = `snyk_${kind}.12345678.${payload}.synthetic`;
+    const seen: string[] = [];
+    const collect = (apiOrigin: string) =>
+      collectSnykIssues(
+        { ...options, apiOrigin, token },
+        {
+          environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+          fetch: async (url, init) => {
+            seen.push(url.origin);
+            expect(new Headers(init.headers).get("authorization")).toBe(
+              `token ${token}`,
+            );
+            return Response.json(
+              url.pathname.endsWith("/issues") ? { data: [] } : project(),
+            );
+          },
+        },
+      );
+    await expect(collect("https://api.snyk.io")).rejects.toThrow(
+      "token's API host",
+    );
+    expect(seen).toHaveLength(0);
+    expect((await collect(options.apiOrigin)).complete).toBe(true);
+    expect(seen).toEqual([options.apiOrigin, options.apiOrigin]);
+  },
+);
+
+test("the Snyk token stays in its configured region and on the selected Issues route", async () => {
+  const regional = transport();
+  await expect(
+    regional.collect(options, {
+      ...environment,
+      SNYK_API: "https://api.snyk.io",
+    }),
+  ).rejects.toThrow();
+  expect(regional.calls).toEqual([]);
+
+  const next = "https://other.example.invalid/steal?starting_after=more";
+  const crossOrigin = transport(project(), { data: [], links: { next } });
+  await expect(crossOrigin.collect()).rejects.toThrow();
+  expect(crossOrigin.calls.map((url) => url.origin)).toEqual([
+    options.apiOrigin,
+    options.apiOrigin,
+  ]);
+});
+
+test("rejects mismatched project evidence before persisting a local import", async () => {
+  const other = "https://github.com/example/other";
+  const wrongProject = transport(project("npm", other));
+  await expect(wrongProject.collect()).rejects.toThrow();
+  expect(wrongProject.calls).toHaveLength(1);
+  const wrongIssue = transport(project(), {
+    data: [issue(false, "55555555-5555-4555-8555-555555555555")],
+  });
+  await expect(wrongIssue.collect()).rejects.toThrow();
+
+  const report = await transport(project(), { data: [issue(false)] }).collect();
+  await using f = await snykLocalFixture({ remote: other });
+  await f.writeJson(report);
+  await expect(f.prepare()).rejects.toThrow();
+  expect(await f.read()).toEqual([]);
+});
+
+test("retains numeric evidence exactly and identifies an issue by its vendor key across resurfacings", async () => {
+  const original = issue(false);
+  const raw = JSON.stringify({
+    data: [{ ...original, original_count: 0 }],
+  }).replace('"original_count":0', '"original_count":9007199254740993');
+  const responses = [JSON.stringify(project()), raw];
+  const report = await collectSnykIssues(options, {
+    environment,
+    fetch: async () => new Response(responses.shift()),
+  });
+  const row = normalizeSnykIssues(JSON.parse(JSON.stringify(report)))
+    .findings[0]!;
+  expect(row.evidence.source_data?.["issueJson"]).toContain(
+    '"original_count":9007199254740993',
+  );
+  report.pages[0]!.responseJson = raw.replace(
+    original.id,
+    "77777777-7777-4777-8777-777777777777",
+  );
+  expect(normalizeSnykIssues(report).findings[0]!.source_finding_id).toBe(
+    row.source_finding_id,
+  );
+});
+
+test("rechecks Snyk Code repository evidence for direct normalized imports without Git remotes", async () => {
+  const report = await transport(project("sast"), {
+    data: [issue(true)],
+  }).collect({
+    ...options,
+    product: "code",
+  });
+  const normalized = normalizeSnykIssues(report);
+  await using f = await snykLocalFixture();
+  const settings = {
+    provider: "snyk" as const,
+    sourceKey: f.sourceKey,
+    repository: f.repository,
+  };
+  const deps = { environment: f.environment };
+  await expect(
+    prepareNormalizedLocalImport(
+      normalized,
+      { ...settings, provider: "github" },
+      deps,
+    ),
+  ).rejects.toThrow("snyk provider");
+  const other = "https://github.com/example/other";
+  await expect(
+    prepareNormalizedLocalImport(normalized, settings, {
+      ...deps,
+      sourceRepositories: [{ url: other }],
+    }),
+  ).rejects.toThrow("original Snyk project");
+  normalized.findings[0]!.evidence.details!.repository!.url = other;
+  await expect(
+    prepareNormalizedLocalImport(normalized, settings, deps),
+  ).rejects.toThrow("original Snyk project");
+});
+
+test("an empty Snyk report still binds the selected checkout to the monitored project", async () => {
+  const sourceRepositoryUrl = "https://git.example.invalid/team/repository";
+  const asset = project("npm", sourceRepositoryUrl);
+  asset.data.attributes.origin = "cli";
+  const report = await transport(asset, { data: [] }).collect({
+    ...options,
+    sourceRepositoryUrl,
+  });
+  // A custom HTTP server can assign the two URLs to different repositories.
+  await using f = await snykLocalFixture({
+    remote: sourceRepositoryUrl + ".git",
+  });
+  await f.writeJson(report);
+  await expect(f.prepare()).rejects.toThrow("configured remote");
+  await expect(
+    f.prepare({ sourceRepositoryUrl: options.sourceRepositoryUrl }),
+  ).rejects.toThrow("original Snyk project");
+});
+
+test("requires target details when the project links a target without its URL", async () => {
+  const expanded = project();
+  const link = expanded.data.relationships.target.data;
+  link.attributes.url = "";
+  const separate = {
+    type: "target",
+    id: link.id,
+    attributes: { url: options.sourceRepositoryUrl },
+  };
+  const api = transport(expanded, { data: separate }, { data: [issue(false)] });
+  const report = await api.collect();
+  expect(normalizeSnykIssues(report).findings).toHaveLength(1);
+  expect(() =>
+    normalizeSnykIssues({
+      ...report,
+      sourceRepositoryUrl: "https://example.invalid/other/repo",
+      targetJson: "null",
+    }),
+  ).toThrow("target");
+});
+
+test("a contradictory integration label cannot alias a distinct Azure repository", async () => {
+  const url = "https://dev.azure.com/example/project/_git/repo";
+  const response = project("npm", url + ".git");
+  response.data.attributes.origin = "github-enterprise";
+  await expect(
+    transport(response).collect({ ...options, sourceRepositoryUrl: url }),
+  ).rejects.toThrow("target URL");
+});
+
+test("checks projected Snyk repository URLs when an SDK caller omits original evidence", async () => {
+  const sourceRepositoryUrl = "https://gitlab.com/Team/Repo";
+  const asset = project("sast", sourceRepositoryUrl);
+  asset.data.attributes.origin = "gitlab";
+  const report = normalizeSnykIssues(
+    await transport(asset, { data: [issue(true)] }).collect({
+      ...options,
+      product: "code",
+      sourceRepositoryUrl,
+    }),
+  );
+  const row = report.findings[0]!;
+  row.source_finding_id = "projected-issue";
+  const evidence = row.evidence;
+  delete evidence.source_data;
+  await using f = await snykLocalFixture({ remote: sourceRepositoryUrl });
+  const settings = {
+    provider: "snyk" as const,
+    sourceKey: f.sourceKey,
+    repository: f.repository,
+  };
+  const prepare = (environment = f.environment) =>
+    prepareNormalizedLocalImport(report, settings, { environment });
+  expect((await prepare()).preview.findings).toHaveLength(1);
+  await expect(
+    prepare({
+      ...f.environment,
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "url.https://gitlab.com/other/repository.insteadOf",
+      GIT_CONFIG_VALUE_0: sourceRepositoryUrl,
+    } as typeof f.environment),
+  ).rejects.toThrow("configured remote");
+  evidence.details!.repository!.url = "https://gitlab.com/team/repo";
+  await expect(prepare()).rejects.toThrow("original Snyk project");
+});
+
+test("preserves explicit repository ports and literal Git paths on custom hosts", async () => {
+  const sourceRepositoryUrl = "https://scm.example.invalid/team/repo";
+  for (const [source, original] of [
+    [sourceRepositoryUrl, "https://scm.example.invalid:443/team/repo"],
+    [sourceRepositoryUrl + "{a}", sourceRepositoryUrl + "%7Ba%7D"],
+  ] as const) {
+    const asset = project("npm", original);
+    asset.data.attributes.origin = "api";
+    await expect(
+      transport(asset).collect({ ...options, sourceRepositoryUrl: source }),
+    ).rejects.toThrow("target URL");
+  }
+});
+
+test("accepts standard GitHub Enterprise clone path spellings from saved Snyk targets", async () => {
+  const url = "https://scm.example.invalid/Org/repo";
+  const withClone = (clone: string) => {
+    const asset = project("npm", clone);
+    asset.data.attributes.origin = "github-enterprise";
+    return transport(asset, { data: [] }).collect({
+      ...options,
+      sourceRepositoryUrl: url,
+    });
+  };
+  expect(
+    normalizeSnykIssues(
+      await withClone("git@scm.example.invalid:/org/REPO.git"),
+    ).read,
+  ).toBe(0);
+  expect(
+    normalizeSnykIssues(
+      await withClone("ssh://git@scm.example.invalid/Org/%72epo%2Egit"),
+    ).read,
+  ).toBe(0);
+  await expect(
+    withClone("ssh://git@scm.example.invalid/elsewhere/%2e%2e/Org/repo"),
+  ).rejects.toThrow("target URL");
+});
+
+test.each([
+  [
+    "gitlab",
+    "https://git.example.invalid/Team/Repo",
+    "git@git.example.invalid:Team/Repo.git",
+  ],
+  [
+    "gitlab",
+    "https://git.example.invalid/Team/Repo",
+    "https://git.example.invalid/Team/Repo.git",
+  ],
+  [
+    "azure-repos",
+    "https://dev.azure.com/org/My%20Project/_git/Repo",
+    "git@SSH.DEV.AZURE.COM:v3/org/My%20Project/Repo",
+  ],
+  [
+    "azure-repos",
+    "https://dev.azure.com/org/My%20Project/_git/Repo",
+    "ssh://git@SSH.DEV.AZURE.COM/v3/org/My Project/Repo",
+  ],
+  [
+    "azure-repos",
+    "https://dev.azure.com/org/My%20Project/_git/Repo",
+    "ssh://git@ssh.dev.azure.com:22/v3/org/My%20Project/Repo",
+  ],
+  [
+    "azure-repos",
+    "https://dev.azure.com/org/My%20Project/_git/Repo",
+    "ssh://git@ssh.dev.azure.com/v3/org/My%2520Project/Repo",
+  ],
+])(
+  "matches a monitored %s project at %s to the checkout %s",
+  async (origin, sourceRepositoryUrl, remote) => {
+    const asset = project("npm", sourceRepositoryUrl);
+    asset.data.attributes.origin = origin;
+    const report = await transport(asset, { data: [issue(false)] }).collect({
+      ...options,
+      sourceRepositoryUrl,
+    });
+    await using fixture = await snykLocalFixture({ remote });
+    await fixture.writeJson(report);
+    if (origin === "gitlab") {
+      await expect(fixture.prepare()).rejects.toThrow("configured remote");
+      const prepare = (url: string) =>
+        prepareNormalizedLocalImport(
+          normalizeSnykIssues(report),
+          {
+            provider: "snyk",
+            sourceKey: options.projectId,
+            repository: fixture.repository,
+          },
+          {
+            environment: fixture.environment,
+            sourceRepositories: [{ url, platform: "gitlab" }],
+          },
+        );
+      expect(
+        (await prepare(sourceRepositoryUrl)).preview.findings,
+      ).toHaveLength(1);
+      await expect(
+        prepare(sourceRepositoryUrl.replace("Repo", "repo")),
+      ).rejects.toThrow();
+    } else {
+      expect((await fixture.prepare()).preview.findings).toHaveLength(1);
+    }
+    const scoped = async (clone: string, provider: string) => {
+      const asset = project("npm", clone);
+      asset.data.attributes.origin = provider;
+      return transport(asset, { data: [] }).collect({
+        ...options,
+        sourceRepositoryUrl,
+      });
+    };
+    await expect(
+      scoped(remote.replace("Repo", "repo"), origin),
+    ).rejects.toThrow("target URL");
+    await expect(
+      scoped(
+        remote.replace(
+          /(^git@|^https:\/\/|^ssh:\/\/git@)[^/:]+/u,
+          "$1other.example.invalid",
+        ),
+        origin,
+      ),
+    ).rejects.toThrow("target URL");
+    if (remote.startsWith("ssh://git@ssh.dev.azure.com:22/")) {
+      await expect(
+        scoped(remote.replace(":22/", ":2222/"), origin),
+      ).rejects.toThrow("target URL");
+      await expect(
+        scoped(remote.replace("git@", "reader@"), origin),
+      ).rejects.toThrow("target URL");
+    }
+    if (origin === "gitlab")
+      await expect(scoped(remote, "api")).rejects.toThrow("target URL");
+  },
+);
+
+test.each([
+  ["https://github.com:443/example/repository", true],
+  ["https://reader@github.com:443/example/repository", true],
+  ["https://github.com:8443/example/repository", false],
+] as const)(
+  "compares the checkout's actual HTTPS endpoint for %s",
+  async (remote, matches) => {
+    await using fixture = await snykLocalFixture({ remote });
+    await fixture.writeJson(snykRestFixture("open-source"));
+    if (matches)
+      expect((await fixture.prepare()).preview.findings).toHaveLength(1);
+    else await expect(fixture.prepare()).rejects.toThrow("configured remote");
+  },
+);
+
+test.each(["git+ssh", "ssh+git"])(
+  "matches %s GitHub checkouts with the same URI path as ssh",
+  async (scheme) => {
+    const remote = `${scheme}://git@github.com/example/%72epository.git`;
+    await using fixture = await snykLocalFixture({ remote });
+    await fixture.writeJson(snykRestFixture("open-source"));
+    expect((await fixture.prepare()).preview.findings).toHaveLength(1);
+  },
+);
+
+test("a v1 Code location stays unchanged until v2 adds its reported source line to the same row", async () => {
+  const { projectJson, targetJson, pages, ...scope } = snykRestFixture("code");
+  const v1 = {
+    ...scope,
+    format: "snyk-rest-issues/v1",
+    project: JSON.parse(projectJson),
+    target: JSON.parse(targetJson),
+    pages: pages.map(({ startingAfter, responseJson }) => ({
+      startingAfter,
+      response: JSON.parse(responseJson),
+    })),
+  };
+  await using fixture = await snykLocalFixture({
+    remote: options.sourceRepositoryUrl,
+  });
+  await fixture.writeJson(v1);
+  const stored = await createAndReplayFinding(fixture);
+  expect(stored.evidence.locations).toEqual([
+    { path: "src/app.ts", line: null },
+  ]);
+  await fixture.writeJson(snykRestFixture("code"));
+  const updated = await updateStoredFinding(fixture, stored);
+  expect(updated.evidence.locations).toEqual([{ path: "src/app.ts", line: 3 }]);
+  expect((await (await fixture.prepare()).import()).counts.unchanged).toBe(1);
+
+  const v2 = snykRestFixture("code");
+  v2.pages[0]!.responseJson = v2.pages[0]!.responseJson.replace(
+    '"line":3',
+    '"line":"3"',
+  );
+  expect(normalizeSnykIssues(v2).findings[0]!.evidence.locations).toEqual([
+    { path: "src/app.ts", line: null },
+  ]);
+});

@@ -102,7 +102,7 @@ export async function readExternalFindings(
     const provider = options.provider;
     const findings =
       provider === "snyk"
-        ? await readSnykFindings(path, target)
+        ? await readSnykFindings(path, target, references)
         : await readEndorFindings(path, target);
     return {
       findings,

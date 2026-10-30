@@ -1,8 +1,64 @@
-# Snyk Open Source imports
+# Import Snyk findings
 
 Vendor finding import and readback require `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`.
 See the [opt-in instructions](../../sdk/typescript/docs/cli.md#import-vendor-findings-locally)
 and [how saved scanner reports map to imported evidence](schema-guide.md).
+
+## Existing issues from Snyk
+
+To import a monitored project's existing issues into the local workbench, set
+`SNYK_TOKEN` to a read-authorized token for the selected region. See the
+[Snyk API access requirements](https://docs.snyk.io/developer-tools/snyk-api/authentication-for-api)
+and [Issues API permissions](https://docs.snyk.io/developer-tools/snyk-api/reference/issues).
+Select the organization ID, project ID and source repository URL. Open Source
+is the default. For a Snyk Code project, add `--snyk-product code`. For a
+regional deployment, set `--snyk-api-origin` to its documented API origin.
+
+Run the commands from a trusted directory outside the project checkout. The
+example saves the report there and imports it into the checkout at `./project`.
+
+```sh
+codex-security import snyk PROJECT_ID --snyk-org ORG_ID \
+  --source-repository-url https://github.com/example/project \
+  --format json > snyk-issues.json &&
+codex-security publish findings snyk-issues.json --to local --provider snyk \
+  --source-key ORG_ID/PROJECT_ID --repository ./project --dry-run
+```
+
+Confirm the preview, then repeat the publish command without `--dry-run`.
+Collection reads open and resolved issues across all pages, including ignored issues.
+The SDK's `collectSnykIssues` defaults to Open Source and returns the same report.
+Pass independently verified `sourceRepositories` in its dependencies when a private
+CLI- or API-monitored project uses an SSH target. The reader
+`readSnykFindings(path, "local")` reads it offline. The v2 report preserves
+the original project and issue evidence. For open Snyk Code issues from an
+SCM integration, v2 imports project the repository-relative path from each open
+coordinate and its reported start line when available. The finding’s
+`issueJson` retains source locations for resolved issues, closed coordinates,
+and projects monitored through the CLI or API.
+
+Use the same source key on later imports. The issue key within the API
+origin, organization, project and product identifies the finding. Replaying
+a saved v1 or v2 report leaves an existing version unchanged. A new v2
+capture of a previously imported v1 issue updates the evidence on that row.
+
+When selecting a subset in the SDK, keep the report’s `snykRestContext` and
+each selected finding’s `source_data`. The importer verifies the original
+issue and its project and product before writing the finding under its generated
+Snyk ID. A batch of native rows must share an API region, organization, project
+and product, even when an SDK reader omits the report header.
+
+For private source-control hosts, use the same repository URL as the checkout.
+SDK callers that have independently verified a GitHub Enterprise or GitLab
+repository can pass its canonical HTTPS URL and platform to the local importer.
+This allows that repository's standard SSH clone URL and `.git` suffix. For
+example, a GitLab repository uses
+`sourceRepositories: [{ url: sourceRepositoryUrl, platform: "gitlab" }]`
+in the SDK dependencies. Use `platform: "github"` for GitHub Enterprise.
+When reading the saved file directly, pass the same verified sources as the
+third argument to `readSnykFindings(path, "local", sourceRepositories)`.
+
+## Fresh Open Source scans
 
 Use the [official Snyk Codex plugin](https://github.com/snyk/studio-recipes/tree/main/plugins/codex)
 to collect a fresh workspace scan. The existing
@@ -11,9 +67,7 @@ accepts its `snyk-findings-export/v1` bundle with `--provider snyk` for local
 storage or Cloud publication. For CLI automation, prefer native JSON from
 `snyk test`; Open Source SARIF remains a compatibility input.
 
-**Scope: Open Source SCA vulnerabilities only.** License findings, Snyk Code,
-Container, IaC, SBOM results and existing platform backlog ingestion are outside
-this adapter. License records in otherwise supported reports appear as explicit
+The workspace scan formats below cover Open Source SCA vulnerabilities. License records in otherwise supported reports appear as explicit
 exclusions; they are not imported as vulnerabilities.
 
 ```sh

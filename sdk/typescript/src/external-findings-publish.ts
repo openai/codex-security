@@ -22,6 +22,7 @@ import {
   isSemgrepPlatformEvidence,
   semgrepPlatformReportRepository,
 } from "./semgrep-platform-findings.js";
+import { isSnykRestReport } from "./snyk-rest-findings.js";
 import { CodexSecurityError } from "./errors.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import {
@@ -358,7 +359,7 @@ async function withImportLock<T>(
   }
 }
 
-function rejectLocalSemgrepReports(
+function rejectLocalScannerReports(
   input: ExternalFindings,
   provider: string,
 ): void {
@@ -371,6 +372,8 @@ function rejectLocalSemgrepReports(
     throw new CodexSecurityError(
       "Semgrep Platform findings require a local import.",
     );
+  if (isSnykRestReport(input))
+    throw new CodexSecurityError("Snyk REST findings require a local import.");
 }
 
 export async function prepareExternalPublication(
@@ -381,7 +384,7 @@ export async function prepareExternalPublication(
   requireExternalImports(dependencies.environment);
   const settings = snapshotImportOptions(options);
   const parsed = await readExternalFindings(path, settings);
-  rejectLocalSemgrepReports(parsed.findings, settings.provider);
+  rejectLocalScannerReports(parsed.findings, settings.provider);
   return preparePublicationInput(
     parsed.publication ?? normalizedPublicationInput(parsed.findings),
     { ...settings, provider: EXTERNAL_FINDINGS_PROVIDERS[settings.provider] },
@@ -397,7 +400,7 @@ export async function prepareNormalizedExternalPublication(
 ): Promise<PreparedExternalPublication> {
   requireExternalImports(dependencies.environment);
   const settings = snapshotImportOptions(options);
-  rejectLocalSemgrepReports(input, settings.provider);
+  rejectLocalScannerReports(input, settings.provider);
   return preparePublicationInput(
     normalizedPublicationInput(input),
     settings,
