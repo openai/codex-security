@@ -1,4 +1,5 @@
-import { defaultSeverityRubric } from "./default-severity-rubric.js";
+import { hash } from "node:crypto";
+import { getDefaultSeverityRubric } from "./severity-rubric.js";
 import { findingEntry } from "./value.js";
 import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
@@ -35,7 +36,7 @@ export interface ClassifySeverityOptions extends Pick<
   | "signal"
   | "workingDirectory"
 > {
-  /** Classification policy override. Omit to use the built-in severity rubric. */
+  /** Classification policy override. Omit for the bundled default, or opt in to the remote default through environment. */
   rubricPath?: string;
   /** Independent reviews per finding: integer 1–10, default 3. */
   classificationRuns?: number;
@@ -57,17 +58,27 @@ export interface SeverityClassification {
   /** Absent on legacy results whose review count was not recorded. */
   classificationRuns?: number;
   rubricSha256: string | null;
+  /** Revision of the bundled or remote rubric. Unversioned file inputs and legacy results omit it. */
+  rubricRevision?: number;
   knowledgeBaseSha256: string | null;
   assessments: SeverityAssessment[];
 }
 
+/** @internal Document collections retain their original checkpoint key. */
+export type SeverityClassificationBinding = Omit<
+  SeverityClassification,
+  "assessments"
+> & {
+  rubricCheckpointSha256: string | null;
+};
+
 /** @internal Per-finding persistence used by saved-scan classification. */
 export interface SeverityClassificationCheckpoint {
-  load(result: SeverityClassification): Promise<SeverityAssessment[]>;
+  load(binding: SeverityClassificationBinding): Promise<SeverityAssessment[]>;
   save(
     finding: SeverityClassificationFinding,
     assessment: SeverityAssessment,
-    result: SeverityClassification,
+    binding: SeverityClassificationBinding,
   ): Promise<void>;
 }
 
@@ -82,6 +93,7 @@ export const severityClassificationSchema = z.strictObject({
   assessedAt: z.string().datetime(),
   classificationRuns: classificationRunsSchema.optional(),
   rubricSha256: digestSchema.nullable(),
+  rubricRevision: z.number().int().positive().optional(),
   knowledgeBaseSha256: digestSchema.nullable(),
   assessments: z.array(
     decisionSchema.extend({
@@ -120,22 +132,31 @@ export async function classifySeverityInternal(
     }
     ids.add(finding.findingId);
   }
-  const rubric =
-    options.rubricPath === undefined
-      ? [defaultSeverityRubric]
-      : await readDocuments([options.rubricPath], options.signal);
+  let rubric: string[];
+  let rubricRevision: number | undefined;
+  if (options.rubricPath === undefined) {
+    const snapshot = await getDefaultSeverityRubric(options);
+    rubric = [snapshot.markdown];
+    rubricRevision = snapshot.revision;
+  } else {
+    rubric = await readDocuments([options.rubricPath], options.signal);
+  }
   const knowledge = options.knowledgeBasePaths?.length
     ? await readDocuments(options.knowledgeBasePaths, options.signal)
     : null;
-  const result: SeverityClassification = {
-    schemaVersion: 1,
+  const rubricCheckpointSha256 = workflowDigest(rubric);
+  const metadata = {
+    schemaVersion: 1 as const,
     classificationRuns,
     assessedAt: new Date().toISOString(),
-    rubricSha256: workflowDigest(rubric),
+    rubricSha256:
+      rubric.length === 1 ? hash("sha256", rubric[0]!) : rubricCheckpointSha256,
+    ...(rubricRevision === undefined ? {} : { rubricRevision }),
     knowledgeBaseSha256: knowledge === null ? null : workflowDigest(knowledge),
-    assessments: [],
   };
-  const cached = new Map((await checkpoint?.load(result))?.map(findingEntry));
+  const result: SeverityClassification = { ...metadata, assessments: [] };
+  const binding = { ...metadata, rubricCheckpointSha256 };
+  const cached = new Map((await checkpoint?.load(binding))?.map(findingEntry));
   for (const finding of findings) {
     options.signal?.throwIfAborted();
     const inputSha256 = workflowDigest(finding);
@@ -180,7 +201,7 @@ export async function classifySeverityInternal(
       inputSha256,
       source: "rubric",
     };
-    await checkpoint?.save(finding, assessment, result);
+    await checkpoint?.save(finding, assessment, binding);
     result.assessments.push(assessment);
   }
   options.signal?.throwIfAborted();

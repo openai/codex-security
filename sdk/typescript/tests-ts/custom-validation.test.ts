@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
   cp,
@@ -856,6 +856,12 @@ describe("custom validation", () => {
         );
       }
       const workflow = "Run the synthetic validation script, then clean up.";
+      const markdown = "# Custom severity policy\nGrade by verified impact.";
+      const severityRubric = {
+        markdown,
+        revision: 4,
+        sha256: createHash("sha256").update(markdown).digest("hex"),
+      };
       const workflowFile = join(root, "validation.md");
       if (scenario === "standard") await writeFile(workflowFile, workflow);
       const falsePositive = {
@@ -946,6 +952,9 @@ describe("custom validation", () => {
                       "daybreak_blue",
                     );
                     turns += 1;
+                    expect(prompt).toContain(
+                      JSON.stringify({ severityRubric }),
+                    );
                     if (turns === 1) {
                       expect(prompt.includes("2026-01-01T00:05:00.000Z")).toBe(
                         maxTimeMinutes !== undefined,
@@ -1119,6 +1128,7 @@ describe("custom validation", () => {
       );
       try {
         const pending = client.run(repository, {
+          severityRubric,
           cyberAccessProgram: "daybreak_blue",
           maxTimeMinutes,
           ...(scenario === "standard"
@@ -1253,6 +1263,10 @@ describe("custom validation", () => {
     expect(standard).toContain("retain the model in an early");
     expect(standard).toContain("`followup_task`");
     expect(standard).toContain("`send_message`");
+    expect(standard).toContain(
+      "[default severity rubric](<plugin_dir>/references/default-severity-rubric.md)",
+    );
+    expect(standard).toContain("the severity rubric selected for this scan");
     expect(standard).not.toContain("undefined");
     expect(standard).not.toContain(
       "Independently validate each unique finding",

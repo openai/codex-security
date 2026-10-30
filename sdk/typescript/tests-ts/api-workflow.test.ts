@@ -1,6 +1,9 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
+import type { JsonObject } from "../src/config.js";
+import { bundledSeverityRubric } from "../src/severity-rubric.js";
+import { rubricConfigResponse } from "./support/rubric-config.js";
 import { runWorkbench } from "../src/runtime.js";
 import * as runtime from "../src/runtime.js";
 import * as ownerArtifacts from "../src/scan-owner-suggestions.js";
@@ -27,6 +30,7 @@ test.each([
   "completed",
   "receipt-lost",
   "scan-interrupted",
+  "legacy-interrupted",
   "prompt-files",
   "knowledge-snapshot",
   "legacy-knowledge",
@@ -42,7 +46,12 @@ test.each([
     const scanDir = join(root, "scan");
     await mkdir(repository);
     await mkdir(scanDir, { mode: 0o700 });
+    const interrupted =
+      scenario === "scan-interrupted" || scenario === "legacy-interrupted";
     const environment = {
+      CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: interrupted
+        ? "1"
+        : undefined,
       PATH: process.env["PATH"],
       SystemRoot: process.env["SystemRoot"],
       TEMP: process.env["TEMP"],
@@ -81,6 +90,23 @@ test.each([
           },
         )
       : undefined;
+    let savedRecipe: JsonObject | undefined;
+    const fetch = interrupted
+      ? spyOn(globalThis, "fetch")
+          .mockRejectedValue(new Error("Unexpected policy fetch"))
+          .mockResolvedValueOnce(
+            rubricConfigResponse({
+              markdown: bundledSeverityRubric.markdown,
+              revision: 9,
+            }),
+          )
+          .mockResolvedValueOnce(
+            rubricConfigResponse({
+              markdown: bundledSeverityRubric.markdown,
+              revision: 10,
+            }),
+          )
+      : undefined;
     let modelCalls = 0;
     let completed = false;
     let loseReceipt = receiptLost;
@@ -108,16 +134,21 @@ test.each([
           }
           if (args[0] === "get-scan")
             return {
+              ...(savedRecipe && { recipe: savedRecipe }),
               scan: {
                 progress: { status: completed ? "complete" : "failed" },
                 continuationThreadId: "thread-1",
               },
             };
           if (args[0] === "register-cli-scan") {
-            expect(JSON.parse(input!).workflowId).toBe(workflowId);
-            expect(JSON.parse(input!).recipe.ownerSuggestions).toBe(
+            const registrationInput = JSON.parse(input!);
+            expect(registrationInput.workflowId).toBe(workflowId);
+            expect(registrationInput.recipe.ownerSuggestions).toBe(
               ownerScenario || undefined,
             );
+            savedRecipe = registrationInput.recipe;
+            if (savedRecipe && scenario === "legacy-interrupted")
+              delete savedRecipe["severityRubric"];
             const registration = mockScanRegistration(args, input);
             await new FindingWorkflow(workflowId, environment).bind({
               scanId: registration["scanId"] as string,
@@ -131,8 +162,16 @@ test.each([
         createCodex: codexFactory(async (input: string) => {
           modelCalls++;
           if (scenario === "prompt-files") expect(input).toContain(scanPrompt);
-          if (scenario === "scan-interrupted" && modelCalls === 1)
-            throw new Error("Synthetic interrupted scan");
+          if (interrupted) {
+            const revision =
+              scenario === "legacy-interrupted" && modelCalls === 2 ? 10 : 9;
+            expect(input).toContain(
+              JSON.stringify({
+                severityRubric: { ...bundledSeverityRubric, revision },
+              }),
+            );
+            if (modelCalls === 1) throw new Error("Synthetic interrupted scan");
+          }
           await copyCompletedScan(root);
           return { events: completedEvents() };
         }, "thread-1"),
@@ -147,7 +186,7 @@ test.each([
         ownerSuggestions: ownerScenario || undefined,
         ...(scenario === "prompt-files" ? { scanPromptFile: promptFile } : {}),
       };
-      if (receiptLost || scenario === "scan-interrupted")
+      if (receiptLost || interrupted)
         await expect(first.run(repository, options)).rejects.toThrow(
           "Synthetic",
         );
@@ -189,7 +228,19 @@ test.each([
         if (!ownerFailure)
           expect(await readFile(ownerPath, "utf8")).toBe("{}\n");
       }
-      expect(modelCalls).toBe(scenario === "scan-interrupted" ? 2 : 1);
+      if (interrupted) {
+        await resumed.run(repository, { workflowId });
+        await expect(
+          resumed.run(repository, {
+            workflowId,
+            severityRubric: bundledSeverityRubric,
+          }),
+        ).rejects.toThrow("already bound to a different");
+        expect(fetch).toHaveBeenCalledTimes(
+          scenario === "legacy-interrupted" ? 2 : 1,
+        );
+      }
+      expect(modelCalls).toBe(interrupted ? 2 : 1);
       expect(
         (await new FindingWorkflow(workflowId, environment).get())?.stages.scan
           .status,
@@ -215,6 +266,7 @@ test.each([
       }
     } finally {
       python.mockRestore();
+      fetch?.mockRestore();
       await resumed.close();
       ownerSpy?.mockRestore();
     }

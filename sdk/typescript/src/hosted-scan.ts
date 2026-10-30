@@ -22,6 +22,10 @@ import { CodexSecurity } from "./api.js";
 import { ScanInterruptedError, errorMessage } from "./errors.js";
 import { normalizeRepository, repositoryRevision } from "./targets.js";
 import { isWithin } from "./trusted-executable.js";
+import {
+  getDefaultSeverityRubric,
+  severityRubricSchema,
+} from "./severity-rubric.js";
 
 /** Hosted v2 mirrors repository/paths targets; only Standard scans are supported. */
 export const HostedScanInputSchema = z.strictObject({
@@ -35,6 +39,7 @@ export const HostedScanInputSchema = z.strictObject({
   stateDirectory: z.string().min(1),
   model: z.string().min(1),
   reasoningEffort: z.string(),
+  severityRubric: severityRubricSchema.optional(),
   ownerSuggestions: z.boolean().optional(),
   identity: z.strictObject({
     runId: z.string().min(1),
@@ -186,6 +191,7 @@ export interface HostedScanOptions {
     };
   };
   signal?: AbortSignal;
+  environment?: NodeJS.ProcessEnv;
   onEvent?: (event: ScanExecutionEvent) => void;
 }
 
@@ -195,7 +201,10 @@ export async function runHostedScan(
   options: HostedScanOptions,
 ) {
   const input = HostedScanInputSchema.parse(value);
-  const context = await prepareHostedScan(input, options.signal);
+  const context = {
+    ...(await prepareHostedScan(input, options.signal)),
+    severityRubric: input.severityRubric,
+  };
   let execution: ScanExecutionResult | undefined;
   let request: ScanExecutionRequest | undefined;
   let scanId: string | undefined;
@@ -251,6 +260,7 @@ export async function runHostedScan(
     ...(execution === undefined ? {} : { execution }),
   });
   try {
+    context.severityRubric ??= await getDefaultSeverityRubric(options);
     const result = await client.run(context.repository, {
       target:
         context.scope.paths[0] === "."
@@ -323,6 +333,7 @@ export async function runHostedScan(
     return {
       ...base(),
       status: "completed" as const,
+      severityRubric: context.severityRubric,
       ...(result.ownerSuggestionsError === undefined
         ? {}
         : { ownerSuggestionsError: result.ownerSuggestionsError }),

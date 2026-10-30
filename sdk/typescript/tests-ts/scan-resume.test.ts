@@ -34,6 +34,7 @@ import { TestClient } from "./support/api-client.js";
 import { completedEvents, preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { fail } from "./support/errors.js";
+import { bundledSeverityRubric } from "../src/severity-rubric.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
@@ -48,6 +49,7 @@ async function interruptedScan(
     | "auth"
     | "knowledgeBasePaths"
     | "cyberAccessProgram"
+    | "severityRubric"
   > & { config?: JsonObject } = {},
   resolvedDeep = false,
   modelProvider?: string,
@@ -1054,8 +1056,20 @@ test.each([
       safetyIdentifier:
         auth === "chatgpt" ? undefined : "synthetic-original-user",
       postScanPrompt: "Run these exact saved post-scan instructions.\n",
+      severityRubric: { ...bundledSeverityRubric, revision: 17 },
     };
     const f = await interruptedScan("deep", bulk, settings, true);
+    const editedInstructions =
+      auth === "api-key" ? "" : "Review the updated scope.";
+    await f.command([
+      "update-scan-context",
+      "--scan-id",
+      f.scanId,
+      "--thread-id",
+      f.threadId,
+      "--user-context",
+      editedInstructions,
+    ]);
     f.environment.OPENAI_API_KEY = "synthetic-resume-key";
     const ambientHome = join(f.root, "ambient-codex-home");
     f.environment.CODEX_HOME = ambientHome;
@@ -1098,8 +1112,17 @@ test.each([
                 );
                 prompts.push(prompt as string);
                 if (prompts.length === 1) {
-                  expect(prompt).toContain(
+                  if (editedInstructions)
+                    expect(prompt).toContain(editedInstructions);
+                  else
+                    expect(prompt).not.toContain(
+                      "Additional scan instructions:",
+                    );
+                  expect(prompt).not.toContain(
                     "Keep the original scan instructions.",
+                  );
+                  expect(prompt).toContain(
+                    JSON.stringify({ severityRubric: settings.severityRubric }),
                   );
                   const deepConfigPath =
                     options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
@@ -1147,6 +1170,7 @@ test.each([
                   ]);
                   expect(saved["recipe"]).toMatchObject({
                     cyberAccessProgram: settings.cyberAccessProgram,
+                    severityRubric: settings.severityRubric,
                   });
                   await finishDiscovery(f);
                 }

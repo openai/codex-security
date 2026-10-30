@@ -14,6 +14,11 @@
       "stateDirectory": "/scan/state",
       "model": "fixture-model",
       "reasoningEffort": "medium",
+      "severityRubric": {
+        "markdown": "# Severity\nUse the supplied evidence.\n",
+        "revision": 1,
+        "sha256": "2e3cad5048e557ea56f7d60793f71512817354d17697baa8a70d22fdaae29132"
+      },
       "identity": {
         "runId": "run-1",
         "attemptId": "attempt-1",
@@ -40,6 +45,11 @@
       "model": "fixture-model",
       "reasoningEffort": "medium",
       "requestId": "request-1",
+      "severityRubric": {
+        "markdown": "# Severity\nUse the supplied evidence.\n",
+        "revision": 1,
+        "sha256": "2e3cad5048e557ea56f7d60793f71512817354d17697baa8a70d22fdaae29132"
+      },
       "scanId": "scan-1",
       "prompt": "Scan the selected paths.",
       "runtime": {
@@ -101,6 +111,11 @@
       },
       "outputDirectory": "/scan/output",
       "status": "completed",
+      "severityRubric": {
+        "markdown": "# Severity\nUse the supplied evidence.\n",
+        "revision": 1,
+        "sha256": "2e3cad5048e557ea56f7d60793f71512817354d17697baa8a70d22fdaae29132"
+      },
       "scanId": "scan-1",
       "pluginVersion": "0.1.95",
       "provenance": {

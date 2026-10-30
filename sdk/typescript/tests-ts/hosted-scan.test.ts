@@ -34,6 +34,7 @@ import {
   type ScanExecutor,
 } from "../src/scan-executor.js";
 import { main } from "../src/cli.js";
+import * as rubricSource from "../src/severity-rubric.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { normalizeTarget } from "../src/targets.js";
 import { runWorkbench } from "../src/runtime.js";
@@ -47,9 +48,190 @@ import {
 import { parseJsonLines, readJson, writeJson } from "./support/json.js";
 import { rejecting } from "./support/errors.js";
 import { writeSource } from "./support/shell.js";
+import { rubricConfigResponse } from "./support/rubric-config.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures("hosted-scan-");
 afterEach(cleanup);
+
+test("hosted scans echo one immutable default snapshot and preserve explicit host policies", async () => {
+  const resolve = spyOn(
+    rubricSource,
+    "getDefaultSeverityRubric",
+  ).mockResolvedValue({
+    ...rubricSource.bundledSeverityRubric,
+    revision: 19,
+  });
+  const environment = { CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: "1" };
+  try {
+    for (const explicit of [false, true]) {
+      const input = await fixture();
+      if (!explicit) delete input.severityRubric;
+      const expected = explicit
+        ? input.severityRubric!
+        : { ...rubricSource.bundledSeverityRubric, revision: 19 };
+      const executor = draftExecutor();
+      const result = await runHostedScan(input, { executor, environment });
+      expect(result.status).toBe("completed");
+      expect(result.severityRubric).toEqual(expected);
+      const request = executor.run.mock.calls[0]![0];
+      expect(request.severityRubric).toEqual(expected);
+      expect(request.prompt).toContain(
+        JSON.stringify({ severityRubric: expected }),
+      );
+    }
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(resolve.mock.calls[0]?.[0]?.environment).toBe(environment);
+  } finally {
+    resolve.mockRestore();
+  }
+});
+
+test("explicit hosted rubrics may exceed the remote config size limit", async () => {
+  const input = await fixture();
+  const markdown = "x".repeat(196_609);
+  input.severityRubric = {
+    revision: 3,
+    markdown,
+    sha256: hash("sha256", markdown),
+  };
+  const result = await runHostedScan(input, { executor: draftExecutor() });
+  expect(result.status).toBe("completed");
+  expect(result.severityRubric).toEqual(input.severityRubric);
+  await expect(
+    runHostedScan(
+      {
+        ...input,
+        severityRubric: { ...input.severityRubric, markdown: markdown + "!" },
+      },
+      { executor: draftExecutor() },
+    ),
+  ).rejects.toThrow("SHA-256");
+});
+
+test("executor mutations cannot change the rubric in the hosted receipt", async () => {
+  const input = await fixture();
+  const result = await runHostedScan(input, {
+    executor: {
+      async run(request) {
+        expect(request.prompt).toContain(
+          JSON.stringify({ severityRubric: input.severityRubric }),
+        );
+        request.severityRubric!.markdown = "Executor-modified policy";
+        return receipt(request, { status: "canceled" });
+      },
+    },
+  });
+  expect(result.status).toBe("canceled");
+  expect(result.severityRubric).toEqual(input.severityRubric);
+});
+
+test.each(["0", "1"])(
+  "CLI hosted protocol uses selected remote policy setting %p",
+  async (enabled) => {
+    const policy = { markdown: "# Remote severity policy\n", revision: 14 };
+    const fetch = spyOn(globalThis, "fetch").mockResolvedValue(
+      rubricConfigResponse(policy),
+    );
+    const stream = new PassThrough();
+    const responses: unknown[] = [];
+    const requests: ScanExecutionRequest[] = [];
+    const output = new Writable({
+      write(chunk, _encoding, callback) {
+        const message = JSON.parse(chunk.toString());
+        responses.push(message);
+        if (message.method === "execution.run") {
+          requests.push(message.params);
+          void writeDraft(message.params).then(() => {
+            send(stream, { id: message.id, result: receipt(message.params) });
+            callback();
+          }, callback);
+        } else callback();
+      },
+    });
+    try {
+      const input = await fixture();
+      delete input.severityRubric;
+      const deps = dependencies();
+      deps.recordsInput = stream;
+      deps.environment = {
+        ...deps.environment,
+        CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: enabled,
+      };
+      const completed = main(
+        ["scan", "--host"],
+        output,
+        capture().stream,
+        deps,
+      );
+      send(stream, { id: "run", method: "run", params: input });
+      expect(await completed).toBe(0);
+      const expected =
+        enabled === "1"
+          ? {
+              ...policy,
+              sha256: hash("sha256", policy.markdown),
+            }
+          : rubricSource.bundledSeverityRubric;
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.severityRubric).toEqual(expected);
+      expect(responses.at(-1)).toMatchObject({
+        id: "run",
+        result: { status: "completed", severityRubric: expected },
+      });
+      expect(fetch).toHaveBeenCalledTimes(enabled === "1" ? 1 : 0);
+    } finally {
+      stream.destroy();
+      output.destroy();
+      fetch.mockRestore();
+    }
+  },
+);
+
+test("cancel during rubric resolution returns a canceled receipt without dispatch", async () => {
+  const params = await fixture();
+  delete params.severityRubric;
+  const input = new PassThrough();
+  const output = capture();
+  const fetching = Promise.withResolvers<void>();
+  const fetch = spyOn<
+    { fetch(url: string, options: RequestInit): Promise<Response> },
+    "fetch"
+  >(globalThis, "fetch").mockImplementation(
+    (_url, options) =>
+      new Promise<Response>((_resolve, reject) => {
+        const signal = options.signal!;
+        signal.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        });
+        fetching.resolve();
+      }),
+  );
+  try {
+    const finished = runHostedScanProtocol(input, output.stream, {
+      environment: { CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: "1" },
+    });
+    send(input, { id: "run", method: "run", params });
+    await fetching.promise;
+    send(input, { method: "cancel", params: { id: "run" } });
+    expect(await finished).toBe(1);
+    const messages = parseJsonLines(output.text());
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      id: "run",
+      result: {
+        identity: params.identity,
+        status: "canceled",
+        error: "Scan canceled.",
+        artifacts: [],
+      },
+    });
+    expect(messages[0].result).not.toHaveProperty("severityRubric");
+    expect(messages[0].result).not.toHaveProperty("execution");
+  } finally {
+    input.destroy();
+    fetch.mockRestore();
+  }
+});
 
 test("hosted owner artifact is opt-in and included in the completed receipt", async () => {
   for (const enabled of [false, true]) {
@@ -150,6 +332,7 @@ async function fixture(
     stateDirectory: join(root, "run", "attempt", "state"),
     model: "gpt-5.6-sol",
     reasoningEffort: "high",
+    severityRubric: { ...rubricSource.bundledSeverityRubric },
     identity: {
       runId: "run-1",
       attemptId: "attempt-1",
@@ -1310,7 +1493,9 @@ test.each(["cancel", "disconnect", "signal"])(
     const { output, writing, release } = blockedOutput();
     const run = spyOn(hostedScan, "runHostedScan");
     try {
-      const finished = runHostedScanProtocol(input, output, controller.signal);
+      const finished = runHostedScanProtocol(input, output, {
+        signal: controller.signal,
+      });
       send(input, { id: "run", method: "run", params });
       await writing;
       if (action === "cancel")
@@ -1382,10 +1567,14 @@ test("the exported contract fixture matches v2 and rejects explicit empty scope"
     version: 2,
     status: "completed",
     identity: fixture.run.params.identity,
+    severityRubric: fixture.run.params.severityRubric,
     scope: fixture.run.params.scope,
     scanId: fixture.execution.params.scanId,
     execution: ScanExecutionResultSchema.parse(fixture.response.result),
   });
+  expect(fixture.execution.params.severityRubric).toEqual(
+    fixture.run.params.severityRubric,
+  );
 });
 
 test("standalone SDK rejects local scan options and configuration before dispatch", async () => {

@@ -1,3 +1,4 @@
+import { bundledSeverityRubric } from "../src/severity-rubric.js";
 import { codexWithRun, jsonCodex } from "./support/codex.js";
 import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import * as fs from "node:fs/promises";
@@ -1757,6 +1758,7 @@ describe("CLI workbench", () => {
     try {
       const knowledgeBasePath = join(knowledgeRoot, "security.md");
       await writeFile(knowledgeBasePath, "Synthetic architecture context.\n");
+      const severityRubric = { ...bundledSeverityRubric, revision: 17 };
       const savedConfig = {
         approval_policy: "on-request",
         model: "gpt-original",
@@ -1779,6 +1781,7 @@ describe("CLI workbench", () => {
                 mode: "deep",
                 pluginVersion: "1.2.3",
                 failOnSeverity: "high",
+                severityRubric,
                 knowledgeBasePaths: [knowledgeBasePath],
                 deepScan: {
                   workers: 2,
@@ -1801,6 +1804,7 @@ describe("CLI workbench", () => {
         parentScanId: "scan-original",
         expectedPluginVersion: "1.2.3",
         failureSeverity: "high",
+        severityRubric,
         knowledgeBasePaths: [knowledgeBasePath],
         workers: 2,
         subagents: 0,

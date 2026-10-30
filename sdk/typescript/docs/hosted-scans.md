@@ -74,6 +74,20 @@ Standard scan lifecycle. Omit `scope` for the entire repository, or pass literal
 repository-relative folders/files. Model settings come from the frozen input;
 local profiles and other local scan options are not accepted.
 
+Pass optional `severityRubric: { markdown, revision, sha256 }` to bind execution
+to a host-resolved policy. The revision must be a positive safe integer and the
+hash must match the exact UTF-8 Markdown. Without it, the SDK uses the bundled
+rubric without fetching rubric configuration by default. Set
+`CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC=1` in the CLI environment or SDK
+options' `environment` to opt in to fetching the shared Statsig default once,
+with a three-second timeout and the bundled rubric as its fallback. Unset the
+variable or use `0` to disable fetching; only the exact value `1` enables it.
+An explicit host snapshot always takes precedence. Once resolved, the same
+snapshot appears in `execution.run`, the terminal receipt, and the saved scan
+recipe. Workers use it to grade findings. Each scan workflow still determines
+how to validate a candidate and whether to report it. Hosts should verify the
+snapshot alongside the frozen checkout and retain it when retrying a run.
+
 Set `ownerSuggestions: true` to record ownership evidence during the existing
 scan execution. The scan agent may include an optional hint on each finding:
 
@@ -271,7 +285,9 @@ with `{id: <original run RPC id>, event}`. Invalid optional event payloads are
 ignored; mismatched request IDs are rejected. Stdout contains JSON-RPC only.
 
 Send `{"jsonrpc":"2.0","method":"cancel","params":{"id":"run"}}` with the
-original run request ID. The CLI aborts its executor signal, emits
+original run request ID. If cancellation arrives while the CLI is fetching the
+default rubric, it returns a canceled receipt without a rubric or execution.
+Once execution starts, the CLI aborts its executor signal, emits
 `execution.cancel` with `{requestId}`, and waits for the host's outcome/usage
 before returning a canceled result. The host must continue reading notifications
 while executing. SIGINT/SIGTERM, output errors/closure, and cancellation with

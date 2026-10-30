@@ -2,6 +2,7 @@ import type { Readable } from "node:stream";
 import { runHostProtocol } from "./host-protocol.js";
 import {
   type HostedScanInput,
+  type HostedScanOptions,
   HostedScanPreparationError,
   runHostedScan,
 } from "./hosted-scan.js";
@@ -13,7 +14,7 @@ import {
 export async function runHostedScanProtocol(
   input: Readable,
   output: Parameters<typeof runHostProtocol>[1],
-  signal?: AbortSignal,
+  options: Pick<HostedScanOptions, "signal" | "environment"> = {},
 ): Promise<number> {
   return await runHostProtocol(
     input,
@@ -28,6 +29,7 @@ export async function runHostedScanProtocol(
           : undefined,
       run: async (params, execute, signal, onEvent) =>
         await runHostedScan(params as HostedScanInput, {
+          ...options,
           signal,
           onEvent,
           executor: {
@@ -41,6 +43,6 @@ export async function runHostedScanProtocol(
           },
         }),
     },
-    signal,
+    options.signal,
   );
 }

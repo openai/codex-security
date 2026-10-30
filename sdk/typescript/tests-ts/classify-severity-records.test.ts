@@ -1,5 +1,5 @@
-import { defaultSeverityRubric } from "../src/default-severity-rubric.js";
-import { expect, test } from "bun:test";
+import { afterEach, expect, mock, spyOn, test } from "bun:test";
+import * as rubricSource from "../src/severity-rubric.js";
 import { createHash } from "node:crypto";
 import { PassThrough, Writable } from "node:stream";
 import {
@@ -9,9 +9,13 @@ import {
 } from "../src/classify-severity-records.js";
 import { main } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+import { rubricConfigResponse } from "./support/rubric-config.js";
+
+afterEach(() => mock.restore());
 
 const hash = (value: string) =>
   createHash("sha256").update(value, "utf8").digest("hex");
+
 function input(): ClassifySeverityRecordsInput & {
   rubric: NonNullable<ClassifySeverityRecordsInput["rubric"]>;
 } {
@@ -34,6 +38,17 @@ function input(): ClassifySeverityRecordsInput & {
     ],
   };
 }
+
+test("canonical records accept an explicitly hashed rubric above the remote config limit", async () => {
+  const data = input();
+  const markdown = "x".repeat(196_609);
+  data.rubric = { revision: 3, markdown, sha256: hash(markdown) };
+  const result = await classifySeverityRecords(data, {
+    reviewRunner: { run: async (request) => answer(request) },
+  });
+  expect(result.status).toBe("completed");
+  expect(result.rubric).toEqual({ revision: 3, sha256: data.rubric.sha256 });
+});
 function answer(request: SeverityClassificationReviewRequest) {
   return {
     findingId: JSON.parse(request.prompt).finding.findingId,
@@ -98,8 +113,12 @@ test.each([
   "version",
   "unsafe-revision",
 ])("rejects %s before any host work", async (scenario) => {
-  const data = input();
-  if (scenario === "rubric-hash") data.rubric.markdown += " ";
+  const data: ClassifySeverityRecordsInput = input();
+  if (scenario === "rubric-hash") data.rubric!.markdown += " ";
+  else delete data.rubric;
+  const fetch = spyOn(globalThis, "fetch").mockResolvedValue(
+    rubricConfigResponse({ markdown: "# Remote policy", revision: 8 }),
+  );
   if (scenario === "finding-hash") data.records[0]!.findingJson += " ";
   if (scenario === "duplicate") data.records.push(data.records[0]!);
   if (scenario === "version") (data as { version: number }).version = 2;
@@ -116,6 +135,7 @@ test.each([
   let calls = 0;
   await expect(
     classifySeverityRecords(data, {
+      environment: { CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: "1" },
       reviewRunner: {
         async run() {
           calls++;
@@ -124,6 +144,7 @@ test.each([
       },
     }),
   ).rejects.toThrow();
+  expect(fetch).not.toHaveBeenCalled();
   expect(calls).toBe(0);
 });
 
@@ -233,6 +254,7 @@ test("cancellation rejects even when the host review does not settle", async () 
 test.each([
   "completed",
   "default-rubric",
+  "remote-rubric",
   "one-run",
   "ten-runs",
   "host-error",
@@ -242,6 +264,10 @@ test.each([
 ])(
   "CLI records protocol handles %s without local execution",
   async (scenario) => {
+    const policy = { markdown: "# Remote severity policy\n", revision: 11 };
+    const fetch = spyOn(globalThis, "fetch").mockResolvedValue(
+      rubricConfigResponse(policy),
+    );
     const stream = new PassThrough();
     const messages: any[] = [];
     const output = new Writable({
@@ -278,6 +304,11 @@ test.each([
       },
     });
     const deps = dependencies();
+    deps.environment = {
+      ...deps.environment,
+      CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC:
+        scenario === "remote-rubric" || scenario === "completed" ? "1" : "0",
+    };
     deps.recordsInput = stream;
     deps.classifyScanSeverity = async () => {
       throw new Error("Local scan execution is forbidden");
@@ -297,10 +328,12 @@ test.each([
       deps,
     );
     const params: ClassifySeverityRecordsInput = input();
-    if (scenario === "default-rubric") delete params.rubric;
+    if (scenario === "default-rubric" || scenario === "remote-rubric")
+      delete params.rubric;
     const completed = [
       "completed",
       "default-rubric",
+      "remote-rubric",
       "one-run",
       "ten-runs",
     ].includes(scenario);
@@ -322,6 +355,7 @@ test.each([
         : 1,
     );
     const final = messages.at(-1);
+    expect(fetch).toHaveBeenCalledTimes(scenario === "remote-rubric" ? 1 : 0);
     expect(final.id).toBe("run-one");
     if (completed)
       expect(final.result.assessments[0]).toHaveProperty("id", "canonical-one");
@@ -331,6 +365,11 @@ test.each([
         assessments: [],
       });
     else expect(final.error).toBeDefined();
+    if (scenario === "remote-rubric")
+      expect(final.result.rubric).toEqual({
+        revision: policy.revision,
+        sha256: hash(policy.markdown),
+      });
     stream.destroy();
   },
 );
@@ -346,6 +385,9 @@ test("records mode is discoverable and rejects saved-scan flags", async () => {
     ),
   ).toBe(0);
   expect(output.text()).toContain("--records");
+  expect(output.text()).toContain(
+    "CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC=1",
+  );
   expect(
     await main(
       ["classify-severity", "--records", "--scan", "latest"],
@@ -356,12 +398,18 @@ test("records mode is discoverable and rejects saved-scan flags", async () => {
   ).toBe(2);
 });
 
-test("empty records probe version 1 without host execution", async () => {
-  const data = input();
+test("empty records resolve the default binding without host execution", async () => {
+  const data: ClassifySeverityRecordsInput = input();
+  delete data.rubric;
   data.records = [];
+  const policy = { markdown: "# Remote severity policy", revision: 16 };
+  const fetch = spyOn(globalThis, "fetch").mockResolvedValue(
+    rubricConfigResponse(policy),
+  );
   let calls = 0;
   expect(
     await classifySeverityRecords(data, {
+      environment: { CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: "1" },
       reviewRunner: {
         async run() {
           calls++;
@@ -373,9 +421,10 @@ test("empty records probe version 1 without host execution", async () => {
     version: 1,
     classificationRuns: 3,
     status: "completed",
-    rubric: { revision: data.rubric.revision, sha256: data.rubric.sha256 },
+    rubric: { revision: policy.revision, sha256: hash(policy.markdown) },
     assessments: [],
   });
+  expect(fetch).toHaveBeenCalledTimes(1);
   expect(calls).toBe(0);
 });
 
@@ -465,30 +514,44 @@ test.each([2, 3])(
   },
 );
 
-test("omitted canonical rubric uses the bundled policy and returns its exact binding", async () => {
-  const data: ClassifySeverityRecordsInput = input();
-  delete data.rubric;
-  const requests: SeverityClassificationReviewRequest[] = [];
-  const result = await classifySeverityRecords(data, {
-    reviewRunner: {
-      async run(request) {
-        requests.push(request);
-        expect(JSON.parse(request.prompt).rubric).toEqual([
-          defaultSeverityRubric,
-        ]);
-        return answer(request);
+test.each([undefined, "0", "1"])(
+  "omitted canonical rubric respects selected remote policy setting %p",
+  async (enabled) => {
+    const policy = { markdown: "# Remote severity policy\n", revision: 12 };
+    const fetch = spyOn(globalThis, "fetch").mockResolvedValue(
+      rubricConfigResponse(policy),
+    );
+    const expected =
+      enabled === "1" ? policy : rubricSource.bundledSeverityRubric;
+    const data: ClassifySeverityRecordsInput = input();
+    delete data.rubric;
+    const requests: SeverityClassificationReviewRequest[] = [];
+    const result = await classifySeverityRecords(data, {
+      environment:
+        enabled === undefined
+          ? {}
+          : { CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: enabled },
+      reviewRunner: {
+        async run(request) {
+          requests.push(request);
+          expect(JSON.parse(request.prompt).rubric).toEqual([
+            expected.markdown,
+          ]);
+          return answer(request);
+        },
       },
-    },
-  });
-  expect(requests).toHaveLength(3);
-  expect(new Set(requests.map(({ requestId }) => requestId)).size).toBe(3);
-  expect(result).toMatchObject({
-    status: "completed",
-    rubric: { revision: 1, sha256: hash(defaultSeverityRubric) },
-    assessments: [{ level: "high" }],
-  });
-  expect(data.rubric).toBeUndefined();
-});
+    });
+    expect(requests).toHaveLength(3);
+    expect(new Set(requests.map(({ requestId }) => requestId)).size).toBe(3);
+    expect(result).toMatchObject({
+      status: "completed",
+      rubric: { revision: expected.revision, sha256: hash(expected.markdown) },
+      assessments: [{ level: "high" }],
+    });
+    expect(data.rubric).toBeUndefined();
+    expect(fetch).toHaveBeenCalledTimes(enabled === "1" ? 1 : 0);
+  },
+);
 
 test.each([1, 2, 4, 10])(
   "runs %i independent canonical reviews",

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { defaultSeverityRubric } from "../src/default-severity-rubric.js";
 import { workflowDigest } from "../src/finding-workflow.js";
 import { modelResponseText } from "./support/model-response-text.js";
@@ -5,13 +6,15 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
 import Ajv2020 from "ajv/dist/2020.js";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, mock, spyOn, test } from "bun:test";
+import * as rubricSource from "../src/severity-rubric.js";
 import {
   classifySeverity,
   validateSeverityClassification,
   type ClassifySeverityOptions,
   type SeverityClassificationFinding,
 } from "../src/classify-severity.js";
+import { rubricConfigResponse } from "./support/rubric-config.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
@@ -19,6 +22,7 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
   false,
 );
 afterEach(cleanup);
+afterEach(() => mock.restore());
 
 async function document(contents: string): Promise<string> {
   const directory = await temporaryDirectory();
@@ -69,7 +73,60 @@ function fakeCodex(response: unknown) {
   return { codex, calls };
 }
 
-test("without a rubric runs three independent reviews with the built-in policy", async () => {
+test.each([
+  { optIn: undefined, custom: false },
+  { optIn: "0", custom: false },
+  { optIn: "1", custom: false },
+  { optIn: "1", custom: true },
+])(
+  "classification honors the selected environment and explicit policy: %j",
+  async ({ optIn, custom }) => {
+    const config = { markdown: "# Remote classification policy", revision: 9 };
+    const request = spyOn(globalThis, "fetch").mockResolvedValue(
+      rubricConfigResponse(config),
+    );
+    const customPolicy = "Use this explicit classification policy.";
+    const { codex, calls } = fakeCodex(assessed);
+    const result = await classifySeverity([finding], {
+      codex,
+      environment: { CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: optIn },
+      ...(custom ? { rubricPath: await document(customPolicy) } : {}),
+    });
+    const markdown = custom
+      ? customPolicy
+      : optIn === "1"
+        ? config.markdown
+        : defaultSeverityRubric;
+    expect(request).toHaveBeenCalledTimes(optIn === "1" && !custom ? 1 : 0);
+    expect(result.rubricSha256).toBe(
+      createHash("sha256").update(markdown).digest("hex"),
+    );
+    expect(result.rubricRevision).toBe(
+      custom
+        ? undefined
+        : optIn === "1"
+          ? config.revision
+          : rubricSource.bundledSeverityRubric.revision,
+    );
+    for (const call of calls)
+      expect(JSON.parse(call.prompt.split("\n\n").at(-1)!).rubric).toEqual([
+        markdown,
+      ]);
+  },
+);
+
+test("rubric directories retain the ordered document digest without a revision", async () => {
+  const directory = await temporaryDirectory();
+  await writeFile(join(directory, "01.md"), "First policy");
+  await writeFile(join(directory, "02.md"), "Second policy");
+  const result = await classifySeverity([], { rubricPath: directory });
+  expect(result.rubricSha256).toBe(
+    workflowDigest(["First policy", "Second policy"]),
+  );
+  expect(result.rubricRevision).toBeUndefined();
+});
+
+test("without a rubric runs three independent reviews with the bundled fallback policy", async () => {
   const { codex, calls } = fakeCodex(assessed);
   const original = structuredClone(finding);
   const result = await classifySeverity([finding], { codex, environment: {} });
@@ -78,7 +135,10 @@ test("without a rubric runs three independent reviews with the built-in policy",
   expect(JSON.parse(calls[0]!.prompt.split("\n\n").at(-1)!).rubric).toEqual([
     defaultSeverityRubric,
   ]);
-  expect(result.rubricSha256).toBe(workflowDigest([defaultSeverityRubric]));
+  expect(result.rubricSha256).toBe(rubricSource.bundledSeverityRubric.sha256);
+  expect(result.rubricRevision).toBe(
+    rubricSource.bundledSeverityRubric.revision,
+  );
   expect(result.assessments[0]).toMatchObject({
     findingId: finding.findingId,
     occurrenceId: finding.occurrenceId,

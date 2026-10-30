@@ -1894,7 +1894,19 @@ The [records protocol](classify-severity-records.md) accepts immutable Markdown 
 report snapshots and delegates model execution to the host.
 
 For saved findings, use exactly one of `--scan` (ID, prefix, or `latest`) and `--scan-dir`.
-Omitting `--rubric` runs classification with the [built-in severity rubric](https://github.com/openai/codex-security/blob/main/sdk/typescript/src/default-severity-rubric.ts).
+Omitting `--rubric` uses the
+[bundled severity rubric](https://github.com/openai/codex-security/blob/main/plugins/codex-security/references/default-severity-rubric.md).
+New scans use the same default. Remote rubric fetching is off by default.
+Set `CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC=1`
+to opt in to the shared default from Statsig; unset it or set it to `0` to disable
+fetching. Only the exact value `1` enables it. Each opted-in operation requests
+`codex_security_default_severity_rubric` from `https://ab.chatgpt.com/v1/get_config`
+with exposure logging disabled and a three-second timeout. The request contains
+no account credentials or finding data. Missing, invalid, or unavailable
+configuration uses the bundled rubric.
+The selected policy stays fixed throughout that scan or classification; saved
+scan resumes and reruns retain their original snapshot. SDK `ScanOptions.severityRubric`
+accepts an explicit `{ markdown, revision, sha256 }` snapshot instead.
 It evaluates attacker access, boundary crossing, additional harm, and evidence for
 Critical, High, Medium, Low, and Informational findings. Confidence remains separate
 from severity; missing proof alone does not justify a downgrade. An explicit
@@ -1919,12 +1931,17 @@ Assessments contain `decision` (`assessed` or `excluded`), normalized `level`,
 the original `rubricLabel`, rationale, confidence, and a `reviewTrigger` for
 missing facts that could change the result. Exclusions have a null level.
 Finding/occurrence IDs and input hashes bind each assessment to its evidence.
+For the bundled or remote rubric, `rubricSha256` hashes the exact UTF-8 Markdown
+and `rubricRevision` identifies the version. Custom documents have no assigned
+revision. A single document uses the hash of its extracted text. Multiple
+documents use the hash of the ordered JSON array of their extracted texts.
+Older results can contain the document-array hash even for a single rubric.
 
 Successful assessments checkpoint immediately in local SQLite. Retries reuse
 matching evidence, rubric, context hashes, and classification run count; failed/canceled runs keep completed
 work. Default-rubric assessments use `source: "rubric"` and a content hash; former
 no-rubric inherited assessments have no rubric hash and are automatically
-reclassified on the next classification run. Changes to the bundled policy or
+reclassified on the next classification run. Changes to the resolved default policy or
 switching between default and custom policies also invalidate matching checkpoints.
 The result and checkpoint record `classificationRuns`; changing the count, or
 reusing an older checkpoint with no recorded count, triggers fresh classification.
@@ -2003,7 +2020,7 @@ await publishScan(scanDirectory, {
 
 `classifySeverity()` accepts `findingId`, `title`, `summary`, and available
 evidence/metadata. Imported reports may lack severity or occurrence IDs; omitting
-`rubricPath` uses the built-in policy even when a scanner severity is present.
+`rubricPath` uses the resolved default policy even when a scanner severity is present.
 Scan wrappers persist checkpoints (including for
 external directories), accept `reprocess: true`, and treat `findingIds: []` as an
 empty selection. Use the same `CODEX_SECURITY_STATE_DIR` for classification and

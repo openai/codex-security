@@ -130,6 +130,7 @@ export class DeepScanWorkerRunner {
         scope: run.scope,
         includePaths: run.includePaths,
         userContext: run.userContext,
+        severityRubric: run.severityRubric,
         workerLabel,
         subagents: run.config.subagents,
       },
@@ -247,7 +248,11 @@ export class DeepScanWorkerRunner {
     const resultPath = join(artifactDir, "result.json");
     await fs.mkdir(artifactDir, { recursive: true });
     const workerIds = consumed.map((worker) => worker.id);
-    const basePrompt = renderDedupPrompt(reducerLabel, workerIds);
+    const basePrompt = renderDedupPrompt(
+      reducerLabel,
+      workerIds,
+      run.severityRubric,
+    );
     await writePrivateFile(promptPath, basePrompt);
     await this.options.store.claimDedup({
       id: reducerId,
@@ -399,6 +404,10 @@ export class DeepScanWorkerRunner {
         attempt,
       });
       try {
+        const resumePrompt = resumableThreadId
+          ? (continuationPrompt ??
+            transientExecutionContinuation(input.kind, attempt))
+          : undefined;
         const result = await this.options.executor.run({
           kind: input.kind,
           promptPath: executionPromptPath,
@@ -412,10 +421,10 @@ export class DeepScanWorkerRunner {
           signal,
           onNonRetryableError: this.options.onNonRetryableError,
           resumeThreadId: resumableThreadId,
-          continuationPrompt: resumableThreadId
-            ? (continuationPrompt ??
-              transientExecutionContinuation(input.kind, attempt))
-            : undefined,
+          continuationPrompt:
+            resumePrompt && run.severityRubric
+              ? `${resumePrompt}\nRetain this scan’s grading criteria for any severity decision: ${JSON.stringify({ severityRubric: run.severityRubric })}`
+              : resumePrompt,
           artifactContext: input.artifactContext,
           onThreadStarted: async (threadId) => {
             activeThreadId = threadId;

@@ -7,7 +7,7 @@ import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { parse as parseToml } from "smol-toml";
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
   cp,
@@ -1279,6 +1279,13 @@ async function testCliDeepScanEngine({
       "# scoped fixture\n",
     );
   }
+  const severityRubric = {
+    markdown: "# Severity\nUse the supplied evidence.\n",
+    revision: 7,
+    sha256: createHash("sha256")
+      .update("# Severity\nUse the supplied evidence.\n")
+      .digest("hex"),
+  };
   const userContext =
     "  Review café authentication.\r\nPreserve exact context.\t";
   const knowledgeBase = path.join(canonicalRoot, "knowledge-base");
@@ -1307,6 +1314,7 @@ async function testCliDeepScanEngine({
           repository,
           mode: "deep",
           maxCostUsd: 0.004,
+          severityRubric,
           target: scoped
             ? { kind: "paths", paths }
             : { kind: "repository", paths: [] },
@@ -1390,6 +1398,7 @@ async function testCliDeepScanEngine({
     assert.equal(entry.hasExpectedApiKey, true);
     assert.equal(entry.knowledgeBase, knowledgeBase);
     const context = discoveryPromptContext(entry.stdin);
+    assert.deepEqual(context.severityRubric, severityRubric);
     if (context.workerLabel) {
       assert.deepEqual(context.includePaths, paths);
       assert.equal(context.userContext, userContext);

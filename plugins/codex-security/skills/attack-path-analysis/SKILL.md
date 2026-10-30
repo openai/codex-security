@@ -15,7 +15,7 @@ For standalone analysis, use the supplied finding, repository, threat model or s
 
 1. Establish the in-scope attacker, affected product surface, entry point, controlled input, security boundary, and sensitive operation. Trace the path from repository evidence.
 2. Identify relevant controls and the strongest counterevidence. Explain what they establish, which prerequisites remain, and whether the exact claimed boundary is crossed.
-3. Assess impact and likelihood from those facts, then apply [references/severity-policy.md](references/severity-policy.md). Keep facts, severity calibration, and the final policy decision distinguishable in the result.
+3. Assess impact and likelihood from those facts. Apply the [reportability rules](references/severity-policy.md#reportability) and grade reportable findings with the scan's rubric when supplied. Otherwise use the [default severity rubric](../../references/default-severity-rubric.md). For a candidate with no security impact, record an `ignore` decision with severity `ignore`.
 4. Return an explicit decision for every eligible candidate, including ignored or deferred candidates. Do not replace a supported instance with a neighboring finding or lose its root-control location.
 
 Use repository evidence and explicitly supplied context. Access the network only when the user has expressly authorized it; an offline scan never accesses the network. Do not invent unsupported attack chains. Missing deployment or public-ingress evidence can limit confidence without defeating an otherwise supported finding.

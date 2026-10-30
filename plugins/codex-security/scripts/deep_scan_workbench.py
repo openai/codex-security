@@ -432,9 +432,11 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
                 "A capped Deep Scan without completed discoveries requires an empty "
                 "candidate ledger."
             )
+    recipe = json.loads(scan["recipe_json"]) if scan["recipe_json"] is not None else {}
     return {
         "scanId": run["scan_id"],
         "sdkOwnsCompletion": scan["recipe_json"] is not None,
+        **({"severityRubric": recipe["severityRubric"]} if "severityRubric" in recipe else {}),
         "targetPath": scan["target_path"],
         "scope": scan["scope"],
         "includePaths": dependencies().requested_scan_paths(scan),

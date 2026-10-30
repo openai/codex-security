@@ -47,6 +47,7 @@ export type {
 } from "./project-config-schema.js";
 export type { ScanSettings } from "./scan-settings.js";
 export { classifySeverity } from "./classify-severity.js";
+export type { SeverityRubricSnapshot } from "./severity-rubric.js";
 export { suggestOwners, suggestOwnersFromScan } from "./suggest-owners.js";
 export type {
   OwnerFinding,

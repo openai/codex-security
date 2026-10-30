@@ -2,6 +2,7 @@ import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
 import type { ScanActivity } from "./scan-activity.js";
 import { scanPhaseSchema, type ScanProgress } from "./worker-progress.js";
+import type { SeverityRubricSnapshot } from "./severity-rubric.js";
 
 /** One Standard scan. The host owns execution, persistence and reconciliation. */
 export interface ScanExecutionRequest {
@@ -12,6 +13,7 @@ export interface ScanExecutionRequest {
   revision: string;
   scope: { paths: string[] };
   identity: { runId: string; attemptId: string; buildId: string };
+  severityRubric?: SeverityRubricSnapshot;
   prompt: string;
   model: string;
   reasoningEffort: string;

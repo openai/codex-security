@@ -24,14 +24,20 @@ Send one newline-delimited JSON-RPC request with `method: "run"` and these param
 }
 ```
 
-The `rubric` field is optional. Omit it to classify with the
-[built-in severity rubric](https://github.com/openai/codex-security/blob/main/sdk/typescript/src/default-severity-rubric.ts), using the same configured
-independent host reviews and usage accounting. The result echoes its built-in
-revision (currently `1`) and exact Markdown SHA-256. Supplying a custom rubric
+The `rubric` field is optional. Omitting it uses the
+[bundled severity rubric](https://github.com/openai/codex-security/blob/main/plugins/codex-security/references/default-severity-rubric.md)
+at revision `1`, without fetching rubric configuration by default. To opt in to the shared
+Statsig default, set `CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC=1` in the CLI
+environment or SDK options' `environment`. Unset it or use `0` to disable fetching;
+only the exact value `1` enables it. The opted-in request sends no account
+credentials or report data and has a three-second timeout; missing, invalid, or
+unavailable configuration uses the bundled rubric. Independent host reviews and
+usage accounting are unchanged. The policy is resolved once before the first review. The result
+echoes the selected revision and exact Markdown SHA-256. Supplying a custom rubric
 replaces the default completely and preserves the supplied revision/hash binding.
 Do not reuse cached results across differing rubric hashes; preserve the default
 snapshot from the review prompt alongside its returned binding. Default revisions
-are local to the bundled policy, not workspace rubric revisions.
+are independent of workspace rubric revisions.
 
 `findingJson` is the exact JSON text of an object with nonblank `findingId`,
 `title`, and `summary`. `findingId` must equal the canonical `id`. Optional

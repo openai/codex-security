@@ -83,6 +83,13 @@ export const runSchema = z
       targetPath: requiredString,
       scope: requiredString,
       userContext: optionalString,
+      severityRubric: z
+        .object({
+          markdown: z.string(),
+          revision: z.number(),
+          sha256: z.string(),
+        })
+        .optional(),
       scanDir: requiredString,
       dispatchedCount: nonNegativeInteger,
       noNewStreak: nonNegativeInteger,
