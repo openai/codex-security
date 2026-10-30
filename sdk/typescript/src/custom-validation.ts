@@ -18,7 +18,7 @@ import {
 import { IncompleteScanError, errorMessage } from "./errors.js";
 import type { CoverageDocument, FindingsDocument } from "./models.js";
 import { isRecord } from "./record.js";
-import { requirePrivateOutputDirectory } from "./runtime.js";
+import { requireOutputDirectoryOwnership } from "./runtime.js";
 import {
   severityRubricInstructions,
   type SeverityRubricSnapshot,
@@ -93,7 +93,7 @@ async function writeJson(
     throw new IncompleteScanError(
       "The scan directory is no longer a real directory.",
     );
-  requirePrivateOutputDirectory(root, directory);
+  requireOutputDirectoryOwnership(root, directory);
   for (const part of name.split("/").slice(0, -1)) {
     directory = join(directory, part);
     await mkdir(directory, { recursive: true, mode: 0o700 });

@@ -250,6 +250,7 @@ export {
   readGitHubFindings,
 } from "./github-findings.js";
 export { importGitHubAdvisories } from "./github-advisories.js";
+export { normalizeGitHubDependabotAlerts } from "./github-dependabot-findings.js";
 export type {
   GitHubAdvisoryImportOptions,
   ImportedGitHubAdvisory,
@@ -326,6 +327,19 @@ export type {
 } from "./validation-records.js";
 
 export { prepareLocalExternalImport } from "./external-findings-import.js";
+export {
+  normalizeOpenGrepFindings,
+  readOpenGrepFindings,
+  type OpenGrepImportOptions,
+} from "./opengrep-findings.js";
+export {
+  normalizeBlackDuckFindings,
+  readBlackDuckFindings,
+} from "./blackduck-findings.js";
+export {
+  normalizeInspectorFindings,
+  readInspectorFindings,
+} from "./inspector-findings.js";
 export {
   normalizeSnykFindingsExport,
   normalizeSnykJson,

@@ -222,6 +222,20 @@ needs before returning that outcome. Use shared mounts or a coordinated transfer
 that preserves the supplied path bindings, not independent copies of mutable
 workbench state.
 
+For path scans with the Linux CLI and a current plugin, use the inventory
+path the scope helper reports. A Linux executor can keep the inventory in
+`stateDirectory` outside the checkout and captured output. The state binding
+may include one protected symlink and must exclude `..` from the path and
+link target. Its protected directory must support executor-owned mode-`0600`
+files and keep a reader open across writer close.
+
+Other layouts use `scoped-source-input.jsonl` in scan output. If a later
+shell loses the inventory, run the recovery command in the prompt. It may
+replace an earlier output file, so the executor needs permission to remove it.
+State transfers include private inventories named
+`<scope-input-filename>.scoped-<24 lowercase hex digits>.jsonl`. Hosts can
+remove the request's private inventories after execution finishes.
+
 Run the plugin stdio server from
 `pluginRoot/scripts/launch_codex_security_mcp --stdio` with the supplied
 environment. The executor needs the target files, plugin skills and registered

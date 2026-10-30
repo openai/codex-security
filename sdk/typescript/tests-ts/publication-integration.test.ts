@@ -4,7 +4,8 @@ import {
   captureCli,
   runCapturedCli,
 } from "./support/cli-run.js";
-import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
+import { sha256 } from "./support/finding-identity.js";
+import { writePublicationFindings } from "./support/sealed-scan.js";
 import { parseJsonLines, jsonLines } from "./support/json.js";
 import { nodeCommand } from "./support/shell.js";
 import { Database } from "bun:sqlite";
@@ -22,11 +23,6 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { prepareScanPublication } from "../src/publication.js";
 import { recordPublishedIssues } from "../src/publication-store.js";
-import type {
-  CoverageDocument,
-  FindingsDocument,
-  ScanManifest,
-} from "../src/models.js";
 import {
   checkScanPublicationInternal,
   forceTerminatePublicationProcesses,
@@ -95,37 +91,11 @@ async function fixture(count: number) {
   await mkdir(repository, { mode: 0o700 });
   if (process.platform !== "win32") await chmod(scanDirectory, 0o700);
 
-  const manifestPath = join(scanDirectory, "scan-manifest.json");
-  const findingsPath = join(scanDirectory, "findings.json");
-  const coveragePath = join(scanDirectory, "coverage.json");
-  const manifest = JSON.parse(
-    await readFile(manifestPath, "utf8"),
-  ) as ScanManifest;
-  const findings = JSON.parse(
-    await readFile(findingsPath, "utf8"),
-  ) as FindingsDocument;
-  const coverage = JSON.parse(
-    await readFile(coveragePath, "utf8"),
-  ) as CoverageDocument;
-  manifest.scan.id = SCAN_ID;
-  findings.scanId = SCAN_ID;
-  coverage.scanId = SCAN_ID;
-  const example = findings.findings[0]!;
-  findings.findings = Array.from({ length: count }, (_, index) => {
-    const finding = structuredClone(example);
-    finding.identity.anchor = `${example.identity.anchor}-${index + 1}`;
-    finding.title = `Synthetic finding ${index + 1}`;
-    setFindingIdentity(manifest.scan, finding);
-    return finding;
-  });
-  await writeFile(findingsPath, `${JSON.stringify(findings, null, 2)}\n`);
-  await writeFile(coveragePath, `${JSON.stringify(coverage, null, 2)}\n`);
-  for (const artifact of manifest.scan.artifacts) {
-    artifact.sha256 = sha256(
-      await readFile(join(scanDirectory, artifact.path)),
-    );
-  }
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  const findings = await writePublicationFindings(
+    scanDirectory,
+    SCAN_ID,
+    count,
+  );
 
   const python = (Bun.which("python3") ?? Bun.which("python"))!;
   expect(python).not.toBeNull();
@@ -149,7 +119,7 @@ async function fixture(count: number) {
       workspaceId: WORKSPACE_ID,
       scanDirectory,
       repository,
-      findings: findings.findings,
+      findings,
     }),
   );
   const seed = [
@@ -178,7 +148,7 @@ async function fixture(count: number) {
     scanDirectory,
     stateDirectory,
     environment,
-    findings: findings.findings,
+    findings,
   };
 }
 

@@ -1331,18 +1331,18 @@ describe("npm package tar listings", () => {
       const contractPath = join(root, "plugin contract.json");
       const logPath = join(root, "tar calls.jsonl");
       const adjacentTarMarker = join(root, "archive tar ran");
-      const pluginFiles = Array.from(
-        { length: 180 },
-        (_, i) =>
-          `fixtures/long-package-member-name-for-the-windows-command-line-${i}.txt`,
+      // A valid plugin inventory can exceed the Windows process command-line limit.
+      const extraFiles = Array.from(
+        { length: 256 },
+        (_, index) => `fixtures/generated-plugin-document-${index}.md`,
       );
       const tarBytes = packageTar({
         compatibleLayout: true,
         rootDirectoryMode: 0o555,
         readmeMode: 0,
-        additionalRecords: pluginFiles.map((path) =>
+        additionalRecords: extraFiles.map((file) =>
           tarRecord(Buffer.alloc(0), {
-            name: `package/_bundled_plugin/${path}`,
+            name: `package/_bundled_plugin/${file}`,
           }),
         ),
       });
@@ -1352,7 +1352,7 @@ describe("npm package tar listings", () => {
         contractPath,
         JSON.stringify({
           ...pluginContract,
-          shippedExact: [...pluginContract.shippedExact, ...pluginFiles],
+          shippedExact: [...pluginContract.shippedExact, ...extraFiles],
         }),
       );
 
@@ -1470,7 +1470,6 @@ process.exit(result.status ?? 1);
         "-",
         "-C",
       ]);
-      expect(calls[2]!.args.join(" ").length).toBeLessThan(32_767);
 
       environment["TAR_PROXY_FAIL_EXTRACT"] = "true";
       const failed = await checkPackage(

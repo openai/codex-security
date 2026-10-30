@@ -26,6 +26,7 @@ from urllib.parse import quote, urlsplit
 # Keep sibling helpers importable when Python starts in isolated mode.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import report_projection
+import servicenow_avit
 import threat_model_projection
 from review_state import checkpoint_review_state, review_state, review_summary
 
@@ -78,6 +79,7 @@ SOURCE_READ_CHUNK_SIZE = 64 * 1024
 MAX_JSON_INTEGER = (1 << 53) - 1
 EXPORT_PATHS = {
     "csv": "exports/findings.csv",
+    "servicenow-avit": "exports/servicenow-avit.csv",
     "json": "exports/findings.json",
     "sarif": "exports/results.sarif",
 }
@@ -2977,11 +2979,21 @@ def build_csv_projection(findings: dict[str, Any], coverage: dict[str, Any]) -> 
     return output.getvalue().encode("utf-8")
 
 
+def _avit_fields(finding: dict[str, Any]) -> dict[str, str]:
+    attack_path = dict(finding.get("attackPath") or {})
+    _normalize_legacy_string_list_fields(attack_path, ("steps",))
+    steps = "\n".join(attack_path.get("steps", []))
+    return servicenow_avit.finding_fields(
+        finding, _sarif_primary_location(finding), csv_cell(steps)
+    )
+
+
 def build_findings_export(
     scan_dir: Path,
     export_format: str,
     source_root: Path | None = None,
     schema_dir: Path | None = None,
+    avit_template: Path | None = None,
 ) -> bytes:
     if export_format not in EXPORT_PATHS:
         raise ContractError(f"unsupported export format: {export_format}")
@@ -2994,6 +3006,13 @@ def build_findings_export(
     )
     if export_format == "json":
         return findings_bytes
+    if export_format == "servicenow-avit":
+        if avit_template is None:
+            raise ContractError("--export-format servicenow-avit requires --avit-template")
+        try:
+            return servicenow_avit.render(avit_template, map(_avit_fields, findings["findings"]))
+        except ValueError as exc:
+            raise ContractError(str(exc)) from exc
     return build_csv_projection(findings, coverage)
 
 
@@ -3407,6 +3426,7 @@ def main() -> int:
         "--export-artifact", choices=("findings", "threat-model"), default="findings"
     )
     parser.add_argument("--export-format", choices=[*sorted(EXPORT_PATHS), "md"])
+    parser.add_argument("--avit-template", type=Path)
     parser.add_argument("--export-output", type=Path)
     parser.add_argument("--export-metadata", action="store_true")
     parser.add_argument("--describe-threat-model", action="store_true")
@@ -3414,6 +3434,18 @@ def main() -> int:
     args = parser.parse_args()
     try:
         args.scan_dir = args.scan_dir.resolve()
+        if args.avit_template is not None:
+            if args.export_format != "servicenow-avit":
+                parser.error(
+                    "--avit-template is only supported with --export-format servicenow-avit"
+                )
+            if (
+                args.export_output
+                and args.export_output.exists()
+                and args.avit_template.exists()
+                and args.export_output.samefile(args.avit_template)
+            ):
+                parser.error("AVIT export output cannot overwrite the reusable template")
         if args.describe_threat_model:
             sys.stdout.buffer.write(
                 _json_bytes(describe_threat_model(args.scan_dir, args.schema_dir))
@@ -3448,7 +3480,11 @@ def main() -> int:
                 description, contents = saved
             else:
                 contents = build_findings_export(
-                    args.scan_dir, args.export_format, args.source_root, args.schema_dir
+                    args.scan_dir,
+                    args.export_format,
+                    args.source_root,
+                    args.schema_dir,
+                    avit_template=args.avit_template,
                 )
             if args.export_output is None:
                 sys.stdout.buffer.write(contents)

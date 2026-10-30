@@ -237,10 +237,8 @@ function extractedArchiveFiles() {
   );
   try {
     chmodSync(extractionRoot, 0o700);
-    const membersPath = join(extractionRoot, "members");
-    writeFileSync(membersPath, [...logicalSizes.keys(), ""].join("\0"), {
-      mode: 0o600,
-    });
+    const fileList = join(extractionRoot, "members.list");
+    writeFileSync(fileList, [...logicalSizes.keys(), ""].join("\0"));
     try {
       tar([
         "-m",
@@ -255,12 +253,12 @@ function extractedArchiveFiles() {
         extractionRoot,
         "--null",
         "-T",
-        membersPath,
+        fileList,
       ]);
     } finally {
       privateExtractionDirectories(extractionRoot);
     }
-    rmSync(membersPath);
+    rmSync(fileList);
 
     const archiveFiles = new Map();
     let expandedBytes = 0;

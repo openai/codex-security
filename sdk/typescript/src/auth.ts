@@ -372,7 +372,7 @@ function userCodeFromOutput(value: string): string | null {
 
 function plainTerminalText(value: string): string {
   return value
-    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
+    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "")
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/\r/g, "");
 }

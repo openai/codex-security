@@ -24,6 +24,7 @@ from workbench_test_support import (
     create_saved_git_workspace,
     create_saved_workspace,
     create_workspace,
+    empty_target_paths,
     empty_target_scan,
     get_scan,
     initialize_git_repository,
@@ -618,9 +619,7 @@ def test_workbench_does_not_run_fsmonitor_during_scan_start(tmp_path: Path) -> N
 
 
 def test_workbench_counts_scope_before_taking_sqlite_writer_lock(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "source.py").write_text("print('fixture')\n")
     workspace = create_saved_workspace(state_dir, target)
     database = state_dir / "workbench.sqlite3"
@@ -1528,9 +1527,7 @@ def test_workbench_repairs_recorded_deep_scan_migration(
     drop_deep_scan_tables: bool,
     attach_continuation: bool,
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_saved_workspace(state_dir, target, thread_id="thread-deep-scan", mode="deep")
     started = start_scan_command(
         state_dir, str(workspace["id"]), "--scan-root", str(tmp_path / "scans")
@@ -1780,9 +1777,7 @@ def test_workbench_repairs_pre_release_scan_continuation_migration(tmp_path: Pat
 
 
 def test_workbench_repairs_recorded_scan_scope_file_count_migration(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_saved_workspace(state_dir, target)
     started = start_scan_command(state_dir, str(workspace["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -1953,9 +1948,7 @@ def test_workbench_upgrades_stable_scan_target_identity_migration(tmp_path: Path
 
 
 def test_workbench_applies_shadowed_delivered_claim_cleanup_once(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_saved_workspace(state_dir, target)
     started = start_scan_command(state_dir, str(workspace["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -2031,9 +2024,7 @@ def test_workbench_repairs_shadowed_setup_preferences_migration(
 def test_workbench_repairs_shadowed_phase_progress_migration(
     tmp_path: Path, legacy_name: str
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_saved_workspace(state_dir, target)
     started = start_scan_command(state_dir, str(workspace["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -2080,9 +2071,7 @@ def test_workbench_repairs_shadowed_phase_progress_migration(
 def test_workbench_repairs_shadowed_preflight_progress_migration(
     tmp_path: Path, legacy_name: str
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_scan_command(state_dir, str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -2121,9 +2110,7 @@ def test_workbench_repairs_shadowed_preflight_progress_migration(
 
 
 def test_workbench_repairs_shadowed_scan_recipe_migration(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_saved_workspace(state_dir, target)
     started = start_scan_command(state_dir, str(workspace["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -2157,9 +2144,7 @@ def test_workbench_repairs_shadowed_scan_recipe_migration(tmp_path: Path) -> Non
 
 
 def test_workbench_reconciles_released_completion_warning_version(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_saved_workspace(state_dir, target)
     started = start_scan_command(state_dir, str(workspace["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -2196,9 +2181,7 @@ def test_workbench_reconciles_released_completion_warning_version(tmp_path: Path
 
 
 def test_workbench_repairs_recorded_completion_warnings_migration(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_saved_workspace(state_dir, target)
     started = start_scan_command(state_dir, str(workspace["id"]))
     scan_id = str(started["results"]["scanId"])
