@@ -1711,19 +1711,57 @@ describe("local normalized scanner findings", () => {
     },
   );
 
-  test("a GitHub reader hint cannot remap a recognized GitLab SSH host", async () => {
-    const { repository, environment } = await fixture({
-      remote: "ssh://gitlab.com/team/project.git",
-    });
-    const url = "https://github.com/team/project";
-    await expect(
-      prepareNormalizedLocalImport(
+  test.each([
+    [
+      "git@github.com.:team/project.git",
+      "https://github.com/team/project",
+      false,
+    ],
+    [
+      "git@github.com:team/project.git",
+      "https://github.com./team/project",
+      true,
+    ],
+    [
+      "ssh://git@ssh.github.com.:443/team/project.git",
+      "https://github.com./team/project",
+      false,
+    ],
+  ] as const)(
+    "a GitHub reader hint preserves a dotted Sonar mapping for %s and %s",
+    async (remote, url, verified) => {
+      const { repository, environment } = await fixture({ remote });
+      const prepared = await prepareNormalizedLocalImport(
         input(),
         { repository, ...source, provider: "sonar", sourceRepositoryUrl: url },
         { environment, sourceRepositories: [{ url, platform: "github" }] },
-      ),
-    ).rejects.toThrow("does not match a configured remote");
-  });
+      );
+      expect(prepared.matchesRepositoryRemote).toBe(verified);
+    },
+  );
+
+  test.each([
+    "ssh://gitlab.com/team/project.git",
+    "git@gitlab.com.:team/project.git",
+  ])(
+    "a GitHub reader hint cannot remap a recognized GitLab SSH host: %s",
+    async (remote) => {
+      const { repository, environment } = await fixture({ remote });
+      const url = "https://github.com/team/project";
+      await expect(
+        prepareNormalizedLocalImport(
+          input(),
+          {
+            repository,
+            ...source,
+            provider: "sonar",
+            sourceRepositoryUrl: url,
+          },
+          { environment, sourceRepositories: [{ url, platform: "github" }] },
+        ),
+      ).rejects.toThrow("does not match a configured remote");
+    },
+  );
 
   test("the normalized Sonar repository selection must agree with retained and reader sources, even outside Git", async () => {
     const url = "https://github.com/example/project";

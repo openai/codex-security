@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
   chmod,
@@ -196,6 +196,48 @@ test.skipIf(process.platform !== "linux")(
       ).rejects.toThrow("saved Sonar capture has changed");
     } finally {
       await file.close();
+    }
+  },
+);
+
+test.skipIf(process.platform !== "linux")(
+  "requires the selected file's identity when procfs metadata is unavailable",
+  async () => {
+    await using directory =
+      await scopedTemporaryDirectory("sonar-fd-identity-");
+    const { options, deps } = await fixture(directory.path);
+    const selection = { ...options, to: "local" } as const;
+    const files = await import("node:fs/promises");
+    const original = files.readlink;
+    const target = await files.realpath(options.capture);
+    let changeFile: (() => Promise<void>) | undefined;
+    const lookup = spyOn(files, "readlink").mockImplementation((async (
+      ...args: Parameters<typeof original>
+    ) => {
+      const name = await original(...args);
+      if (String(args[0]).startsWith("/proc/self/fd/") && name === target) {
+        await changeFile?.();
+        throw Object.assign(new Error("procfs access denied"), {
+          code: "EACCES",
+        });
+      }
+      return name;
+    }) as typeof original);
+    try {
+      expect((await prepareSonarImport(selection, deps)).local.read).toBe(1);
+      changeFile = async () => {
+        await files.rename(target, `${target}.original`);
+        await copyFile(`${target}.original`, target);
+      };
+      await expect(prepareSonarImport(selection, deps)).rejects.toThrow(
+        "changed while being opened",
+      );
+      changeFile = () => rm(target);
+      await expect(prepareSonarImport(selection, deps)).rejects.toThrow(
+        "Could not verify the unlinked Sonar capture",
+      );
+    } finally {
+      lookup.mockRestore();
     }
   },
 );

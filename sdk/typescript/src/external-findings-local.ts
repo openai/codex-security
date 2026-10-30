@@ -164,6 +164,7 @@ function remoteRepository(
   value: string,
   provider: Provider,
   bound: boolean,
+  platform: Provider = provider,
   possibleSshHost?: string,
 ): RemoteRepositoryIdentity | undefined {
   if (/^[A-Za-z]:[\\/]/u.test(value)) return undefined;
@@ -205,7 +206,7 @@ function remoteRepository(
       : url.port;
   // A GitHub source identifies a case-insensitive repository on custom Enterprise
   // hosts too; other providers can refer to VCS hosts with case-sensitive paths.
-  const key = provider === "github" ? cloudRepositoryUrlKey : repositoryUrlKey;
+  const key = platform === "github" ? cloudRepositoryUrlKey : repositoryUrlKey;
   const origin = `${protocol}//${hostname}${port ? `:${port}` : ""}/`;
   if (!bound) return { key: key(origin + path) };
 
@@ -272,7 +273,7 @@ function remoteRepository(
     account: ssh && login ? literal(login) : undefined,
     // GitHub serves the same repository path through its SCP and SSH URLs.
     homeRelative:
-      ssh && provider !== "github" && !isGitHubCloudHost(hostname.toLowerCase())
+      ssh && platform !== "github" && !isGitHubCloudHost(hostname.toLowerCase())
         ? homeRelative
         : undefined,
   };
@@ -370,7 +371,7 @@ function localRepositoryPlatform(
   bound: boolean,
 ) {
   const githubKey = (url: string) =>
-    remoteRepository(url, "github", bound)?.key;
+    remoteRepository(url, provider, bound, "github")?.key;
   const githubRepositories = new Set(
     sources.flatMap((source) => {
       if (source.platform !== "github") return [];
@@ -723,7 +724,8 @@ async function requireMatchingRepository(
     const platform = bound
       ? (strictSources.get(source.url) ?? strictPlatformFor(source))
       : loosePlatformFor(source);
-    const identity = (url: string) => remoteRepository(url, platform, bound);
+    const identity = (url: string) =>
+      remoteRepository(url, provider, bound, platform);
     const targets = comparable.flatMap((remote) => identity(remote) ?? []);
     const target = identity(source.url);
     if (target && targets.some((remote) => matchingRemote(remote, target)))
@@ -733,7 +735,8 @@ async function requireMatchingRepository(
     // recognized HTTPS remote points at a fork. It cannot prove a Cloud binding.
     const configured = unverified.flatMap(
       (remote) =>
-        remoteRepository(remote, platform, bound, possibleSshHost) ?? [],
+        remoteRepository(remote, provider, bound, platform, possibleSshHost) ??
+        [],
     );
     if (target && configured.some((remote) => matchingRemote(remote, target)))
       continue;
@@ -921,7 +924,9 @@ export async function prepareLocalImport(
     true,
   );
   const identify = (url: string) =>
-    remoteRepository(url, platformFor({ url }), true) ?? { key: url };
+    remoteRepository(url, options.provider, true, platformFor({ url })) ?? {
+      key: url,
+    };
   // A hint from an independent reader applies across projected rows. A native
   // GitHub asset in one row only identifies the platform of that row's claims.
   const operatorPlatform = localRepositoryPlatform(
@@ -969,7 +974,12 @@ export async function prepareLocalImport(
         !sameScannerRepositories(
           claims.map(
             (claim) =>
-              remoteRepository(claim, rowPlatform(claim), true) ?? {
+              remoteRepository(
+                claim,
+                options.provider,
+                true,
+                rowPlatform(claim),
+              ) ?? {
                 key: claim,
               },
           ),
@@ -1014,9 +1024,18 @@ export async function prepareLocalImport(
   }
   if (inspector) {
     const platform = inspector.platform ?? options.provider;
-    const native = remoteRepository(inspector.url, platform, true);
+    const native = remoteRepository(
+      inspector.url,
+      options.provider,
+      true,
+      platform,
+    );
     for (const url of sources.keys()) {
-      if (!native || remoteRepository(url, platform, true)?.key !== native.key)
+      if (
+        !native ||
+        remoteRepository(url, options.provider, true, platform)?.key !==
+          native.key
+      )
         throw new CodexSecurityError(
           `Imported repository ${JSON.stringify(url)} does not match the retained Inspector repository ${JSON.stringify(inspector.url)}.`,
         );
