@@ -56311,6 +56311,7 @@ function assertSafeSarif(value) {
 
 // src/results.ts
 var REPORT_FILES = /* @__PURE__ */ new Set(["scan-manifest.json", "findings.json", "coverage.json", "exports/results.sarif"]);
+var SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3, informational: 4 };
 async function processReportFile(root, name, adapt) {
   if (!REPORT_FILES.has(name)) throw new Error("Unsupported report filename.");
   const absoluteRoot = (0, import_node_path5.resolve)(root);
@@ -56413,6 +56414,7 @@ async function analyzeResults(options) {
     result.errors.push(error2.message);
     return result;
   }
+  result.findings.sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity]);
   result.counts = { critical: 0, high: 0, medium: 0, low: 0, informational: 0 };
   for (const finding of result.findings) result.counts[finding.severity] += 1;
   const usage = value.turn?.usage;

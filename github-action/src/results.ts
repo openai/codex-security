@@ -45,6 +45,7 @@ export interface ScanResults {
 }
 
 const REPORT_FILES = new Set(['scan-manifest.json', 'findings.json', 'coverage.json', 'exports/results.sarif']);
+const SEVERITY_RANK: Record<Severity, number> = { critical: 0, high: 1, medium: 2, low: 3, informational: 4 };
 
 /** Access only owned report files after the scanner exits; never follow links. */
 async function processReportFile(root: string, name: string, adapt?: (bytes: Buffer) => Buffer): Promise<Buffer> {
@@ -143,6 +144,8 @@ export async function analyzeResults(options: ResultOptions): Promise<ScanResult
     result.errors.push((error as Error).message);
     return result;
   }
+  // Prioritize the findings that fit in the job summary and source annotations.
+  result.findings.sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity]);
   result.counts = { critical: 0, high: 0, medium: 0, low: 0, informational: 0 };
   for (const finding of result.findings) result.counts[finding.severity] += 1;
   const usage = value.turn?.usage;
