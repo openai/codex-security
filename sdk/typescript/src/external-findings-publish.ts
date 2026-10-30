@@ -227,7 +227,10 @@ function reportForJson(report: ExternalFindings["report"]) {
   return { ...report, errors: JSON.parse(json) as unknown[] };
 }
 
-async function writeAtomicJson(path: string, value: unknown): Promise<void> {
+export async function writeAtomicJson(
+  path: string,
+  value: unknown,
+): Promise<void> {
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
     const file = await open(temporary, "wx", 0o600);

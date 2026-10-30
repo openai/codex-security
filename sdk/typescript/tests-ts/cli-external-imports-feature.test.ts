@@ -101,6 +101,7 @@ test("disabled commands cannot invoke import, storage, or publication handlers",
     ],
     ["findings", "imported", "."],
     ["import", "github-advisories", "example/project"],
+    ["import", "sonar"],
   ]) {
     const cli = createCliTest(main);
     expect(await cli.runCli(command, deps)).not.toBe(0);

@@ -1,13 +1,13 @@
 ---
 name: publish-findings
-description: Requires explicit opt-in with CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Preview and import scanner findings into the local workbench or Codex Security Cloud. Use the selected provider's documented export format.
+description: Requires explicit opt-in with CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Preview and import scanner findings, including issues selected in the SonarQube plugin, into the local workbench or Codex Security Cloud.
 ---
 
 # Publish external findings
 
 Before acquiring or importing findings, check for `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1` in the command environment. If it is unset or has another value, stop and ask the user to enable imports.
 
-Use the installed `codex-security publish findings` command for preview and import. Select `--to local` for the local workbench or `--to cloud` for Cloud. The command owns source mapping, persistence, and Cloud authentication and retries. Do not implement another store or uploader or put credentials in command arguments.
+Use `codex-security import sonar` for [live SonarQube Cloud issues](#sonarqube-cloud-issues) or a capture saved by that command. Use `codex-security publish findings` for native scanner exports, including Sonar `/api/issues/search` pages with `--provider sonar`. Select the requested destination. The CLI owns source mapping, persistence, and Cloud authentication and retries. Do not implement another store or uploader or put credentials in command arguments.
 
 ## Select the evidence
 
@@ -95,6 +95,21 @@ Keep supplied fingerprints. Reimporting the same fingerprint after code moves up
 ## OpenGrep
 
 Import native OpenGrep JSON with `--provider opengrep`, `--source-repository-url`, and a stable OpenGrep-specific `--source-key`. Preview the destination and scan diagnostics before importing. Local and Cloud imports use the Semgrep provider and retain OpenGrep as the scanner origin.
+
+## SonarQube Cloud issues
+
+For “import these Sonar findings,” carry over the Sonar project, branch or PR, and the exact issue keys selected in the [SonarQube plugin for Codex](https://www.sonarsource.com/blog/now-available-sonarqube-plugin-for-codex/). Use the keys from the underlying Sonar result. If only a formatted table remains, resolve the selected rows against the same project and ref and ask about ambiguous matches. A rule can occur more than once. Never turn a selection into a project-wide import.
+
+From the intended checkout, preview the selection using the developer's authenticated `sonar` CLI. Use `--sonar-pull-request` in place of `--sonar-branch` for a PR. Omit `--sonar-issue` only when the user wants the project's open security issues. If the project has no verified SCM binding, confirm the repository URL that belongs to the project and pass it with `--source-repository-url`.
+
+```sh
+codex-security import sonar --sonar-project example_project --sonar-branch main \
+  --sonar-issue ISSUE_A --sonar-issue ISSUE_B --dry-run --format json
+```
+
+Pass `--to cloud` at preview time if the user also requested Cloud publication. Show the selected issues and exclusions, the local repository, and any Cloud destination as described under [Publish to Cloud](#publish-to-cloud). The preview returns a private evidence file in `capture`. After confirmation, run `codex-security import sonar CAPTURE --yes` for local import. For Cloud, use the exact `capture` from the successful Cloud preview and add `--to cloud`. If the account, repository, or environment changes, show a fresh preview and ask for confirmation. If Cloud is unavailable, finish the requested local import and report the Cloud error. For a request to publish an existing import, start with its capture. Report the saved path so the developer can resume.
+
+Sonar authentication is required only for a live fetch. If the local CLI lacks a login, direct the user to `sonar auth login` and keep the selection. A hosted MCP connection can help identify issues, but its issue summaries omit flow evidence. Use the signed-in CLI or a saved Codex Security Sonar capture to complete the import. If `codex-security` is absent, use the documented `npx @openai/codex-security` invocation with a version that supports `import sonar`.
 
 ## GitHub alerts and advisories
 

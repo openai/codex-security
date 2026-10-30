@@ -673,6 +673,142 @@ async function fixture(
   };
 }
 
+test("Sonar replays the selected evidence locally and to Cloud without signing in to Sonar again", async () => {
+  const repo = "https://github.com/example/project";
+  const source = {
+    format: "sonar-issues/v1" as const,
+    server: "https://sonarcloud.io",
+    organization: "example",
+    project: "example_project",
+    branch: "main",
+    projectBase: "",
+    repositoryUrl: repo,
+    pages: [
+      {
+        paging: { pageIndex: 1, pageSize: 100, total: 1 },
+        issues: [
+          {
+            key: "issue-1",
+            project: "example_project",
+            component: "file",
+            rule: "example:R1",
+            message: "Review input handling",
+            type: "VULNERABILITY",
+            severity: "CRITICAL",
+            flows: [
+              {
+                locations: [
+                  {
+                    component: "file",
+                    textRange: { startLine: 2, endLine: 3 },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        components: [{ key: "file", path: "src/example.ts" }],
+      },
+    ],
+  };
+  const f = await fixture(source, repo);
+  const checkout = join(f.root, "checkout");
+  const git = promisify(execFile);
+  await git("git", ["init", "--quiet", checkout]);
+  await git("git", ["-C", checkout, "remote", "add", "origin", repo]);
+  const deps = { ...f.cliDeps, currentDirectory: () => checkout };
+  const first = createCliTest(main);
+  const previewExit = await first.runCli(
+    [
+      "import",
+      "sonar",
+      "--sonar-project",
+      source.project,
+      "--sonar-branch",
+      source.branch,
+      "--sonar-issue",
+      "issue-1",
+      "--dry-run",
+      "--format",
+      "json",
+    ],
+    {
+      ...deps,
+      collectSonarIssues: async (selection) => {
+        expect(selection.issueKeys).toEqual(["issue-1"]);
+        return source;
+      },
+    },
+  );
+  expect(previewExit, first.stderr.text()).toBe(0);
+  expect(f.posts).toHaveLength(0);
+  const capture: string = JSON.parse(first.stdout.text()).capture;
+  expect(JSON.parse(await readFile(capture, "utf8"))).toEqual(source);
+  const previewArgs = [
+    "import",
+    "sonar",
+    capture,
+    "--to",
+    "cloud",
+    "--format",
+    "json",
+  ];
+
+  const outside = join(f.root, "without-remotes");
+  await mkdir(outside);
+  const noRemotes = createCliTest(main);
+  expect(
+    await noRemotes.runCli([...previewArgs, "--dry-run"], {
+      ...deps,
+      currentDirectory: () => outside,
+    }),
+  ).toBe(2);
+  expect(noRemotes.stderr.text()).toContain("--source-repository-url");
+  expect(f.posts).toHaveLength(0);
+
+  const cloudPreview = createCliTest(main);
+  expect(await cloudPreview.runCli([...previewArgs, "--dry-run"], deps)).toBe(
+    0,
+  );
+  const reviewed = JSON.parse(cloudPreview.stdout.text());
+  expect(reviewed.cloud.destination.url).toBe(repo);
+  expect(reviewed.capture).not.toBe(capture);
+  expect(f.posts).toHaveLength(0);
+  const args = [
+    "import",
+    "sonar",
+    reviewed.capture,
+    "--to",
+    "cloud",
+    "--format",
+    "json",
+  ];
+
+  const unavailable = createCliTest(main);
+  expect(
+    await unavailable.runCli([...args, "--yes"], {
+      ...deps,
+      cloudFetch: async () => new Response("Unknown account", { status: 403 }),
+    }),
+  ).toBe(2);
+  expect(JSON.parse(unavailable.stdout.text()).local.counts.created).toBe(1);
+
+  const replay = createCliTest(main);
+  expect(await replay.runCli([...args, "--yes"], deps)).toBe(0);
+  const result = JSON.parse(replay.stdout.text());
+  expect(result.local.counts.unchanged).toBe(1);
+  expect(result.cloud.verified).toBe(1);
+  const posted = JSON.parse(f.posts[0]!);
+  expect(posted.source).toEqual({
+    provider: "sonar",
+    source_key: result.sourceKey,
+  });
+  expect(posted.items[0].source_finding_id).toBe("issue-1");
+  expect(posted.items[0].evidence.source_data.issue.flows).toEqual(
+    source.pages[0]!.issues[0]!.flows,
+  );
+});
+
 test("Wiz occurrence mapping preserves original evidence without inventing repository provenance", async () => {
   const record = {
     id: "wiz-occurrence",

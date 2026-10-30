@@ -663,11 +663,12 @@ for setup and review steps, or [Linear publication](docs/cli.md#publish-complete
 for issue creation.
 
 External vendor imports are opt-in. Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`
-to enable `publish findings`, `findings imported`, `import github-advisories`, and
-the SDK's external publication, local import/readback, and advisory acquisition
+to enable `publish findings`, `findings imported`, `import sonar`, `import github-advisories`, and
+the SDK's external publication, local import/readback, Sonar issue collection, and advisory acquisition
 APIs. They are disabled otherwise; CLI commands are hidden from help and schemas.
 SDK callers can supply the flag through the existing per-call
-`dependencies.environment`. Pure normalizers and file readers remain available.
+`dependencies.environment`, or in `options.environment` for `collectSonarIssues(options)`.
+Pure normalizers and file readers remain available.
 This does not affect scan publishing or the existing GitHub alert collector.
 
 The SDK also exposes `prepareExternalPublication(file, options)` for supported
@@ -684,6 +685,11 @@ the same acquisition format for repeat imports: SARIF and CSV are compatibility
 options where supported, and changing formats can change record identities or
 replace richer evidence with less detail. See the
 [import guide](docs/cli.md#import-vendor-findings-locally) for format selection.
+
+For SonarQube Cloud, `codex-security import sonar` reads open security issues
+through the signed-in Sonar CLI. You can pass exact issue keys from the
+SonarQube plugin for Codex and save a local capture for later Cloud publication.
+See the [Sonar import commands](docs/cli.md#import-sonarqube-cloud-issues).
 
 For Amazon Inspector Code Security, use `--provider inspector` with a complete
 ListFindings JSON export and `--source-repository-url`. When the export identifies

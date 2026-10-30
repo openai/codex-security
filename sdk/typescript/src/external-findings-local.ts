@@ -99,6 +99,8 @@ export interface LocalExternalImportResult {
 }
 
 export interface PreparedLocalExternalImport {
+  /** Every declared source matched a configured Git remote of the checkout. */
+  matchesRepositoryRemote: boolean;
   preview: LocalExternalImportPreview;
   import(): Promise<LocalExternalImportResult>;
 }
@@ -490,9 +492,9 @@ async function requireMatchingRepository(
   protectedRoots: WorkbenchCommandOptions["protectedRoot"],
   environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
-): Promise<void> {
-  if (sources.length === 0) return;
-  if (!(await hasGitMetadata(repository, signal))) return;
+): Promise<boolean> {
+  if (sources.length === 0) return false;
+  if (!(await hasGitMetadata(repository, signal))) return false;
   const gitProtectedRoots = [
     ...(typeof protectedRoots === "string"
       ? [protectedRoots]
@@ -532,7 +534,7 @@ async function requireMatchingRepository(
           error.stderr.trimEnd(),
         ))
     )
-      return;
+      return false;
     throw error;
   }
   const remotes: string[] = [];
@@ -541,10 +543,12 @@ async function requireMatchingRepository(
     remotes.push(...urls.split(/\r?\n/u));
   }
   const boundProvider =
+    provider === "sonar" ||
     provider === "inspector" ||
     provider === "blackduck" ||
     provider === "veracode";
   const loosePlatformFor = localRepositoryPlatform(provider, sources, false);
+  let allSourcesMatched = true;
   for (const source of sources) {
     const bound = boundProvider || strictSources.has(source.url);
     const platform = bound
@@ -552,13 +556,17 @@ async function requireMatchingRepository(
       : loosePlatformFor(source);
     const identity = (url: string) => remoteRepository(url, platform, bound);
     const targets = remotes.flatMap((remote) => identity(remote) ?? []);
-    if (!targets.length) continue;
+    if (!targets.length) {
+      allSourcesMatched = false;
+      continue;
+    }
     const target = identity(source.url);
     if (!target || !targets.some((remote) => matchingRemote(remote, target)))
       throw new CodexSecurityError(
         `Imported repository ${JSON.stringify(source.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
       );
   }
+  return allSourcesMatched;
 }
 
 async function localContext(
@@ -840,7 +848,7 @@ export async function prepareLocalImport(
       url: dependabotSource,
       platform: "github",
     });
-  await requireMatchingRepository(
+  const matchesRepositoryRemote = await requireMatchingRepository(
     repository,
     options.provider,
     [...sources.values()],
@@ -873,6 +881,7 @@ export async function prepareLocalImport(
     },
   );
   return {
+    matchesRepositoryRemote,
     preview,
     async import() {
       dependencies.signal?.throwIfAborted();
