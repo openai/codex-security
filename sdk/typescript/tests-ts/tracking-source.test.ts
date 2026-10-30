@@ -8,6 +8,7 @@ import {
   mkdir,
   readFile,
   rename,
+  stat,
   symlink,
   unlink,
   writeFile,
@@ -297,24 +298,25 @@ describe("native tracking source validation", () => {
     },
   );
 
-  test.skipIf(process.platform === "win32")(
-    "accepts a readable sealed directory while the SDK still requires private output",
-    async () => {
+  test.skipIf(process.platform === "win32").each([0o755, 0o775])(
+    "both readers accept an owned scan directory with mode %o without changing its permissions",
+    async (mode) => {
       const f = await fixture();
-      await chmod(f.scanDir, 0o755);
+      await chmod(f.scanDir, mode);
 
       expect(await validateTrackingSource(f.scanDir)).toEqual(
         f.findings.findings,
       );
+      expect((await stat(f.scanDir)).mode & 0o777).toBe(mode);
       const result = run(f);
       expect(result.status, result.stderr).toBe(0);
       expect(result.stdout).toBe(`${f.findings.findings[0]!.findingId}\n`);
       expect(result.stderr).toBe("");
-      await expect(
-        loadContract(f.scanDir, { pluginRoot: PLUGIN_ROOT }),
-      ).rejects.toThrow(
-        "Scan output directory must not be accessible to other users",
-      );
+      expect((await stat(f.scanDir)).mode & 0o777).toBe(mode);
+      expect(
+        (await loadContract(f.scanDir, { pluginRoot: PLUGIN_ROOT })).findings,
+      ).toEqual(f.findings);
+      expect((await stat(f.scanDir)).mode & 0o777).toBe(mode);
     },
   );
 
