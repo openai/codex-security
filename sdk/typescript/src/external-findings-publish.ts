@@ -556,6 +556,8 @@ async function preparePublicationInput(
     );
   const destination = destinations[0]!;
   const source = { provider: options.provider, source_key: options.sourceKey };
+  const importPrefix = source.provider === "sonar" ? "/v2" : "";
+  const sourceReportsPath = importPrefix + sourcePath(destination);
   const state = externalPublicationStateDirectory(environment);
   const checkpointIdentity = [
     // Keep existing production checkpoints readable; other deployments must
@@ -868,7 +870,7 @@ async function preparePublicationInput(
           limit: "2",
         });
         const summaries = validateSourceReports(
-          await request(`${sourcePath(destination)}?${query}`),
+          await request(`${sourceReportsPath}?${query}`),
         );
         if (summaries.has_more || summaries.data.length > 1)
           throw new CodexSecurityError(
@@ -1053,7 +1055,7 @@ async function preparePublicationInput(
           for (const [batchIndex, batch] of requests.entries()) {
             const receipt = validatePublicationReceipt(
               receipts[batchIndex] ??
-                (await request("/finding_imports", batch)),
+                (await request(`${importPrefix}/finding_imports`, batch)),
               batch,
             );
             acknowledged.push(receipt);
@@ -1096,7 +1098,7 @@ async function preparePublicationInput(
           await readInBatches(readbacks, async ({ item, expected, batch }) => {
             const report = validateSourceReport(
               await request(
-                `${sourcePath(destination)}/${encodeURIComponent(item.source_report_id!)}`,
+                `${sourceReportsPath}/${encodeURIComponent(item.source_report_id!)}`,
               ),
             );
             if (

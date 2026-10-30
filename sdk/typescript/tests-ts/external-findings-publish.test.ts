@@ -720,7 +720,16 @@ test("Sonar replays the selected evidence locally and to Cloud without signing i
   await git("git", ["-C", checkout, "remote", "add", "origin", repo], {
     env: environment,
   });
-  const deps = { ...f.cliDeps, environment, currentDirectory: () => checkout };
+  const paths = new Set<string>();
+  const deps = {
+    ...f.cliDeps,
+    environment,
+    currentDirectory: () => checkout,
+    cloudFetch: (url: string, init: RequestInit) => {
+      paths.add(new URL(url).pathname.split("/external/")[1]!);
+      return f.cliDeps.cloudFetch(url, init);
+    },
+  };
   const first = createCliTest(main);
   const previewExit = await first.runCli(
     [
@@ -808,6 +817,16 @@ test("Sonar replays the selected evidence locally and to Cloud without signing i
     source_key: result.sourceKey,
   });
   expect(posted.items[0].source_finding_id).toBe("issue-1");
+  const repository = f.destination();
+  const reportsPath = `v2/repository_connectors/${repository.repo_connector_id}/repositories/${repository.id}/source_reports`;
+  expect(paths).toEqual(
+    new Set([
+      "repositories",
+      reportsPath,
+      "v2/finding_imports",
+      `${reportsPath}/${f.reports.get("issue-1")!.id}`,
+    ]),
+  );
   expect(posted.items[0].evidence.source_data.issue.flows).toEqual(
     source.pages[0]!.issues[0]!.flows,
   );
@@ -3538,6 +3557,7 @@ test("Cloud deployment routing covers every request and isolates saved retries",
   expect(requested.some((url) => url.includes("/source_reports?"))).toBe(true);
   expect(requested.some((url) => url.endsWith("/finding_imports"))).toBe(true);
   expect(requested.some((url) => url.includes("/source_reports/"))).toBe(true);
+  expect(requested.some((url) => url.includes("/external/v2/"))).toBe(false);
 });
 
 test.each(["localhost", "127.0.0.1", "127.0.0.2", "[::1]"])(
