@@ -214,14 +214,14 @@ test.skipIf(process.platform !== "linux")(
     const lookup = spyOn(files, "readlink").mockImplementation((async (
       ...args: Parameters<typeof original>
     ) => {
-      const name = await original(...args);
-      if (String(args[0]).startsWith("/proc/self/fd/") && name === target) {
-        await changeFile?.();
-        throw Object.assign(new Error("procfs access denied"), {
-          code: "EACCES",
-        });
-      }
-      return name;
+      if (!String(args[0]).startsWith("/proc/self/fd/"))
+        return original(...args);
+      const change = changeFile;
+      changeFile = undefined;
+      await change?.();
+      throw Object.assign(new Error("procfs access denied"), {
+        code: "EACCES",
+      });
     }) as typeof original);
     try {
       expect((await prepareSonarImport(selection, deps)).local.read).toBe(1);
