@@ -8,10 +8,9 @@ Prefer native **Semgrep Code/SAST CLI or CI JSON** for this reader. It preserves
 the scanner's original severity and source evidence. Self-contained SARIF 2.1.0
 is a compatibility path. Both formats may be plain or gzip-compressed.
 
-This reader does not accept Platform API, Guardian or MCP response envelopes,
-or a general Supply Chain or Secrets feed. Those products and acquisition
-contracts require separate mappings; installing a plugin does not change the
-formats accepted here.
+For existing Semgrep Platform SAST findings, the SDK can
+[import selected finding IDs](#import-selected-semgrep-platform-sast-findings-with-the-sdk)
+from Web API responses. The CLI file reader accepts the CLI/CI reports described below.
 
 To produce JSON locally, run the following from the source repository root with
 your selected SAST rules. This runs a new scan; it does not retrieve earlier
@@ -59,20 +58,15 @@ accepted findings. Unknown Git hosts keep case-sensitive repository paths.
 
 Semgrep's official
 [Guardian Codex plugin](https://docs.semgrep.dev/semgrep-guardian/ide-setup/codex)
-can select and inspect existing findings. Its output is not accepted by this
-reader. A Platform importer needs a mapping qualified against the hosted tools'
-actual responses, repository/ref filters and pagination using an authorized test
-tenant. The separate local `semgrep mcp` server also exposes `semgrep_findings`,
-but its current tool
-returns a limited list without continuation metadata. It cannot establish a
-complete export. [Official MCP implementation](https://github.com/semgrep/semgrep/blob/fe209763a4a2ccfcdf6434e6c332edc24a2f586e/cli/src/semgrep/mcp/server.py).
+can select and inspect existing findings. The separate local `semgrep mcp` server
+also exposes `semgrep_findings`. Its output lacks continuation metadata.
+[Official MCP implementation](https://github.com/semgrep/semgrep/blob/fe209763a4a2ccfcdf6434e6c332edc24a2f586e/cli/src/semgrep/mcp/server.py).
 
-For an automated acquisition path, Semgrep's
-[findings API](https://docs.semgrep.dev/semgrep-appsec-platform/semgrep-api) supports
-pagination with a Web API token. Its Platform finding objects
-need their own mapping into the shared publisher; they are not CLI `results`
-objects. Do not rename an API/MCP response to `semgrep.json` or reconstruct a scan
-report from a summary. No manual website export is required for either path.
+The [Semgrep Web API](https://docs.semgrep.dev/semgrep-appsec-platform/semgrep-api)
+supports project lookups and paginated findings queries with a Web API token.
+Supply its original JSON responses to the
+[SDK selection adapter](#import-selected-semgrep-platform-sast-findings-with-the-sdk).
+The adapter requires native finding IDs and repository/ref evidence.
 
 ## Evidence and identity
 
@@ -125,3 +119,34 @@ importer forwards them automatically. For an independently known GitHub custom
 host, use `{ url, platform: "github" }` for its references. The Semgrep file reader
 accepts native reports, not normalized JSON/JSONL exports.
 See the [native output fields](https://docs.semgrep.dev/semgrep-appsec-platform/json-and-sarif).
+
+### Import selected Semgrep Platform SAST findings with the SDK
+
+Capture the project lookup and Findings API pages as original response text.
+Pass a fully qualified ref, such as `refs/heads/topic` or `refs/tags/topic`, exactly as it appears in the findings.
+Supply the HTTP(S) repository URL you independently associate with the target checkout.
+The project response and any finding URL must match this spelling. A finding without a URL
+must carry the native project ID and a namespace-qualified repository name matching the project name or repository URL path. The local importer checks the checkout using its existing repository rules.
+
+```ts
+const selected = normalizeSelectedSemgrepPlatformFindings({
+  deployment,
+  ref,
+  sourceRepositoryUrl,
+  projectResponse,
+  findingsResponses,
+  findingIds,
+});
+const prepared = await prepareNormalizedLocalImport(
+  selected,
+  { provider: "semgrep", sourceKey, repository: checkout },
+  { sourceRepositories: [{ url: sourceRepositoryUrl }] },
+);
+if (prepared.preview.excluded.length) {
+  console.error(prepared.preview.excluded);
+} else {
+  await prepared.import();
+}
+```
+
+Keep the same source key on replay. Finding identity includes the deployment, project ID, SAST product, full ref, and native finding ID. The adapter retains native JSON values with exact numeric precision. Changes to key order or equivalent number spellings such as `2` and `2.0` leave the stored record unchanged.

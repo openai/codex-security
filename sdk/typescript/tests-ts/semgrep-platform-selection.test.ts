@@ -1,0 +1,219 @@
+import { expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
+import {
+  listLocalExternalFindings,
+  prepareNormalizedLocalImport,
+} from "../src/external-findings-local.js";
+import { normalizeSelectedSemgrepPlatformFindings } from "../src/semgrep-platform-findings.js";
+import { localFindingsFixture } from "./external-findings-local-helpers.js";
+
+const url = "https://github.com/example/project";
+const ref = "refs/heads/topic";
+const ids = ["9007199254740992", "9007199254740993"];
+const source = {
+  deployment: "demo",
+  ref,
+  sourceRepositoryUrl: url,
+  projectResponse: JSON.stringify({
+    project: { id: 77, name: "example/project", url },
+  }),
+  findingIds: ids,
+};
+const page = (id: string, branch = ref, repo = url) =>
+  `{"findings":[{"id":${id},"ref":"${branch}","repository":{"url":"${repo}"},"rule":{"name":"example.rule"},"severity":"medium","location":{"file_path":"src/app.ts","line":2},"score":1.00000000000000001,"units":9007199254740993,"magnitude":1e100000}]}`;
+
+test("reimporting two selected IDs from a non-default branch leaves both SQLite records unchanged", async () => {
+  await using fixture = await localFindingsFixture({ remote: url });
+  execFileSync("git", [
+    "-C",
+    fixture.repository,
+    "switch",
+    "--quiet",
+    "--orphan",
+    "topic",
+  ]);
+  expect(
+    execFileSync("git", ["-C", fixture.repository, "symbolic-ref", "HEAD"], {
+      encoding: "utf8",
+    }).trim(),
+  ).toBe(ref);
+  const options = {
+    provider: "semgrep" as const,
+    sourceKey: "demo/topic",
+    repository: fixture.repository,
+  };
+  const dependencies = {
+    environment: fixture.environment,
+    sourceRepositories: [{ url }],
+  };
+  const prepare = (findingsResponses: string[]) =>
+    prepareNormalizedLocalImport(
+      normalizeSelectedSemgrepPlatformFindings({
+        ...source,
+        findingsResponses,
+      }),
+      options,
+      dependencies,
+    );
+  const pages = [page("3"), ...ids.map((id) => page(id))];
+  const first = await prepare(pages);
+  expect(first.preview.excluded).toEqual([]);
+  expect((await first.import()).counts).toEqual({
+    created: 2,
+    updated: 0,
+    unchanged: 0,
+  });
+  const original = await listLocalExternalFindings(options, dependencies);
+  expect(original).toHaveLength(2);
+  expect(new Set(original.map((row) => row.sourceFindingId)).size).toBe(2);
+  for (const row of original) {
+    expect(row.evidence.branch).toBe(ref);
+    const raw = row.evidence.source_data?.["semgrepPlatformFindingJson"];
+    expect(raw).toContain('"score":1.00000000000000001');
+    expect(raw).toContain('"units":9007199254740993');
+    expect(raw).toMatch(/"magnitude":1e\+?100000/u);
+  }
+  const replay = await prepare(
+    pages
+      .reverse()
+      .map((p) =>
+        p
+          .replace('"severity":"medium","location":', '"location":')
+          .replace('"line":2', '"line":2.0')
+          .replace(
+            ',"score":1.00000000000000001',
+            ',"severity":"medium","score":1.000000000000000010',
+          )
+          .replace('"units":9007199254740993', '"units":90071992547409930e-1')
+          .replace('"magnitude":1e100000', '"magnitude":10e99999'),
+      ),
+  );
+  expect((await replay.import()).counts).toEqual({
+    created: 0,
+    updated: 0,
+    unchanged: 2,
+  });
+  const malformed = await prepare([
+    page(ids[0]!).replace('"rule":{"name":"example.rule"}', '"rule":42'),
+    page(ids[1]!).replace(
+      '"location":{"file_path":"src/app.ts","line":2}',
+      '"location":42',
+    ),
+  ]);
+  expect(malformed.preview.excluded).toHaveLength(2);
+  expect((await malformed.import()).counts).toEqual({
+    created: 0,
+    updated: 0,
+    unchanged: 0,
+  });
+  expect(await listLocalExternalFindings(options, dependencies)).toEqual(
+    original,
+  );
+});
+
+test("each selected finding must match the independently named project, ref, and SAST product", () => {
+  const first = page(ids[0]!);
+  const second = page(ids[1]!);
+  const select = (pages: string[]) =>
+    normalizeSelectedSemgrepPlatformFindings({
+      ...source,
+      findingsResponses: pages,
+    });
+  const unrelated = '{"findings":[{"rule_name":"no-id"},{"id":2.5}]}';
+  expect(select([first, unrelated, second]).findings).toHaveLength(2);
+  expect(() => select([first, unrelated])).toThrow(ids[1]);
+  expect(() => select([first, second, second])).toThrow("Duplicate");
+  expect(() => select([first, page(ids[1]!, "refs/heads/main")])).toThrow(
+    "project and ref",
+  );
+  expect(() => select([first, page(ids[1]!, ref, url + ".git")])).toThrow(
+    "project and ref",
+  );
+  expect(() =>
+    select([first, second.replace('"id":', '"product":"sca","id":')]),
+  ).toThrow("SAST");
+  expect(() =>
+    normalizeSelectedSemgrepPlatformFindings({
+      ...source,
+      sourceRepositoryUrl: url + "-other",
+      findingsResponses: [first, second],
+    }),
+  ).toThrow("operator");
+});
+
+test("the same native ID from distinct project IDs or refs has distinct occurrence IDs", () => {
+  const occurrence = (projectId: number, branch: string) =>
+    normalizeSelectedSemgrepPlatformFindings({
+      ...source,
+      projectResponse: JSON.stringify({
+        project: { id: projectId, name: "example/project", url },
+      }),
+      ref: branch,
+      findingIds: ["8"],
+      findingsResponses: page("8", branch),
+    }).findings[0]!.source_finding_id;
+  expect(
+    new Set([
+      occurrence(77, ref),
+      occurrence(78, ref),
+      occurrence(77, "refs/tags/topic"),
+    ]).size,
+  ).toBe(3);
+  expect(() => occurrence(77, "topic")).toThrow(/ref/i);
+});
+
+test("a URL-less row needs the matching project ID and full name, while an exact URL identifies the path of a short-named project", () => {
+  function select(
+    projectName: string,
+    repository: Record<string, unknown>,
+    projectUrl = url,
+  ) {
+    return normalizeSelectedSemgrepPlatformFindings({
+      ...source,
+      sourceRepositoryUrl: projectUrl,
+      projectResponse: JSON.stringify({
+        project: { id: 77, name: projectName, url: projectUrl },
+      }),
+      findingIds: ["8"],
+      findingsResponses: [
+        JSON.stringify({ findings: [{ id: 8, ref, repository }] }),
+      ],
+    });
+  }
+  const name = "example/project";
+  expect(select(name, { id: 77, name }).findings).toHaveLength(1);
+  expect(select("project", { id: 77, name }).findings).toHaveLength(1);
+  expect(() => select("project", { id: 77, name: "project" })).toThrow(
+    "project and ref",
+  );
+  for (const repository of [
+    { name },
+    { id: 78, name },
+    { id: 77, name: "project" },
+  ]) {
+    expect(() => select(name, repository)).toThrow("project and ref");
+  }
+  expect(select("project", { url, name }).findings).toHaveLength(1);
+  const cloneUrl = url + ".git";
+  expect(
+    select("project", { url: cloneUrl, name }, cloneUrl).findings,
+  ).toHaveLength(1);
+  expect(() => select("project", { url, name: "other/project" })).toThrow(
+    "project and ref",
+  );
+});
+
+test("a fractional source position cannot round to an integer during projection", () => {
+  for (const position of [
+    '"line":2.00000000000000001',
+    '"line":2,"end_line":2.00000000000000001',
+  ]) {
+    const result = normalizeSelectedSemgrepPlatformFindings({
+      ...source,
+      findingIds: ["8"],
+      findingsResponses: [page("8").replace('"line":2', position)],
+    });
+    expect(result.findings).toHaveLength(0);
+    expect(result.excluded).toHaveLength(1);
+  }
+});
