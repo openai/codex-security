@@ -59,43 +59,38 @@ test("an opaque bulk finding ID still requires the original native occurrence ID
   );
 });
 
-test("bulk-only native ID spellings retain their original evidence and report format", async () => {
-  for (const [findingId, repositoryId] of [
-    ["1e1", "77"],
-    ["10", "77.0"],
-  ]) {
-    const row = `{"id":${findingId},"repository":{"id":${repositoryId},"url":"${url}"},"ref":"${options.ref}"}`;
-    const page = `{"findings":[${row}]}`;
-    const report = await collectSemgrepPlatformFindings(
-      options,
-      responses(new Response(page)),
-    );
-    const [finding] = normalizeSemgrepFindings(report, {}, "local").findings;
-    const data = finding!.evidence.source_data!;
-    expect(data["format"]).toBe(report.format);
-    expect(data["semgrepPlatformFindingJson"]).toContain(`"id":${findingId}`);
-    expect(data["semgrepPlatformFindingJson"]).toContain(
-      `"id":${repositoryId}`,
-    );
-    const selectedInput = {
-      ...options,
-      projectResponse: JSON.stringify({ project }),
-      findingsResponses: [page],
-      findingIds: ["10"],
-      sourceRepositoryUrl: url,
-    };
-    expect(() =>
-      normalizeSelectedSemgrepPlatformFindings(selectedInput),
-    ).toThrow();
-    expect(() => selectSemgrepPlatformFindings(selectedInput)).toThrow();
-    expect(() =>
-      normalizeSemgrepFindings(
-        { ...report, format: "semgrep-platform-selection/v1" },
-        {},
-        "local",
-      ),
-    ).toThrow(/Semgrep Platform ID/u);
+test("integer-valued native IDs replay identically through selected and bulk imports", async () => {
+  const page = `{"findings":[{"id":1e1,"repository":{"id":77.0,"url":"${url}"},"ref":"${options.ref}"}]}`;
+  const input = {
+    ...options,
+    projectResponse: JSON.stringify({ project }),
+    findingsResponses: [page],
+    findingIds: ["10"],
+    sourceRepositoryUrl: url,
+  };
+  const direct = normalizeSelectedSemgrepPlatformFindings(input);
+  expect(direct.excluded).toEqual([]);
+  expect(direct.findings).toHaveLength(1);
+  const finding = direct.findings[0]!;
+  expect(finding.evidence.source_data).toMatchObject({
+    format: "semgrep-platform-selection/v1",
+    semgrepPlatformFindingJson: JSON.stringify({
+      id: 10,
+      ref: options.ref,
+      repository: { id: 77, url },
+    }),
+  });
+  const selected = selectSemgrepPlatformFindings(input);
+  const bulk = await collectSemgrepPlatformFindings(
+    options,
+    responses(new Response(page)),
+  );
+  for (const saved of [selected, bulk]) {
+    const replay = normalizeSemgrepFindings(saved, {}, "local");
+    expect(replay.excluded).toEqual([]);
+    expect(replay.findings).toEqual(direct.findings);
   }
+  expect(semgrepPlatformFindingRepository(finding, "semgrep")).toBe(url);
 });
 
 test("a retagged Semgrep row still requires its provider after assigning an opaque ID", async () => {

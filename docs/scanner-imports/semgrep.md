@@ -166,6 +166,12 @@ and advisory IDs when Semgrep supplies them. With the same source key, importing
 selection reports them as unchanged when switching between a selection and a full collection.
 See the [Semgrep Findings API](https://docs.semgrep.dev/api-reference/v1/findingsservice/list-code-supply-chain-or-ai-powered-detection-findings).
 
+If you previously imported a v1 export with the development version that stored
+each finding as an object, the first replay updates the existing SQLite record
+to store the native finding as JSON text. Its local ID and source finding ID stay
+the same, and its version increases once. Replaying the same evidence again
+reports it as unchanged.
+
 ## Evidence and identity
 
 JSON preserves original severity, rule, CWE IDs, source range, snippets when

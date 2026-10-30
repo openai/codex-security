@@ -176,27 +176,22 @@ export function parseSemgrepResponse(json: string): Record<string, unknown> {
 export function semgrepPlatformIdOrUndefined(
   value: unknown,
 ): string | undefined {
-  const token =
-    hostedNumberToken(value) ??
-    (typeof value === "string"
-      ? value
-      : typeof value === "number" && Number.isSafeInteger(value)
-        ? String(value)
-        : undefined);
-  if (!token) return;
-  if (/^[1-9][0-9]*$/u.test(token)) return token;
-  if (typeof value !== "string") return legacyDecimalInteger(token);
+  let id = value;
+  if (wireJson.isRawJSON(value)) {
+    const token = value.rawJSON;
+    // Keep positive integer literals as digits even outside the ordinary notation range.
+    id = /^[1-9][0-9]*$/u.test(token) ? token : canonicalNumber(token);
+  } else if (typeof value === "number" && Number.isSafeInteger(value)) {
+    id = String(value);
+  }
+  return typeof id === "string" && /^[1-9][0-9]*$/u.test(id) ? id : undefined;
 }
+
 export function semgrepPlatformId(value: unknown): string {
   const id = semgrepPlatformIdOrUndefined(value);
   if (id === undefined)
     throw new Error("Expected an exact, positive Semgrep Platform ID.");
   return id;
-}
-
-// The selected SAST API accepts positive integer tokens in their decimal spelling.
-function selectionId(value: unknown) {
-  return semgrepPlatformId(hostedNumberToken(value) ?? value);
 }
 
 function scopeOf(
@@ -419,14 +414,13 @@ export function checkSemgrepPlatformRow(
   );
   const urlPathName =
     label !== null && (label === projectPath || label + ".git" === projectPath);
+  const nameParts = label?.split("/") ?? [];
   const qualifiedName =
-    label !== null &&
-    /^[^/]+(?:\/[^/]+)+$/u.test(label) &&
+    nameParts.length > 1 &&
+    nameParts.every((part) => part && part !== "." && part !== "..") &&
     (label === full || urlPathName);
   const matchedName =
-    label === full ||
-    label === full.split("/").at(-1) ||
-    (urlPathName && full === label.split("/").at(-1));
+    label === full || label === full.split("/").at(-1) || urlPathName;
   const selectionRepositoryMatches = hasUrl
     ? repositoryId !== undefined || name == null || matchedName
     : repositoryId !== undefined && qualifiedName;
@@ -446,7 +440,8 @@ export function checkSemgrepPlatformRow(
   for (const product of [finding["issue_type"], finding["product"]]) {
     if (
       product != null &&
-      !declaredProduct.includes(String(product).toLowerCase())
+      (typeof product !== "string" ||
+        !declaredProduct.includes(product.toLowerCase()))
     )
       throw new Error(
         scope.product === "sast"
@@ -493,9 +488,7 @@ export function checkSemgrepPlatformRow(
     finding["ref"] === scope.ref &&
     selectionRepositoryMatches &&
     [finding["id"], repo["id"]].every(
-      (id) =>
-        id == null ||
-        semgrepPlatformIdOrUndefined(hostedNumberToken(id) ?? id) !== undefined,
+      (id) => id == null || semgrepPlatformIdOrUndefined(id) !== undefined,
     )
   );
 }
@@ -519,10 +512,10 @@ function selectedRows(
     options.deployment,
     parseSemgrepResponse(options.projectResponse)["project"],
     options.ref,
-    selectionId,
+    semgrepPlatformId,
   );
   const repository = repositoryFor(scope);
-  const wanted = new Set(options.findingIds.map(selectionId));
+  const wanted = new Set(options.findingIds.map(semgrepPlatformId));
   if (!wanted.size) throw new Error("Select at least one Semgrep finding ID.");
   const selected = new Map<string, Record<string, unknown>>();
   const pages =
@@ -535,9 +528,7 @@ function selectedRows(
       "Semgrep findings",
     )) {
       if (!isRecord(finding)) continue;
-      const id = semgrepPlatformIdOrUndefined(
-        hostedNumberToken(finding["id"]) ?? finding["id"],
-      );
+      const id = semgrepPlatformIdOrUndefined(finding["id"]);
       if (!id || !wanted.has(id)) continue;
       if (selected.has(id))
         throw new Error(`Duplicate selected Semgrep finding ${id}.`);
@@ -546,7 +537,7 @@ function selectedRows(
         scope,
         undefined,
         repository,
-        selectionId,
+        semgrepPlatformId,
         repositoryUrl,
       );
       selected.set(id, finding);
@@ -556,7 +547,7 @@ function selectedRows(
     const value = selected.get(id);
     if (!value)
       throw new Error(
-        `Selected Semgrep finding ${id} was not present in the supplied pages.`,
+        `Selected Semgrep finding ${id} is missing from the supplied pages.`,
       );
     return value;
   });
@@ -589,7 +580,19 @@ export function normalizeSelectedSemgrepPlatformFindings(
   const { scope, rows } = selectedRows(
     options,
     (scope) => {
-      if (!/^refs\/[^/]+(?:\/[^/]+)*$/u.test(scope.ref))
+      // git-check-ref-format distinguishes literal branch/tag names from revision expressions.
+      const refParts = scope.ref.split("/");
+      if (
+        refParts[0] !== "refs" ||
+        refParts.length < 2 ||
+        refParts.some(
+          (part) => !part || part.startsWith(".") || part.endsWith(".lock"),
+        ) ||
+        scope.ref.endsWith(".") ||
+        scope.ref.includes("..") ||
+        scope.ref.includes("@{") ||
+        /[\u0000-\u0020\u007f~^:?*\[\\]/u.test(scope.ref)
+      )
         throw new Error(
           "Use a fully qualified Semgrep ref such as refs/heads/topic.",
         );
@@ -665,7 +668,7 @@ function readScope(input: Record<string, unknown>) {
       input["deployment"],
       mapping ? { ...project, url: mapping } : project,
       input["ref"],
-      complete ? semgrepPlatformId : selectionId,
+      semgrepPlatformId,
     ),
     ...(mapping && { sourceRepositoryUrl: mapping }),
     product,
@@ -988,11 +991,7 @@ export function normalizeSemgrepPlatformFindings(
   if (!isSemgrepPlatformFormat(sourceFormat))
     throw new Error("Expected a Semgrep Platform selection or project export.");
   const legacy = sourceFormat === semgrepPlatformLegacyFormat;
-  const readId = legacy
-    ? semgrepV1Id
-    : sourceFormat === semgrepSelectionFormat
-      ? selectionId
-      : semgrepPlatformId;
+  const readId = legacy ? semgrepV1Id : semgrepPlatformId;
   const input = legacy
     ? upgradeSemgrepPlatformReport(
         saved,
@@ -1073,13 +1072,12 @@ export function normalizeSemgrepPlatformFindings(
 
 function stringifySemgrepFinding(finding: Record<string, unknown>): string {
   return JSON.stringify(finding, function (this: unknown, key, value: unknown) {
-    // Native occurrence and repository IDs must stay unsigned decimal tokens on replay.
-    if (
-      !wireJson.isRawJSON(value) ||
-      (key === "id" && (this === finding || this === finding["repository"]))
-    )
-      return value;
-    return wireJson.rawJSON(canonicalNumber(value.rawJSON));
+    if (!wireJson.isRawJSON(value)) return value;
+    const nativeId =
+      key === "id" && (this === finding || this === finding["repository"]);
+    return wireJson.rawJSON(
+      nativeId ? semgrepPlatformId(value) : canonicalNumber(value.rawJSON),
+    );
   });
 }
 
@@ -1145,7 +1143,7 @@ function normalizePlatformRows(
   },
 ) {
   const legacy = bulk?.legacy;
-  const readId = legacy ? semgrepV1Id : bulk ? semgrepPlatformId : selectionId;
+  const readId = legacy ? semgrepV1Id : semgrepPlatformId;
   return normalizeRecords(
     rows,
     ({ finding, selectable }) => {
