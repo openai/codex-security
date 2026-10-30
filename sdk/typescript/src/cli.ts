@@ -57,6 +57,7 @@ import {
   stripVTControlCharacters,
 } from "node:util";
 import { Cli, z } from "incur";
+import stringWidth from "string-width";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import { formatCliHelp } from "./cli-help.js";
 import { formatCoverageScope } from "./coverage-presentation.js";
@@ -625,6 +626,21 @@ function padPublicationColumn(value: string, width: number): string {
   return `${value}${" ".repeat(width - publicationDisplayWidth(value))}`;
 }
 
+function fitProgressLine(line: string, width: number): string {
+  const plain = stripVTControlCharacters(line);
+  let ellipsisIndex = 0;
+  let used = 0;
+  for (const { index, segment } of PUBLICATION_GRAPHEME_SEGMENTER.segment(
+    plain,
+  )) {
+    used += stringWidth(segment.toWellFormed());
+    if (used > width)
+      return width > 0 ? `${plain.slice(0, ellipsisIndex)}…` : "";
+    if (used < width) ellipsisIndex = index + segment.length;
+  }
+  return line;
+}
+
 function publicationIssueUrl(value: string | undefined): string | undefined {
   if (
     value === undefined ||
@@ -875,10 +891,7 @@ class PublicationProgressPresenter {
       return;
     }
     const width = Math.max(24, Math.min(this.#stream.columns ?? 120, 160));
-    const visible =
-      sanitized.length <= width
-        ? sanitized
-        : `${sanitized.slice(0, width - 1)}…`;
+    const visible = fitProgressLine(sanitized, width);
     this.#stream.write(`${visible}\n`);
   }
 }
@@ -11261,19 +11274,8 @@ export class Progress {
   }
 
   #renderTimer(message: string): void {
-    let line = this.#line(message);
     const width = Math.max(0, (this.#stream.columns ?? 80) - 1);
-    if (publicationDisplayWidth(line) > width) {
-      let visible = "";
-      let used = 0;
-      for (const { segment } of PUBLICATION_GRAPHEME_SEGMENTER.segment(line)) {
-        const segmentWidth = publicationDisplayWidth(segment);
-        if (used + segmentWidth >= width) break;
-        visible += segment;
-        used += segmentWidth;
-      }
-      line = width > 0 ? `${visible}…` : "";
-    }
+    const line = fitProgressLine(this.#line(message), width);
     this.#stream.write(`${this.#timerLineActive ? "\r\u001B[K" : ""}${line}`);
     this.#timerLineActive = true;
   }
