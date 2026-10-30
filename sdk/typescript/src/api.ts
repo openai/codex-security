@@ -2076,7 +2076,7 @@ export class CodexSecurity {
         prompts,
       } = inputs;
       options = { ...options, ...prompts };
-      const severityRubric =
+      let severityRubric =
         options.severityRubric === undefined
           ? options.resumeScanId === undefined
             ? await getDefaultSeverityRubric({
@@ -2546,12 +2546,6 @@ export class CodexSecurity {
         signal,
         failureMessage: "Could not save the Codex Security scan",
       };
-      const scanContext =
-        severityRubric === undefined
-          ? options.scanPrompt
-          : [options.scanPrompt, severityRubricInstructions(severityRubric)]
-              .filter((value) => value !== undefined)
-              .join("\n\n");
       checkOpen();
       const registration =
         options.resumeScanId !== undefined
@@ -2571,7 +2565,7 @@ export class CodexSecurity {
               }),
               JSON.stringify({
                 recipe,
-                userContext: scanContext,
+                userContext: options.scanPrompt,
                 workflowId: options.workflowId,
               }),
             );
@@ -2621,6 +2615,7 @@ export class CodexSecurity {
           throw new CodexSecurityError(
             "The supplied severity rubric differs from this scan's saved policy. Resume with the original rubric or start a new scan.",
           );
+        severityRubric = savedRubric;
         if (
           isRecord(savedInputs) &&
           workflowDigest(savedInputs["knowledgeBase"]) !==
@@ -2784,13 +2779,15 @@ export class CodexSecurity {
         scanId,
         knowledgeBase !== null,
         options.resumeScanId !== undefined &&
-          typeof registration["userContext"] === "string"
-          ? registration["userContext"]
-          : scanContext,
+          (registration["userContext"] === null ||
+            typeof registration["userContext"] === "string")
+          ? (registration["userContext"] ?? undefined)
+          : options.scanPrompt,
         options.maxCostUsd !== undefined,
         discoveryPrompt,
         modelProvider,
         options.ownerSuggestions,
+        severityRubric,
       );
       checkOpen();
       const feedback = await workbench(
@@ -3040,6 +3037,7 @@ export class CodexSecurity {
               scanId,
               pluginRoot: runtime.plugin.installedRoot,
               prompt: options.validationPrompt,
+              severityRubric,
               falsePositives: falsePositiveExamples,
               signal,
               run: async (validationPrompt, outputSchema) => {
@@ -3823,7 +3821,7 @@ export class CodexSecurity {
                 const request = {
                   version: 2 as const,
                   requestId: randomUUID(),
-                  ...hosted.context,
+                  ...structuredClone(hosted.context),
                   scanId: runtimePaths["CODEX_SECURITY_SCAN_ID"]!,
                   prompt,
                   ...model,
@@ -5266,6 +5264,7 @@ function scanPrompt(
   discoveryPrompt?: string,
   modelProvider?: unknown,
   ownerSuggestions = false,
+  severityRubric?: SeverityRubricSnapshot,
 ): string {
   const python = pluginPythonCommand();
   const customValidation = discoveryPrompt !== undefined;
@@ -5348,6 +5347,7 @@ function scanPrompt(
         : [
             "Use record_codex_security_scan_draft and complete_codex_security_scan as directed by the selected skill; the workbench owns authoritative metadata, finalization, report generation, and sealing.",
           ]),
+    ...(severityRubric ? [severityRubricInstructions(severityRubric)] : []),
     ...(additionalPrompt?.trim()
       ? ["Additional scan instructions:", additionalPrompt]
       : []),

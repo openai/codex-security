@@ -32,10 +32,7 @@ import { TestClient } from "./support/api-client.js";
 import { completedEvents, preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { fail } from "./support/errors.js";
-import {
-  bundledSeverityRubric,
-  severityRubricInstructions,
-} from "../src/severity-rubric.js";
+import { bundledSeverityRubric } from "../src/severity-rubric.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
@@ -202,11 +199,7 @@ async function interruptedScan(
     ],
     JSON.stringify({
       recipe,
-      userContext:
-        "Keep the original scan instructions." +
-        (settings.severityRubric === undefined
-          ? ""
-          : "\n\n" + severityRubricInstructions(settings.severityRubric)),
+      userContext: "Keep the original scan instructions.",
     }),
   );
   const scanId = registration["scanId"] as string;
@@ -1045,6 +1038,17 @@ test.each([
       severityRubric: { ...bundledSeverityRubric, revision: 17 },
     };
     const f = await interruptedScan("deep", bulk, settings, true);
+    const editedInstructions =
+      auth === "api-key" ? "" : "Review the updated scope.";
+    await f.command([
+      "update-scan-context",
+      "--scan-id",
+      f.scanId,
+      "--thread-id",
+      f.threadId,
+      "--user-context",
+      editedInstructions,
+    ]);
     f.environment.OPENAI_API_KEY = "synthetic-resume-key";
     const ambientHome = join(f.root, "ambient-codex-home");
     f.environment.CODEX_HOME = ambientHome;
@@ -1087,7 +1091,13 @@ test.each([
                 );
                 prompts.push(prompt as string);
                 if (prompts.length === 1) {
-                  expect(prompt).toContain(
+                  if (editedInstructions)
+                    expect(prompt).toContain(editedInstructions);
+                  else
+                    expect(prompt).not.toContain(
+                      "Additional scan instructions:",
+                    );
+                  expect(prompt).not.toContain(
                     "Keep the original scan instructions.",
                   );
                   expect(prompt).toContain(

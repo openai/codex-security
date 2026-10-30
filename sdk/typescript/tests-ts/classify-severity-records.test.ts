@@ -71,6 +71,17 @@ function input(): ClassifySeverityRecordsInput & {
     ],
   };
 }
+
+test("canonical records accept an explicitly hashed rubric above the remote config limit", async () => {
+  const data = input();
+  const markdown = "x".repeat(196_609);
+  data.rubric = { revision: 3, markdown, sha256: hash(markdown) };
+  const result = await classifySeverityRecords(data, {
+    reviewRunner: { run: async (request) => answer(request) },
+  });
+  expect(result.status).toBe("completed");
+  expect(result.rubric).toEqual({ revision: 3, sha256: data.rubric.sha256 });
+});
 function answer(request: SeverityClassificationReviewRequest) {
   return {
     findingId: JSON.parse(request.prompt).finding.findingId,

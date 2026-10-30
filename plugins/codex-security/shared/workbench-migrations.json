@@ -469,5 +469,12 @@
     "statements": [
       "ALTER TABLE scans ADD COLUMN retained_checkpoint_heads_json TEXT;"
     ]
+  },
+  {
+    "version": 58,
+    "name": "record classification rubric provenance",
+    "statements": [
+      "ALTER TABLE scan_severity_classifications ADD COLUMN rubric_binding_json TEXT;"
+    ]
   }
 ]

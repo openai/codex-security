@@ -78,6 +78,45 @@ test("hosted scans echo one immutable default snapshot and preserve explicit hos
   }
 });
 
+test("explicit hosted rubrics may exceed the remote config size limit", async () => {
+  const input = await fixture();
+  const markdown = "x".repeat(196_609);
+  input.severityRubric = {
+    revision: 3,
+    markdown,
+    sha256: hash("sha256", markdown),
+  };
+  const result = await runHostedScan(input, { executor: draftExecutor() });
+  expect(result.status).toBe("completed");
+  expect(result.severityRubric).toEqual(input.severityRubric);
+  await expect(
+    runHostedScan(
+      {
+        ...input,
+        severityRubric: { ...input.severityRubric, markdown: markdown + "!" },
+      },
+      { executor: draftExecutor() },
+    ),
+  ).rejects.toThrow("SHA-256");
+});
+
+test("executor mutations cannot change the rubric in the hosted receipt", async () => {
+  const input = await fixture();
+  const result = await runHostedScan(input, {
+    executor: {
+      async run(request) {
+        expect(request.prompt).toContain(
+          JSON.stringify({ severityRubric: input.severityRubric }),
+        );
+        request.severityRubric!.markdown = "Executor-modified policy";
+        return receipt(request, { status: "canceled" });
+      },
+    },
+  });
+  expect(result.status).toBe("canceled");
+  expect(result.severityRubric).toEqual(input.severityRubric);
+});
+
 test.each([undefined, "0", "1"])(
   "hosted scans resolve the default using selected remote policy setting %p",
   async (enabled) => {
@@ -186,6 +225,52 @@ test.each(["0", "1"])(
     }
   },
 );
+
+test("cancel during rubric resolution returns a canceled receipt without dispatch", async () => {
+  const params = await fixture();
+  delete params.severityRubric;
+  const input = new PassThrough();
+  const output = capture();
+  const fetching = Promise.withResolvers<void>();
+  const fetch = spyOn<
+    { fetch(url: string, options: RequestInit): Promise<Response> },
+    "fetch"
+  >(globalThis, "fetch").mockImplementation(
+    (_url, options) =>
+      new Promise<Response>((_resolve, reject) => {
+        const signal = options.signal!;
+        signal.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        });
+        fetching.resolve();
+      }),
+  );
+  try {
+    const finished = runHostedScanProtocol(input, output.stream, {
+      environment: { CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: "1" },
+    });
+    send(input, { id: "run", method: "run", params });
+    await fetching.promise;
+    send(input, { method: "cancel", params: { id: "run" } });
+    expect(await finished).toBe(1);
+    const messages = parseJsonLines(output.text());
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      id: "run",
+      result: {
+        identity: params.identity,
+        status: "canceled",
+        error: "Scan canceled.",
+        artifacts: [],
+      },
+    });
+    expect(messages[0].result).not.toHaveProperty("severityRubric");
+    expect(messages[0].result).not.toHaveProperty("execution");
+  } finally {
+    input.destroy();
+    fetch.mockRestore();
+  }
+});
 
 test("hosted owner artifact is opt-in and included in the completed receipt", async () => {
   for (const enabled of [false, true]) {

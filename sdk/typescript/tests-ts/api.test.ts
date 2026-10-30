@@ -1,8 +1,4 @@
 import { readReviewState } from "./support/review-state.js";
-import {
-  bundledSeverityRubric,
-  severityRubricInstructions,
-} from "../src/severity-rubric.js";
 import { once } from "node:events";
 import { createServer, type Socket } from "node:net";
 import {
@@ -2809,8 +2805,7 @@ if __name__ == "__main__":
     expect(followUpPrompt).toBe("Draft fixes for confirmed findings.");
     expect(commands[0]).toContain("--registration-json-stdin");
     expect(JSON.parse(registrationInput!).userContext).toBe(
-      "Focus on authentication and authorization.\n\n" +
-        severityRubricInstructions(bundledSeverityRubric),
+      "Focus on authentication and authorization.",
     );
     expect(JSON.parse(registrationInput!).recipe).toMatchObject({
       repository,
@@ -2938,9 +2933,7 @@ if __name__ == "__main__":
             falsePositives: [],
           };
         }
-        expect(JSON.parse(input!).userContext).toBe(
-          severityRubricInstructions(bundledSeverityRubric),
-        );
+        expect(JSON.parse(input!).userContext).toBeUndefined();
         recipe = JSON.parse(input!).recipe;
         return mockScanRegistration(args, input);
       },
@@ -5835,11 +5828,7 @@ if __name__ == "__main__":
             workbenchOptions.environment["CODEX_SECURITY_GIT"] ?? "";
           if (args[0] !== "register-cli-scan")
             return mockWorkbench(args, input);
-          expect(JSON.parse(input!).userContext).toBe(
-            scanPrompt +
-              "\n\n" +
-              severityRubricInstructions(bundledSeverityRubric),
-          );
+          expect(JSON.parse(input!).userContext).toBe(scanPrompt);
           recipe = JSON.parse(input!).recipe;
           return mockScanRegistration(args, input);
         },

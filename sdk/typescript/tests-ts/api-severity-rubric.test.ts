@@ -90,7 +90,7 @@ test.each(["standard", "deep"] as const)(
 );
 
 test.each(["standard", "deep"] as const)(
-  "%s scans retain one resolved policy in the model and persisted worker context",
+  "%s scans retain one resolved policy in the model and saved recipe",
   async (mode) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -124,12 +124,7 @@ test.each(["standard", "deep"] as const)(
     const saved = { ...bundledSeverityRubric, revision: 7 };
     expect(registration.recipe.severityRubric).toEqual(saved);
     expect(registration.recipe.requiresScanPrompt).toBe(true);
-    expect(registration.userContext.split("\n\n")[0]).toBe(
-      "Review authorization.",
-    );
-    expect(
-      JSON.parse(registration.userContext.split("\n").at(-1)!).severityRubric,
-    ).toEqual(saved);
+    expect(registration.userContext).toBe("Review authorization.");
     expect(prompt).toContain(JSON.stringify({ severityRubric: saved }));
   },
 );

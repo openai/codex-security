@@ -1911,6 +1911,11 @@ Assessments contain `decision` (`assessed` or `excluded`), normalized `level`,
 the original `rubricLabel`, rationale, confidence, and a `reviewTrigger` for
 missing facts that could change the result. Exclusions have a null level.
 Finding/occurrence IDs and input hashes bind each assessment to its evidence.
+For the bundled or remote rubric, `rubricSha256` hashes the exact UTF-8 Markdown
+and `rubricRevision` identifies the version. Custom documents have no assigned
+revision. A single document uses the hash of its extracted text. Multiple
+documents use the hash of the ordered JSON array of their extracted texts.
+Older results can contain the document-array hash even for a single rubric.
 
 Successful assessments checkpoint immediately in local SQLite. Retries reuse
 matching evidence, rubric, context hashes, and classification run count; failed/canceled runs keep completed

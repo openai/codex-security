@@ -199,8 +199,7 @@ export async function runHostedScan(
   const input = HostedScanInputSchema.parse(value);
   const context = {
     ...(await prepareHostedScan(input, options.signal)),
-    severityRubric:
-      input.severityRubric ?? (await getDefaultSeverityRubric(options)),
+    severityRubric: input.severityRubric,
   };
   let execution: ScanExecutionResult | undefined;
   let request: ScanExecutionRequest | undefined;
@@ -257,6 +256,7 @@ export async function runHostedScan(
     ...(execution === undefined ? {} : { execution }),
   });
   try {
+    context.severityRubric ??= await getDefaultSeverityRubric(options);
     const result = await client.run(context.repository, {
       target:
         context.scope.paths[0] === "."
@@ -320,6 +320,7 @@ export async function runHostedScan(
     return {
       ...base(),
       status: "completed" as const,
+      severityRubric: context.severityRubric,
       ...(result.ownerSuggestionsError === undefined
         ? {}
         : { ownerSuggestionsError: result.ownerSuggestionsError }),

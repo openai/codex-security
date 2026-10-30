@@ -103,7 +103,16 @@ test.each([
         ? config.markdown
         : defaultSeverityRubric;
     expect(request).toHaveBeenCalledTimes(optIn === "1" && !custom ? 1 : 0);
-    expect(result.rubricSha256).toBe(workflowDigest([markdown]));
+    expect(result.rubricSha256).toBe(
+      createHash("sha256").update(markdown).digest("hex"),
+    );
+    expect(result.rubricRevision).toBe(
+      custom
+        ? undefined
+        : optIn === "1"
+          ? config.revision
+          : rubricSource.bundledSeverityRubric.revision,
+    );
     for (const call of calls)
       expect(JSON.parse(call.prompt.split("\n\n").at(-1)!).rubric).toEqual([
         markdown,
@@ -137,6 +146,17 @@ test("reclassification freezes one shared default across independent reviews", a
   expect(resolve).not.toHaveBeenCalled();
 });
 
+test("rubric directories retain the ordered document digest without a revision", async () => {
+  const directory = await temporaryDirectory();
+  await writeFile(join(directory, "01.md"), "First policy");
+  await writeFile(join(directory, "02.md"), "Second policy");
+  const result = await classifySeverity([], { rubricPath: directory });
+  expect(result.rubricSha256).toBe(
+    workflowDigest(["First policy", "Second policy"]),
+  );
+  expect(result.rubricRevision).toBeUndefined();
+});
+
 test("without a rubric runs three independent reviews with the bundled fallback policy", async () => {
   const { codex, calls } = fakeCodex(assessed);
   const original = structuredClone(finding);
@@ -146,7 +166,10 @@ test("without a rubric runs three independent reviews with the bundled fallback 
   expect(JSON.parse(calls[0]!.prompt.split("\n\n").at(-1)!).rubric).toEqual([
     defaultSeverityRubric,
   ]);
-  expect(result.rubricSha256).toBe(workflowDigest([defaultSeverityRubric]));
+  expect(result.rubricSha256).toBe(rubricSource.bundledSeverityRubric.sha256);
+  expect(result.rubricRevision).toBe(
+    rubricSource.bundledSeverityRubric.revision,
+  );
   expect(result.assessments[0]).toMatchObject({
     findingId: finding.findingId,
     occurrenceId: finding.occurrenceId,

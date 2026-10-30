@@ -1283,10 +1283,8 @@ async function testCliDeepScanEngine({
       .update("# Severity\nUse the supplied evidence.\n")
       .digest("hex"),
   };
-  const userContext = [
-    "  Review café authentication.\r\nPreserve exact context.\t",
-    JSON.stringify({ severityRubric }),
-  ].join("\n\n");
+  const userContext =
+    "  Review café authentication.\r\nPreserve exact context.\t";
   const knowledgeBase = path.join(canonicalRoot, "knowledge-base");
   await mkdir(knowledgeBase);
   await writeFile(
@@ -1396,6 +1394,7 @@ async function testCliDeepScanEngine({
     assert.equal(entry.hasExpectedApiKey, true);
     assert.equal(entry.knowledgeBase, knowledgeBase);
     const context = discoveryPromptContext(entry.stdin);
+    assert.deepEqual(context.severityRubric, severityRubric);
     if (context.workerLabel) {
       assert.deepEqual(context.includePaths, paths);
       assert.equal(context.userContext, userContext);

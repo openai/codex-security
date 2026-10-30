@@ -2,11 +2,10 @@
 export const defaultSeverityRubric = `# Severity guidance
 
 Judge the attacker's actual starting access, the security boundary crossed, and
-the additional unauthorized harm. Use the supplied report and evidence; do not
-perform new validation. Keep confidence separate from severity and identify the
-missing fact that could change the assessment. Missing proof alone does not
-establish that a broader attack is impossible; do not invent an attack path or
-downgrade merely because exploitation was not demonstrated.
+the additional unauthorized harm. Keep confidence separate from severity and
+identify the missing fact that could change the assessment. Missing proof alone
+does not establish that a broader attack is impossible; do not invent an attack
+path or downgrade merely because exploitation was not demonstrated.
 
 ## Critical
 

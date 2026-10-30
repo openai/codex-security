@@ -2623,10 +2623,7 @@ export async function main(
             saved["recipe"],
             saved["scanId"],
             {
-              scanPrompt:
-                typeof saved["userContext"] === "string"
-                  ? saved["userContext"]
-                  : undefined,
+              savedUserContext: saved["userContext"],
             },
             dependencies.currentDirectory(),
           );
@@ -5455,10 +5452,7 @@ export async function main(
                       saved["recipe"],
                       scan.scanId,
                       {
-                        scanPrompt:
-                          typeof saved["userContext"] === "string"
-                            ? saved["userContext"]
-                            : undefined,
+                        savedUserContext: saved["userContext"],
                       },
                       currentDirectory,
                     );
@@ -7180,13 +7174,12 @@ async function prepareScanArgumentsFromRecipe(
   recipe: JsonValue | undefined,
   parentScanId: string,
   {
-    scanPrompt,
+    savedUserContext,
     scanPromptFile,
     validationPromptFile,
-  }: Pick<
-    ScanArguments,
-    "scanPrompt" | "scanPromptFile" | "validationPromptFile"
-  >,
+  }: Pick<ScanArguments, "scanPromptFile" | "validationPromptFile"> & {
+    savedUserContext?: JsonValue;
+  },
   directory: string,
 ): Promise<ScanArguments> {
   if (recipe === undefined || !isJsonObject(recipe)) {
@@ -7194,8 +7187,12 @@ async function prepareScanArgumentsFromRecipe(
       "This scan does not have a saved launch recipe.",
     );
   }
+  const scanPrompt =
+    typeof savedUserContext === "string" ? savedUserContext : undefined;
+  const requiresScanPrompt =
+    recipe["requiresScanPrompt"] === true && savedUserContext !== null;
   if (
-    recipe["requiresScanPrompt"] === true &&
+    requiresScanPrompt &&
     scanPrompt === undefined &&
     scanPromptFile === undefined
   ) {
@@ -7365,7 +7362,7 @@ async function prepareScanArgumentsFromRecipe(
     repository,
     directory,
   );
-  if (recipe["requiresScanPrompt"] === true && !prompts.scanPrompt?.trim()) {
+  if (requiresScanPrompt && !prompts.scanPrompt?.trim()) {
     throw new CodexSecurityError(
       "This scan used additional instructions. The --scan-prompt-file must not be empty.",
     );

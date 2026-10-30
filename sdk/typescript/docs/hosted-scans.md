@@ -82,10 +82,11 @@ rubric without fetching rubric configuration by default. Set
 options' `environment` to opt in to fetching the shared Statsig default once,
 with a three-second timeout and the bundled rubric as its fallback. Unset the
 variable or use `0` to disable fetching; only the exact value `1` enables it.
-An explicit host snapshot always takes precedence. The same snapshot appears in `execution.run`, the terminal
-receipt, and the saved scan recipe. All scan workers use that policy instead of
-the bundled plugin severity guidance. Hosts should verify this binding alongside
-the frozen checkout and retain it when reconciling or retrying a run.
+An explicit host snapshot always takes precedence. Once resolved, the same
+snapshot appears in `execution.run`, the terminal receipt, and the saved scan
+recipe. Workers use it to grade findings. Each scan workflow still determines
+how to validate a candidate and whether to report it. Hosts should verify the
+snapshot alongside the frozen checkout and retain it when retrying a run.
 
 Set `ownerSuggestions: true` to record ownership evidence during the existing
 scan execution. The scan agent may include an optional hint on each finding:
@@ -270,7 +271,9 @@ with `{id: <original run RPC id>, event}`. Invalid optional event payloads are
 ignored; mismatched request IDs are rejected. Stdout contains JSON-RPC only.
 
 Send `{"jsonrpc":"2.0","method":"cancel","params":{"id":"run"}}` with the
-original run request ID. The CLI aborts its executor signal, emits
+original run request ID. If cancellation arrives while the CLI is fetching the
+default rubric, it returns a canceled receipt without a rubric or execution.
+Once execution starts, the CLI aborts its executor signal, emits
 `execution.cancel` with `{requestId}`, and waits for the host's outcome/usage
 before returning a canceled result. The host must continue reading notifications
 while executing. SIGINT/SIGTERM, output errors/closure, and cancellation with

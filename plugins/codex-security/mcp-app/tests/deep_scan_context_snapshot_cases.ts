@@ -15,6 +15,7 @@ import type { CodexSdkWorkerExecutor as WorkerExecutor } from "../src/deep-scan/
 import type {
   CodexWorkerRequest,
   DeepScanWorkerKind,
+  DeepScanRunState,
 } from "../src/deep-scan/types.js";
 
 export async function testDeepScanContextSnapshots({
@@ -73,6 +74,7 @@ export async function testDeepScanContextSnapshots({
   try {
     const contexts: {
       userContext?: string;
+      severityRubric?: DeepScanRunState["severityRubric"];
       initialRemoteRubricSetting?: "1" | "0";
     }[] = [{ userContext: "Review authentication only." }, {}];
     for (const { initialRemoteRubricSetting, markdown, revision } of [
@@ -88,13 +90,12 @@ export async function testDeepScanContextSnapshots({
       },
     ] as const) {
       contexts.push({
-        userContext: JSON.stringify({
-          severityRubric: {
-            markdown,
-            revision,
-            sha256: createHash("sha256").update(markdown).digest("hex"),
-          },
-        }),
+        userContext: "Instructions edited before the first worker starts.",
+        severityRubric: {
+          markdown,
+          revision,
+          sha256: createHash("sha256").update(markdown).digest("hex"),
+        },
         initialRemoteRubricSetting,
       });
     }
@@ -103,7 +104,10 @@ export async function testDeepScanContextSnapshots({
     await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
     const outcomes = await Promise.allSettled(
       contexts.map(
-        async ({ userContext, initialRemoteRubricSetting }, index) => {
+        async (
+          { userContext, severityRubric, initialRemoteRubricSetting },
+          index,
+        ) => {
           const deepConfig = path.join(fixture.root, `deep-${index}.toml`);
           const maxTimeHours = 1.5 + index;
           await writeFile(deepConfig, `[deep_scan]\nmax_time_hours = 48\n`);
@@ -139,12 +143,62 @@ export async function testDeepScanContextSnapshots({
             }),
           );
           let store = new WorkbenchDeepScanStore(command);
+          let start:
+            { scanId: string } | { targetPath: string; userContext?: string } =
+            {
+              targetPath,
+              userContext,
+            };
+          if (severityRubric) {
+            assert.ok(userContext);
+            await writeFile(
+              deepConfig,
+              `[deep_scan]\nmax_time_hours = ${maxTimeHours}\nsubagents = ${index}\n`,
+            );
+            const scanDir = path.join(fixture.root, `registered-${index}`);
+            await mkdir(scanDir, { mode: 0o700 });
+            const { scanId } = await command(
+              [
+                "register-cli-scan",
+                "--repository",
+                targetPath,
+                "--scan-dir",
+                scanDir,
+                "--registration-json-stdin",
+              ],
+              JSON.stringify({
+                recipe: {
+                  repository: targetPath,
+                  mode: "deep",
+                  target: { kind: "repository", paths: [] },
+                  config: {},
+                  severityRubric,
+                },
+                userContext: "Original user instructions.",
+              }),
+            );
+            await command([
+              "set-scan-thread",
+              "--scan-id",
+              scanId,
+              "--thread-id",
+              threadId,
+            ]);
+            await command([
+              "update-scan-context",
+              "--scan-id",
+              scanId,
+              "--thread-id",
+              threadId,
+              "--user-context",
+              userContext,
+            ]);
+            start = { scanId };
+          }
           let run = await store.begin({
-            targetPath,
-            scope: ".",
+            ...start,
             threadId,
-            userContext,
-            projectConfigPath,
+            projectConfigPath: severityRubric ? undefined : projectConfigPath,
             scanRoot: path.join(fixture.root, "scans"),
           });
           const createdAt = run.createdAt;
@@ -297,6 +351,18 @@ export async function testDeepScanContextSnapshots({
             const context = JSON.parse(
               fresh.invocation.stdin.match(/```json\n([\s\S]*?)\n```/)![1],
             );
+            assert.deepEqual(context.severityRubric, severityRubric);
+            if (severityRubric) {
+              assert.ok(
+                resumed.invocation.stdin.includes(
+                  JSON.stringify({ severityRubric }),
+                ),
+              );
+              assert.equal(
+                fresh.invocation.stdin.includes("Original user instructions."),
+                false,
+              );
+            }
             if (fresh.kind === "discovery") {
               assert.equal(context.userContext, userContext ?? null);
               assert.equal(context.scanId, run.scanId);

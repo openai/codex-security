@@ -99,6 +99,7 @@ EXPECTED_MIGRATIONS = [
     (55, "retain undelivered headless deep scan results"),
     (56, "recover unfinished legacy headless deep scans"),
     (57, "freeze stopped scan checkpoint selections"),
+    (58, "record classification rubric provenance"),
 ]
 
 

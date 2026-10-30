@@ -33,6 +33,7 @@ export type SeverityCheckpoint =
       findingIds: string[];
       assessedAt: string;
       rubricSha256: string | null;
+      rubric?: { sha256: string | null; revision?: number };
       knowledgeBaseSha256: string | null;
       classificationRuns?: number;
     }
@@ -94,14 +95,15 @@ export function severityCheckpoint(
       database
         .prepare(
           `INSERT INTO scan_severity_classifications (
-            scan_id, finding_ids_json, assessed_at, rubric_sha256, knowledge_base_sha256, classification_runs
-          ) VALUES (?, ?, ?, ?, ?, ?)
+            scan_id, finding_ids_json, assessed_at, rubric_sha256, knowledge_base_sha256, classification_runs, rubric_binding_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(scan_id) DO UPDATE SET
             finding_ids_json = excluded.finding_ids_json,
             assessed_at = excluded.assessed_at,
             rubric_sha256 = excluded.rubric_sha256,
             knowledge_base_sha256 = excluded.knowledge_base_sha256,
-            classification_runs = excluded.classification_runs`,
+            classification_runs = excluded.classification_runs,
+            rubric_binding_json = excluded.rubric_binding_json`,
         )
         .run(
           payload.scanId,
@@ -110,6 +112,9 @@ export function severityCheckpoint(
           payload.rubricSha256,
           payload.knowledgeBaseSha256,
           payload.classificationRuns ?? null,
+          payload.rubric === undefined
+            ? null
+            : stringifyJson(payload.rubric, 0),
         );
       // Cache hits are not saved again by the classifier. Keep each scan's own assessments.
       database
@@ -208,16 +213,17 @@ export function readSeverityClassification(
           .get()
       )
         return {};
-      const hasRunCount = database
+      const columns = database
         .prepare("PRAGMA table_info(scan_severity_classifications)")
         .all()
-        .some((column) => column.name === "classification_runs");
+        .map((column) => column.name);
       const row = database
         .prepare(
           `SELECT json_object(
             'findingIds', json(finding_ids_json), 'assessedAt', assessed_at,
             'rubricSha256', rubric_sha256, 'knowledgeBaseSha256', knowledge_base_sha256
-            ${hasRunCount ? ", 'classificationRuns', classification_runs" : ""}
+            ${columns.includes("classification_runs") ? ", 'classificationRuns', classification_runs" : ""}
+            ${columns.includes("rubric_binding_json") ? ", 'rubric', json(rubric_binding_json)" : ""}
           ) AS value FROM scan_severity_classifications WHERE scan_id = ?`,
         )
         .get(scanId);

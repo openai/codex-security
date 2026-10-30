@@ -22,6 +22,8 @@ import {
 } from "../src/classify-severity.js";
 import { Database } from "bun:sqlite";
 import { loadContract } from "../src/contract.js";
+import { workflowDigest } from "../src/finding-workflow.js";
+import { bundledSeverityRubric } from "../src/severity-rubric.js";
 import type { JsonObject } from "../src/config.js";
 import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
 import { prepareScanPublication } from "../src/publication.js";
@@ -541,13 +543,20 @@ test("migration leaves unindexed legacy assessments incomplete until reclassifie
     { environment, codex: recordingClassifier().codex },
   );
   query(environment, "DROP TABLE scan_severity_assessments");
+  query(
+    environment,
+    "ALTER TABLE scan_severity_classifications DROP COLUMN rubric_binding_json",
+  );
   for (const table of [
     "finding_severity_assessments",
     "scan_severity_classifications",
   ]) {
     query(environment, `ALTER TABLE ${table} DROP COLUMN classification_runs`);
   }
-  query(environment, "DELETE FROM schema_migrations WHERE version IN (43, 52)");
+  query(
+    environment,
+    "DELETE FROM schema_migrations WHERE version IN (43, 52, 58)",
+  );
   expect(
     await readScanSeverityClassification(
       first.scanDirectory,
@@ -556,7 +565,12 @@ test("migration leaves unindexed legacy assessments incomplete until reclassifie
       undefined,
       environment,
     ),
-  ).toEqual({ ...classification, classificationRuns: undefined });
+  ).toEqual({
+    ...classification,
+    classificationRuns: undefined,
+    rubricRevision: undefined,
+    rubricSha256: workflowDigest([bundledSeverityRubric.markdown]),
+  });
   expect(
     query(
       environment,
@@ -964,7 +978,7 @@ test("migrates existing databases without changing findings and reads older stat
   query(environment, "DROP TABLE scan_severity_classifications");
   query(
     environment,
-    "DELETE FROM schema_migrations WHERE version IN (41, 43, 52)",
+    "DELETE FROM schema_migrations WHERE version IN (41, 43, 52, 58)",
   );
   expect(
     (
@@ -1061,7 +1075,7 @@ test("default rubric replaces legacy inherited assessments and respects custom p
   }
   query(
     environment,
-    "UPDATE scan_severity_classifications SET rubric_sha256 = NULL",
+    "UPDATE scan_severity_classifications SET rubric_sha256 = NULL, rubric_binding_json = NULL",
   );
   const legacy = await readScanSeverityClassification(
     scanDirectory,
@@ -1076,13 +1090,18 @@ test("default rubric replaces legacy inherited assessments and respects custom p
   calls.length = 0;
   const result = await classifyScanDirectorySeverity(scanDirectory, options);
   expect(calls).toHaveLength(6);
-  expect(result.rubricSha256).toMatch(/^[a-f0-9]{64}$/u);
+  expect(result.rubricSha256).toBe(bundledSeverityRubric.sha256);
+  expect(result.rubricRevision).toBe(bundledSeverityRubric.revision);
   expect(
     result.assessments.every(
       (a) => a.source === "rubric" && a.level === "medium",
     ),
   ).toBe(true);
   calls.length = 0;
+  query(
+    environment,
+    "UPDATE scan_severity_classifications SET rubric_binding_json = NULL",
+  );
   expect(
     (await classifyScanDirectorySeverity(scanDirectory, options)).assessments,
   ).toEqual(result.assessments);
