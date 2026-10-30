@@ -5,7 +5,10 @@ import type { ScanResults } from './results.js';
 
 export function plain(value: string, limit?: number): string {
   const text = value.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, '');
-  return text.slice(0, limit);
+  const prefix = text.slice(0, limit);
+  // A two-unit code point starting at the last included unit spans the cut.
+  const codePoint = text.codePointAt(prefix.length - 1);
+  return codePoint !== undefined && codePoint > 0xffff ? prefix.slice(0, -1) : prefix;
 }
 function html(value: string): string {
   // Inline HTML still parses Markdown; entities keep report fields literal.
@@ -46,7 +49,7 @@ export function resultSummary(result: ScanResults, inputs: Inputs, target: Targe
     parts.push(`<h3>${finding.severity.toUpperCase()}: ${esc(finding.title, 200)}</h3>\n\n<code>${esc(finding.path ?? 'No source location')}:${finding.startLine ?? '?'}</code>\n\n<pre>${esc(finding.summary, 1200)}</pre>`);
   }
   if (result.findings.length > 30) parts.push(`${result.findings.length - 30} additional findings are available in the JSON/SARIF reports.`);
-  parts.push('Use the action outputs for full JSON, coverage, and SARIF. Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.');
+  parts.push('Use the action outputs for full JSON and SARIF. Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.');
   // GitHub check output is byte bounded. Truncate at UTF-8 boundaries.
   return Buffer.from(parts.join('\n\n')).subarray(0, 58_000).toString('utf8').replace(/\uFFFD$/, '');
 }

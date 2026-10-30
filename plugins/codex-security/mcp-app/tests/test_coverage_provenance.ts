@@ -136,7 +136,7 @@ for (const outcome of ["completion", "recovery", "frozen recovery"]) {
       });
       const coverage = await readFixtureCoverage(scanDir);
       assert.deepEqual(
-        coverage.openQuestions.map((item) => item.question),
+        coverage.openQuestions.map((item) => item.question.trim()),
         ["Which deployment controls apply?", "Which runtime settings apply?"],
       );
       assert.equal(

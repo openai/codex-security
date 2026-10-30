@@ -263,11 +263,16 @@ Generated PRs leave the disclosure attestations unchecked for maintainer review.
 3. Summarize the changes a user will notice. Call out required migration or
    compatibility work, link relevant public documentation, and leave the
    pull-request inventory to the generated section.
+   The release maintainer checks the [published guides and examples](https://learn.chatgpt.com/docs/security)
+   against the highlights and upgrade notes and prepares a docs PR for any that need updating.
 4. Open a pull request with a strict Conventional Commit title such as
    `chore(release): 0.2.0`.
-5. Run the checks required by the changed files and record the results in the
-   pull request. Do not merge until required CI, review, and public disclosure
-   checks pass on the current commit.
+5. Run the checks required by the changed files and record the initial results
+   in the PR description. Post later manual test results in a comment or review
+   with the tested commit SHA. Editing the description to update status can
+   trigger CI. Before merging, confirm that required CI passed in the **Checks**
+   tab and that review and the PR's public disclosure checklist cover the current
+   commit.
 
 Review the summary with the same standard as product documentation. Keep it
 specific, describe behavior before implementation, and do not include private
@@ -280,11 +285,13 @@ for that exact commit:
 
 1. `node-release-cut` verifies that the version increased, checks the reviewed
    summary, and creates the exact `npm-vX.Y.Z` tag.
-2. `node-release` installs the committed dependency graph, tests and packs the
-   package, publishes it to npm, and records npm provenance. Three TypeScript
-   test shards and the MCP tests run in parallel with package verification.
-   Every shard and package check must pass before the protected npm job can
-   publish the verified archive.
+2. `node-release` installs the committed dependency graph and packs the
+   package. Three TypeScript test shards and the MCP tests run in parallel
+   with package verification.
+   After every shard and package check passes, approve the **npm** deployment
+   for **Publish npm and container images**. This authorizes the npm archive
+   and the matching container images built from the tagged release. The job
+   publishes the verified archive to npm with signed provenance.
 3. `node-github-release` verifies the public package, provenance, tag, and
    archive before publishing the GitHub release. It prepends the reviewed
    summary to GitHub's categorized notes.
@@ -327,8 +334,8 @@ registry errors fail immediately.
 do not prepare a release by editing or committing files there.
 
 The merged release PR receives one progress comment covering post-merge CI,
-release verification, protected npm approval, public-package provenance,
-installation checks, Action publication, and container approval and publication.
+release verification and approval, public-package provenance, installation
+checks, and Action and container publication. It links to any pending deployment.
 The main CI completion handler requests the first update for a merged release
 PR, including when CI fails. Subsequent updates link to the relevant workflows
 and track each publication stage. Each automatic release dispatch starts
@@ -357,31 +364,26 @@ The automated release is complete when npm and GitHub publication, exact-version
 install checks, and applicable Action and container publication have succeeded.
 The final job summarizes each result and identifies Marketplace publication as a
 separate step. A successful workflow does not confirm a Marketplace listing.
-The protected npm publication gates and immutable `npm-vX.Y.Z` tag remain in place.
 
 The npm package and CLI GitHub release become public before the installation and
 Action and container checks finish. Use the final workflow result before
 announcing that the automated release is complete.
 
-After the installed-package checks pass, `node-github-release` calls
-`container-release` with the verified npm version and source commit. Native
-binaries, Docker builds, OCI revision labels, and image tags all use that commit,
-including when the release is older than `main`. Publication still requires
-approval in the protected `container` environment. The final status waits for
-both architectures, public pulls, attestation, and stable tag promotion.
-Coordinated container publication starts at 0.5.0. Earlier releases use older
-container and native build contracts, so their recovery runs continue to publish
-npm and the Action without requiring this container pipeline. Sources without a
-Dockerfile also skip container publication.
+For new scanner releases, `node-github-release` publishes the matching Action
+before starting the Debian and Wolfi builders. The Action distribution records
+the runtime dependency lock used by both images with the verified npm tarball.
+Debian (amd64 and arm64) and Wolfi (amd64) use the tagged release recipes.
+After the native builds pass, the coordinator publishes the tested images
+under the release approval and verifies both public version tags.
 
-To publish a missing container for an existing npm release, dispatch
-`node-github-release` on `main` with its `npm-vX.Y.Z` tag and approve the container
-deployment after validation. Recovery verifies and reuses an existing container
-only when its version, source commit, architectures, attestation, public pull, and
-immutable tag checks pass. It does not rebuild or overwrite that version.
-Standalone `container-vX.Y.Z` and manual `container-release` triggers remain
-available.
-See [Container releases](docker/README.md) for publication and verification.
+To recover a missing image, dispatch `node-github-release` on `main` with the
+original `npm-vX.Y.Z` tag. The default backfill uses the release recipes.
+Publishing missing images for a historical npm-only approval, or using a
+different Wolfi recipe commit on request, requires a `container` approval.
+Releases from 0.5.0 with a Dockerfile but without coordinated Wolfi
+builds require only Debian. Earlier releases or releases without a Dockerfile
+skip containers. For retry instructions and independent Wolfi OS revisions, see
+[Container releases](docker/README.md#publishing).
 
 ## Publish to GitHub Marketplace
 
@@ -421,6 +423,8 @@ Check the published state before announcing the release:
 - The exact-version published installation checks succeeded.
 - For releases at or after 0.5.0 with a Dockerfile, container publication
   succeeded and the version tag is publicly pullable on Linux `amd64` and `arm64`.
+  For coordinated Wolfi releases, verify `X.Y.Z-wolfi-amd64` is publicly
+  pullable on Linux `amd64` as well.
 - For releases with the Action, `action-vX.Y.Z` points to the distribution
   commit recorded in its manifest, whose parent is the CLI release commit.
   Its companion GitHub Release contains the manifest and SBOM, links to the
@@ -435,6 +439,8 @@ Check the published state before announcing the release:
   Historical releases may have generated notes only.
 - Every merged pull request is included or has an intentional
   `skip-release-notes` label.
+- Once the documented version ships, publish any prepared docs updates and
+  verify the changed instructions on the live site.
 
 The `published-install-smoke` workflow checks each exact version during release
 publication. It also checks npm's current `latest` daily and on pull requests
@@ -458,6 +464,13 @@ from the repository. Omit the version to check `latest`.
 Do not retarget a release tag or publish a second package under the same
 version. The workflows are designed to recover from partial publication while
 keeping the original tag and package identity.
+
+When the package is already published, `node-release` requests **npm** approval
+for **Verify existing npm release**. This job verifies the original archive
+and its signed provenance. Container publication uses the approval from the
+run attempt that signed the package. If that attempt has no record of a
+combined approval, the coordinator requests **container** approval before
+publishing missing images.
 
 To retry GitHub publication, run `node-github-release` from `main` with the
 existing `npm-vX.Y.Z` tag. Supply the successful `node-release` run ID when

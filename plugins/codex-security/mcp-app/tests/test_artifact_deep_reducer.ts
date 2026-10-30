@@ -33,7 +33,7 @@ assert.equal(deepReductionInputSchema.safeParse(validReduction).success, true);
 assert.equal(
   deepReductionInputSchema.safeParse(workerDraft([])).success,
   false,
-  "Deep reducer submissions no longer accept coverage",
+  "Deep reducer submissions no longer accept reviewState",
 );
 assert.equal(
   deepReductionInputSchema.safeParse({ ...validReduction, resultPath: "/tmp" })
@@ -98,7 +98,7 @@ try {
     id: "worker-001",
     result: workerDraft([shared], {
       threatModel: { summary: "Requests may reach shared code." },
-      coverage: rejectedCoverage,
+      reviewState: rejectedCoverage,
     }),
   });
   const second = await createWorker({
@@ -218,7 +218,7 @@ try {
   assert.deepEqual(
     await readJson(outputRoot, "checkpoints", checkpointNames[0]),
     mergedWithSources,
-    "reducer checkpoints retain the accepted findings and scope without coverage",
+    "reducer checkpoints retain the accepted findings and scope without reviewState",
   );
 
   assert.deepEqual(
@@ -226,7 +226,7 @@ try {
       [first, second].map((worker) => readFile(worker.resultPath, "utf8")),
     ),
     originalWorkerArtifacts,
-    "reduction must not rewrite raw Standard worker coverage evidence",
+    "reduction must not rewrite raw Standard worker reviewState evidence",
   );
 
   const collision = {
@@ -411,16 +411,16 @@ try {
 
   for (const invalidCoverage of [
     undefined,
-    { ...workerDraft([]).coverage, deferred: "invalid" },
+    { ...workerDraft([]).reviewState, deferred: "invalid" },
   ]) {
     await writeJson(first.resultPath, {
       ...first.result,
-      coverage: invalidCoverage,
+      reviewState: invalidCoverage,
     });
     await assert.rejects(
       getCodexSecurityDeepReducerInputs(context),
-      /coverage/,
-      "Standard worker coverage remains required and validated before projection",
+      /reviewState/,
+      "Standard worker reviewState remains required and validated before projection",
     );
   }
 
@@ -648,7 +648,7 @@ function reduction(findings: Record<string, unknown>[], extra = {}) {
 }
 
 function withSourceRefs(worker: Awaited<ReturnType<typeof createWorker>>) {
-  const { coverage: _coverage, ...result } = worker.result;
+  const { reviewState: _coverage, ...result } = worker.result;
   return {
     ...result,
     findings: worker.result.findings.map(sourceReferences(worker)),

@@ -15,7 +15,7 @@ from test_deep_scan_successful_publication import (
 from test_deep_scan_successful_publication import (
     publication_scan as publication_scan,
 )
-from workbench_test_support import saved_draft, write_checkpoint
+from workbench_test_support import read_review_state, saved_draft, write_checkpoint
 
 
 @pytest.fixture
@@ -251,7 +251,7 @@ def test_deadline_resolves_worker_local_deferred_ids_before_scoping(
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
     complete(workbench_api, workbench_db, scan)
 
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert not any(item["reason"] == "Review pending." for item in coverage["deferred"])
 
 
@@ -279,7 +279,7 @@ def test_deadline_does_not_turn_invalid_worker_receipts_into_parent_artifacts(
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
     completed = complete(workbench_api, workbench_db, scan)
 
-    surface = json.loads((scan.scan_dir / "coverage.json").read_text())["surfaces"][0]
+    surface = read_review_state(workbench_db, scan.scan_dir)["surfaces"][0]
     assert surface["receiptRefs"] == []
     assert surface["disposition"] == "needs_follow_up"
     assert (
@@ -344,7 +344,7 @@ def test_deadline_preserves_worker_receipts_and_surface_links(
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
     complete(workbench_api, workbench_db, scan)
 
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert len(coverage["surfaces"]) == 3
     assert canonical_surface in coverage["surfaces"]
     sources = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"][
@@ -530,7 +530,7 @@ def test_unfinished_checkpoints_after_a_completed_reduction(
             item["remediation"] == duplicate["remediation"]
             for item in canonical["provenance"]["previousFindings"]
         )
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert any(item["reason"] == pending["reason"] for item in coverage["deferred"]) == (
         stop == "deadline"
     )
@@ -538,7 +538,7 @@ def test_unfinished_checkpoints_after_a_completed_reduction(
         stop == "deadline"
     )
     assert checkpoint.read_bytes() == source_bytes
-    names = ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    names = ("scan-manifest.json", "findings.json", "report.md")
     sealed = {name: (scan.scan_dir / name).read_bytes() for name in names}
     finish(workbench_api, workbench_db, scan, terminal_reason=reason)
     complete(workbench_api, workbench_db, scan)
@@ -664,7 +664,9 @@ def test_rejected_deadline_publication_does_not_leave_parent_observations(
         finish(workbench_api, workbench_db, scan, terminal_reason="capped")["status"] == "succeeded"
     )
     if existing_head:
-        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+        coverage = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"][
+            "reviewState"
+        ]
         assert any(item["reason"] == pending["reason"] for item in coverage["deferred"])
 
 
@@ -723,7 +725,7 @@ def test_zero_accepted_deadline_preserves_worker_checkpoint_links_and_receipts(
 
     assert finished["status"] == "succeeded"
     assert finished["completionSequence"] == 0
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert {row["id"] for row in coverage["surfaces"]} == {
         f"{worker_id}/api" for worker_id in workers
     }

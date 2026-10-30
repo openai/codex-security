@@ -4,23 +4,14 @@ from pathlib import Path
 
 from workbench_test_support import (
     create_saved_workspace,
+    empty_target_paths,
     start_delivered_scan,
     update_progress,
 )
 
 
-def test_usage_list_coverage_is_invalid(workbench_api):
-    from workbench_validation import _valid_measured_scan_usage
-
-    assert not _valid_measured_scan_usage(
-        {"coverage": ["complete"], "source": "codex_rollout", "threadCount": 0}
-    )
-
-
 def test_progress_preserves_phase_receipts_until_validation(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -76,9 +67,7 @@ def test_progress_preserves_phase_receipts_until_validation(tmp_path: Path) -> N
 
 
 def test_historical_preflight_issues_survive_progress_updates(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])

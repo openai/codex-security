@@ -114,7 +114,7 @@ export async function analyzeResults(options: ResultOptions): Promise<ScanResult
       result.errors.push(value.message);
       return result;
     }
-    if (!value?.manifest?.scan?.target || !Array.isArray(value?.findings?.findings) || !value?.coverage)
+    if (!value?.manifest?.scan?.target || !Array.isArray(value?.findings?.findings) || !(value?.review ?? value?.coverage))
       throw new Error();
   } catch {
     result.errors.push('CLI did not return a usable JSON scan result. See the CLI diagnostics.');
@@ -150,7 +150,7 @@ export async function analyzeResults(options: ResultOptions): Promise<ScanResult
   result.estimatedCost = value.cost?.estimatedUsd;
   result.estimatedCostRange = value.cost?.estimatedUsdRange;
   result.paths = {resultsDirectory: options.resultsDirectory, manifestPath: join(options.resultsDirectory, 'scan-manifest.json'),
-    jsonPath: join(options.resultsDirectory, 'findings.json'), coveragePath: join(options.resultsDirectory, 'coverage.json'), sarifPath: ''};
+    jsonPath: join(options.resultsDirectory, 'findings.json'), coveragePath: value.coverage ? join(options.resultsDirectory, 'coverage.json') : '', sarifPath: ''};
   const warnings: string[] = value.warnings ?? [];
   // Execution and severity-policy outcomes come from the CLI, not coverage notes.
   // Target-change warnings still prevent publication of a changed checkout.

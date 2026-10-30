@@ -99,6 +99,15 @@ const stoppedScanProbe = [
   "    legacy_manifest = json.loads(manifest_path.read_text(encoding='utf-8'))",
   "    legacy_manifest['scan']['status'] = 'completed'",
   "    legacy_manifest['scan'].pop('preservedSources', None)",
+  "    legacy_coverage = json.loads((plugin / 'examples' / 'legacy-completed-scan' / 'coverage.json').read_text())",
+  "    legacy_coverage.update(payload['coverage'], scanId=scan_id, mode='deep_repository')",
+  "    legacy_coverage['deferred'] = [{**item, 'id': item['candidateId']} for item in legacy_coverage['deferred']]",
+  "    legacy_bytes = json.dumps(legacy_coverage).encode()",
+  "    (scan_dir / 'coverage.json').write_bytes(legacy_bytes)",
+  "    legacy_manifest['scan'].pop('review', None)",
+  "    legacy_manifest['scan'].pop('mode', None)",
+  "    legacy_manifest['scan']['coverageRef'] = 'coverage.json'",
+  "    legacy_manifest['scan']['artifacts'].append({'path': 'coverage.json', 'mediaType': 'application/json', 'sha256': hashlib.sha256(legacy_bytes).hexdigest()})",
   "    manifest_path.write_text(json.dumps(legacy_manifest, indent=2, sort_keys=True) + '\\n', encoding='utf-8')",
   "    os.environ.update(environment)",
   "    sys.path.insert(0, str(plugin / 'scripts'))",
@@ -249,7 +258,6 @@ test("retries a legacy stopped seal after transient publication failure", () => 
     [`checkpoints/${recovered.head.checkpoint}`]: recovered.snapshotDigest,
     [recovered.headPath]: recovered.headDigest,
   });
-  expect(recovered.snapshot.coverage).not.toHaveProperty("completeness");
   expect(recovered.snapshot).toMatchObject({
     scanId: recovered.scanId,
     findings: [
@@ -259,7 +267,7 @@ test("retries a legacy stopped seal after transient publication failure", () => 
         }),
       }),
     ],
-    coverage: {
+    reviewState: {
       deferred: expect.arrayContaining([
         expect.objectContaining({ candidateId: "pending-validation" }),
       ]),

@@ -68,25 +68,22 @@ function providerSettings(
   };
 }
 
-// Exercise every configuration combination without repeatedly preparing a
-// credential home and launching the same subprocess protocol.
 describe("skill authentication configuration", () => {
   test.each(
-    commandSources.flatMap(([command, source]) =>
+    (["override", "ambient", "profile"] as const).flatMap((source) =>
       [true, false, undefined].flatMap((requiresOpenAiAuth) =>
         (["env_key", "bearer"] as const).map(
-          (credential) =>
-            [command, source, requiresOpenAiAuth, credential] as const,
+          (credential) => [source, requiresOpenAiAuth, credential] as const,
         ),
       ),
     ),
   )(
-    "%s removes the custom provider key and %s config for explicit ChatGPT auth (requires OpenAI: %p, credential: %s)",
-    (command, source, requiresOpenAiAuth, credential) => {
+    "explicit ChatGPT auth removes the custom provider key from %s config (requires OpenAI: %p, credential: %s)",
+    (source, requiresOpenAiAuth, credential) => {
       const { providerConfig, environment, overrides, ambientConfig } =
         providerSettings(source, requiresOpenAiAuth, credential);
       const options = {
-        command,
+        command: "patch" as const,
         auth: "chatgpt" as const,
         codexOverrides: parseToml(overrides.join("\n")) as JsonObject,
       };

@@ -1,3 +1,4 @@
+import { readReviewState } from "./support/review-state.js";
 import { once } from "node:events";
 import { createServer, type Socket } from "node:net";
 import {
@@ -68,7 +69,11 @@ import {
   matchScanFindingsInternal,
 } from "../src/scan-comparison.js";
 import { normalizeTarget } from "../src/targets.js";
-import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
+import {
+  copyCompletedScan,
+  copyCredentialTestPlugin,
+  PLUGIN_ROOT,
+} from "./plugin-root.js";
 import {
   mockScanRegistration,
   mockWorkbench,
@@ -98,7 +103,7 @@ import { pythonExecutable, nodeCommand, gitText } from "./support/shell.js";
 import { fail, rejecting, throwing } from "./support/errors.js";
 import { mockFs, restoreFs } from "./support/module-mocks.js";
 
-const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
+const EXAMPLE = join(PLUGIN_ROOT, "examples", "legacy-completed-scan");
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
 
@@ -1915,14 +1920,8 @@ describe("CodexSecurity orchestration", () => {
   test.each(["revision", "registration", "cancellation", "mock"] as const)(
     "keeps existing output when %s prevents scan registration",
     async (failurePoint) => {
-      const root = await temporaryDirectory();
-      const repository = join(root, "repository");
-      const codexHome = join(root, "codex-home");
-      const output = join(root, "scan");
-      await mkdir(repository);
-      await mkdir(codexHome);
-      await mkdir(output, { mode: 0o700 });
-      await writeFile(join(output, "previous.txt"), "previous scan\n");
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      await writeFile(join(scanDir, "previous.txt"), "previous scan\n");
       const cancellation = new AbortController();
       const client = new TestClient(
         { pluginPath: PLUGIN_ROOT },
@@ -1944,13 +1943,13 @@ describe("CodexSecurity orchestration", () => {
       try {
         await expect(
           client.run(repository, {
-            outputDir: output,
+            outputDir: scanDir,
             archiveExisting: true,
             signal: cancellation.signal,
             mock: failurePoint === "mock",
           }),
         ).rejects.toThrow();
-        expect(await readFile(join(output, "previous.txt"), "utf8")).toBe(
+        expect(await readFile(join(scanDir, "previous.txt"), "utf8")).toBe(
           "previous scan\n",
         );
         expect(
@@ -1967,14 +1966,8 @@ describe("CodexSecurity orchestration", () => {
   test.each([false, true])(
     "archives accepted output before starting, cancellation=%p",
     async (cancelRegistration) => {
-      const root = await temporaryDirectory();
-      const repository = join(root, "repository");
-      const codexHome = join(root, "codex-home");
-      const output = join(root, "scan");
-      await mkdir(repository);
-      await mkdir(codexHome);
-      await mkdir(output, { mode: 0o700 });
-      await writeFile(join(output, "previous.txt"), "previous scan\n");
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      await writeFile(join(scanDir, "previous.txt"), "previous scan\n");
       const cancellation = new AbortController();
       const notifications: string[] = [];
       let archived: string | undefined;
@@ -2014,7 +2007,7 @@ describe("CodexSecurity orchestration", () => {
 
       await expect(
         client.run(repository, {
-          outputDir: output,
+          outputDir: scanDir,
           archiveExisting: true,
           signal: cancellation.signal,
           onOutputDirReady: () => {
@@ -2034,13 +2027,13 @@ describe("CodexSecurity orchestration", () => {
       expect(observerErrors).toEqual([
         ["onOutputArchived", "archive observer exploded"],
       ]);
-      expect(archived?.startsWith(`${output}.previous-`)).toBe(true);
+      expect(archived?.startsWith(`${scanDir}.previous-`)).toBe(true);
       expect(registration).toContain("--archive-existing");
       expect(registration).not.toContain("--archived-scan-dir");
       expect(await readFile(join(archived!, "previous.txt"), "utf8")).toBe(
         "previous scan\n",
       );
-      await expect(stat(output)).resolves.toBeDefined();
+      await expect(stat(scanDir)).resolves.toBeDefined();
       await client.close();
     },
   );
@@ -2058,9 +2051,7 @@ describe("CodexSecurity orchestration", () => {
   )(
     "cancels archived registration at $boundary via $cancel, mode=$mode",
     async ({ boundary, cancel, mode }) => {
-      const { root, repository, codexHome } = await runtimeDirectories();
-      const output = join(root, "scan");
-      await mkdir(output, { mode: 0o700 });
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
       const python = pythonExecutable()!;
       const environment = {
         PATH: process.env["PATH"],
@@ -2085,7 +2076,7 @@ describe("CodexSecurity orchestration", () => {
           "--repository",
           repository,
           "--scan-dir",
-          output,
+          scanDir,
           "--recipe-json",
           JSON.stringify({
             repository,
@@ -2102,7 +2093,7 @@ describe("CodexSecurity orchestration", () => {
           "--message",
           "synthetic stopped scan",
         ]);
-        await writeFile(join(output, "previous.txt"), "previous scan\n");
+        await writeFile(join(scanDir, "previous.txt"), "previous scan\n");
       }
       const connections = new Set<Socket>();
       let cleaningUp = false;
@@ -2117,43 +2108,51 @@ describe("CodexSecurity orchestration", () => {
       if (address === null || typeof address === "string")
         throw new Error("Missing fixture port");
       const pluginRoot = join(root, "controlled-plugin");
-      await cp(PLUGIN_ROOT, pluginRoot, { recursive: true });
+      for (const file of [
+        ".codex-plugin/plugin.json",
+        "skills/security-scan/SKILL.md",
+        "schemas/findings.schema.json",
+      ]) {
+        await cp(join(PLUGIN_ROOT, file), join(pluginRoot, file));
+      }
+      await mkdir(join(pluginRoot, "scripts"), { recursive: true });
+      const afterRename = boundary === "commit" || boundary === "rollback";
+      const hook = afterRename
+        ? "insert_running_scan"
+        : "directory_snapshot_regular_file_count";
+      const framedArgument = "--fixture-message=出力\0literal\nsecond line";
       await writeFile(
         join(pluginRoot, "scripts", "workbench_db.py"),
-        [
-          "import io, runpy, socket, sys",
-          "from pathlib import Path",
-          `workbench = runpy.run_path(${JSON.stringify(join(PLUGIN_ROOT, "scripts", "workbench_db.py"))})`,
-          "namespace = workbench['main'].__globals__",
-          "def pause():",
-          `    with socket.create_connection(('127.0.0.1', ${address.port})) as connection:`,
-          "        connection.sendall(b'ready')",
-          "        if connection.recv(1) == b'p':",
-          "            connection.sendall(b'alive')",
-          "            connection.recv(1)",
-          "def main(**kwargs):",
-          "    sys.stdout.reconfigure(newline='\\r\\n')",
-          "    if sys.argv[1:2] == ['register-cli-scan'] and '--help' not in sys.argv:",
-          ...(mode === "real"
-            ? [
-                `        sys.argv.remove(${JSON.stringify("--fixture-message=出力\0literal\nsecond line")})`,
-              ]
-            : []),
-          "        payload = sys.stdin.buffer.read()",
-          `        Path(${JSON.stringify(join(root, "registration-input.json"))}).write_bytes(payload)`,
-          '        sys.stdin = io.TextIOWrapper(io.BytesIO(payload), encoding="utf-8")',
-          `        original = namespace[${JSON.stringify(boundary === "commit" || boundary === "rollback" ? "insert_running_scan" : "directory_snapshot_regular_file_count")}]`,
-          "        def paused(*args, **options):",
-          "            pause()",
-          ...(boundary === "rollback"
-            ? [
-                "            raise RuntimeError('synthetic registration failure after rename')",
-              ]
-            : ["            return original(*args, **options)"]),
-          `        namespace[${JSON.stringify(boundary === "commit" || boundary === "rollback" ? "insert_running_scan" : "directory_snapshot_regular_file_count")}] = paused`,
-          "    workbench['main'](**kwargs)",
-          "if __name__ == '__main__': main()",
-        ].join("\n"),
+        `import io, runpy, socket, sys
+from pathlib import Path
+
+workbench = runpy.run_path(${JSON.stringify(join(PLUGIN_ROOT, "scripts", "workbench_db.py"))})
+namespace = workbench["main"].__globals__
+original = namespace["${hook}"]
+
+def paused(*args, **options):
+    with socket.create_connection(("127.0.0.1", ${address.port})) as connection:
+        connection.sendall(b"ready")
+        if connection.recv(1) == b"p":
+            connection.sendall(b"alive")
+            connection.recv(1)
+    if ${JSON.stringify(boundary)} == "rollback":
+        raise RuntimeError("synthetic registration failure after rename")
+    return original(*args, **options)
+
+def main(**kwargs):
+    sys.stdout.reconfigure(newline="\\r\\n")
+    if sys.argv[1:2] == ["register-cli-scan"] and "--help" not in sys.argv:
+        sys.argv.remove(${JSON.stringify(framedArgument)})
+        payload = sys.stdin.buffer.read()
+        Path(${JSON.stringify(join(root, "registration-input.json"))}).write_bytes(payload)
+        sys.stdin = io.TextIOWrapper(io.BytesIO(payload), encoding="utf-8")
+        namespace["${hook}"] = paused
+    workbench["main"](**kwargs)
+
+if __name__ == "__main__":
+    main()
+`,
       );
       let submitted: string | undefined;
       const registration: typeof runWorkbench = async (
@@ -2161,15 +2160,12 @@ describe("CodexSecurity orchestration", () => {
         args,
         input,
       ) => {
-        if (args[0] === "register-cli-scan") {
-          submitted = `\n${JSON.stringify(JSON.parse(input!), null, 2)}\r\n`;
-          input = submitted;
-          // The custom wrapper accepts this text argument before calling the
-          // real workbench, exercising framed argv at each archive boundary.
-          if (mode === "real")
-            args = [...args, "--fixture-message=出力\0literal\nsecond line"];
-        }
-        return runWorkbench(options, args, input);
+        if (args[0] !== "register-cli-scan")
+          return runWorkbench(options, args, input);
+        submitted = `\n${JSON.stringify(JSON.parse(input!), null, 2)}\r\n`;
+        // The custom wrapper accepts this text argument before calling the
+        // real workbench, exercising framed argv at each archive boundary.
+        return runWorkbench(options, [...args, framedArgument], submitted);
       };
       const controller = new AbortController();
       const client = new TestClient(
@@ -2195,7 +2191,7 @@ describe("CodexSecurity orchestration", () => {
       const deadline = guard.signal;
       const connected = once(server, "connection", { signal: deadline });
       const options = {
-        outputDir: output,
+        outputDir: scanDir,
         archiveExisting: true,
         signal: controller.signal,
       };
@@ -2256,7 +2252,7 @@ describe("CodexSecurity orchestration", () => {
         });
         if (cancel === "close") closing = client.close();
         else controller.abort();
-        if (boundary === "commit" || boundary === "rollback") {
+        if (afterRename) {
           // This child has already renamed the directory. A request/response
           // proves it remains alive after cancellation until we let it settle.
           const alive = once(socket, "data", { signal: deadline });
@@ -2280,7 +2276,7 @@ describe("CodexSecurity orchestration", () => {
         );
         if (previousId !== undefined) {
           const previous = scans.find((scan) => scan.scanId === previousId)!;
-          expect(previous.scanDir === output).toBe(boundary !== "commit");
+          expect(previous.scanDir === scanDir).toBe(boundary !== "commit");
           expect(
             await readFile(join(previous.scanDir, "previous.txt"), "utf8"),
           ).toBe("previous scan\n");
@@ -4287,7 +4283,7 @@ describe("CodexSecurity orchestration", () => {
         "prompt captured",
       );
       expect(prompt).toContain(
-        `Use exactly "${scanId}" as the scan ID in the manifest, findings, and coverage.`,
+        `Use exactly "${scanId}" as the scan ID in the manifest and findings.`,
       );
       expect(prompt).not.toContain("$CODEX_SECURITY_SCAN_ID");
       if (mode === "deep") {
@@ -5160,7 +5156,9 @@ describe("CodexSecurity orchestration", () => {
       } else if (scanFails) {
         await expect(result).rejects.toThrow("The scan failed.");
       } else {
-        expect((await result).coverage.deferred).toEqual([
+        expect(
+          (await readReviewState((await result).scanDir)).deferred,
+        ).toEqual([
           {
             id: "runtime-note",
             reason: "Optional runtime reproduction was unavailable.",
@@ -5559,7 +5557,11 @@ describe("CodexSecurity orchestration", () => {
             cost: { estimatedUsd: 0.0036 },
           });
         else if (scenario === "canceled")
-          await expect(scan).rejects.toBeInstanceOf(ScanInterruptedError);
+          await expect(scan).rejects.toMatchObject({
+            name: ScanInterruptedError.name,
+            message: `Codex Security scan was interrupted; output directory: ${scanDir}.`,
+            scanDir,
+          });
         else
           await expect(scan).rejects.toMatchObject({
             name: ScanCostLimitExceededError.name,
@@ -5670,7 +5672,7 @@ describe("CodexSecurity orchestration", () => {
       "fail-scan",
       "--scan-id",
       "scan_example_001",
-      `--message=Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at ${scanDir}.`,
+      `--message=Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); scan output directory: ${scanDir}.`,
       "--cost-json",
       JSON.stringify(cost),
     ]);
@@ -5782,12 +5784,12 @@ describe("CodexSecurity orchestration", () => {
           }
         } else {
           const recovered = await result;
-          expect(recovered.coverage).not.toHaveProperty("completeness");
+          expect(recovered.review).not.toHaveProperty("status");
           expect(recovered.findings.findings).toHaveLength(1);
           expect(recovered.threadId).toBe("scan-thread");
           expect(recovered.cost?.estimatedUsd).toBe(0.00488);
           expect(warnings).toEqual([
-            `Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at ${scanDir}.`,
+            `Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); scan output directory: ${scanDir}.`,
           ]);
           expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
           expect(
@@ -6274,9 +6276,10 @@ describe("CodexSecurity orchestration", () => {
           process.platform === "win32" ? "junction" : "dir",
         );
       }
+      const sessions = new Map<string, string>();
       const client = new TestClient(
         {
-          pluginPath: PLUGIN_ROOT,
+          pluginPath: await copyCredentialTestPlugin(root),
           codexOverrides: {
             model,
             ...(provider === undefined
@@ -6329,9 +6332,12 @@ describe("CodexSecurity orchestration", () => {
                     ? "synthetic-transient-key"
                     : undefined,
                 );
-                await writeUsageSession(codexHome, "persistent-thread", {
-                  input_tokens: 1,
-                });
+                const path = await writeUsageSession(
+                  codexHome,
+                  `persistent-thread-${sessions.size + 1}`,
+                  { input_tokens: 1 },
+                );
+                sessions.set(path, await readFile(path, "utf8"));
                 throw new Error("persistent session recorded");
               },
             }),
@@ -6350,18 +6356,10 @@ describe("CodexSecurity orchestration", () => {
         await client.close();
       }
 
-      expect(
-        existsSync(
-          join(
-            codexHome,
-            "sessions",
-            "2026",
-            "07",
-            "26",
-            "rollout-persistent-thread.jsonl",
-          ),
-        ),
-      ).toBe(true);
+      expect(sessions.size).toBe(2);
+      for (const [path, contents] of sessions) {
+        expect(await readFile(path, "utf8")).toBe(contents);
+      }
       expect(existsSync(join(codexHome, "auth.json"))).toBe(false);
       const persistentConfigText = await readFile(
         join(codexHome, "config.toml"),
@@ -7007,8 +7005,8 @@ describe("CodexSecurity orchestration", () => {
         : `${helper} --helper make-repo-scope-input --repo ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")} --scopes-file ${scopes} --out ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scoped-source-input.jsonl")}`;
     const bindScopeCommand =
       process.platform === "win32"
-        ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper bind-repo-scopes --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --manifest "%CODEX_SECURITY_SCAN_DIR%\scan-manifest.json" --coverage "%CODEX_SECURITY_SCAN_DIR%\coverage.json""'`
-        : `${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/scripts/launch_codex_security_mcp")} --helper bind-repo-scopes --scopes-file ${scopes} --manifest ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scan-manifest.json")} --coverage ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/coverage.json")}`;
+        ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper bind-repo-scopes --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --manifest "%CODEX_SECURITY_SCAN_DIR%\scan-manifest.json""'`
+        : `${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/scripts/launch_codex_security_mcp")} --helper bind-repo-scopes --scopes-file ${scopes} --manifest ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scan-manifest.json")}`;
     expect(prompt).toContain(makeScopeCommand);
     expect(prompt).toContain(
       "Do not print, evaluate, or modify the target-paths file.",
@@ -7086,19 +7084,14 @@ describe("CodexSecurity orchestration", () => {
     for (const separator of ["\u0085", "\u2028", "\u2029"])
       expect(scopedSourceInputContents).not.toContain(separator);
     const manifest = join(scanDir, "scan-manifest.json");
-    const coverage = join(scanDir, "coverage.json");
     await writeFile(
       manifest,
       JSON.stringify({ scan: { scope: { includePaths: ["wrong"] } } }),
     );
-    await writeFile(coverage, JSON.stringify({ includePaths: ["wrong"] }));
     runScopedHelper(bindScopeCommand);
     expect(
       JSON.parse(await readFile(manifest, "utf8")).scan.scope.includePaths,
     ).toEqual(paths);
-    expect(JSON.parse(await readFile(coverage, "utf8")).includePaths).toEqual(
-      paths,
-    );
     if (process.platform === "win32") {
       const driveRoot = win32.parse(repository).root;
       const absoluteScopes = join(root, "absolute-scopes.json");
@@ -7218,109 +7211,6 @@ describe("CodexSecurity orchestration", () => {
       ).rejects.toThrow("legacy scope prepared");
     } finally {
       await client.close();
-    }
-  });
-
-  test("keeps requested source paths without ranking or ignored directory files", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const source = join(repository, "src");
-    const ignored = join(source, "node_modules");
-    const vendored = join(source, "vendor");
-    const scopes = join(root, "scopes.json");
-    const output = join(root, "scoped-source-input.jsonl");
-    await mkdir(join(source, "tests"), { recursive: true });
-    await mkdir(join(source, "examples"));
-    await mkdir(ignored);
-    await mkdir(vendored);
-    execFileSync("git", ["init", "-q"], { cwd: repository });
-    execFileSync("git", ["config", "--local", "core.autocrlf", "false"], {
-      cwd: repository,
-    });
-    await Promise.all([
-      writeFile(
-        join(repository, ".gitignore"),
-        "node_modules/\n.env\nvendor/\n",
-      ),
-      writeFile(join(source, "handler.ts"), "export {};\n"),
-      writeFile(join(source, "Dockerfile"), "FROM scratch\n"),
-      writeFile(join(source, "tests", "handler.test.ts"), "export {};\n"),
-      writeFile(join(source, "examples", "demo.ts"), "export {};\n"),
-      writeFile(join(source, ".env"), "SECRET=private\n"),
-      writeFile(
-        join(source, "logo.png"),
-        Buffer.from([0x89, 0x50, 0x4e, 0x47]),
-      ),
-      writeFile(join(ignored, "dependency.ts"), "export {};\n"),
-      writeFile(join(vendored, "dependency.ts"), "export {};\n"),
-    ]);
-    execFileSync(
-      "git",
-      ["add", "--force", "src/vendor/dependency.ts", "src/logo.png"],
-      { cwd: repository },
-    );
-
-    const enumerate = async (requested: string[]) => {
-      await writeFile(scopes, JSON.stringify(requested));
-      execFileSync(
-        nodeCommand().command,
-        [
-          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
-          "make-repo-scope-input",
-          "--repo",
-          repository,
-          "--scopes-file",
-          scopes,
-          "--out",
-          output,
-        ],
-        { stdio: "pipe" },
-      );
-      return (await readFile(output, "utf8"))
-        .trimEnd()
-        .split("\n")
-        .map((row) => (JSON.parse(row) as { path: string }).path);
-    };
-
-    expect(await enumerate(["src"])).toEqual([
-      "src/Dockerfile",
-      "src/examples/demo.ts",
-      "src/handler.ts",
-      "src/logo.png",
-      "src/tests/handler.test.ts",
-      "src/vendor/dependency.ts",
-    ]);
-    expect(await enumerate(["src", "src/.env"])).toEqual([
-      "src/.env",
-      "src/Dockerfile",
-      "src/examples/demo.ts",
-      "src/handler.ts",
-      "src/logo.png",
-      "src/tests/handler.test.ts",
-      "src/vendor/dependency.ts",
-    ]);
-    expect(await enumerate(["src/vendor", "src/logo.png"])).toEqual([
-      "src/logo.png",
-      "src/vendor/dependency.ts",
-    ]);
-    await expect(enumerate(["../scopes.json"])).rejects.toThrow();
-    if (process.platform !== "win32") {
-      await symlink(join(source, "handler.ts"), join(source, "alias.ts"));
-      await symlink(source, join(repository, "alias"));
-      await expect(enumerate(["src/alias.ts"])).rejects.toThrow(
-        /symbolic links/,
-      );
-      await expect(enumerate(["alias/handler.ts"])).rejects.toThrow(
-        /symbolic links/,
-      );
-      await expect(enumerate(["alias/../src/handler.ts"])).rejects.toThrow(
-        /symbolic links/,
-      );
-    } else {
-      await symlink(source, join(repository, "junction"), "junction");
-      await expect(enumerate(["junction/handler.ts"])).rejects.toThrow(
-        /symbolic links/,
-      );
     }
   });
 

@@ -49,6 +49,71 @@ fs.writeFileSync(path.join(fixture, 'SECURITY.md'), '# Synthetic policy\\n');
 const policy = require('node:child_process').execFileSync(launcher, ['--helper', 'resolve-security-md', '--repo', fixture, '--scope', 'src/server.js', '--out', '-'], {encoding:'utf8'});
 `;
 
+async function replayInViewer(
+  t: TestContext,
+  environment: NodeJS.ProcessEnv,
+  request: {
+    evaluationId: unknown;
+    prompt: string;
+    variables: Record<string, unknown>;
+  },
+) {
+  const listener = createServer();
+  await new Promise<void>((resolve) =>
+    listener.listen(0, "127.0.0.1", resolve),
+  );
+  const address = listener.address();
+  assert.ok(address && typeof address !== "string");
+  const port = address.port;
+  await new Promise<void>((resolve, reject) =>
+    listener.close((error) => (error ? reject(error) : resolve())),
+  );
+  const viewer = spawn(
+    process.execPath,
+    [...replayRunnerArgs(), "view", "--port", String(port), "--no"],
+    {
+      cwd: evalRoot,
+      env: { ...process.env, ...environment, NODE_USE_ENV_PROXY: "" },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let viewerOutput = "";
+  for (const stream of [viewer.stdout, viewer.stderr])
+    stream.on("data", (chunk) => {
+      viewerOutput += chunk;
+    });
+  const closed = new Promise<number | null>((resolve, reject) => {
+    viewer.once("error", reject);
+    viewer.once("close", resolve);
+  });
+  t.after(async () => {
+    if (viewer.exitCode === null) viewer.kill("SIGTERM");
+    await closed;
+  });
+  const url = `http://127.0.0.1:${port}`;
+  while (true) {
+    try {
+      const response = await fetch(`${url}/api/eval`);
+      if (response.ok) break;
+    } catch {
+      /* The actual viewer is still building its staged runtime. */
+    }
+    assert.equal(viewer.exitCode, null, viewerOutput);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  const replay = await fetch(`${url}/api/eval/replay`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ testIndex: 0, ...request }),
+  });
+  assert.equal(replay.status, 200, viewerOutput);
+  const replayResult = (await replay.json()) as { output: unknown };
+  assert.equal(replayResult.output, "ok", JSON.stringify(replayResult));
+  viewer.kill("SIGTERM");
+  await closed;
+  return viewerOutput;
+}
+
 function providerConfig(name: string) {
   return parse(
     fs.readFileSync(path.join(evalRoot, "providers", `${name}.yaml`), "utf8"),
@@ -1191,63 +1256,13 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
     const replayVariables =
       JSON.parse((resumedResult.metadata as string) || "{}").inputVars ||
       JSON.parse(resumedResult.test_case).vars;
-    const listener = createServer();
-    await new Promise<void>((resolve) =>
-      listener.listen(0, "127.0.0.1", resolve),
-    );
-    const address = listener.address();
-    assert.ok(address && typeof address !== "string");
-    const port = address.port;
-    await new Promise<void>((resolve, reject) =>
-      listener.close((error) => (error ? reject(error) : resolve())),
-    );
-    const viewer = spawn(
-      process.execPath,
-      [...replayRunnerArgs(), "view", "--port", String(port), "--no"],
-      {
-        cwd: evalRoot,
-        env: { ...process.env, ...environment, NODE_USE_ENV_PROXY: "" },
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-    let viewerOutput = "";
-    for (const stream of [viewer.stdout, viewer.stderr])
-      stream.on("data", (chunk) => {
-        viewerOutput += chunk;
-      });
-    const closed = new Promise<number | null>((resolve, reject) => {
-      viewer.once("error", reject);
-      viewer.once("close", resolve);
+    await replayInViewer(t, environment, {
+      evaluationId: stored.id,
+      prompt:
+        "Read and follow skills/triage-finding/SKILL.md.\nTARGET=" +
+        replayVariables.target_repo,
+      variables: replayVariables,
     });
-    t.after(async () => {
-      if (viewer.exitCode === null) viewer.kill("SIGTERM");
-      await closed;
-    });
-    const url = `http://127.0.0.1:${port}`;
-    while (true) {
-      try {
-        if ((await fetch(`${url}/api/eval`)).ok) break;
-      } catch {}
-      assert.equal(viewer.exitCode, null, viewerOutput);
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    const replay = await fetch(`${url}/api/eval/replay`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        evaluationId: stored.id,
-        testIndex: 0,
-        prompt:
-          "Read and follow skills/triage-finding/SKILL.md.\nTARGET=" +
-          replayVariables.target_repo,
-        variables: replayVariables,
-      }),
-    });
-    assert.equal(replay.status, 200, viewerOutput);
-    const replayResult = (await replay.json()) as { output: unknown };
-    assert.equal(replayResult.output, "ok", JSON.stringify(replayResult));
-    viewer.kill("SIGTERM");
-    await closed;
     const rows = fs
       .readFileSync(capture, "utf8")
       .trim()
@@ -1512,64 +1527,11 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
           .inputVars || JSON.parse(resumedResult.test_case).vars;
       assert.equal(typeof replayVariables.target_repo, "string");
 
-      const listener = createServer();
-      await new Promise<void>((resolve) =>
-        listener.listen(0, "127.0.0.1", resolve),
-      );
-      const address = listener.address();
-      assert.ok(address && typeof address !== "string");
-      const port = address.port;
-      await new Promise<void>((resolve, reject) =>
-        listener.close((error) => (error ? reject(error) : resolve())),
-      );
-      const viewer = spawn(
-        process.execPath,
-        [...replayRunnerArgs(), "view", "--port", String(port), "--no"],
-        {
-          cwd: evalRoot,
-          env: { ...process.env, ...environment, NODE_USE_ENV_PROXY: "" },
-          stdio: ["ignore", "pipe", "pipe"],
-        },
-      );
-      let viewerOutput = "";
-      for (const stream of [viewer.stdout, viewer.stderr])
-        stream.on("data", (chunk) => {
-          viewerOutput += chunk;
-        });
-      const closed = new Promise<number | null>((resolve, reject) => {
-        viewer.once("error", reject);
-        viewer.once("close", resolve);
+      const viewerOutput = await replayInViewer(t, environment, {
+        evaluationId: stored.id,
+        prompt: "hello",
+        variables: replayVariables,
       });
-      t.after(async () => {
-        if (viewer.exitCode === null) viewer.kill("SIGTERM");
-        await closed;
-      });
-      const url = `http://127.0.0.1:${port}`;
-      while (true) {
-        try {
-          const response = await fetch(`${url}/api/eval`);
-          if (response.ok) break;
-        } catch {
-          /* The actual viewer is still building its staged runtime. */
-        }
-        assert.equal(viewer.exitCode, null, viewerOutput);
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-      const replay = await fetch(`${url}/api/eval/replay`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          evaluationId: stored.id,
-          testIndex: 0,
-          prompt: "hello",
-          variables: replayVariables,
-        }),
-      });
-      assert.equal(replay.status, 200, viewerOutput);
-      const replayResult = (await replay.json()) as { output: unknown };
-      assert.equal(replayResult.output, "ok", JSON.stringify(replayResult));
-      viewer.kill("SIGTERM");
-      await closed;
       assert.doesNotMatch(viewerOutput, /afterEach extension hook failed/);
       const rows = fs
         .readFileSync(capture, "utf8")

@@ -38,7 +38,9 @@ export interface RepositoryFinding extends Pick<
 export interface ScanResultOptions {
   manifest: ScanManifest;
   findings: FindingsDocument;
-  coverage: CoverageDocument;
+  review?: NonNullable<ScanManifest["scan"]["review"]>;
+  coverage?: CoverageDocument;
+  mode?: NonNullable<ScanManifest["scan"]["mode"]>;
   scanDir: string;
   threadId: string;
   turnResult: TurnResultMetadata;
@@ -50,9 +52,10 @@ export interface ScanResultOptions {
 }
 
 export class ScanResult {
+  public readonly mode: NonNullable<ScanManifest["scan"]["mode"]>;
   public readonly manifest: ScanManifest;
   public readonly findings: FindingsDocument;
-  public readonly coverage: CoverageDocument;
+  public readonly review: NonNullable<ScanManifest["scan"]["review"]>;
   public readonly scanDir: string;
   public readonly threadId: string;
   public readonly turnResult: Readonly<TurnResultMetadata>;
@@ -64,9 +67,16 @@ export class ScanResult {
   public ownerSuggestionsError: string | undefined;
 
   public constructor(options: ScanResultOptions) {
+    this.mode =
+      options.mode ?? options.manifest.scan.mode ?? options.coverage!.mode;
     this.manifest = options.manifest;
     this.findings = options.findings;
-    this.coverage = options.coverage;
+    this.review = options.review ??
+      options.manifest.scan.review ?? {
+        excludedPaths: options.coverage!.explicitExclusions.map(
+          (item) => item.pattern,
+        ),
+      };
     this.scanDir = options.scanDir;
     this.threadId = options.threadId;
     this.turnResult = options.turnResult;
@@ -118,10 +128,6 @@ export class ScanResult {
     return join(this.scanDir, "findings.json");
   }
 
-  public get coveragePath(): string {
-    return join(this.scanDir, "coverage.json");
-  }
-
   public get artifactsDir(): string {
     return join(this.scanDir, "artifacts");
   }
@@ -144,7 +150,7 @@ export class ScanResult {
         ? {}
         : { ownerSuggestionsError: this.ownerSuggestionsError }),
       findings: this.findings,
-      coverage: this.coverage,
+      review: this.review,
       scanDir: this.scanDir,
       threadId: this.threadId,
       reportPath: this.reportPath,

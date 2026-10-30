@@ -7,43 +7,57 @@ const utf8 = { encoding: "utf8" };
 const successful = (job) =>
   job.status === "completed" && job.conclusion === "success";
 
-function samePull(candidate, pr) {
+function samePull(candidate, pr, base) {
   return (
     candidate?.number === pr.number &&
+    candidate.head?.sha === pr.head.sha &&
+    [pr.base.sha, base].includes(candidate.base?.sha) &&
     ["head", "base"].every(
       (side) =>
         candidate[side]?.ref === pr[side].ref &&
-        candidate[side]?.sha === pr[side].sha &&
         candidate[side].repo?.id === pr[side].repo.id,
     )
   );
 }
 
-export function checkCheckout(pr, sha, cwd) {
-  const git = (args) =>
-    execFileSync("git", args, { encoding: "utf8", cwd }).trim();
-  // The CI gate uses a depth-one checkout. Read its parent IDs from the raw object.
-  const headers = git(["cat-file", "-p", "HEAD"])
+export function checkoutBase(pr, sha, cwd) {
+  // A depth-one checkout still contains the raw commit and its parent IDs.
+  const [object, ...headers] = execFileSync("git", ["cat-file", "--batch"], {
+    cwd,
+    input: "HEAD\n",
+    encoding: "utf8",
+  })
     .split("\n\n", 1)[0]
     .split("\n");
   const parents = headers
-    .filter((h) => h.startsWith("parent "))
-    .map((h) => h.slice(7));
+    .filter((line) => line.startsWith("parent "))
+    .map((line) => line.slice(7));
   if (
-    git(["rev-parse", "HEAD"]) !== sha ||
-    parents.join(" ") !== `${pr.base.sha} ${pr.head.sha}`
+    !object.startsWith(`${sha} commit `) ||
+    parents.length !== 2 ||
+    parents[1] !== pr.head.sha
   )
     throw new Error(
-      "The checked-out merge does not match the pull request base and head. Reopen the pull request or push a commit to qualify its current target.",
+      `Stale test merge. Expected ${sha} with head ${pr.head.sha}, checked out ${object} with parents ${parents.join(" ")}. Start a fresh pull request event.`,
     );
+  return parents[0];
 }
 
-export async function confirmTarget(pr, sha, api) {
+async function confirmTarget({ pr, sha, base, api }) {
   const live = await api(`pulls/${pr.number}`);
-  if (!samePull(live, pr) || live.merge_commit_sha !== sha)
+  if (!samePull(live, pr, base) || live.merge_commit_sha !== sha)
     throw new Error(
       "The pull request target changed while its checks were running.",
     );
+  if (base !== pr.base.sha) {
+    // PR metadata can lag its test merge. Compare the named branch itself, including its ancestry.
+    const ref = encodeURIComponent(`refs/heads/${pr.base.ref}`);
+    const comparison = await api(`compare/${ref}...${pr.base.sha}?per_page=1`);
+    if (comparison.base_commit.sha !== base || comparison.status !== "behind")
+      throw new Error(
+        `Stale test merge. Checked out base ${base}, but ${pr.base.ref} is at ${comparison.base_commit.sha} and event base ${pr.base.sha} is ${comparison.status}. Reopen the pull request or push a commit after its merge ref updates.`,
+      );
+  }
 }
 
 export function realSource(page, run) {
@@ -66,7 +80,7 @@ export function realSource(page, run) {
     );
 }
 
-function sourceCandidate(runs, { pr, sha }) {
+function sourceCandidate(runs, { pr, sha, base }) {
   const target = `PR #${pr.number} → ${pr.base.ref}`;
   const source = `Source CI · ${target}`;
   const edit = `PR edit CI · ${target}`;
@@ -76,7 +90,7 @@ function sourceCandidate(runs, { pr, sha }) {
       run.event === "pull_request" &&
       run.head_sha === pr.head.sha &&
       run.run_attempt === 1 &&
-      run.pull_requests.some((p) => samePull(p, pr)) &&
+      run.pull_requests.some((p) => samePull(p, pr, base)) &&
       refs?.length &&
       refs.every(
         (ref) => ref.sha === sha && ref.ref === `refs/pull/${pr.number}/merge`,
@@ -141,8 +155,7 @@ async function verifyHistory(input, wait) {
 }
 
 export async function verifyEdit(input, wait) {
-  const { pr, sha, api } = input;
-  await confirmTarget(pr, sha, api);
+  await confirmTarget(input);
   let result;
   try {
     result = await verifyHistory(input, wait);
@@ -153,7 +166,7 @@ export async function verifyEdit(input, wait) {
     result = "full";
   }
   // A history failure can select full CI only while the originating PR target is still current.
-  await confirmTarget(pr, sha, api);
+  await confirmTarget(input);
   return result;
 }
 
@@ -164,7 +177,7 @@ export async function confirmEdit(input, expectedId, classifierAttempt) {
     throw new Error(
       "The selected source qualification changed before the CI gate finished.",
     );
-  await confirmTarget(input.pr, input.sha, input.api);
+  await confirmTarget(input);
 }
 
 if (
@@ -176,7 +189,6 @@ if (
     readFileSync(env.GITHUB_EVENT_PATH, "utf8"),
   );
   const sha = env.GITHUB_SHA;
-  checkCheckout(pr, sha);
   function api(path) {
     const endpoint = `repos/${env.GITHUB_REPOSITORY}/${path}`;
     return JSON.parse(execFileSync("gh", ["api", endpoint], utf8));
@@ -184,6 +196,7 @@ if (
   const input = {
     pr,
     sha,
+    base: checkoutBase(pr, sha),
     runId: Number(env.GITHUB_RUN_ID),
     runAttempt: Number(env.GITHUB_RUN_ATTEMPT),
     api,

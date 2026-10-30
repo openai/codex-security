@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from test_deep_scan_successful_publication import complete
 from test_deep_scan_successful_publication import publication_scan as publication_scan
-from workbench_test_support import saved_draft, write_checkpoint
+from workbench_test_support import read_review_state, saved_draft, write_checkpoint
 
 
 @pytest.mark.parametrize(
@@ -84,7 +84,7 @@ def test_stopped_scan_requires_valid_rejection_evidence_before_sealing(
         assert warnings == []
         findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
         assert [item["title"] for item in findings] == ([finding["title"]] if label is None else [])
-        surfaces = json.loads(coverage_path.read_text())["surfaces"]
+        surfaces = read_review_state(workbench_db, scan.scan_dir)["surfaces"]
         assert [(item.get("candidateId"), item["disposition"]) for item in surfaces] == (
             [] if label is None else [("candidate-a", "rejected")]
         )
@@ -140,6 +140,6 @@ def test_standard_completion_requires_valid_closure_evidence_before_sealing(
         assert status == "complete"
         assert manifest["sealedAt"]
         assert report_path.is_file()
-        coverage = json.loads(coverage_path.read_text())
+        coverage = read_review_state(workbench_db, scan.scan_dir)
         assert coverage["deferred"] == []
         assert coverage["resolvedDeferred"] == [closure]

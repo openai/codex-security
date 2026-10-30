@@ -117,23 +117,6 @@ export async function publishFindingsCsvToCloud(
     scanId,
     findings,
   });
-  const coverageDocument = JSON.stringify({
-    documentType: "codex-security.coverage",
-    schemaVersion: "1.0",
-    scanId,
-    mode: "repository",
-    inventoryStrategy: "custom",
-    includePaths: ["."],
-    excludePaths: [],
-    surfaces: findings.map((finding) => ({
-      id: finding.occurrenceId,
-      label: finding.title,
-      disposition: "reported",
-      receiptRefs: [],
-    })),
-    explicitExclusions: [],
-    deferred: [],
-  });
   const scan: ScanManifest["scan"] = {
     id: scanId,
     producer: { name: "codex-security-cli", version: VERSION },
@@ -152,17 +135,13 @@ export async function publishFindingsCsvToCloud(
       excludePaths: [],
       summary: "Findings imported from a Codex Security CSV export.",
     },
-    coverageRef: "coverage.json",
+    mode: "repository",
+    review: { excludedPaths: [] },
     findingsRef: "findings.json",
     artifacts: [
       {
         path: "findings.json",
         sha256: sha256(findingsDocument),
-        mediaType: "application/json",
-      },
-      {
-        path: "coverage.json",
-        sha256: sha256(coverageDocument),
         mediaType: "application/json",
       },
       {

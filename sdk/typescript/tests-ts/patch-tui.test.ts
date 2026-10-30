@@ -100,6 +100,55 @@ async function press(
 }
 
 describe("interactive patch finding browser", () => {
+  test("orders findings by severity while keeping navigation and selection aligned", async () => {
+    const inputFindings = findings([
+      "low",
+      "high",
+      "medium",
+      "critical",
+      "high",
+    ]);
+    const originalOrder = inputFindings.map(({ occurrenceId }) => occurrenceId);
+    const selected: (PatchSelection | null)[] = [];
+    const app = render(
+      createElement(PatchTui, {
+        repository: "/work/example",
+        findings: inputFindings,
+        color: false,
+        onComplete: (value) => selected.push(value),
+      }),
+    );
+
+    const displayedFindings = (app.lastFrame() ?? "")
+      .split("\n")
+      .flatMap(
+        (line) =>
+          line.match(/(?:CRITICAL|HIGH|MEDIUM|LOW) Finding \d+/gu) ?? [],
+      );
+    expect(displayedFindings).toEqual([
+      "CRITICAL Finding 4",
+      "HIGH Finding 2",
+      "HIGH Finding 5",
+      "MEDIUM Finding 3",
+      "LOW Finding 1",
+    ]);
+    expect(app.lastFrame()).toContain("input reaches finding 4.");
+
+    await press(app, "n");
+    await press(app, " ");
+    await press(app, "j");
+    expect(app.lastFrame()).toContain("input reaches finding 2.");
+    await press(app, " ");
+    await press(app, "\r");
+
+    expect(selected).toEqual([
+      { severity: "high", occurrenceIds: ["occ_4", "occ_2"] },
+    ]);
+    expect(inputFindings.map(({ occurrenceId }) => occurrenceId)).toEqual(
+      originalOrder,
+    );
+  });
+
   test("shows complete finding details and scrolls through source evidence", async () => {
     const app = render(
       createElement(PatchTui, {
@@ -187,6 +236,7 @@ describe("interactive patch finding browser", () => {
           'const token = "sk-proj-SYNTHETIC_KEY_123";',
         ].join("\n"),
       );
+      await writeFile(join(repository, "eof.ts"), "\r\n".repeat(10));
       const outside = join(directory, "outside.ts");
       await writeFile(outside, "OUTSIDE_PRIVATE_SOURCE");
       await symlink(outside, join(repository, "src", "outside-link.ts"));
@@ -199,6 +249,7 @@ describe("interactive patch finding browser", () => {
           endLine: 6,
           role: "sink",
         },
+        { path: "eof.ts", startLine: 10 },
         { path: "../outside.ts", startLine: 1 },
         { path: "src/outside-link.ts", startLine: 1 },
       ];
@@ -226,6 +277,8 @@ describe("interactive patch finding browser", () => {
       expect(reviewed).toContain("includeDeleted: false");
       expect(reviewed).toContain("7 │   audit.record(tenant);");
       expect(reviewed).toContain('const token = "sk-proj-SYNTHETIC_KEY_123";');
+      expect(reviewed).toContain("› 10 │");
+      expect(reviewed).not.toContain(" 11 │");
       expect(reviewed).toContain("../outside.ts:1");
       expect(reviewed).toContain("src/outside-link.ts:1");
       expect(reviewed).not.toContain("OUTSIDE_PRIVATE_SOURCE");

@@ -11,8 +11,9 @@ import pytest
 from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_partial_coverage_projection import stop_and_recover_projection
+from test_partial_coverage_projection import stop_scan as stop_scan
 from test_saved_deferred_identity import recover, save_worker
-from workbench_test_support import saved_draft, write_checkpoint
+from workbench_test_support import read_review_state, saved_draft, write_checkpoint
 
 
 @pytest.mark.parametrize("reordered", [False, True])
@@ -67,7 +68,7 @@ def test_unselected_pending_checkpoint_links_to_accepted_worker_surface(
 @pytest.mark.parametrize("retry", [False, True])
 @pytest.mark.parametrize("archived", [False, True])
 def test_stopped_receipt_ownership_requires_a_matching_checkpoint(
-    workbench_api, workbench_db, publication_scan, monkeypatch, recorded, retry, archived
+    workbench_api, workbench_db, publication_scan, stop_scan, recorded, retry, archived
 ):
     scan = publication_scan()
     initial = add_worker(workbench_db, scan)
@@ -124,7 +125,7 @@ def test_stopped_receipt_ownership_requires_a_matching_checkpoint(
     original = result.read_bytes()
     for name in ("scan-manifest.json", "findings.json", "coverage.json"):
         (scan.scan_dir / name).unlink()
-    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, stop_scan, retry)
     assert len(coverage["surfaces"]) == 1
     refs = coverage["surfaces"][0]["receiptRefs"]
     selected = shared if recorded else local
@@ -244,8 +245,7 @@ def test_legacy_file_scope_preserves_shared_receipts_when_stopped(
         coordinator_generation=None,
     )
     (saved.fail_scan if outcome == "failed" else saved.cancel_scan)(db, workbench_db, args)
-    coverage_path = scan.scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert len(coverage["surfaces"]) == 1
     assert coverage["surfaces"][0]["receiptRefs"] == [ref]
     assert (
@@ -255,7 +255,7 @@ def test_legacy_file_scope_preserves_shared_receipts_when_stopped(
     assert manifest["scan"]["status"] == outcome
     assert "filePaths" not in manifest["scan"]["scope"]
     assert "filePaths" not in coverage
-    published = coverage_path.read_bytes()
+    published = (scan.scan_dir / "scan-manifest.json").read_bytes()
     saved.preserve_scan_results(db, workbench_db, args)
-    assert coverage_path.read_bytes() == published
+    assert (scan.scan_dir / "scan-manifest.json").read_bytes() == published
     assert {path: path.read_bytes() for path in original} == original

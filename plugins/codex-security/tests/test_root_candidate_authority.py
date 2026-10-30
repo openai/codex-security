@@ -9,7 +9,12 @@ from argparse import Namespace
 import pytest
 from test_deep_scan_successful_publication import add_worker, complete
 from test_deep_scan_successful_publication import publication_scan as publication_scan
-from workbench_test_support import saved_draft, sort_checkpoint_entries, write_checkpoint
+from workbench_test_support import (
+    read_review_state,
+    saved_draft,
+    sort_checkpoint_entries,
+    write_checkpoint,
+)
 
 
 def canonical_disposition(scan, disposition, complete_marker):
@@ -109,7 +114,7 @@ def test_canonical_candidate_resolution_keeps_legacy_checkpoint_authority(
                 scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
             ),
         )
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert "completeness" not in coverage
     for document in [coverage, *prepared_coverage]:
         assert any(
@@ -127,7 +132,7 @@ def test_canonical_candidate_resolution_keeps_legacy_checkpoint_authority(
         )["scan"]
         assert not recovered["resultsRecoveryNeeded"]
         assert (scan.scan_dir / "scan-manifest.json").read_bytes() == before
-        assert json.loads((scan.scan_dir / "coverage.json").read_text()) == coverage
+        assert read_review_state(workbench_db, scan.scan_dir) == coverage
     assert checkpoint.read_bytes() == original
 
 
@@ -154,11 +159,11 @@ def test_accepted_pending_root_tie_survives_canonical_disposition(
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
     )
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert "completeness" not in coverage
     assert any(row.get("candidateId") == "candidate-review" for row in coverage["deferred"])
     saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
-    assert json.loads((scan.scan_dir / "coverage.json").read_text()) == coverage
+    assert read_review_state(workbench_db, scan.scan_dir) == coverage
 
 
 @pytest.mark.parametrize("disposition", ["reported", "rejected", "provenance-reported"])
@@ -216,14 +221,14 @@ def test_restored_root_observation_keeps_tied_pending_payload(
             scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
         ),
     )
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert len(prepared_coverage) == 1
     for document in [coverage, *prepared_coverage]:
         assert any(
             row.get("candidateId") == "candidate-review" for row in document["deferred"]
         ) is (pending_time >= 100)
     saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
-    assert json.loads((scan.scan_dir / "coverage.json").read_text()) == coverage
+    assert read_review_state(workbench_db, scan.scan_dir) == coverage
 
 
 @pytest.mark.parametrize(
@@ -331,7 +336,7 @@ def test_root_outcome_uses_its_own_completion_marker(
         ),
     )["scan"]
     assert not published["resultsRecoveryNeeded"]
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert len(prepared_coverage) == 1
     for document in [coverage, *prepared_coverage]:
         assert any(
@@ -339,7 +344,7 @@ def test_root_outcome_uses_its_own_completion_marker(
         ) is (root_complete is False)
     manifest = (scan.scan_dir / "scan-manifest.json").read_bytes()
     saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
-    assert json.loads((scan.scan_dir / "coverage.json").read_text()) == coverage
+    assert read_review_state(workbench_db, scan.scan_dir) == coverage
     assert (scan.scan_dir / "scan-manifest.json").read_bytes() == manifest
     assert all(path.read_bytes() == contents for path, contents in originals.items())
 
@@ -451,7 +456,7 @@ def test_legacy_tied_root_parent_preserves_accepted_pending_evidence(
     manifest = manifest_path.read_bytes()
     assert json.loads(manifest)["scan"]["preservedCheckpointHeads"] == {}
     findings = json.loads((scan.scan_dir / "findings.json").read_text())
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert len(prepared_documents) == 1
     for current_findings, current_coverage in [(findings, coverage), *prepared_documents]:
         assert len(current_findings["findings"]) == 1
@@ -481,7 +486,7 @@ def test_legacy_tied_root_parent_preserves_accepted_pending_evidence(
             },
         }
     assert json.loads((scan.scan_dir / "findings.json").read_text()) == findings
-    assert json.loads((scan.scan_dir / "coverage.json").read_text()) == coverage
+    assert read_review_state(workbench_db, scan.scan_dir) == coverage
     if wrapped:
         assert manifest_path.read_bytes() == manifest
     manifest = manifest_path.read_bytes()
@@ -495,7 +500,7 @@ def test_legacy_tied_root_parent_preserves_accepted_pending_evidence(
     ]
     assert recovered["findingCount"] == (0 if later_selection == "rejected" else 1)
     assert not recovered["resultsRecoveryNeeded"]
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert any(row.get("candidateId") == "candidate-review" for row in coverage["deferred"]) is (
         later_selection == "pending"
     )
@@ -621,7 +626,7 @@ def test_legacy_pending_ties_aggregate_accepted_provenance(
     assert published["findingCount"] == int(retained_pending)
     assert not published["resultsRecoveryNeeded"]
     findings = json.loads((scan.scan_dir / "findings.json").read_text())
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert len(prepared_documents) == 1
     for current_findings, current_coverage in [(findings, coverage), *prepared_documents]:
         assert len(current_findings["findings"]) == int(retained_pending)
@@ -638,7 +643,7 @@ def test_legacy_pending_ties_aggregate_accepted_provenance(
     assert recovered["findingCount"] == int(retained_pending)
     assert not recovered["resultsRecoveryNeeded"]
     assert json.loads((scan.scan_dir / "findings.json").read_text()) == findings
-    assert json.loads((scan.scan_dir / "coverage.json").read_text()) == coverage
+    assert read_review_state(workbench_db, scan.scan_dir) == coverage
     manifest_path = scan.scan_dir / "scan-manifest.json"
     manifest = manifest_path.read_bytes()
     saved.recover_scan_results(context, workbench_db, args)
