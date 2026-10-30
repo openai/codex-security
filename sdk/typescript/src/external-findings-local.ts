@@ -303,7 +303,9 @@ function localRepositoryPlatform(
   bound: boolean,
 ) {
   const githubKey = (url: string) =>
-    remoteRepository(url, "github", bound)?.key;
+    windowsDrivePath.test(url)
+      ? undefined
+      : remoteRepository(url, "github", bound)?.key;
   const githubRepositories = new Set(
     sources.flatMap((source) => {
       if (source.platform !== "github") return [];
@@ -1062,9 +1064,18 @@ export async function prepareLocalImport(
           : native.some((source) => source.platform === "github")
             ? "github"
             : operatorPlatform({ url: claim });
+      const snykClaims =
+        evidence.source_data && snyk?.claims.get(evidence.source_data);
       if (
         !sameScannerRepositories(
-          claims.map((claim) => scannerRepository(claim, rowPlatform(claim))),
+          claims.map((claim) =>
+            scannerRepository(
+              // Snyk already verified its native URL against this row's declared repository.
+              snykClaims?.find(({ nativeUrl }) => nativeUrl === claim)?.url ??
+                claim,
+              rowPlatform(claim),
+            ),
+          ),
         )
       )
         throw new CodexSecurityError(

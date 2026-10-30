@@ -539,8 +539,13 @@ async function preparePublicationInput(
       `No supported findings are ready to publish. ${parsed.excluded.map((item) => `Item ${item.position}: ${item.reason}`).join(" ")}${Array.isArray(diagnostics) && diagnostics.length ? ` Scanner diagnostics: ${JSON.stringify(diagnostics)}` : ""}`,
     );
   }
-  for (const { evidence } of parsed.findings)
-    checkHostedFindingProvider(options.provider, evidence.source_data);
+  // Black Duck and Veracode saved opaque hosted-format metadata before these
+  // formats were recognized. Recover those requests before checking fresh input.
+  const deferHostedProviderCheck =
+    options.provider === "blackduck" || options.provider === "veracode";
+  if (!deferHostedProviderCheck)
+    for (const { evidence } of parsed.findings)
+      checkHostedFindingProvider(options.provider, evidence.source_data);
   const snyk =
     options.provider === "snyk" ? snykRepositoryScope(parsed) : undefined;
   const semgrepProject =
@@ -704,8 +709,9 @@ async function preparePublicationInput(
       throw new Error("Saved import account or requests do not match.");
     content.requests = content.requests.map(validateImportRequest);
     const savedFindings = submissionFindings(content.requests);
-    for (const { evidence } of savedFindings)
-      checkHostedFindingProvider(options.provider, evidence.source_data);
+    if (!deferHostedProviderCheck)
+      for (const { evidence } of savedFindings)
+        checkHostedFindingProvider(options.provider, evidence.source_data);
     const savedEvidence = canonicalJson(savedFindings);
     const expected = legacy ? legacyParsed.findings : parsed.findings;
     const projectionDigest = content.inputProjection?.inputDigest;
@@ -996,9 +1002,12 @@ async function preparePublicationInput(
     }
     for (const finding of findings) {
       const { source_finding_id: id, evidence } = finding;
-      const projected = repositories
-        ? repositories.get(id)?.url
-        : projectedBlackDuckRepositoryUrl(finding, "cloud");
+      const projected =
+        mode === "source"
+          ? undefined
+          : repositories
+            ? repositories.get(id)?.url
+            : projectedBlackDuckRepositoryUrl(finding, "cloud");
       if (
         mode === "retry" &&
         replay &&
@@ -1046,6 +1055,9 @@ async function preparePublicationInput(
     }
   }
   if (!saved) {
+    if (deferHostedProviderCheck)
+      for (const { evidence } of parsed.findings)
+        checkHostedFindingProvider(options.provider, evidence.source_data);
     checkRepositories(
       parsed.findings,
       reportSource || destination.url,

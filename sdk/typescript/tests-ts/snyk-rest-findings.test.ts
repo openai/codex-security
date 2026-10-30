@@ -1360,6 +1360,63 @@ test.each(["open-source", "code"] as const)(
   },
 );
 
+test.each(
+  ["gitlab.com", "scm.example.test"].flatMap((host) =>
+    ["source", "native"].map((encoded) => [host, encoded] as const),
+  ),
+)(
+  "projected Snyk rows preserve verified HTTP aliases on %s (encoded %s)",
+  async (host, encodedClaim) => {
+    const encodedSource = encodedClaim === "source";
+    await using fixture = await localFindingsFixture();
+    const plain = `https://${host}/Group/project`;
+    const encoded = `https://${host}/Group/proj%65ct`;
+    const url = encodedSource ? encoded : plain;
+    const remote = encodedSource ? plain : encoded;
+    const input = normalizeSnykIssues(
+      {
+        ...envelope(),
+        sourceRepositoryUrl: url,
+        project: project({ origin: "gitlab", remote }),
+      },
+      "local",
+    );
+    const prepare = (selected = input) =>
+      prepareNormalizedLocalImport(
+        selected,
+        {
+          provider: "snyk",
+          sourceKey: projectId,
+          repository: fixture.repository,
+        },
+        { environment: fixture.environment },
+      );
+    expect((await prepare()).preview.findings).toEqual(input.findings);
+    input.findings[0]!.source_finding_id = "blackduck-bom:" + "a".repeat(64);
+    expect((await prepare()).preview.findings).toEqual(input.findings);
+    for (const wrong of [
+      plain.replace("/Group/", "/group/"),
+      plain + "-other",
+    ]) {
+      const conflicting = structuredClone(input);
+      conflicting.findings[0]!.evidence.details = {
+        kind: "sast",
+        repository: { url: wrong },
+      };
+      await expect(prepare(conflicting)).rejects.toThrow(/does not match/);
+    }
+    execFileSync("git", [
+      "-C",
+      fixture.repository,
+      "remote",
+      "add",
+      "origin",
+      remote,
+    ]);
+    expect((await prepare()).preview.findings).toEqual(input.findings);
+  },
+);
+
 test("local Snyk replay accepts the verified GitLab.com SSH alias and preserves namespace case", async () => {
   const url = "https://gitlab.com/Group/project";
   const remote = "git@gitlab.com:Group/project.git";

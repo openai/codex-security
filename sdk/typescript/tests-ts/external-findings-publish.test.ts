@@ -1245,12 +1245,30 @@ const savedBlackDuckEvidence = {
   digest: "d3001de83673b0f42b1d1d42cb19ea546869d41ed99504ca213b303267bb1346",
 };
 
+const savedSemgrepEvidence = {
+  data: { format: "semgrep-platform-findings/v1" },
+  requiredProvider: "semgrep",
+  digest: "03781aba18f0321eef4e0aeccb512116387931f166fa42c148587085933cd48b",
+};
+
 const savedDependabotData = {
   ...githubDependabotAlert(),
   sourceRepositoryUrl: "https://github.com/example/different",
 };
 
 test.each([
+  {
+    ...savedSemgrepEvidence,
+    selected: { ...options, provider: "blackduck" as const },
+    filename:
+      "123a043446a79ccf8360b3c3d35599bfdf3f9471d1c7b330758de84b23268981.pending.json",
+  },
+  {
+    ...savedSemgrepEvidence,
+    selected: { ...options, provider: "veracode" as const },
+    filename:
+      "b1fda8b80a88dc44670dcd566e5b4e13f8a3cc1ddd776973a047ffe45e998987.pending.json",
+  },
   {
     ...savedBlackDuckEvidence,
     selected: options,
@@ -1400,6 +1418,79 @@ test.each([
     );
   },
 );
+
+test("a repository reset retires a historical Semgrep request with a conflicting Black Duck projection", async () => {
+  const f = await fixture();
+  const environment: NodeJS.ProcessEnv = { ...f.environment };
+  delete environment["CODEX_SECURITY_CLOUD_BASE_URL"];
+  delete environment["CODEX_SECURITY_CLOUD_WEB_URL"];
+  const finding = {
+    source_finding_id: "blackduck-bom:" + "a".repeat(64),
+    evidence: validateExternalEvidence({
+      ...normalized().evidence,
+      source_data: {
+        sourceRepositoryUrl: "https://github.com/example/different",
+      },
+    }),
+  };
+  const selected = {
+    ...options,
+    provider: "semgrep" as const,
+    repository: f.state.repositoryUrl,
+  };
+  const prepare = () =>
+    prepareNormalizedExternalPublication(
+      {
+        read: 1,
+        findings: [finding],
+        excluded: [],
+        sourceRepositoryUrl: selected.repository,
+      },
+      selected,
+      { ...f.deps, environment },
+    );
+  const directory = join(
+    f.environment.CODEX_SECURITY_STATE_DIR,
+    "external-finding-publications",
+  );
+  const path = join(
+    directory,
+    "bd188d5340437b7d1989943d2f0643c0362bab1eaedb0c7e1625e8ad623f79d5.pending.json",
+  );
+  // The hosted publisher saved this projection before recognizing Black Duck IDs.
+  const saved = JSON.stringify({
+    accountId: "synthetic-account",
+    requests: [
+      {
+        request_id: "efbc3c2e-0462-4411-89aa-9ced1d34223c",
+        repository: {
+          id: options.repository,
+          repo_connector_id: "github",
+          environment_id: f.state.environmentId,
+          reset_marker: f.state.marker,
+        },
+        source: { provider: selected.provider, source_key: selected.sourceKey },
+        items: [{ client_id: "item-1", ...finding, expected_version: 0 }],
+      },
+    ],
+    inputProjection: {
+      inputDigest:
+        "27fb1fb214cd16696f6e5d0280a36428f23247c975f2dec233e690b1b8d4223b",
+      savedEvidenceDigest:
+        "fe31089cf84952b7f92e5c3a8c83c59bab1114b67ca53da62620cbe72efac68b",
+    },
+  });
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await writeFile(path, saved, { mode: 0o600 });
+
+  await expect(prepare()).rejects.toThrow(/Finding .*does not match/);
+  expect(await readFile(path, "utf8")).toBe(saved);
+  f.state.marker = "generation-2";
+  await expect(prepare()).rejects.toThrow("retired without uploading");
+  await expect(readFile(path)).rejects.toThrow("ENOENT");
+  await expect(prepare()).rejects.toThrow("does not match");
+  expect(f.posts).toHaveLength(0);
+});
 
 test.each(["wiz", "inspector"] as const)(
   "rechecks a projected Black Duck repository on a saved %s publication",

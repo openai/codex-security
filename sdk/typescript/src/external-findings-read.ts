@@ -143,9 +143,11 @@ export async function readExternalFindings(
     }
     return {
       findings,
-      sourceRepositories: findings.findings.flatMap((finding) =>
-        localFindingRepositories("snyk", finding),
-      ),
+      ...(target === "local" && {
+        sourceRepositories: findings.findings.flatMap((finding) =>
+          localFindingRepositories("snyk", finding),
+        ),
+      }),
     };
   }
   if (options.provider === "endor") {

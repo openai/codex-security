@@ -145,3 +145,48 @@ test("a mixed SDK batch recognizes the repository retained by each Veracode row"
     /Reader repository does not match/,
   );
 });
+
+test.each(["C:/team/repo", "C:\\team\\repo"])(
+  "a GitHub reader hint for %s cannot relax a Veracode repository path",
+  async (drive) => {
+    await using fixture = await localFindingsFixture();
+    const retained = "https://c/Team/Repo";
+    const input = {
+      read: 1,
+      excluded: [],
+      findings: [
+        {
+          source_finding_id: "sdk-summary",
+          evidence: {
+            title: "Example",
+            severity: "unknown" as const,
+            source_data: { sourceRepositoryUrl: retained },
+            details: {
+              kind: "sast" as const,
+              repository: { url: "https://c/team/repo" },
+            },
+          },
+        },
+      ],
+    };
+    const prepare = (
+      sourceRepositories: { url: string; platform: "github" }[] = [],
+    ) =>
+      prepareNormalizedLocalImport(
+        input,
+        {
+          provider: "veracode",
+          sourceKey: "example",
+          repository: fixture.repository,
+        },
+        { environment: fixture.environment, sourceRepositories },
+      );
+    await expect(prepare()).rejects.toThrow(/retained scanner repository/i);
+    await expect(prepare([{ url: drive, platform: "github" }])).rejects.toThrow(
+      /retained scanner repository/i,
+    );
+    expect(
+      (await prepare([{ url: retained, platform: "github" }])).preview.findings,
+    ).toEqual(input.findings);
+  },
+);
