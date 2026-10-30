@@ -42,6 +42,7 @@ import {
 } from "./blackduck-findings.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
+import { sonarRepositoryUrls } from "./sonar-findings.js";
 import {
   snapshotImportOptions,
   type ExternalFindings,
@@ -746,7 +747,10 @@ async function preparePublicationInput(
       "Supply the verified Inspector project binding again to resume.",
     );
 
-  function checkRepositories(findings: ExternalFindings["findings"]) {
+  function checkRepositories(
+    findings: ExternalFindings["findings"],
+    report?: ExternalFindings["report"],
+  ) {
     function requireDestination(id: string, url: string | null | undefined) {
       if (
         url &&
@@ -759,6 +763,15 @@ async function preparePublicationInput(
     // Historical checkpoints already fixed the provider and request bytes.
     // Recheck any projected source against the destination discovered for this retry.
     const replay = saved && options.provider !== "blackduck";
+    if (!saved || options.provider === "sonar") {
+      for (const url of sonarRepositoryUrls(
+        options.provider,
+        findings,
+        report,
+        "cloud",
+      ))
+        requireDestination("Sonar source", url);
+    }
     const repositories = replay
       ? undefined
       : blackDuckReportRepositories(options.provider, findings, "cloud");
@@ -792,7 +805,8 @@ async function preparePublicationInput(
         replay &&
         !projected &&
         options.provider !== "inspector" &&
-        options.provider !== "veracode"
+        options.provider !== "veracode" &&
+        options.provider !== "sonar"
       )
         continue;
       const urls = [
@@ -818,7 +832,7 @@ async function preparePublicationInput(
       for (const url of urls) requireDestination(id, url);
     }
   }
-  checkRepositories(parsed.findings);
+  checkRepositories(parsed.findings, parsed.report);
   // A retry sends its saved projection, which may differ from today's reader.
   if (saved) checkRepositories(submissionFindings(saved.requests));
 

@@ -1,14 +1,21 @@
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  copyFile,
+  mkdir,
+  readFile,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { basename, join } from "node:path";
 import { prepareSonarImport } from "../src/sonar-import.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
 const repositoryUrl = "https://github.com/example/project";
 
-async function fixture(root: string) {
-  const checkout = join(root, "checkout");
+async function fixture(root: string, name = "checkout") {
+  const checkout = join(root, name);
   await mkdir(checkout);
   execFileSync("git", ["-C", checkout, "init", "--quiet"]);
   execFileSync("git", [
@@ -95,6 +102,7 @@ test("Cloud confirmation verifies the retained evidence, account and assigned en
   const f = await fixture(directory.path);
   let account = "account-a";
   let environmentId = "env-a";
+  let reportVersion = 0;
   const selection = { ...f.options, to: "cloud" } as const;
   const deps = {
     ...f.deps,
@@ -119,7 +127,29 @@ test("Cloud confirmation verifies the retained evidence, account and assigned en
                 reset_marker: "generation-1",
               },
             ]
-          : [],
+          : reportVersion
+            ? [
+                {
+                  id: `aif_${"a".repeat(64)}`,
+                  repo_id: "repo-a",
+                  repo_connector_id: "github",
+                  environment_id: environmentId,
+                  canonical_finding_id: `acf_${"b".repeat(32)}`,
+                  source: {
+                    provider: "sonar",
+                    source_key: new URL(url).searchParams.get("source_key"),
+                  },
+                  source_finding_id: "issue-1",
+                  observation_id: `aio_${"c".repeat(64)}`,
+                  version: reportVersion,
+                  title: "Reviewed evidence",
+                  severity: "high",
+                  source_updated_at: null,
+                  created_at: 1,
+                  updated_at: 2,
+                },
+              ]
+            : [],
       });
     },
   };
@@ -132,6 +162,11 @@ test("Cloud confirmation verifies the retained evidence, account and assigned en
     dryRun: false,
   };
   expect((await prepareSonarImport(confirm, deps)).cloud).toBeDefined();
+  reportVersion = 1;
+  expect((await prepareSonarImport(confirm, deps)).cloudError).toContain(
+    "--to cloud --dry-run",
+  );
+  reportVersion = 0;
   const copy = join(selection.cwd, basename(confirm.capture));
   await copyFile(confirm.capture, copy);
   expect(
@@ -154,6 +189,89 @@ test("Cloud confirmation verifies the retained evidence, account and assigned en
     await readFile(alternate.info.capture, "utf8"),
   );
 });
+
+test("replays a manually bound capture using the native branch as its identity", async () => {
+  await using directory = await scopedTemporaryDirectory("sonar-binding-");
+  const { report, options, deps } = await fixture(directory.path);
+  const { branch, repositoryUrl: url, ...unbound } = report;
+  Object.assign(unbound.pages[0]!.issues[0]!, { branch });
+  await writeFile(options.capture, JSON.stringify(unbound));
+  const selected = { ...options, to: "local" } as const;
+  const mapped = await prepareSonarImport(
+    { ...selected, sourceRepositoryUrl: url },
+    deps,
+  );
+  const replay = await prepareSonarImport(
+    { ...selected, capture: mapped.info.capture },
+    deps,
+  );
+  await writeFile(options.capture, JSON.stringify(report));
+  const bound = await prepareSonarImport(selected, deps);
+  expect(replay.info.capture).toBe(mapped.info.capture);
+  expect(replay.info.branch).toBe(branch);
+  expect(replay.info.sourceKey).toBe(bound.info.sourceKey);
+});
+
+test("a dry run cannot create the capture directory inside a checkout or its linked Git metadata", async () => {
+  await using directory = await scopedTemporaryDirectory("sonar-protected-");
+  const { options, deps } = await fixture(directory.path, "imports");
+  const selected = { ...options, to: "local" } as const;
+  deps.environment.CODEX_SECURITY_STATE_DIR = directory.path;
+  await expect(prepareSonarImport(selected, deps)).rejects.toThrow();
+  expect(
+    await stat(join(directory.path, "imports", "sonar")).catch(() => null),
+  ).toBeNull();
+
+  const other = join(directory.path, "linked");
+  execFileSync("git", [
+    "-C",
+    options.cwd,
+    "-c",
+    "user.name=Example",
+    "-c",
+    "user.email=example@example.com",
+    "commit",
+    "--quiet",
+    "--allow-empty",
+    "-m",
+    "initial",
+  ]);
+  execFileSync("git", [
+    "-C",
+    options.cwd,
+    "worktree",
+    "add",
+    "--quiet",
+    "--detach",
+    other,
+  ]);
+  const state = join(options.cwd, ".git", "state");
+  deps.environment.CODEX_SECURITY_STATE_DIR = state;
+  await expect(
+    prepareSonarImport({ ...selected, cwd: other }, deps),
+  ).rejects.toThrow();
+  expect(await stat(state).catch(() => null)).toBeNull();
+});
+
+test.skipIf(process.platform === "win32")(
+  "rejects a pre-existing shared capture directory",
+  async () => {
+    await using directory = await scopedTemporaryDirectory(
+      "sonar-capture-permissions-",
+    );
+    const { options, deps } = await fixture(directory.path);
+    const root = join(
+      deps.environment.CODEX_SECURITY_STATE_DIR,
+      "imports",
+      "sonar",
+    );
+    await mkdir(root, { recursive: true, mode: 0o700 });
+    await chmod(root, 0o777);
+    await expect(
+      prepareSonarImport({ ...options, to: "local" }, deps),
+    ).rejects.toThrow();
+  },
+);
 
 test("a clean Sonar project needs no Cloud credentials or upload", async () => {
   await using directory = await scopedTemporaryDirectory("sonar-clean-");

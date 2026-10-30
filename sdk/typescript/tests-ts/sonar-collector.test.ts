@@ -1,8 +1,15 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { collectSonarIssues } from "../src/sonar-collector.js";
 
 const roots: string[] = [];
@@ -70,6 +77,8 @@ function sonarSession(options: {
   boundProjectId?: string;
   navigationDenied?: boolean;
   resolvedProject?: string;
+  repositoryUrl?: string;
+  analyses?: Record<string, unknown>[] | Error;
 }) {
   const commands: string[][] = [];
   const queries: URLSearchParams[] = [];
@@ -98,7 +107,9 @@ function sonarSession(options: {
         };
       }
       if (url.pathname === "/dop-translation/project-bindings") {
-        expect(url.searchParams.get("url")).toBe(repositoryUrl);
+        expect(url.searchParams.get("url")).toBe(
+          options.repositoryUrl ?? repositoryUrl,
+        );
         return { bindings: [{ projectId: options.boundProjectId ?? "p-1" }] };
       }
       if (url.pathname === "/api/components/search_projects") {
@@ -107,6 +118,10 @@ function sonarSession(options: {
         );
         expect(url.searchParams.get("organization")).toBe(organization);
         return { components: [{ key: options.resolvedProject ?? project }] };
+      }
+      if (url.pathname === "/api/project_analyses/search") {
+        if (options.analyses instanceof Error) throw options.analyses;
+        return { analyses: options.analyses ?? [] };
       }
       expect(url.pathname).toBe("/api/issues/search");
       queries.push(url.searchParams);
@@ -121,6 +136,7 @@ test("uses the signed-in CLI and a verified checkout binding, retaining all secu
   const session = sonarSession({
     pages,
     links: [{ ...link, projectRoot: cwd }],
+    analyses: [{ relativePathFromScmRoot: "" }],
   });
   const branch = "release/space & plus+";
   const capture = await collectSonarIssues(
@@ -154,24 +170,19 @@ test("uses the signed-in CLI and a verified checkout binding, retaining all secu
 test("collects the exact issue keys and PR selected in the plugin handoff", async () => {
   const cwd = await checkout();
   const issueKeys = ["A", "B"];
-  const projectRoot = join(cwd, "packages", "api");
-  await mkdir(projectRoot, { recursive: true });
   const session = sonarSession({
     pages: [page("A", 1, 2), page("B", 2, 2)],
-    links: [{ ...link, projectRoot }],
+    analyses: [{ relativePathFromScmRoot: "packages/main-branch" }],
   });
   const capture = await collectSonarIssues(
     { cwd, project, pullRequest: "35", issueKeys, environment },
     session.run,
   );
   expect(capture.pullRequest).toBe("35");
-  expect(capture.projectBase).toBe("packages/api");
-  expect(session.commands).toContainEqual([
-    "link",
-    "list",
-    "--pattern",
-    "^example:service$",
-  ]);
+  expect(capture.projectBase).toBeUndefined();
+  expect(session.commands.flat().join(" ")).not.toContain(
+    "/api/project_analyses/search",
+  );
   const query = session.queries[0]!;
   expect(query.get("issues")).toBe("A,B");
   expect(query.get("pullRequest")).toBe("35");
@@ -295,21 +306,87 @@ test("requires the external import opt-in before invoking Sonar", async () => {
   expect(session.commands).toEqual([]);
 });
 
-test("omits an unlinked, ambiguous or external project base", async () => {
+test("projects paths only from the selected branch's recorded analysis base", async () => {
   const cwd = await checkout();
-  const rootLink = { ...link, projectRoot: cwd };
-  for (const links of [
-    [],
-    [{ ...rootLink, projectKey: "another" }],
-    [rootLink, { ...rootLink, projectRoot: join(cwd, "packages") }],
-    [{ ...rootLink, projectRoot: join(cwd, "..", "outside") }],
-    [{ ...rootLink, serverUrl: "https://sonarcloud.io" }],
-  ]) {
-    const session = sonarSession({ pages: [page("A")], links });
+  const branch = "release/service";
+  for (const [analyses, expected] of [
+    [[{ relativePathFromScmRoot: "packages/service" }], "packages/service"],
+    [[{ relativePathFromScmRoot: "../outside" }], undefined],
+    [[{}], undefined],
+    [new Error("Analysis metadata unavailable"), undefined],
+  ] as Array<[Record<string, unknown>[] | Error, string | undefined]>) {
+    const session = sonarSession({
+      pages: [page("A")],
+      links: [{ ...link, projectRoot: cwd }],
+      analyses,
+    });
     const capture = await collectSonarIssues(
-      { cwd, project, environment },
+      { cwd, branch, environment },
       session.run,
     );
-    expect(capture.projectBase).toBeUndefined();
+    expect(session.commands).toContainEqual([
+      "api",
+      "get",
+      `/api/project_analyses/search?${new URLSearchParams({ project, branch, ps: "1" })}`,
+    ]);
+    expect(capture.projectBase).toBe(expected);
+    expect(capture.pages[0]).toEqual(page("A"));
   }
 });
+
+test("verifies the GitHub SSH-over-443 origin using its HTTPS repository binding", async () => {
+  const cwd = await checkout();
+  execFileSync("git", [
+    "-C",
+    cwd,
+    "remote",
+    "set-url",
+    "origin",
+    "ssh://git@ssh.github.com:443/team/service.git",
+  ]);
+  const source = "https://github.com/team/service";
+  const session = sonarSession({ pages: [page("A")], repositoryUrl: source });
+  const capture = await collectSonarIssues({ cwd, environment }, session.run);
+  expect(capture.repositoryUrl).toBe(source);
+});
+
+test.each(["checkout", "metadata"])(
+  "excludes Git in a separate caller %s from the SDK lookup",
+  async (kind) => {
+    const cwd = await checkout();
+    const root = await realpath(await mkdtemp(join(tmpdir(), "sonar caller ")));
+    roots.push(root);
+    const caller = join(root, "caller");
+    const metadata = join(root, "caller.git");
+    execFileSync("git", [
+      "init",
+      "--quiet",
+      "--separate-git-dir",
+      metadata,
+      caller,
+    ]);
+    const bin = join(kind === "checkout" ? caller : metadata, "bin");
+    await mkdir(bin);
+    if (process.platform === "win32")
+      await copyFile(process.execPath, join(bin, "git.exe"));
+    else
+      await writeFile(join(bin, "git"), "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+    const current = spyOn(process, "cwd").mockReturnValue(caller);
+    try {
+      const session = sonarSession({ pages: [page("A")] });
+      const capture = await collectSonarIssues(
+        {
+          cwd,
+          environment: {
+            ...environment,
+            PATH: [bin, process.env["PATH"]].join(delimiter),
+          },
+        },
+        session.run,
+      );
+      expect(capture.repositoryUrl).toBe(repositoryUrl);
+    } finally {
+      current.mockRestore();
+    }
+  },
+);

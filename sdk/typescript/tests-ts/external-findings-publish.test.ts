@@ -809,6 +809,47 @@ test("Sonar replays the selected evidence locally and to Cloud without signing i
   );
 });
 
+test("normalized Sonar publication checks retained bindings on preview and retry", async () => {
+  const f = await fixture();
+  const repository = f.state.repositoryUrl;
+  const foreign = repository + "-other";
+  const selected = { ...options, provider: "sonar" as const };
+  const context = { format: "sonar-issues/v1", repositoryUrl: repository };
+  const finding = {
+    source_finding_id: "issue-1",
+    evidence: {
+      title: "Review input handling",
+      severity: "high" as const,
+      source_data: { ...context, issue: { key: "issue-1" } },
+    },
+  };
+  const rows = { read: 1, findings: [finding], excluded: [] };
+  const prepare = () =>
+    prepareNormalizedExternalPublication(rows, selected, f.deps);
+  await expect(
+    prepareNormalizedExternalPublication(
+      { ...rows, report: { ...context, repositoryUrl: foreign } },
+      selected,
+      f.deps,
+    ),
+  ).rejects.toThrow("does not match the selected Cloud repository");
+  f.state.loseResponse = true;
+  await expect((await prepare()).publish()).rejects.toThrow(
+    "resume the saved request",
+  );
+  f.state.repositoryUrl = foreign;
+  await expect(prepare()).rejects.toThrow(
+    "does not match the selected Cloud repository",
+  );
+  expect(f.posts).toHaveLength(1);
+  f.state.repositoryUrl = repository;
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  await retry.publish();
+  expect(f.posts).toHaveLength(2);
+  expect(f.posts[1]).toBe(f.posts[0]);
+});
+
 test("Wiz occurrence mapping preserves original evidence without inventing repository provenance", async () => {
   const record = {
     id: "wiz-occurrence",
@@ -1328,35 +1369,38 @@ test("publishing an Inspector retry adopts its project map without changing the 
   expect(f.posts).toEqual([body, body, body]);
 });
 
-test("a normalized Inspector retry checks its typed repository without native evidence", async () => {
-  const f = await fixture();
-  const finding = {
-    source_finding_id: "vendor-1",
-    evidence: {
-      title: "Synthetic code finding",
-      severity: "high" as const,
-      details: {
-        kind: "sast" as const,
-        repository: { url: inspectorRepositoryUrl },
+test.each(["inspector", "sonar"] as const)(
+  "a normalized %s retry checks its typed repository without native evidence",
+  async (provider) => {
+    const f = await fixture();
+    const finding = {
+      source_finding_id: "vendor-1",
+      evidence: {
+        title: "Synthetic code finding",
+        severity: "high" as const,
+        details: {
+          kind: "sast" as const,
+          repository: { url: inspectorRepositoryUrl },
+        },
       },
-    },
-  };
-  const prepare = () =>
-    prepareNormalizedExternalPublication(
-      { read: 1, findings: [finding], excluded: [] },
-      inspectorOptions,
-      f.deps,
+    };
+    const prepare = () =>
+      prepareNormalizedExternalPublication(
+        { read: 1, findings: [finding], excluded: [] },
+        { ...options, provider },
+        f.deps,
+      );
+    f.state.loseResponse = true;
+    await expect((await prepare()).publish()).rejects.toThrow(
+      "resume the saved request",
     );
-  f.state.loseResponse = true;
-  await expect((await prepare()).publish()).rejects.toThrow(
-    "resume the saved request",
-  );
-  f.state.repositoryUrl = "https://github.com/different/project";
-  await expect(prepare()).rejects.toThrow(
-    "does not match the selected Cloud repository",
-  );
-  expect(f.posts).toHaveLength(1);
-});
+    f.state.repositoryUrl = "https://github.com/different/project";
+    await expect(prepare()).rejects.toThrow(
+      "does not match the selected Cloud repository",
+    );
+    expect(f.posts).toHaveLength(1);
+  },
+);
 
 const savedBlackDuckEvidence = {
   data: { format: "blackduck-bom-6" },

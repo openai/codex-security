@@ -30,3 +30,11 @@ export function parseGitRemote(remote: string): GitRemote | undefined {
 export function isGitHubCloudHost(host: string): boolean {
   return host === "github.com" || host.endsWith(".ghe.com");
 }
+
+export function isGitHubSshOverHttps(url: URL): boolean {
+  return (
+    ["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol) &&
+    url.hostname.toLowerCase() === "ssh.github.com" &&
+    url.port === "443"
+  );
+}

@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
-import { writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import {
   normalizeSonarFindings,
   readSonarFindings,
@@ -216,6 +218,55 @@ test("validates the repository binding and native project or ref before attribut
   expect(new URL(evidence.url!).searchParams.get("pullRequest")).toBe("23");
   expect(evidence.source_data?.["pullRequest"]).toBe("23");
   expect(evidence.branch).toBeNull();
+});
+
+test("normalized local imports verify both report and issue bindings against the checkout and projections", async () => {
+  await using tmp = await scopedTemporaryDirectory("sonar-binding-");
+  const checkout = join(tmp.path, "checkout");
+  await mkdir(checkout);
+  execFileSync("git", ["init", "--quiet", checkout]);
+  const foreign = repository + "-other";
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-C", checkout, ...args]);
+  git("remote", "add", "origin", foreign);
+  const options = {
+    repository: checkout,
+    provider: "sonar",
+    sourceKey: project,
+  } as const;
+  const deps = {
+    environment: {
+      ...process.env,
+      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
+      CODEX_SECURITY_STATE_DIR: join(tmp.path, "state"),
+    },
+  };
+  const { report, ...rows } = normalizeSonarFindings(
+    capture([page([issue()])]),
+    repository,
+    "local",
+  );
+  const finding = rows.findings[0]!;
+  delete finding.evidence.details;
+  await expect(
+    prepareNormalizedLocalImport(rows, options, deps),
+  ).rejects.toThrow("does not match a configured remote");
+  const reportOnly = { report, read: 0, excluded: [], findings: [] };
+  await expect(
+    prepareNormalizedLocalImport(reportOnly, options, deps),
+  ).rejects.toThrow("does not match a configured remote");
+  git("remote", "add", "upstream", repository);
+  expect(
+    (await prepareNormalizedLocalImport(rows, options, deps))
+      .matchesRepositoryRemote,
+  ).toBe(true);
+  await expect(
+    prepareNormalizedLocalImport(rows, { ...options, provider: "wiz" }, deps),
+  ).rejects.toThrow("requires the sonar provider");
+  finding.evidence.details = { kind: "sast", repository: { url: foreign } };
+  await expect(
+    prepareNormalizedLocalImport(rows, options, deps),
+  ).rejects.toThrow("retained Sonar repository");
 });
 
 test("maps native component paths relative to a verified monorepo project base", () => {

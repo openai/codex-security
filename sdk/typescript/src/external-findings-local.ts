@@ -27,9 +27,14 @@ import {
   blackDuckReportRepositories,
   projectedBlackDuckRepositoryUrl,
 } from "./blackduck-findings.js";
-import { isGitHubCloudHost, parseGitRemote } from "./git-remote.js";
+import {
+  isGitHubCloudHost,
+  isGitHubSshOverHttps,
+  parseGitRemote,
+} from "./git-remote.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
+import { sonarRepositoryUrls } from "./sonar-findings.js";
 import { isRecord } from "./record.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import {
@@ -163,10 +168,7 @@ function remoteRepository(
   const { url, path, scpStyle } = remote;
   const ssh = url.protocol.includes("ssh");
   const protocol = url.protocol === "http:" ? "http:" : "https:";
-  const githubSshOverHttps =
-    ssh &&
-    url.hostname.toLowerCase() === "ssh.github.com" &&
-    url.port === "443";
+  const githubSshOverHttps = isGitHubSshOverHttps(url);
   const hostname = githubSshOverHttps ? "github.com" : url.hostname;
   const port =
     githubSshOverHttps || url.port === gitTransportPorts[url.protocol]
@@ -415,7 +417,7 @@ async function associatedMetadataRoots(
   return roots;
 }
 
-async function localGitProtectionRoots(
+export async function localGitProtectionRoots(
   repository: string,
   environment: NodeJS.ProcessEnv,
   signal?: AbortSignal,
@@ -834,6 +836,18 @@ export async function prepareLocalImport(
         options.inspectorProjectMap ? { url: source.url } : source,
       );
   }
+  const sonarSources = sonarRepositoryUrls(
+    options.provider,
+    current.findings,
+    current.report,
+    "local",
+  );
+  for (const url of sonarSources)
+    if (!sources.has(url)) sources.set(url, { url });
+  if (sonarSources.size && !sameRepositories(sources.keys()))
+    throw new CodexSecurityError(
+      "The retained Sonar repository does not match the other source repository claims.",
+    );
   if (
     options.provider === "blackduck" &&
     current.findings.length &&

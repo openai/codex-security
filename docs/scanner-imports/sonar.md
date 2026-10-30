@@ -14,8 +14,8 @@ The [publish-findings skill](../../plugins/codex-security/skills/publish-finding
 uses the project's key, the selected ref, and the original Sonar issue keys to
 retrieve the full records and preview the destination. You can also start in
 the terminal with those same identifiers. If you installed only the Codex
-Security plugin, use `npx @openai/codex-security` in place of `codex-security`
-with a package version that includes the Sonar importer.
+Security plugin, install a version of `@openai/codex-security` that includes
+the Sonar importer from a trusted directory, then run that CLI in the checkout.
 
 ## Preview a local import
 

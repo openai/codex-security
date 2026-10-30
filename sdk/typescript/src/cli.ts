@@ -4130,153 +4130,172 @@ export async function main(
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, options, format, formatExplicit, error: incurError }) {
-        const humanSummary =
-          format === "toon" &&
-          !formatExplicit &&
-          !argv.some((arg) => OUTPUT_OPTION.test(arg));
-        const controller = new AbortController();
-        const removeSignals = listenForAbort(dependencies, controller);
-        const note = (line: string) =>
-          notify(() => errorOutput.write(line + "\n"));
-        try {
-          const prepared = await prepareSonarImport(
-            {
-              cwd: dependencies.currentDirectory(),
-              capture: args.capture,
-              project: options.sonarProject,
-              branch: options.sonarBranch,
-              pullRequest: options.sonarPullRequest,
-              issueKeys: options.sonarIssue,
-              sourceRepositoryUrl: options.sourceRepositoryUrl,
-              to: options.to,
-              dryRun: options.dryRun,
-              yes: options.yes,
-            },
-            {
-              environment: dependencies.environment,
-              signal: controller.signal,
-              fetch: dependencies.cloudFetch,
-              collect: dependencies.collectSonarIssues,
-              onCapture: (path) =>
-                note("Evidence file: " + diagnosticValue(path)),
-            },
-          );
-          const { info, local, cloud, cloudError } = prepared;
-          const ref = info.pullRequest
-            ? `pull request ${info.pullRequest}`
-            : (info.branch ?? "main branch");
-          note(
-            `Sonar project: ${diagnosticValue(info.organization)}/${diagnosticValue(info.project)} (${diagnosticValue(ref)}) on ${diagnosticValue(info.server)}`,
-          );
-          note(`Local repository: ${diagnosticValue(info.repository)}`);
-          note(
-            `Local: ${local.findings.length} ready, ${local.excluded.length} excluded.`,
-          );
-          if (cloud) {
-            const environments = new Set(
-              cloud.requests.map(
-                (request) => request.repository.environment_id,
+        return await withTerminalErrorsHandled(errorOutput, async () => {
+          const humanSummary =
+            format === "toon" &&
+            !formatExplicit &&
+            !argv.some((arg) => OUTPUT_OPTION.test(arg));
+          const controller = new AbortController();
+          const removeSignals = listenForAbort(dependencies, controller);
+          const note = (line: string) =>
+            notify(() => errorOutput.write(line + "\n"));
+          const cloudFailure = (message: string) => {
+            const reason = controller.signal.reason;
+            exitCode =
+              reason === "SIGINT" ? 130 : reason === "SIGTERM" ? 143 : 2;
+            if (
+              argv.includes("--full-output") &&
+              (format === "json" || format === "jsonl")
+            )
+              failedResultOutput = {
+                format,
+                code: "SONAR_IMPORT_FAILED",
+                message,
+              };
+          };
+          try {
+            const prepared = await prepareSonarImport(
+              {
+                cwd: dependencies.currentDirectory(),
+                capture: args.capture,
+                project: options.sonarProject,
+                branch: options.sonarBranch,
+                pullRequest: options.sonarPullRequest,
+                issueKeys: options.sonarIssue,
+                sourceRepositoryUrl: options.sourceRepositoryUrl,
+                to: options.to,
+                dryRun: options.dryRun,
+                yes: options.yes,
+              },
+              {
+                environment: dependencies.environment,
+                signal: controller.signal,
+                fetch: dependencies.cloudFetch,
+                collect: dependencies.collectSonarIssues,
+                onCapture: (path) =>
+                  note("Evidence file: " + diagnosticValue(path)),
+              },
+            );
+            const { info, local, cloud, cloudError } = prepared;
+            const ref = info.pullRequest
+              ? `pull request ${info.pullRequest}`
+              : (info.branch ?? "unspecified ref");
+            note(
+              `Sonar project: ${diagnosticValue(info.organization)}/${diagnosticValue(info.project)} (${diagnosticValue(ref)}) on ${diagnosticValue(info.server)}`,
+            );
+            note(`Local repository: ${diagnosticValue(info.repository)}`);
+            note(
+              `Local: ${local.findings.length} ready, ${local.excluded.length} excluded.`,
+            );
+            if (cloud) {
+              const environments = new Set(
+                cloud.requests.map(
+                  (request) => request.repository.environment_id,
+                ),
+              );
+              note(
+                `Cloud account: ${diagnosticValue(cloud.accountId)} on ${diagnosticValue(cloud.cloudApiUrl)}`,
+              );
+              note(
+                `Cloud repository: ${diagnosticValue(cloud.destination.url)} · Environments: ${[...environments].map(diagnosticValue).join(", ")}`,
+              );
+              note(
+                `Cloud: ${cloud.findings.length} ready, ${cloud.excluded.length} excluded.`,
+              );
+            }
+            if (options.to === "cloud" && local.read === 0)
+              note("No Sonar findings to publish to Cloud.");
+            if (cloudError)
+              note(`Cloud unavailable: ${diagnosticValue(cloudError)}`);
+            for (const { source_finding_id, evidence } of local.findings.slice(
+              0,
+              5,
+            ))
+              note(
+                `  ${diagnosticValue(source_finding_id)} [${evidence.severity}] ${diagnosticValue(evidence.title)}`,
+              );
+            if (local.findings.length > 5)
+              note(
+                `  Showing the first 5 of ${local.findings.length} ready findings. Use --dry-run --format json for the full selection.`,
+              );
+            const exclusions = new Set(
+              [...local.excluded, ...(cloud?.excluded ?? [])].map(
+                (item) =>
+                  `Excluded ${diagnosticValue(item.source_finding_id ?? `item ${item.position}`)}: ${diagnosticValue(item.reason)}`,
               ),
             );
-            note(
-              `Cloud account: ${diagnosticValue(cloud.accountId)} on ${diagnosticValue(cloud.cloudApiUrl)}`,
-            );
-            note(
-              `Cloud repository: ${diagnosticValue(cloud.destination.url)} · Environments: ${[...environments].map(diagnosticValue).join(", ")}`,
-            );
-            note(
-              `Cloud: ${cloud.findings.length} ready, ${cloud.excluded.length} excluded.`,
-            );
-          }
-          if (options.to === "cloud" && local.read === 0)
-            note("No Sonar findings to publish to Cloud.");
-          if (cloudError)
-            note(`Cloud unavailable: ${diagnosticValue(cloudError)}`);
-          for (const { source_finding_id, evidence } of local.findings.slice(
-            0,
-            5,
-          ))
-            note(
-              `  ${diagnosticValue(source_finding_id)} [${evidence.severity}] ${diagnosticValue(evidence.title)}`,
-            );
-          if (local.findings.length > 5)
-            note(
-              `  Showing the first 5 of ${local.findings.length} ready findings. Use --dry-run --format json for the full selection.`,
-            );
-          const exclusions = new Set(
-            [...local.excluded, ...(cloud?.excluded ?? [])].map(
-              (item) =>
-                `Excluded ${diagnosticValue(item.source_finding_id ?? `item ${item.position}`)}: ${diagnosticValue(item.reason)}`,
-            ),
-          );
-          for (const line of exclusions) note(line);
-          if (options.dryRun) {
-            if (cloudError) exitCode = 2;
-            if (humanSummary)
-              renderedOutput =
-                "Preview complete. Use the saved evidence file to import this selection.\n";
-            return { ...info, local, cloud, cloudError, dryRun: true };
-          }
-          if (!options.yes) {
-            const prompt =
-              dependencies.externalPublicationPrompt ??
-              createTerminalPrompt(errorOutput);
-            if (!prompt.isInteractive())
-              throw new Error(
-                "Review the saved capture with --dry-run, then pass its path and --yes to confirm.",
-              );
-            const action = cloud
-              ? " and publish " +
-                cloud.findings.length +
-                " to the displayed Cloud destination"
-              : " locally";
-            if (
-              !(await prompt.confirm(
-                "Import " +
-                  local.findings.length +
-                  " Sonar findings" +
-                  action +
-                  "?",
-                false,
-                controller.signal,
-              ))
-            ) {
-              if (humanSummary) renderedOutput = "Import canceled.\n";
-              return { ...info, imported: false };
+            for (const line of exclusions) note(line);
+            if (options.dryRun) {
+              if (cloudError) cloudFailure(cloudError);
+              if (humanSummary)
+                renderedOutput =
+                  "Preview complete. Use the saved evidence file to import this selection.\n";
+              return { ...info, local, cloud, cloudError, dryRun: true };
             }
+            if (!options.yes) {
+              const prompt =
+                dependencies.externalPublicationPrompt ??
+                createTerminalPrompt(errorOutput);
+              if (!prompt.isInteractive())
+                throw new Error(
+                  "Review the saved capture with --dry-run, then pass its path and --yes to confirm.",
+                );
+              const action = cloud
+                ? " and publish " +
+                  cloud.findings.length +
+                  " to the displayed Cloud destination"
+                : " locally";
+              if (
+                !(await prompt.confirm(
+                  "Import " +
+                    local.findings.length +
+                    " Sonar findings" +
+                    action +
+                    "?",
+                  false,
+                  controller.signal,
+                ))
+              ) {
+                if (humanSummary) renderedOutput = "Import canceled.\n";
+                return { ...info, imported: false };
+              }
+            }
+            const result = await prepared.import();
+            if (result.cloudError) {
+              cloudFailure(result.cloudError);
+              note(
+                "Stored locally. Cloud: " + diagnosticValue(result.cloudError),
+              );
+            } else if (
+              result.local.excluded.length ||
+              result.cloud?.status === "partial"
+            )
+              exitCode = 1;
+            if (result.cloud?.cloudUrl)
+              note(
+                "Cloud repository: " + diagnosticValue(result.cloud.cloudUrl),
+              );
+            if (humanSummary) {
+              const { created, updated, unchanged } = result.local.counts;
+              renderedOutput = `Local import: ${created} created, ${updated} updated, ${unchanged} unchanged.\n`;
+              if (result.cloud)
+                renderedOutput += renderExternalPublicationSummary(
+                  result.cloud,
+                );
+            }
+            return { ...result };
+          } catch (error) {
+            reportPublicationError(error, controller.signal.reason);
+            if (argv.includes("--full-output")) structuredError = true;
+            return incurError({
+              code: "SONAR_IMPORT_FAILED",
+              message: diagnosticValue(error),
+              exitCode,
+            });
+          } finally {
+            removeSignals();
           }
-          const result = await prepared.import();
-          if (result.cloudError) {
-            const signal = controller.signal.reason;
-            exitCode =
-              signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
-            note(
-              "Stored locally. Cloud: " + diagnosticValue(result.cloudError),
-            );
-          } else if (
-            result.local.excluded.length ||
-            result.cloud?.status === "partial"
-          )
-            exitCode = 1;
-          if (result.cloud?.cloudUrl)
-            note("Cloud repository: " + diagnosticValue(result.cloud.cloudUrl));
-          if (humanSummary) {
-            const { created, updated, unchanged } = result.local.counts;
-            renderedOutput = `Local import: ${created} created, ${updated} updated, ${unchanged} unchanged.\n`;
-            if (result.cloud)
-              renderedOutput += renderExternalPublicationSummary(result.cloud);
-          }
-          return { ...result };
-        } catch (error) {
-          reportPublicationError(error, controller.signal.reason);
-          return incurError({
-            code: "SONAR_IMPORT_FAILED",
-            message: diagnosticValue(error),
-            exitCode,
-          });
-        } finally {
-          removeSignals();
-        }
+        });
       },
     });
   }

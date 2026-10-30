@@ -1,15 +1,19 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { isAbsolute, relative, sep } from "node:path";
 import { promisify } from "node:util";
 import { CodexSecurityError, errorMessage } from "./errors.js";
+import { localGitProtectionRoots } from "./external-findings-local.js";
 import { repositoryUrlKey } from "./external-import-contract.js";
 import { requireExternalImports } from "./external-imports-feature.js";
-import { isGitHubCloudHost, parseGitRemote } from "./git-remote.js";
+import {
+  isGitHubCloudHost,
+  isGitHubSshOverHttps,
+  parseGitRemote,
+} from "./git-remote.js";
 import { isRecord } from "./record.js";
 import { array, record, relativePath, requiredText } from "./scanner-import.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 import { completeSonarPages, type SonarCapture } from "./sonar-findings.js";
-import { gitMarkerRoot, gitOutput, gitProtectionRoots } from "./targets.js";
+import { gitOutput } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 import { isSafeNonNegativeInteger } from "./value.js";
 
@@ -29,14 +33,14 @@ type SonarCommand = (args: string[]) => Promise<Record<string, unknown>>;
 
 async function sonarCommand(
   options: SonarCollectionOptions,
+  protectedRoots: string[],
 ): Promise<SonarCommand> {
   const { cwd, environment = process.env, signal } = options;
-  const trusted = await resolveTrustedExecutable("sonar", environment, [
-    cwd,
-    process.cwd(),
-    ...(await gitProtectionRoots(cwd, signal)),
-    ...(await gitProtectionRoots(process.cwd(), signal)),
-  ]);
+  const trusted = await resolveTrustedExecutable(
+    "sonar",
+    environment,
+    protectedRoots,
+  );
   if (!trusted) {
     throw new CodexSecurityError(
       "Install the SonarQube CLI (sonar) and run 'sonar auth login', or import a saved Sonar export.",
@@ -74,6 +78,7 @@ async function sonarCommand(
 
 async function checkoutOrigin(
   options: SonarCollectionOptions,
+  protectedRoots: string[],
 ): Promise<string | undefined> {
   try {
     const origin = await gitOutput(
@@ -83,7 +88,7 @@ async function checkoutOrigin(
       undefined,
       undefined,
       "utf8",
-      [],
+      protectedRoots,
       options.environment,
     );
     if (/[\r\n]/u.test(origin)) return;
@@ -93,6 +98,8 @@ async function checkoutOrigin(
     let base: string;
     if (url.protocol === "http:" || url.protocol === "https:") {
       base = url.origin;
+    } else if (url.username === "git" && isGitHubSshOverHttps(url)) {
+      base = "https://github.com";
     } else if (
       url.protocol === "ssh:" &&
       url.username === "git" &&
@@ -119,26 +126,16 @@ async function discoverProject(
   sonar: SonarCommand,
   server: string,
   organization: string,
-  selected?: string,
-): Promise<{ key: string; root?: string }> {
-  const args = ["link", "list"];
-  if (selected)
-    args.push(
-      "--pattern",
-      "^" + selected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$",
-    );
-  const links = await sonar(args);
-  let projects = array(links["projects"], "Sonar project links").map((entry) =>
-    record(entry, "Sonar project link"),
+): Promise<string> {
+  const links = await sonar(["link", "list"]);
+  const projects = array(links["projects"], "Sonar project links").map(
+    (entry) => record(entry, "Sonar project link"),
   );
-  if (selected)
-    projects = projects.filter((project) => project["projectKey"] === selected);
   const paging = links["paging"];
   if (
     projects.length !== 1 ||
     (isRecord(paging) && paging["hasNextPage"] === true)
   ) {
-    if (selected) return { key: selected };
     const candidates = projects
       .map((project) => project["projectKey"])
       .join(", ");
@@ -152,18 +149,11 @@ async function discoverProject(
       project["serverUrl"] !== server + "/") ||
     (project["organization"] && project["organization"] !== organization)
   ) {
-    if (selected) return { key: selected };
     throw new CodexSecurityError(
       "The linked project uses another Sonar connection. Switch to its server and organization with 'sonar auth login'.",
     );
   }
-  return {
-    key: requiredText(project["projectKey"], "Linked Sonar project key"),
-    root:
-      typeof project["projectRoot"] === "string"
-        ? project["projectRoot"]
-        : undefined,
-  };
+  return requiredText(project["projectKey"], "Linked Sonar project key");
 }
 
 /** Use a Sonar binding before attributing findings to the checkout's Git origin. */
@@ -285,7 +275,14 @@ export async function collectSonarIssues(
         "Provide individual, nonempty Sonar issue keys.",
       );
   }
-  const sonar = runSonar ?? (await sonarCommand(options));
+  const environment = options.environment ?? process.env;
+  const protectedRoots = [options.cwd, process.cwd()];
+  for (const root of new Set(protectedRoots)) {
+    protectedRoots.push(
+      ...(await localGitProtectionRoots(root, environment, options.signal)),
+    );
+  }
+  const sonar = runSonar ?? (await sonarCommand(options, protectedRoots));
   const auth = await sonar(["auth", "status", "--format", "json"]);
   if (auth["status"] !== "connected")
     throw new CodexSecurityError(
@@ -303,46 +300,21 @@ export async function collectSonarIssues(
       "Connect the Sonar CLI to a SonarQube Cloud organization with 'sonar auth login'.",
     );
   const organization = requiredText(auth["org"], "Sonar organization");
-  let link =
-    options.project === undefined
-      ? await discoverProject(sonar, server, organization)
-      : undefined;
-  const project = options.project ?? link!.key;
+  const project =
+    options.project ?? (await discoverProject(sonar, server, organization));
   if (project.includes(","))
     throw new CodexSecurityError("Select one Sonar project key.");
   const binding = await repositoryBinding(
     sonar,
     project,
     organization,
-    await checkoutOrigin(options),
+    await checkoutOrigin(options, protectedRoots),
     options.signal,
   );
   if (options.project === undefined && !binding.matchesCheckout) {
     throw new CodexSecurityError(
       `Sonar could not verify that linked project ${JSON.stringify(project)} belongs to this checkout's origin. Rerun with --sonar-project KEY to confirm the source project.${binding.diagnostic ? `\n${binding.diagnostic}` : ""}`,
     );
-  }
-  let projectBase: string | undefined;
-  if (binding.matchesCheckout) {
-    if (!link) {
-      // A handoff can select an unlinked project. Its native paths still belong in the evidence.
-      try {
-        link = await discoverProject(sonar, server, organization, project);
-      } catch {
-        options.signal?.throwIfAborted();
-      }
-    }
-    if (link?.root && isAbsolute(link.root)) {
-      const checkoutRoot = await gitMarkerRoot(
-        options.cwd,
-        options.signal,
-        "nearest",
-      );
-      if (checkoutRoot) {
-        const base = relative(checkoutRoot, link.root).split(sep).join("/");
-        projectBase = base === "" ? "" : (relativePath(base) ?? undefined);
-      }
-    }
   }
   if (branch === undefined && pullRequest === undefined) {
     const response = await sonar([
@@ -412,6 +384,25 @@ export async function collectSonarIssues(
     throw new CodexSecurityError(
       `Selected Sonar security issues were not returned for this project and ref: ${[...missing].join(", ")}.`,
     );
+  let projectBase: string | undefined;
+  if (binding.matchesCheckout && branch !== undefined) {
+    // A Git-discovered link anchors at the checkout root even for a nested analysis.
+    try {
+      const metadata = await sonar([
+        "api",
+        "get",
+        `/api/project_analyses/search?${new URLSearchParams({ project, branch, ps: "1" })}`,
+      ]);
+      const analysis = array(metadata["analyses"], "Sonar analyses")[0];
+      const base = isRecord(analysis)
+        ? analysis["relativePathFromScmRoot"]
+        : undefined;
+      projectBase =
+        base === "" || base === "." ? "" : (relativePath(base) ?? undefined);
+    } catch {
+      options.signal?.throwIfAborted();
+    }
+  }
   return {
     format: "sonar-issues/v1",
     server,

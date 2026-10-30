@@ -1,9 +1,13 @@
 import { hash } from "node:crypto";
+import { lstat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { collectSonarIssues } from "./sonar-collector.js";
 import { normalizeSonarFindings, parseSonarCapture } from "./sonar-findings.js";
 import { requireExternalImports } from "./external-imports-feature.js";
-import { prepareLocalImport } from "./external-findings-local.js";
+import {
+  localGitProtectionRoots,
+  prepareLocalImport,
+} from "./external-findings-local.js";
 import {
   ExternalPublicationError,
   prepareNormalizedExternalPublication,
@@ -18,13 +22,11 @@ import {
   canonicalConfigPath,
   codexSecurityStateDirectory,
   preparePersistentOutputRoot,
+  requirePrivateDirectory,
+  requireSecureOutputAncestry,
   requireOutputOutsideRepositories,
 } from "./runtime.js";
-import {
-  gitMarkerRoot,
-  gitProtectionRoots,
-  normalizeRepository,
-} from "./targets.js";
+import { gitMarkerRoot, normalizeRepository } from "./targets.js";
 import { errorMessage } from "./errors.js";
 import { canonicalJson } from "./record.js";
 
@@ -59,6 +61,7 @@ function cloudReviewDigest(
       items: preview.requests.flatMap((request) =>
         request.items.map((item) => [
           item.source_finding_id,
+          item.expected_version,
           request.repository.environment_id,
           item.evidence,
         ]),
@@ -91,45 +94,57 @@ export async function prepareSonarImport(
     (await gitMarkerRoot(options.cwd, signal, "nearest")) ??
     (await normalizeRepository(options.cwd, signal));
   const input = options.capture && resolve(options.cwd, options.capture);
-  const report = parseSonarCapture(
-    input
-      ? await readScannerJson(input)
-      : await (dependencies.collect ?? collectSonarIssues)({
-          cwd: options.cwd,
-          project: options.project,
-          branch: options.branch,
-          pullRequest: options.pullRequest,
-          issueKeys: options.issueKeys,
-          environment,
-          signal,
-        }),
-  );
+  const raw = input
+    ? await readScannerJson(input)
+    : await (dependencies.collect ?? collectSonarIssues)({
+        cwd: options.cwd,
+        project: options.project,
+        branch: options.branch,
+        pullRequest: options.pullRequest,
+        issueKeys: options.issueKeys,
+        environment,
+        signal,
+      });
+  let report = parseSonarCapture(raw);
   const state = await canonicalConfigPath(
     codexSecurityStateDirectory(environment),
   );
-  requireOutputOutsideRepositories(
-    [repository, ...(await gitProtectionRoots(options.cwd, signal))],
-    state,
-    "runtime",
+  const protectedRoots = [
+    repository,
+    ...(await localGitProtectionRoots(options.cwd, environment, signal)),
+    ...(await localGitProtectionRoots(process.cwd(), environment, signal)),
+  ];
+  const destination = await canonicalConfigPath(
+    join(state, "imports", "sonar"),
   );
+  requireOutputOutsideRepositories(protectedRoots, state, "runtime");
+  requireOutputOutsideRepositories(protectedRoots, destination, "runtime");
+  await requireSecureOutputAncestry(destination);
   const root = await preparePersistentOutputRoot(state, "imports", "sonar");
+  await requirePrivateDirectory(
+    await lstat(root),
+    root,
+    "Sonar capture directory",
+  );
   const retained =
     input && dirname(input) === root
       ? /^([a-f0-9]{64})(?:\.([a-f0-9]{64}))?\.json$/u.exec(basename(input))
       : undefined;
-  let evidenceDigest = hash("sha256", JSON.stringify(report));
-  if (retained && evidenceDigest !== retained[1])
+  if (retained && hash("sha256", JSON.stringify(raw)) !== retained[1])
     throw new Error(
       "The saved Sonar capture has changed. Preview a fresh copy of the Sonar evidence.",
     );
   if (!report.repositoryUrl && options.sourceRepositoryUrl) {
-    report.repositoryUrl = declaredScannerRepositoryUrl(
-      options.sourceRepositoryUrl,
-      "Sonar",
-      "local",
-    );
-    evidenceDigest = hash("sha256", JSON.stringify(report));
+    report = parseSonarCapture({
+      ...report,
+      repositoryUrl: declaredScannerRepositoryUrl(
+        options.sourceRepositoryUrl,
+        "Sonar",
+        "local",
+      ),
+    });
   }
+  const evidenceDigest = hash("sha256", JSON.stringify(report));
   let capture =
     input && retained?.[1] === evidenceDigest
       ? input
@@ -142,16 +157,22 @@ export async function prepareSonarImport(
       "Sonar did not supply a repository binding. Verify the project's repository and rerun with the saved capture and --source-repository-url.",
     );
   }
+  const findings = normalizeSonarFindings(
+    report,
+    options.sourceRepositoryUrl ?? "",
+    "local",
+  );
+  const { branch, pullRequest } = findings.report;
   const sourceKey = stableId("sonar", [
     report.server,
     report.organization,
     report.project,
-    report.branch ?? null,
-    report.pullRequest ?? null,
+    branch ?? null,
+    pullRequest ?? null,
   ]);
   const source = { provider: "sonar", sourceKey } as const;
   const local = await prepareLocalImport(
-    normalizeSonarFindings(report, options.sourceRepositoryUrl ?? "", "local"),
+    findings,
     { repository, ...source },
     { environment, signal },
     [{ url: repositoryUrl }],
@@ -201,8 +222,8 @@ export async function prepareSonarImport(
     server: report.server,
     organization: report.organization,
     project: report.project,
-    branch: report.branch,
-    pullRequest: report.pullRequest,
+    branch,
+    pullRequest,
   };
   return {
     info,

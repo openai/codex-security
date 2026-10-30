@@ -6,7 +6,7 @@ import {
   validateExternalEvidence,
 } from "./external-import-contract.js";
 import type { ExternalFindings } from "./external-findings.js";
-import type { Severity } from "./external-import-models.js";
+import type { Provider, Severity } from "./external-import-models.js";
 import { isRecord } from "./record.js";
 import {
   array,
@@ -19,9 +19,10 @@ import {
 } from "./scanner-import.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 
+const sonarFormat = "sonar-issues/v1";
 const captureText = z.string().refine((value) => Boolean(value.trim()));
 const captureSchema = z.object({
-  format: z.literal("sonar-issues/v1"),
+  format: z.literal(sonarFormat),
   server: captureText,
   organization: captureText,
   project: captureText,
@@ -61,6 +62,27 @@ export function parseSonarCapture(value: unknown): SonarCapture {
 }
 
 type NativeRecord = Record<string, unknown>;
+
+/** Normalized Sonar reports and their individual issues retain the source repository. */
+export function sonarRepositoryUrls(
+  provider: Provider,
+  findings: ExternalFindings["findings"],
+  report: ExternalFindings["report"],
+  target: ExternalImportTarget,
+): Set<string> {
+  const urls = new Set<string>();
+  function add(data: NativeRecord | undefined) {
+    if (data?.["format"] !== sonarFormat) return;
+    if (provider !== "sonar")
+      throw new Error("Retained Sonar evidence requires the sonar provider.");
+    urls.add(
+      declaredScannerRepositoryUrl(data["repositoryUrl"], "Sonar", target),
+    );
+  }
+  add(report);
+  for (const { evidence } of findings) add(evidence.source_data ?? undefined);
+  return urls;
+}
 
 const pagingSchema = z.object({
   pageIndex: z.int().positive(),
@@ -190,7 +212,7 @@ export function normalizeSonarFindings(
   input: unknown,
   sourceRepositoryUrl: string,
   target: ExternalImportTarget = "cloud",
-): ExternalFindings {
+) {
   const capture =
     isRecord(input) && "format" in input ? parseSonarCapture(input) : undefined;
   const repository = declaredScannerRepositoryUrl(
@@ -242,7 +264,7 @@ export function normalizeSonarFindings(
       );
   }
   const context = {
-    format: "sonar-issues/v1",
+    format: sonarFormat,
     ...(capture && { server: capture.server }),
     ...(capture?.projectBase !== undefined && {
       projectBase: capture.projectBase,
