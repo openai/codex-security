@@ -355,6 +355,7 @@ export {
   readSemgrepFindings,
   type SemgrepImportOptions,
 } from "./semgrep-findings.js";
+export { normalizeTrivyFindings, readTrivyFindings } from "./trivy-findings.js";
 export {
   collectSemgrepPlatformFindings,
   normalizeSemgrepPlatformFindings,

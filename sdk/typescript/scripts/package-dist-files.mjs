@@ -36,6 +36,7 @@ const distModules = [
   "hosted-scanner-http",
   "native-json-findings",
   "opengrep-findings",
+  "trivy-findings",
   "external-findings-publish",
   "external-import-contract",
   "external-import-models",

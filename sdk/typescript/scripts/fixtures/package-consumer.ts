@@ -15,6 +15,7 @@ import {
   type SemgrepImportOptions,
   collectSnykIssues,
   collectSemgrepPlatformFindings,
+  normalizeTrivyFindings,
   prepareNormalizedExternalPublication,
   type ExternalFindings,
   type FindingImportRequest,
@@ -461,3 +462,7 @@ export const hostedCollectors = {
   snyk: collectSnykIssues,
   semgrep: collectSemgrepPlatformFindings,
 };
+
+export function trivyFindings(report: unknown): ExternalFindings {
+  return normalizeTrivyFindings(report, "local", ".");
+}

@@ -1307,6 +1307,7 @@ repository path instead of a Cloud repository ID or URL. Supported inputs includ
 Wiz findings, [Snyk Open Source JSON and SARIF](#import-snyk-open-source-findings),
 [hosted Snyk and Semgrep reports](#collect-hosted-snyk-and-semgrep-findings),
 [Endor Labs Finding JSON and SARIF](#import-endor-labs-findings),
+[Trivy dependency vulnerability JSON](#import-trivy-dependency-findings),
 [Amazon Inspector repository findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/inspector.md),
 [Semgrep Code JSON and SARIF](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md),
 [OpenGrep native JSON](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/opengrep.md),
@@ -1359,6 +1360,20 @@ the existing SDK validator.
 `scan import --json` and `scan import --csv` remain separate commands for importing
 Codex Security's findings schema as a saved scan; they do not accept vendor
 exports.
+
+## Import Trivy dependency findings
+
+Preview a saved Trivy repository or filesystem report against its local checkout. Use schema-v2 JSON or gzip from CI or an isolated, credential-free scanner job with only approved inputs.
+
+```sh
+checkout=/absolute/path/to/project
+codex-security publish findings /path/to/reports/trivy.json --to local --repository "$checkout" \
+  --provider trivy --trivy-scan-root . --source-key example/project/main --dry-run --format json
+```
+
+Set `--trivy-scan-root` to the directory scanned, relative to the Git root. Omit it only when the report's Git metadata confirms a remote repository scan. To import, repeat the command without `--dry-run`. Read the result with `codex-security findings imported "$checkout" --format json`.
+
+For Cloud, use `--to cloud --repository URL_OR_ID` on a deployment that accepts the `trivy` provider. See the [Trivy import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/trivy.md) for repository matching, exclusions, and repeat imports.
 
 ## Import Endor Labs findings
 

@@ -3587,6 +3587,11 @@ export async function main(
           .describe(
             "Full Inspector project ARN independently verified for --source-repository-url. Required when the report does not identify its repository by URL.",
           ),
+        trivyScanRoot: optionValue("--trivy-scan-root")
+          .optional()
+          .describe(
+            "Repository-relative directory scanned by Trivy. Use . for the repository root. Required unless Git metadata confirms a whole-checkout scan.",
+          ),
         sourceKey: optionValue("--source-key").describe(
           "Stable vendor tenant and finding namespace; not a project selection filter.",
         ),

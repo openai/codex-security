@@ -78,6 +78,13 @@ import {
   snykRestIssue,
   snykRestProject,
 } from "./support/snyk-rest-fixtures.js";
+import { normalizeTrivyFindings } from "../src/trivy-findings.js";
+import { normalizeInspectorFindings } from "../src/inspector-findings.js";
+import { inspectorReport } from "./support/inspector-import-fixtures.js";
+import {
+  trivyReport,
+  trivyRepositoryHeader,
+} from "./support/trivy-import-fixtures.js";
 import { normalizeSnykIssues } from "../src/snyk-rest-findings.js";
 import { normalizeSemgrepPlatformFindings } from "../src/semgrep-platform-findings.js";
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
@@ -1079,43 +1086,60 @@ test("Inspector publication checks its source and reuses the finding ARN", async
   expect(f.posts).toHaveLength(2);
 });
 
-test("Wiz can import, resume and update its own occurrence with upstream Inspector evidence", async () => {
-  const record = {
-    id: "wiz-vulnerability-1",
-    name: "CVE-2099-1234",
-    detailedName: "example-package",
-    vendorSeverity: "HIGH",
-    vulnerableAsset: { id: "example-asset" },
-    finding: inspectorPackageFinding(),
-  };
-  const f = await fixture([record]);
-  const prepare = () => prepareExternalPublication(f.file, options, f.deps);
-  const first = await prepare();
-  f.state.loseResponse = true;
-  const error = await first.publish().catch((error: unknown) => error);
-  if (!(error instanceof ExternalPublicationError)) throw error;
-  expect(f.reports.get(record.id)?.evidence.source_data).toEqual(record);
+test.each(["Inspector", "Trivy"] as const)(
+  "Wiz can import, resume and update its own occurrence with upstream %s evidence",
+  async (upstream) => {
+    const trivy = selectedTrivyRows(trivyReport()).findings[0]!;
+    const record = {
+      id:
+        upstream === "Trivy" ? trivy.source_finding_id : "wiz-vulnerability-1",
+      name: "CVE-2099-1234",
+      detailedName: "example-package",
+      vendorSeverity: "HIGH",
+      vulnerableAsset: { id: "example-asset" },
+      ...(upstream === "Trivy"
+        ? trivy.evidence.source_data
+        : { finding: inspectorPackageFinding() }),
+    };
+    const f = await fixture([record]);
+    await using local = await localFindingsFixture({
+      remote: foreignArtifactUrl,
+    });
+    const prepared = await prepareNormalizedLocalImport(
+      await readVendorFindings(f.file),
+      { ...options, repository: local.repository },
+      { environment: local.environment },
+    );
+    expect((await prepared.import()).counts.created).toBe(1);
 
-  // A pre-Inspector checkpoint can contain the original requests without their input projection.
-  const path = error.result.savedSubmission!;
-  const saved = JSON.parse(await readFile(path, "utf8"));
-  delete saved.inputProjection;
-  await writeFile(path, JSON.stringify(saved));
-  const retry = await prepare();
-  expect(retry.preview.resumed).toBe(true);
-  expect((await retry.publish()).verified).toBe(1);
-  expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+    const prepare = () => prepareExternalPublication(f.file, options, f.deps);
+    const first = await prepare();
+    f.state.loseResponse = true;
+    const error = await first.publish().catch((error: unknown) => error);
+    if (!(error instanceof ExternalPublicationError)) throw error;
+    expect(f.reports.get(record.id)?.evidence.source_data).toEqual(record);
 
-  record.vendorSeverity = "MEDIUM";
-  await writeFile(f.file, JSON.stringify([record]));
-  const updated = await prepareNormalizedExternalPublication(
-    await readVendorFindings(f.file),
-    options,
-    f.deps,
-  );
-  expect((await updated.publish()).counts.updated).toBe(1);
-  expect(f.reports.get(record.id)?.evidence.source_data).toEqual(record);
-});
+    // Older checkpoints can contain the original requests without their input projection.
+    const path = error.result.savedSubmission!;
+    const saved = JSON.parse(await readFile(path, "utf8"));
+    delete saved.inputProjection;
+    await writeFile(path, JSON.stringify(saved));
+    const retry = await prepare();
+    expect(retry.preview.resumed).toBe(true);
+    expect((await retry.publish()).verified).toBe(1);
+    expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+
+    record.vendorSeverity = "MEDIUM";
+    await writeFile(f.file, JSON.stringify([record]));
+    const updated = await prepareNormalizedExternalPublication(
+      await readVendorFindings(f.file),
+      options,
+      f.deps,
+    );
+    expect((await updated.publish()).counts.updated).toBe(1);
+    expect(f.reports.get(record.id)?.evidence.source_data).toEqual(record);
+  },
+);
 
 test.each(["example/project", inspectorRepositoryUrl])(
   "pending Inspector requests for %s recheck their project mapping and destination host",
@@ -4805,6 +4829,627 @@ async function snykRepositoryEvidence(
 
 const gitHubProject = "https://github.com/example/project";
 const connectedProject = "https://git.example.test/example/project";
+const foreignArtifactUrl = "https://github.com/example/other";
+
+const trivyOptions = {
+  ...options,
+  provider: "trivy" as const,
+  trivyScanRoot: ".",
+};
+
+test.each([
+  [
+    "http://git.example.test/Example/Project",
+    "http://git.example.test/example/project.git",
+  ],
+  [
+    "https://git.example.test/Example/Project",
+    "https://git.example.test/example/project.git",
+  ],
+  [connectedProject, "git@git.example.test:example/project.git"],
+])(
+  "Trivy CLI verifies Enterprise artifact %s and report remote %s before publication",
+  async (artifact, remote) => {
+    const report = trivyReport();
+    report.ArtifactName = artifact;
+    report.Metadata.RepoURL = remote;
+    const scheme = remote.startsWith("http:") ? "http" : "https";
+    const fixtureData = await fixture(
+      report,
+      `${scheme}://git.example.test/example/project`,
+    );
+    const command = [...fixtureData.command, "--trivy-scan-root", "."];
+    command[command.indexOf("--provider") + 1] = "trivy";
+    const cli = createCliTest(main);
+    expect(
+      await cli.runCli([...command, "--dry-run"], fixtureData.cliDeps),
+    ).toBe(0);
+    expect(fixtureData.posts).toHaveLength(0);
+    const code = await cli.runCli([...command, "--yes"], fixtureData.cliDeps);
+    expect({ code, error: cli.stderr.text() }).toEqual({ code: 0, error: "" });
+    expect(fixtureData.posts).toHaveLength(1);
+    expect(
+      JSON.parse(fixtureData.posts[0]!).items[0].evidence.source_data.report
+        .Metadata.RepoURL,
+    ).toBe(remote);
+    expect([...fixtureData.reports.values()]).toMatchObject([
+      {
+        source: { provider: "trivy" },
+        assessment: { state: "not_assessed" },
+      },
+    ]);
+  },
+);
+
+test("Trivy CLI rejects a checkout-supplied repository label even in a dry run", async () => {
+  const report = trivyReport();
+  report.ArtifactName = "ssh://tenant-a@git.example.test/example/project";
+  report.Metadata.RepoURL = "ssh://git.example.test/example/project";
+  const f = await fixture(report, connectedProject);
+  const command = [...f.command, "--trivy-scan-root", "."];
+  command[command.indexOf("--provider") + 1] = "trivy";
+  const cli = createCliTest(main);
+  for (const mode of ["--dry-run", "--yes"]) {
+    expect(await cli.runCli([...command, mode], f.cliDeps)).toBe(2);
+    expect(cli.stderr.text()).toContain("Trivy omitted the SSH user");
+  }
+  expect(f.posts).toHaveLength(0);
+});
+
+test.each([
+  ["HTTPS://github.com/example/project", gitHubProject, undefined],
+  ["Git+SSH://git@github.com/example/project", gitHubProject, undefined],
+  [
+    "http://git.example.test/example/project.git",
+    connectedProject,
+    "http://git.example.test/Example/Project",
+  ],
+  [gitHubProject, foreignArtifactUrl, undefined],
+  ["git@github.com:example/project.git.git", gitHubProject, undefined],
+  [
+    "ssh://git@git.example.test/other/../example/project.git",
+    connectedProject,
+    undefined,
+  ],
+  [
+    "https://git.example.test/example/project.git",
+    "https://git.example.test/example/other",
+    "https://git.example.test/Example/Project",
+  ],
+])(
+  "Trivy source %s is rejected for Cloud destination %s by both entrypoints",
+  async (source, destination, artifact) => {
+    const report = trivyReport();
+    if (artifact) report.ArtifactName = artifact;
+    report.Metadata.RepoURL = source;
+    const cloud = await fixture(report, destination);
+    await expect(
+      prepareExternalPublication(cloud.file, trivyOptions, cloud.deps),
+    ).rejects.toThrow("does not match the selected Cloud repository");
+    await expect(
+      prepareNormalizedExternalPublication(
+        selectedTrivyRows(report),
+        trivyOptions,
+        cloud.deps,
+      ),
+    ).rejects.toThrow("does not match the selected Cloud repository");
+    expect(cloud.posts).toHaveLength(0);
+  },
+);
+
+// A selected row can be imported without the original batch header.
+function selectedTrivyRows(report: unknown) {
+  const { findings, read, excluded } = normalizeTrivyFindings(
+    report,
+    "cloud",
+    ".",
+  );
+  return { findings, read, excluded };
+}
+
+test.each([
+  [false, false],
+  [true, false],
+  [false, true],
+  [true, true],
+])(
+  "retained Trivy rows require their provider after renaming the ID (%j) or projecting the artifact type (%j)",
+  async (renamed, projected) => {
+    const rows = selectedTrivyRows(trivyReport());
+    const row = rows.findings[0]!;
+    if (renamed) row.source_finding_id = "selected-occurrence";
+    if (projected)
+      delete (row.evidence.source_data!["report"] as Record<string, unknown>)[
+        "ArtifactType"
+      ];
+    const input = renamed && projected ? { ...rows, report: {} } : rows;
+    await expectTrivyOwnership(input);
+  },
+);
+
+const foreignTrivyTarget = {
+  remote: foreignArtifactUrl,
+  cloudRepository: foreignArtifactUrl,
+};
+
+async function expectTrivyOwnership(
+  input: ReturnType<typeof normalizeTrivyFindings>,
+) {
+  await expectTrivyReplay(
+    input,
+    "Retained Trivy evidence requires the trivy provider.",
+    { ...foreignTrivyTarget, provider: "wiz" },
+  );
+  await expectTrivyReplay(input);
+  await expectTrivyReplay(input, /does not match/u, foreignTrivyTarget);
+}
+
+test.each(["native header", "repository URL"] as const)(
+  "selected Trivy rows bind their retained %s after projecting other scanner fields",
+  async (retained) => {
+    const rows = selectedTrivyRows(trivyReport());
+    const row = rows.findings[0]!;
+    if (retained === "native header") {
+      row.source_finding_id = "selected-occurrence";
+      row.evidence.source_data = {
+        report: row.evidence.source_data!["report"],
+      };
+    } else {
+      row.evidence.source_data = {
+        report: { Metadata: { RepoURL: gitHubProject } },
+      };
+    }
+    await expectTrivyOwnership(rows);
+  },
+);
+
+test("a native Trivy batch header retains its provider when rows have no source data", async () => {
+  const rows = selectedTrivyRows(trivyReport());
+  const row = rows.findings[0]!;
+  const report = row.evidence.source_data!["report"] as Record<string, unknown>;
+  row.source_finding_id = "selected-occurrence";
+  delete row.evidence.source_data;
+  await expectTrivyReplay(
+    { ...rows, report },
+    "Retained Trivy evidence requires the trivy provider.",
+    { ...foreignTrivyTarget, provider: "wiz" },
+  );
+});
+
+test.each(["sast", "package"] as const)(
+  "adding Wiz %s fields to a native Trivy row cannot rebind its repository",
+  async (kind) => {
+    const rows = selectedTrivyRows(trivyReport());
+    const row = rows.findings[0]!;
+    const id = "selected-occurrence";
+    row.source_finding_id = kind === "sast" ? `sast:${id}` : id;
+    Object.assign(row.evidence.source_data!, { id });
+    if (kind === "sast") {
+      row.evidence.details = {
+        kind: "sast",
+        repository: { id: "wiz-repository", url: foreignArtifactUrl },
+      };
+    } else {
+      Object.assign(row.evidence.source_data!, {
+        name: "CVE-2099-0001",
+        detailedName: "example-package",
+        vendorSeverity: "HIGH",
+        vulnerableAsset: { id: "example-asset" },
+      });
+    }
+    await expectTrivyReplay(
+      rows,
+      "Retained Trivy evidence requires the trivy provider.",
+      {
+        provider: "wiz",
+        remote: foreignArtifactUrl,
+        cloudRepository: foreignArtifactUrl,
+      },
+    );
+  },
+);
+
+test("Wiz SAST can carry upstream Trivy evidence while binding its own repository through inventory", async () => {
+  const record = {
+    ...selectedTrivyRows(trivyReport()).findings[0]!.evidence.source_data,
+    id: "example-occurrence",
+    name: "Synthetic finding",
+    severity: "HIGH",
+    repository: { id: "wiz-repository" },
+  };
+  const cloud = await fixture(
+    {
+      data: {
+        sastFindings: { nodes: [record] },
+        versionControlResources: {
+          nodes: [
+            {
+              platform: "GITHUB",
+              repository: { ...record.repository, url: foreignArtifactUrl },
+            },
+          ],
+        },
+      },
+    },
+    foreignArtifactUrl,
+  );
+  const rows = await readVendorFindings(cloud.file);
+  expect(rows.findings[0]).toMatchObject({
+    source_finding_id: `sast:${record.id}`,
+    evidence: {
+      details: { repository: { url: foreignArtifactUrl } },
+      source_data: record,
+    },
+  });
+  await using local = await localFindingsFixture({
+    remote: foreignArtifactUrl,
+  });
+  const prepared = await prepareNormalizedLocalImport(
+    rows,
+    { ...options, repository: local.repository },
+    { environment: local.environment },
+  );
+  expect((await prepared.import()).counts.created).toBe(1);
+  const publication = await prepareExternalPublication(
+    cloud.file,
+    options,
+    cloud.deps,
+  );
+  expect((await publication.publish()).counts.created).toBe(1);
+});
+
+async function expectTrivyReplay(
+  input: ReturnType<typeof normalizeTrivyFindings>,
+  error?: string | RegExp,
+  {
+    remote = gitHubProject,
+    cloudRepository = gitHubProject,
+    cloudError = error,
+    provider = "trivy",
+  }: {
+    remote?: string;
+    cloudRepository?: string;
+    cloudError?: string | RegExp;
+    provider?: "trivy" | "wiz";
+  } = {},
+) {
+  const selected = { ...options, provider };
+  const local = await localFindingsFixture({ remote });
+  cleanups.push(local.dispose);
+  const cloud = await fixture(undefined, cloudRepository);
+  for (const [prepare, expected] of [
+    [
+      () =>
+        prepareNormalizedLocalImport(
+          input,
+          { ...selected, repository: local.repository },
+          { environment: local.environment },
+        ),
+      error,
+    ],
+    [
+      () => prepareNormalizedExternalPublication(input, selected, cloud.deps),
+      cloudError,
+    ],
+  ] as const) {
+    if (expected === undefined)
+      expect((await prepare()).preview.findings).toHaveLength(1);
+    else await expect(prepare()).rejects.toThrow(expected);
+  }
+}
+
+test.each([{}, { RepoURL: gitHubProject }])(
+  "a mixed-case HTTP transport in a selected Trivy finding with metadata %j cannot bind to HTTPS",
+  async (Metadata) => {
+    const report = {
+      ...trivyReport(),
+      Metadata,
+      ArtifactName: "HTTPS://github.com/example/project",
+    };
+    for (const remote of [gitHubProject, report.ArtifactName])
+      await expectTrivyReplay(
+        selectedTrivyRows(report),
+        /mixed-case HTTP target|different repositories|does not match/,
+        { remote },
+      );
+    if (!Metadata.RepoURL)
+      await expectTrivyReplay(
+        normalizeTrivyFindings({ ...report, Results: [] }, "local", "."),
+        "mixed-case HTTP target",
+        {
+          remote: report.ArtifactName,
+          cloudError: "No supported findings are ready to publish",
+        },
+      );
+  },
+);
+
+const userlessSsh = "ssh://github.com/example/project";
+const explicitSsh = "ssh://git@github.com/example/project";
+
+test.each([
+  [userlessSsh, undefined, userlessSsh, false],
+  [userlessSsh, undefined, gitHubProject, false],
+  [userlessSsh, undefined, explicitSsh, false],
+  [explicitSsh, undefined, gitHubProject, true],
+  ["git@github.com:example/project", undefined, gitHubProject, true],
+  [userlessSsh, gitHubProject, gitHubProject, false],
+  [userlessSsh, explicitSsh, gitHubProject, false],
+] as const)(
+  "selected Trivy SSH finding with origin %s and artifact %s on checkout %s",
+  async (RepoURL, ArtifactName, remote, accepts) => {
+    const input = selectedTrivyRows({ ...trivyReport(), Metadata: {} });
+    const evidence = input.findings[0]!.evidence;
+    evidence.source_data!["report"] = {
+      SchemaVersion: 2,
+      ArtifactType: "repository",
+      Metadata: { RepoURL },
+      ...(ArtifactName && { ArtifactName }),
+    };
+    evidence.details = { kind: "sast", repository: { url: gitHubProject } };
+    await expectTrivyReplay(
+      {
+        ...input,
+        report: trivyRepositoryHeader(gitHubProject),
+      },
+      accepts ? undefined : /Trivy omitted the SSH user/u,
+      { remote },
+    );
+  },
+);
+
+test("each normalized Trivy finding must retain its report's repository", async () => {
+  const report = trivyReport();
+  report.Results.push({
+    ...report.Results[0]!,
+    Target: "nested/package-lock.json",
+  });
+  const input = normalizeTrivyFindings(report, "cloud", ".");
+  delete input.findings[1]!.evidence.source_data;
+  input.report = trivyRepositoryHeader(report.Metadata.RepoURL);
+  await expectTrivyReplay(input, /retain/i);
+});
+
+test.each([
+  ["Kit", "Kit", false],
+  ["Kit", "%E2%84%AAit", true],
+] as const)(
+  "matches Trivy repository paths %s and %s by HTTP path",
+  async (source, target, matches) => {
+    const remote = `https://github.com/example/${target}`;
+    const sourceUrl = `https://github.com/example/${source}`;
+    const error = matches
+      ? undefined
+      : /does not match|different repositories/u;
+    for (const kind of ["native", "typed"] as const) {
+      const report = trivyReport();
+      report.Metadata.RepoURL = kind === "native" ? sourceUrl : remote;
+      const rows = selectedTrivyRows(report);
+      if (kind === "typed")
+        rows.findings[0]!.evidence.details = {
+          kind: "sast",
+          repository: { url: sourceUrl },
+        };
+      await expectTrivyReplay(rows, error, { remote, cloudRepository: remote });
+    }
+
+    // Selecting by URL independently checks the operator's destination against the catalog.
+    const cloud = await fixture([], remote);
+    const rows = selectedTrivyRows({ ...trivyReport(), Metadata: {} });
+    const prepare = prepareNormalizedExternalPublication(
+      rows,
+      { ...trivyOptions, repository: sourceUrl },
+      cloud.deps,
+    );
+    if (matches) expect((await prepare).preview.destination.url).toBe(remote);
+    else
+      await expect(prepare).rejects.toThrow(
+        "destination repository is not available",
+      );
+  },
+);
+
+test("Trivy preparation rejects retained Inspector findings", async () => {
+  const input = normalizeInspectorFindings(inspectorReport(), gitHubProject);
+  const cloud = await fixture();
+  await expect(
+    prepareNormalizedExternalPublication(input, trivyOptions, cloud.deps),
+  ).rejects.toThrow(
+    "Retained Inspector evidence requires the inspector provider.",
+  );
+});
+
+test("Trivy typed repository links and catalog URLs must identify the same HTTP and Git path", async () => {
+  const ambiguous = "https://github.com/example/%2e%2e/../project";
+  const error = /HTTP path that does not match its Git path/u;
+  const input = selectedTrivyRows({ ...trivyReport(), Metadata: {} });
+  input.findings[0]!.evidence.details = {
+    kind: "sast",
+    repository: { url: ambiguous },
+  };
+  await expectTrivyReplay(input, error);
+
+  const rows = selectedTrivyRows(trivyReport());
+  const cloud = await fixture();
+  await expect(
+    prepareNormalizedExternalPublication(
+      rows,
+      { ...trivyOptions, repository: ambiguous },
+      cloud.deps,
+    ),
+  ).rejects.toThrow(error);
+  cloud.state.repositoryUrl = ambiguous;
+  await expect(
+    prepareNormalizedExternalPublication(rows, trivyOptions, cloud.deps),
+  ).rejects.toThrow(error);
+});
+
+const uppercaseWebUrl = "HTTPS://github.com/Example/Project";
+test.each([
+  [uppercaseWebUrl, gitHubProject, true],
+  [foreignArtifactUrl, gitHubProject, false],
+  [gitHubProject, uppercaseWebUrl, false],
+  [uppercaseWebUrl, uppercaseWebUrl, false],
+] as const)(
+  "compares a typed repository URL %s and a raw Trivy remote %s independently",
+  async (typed, raw, matches) => {
+    const report = trivyReport();
+    report.Metadata.RepoURL = raw;
+    const input = selectedTrivyRows(report);
+    input.findings[0]!.evidence.details = {
+      kind: "sast",
+      repository: { url: typed },
+    };
+    await expectTrivyReplay(
+      input,
+      matches ? undefined : /does not match|different repositories/,
+    );
+  },
+);
+
+const credentialUrl = "https://scanner:fixture@github.com/example/project";
+
+test.each([
+  ["filesystem", credentialUrl, "without credentials"],
+  [undefined, credentialUrl, "without credentials"],
+  ["unknown", credentialUrl, "without credentials"],
+  [undefined, foreignArtifactUrl, "does not match"],
+  ["filesystem", foreignArtifactUrl, undefined],
+] as const)(
+  "checks retained Trivy artifact type %s with URL %s",
+  async (ArtifactType, ArtifactName, error) => {
+    const input = normalizeTrivyFindings(
+      { ...trivyReport(), Metadata: {} },
+      "cloud",
+      ".",
+    );
+    input.findings[0]!.evidence.source_data!["report"] = {
+      SchemaVersion: 2,
+      ...(ArtifactType && { ArtifactType }),
+      ArtifactName,
+    };
+    await expectTrivyReplay(input, error);
+  },
+);
+
+test.each([
+  ["repository", "other", false],
+  ["repository", "project", true],
+  ["filesystem", "other", true],
+])(
+  "Trivy %s artifact URL ending in %s binds individual findings when it identifies a repository",
+  async (ArtifactType, project, accepts) => {
+    const ArtifactName = `ssh://git@github.com/example/${project}.git`;
+    const report = {
+      ...trivyReport(),
+      ArtifactType,
+      ArtifactName,
+      Metadata: {},
+    };
+    const f = await fixture(report, gitHubProject);
+    const normalized = normalizeTrivyFindings(report, "cloud", ".");
+    const selectedRow = {
+      read: 1,
+      findings: [normalized.findings[0]!],
+      excluded: [],
+    };
+    for (const prepare of [
+      () => prepareExternalPublication(f.file, trivyOptions, f.deps),
+      () =>
+        prepareNormalizedExternalPublication(selectedRow, trivyOptions, f.deps),
+    ]) {
+      if (!accepts) {
+        await expect(prepare()).rejects.toThrow(
+          "does not match the selected Cloud repository",
+        );
+        continue;
+      }
+      const prepared = await prepare();
+      const reloaded = JSON.parse(JSON.stringify(prepared.preview));
+      if (ArtifactType === "repository") {
+        const other = await fixture(report, foreignArtifactUrl);
+        await expect(
+          prepareNormalizedExternalPublication(
+            reloaded,
+            trivyOptions,
+            other.deps,
+          ),
+        ).rejects.toThrow("does not match the selected Cloud repository");
+      } else {
+        expect(
+          reloaded.findings[0].evidence.source_data.report.ArtifactName,
+        ).toBe(ArtifactName);
+      }
+      await prepared.publish();
+    }
+    expect(f.posts.length > 0).toBe(accepts);
+    for (const body of f.posts) {
+      const report = JSON.parse(body).items[0].evidence.source_data.report;
+      expect(report.ArtifactName).toBe(ArtifactName);
+    }
+  },
+);
+
+test.each([
+  ["empty", [], "No supported findings are ready to publish"],
+  [
+    "excluded-only",
+    [{ Class: "os-pkgs" }],
+    "Unsupported Trivy result class: os-pkgs",
+  ],
+] as const)(
+  "an %s Trivy report stops before Cloud authentication or repository discovery",
+  async (_name, Results, error) => {
+    const report = {
+      ...trivyReport(),
+      Metadata: { RepoURL: "ssh://git.example.test/example/project" },
+      Results,
+    };
+    const cloud = await fixture(report);
+    const unexpected = async () => {
+      throw new Error("Unexpected Cloud access");
+    };
+    const deps = {
+      environment: cloud.environment,
+      credentials: unexpected,
+      fetch: unexpected,
+    };
+    await expect(
+      prepareExternalPublication(cloud.file, trivyOptions, deps),
+    ).rejects.toThrow(error);
+    const input = normalizeTrivyFindings(report, "cloud", ".");
+    await expect(
+      prepareNormalizedExternalPublication(input, trivyOptions, deps),
+    ).rejects.toThrow(error);
+    input.report = trivyRepositoryHeader(credentialUrl);
+    await expect(
+      prepareNormalizedExternalPublication(input, trivyOptions, deps),
+    ).rejects.toThrow("without credentials");
+  },
+);
+
+test.each([
+  [
+    {
+      provider: "trivy",
+      trivyScanRoot: ".",
+      sourceRepositoryUrl: "https://github.com/example/other",
+    },
+    "--source-repository-url",
+  ],
+  [{ provider: "trivy" }, "--trivy-scan-root"],
+  [{ provider: "wiz", trivyScanRoot: "." }, "only to --provider trivy"],
+] as const)(
+  "rejects invalid file import options %p",
+  async (settings, message) => {
+    const f = await fixture(trivyReport());
+    await expect(
+      prepareExternalPublication(f.file, { ...options, ...settings }, f.deps),
+    ).rejects.toThrow(message);
+    expect(f.posts).toHaveLength(0);
+  },
+);
+
 const tenantProject = "https://tenant.ghe.com/example/project";
 
 const snykRepositoryAliases: [string, string][] = [
@@ -5397,6 +6042,125 @@ test("Endor JSON and SARIF reuse UUID identity through Cloud publication", async
     result: sarif.runs[0]!.results[0],
   });
 });
+test.each(["file", "selected rows"] as const)(
+  "a Trivy %s publication resumes its original request across entrypoints and a repository rename",
+  async (initialKind) => {
+    const report = {
+      ...trivyReport(),
+      Metadata: {},
+      ArtifactName: "ssh://git@github.com/example/project.git",
+    };
+    const cloud = await fixture(report);
+    const rows = selectedTrivyRows(report);
+    const file = () =>
+      prepareExternalPublication(cloud.file, trivyOptions, cloud.deps);
+    const selected = (header?: Record<string, unknown>) =>
+      prepareNormalizedExternalPublication(
+        { ...rows, report: header },
+        trivyOptions,
+        cloud.deps,
+      );
+    const first = initialKind === "file" ? await file() : await selected();
+    cloud.state.loseResponse = true;
+    await expect(first.publish()).rejects.toThrow("resume the saved request");
+    const body = cloud.posts[0]!;
+    expect(JSON.parse(body)).toEqual(first.preview.requests[0]);
+    await writeFile(
+      cloud.file,
+      JSON.stringify({ ...report, ArtifactName: foreignArtifactUrl }),
+    );
+    await expect(file()).rejects.toThrow("does not match");
+    await writeFile(cloud.file, JSON.stringify(report));
+
+    cloud.state.repositoryUrl = "https://github.com/example/renamed";
+    await expect(
+      selected(trivyRepositoryHeader(cloud.state.repositoryUrl)),
+    ).rejects.toThrow("does not match");
+    expect(cloud.posts).toEqual([body]);
+    expect(
+      (await selected(trivyRepositoryHeader(gitHubProject))).preview.resumed,
+    ).toBe(true);
+    const retry = initialKind === "file" ? await selected() : await file();
+    expect(retry.preview.resumed).toBe(true);
+    expect(retry.preview.requests).toEqual(first.preview.requests);
+    expect((await retry.publish()).status).toBe("complete");
+    expect(cloud.posts).toEqual([body, body]);
+  },
+);
+
+test("unverified Trivy checkpoints retain their requests and receipts for the original importer", async () => {
+  const cloud = await fixture(trivyReport());
+  const prepare = () =>
+    prepareExternalPublication(cloud.file, trivyOptions, cloud.deps);
+  cloud.state.brokenReadback = true;
+  await expect((await prepare()).publish()).rejects.toThrow();
+  cloud.state.brokenReadback = false;
+  const retry = await prepare();
+  const directory = join(cloud.root, "state", "external-finding-publications");
+  const filename = join(
+    directory,
+    (await readdir(directory)).find((name) => name.endsWith(".pending.json"))!,
+  );
+  const { accountId, requests, receipts, inputProjection } = JSON.parse(
+    await readFile(filename, "utf8"),
+  );
+  expect(receipts).toHaveLength(1);
+  const original = JSON.stringify({
+    accountId,
+    requests,
+    receipts,
+    inputProjection,
+  });
+  await writeFile(filename, original);
+  await expect(prepare()).rejects.toThrow("the build that created it");
+  await expect(retry.publish()).rejects.toThrow();
+  expect(await readFile(filename, "utf8")).toBe(original);
+  expect(cloud.posts).toHaveLength(1);
+});
+
+test.each([
+  [
+    "native Semgrep",
+    semgrepJson(),
+    { provider: "semgrep", sourceRepositoryUrl: gitHubProject },
+  ],
+  ["Trivy", trivyReport(), { provider: "trivy", trivyScanRoot: "." }],
+  [
+    "hosted Snyk REST",
+    snykRestFixture("open-source", {
+      sourceRepositoryUrl: gitHubProject,
+    }),
+    { provider: "snyk" },
+  ],
+  ["hosted Semgrep Platform", platformReport(), { provider: "semgrep" }],
+] as const)(
+  "a %s file checkpoint resumes after the same destination is renamed, but a fresh submission cannot",
+  async (_name, report, readerOptions) => {
+    const cloud = await fixture(report, gitHubProject);
+    const selected = { ...options, ...readerOptions };
+    const first = await prepareExternalPublication(
+      cloud.file,
+      selected,
+      cloud.deps,
+    );
+    cloud.state.loseResponse = true;
+    await expect(first.publish()).rejects.toThrow("resume the saved request");
+    cloud.state.repositoryUrl = "https://github.com/example/renamed";
+    const retry = await prepareExternalPublication(
+      cloud.file,
+      selected,
+      cloud.deps,
+    );
+    expect(retry.preview.resumed).toBe(true);
+    expect((await retry.publish()).status).toBe("complete");
+    expect(cloud.posts[1]).toBe(cloud.posts[0]);
+    await expect(
+      prepareExternalPublication(cloud.file, selected, cloud.deps),
+    ).rejects.toThrow("does not match");
+    expect(cloud.posts).toHaveLength(2);
+  },
+);
+
 test("Endor source repository binding preserves immutable requests across a repository rename", async () => {
   const input: any = endorSarif();
   input.runs[0].versionControlProvenance = [

@@ -3,6 +3,14 @@ import {
   validateHostedRepositoryUrl,
 } from "./hosted-scanner-http.js";
 import { CodexSecurityError } from "./errors.js";
+import { isRecord } from "./record.js";
+import {
+  identifiesTrivyReport,
+  isTrivyReportHeader,
+  retainedTrivyReport,
+} from "./trivy-findings.js";
+import { isWizOccurrence } from "./wiz-findings.js";
+import type { ExternalImportTarget } from "./external-import-contract.js";
 import { requiredText } from "./scanner-import.js";
 import type { ExternalPublicationOptions } from "./external-findings-publish.js";
 import type {
@@ -59,11 +67,46 @@ export const HOSTED_FINDINGS_FORMATS = {
   semgrep: "semgrep-platform-findings/v1",
 } as const;
 
+function isRetainedTrivyFinding(finding: ExternalFinding) {
+  const data = finding.evidence.source_data;
+  if (!data) return false;
+  const report = retainedTrivyReport(finding);
+  if (identifiesTrivyReport(report)) return true;
+  const metadata = isRecord(report) ? report["Metadata"] : undefined;
+  const nativeReport =
+    isRecord(report) &&
+    report["SchemaVersion"] === 2 &&
+    (isTrivyReportHeader(report) ||
+      (isRecord(metadata) && typeof metadata["RepoURL"] === "string"));
+  const result = data["result"];
+  const vulnerability = data["vulnerability"];
+  const nativeRow =
+    isRecord(result) &&
+    result["Class"] === "lang-pkgs" &&
+    isRecord(vulnerability) &&
+    typeof vulnerability["VulnerabilityID"] === "string" &&
+    typeof vulnerability["PkgName"] === "string";
+  return (
+    (nativeReport && finding.source_finding_id.startsWith("trivy:")) ||
+    (nativeRow && (nativeReport || typeof data["scanRoot"] === "string"))
+  );
+}
+
 /** Retained rows keep their scanner identity even if the report header is projected out. */
-export function checkHostedFindingProvider(
+export function checkRetainedFindingProvider(
   provider: Provider,
-  data: ExternalFindingEvidence["source_data"],
+  finding: ExternalFinding,
+  target: ExternalImportTarget = "cloud",
 ): void {
+  const data = finding.evidence.source_data;
+  if (
+    provider !== "trivy" &&
+    isRetainedTrivyFinding(finding) &&
+    !(provider === "wiz" && isWizOccurrence(finding, target))
+  )
+    throw new CodexSecurityError(
+      "Retained Trivy evidence requires the trivy provider.",
+    );
   const format = data?.["format"];
   const native =
     format === HOSTED_FINDINGS_FORMATS.snyk
@@ -92,6 +135,10 @@ export function snapshotExternalFindings(
     snykRestContext,
     ...rest
   } = input;
+  if (provider !== "trivy" && identifiesTrivyReport(report))
+    throw new CodexSecurityError(
+      "Retained Trivy evidence requires the trivy provider.",
+    );
   if (
     (sourceRepositoryUrl !== undefined ||
       sourceRepositoryPlatform !== undefined) &&
@@ -143,6 +190,7 @@ export function snapshotImportOptions<
   provider,
   sourceKey,
   sourceRepositoryUrl,
+  trivyScanRoot,
   inspectorProjectMap,
 }: ExternalPublicationOptions & { provider: P }) {
   if (inspectorProjectMap !== undefined && provider !== "inspector")
@@ -154,6 +202,7 @@ export function snapshotImportOptions<
     provider,
     sourceKey,
     sourceRepositoryUrl,
+    trivyScanRoot,
     inspectorProjectMap: inspectorProjectMap && new Map(inspectorProjectMap),
   };
 }

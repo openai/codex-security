@@ -1,4 +1,5 @@
 import { CodexSecurityError } from "./errors.js";
+import { canonicalJson } from "./record.js";
 import {
   repositoryUrlKey,
   validateExternalEvidence,
@@ -547,6 +548,48 @@ async function readFindingInput(path: string): Promise<FindingInput> {
       { cause },
     );
   }
+}
+
+/** Apply Wiz's own reader to an occurrence that also retains another scanner's fields. */
+export function isWizOccurrence(
+  finding: VendorFinding,
+  target: ExternalImportTarget,
+): boolean {
+  const { source_data: data, details } = finding.evidence;
+  if (!data || typeof data["id"] !== "string") return false;
+  const kind = details?.kind;
+  const scoped = kind === "sast" || kind === "iac" || kind === "secret";
+  if (
+    finding.source_finding_id !==
+    (scoped ? `${kind}:${data["id"]}` : data["id"])
+  )
+    return false;
+  const input: FindingInput = {
+    records: [{ value: data, kind: scoped ? kind : "sca" }],
+    repositories: new Map(),
+  };
+  const repository = details?.repository;
+  if (scoped && repository?.id)
+    input.repositories.set(repository.id, {
+      id: repository.id,
+      name: repository.name ?? null,
+      url: repository.url,
+      platform: null,
+    });
+  // The raw record is the same. Check that Wiz produced the selected evidence,
+  // including its own repository binding, before treating upstream fields as opaque.
+  const selected = canonicalJson({
+    ...validateExternalEvidence(finding.evidence, target),
+    source_data: undefined,
+  });
+  const matches = (legacy: boolean) => {
+    const [row] = normalizeFindings(input, target, undefined, legacy).findings;
+    return (
+      row !== undefined &&
+      canonicalJson({ ...row.evidence, source_data: undefined }) === selected
+    );
+  };
+  return matches(false) || (scoped && matches(true));
 }
 
 function normalizeFindings(

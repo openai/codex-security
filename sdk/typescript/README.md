@@ -724,6 +724,12 @@ project's findings, then import the report with `--provider snyk` or
 and [Semgrep](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md)
 guides also cover fresh scans and supported file formats.
 
+Use `--provider trivy` to import language-package vulnerabilities from a saved
+Trivy schema-v2 repository or filesystem report. Use a CI artifact or a report
+from an isolated, credential-free scanner job with only approved inputs.
+Set `--trivy-scan-root` to the scanned directory relative to the Git root unless
+the report's Git metadata confirms a remote repository scan. See [Trivy imports](docs/cli.md#import-trivy-dependency-findings).
+
 Use `--provider endor` with native Endor Finding JSON; existing endorctl SARIF is
 accepted as a lossy compatibility format. See
 [Endor imports](docs/cli.md#import-endor-labs-findings).
