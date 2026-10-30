@@ -183,18 +183,16 @@ function remoteRepository(
   const { url, path, scpStyle } = remote;
   const ssh = isGitSsh(url.protocol);
   const protocol = url.protocol === "http:" ? "http:" : "https:";
+  const sshHostname = url.hostname.toLowerCase().replace(/\.$/u, "");
+  const hostedSsh =
+    sonarHostedGit(sshHostname) ||
+    ["ssh.github.com", "ssh.dev.azure.com"].includes(sshHostname);
+  if (provider === "sonar" && ssh && hostedSsh) url.hostname = sshHostname;
   const githubSshOverHttps = isGitHubSshOverHttps(url);
   let hostname = githubSshOverHttps ? "github.com" : url.hostname;
   // An unresolved SSH name can be a local Host alias. Only substitute the
   // supplied hostname when checking the path of an unverified manual mapping.
-  const sshHostname = hostname.toLowerCase().replace(/\.$/u, "");
-  if (
-    possibleSshHost &&
-    ssh &&
-    !sonarHostedGit(sshHostname) &&
-    !["ssh.github.com", "ssh.dev.azure.com"].includes(sshHostname)
-  )
-    hostname = possibleSshHost;
+  if (possibleSshHost && ssh && !hostedSsh) hostname = possibleSshHost;
   const port =
     githubSshOverHttps || url.port === gitTransportPorts[url.protocol]
       ? ""
@@ -588,6 +586,12 @@ async function hasGitMetadata(
   );
 }
 
+/** @internal */
+export interface ConfiguredFetchRemote {
+  name: string;
+  url: string;
+}
+
 /** @internal Effective fetch URLs from the selected, protected checkout. */
 export async function configuredFetchRemotes(
   repository: string,
@@ -595,7 +599,7 @@ export async function configuredFetchRemotes(
   protectedRoots: WorkbenchCommandOptions["protectedRoot"],
   environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
-): Promise<string[]> {
+): Promise<ConfiguredFetchRemote[]> {
   if (!(await hasGitMetadata(repository, signal))) return [];
   const gitProtectedRoots = [
     ...(typeof protectedRoots === "string"
@@ -653,29 +657,20 @@ export async function configuredFetchRemotes(
       return [];
     throw error;
   }
-  const remotes: string[] = [];
+  const remotes: ConfiguredFetchRemote[] = [];
   for (const name of remoteNames.split(/\r?\n/u).filter(Boolean)) {
-    const urls = await readGit(["remote", "get-url", "--all", "--", name]);
-    const values = urls.split(
-      provider === "sonar" && process.platform !== "win32" ? /\n/u : /\r?\n/u,
-    );
-    if (provider === "sonar" && /[\r\n]/u.test(urls)) {
-      // get-url uses a newline between values and also emits literal newlines inside a URL.
-      const configured = await readGit([
-        "config",
-        "--null",
-        "--get-all",
-        `remote.${name}.url`,
-      ]);
-      if (
-        /[\r\n]/u.test(configured) ||
-        values.some((url) => url.includes("\r"))
-      )
+    if (provider === "sonar") {
+      // Git fetches from only the first URL, after insteadOf rewrites.
+      const url = await readGit(["remote", "get-url", "--", name]);
+      if (/[\r\n]/u.test(url))
         throw new CodexSecurityError(
           "A configured Git remote URL contains a line break. Configure each fetch URL as a separate Git value.",
         );
+      remotes.push({ name, url });
+    } else {
+      const urls = await readGit(["remote", "get-url", "--all", "--", name]);
+      for (const url of urls.split(/\r?\n/u)) remotes.push({ name, url });
     }
-    remotes.push(...values);
   }
   return remotes;
 }
@@ -690,15 +685,18 @@ async function requireMatchingRepository(
   environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
   possibleSshHost?: string,
+  fetchRemotes?: readonly ConfiguredFetchRemote[],
 ): Promise<boolean> {
   if (sources.length === 0) return false;
-  const remotes = await configuredFetchRemotes(
-    repository,
-    provider,
-    protectedRoots,
-    environment,
-    signal,
-  );
+  const remotes =
+    fetchRemotes ??
+    (await configuredFetchRemotes(
+      repository,
+      provider,
+      protectedRoots,
+      environment,
+      signal,
+    ));
   const boundProvider =
     provider === "sonar" ||
     provider === "inspector" ||
@@ -707,7 +705,7 @@ async function requireMatchingRepository(
   const loosePlatformFor = localRepositoryPlatform(provider, sources, false);
   const comparable: string[] = [];
   const unverified: string[] = [];
-  for (const remote of remotes) {
+  for (const { url: remote } of remotes) {
     const verified =
       provider === "sonar" ? sonarRepositoryForRemote(remote) : remote;
     if (verified) comparable.push(verified);
@@ -838,6 +836,7 @@ export async function prepareLocalImport(
   dependencies: LocalExternalImportDependencies,
   readerSources = snapshotSourceRepositories(dependencies.sourceRepositories),
   parsedSources: readonly ExternalSourceRepository[] = [],
+  fetchRemotes?: readonly ConfiguredFetchRemote[],
 ): Promise<PreparedLocalExternalImport> {
   requireIdentity(options.sourceKey, "Source key");
   const current = structuredClone(input);
@@ -1073,6 +1072,7 @@ export async function prepareLocalImport(
     workbenchOptions.environment,
     dependencies.signal,
     selected?.protocol === "https:" ? selected.hostname : undefined,
+    fetchRemotes,
   );
   dependencies.signal?.throwIfAborted();
   const preview = {

@@ -1655,6 +1655,29 @@ describe("local normalized scanner findings", () => {
   );
 
   test.each([
+    ["git@gitlab.com.:team/project.git", "https://gitlab.com/team/project"],
+    [
+      "ssh://git@ssh.github.com.:443/team/project.git",
+      "https://github.com/team/project",
+    ],
+    [
+      "git@ssh.dev.azure.com.:v3/team/project/repo",
+      "https://dev.azure.com/team/project/_git/repo",
+    ],
+  ])(
+    "an explicit Sonar mapping accepts the dotted provider host in %s",
+    async (remote, url) => {
+      const { repository, environment } = await fixture({ remote });
+      const prepared = await prepareNormalizedLocalImport(
+        input(),
+        { repository, ...source, provider: "sonar", sourceRepositoryUrl: url },
+        { environment, sourceRepositories: [{ url }] },
+      );
+      expect(prepared.matchesRepositoryRemote).toBe(false);
+    },
+  );
+
+  test.each([
     "git@gitlab.com:team/project.git",
     "ssh://gitlab.com/team/project.git",
     "git@gitlab.com.:team/project.git",

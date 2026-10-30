@@ -1,5 +1,5 @@
 import { hash } from "node:crypto";
-import { lstat, realpath, stat } from "node:fs/promises";
+import { lstat, open, readlink, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { resolveConfigPath } from "./config-path.js";
 import { collectSonarIssues } from "./sonar-collector.js";
@@ -7,6 +7,7 @@ import { normalizeSonarFindings, parseSonarCapture } from "./sonar-findings.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import {
   configuredFetchRemotes,
+  type ConfiguredFetchRemote,
   localGitProtectionRoots,
   prepareLocalImport,
 } from "./external-findings-local.js";
@@ -83,21 +84,39 @@ function cloudReviewDigest(
   );
 }
 
-async function captureReadPath(input: string): Promise<string> {
-  const selected = await stat(input, { bigint: true });
-  if (!selected.isFile()) return input;
-  const target = await realpath(input).catch(nullIfMissingPath);
-  if (!target || target === input) return input;
-  // A kernel descriptor can resolve to a display name that no longer names
-  // its inode. Ordinary symlinks must be read through the verified target.
-  const named = await stat(target, { bigint: true }).catch(nullIfMissingPath);
-  if (!named) return input;
-  if (named.ino === selected.ino && named.dev === selected.dev) return target;
-  // If the input moved during resolution, keep the target we just resolved.
-  const current = await stat(input, { bigint: true });
-  return current.ino === selected.ino && current.dev === selected.dev
-    ? input
-    : target;
+async function readCapture(input: string) {
+  if (!(await stat(input)).isFile())
+    return { path: input, raw: await readScannerJson(input) };
+  if (process.platform === "linux") {
+    const file = await open(input, "r");
+    try {
+      // Use the same open file for its bytes and its retained evidence name.
+      // An unlinked descriptor is still readable, even if its name is reused.
+      const name = await readlink(`/proc/self/fd/${file.fd}`).catch(
+        nullIfMissingPath,
+      );
+      if (name !== null) {
+        let path = name;
+        const deletedSuffix = " (deleted)";
+        if (name.endsWith(deletedSuffix)) {
+          // The suffix can also be literal. Only ascribe the former name to
+          // this descriptor when the displayed name does not identify it.
+          const opened = await file.stat({ bigint: true });
+          const named =
+            opened.nlink > 0n
+              ? await stat(name, { bigint: true }).catch(() => undefined)
+              : undefined;
+          if (named?.ino !== opened.ino || named.dev !== opened.dev)
+            path = name.slice(0, -deletedSuffix.length);
+        }
+        return { path, raw: await readScannerJson(file) };
+      }
+    } finally {
+      await file.close();
+    }
+  }
+  const path = await realpath(input);
+  return { path, raw: await readScannerJson(path) };
 }
 
 export async function prepareSonarImport(
@@ -130,9 +149,9 @@ export async function prepareSonarImport(
   const input =
     selectedPath &&
     join(await realpath(dirname(selectedPath)), basename(selectedPath));
-  const sourcePath = input && (await captureReadPath(input));
-  const raw = sourcePath
-    ? await readScannerJson(sourcePath)
+  const captureData = input ? await readCapture(input) : undefined;
+  const raw = captureData
+    ? captureData.raw
     : await (dependencies.collect ?? collectSonarIssues)({
         cwd: options.cwd,
         project: options.project,
@@ -172,7 +191,7 @@ export async function prepareSonarImport(
         )
       : undefined;
   const retained = retainedName(input);
-  const target = sourcePath === input ? undefined : retainedName(sourcePath);
+  const target = retainedName(captureData?.path);
   if (retained || target) {
     const digest = hash("sha256", JSON.stringify(raw));
     if (
@@ -196,6 +215,7 @@ export async function prepareSonarImport(
   const evidenceDigest = hash("sha256", JSON.stringify(report));
   let checkout = hash("sha256", repository);
   let sourceRepositoryUrl = options.sourceRepositoryUrl;
+  let fetchRemotes: ConfiguredFetchRemote[] | undefined;
   // A portable report can name a repository. Only a reviewed capture can
   // restore the operator's mapping to this checkout's effective fetch URLs.
   const mappedUrl =
@@ -204,16 +224,23 @@ export async function prepareSonarImport(
       ? report.repositoryUrl
       : undefined);
   if (mappedUrl) {
-    const remotes = await configuredFetchRemotes(
+    // A completed live selection can be replayed after a Git configuration
+    // error, without giving the recovery file a reviewed checkout identity.
+    const recovery = !input ? join(root, `${evidenceDigest}.json`) : undefined;
+    if (recovery) await writeAtomicJson(recovery, report);
+    fetchRemotes = await configuredFetchRemotes(
       repository,
       "sonar",
       protectedRoots,
       workbenchEnvironment(environment),
       signal,
-    );
+    ).catch((error: unknown) => {
+      if (recovery) notify(() => dependencies.onCapture?.(recovery));
+      throw error;
+    });
     const mapped = hash(
       "sha256",
-      canonicalJson([repository, repositoryUrlKey(mappedUrl), remotes.sort()]),
+      canonicalJson([repository, repositoryUrlKey(mappedUrl), fetchRemotes]),
     );
     if (sourceRepositoryUrl || mapped === retained?.[2]) {
       sourceRepositoryUrl = mappedUrl;
@@ -266,6 +293,8 @@ export async function prepareSonarImport(
       { repository, ...source, sourceRepositoryUrl },
       { environment, signal },
       [{ url: repositoryUrl }],
+      [],
+      fetchRemotes,
     );
     let cloud: PreparedExternalPublication | undefined;
     let cloudError: string | undefined;

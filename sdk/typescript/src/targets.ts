@@ -796,7 +796,8 @@ export async function gitOutput(
         args[0] === "ls-files" ||
         (args[0] === "remote" &&
           (args.length === 1 ||
-            (args[1] === "get-url" && args[2] === "--all"))),
+            (args[1] === "get-url" &&
+              (args[2] === "--all" || args[2] === "--")))),
       sourceEnvironment,
     ),
     [

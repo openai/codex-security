@@ -16,7 +16,10 @@ import { basename, dirname, join } from "node:path";
 import { prepareSonarImport } from "../src/sonar-import.js";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
-import { normalizeSonarFindings } from "../src/sonar-findings.js";
+import {
+  normalizeSonarFindings,
+  parseSonarCapture,
+} from "../src/sonar-findings.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 import { sonarGitTestEnvironment } from "./support/sonar-import-fixtures.js";
 
@@ -135,6 +138,61 @@ test.skipIf(process.platform !== "linux")(
         deps,
       );
       expect(preview.local.findings[0]!.source_finding_id).toBe("issue-1");
+    } finally {
+      await file.close();
+    }
+  },
+);
+
+test.skipIf(process.platform !== "linux")(
+  "reads a zero-link descriptor even when its deleted display name exceeds the filesystem limit",
+  async () => {
+    await using directory = await scopedTemporaryDirectory("sonar-fd-");
+    const { options, deps } = await fixture(directory.path);
+    const name = join(directory.path, "x".repeat(255));
+    await copyFile(options.capture, name);
+    const file = await open(name, "r");
+    try {
+      await rm(name);
+      const preview = await prepareSonarImport(
+        { ...options, to: "local", capture: `/proc/self/fd/${file.fd}` },
+        deps,
+      );
+      expect(preview.local.findings[0]!.source_finding_id).toBe("issue-1");
+    } finally {
+      await file.close();
+    }
+  },
+);
+
+test.skipIf(process.platform !== "linux")(
+  "checks an unlinked retained capture and accepts a literal deleted suffix",
+  async () => {
+    await using directory = await scopedTemporaryDirectory("sonar-fd-");
+    const { options, deps, report } = await fixture(directory.path);
+    const selection = { ...options, to: "local" } as const;
+    const { info } = await prepareSonarImport(selection, deps);
+    report.pages[0]!.issues[0]!.message = "Updated evidence";
+    const bytes = JSON.stringify(report);
+    const literal = `${info.capture} (deleted)`;
+    await writeFile(literal, bytes);
+    const updated = await prepareSonarImport(
+      { ...selection, capture: literal },
+      deps,
+    );
+    expect(updated.local.findings[0]!.evidence.description).toBe(
+      "Updated evidence",
+    );
+    await writeFile(info.capture, bytes);
+    const file = await open(info.capture, "r");
+    try {
+      await rm(info.capture);
+      await expect(
+        prepareSonarImport(
+          { ...selection, capture: `/proc/self/fd/${file.fd}` },
+          deps,
+        ),
+      ).rejects.toThrow("saved Sonar capture has changed");
     } finally {
       await file.close();
     }
@@ -471,6 +529,44 @@ test("replays a manually bound capture using the native branch as its identity",
   expect(replay.info.sourceKey).toBe(bound.info.sourceKey);
 });
 
+test("a reviewed mapping follows each remote's primary fetch URL", async () => {
+  await using directory = await scopedTemporaryDirectory("sonar-fetch-url-");
+  const { git, options, deps } = await fixture(directory.path);
+  deps.environment.GIT_CONFIG_GLOBAL = join(directory.path, "global.gitconfig");
+  git("config", "--global", "url.git@work:example/.insteadOf", "work:");
+  const project = "work:project.git";
+  const fork = "git@other:example/fork.git";
+  git("remote", "set-url", "origin", project);
+  git("config", "--add", "remote.origin.url", fork);
+  const selection = { ...options, to: "local" } as const;
+  const preview = await prepareSonarImport(
+    { ...selection, sourceRepositoryUrl: repositoryUrl },
+    deps,
+  );
+  const confirm = {
+    ...selection,
+    capture: preview.info.capture,
+    dryRun: false,
+    yes: true,
+  };
+  expect((await prepareSonarImport(confirm, deps)).info.capture).toBe(
+    preview.info.capture,
+  );
+
+  git("config", "--unset-all", "remote.origin.url");
+  git("config", "--add", "remote.origin.url", fork);
+  git("config", "--add", "remote.origin.url", project);
+  await expect(prepareSonarImport(confirm, deps)).rejects.toThrow(
+    "has not been reviewed for this checkout",
+  );
+  await expect(
+    prepareSonarImport(
+      { ...selection, sourceRepositoryUrl: repositoryUrl },
+      deps,
+    ),
+  ).rejects.toThrow("does not match a configured remote");
+});
+
 test("a dry run cannot create the capture directory inside a checkout or its linked Git metadata", async () => {
   await using directory = await scopedTemporaryDirectory("sonar-protected-");
   const { options, deps, git } = await fixture(directory.path, "imports");
@@ -553,6 +649,47 @@ test("reports the saved evidence after preparation fails", async () => {
   ).rejects.toThrow("--to cloud --dry-run");
   expect(captures).toHaveLength(1);
   expect(JSON.parse(await readFile(captures[0]!, "utf8"))).toEqual(report);
+});
+
+test("recovers a completed live selection after a Git mapping error", async () => {
+  await using directory = await scopedTemporaryDirectory("sonar-git-recovery-");
+  const { options, deps, report } = await fixture(directory.path);
+  const config = join(options.cwd, ".git", "config");
+  const original = await readFile(config);
+  await writeFile(config, "[invalid\n");
+  const paths: string[] = [];
+  await expect(
+    prepareSonarImport(
+      {
+        ...options,
+        capture: undefined,
+        project: report.project,
+        sourceRepositoryUrl: repositoryUrl,
+        to: "local",
+      },
+      {
+        ...deps,
+        collect: async () => parseSonarCapture(report),
+        onCapture: (path) => paths.push(path),
+      },
+    ),
+  ).rejects.toThrow("config");
+  expect(paths).toHaveLength(1);
+  const capture = paths[0]!;
+  expect(JSON.parse(await readFile(capture, "utf8"))).toEqual(report);
+  await writeFile(config, original);
+  const replay = {
+    ...options,
+    capture,
+    sourceRepositoryUrl: repositoryUrl,
+    to: "local",
+  } as const;
+  await expect(
+    prepareSonarImport({ ...replay, dryRun: false, yes: true }, deps),
+  ).rejects.toThrow("not been reviewed for this checkout");
+  const reviewed = await prepareSonarImport(replay, deps);
+  expect(reviewed.info.capture).not.toBe(capture);
+  expect(reviewed.local.read).toBe(1);
 });
 
 test("rejects a non-finite native JSON number before snapshotting a capture", async () => {
