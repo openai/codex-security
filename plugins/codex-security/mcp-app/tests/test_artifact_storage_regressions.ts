@@ -113,6 +113,123 @@ async function connect(overrides: Record<string, string | undefined> = {}) {
 }
 
 try {
+  await test("standalone persistent storage rejects filesystem-root and contained targets", async () => {
+    const scanRoot = path.join(repository, "root-target-scans");
+    const entries = await fs.readdir(repository);
+    for (const [targetPath, selectedRoot] of [
+      [path.parse(repository).root, scanRoot],
+      [repository, repository],
+      [repository, scanRoot],
+    ]) {
+      for (const create of [true, false]) {
+        await assert.rejects(
+          standaloneArtifactContext(
+            targetPath,
+            workbench,
+            create,
+            selectedRoot,
+            "persistent",
+          ),
+          /Artifact storage must be outside the target repository/,
+        );
+      }
+    }
+    await assert.rejects(fs.stat(scanRoot), { code: "ENOENT" });
+    assert.deepEqual(await fs.readdir(repository), entries);
+  });
+
+  await test("filesystem-root targets retain temporary artifact storage", async () => {
+    const scanRoot = path.join(fixture, "root-temporary-scans");
+    const context = await standaloneArtifactContext(
+      path.parse(repository).root,
+      workbench,
+      true,
+      scanRoot,
+      "temporary",
+    );
+    const saved = await saveCodexSecurityArtifact(
+      context,
+      { storage: "temporary", path: "notes.md", content: "temporary evidence" },
+      workbench,
+    );
+    temporaryDirectories.push(saved.directory);
+    const read = await readCodexSecurityArtifact(
+      context,
+      { storage: "temporary", path: "notes.md", encoding: "utf8" },
+      workbench,
+    );
+    assert.equal(read.content, "temporary evidence");
+    await assert.rejects(fs.stat(scanRoot), { code: "ENOENT" });
+  });
+
+  await test("option-shaped temporary artifact names survive save, read and import", async () => {
+    const context = await standaloneArtifactContext(
+      repository,
+      workbench,
+      true,
+      path.join(fixture, "literal-name-scans"),
+      "persistent",
+    );
+    for (const name of ["--help", "-evidence=λ.txt"]) {
+      const saved = await saveCodexSecurityArtifact(
+        context,
+        { storage: "temporary", path: name, content: "literal evidence\n" },
+        workbench,
+      );
+      temporaryDirectories.push(saved.directory);
+      const read = await readCodexSecurityArtifact(
+        context,
+        { storage: "temporary", path: name, encoding: "utf8" },
+        workbench,
+      );
+      assert.equal(read.content, "literal evidence\n");
+      const retained = await saveCodexSecurityArtifact(
+        context,
+        {
+          storage: "persistent",
+          path: `artifacts/${name}`,
+          sourcePath: saved.path,
+        },
+        workbench,
+      );
+      assert.equal(await fs.readFile(retained.path, "utf8"), read.content);
+    }
+  });
+
+  await test("standalone persistent storage allows sibling-prefix directories", async () => {
+    const scanRoot = repository + "-scans";
+    const context = await standaloneArtifactContext(
+      repository,
+      workbench,
+      true,
+      scanRoot,
+      "persistent",
+    );
+    const saved = await saveCodexSecurityArtifact(
+      context,
+      {
+        storage: "persistent",
+        path: "threatmodel.md",
+        content: "retained evidence",
+      },
+      workbench,
+    );
+    assert.equal(path.dirname(path.dirname(saved.directory)), scanRoot);
+    const readContext = await standaloneArtifactContext(
+      repository,
+      workbench,
+      false,
+      scanRoot,
+      "persistent",
+    );
+    const read = await readCodexSecurityArtifact(
+      readContext,
+      { storage: "persistent", path: "threatmodel.md", encoding: "utf8" },
+      workbench,
+    );
+    assert.equal(read.content, "retained evidence");
+  });
+
   await test(
     "temporary artifact operations reject a collection owned by another user",
     { skip: typeof process.geteuid !== "function" },
@@ -673,8 +790,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       ...identity,
       findings: [],
       threatModel: { summary: "Synthetic test target" },
-      coverage: {
-        completeness: "complete",
+      reviewState: {
         surfaces: [
           {
             id: "source",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -16,8 +17,9 @@ def workflow(api, connection, action, *, workflow_id="synthetic-workflow", **pay
     )
 
 
+@pytest.mark.parametrize("optional", [False, True])
 def test_source_snapshot_excludes_private_storage_without_hiding_source(
-    workbench_api, workbench_db, tmp_path, monkeypatch
+    workbench_api, workbench_db, tmp_path, monkeypatch, optional
 ):
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -27,13 +29,13 @@ def test_source_snapshot_excludes_private_storage_without_hiding_source(
     private.mkdir()
     database = private / "state.sqlite"
     database.write_text("synthetic state")
-    original_iterdir = Path.iterdir
+    original_scandir = os.scandir
 
     def inspect(path):
-        assert path != private, "private storage must not be traversed"
-        return original_iterdir(path)
+        assert Path(path) != private, "private storage must not be traversed"
+        return original_scandir(path)
 
-    monkeypatch.setattr(Path, "iterdir", inspect)
+    monkeypatch.setattr(os, "scandir", inspect)
 
     def snapshot():
         return workflow(
@@ -42,6 +44,7 @@ def test_source_snapshot_excludes_private_storage_without_hiding_source(
             "source",
             repository=str(repository),
             privateStatePaths=[str(private)],
+            optional=optional,
         )["source"]
 
     before = snapshot()
@@ -65,6 +68,47 @@ def test_source_snapshot_excludes_private_storage_without_hiding_source(
             "source",
             repository=str(repository),
             privateStatePaths=["relative-state"],
+        )
+
+
+@pytest.mark.parametrize("location", ["root", "descendant"])
+def test_source_snapshot_preserves_unreadable_directory_errors(
+    workbench_api, workbench_db, tmp_path, monkeypatch, location
+):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    unreadable = repository if location == "root" else repository / "unreadable"
+    unreadable.mkdir(exist_ok=True)
+    (unreadable / "contents.txt").write_text("source content")
+    private = repository / "native-state"
+    private.mkdir()
+    original_scandir = os.scandir
+    failure = PermissionError("synthetic inaccessible source directory")
+
+    def inspect(path):
+        assert Path(path) != private, "private storage must not be traversed"
+        if Path(path) == unreadable:
+            raise failure
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", inspect)
+
+    def snapshot(excluded):
+        return workflow(
+            workbench_api,
+            workbench_db,
+            "source",
+            repository=str(repository),
+            gitDisabled=True,
+            privateStatePaths=[str(path) for path in excluded],
+        )["source"]
+
+    with pytest.raises(PermissionError) as raised:
+        snapshot([private])
+    assert raised.value is failure
+    if location == "descendant":
+        assert snapshot([private, unreadable])["privateStatePaths"] == sorted(
+            [str(private), str(unreadable)]
         )
 
 
@@ -96,7 +140,7 @@ def test_failed_stages_resume_and_completed_results_are_immutable(
     assert completed["workflow"]["stages"][stage] == {"status": "completed", "result": result}
     for action, payload in [
         ("begin", {}),
-        ("fail", {"error": "Late failure"}),
+        ("fail", {"error": "Late failure", "result": {"unexpected": True}}),
         ("complete", {"result": {"unexpected": True}}),
     ]:
         assert workflow(workbench_api, workbench_db, action, stage=stage, **payload) == completed
@@ -213,6 +257,30 @@ def test_review_checkpoints_keep_the_first_valid_result_and_enforce_workflow_own
     assert row["source_repository_path"] == binding["source"]["repository"]
     assert row["settings_digest"] == binding["settingsDigest"]
     assert json.loads(row["result_json"]) == result
+
+    replacement = {"assessment": {"report": "Regenerated validation"}, "evidenceDigest": "new"}
+    workflow(
+        workbench_api,
+        workbench_db,
+        "save-review",
+        key="review-1",
+        binding=binding,
+        result=replacement,
+        replace=True,
+    )
+    assert workflow(workbench_api, workbench_db, "get-review", key="review-1") == {"review": result}
+    workflow(
+        workbench_api,
+        workbench_db,
+        "save-review",
+        key="review-1",
+        binding={**binding, "stage": "scan-validation"},
+        result=replacement,
+        replace=True,
+    )
+    assert workflow(workbench_api, workbench_db, "get-review", key="review-1") == {
+        "review": replacement
+    }
 
 
 @pytest.mark.parametrize(
@@ -399,3 +467,205 @@ def test_workflow_column_migration_is_atomic_and_preserves_resume_state(workbenc
             "status": "completed",
             "result": {"scanId": "resumed-scan"},
         }
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs require a Unix filesystem")
+def test_optional_review_snapshot_disables_cache_for_unsupported_file_types(
+    workbench_api, workbench_db, tmp_path
+):
+    target = tmp_path / "repository"
+    target.mkdir()
+    source = target / "source.ts"
+    source.write_text("export const value = 1;\n", encoding="utf-8")
+    first = workflow(workbench_api, workbench_db, "source", repository=str(target))
+    assert first["source"]["content"].startswith("codex-security-snapshot/v1:")
+    pipe = target / "pipe"
+    os.mkfifo(pipe)
+    with pytest.raises(SystemExit, match="Unsupported local file type: pipe"):
+        workflow(workbench_api, workbench_db, "source", repository=str(target))
+    assert workflow(
+        workbench_api, workbench_db, "source", repository=str(target), optional=True
+    ) == {"source": None}
+    pipe.unlink()
+    assert (
+        workflow(workbench_api, workbench_db, "source", repository=str(target), optional=True)
+        == first
+    )
+    source.write_text("export const value = 2;\n", encoding="utf-8")
+    assert (
+        workflow(workbench_api, workbench_db, "source", repository=str(target), optional=True)[
+            "source"
+        ]["content"]
+        != first["source"]["content"]
+    )
+    with pytest.raises(FileNotFoundError):
+        workflow(
+            workbench_api, workbench_db, "source", repository=str(target / "missing"), optional=True
+        )
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or getattr(os, "geteuid", lambda: 0)() == 0,
+    reason="Mode permissions require a non-root Unix user",
+)
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_optional_review_snapshot_disables_cache_for_unreadable_entries(
+    workbench_api, workbench_db, tmp_path, kind
+):
+    target = tmp_path / "repository"
+    target.mkdir()
+    (target / "source.ts").write_text("export const value = 1;\n", encoding="utf-8")
+    entry = target / "ignored-cache"
+    if kind == "directory":
+        entry.mkdir()
+        (entry / "cache.txt").write_text("Synthetic cache data.", encoding="utf-8")
+    else:
+        entry.write_text("Synthetic cache data.", encoding="utf-8")
+    first = workflow(workbench_api, workbench_db, "source", repository=str(target), optional=True)
+    mode = entry.stat().st_mode
+    entry.chmod(0)
+    try:
+        with pytest.raises((PermissionError, SystemExit)):
+            workflow(workbench_api, workbench_db, "source", repository=str(target))
+        assert workflow(
+            workbench_api, workbench_db, "source", repository=str(target), optional=True
+        ) == {"source": None}
+    finally:
+        entry.chmod(mode)
+    assert (
+        workflow(workbench_api, workbench_db, "source", repository=str(target), optional=True)
+        == first
+    )
+    with pytest.raises(FileNotFoundError):
+        workflow(
+            workbench_api, workbench_db, "source", repository=str(target / "missing"), optional=True
+        )
+
+
+@pytest.mark.parametrize("metadata_name", [".git", ".svn"])
+def test_optional_evidence_snapshot_includes_source_metadata(
+    workbench_api, workbench_db, tmp_path, metadata_name
+):
+    evidence = tmp_path / "evidence"
+    metadata = evidence / metadata_name
+    metadata.mkdir(parents=True)
+    (evidence / "proof.txt").write_text("Original proof.\n")
+    head = metadata / "HEAD"
+    head.write_text("Synthetic metadata.\n")
+    source = workflow(workbench_api, workbench_db, "source", repository=str(evidence))
+    before = workflow(
+        workbench_api,
+        workbench_db,
+        "source",
+        repository=str(evidence),
+        evidence=True,
+        optional=True,
+    )
+    head.write_text("Changed metadata.\n")
+    assert workflow(workbench_api, workbench_db, "source", repository=str(evidence)) == source
+    assert (
+        workflow(
+            workbench_api,
+            workbench_db,
+            "source",
+            repository=str(evidence),
+            evidence=True,
+            optional=True,
+        )
+        != before
+    )
+    if hasattr(os, "mkfifo"):
+        pipe = metadata / "pipe"
+        os.mkfifo(pipe)
+        try:
+            assert workflow(
+                workbench_api,
+                workbench_db,
+                "source",
+                repository=str(evidence),
+                evidence=True,
+                optional=True,
+            ) == {"source": None}
+        finally:
+            pipe.unlink()
+
+
+def test_optional_evidence_snapshot_does_not_follow_directory_links(
+    workbench_api, workbench_db, tmp_path
+):
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    source = outside / "proof.txt"
+    source.write_text("Outside contents.\n")
+    linked = evidence / "linked"
+    try:
+        linked.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        if os.name == "nt":
+            pytest.skip("Directory symlinks are unavailable on this Windows filesystem")
+        raise
+    before = workflow(
+        workbench_api,
+        workbench_db,
+        "source",
+        repository=str(evidence),
+        evidence=True,
+        optional=True,
+    )
+    source.write_text("Changed outside contents.\n")
+    assert (
+        workflow(
+            workbench_api,
+            workbench_db,
+            "source",
+            repository=str(evidence),
+            evidence=True,
+            optional=True,
+        )
+        == before
+    )
+    evidence.rename(tmp_path / "original")
+    evidence.symlink_to(outside, target_is_directory=True)
+    assert workflow(
+        workbench_api,
+        workbench_db,
+        "source",
+        repository=str(evidence),
+        evidence=True,
+        optional=True,
+    ) == {"source": None}
+
+
+@pytest.mark.parametrize("kind", ["missing", "file", "unreadable"])
+def test_optional_evidence_snapshot_unavailable_roots(workbench_api, workbench_db, tmp_path, kind):
+    evidence = tmp_path / "evidence"
+    if kind == "file":
+        evidence.write_text("Not a directory.\n")
+    if kind == "unreadable":
+        if os.name == "nt" or getattr(os, "geteuid", lambda: 0)() == 0:
+            pytest.skip("Mode permissions require a non-root Unix user")
+        evidence.mkdir()
+        evidence.chmod(0)
+    try:
+        assert workflow(
+            workbench_api,
+            workbench_db,
+            "source",
+            repository=str(evidence),
+            evidence=True,
+            optional=True,
+        ) == {"source": None}
+        if kind == "missing":
+            with pytest.raises(FileNotFoundError):
+                workflow(
+                    workbench_api,
+                    workbench_db,
+                    "source",
+                    repository=str(evidence),
+                    optional=True,
+                )
+    finally:
+        if kind == "unreadable":
+            evidence.chmod(0o700)

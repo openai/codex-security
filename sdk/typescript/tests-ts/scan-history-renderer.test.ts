@@ -3,6 +3,174 @@ import { describe, expect, test } from "bun:test";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
 
 describe("scan history renderer", () => {
+  test("shows canonical scope separately from the saved recipe without changing execution status", () => {
+    const scan = {
+      targetPath: "/synthetic/repository",
+      scanId: "synthetic-scan",
+      mode: "standard",
+      progress: { status: "complete" },
+      findings: [],
+      recipe: { target: { kind: "paths", paths: ["src"] } },
+    };
+    const text = renderScanHistory(
+      {
+        ...scan,
+        coverage: {
+          mode: "scoped_path",
+          includePaths: ["src/a  b.ts", "src/trailing "],
+          excludePaths: ["generated/**"],
+          explicitExclusions: [{ pattern: "fixtures", reason: "Fixtures" }],
+        },
+      },
+      "show",
+      { color: false, columns: 120 },
+    );
+    expect(text).toContain("COMPLETE");
+    expect(text).toContain('scoped paths: "src/a  b.ts", "src/trailing ";');
+    expect(text).toContain("excluding generated/**, fixtures");
+    expect(text).toContain("SAVED SCOPE");
+    const historical = renderScanHistory(scan, "show", { color: false });
+    expect(historical).toContain("COMPLETE");
+    expect(historical).not.toContain("scoped paths:");
+  });
+
+  test("counts singleton sides when the other side is grouped", () => {
+    const text = renderScanHistory(
+      {
+        repository: "/synthetic/repository",
+        beforeScanId: "before-scan",
+        afterScanId: "after-scan",
+        summary: { persisting: 2 },
+        findings: [
+          {
+            title: "Merged group",
+            severity: "high",
+            status: "persisting",
+            path: "merged.ts",
+            beforeOccurrenceIds: ["before-one", "before-two"],
+            afterOccurrenceId: "after-one",
+          },
+          {
+            title: "Expanded group",
+            severity: "high",
+            status: "persisting",
+            path: "expanded.ts",
+            beforeOccurrenceId: "before-one",
+            afterOccurrenceIds: ["after-one", "after-two"],
+          },
+        ],
+      },
+      "compare",
+      { color: false },
+    );
+    expect(text).toContain("2 → 1");
+    expect(text).toContain("1 → 2");
+  });
+
+  test("shows zero findings on the absent side of grouped comparisons", () => {
+    const text = renderScanHistory(
+      {
+        repository: "/synthetic/repository",
+        beforeScanId: "before-scan",
+        afterScanId: "after-scan",
+        summary: { resolved: 2, new: 2 },
+        findings: [
+          {
+            title: "Resolved group",
+            severity: "high",
+            status: "resolved",
+            path: "before.ts",
+            beforeOccurrenceIds: ["before-one", "before-two"],
+          },
+          {
+            title: "Added group",
+            severity: "medium",
+            status: "new",
+            path: "after.ts",
+            afterOccurrenceIds: ["after-one", "after-two"],
+          },
+        ],
+      },
+      "compare",
+      { color: false },
+    );
+    expect(text).toContain("2 → 0");
+    expect(text).toContain("0 → 2");
+  });
+
+  test("orders severity totals from critical to informational", () => {
+    const text = renderScanHistory(
+      {
+        scanId: "synthetic-scan",
+        targetPath: "/synthetic/repository",
+        progress: { status: "complete" },
+        findings: [],
+        severityCounts: {
+          low: 4,
+          informational: 5,
+          medium: 3,
+          critical: 1,
+          high: 2,
+        },
+      },
+      "show",
+      { color: false },
+    );
+    expect(text).toMatch(
+      /1 CRITICAL.*2 HIGH.*3 MEDIUM.*4 LOW.*5 INFORMATIONAL/,
+    );
+  });
+
+  test.each([
+    [
+      "spaced Chinese",
+      "权限校验失败 导致任意用户读取其他用户的私人扫描结果",
+      ["权限校验失败", "导致任意用户读取其他用户的私人扫", "描结果"],
+    ],
+    [
+      "unspaced Chinese",
+      "中文".repeat(20),
+      ["中文".repeat(8), "中文".repeat(8), "中文".repeat(4)],
+    ],
+    ["mixed text", "a".repeat(31) + "中文", ["a".repeat(31), "中文"]],
+    [
+      "combining marks",
+      "e\u0301".repeat(33),
+      ["e\u0301".repeat(32), "e\u0301"],
+    ],
+    ["joined emoji", "👩‍💻".repeat(17), ["👩‍💻".repeat(16), "👩‍💻"]],
+    ["long ASCII word", "a".repeat(65), ["a".repeat(32), "a".repeat(32), "a"]],
+    [
+      "English words",
+      "A finding title with several words that should wrap",
+      ["A finding title with several", "words that should wrap"],
+    ],
+  ] as const)(
+    "wraps %s titles at terminal columns",
+    (_name, title, expected) => {
+      for (const color of [false, true]) {
+        const output = renderScanHistory(
+          {
+            repository: "/repo",
+            findings: [{ title, severity: "high", path: "source.ts" }],
+          },
+          "findings",
+          { columns: 48, color },
+        );
+        const lines = stripVTControlCharacters(output).split("\n");
+        const start = lines.findIndex((line) => line.startsWith("    HIGH"));
+        const end = lines.indexOf("              source.ts");
+        expect(lines.slice(start, end)).toEqual(
+          expected.map(
+            (line, index) =>
+              `${index === 0 ? "    HIGH      " : "              "}${line}`,
+          ),
+        );
+        if (color) expect(output).toContain("\u001B[31mHIGH    \u001B[0m");
+      }
+    },
+  );
+
   test("separates current repository findings from earlier observations", () => {
     const text = renderScanHistory(
       {
@@ -29,8 +197,6 @@ describe("scan history renderer", () => {
           repository: "/demo/juice-shop",
           beforeScanId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
           afterScanId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-          comparable: true,
-          coverage: { afterCompleteness: "complete" },
           summary: {
             new: 1,
             persisting: 2,
@@ -151,26 +317,30 @@ describe("scan history renderer", () => {
         ([, value]) => value,
       ),
     ).toEqual(["/demo/threat-model.md", "routes/login.ts"]);
-    for (const coverage of ["partial", "unknown", "complete"]) {
-      const comparison = renderScanHistory(
-        {
-          beforeScanId: "before-scan",
-          afterScanId: "after-scan",
-          coverage: { afterCompleteness: coverage },
-          summary: {},
-          findings: [],
-        },
-        "compare",
-        { color: false },
-      );
-      if (coverage === "complete") {
-        expect(comparison).not.toContain("Follow-up coverage");
-      } else {
-        expect(comparison).toContain(
-          `⚠ Follow-up coverage is ${coverage}; resolved findings cannot be confirmed.`,
-        );
-      }
-    }
+  });
+
+  test("shows absent findings without claiming they were fixed", () => {
+    const output = renderScanHistory(
+      {
+        beforeScanId: "before-scan",
+        afterScanId: "after-scan",
+        summary: { not_observed: 1 },
+        findings: [
+          {
+            status: "not_observed",
+            severity: "high",
+            title: "Missing authorization",
+            path: "src/handler.ts",
+            reason:
+              "Not observed in the later scan; remediation has not been verified.",
+          },
+        ],
+      },
+      "compare",
+      { color: false },
+    );
+    expect(output).toContain("Not observed");
+    expect(output).not.toContain("Resolved");
   });
 
   test("keeps repositories visible at narrow and wide terminal widths", () => {
@@ -212,6 +382,7 @@ describe("scan history renderer", () => {
   test("shows bounded findings, saved configuration, and failure reasons", () => {
     const scan = {
       scanId: "12345678-abcd-4567-abcd-1234567890ab",
+      updatedAt: "2026-01-01T12:00:00Z",
       parentScanId: "87654321-abcd-4567-abcd-1234567890ab",
       targetPath: "/demo/juice-shop",
       mode: "standard",
@@ -223,6 +394,17 @@ describe("scan history renderer", () => {
       findingsTruncated: true,
       artifacts: { markdownReport: "/demo/results/report.md" },
       recipe: {
+        target: { kind: "paths", paths: ["src"] },
+        deepScan: { workers: 2, subagents: 0 },
+        scanInputs: {
+          scanPromptSha256: "a".repeat(64),
+          knowledgeBase: {
+            sha256: "b".repeat(64),
+            documents: [
+              { name: "0-architecture.md.txt", sha256: "c".repeat(64) },
+            ],
+          },
+        },
         config: {
           model: "gpt-5.6-sol",
           model_reasoning_effort: "high",
@@ -238,13 +420,22 @@ describe("scan history renderer", () => {
     };
     const output = stripVTControlCharacters(renderScanHistory(scan, "show"));
     for (const expected of [
+      `UPDATED  ${scan.updatedAt}`,
       "FINDINGS  20 of 75",
       "PARENT SCAN  87654321",
       "CONFIGURATION",
+      "SCOPE",
+      '"paths":["src"]',
+      "DEEP SCAN",
+      '"workers":2',
+      `SCAN INSTRUCTIONS  sha256:${"a".repeat(64)}`,
+      `KNOWLEDGE SNAPSHOT  sha256:${"b".repeat(64)}`,
+      "0-architecture.md.txt",
+      `sha256:${"c".repeat(64)}`,
       "model=gpt-5.6-sol",
       'features={"goals":true,"multi_agent_v2":{"enabled":true}}',
       'trusted_paths=["src","packages/core"]',
-      "COVERAGE",
+      "REVIEW",
       "12 of 15 reviewed",
       "9 files",
       "ARTIFACTS",
@@ -333,7 +524,6 @@ describe("scan history renderer", () => {
       {
         beforeScanId: "before",
         afterScanId: "after",
-        coverage: { afterCompleteness: "complete" },
         summary: {},
         findings: [],
         related: [relation],

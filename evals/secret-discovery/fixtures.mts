@@ -165,7 +165,7 @@ CONTENT_SHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd
 /** Stage source only. Gold labels and secret-value lookup stay in the harness. */
 export async function writeFixture(
   repo: string,
-  fixture: ReturnType<typeof createFixture>,
+  fixture: Pick<ReturnType<typeof createFixture>, "files">,
 ) {
   for (const [relative, contents] of Object.entries(fixture.files)) {
     const destination = join(repo, relative);

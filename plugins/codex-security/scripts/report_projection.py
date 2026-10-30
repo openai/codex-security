@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from collections import Counter
 from typing import Any
@@ -19,21 +20,44 @@ DISPOSITION_LABELS = {
     "needs_follow_up": "Needs follow-up",
 }
 WRITEUP_REPORT_PATH_RE = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
+INLINE_CODE_RE = r"(?<!`)`[^`\n]+`(?!`)"
+ENTITY_AMP_RE = r"&(?=(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]*);)"
+WWW_LINK_RE = r"(?<![^\s*_~(])(?i:www)\.[^\s<>]+"
 
 
 class ReportProjectionError(ValueError):
     """Raised when a canonical scan cannot be projected into a valid report."""
 
 
+def _escape_markdown(value: str) -> str:
+    # Locate whole URLs before matching code spans: a URL can contain backticks.
+    urls = [match.span() for match in re.finditer(WWW_LINK_RE, value)]
+    # Preserve protocol-relative and fuzzy links without a domain/TLD table.
+    for match in re.finditer(r"[^\s<>]+", value):
+        token = match[0]
+        dot = token.split("/", 1)[0].find(".")
+        if "//" in token or (dot >= 0 and re.search(r"[/?#]", token[dot + 1 :])):
+            urls.append(match.span())
+    punctuation = r"[\\`*_\[\]<>]|" + ENTITY_AMP_RE
+    pattern = f"(?P<code>{INLINE_CODE_RE})|{punctuation}"
+
+    def escape(match: re.Match[str]) -> str:
+        if match.lastgroup == "code":
+            return match[0]
+        # GFM autolinks retain backslashes literally, including in query strings.
+        if match[0] == "&" and any(start <= match.start() < end for start, end in urls):
+            return "&"
+        return "\\" + match[0]
+
+    return re.sub(pattern, escape, value)
+
+
 def _text(value: Any, fallback: str) -> str:
     candidate = value if isinstance(value, str) and value.strip() else fallback
     normalized = " ".join(candidate.split())
-    if re.match(r"^(?:#{1,6}\s|[-*+]\s|>\s|```|\d+\.\s|\|)", normalized):
+    if re.match(r"^(?:#{1,6}\s|[-*+]\s|>\s|```|~~~|\d+[.)]\s|\|)", normalized):
         normalized = f"Text: {normalized}"
-    return "".join(
-        part if index % 2 else re.sub(r"([\\`*_\[\]<>])", r"\\\1", part)
-        for index, part in enumerate(re.split(r"((?<!`)`[^`\n]+`(?!`))", normalized))
-    )
+    return _escape_markdown(normalized)
 
 
 def _strings(value: Any) -> list[str]:
@@ -42,6 +66,22 @@ def _strings(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [text for item in value if (text := _text(item, ""))]
+
+
+def _path_label(value: str, *, ensure_ascii: bool = False) -> str:
+    if "," in value or value != " ".join(value.split()) or any(ord(c) < 32 for c in value):
+        quoted = json.dumps(value, ensure_ascii=ensure_ascii)
+        return "".join(c if c.isprintable() else json.dumps(c)[1:-1] for c in quoted)
+    return value
+
+
+def _path_text(value: str, *, ensure_ascii: bool = False) -> str:
+    label = _path_label(value, ensure_ascii=ensure_ascii)
+    if label != value or re.search(ENTITY_AMP_RE, value):
+        marker = _code_fence(label, minimum=1)
+        padding = " " if label.startswith("`") or label.endswith("`") else ""
+        return f"{marker}{padding}{label}{padding}{marker}"
+    return re.sub(r"([\\`*_\[\]<>])", r"\\\1", value)
 
 
 def _cell(value: Any) -> str:
@@ -89,7 +129,7 @@ def _has_deep_child_metadata(finding: dict[str, Any]) -> bool:
     )
 
 
-def _uses_deep_presentation(coverage: dict[str, Any], findings: list[dict[str, Any]]) -> bool:
+def uses_deep_presentation(coverage: dict[str, Any], findings: list[dict[str, Any]]) -> bool:
     if coverage.get("mode") == "deep_repository":
         return True
     if coverage.get("mode") != "scoped_path":
@@ -386,17 +426,20 @@ def _root_cause_code_evidence(
 def _code_evidence_location(item: dict[str, Any]) -> str:
     location = item.get("location")
     if isinstance(location, str):
-        return location
+        return " ".join(location.split())
     if isinstance(location, dict):
         item = location
     path = item.get("path")
     start = item.get("startLine")
-    end = item.get("endLine", start)
+    end = item.get("endLine")
     if not isinstance(path, str) or not path:
         return ""
-    if not isinstance(start, int):
+    path = _path_label(path)
+    if not isinstance(start, int) or isinstance(start, bool) or start < 1:
         return path
-    return f"{path}:{start}" if end == start else f"{path}:{start}-{end}"
+    if not isinstance(end, int) or isinstance(end, bool) or end <= start:
+        return f"{path}:{start}"
+    return f"{path}:{start}-{end}"
 
 
 def _code_fence(code: str, minimum: int = 3) -> str:
@@ -408,7 +451,7 @@ def _code_evidence_lines(evidence: list[dict[str, Any]]) -> list[str]:
     lines: list[str] = []
     for index, item in enumerate(evidence):
         label = _text(item.get("label"), f"Code evidence {index + 1}")
-        location = " ".join(_code_evidence_location(item).split())
+        location = _code_evidence_location(item)
         explanation = _text(item.get("explanation"), "")
         language = item.get("language") if isinstance(item.get("language"), str) else ""
         language = language if re.fullmatch(r"[A-Za-z0-9_+.-]*", language) else ""
@@ -447,7 +490,7 @@ def _locations(finding: dict[str, Any]) -> str:
         start = location["startLine"]
         end = location.get("endLine", start)
         suffix = f":{start}" if end == start else f":{start}-{end}"
-        rendered.append(f"{location['path']}{suffix}")
+        rendered.append(f"{_path_text(location['path'])}{suffix}")
     return ", ".join(rendered)
 
 
@@ -551,7 +594,7 @@ def _finding_header(number: int, finding: dict[str, Any]) -> list[str]:
         f"| Confidence rationale | {_cell(finding['confidence']['rationale'])} |",
         f"| Category | {_cell(finding['taxonomy']['category'])} |",
         f"| CWE | {_cell(cwes)} |",
-        f"| Affected lines | {_cell(_locations(finding))} |",
+        "| Affected lines | " + _locations(finding).replace("|", "\\|") + " |",
     ]
 
 
@@ -625,9 +668,9 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     validation_code_evidence = _section_code_evidence(finding, validation)
     dataflow_code_evidence = _section_code_evidence(finding, attack_path, *dataflow_sections)
     reachability_code_evidence = _section_code_evidence(finding, reachability)
-    dataflow_summary = _text(
-        dataflow.get("summary"),
-        f"The canonical finding records the affected path at {_locations(finding)}, but no expanded source-to-sink narrative was recorded.",
+    dataflow_summary = _text(dataflow.get("summary"), "") or (
+        f"The canonical finding records the affected path at {_locations(finding)}, "
+        "but no expanded source-to-sink narrative was recorded."
     )
     reachability_summary = _text(reachability.get("summary"), "") or _text(
         attack_path.get("summary"),
@@ -754,6 +797,10 @@ def build_report_markdown(
     manifest: dict[str, Any], findings_document: dict[str, Any], coverage: dict[str, Any]
 ) -> str:
     scan = manifest["scan"]
+    if "review" in scan and "coverageRef" not in scan:
+        from review_state import review_state
+
+        coverage = review_state(scan)
     target = scan["target"]
     scope = scan["scope"]
     threat_model = scan.get("threatModel") if isinstance(scan.get("threatModel"), dict) else {}
@@ -781,11 +828,15 @@ def build_report_markdown(
             "reportable findings have duplicate writeup reportPath values: "
             + ", ".join(duplicate_writeup_paths)
         )
-    deep_presentation = _uses_deep_presentation(coverage, findings)
+    deep_presentation = uses_deep_presentation(coverage, findings)
     deep_finding_groups = _deep_finding_groups(findings, writeup_paths) if deep_presentation else []
     hardening_portfolio_path = _hardening_portfolio_path(scan)
-    include_paths = _strings(coverage.get("includePaths", scope.get("includePaths", [])))
-    exclude_paths = _strings(coverage.get("excludePaths", scope.get("excludePaths", [])))
+    include_paths = [
+        _path_text(path) for path in coverage.get("includePaths", scope.get("includePaths", []))
+    ]
+    exclude_paths = [
+        _path_text(path) for path in coverage.get("excludePaths", scope.get("excludePaths", []))
+    ]
     limitations = _strings(scope.get("limitations"))
     explicit_exclusions = coverage.get("explicitExclusions", [])
     lines = [
@@ -800,7 +851,6 @@ def build_report_markdown(
         "",
         f"- Scan mode: {coverage['mode']}",
         *_target_scope_lines(target),
-        f"- Inventory strategy: {coverage['inventoryStrategy']}",
         f"- Included paths: {', '.join(include_paths) or 'none'}",
         f"- Excluded paths: {', '.join(exclude_paths) or 'none'}",
     ]
@@ -840,10 +890,9 @@ def build_report_markdown(
             "| --- | --- |",
             f"| Scan outcome | {scan.get('status', 'completed')} |",
             *summary_count_lines,
-            f"| Coverage | {coverage['completeness']} |",
             f"| Validation mode | {_cell(scope.get('validationMode', 'not recorded'))} |",
             "",
-            "Canonical artifacts: `scan-manifest.json`, `findings.json`, and `coverage.json`. This report is a deterministic projection of those files.",
+            "Canonical artifacts: `scan-manifest.json` and `findings.json`. This report is a deterministic projection of those files.",
             "",
             "## Threat Model",
             "",
@@ -924,33 +973,6 @@ def build_report_markdown(
             else:
                 lines.extend(["", *_finding_section(number, finding)])
     else:
-        deferred = coverage.get("deferred", [])
-        no_source_review = (
-            coverage.get("completeness") == "partial"
-            and isinstance(deferred, list)
-            and any(
-                isinstance(item, dict)
-                and item.get("reason")
-                == "The configured discovery time limit elapsed before any source review completed."
-                for item in deferred
-            )
-        )
-        budget_exhausted = (
-            coverage.get("completeness") == "partial"
-            and isinstance(deferred, list)
-            and any(
-                isinstance(item, dict)
-                and isinstance(item.get("reason"), str)
-                and (
-                    item["reason"]
-                    == "Validation was deferred because the scan reached its cost limit."
-                    or item["reason"].startswith(
-                        "Validation was deferred because the scan reached its cost limit: "
-                    )
-                )
-                for item in deferred
-            )
-        )
         stopped = manifest.get("scan", {}).get("status") in {
             "failed",
             "canceled",
@@ -964,18 +986,7 @@ def build_report_markdown(
                     "No findings were retained before the scan stopped. "
                     "The scan did not complete. No vulnerability conclusion can be drawn."
                     if stopped
-                    else (
-                        "No source review completed before the configured time limit. "
-                        "No vulnerability conclusion can be drawn."
-                        if no_source_review
-                        else (
-                            "No findings were validated before the scan reached its cost limit. "
-                            "Review the deferred candidates in Open Questions And Follow Up."
-                            if budget_exhausted
-                            else "No reportable findings survived the canonical discovery, validation, "
-                            "and reportability gates."
-                        )
-                    )
+                    else "No findings were reported."
                 ),
             ]
         )
@@ -1023,10 +1034,10 @@ def build_report_markdown(
                 + " |"
             )
     open_questions = coverage.get("openQuestions", [])
-    questions = list(open_questions) if isinstance(open_questions, list) else []
+    deferred_questions = []
     deferred = coverage.get("deferred", [])
     if isinstance(deferred, list):
-        questions.extend(
+        deferred_questions = [
             {
                 "question": item.get("reason", "Deferred review requires follow-up."),
                 "followUpPrompt": " ".join(
@@ -1043,9 +1054,14 @@ def build_report_markdown(
             }
             for item in deferred
             if isinstance(item, dict)
-        )
-    if questions:
-        lines.extend(["", "## Open Questions And Follow Up", ""])
+        ]
+    for heading, questions in (
+        ("Deferred Requested Work", deferred_questions),
+        ("Open Questions And Follow Up", open_questions),
+    ):
+        if not isinstance(questions, list) or not questions:
+            continue
+        lines.extend(["", f"## {heading}", ""])
         for question in questions:
             if not isinstance(question, dict):
                 continue
