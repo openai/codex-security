@@ -185,7 +185,7 @@ for (const mode of ["standard", "diff"]) {
             handoffClaimToken: claim,
             complete: true,
             findings: observations,
-            coverage: { surfaces: [], explicitExclusions: [], deferred: [] },
+            reviewState: { surfaces: [], explicitExclusions: [], deferred: [] },
           },
           runWorkbench,
         );

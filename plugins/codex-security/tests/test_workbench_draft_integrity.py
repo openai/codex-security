@@ -18,6 +18,7 @@ from test_workbench_standard_deep_results import (
 )
 from workbench_test_support import (
     create_saved_workspace,
+    read_review_state,
     run_workbench,
     saved_draft,
     start_saved_scan,
@@ -971,7 +972,7 @@ def test_tied_parent_checkpoint_keeps_identityless_semantic_rows(tmp_path: Path,
     findings = json.loads(path.read_text())["findings"]
     assert len(findings) == 2
     assert any(row["title"] == finding["title"] and row["identity"] for row in findings)
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, scan_dir)
     assert any(row["reason"] == "Validation remains." and row["id"] for row in coverage["deferred"])
     assert any(row["label"] == "Semantic review" and row["id"] for row in coverage["surfaces"])
 
@@ -2794,7 +2795,7 @@ def test_findings_only_reducer_retains_headless_parent_coverage(
         os.utime(head, ns=(150, 150))
     os.utime(reducer_path, ns=(200, 200))
     stop_draft(tmp_path, state, home, scan_id, deep=True, retry=retry)
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, scan_dir)
     assert any(row.get("reason") == "Synthetic review remains" for row in coverage["deferred"])
     assert any(row.get("label") == "Synthetic pending surface" for row in coverage["surfaces"])
     assert any(row.get("reason") == "Synthetic exclusion" for row in coverage["explicitExclusions"])

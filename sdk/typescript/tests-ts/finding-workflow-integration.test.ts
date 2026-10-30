@@ -384,39 +384,52 @@ test("reuses publication after dedupe failure and persists a successful empty du
   expect(await readFile(join(scanDir, "findings.json"), "utf8")).toBe(original);
 });
 
-test("an empty scan completes publication and dedupe and remains retrievable", async () => {
-  const { scanDir, environment, document, history } = await fixture();
-  document.findings = [];
-  const content = JSON.stringify(document);
-  await writeFile(join(scanDir, "findings.json"), content);
-  const manifestPath = join(scanDir, "scan-manifest.json");
-  const manifest = JSON.parse(
-    await readFile(manifestPath, "utf8"),
-  ) as ScanManifest;
-  manifest.scan.artifacts!.find(
-    (artifact) => artifact.path === "findings.json",
-  )!.sha256 = sha256(content);
-  await writeFile(manifestPath, JSON.stringify(manifest));
+test("an empty workflow preserves its result across cancellation at completion and on cached lookup", async () => {
+  const { environment, document, history } = await fixtureWithFindings(0);
   const options = {
     workflowId: "empty-scan",
     findingsUrl: "http://synthetic.test",
   };
-
-  const fetch = mock(async (_url: URL, init: RequestInit) => {
-    expect(JSON.parse(init.body as string).findings).toEqual([]);
-    return Response.json([]);
-  });
-  const result = await deduplicateScanInternal(document.scanId, options, {
-    environment,
-    runWorkbench: history,
-    fetch,
-  });
-  expect(result).toEqual({
+  const result = {
     scanId: document.scanId,
     uniqueFindingIds: [],
     duplicateGroups: [],
-    deduplicationStatus: "completed",
+    deduplicationStatus: "completed" as const,
+  };
+  const fetch = mock(async (url: URL, init: RequestInit) => {
+    expect(url.pathname).toBe("/v1/bulk/findings");
+    expect(JSON.parse(init.body as string).findings).toEqual([]);
+    return Response.json([]);
   });
+  const workflow = new FindingWorkflow(options.workflowId, environment);
+  for (const action of ["complete", "begin"]) {
+    const controller = new AbortController();
+    const reason = new Error(`Canceled after dedupe ${action}`);
+    await expect(
+      deduplicateScanInternal(
+        document.scanId,
+        { ...options, signal: controller.signal },
+        {
+          environment,
+          fetch,
+          runWorkbench: async (args, input) => {
+            const response = await history(args, input);
+            const payload = input ? JSON.parse(input) : {};
+            if (payload.stage === "dedupe" && payload.action === action)
+              controller.abort(reason);
+            return response;
+          },
+        },
+      ),
+    ).rejects.toThrow(reason.message);
+    expect((await workflow.get())?.stages).toMatchObject({
+      publish: {
+        status: "completed",
+        result: { findingIds: [], findingCount: 0 },
+      },
+      dedupe: { status: "completed", result },
+    });
+  }
   expect(
     await deduplicateScanInternal(document.scanId, options, {
       environment,
@@ -425,13 +438,6 @@ test("an empty scan completes publication and dedupe and remains retrievable", a
     }),
   ).toEqual(result);
   expect(fetch).toHaveBeenCalledTimes(1);
-  expect(
-    (await new FindingWorkflow(options.workflowId, environment).get())?.stages
-      .publish,
-  ).toMatchObject({
-    status: "completed",
-    result: { findingIds: [], findingCount: 0 },
-  });
 });
 
 test.each(["acknowledged", "interrupted", "without workflow"])(
@@ -499,66 +505,6 @@ test.each(["acknowledged", "interrupted", "without workflow"])(
       status: "completed",
       result: saved.result,
     });
-  },
-);
-
-test.each(["complete", "cached"])(
-  "observes final cancellation for a %s workflow without group writes",
-  async (phase) => {
-    const { environment, document, history } = await fixtureWithFindings(0);
-    const controller = new AbortController();
-    const reason = new Error(
-      "Synthetic cancellation after workflow completion",
-    );
-    const options = {
-      workflowId: "empty-canceled",
-      findingsUrl: "http://synthetic.test",
-    };
-    const fetch = mock(findingFetch(document));
-    if (phase === "cached")
-      await deduplicateScanInternal(document.scanId, options, {
-        environment,
-        runWorkbench: history,
-        fetch,
-      });
-    await expect(
-      deduplicateScanInternal(
-        document.scanId,
-        { ...options, signal: controller.signal },
-        {
-          environment,
-          fetch,
-          runWorkbench: async (args, input) => {
-            const result = await history(args, input);
-            const payload = input ? JSON.parse(input) : {};
-            if (
-              payload.stage === "dedupe" &&
-              payload.action === (phase === "cached" ? "begin" : "complete")
-            )
-              controller.abort(reason);
-            return result;
-          },
-        },
-      ),
-    ).rejects.toThrow(reason.message);
-    const saved = (await new FindingWorkflow(
-      options.workflowId,
-      environment,
-    ).get())!.stages.dedupe;
-    expect(saved).toMatchObject({
-      status: "completed",
-      result: { duplicateGroups: [] },
-    });
-    expect(fetch).toHaveBeenCalledTimes(1);
-    expect(fetch.mock.calls[0]![0].pathname).toBe("/v1/bulk/findings");
-    expect<unknown>(
-      await deduplicateScanInternal(document.scanId, options, {
-        environment,
-        runWorkbench: history,
-        fetch,
-      }),
-    ).toEqual(saved.result);
-    expect(fetch).toHaveBeenCalledTimes(1);
   },
 );
 

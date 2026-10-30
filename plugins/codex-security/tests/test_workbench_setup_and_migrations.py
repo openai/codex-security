@@ -24,6 +24,7 @@ from workbench_test_support import (
     create_saved_git_workspace,
     create_saved_workspace,
     create_workspace,
+    empty_target_paths,
     empty_target_scan,
     get_scan,
     initialize_git_repository,
@@ -95,6 +96,10 @@ EXPECTED_MIGRATIONS = [
     (51, "preserve deep scan worker thread history"),
     (52, "record severity classification review counts"),
     (53, "store external source findings without assessments"),
+    (54, "snapshot deep scan setup configuration"),
+    (55, "retain undelivered headless deep scan results"),
+    (56, "recover unfinished legacy headless deep scans"),
+    (57, "freeze stopped scan checkpoint selections"),
 ]
 
 
@@ -613,9 +618,7 @@ def test_workbench_does_not_run_fsmonitor_during_scan_start(tmp_path: Path) -> N
 
 
 def test_workbench_counts_scope_before_taking_sqlite_writer_lock(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "source.py").write_text("print('fixture')\n")
     workspace = create_saved_workspace(state_dir, target)
     database = state_dir / "workbench.sqlite3"
@@ -1116,69 +1119,16 @@ def test_scan_model_migration_preserves_existing_scans() -> None:
     assert scan["completion_warnings_json"] == "[]"
 
 
-def test_deep_discovery_error_migration_backfills_each_existing_threshold() -> None:
-    connection, apply_migrations = create_historical_database(27)
-
-    timestamp = "2026-07-01T00:00:00Z"
-    for index, stop_after_no_new in enumerate((2, 7), start=1):
-        workspace_id = f"legacy-deep-workspace-{index}"
-        scan_id = f"legacy-deep-scan-{index}"
-        connection.execute(
-            "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
-            (workspace_id, timestamp, timestamp),
-        )
-        connection.execute(
-            """
-            INSERT INTO scans (
-                id, workspace_id, target_path, target_revision, scope, mode,
-                scan_dir, status, phase, started_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, '.', 'deep', ?, 'running', 'discovery', ?, ?, ?)
-            """,
-            (
-                scan_id,
-                workspace_id,
-                f"/legacy/target-{index}",
-                "legacy-revision",
-                f"/legacy/scan-{index}",
-                timestamp,
-                timestamp,
-                timestamp,
-            ),
-        )
-        connection.execute(
-            """
-            INSERT INTO deep_scan_runs (
-                scan_id, schema_version, workflow_version, status, phase,
-                workers, subagents, stop_after_no_new, max_discovery_runs,
-                created_at, updated_at
-            ) VALUES (?, 1, 'deep-scan-mcp/v1', 'running', 'discovery',
-                2, 0, ?, 10, ?, ?)
-            """,
-            (scan_id, stop_after_no_new, timestamp, timestamp),
-        )
-    connection.commit()
-
-    apply_migrations(connection)
-
-    rows = connection.execute(
-        """
-        SELECT stop_after_no_new, stop_after_consecutive_errors, consecutive_errors
-        FROM deep_scan_runs
-        ORDER BY scan_id
-        """
-    ).fetchall()
-    assert [tuple(row) for row in rows] == [(2, 2, 0), (7, 7, 0)]
-
-
 @pytest.mark.parametrize(
     ("legacy_name", "has_owner_columns"),
     (
+        (None, False),
         ("durable deep scan coordinator ownership", True),
         ("repair deep scan orchestration state", False),
     ),
 )
-def test_workbench_repairs_recorded_deep_scan_failure_counter_migration(
-    legacy_name: str, has_owner_columns: bool
+def test_deep_scan_failure_counter_migration_backfills_existing_thresholds(
+    legacy_name: str | None, has_owner_columns: bool
 ) -> None:
     connection, apply_migrations = create_historical_database(27)
     timestamp = "2026-07-01T00:00:00Z"
@@ -1218,10 +1168,11 @@ def test_workbench_repairs_recorded_deep_scan_failure_counter_migration(
     if has_owner_columns:
         connection.execute("ALTER TABLE deep_scan_runs ADD COLUMN coordinator_owner_id TEXT")
         connection.execute("ALTER TABLE deep_scan_runs ADD COLUMN coordinator_heartbeat_at TEXT")
-    connection.execute(
-        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (27, ?, ?)",
-        (legacy_name, timestamp),
-    )
+    if legacy_name is not None:
+        connection.execute(
+            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (27, ?, ?)",
+            (legacy_name, timestamp),
+        )
     connection.commit()
     apply_migrations(connection)
     assert [
@@ -1244,12 +1195,9 @@ def test_workbench_repairs_recorded_deep_scan_failure_counter_migration(
             "FROM deep_scan_runs ORDER BY scan_id"
         )
     ] == [(9, 3), (9, 3)]
-    assert (
-        connection.execute("SELECT name FROM schema_migrations WHERE version = 27").fetchone()[
-            "name"
-        ]
-        == legacy_name
-    )
+    assert connection.execute("SELECT name FROM schema_migrations WHERE version = 27").fetchone()[
+        "name"
+    ] == (legacy_name or "persist deep scan consecutive discovery failures")
     if has_owner_columns:
         assert {"coordinator_owner_id", "coordinator_heartbeat_at"} <= {
             row[1] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
@@ -1578,9 +1526,7 @@ def test_workbench_repairs_recorded_deep_scan_migration(
     drop_deep_scan_tables: bool,
     attach_continuation: bool,
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_saved_workspace(state_dir, target, thread_id="thread-deep-scan", mode="deep")
     started = start_scan_command(
         state_dir, str(workspace["id"]), "--scan-root", str(tmp_path / "scans")
@@ -1830,9 +1776,7 @@ def test_workbench_repairs_pre_release_scan_continuation_migration(tmp_path: Pat
 
 
 def test_workbench_repairs_recorded_scan_scope_file_count_migration(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_saved_workspace(state_dir, target)
     started = start_scan_command(state_dir, str(workspace["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -2003,9 +1947,7 @@ def test_workbench_upgrades_stable_scan_target_identity_migration(tmp_path: Path
 
 
 def test_workbench_applies_shadowed_delivered_claim_cleanup_once(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_saved_workspace(state_dir, target)
     started = start_scan_command(state_dir, str(workspace["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -2081,9 +2023,7 @@ def test_workbench_repairs_shadowed_setup_preferences_migration(
 def test_workbench_repairs_shadowed_phase_progress_migration(
     tmp_path: Path, legacy_name: str
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_saved_workspace(state_dir, target)
     started = start_scan_command(state_dir, str(workspace["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -2130,9 +2070,7 @@ def test_workbench_repairs_shadowed_phase_progress_migration(
 def test_workbench_repairs_shadowed_preflight_progress_migration(
     tmp_path: Path, legacy_name: str
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_scan_command(state_dir, str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -2171,9 +2109,7 @@ def test_workbench_repairs_shadowed_preflight_progress_migration(
 
 
 def test_workbench_repairs_shadowed_scan_recipe_migration(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_saved_workspace(state_dir, target)
     started = start_scan_command(state_dir, str(workspace["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -2207,9 +2143,7 @@ def test_workbench_repairs_shadowed_scan_recipe_migration(tmp_path: Path) -> Non
 
 
 def test_workbench_reconciles_released_completion_warning_version(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_saved_workspace(state_dir, target)
     started = start_scan_command(state_dir, str(workspace["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -2246,9 +2180,7 @@ def test_workbench_reconciles_released_completion_warning_version(tmp_path: Path
 
 
 def test_workbench_repairs_recorded_completion_warnings_migration(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_saved_workspace(state_dir, target)
     started = start_scan_command(state_dir, str(workspace["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -2323,7 +2255,8 @@ def test_workbench_reconciles_legacy_execution_profile_migrations(
             connection.execute("UPDATE scans SET model = 'current-model' WHERE id = ?", (scan_id,))
 
     run_workbench(state_dir, "database-info")
-    run_workbench(state_dir, "database-info")
+    # Creating, saving, starting and updating the new scan each reopen the migrated database.
+    assert_new_scan_model_is_independent(state_dir, target, tmp_path / "current-scans")
 
     expected_migration_name = {
         11: "deep scan orchestration state",
@@ -2352,8 +2285,6 @@ def test_workbench_reconciles_legacy_execution_profile_migrations(
             (workspace_id,),
         ).fetchone() == (legacy_model, legacy_effort)
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-
-    assert_new_scan_model_is_independent(state_dir, target, tmp_path / "current-scans")
 
 
 @pytest.mark.parametrize("installed_history", ["main-scan-names", "source-excerpt-scopes"])
@@ -2763,7 +2694,8 @@ def test_workbench_upgrades_legacy_execution_profile_migrations(
             connection.execute("UPDATE scans SET model = ? WHERE id = ?", ("gpt-current", scan_id))
 
     run_workbench(state_dir, "database-info")
-    run_workbench(state_dir, "database-info")
+    # Creating, saving, starting and updating the new scan each reopen the migrated database.
+    assert_new_scan_model_is_independent(state_dir, target, tmp_path / "current-scans")
 
     with sqlite3.connect(database) as connection:
         assert connection.execute(
@@ -2799,8 +2731,6 @@ def test_workbench_upgrades_legacy_execution_profile_migrations(
             (workspace_id,),
         ).fetchone() == (model, reasoning_effort)
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-
-    assert_new_scan_model_is_independent(state_dir, target, tmp_path / "current-scans")
 
 
 def test_workbench_rejects_unknown_execution_profile_migration_without_mutating_history() -> None:

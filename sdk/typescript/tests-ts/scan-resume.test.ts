@@ -7,12 +7,14 @@ import { randomUUID } from "node:crypto";
 import { stripVTControlCharacters } from "node:util";
 import {
   appendFile,
+  chmod,
   cp,
   mkdir,
   readFile,
   readdir,
   rename,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
@@ -382,8 +384,9 @@ test.each([
   },
 );
 
-test("CLI resumes through native execution with current permissions and preserves interrupted state", async () => {
+test("CLI resumes through native execution with current permissions and preserves interrupted state and output permissions", async () => {
   const f = await interruptedScan();
+  if (process.platform !== "win32") await chmod(f.scanDir, 0o755);
   const feedbackPath = join(
     f.scanDir,
     "artifacts",
@@ -479,6 +482,8 @@ test("CLI resumes through native execution with current permissions and preserve
             return {
               id: threadId,
               async runStreamed(prompt) {
+                if (process.platform !== "win32")
+                  expect((await stat(f.scanDir)).mode & 0o777).toBe(0o755);
                 expect(await readFile(feedbackPath, "utf8")).toBe(
                   originalFeedback,
                 );
@@ -524,6 +529,8 @@ test("CLI resumes through native execution with current permissions and preserve
   ).toMatchObject({ progress: { status: "running" } });
   expect(await readFile(f.checkpoint, "utf8")).toBe('{"completed":"setup"}\n');
   expect(await readFile(feedbackPath, "utf8")).toBe(originalFeedback);
+  if (process.platform !== "win32")
+    expect((await stat(f.scanDir)).mode & 0o777).toBe(0o755);
 });
 
 test("resumed Bedrock scans retain provider context for the account advisory", async () => {
@@ -702,9 +709,20 @@ test.each([
   [false, true],
   [true, true],
 ])(
-  "resumed CLI seals the original scan (coordinator finished: %p, bulk: %p)",
+  "resumed CLI seals the original scan after its instructions are cleared (coordinator finished: %p, bulk: %p)",
   async (alreadyFinished, bulk) => {
     const f = await interruptedScan("deep", bulk);
+    await f.command(
+      [
+        "update-scan-context",
+        "--scan-id",
+        f.scanId,
+        "--thread-id",
+        f.threadId,
+        "--user-context-stdin",
+      ],
+      "",
+    );
     if (alreadyFinished) await finishDiscovery(f);
     await appendFile(
       f.sessionPath,
@@ -730,7 +748,10 @@ test.each([
           expect(threadId).toBe(f.threadId);
           return {
             id: threadId,
-            async runStreamed() {
+            async runStreamed(prompt) {
+              expect(prompt).not.toContain(
+                "Keep the original scan instructions.",
+              );
               if (!alreadyFinished) await finishDiscovery(f);
               return { events: completedEvents(threadId) };
             },
@@ -795,7 +816,6 @@ test.each([
         failed: 0,
       });
     } else {
-      expect(result.coverage).not.toHaveProperty("completeness");
       expect(result.manifest.scan.id).toBe(f.scanId);
       expect(result.manifest.scan.sealedAt).toBeString();
       expect(result.cost.inputTokens).toBe(10000);
@@ -856,12 +876,7 @@ test.each([
     if (scenario === "changed-findings") {
       await appendFile(join(f.scanDir, "findings.json"), "\n");
     }
-    const artifactNames = [
-      "scan-manifest.json",
-      "findings.json",
-      "coverage.json",
-      "report.md",
-    ];
+    const artifactNames = ["scan-manifest.json", "findings.json", "report.md"];
     const artifacts = await Promise.all(
       artifactNames.map((name) => readFile(join(f.scanDir, name))),
     );
@@ -1404,7 +1419,7 @@ test.each(["failed", "missing-checkout", "missing-session", "standard"])(
                 manifest: { scan: { status: "completed" } },
                 coverage: {},
                 cost: null,
-              } as import("../src/result.js").ScanResult;
+              } as unknown as import("../src/result.js").ScanResult;
             },
           }),
         },

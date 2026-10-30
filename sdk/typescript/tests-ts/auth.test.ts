@@ -255,6 +255,23 @@ describe("Codex authentication process boundary", () => {
     },
   );
 
+  test("reads login URLs from hyperlinks terminated with ST", async () => {
+    const url = "https://auth.example.test/device";
+    const st = "\u001b\\";
+    const link = `\u001b]8;;https://link.example.test/${st}${url}\u001b]8;;${st}`;
+    const output = `Open ${link}\nUser code: ABCD-EFGH\n`;
+    const handle = new CodexLoginHandle(
+      nodeCommand(),
+      ["-e", "process.stderr.write(process.argv[1])", output],
+      process.env,
+      () => {},
+    );
+
+    await expect(handle.wait()).resolves.toMatchObject({ success: true });
+    expect(handle.verificationUrl).toBe(url);
+    expect(handle.userCode).toBe("ABCD-EFGH");
+  });
+
   test("retains large interactive output and login instructions", async () => {
     const root = await temporaryDirectory("codex-security-auth-output-");
     const script = join(root, "login.mjs");

@@ -5,7 +5,19 @@ import { mkdtemp, realpath, writeFile, mkdir, rm, symlink } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { parseInputs } from '../src/inputs.js';
-import { resolveTarget, validateEvent, git, gitEnvironment, type EventContext } from '../src/targets.js';
+import { resolveTarget, validateEvent, originMatches, git, gitEnvironment, type EventContext } from '../src/targets.js';
+
+function eventContext(head = 'a'.repeat(40), eventName = 'pull_request', base = head): EventContext {
+  const repository = 'example/repo';
+  const pr = eventName === 'pull_request';
+  return {
+    eventName, repository, sha:head, serverUrl:'https://github.com',
+    ref:pr ? 'refs/pull/7/merge' : 'refs/heads/main',
+    payload:pr ? {number:7, pull_request:{
+      number:7, head:{sha:head,repo:{full_name:repository}}, base:{sha:base,repo:{full_name:repository}},
+    }} : {},
+  };
+}
 
 async function fixture(t: any) {
   const path = await realpath(await mkdtemp(join(tmpdir(),'action-target-')));
@@ -18,9 +30,7 @@ async function fixture(t: any) {
   const change = async (file = 'src/app.ts', text = 'export const n = 2;\n') => {
     await writeFile(join(path,file),text); run('add','.'); run('commit','-m','change'); return run('rev-parse','HEAD');
   };
-  const event = (head: string, eventName = 'pull_request'): EventContext => ({eventName, repository:'example/repo',
-    sha:head, ref:eventName === 'pull_request' ? 'refs/pull/7/merge' : 'refs/heads/main',serverUrl:'https://github.com',
-    payload:{number:7,pull_request:{number:7,head:{sha:head,repo:{full_name:'example/repo'}},base:{sha:base,repo:{full_name:'example/repo'}}}}});
+  const event = (head: string, eventName?: string) => eventContext(head, eventName, base);
   const inputs = (values: Record<string,string>={scope:'diff'}) => parseInputs(key=>values[key]??'',path);
   return {path,run,base,change,event,inputs};
 }
@@ -46,8 +56,7 @@ test('PR target resolves merge base and preserves exact upload head identity', a
   assert.equal(target.diffBase,f.base); assert.equal(target.diffHead,head);
   assert.equal(target.analysisRef,'refs/pull/7/head'); assert.equal(target.publishable,true);
 });
-test('GitHub Cloud checkout origins match the event host for HTTPS and SSH', async t => {
-  const f = await fixture(t); const head = await f.change();
+test('GitHub Cloud matches HTTPS, SSH and SCP origin spellings for each event host', () => {
   for (const [host, sshUser] of [['github.com', 'git'], ['example-enterprise.ghe.com', 'example-enterprise']]) {
     for (const origin of [
       `https://${host}/example/repo.git`, `https://${host}:443/example/repo`,
@@ -55,58 +64,46 @@ test('GitHub Cloud checkout origins match the event host for HTTPS and SSH', asy
       `${sshUser}@${host}:example/repo.git`, `${sshUser}@${host.toUpperCase()}:Example/Repo/`,
       `ssh://${sshUser}@${host}/example/repo`, `ssh://${sshUser}@${host.toUpperCase()}:22/Example/Repo.git/`,
     ]) {
-      f.run('remote', 'set-url', 'origin', origin);
-      for (const eventName of ['schedule', 'pull_request']) {
-        const event = {...f.event(head, eventName), serverUrl:`https://${host}`};
-        const target = await resolveTarget(f.inputs({scope:eventName === 'schedule' ? 'repository' : 'diff'}), event);
-        assert.equal(target.scannedSha, head); assert.equal(target.publishable, true);
-        assert.equal(target.analysisRef, eventName === 'schedule' ? 'refs/heads/main' : 'refs/pull/7/head');
-        assert.equal(target.diffBase, eventName === 'schedule' ? undefined : f.base);
-      }
+      assert.equal(originMatches(origin, 'example/repo', `https://${host}`), true, origin);
     }
   }
 });
-test('GitHub.com checkout origins support its SSH-over-443 endpoint', async t => {
-  const f = await fixture(t);
-  f.run('remote', 'set-url', 'origin', 'ssh://git@ssh.github.com:443/example/repo.git');
-  const target = await resolveTarget(f.inputs({scope:'repository'}), f.event(f.base, 'schedule'));
-  assert.equal(target.scannedSha, f.base);
-  assert.equal(target.publishable, true);
+test('target resolution checks the configured SSH origin against the triggering host and repository', async t => {
+  const f = await fixture(t); const head = await f.change();
+  const enterpriseEvent = {...f.event(head), serverUrl:'https://example-enterprise.ghe.com'};
+  f.run('remote', 'set-url', 'origin', 'example-enterprise@example-enterprise.ghe.com:example/repo.git');
+  const pr = await resolveTarget(f.inputs(), enterpriseEvent);
+  assert.equal(pr.scannedSha, head); assert.equal(pr.publishable, true);
+  assert.equal(pr.analysisRef, 'refs/pull/7/head'); assert.equal(pr.diffBase, f.base);
+  const schedule = f.event(head, 'schedule');
+  await assert.rejects(resolveTarget(f.inputs({scope:'repository'}), schedule), /origin does not match/);
 
-  const enterpriseEvent = {...f.event(f.base), serverUrl:'https://example-enterprise.ghe.com'};
+  f.run('remote', 'set-url', 'origin', 'ssh://git@ssh.github.com:443/example/repo.git');
+  const target = await resolveTarget(f.inputs({scope:'repository'}), schedule);
+  assert.equal(target.scannedSha, head); assert.equal(target.publishable, true);
+  assert.equal(target.analysisRef, 'refs/heads/main'); assert.equal(target.diffBase, undefined);
   await assert.rejects(resolveTarget(f.inputs(), enterpriseEvent), /origin does not match/);
+  await assert.rejects(resolveTarget(f.inputs({scope:'repository'}), {...schedule, repository:'example/other'}), /origin does not match/);
+});
+test('origins must match the event host, SSH endpoint and literal repository path', () => {
   for (const origin of ['https://ssh.github.com/example/repo.git', 'ssh://git@ssh.github.com:22/example/repo.git',
-    'ssh://git@ssh.github.com:443/other/repo.git', 'ssh://other@ssh.github.com:443/example/repo.git']) {
-    f.run('remote', 'set-url', 'origin', origin);
-    await assert.rejects(resolveTarget(f.inputs(), f.event(f.base)), /origin does not match/);
-  }
-});
-test('SCP checkout paths remain literal when compared with the triggering repository', async t => {
-  const f = await fixture(t);
-  for (const origin of ['git@github.com:example/repo.git#suffix', 'git@github.com:example/repo.git?suffix',
+    'ssh://git@ssh.github.com:443/other/repo.git', 'ssh://other@ssh.github.com:443/example/repo.git',
+    'git@github.com:example/repo.git#suffix', 'git@github.com:example/repo.git?suffix',
     'git@github.com:other/../example/repo.git']) {
-    f.run('remote', 'set-url', 'origin', origin);
-    await assert.rejects(resolveTarget(f.inputs(), f.event(f.base)), /origin does not match/);
+    assert.equal(originMatches(origin, 'example/repo', 'https://github.com'), false, origin);
   }
-});
-test('unsupported server URLs still fail eligibility', async t => {
-  const f = await fixture(t);
-  for (const serverUrl of ['', 'https://github.example.invalid', 'http://example-enterprise.ghe.com',
-    'https://ghe.com', 'https://example-enterprise.ghe.com.example.invalid', 'https://example-enterprise-ghe.com']) {
-    assert.throws(() => validateEvent({...f.event(f.base), serverUrl}), /supports GitHub.com and GitHub Enterprise Cloud/);
-  }
-});
-test('enterprise checkout origins cannot select another host or repository', async t => {
-  const f = await fixture(t);
-  const event = {...f.event(f.base), serverUrl:'https://example-enterprise.ghe.com'};
   for (const origin of ['https://github.com/example/repo.git', 'https://other-enterprise.ghe.com/example/repo.git',
     'other-enterprise@other-enterprise.ghe.com:example/repo.git', 'https://example-enterprise.ghe.com/other/repo.git',
     'example-enterprise@example-enterprise.ghe.com:other/repo.git']) {
-    f.run('remote', 'set-url', 'origin', origin);
-    await assert.rejects(resolveTarget(f.inputs(), event), /origin does not match/);
+    assert.equal(originMatches(origin, 'example/repo', 'https://example-enterprise.ghe.com'), false, origin);
   }
-  f.run('remote', 'set-url', 'origin', 'https://example-enterprise.ghe.com/example/repo.git');
-  await assert.rejects(resolveTarget(f.inputs(), f.event(f.base)), /origin does not match/);
+});
+test('unsupported server URLs fail eligibility', () => {
+  const event = eventContext();
+  for (const serverUrl of ['', 'https://github.example.invalid', 'http://example-enterprise.ghe.com',
+    'https://ghe.com', 'https://example-enterprise.ghe.com.example.invalid', 'https://example-enterprise-ghe.com']) {
+    assert.throws(() => validateEvent({...event, serverUrl}), /supports GitHub.com and GitHub Enterprise Cloud/, serverUrl);
+  }
 });
 test('manual diff scans resolve an explicit base against the checked-out head', async t => {
   const f=await fixture(t);
@@ -129,7 +126,7 @@ test('large diffs are nonempty without collecting every changed pathname', async
   f.run('reset', '--hard', head);
   for (const eventName of ['pull_request', 'workflow_dispatch']) {
     const event = f.event(head, eventName);
-    event.payload.pull_request.base.sha = base;
+    if (eventName === 'pull_request') event.payload.pull_request.base.sha = base;
     const inputs = f.inputs(eventName === 'pull_request' ? {scope:'diff'} : {scope:'diff', 'diff-base':base});
     const target = await resolveTarget(inputs, event);
     assert.equal(target.diffBase, base);
@@ -169,8 +166,8 @@ test('wrong checkout, local changes, missing diff base and option revisions are 
   await assert.rejects(resolveTarget(f.inputs(),f.event(head)),/local changes/);
   await assert.rejects(resolveTarget(f.inputs({scope:'repository'}),f.event(head,'schedule')),/local changes/);
 });
-test('forks and privileged events fail eligibility',async t=>{
-  const f=await fixture(t); const event=f.event(f.base);
+test('forks and privileged events fail eligibility',()=>{
+  const event=eventContext();
   event.payload.pull_request.head.repo.full_name='fork/repo'; assert.throws(()=>validateEvent(event),/Fork PR/);
   for(const eventName of ['pull_request_target','workflow_run']) assert.throws(()=>validateEvent({...event,eventName}),/Unsupported event/);
 });

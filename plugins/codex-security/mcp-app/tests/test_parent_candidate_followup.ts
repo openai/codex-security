@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { importSource } from "./import-module.ts";
+import { readFixtureCoverage } from "./deep_scan_coverage_fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
 const exec = promisify(execFile);
@@ -96,7 +97,7 @@ for (const newerTask of [false, true]) {
           scanId,
           complete: false,
           findings: newerTask ? [finding] : [],
-          coverage: { ...coverage, deferred: newerTask ? [] : [task] },
+          reviewState: { ...coverage, deferred: newerTask ? [] : [task] },
         },
         runWorkbench,
       );
@@ -106,7 +107,7 @@ for (const newerTask of [false, true]) {
           scanId,
           complete: true,
           findings: newerTask ? [] : [finding],
-          coverage: {
+          reviewState: {
             ...coverage,
             completeness: newerTask ? "partial" : "complete",
             deferred: newerTask ? [task] : [],
@@ -115,7 +116,7 @@ for (const newerTask of [false, true]) {
         runWorkbench,
       );
       assert.equal(written.findingCount, 1);
-      assert.deepEqual(written.coverage.deferred, newerTask ? [task] : []);
+      assert.deepEqual(written.reviewState.deferred, newerTask ? [task] : []);
       if (stoppedRetry) {
         const fault = path.join(root, "fault.py");
         await writeFile(
@@ -143,8 +144,9 @@ for (const newerTask of [false, true]) {
         .scan;
       assert.equal(saved.resultsRecoveryNeeded, false);
       assert.equal(saved.findingCount, 1);
-      const published = JSON.parse(
-        await readFile(path.join(scanDir, "coverage.json"), "utf8"),
+      const published = await readFixtureCoverage(
+        scanDir,
+        path.join(root, "state"),
       );
       assert.deepEqual(
         published.deferred.filter(
@@ -152,14 +154,17 @@ for (const newerTask of [false, true]) {
         ),
         newerTask ? [task] : [],
       );
-      const bytes = await readFile(path.join(scanDir, "coverage.json"), "utf8");
+      const bytes = await readFile(
+        path.join(scanDir, "scan-manifest.json"),
+        "utf8",
+      );
       await runWorkbench([
         stoppedRetry ? "recover-scan-results" : "get-scan",
         "--scan-id",
         scanId,
       ]);
       assert.equal(
-        await readFile(path.join(scanDir, "coverage.json"), "utf8"),
+        await readFile(path.join(scanDir, "scan-manifest.json"), "utf8"),
         bytes,
       );
     });

@@ -9,7 +9,7 @@ import { assertExpectedGitHead } from "./package-provenance.mjs";
  * @typedef {{ version: string, gitHead: string }} PublishedRelease
  * @typedef {PublishedRelease & { repository: string }} RepositoryRelease
  * @typedef {RepositoryRelease & { runId: string }} WorkflowRelease
- * @typedef {WorkflowRelease & { sha512: string }} ReleaseProvenance
+ * @typedef {WorkflowRelease & { runAttempt: string, sha512: string }} ReleaseProvenance
  */
 
 const packageName = "@openai/codex-security";
@@ -466,13 +466,7 @@ function verifySigningCertificate(bundle, expected) {
     );
   }
 
-  const runPrefix = `${expected.repository}/actions/runs/${expected.runId}/attempts/`;
-  const certificateRun = extensions.get(21);
-  if (
-    typeof certificateRun !== "string" ||
-    !certificateRun.startsWith(runPrefix) ||
-    !/^[1-9][0-9]*$/u.test(certificateRun.slice(runPrefix.length))
-  ) {
+  if (extensions.get(21) !== expected.invocation) {
     throw new Error(
       "The Fulcio certificate must identify the exact release run.",
     );
@@ -770,7 +764,7 @@ export function verifySignatureAudit(report, archive, expected) {
     repository,
     releaseRef,
     gitHead: expected.gitHead,
-    runId,
+    invocation,
   });
 
   return {
@@ -778,6 +772,7 @@ export function verifySignatureAudit(report, archive, expected) {
     gitHead: expected.gitHead,
     repository: expected.repository,
     runId,
+    runAttempt: invocation.slice(invocationPrefix.length),
     sha512,
   };
 }

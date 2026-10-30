@@ -94,7 +94,7 @@ export const outputSchema = object({
       remediation: text,
     }),
   ),
-  coverage: object({
+  reviewState: object({
     surfaces: array(
       object({
         label: text,

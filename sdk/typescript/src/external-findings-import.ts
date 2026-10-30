@@ -8,10 +8,15 @@ import {
   readExternalFindings,
 } from "./external-findings-read.js";
 import {
-  prepareNormalizedLocalImport,
+  prepareLocalImport,
   type LocalExternalImportDependencies,
 } from "./external-findings-local.js";
+import {
+  snapshotImportOptions,
+  snapshotSourceRepositories,
+} from "./external-findings.js";
 import { abortable } from "./targets.js";
+import { requireExternalImports } from "./external-imports-feature.js";
 
 /** Read an installed vendor format and prepare it for the local workbench. */
 export async function prepareLocalExternalImport(
@@ -20,20 +25,25 @@ export async function prepareLocalExternalImport(
   dependencies: LocalExternalImportDependencies = {},
 ) {
   dependencies.signal?.throwIfAborted();
+  requireExternalImports(dependencies.environment);
+  const settings = snapshotImportOptions(options);
+  const readerSources = snapshotSourceRepositories(
+    dependencies.sourceRepositories,
+  );
   const parsed = await abortable(
-    () => readExternalFindings(path, options, "local"),
+    () => readExternalFindings(path, settings, "local"),
     dependencies.signal,
   );
   const normalizedOptions = {
-    ...options,
-    provider: EXTERNAL_FINDINGS_PROVIDERS[options.provider],
+    ...settings,
+    provider: EXTERNAL_FINDINGS_PROVIDERS[settings.provider],
   };
   let sourceRepositories = parsed.sourceRepositories ?? [];
   if (normalizedOptions.provider === "semgrep") {
     // The Cloud reader allows custom GitHub casing. Local provenance must also
     // agree with the caller's source URL when the checkout has no remote.
-    const source = options.sourceRepositoryUrl!;
-    const knownGitHub = dependencies.sourceRepositories?.some(
+    const source = settings.sourceRepositoryUrl!;
+    const knownGitHub = readerSources.some(
       ({ url, platform }) =>
         platform === "github" &&
         cloudRepositoryUrlKey(url) === cloudRepositoryUrlKey(source),
@@ -54,11 +64,12 @@ export async function prepareLocalExternalImport(
         })),
       ];
   }
-  return prepareNormalizedLocalImport(parsed.findings, normalizedOptions, {
-    ...dependencies,
-    sourceRepositories: [
-      ...(dependencies.sourceRepositories ?? []),
-      ...sourceRepositories,
-    ],
-  });
+  const { environment, runWorkbench, signal } = dependencies;
+  return prepareLocalImport(
+    parsed.findings,
+    normalizedOptions,
+    { environment, runWorkbench, signal },
+    readerSources,
+    sourceRepositories,
+  );
 }

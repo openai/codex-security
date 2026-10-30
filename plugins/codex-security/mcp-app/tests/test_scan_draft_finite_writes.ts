@@ -94,11 +94,11 @@ for (const layout of ["worker", "deep"] as const) {
         ? await readJson(f.root, "result.json")
         : {
             ...(await readJson(f.root, "findings.json")),
-            coverage: await readJson(f.root, "coverage.json"),
+            reviewState: await readJson(f.root, "coverage.json"),
           };
     for (const document of [saved, ...(await checkpoints(f.root))]) {
       assert.deepEqual(document.findings, [kept]);
-      assert.equal(Object.hasOwn(document.coverage, "completeness"), false);
+      assert.equal(Object.hasOwn(document.reviewState, "completeness"), false);
     }
     assert.deepEqual(input, before);
     if (layout === "deep")

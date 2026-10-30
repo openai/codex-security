@@ -10,6 +10,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from finalize_scan_contract import _finding_strength, _has_identity_text, finding_candidate_id
+from workbench.retained_records import _ensure_finding_identity, _finding_identity, raw_scope
 from workbench.saved_sources import _digest, _encoded
 
 
@@ -338,3 +339,101 @@ def bind_saved_candidate_identities(
                 if owner is not None:
                     bound_owners[index] = owner
     return bound_owners
+
+
+def _finding_key(
+    finding: dict[str, Any], owner: str | None = None, *, include_candidate: bool = True
+) -> str:
+    # Wording and evidence may improve between checkpoints; distinct source locations
+    # must not collide merely because two workers chose the same semantic identity.
+    provenance = finding.get("provenance")
+    identity = _finding_identity(finding)
+    if not isinstance(identity, dict):
+        normalized = dict(finding)
+        normalized.pop("identity", None)
+        _ensure_finding_identity(normalized)
+        identity = normalized["identity"]
+    owner = provenance.get("workerId", owner) if isinstance(provenance, dict) else owner
+    parts = [
+        finding.get("ruleId"),
+        identity.get("anchor"),
+        identity.get("instance"),
+        _finding_locations(finding),
+    ]
+    if include_candidate and (candidate := _identity_candidate(finding)):
+        parts.extend((candidate, owner))
+    elif owner is not None and finding_candidate_id(finding):
+        parts.append(owner)
+    return _digest(parts)
+
+
+def _append_previous_finding(
+    item: dict[str, Any], finding: dict[str, Any], *, clone: bool = False
+) -> None:
+    if not isinstance(item.get("previousFindings"), list):
+        item["previousFindings"] = []
+    history = item["previousFindings"]
+    if not any(
+        isinstance(previous, dict)
+        and _finding_key(previous) == _finding_key(finding)
+        and _finding_content(previous) == _finding_content(finding)
+        for previous in history
+    ):
+        history.append(copy.deepcopy(finding) if clone else finding)
+
+
+def same_raw_finding(
+    left: dict[str, Any], right: dict[str, Any], *, allow_relabel: bool = False
+) -> bool:
+    candidates = (_identity_candidate(left), _identity_candidate(right))
+    if all(candidates) and candidates[0] != candidates[1]:
+        # A later revision of one authored finding can replace its candidate label.
+        return (
+            allow_relabel
+            and "identity" in left
+            and "identity" in right
+            and _semantic_identity_key(left) == _semantic_identity_key(right)
+            and raw_scope(left) == raw_scope(right)
+            and _report_ids(left) == _report_ids(right)
+        )
+    if isinstance(left.get("identity"), dict) and isinstance(right.get("identity"), dict):
+        if all("preservedIdentity" in row["provenance"] for row in (left, right)):
+            same_identity = _semantic_identity_key(left) == _semantic_identity_key(right)
+        else:
+            same_identity = _semantic_identity_key(
+                left, _finding_identity(left)
+            ) == _semantic_identity_key(right, _finding_identity(right))
+        # At a different site the same anchor can describe a separate report.
+        if not same_identity or raw_scope(left) == raw_scope(right):
+            return same_identity
+    pairs = list(zip(_report_ids(left), _report_ids(right), strict=True))
+    if any(a is not None for a, _ in pairs) and any(b is not None for _, b in pairs):
+        if not any(a is not None and b is not None for a, b in pairs) or any(
+            a is not None and b is not None and a != b for a, b in pairs
+        ):
+            return False
+    return True
+
+
+def _same_published_finding(left: dict[str, Any], right: dict[str, Any], *, valid_finding) -> bool:
+    if not valid_finding(left) or not valid_finding(right):
+        return False
+    return (
+        same_raw_value(_finding_content(left), _finding_content(right))
+        and (
+            "identity" not in left
+            or same_raw_value(_finding_identity(left), _finding_identity(right))
+        )
+        and same_raw_value(
+            {
+                key: value
+                for key, value in left.get("provenance", {}).items()
+                if key not in ("previousFindings", "preservedIdentity")
+            },
+            {
+                key: value
+                for key, value in right.get("provenance", {}).items()
+                if key not in ("previousFindings", "preservedIdentity")
+            },
+        )
+    )

@@ -29,17 +29,19 @@ jobs:
       actions: read
       pull-requests: read
     outputs:
+      native-cache-group: ${{ steps.native-cache.outputs.cold-group }}
+      native-cache-week: ${{ steps.native-cache.outputs.week }}
       source-run: ${{ steps.proof.outputs.source-run }}
       edit-attempt: ${{ steps.proof.outputs.edit-attempt }}
       source-required: ${{ steps.scope.outputs.source-required }}
+      container-required: ${{ steps.scope.outputs.container-required }}
+      plugin-tests-required: ${{ steps.scope.outputs.plugin-tests-required }}
       package-required: ${{ steps.scope.outputs.package-required }}
       action-ci: ${{ steps.scope.outputs.action-ci }}
       eval-contracts: ${{ steps.scope.outputs.eval-contracts }}
-      container-validate: ${{ steps.scope.outputs.container-validate }}
       workflow-quality: ${{ steps.scope.outputs.workflow-quality }}
       compatibility-matrix: ${{ steps.scope.outputs.compatibility-matrix }}
       python-matrix: ${{ steps.scope.outputs.python-matrix }}
-      windows-node-matrix: ${{ steps.scope.outputs.windows-node-matrix }}
     steps:
       - name: Checkout repository for change classification
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -59,6 +61,14 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_CHANGED: ${{ github.event.action == 'edited' }}
         run: node .github/scripts/select-ci-checks.mjs
+
+      - name: Group protected pushes waiting for the same native cache
+        id: native-cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected && github.run_attempt == 1
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/actions/native-cache-key/key.sh cold-group >> "$GITHUB_OUTPUT"
 
   workflow-quality:
     needs: classify-changes
@@ -104,8 +114,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: node --experimental-strip-types sdk/typescript/scripts/check-devcontainer-cooldown.mts
-      - name: Test CI selection and result gating
-        run: node --test .github/scripts/test-ci-selection.mjs .github/scripts/test-verify-pr-source.mjs
+      - name: Test CI selection, result gating and the release guide
+        run: node --test .github/scripts/test-ci-selection.mjs .github/scripts/test-verify-pr-source.mjs .github/scripts/test-release-guide.mjs
       - name: Typecheck
         run: pnpm --dir sdk/typescript run types
       - name: Check formatting
@@ -118,13 +128,18 @@ jobs:
   native:
     if: needs.classify-changes.outputs.package-required == 'true'
     needs: classify-changes
+    # Hits and PRs keep a unique group. Every entrant restores or rebuilds on its own commit.
+    concurrency:
+      group: native-producer-${{ github.run_attempt == 1 && needs.classify-changes.outputs.native-cache-group || github.run_id }}
+      queue: max
     uses: ./.github/workflows/native-artifacts.yml
     with:
       reuse-verified: true
+      cache-week: ${{ fromJSON(github.run_attempt == 1 && needs.classify-changes.outputs.native-cache-week || '0') }}
 
   container-validate:
     needs: [classify-changes, native, static-checks]
-    if: needs.classify-changes.outputs.container-validate == 'true'
+    if: needs.classify-changes.outputs.container-required == 'true'
     uses: ./.github/workflows/container-validate.yml
 
   package:
@@ -161,9 +176,13 @@ jobs:
           retention-days: 7
 
   test:
-    if: needs.classify-changes.outputs.source-required == 'true'
+    if: &run-sdk-shards >-
+      ${{ !cancelled() && needs.package.result == 'success' &&
+      needs['classify-changes'].outputs['source-required'] == 'true' &&
+      (github.event_name != 'pull_request' || github.event.action == 'edited' ||
+      needs['static-checks'].result == 'success') }}
     name: tests / ${{ matrix.os }} / shard-${{ matrix.shard }}
-    needs: [classify-changes, package]
+    needs: &sdk-shard-needs [classify-changes, package, static-checks]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -192,11 +211,10 @@ jobs:
         run: |
           tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
           cp -R sdk/typescript/_bundled_plugin/mcp/native/. plugins/codex-security/native/prebuilt
+          python3 -I -m compileall -q --invalidation-mode checked-hash sdk/typescript/_bundled_plugin/scripts
       - name: Install ripgrep
         if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ripgrep
+        run: .github/scripts/install-ripgrep.sh
       - name: Test
         working-directory: sdk/typescript
         env:
@@ -204,6 +222,7 @@ jobs:
           TMP: ${{ runner.temp }}
           TMPDIR: ${{ runner.temp }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
+          CODEX_SECURITY_TEST_MCP_WORKERS_SEPARATE: ${{ needs.classify-changes.outputs.plugin-tests-required }}
         run: node --experimental-strip-types scripts/run-ci-tests.mts ${{ matrix.shard }}/6 --seed=${{ github.run_number }} ${{ matrix.os == 'ubuntu-latest' && '--coverage --coverage-reporter=text --coverage-reporter=lcov' || '' }}
       - name: Upload test reports
         if: always()
@@ -230,16 +249,19 @@ jobs:
       matrix: ${{ fromJSON(needs.classify-changes.outputs.compatibility-matrix) }}
     steps:
       - *checkout-repository
-      - &set-up-node-js
-        name: Set up Node.js
+      - name: Set up Python on Windows
+        if: runner.os == 'Windows'
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Set up Node.js
         id: node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: sdk/typescript/pnpm-lock.yaml
-      - &resolve-npm-cache
-        name: Resolve npm download cache
+      - name: Resolve npm download cache
         id: npm-cache
         if: steps.node.outputs.cache-hit != 'true'
         shell: bash
@@ -248,8 +270,7 @@ jobs:
         run: |
           echo "path=$(npm config get cache)" >> "$GITHUB_OUTPUT"
           echo "restore-prefix=${PRIMARY_CACHE_KEY%-*}-" >> "$GITHUB_OUTPUT"
-      - &restore-npm-cache
-        name: Restore previous npm downloads
+      - name: Restore previous npm downloads
         if: steps.node.outputs.cache-hit != 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -259,8 +280,9 @@ jobs:
       - *download-package-for-this-commit
       - name: Inspect installed package
         working-directory: sdk/typescript
-        env: &package-deep-retry
-          # On PRs, exercise the real retry delay on each OS's floor or only runtime.
+        shell: bash
+        env:
+          # A successful main push can be tagged for release. Only PRs sample retries by runtime.
           PACKAGE_DEEP_RETRY: ${{ github.event_name != 'pull_request' || matrix.node == '22.13.0' || strategy.job-total == 1 }}
         run: node scripts/check-package.mjs ../../dist/*.tgz
 
@@ -269,7 +291,7 @@ jobs:
         uses: ./.github/actions/check-action-candidate
 
   mcp:
-    if: needs.classify-changes.outputs.source-required == 'true'
+    if: needs.classify-changes.outputs.plugin-tests-required == 'true'
     name: MCP app tests (${{ matrix.shard }}/${{ strategy.job-total }})
     needs: [classify-changes, package]
     runs-on: ubuntu-latest
@@ -288,19 +310,15 @@ jobs:
       - name: Install dependencies
         run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
       - name: Install ripgrep
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ripgrep
+        run: .github/scripts/install-ripgrep.sh
       - *download-package-for-this-commit
       - name: Restore bundled plugin
         run: tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
       - name: Test MCP app
         working-directory: plugins/codex-security/mcp-app
-        # Keep Node options before the glob; trailing shard flags run every file.
         run: >-
-          node --experimental-strip-types --test --test-concurrency=2
-          --test-shard=${{ matrix.shard }}/${{ strategy.job-total }}
-          --test-reporter=./scripts/test_reporter.mts "tests/test_*.ts"
+          node --experimental-strip-types ../../../sdk/typescript/scripts/run-mcp-test-shard.mts
+          ${{ matrix.shard }} ${{ strategy.job-total }}
       - name: Upload MCP test reports
         if: always()
         continue-on-error: true
@@ -313,7 +331,7 @@ jobs:
           retention-days: 14
 
   plugin-host:
-    if: needs.classify-changes.outputs.source-required == 'true'
+    if: needs.classify-changes.outputs.plugin-tests-required == 'true'
     name: standalone plugin / ${{ matrix.os }}
     needs: classify-changes
     runs-on: ${{ matrix.os }}
@@ -337,7 +355,7 @@ jobs:
         run: node --experimental-strip-types --test plugins/codex-security/mcp-app/scripts/test_host_build.mts
 
   plugin-source:
-    if: needs.classify-changes.outputs.source-required == 'true'
+    if: needs.classify-changes.outputs.plugin-tests-required == 'true'
     name: plugin source contracts / ${{ matrix.os }} / python-${{ matrix.python }}
     needs: classify-changes
     runs-on: ${{ matrix.os }}
@@ -347,16 +365,10 @@ jobs:
       matrix: ${{ fromJSON(needs.classify-changes.outputs.python-matrix) }}
     steps:
       - *checkout-repository
-      - name: Set up Node.js
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "22.13.0"
-      - name: Set up pnpm
+      - name: Set up TypeScript tools
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         uses: ./.github/actions/setup-tools
         with:
-          setup-node: false
           compile: true
           cache-dependency-path: |
             sdk/typescript/pnpm-lock.yaml
@@ -365,7 +377,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
       - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python }}
           cache: pip
@@ -374,9 +386,7 @@ jobs:
         run: python -m pip install --disable-pip-version-check --no-input -r plugins/codex-security/requirements-test.txt
       - name: Install ripgrep
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ripgrep
+        run: .github/scripts/install-ripgrep.sh
       - name: Check plugin source compatibility
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: |
@@ -429,27 +439,19 @@ jobs:
       - *set-up-bun
       - name: Check the Codex version across the SDK, MCP app and evals
         run: bun test sdk/typescript/tests-ts/codex-dependency-pins.test.ts
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-        with:
-          package_json_file: package.json
-      - name: Set up eval Node.js and pnpm cache
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - name: Set up eval tools
+        uses: ./.github/actions/setup-tools
         with:
           node-version: "24.15.0"
-          cache: pnpm
           cache-dependency-path: |
             sdk/typescript/pnpm-lock.yaml
             plugins/codex-security/mcp-app/pnpm-lock.yaml
             evals/triage-finding/pnpm-lock.yaml
       - &set-up-python
         name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - name: Install ripgrep
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ripgrep
       - name: Set up eval dependencies and host runtime
         run: |
           pnpm --dir sdk/typescript install --frozen-lockfile
@@ -486,9 +488,8 @@ jobs:
         container-validate,
         workflow-quality,
         windows-test,
-        windows-verify,
       ]
-    if: &source-aggregate always()
+    if: always()
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -508,33 +509,10 @@ jobs:
           CLASSIFIER_ATTEMPT: ${{ needs.classify-changes.outputs.edit-attempt }}
         run: node .github/scripts/verify-pr-source.mjs confirm-target
 
-  # Retain required names until the repository ruleset has migrated to `ci`.
-  required-test:
-    name: ${{ matrix.os }} / node-22
-    needs: [classify-changes, ci]
-    if: *source-aggregate
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    steps:
-      - name: Require CI gate
-        if: needs.ci.result != 'success'
-        run: exit 1
-      - name: Require the edit classifier from this attempt
-        if: >-
-          github.event_name == 'pull_request' && github.event.action == 'edited' &&
-          github.event.changes.base == null &&
-          needs['classify-changes'].outputs['edit-attempt'] != github.run_attempt
-        run: |
-          echo 'Re-run all jobs to qualify this pull request edit.'
-          exit 1
-
   windows-test:
-    if: needs.classify-changes.outputs.source-required == 'true'
+    if: *run-sdk-shards
     name: windows-latest / node-22 / tests-${{ matrix.shard }}
-    needs: [classify-changes, package]
+    needs: *sdk-shard-needs
     runs-on: windows-latest
     timeout-minutes: 40
     strategy:
@@ -585,25 +563,3 @@ jobs:
           TMPDIR: ${{ steps.windows-temp.outputs.path }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "true"
         run: bun test --timeout 360000 ./tests-ts/windows-machine-policy.test.ts
-
-  windows-verify:
-    if: needs.classify-changes.outputs.source-required == 'true'
-    name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / verify
-    needs: [classify-changes, package]
-    runs-on: windows-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.classify-changes.outputs.windows-node-matrix) }}
-    steps:
-      - *checkout-repository
-      - *set-up-python
-      - *set-up-node-js
-      - *resolve-npm-cache
-      - *restore-npm-cache
-      - *download-package-for-this-commit
-      - name: Inspect installed package
-        working-directory: sdk/typescript
-        shell: bash
-        env: *package-deep-retry
-        run: node scripts/check-package.mjs ../../dist/*.tgz

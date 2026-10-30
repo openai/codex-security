@@ -74,7 +74,6 @@ import {
 } from "./artifact-export.js";
 export { exportEnvironment } from "./artifact-export.js";
 import { parse as parseToml } from "smol-toml";
-import { parse as parseYaml } from "yaml";
 import {
   classifyConnectionFailure,
   CodexSecurity,
@@ -114,6 +113,11 @@ import {
   type ExternalPublicationResult,
 } from "./external-findings-publish.js";
 import { prepareLocalExternalImport } from "./external-findings-import.js";
+import { validateInspectorProjectMapping } from "./inspector-findings.js";
+import {
+  externalImportsDisabledMessage,
+  externalImportsEnabled,
+} from "./external-imports-feature.js";
 import { listLocalExternalFindings } from "./external-findings-local.js";
 import { EXTERNAL_FINDINGS_READERS } from "./external-findings-read.js";
 import type { ExternalFindings } from "./external-findings.js";
@@ -215,6 +219,7 @@ import {
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
+import { GHSA_ID } from "./github-identifiers.js";
 import {
   GITHUB_ADVISORY_STATES,
   importGitHubAdvisories,
@@ -301,6 +306,13 @@ import {
 } from "./scan-history-renderer.js";
 import { ScanDashboard } from "./scan-dashboard.js";
 import {
+  ACCOUNT_LIMITS_UNAVAILABLE,
+  formatAccountLimits,
+  formatUsageFreshness,
+  isChatGptAuthentication,
+  USAGE_TIME_UNAVAILABLE,
+} from "./scan-usage-display.js";
+import {
   policyDisplayData,
   runPolicyCommand,
   type PolicyPrompt,
@@ -371,6 +383,19 @@ const execFile = promisify(execFileCallback);
 const WINDOWS_NETWORK_PATH = /^[\\/]{2}/u;
 const WINDOWS_LOCAL_DEVICE_ROOT =
   /^[\\/]{2}[?.][\\/](?:[A-Za-z]:|Volume\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}|GLOBALROOT[\\/]Device[\\/]HarddiskVolume[0-9]+)(?=[\\/]|$)/iu;
+const FRAMEWORK_ACTIONS = new Set([
+  "--llms",
+  "--llms-full",
+  "--mcp",
+  "--update",
+  "--incur-update-check",
+]);
+const FRAMEWORK_VALUE_OPTIONS = new Set([
+  "--format",
+  "--filter-output",
+  "--token-limit",
+  "--token-offset",
+]);
 const OUTPUT_OPTION =
   /^--(?:format|filter-output|full-output|token-count|token-limit|token-offset)(?:=|$)/u;
 const HIDE_CURSOR = "\u001B[?25l";
@@ -1240,6 +1265,7 @@ interface CliDependencies {
   exportFindings(
     arguments_: ArtifactExportArguments,
     output?: Writable,
+    diagnostics?: Writable,
   ): Promise<string | Uint8Array | undefined>;
   runCodex(
     args: readonly string[],
@@ -1895,6 +1921,7 @@ export async function main(
   errorOutput: Writable = process.stderr,
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<number> {
+  const importsEnabled = externalImportsEnabled(dependencies.environment);
   const remediationOperation =
     argv[0] === "patch"
       ? "patch"
@@ -2272,7 +2299,7 @@ export async function main(
       );
       return presentHistory(
         await history(
-          ["list-repositories"],
+          ["list-repositories", "--status", "scanned"],
           async (value): Promise<JsonObject> => {
             const repositories = value["repositories"] as JsonObject[];
             let target = repositories.find(
@@ -2319,53 +2346,60 @@ export async function main(
       );
     },
   });
-  findingFeedback.command("imported", {
-    description: "List imported vendor evidence for a local repository.",
-    mcp: false,
-    args: z.object({
-      repository: z
-        .string()
-        .optional()
-        .describe("Local repository to inspect (default: current directory)."),
-    }),
-    output: z.record(z.string(), z.unknown()).optional(),
-    async run({ args, format, error: incurError }) {
-      const controller = new AbortController();
-      const removeSignals = listenForAbort(dependencies, controller);
-      try {
-        const repository = resolveCliPath(
-          dependencies.currentDirectory(),
-          args.repository ?? ".",
-        );
-        const findings = await (
-          dependencies.listLocalExternalFindings ?? listLocalExternalFindings
-        )(
-          { repository },
-          { environment: dependencies.environment, signal: controller.signal },
-        );
-        return { repository, findings };
-      } catch (error) {
-        if (controller.signal.aborted) {
-          exitCode = controller.signal.reason === "SIGINT" ? 130 : 143;
-          if (
-            argv.includes("--full-output") &&
-            (format === "json" || format === "jsonl")
-          ) {
-            structuredError = true;
-            return incurError({
-              code: "FINDINGS_READ_FAILED",
-              message: diagnosticValue(error),
-              exitCode,
-            });
+  if (importsEnabled) {
+    findingFeedback.command("imported", {
+      description: "List imported vendor evidence for a local repository.",
+      mcp: false,
+      args: z.object({
+        repository: z
+          .string()
+          .optional()
+          .describe(
+            "Local repository to inspect (default: current directory).",
+          ),
+      }),
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ args, format, error: incurError }) {
+        const controller = new AbortController();
+        const removeSignals = listenForAbort(dependencies, controller);
+        try {
+          const repository = resolveCliPath(
+            dependencies.currentDirectory(),
+            args.repository ?? ".",
+          );
+          const findings = await (
+            dependencies.listLocalExternalFindings ?? listLocalExternalFindings
+          )(
+            { repository },
+            {
+              environment: dependencies.environment,
+              signal: controller.signal,
+            },
+          );
+          return { repository, findings };
+        } catch (error) {
+          if (controller.signal.aborted) {
+            exitCode = controller.signal.reason === "SIGINT" ? 130 : 143;
+            if (
+              argv.includes("--full-output") &&
+              (format === "json" || format === "jsonl")
+            ) {
+              structuredError = true;
+              return incurError({
+                code: "FINDINGS_READ_FAILED",
+                message: diagnosticValue(error),
+                exitCode,
+              });
+            }
+            return;
           }
-          return;
+          throw error;
+        } finally {
+          removeSignals();
         }
-        throw error;
-      } finally {
-        removeSignals();
-      }
-    },
-  });
+      },
+    });
+  }
   const scanHistory = Cli.create("scans", {
     description: "Review saved scans (default: list).",
   })
@@ -2579,7 +2613,7 @@ export async function main(
           }
           scanArguments = await prepareScanArgumentsFromRecipe(
             saved["recipe"],
-            saved["scanId"],
+            "resume",
             {
               scanPrompt:
                 typeof saved["userContext"] === "string"
@@ -2600,7 +2634,6 @@ export async function main(
               (saved["recipe"] as JsonObject)["scanInputs"],
             );
           }
-          scanArguments.parentScanId = undefined;
           // Resume uses the installed engine with the saved recipe and checkpoints.
           scanArguments.expectedPluginVersion = undefined;
           scanArguments.verbose = options.verbose;
@@ -2730,7 +2763,7 @@ export async function main(
           }
           scanArguments = await prepareScanArgumentsFromRecipe(
             recipe,
-            parentScanId,
+            "rerun",
             {
               scanPromptFile:
                 options.scanPromptFile === undefined
@@ -2751,6 +2784,7 @@ export async function main(
           );
           scanArguments.verbose = options.verbose;
           scanArguments.showCost = options.showCost;
+          scanArguments.parentScanId = parentScanId;
           scanArguments.rerunInputIdentity = isJsonObject(recipe)
             ? (recipe["scanInputs"] ?? null)
             : null;
@@ -2824,7 +2858,7 @@ export async function main(
       },
     })
     .command("compare", {
-      description: "Match and compare findings and coverage between scans.",
+      description: "Match and compare findings between scans.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -3508,268 +3542,307 @@ export async function main(
       });
     },
   });
-  publication.command("findings", {
-    description:
-      "Preview and import selected Wiz, Snyk, Semgrep Code, Endor, or GitHub findings locally or to Cloud.",
-    hint: "For Snyk Open Source SCA vulnerabilities only, prefer native snyk test JSON or an official plugin snyk-findings-export/v1 bundle; Open Source SARIF 2.1.0 is also supported. Snyk licenses, Code, Container, IaC and platform backlogs are unsupported. For Semgrep Code, supply native JSON or SARIF and --source-repository-url. For Endor, supply native Finding JSON or endorctl SARIF 2.1.0. For GitHub, supply complete JSON/JSONL saved by import github or import github-advisories. GHSA advisories do not establish an installed dependency or applicability. For Wiz, prefer a native package vulnerability JSON report or named SAST/repository-secret/IaC JSON collections with repository metadata. Normalized JSONL and repository package-vulnerability CSV (SCA only, GitHub repositories) are also supported. Gzip is supported for each format; Wiz CSV does not cover SAST or cloud posture. Other Wiz CSV profiles, scan events, workload secrets, and cloud configuration exports are not supported. --to local stores unassessed evidence for a local repository path without Cloud login. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
-    destructive: true,
-    mcp: false,
-    args: z.object({
-      file: z
-        .string()
-        .describe(
-          "Snyk native test JSON, plugin SCA bundle or Open Source SARIF; Semgrep Code JSON/SARIF; Endor Finding JSON/endorctl SARIF; saved GitHub import output; native Wiz JSON, normalized JSONL, or repository package-vulnerability CSV.",
+  let disabledImportInvocation = false;
+  function registerFindingPublication() {
+    publication.command("findings", {
+      description:
+        "Preview and import a saved scanner report locally or to Cloud.",
+      hint: "Choose the reader with --provider and keep --source-key stable for reimports. See the scanner import guide for accepted formats, repository requirements and export examples: https://github.com/openai/codex-security/blob/main/docs/scanner-imports/schema-guide.md. Gzip is supported. --to local stores unassessed evidence without Cloud login. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
+      destructive: true,
+      mcp: false,
+      args: z.object({
+        file: z
+          .string()
+          .describe(
+            "Saved report in a format accepted by the selected reader.",
+          ),
+      }),
+      options: z.object({
+        to: z
+          .enum(["cloud", "local"])
+          .describe("Import destination (required)."),
+        repository: optionValue("--repository").describe(
+          "Local repository path for --to local; authorized repository ID or URL for --to cloud.",
         ),
-    }),
-    options: z.object({
-      to: z.enum(["cloud", "local"]).describe("Import destination (required)."),
-      repository: optionValue("--repository").describe(
-        "Local repository path for --to local; authorized repository ID or URL for --to cloud.",
-      ),
-      provider: z
-        .enum(EXTERNAL_FINDINGS_READERS)
-        .describe("Provider that produced these findings."),
-      sourceRepositoryUrl: optionValue("--source-repository-url")
-        .optional()
-        .describe(
-          "Required for Semgrep: source repository URL, checked against the Cloud destination or configured local Git remotes.",
+        provider: z
+          .enum(EXTERNAL_FINDINGS_READERS)
+          .describe(
+            "Select the file reader for this report. OpenGrep findings use the semgrep storage provider.",
+          ),
+        sourceRepositoryUrl: optionValue("--source-repository-url")
+          .optional()
+          .describe(
+            "Source repository URL when required by the selected reader. Checked against the Cloud destination or configured local Git remotes.",
+          ),
+        inspectorProjectArn: optionValue("--inspector-project-arn")
+          .optional()
+          .describe(
+            "Full Inspector project ARN independently verified for --source-repository-url. Required when the report does not identify its repository by URL.",
+          ),
+        sourceKey: optionValue("--source-key").describe(
+          "Stable vendor tenant and finding namespace; not a project selection filter.",
         ),
-      sourceKey: optionValue("--source-key").describe(
-        "Stable vendor tenant and finding namespace; not a project selection filter.",
-      ),
-      dryRun: z
-        .boolean()
-        .default(false)
-        .describe(
-          "Read and preview the destination and findings without storing them.",
-        ),
-      yes: z
-        .boolean()
-        .default(false)
-        .describe(
-          "Confirm publication of the previewed input without a terminal prompt.",
-        ),
-    }),
-    output: z.record(z.string(), z.unknown()).optional(),
-    async run({ args, options, format, formatExplicit, error: incurError }) {
-      return await withTerminalErrorsHandled(errorOutput, async () => {
-        const writeDiagnostic = (message: string): void =>
-          notify(() => errorOutput.write(message));
-        if (
-          argv.includes("--full-output") &&
-          format !== "json" &&
-          format !== "jsonl"
-        ) {
-          structuredError = true;
-          exitCode = 2;
-          return incurError({
-            code: "INVALID_ARGUMENTS",
-            message:
-              "Finding imports support --full-output with --format json or --format jsonl. Choose one of those formats or omit --full-output.",
-            exitCode,
-          });
-        }
-        const controller = new AbortController();
-        const removeSignals = listenForAbort(dependencies, controller);
-        const structured = formatExplicit && format !== "toon";
-        const humanSummary =
-          format === "toon" &&
-          !formatExplicit &&
-          !argv.some((argument) => OUTPUT_OPTION.test(argument));
-        const confirmImport = async (
-          preview: ExternalFindings,
-          showPreview: () => void,
-        ): Promise<boolean> => {
-          if (options.yes) return true;
-          const prompt =
-            dependencies.externalPublicationPrompt ??
-            createTerminalPrompt(errorOutput);
-          const local = options.to === "local";
-          if (!prompt.isInteractive())
-            throw new CodexSecurityError(
-              `${local ? "Local import" : "Publication"} needs confirmation. Run --dry-run, review the results, then use --yes to approve this input.`,
+        dryRun: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Read and preview the destination and findings without storing them.",
+          ),
+        yes: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Confirm publication of the previewed input without a terminal prompt.",
+          ),
+      }),
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ args, options, format, formatExplicit, error: incurError }) {
+        return await withTerminalErrorsHandled(errorOutput, async () => {
+          const writeDiagnostic = (message: string): void =>
+            notify(() => errorOutput.write(message));
+          const machineFormat = format === "json" || format === "jsonl";
+          if (argv.includes("--full-output") && !machineFormat) {
+            structuredError = true;
+            exitCode = 2;
+            return incurError({
+              code: "INVALID_ARGUMENTS",
+              message:
+                "Finding imports support --full-output with --format json or --format jsonl. Choose one of those formats or omit --full-output.",
+              exitCode,
+            });
+          }
+          const controller = new AbortController();
+          const removeSignals = listenForAbort(dependencies, controller);
+          const structured = formatExplicit && format !== "toon";
+          const humanSummary =
+            format === "toon" &&
+            !formatExplicit &&
+            !argv.some((argument) => OUTPUT_OPTION.test(argument));
+          const confirmImport = async (
+            preview: ExternalFindings,
+            showPreview: () => void,
+          ): Promise<boolean> => {
+            if (options.yes) return true;
+            const prompt =
+              dependencies.externalPublicationPrompt ??
+              createTerminalPrompt(errorOutput);
+            const local = options.to === "local";
+            if (!prompt.isInteractive())
+              throw new CodexSecurityError(
+                `${local ? "Local import" : "Publication"} needs confirmation. Run --dry-run, review the results, then use --yes to approve this input.`,
+              );
+            if (structured) showPreview();
+            const action = local
+              ? `Store these ${preview.findings.length} findings locally`
+              : `Publish these ${preview.findings.length} findings`;
+            return prompt.confirm(
+              `${action}${preview.excluded.length ? ` and skip ${preview.excluded.length} excluded records` : ""}?`,
+              false,
+              controller.signal,
             );
-          if (structured) showPreview();
-          const action = local
-            ? `Store these ${preview.findings.length} findings locally`
-            : `Publish these ${preview.findings.length} findings`;
-          return prompt.confirm(
-            `${action}${preview.excluded.length ? ` and skip ${preview.excluded.length} excluded records` : ""}?`,
-            false,
-            controller.signal,
-          );
-        };
-        let lastProgress = "";
-        const onProgress = (event: ExternalPublicationProgress) => {
-          if (errorOutput.isTTY !== true) return;
-          const step = event.total
-            ? Math.floor((event.completed * 10) / event.total)
-            : 0;
-          const key = `${event.phase}:${step}`;
-          if (key === lastProgress) return;
-          lastProgress = key;
-          const labels = {
-            reading: "Reading selected findings",
-            discovering: "Checking Cloud account and repository",
-            preparing: "Preparing findings",
-            waiting: "Waiting for publication access",
-            uploading: "Acknowledged findings",
-            verifying: "Verifying source records",
           };
-          writeDiagnostic(
-            `${labels[event.phase]}${event.total === undefined ? "..." : `: ${event.completed}/${event.total}`}\n`,
-          );
-        };
-        try {
-          if (options.to === "local") {
-            const prepared = await (
-              dependencies.prepareLocalExternalImport ??
-              prepareLocalExternalImport
-            )(
-              resolveCliPath(dependencies.currentDirectory(), args.file),
-              {
-                ...options,
-                repository: resolveCliPath(
-                  dependencies.currentDirectory(),
-                  options.repository,
-                ),
-              },
-              {
+          const showScannerReport = (preview: ExternalFindings) => {
+            if (options.provider !== "opengrep") return;
+            writeDiagnostic("Reader: OpenGrep (stored provider: semgrep)\n");
+            const diagnostics = preview.report?.["errors"];
+            if (Array.isArray(diagnostics) && diagnostics.length) {
+              writeDiagnostic(
+                `Scanner diagnostics: ${diagnostics.length}. Scan coverage may be incomplete.\n`,
+              );
+              for (const diagnostic of diagnostics)
+                writeDiagnostic(
+                  `${diagnosticValue(JSON.stringify(diagnostic))}\n`,
+                );
+            }
+          };
+          let lastProgress = "";
+          const onProgress = (event: ExternalPublicationProgress) => {
+            if (errorOutput.isTTY !== true) return;
+            const step = event.total
+              ? Math.floor((event.completed * 10) / event.total)
+              : 0;
+            const key = `${event.phase}:${step}`;
+            if (key === lastProgress) return;
+            lastProgress = key;
+            const labels = {
+              reading: "Reading selected findings",
+              discovering: "Checking Cloud account and repository",
+              preparing: "Preparing findings",
+              waiting: "Waiting for publication access",
+              uploading: "Acknowledged findings",
+              verifying: "Verifying source records",
+            };
+            writeDiagnostic(
+              `${labels[event.phase]}${event.total === undefined ? "..." : `: ${event.completed}/${event.total}`}\n`,
+            );
+          };
+          try {
+            if (!importsEnabled)
+              throw new CodexSecurityError(externalImportsDisabledMessage);
+            const { inspectorProjectArn, ...readerOptions } = options;
+            let inspectorProjectMap: Map<string, string> | undefined;
+            if (inspectorProjectArn !== undefined) {
+              if (options.provider !== "inspector")
+                throw new CodexSecurityError(
+                  "--inspector-project-arn requires --provider inspector.",
+                );
+              const url = validateInspectorProjectMapping(
+                inspectorProjectArn,
+                options.sourceRepositoryUrl,
+              );
+              inspectorProjectMap = new Map([[inspectorProjectArn, url]]);
+            }
+            const directory = dependencies.currentDirectory();
+            const report = resolveCliPath(directory, args.file);
+            const repository =
+              options.to === "local"
+                ? resolveCliPath(directory, options.repository)
+                : options.repository;
+            const publicationOptions = {
+              ...readerOptions,
+              repository,
+              inspectorProjectMap,
+            };
+            if (options.to === "local") {
+              const prepared = await (
+                dependencies.prepareLocalExternalImport ??
+                prepareLocalExternalImport
+              )(report, publicationOptions, {
                 environment: dependencies.environment,
                 signal: controller.signal,
+              });
+              const { preview } = prepared;
+              const showPreview = () => {
+                showScannerReport(preview);
+                writeDiagnostic(
+                  `Local repository: ${diagnosticValue(preview.repository)}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}\n`,
+                );
+                for (const excluded of preview.excluded)
+                  writeDiagnostic(
+                    `Excluded item ${excluded.position}: ${diagnosticValue(excluded.reason)}\n`,
+                  );
+                for (const finding of preview.findings.slice(0, 5))
+                  writeDiagnostic(
+                    `  ${diagnosticValue(finding.source_finding_id)} [${finding.evidence.severity}] ${diagnosticValue(finding.evidence.title)}\n`,
+                  );
+                writeDiagnostic(
+                  `Evidence file: ${diagnosticValue(resolveCliPath(dependencies.currentDirectory(), args.file))}\nImported evidence remains not assessed by Codex.\nUse --dry-run --format json to inspect all normalized findings and complete evidence before storing them.\n`,
+                );
+              };
+              if (!structured) showPreview();
+              if (options.dryRun) {
+                if (humanSummary)
+                  renderedOutput = "Dry run complete. No findings stored.\n";
+                return { ...preview, dryRun: true };
+              }
+              if (!(await confirmImport(preview, showPreview))) {
+                if (humanSummary) renderedOutput = "No findings stored.\n";
+                return { imported: false, preview };
+              }
+              const result = await prepared.import();
+              if (result.excluded.length > 0) exitCode = 1;
+              const summary = `Local import complete.\nCreated: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Excluded: ${result.excluded.length}\nImported evidence remains not assessed by Codex.\nRead stored evidence with codex-security findings imported REPOSITORY.\n`;
+              if (humanSummary) renderedOutput = summary;
+              else if (!structured) writeDiagnostic(summary);
+              return { ...result };
+            }
+            const prepared = await prepareExternalPublication(
+              report,
+              publicationOptions,
+              {
+                environment: dependencies.environment,
+                fetch: dependencies.cloudFetch,
+                signal: controller.signal,
+                onProgress,
               },
             );
             const { preview } = prepared;
             const showPreview = () => {
+              showScannerReport(preview);
               writeDiagnostic(
-                `Local repository: ${diagnosticValue(preview.repository)}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}\n`,
+                `Cloud API: ${diagnosticValue(preview.cloudApiUrl)}\nAccount: ${diagnosticValue(preview.accountId)}\nDestination: ${diagnosticValue(preview.destination.url)} (${diagnosticValue(preview.destination.id)})\nEnvironment: ${[...new Set(preview.requests.map((request) => request.repository.environment_id))].map(diagnosticValue).join(", ")}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}${preview.resumed ? "\nResuming the saved submission." : ""}\n`,
               );
+              if (preview.cloudUrl)
+                writeDiagnostic(
+                  `Cloud app: ${diagnosticValue(preview.cloudUrl)}\n`,
+                );
               for (const excluded of preview.excluded)
                 writeDiagnostic(
                   `Excluded item ${excluded.position}: ${diagnosticValue(excluded.reason)}\n`,
                 );
+              writeDiagnostic(
+                `Evidence file: ${diagnosticValue(resolveCliPath(dependencies.currentDirectory(), args.file))}\nImported evidence remains not assessed by Codex.\n`,
+              );
+              const severities = new Map<string, number>();
+              for (const finding of preview.findings)
+                severities.set(
+                  finding.evidence.severity,
+                  (severities.get(finding.evidence.severity) ?? 0) + 1,
+                );
+              writeDiagnostic(
+                `Severities: ${[...severities].map(([severity, count]) => `${severity}: ${count}`).join("  ")}\n`,
+              );
               for (const finding of preview.findings.slice(0, 5))
                 writeDiagnostic(
                   `  ${diagnosticValue(finding.source_finding_id)} [${finding.evidence.severity}] ${diagnosticValue(finding.evidence.title)}\n`,
                 );
+              if (preview.findings.length > 5)
+                writeDiagnostic(
+                  `Showing 5 of ${preview.findings.length} findings.\n`,
+                );
               writeDiagnostic(
-                `Evidence file: ${diagnosticValue(resolveCliPath(dependencies.currentDirectory(), args.file))}\nImported evidence remains not assessed by Codex.\nUse --dry-run --format json to inspect all normalized findings and complete evidence before storing them.\n`,
+                "Use --dry-run --format json to inspect all normalized findings and the complete evidence before uploading.\n",
               );
             };
             if (!structured) showPreview();
             if (options.dryRun) {
               if (humanSummary)
-                renderedOutput = "Dry run complete. No findings stored.\n";
+                renderedOutput = "Dry run complete. No findings uploaded.\n";
               return { ...preview, dryRun: true };
             }
             if (!(await confirmImport(preview, showPreview))) {
-              if (humanSummary) renderedOutput = "No findings stored.\n";
-              return { imported: false, preview };
+              if (humanSummary) renderedOutput = "No findings published.\n";
+              return { published: false, preview };
             }
-            const result = await prepared.import();
-            if (result.excluded.length > 0) exitCode = 1;
-            const summary = `Local import complete.\nCreated: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Excluded: ${result.excluded.length}\nImported evidence remains not assessed by Codex.\nRead stored evidence with codex-security findings imported REPOSITORY.\n`;
-            if (humanSummary) renderedOutput = summary;
-            else if (!structured) writeDiagnostic(summary);
+            const result = await prepared.publish();
+            if (result.status === "partial") exitCode = 1;
+            if (humanSummary)
+              renderedOutput = renderExternalPublicationSummary(result);
+            else if (!structured)
+              writeDiagnostic(renderExternalPublicationSummary(result));
             return { ...result };
-          }
-          const prepared = await prepareExternalPublication(
-            resolveCliPath(dependencies.currentDirectory(), args.file),
-            options,
-            {
-              environment: dependencies.environment,
-              fetch: dependencies.cloudFetch,
-              signal: controller.signal,
-              onProgress,
-            },
-          );
-          const { preview } = prepared;
-          const showPreview = () => {
-            writeDiagnostic(
-              `Cloud API: ${diagnosticValue(preview.cloudApiUrl)}\nAccount: ${diagnosticValue(preview.accountId)}\nDestination: ${diagnosticValue(preview.destination.url)} (${diagnosticValue(preview.destination.id)})\nEnvironment: ${[...new Set(preview.requests.map((request) => request.repository.environment_id))].map(diagnosticValue).join(", ")}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}${preview.resumed ? "\nResuming the saved submission." : ""}\n`,
+          } catch (error) {
+            if (argv.includes("--full-output") && machineFormat)
+              failedResultOutput = {
+                format,
+                code: "IMPORT_FAILED",
+                message: diagnosticValue(error),
+              };
+            reportPublicationError(
+              diagnosticValue(error),
+              controller.signal.aborted ? controller.signal.reason : undefined,
             );
-            if (preview.cloudUrl)
-              writeDiagnostic(
-                `Cloud app: ${diagnosticValue(preview.cloudUrl)}\n`,
-              );
-            for (const excluded of preview.excluded)
-              writeDiagnostic(
-                `Excluded item ${excluded.position}: ${diagnosticValue(excluded.reason)}\n`,
-              );
-            writeDiagnostic(
-              `Evidence file: ${diagnosticValue(resolveCliPath(dependencies.currentDirectory(), args.file))}\nImported evidence remains not assessed by Codex.\n`,
-            );
-            const severities = new Map<string, number>();
-            for (const finding of preview.findings)
-              severities.set(
-                finding.evidence.severity,
-                (severities.get(finding.evidence.severity) ?? 0) + 1,
-              );
-            writeDiagnostic(
-              `Severities: ${[...severities].map(([severity, count]) => `${severity}: ${count}`).join("  ")}\n`,
-            );
-            for (const finding of preview.findings.slice(0, 5))
-              writeDiagnostic(
-                `  ${diagnosticValue(finding.source_finding_id)} [${finding.evidence.severity}] ${diagnosticValue(finding.evidence.title)}\n`,
-              );
-            if (preview.findings.length > 5)
-              writeDiagnostic(
-                `Showing 5 of ${preview.findings.length} findings.\n`,
-              );
-            writeDiagnostic(
-              "Use --dry-run --format json to inspect all normalized findings and the complete evidence before uploading.\n",
-            );
-          };
-          if (!structured) showPreview();
-          if (options.dryRun) {
-            if (humanSummary)
-              renderedOutput = "Dry run complete. No findings uploaded.\n";
-            return { ...preview, dryRun: true };
+            if (error instanceof ExternalPublicationError) {
+              if (humanSummary)
+                renderedOutput = renderExternalPublicationSummary(error.result);
+              return { ...error.result };
+            }
+            const failure = { status: "failed", error: diagnosticValue(error) };
+            if (
+              machineFormat &&
+              !argv.includes("--full-output") &&
+              argv.some((argument) => /^--filter-output(?:=|$)/u.test(argument))
+            )
+              filteredScanFailure = { format, data: failure };
+            return structured ? failure : undefined;
+          } finally {
+            removeSignals();
           }
-          if (!(await confirmImport(preview, showPreview))) {
-            if (humanSummary) renderedOutput = "No findings published.\n";
-            return { published: false, preview };
-          }
-          const result = await prepared.publish();
-          if (result.status === "partial") exitCode = 1;
-          if (humanSummary)
-            renderedOutput = renderExternalPublicationSummary(result);
-          else if (!structured)
-            writeDiagnostic(renderExternalPublicationSummary(result));
-          return { ...result };
-        } catch (error) {
-          if (
-            argv.includes("--full-output") &&
-            (format === "json" || format === "jsonl")
-          )
-            failedResultOutput = {
-              format,
-              code: "IMPORT_FAILED",
-              message: diagnosticValue(error),
-            };
-          reportPublicationError(
-            diagnosticValue(error),
-            controller.signal.aborted ? controller.signal.reason : undefined,
-          );
-          if (error instanceof ExternalPublicationError) {
-            if (humanSummary)
-              renderedOutput = renderExternalPublicationSummary(error.result);
-            return { ...error.result };
-          }
-          const failure = { status: "failed", error: diagnosticValue(error) };
-          if (
-            (format === "json" || format === "jsonl") &&
-            !argv.includes("--full-output") &&
-            argv.some((argument) => /^--filter-output(?:=|$)/u.test(argument))
-          )
-            filteredScanFailure = { format, data: failure };
-          return structured ? failure : undefined;
-        } finally {
-          removeSignals();
-        }
-      });
-    },
-  });
+        });
+      },
+    });
+  }
+  if (importsEnabled) registerFindingPublication();
   publication.command("check", {
     description:
       "Check saved scan history and Linear access without creating issues.",
@@ -3802,10 +3875,12 @@ export async function main(
     },
   });
   const imports = Cli.create("import", {
-    description: "Read GitHub code scanning alerts and security advisories.",
+    description: importsEnabled
+      ? "Read GitHub code scanning alerts and security advisories."
+      : "Read GitHub code scanning alerts.",
   }).command("github", {
     description: "Read GitHub code scanning alerts without changing GitHub.",
-    hint: "Save complete --format json output for publish findings --provider github. This command reads code-scanning alerts; Dependabot and secret-scanning alerts are not supported. To save CSV or JSON findings as a local scan, use codex-security scan import --help.",
+    hint: `${importsEnabled ? "Save complete --format json output for publish findings --provider github. " : ""}This command reads code-scanning alerts; Dependabot and secret-scanning alerts are not supported. To save CSV or JSON findings as a local scan, use codex-security scan import --help.`,
     destructive: false,
     mcp: false,
     args: z.object({
@@ -3883,101 +3958,106 @@ export async function main(
       }
     },
   });
-  imports.command("github-advisories", {
-    description: "Read GitHub security advisories without changing GitHub.",
-    hint: "Defaults to published repository advisories. Use --github-advisory-source global with explicit --github-advisory IDs to select public database entries. Advisories do not establish an installed dependency or applicability to the selected repository.",
-    destructive: false,
-    mcp: false,
-    args: z.object({
-      repository: z
-        .string()
-        .min(1)
-        .describe(
-          "Source repository, or target context for global IDs, in OWNER/REPO form.",
-        ),
-    }),
-    options: z.object({
-      githubAdvisory: z
-        .array(
-          optionValue("--github-advisory").regex(
-            /^GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/iu,
-            "GitHub advisory IDs must use GHSA-xxxx-xxxx-xxxx form.",
+  function registerGitHubAdvisories() {
+    imports.command("github-advisories", {
+      description: "Read GitHub security advisories without changing GitHub.",
+      hint: "Defaults to published repository advisories. Use --github-advisory-source global with explicit --github-advisory IDs to select public database entries. Advisories do not establish an installed dependency or applicability to the selected repository.",
+      destructive: false,
+      mcp: false,
+      args: z.object({
+        repository: z
+          .string()
+          .min(1)
+          .describe(
+            "Source repository, or target context for global IDs, in OWNER/REPO form.",
           ),
+      }),
+      options: z.object({
+        githubAdvisory: z
+          .array(
+            optionValue("--github-advisory").regex(
+              GHSA_ID,
+              "GitHub advisory IDs must use GHSA-xxxx-xxxx-xxxx form.",
+            ),
+          )
+          .default([])
+          .describe(
+            "Exact GHSA ID; repeat to select a subset. Required for global advisories.",
+          ),
+        githubAdvisorySource: z
+          .enum(["repository", "global"])
+          .default("repository")
+          .describe(
+            "Advisory API to read; global requires exact IDs and never lists the database.",
+          ),
+        githubState: z
+          .enum(GITHUB_ADVISORY_STATES)
+          .default("published")
+          .describe(
+            "Repository advisory list state; omit when selecting exact GHSA IDs.",
+          ),
+      }),
+      output: z
+        .array(
+          z.object({
+            source: z.literal("github-security-advisory"),
+            selection: z.enum(["repository", "global"]),
+            repository: z.string(),
+            githubHost: z.string(),
+            ghsaId: z.string(),
+            url: z.string(),
+            advisory: z.record(z.string(), z.unknown()),
+          }),
         )
-        .default([])
-        .describe(
-          "Exact GHSA ID; repeat to select a subset. Required for global advisories.",
-        ),
-      githubAdvisorySource: z
-        .enum(["repository", "global"])
-        .default("repository")
-        .describe(
-          "Advisory API to read; global requires exact IDs and never lists the database.",
-        ),
-      githubState: z
-        .enum(GITHUB_ADVISORY_STATES)
-        .default("published")
-        .describe(
-          "Repository advisory list state; omit when selecting exact GHSA IDs.",
-        ),
-    }),
-    output: z
-      .array(
-        z.object({
-          source: z.literal("github-security-advisory"),
-          selection: z.enum(["repository", "global"]),
-          repository: z.string(),
-          githubHost: z.string(),
-          ghsaId: z.string(),
-          url: z.string(),
-          advisory: z.record(z.string(), z.unknown()),
-        }),
-      )
-      .optional(),
-    async run({ args, options, error: incurError }) {
-      const controller = new AbortController();
-      const removeSignals = listenForAbort(dependencies, controller);
-      try {
-        return await (
-          dependencies.importGitHubAdvisories ?? importGitHubAdvisories
-        )(
-          {
-            repository: args.repository,
-            advisoryIds: options.githubAdvisory,
-            source: options.githubAdvisorySource,
-            state: options.githubState,
-            signal: controller.signal,
-          },
-          {
-            environment: dependencies.environment,
-            currentDirectory: dependencies.currentDirectory(),
-          },
-        );
-      } catch (error) {
-        const signal = controller.signal.reason;
-        if (signal === "SIGINT" || signal === "SIGTERM") {
-          exitCode = signal === "SIGINT" ? 130 : 143;
-          errorOutput.write(
-            `codex-security: GitHub advisory import ${signal === "SIGINT" ? "canceled" : "terminated"}.\n`,
+        .optional(),
+      async run({ args, options, error: incurError }) {
+        const controller = new AbortController();
+        const removeSignals = listenForAbort(dependencies, controller);
+        try {
+          if (!importsEnabled)
+            throw new CodexSecurityError(externalImportsDisabledMessage);
+          return await (
+            dependencies.importGitHubAdvisories ?? importGitHubAdvisories
+          )(
+            {
+              repository: args.repository,
+              advisoryIds: options.githubAdvisory,
+              source: options.githubAdvisorySource,
+              state: options.githubState,
+              signal: controller.signal,
+            },
+            {
+              environment: dependencies.environment,
+              currentDirectory: dependencies.currentDirectory(),
+            },
           );
-        } else {
-          exitCode = 2;
-          errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
+        } catch (error) {
+          const signal = controller.signal.reason;
+          if (signal === "SIGINT" || signal === "SIGTERM") {
+            exitCode = signal === "SIGINT" ? 130 : 143;
+            errorOutput.write(
+              `codex-security: GitHub advisory import ${signal === "SIGINT" ? "canceled" : "terminated"}.\n`,
+            );
+          } else {
+            exitCode = 2;
+            errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
+          }
+          if (argv.includes("--full-output")) {
+            structuredError = true;
+            return incurError({
+              code: "GITHUB_IMPORT_FAILED",
+              message: diagnosticValue(error),
+              exitCode,
+            });
+          }
+          return undefined;
+        } finally {
+          removeSignals();
         }
-        if (argv.includes("--full-output")) {
-          structuredError = true;
-          return incurError({
-            code: "GITHUB_IMPORT_FAILED",
-            message: diagnosticValue(error),
-            exitCode,
-          });
-        }
-        return undefined;
-      } finally {
-        removeSignals();
-      }
-    },
-  });
+      },
+    });
+  }
+  if (importsEnabled) registerGitHubAdvisories();
   const infoOutput = z.object({
     sdkVersion: z.string(),
     bundledPluginVersion: z.string(),
@@ -3992,7 +4072,7 @@ export async function main(
     configuration: z.record(z.string(), z.unknown()),
   });
 
-  const cli = Cli.create("codex-security", {
+  const cliOptions: Cli.create.Options = {
     aliases: ["cs"],
     description: "Find, review, and fix security issues in your code.",
     version: VERSION,
@@ -4002,7 +4082,8 @@ export async function main(
       instructions:
         "Use info for read-only SDK metadata. Scans and other state-changing commands are CLI-only because the MCP transport cannot cancel active commands.",
     },
-  })
+  };
+  const cli = Cli.create("codex-security", cliOptions)
     .command("policy", {
       description: "Draft SECURITY.md for review.",
       destructive: true,
@@ -5037,10 +5118,12 @@ export async function main(
               ? options.component.map((path) => ({ name: path, paths: [path] }))
               : componentPlanSchema.parse(
                   JSON.parse(
-                    await readRegularInputFile(
-                      resolveCliPath(directory, options.componentsFile),
-                      repository,
-                    ),
+                    (
+                      await readRegularInputFile(
+                        resolveCliPath(directory, options.componentsFile),
+                        repository,
+                      )
+                    ).replace(/^\uFEFF/u, ""),
                   ),
                 ).components;
           if (
@@ -5100,10 +5183,12 @@ export async function main(
                       componentName,
                       event,
                       options.showCost || settings.maxCostUsd !== undefined,
+                      settings.auth,
                     );
                     if (line !== null) errorOutput.write(line);
                   }
-                : (event) => dashboard?.recordComponentEvent(event),
+                : (event) =>
+                    dashboard?.recordComponentEvent(event, settings.auth),
             onDeduplicationStarted: () => {
               if (dashboard !== null)
                 dashboard.showComponents("Combining duplicate findings");
@@ -5399,7 +5484,7 @@ export async function main(
                     }
                     const recipe = await prepareScanArgumentsFromRecipe(
                       saved["recipe"],
-                      scan.scanId,
+                      "resume",
                       {
                         scanPrompt:
                           typeof saved["userContext"] === "string"
@@ -5483,18 +5568,23 @@ export async function main(
           scan: optionValue("--scan")
             .optional()
             .describe(
-              "Saved scan ID or unique prefix; cannot be combined with a result directory.",
+              "Saved scan ID, unique prefix, or latest completed scan ('latest').",
             ),
           exportFormat: z
-            .enum(["csv", "json", "sarif", "md"])
+            .enum(["csv", "json", "sarif", "md", "servicenow-avit"])
             .optional()
             .describe(
-              "Findings: csv, json, or sarif (default); threat-model: md (default).",
+              "Findings: csv, json, servicenow-avit, or sarif (default). Threat models use md.",
+            ),
+          avitTemplate: optionValue("--avit-template")
+            .optional()
+            .describe(
+              "Per-application CSV template required for servicenow-avit exports.",
             ),
           output: optionValue("--output")
             .optional()
             .describe(
-              "FILE or '-' for stdout (default: results.sarif, findings.json, findings.csv, or threatmodel.md).",
+              "FILE or '-' for stdout (default: results.sarif, findings.json, findings.csv, servicenow-avit.csv, or threatmodel.md).",
             ),
           sourceRoot: optionValue("--source-root")
             .optional()
@@ -5528,6 +5618,7 @@ export async function main(
           const format = resolveArtifactFormat(
             options.artifact,
             options.exportFormat,
+            options.avitTemplate,
           );
           const sourceRoot =
             options.sourceRoot === undefined
@@ -5539,16 +5630,20 @@ export async function main(
               : [currentDirectory, sourceRoot];
           let scanDir = args.scanDir;
           if (scanDir === undefined) {
-            const scanId =
-              options.scan ??
-              (
-                await latestScans(1, "complete", options.python, protectedRoot)
-              )?.[0]?.scanId;
+            let scanId = options.scan;
+            if (!scanId || scanId === "latest") {
+              const scans = await latestScans(
+                1,
+                "complete",
+                options.python,
+                protectedRoot,
+              );
+              scanId = scans?.[0]?.scanId;
+            }
             if (scanId === undefined) return;
             scanDir = await resolveSavedArtifactDirectory(
               scanId,
               options.artifact,
-              format,
               (args) =>
                 dependencies.runWorkbench(
                   args,
@@ -5559,33 +5654,34 @@ export async function main(
                 ),
             );
           }
-          const arguments_: ArtifactExportArguments = {
-            scanDir: resolveCliPath(currentDirectory, scanDir),
-            artifact: options.artifact,
-            format,
-            output:
-              options.output === "-"
-                ? "-"
-                : resolveCliPath(
-                    currentDirectory,
-                    options.output ?? EXPORT_DEFAULT_OUTPUTS[format],
-                  ),
-            sourceRoot,
-            pythonPath: options.python,
-          };
+          const destination = options.output ?? EXPORT_DEFAULT_OUTPUTS[format];
+          const outputPath =
+            destination === "-"
+              ? "-"
+              : resolveCliPath(currentDirectory, destination);
           const prepared = await resolveArtifactExportOutput(
-            arguments_,
-            dependencies.currentDirectory(),
+            {
+              scanDir: resolveCliPath(currentDirectory, scanDir),
+              artifact: options.artifact,
+              format,
+              output: outputPath,
+              sourceRoot,
+              avitTemplate: options.avitTemplate,
+              pythonPath: options.python,
+            },
+            currentDirectory,
           );
-          const contents = await dependencies.exportFindings(prepared, output);
-          if (arguments_.output === "-") {
+          const contents = await dependencies.exportFindings(
+            prepared,
+            output,
+            errorOutput,
+          );
+          if (outputPath === "-") {
             if (contents !== undefined) {
               await writeCliOutput(output, Buffer.from(contents));
             }
           } else {
-            errorOutput.write(
-              `${arguments_.format.toUpperCase()}: ${arguments_.output}\n`,
-            );
+            errorOutput.write(`${format.toUpperCase()}: ${outputPath}\n`);
           }
           exitCode = 0;
         } catch (error) {
@@ -6580,7 +6676,7 @@ export async function main(
     });
 
   const commands = Cli.toCommands.get(cli)!;
-  const valueOptions = cliValueOptions(commands);
+  let valueOptions = cliValueOptions(commands);
   function isScanImportCommand(argv: readonly string[]): boolean {
     const commandIndex = cliCommandIndex(argv);
     return argv[commandIndex] === "scan" && argv[commandIndex + 1] === "import";
@@ -6664,41 +6760,30 @@ export async function main(
     ) {
       return `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`;
     }
-    if (
-      command === "export" &&
-      structuredOutput &&
-      argv.some(
-        (value, index) =>
-          value === "--output=-" ||
-          (value === "--output" && argv[index + 1] === "-"),
-      ) &&
-      argv.some(
-        (value, index) =>
-          value === "--export-format=csv" ||
-          value === "--exportFormat=csv" ||
-          ((value === "--export-format" || value === "--exportFormat") &&
-            argv[index + 1] === "csv"),
-      )
-    ) {
-      return "CSV stdout cannot be combined with JSON output; write CSV to a file or omit --json.";
-    }
-    if (
-      command === "export" &&
-      structuredOutput &&
-      argv.some(
-        (value, index) =>
-          value === "--output=-" ||
-          (value === "--output" && argv[index + 1] === "-"),
-      ) &&
-      argv.some(
-        (value, index) =>
-          value === "--artifact=threat-model" ||
-          (value === "--artifact" && argv[index + 1] === "threat-model") ||
-          value === "--export-format=md" ||
-          (value === "--export-format" && argv[index + 1] === "md"),
-      )
-    ) {
-      return "Markdown stdout cannot be combined with JSON output; write Markdown to a file or omit --json.";
+    if (command === "export" && structuredOutput) {
+      const hasValue = (flag: string, value: string) =>
+        argv.some(
+          (arg, index) =>
+            arg === `${flag}=${value}` ||
+            (arg === flag && argv[index + 1] === value),
+        );
+      if (hasValue("--output", "-")) {
+        if (
+          ["csv", "servicenow-avit"].some(
+            (format) =>
+              hasValue("--export-format", format) ||
+              hasValue("--exportFormat", format),
+          )
+        ) {
+          return "CSV stdout cannot be combined with JSON output; write CSV to a file or omit --json.";
+        }
+        if (
+          hasValue("--artifact", "threat-model") ||
+          hasValue("--export-format", "md")
+        ) {
+          return "Markdown stdout cannot be combined with JSON output; write Markdown to a file or omit --json.";
+        }
+      }
     }
     if (command === "scan" && !argv.includes("--schema")) {
       if (
@@ -6727,6 +6812,42 @@ export async function main(
       command === "publish" ||
       command === "import";
     const subcommand = nestedCommand ? argv[commandIndex + 1] : undefined;
+    if (
+      command === "import" &&
+      (subcommand === "github" || subcommand === "github-advisories") &&
+      frameworkFlags.rawCollector
+    ) {
+      // Incur's skill-sync notice turns a saved collector array into an object.
+      cliOptions.sync = false;
+    }
+    if (
+      !importsEnabled &&
+      ((command === "publish" && subcommand === "findings") ||
+        (command === "findings" && subcommand === "imported") ||
+        (command === "import" && subcommand === "github-advisories"))
+    ) {
+      if (
+        process.env["COMPLETE"] ||
+        argv.some((value) => FRAMEWORK_ACTIONS.has(value))
+      ) {
+        return externalImportsDisabledMessage;
+      }
+      if (!argv.includes("--version")) {
+        if (
+          argv.includes("--schema") ||
+          (command !== "publish" &&
+            (command !== "import" || !argv.includes("--full-output")))
+        ) {
+          return externalImportsDisabledMessage;
+        }
+        disabledImportInvocation = true;
+        // This route only formats a disabled command; it is not an installed skill.
+        cliOptions.sync = false;
+        if (command === "publish") registerFindingPublication();
+        else registerGitHubAdvisories();
+        valueOptions = cliValueOptions(commands);
+      }
+    }
     if (command === "info") {
       for (let index = 0; index < argv.length; index += 1) {
         const argument = argv[index]!;
@@ -6803,8 +6924,20 @@ export async function main(
     ) {
       return `Unexpected positional argument for ${command}${subcommand === undefined ? "" : ` ${subcommand}`}.`;
     }
+    if (disabledImportInvocation && frameworkFlags.hideDisabledRoute)
+      return externalImportsDisabledMessage;
   }
   argv = normalizeScanImportArguments(defaultListCommand(argv));
+  const frameworkArgv = argv.flatMap((argument) => {
+    const separator = argument.indexOf("=");
+    if (
+      separator < 0 ||
+      !FRAMEWORK_VALUE_OPTIONS.has(argument.slice(0, separator))
+    )
+      return [argument];
+    return [argument.slice(0, separator), argument.slice(separator + 1)];
+  });
+  const frameworkFlags = frameworkOutputFlags(frameworkArgv);
   const policyFullOutput =
     argv[cliCommandIndex(argv)] === "policy" && argv.includes("--full-output");
   const argumentError = validateCliArguments(argv, positionals);
@@ -6922,24 +7055,12 @@ export async function main(
 
   let notice: UpdateNotice | undefined;
   try {
-    await cli.serve(
-      argv.flatMap((argument) => {
-        if (
-          !/^--(?:format|filter-output|token-limit|token-offset)=/u.test(
-            argument,
-          )
-        )
-          return [argument];
-        const separator = argument.indexOf("=");
-        return [argument.slice(0, separator), argument.slice(separator + 1)];
-      }),
-      {
-        stdout: frameworkCapture.stream.write,
-        exit: (code) => {
-          frameworkExit = code;
-        },
+    await cli.serve(frameworkArgv, {
+      stdout: frameworkCapture.stream.write,
+      exit: (code) => {
+        frameworkExit = code;
       },
-    );
+    });
     if (pendingUpdate !== undefined) {
       notice = await Promise.race([pendingUpdate, undefined]);
     }
@@ -6981,12 +7102,16 @@ export async function main(
     } catch {}
   }
   if (frameworkExit !== undefined) {
+    if (disabledImportInvocation && exitCode === 0) {
+      reportPublicationError(externalImportsDisabledMessage, undefined);
+      return exitCode;
+    }
     if (policyFullOutput || structuredError) {
       if (exitCode === 0) exitCode = 2;
     } else {
       if (exitCode !== 0) return exitCode;
       errorOutput.write(
-        `codex-security: ${diagnosticLines(incurErrorMessage(frameworkOutput))}\n`,
+        `codex-security: ${diagnosticLines(await incurErrorMessage(frameworkOutput))}\n`,
       );
       return 2;
     }
@@ -7083,7 +7208,7 @@ async function runScanImport(
 
 async function prepareScanArgumentsFromRecipe(
   recipe: JsonValue | undefined,
-  parentScanId: string,
+  operation: "resume" | "rerun",
   {
     scanPrompt,
     scanPromptFile,
@@ -7099,11 +7224,9 @@ async function prepareScanArgumentsFromRecipe(
       "This scan does not have a saved launch recipe.",
     );
   }
-  if (
-    recipe["requiresScanPrompt"] === true &&
-    scanPrompt === undefined &&
-    scanPromptFile === undefined
-  ) {
+  const requiresRerunPrompt =
+    operation === "rerun" && recipe["requiresScanPrompt"] === true;
+  if (requiresRerunPrompt && scanPromptFile === undefined) {
     throw new CodexSecurityError(
       "This scan used additional instructions. Supply --scan-prompt-file to rerun it.",
     );
@@ -7267,7 +7390,7 @@ async function prepareScanArgumentsFromRecipe(
     repository,
     directory,
   );
-  if (recipe["requiresScanPrompt"] === true && !prompts.scanPrompt?.trim()) {
+  if (requiresRerunPrompt && !prompts.scanPrompt?.trim()) {
     throw new CodexSecurityError(
       "This scan used additional instructions. The --scan-prompt-file must not be empty.",
     );
@@ -7306,7 +7429,6 @@ async function prepareScanArgumentsFromRecipe(
     maxCostUsd,
     maxTimeMinutes: maxTimeMinutes.data,
     dryRun: false,
-    parentScanId,
     ...(recipe["mock"] === true ? { mock: true } : {}),
     expectedPluginVersion:
       typeof recipe["pluginVersion"] === "string"
@@ -7315,15 +7437,35 @@ async function prepareScanArgumentsFromRecipe(
   };
 }
 
+function frameworkOutputFlags(argv: readonly string[]) {
+  let hideDisabledRoute = false;
+  let fullOutput = false;
+  let rawCollector = false;
+  for (let index = 0; index < argv.length; index++) {
+    const value = argv[index]!;
+    if (
+      FRAMEWORK_ACTIONS.has(value) ||
+      value === "--schema" ||
+      value === "--help" ||
+      value === "-h"
+    )
+      hideDisabledRoute = true;
+    if (value === "--full-output") fullOutput = true;
+    if (value === "--json") rawCollector = true;
+    if (FRAMEWORK_VALUE_OPTIONS.has(value)) {
+      const operand = argv[++index];
+      if (value === "--format")
+        rawCollector =
+          operand === "json" || operand === "jsonl" || operand === "yaml";
+    }
+  }
+  return { hideDisabledRoute, rawCollector: rawCollector && !fullOutput };
+}
+
 function cliValueOptions(
   commands: NonNullable<ReturnType<typeof Cli.toCommands.get>>,
 ): Set<string> {
-  const options = new Set([
-    "--format",
-    "--filter-output",
-    "--token-limit",
-    "--token-offset",
-  ]);
+  const options = new Set(FRAMEWORK_VALUE_OPTIONS);
   for (const command of commands.values()) {
     if ("_group" in command) {
       for (const option of cliValueOptions(command.commands))
@@ -7626,7 +7768,6 @@ async function readSavedFindings(
   const directory = await resolveSavedArtifactDirectory(
     scanId,
     "findings",
-    "json",
     workbench,
   );
   const { findings } = await loadContract(directory, {
@@ -9011,11 +9152,12 @@ export function skillCommandFailure(
   return detail || `${command} failed with exit code ${status}.`;
 }
 
-function incurErrorMessage(output: string): string {
+async function incurErrorMessage(output: string): Promise<string> {
   // YAML folds long strings across lines; JSON output keeps its serialized form.
   if (!output.startsWith("{")) {
+    const { parse } = await import("yaml");
     try {
-      const parsed: unknown = parseYaml(output);
+      const parsed: unknown = parse(output);
       if (isJsonObject(parsed) && typeof parsed["message"] === "string")
         return parsed["message"];
     } catch {
@@ -9158,6 +9300,8 @@ async function executeScan(
   let deepConsolidating = false;
   let runningCost: Readonly<ScanCost> | null = null;
   let runningUsage: Readonly<ScanTokenUsage> | null = null;
+  let usageFreshness: string | null = null;
+  let accountLimits: string | null = null;
   let maxCostUsd = arguments_.maxCostUsd;
   const showCost = arguments_.showCost === true || maxCostUsd !== undefined;
   let phase: string | null = null;
@@ -9380,7 +9524,7 @@ async function executeScan(
     );
     if (progress.interactive && !arguments_.dryRun && !verbose) {
       dashboard = new ScanDashboard(errorOutput, {
-        repository,
+        repository: resolveCliPath(directory, repository),
         mode: arguments_.mode,
         showCost,
         model: scanModelConfiguration(await mergedCodexConfig(config)),
@@ -9392,6 +9536,9 @@ async function executeScan(
         input: scanInput,
         onInterrupt,
       });
+      dashboard.setChatGptAuth(
+        isChatGptAuthentication(selectedAuthentication, auth),
+      );
     }
     const scope = scanScope(arguments_);
     const runningMessage = (): string => {
@@ -9412,11 +9559,7 @@ async function executeScan(
           `Reviews: ${deepProgress.completed} completed, ${deepProgress.active} active, cap ${deepProgress.maximum}`,
         );
       } else if (fileProgress !== null) {
-        const count = scanProgressCount(fileProgress);
-        if (count.total > 0)
-          details.push(
-            `${count.label === "reviews" ? "Reviews" : "Files"}: ${count.completed.toLocaleString("en-US")}/${count.total.toLocaleString("en-US")}`,
-          );
+        details.push(formatScanProgressCount(fileProgress, "status"));
       }
       const tokens =
         runningCost !== null
@@ -9426,6 +9569,11 @@ async function executeScan(
       if (showCost && runningCost !== null) {
         details.push(`Cost: ${formatScanCost(runningCost)}`);
       }
+      if (tokens !== null)
+        details.push(usageFreshness ?? USAGE_TIME_UNAVAILABLE);
+      if (accountLimits !== null) details.push(diagnosticValue(accountLimits));
+      else if (isChatGptAuthentication(selectedAuthentication, auth))
+        details.push(ACCOUNT_LIMITS_UNAVAILABLE);
       return details.length === 0 ? stage : `${stage} | ${details.join(" | ")}`;
     };
     if (dashboard === null) {
@@ -9463,6 +9611,22 @@ async function executeScan(
       archiveExisting: arguments_.archiveExisting,
       parentScanId: arguments_.parentScanId,
       expectedPluginVersion: arguments_.expectedPluginVersion,
+      onUsageObservation: async (observation) => {
+        if (dashboard !== null) {
+          dashboard.setUsageObservation(observation);
+          return;
+        }
+        usageFreshness = formatUsageFreshness(observation);
+        accountLimits = formatAccountLimits(observation);
+        const priorUsage = runningUsage;
+        const priorCost = runningCost;
+        // Usage and cost callbacks render the same poll. Refresh here for a receipt alone.
+        await Promise.resolve();
+        if (runningUsage === priorUsage && runningCost === priorCost) {
+          progress?.stopTimer();
+          progress?.startTimer(runningMessage());
+        }
+      },
       onUsage: async (usage) => {
         runningUsage = usage;
         if (dashboard !== null) {
@@ -9539,6 +9703,9 @@ async function executeScan(
       },
       onAuthentication: (authentication) => {
         selectedAuthentication = authentication;
+        dashboard?.setChatGptAuth(
+          isChatGptAuthentication(authentication, auth),
+        );
         const bedrock =
           providerOptions.provider === "amazon-bedrock" ||
           authentication.method === "aws_credentials";
@@ -9663,10 +9830,8 @@ async function executeScan(
         }
         if (progress === null) return;
         progress.stopTimer();
-        const count = scanProgressCount(update);
-        progress.stage(
-          `Scan phase: ${phase}${count.total === 0 ? "" : ` (${count.completed.toLocaleString("en-US")}/${count.total.toLocaleString("en-US")} ${count.label})`}.`,
-        );
+        const count = formatScanProgressCount(update, "phase");
+        progress.stage(`Scan phase: ${phase} (${count}).`);
         progress.startTimer(runningMessage());
       },
       onDeepProgress: (update) => {
@@ -9887,7 +10052,7 @@ async function executeScan(
             );
             if (validation["reportPath"] !== undefined) {
               errorOutput.write(
-                `Partial validation report: ${diagnosticValue(validation["reportPath"])}\n`,
+                `Validation report opened at ${diagnosticValue(validation["reportPath"])}\n`,
               );
             }
           }
@@ -9946,11 +10111,11 @@ async function executeScan(
   if (requestedSignal !== null) {
     diagnostic("scan.interrupted", {
       signal: requestedSignal,
-      partial_output: scanDir !== null,
     });
     if (result !== null && arguments_.validate) {
       const exitCode = requestedSignal === "SIGINT" ? 130 : 143;
-      const message = `Validation interrupted. Completed scan output was kept at ${errorMessage(result.scanDir)}.`;
+      const scanId = quoteCliPath(diagnosticValue(result.manifest.scan.id));
+      const message = `Validation interrupted. Original output directory: ${errorMessage(result.scanDir)}. Run codex-security scans show ${scanId} to inspect the completed scan.`;
       errorOutput.write(`codex-security: ${message}\n`);
       return {
         exitCode,
@@ -9961,6 +10126,7 @@ async function executeScan(
         },
       };
     }
+    if (failure instanceof ScanInterruptedError) scanDir ??= failure.scanDir;
     const exitCode = interruptedExit(requestedSignal, scanDir, errorOutput);
     printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
     return {
@@ -9990,7 +10156,6 @@ async function executeScan(
           : isLocalScanFailure(failure)
             ? "local"
             : classifyConnectionFailure(failure),
-      partial_output: scanDir !== null,
       max_cost_usd: costLimitFailure?.maxCostUsd,
       estimated_usd: costLimitFailure?.cost.estimatedUsd,
       cost_estimate:
@@ -10000,9 +10165,7 @@ async function executeScan(
     });
     errorOutput.write(`${message}\n`);
     if (!(failure instanceof ScanInterruptedError) && scanDir !== null) {
-      errorOutput.write(
-        `Partial output was kept at ${errorMessage(scanDir)}.\n`,
-      );
+      errorOutput.write(`Output directory: ${errorMessage(scanDir)}\n`);
     }
     printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
     return { exitCode: 2, error: message, data: failureData };
@@ -10551,7 +10714,7 @@ function printFailedScanReference(
     if (phase !== null)
       output.write(`Last observed phase: ${diagnosticValue(phase)}\n`);
     output.write(
-      `Retained results: ${diagnosticValue(scan["scanDir"])}\n` +
+      `Output directory: ${diagnosticValue(scan["scanDir"])}\n` +
         "Inspect the saved scan status before choosing resume or rerun.\n",
     );
     const prompts = [
@@ -10631,7 +10794,7 @@ function printScanSummary(
         ? ""
         : `  ${paint("THREAT MODEL", "1;36")}  ${paint(errorMessage(threatModelPath), 4)}\n`) +
       `\n  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${findingSummary === "" ? "" : ` (${findingSummary})`}`, findingColor)}\n` +
-      `  ${paint("SCOPE", 1)}     ${formatCoverageScope(result.coverage)}\n` +
+      `  ${paint("SCOPE", 1)}     ${formatCoverageScope({ mode: result.mode, ...result.manifest.scan.scope, explicitExclusions: result.review.excludedPaths.map((pattern) => ({ pattern, reason: "Excluded from review" })) })}\n` +
       (deepScanStop === undefined
         ? ""
         : `  ${paint("STOPPED", 1)}   ${deepScanStop.reason}\n`) +
@@ -10665,21 +10828,51 @@ function printScanSummary(
   }
 }
 
+function formatScanProgressCount(
+  progress: ScanProgress,
+  style: "phase" | "status",
+): string {
+  const { label, completed, total } = scanProgressCount(progress);
+  const totalText = total.toLocaleString("en-US");
+  if (label === "files" && completed === 0) {
+    return style === "phase"
+      ? `${totalText} ${total === 1 ? "file" : "files"} inventoried`
+      : `File inventory: ${totalText}`;
+  }
+  const ratio = `${completed.toLocaleString("en-US")}/${totalText}`;
+  return style === "phase"
+    ? `${ratio} ${label}`
+    : `${label === "reviews" ? "Reviews" : "Files"}: ${ratio}`;
+}
+
 function componentScanEventLine(
   componentName: string,
   event: ComponentScanEvent,
   showCost: boolean,
+  requestedAuth?: ScanAuthMode,
 ): string | null {
+  if (event.type === "authentication") {
+    return isChatGptAuthentication(event.value, requestedAuth)
+      ? `codex-security: ${componentName} | ${ACCOUNT_LIMITS_UNAVAILABLE}\n`
+      : null;
+  }
   if (event.type === "progress") {
     const progress = event.value;
-    const count = scanProgressCount(progress);
-    return `codex-security: ${componentName} ${scanPhase(progress.phase)} | ${count.label === "reviews" ? "Reviews" : "Files"}: ${count.completed.toLocaleString("en-US")}/${count.total.toLocaleString("en-US")}\n`;
+    const count = formatScanProgressCount(progress, "status");
+    return `codex-security: ${componentName} ${scanPhase(progress.phase)} | ${count}\n`;
   }
   if (event.type === "usage") {
     const tokens = formatTokenUsage(event.value);
     return tokens === null
       ? null
       : `codex-security: ${componentName} | Tokens: ${tokens}\n`;
+  }
+  if (event.type === "usage-observation") {
+    const details = [
+      formatUsageFreshness(event.value) ?? USAGE_TIME_UNAVAILABLE,
+      formatAccountLimits(event.value),
+    ].filter((detail) => detail !== null);
+    return `codex-security: ${componentName} | ${diagnosticValue(details.join(" | "))}\n`;
   }
   if (event.type !== "cost" || !showCost) return null;
   return `codex-security: ${componentName} | Cost: ${formatScanCost(event.value)}\n`;
@@ -10706,7 +10899,7 @@ function protectedRootErrorMessage(
     `  Reason:         ${reason}`,
     error.pathKind === "output"
       ? suggestion === undefined
-        ? "Choose a private output directory outside the protected root."
+        ? "Choose an output directory outside the protected root."
         : `Re-run with --output-dir ${quoteCliPath(suggestion)}.`
       : suggestion === undefined
         ? "Set TMPDIR (or TEMP on Windows) to a writable directory outside the protected root."
@@ -11095,11 +11288,11 @@ function interruptedExit(
   errorOutput.write(
     `codex-security: Scan ${ctrlC ? "canceled by Ctrl-C" : "terminated by SIGTERM"}.\n`,
   );
-  errorOutput.write(
-    scanDir === null
-      ? "codex-security: No partial output was kept.\n"
-      : `codex-security: Partial output was kept at ${errorMessage(scanDir)}.\n`,
-  );
+  if (scanDir) {
+    errorOutput.write(
+      `codex-security: Output directory: ${errorMessage(scanDir)}\n`,
+    );
+  }
   return ctrlC ? 130 : 143;
 }
 
