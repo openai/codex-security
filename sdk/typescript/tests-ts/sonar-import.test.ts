@@ -6,6 +6,7 @@ import {
   mkdir,
   readFile,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -275,6 +276,39 @@ test("rejects a Cloud checkpoint directory inside the checkout before contacting
   );
   expect(result.cloudError).toContain(options.cwd);
   expect(result.cloud).toBeUndefined();
+});
+
+test("rejects an in-checkout state symlink pointing to an outside directory", async () => {
+  await using directory = await scopedTemporaryDirectory("sonar-state-link-");
+  const { options, deps } = await fixture(directory.path);
+  const outside = join(directory.path, "private");
+  await mkdir(outside, { mode: 0o700 });
+  const link = join(options.cwd, "state");
+  await symlink(outside, link, "junction");
+  deps.environment.CODEX_SECURITY_STATE_DIR = link;
+  await expect(
+    prepareSonarImport({ ...options, to: "local" }, deps),
+  ).rejects.toThrow();
+  expect(await stat(join(outside, "imports")).catch(() => null)).toBeNull();
+});
+
+test("reports the saved evidence after preparation fails", async () => {
+  await using directory = await scopedTemporaryDirectory("sonar-saved-path-");
+  const { options, deps, report } = await fixture(directory.path);
+  const captures: string[] = [];
+  await expect(
+    prepareSonarImport(
+      { ...options, to: "cloud", yes: true, dryRun: false },
+      {
+        ...deps,
+        onCapture(path) {
+          captures.push(path);
+        },
+      },
+    ),
+  ).rejects.toThrow("--to cloud --dry-run");
+  expect(captures).toHaveLength(1);
+  expect(JSON.parse(await readFile(captures[0]!, "utf8"))).toEqual(report);
 });
 
 test("rejects a non-finite native JSON number before snapshotting a capture", async () => {

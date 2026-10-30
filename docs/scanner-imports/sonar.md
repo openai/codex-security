@@ -33,7 +33,9 @@ codex-security import sonar --sonar-project example_project --sonar-branch main 
 For a pull request, replace `--sonar-branch main` with, for example,
 `--sonar-pull-request 42`. With neither ref option, the collector reads the
 project's main branch. Omit the issue options to collect open security
-issues for the selected project and ref. You can omit `--sonar-project` when
+issues for the selected project and ref. If the search exceeds Sonar's
+10,000-result window, pass the keys of the issues you want to import.
+You can omit `--sonar-project` when
 Sonar binds the checkout's Git origin to exactly one project in the signed-in
 organization. For a monorepo with several Sonar projects, pass the project key
 you want to import. If Sonar cannot supply the project's

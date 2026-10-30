@@ -9,6 +9,7 @@ import {
 import { repositoryUrlKey } from "./external-import-contract.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import {
+  azureReposHttpsUrl,
   isGitHubCloudHost,
   isGitHubSshOverHttps,
   parseGitRemote,
@@ -113,24 +114,26 @@ async function checkoutOrigin(
       ? remote.path
       : /^[^:/]+:\/\/[^/]+\/(.+)$/u.exec(origin)?.[1];
     if (!path) return;
-    let base: string;
+    const hostname = url.hostname.toLowerCase();
+    let candidate: string | undefined;
     if (url.protocol === "http:" || url.protocol === "https:") {
-      base = url.origin;
+      candidate = `${url.origin}/${path}`;
     } else if (url.username === "git" && isGitHubSshOverHttps(url)) {
-      base = "https://github.com";
+      candidate = `https://github.com/${path}`;
     } else if (
       url.protocol === "ssh:" &&
       url.username === "git" &&
       (!url.port || url.port === "22") &&
-      (isGitHubCloudHost(url.hostname) ||
-        ["gitlab.com", "bitbucket.org"].includes(url.hostname))
+      (isGitHubCloudHost(hostname) ||
+        ["gitlab.com", "bitbucket.org"].includes(hostname))
     ) {
-      base = `https://${url.hostname}`;
+      candidate = `https://${hostname}/${path}`;
     } else {
-      return;
+      candidate = azureReposHttpsUrl(url, path);
     }
+    if (!candidate) return;
     const source = declaredScannerRepositoryUrl(
-      `${base}/${path.replace(/\.git$/iu, "")}`,
+      candidate.replace(/\.git$/iu, ""),
       "Sonar",
       "local",
     );
@@ -164,28 +167,31 @@ async function projectFromOrigin(
       ? selected
       : undefined;
   }
-  if (bindings.length !== 1) return;
-  const id = requiredText(
-    record(bindings[0], "Sonar repository binding")["projectId"],
-    "Sonar bound project ID",
-  );
-  if (id.includes(",")) return;
-  const result = await sonar([
-    "api",
-    "get",
-    `/api/components/search_projects?${new URLSearchParams({ projectIds: id, organization })}`,
-  ]);
-  const components = array(result["components"], "Sonar bound projects");
-  const component = components.length === 1 ? components[0] : undefined;
-  if (
-    !isRecord(component) ||
-    (component["id"] !== undefined && component["id"] !== id) ||
-    (component["organization"] !== undefined &&
-      component["organization"] !== organization)
-  )
-    return;
-  const project = requiredText(component["key"], "Sonar bound project key");
-  return selected === undefined || selected === project ? project : undefined;
+  if (selected === undefined && bindings.length !== 1) return;
+  for (const binding of bindings) {
+    const id = requiredText(
+      record(binding, "Sonar repository binding")["projectId"],
+      "Sonar bound project ID",
+    );
+    if (id.includes(",")) continue;
+    const result = await sonar([
+      "api",
+      "get",
+      `/api/components/search_projects?${new URLSearchParams({ projectIds: id, organization })}`,
+    ]);
+    const components = array(result["components"], "Sonar bound projects");
+    const component = components.length === 1 ? components[0] : undefined;
+    if (
+      !isRecord(component) ||
+      (component["id"] !== undefined && component["id"] !== id) ||
+      (component["organization"] !== undefined &&
+        component["organization"] !== organization)
+    )
+      continue;
+    const project = requiredText(component["key"], "Sonar bound project key");
+    if (selected === undefined || selected === project) return project;
+  }
+  return undefined;
 }
 
 async function resolveProject(
@@ -198,18 +204,26 @@ async function resolveProject(
   let selectedId: string | undefined;
   if (selected !== undefined) {
     // The handoff or user has already selected this project.
-    try {
-      const component = await sonar([
-        "api",
-        "get",
-        `/api/navigation/component?${new URLSearchParams({ component: selected, organization })}`,
-      ]);
-      if (
-        component["key"] !== selected ||
-        (component["organization"] &&
-          component["organization"] !== organization)
-      )
-        return { project: selected };
+    const component = await sonar([
+      "api",
+      "get",
+      `/api/navigation/component?${new URLSearchParams({ component: selected, organization })}`,
+    ]).catch(() => {
+      // Some token sessions cannot read browser navigation metadata.
+      signal?.throwIfAborted();
+      return undefined;
+    });
+    if (
+      component &&
+      ((component["key"] !== undefined && component["key"] !== selected) ||
+        (component["organization"] !== undefined &&
+          component["organization"] !== organization))
+    ) {
+      throw new CodexSecurityError(
+        "Sonar returned a different project or organization. Check --sonar-project and the organization in 'sonar auth status'.",
+      );
+    }
+    if (component?.["key"] === selected) {
       const alm = component["alm"];
       if (isRecord(alm) && alm["url"])
         return {
@@ -221,9 +235,6 @@ async function resolveProject(
           ),
         };
       if (typeof component["id"] === "string") selectedId = component["id"];
-    } catch {
-      // Some token sessions cannot read browser navigation metadata.
-      signal?.throwIfAborted();
     }
   }
   if (origin !== undefined) {
@@ -270,6 +281,8 @@ export async function collectSonarIssues(
     if (value !== undefined) requiredText(value, `Sonar ${label}`);
   }
   const keys = new Set(options.issueKeys);
+  if (options.issueKeys !== undefined && keys.size === 0)
+    throw new CodexSecurityError("The Sonar issue selection is empty.");
   for (const key of keys) {
     if (!key.trim() || key.includes(","))
       throw new CodexSecurityError(
@@ -366,6 +379,10 @@ export async function collectSonarIssues(
       );
     }
     pages.push(page);
+    if (total > 10_000)
+      throw new CodexSecurityError(
+        "Sonar issue search returns at most 10,000 results. Narrow the selection with --sonar-issue KEY or select a different branch or pull request.",
+      );
     if (index * size >= total) break;
   }
   const missing = new Set(keys);

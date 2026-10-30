@@ -63,6 +63,31 @@ export function parseSonarCapture(value: unknown): SonarCapture {
 
 type NativeRecord = Record<string, unknown>;
 
+const issueScopeFields = [
+  "organization",
+  "project",
+  "branch",
+  "pullRequest",
+] as const;
+const scopeFields = ["server", ...issueScopeFields] as const;
+type SonarScope = Partial<Record<(typeof scopeFields)[number], string>>;
+
+function mergeSonarScope(
+  scope: SonarScope,
+  data: NativeRecord,
+  fields: readonly (keyof SonarScope)[] = scopeFields,
+) {
+  for (const field of fields) {
+    const value = text(data[field]);
+    if (value === null) continue;
+    if (scope[field] !== undefined && scope[field] !== value)
+      throw new Error(`The Sonar export contains conflicting ${field} values.`);
+    scope[field] = value;
+  }
+  if (scope.branch && scope.pullRequest)
+    throw new Error("The Sonar export mixes branch and pull request results.");
+}
+
 /** Normalized Sonar reports and their individual issues retain the source repository. */
 export function sonarRepositoryUrls(
   provider: Provider,
@@ -71,10 +96,12 @@ export function sonarRepositoryUrls(
   target: ExternalImportTarget,
 ): Set<string> {
   const urls = new Set<string>();
+  const scope: SonarScope = {};
   function add(data: NativeRecord | undefined) {
     if (data?.["format"] !== sonarFormat) return;
     if (provider !== "sonar")
       throw new Error("Retained Sonar evidence requires the sonar provider.");
+    mergeSonarScope(scope, data);
     urls.add(
       declaredScannerRepositoryUrl(data["repositoryUrl"], "Sonar", target),
     );
@@ -85,6 +112,7 @@ export function sonarRepositoryUrls(
     add(data ?? undefined);
     if (data?.["format"] === sonarFormat && data["issue"] !== undefined) {
       const issue = record(data["issue"], "Retained Sonar issue");
+      mergeSonarScope(scope, issue, issueScopeFields);
       if (
         requiredText(issue["key"], "Retained Sonar issue key") !==
         source_finding_id
@@ -249,35 +277,14 @@ export function normalizeSonarFindings(
   const rows = pages.flatMap((page) =>
     page.issues.map((issue) => ({ issue, page })),
   );
-  const scope = {
-    project: capture?.project,
-    organization: capture?.organization,
-    branch: capture?.branch,
-    pullRequest: capture?.pullRequest,
-  };
+  const scope: SonarScope = {};
+  if (capture) mergeSonarScope(scope, capture);
   const hasUnscopedIssue = rows.some(
     ({ issue }) => !text(issue["branch"]) && !text(issue["pullRequest"]),
   );
   for (const { issue } of rows) {
     requiredText(issue["project"], "Sonar issue project");
-    for (const field of [
-      "project",
-      "organization",
-      "branch",
-      "pullRequest",
-    ] as const) {
-      const value = text(issue[field]);
-      if (value === null) continue;
-      if (scope[field] !== undefined && scope[field] !== value)
-        throw new Error(
-          `The Sonar export contains conflicting ${field} values.`,
-        );
-      scope[field] = value;
-    }
-    if (scope.branch && scope.pullRequest)
-      throw new Error(
-        "The Sonar export mixes branch and pull request results.",
-      );
+    mergeSonarScope(scope, issue, issueScopeFields);
   }
   if (
     !capture?.branch &&
@@ -290,7 +297,6 @@ export function normalizeSonarFindings(
     );
   const context = {
     format: sonarFormat,
-    ...(capture && { server: capture.server }),
     ...(capture?.projectBase !== undefined && {
       projectBase: capture.projectBase,
     }),
@@ -324,10 +330,6 @@ export function normalizeSonarFindings(
       const name = text(descriptor?.["name"]);
       const updated = text(issue["updateDate"]);
       const severity = securitySeverity(issue);
-      if (target === "cloud" && severity === "unknown")
-        throw new Error(
-          "Codex Security Cloud requires a recognized Sonar security severity. The issue can be imported locally.",
-        );
       return validateExternalEvidence(
         {
           title: name ?? rule,

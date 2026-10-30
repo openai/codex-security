@@ -668,6 +668,8 @@ the SDK's external publication, local import/readback, Sonar issue collection, a
 APIs. They are disabled otherwise; CLI commands are hidden from help and schemas.
 SDK callers can supply the flag through the existing per-call
 `dependencies.environment`, or in `options.environment` for `collectSonarIssues(options)`.
+For an SDK import of selected Sonar issues, pass their keys in `options.issueKeys`.
+Omit `issueKeys` to collect the project's open security issues. An empty list is rejected.
 Pure normalizers and file readers remain available.
 This does not affect scan publishing or the existing GitHub alert collector.
 

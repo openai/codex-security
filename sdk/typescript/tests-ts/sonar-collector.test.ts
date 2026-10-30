@@ -76,7 +76,9 @@ function sonarSession(options: {
   pages: Record<string, unknown>[];
   bindings?: Record<string, unknown>[];
   navigationDenied?: boolean;
+  navigation?: Record<string, unknown>;
   components?: Record<string, unknown>[];
+  componentsById?: Record<string, Record<string, unknown>[]>;
   repositoryUrl?: string;
   analyses?: Record<string, unknown>[] | Error;
 }) {
@@ -104,6 +106,7 @@ function sonarSession(options: {
           key: project,
           id: "p-1",
           badgeToken: "synthetic badge metadata",
+          ...options.navigation,
         };
       }
       if (url.pathname === "/dop-translation/project-bindings") {
@@ -113,12 +116,12 @@ function sonarSession(options: {
         return { bindings: options.bindings ?? [{ projectId: "p-1" }] };
       }
       if (url.pathname === "/api/components/search_projects") {
-        expect(url.searchParams.get("projectIds")).toBe("p-1");
+        const id = url.searchParams.get("projectIds")!;
+        if (!options.componentsById) expect(id).toBe("p-1");
         expect(url.searchParams.get("organization")).toBe(organization);
         return {
-          components: options.components ?? [
-            { key: project, id: "p-1", organization },
-          ],
+          components: options.componentsById?.[id] ??
+            options.components ?? [{ key: project, id: "p-1", organization }],
         };
       }
       if (url.pathname === "/api/project_analyses/search") {
@@ -248,6 +251,57 @@ test("uses the explicit project in token-only sessions and claims only a matchin
   }
 });
 
+test("an explicit project disambiguates token-only monorepo bindings", async () => {
+  const cwd = await checkout();
+  const session = sonarSession({
+    pages: [page("A")],
+    navigationDenied: true,
+    bindings: [{ projectId: "p-other" }, { projectId: "p-1" }],
+    componentsById: {
+      "p-other": [{ key: "other", id: "p-other", organization }],
+      "p-1": [{ key: project, id: "p-1", organization }],
+    },
+  });
+  const capture = await collectSonarIssues(
+    { cwd, project, environment },
+    session.run,
+  );
+  expect(capture.repositoryUrl).toBe(repositoryUrl);
+  expect(session.queries.map((q) => q.get("componentKeys"))).toEqual([project]);
+});
+
+test("a confirmed project or organization mismatch stops before further lookups", async () => {
+  const cwd = await checkout();
+  for (const navigation of [{ key: "foreign" }, { organization: "foreign" }]) {
+    const session = sonarSession({ pages: [], navigation });
+    await expect(
+      collectSonarIssues({ cwd, project, environment }, session.run),
+    ).rejects.toThrow("different project or organization");
+    expect(session.commands).toHaveLength(2);
+  }
+});
+
+test("explicitly selecting zero issues never broadens to all open issues", async () => {
+  const cwd = await checkout();
+  const session = sonarSession({ pages: [] });
+  await expect(
+    collectSonarIssues(
+      { cwd, project, issueKeys: [], environment },
+      session.run,
+    ),
+  ).rejects.toThrow("selection is empty");
+  expect(session.commands).toEqual([]);
+});
+
+test("asks for a narrower selection on the first page exceeding Sonar's search window", async () => {
+  const cwd = await checkout();
+  const session = sonarSession({ pages: [page("A", 1, 10_001)] });
+  await expect(
+    collectSonarIssues({ cwd, project, environment }, session.run),
+  ).rejects.toThrow("--sonar-issue");
+  expect(session.queries).toHaveLength(1);
+});
+
 test("cannot save a partial or overlapping Sonar search as a complete capture", async () => {
   const cwd = await checkout();
   for (const pages of [
@@ -348,21 +402,30 @@ test("projects paths only from the selected branch's recorded analysis base", as
   }
 });
 
-test("verifies the GitHub SSH-over-443 origin using its HTTPS repository binding", async () => {
-  const cwd = await checkout();
-  execFileSync("git", [
-    "-C",
-    cwd,
-    "remote",
-    "set-url",
-    "origin",
+test.each([
+  [
     "ssh://git@ssh.github.com:443/team/service.git",
-  ]);
-  const source = "https://github.com/team/service";
-  const session = sonarSession({ pages: [page("A")], repositoryUrl: source });
-  const capture = await collectSonarIssues({ cwd, environment }, session.run);
-  expect(capture.repositoryUrl).toBe(source);
-});
+    "https://github.com/team/service",
+  ],
+  ["git@GitHub.com:Team/Service.git", "https://github.com/Team/Service"],
+  [
+    "git@SSH.dev.azure.com:v3/Org/Project/Repo",
+    "https://dev.azure.com/Org/Project/_git/Repo",
+  ],
+  [
+    "ssh://git@ssh.dev.azure.com:22/v3/Org/Project/Repo",
+    "https://dev.azure.com/Org/Project/_git/Repo",
+  ],
+])(
+  "verifies the HTTPS repository binding for SSH origin %s",
+  async (origin, source) => {
+    const cwd = await checkout();
+    execFileSync("git", ["-C", cwd, "remote", "set-url", "origin", origin]);
+    const session = sonarSession({ pages: [page("A")], repositoryUrl: source });
+    const capture = await collectSonarIssues({ cwd, environment }, session.run);
+    expect(capture.repositoryUrl).toBe(source);
+  },
+);
 
 test("rejects ambiguous Git transport and credential-bearing query strings before Sonar discovery", async () => {
   const cwd = await checkout();
@@ -377,6 +440,8 @@ test("rejects ambiguous Git transport and credential-bearing query strings befor
     "ssh://git@github.com/team/old/%2e%2e/service.git",
     "ssh://git@github.com%2f/team/service.git",
     "git@github.com:team/%73ervice.git",
+    "ssh://git@ssh.dev.azure.com:2222/v3/Org/Project/Repo",
+    "git@ssh.dev.azure.com:v3/Org/../Repo",
   ]) {
     execFileSync("git", ["-C", cwd, "remote", "set-url", "origin", origin]);
     const session = sonarSession({ pages: [] });

@@ -276,6 +276,18 @@ test("normalized local imports verify both report and issue bindings against the
     prepareNormalizedLocalImport(rows, options, deps),
   ).rejects.toThrow("retained Sonar issue key");
   finding.source_finding_id = id;
+  const alternate = structuredClone(finding);
+  alternate.source_finding_id = "other-key";
+  const native = alternate.evidence.source_data!;
+  native["project"] = "another-project";
+  native["issue"] = { key: "other-key", project: "another-project" };
+  await expect(
+    prepareNormalizedLocalImport(
+      { ...rows, report, findings: [finding, alternate] },
+      options,
+      deps,
+    ),
+  ).rejects.toThrow("conflicting project");
   finding.evidence.details = { kind: "sast", repository: { url: foreign } };
   await expect(
     prepareNormalizedLocalImport(rows, options, deps),
@@ -323,7 +335,7 @@ test("keeps uncertainty about a source path in the evidence", () => {
   ]);
 });
 
-test("unknown Sonar ratings remain local and explain the Cloud exclusion", () => {
+test("unknown Sonar ratings retain their native evidence locally and in Cloud", () => {
   const finding = {
     ...issue(),
     impacts: [{ softwareQuality: "SECURITY", severity: "UNRATED" }],
@@ -333,11 +345,7 @@ test("unknown Sonar ratings remain local and explain the Cloud exclusion", () =>
   expect(local.findings[0]?.evidence.severity).toBe("unknown");
   expect(local.findings[0]?.evidence.source_data?.["issue"]).toEqual(finding);
   const cloud = normalizeSonarFindings(input, repository, "cloud");
-  expect(cloud.findings).toEqual([]);
-  expect(cloud.excluded).toMatchObject([
-    {
-      source_finding_id: finding.key,
-      reason: expect.stringContaining("recognized Sonar"),
-    },
-  ]);
+  expect(cloud.excluded).toEqual([]);
+  expect(cloud.findings[0]?.evidence.severity).toBe("unknown");
+  expect(cloud.findings[0]?.evidence.source_data?.["issue"]).toEqual(finding);
 });

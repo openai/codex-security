@@ -1597,6 +1597,23 @@ describe("local normalized scanner findings", () => {
     },
   );
 
+  test("a newline inside one Git remote URL cannot establish a repository match", async () => {
+    const url = "https://github.com/example/project";
+    const { repository, environment } = await fixture({
+      remote: url + "\nhttps://github.com/other/repo",
+    });
+    await expect(
+      prepareNormalizedLocalImport(
+        input(),
+        { repository, ...source, provider: "sonar" },
+        {
+          environment,
+          sourceRepositories: [{ url }],
+        },
+      ),
+    ).rejects.toThrow("remote URL contains a line break");
+  });
+
   test.each(["local", "global"])(
     "matches all effective fetch URLs with %s Git URL rewrites",
     async (scope) => {

@@ -38,3 +38,18 @@ export function isGitHubSshOverHttps(url: URL): boolean {
     url.port === "443"
   );
 }
+
+/** Azure Repos uses different hosts and paths for the same SSH and HTTPS repository. */
+export function azureReposHttpsUrl(url: URL, path: string): string | undefined {
+  if (
+    url.protocol !== "ssh:" ||
+    url.hostname.toLowerCase() !== "ssh.dev.azure.com" ||
+    url.username !== "git" ||
+    url.password ||
+    (url.port && url.port !== "22")
+  )
+    return;
+  const match = /^v3\/([^/]+)\/([^/]+)\/([^/]+)$/u.exec(path);
+  if (match)
+    return `https://dev.azure.com/${match[1]}/${match[2]}/_git/${match[3]}`;
+}

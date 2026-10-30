@@ -28,6 +28,7 @@ import {
   projectedBlackDuckRepositoryUrl,
 } from "./blackduck-findings.js";
 import {
+  azureReposHttpsUrl,
   isGitHubCloudHost,
   isGitHubSshOverHttps,
   parseGitRemote,
@@ -225,11 +226,15 @@ function remoteRepository(
       (byte) =>
         "%" + byte.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0"),
     );
+  const azure =
+    provider === "sonar" && !(scpStyle && path.startsWith("/"))
+      ? azureReposHttpsUrl(url, name)
+      : undefined;
   const repository = suffix
     ? key(origin + name + "?") +
       "\0" +
       suffix[0].replace(/\/$/u, "").replace(/\.git$/u, "")
-    : key(origin + name);
+    : key(azure ?? origin + name);
   return {
     key: repository,
     account: ssh && login ? literal(login) : undefined,
@@ -553,7 +558,26 @@ async function requireMatchingRepository(
   const remotes: string[] = [];
   for (const name of remoteNames.split(/\r?\n/u).filter(Boolean)) {
     const urls = await readGit(["remote", "get-url", "--all", "--", name]);
-    remotes.push(...urls.split(/\r?\n/u));
+    const values = urls.split(
+      provider === "sonar" && process.platform !== "win32" ? /\n/u : /\r?\n/u,
+    );
+    if (provider === "sonar" && /[\r\n]/u.test(urls)) {
+      // get-url uses a newline between values and also emits literal newlines inside a URL.
+      const configured = await readGit([
+        "config",
+        "--null",
+        "--get-all",
+        `remote.${name}.url`,
+      ]);
+      if (
+        /[\r\n]/u.test(configured) ||
+        values.some((url) => url.includes("\r"))
+      )
+        throw new CodexSecurityError(
+          "A configured Git remote URL contains a line break. Configure each fetch URL as a separate Git value.",
+        );
+    }
+    remotes.push(...values);
   }
   const boundProvider =
     provider === "sonar" ||

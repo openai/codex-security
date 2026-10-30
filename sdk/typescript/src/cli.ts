@@ -4243,8 +4243,9 @@ export async function main(
             if (options.dryRun) {
               if (cloudError) cloudFailure(cloudError);
               if (humanSummary)
-                renderedOutput =
-                  "Preview complete. Use the saved evidence file to import this selection.\n";
+                renderedOutput = cloudError
+                  ? "Evidence saved. Retry with the saved file and --to cloud --dry-run to review the Cloud destination.\n"
+                  : "Preview complete. Use the saved evidence file to import this selection.\n";
               return { ...info, local, cloud, cloudError, dryRun: true };
             }
             if (!options.yes) {
