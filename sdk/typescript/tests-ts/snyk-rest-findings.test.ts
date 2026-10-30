@@ -71,9 +71,19 @@ test.each(["open-source", "code"] as const)(
       asset,
       {
         data: [],
-        links: { next: `?starting_after=${encodeURIComponent(cursor)}` },
+        links: {
+          self: path,
+          prev: null,
+          next: `?starting_after=${encodeURIComponent(cursor)}`,
+        },
       },
-      { data: [record] },
+      {
+        data: [record],
+        links: {
+          self: { href: `?starting_after=${encodeURIComponent(cursor)}` },
+          prev: "?ending_before=opaque",
+        },
+      },
     );
     const report = await api.collect({ ...options, product });
     expect(api.calls.map((url) => url.pathname)).toEqual([
@@ -172,6 +182,71 @@ test("the Snyk token stays in its configured region and on the selected Issues r
   expect(crossOrigin.calls.map((url) => url.origin)).toEqual([
     options.apiOrigin,
     options.apiOrigin,
+  ]);
+});
+
+test("compares the Git HTTP authority of native and selected Snyk repositories", async () => {
+  const canonical = "https://127.0.0.1/org/project";
+  const ambiguous = "https://0177.1./org/project";
+  for (const [source, target] of [
+    [canonical, ambiguous],
+    [ambiguous, canonical],
+  ] as const) {
+    const asset = project("npm", target);
+    asset.data.attributes.origin = "cli";
+    const api = transport(asset, { data: [] });
+    await expect(
+      api.collect({ ...options, sourceRepositoryUrl: source }),
+    ).rejects.toThrow("target URL");
+    expect(api.calls).toHaveLength(1);
+    const report = snykRestFixture("open-source", {
+      sourceRepositoryUrl: source,
+    });
+    report.projectJson = JSON.stringify(asset.data);
+    expect(() => normalizeSnykIssues(report)).toThrow("target URL");
+  }
+  expect(
+    normalizeSnykIssues(
+      snykRestFixture("open-source", { sourceRepositoryUrl: canonical }),
+    ).findings,
+  ).toHaveLength(1);
+});
+
+test.each([
+  ["numeric links", 123],
+  ["a self cursor from a later page", { self: "?starting_after=page-two" }],
+  ["a self link to another project", { self: "?scan_item.id=another-project" }],
+  ["a self link to another endpoint", { self: "/v1/issues" }],
+  ["a previous page before the first", { prev: "?ending_before=opaque" }],
+] as const)(
+  "rejects %s during collection and saved replay",
+  async (_, links) => {
+    const page = { data: [issue(false)], links };
+    const api = transport(project(), page);
+    await expect(api.collect()).rejects.toThrow();
+    expect(api.calls).toHaveLength(2);
+
+    const report = snykRestFixture("open-source");
+    report.pages[0]!.responseJson = JSON.stringify(page);
+    expect(() => normalizeSnykIssues(report)).toThrow();
+  },
+);
+
+test("an invalid issue key cannot hide a duplicate resource UUID in saved pages", async () => {
+  const valid = issue(false);
+  const invalid = { ...valid, attributes: { ...valid.attributes, key: null } };
+  const page = { data: [valid, invalid] };
+  await expect(transport(project(), page).collect()).rejects.toThrow(
+    "overlapping issue IDs",
+  );
+
+  const report = snykRestFixture("open-source");
+  report.pages[0]!.responseJson = JSON.stringify(page);
+  const result = normalizeSnykIssues(report);
+  expect(result.findings).toBeEmpty();
+  expect(result.excluded).toMatchObject([
+    { position: 1, reason: expect.stringContaining("overlapping issue IDs") },
+    { position: 2, reason: expect.stringContaining("Snyk issue key") },
   ]);
 });
 

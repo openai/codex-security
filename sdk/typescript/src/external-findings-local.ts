@@ -814,7 +814,6 @@ export async function prepareLocalImport(
       throw new CodexSecurityError(
         "The Semgrep report repository does not match the native finding's project.",
       );
-    sources.set(source.url, source);
     hostedSources.set(source.url, source);
   }
   if (semgrepPlatformRepositoryUrl)
@@ -961,13 +960,6 @@ export async function prepareLocalImport(
       url: dependabotSource,
       platform: "github",
     });
-  const ordinarySources = [...sources.values()];
-  // A reader can identify the VCS for both a hosted project and an ordinary row.
-  const loosePlatformFor = localRepositoryPlatform(
-    options.provider,
-    [...ordinarySources, ...hostedReferences],
-    false,
-  );
   const snyk = snykRestImportRepository(
     current,
     options.provider,
@@ -978,6 +970,25 @@ export async function prepareLocalImport(
         : [options.sourceRepositoryUrl]),
     ],
     readerSources,
+  );
+  if (!snyk && options.provider === "snyk" && current.sourceRepositoryUrl) {
+    const declared = { url: current.sourceRepositoryUrl };
+    const native = current.findings.flatMap((finding) =>
+      localFindingRepositories("snyk", finding),
+    );
+    for (const source of [declared, ...native])
+      if (!sources.has(source.url)) sources.set(source.url, source);
+    if (!sameRepositories(sources.keys()))
+      throw new CodexSecurityError(
+        "The normalized repository does not match the Snyk reader's repository.",
+      );
+  }
+  const ordinarySources = [...sources.values()];
+  // A reader can identify the VCS for both a hosted project and an ordinary row.
+  const loosePlatformFor = localRepositoryPlatform(
+    options.provider,
+    [...ordinarySources, ...hostedReferences],
+    false,
   );
   await requireMatchingRepository(
     repository,

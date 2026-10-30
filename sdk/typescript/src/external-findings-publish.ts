@@ -528,6 +528,11 @@ function hostedRepositoryMatcher(
     input.sourceRepositoryPlatform,
   );
   if (provider === "snyk") {
+    const declaredSource =
+      input.sourceRepositoryUrl !== undefined ||
+      input.sourceRepositoryPlatform !== undefined ||
+      declaredUrl !== undefined ||
+      readerSources.length > 0;
     const binding = snykRestImportRepository(
       input,
       provider,
@@ -537,6 +542,7 @@ function hostedRepositoryMatcher(
       ],
       references,
       allowOpaqueLegacyRows,
+      declaredSource ? destination.url : undefined,
     );
     if (binding)
       return {

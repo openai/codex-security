@@ -41,6 +41,92 @@ function cloudCatalog(environment: NodeJS.ProcessEnv, repositoryUrl: string) {
   };
 }
 
+test("a generic Snyk reader can import findings with an SSH repository URL", async () => {
+  const target = { repository: snykOptions.sourceRepositoryUrl };
+  const report = {
+    read: 1,
+    findings: [
+      {
+        source_finding_id: "reader-id",
+        evidence: {
+          title: "Reader finding",
+          severity: "high" as const,
+          source_data: {
+            format: "snyk-findings-export/v1",
+            collection: { target },
+          },
+        },
+      },
+    ],
+    excluded: [],
+    sourceRepositoryUrl: "git@github.com:example/repository.git",
+  };
+  await using fixture = await snykLocalFixture({
+    remote: snykOptions.sourceRepositoryUrl,
+  });
+  const prepare = (checkout = fixture) =>
+    prepareNormalizedLocalImport(
+      report,
+      {
+        provider: "snyk",
+        sourceKey: checkout.sourceKey,
+        repository: checkout.repository,
+      },
+      { environment: checkout.environment },
+    );
+  const first = await prepare();
+  expect((await first.import()).counts.created).toBe(1);
+  const second = await prepare();
+  expect((await second.import()).counts.unchanged).toBe(1);
+  await using other = await snykLocalFixture({
+    remote: "git@github.com:example/other.git",
+  });
+  await expect(prepare(other)).rejects.toThrow(
+    "does not match a configured remote",
+  );
+  target.repository = "https://github.com/example/other";
+  await expect(prepare()).rejects.toThrow("Snyk reader's repository");
+});
+
+test("normalized Snyk Open Source rows require their matching Cloud repository", async () => {
+  const normalized = normalizeSnykIssues(
+    snykRestFixture("open-source"),
+    "cloud",
+  );
+  expect(normalized.findings).toHaveLength(1);
+  await expect(
+    prepareNormalizedExternalPublication(
+      normalized,
+      { provider: "snyk", repository: "repo-example", sourceKey: "example" },
+      cloudCatalog(
+        { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+        "https://github.com/example/another",
+      ),
+    ),
+  ).rejects.toThrow(/does not match/);
+});
+
+test("an empty normalized Snyk report stops before Cloud credentials", async () => {
+  const capture = snykRestFixture("open-source");
+  capture.pages[0]!.responseJson = JSON.stringify({ data: [], links: {} });
+  const normalized = normalizeSnykIssues(capture);
+  expect(normalized.findings).toHaveLength(0);
+  const credentials = mock(async () => {
+    throw new Error("Unexpected credentials");
+  });
+  await expect(
+    prepareNormalizedExternalPublication(
+      normalized,
+      { provider: "snyk", repository: "repo-example", sourceKey: "example" },
+      {
+        environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+        credentials,
+      },
+    ),
+  ).rejects.toThrow("No supported findings");
+  expect(credentials).not.toHaveBeenCalled();
+});
+
 test("a Snyk asset cannot authorize a projected row from a second repository", async () => {
   const normalized = normalizeSnykIssues(snykRestFixture("open-source"));
   const other = "https://github.com/example/another";
@@ -250,6 +336,29 @@ test("a reader may use its own IDs for sparse Snyk projections, while the native
   await expect(prepare()).rejects.toThrow(/snyk-rest/);
   row.source_finding_id = "custom-issue";
   expect((await prepare()).preview.findings).toHaveLength(1);
+  const otherId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  for (const claim of [
+    {
+      projectId: otherId,
+      sourceRepositoryUrl: "https://github.com/example/unrelated",
+    },
+    { projectId: otherId },
+    { organizationId: otherId },
+    { apiOrigin: "https://api.au.snyk.io" },
+    { product: "code" },
+    { sourceRepositoryUrl: "https://github.com/example/unrelated" },
+  ]) {
+    row.evidence.source_data = claim;
+    await expect(
+      prepare().then((prepared) => prepared.import()),
+    ).rejects.toThrow(/Snyk project/);
+  }
+  expect(await f.read()).toBeEmpty();
+  row.evidence.source_data = {
+    projectId: snykOptions.projectId,
+    sourceRepositoryUrl: report.sourceRepositoryUrl + ".git",
+  };
+  expect((await prepare()).preview.findings).toHaveLength(1);
   report.sourceRepositoryUrl = "https://github.com/example/other";
   await expect(prepare()).rejects.toThrow("original Snyk project");
 });
@@ -297,6 +406,40 @@ test("retagged original Snyk records remain scoped without a matching source ID 
         environment: f.environment,
       }),
     ).rejects.toThrow(/Snyk|snyk-rest/);
+  }
+  const mismatched = { ...legacy.project, id: snykOptions.organizationId };
+  for (const resources of [
+    { project: mismatched, issue: legacy.issue, target: null },
+    {
+      projectJson: JSON.stringify(mismatched),
+      issueJson: original["issueJson"],
+      targetJson: "null",
+    },
+    {
+      projectJson: JSON.stringify(mismatched),
+      snykRestIssueKey: original["snykRestIssueKey"],
+      targetJson: "null",
+    },
+  ]) {
+    row.evidence.source_data = {
+      ...snykOptions,
+      apiVersion: original["apiVersion"],
+      ...resources,
+    };
+    await expect(
+      prepareNormalizedExternalPublication(
+        projected,
+        { ...opts, repository: "repo-example" },
+        cloud,
+      ),
+    ).rejects.toThrow("requires the snyk provider");
+    await expect(
+      prepareNormalizedLocalImport(projected, opts, {
+        environment: f.environment,
+      }),
+    ).rejects.toThrow(
+      "snykRestIssueKey" in resources ? /Snyk/ : /different project/,
+    );
   }
   for (const missing of ["issueJson", "projectJson"]) {
     row.evidence.source_data = { ...original, format: "reader/v1" };
