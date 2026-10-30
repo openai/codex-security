@@ -1711,6 +1711,20 @@ describe("local normalized scanner findings", () => {
     },
   );
 
+  test("a GitHub reader hint cannot remap a recognized GitLab SSH host", async () => {
+    const { repository, environment } = await fixture({
+      remote: "ssh://gitlab.com/team/project.git",
+    });
+    const url = "https://github.com/team/project";
+    await expect(
+      prepareNormalizedLocalImport(
+        input(),
+        { repository, ...source, provider: "sonar", sourceRepositoryUrl: url },
+        { environment, sourceRepositories: [{ url, platform: "github" }] },
+      ),
+    ).rejects.toThrow("does not match a configured remote");
+  });
+
   test("the normalized Sonar repository selection must agree with retained and reader sources, even outside Git", async () => {
     const url = "https://github.com/example/project";
     const { repository, root, environment } = await fixture({ remote: url });

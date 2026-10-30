@@ -191,8 +191,8 @@ function remoteRepository(
   const { url, path, scpStyle } = remote;
   const ssh = isGitSsh(url.protocol);
   const protocol = url.protocol === "http:" ? "http:" : "https:";
-  const hosted = provider === "sonar" && sonarHostedHostname(url.hostname);
-  if (hosted) url.hostname = hosted;
+  const hosted = sonarHostedHostname(url.hostname);
+  if (provider === "sonar" && hosted) url.hostname = hosted;
   const githubSshOverHttps = isGitHubSshOverHttps(url);
   let hostname = githubSshOverHttps ? "github.com" : url.hostname;
   // An unresolved SSH name can be a local Host alias. Only substitute the

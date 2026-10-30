@@ -705,6 +705,35 @@ test("recovers a completed live selection after a Git mapping error", async () =
   expect(reviewed.local.read).toBe(1);
 });
 
+test("recovers live evidence if its checkout-specific capture cannot be written", async () => {
+  await using directory = await scopedTemporaryDirectory(
+    "sonar-write-recovery-",
+  );
+  const { options, deps, report } = await fixture(directory.path);
+  const selected = {
+    ...options,
+    to: "local",
+    sourceRepositoryUrl: repositoryUrl,
+  } as const;
+  const reviewed = (await prepareSonarImport(selected, deps)).info.capture;
+  await rm(reviewed);
+  await mkdir(reviewed);
+  const paths: string[] = [];
+  await expect(
+    prepareSonarImport(
+      { ...selected, capture: undefined, project: report.project },
+      {
+        ...deps,
+        collect: async () => parseSonarCapture(report),
+        onCapture: (path) => paths.push(path),
+      },
+    ),
+  ).rejects.toThrow();
+  expect(paths).toHaveLength(1);
+  expect(basename(paths[0]!)).toMatch(/^[0-9a-f]{64}\.json$/);
+  expect(JSON.parse(await readFile(paths[0]!, "utf8"))).toEqual(report);
+});
+
 test("rejects a non-finite native JSON number before snapshotting a capture", async () => {
   await using directory = await scopedTemporaryDirectory(
     "sonar-numeric-evidence-",

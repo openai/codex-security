@@ -88,25 +88,38 @@ async function readCapture(input: string) {
     try {
       // Use the same open file for its bytes and its retained evidence name.
       // An unlinked descriptor is still readable, even if its name is reused.
-      const name = await readlink(`/proc/self/fd/${file.fd}`).catch(() => null);
-      if (name !== null) {
-        let path = name;
-        const deletedSuffix = " (deleted)";
-        if (name.endsWith(deletedSuffix)) {
-          // The suffix can also be literal. Only ascribe the former name to
-          // this descriptor when the displayed name does not identify it.
+      const name = await readlink(`/proc/self/fd/${file.fd}`).catch(
+        async (error: unknown) => {
           const opened = await file.stat({ bigint: true });
-          const named =
-            opened.nlink > 0n
-              ? await stat(name, { bigint: true }).catch(() => undefined)
-              : undefined;
-          if (named?.ino !== opened.ino || named.dev !== opened.dev)
-            path = name.slice(0, -deletedSuffix.length);
-        }
-        return { path, raw: await readScannerJson(file) };
+          if (opened.nlink === 0n)
+            throw new Error(
+              `Could not verify the unlinked Sonar capture's name: ${errorMessage(error)}. Select a named JSON file and retry.`,
+              { cause: error },
+            );
+          const path = await realpath(input);
+          const named = await stat(path, { bigint: true });
+          if (named.ino !== opened.ino || named.dev !== opened.dev)
+            throw new Error(
+              "The selected Sonar capture changed while being opened. Preview it again.",
+              { cause: error },
+            );
+          return path;
+        },
+      );
+      let path = name;
+      const deletedSuffix = " (deleted)";
+      if (name.endsWith(deletedSuffix)) {
+        // The suffix can also be literal. Only ascribe the former name to
+        // this descriptor when the displayed name does not identify it.
+        const opened = await file.stat({ bigint: true });
+        const named =
+          opened.nlink > 0n
+            ? await stat(name, { bigint: true }).catch(() => undefined)
+            : undefined;
+        if (named?.ino !== opened.ino || named.dev !== opened.dev)
+          path = name.slice(0, -deletedSuffix.length);
       }
-      if ((await file.stat()).nlink === 0)
-        return { path: input, raw: await readScannerJson(file) };
+      return { path, raw: await readScannerJson(file) };
     } finally {
       await file.close();
     }
@@ -209,6 +222,22 @@ export async function prepareSonarImport(
     });
   }
   const evidenceDigest = hash("sha256", JSON.stringify(report));
+  async function recoverLiveSelection(error: unknown): Promise<never> {
+    if (!input) {
+      // Keep the collected bytes replayable without marking them reviewed.
+      const recovery = join(root, `${evidenceDigest}.json`);
+      try {
+        await writeAtomicJson(recovery, report);
+      } catch (recoveryError) {
+        throw new Error(
+          `${errorMessage(error)}. Could not save the Sonar capture: ${errorMessage(recoveryError)}`,
+          { cause: error },
+        );
+      }
+      notify(() => dependencies.onCapture?.(recovery));
+    }
+    throw error;
+  }
   let checkout = hash("sha256", repository);
   let sourceRepositoryUrl = options.sourceRepositoryUrl;
   let fetchRemotes: ConfiguredFetchRemote[] | undefined;
@@ -226,15 +255,7 @@ export async function prepareSonarImport(
       protectedRoots,
       workbenchEnvironment(environment),
       signal,
-    ).catch(async (error: unknown) => {
-      // Preserve a completed live selection without marking it reviewed.
-      if (!input) {
-        const recovery = join(root, `${evidenceDigest}.json`);
-        await writeAtomicJson(recovery, report);
-        notify(() => dependencies.onCapture?.(recovery));
-      }
-      throw error;
-    });
+    ).catch(recoverLiveSelection);
     const mapped = hash(
       "sha256",
       canonicalJson([repository, repositoryUrlKey(mappedUrl), fetchRemotes]),
@@ -263,7 +284,8 @@ export async function prepareSonarImport(
     retained?.[2] === checkout
       ? input
       : localCapture;
-  if (capture !== input) await writeAtomicJson(capture, report);
+  if (capture !== input)
+    await writeAtomicJson(capture, report).catch(recoverLiveSelection);
   try {
     const repositoryUrl = report.repositoryUrl ?? options.sourceRepositoryUrl;
     if (!repositoryUrl) {
