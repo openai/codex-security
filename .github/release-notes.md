@@ -23,6 +23,7 @@
 - bump the codex group across 3 directories with 2 updates ([#2154](https://github.com/openai/codex-security/pull/2154))
 - keep whole characters when shortening publish progress ([#2158](https://github.com/openai/codex-security/pull/2158))
 - preserve local scan startup diagnostics ([#2115](https://github.com/openai/codex-security/pull/2115))
+- name the outermost rejected Windows ancestor ([#2065](https://github.com/openai/codex-security/pull/2065))
 
 <!-- release-section: highlights:end -->
 
