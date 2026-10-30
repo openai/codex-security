@@ -38,6 +38,10 @@ the selected scope for omitted fields and check supplied values against it.
 This endpoint excludes removed findings and Secrets. [Project API](https://docs.semgrep.dev/api-reference/v1/projectsservice/get-project-details)
 and [Findings API](https://docs.semgrep.dev/api-reference/v1/findingsservice/list-code-supply-chain-or-ai-powered-detection-findings).
 
+On HTTP 429, the collector retries the same GET once if `Retry-After` specifies
+a wait of 10 seconds or less, in whole seconds or as an HTTP date. Zero or a
+past date triggers an immediate retry. Cancellation stops the wait.
+
 The SDK exposes `collectSemgrepPlatformFindings` and
 `normalizeSemgrepPlatformFindings`. For a custom GitHub Enterprise host, pass
 `{ sourceRepositories: [{ url, platform: "github" }] }` as the second argument

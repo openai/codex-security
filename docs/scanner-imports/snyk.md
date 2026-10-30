@@ -67,6 +67,10 @@ to identify updates. Duplicate keys in one export are excluded. When preparing
 a REST export yourself, keep the UTC marker or offset in `updated_at` so replay
 uses the same timestamp in every time zone.
 
+On HTTP 429, the collector retries the same GET once if `Retry-After` specifies
+a wait of 10 seconds or less, in whole seconds or as an HTTP date. Zero or a
+past date triggers an immediate retry. Cancellation stops the wait.
+
 Native evidence retains issue status, ignored state and coordinates. Package
 versions or Code locations are projected only when the issue and coordinate
 are both open. Code regions retain Snyk's original line numbering. Missing

@@ -34,7 +34,7 @@ function collectPages(...pages: unknown[]) {
   });
 }
 
-test("collects consecutive authenticated pages for exactly one project, ref and product", async () => {
+test("retries the throttled page for the selected Semgrep project, ref and product", async () => {
   const pages: string[] = [];
   const name = "https://example.test/monorepo/.";
   const selection = {
@@ -50,6 +50,7 @@ test("collects consecutive authenticated pages for exactly one project, ref and 
         "Bearer synthetic-web-token",
       );
       expect(init.redirect).toBe("error");
+      expect(init.method).toBe("GET");
       if (url.pathname.includes("/projects/")) {
         expect(url.pathname).toBe(
           `/api/v1/deployments/example/projects/${encodeURIComponent(name)}`,
@@ -66,13 +67,18 @@ test("collects consecutive authenticated pages for exactly one project, ref and 
         page_size: "3000",
       });
       pages.push(query["page"]!);
+      if (pages.length === 2)
+        return new Response("try again", {
+          status: 429,
+          headers: { "Retry-After": "0" },
+        });
       return Response.json({
         findings: query["page"] === "0" ? first : [{ id: first.length + 1 }],
       });
     },
   });
-  expect(pages).toEqual(["0", "1", "0"]);
-  expect(report.findings).toHaveLength(first.length + 1);
+  expect(pages).toEqual(["0", "1", "1", "0"]);
+  expect(report.findings).toEqual([...first, { id: first.length + 1 }]);
   expect(JSON.stringify(report)).not.toContain("synthetic-web-token");
 });
 
@@ -205,6 +211,11 @@ test("fails before acquisition without opt-in, honors cancellation, and never re
       error,
     );
   }
+  const limited = () =>
+    new Response("try later", { status: 429, headers: { "Retry-After": "0" } });
+  await expect(
+    collectPages({ findings: first }, limited(), limited()),
+  ).rejects.toThrow("Retry-After: 0: try later");
 });
 
 test("detects removals before the next offset even when no finding ID repeats", async () => {
