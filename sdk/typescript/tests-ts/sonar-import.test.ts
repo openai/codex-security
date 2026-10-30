@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import {
   chmod,
   copyFile,
+  link,
   mkdir,
   open,
   readFile,
@@ -124,7 +125,11 @@ test.skipIf(process.platform !== "linux")(
     const { options, deps } = await fixture(directory.path);
     const file = await open(options.capture, "r");
     try {
+      await link(options.capture, join(directory.path, "other-link.json"));
       await rm(options.capture);
+      const unrelated = join(directory.path, "unrelated.json");
+      await writeFile(unrelated, "unrelated contents");
+      await symlink(unrelated, `${options.capture} (deleted)`);
       const preview = await prepareSonarImport(
         { ...options, to: "local", capture: `/proc/self/fd/${file.fd}` },
         deps,

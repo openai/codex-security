@@ -30,7 +30,11 @@ import {
   requireOutputOutsideRepositories,
   workbenchEnvironment,
 } from "./runtime.js";
-import { gitMarkerRoot, normalizeRepository } from "./targets.js";
+import {
+  gitMarkerRoot,
+  normalizeRepository,
+  nullIfMissingPath,
+} from "./targets.js";
 import { errorMessage } from "./errors.js";
 import { canonicalJson } from "./record.js";
 import {
@@ -79,6 +83,23 @@ function cloudReviewDigest(
   );
 }
 
+async function captureReadPath(input: string): Promise<string> {
+  const selected = await stat(input, { bigint: true });
+  if (!selected.isFile()) return input;
+  const target = await realpath(input).catch(nullIfMissingPath);
+  if (!target || target === input) return input;
+  // A kernel descriptor can resolve to a display name that no longer names
+  // its inode. Ordinary symlinks must be read through the verified target.
+  const named = await stat(target, { bigint: true }).catch(nullIfMissingPath);
+  if (!named) return input;
+  if (named.ino === selected.ino && named.dev === selected.dev) return target;
+  // If the input moved during resolution, keep the target we just resolved.
+  const current = await stat(input, { bigint: true });
+  return current.ino === selected.ino && current.dev === selected.dev
+    ? input
+    : target;
+}
+
 export async function prepareSonarImport(
   options: SonarImportOptions,
   dependencies: ExternalPublicationDependencies & {
@@ -109,11 +130,7 @@ export async function prepareSonarImport(
   const input =
     selectedPath &&
     join(await realpath(dirname(selectedPath)), basename(selectedPath));
-  // An unlinked file is readable through its descriptor alone. For named files,
-  // read the same resolved target whose retained evidence digest we check.
-  const stats = input ? await stat(input) : undefined;
-  const sourcePath =
-    input && stats?.isFile() && stats.nlink > 0 ? await realpath(input) : input;
+  const sourcePath = input && (await captureReadPath(input));
   const raw = sourcePath
     ? await readScannerJson(sourcePath)
     : await (dependencies.collect ?? collectSonarIssues)({
