@@ -7,7 +7,7 @@ import {
 import type { ExternalPublicationOptions } from "../src/external-findings-publish.js";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { devNull, tmpdir } from "node:os";
 import { join } from "node:path";
 
 /** Real Git checkout and separate state, shared by normalized and vendor import tests. */
@@ -70,6 +70,26 @@ export async function localReportFixture(
       ),
     read: () => listLocalExternalFindings(options, dependencies),
   };
+}
+
+export function isolatedGitReportFixture(
+  filename: string,
+  source: Omit<ExternalPublicationOptions, "repository">,
+  checkout: Checkout = {},
+) {
+  const environment = Object.fromEntries(
+    Object.entries(checkout.environment ?? process.env).filter(
+      ([key]) => !key.toUpperCase().startsWith("GIT_"),
+    ),
+  );
+  return localReportFixture(filename, source, {
+    ...checkout,
+    environment: {
+      ...environment,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: devNull,
+    },
+  });
 }
 
 type LocalReportFixture = Awaited<ReturnType<typeof localReportFixture>>;

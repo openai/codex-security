@@ -41,6 +41,7 @@ export async function prepareLocalExternalImport(
   let sourceRepositories = parsed.sourceRepositories ?? [];
   if (
     normalizedOptions.provider === "semgrep" &&
+    parsed.sourceRepositories &&
     settings.sourceRepositoryUrl
   ) {
     // The Cloud reader allows custom GitHub casing. Local provenance must also

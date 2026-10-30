@@ -2,8 +2,11 @@ import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { isNumberObject } from "node:util/types";
 import {
+  semgrepLegacyRepositoryWitnesses,
+  semgrepPlatformFindingBinding,
+  semgrepPlatformReportRepository,
+  semgrepPlatformRepositoryReference,
   semgrepReferenceMatches,
-  semgrepSelectionRepository,
 } from "./semgrep-platform-findings.js";
 import { hostedRepositoryMatches } from "./hosted-git-repository.js";
 import { readHostedGitRemotes } from "./hosted-git-remotes.js";
@@ -764,16 +767,44 @@ export async function prepareLocalImport(
   }
   const strictSources = new Map<string, Provider>();
   const hostedSources = new Map<string, ExternalSourceRepository>();
+  const semgrepPlatformRepositoryUrl = semgrepPlatformReportRepository(current);
+  function addSemgrepSource(url: string) {
+    if (options.provider !== "semgrep")
+      throw new CodexSecurityError(
+        "Use the semgrep provider for Semgrep Platform findings.",
+      );
+    const source = semgrepPlatformRepositoryReference(url, readerSources);
+    if (
+      semgrepPlatformRepositoryUrl &&
+      semgrepPlatformRepositoryUrl !== url &&
+      !semgrepReferenceMatches(source, semgrepPlatformRepositoryUrl)
+    )
+      throw new CodexSecurityError(
+        "The Semgrep report repository does not match the native finding's project.",
+      );
+    sources.set(source.url, source);
+    hostedSources.set(source.url, source);
+  }
+  if (semgrepPlatformRepositoryUrl)
+    addSemgrepSource(semgrepPlatformRepositoryUrl);
   const known = new Set<string>(parsedSources.map(({ url }) => url));
+  const legacyWitnesses = semgrepLegacyRepositoryWitnesses(
+    current.findings,
+    options.provider,
+    readerSources,
+  );
   let hasOrdinaryRows = false;
   for (const finding of current.findings) {
-    const semgrep = semgrepSelectionRepository(finding, readerSources);
-    if (semgrep && options.provider !== "semgrep")
-      throw new CodexSecurityError(
-        "Use the semgrep provider for Semgrep Platform selections.",
-      );
-    if (semgrep) hostedSources.set(semgrep.url, semgrep);
-    else hasOrdinaryRows = true;
+    const semgrep = semgrepPlatformFindingBinding(
+      finding,
+      options.provider,
+      readerSources,
+      legacyWitnesses,
+    );
+    if (semgrep) {
+      addSemgrepSource(semgrep.url);
+      if (semgrep.sourceData) finding.evidence.source_data = semgrep.sourceData;
+    } else hasOrdinaryRows = true;
     const { evidence, source_finding_id: id } = finding;
     const url = evidence.details?.repository?.url;
     // A selected row's projected URL was already verified against its hosted source.

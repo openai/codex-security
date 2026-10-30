@@ -1,4 +1,4 @@
-# Import Semgrep Code findings
+# Import Semgrep findings
 
 Vendor finding import and readback require `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`.
 See the [opt-in instructions](../../sdk/typescript/docs/cli.md#import-vendor-findings-locally)
@@ -117,6 +117,53 @@ When passing normalized findings to the SDK, keep each generated Semgrep
 caller-managed identity, use an opaque ID of your own. The generated Semgrep ID
 requires the original scoped evidence on every import.
 
+## Collect a Platform project and branch
+
+With a Web API token in `SEMGREP_APP_TOKEN`, collect all findings returned for a
+project, exact ref and product. The collector looks up the project ID, requests
+every page with server-side deduplication disabled, and stops on a failed or
+overlapping page. Offset pagination does not provide a point-in-time snapshot.
+For a multi-page result the collector also checks whether the first page's
+membership has changed. Retry the collection if it reports a change.
+
+A finding that identifies its repository only by name can use the project name,
+the Git URL path, or the final path component of either. For any other name,
+at least one finding in the collection must pair that name with the project's
+repository ID or a matching repository URL. That finding can appear on any
+page. Collection fails if the name has no such match. When one finding proves another
+finding’s alias, the importer saves the verified label and resolved project ID in
+`source_data.repositoryWitnessJson` on the name-only finding. The proving finding
+retains its original repository fields in `source_data.semgrepPlatformFindingJson`.
+
+SDK callers can pass a verified GitHub Enterprise repository as
+`sourceRepositories: [{ url, platform: "github" }]` to
+`collectSemgrepPlatformFindings` and the local reader. The reference must match
+the selected project. It allows equivalent GitHub path casing, `.git` suffixes
+and supported SSH URLs on that host.
+
+Run the following commands from a trusted working directory outside the project
+checkout. Each collection gets a new owner-only file. A failed collection
+leaves earlier exports available for replay.
+
+```sh
+export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
+report=$(mktemp ./semgrep-backlog.XXXXXX) &&
+  codex-security import semgrep example/project --semgrep-deployment example \
+    --semgrep-ref refs/heads/topic --semgrep-product sast --format json > "$report" &&
+  codex-security publish findings "$report" --to local --repository /path/to/project \
+    --provider semgrep --source-key example/project/topic --dry-run --format json
+```
+
+Use `--semgrep-product sca` for Supply Chain or `ai_sast` for AI-powered
+detection. The default is `sast`. Use `--source-repository-url` on collection
+when the project has no repository URL. Save the complete output from a successful
+command; the local importer checks the recorded finding count and repository/ref
+claims. It retains each original finding as JSON text so large IDs survive replay. The reader also accepts saved v1 project exports with native object rows and decimal type witnesses.
+Supply Chain findings include native package versions, matching fix recommendations
+and advisory IDs when Semgrep supplies them. With the same source key, importing identical Code findings that qualify for individual
+selection reports them as unchanged when switching between a selection and a full collection.
+See the [Semgrep Findings API](https://docs.semgrep.dev/api-reference/v1/findingsservice/list-code-supply-chain-or-ai-powered-detection-findings).
+
 ## Evidence and identity
 
 JSON preserves original severity, rule, CWE IDs, source range, snippets when
@@ -144,7 +191,7 @@ Read back both with `codex-security findings imported . --format json` before
 selecting evidence for assessment. A current checkout does not establish the
 report's revision or branch.
 
-The adapter accepts SAST only. Select SAST rules or a Code-only CI scan, since
+The CLI/CI and SARIF readers accept SAST only. Select SAST rules or a Code-only CI scan, since
 SARIF may omit enough product metadata to distinguish Secrets. Identifiable
 Supply Chain and Secrets records are excluded. Reports with scan errors,
 unsuccessful SARIF invocations or scan-error notifications are rejected. The

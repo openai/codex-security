@@ -8,6 +8,7 @@ import type { Provider } from "./external-import-models.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
 import { readSemgrepFindings } from "./semgrep-findings.js";
+import { semgrepPlatformReportRepository } from "./semgrep-platform-findings.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
@@ -114,11 +115,12 @@ export async function readExternalFindings(
     const findings = await readSemgrepFindings(
       path,
       {
-        sourceRepositoryUrl: options.sourceRepositoryUrl ?? "",
+        sourceRepositoryUrl: options.sourceRepositoryUrl,
         sourceRepositories: references,
       },
       target,
     );
+    if (semgrepPlatformReportRepository(findings)) return { findings };
     const sourceRepositories = findings.findings.flatMap(({ evidence }) => {
       const context = evidence.source_data?.["runContext"];
       const references = isRecord(context)
