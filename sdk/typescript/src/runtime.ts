@@ -290,8 +290,13 @@ export async function prepareCodexSecurityCredentialHome(
     return canonical;
   } catch (error) {
     if (error instanceof OutputDirectoryError) throw error;
+    const code = nodeErrorCode(error);
+    const recovery =
+      code === "EACCES" || code === "EPERM" || code === "EROFS"
+        ? "\nCheck permissions or set CODEX_SECURITY_STATE_DIR to a private, writable directory outside the repository."
+        : "";
     throw new OutputDirectoryError(
-      `Unable to prepare the Codex Security credential home: ${path}`,
+      `Unable to prepare the Codex Security credential home: ${path}\n${errorMessage(error)}${recovery}`,
       { cause: error },
     );
   }
@@ -3338,8 +3343,12 @@ export async function probeCodexSandbox(
     signal?.throwIfAborted();
     detail = processErrorDetail(error);
   }
+  const guidance =
+    process.platform === "linux"
+      ? "\nOn Linux this usually means unprivileged user namespaces are restricted (kernel.apparmor_restrict_unprivileged_userns=1 on Ubuntu 24.04 and later), which Bubblewrap needs; inside the container image, use the AppArmor profile and Compose override from the SDK README."
+      : "";
   throw new SandboxUnavailableError(
-    `Codex could not run a command in its sandbox; reproduce with '${command.command} ${args.join(" ")}'. On Linux this usually means unprivileged user namespaces are restricted (kernel.apparmor_restrict_unprivileged_userns=1 on Ubuntu 24.04 and later), which Bubblewrap needs; inside the container image, use the AppArmor profile and Compose override from the SDK README. Codex reported: ${detail}`,
+    `Codex could not run a command in its sandbox: ${detail}\nTo reproduce, run '${command.command} ${args.join(" ")}'.${guidance}`,
   );
 }
 

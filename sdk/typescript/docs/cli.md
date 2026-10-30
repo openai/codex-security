@@ -986,6 +986,15 @@ Finish older-version operations before upgrading. Never remove
 `.codex-security-scan.sqlite3` during an operation. Stop all operations using the
 credential home before manually removing an old `.codex-security-scan.lock`.
 
+If credential-home preparation fails, the error includes the underlying
+filesystem diagnostic. For permission or read-only filesystem errors, check
+the reported path or set `CODEX_SECURITY_STATE_DIR` to a private, writable
+directory outside the repository. A new state directory has separate history
+and does not migrate existing credentials or reports.
+
+Sandbox startup errors include the native diagnostic followed by a command to
+reproduce it. Linux namespace and AppArmor guidance appears only on Linux.
+
 On Windows, credential-home checks require trusted ownership and permissions
 through every ancestor, including the volume root. Codex Security can repair
 the credential home and its descendants; it does not change ancestor ownership

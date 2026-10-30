@@ -2948,6 +2948,43 @@ for await (const line of createInterface({ input: process.stdin })) {
 });
 
 describe("runtime directories and plugin Python boundary", () => {
+  test.each([
+    ["EACCES", "permission denied", true],
+    ["EPERM", "operation not permitted", true],
+    ["EROFS", "read-only file system", true],
+    ["ENOSPC", "no space left on device", false],
+  ] as const)(
+    "preserves %s credential-home failures with relevant recovery advice",
+    async (code, detail, permissionFailure) => {
+      const root = await temporaryDirectory();
+      const environment = { CODEX_SECURITY_STATE_DIR: join(root, "state") };
+      const home = codexSecurityCredentialHome(environment);
+      const cause = Object.assign(
+        new Error(`${code}: ${detail}, mkdir '${home}'`),
+        { code },
+      );
+      const createDirectory = spyOn(fsPromises, "mkdir").mockRejectedValue(
+        cause,
+      );
+      try {
+        const failure = await prepareCodexSecurityCredentialHome(
+          environment,
+        ).then(
+          () => null,
+          (error: Error) => error,
+        );
+        expect(failure?.name).toBe("OutputDirectoryError");
+        expect(failure?.message).toContain(cause.message);
+        expect(failure?.cause).toBe(cause);
+        expect(failure?.message.includes("CODEX_SECURITY_STATE_DIR")).toBe(
+          permissionFailure,
+        );
+      } finally {
+        createDirectory.mockRestore();
+      }
+    },
+  );
+
   test("prepares one private, reusable managed-credential home", async () => {
     const root = await temporaryDirectory();
     const environment = { CODEX_SECURITY_STATE_DIR: join(root, "state") };
