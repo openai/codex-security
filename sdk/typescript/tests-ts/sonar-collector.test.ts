@@ -447,12 +447,54 @@ test("automatic discovery rejects a forged Git pointer but accepts a registered 
   );
   const linked = join(root, "linked");
   git("-C", cwd, "worktree", "add", "--quiet", "--detach", linked);
+  git(
+    "-C",
+    cwd,
+    "remote",
+    "set-url",
+    "--add",
+    "origin",
+    repositoryUrl + "-mirror",
+  );
   const capture = await collectSonarIssues(
     { cwd: linked, environment },
     session.run,
   );
   expect(capture).toMatchObject({ project, repositoryUrl });
   expect(session.queries).toHaveLength(1);
+});
+
+test("automatic discovery uses only the rewritten primary fetch URL of origin", async () => {
+  const cwd = await checkout();
+  git("-C", cwd, "config", `url.${repositoryUrl}.insteadOf`, "source:service");
+  git("-C", cwd, "remote", "set-url", "origin", "source:service.git");
+  git(
+    "-C",
+    cwd,
+    "remote",
+    "set-url",
+    "--add",
+    "origin",
+    repositoryUrl + "-mirror",
+  );
+  const session = sonarSession({ pages: [page("A")] });
+  const capture = await collectSonarIssues({ cwd, environment }, session.run);
+  expect(capture).toMatchObject({ project, repositoryUrl });
+
+  git(
+    "-C",
+    cwd,
+    "config",
+    "--replace-all",
+    "remote.origin.url",
+    "unsupported::service",
+    "^source:",
+  );
+  const rejected = sonarSession({ pages: [] });
+  await expect(
+    collectSonarIssues({ cwd, environment }, rejected.run),
+  ).rejects.toThrow("--sonar-project");
+  expect(rejected.commands).toEqual([]);
 });
 
 test("uses the explicit project in token-only sessions and claims only a matching binding", async () => {

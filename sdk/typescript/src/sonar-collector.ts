@@ -110,7 +110,7 @@ async function checkoutOrigin(
       return;
     const origin = await gitOutput(
       options.cwd,
-      ["remote", "get-url", "--all", "--", "origin"],
+      ["remote", "get-url", "--", "origin"],
       options.signal,
       undefined,
       undefined,
