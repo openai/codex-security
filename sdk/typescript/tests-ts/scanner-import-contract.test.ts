@@ -140,107 +140,100 @@ test.each(cases)(
 );
 
 test("overlapping vendor IDs and advisories stay distinct on SQLite replay", async () => {
-  const fixture = await localFindingsFixture({ remote: repositoryUrl });
-  try {
-    const { repository, environment } = fixture;
-    const sourceKey = "example/project/main";
-    const ingest = async (provider: Provider, report: unknown) => {
-      const path = join(fixture.root, `${provider}.json`);
-      await writeFile(path, JSON.stringify(report));
-      const prepared = await prepareLocalExternalImport(
-        path,
-        { repository, sourceKey, ...readerOptions(provider) },
-        { environment },
-      );
-      expect(prepared.preview.excluded).toEqual([]);
-      return (await prepared.import()).counts;
-    };
-    const read = () =>
-      listLocalExternalFindings({ repository }, { environment });
-    for (const { provider, report } of cases)
-      expect(await ingest(provider, report)).toEqual({
-        created: 1,
-        updated: 0,
-        unchanged: 0,
-      });
+  await using fixture = await localFindingsFixture({ remote: repositoryUrl });
+  const { repository, environment } = fixture;
+  const sourceKey = "example/project/main";
+  const ingest = async (provider: Provider, report: unknown) => {
+    const path = join(fixture.root, `${provider}.json`);
+    await writeFile(path, JSON.stringify(report));
+    const prepared = await prepareLocalExternalImport(
+      path,
+      { repository, sourceKey, ...readerOptions(provider) },
+      { environment },
+    );
+    expect(prepared.preview.excluded).toEqual([]);
+    return (await prepared.import()).counts;
+  };
+  const read = () => listLocalExternalFindings({ repository }, { environment });
+  for (const { provider, report } of cases)
+    expect(await ingest(provider, report)).toEqual({
+      created: 1,
+      updated: 0,
+      unchanged: 0,
+    });
 
-    const stored = await read();
-    expect(stored).toHaveLength(cases.length);
-    for (const { provider, sourceFindingId, evidence, report } of cases) {
-      expect(
-        stored.find((record) => record.provider === provider),
-      ).toMatchObject({
+  const stored = await read();
+  expect(stored).toHaveLength(cases.length);
+  for (const { provider, sourceFindingId, evidence, report } of cases) {
+    expect(stored.find((record) => record.provider === provider)).toMatchObject(
+      {
         sourceKey,
         sourceFindingId,
         version: 1,
         assessment: { state: "not_assessed" },
         evidence,
-      });
-      expect(await ingest(provider, report)).toEqual({
-        created: 0,
-        updated: 0,
-        unchanged: 1,
-      });
-    }
-    expect(await read()).toEqual(stored);
-
-    const sarif = semgrepSarif();
-    const region =
-      sarif.runs[0]!.results[0]!.locations[0]!.physicalLocation.region;
-    region.startLine = region.endLine = 27;
-    expect(await ingest("semgrep", sarif)).toEqual({
-      created: 0,
-      updated: 1,
-      unchanged: 0,
-    });
-    const after = await read();
-    expect(after).toHaveLength(stored.length);
-    const changed = after.find((record) => record.provider === "semgrep");
-    expect(changed).toMatchObject({
-      id: stored.find((record) => record.provider === "semgrep")!.id,
-      sourceFindingId: semgrepId,
-      version: 2,
-      assessment: { state: "not_assessed" },
-      evidence: {
-        severity: "high",
-        locations: [{ path: "src/example.ts", line: 27 }],
-        details: { kind: "sast", source_status: "suppressed" },
-        source_data: {
-          result: { codeFlows: [{ message: { text: "Synthetic dataflow" } }] },
-        },
       },
-    });
-    expect(changed!.evidence.source_data?.["result"]).not.toHaveProperty(
-      "extra",
     );
-    expect(after.filter((record) => record.provider !== "semgrep")).toEqual(
-      stored.filter((record) => record.provider !== "semgrep"),
-    );
-
-    expect(await ingest("endor", endorSarif())).toEqual({
+    expect(await ingest(provider, report)).toEqual({
       created: 0,
-      updated: 1,
-      unchanged: 0,
+      updated: 0,
+      unchanged: 1,
     });
-    const overlapping = (await read()).filter(
-      (record) => record.sourceFindingId === "finding-example-1",
-    );
-    expect(overlapping).toHaveLength(2);
-    expect(
-      overlapping.find((record) => record.provider === "endor"),
-    ).toMatchObject({
-      id: stored.find((record) => record.provider === "endor")!.id,
-      version: 2,
-      evidence: {
-        severity: "unknown",
-        packages: [],
-        source_data: { result: { properties: { "cvss-score": 9.8 } } },
-      },
-    });
-    expect(overlapping.find((record) => record.provider === "wiz")).toEqual(
-      stored.find((record) => record.provider === "wiz"),
-    );
-  } finally {
-    await fixture.dispose();
   }
+  expect(await read()).toEqual(stored);
+
+  const sarif = semgrepSarif();
+  const region =
+    sarif.runs[0]!.results[0]!.locations[0]!.physicalLocation.region;
+  region.startLine = region.endLine = 27;
+  expect(await ingest("semgrep", sarif)).toEqual({
+    created: 0,
+    updated: 1,
+    unchanged: 0,
+  });
+  const after = await read();
+  expect(after).toHaveLength(stored.length);
+  const changed = after.find((record) => record.provider === "semgrep");
+  expect(changed).toMatchObject({
+    id: stored.find((record) => record.provider === "semgrep")!.id,
+    sourceFindingId: semgrepId,
+    version: 2,
+    assessment: { state: "not_assessed" },
+    evidence: {
+      severity: "high",
+      locations: [{ path: "src/example.ts", line: 27 }],
+      details: { kind: "sast", source_status: "suppressed" },
+      source_data: {
+        result: { codeFlows: [{ message: { text: "Synthetic dataflow" } }] },
+      },
+    },
+  });
+  expect(changed!.evidence.source_data?.["result"]).not.toHaveProperty("extra");
+  expect(after.filter((record) => record.provider !== "semgrep")).toEqual(
+    stored.filter((record) => record.provider !== "semgrep"),
+  );
+
+  expect(await ingest("endor", endorSarif())).toEqual({
+    created: 0,
+    updated: 1,
+    unchanged: 0,
+  });
+  const overlapping = (await read()).filter(
+    (record) => record.sourceFindingId === "finding-example-1",
+  );
+  expect(overlapping).toHaveLength(2);
+  expect(
+    overlapping.find((record) => record.provider === "endor"),
+  ).toMatchObject({
+    id: stored.find((record) => record.provider === "endor")!.id,
+    version: 2,
+    evidence: {
+      severity: "unknown",
+      packages: [],
+      source_data: { result: { properties: { "cvss-score": 9.8 } } },
+    },
+  });
+  expect(overlapping.find((record) => record.provider === "wiz")).toEqual(
+    stored.find((record) => record.provider === "wiz"),
+  );
 });

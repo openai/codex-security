@@ -190,8 +190,8 @@ For failure or an inconclusive review, send an explicit error:
 }
 ```
 
-A host error ends the review without another submission. Invalid model
-answers, missing decisions, and host errors make the whole batch unresolved;
+A host error ends the review without another submission. Invalid final model
+answers, missing final decisions, and host errors make the whole batch unresolved;
 previous successful reviews in that run do not become persistence decisions.
 The existing algorithm treats a validated `DISTINCT` as a nonmatch, when
 supplied finding content is insufficient to establish a shared correction. If the host considers the review
@@ -213,9 +213,22 @@ fresh JSON-RPC ID and `params: {requestId, prompt}`. The request ID in the
 parameters identifies the original review. Submit the prompt in the same
 session and reply on the new JSON-RPC ID. The correction omits
 `supportsContinuation`, so the host releases the session after that turn. A second missing submission ends
-the review as unresolved. A pending tool call uses the original turn and
-requires no correction. An uncertain outcome or explicit blocker follows the
+the review as unresolved. A pending tool call stays in the original turn.
+An uncertain outcome or explicit blocker follows the
 existing error path. Hosts without continuation support can ignore the field.
+
+When `review.run` also advertises `supportsSubmissionValidation: true`, a host
+can keep a pending decision tool call open by adding `reviewPending: true` to
+the JSON-RPC reply envelope, alongside `id` and `result`. Put the raw tool
+arguments in `result`; only the host sets the envelope flag. The CLI checks
+the arguments against the original assignment. If valid, it sends
+`review.release` with `{requestId}`. Release the session and reply
+`{"status":"released"}` only after cleanup succeeds. If invalid, the CLI sends
+`review.continue` with the validation error. Return that prompt to the pending
+tool call in the same session. Release the session and reply with the corrected
+decision. The CLI validates this final answer and allows no further correction.
+Either follow-up uses a fresh JSON-RPC ID. A host that has already closed the
+session returns its ordinary final answer as before.
 
 ## Final response and persistence
 

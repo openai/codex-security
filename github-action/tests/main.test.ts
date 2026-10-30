@@ -377,6 +377,13 @@ for (const scenario of ['schedule', 'pr'] as const) {
   });
 }
 
+test('missing RUNNER_TEMP fails with setup guidance', async (t) => {
+  const app = await harness(t); delete process.env.RUNNER_TEMP;
+  const result = await app.run();
+  assert.equal(result.exitCode, 1); assert.equal(result.setups, 0); assert.equal(result.processes, 0);
+  assert.match(result.summary, /RUNNER_TEMP is required\./);
+});
+
 test('cleanup failure fails the job and appears in the summary and final error', async (t) => {
   const app = await harness(t); app.configure({cleanupFails: true});
   const result = await app.run();

@@ -88,8 +88,8 @@ import {
   environmentWithGit,
   requirePrivateCredentialHome,
   requirePrivateCredentialFile,
-  requirePrivateOutputDirectory,
-  requirePrivatePolicyOutputDirectory,
+  requireOutputDirectoryOwnership,
+  preparePolicyOutputDirectory,
   requireSecureCredentialHome,
   requireSecureOutputAncestry,
   requireTrustedOutputAncestor,
@@ -2948,6 +2948,43 @@ for await (const line of createInterface({ input: process.stdin })) {
 });
 
 describe("runtime directories and plugin Python boundary", () => {
+  test.each([
+    ["EACCES", "permission denied", true],
+    ["EPERM", "operation not permitted", true],
+    ["EROFS", "read-only file system", true],
+    ["ENOSPC", "no space left on device", false],
+  ] as const)(
+    "preserves %s credential-home failures with relevant recovery advice",
+    async (code, detail, permissionFailure) => {
+      const root = await temporaryDirectory();
+      const environment = { CODEX_SECURITY_STATE_DIR: join(root, "state") };
+      const home = codexSecurityCredentialHome(environment);
+      const cause = Object.assign(
+        new Error(`${code}: ${detail}, mkdir '${home}'`),
+        { code },
+      );
+      const createDirectory = spyOn(fsPromises, "mkdir").mockRejectedValue(
+        cause,
+      );
+      try {
+        const failure = await prepareCodexSecurityCredentialHome(
+          environment,
+        ).then(
+          () => null,
+          (error: Error) => error,
+        );
+        expect(failure?.name).toBe("OutputDirectoryError");
+        expect(failure?.message).toContain(cause.message);
+        expect(failure?.cause).toBe(cause);
+        expect(failure?.message.includes("CODEX_SECURITY_STATE_DIR")).toBe(
+          permissionFailure,
+        );
+      } finally {
+        createDirectory.mockRestore();
+      }
+    },
+  );
+
   test("prepares one private, reusable managed-credential home", async () => {
     const root = await temporaryDirectory();
     const environment = { CODEX_SECURITY_STATE_DIR: join(root, "state") };
@@ -3510,13 +3547,13 @@ describe("runtime directories and plugin Python boundary", () => {
     for (const [description, secure] of [
       [
         "credential home",
-        (options: Parameters<typeof requirePrivatePolicyOutputDirectory>[1]) =>
+        (options: Parameters<typeof preparePolicyOutputDirectory>[1]) =>
           requirePrivateCredentialHome(metadata, home, options),
       ],
       [
         "policy output directory",
-        (options: Parameters<typeof requirePrivatePolicyOutputDirectory>[1]) =>
-          requirePrivatePolicyOutputDirectory(home, options),
+        (options: Parameters<typeof preparePolicyOutputDirectory>[1]) =>
+          preparePolicyOutputDirectory(home, options),
       ],
     ] as const) {
       await secure({
@@ -4698,7 +4735,7 @@ describe("runtime directories and plugin Python boundary", () => {
         "*S-1-1-0:(OI)(CI)R",
       ]);
       expect(grant.status, grant.stderr).toBe(0);
-      await requirePrivatePolicyOutputDirectory(output);
+      await preparePolicyOutputDirectory(output);
       const draft = join(output, "THREAT_MODEL.md");
       await writeFile(draft, "Synthetic private draft\n");
       const descriptor = inspectWindowsTestAcl(
@@ -5754,20 +5791,12 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
-  testPosix("rejects private output directories owned by another user", () => {
+  testPosix("rejects output directories owned by another user", () => {
     expect(() =>
-      requirePrivateOutputDirectory(
-        { mode: 0o40700, uid: 1001 },
-        "/scan",
-        1000,
-      ),
+      requireOutputDirectoryOwnership({ uid: 1001 }, "/scan", 1000),
     ).toThrow("must be owned by the current user");
     expect(() =>
-      requirePrivateOutputDirectory(
-        { mode: 0o40700, uid: 1000 },
-        "/scan",
-        1000,
-      ),
+      requireOutputDirectoryOwnership({ uid: 1000 }, "/scan", 1000),
     ).not.toThrow();
   });
 
@@ -5845,7 +5874,7 @@ describe("runtime directories and plugin Python boundary", () => {
     ).not.toThrow();
   });
 
-  test("prepares a private output directory without moving prior results", async () => {
+  test("prepares an output directory without moving prior results", async () => {
     const root = await temporaryDirectory();
     const output = join(root, "scan");
     await mkdir(output, { mode: 0o700 });
@@ -5885,10 +5914,17 @@ describe("runtime directories and plugin Python boundary", () => {
       );
 
       await chmod(output, 0o770);
-      await expect(validateOutputDir(output, true)).rejects.toThrow(
-        "must not be accessible to other users",
-      );
-      await chmod(output, 0o700);
+      expect(await validateOutputDir(output, true)).toBe(output);
+      expect(
+        await prepareScanRegistrationOutput(
+          output,
+          "repo",
+          undefined,
+          undefined,
+          true,
+        ),
+      ).toBe(output);
+      expect((await stat(output)).mode & 0o777).toBe(0o770);
     }
 
     expect(await planOutputArchive(output)).not.toBeNull();
@@ -6048,18 +6084,13 @@ describe("runtime directories and plugin Python boundary", () => {
     if (process.platform !== "win32") {
       const callerOwned = join(root, "caller-owned");
       await mkdir(callerOwned, { mode: 0o700 });
-      for (const mode of [0o770, 0o777]) {
+      for (const mode of [0o700, 0o755, 0o770, 0o775, 0o777]) {
         await chmod(callerOwned, mode);
-        await expect(validateOutputDir(callerOwned)).rejects.toThrow(
-          "must not be accessible to other users",
-        );
-        await expect(prepareOutputDir(callerOwned, "repo")).rejects.toThrow(
-          "must not be accessible to other users",
-        );
+        expect(await validateOutputDir(callerOwned)).toBe(callerOwned);
+        expect(await prepareOutputDir(callerOwned, "repo")).toBe(callerOwned);
+        await preparePolicyOutputDirectory(callerOwned);
+        expect((await stat(callerOwned)).mode & 0o777).toBe(mode);
       }
-      await chmod(callerOwned, 0o700);
-      expect(await prepareOutputDir(callerOwned, "repo")).toBe(callerOwned);
-      expect((await stat(callerOwned)).mode & 0o777).toBe(0o700);
     }
     if (process.platform !== "win32") {
       const filesystemChild = join(

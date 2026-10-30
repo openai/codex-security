@@ -45,6 +45,8 @@ const automationScript = new URL(
 const releaseCommit = "1e03c89ad22d2df5ae65b146be1483b3608572a9";
 const releaseRun = "30481596229";
 const releaseRepository = "openai/codex-security";
+const combinedPublisher = "Publish npm and container images";
+const recoveryPublisher = "Verify existing npm release";
 const releaseWorkflowTimeout = process.platform === "win32" ? 20_000 : 10_000;
 
 const directories = createTemporaryDirectoriesSync();
@@ -494,6 +496,7 @@ type WorkflowContract = {
   jobs: Record<
     string,
     {
+      name?: string;
       permissions?: Record<string, string>;
       env?: Record<string, string>;
       needs?: string | string[];
@@ -565,10 +568,10 @@ gh() {
       printf '%s\n' "$MOCK_BRANCH_SHA"
       ;;
     "repos/test/codex-security/actions/runs/$INPUT_RUN_ID")
-      [[ "$4" == '[.name, .status, (.conclusion // "pending"), .head_sha, .head_branch] | @tsv' ]] || return 65
+      [[ "$4" == '[.path, .event, .status, (.conclusion // "pending"), .head_sha, .head_branch] | @tsv' ]] || return 65
       local conclusion=pending
       if [[ "$MOCK_RUN_STATUS" == completed ]]; then conclusion=success; fi
-      printf '%s\t%s\t%s\t%s\t%s\n' node-release "$MOCK_RUN_STATUS" "$conclusion" "$MOCK_RUN_SHA" npm-v0.1.2
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$MOCK_WORKFLOW_PATH" "$MOCK_RUN_EVENT" "$MOCK_RUN_STATUS" "$conclusion" "$MOCK_RUN_SHA" npm-v0.1.2
       ;;
     *) return 65 ;;
   esac
@@ -582,9 +585,12 @@ ${script}`,
       MOCK_TAG_TYPE: "commit",
       MOCK_TAG_OBJECT: releaseCommit,
       MOCK_RUN_STATUS: "completed",
+      MOCK_RUN_EVENT: "workflow_dispatch",
       MOCK_NEXT_STATUS: "completed",
       MOCK_SLEEP_LOG: "",
       MOCK_RUN_SHA: releaseCommit,
+      MOCK_WORKFLOW_PATH:
+        ".github/workflows/node-release.yml@refs/tags/npm-v0.1.2",
       MOCK_BRANCH_SHA: releaseCommit,
       MOCK_GH_LOG: "/dev/null",
       ...env,
@@ -1213,6 +1219,7 @@ describe("GitHub release publication verification", () => {
   };
   const provenance = {
     ...expected,
+    runAttempt: "1",
     sha512,
   };
 
@@ -1316,6 +1323,7 @@ describe("cryptographically verified npm provenance", () => {
       gitHead: releaseCommit,
       repository: releaseRepository,
       runId: releaseRun,
+      runAttempt: "1",
       sha512,
     });
   });
@@ -1332,6 +1340,7 @@ describe("cryptographically verified npm provenance", () => {
       gitHead: releaseCommit,
       repository: releaseRepository,
       runId: releaseRun,
+      runAttempt: "1",
       sha512,
     });
   });
@@ -1368,6 +1377,24 @@ describe("cryptographically verified npm provenance", () => {
     ).toThrow("The Fulcio certificate must identify the exact release run.");
   });
 
+  test("rejects an invocation for a different attempt of the signing run", () => {
+    expect(() => verifySignatureFixture({ attempt: "2" })).toThrow(
+      "The Fulcio certificate must identify the exact release run.",
+    );
+  });
+
+  test("returns the attempt number authenticated by the statement and certificate", () => {
+    expect(
+      verifySignatureFixture({
+        attempt: "3",
+        signingCertificate: signingCertificateWithReplacement(
+          "/attempts/1",
+          "/attempts/3",
+        ),
+      }).runAttempt,
+    ).toBe("3");
+  });
+
   test("rejects a recovered archive signed for a different source commit", () => {
     expect(() =>
       verifyRecoveredSignatureAudit(signatureAudit(), archive, {
@@ -1398,6 +1425,7 @@ describe("cryptographically verified npm provenance", () => {
       gitHead: releaseCommit,
       repository: releaseRepository,
       runId: releaseRun,
+      runAttempt: "1",
       sha512,
     });
   });
@@ -2673,6 +2701,9 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
     expect(jobs["test"]?.permissions).toEqual({ contents: "read" });
     expect(jobs["test"]?.env).toEqual(jobs["verify"]?.env);
     expect(jobs["publish"]?.needs).toEqual(["verify", "test"]);
+    expect(jobs["publish"]?.name).toBe(
+      `\${{ needs.verify.outputs.mode == 'recover' && '${recoveryPublisher}' || '${combinedPublisher}' }}`,
+    );
     expect(jobs["publish"]?.environment).toBe("npm");
     expect(jobs["publish"]?.permissions).toEqual({
       contents: "read",
@@ -2848,6 +2879,18 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
 
   test.each([
     {
+      workflow: readFileSync(
+        new URL(
+          "../../../.github/workflows/container-release.yml",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+      step: "Dispatch the coordinator on protected main",
+      target: "node-github-release.yml",
+      fields: ["-f", "ref=main", "-f", "inputs[tag]=npm-v0.1.2"],
+    },
+    {
       workflow: releaseCutWorkflow,
       step: "Dispatch the protected npm release",
       target: "node-release.yml",
@@ -2875,6 +2918,12 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
       const mock = "gh() { printf '%s\\n' \"$@\" >&2; printf '12345\\n'; }";
       const env = {
         GITHUB_REPOSITORY: releaseRepository,
+        GITHUB_SERVER_URL: "https://github.com",
+        GITHUB_STEP_SUMMARY: join(
+          directories.create("release-summary-"),
+          "summary",
+        ),
+        VERSION: "0.1.2",
         RELEASE_RUN_ID: releaseRun,
         RELEASE_TAG: "npm-v0.1.2",
         GITHUB_OUTPUT: output,
@@ -2955,6 +3004,28 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
       "The release run must successfully publish the exact tagged commit.",
     );
   });
+
+  test("rejects a different workflow presenting the release tag and commit", async () => {
+    const result = await resolveProtectedRelease({
+      MOCK_WORKFLOW_PATH: ".github/workflows/other.yml",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "The release run must successfully publish the exact tagged commit.",
+    );
+  });
+
+  test.each([
+    ["push", 0],
+    ["workflow_dispatch", 0],
+    ["pull_request", 1],
+  ] as const)(
+    "checks the %s event for the selected npm run",
+    async (event, status) => {
+      const result = await resolveProtectedRelease({ MOCK_RUN_EVENT: event });
+      expect(result.status).toBe(status);
+    },
+  );
 
   test("times out safely if a protected npm release never completes", async () => {
     const sleeps = join(directories.create("release-timeout-"), "sleeps");
@@ -3231,7 +3302,29 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
 
   test.each([
     {
-      description: "the exact successful publishing run",
+      description:
+        "a successful signing attempt carried into a failed-jobs-only rerun",
+      exact: true,
+      resolvedPublisher: combinedPublisher,
+      originalCombined: true,
+      combined: true,
+      recoveryConclusion: "skipped",
+      status: 0,
+      message: "Verified npm provenance for the resolved release run.",
+    },
+    {
+      description:
+        "a failed signing attempt followed by a successful recovery in the same run",
+      exact: true,
+      resolvedPublisher: recoveryPublisher,
+      originalCombined: true,
+      originalConclusion: "failure",
+      recoveryConclusion: "success",
+      status: 0,
+      message: "Verified npm provenance for the resolved release run.",
+    },
+    {
+      description: "the historical npm-only publisher",
       exact: true,
       recoveryConclusion: "skipped",
       status: 0,
@@ -3245,7 +3338,44 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
         "Signed npm provenance must identify the resolved successful release run.",
     },
     {
-      description: "the authenticated original signing run after recovery",
+      description: "a combined signing run recovered by an npm-only job",
+      originalCombined: true,
+      latestOriginalConclusion: "failure",
+      combined: true,
+      recoveryConclusion: "success",
+      status: 0,
+      message:
+        "Verified protected recovery provenance from its original signing run.",
+    },
+    {
+      description:
+        "an npm-only signing run verified by the current recovery job",
+      resolvedPublisher: recoveryPublisher,
+      recoveryConclusion: "success",
+      status: 0,
+      message:
+        "Verified protected recovery provenance from its original signing run.",
+    },
+    {
+      description: "a recovery run impersonating the combined publisher",
+      resolvedPublisher: combinedPublisher,
+      recoveryConclusion: "success",
+      status: 1,
+      message:
+        "Signed npm provenance must identify the resolved successful release run.",
+    },
+    {
+      description: "an exact historical signing run whose jobs are unavailable",
+      exact: true,
+      jobsUnavailable: true,
+      recoveryConclusion: "skipped",
+      status: 0,
+      message: "Verified npm provenance for the resolved release run.",
+    },
+    {
+      description: "a package signed before its combined publisher failed",
+      originalCombined: true,
+      originalConclusion: "failure",
       recoveryConclusion: "success",
       status: 0,
       message:
@@ -3262,7 +3392,13 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
   ])(
     "binds GitHub release provenance to $description",
     async ({
+      combined = false,
       exact = false,
+      jobsUnavailable = false,
+      resolvedPublisher = "publish",
+      originalCombined = false,
+      originalConclusion = "success",
+      latestOriginalConclusion = originalConclusion,
       recoveryConclusion,
       originalCommit = releaseCommit,
       status,
@@ -3277,8 +3413,29 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
       );
       mkdirSync(join(workspace, "dist"));
       writeFileSync(join(workspace, "dist", "release.tgz"), "verified archive");
+      const signingRun = exact ? releaseRun : "30481596228";
+      function jobsPayload(name: string, conclusion: string, recovery: string) {
+        return JSON.stringify({
+          jobs: [
+            {
+              name,
+              conclusion,
+              steps: [
+                {
+                  name: "Verify recovered npm release provenance",
+                  conclusion: recovery,
+                },
+              ],
+            },
+          ],
+        });
+      }
 
       const mocks = [
+        // Native Windows jq otherwise writes CRLF to the workflow's Bash substitutions.
+        process.platform === "win32"
+          ? 'jq() { command jq --binary "$@"; }'
+          : "",
         "npm() {",
         '  case "$1" in',
         "    view) printf '%s\\n' '{}' ;;",
@@ -3300,10 +3457,10 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
         '        if [[ "$MOCK_EXACT_PROVENANCE" != "1" || "$7" != "$RELEASE_RUN_ID" ]]; then',
         "          return 68",
         "        fi",
-        '        printf \'{"runId":"%s"}\\n\' "$RELEASE_RUN_ID"',
+        '        printf \'{"runId":"%s","runAttempt":"3"}\\n\' "$RELEASE_RUN_ID"',
         "        ;;",
         "      verify-recovered-provenance)",
-        '        printf \'{"runId":"%s"}\\n\' "$MOCK_ORIGINAL_RUN_ID"',
+        '        printf \'{"runId":"%s","runAttempt":"3"}\\n\' "$MOCK_ORIGINAL_RUN_ID"',
         "        ;;",
         "      *) return 66 ;;",
         "    esac",
@@ -3316,10 +3473,17 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
         "  shift",
         '  case "$1" in',
         `    "repos/test/codex-security/actions/runs/${releaseRun}/jobs?per_page=100")`,
-        "      printf '%s\\n' \"$MOCK_RECOVERY_CONCLUSION\"",
+        '      jq -r "${!#}" <<< "$MOCK_RESOLVED_JOBS"',
+        "      ;;",
+        '    "repos/test/codex-security/actions/runs/30481596228/jobs?per_page=100")',
+        '      jq -r "${!#}" <<< "$MOCK_ORIGINAL_LATEST_JOBS"',
+        "      ;;",
+        `    "repos/test/codex-security/actions/runs/${signingRun}/attempts/3/jobs?per_page=100")`,
+        '      if [[ "$MOCK_JOBS_UNAVAILABLE" == true ]]; then return 68; fi',
+        '      jq -r "${!#}" <<< "$MOCK_SIGNING_JOBS"',
         "      ;;",
         '    "repos/test/codex-security/actions/runs/30481596228")',
-        "      printf '%s\\t%s\\t%s\\t%s\\n' node-release completed \"$MOCK_ORIGINAL_COMMIT\" npm-v0.1.2",
+        "      printf '%s\\t%s\\t%s\\t%s\\n' .github/workflows/node-release.yml completed \"$MOCK_ORIGINAL_COMMIT\" npm-v0.1.2",
         "      ;;",
         "    *) return 67 ;;",
         "  esac",
@@ -3328,12 +3492,27 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
       const result = await runShell(
         `${mocks}\n${script}`,
         {
-          GITHUB_OUTPUT: "/dev/null",
+          GITHUB_OUTPUT: "outputs",
           GITHUB_REPOSITORY: "test/codex-security",
           MOCK_EXACT_PROVENANCE: exact ? "1" : "0",
           MOCK_ORIGINAL_COMMIT: originalCommit,
           MOCK_ORIGINAL_RUN_ID: "30481596228",
-          MOCK_RECOVERY_CONCLUSION: recoveryConclusion,
+          MOCK_JOBS_UNAVAILABLE: String(jobsUnavailable),
+          MOCK_RESOLVED_JOBS: jobsPayload(
+            resolvedPublisher,
+            "success",
+            recoveryConclusion,
+          ),
+          MOCK_ORIGINAL_LATEST_JOBS: jobsPayload(
+            originalCombined ? combinedPublisher : "publish",
+            latestOriginalConclusion,
+            "skipped",
+          ),
+          MOCK_SIGNING_JOBS: jobsPayload(
+            originalCombined ? combinedPublisher : "publish",
+            originalConclusion,
+            "skipped",
+          ),
           RELEASE_RUN_ID: releaseRun,
           RELEASE_SHA: releaseCommit,
           RELEASE_TAG: "npm-v0.1.2",
@@ -3345,6 +3524,11 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
       expect(result.status).toBe(status);
       if (status === 0) {
         expect(result.stdout).toContain(message);
+        expect(
+          readFileSync(join(workspace, "outputs"), "utf8").includes(
+            "combined-approval=true",
+          ),
+        ).toBe(combined);
       } else {
         expect(result.stderr).toContain(message);
       }

@@ -290,8 +290,13 @@ export async function prepareCodexSecurityCredentialHome(
     return canonical;
   } catch (error) {
     if (error instanceof OutputDirectoryError) throw error;
+    const code = nodeErrorCode(error);
+    const recovery =
+      code === "EACCES" || code === "EPERM" || code === "EROFS"
+        ? "\nCheck permissions or set CODEX_SECURITY_STATE_DIR to a private, writable directory outside the repository."
+        : "";
     throw new OutputDirectoryError(
-      `Unable to prepare the Codex Security credential home: ${path}`,
+      `Unable to prepare the Codex Security credential home: ${path}\n${errorMessage(error)}${recovery}`,
       { cause: error },
     );
   }
@@ -382,12 +387,17 @@ export async function requirePrivateCredentialHome(
   await requirePrivateDirectory(metadata, path, "credential home", options);
 }
 
-export async function requirePrivatePolicyOutputDirectory(
+export async function preparePolicyOutputDirectory(
   path: string,
   options: Parameters<typeof requirePrivateDirectory>[3] = {},
 ): Promise<void> {
+  const metadata = await lstat(path);
+  if ((options.platform ?? process.platform) !== "win32") {
+    requireOutputDirectoryOwnership(metadata, path);
+    return;
+  }
   await requirePrivateDirectory(
-    await lstat(path),
+    metadata,
     path,
     "policy output directory",
     options,
@@ -1786,7 +1796,7 @@ export async function validateOutputDir(
       if (!archiveExisting && (await readdir(path)).length !== 0) {
         throw new OutputDirectoryNotEmptyError(path);
       }
-      requirePrivateOutputDirectory(metadata, path);
+      requireOutputDirectoryOwnership(metadata, path);
       await requireSecureOutputAncestry(path);
       const canonical = await realpath(path);
       requireModelSafeOutputDir(canonical);
@@ -2152,7 +2162,7 @@ export async function validatePreparedOutputDir(
       `Scan output directory must be empty: ${path}`,
     );
   }
-  requirePrivateOutputDirectory(metadata, path);
+  requireOutputDirectoryOwnership(metadata, path);
   await requireSecureOutputAncestry(canonical);
   return canonical;
 }
@@ -2168,6 +2178,15 @@ export function requirePrivateOutputDirectory(
       `Scan output directory must not be accessible to other users (chmod 700): ${path}`,
     );
   }
+  requireOutputDirectoryOwnership(metadata, path, effectiveUid);
+}
+
+export function requireOutputDirectoryOwnership(
+  metadata: Pick<Stats, "uid">,
+  path: string,
+  effectiveUid = process.geteuid?.(),
+): void {
+  if (process.platform === "win32") return;
   if (effectiveUid !== undefined && metadata.uid !== effectiveUid) {
     throw new OutputDirectoryError(
       `Scan output directory must be owned by the current user: ${path}`,
@@ -2175,7 +2194,7 @@ export function requirePrivateOutputDirectory(
   }
 }
 
-/** Reject shared parents whose owner can rename or replace private scan output. */
+/** Reject shared parents whose owner can rename or replace scan output. */
 export async function requireSecureOutputAncestry(
   path: string,
   effectiveUid = process.geteuid?.(),
@@ -3324,8 +3343,12 @@ export async function probeCodexSandbox(
     signal?.throwIfAborted();
     detail = processErrorDetail(error);
   }
+  const guidance =
+    process.platform === "linux"
+      ? "\nOn Linux this usually means unprivileged user namespaces are restricted (kernel.apparmor_restrict_unprivileged_userns=1 on Ubuntu 24.04 and later), which Bubblewrap needs; inside the container image, use the AppArmor profile and Compose override from the SDK README."
+      : "";
   throw new SandboxUnavailableError(
-    `Codex could not run a command in its sandbox; reproduce with '${command.command} ${args.join(" ")}'. On Linux this usually means unprivileged user namespaces are restricted (kernel.apparmor_restrict_unprivileged_userns=1 on Ubuntu 24.04 and later), which Bubblewrap needs; inside the container image, use the AppArmor profile and Compose override from the SDK README. Codex reported: ${detail}`,
+    `Codex could not run a command in its sandbox: ${detail}\nTo reproduce, run '${command.command} ${args.join(" ")}'.${guidance}`,
   );
 }
 

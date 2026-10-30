@@ -1,7 +1,7 @@
 # How saved scanner reports map to imported evidence
 
-This guide covers the Wiz, Endor Labs, Snyk Open Source, Semgrep Code and GitHub
-**file readers** used by `publish findings`. Acquisition produces the artifact:
+The **reader** selected by `publish findings --provider` interprets a saved
+scanner export. Acquisition produces the artifact:
 for example, `snyk test` scans a workspace, while `codex-security import github`
 retrieves selected code-scanning alerts. File ingestion reads the saved report.
 Use the mappings to decide what one record represents, whether a later export
@@ -23,14 +23,20 @@ to investigate records together, not instructions to merge them.
 | [Wiz package JSON or detailed CSV](../../sdk/typescript/docs/cli.md#package-vulnerability-inputs); CSV requires `CloudPlatform=GitHub` and `CloudProviderURL` for a GitHub repository `/tree/<ref>` | Vendor occurrence `id` (CSV: `ID`), not the CVE                                                                                                         | Tenant and finding family                  |
 | [Wiz named repository collections](../../sdk/typescript/docs/cli.md#sast-repository-secrets-and-iac-inputs)                                                                                         | `sast:<id>`, `secret:<id>`, `iac:<id>`                                                                                                                  | Tenant and finding family                  |
 | [Endor Finding JSON or endorctl SARIF](endor.md)                                                                                                                                                    | Finding `uuid` or SARIF `properties["finding-uuid"]`                                                                                                    | Namespace, project and context             |
+| [Amazon Inspector Code Security ListFindings JSON](inspector.md)                                                                                                                                    | Full Inspector finding ARN                                                                                                                              | AWS account, Region and repository project |
 | [Snyk Open Source CLI JSON, plugin v1 or SARIF](snyk.md)                                                                                                                                            | CLI: manager, manifest, advisory, package/version and dependency path; plugin: supplied composite; SARIF: advisory, manifest set and project when known | Repository, branch, scan target and format |
 | [Semgrep Code CLI/CI JSON or SARIF](semgrep.md)                                                                                                                                                     | Fingerprint; otherwise rule, literal path and start/end lines and columns                                                                               | Organization, project and branch           |
+| [GitHub Dependabot repository REST alerts](github-dependabot.md)                                                                                                                                    | Host, repository and alert number                                                                                                                       | Host, repository and Dependabot family     |
 | [GitHub saved `import github` output](../../sdk/typescript/docs/cli.md#import-github-findings-locally-or-to-cloud)                                                                                  | Host, repository, alert number and hash of selected ref                                                                                                 | Host, repository and code-scanning family  |
 | [GitHub saved `import github-advisories` output](../../sdk/typescript/docs/cli.md#import-ghsa-advisories-separately)                                                                                | Host, repository **or** global scope, and GHSA ID                                                                                                       | Separate advisory stream from alerts       |
+| [Black Duck BOM-6 collection or selected rows](blackduck.md)                                                                                                                                        | Project version, component version, origin, advisory source and advisory name                                                                           | Deployment, project and version            |
+| [Veracode Static Analysis Findings API pages](veracode.md)                                                                                                                                          | API origin, application and context, and native issue ID                                                                                                | Deployment, application and static policy  |
 
 Within **one input**, duplicate IDs are ambiguous, not corroboration. Wiz and
 GitHub reject a selection with duplicate accepted IDs. Endor, Snyk and Semgrep
-exclude every record with the colliding identity. Inspect the source and select
+exclude every record with the colliding identity. Black Duck rejects duplicate occurrences in a complete collection, and excludes all colliding rows in an explicit selection.
+Veracode rejects a capture that repeats an issue ID for the same scan type.
+Inspect the source and select
 the intended occurrence; don't rename records simply to make them import. Across
 **separate local imports**, changed evidence updates the same record; omission
 does not delete or resolve it. Cloud publication sends an expected version;
@@ -54,6 +60,11 @@ before preparing a fresh submission.
   normalized JSONL: supply the reviewed `source_finding_id` and `evidence`,
   retaining the raw row. The reader does not infer a mapping for other CSV
   profiles.
+- **Amazon Inspector.** Supply a complete export for one repository project.
+  A matching native URL or the operator's full project ARN mapping establishes
+  the Git host. Local import and Cloud replay check the destination again.
+  Each finding ARN identifies one occurrence. Duplicate ARNs exclude all
+  colliding rows. Package and code evidence retain the native finding.
 - **Endor Labs:** Prefer a complete native Finding, array or `list.objects`.
   `spec.level`, dependency paths/versions, advisory aliases, source SHA and
   primary SAST/AI SAST locations map when present. The project UUID does not
@@ -77,14 +88,20 @@ before preparing a fresh submission.
   Critical from High; both become diagnostic `error`, mapped to High, in Semgrep
   SARIF. Inspect the selected result for trace/fix details. Platform/MCP
   envelopes and general Supply Chain/Secrets feeds are not Code CLI or SARIF exports.
+- **OpenGrep.** Use native JSON and supply `--source-repository-url`. The
+  [OpenGrep guide](opengrep.md) covers export and occurrence identity.
 - **GitHub:** For code scanning, the selected instance supplies path/range, ref
   and commit. The rule's `security_severity_level` supplies severity; diagnostic
   `error` alone means `unknown`. An alert-wide dismissal takes precedence over
   instance state. For GHSA, a repository disclosure identifies its publisher; a
   global disclosure has no source repository. Both can carry CVE aliases,
   affected ranges and patched versions. Neither proves installation or
-  applicability. Raw API pages, Dependabot and secret-scanning alerts are not
-  these saved inputs.
+  applicability. Both readers require saved collector output.
+- **GitHub Dependabot.** Use `gh api --paginate` to save native repository
+  alert pages as JSONL for the `github` reader. Each alert identifies the
+  matched package, manifest and vulnerable range. The embedded advisory supplies advisory IDs.
+  Each alert number has its own history, including when several alerts cite the
+  same GHSA. GitHub secret-scanning alerts remain outside the file reader.
 
 ## Read the right field
 
