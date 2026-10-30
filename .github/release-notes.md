@@ -25,6 +25,7 @@
 - preserve local scan startup diagnostics ([#2115](https://github.com/openai/codex-security/pull/2115))
 - name the outermost rejected Windows ancestor ([#2065](https://github.com/openai/codex-security/pull/2065))
 - count only CR and LF as assessment line breaks ([#2147](https://github.com/openai/codex-security/pull/2147))
+- retain the reviewed surface count for completed Deep scans ([#2161](https://github.com/openai/codex-security/pull/2161))
 
 <!-- release-section: highlights:end -->
 
