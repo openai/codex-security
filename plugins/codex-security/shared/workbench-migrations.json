@@ -469,5 +469,13 @@
     "statements": [
       "ALTER TABLE scans ADD COLUMN retained_checkpoint_heads_json TEXT;"
     ]
+  },
+  {
+    "version": 58,
+    "name": "persist observed files from saved tool outputs",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN observed_files_read_at TEXT;",
+      "CREATE TABLE scan_observed_files (\n    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,\n    path TEXT NOT NULL,\n    thread_id TEXT NOT NULL,\n    call_id TEXT NOT NULL,\n    PRIMARY KEY (scan_id, path)\n);"
+    ]
   }
 ]

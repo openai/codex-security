@@ -273,7 +273,8 @@ export function renderScanHistory(
     );
     if (typeof result["startedAt"] === "string") {
       lines.push(`  ${strong("STARTED")}  ${clean(result["startedAt"])}`);
-    } else if (typeof result["updatedAt"] === "string") {
+    }
+    if (typeof result["updatedAt"] === "string") {
       lines.push(`  ${strong("UPDATED")}  ${clean(result["updatedAt"])}`);
     }
     const canonicalCoverage = result["coverage"] as CoverageSummary | undefined;
@@ -362,6 +363,24 @@ export function renderScanHistory(
         );
       }
     }
+    const observedFiles = result["observedFilesRead"];
+    const observedCount =
+      observedFiles !== null &&
+      typeof observedFiles === "object" &&
+      !Array.isArray(observedFiles) &&
+      typeof observedFiles["count"] === "number"
+        ? observedFiles["count"]
+        : null;
+    wrap(
+      `Files shown to model (observed): ${observedCount ?? "unavailable"}`,
+      2,
+    );
+    wrap(
+      observedCount === null
+        ? "No saved output observation is available."
+        : "Best effort from saved source excerpts; not a count of fully reviewed files.",
+      4,
+    );
     const knowledgeBase = recipe?.["knowledgeBasePaths"] as
       string[] | undefined;
     if (knowledgeBase?.length) {

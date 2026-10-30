@@ -289,6 +289,7 @@ import {
   type ScanMatchingBatch,
 } from "./scan-comparison.js";
 import { scanActivitiesFromEvent } from "./scan-activity.js";
+import { refreshObservedFiles } from "./saved-file-observations.js";
 import { codexSecurityRequestContext } from "./request-metadata.js";
 import {
   CODEX_SECURITY_THREAD_SOURCES,
@@ -2495,13 +2496,28 @@ export async function main(
         return presentHistory(
           await history(["get-scan", "--scan-id", scanId], async (value) => {
             const { scan, recipe, parentScanId } = value;
+            let observedScan = scan as ScanLogSource;
+            try {
+              observedScan = await refreshObservedFiles(
+                observedScan,
+                [
+                  codexSecurityCredentialHome(dependencies.environment),
+                  configuredCodexHome(dependencies.environment),
+                ],
+                (args, input) => dependencies.runWorkbench(args, input),
+              );
+            } catch (error) {
+              errorOutput.write(
+                `Could not update observed files read: ${diagnosticLines(error)}\n`,
+              );
+            }
             await showHistoryNavigation(
-              scan as JsonObject,
+              observedScan,
               format,
               args.scanId === undefined ? "latest completed scan" : undefined,
             );
             return {
-              ...(scan as JsonObject),
+              ...observedScan,
               ...(recipe === undefined ? {} : { recipe }),
               ...(parentScanId === undefined ? {} : { parentScanId }),
             };
@@ -10689,9 +10705,10 @@ function printScanReference(
       : []),
     ...(typeof scan["startedAt"] === "string"
       ? [`started ${diagnosticValue(scan["startedAt"])}`]
-      : typeof scan["updatedAt"] === "string"
-        ? [`updated ${diagnosticValue(scan["updatedAt"])}`]
-        : []),
+      : []),
+    ...(typeof scan["updatedAt"] === "string"
+      ? [`updated ${diagnosticValue(scan["updatedAt"])}`]
+      : []),
   ];
   const argument = quoteCliPath(diagnosticValue(scanId));
   output.write(

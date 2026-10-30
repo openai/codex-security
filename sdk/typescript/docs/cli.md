@@ -568,6 +568,25 @@ codex-security scans show SCAN_ID --json
 codex-security scans logs SCAN_ID
 ```
 
+`scans show` reports **Files shown to model (observed)** separately from review
+coverage. Its JSON output includes `observedFilesRead: { count, observedAt }`.
+The count is the union of repository-relative paths identified in saved tool
+outputs from the scan and its workers, including resumed workers. Repeated
+reads of a path count once, and the paths remain saved in scan history even
+after session logs are removed. CLI and SDK scans refresh the count from
+available logs at termination. `scans show` also refreshes it, including for
+scans run in the Codex app that have retained logs on the same machine.
+
+This is a best-effort observation of recognizable single-file reads and search
+results that include source excerpts. Directory listings, filename-only search
+results, opaque scripts, compound shell commands, and tool calls nested inside
+code-mode execution are not counted. A partial or truncated excerpt still
+counts its file when the retained source text identifies it; the count does
+not mean those files were fully reviewed. `count: null` (displayed as
+`unavailable`) means no saved output observation is available. A recorded zero
+means analysis ran but identified no qualifying files; it does not prove that
+the scan read no files.
+
 Replace `SCAN_ID` with the ID from the completion or failure summary. A scan can
 fail after registration but before writing its artifacts; investigate those
 failures through its history record and any available logs. When artifacts were

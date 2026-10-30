@@ -24,6 +24,7 @@ interface ScanLogOptions {
   scanDirectory?: string;
   completedAt?: string | null;
   allowMissingRoot?: boolean;
+  workerWindow?: { startedAt: string; completedAt?: string | null };
 }
 
 export type ScanLogSource = JsonObject & {
@@ -39,7 +40,7 @@ export type ScanLogSource = JsonObject & {
 export function readSavedScanLogs(
   scan: ScanLogSource,
   codexHome: string | readonly string[],
-  options: { allowMissingRoot?: boolean } = {},
+  options: Pick<ScanLogOptions, "allowMissingRoot" | "workerWindow"> = {},
 ) {
   const threadId = scan.continuationThreadId;
   if (!threadId && !options.allowMissingRoot) {
@@ -54,6 +55,7 @@ export function readSavedScanLogs(
     executionThreadIds: scan.executionThreadIds ?? [],
     codexHome,
     allowMissingRoot: options.allowMissingRoot,
+    workerWindow: options.workerWindow,
     scanDirectory: scan.mode === "deep" ? scan.scanDir : undefined,
     completedAt:
       scan.progress?.status === "running"
@@ -133,14 +135,26 @@ export async function readScanLogs(options: ScanLogOptions) {
     ...(options.threadIds ?? []),
     ...(options.executionThreadIds ?? []),
   ]);
-  // A Desktop owner can contain other work. Include its log without treating
-  // the whole conversation tree as part of this scan.
-  const traversed = new Set(options.executionThreadIds ?? included);
+  // A Desktop owner can contain other work. Only traverse its workers when
+  // the caller supplies a scan window that limits which children belong to it.
+  const traversed = new Set(
+    options.workerWindow ? included : (options.executionThreadIds ?? included),
+  );
+  const workerStart = options.workerWindow
+    ? Date.parse(options.workerWindow.startedAt)
+    : -Infinity;
+  const workerEnd = options.workerWindow?.completedAt
+    ? Date.parse(options.workerWindow.completedAt)
+    : Infinity;
   for (const parentId of traversed) {
     const parent = logs.get(parentId)?.[0];
     for (const [session] of logs.values()) {
       if (
         !traversed.has(session.threadId) &&
+        (options.workerWindow === undefined ||
+          (session.startedAt !== null &&
+            session.startedAt >= workerStart &&
+            session.startedAt <= workerEnd)) &&
         (session.parentThreadId === parentId ||
           (root !== undefined &&
             parent === root &&

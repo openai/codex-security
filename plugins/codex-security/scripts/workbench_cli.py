@@ -114,6 +114,8 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
 
     add_command("rename-scan", "--scan-id", "--name")
 
+    add_command("record-observed-files", "--scan-id")
+
     add_command("get-scan-feedback", "--scan-id")
 
     update_scan_context = add_command("update-scan-context", "--scan-id")
