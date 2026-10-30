@@ -941,14 +941,16 @@ async function preparePublicationInput(
     gitAlias = false,
     description = "selected Cloud repository",
     claim = false,
+    catalog = false,
   ) {
     if (bound && url) validateHostedRepositoryUrl(url);
     const suffix = claim ? snyk?.allowsSuffix(url) : snyk?.destinationSuffix;
-    const key = strictPath
-      ? (value: string) => hostedRepositoryUrlKey(value, false, suffix)
-      : gitAlias && !bound
-        ? (value: string) => hostedRepositoryUrlKey(value, true)
-        : catalogKey;
+    const key =
+      strictPath && !catalog
+        ? (value: string) => hostedRepositoryUrlKey(value, false, suffix)
+        : gitAlias && !bound
+          ? (value: string) => hostedRepositoryUrlKey(value, true)
+          : catalogKey;
     if (url && key(url) !== key(targetUrl)) {
       const label =
         id === undefined ? "Source report" : `Finding ${JSON.stringify(id)}`;
@@ -968,7 +970,17 @@ async function preparePublicationInput(
       url: string | null | undefined,
       id?: string,
       alias = false,
-    ) => requireRepository(url, targetUrl, id, alias, description, true);
+    ) =>
+      requireRepository(
+        url,
+        targetUrl,
+        id,
+        alias,
+        description,
+        true,
+        // Saved destinations use catalog identity after strict source validation.
+        mode === "retry",
+      );
     // Source claims must agree before checkpoint lookup, but historical
     // checkpoints already fixed the provider and immutable request bytes.
     const replay = mode !== "fresh" && options.provider !== "blackduck";

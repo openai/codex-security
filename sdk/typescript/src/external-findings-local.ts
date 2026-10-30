@@ -1066,13 +1066,15 @@ export async function prepareLocalImport(
             : operatorPlatform({ url: claim });
       const snykClaims =
         evidence.source_data && snyk?.claims.get(evidence.source_data);
+      // Snyk already verified its native URLs against this row's declared repository.
+      const snykAliases = new Map<string, string>();
+      for (const { nativeUrl, url } of snykClaims ?? [])
+        if (nativeUrl !== undefined && !snykAliases.has(nativeUrl))
+          snykAliases.set(nativeUrl, url);
       if (
         !sameScannerRepositories(
           claims.map((claim) => {
-            // Snyk already verified its native URL against this row's declared repository.
-            const resolved =
-              snykClaims?.find(({ nativeUrl }) => nativeUrl === claim)?.url ??
-              claim;
+            const resolved = snykAliases.get(claim) ?? claim;
             return scannerRepository(resolved, rowPlatform(resolved));
           }),
         )
@@ -1090,7 +1092,8 @@ export async function prepareLocalImport(
     }
     for (const source of native) known.add(source.url);
   }
-  if (mixed) {
+  // Bound reports compare every source with hosted aliases below.
+  if (mixed && !singleProject) {
     // A caller reference with no matching row spelling can still be a Git alias.
     const rows = [...sources.keys(), ...known].map(identify);
     const byKey = Map.groupBy(rows, (remote) => remote.key);

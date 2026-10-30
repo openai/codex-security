@@ -88,6 +88,74 @@ test("a retained Platform row binds mixed SARIF provenance in either order", asy
   }
 });
 
+test.each([
+  ["gitlab.com", "scp"],
+  ["gitlab.com", "ssh"],
+  ["scm.example.test", "scp"],
+] as const)(
+  "mixed projected Semgrep reports preserve hosted alias scope on %s with %s provenance",
+  async (host, transport) => {
+    const url = `https://${host}/Group/repo`;
+    await using fixture = await platformCheckout(url);
+    const aliases = [
+      `git@${host}:Group/repo.git`,
+      `ssh://git@${host}/Group/repo.git`,
+    ] as const;
+    const [native, reader] =
+      transport === "scp" ? aliases : ([aliases[1], aliases[0]] as const);
+    const report = normalizeSemgrepSarif(semgrepSarif(), {
+      sourceRepositoryUrl: url,
+    });
+    const input: HostedExternalFindings = {
+      ...report,
+      sourceRepositoryUrl: url,
+      read: report.read + 1,
+      findings: [
+        {
+          source_finding_id: "blackduck-bom:" + "a".repeat(64),
+          evidence: {
+            title: "Projected scanner finding",
+            severity: "high",
+            details: { kind: "sast", repository: { url } },
+          },
+        },
+        ...report.findings.map((finding) => ({
+          ...finding,
+          evidence: {
+            ...finding.evidence,
+            source_data: {
+              ...finding.evidence.source_data,
+              runContext: {
+                versionControlProvenance: [{ repositoryUri: native }],
+              },
+            },
+          },
+        })),
+      ],
+    };
+    const prepare = (reference: string) =>
+      prepareNormalizedLocalImport(input, fixture.options, {
+        ...fixture.dependencies,
+        sourceRepositories: [{ url: reference }],
+      });
+    if (host === "gitlab.com") {
+      expect((await prepare(reader)).preview.findings).toEqual(input.findings);
+      for (const reference of [
+        reader.replace("git@", "other@"),
+        reader.replace("Group/", "group/"),
+        reader.replace("repo.git", "other.git"),
+      ])
+        await expect(prepare(reference)).rejects.toThrow(
+          "does not match the hosted scanner project",
+        );
+    } else {
+      await expect(prepare(reader)).rejects.toThrow(
+        "does not match the hosted scanner project",
+      );
+    }
+  },
+);
+
 test("a prepared Platform import retains its selected runner and signal", async () => {
   await using fixture = await platformCheckout(repositoryUrl);
   await fixture.writeJson(platformReport());

@@ -2064,6 +2064,61 @@ test("a pending Snyk publication binds the projected report's repository and com
   expect(cloud.posts[1]).toBe(cloud.posts[0]);
 });
 
+test("a saved strict projection resumes after a case-only catalog rename", async () => {
+  const url = "https://scm.example.test/Team/Repo";
+  const cloud = await fixture([], url);
+  const input = {
+    read: 1,
+    excluded: [],
+    sourceRepositoryUrl: url,
+    sourceRepositoryPlatform: "other" as const,
+    findings: [
+      {
+        source_finding_id: "blackduck-bom:" + "a".repeat(64),
+        evidence: {
+          title: "Example projected finding",
+          severity: "high" as const,
+          details: { kind: "sast" as const, repository: { url } },
+        },
+      },
+    ],
+  };
+  const prepare = (selected = input) =>
+    prepareNormalizedExternalPublication(
+      selected,
+      {
+        ...options,
+        provider: "semgrep",
+        repository: cloud.state.repositoryUrl,
+      },
+      cloud.deps,
+    );
+  cloud.state.loseResponse = true;
+  await expect((await prepare()).publish()).rejects.toThrow(
+    "resume the saved request",
+  );
+  const contradictory = structuredClone(input);
+  contradictory.findings[0]!.evidence.details.repository.url =
+    url.toLowerCase();
+  await expect(prepare(contradictory)).rejects.toThrow(
+    "does not match the source report repository",
+  );
+  cloud.state.repositoryUrl = url + "-different";
+  await expect(prepare()).rejects.toThrow(
+    "does not match the selected Cloud repository",
+  );
+  expect(cloud.posts).toHaveLength(1);
+
+  cloud.state.repositoryUrl = url.toLowerCase();
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).counts.created).toBe(1);
+  expect(cloud.posts).toEqual([cloud.posts[0]!, cloud.posts[0]!]);
+  await expect(prepare()).rejects.toThrow(
+    "does not match the selected Cloud repository",
+  );
+});
+
 test("hosted Semgrep accepts Enterprise casing against the connected Cloud repository", async () => {
   const url = "https://scm.example.test/Team/Proj%65ct";
   const report = platformReport();
