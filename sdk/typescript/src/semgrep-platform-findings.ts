@@ -163,13 +163,13 @@ export function normalizeSelectedSemgrepPlatformFindings(options: {
   const projectPath = decodeURIComponent(
     new URL(scope.project.url).pathname,
   ).replace(/^\/|\/$/gu, "");
-  const projectNames = [
-    scope.project.name,
-    projectPath,
-    projectPath.replace(/\.git$/u, ""),
-  ];
+  const projectNames = [scope.project.name, projectPath];
+  // Short clone display labels accompany an exact URL; URL-less rows need the original name or path.
   const projectLabels = new Set(
-    projectNames.flatMap((name) => [name, name.split("/").at(-1)!]),
+    [...projectNames, projectPath.replace(/\.git$/u, "")].flatMap((name) => [
+      name,
+      name.split("/").at(-1)!,
+    ]),
   );
   for (const response of pages) {
     for (const finding of array(

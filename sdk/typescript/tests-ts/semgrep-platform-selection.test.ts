@@ -243,6 +243,14 @@ test("a URL-less row needs the matching project ID and full name, while an exact
   expect(
     select("café", { url: encoded, name: "example/café" }, encoded).findings,
   ).toHaveLength(1);
+  const literal = "https://scm.example.test/team/repo.git";
+  expect(() =>
+    select("team/repo.git", { id: 77, name: "team/repo" }, literal),
+  ).toThrow("project and ref");
+  expect(
+    select("team/repo.git", { id: 77, name: "team/repo.git" }, literal)
+      .findings,
+  ).toHaveLength(1);
   const cloneUrl = url + ".git";
   expect(
     select("project", { url: cloneUrl, name }, cloneUrl).findings,
