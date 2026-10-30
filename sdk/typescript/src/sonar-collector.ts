@@ -1,23 +1,22 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import {
-  gitRemoteMatchesSource,
+  boundSonarWorktree,
+  sonarRepositoryForRemote,
   localGitProtectionRoots,
 } from "./external-findings-local.js";
 import { repositoryUrlKey } from "./external-import-contract.js";
 import { requireExternalImports } from "./external-imports-feature.js";
-import {
-  azureReposHttpsUrl,
-  isGitHubCloudHost,
-  isGitHubSshOverHttps,
-  parseGitRemote,
-} from "./git-remote.js";
 import { isRecord } from "./record.js";
 import { array, record, relativePath, requiredText } from "./scanner-import.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
-import { completeSonarPages, type SonarCapture } from "./sonar-findings.js";
+import {
+  completeSonarPages,
+  mergeSonarIssueScope,
+  type SonarCapture,
+} from "./sonar-findings.js";
 import { gitOutput } from "./targets.js";
 import {
   inspectTrustedExecutable,
@@ -30,6 +29,7 @@ const execFile = promisify(execFileCallback);
 export interface SonarCollectionOptions {
   cwd: string;
   project?: string;
+  sourceRepositoryUrl?: string | undefined;
   branch?: string;
   pullRequest?: string;
   issueKeys?: readonly string[];
@@ -95,6 +95,15 @@ async function checkoutOrigin(
   protectedRoots: string[],
 ): Promise<string | undefined> {
   try {
+    if (
+      !(await boundSonarWorktree(
+        options.cwd,
+        protectedRoots,
+        options.environment,
+        options.signal,
+      ))
+    )
+      return;
     const origin = await gitOutput(
       options.cwd,
       ["remote", "get-url", "--all", "--", "origin"],
@@ -105,39 +114,7 @@ async function checkoutOrigin(
       protectedRoots,
       options.environment,
     );
-    if (/[\s\\\p{Cc}?#]/u.test(origin)) return;
-    const remote = parseGitRemote(origin);
-    if (!remote) return;
-    const { url } = remote;
-    // Git passes literal SSH paths to upload-pack. URL.pathname collapses dot segments.
-    const path = remote.scpStyle
-      ? remote.path
-      : /^[^:/]+:\/\/[^/]+\/(.+)$/u.exec(origin)?.[1];
-    if (!path) return;
-    const hostname = url.hostname.toLowerCase();
-    let candidate: string | undefined;
-    if (url.protocol === "http:" || url.protocol === "https:") {
-      candidate = `${url.origin}/${path}`;
-    } else if (url.username === "git" && isGitHubSshOverHttps(url)) {
-      candidate = `https://github.com/${path}`;
-    } else if (
-      url.protocol === "ssh:" &&
-      url.username === "git" &&
-      (!url.port || url.port === "22") &&
-      (isGitHubCloudHost(hostname) ||
-        ["gitlab.com", "bitbucket.org"].includes(hostname))
-    ) {
-      candidate = `https://${hostname}/${path}`;
-    } else {
-      candidate = azureReposHttpsUrl(url, path);
-    }
-    if (!candidate) return;
-    const source = declaredScannerRepositoryUrl(
-      candidate.replace(/\.git$/iu, ""),
-      "Sonar",
-      "local",
-    );
-    return gitRemoteMatchesSource(origin, source, "sonar") ? source : undefined;
+    return sonarRepositoryForRemote(origin);
   } catch {
     options.signal?.throwIfAborted();
     return undefined;
@@ -260,11 +237,43 @@ async function resolveProject(
   throw new CodexSecurityError(selectProjectHint);
 }
 
+function exactIssueBatches(
+  server: string,
+  query: URLSearchParams,
+  keys: Set<string>,
+): Set<string>[] {
+  if (!keys.size) return [keys];
+  // RFC 9110 §4.1 recommends support for URIs up to 8,000 octets. URLSearchParams
+  // emits ASCII, including three bytes for each encoded comma between issue keys.
+  const prefix = `${server}/api/issues/search?${query}&p=10000&issues=`.length;
+  const batches: Set<string>[] = [];
+  let batch = new Set<string>();
+  let size = prefix;
+  for (const key of keys) {
+    const encoded =
+      new URLSearchParams({ issues: key }).toString().length - "issues=".length;
+    if (batch.size && size + 3 + encoded > 8_000) {
+      batches.push(batch);
+      batch = new Set();
+      size = prefix;
+    }
+    size += encoded + (batch.size ? 3 : 0);
+    batch.add(key);
+  }
+  batches.push(batch);
+  return batches;
+}
+
 /** Fetch native SonarQube Cloud evidence through the developer's existing CLI session. */
 export async function collectSonarIssues(
   options: SonarCollectionOptions,
   runSonar?: SonarCommand,
 ): Promise<SonarCapture> {
+  options = {
+    ...options,
+    cwd: resolve(options.cwd),
+    environment: { ...(options.environment ?? process.env) },
+  };
   requireExternalImports(options.environment);
   options.signal?.throwIfAborted();
   const { pullRequest } = options;
@@ -298,7 +307,26 @@ export async function collectSonarIssues(
       ...(await localGitProtectionRoots(root, environment, options.signal)),
     );
   }
+  const expected =
+    options.sourceRepositoryUrl === undefined
+      ? undefined
+      : declaredScannerRepositoryUrl(
+          options.sourceRepositoryUrl,
+          "Sonar",
+          "local",
+        );
   const origin = await checkoutOrigin(options, protectedRoots);
+  const checkExpectedRepository = (boundUrl: string | undefined) => {
+    if (
+      expected &&
+      boundUrl &&
+      repositoryUrlKey(expected) !== repositoryUrlKey(boundUrl)
+    )
+      throw new CodexSecurityError(
+        "The selected Sonar repository does not match --source-repository-url.",
+      );
+  };
+  if (options.project === undefined) checkExpectedRepository(origin);
   if (options.project === undefined && origin === undefined)
     throw new CodexSecurityError(selectProjectHint);
   const sonar = runSonar ?? (await sonarCommand(options, protectedRoots));
@@ -326,6 +354,7 @@ export async function collectSonarIssues(
     options.project,
     options.signal,
   );
+  checkExpectedRepository(repositoryUrl);
   if (project.includes(","))
     throw new CodexSecurityError("Select one Sonar project key.");
   if (branch === undefined && pullRequest === undefined) {
@@ -356,45 +385,59 @@ export async function collectSonarIssues(
   });
   if (branch !== undefined) query.set("branch", branch);
   if (pullRequest !== undefined) query.set("pullRequest", pullRequest);
-  if (keys.size) query.set("issues", [...keys].join(","));
-  else query.set("issueStatuses", "OPEN,CONFIRMED");
   const pages: Record<string, unknown>[] = [];
-  for (let index = 1; ; index++) {
-    options.signal?.throwIfAborted();
-    query.set("p", String(index));
-    const page = await sonar(["api", "get", `/api/issues/search?${query}`]);
-    const issues = array(page["issues"], "Sonar issues");
-    const paging = record(page["paging"], "Sonar paging");
-    const size = paging["pageSize"],
-      total = paging["total"];
-    if (
-      paging["pageIndex"] !== index ||
-      !isSafeNonNegativeInteger(size) ||
-      size === 0 ||
-      !isSafeNonNegativeInteger(total) ||
-      (!issues.length && index * size < total)
-    ) {
-      throw new CodexSecurityError(
-        `Incomplete pagination in Sonar issues page ${index}.`,
-      );
-    }
-    pages.push(page);
-    if (total > 10_000)
-      throw new CodexSecurityError(
-        "Sonar issue search returns at most 10,000 results. Narrow the selection with --sonar-issue KEY or select a different branch or pull request.",
-      );
-    if (index * size >= total) break;
-  }
+  const queryPageCounts: number[] = [];
   const missing = new Set(keys);
-  for (const { issues } of completeSonarPages(pages)) {
-    for (const issue of issues) {
-      const key = requiredText(issue["key"], "Sonar issue key");
-      if (issue["project"] !== project || (keys.size && !keys.has(key)))
+  const scope = {
+    organization,
+    project,
+    ...(branch === undefined ? {} : { branch }),
+    ...(pullRequest === undefined ? {} : { pullRequest }),
+  };
+  for (const batch of exactIssueBatches(server, query, keys)) {
+    if (batch.size) query.set("issues", [...batch].join(","));
+    else query.set("issueStatuses", "OPEN,CONFIRMED");
+    const queryPages: Record<string, unknown>[] = [];
+    for (let index = 1; ; index++) {
+      options.signal?.throwIfAborted();
+      query.set("p", String(index));
+      const page = await sonar(["api", "get", `/api/issues/search?${query}`]);
+      const issues = array(page["issues"], "Sonar issues");
+      const paging = record(page["paging"], "Sonar paging");
+      const size = paging["pageSize"],
+        total = paging["total"];
+      if (
+        paging["pageIndex"] !== index ||
+        !isSafeNonNegativeInteger(size) ||
+        size === 0 ||
+        !isSafeNonNegativeInteger(total) ||
+        (!issues.length && index * size < total)
+      ) {
         throw new CodexSecurityError(
-          `Sonar returned issue ${key} outside the selected project or issue keys.`,
+          `Incomplete pagination in Sonar issues page ${index}.`,
         );
-      missing.delete(key);
+      }
+      queryPages.push(page);
+      if (total > 10_000)
+        throw new CodexSecurityError(
+          "Sonar issue search returns at most 10,000 results. Narrow the selection with --sonar-issue KEY or select a different branch or pull request.",
+        );
+      if (index * size >= total) break;
     }
+
+    for (const { issues } of completeSonarPages(queryPages)) {
+      for (const issue of issues) {
+        const key = requiredText(issue["key"], "Sonar issue key");
+        if (issue["project"] !== project || (batch.size && !batch.has(key)))
+          throw new CodexSecurityError(
+            `Sonar returned issue ${key} outside the selected project or issue keys.`,
+          );
+        mergeSonarIssueScope(scope, issue);
+        missing.delete(key);
+      }
+    }
+    pages.push(...queryPages);
+    queryPageCounts.push(queryPages.length);
   }
   if (missing.size)
     throw new CodexSecurityError(
@@ -434,5 +477,6 @@ export async function collectSonarIssues(
     repositoryUrl,
     projectBase,
     pages,
+    ...(queryPageCounts.length > 1 ? { queryPageCounts } : {}),
   };
 }

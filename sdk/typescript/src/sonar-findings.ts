@@ -34,6 +34,7 @@ const captureSchema = z.object({
     .refine((path) => path === "" || relativePath(path) === path)
     .optional(),
   pages: z.array(z.unknown()).min(1),
+  queryPageCounts: z.array(z.int().positive()).min(1).optional(),
 });
 export type SonarCapture = z.infer<typeof captureSchema>;
 
@@ -122,6 +123,19 @@ export function sonarRepositoryUrls(
         );
     }
   }
+  if (
+    scope.branch &&
+    findings.some(
+      ({ evidence }) =>
+        (report?.["format"] === sonarFormat ||
+          evidence.source_data?.["format"] === sonarFormat) &&
+        evidence.branch != null &&
+        evidence.branch !== scope.branch,
+    )
+  )
+    throw new Error(
+      "The finding branch does not match the retained Sonar branch.",
+    );
   return urls;
 }
 
@@ -141,6 +155,10 @@ function indexByKey(value: unknown, label: string) {
   return index;
 }
 
+export function mergeSonarIssueScope(scope: SonarScope, issue: NativeRecord) {
+  mergeSonarScope(scope, issue, issueScopeFields);
+}
+
 function readPage(value: unknown) {
   const page = record(value, "Sonar issue search page");
   return {
@@ -153,7 +171,7 @@ function readPage(value: unknown) {
   };
 }
 
-export function completeSonarPages(values: unknown[]) {
+function completeQueryPages(values: unknown[]) {
   const pages = values
     .map(readPage)
     .sort((a, b) => a.paging.pageIndex - b.paging.pageIndex);
@@ -173,6 +191,22 @@ export function completeSonarPages(values: unknown[]) {
     throw new Error(
       "Supply every Sonar issue search page exactly once, with consistent paging and issue counts.",
     );
+  return pages;
+}
+
+export function completeSonarPages(
+  values: unknown[],
+  queryPageCounts?: number[],
+) {
+  const counts = queryPageCounts ?? [values.length];
+  if (counts.reduce((sum, count) => sum + count, 0) !== values.length)
+    throw new Error("Sonar query page counts do not match the captured pages.");
+  let offset = 0;
+  const pages = counts.flatMap((count) => {
+    const query = values.slice(offset, offset + count);
+    offset += count;
+    return completeQueryPages(query);
+  });
   const ids = new Set<string>();
   for (const { issues } of pages) {
     for (const issue of issues) {
@@ -273,6 +307,7 @@ export function normalizeSonarFindings(
   }
   const pages = completeSonarPages(
     capture?.pages ?? (Array.isArray(input) ? input : [input]),
+    capture?.queryPageCounts,
   );
   const rows = pages.flatMap((page) =>
     page.issues.map((issue) => ({ issue, page })),
@@ -284,7 +319,7 @@ export function normalizeSonarFindings(
   );
   for (const { issue } of rows) {
     requiredText(issue["project"], "Sonar issue project");
-    mergeSonarScope(scope, issue, issueScopeFields);
+    mergeSonarIssueScope(scope, issue);
   }
   if (
     !capture?.branch &&

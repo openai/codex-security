@@ -104,6 +104,7 @@ export async function prepareSonarImport(
     : await (dependencies.collect ?? collectSonarIssues)({
         cwd: options.cwd,
         project: options.project,
+        sourceRepositoryUrl: options.sourceRepositoryUrl,
         branch: options.branch,
         pullRequest: options.pullRequest,
         issueKeys: options.issueKeys.length ? options.issueKeys : undefined,

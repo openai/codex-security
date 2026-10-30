@@ -35,6 +35,7 @@ import {
 } from "./git-remote.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
+import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 import { sonarRepositoryUrls } from "./sonar-findings.js";
 import { isRecord } from "./record.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
@@ -50,6 +51,7 @@ import {
 } from "./runtime.js";
 import {
   abortable,
+  enclosingGitWorktreeRoot,
   gitMarkerRoot,
   gitOutput,
   gitProtectionRoots,
@@ -226,9 +228,13 @@ function remoteRepository(
       (byte) =>
         "%" + byte.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0"),
     );
+  // Azure's generated SCP clone URL spells spaces as %20, even though Git sends SCP paths literally.
   const azure =
     provider === "sonar" && !(scpStyle && path.startsWith("/"))
-      ? azureReposHttpsUrl(url, name)
+      ? azureReposHttpsUrl(
+          url,
+          scpStyle ? name.replace(/%2520/gu, "%20") : name,
+        )
       : undefined;
   const repository = suffix
     ? key(origin + name + "?") +
@@ -262,15 +268,72 @@ function matchingRemote(
   );
 }
 
-/** Use the same literal Git transport semantics as source-bound local imports. */
-export function gitRemoteMatchesSource(
-  remote: string,
-  source: string,
-  provider: Provider,
-): boolean {
-  const candidate = remoteRepository(remote, provider, true);
-  const target = remoteRepository(source, provider, true);
-  return Boolean(candidate && target && matchingRemote(candidate, target));
+/** A credential-free Sonar repository binding from a supported Git fetch transport. */
+export function sonarRepositoryForRemote(origin: string): string | undefined {
+  try {
+    if (/[\s\\\p{Cc}?#]/u.test(origin)) return;
+    const remote = parseGitRemote(origin);
+    if (!remote) return;
+    const { url } = remote;
+    // Git passes literal SSH paths to upload-pack. URL.pathname collapses dot segments.
+    const path = remote.scpStyle
+      ? remote.path
+      : /^[^:/]+:\/\/[^/]+\/(.+)$/u.exec(origin)?.[1];
+    if (!path) return;
+    const hostname = url.hostname.toLowerCase();
+    let candidate: string | undefined;
+    if (url.protocol === "http:" || url.protocol === "https:") {
+      candidate = `${url.origin}/${path}`;
+    } else if (url.username === "git" && isGitHubSshOverHttps(url)) {
+      candidate = `https://github.com/${path}`;
+    } else if (
+      url.protocol === "ssh:" &&
+      url.username === "git" &&
+      (!url.port || url.port === "22") &&
+      (isGitHubCloudHost(hostname) ||
+        ["gitlab.com", "bitbucket.org"].includes(hostname))
+    ) {
+      candidate = `https://${hostname}/${path}`;
+    } else {
+      candidate = azureReposHttpsUrl(url, path);
+    }
+    if (!candidate) return;
+    const source = declaredScannerRepositoryUrl(
+      candidate.replace(/\.git$/iu, ""),
+      "Sonar",
+      "local",
+    );
+    const candidateRemote = remoteRepository(origin, "sonar", true);
+    const target = remoteRepository(source, "sonar", true);
+    return candidateRemote && target && matchingRemote(candidateRemote, target)
+      ? source
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Use the same executable and configuration boundaries for every Git query proving a binding. */
+export function boundSonarWorktree(
+  repository: string,
+  protectedRoots: string | readonly string[],
+  environment: NodeJS.ProcessEnv | undefined,
+  signal?: AbortSignal,
+) {
+  return enclosingGitWorktreeRoot(repository, signal, {
+    requireIfPresent: true,
+    readGit: (directory, args) =>
+      gitOutput(
+        directory,
+        args,
+        signal,
+        undefined,
+        undefined,
+        "utf8",
+        protectedRoots,
+        environment,
+      ),
+  });
 }
 
 function localRepositoryPlatform(
@@ -519,6 +582,16 @@ async function requireMatchingRepository(
       : (protectedRoots ?? [])),
     await abortable(() => canonicalConfigPath(process.cwd()), signal),
   ];
+  if (
+    provider === "sonar" &&
+    !(await boundSonarWorktree(
+      repository,
+      gitProtectedRoots,
+      environment,
+      signal,
+    ))
+  )
+    return false;
   const readGit = (args: readonly string[]) =>
     abortable(
       () =>
@@ -577,7 +650,11 @@ async function requireMatchingRepository(
           "A configured Git remote URL contains a line break. Configure each fetch URL as a separate Git value.",
         );
     }
-    remotes.push(...values);
+    remotes.push(
+      ...(provider === "sonar"
+        ? values.flatMap((value) => sonarRepositoryForRemote(value) ?? [])
+        : values),
+    );
   }
   const boundProvider =
     provider === "sonar" ||

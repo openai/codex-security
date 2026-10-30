@@ -10,9 +10,10 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { devNull, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { collectSonarIssues } from "../src/sonar-collector.js";
+import { readSonarFindings } from "../src/sonar-findings.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -29,13 +30,19 @@ const auth = { status: "connected", org: organization, server };
 const environment = {
   ...process.env,
   CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
+  GIT_CONFIG_GLOBAL: devNull,
+  GIT_CONFIG_NOSYSTEM: "1",
 };
+
+function git(...args: string[]) {
+  return execFileSync("git", args, { env: environment });
+}
 
 async function checkout() {
   const cwd = await realpath(await mkdtemp(join(tmpdir(), "sonar import ")));
   roots.push(cwd);
-  execFileSync("git", ["init", "--quiet", cwd]);
-  execFileSync("git", [
+  git("init", "--quiet", cwd);
+  git(
     "-C",
     cwd,
     "remote",
@@ -44,7 +51,7 @@ async function checkout() {
     "https://synthetic-user:example@" +
       new URL(repositoryUrl).host +
       "/team/service.git",
-  ]);
+  );
   return cwd;
 }
 
@@ -73,7 +80,9 @@ function page(key: string, index = 1, total = 1) {
 }
 
 function sonarSession(options: {
-  pages: Record<string, unknown>[];
+  pages:
+    | Record<string, unknown>[]
+    | ((query: URLSearchParams) => Record<string, unknown>);
   bindings?: Record<string, unknown>[];
   navigationDenied?: boolean;
   navigation?: Record<string, unknown>;
@@ -130,6 +139,8 @@ function sonarSession(options: {
       }
       expect(url.pathname).toBe("/api/issues/search");
       queries.push(url.searchParams);
+      if (typeof options.pages === "function")
+        return options.pages(url.searchParams);
       return options.pages[Number(url.searchParams.get("p")) - 1]!;
     },
   };
@@ -211,6 +222,94 @@ test("collects the exact issue keys and PR selected in the plugin handoff", asyn
   }
 });
 
+const largeSelection = Array.from(
+  { length: 2_000 },
+  (_, index) => "example-issue-" + index,
+);
+
+function exactIssuePage(
+  query: URLSearchParams,
+  keys = query.get("issues")!.split(","),
+) {
+  const index = Number(query.get("p")),
+    size = Number(query.get("ps"));
+  return {
+    paging: { pageIndex: index, pageSize: size, total: keys.length },
+    issues: keys.slice((index - 1) * size, index * size).map((key) => ({
+      key,
+      project,
+      component: project + ":source.ts",
+      rule: "test:S1",
+      type: "VULNERABILITY",
+    })),
+  };
+}
+
+test("a large exact selection retains each query's native pages for offline replay", async () => {
+  const cwd = await checkout();
+  const nativePages: Record<string, unknown>[] = [];
+  const session = sonarSession({
+    pages: (query) => {
+      const result = exactIssuePage(query);
+      nativePages.push(result);
+      return result;
+    },
+  });
+  const capture = await collectSonarIssues(
+    { cwd, project, branch: "main", issueKeys: largeSelection, environment },
+    session.run,
+  );
+  const firstPages = session.queries.filter((query) => query.get("p") === "1");
+  expect(firstPages.length).toBeGreaterThan(1);
+  expect(
+    firstPages.flatMap((query) => query.get("issues")!.split(",")),
+  ).toEqual(largeSelection);
+  expect(capture.pages).toEqual(nativePages);
+  expect(nativePages.length).toBeGreaterThan(firstPages.length);
+  const path = join(cwd, "selection.json");
+  await writeFile(path, JSON.stringify(capture));
+  const replay = await readSonarFindings(path, repositoryUrl, "local");
+  expect(replay.findings.map((finding) => finding.source_finding_id)).toEqual(
+    largeSelection,
+  );
+});
+
+test("multiple exact-key queries reject missing, foreign, and duplicate keys in later responses", async () => {
+  const cwd = await checkout();
+  for (const [defect, error] of [
+    ["missing", /were not returned/],
+    ["foreign", /outside the selected/],
+    ["duplicate", /overlap/],
+  ] as const) {
+    const session = sonarSession({
+      pages: (query) => {
+        const keys = query.get("issues")!.split(",");
+        if (keys[0] !== largeSelection[0]) {
+          if (defect === "missing") keys.shift();
+          if (defect === "foreign") keys[0] = largeSelection[0]!;
+          if (defect === "duplicate") keys[0] = keys[1]!;
+        }
+        return exactIssuePage(query, keys);
+      },
+    });
+    await expect(
+      collectSonarIssues(
+        {
+          cwd,
+          project,
+          branch: "main",
+          issueKeys: largeSelection,
+          environment,
+        },
+        session.run,
+      ),
+    ).rejects.toThrow(error);
+    expect(
+      session.queries.filter((query) => query.get("p") === "1").length,
+    ).toBeGreaterThan(1);
+  }
+});
+
 test("an omitted ref and the explicit Sonar main branch produce identical captures", async () => {
   const cwd = await checkout();
   const session = sonarSession({ pages: [page("A")] });
@@ -227,6 +326,109 @@ test("an omitted ref and the explicit Sonar main branch produce identical captur
     "trunk",
     "trunk",
   ]);
+});
+
+test("SDK collection keeps the checkout and issue selection supplied when the call started", async () => {
+  const cwd = await checkout();
+  const session = sonarSession({ pages: [page("A")] });
+  const options = {
+    cwd,
+    project,
+    branch: "trunk",
+    issueKeys: ["A"],
+    sourceRepositoryUrl: repositoryUrl,
+    environment: { ...environment, PATH: process.env["PATH"] },
+  };
+  const collection = collectSonarIssues(options, session.run);
+  options.cwd = join(cwd, "absent");
+  options.project = "another-project";
+  options.branch = "another-branch";
+  options.issueKeys[0] = "B";
+  options.sourceRepositoryUrl += "-other";
+  options.environment.PATH = "";
+  const capture = await collection;
+  expect(capture).toMatchObject({ project, branch: "trunk", repositoryUrl });
+  expect(session.queries.map((query) => query.get("issues"))).toEqual(["A"]);
+});
+
+test("a supplied source repository must agree with checkout discovery and selected project metadata before issue search", async () => {
+  const cwd = await checkout();
+  const sourceRepositoryUrl = repositoryUrl + "-other";
+  const implicit = sonarSession({ pages: [] });
+  await expect(
+    collectSonarIssues({ cwd, sourceRepositoryUrl, environment }, implicit.run),
+  ).rejects.toThrow("--source-repository-url");
+  expect(implicit.commands).toEqual([]);
+  const explicit = sonarSession({
+    pages: [],
+    navigation: { alm: { url: sourceRepositoryUrl } },
+  });
+  await expect(
+    collectSonarIssues(
+      { cwd, project, sourceRepositoryUrl: repositoryUrl, environment },
+      explicit.run,
+    ),
+  ).rejects.toThrow("--source-repository-url");
+  expect(explicit.queries).toEqual([]);
+});
+
+test("conflicting organization, branch, and pull request on returned issues fail collection", async () => {
+  const cwd = await checkout();
+  for (const [selection, scope, error] of [
+    [{ branch: "main" }, { organization: "other" }, /organization/],
+    [{ branch: "main" }, { branch: "other" }, /branch/],
+    [{ pullRequest: "12" }, { pullRequest: "13" }, /pullRequest/],
+    [{ pullRequest: "12" }, { branch: "main" }, /branch and pull request/],
+  ] as const) {
+    const result = page("A");
+    Object.assign(result.issues[0]!, scope);
+    const session = sonarSession({ pages: [result] });
+    await expect(
+      collectSonarIssues(
+        { cwd, project, ...selection, environment },
+        session.run,
+      ),
+    ).rejects.toThrow(error);
+    expect(session.queries).toHaveLength(1);
+  }
+});
+
+test("automatic discovery rejects a forged Git pointer but accepts a registered linked worktree", async () => {
+  const cwd = await checkout();
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "sonar worktrees ")),
+  );
+  roots.push(root);
+  const forged = join(root, "forged");
+  await mkdir(forged);
+  await writeFile(join(forged, ".git"), `gitdir: ${join(cwd, ".git")}\n`);
+  const session = sonarSession({ pages: [page("A")] });
+  await expect(
+    collectSonarIssues({ cwd: forged, environment }, session.run),
+  ).rejects.toThrow("--sonar-project");
+  expect(session.commands).toEqual([]);
+
+  git(
+    "-C",
+    cwd,
+    "-c",
+    "user.name=Fixture",
+    "-c",
+    "user.email=fixture@example.invalid",
+    "commit",
+    "--quiet",
+    "--allow-empty",
+    "-m",
+    "fixture",
+  );
+  const linked = join(root, "linked");
+  git("-C", cwd, "worktree", "add", "--quiet", "--detach", linked);
+  const capture = await collectSonarIssues(
+    { cwd: linked, environment },
+    session.run,
+  );
+  expect(capture).toMatchObject({ project, repositoryUrl });
+  expect(session.queries).toHaveLength(1);
 });
 
 test("uses the explicit project in token-only sessions and claims only a matching binding", async () => {
@@ -413,6 +615,10 @@ test.each([
     "https://dev.azure.com/Org/Project/_git/Repo",
   ],
   [
+    "git@ssh.dev.azure.com:v3/Org/Project%20Name/Repo%20Name",
+    "https://dev.azure.com/Org/Project%20Name/_git/Repo%20Name",
+  ],
+  [
     "ssh://git@ssh.dev.azure.com:22/v3/Org/Project/Repo",
     "https://dev.azure.com/Org/Project/_git/Repo",
   ],
@@ -420,7 +626,7 @@ test.each([
   "verifies the HTTPS repository binding for SSH origin %s",
   async (origin, source) => {
     const cwd = await checkout();
-    execFileSync("git", ["-C", cwd, "remote", "set-url", "origin", origin]);
+    git("-C", cwd, "remote", "set-url", "origin", origin);
     const session = sonarSession({ pages: [page("A")], repositoryUrl: source });
     const capture = await collectSonarIssues({ cwd, environment }, session.run);
     expect(capture.repositoryUrl).toBe(source);
@@ -443,7 +649,7 @@ test("rejects ambiguous Git transport and credential-bearing query strings befor
     "ssh://git@ssh.dev.azure.com:2222/v3/Org/Project/Repo",
     "git@ssh.dev.azure.com:v3/Org/../Repo",
   ]) {
-    execFileSync("git", ["-C", cwd, "remote", "set-url", "origin", origin]);
+    git("-C", cwd, "remote", "set-url", "origin", origin);
     const session = sonarSession({ pages: [] });
     await expect(
       collectSonarIssues({ cwd, environment }, session.run),
@@ -501,13 +707,7 @@ test.each(["checkout", "metadata"])(
     roots.push(root);
     const caller = join(root, "caller");
     const metadata = join(root, "caller.git");
-    execFileSync("git", [
-      "init",
-      "--quiet",
-      "--separate-git-dir",
-      metadata,
-      caller,
-    ]);
+    git("init", "--quiet", "--separate-git-dir", metadata, caller);
     const bin = join(kind === "checkout" ? caller : metadata, "bin");
     await mkdir(bin);
     if (process.platform === "win32")

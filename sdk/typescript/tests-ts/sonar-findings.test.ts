@@ -276,6 +276,17 @@ test("normalized local imports verify both report and issue bindings against the
     prepareNormalizedLocalImport(rows, options, deps),
   ).rejects.toThrow("retained Sonar issue key");
   finding.source_finding_id = id;
+  const wrongBranch = {
+    ...finding,
+    evidence: { ...finding.evidence, branch: "unrelated" },
+  };
+  await expect(
+    prepareNormalizedLocalImport(
+      { ...rows, findings: [wrongBranch] },
+      options,
+      deps,
+    ),
+  ).rejects.toThrow("retained Sonar branch");
   const alternate = structuredClone(finding);
   alternate.source_finding_id = "other-key";
   const native = alternate.evidence.source_data!;

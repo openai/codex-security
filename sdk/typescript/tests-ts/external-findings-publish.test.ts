@@ -828,6 +828,22 @@ test("normalized Sonar publication checks retained bindings on preview and retry
     prepareNormalizedExternalPublication(rows, selected, f.deps);
   await expect(
     prepareNormalizedExternalPublication(
+      {
+        ...rows,
+        report: { ...context, branch: "main" },
+        findings: [
+          {
+            ...finding,
+            evidence: { ...finding.evidence, branch: "unrelated" },
+          },
+        ],
+      },
+      selected,
+      f.deps,
+    ),
+  ).rejects.toThrow("retained Sonar branch");
+  await expect(
+    prepareNormalizedExternalPublication(
       { ...rows, report: { ...context, repositoryUrl: foreign } },
       selected,
       f.deps,

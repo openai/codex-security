@@ -1614,6 +1614,35 @@ describe("local normalized scanner findings", () => {
     ).rejects.toThrow("remote URL contains a line break");
   });
 
+  test.each([
+    [
+      "ftp://example.invalid/team/project",
+      "https://example.invalid/team/project",
+      false,
+    ],
+    [
+      "https://example.invalid/team/pro\tject",
+      "https://example.invalid/team/project",
+      false,
+    ],
+    [
+      "git@ssh.dev.azure.com:v3/example/My%20Project/repo",
+      "https://dev.azure.com/example/My%20Project/_git/repo",
+      true,
+    ],
+  ] as const)(
+    "checks the same Sonar binding for replay of %s as for discovery",
+    async (remote, url, matches) => {
+      const { repository, environment } = await fixture({ remote });
+      const prepared = await prepareNormalizedLocalImport(
+        input(),
+        { repository, ...source, provider: "sonar" },
+        { environment, sourceRepositories: [{ url }] },
+      );
+      expect(prepared.matchesRepositoryRemote).toBe(matches);
+    },
+  );
+
   test.each(["local", "global"])(
     "matches all effective fetch URLs with %s Git URL rewrites",
     async (scope) => {

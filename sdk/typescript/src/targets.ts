@@ -161,12 +161,19 @@ function requirePortableWindowsRepositoryPath(path: string): void {
   }
 }
 
+type ReadWorktreeGit = (
+  repository: string,
+  args: readonly string[],
+  signal?: AbortSignal,
+) => Promise<string>;
+
 export async function enclosingGitWorktreeRoot(
   repository: string,
   signal?: AbortSignal,
-  options: { requireIfPresent?: boolean } = {},
+  options: { requireIfPresent?: boolean; readGit?: ReadWorktreeGit } = {},
 ): Promise<string | null> {
   const strict = options.requireIfPresent === true;
+  const readGit = options.readGit ?? gitOutput;
   const markerRoot = strict
     ? await gitMarkerRoot(repository, signal, "nearest")
     : null;
@@ -174,7 +181,7 @@ export async function enclosingGitWorktreeRoot(
   try {
     if (strict) {
       if (
-        (await gitOutput(
+        (await readGit(
           repository,
           ["rev-parse", "--is-inside-git-dir"],
           signal,
@@ -186,7 +193,7 @@ export async function enclosingGitWorktreeRoot(
       }
       if (markerRoot === null) return null;
     }
-    const root = await gitOutput(
+    const root = await readGit(
       repository,
       ["rev-parse", "--show-toplevel"],
       signal,
@@ -215,7 +222,7 @@ export async function enclosingGitWorktreeRoot(
     );
   }
   if (markerRoot !== null)
-    await requireGitWorktreeBinding(canonicalRoot, signal);
+    await requireGitWorktreeBinding(canonicalRoot, signal, readGit);
   return canonicalRoot;
 }
 
@@ -321,11 +328,12 @@ export async function isGitMetadataDirectory(
 export async function gitMetadataDirectories(
   repository: string,
   signal?: AbortSignal,
-  options: { includeLocalObjects?: boolean } = {},
+  options: { includeLocalObjects?: boolean; readGit?: ReadWorktreeGit } = {},
 ): Promise<[string, string, ...string[]]> {
+  const readGit = options.readGit ?? gitOutput;
   const [directory, commonDirectory] = await Promise.all([
-    gitOutput(repository, ["rev-parse", "--absolute-git-dir"], signal),
-    gitOutput(repository, ["rev-parse", "--git-common-dir"], signal),
+    readGit(repository, ["rev-parse", "--absolute-git-dir"], signal),
+    readGit(repository, ["rev-parse", "--git-common-dir"], signal),
   ]);
   const roots = await Promise.all([
     abortable(() => realpath(resolve(repository, directory)), signal),
@@ -434,13 +442,15 @@ export async function gitObjectDirectories(
 
 async function requireGitWorktreeBinding(
   repository: string,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  readGit: ReadWorktreeGit,
 ): Promise<void> {
   let cause: unknown;
   try {
     const [directory, commonDirectory] = await gitMetadataDirectories(
       repository,
       signal,
+      { readGit },
     );
     if (
       [directory, commonDirectory].every(
@@ -451,11 +461,7 @@ async function requireGitWorktreeBinding(
     if (relative(directory, commonDirectory) === "") {
       // The toplevel check already verified the configured worktree path.
       if (
-        await gitOutput(
-          repository,
-          ["config", "--get", "core.worktree"],
-          signal,
-        )
+        await readGit(repository, ["config", "--get", "core.worktree"], signal)
       )
         return;
     } else {

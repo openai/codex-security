@@ -17,16 +17,19 @@ const repositoryUrl = "https://github.com/example/project";
 
 async function fixture(root: string, name = "checkout") {
   const checkout = join(root, name);
+  const environment = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: join(root, "gitconfig"),
+    GIT_CONFIG_NOSYSTEM: "1",
+    CODEX_HOME: join(root, "codex"),
+    CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
+    CODEX_SECURITY_STATE_DIR: join(root, "state"),
+  };
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-C", checkout, ...args], { env: environment });
   await mkdir(checkout);
-  execFileSync("git", ["-C", checkout, "init", "--quiet"]);
-  execFileSync("git", [
-    "-C",
-    checkout,
-    "remote",
-    "add",
-    "origin",
-    repositoryUrl,
-  ]);
+  git("init", "--quiet");
+  git("remote", "add", "origin", repositoryUrl);
   const capture = join(checkout, "report.json");
   const report = {
     format: "sonar-issues/v1",
@@ -54,6 +57,7 @@ async function fixture(root: string, name = "checkout") {
   };
   await writeFile(capture, JSON.stringify(report));
   return {
+    git,
     report,
     options: {
       cwd: checkout,
@@ -62,14 +66,7 @@ async function fixture(root: string, name = "checkout") {
       dryRun: true,
       yes: false,
     },
-    deps: {
-      environment: {
-        ...process.env,
-        CODEX_HOME: join(root, "codex"),
-        CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
-        CODEX_SECURITY_STATE_DIR: join(root, "state"),
-      },
-    },
+    deps: { environment },
   };
 }
 
@@ -94,6 +91,35 @@ test("preview snapshots caller-owned evidence and rejects changes to the retaine
   await expect(
     prepareSonarImport({ ...selection, capture: info.capture }, deps),
   ).rejects.toThrow("saved Sonar capture has changed");
+});
+
+test("live import passes the expected repository to the collector before saving evidence", async () => {
+  await using directory = await scopedTemporaryDirectory(
+    "sonar-expected-source-",
+  );
+  const { options, deps } = await fixture(directory.path);
+  let source: string | undefined;
+  await expect(
+    prepareSonarImport(
+      {
+        ...options,
+        capture: undefined,
+        to: "local",
+        sourceRepositoryUrl: repositoryUrl,
+      },
+      {
+        ...deps,
+        collect: async (selection) => {
+          source = selection.sourceRepositoryUrl;
+          throw new Error("Conflicting Sonar binding");
+        },
+      },
+    ),
+  ).rejects.toThrow("Conflicting Sonar binding");
+  expect(source).toBe(repositoryUrl);
+  expect(
+    await stat(deps.environment.CODEX_SECURITY_STATE_DIR).catch(() => null),
+  ).toBeNull();
 });
 
 test("Cloud confirmation verifies the retained evidence, account and assigned environment", async () => {
@@ -219,7 +245,7 @@ test("replays a manually bound capture using the native branch as its identity",
 
 test("a dry run cannot create the capture directory inside a checkout or its linked Git metadata", async () => {
   await using directory = await scopedTemporaryDirectory("sonar-protected-");
-  const { options, deps } = await fixture(directory.path, "imports");
+  const { options, deps, git } = await fixture(directory.path, "imports");
   const selected = { ...options, to: "local" } as const;
   deps.environment.CODEX_SECURITY_STATE_DIR = directory.path;
   await expect(prepareSonarImport(selected, deps)).rejects.toThrow();
@@ -228,9 +254,7 @@ test("a dry run cannot create the capture directory inside a checkout or its lin
   ).toBeNull();
 
   const other = join(directory.path, "linked");
-  execFileSync("git", [
-    "-C",
-    options.cwd,
+  git(
     "-c",
     "user.name=Example",
     "-c",
@@ -240,16 +264,8 @@ test("a dry run cannot create the capture directory inside a checkout or its lin
     "--allow-empty",
     "-m",
     "initial",
-  ]);
-  execFileSync("git", [
-    "-C",
-    options.cwd,
-    "worktree",
-    "add",
-    "--quiet",
-    "--detach",
-    other,
-  ]);
+  );
+  git("worktree", "add", "--quiet", "--detach", other);
   const state = join(options.cwd, ".git", "state");
   deps.environment.CODEX_SECURITY_STATE_DIR = state;
   await expect(

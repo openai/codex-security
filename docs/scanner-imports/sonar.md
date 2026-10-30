@@ -68,9 +68,10 @@ deployment must accept the `sonar` source provider. Review the Cloud account,
 repository, environments, counts, and exclusions before confirming. Use
 the `capture` path from this Cloud preview to confirm. If the destination
 changes, preview again and confirm using the new path. Replaying the capture
-works without a Sonar login. For a checkout without a matching Git remote,
+works without a Sonar login. For a checkout without a usable Git remote,
 verify the Sonar project's repository and pass `--source-repository-url` to
-the Cloud preview.
+the Cloud preview. If the configured remotes point to another repository,
+use the matching checkout or add its verified upstream remote before previewing.
 
 ```sh
 codex-security import sonar "/path/from/local-preview.json" --to cloud --dry-run --format json
