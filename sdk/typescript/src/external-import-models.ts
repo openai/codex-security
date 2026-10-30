@@ -6,7 +6,14 @@ export type RepoConnectorId = string;
 export type EnvironmentId = string;
 export type ResetMarker = string;
 export type Provider =
-  "wiz" | "endor" | "snyk" | "github" | "semgrep" | "inspector";
+  | "wiz"
+  | "endor"
+  | "snyk"
+  | "github"
+  | "semgrep"
+  | "inspector"
+  | "blackduck"
+  | "veracode";
 export type SourceKey = string;
 export type ClientId = string;
 export type SourceFindingId = string;

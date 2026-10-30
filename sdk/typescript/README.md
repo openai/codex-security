@@ -691,6 +691,16 @@ the repository by an ARN and name, pass `--inspector-project-arn ARN` with the A
 you verified for that Git URL in the SCM integration. See the
 [Inspector guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/inspector.md).
 
+For Black Duck SCA, use `--provider blackduck` with a BOM-6 vulnerable-components
+export for one project version. Map that version to its source repository with
+`--source-repository-url`. See the
+[Black Duck guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/blackduck.md).
+
+For Veracode Static Analysis policy findings, use `--provider veracode` with
+every Findings API page from one application. Set `--source-repository-url`
+to the source repository mapped to that application. See the
+[Veracode guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/veracode.md).
+
 For OpenGrep, use `--provider opengrep` with native JSON or gzip and an explicit
 `--source-repository-url`. Local and Cloud imports retain unassessed OpenGrep
 evidence through the existing Semgrep source-provider contract. See the

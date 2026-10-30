@@ -29,11 +29,11 @@ export async function prepareLocalExternalImport(
   requireExternalImports(dependencies.environment);
   const runWorkbench = dependencies.runWorkbench;
   const settings = snapshotImportOptions(options);
-  const verifiedRepositories = snapshotSourceRepositories(
+  const readerSources = snapshotSourceRepositories(
     dependencies.sourceRepositories,
   );
   const parsed = await abortable(
-    () => readExternalFindings(path, settings, "local", verifiedRepositories),
+    () => readExternalFindings(path, settings, "local", readerSources),
     signal,
   );
   const normalizedOptions = {
@@ -49,7 +49,7 @@ export async function prepareLocalExternalImport(
     // agree with the caller's source URL when the checkout has no remote.
     const source = settings.sourceRepositoryUrl!;
     sourceRepositories = [{ url: source }, ...sourceRepositories];
-    const knownGitHub = verifiedRepositories.some(
+    const knownGitHub = readerSources.some(
       ({ url, platform }) =>
         platform === "github" &&
         cloudRepositoryUrlKey(url) === cloudRepositoryUrlKey(source),
@@ -71,6 +71,7 @@ export async function prepareLocalExternalImport(
     parsed.findings,
     normalizedOptions,
     { environment: dependencies.environment, signal, runWorkbench },
-    [...verifiedRepositories, ...sourceRepositories],
+    readerSources,
+    sourceRepositories,
   );
 }

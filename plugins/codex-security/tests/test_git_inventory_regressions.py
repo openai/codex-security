@@ -25,7 +25,8 @@ def test_root_commit_message_does_not_supply_diff_parent(tmp_path: Path, workben
     git(target, "commit", "--amend", "-qm", f"Synthetic root\n\nparent {previous}")
     head = git(target, "rev-parse", "HEAD").decode()
     diff = workbench_api["require_diff_target"](target, "commit", None, head, None)
-    assert diff["baseRevision"] == workbench_api["EMPTY_GIT_TREE"]
+    empty_tree = git(target, "hash-object", "-t", "tree", "--stdin", input=b"").decode()
+    assert diff["baseRevision"] == empty_tree
 
 
 def test_sha256_root_commit_uses_the_sha256_empty_tree(tmp_path: Path, workbench_api) -> None:

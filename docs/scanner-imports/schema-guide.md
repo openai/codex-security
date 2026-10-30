@@ -44,10 +44,14 @@ to investigate records together, not instructions to merge them.
 | [GitHub Dependabot repository REST alerts](github-dependabot.md)                                                                                                                                    | Host, repository and alert number                                                                                                                       | Host, repository and Dependabot family     |
 | [GitHub saved `import github` output](../../sdk/typescript/docs/cli.md#import-github-findings-locally-or-to-cloud)                                                                                  | Host, repository, alert number and hash of selected ref                                                                                                 | Host, repository and code-scanning family  |
 | [GitHub saved `import github-advisories` output](../../sdk/typescript/docs/cli.md#import-ghsa-advisories-separately)                                                                                | Host, repository **or** global scope, and GHSA ID                                                                                                       | Separate advisory stream from alerts       |
+| [Black Duck BOM-6 collection or selected rows](blackduck.md)                                                                                                                                        | Project version, component version, origin, advisory source and advisory name                                                                           | Deployment, project and version            |
+| [Veracode Static Analysis Findings API pages](veracode.md)                                                                                                                                          | API origin, application and context, and native issue ID                                                                                                | Deployment, application and static policy  |
 
 Within **one input**, duplicate IDs are ambiguous, not corroboration. Wiz and
 GitHub reject a selection with duplicate accepted IDs. Endor, Snyk and Semgrep
-exclude every record with the colliding identity. Inspect the source and select
+exclude every record with the colliding identity. Black Duck rejects duplicate occurrences in a complete collection, and excludes all colliding rows in an explicit selection.
+Veracode rejects a capture that repeats an issue ID for the same scan type.
+Inspect the source and select
 the intended occurrence; don't rename records simply to make them import. Across
 **separate local imports**, changed evidence updates the same record; omission
 does not delete or resolve it. Cloud publication sends an expected version;

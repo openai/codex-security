@@ -74,7 +74,6 @@ import {
 } from "./artifact-export.js";
 export { exportEnvironment } from "./artifact-export.js";
 import { parse as parseToml } from "smol-toml";
-import { parse as parseYaml } from "yaml";
 import {
   classifyConnectionFailure,
   CodexSecurity,
@@ -5227,10 +5226,12 @@ export async function main(
               ? options.component.map((path) => ({ name: path, paths: [path] }))
               : componentPlanSchema.parse(
                   JSON.parse(
-                    await readRegularInputFile(
-                      resolveCliPath(directory, options.componentsFile),
-                      repository,
-                    ),
+                    (
+                      await readRegularInputFile(
+                        resolveCliPath(directory, options.componentsFile),
+                        repository,
+                      )
+                    ).replace(/^\uFEFF/u, ""),
                   ),
                 ).components;
           if (
@@ -7217,7 +7218,7 @@ export async function main(
     } else {
       if (exitCode !== 0) return exitCode;
       errorOutput.write(
-        `codex-security: ${diagnosticLines(incurErrorMessage(frameworkOutput))}\n`,
+        `codex-security: ${diagnosticLines(await incurErrorMessage(frameworkOutput))}\n`,
       );
       return 2;
     }
@@ -9258,11 +9259,12 @@ export function skillCommandFailure(
   return detail || `${command} failed with exit code ${status}.`;
 }
 
-function incurErrorMessage(output: string): string {
+async function incurErrorMessage(output: string): Promise<string> {
   // YAML folds long strings across lines; JSON output keeps its serialized form.
   if (!output.startsWith("{")) {
+    const { parse } = await import("yaml");
     try {
-      const parsed: unknown = parseYaml(output);
+      const parsed: unknown = parse(output);
       if (isJsonObject(parsed) && typeof parsed["message"] === "string")
         return parsed["message"];
     } catch {
@@ -10157,7 +10159,7 @@ async function executeScan(
             );
             if (validation["reportPath"] !== undefined) {
               errorOutput.write(
-                `Partial validation report: ${diagnosticValue(validation["reportPath"])}\n`,
+                `Validation report opened at ${diagnosticValue(validation["reportPath"])}\n`,
               );
             }
           }
@@ -10216,11 +10218,11 @@ async function executeScan(
   if (requestedSignal !== null) {
     diagnostic("scan.interrupted", {
       signal: requestedSignal,
-      partial_output: scanDir !== null,
     });
     if (result !== null && arguments_.validate) {
       const exitCode = requestedSignal === "SIGINT" ? 130 : 143;
-      const message = `Validation interrupted. Completed scan output was kept at ${errorMessage(result.scanDir)}.`;
+      const scanId = quoteCliPath(diagnosticValue(result.manifest.scan.id));
+      const message = `Validation interrupted. Original output directory: ${errorMessage(result.scanDir)}. Run codex-security scans show ${scanId} to inspect the completed scan.`;
       errorOutput.write(`codex-security: ${message}\n`);
       return {
         exitCode,
@@ -10231,6 +10233,7 @@ async function executeScan(
         },
       };
     }
+    if (failure instanceof ScanInterruptedError) scanDir ??= failure.scanDir;
     const exitCode = interruptedExit(requestedSignal, scanDir, errorOutput);
     printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
     return {
@@ -10260,7 +10263,6 @@ async function executeScan(
           : isLocalScanFailure(failure)
             ? "local"
             : classifyConnectionFailure(failure),
-      partial_output: scanDir !== null,
       max_cost_usd: costLimitFailure?.maxCostUsd,
       estimated_usd: costLimitFailure?.cost.estimatedUsd,
       cost_estimate:
@@ -10270,9 +10272,7 @@ async function executeScan(
     });
     errorOutput.write(`${message}\n`);
     if (!(failure instanceof ScanInterruptedError) && scanDir !== null) {
-      errorOutput.write(
-        `Partial output was kept at ${errorMessage(scanDir)}.\n`,
-      );
+      errorOutput.write(`Output directory: ${errorMessage(scanDir)}\n`);
     }
     printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
     return { exitCode: 2, error: message, data: failureData };
@@ -10821,7 +10821,7 @@ function printFailedScanReference(
     if (phase !== null)
       output.write(`Last observed phase: ${diagnosticValue(phase)}\n`);
     output.write(
-      `Retained results: ${diagnosticValue(scan["scanDir"])}\n` +
+      `Output directory: ${diagnosticValue(scan["scanDir"])}\n` +
         "Inspect the saved scan status before choosing resume or rerun.\n",
     );
     const prompts = [
@@ -11395,11 +11395,11 @@ function interruptedExit(
   errorOutput.write(
     `codex-security: Scan ${ctrlC ? "canceled by Ctrl-C" : "terminated by SIGTERM"}.\n`,
   );
-  errorOutput.write(
-    scanDir === null
-      ? "codex-security: No partial output was kept.\n"
-      : `codex-security: Partial output was kept at ${errorMessage(scanDir)}.\n`,
-  );
+  if (scanDir) {
+    errorOutput.write(
+      `codex-security: Output directory: ${errorMessage(scanDir)}\n`,
+    );
+  }
   return ctrlC ? 130 : 143;
 }
 

@@ -41,9 +41,15 @@ import {
 import { canonicalJson, isRecord } from "./record.js";
 import { hostedNumber, restoreHostedNumbers } from "./scanner-import.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
+import { wizFindingRepository } from "./wiz-findings.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import { snykRepositoryClaims, snykRepositoryScope } from "./snyk-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
+import {
+  blackDuckReportRepositories,
+  projectedBlackDuckRepositoryUrl,
+} from "./blackduck-findings.js";
+import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import {
   HOSTED_FINDINGS_FORMATS,
@@ -950,25 +956,56 @@ async function preparePublicationInput(
     findings: ExternalFindings["findings"],
     targetUrl: string,
     description = "selected Cloud repository",
+    retry = false,
   ) {
-    const binding = inspectorReportRepository(
-      options.provider,
-      findings,
-      "cloud",
-      inspectorProjectMap,
-    );
     const check = (
       url: string | null | undefined,
       id?: string,
       alias = false,
     ) => requireRepository(url, targetUrl, id, alias, description, true);
-    if (binding) check(binding.url, binding.findingId);
-    if (snyk?.project) {
+    // Historical checkpoints already fixed the provider and request bytes.
+    // Recheck any projected source against the destination discovered for this retry.
+    const replay = retry && options.provider !== "blackduck";
+    const repositories = replay
+      ? undefined
+      : blackDuckReportRepositories(options.provider, findings, "cloud");
+    if (!retry || options.provider === "veracode") {
+      for (const [id, source] of veracodeReportRepositories(
+        options.provider,
+        findings,
+        "cloud",
+      ))
+        check(source.url, id);
+    }
+    if (
+      !replay ||
+      options.provider === "inspector" ||
+      options.provider === "veracode"
+    ) {
+      const binding = inspectorReportRepository(
+        options.provider,
+        findings,
+        "cloud",
+        inspectorProjectMap,
+      );
+      if (binding) check(binding.url, binding.findingId);
+    }
+    if (!replay && snyk?.project) {
       check(snyk.project.url);
       check(snyk.project.nativeUrl);
     }
     for (const finding of findings) {
       const { source_finding_id: id, evidence } = finding;
+      const projected = repositories
+        ? repositories.get(id)?.url
+        : projectedBlackDuckRepositoryUrl(finding, "cloud");
+      if (
+        replay &&
+        !projected &&
+        options.provider !== "inspector" &&
+        options.provider !== "veracode"
+      )
+        continue;
       const data = evidence.source_data;
       if (options.provider === "snyk") {
         const native = data && snyk?.claims.get(data);
@@ -979,6 +1016,7 @@ async function preparePublicationInput(
         }
       }
       const urls = [
+        projected,
         evidence.details?.repository?.url,
         options.provider === "semgrep"
           ? semgrepPlatformFindingRepository(
@@ -986,7 +1024,11 @@ async function preparePublicationInput(
               (url) => !strictPath && reportKey(url) === reportKey(targetUrl),
             )
           : undefined,
-        options.provider === "wiz" ? wizCsvRepositoryUrl(evidence) : undefined,
+        options.provider === "wiz"
+          ? projected
+            ? wizFindingRepository(evidence, "cloud")?.url
+            : wizCsvRepositoryUrl(evidence)
+          : undefined,
         ...(options.provider === "semgrep" &&
         bound &&
         !isSemgrepPlatformReport(data)
@@ -1005,9 +1047,14 @@ async function preparePublicationInput(
   if (!saved) {
     if (reportSource) requireRepository(reportSource, destination.url);
     else checkRepositories(parsed.findings, destination.url);
-  } else if (options.provider === "inspector") {
-    checkRepositories(parsed.findings, destination.url);
-    checkRepositories(submissionFindings(saved.requests), destination.url);
+  } else {
+    checkRepositories(parsed.findings, destination.url, undefined, true);
+    checkRepositories(
+      submissionFindings(saved.requests),
+      destination.url,
+      undefined,
+      true,
+    );
   }
 
   let requests = saved?.requests;
