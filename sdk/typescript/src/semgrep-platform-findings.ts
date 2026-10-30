@@ -25,7 +25,7 @@ function responseRecord(value: unknown, label: string) {
 }
 
 // Normalize equivalent JSON numbers exactly. Keep very large exponents compact.
-function canonicalNumber(token: string): string {
+function canonicalNumber(token: string, fixedDigits = 21): string {
   const [, sign = "", integer, fraction = "", exponent = "0"] =
     /^(-?)(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/iu.exec(token)!;
   const significant = (integer + fraction).replace(/^0+/u, "");
@@ -34,8 +34,8 @@ function canonicalNumber(token: string): string {
   while (significant[end - 1] === "0") end--;
   const digits = significant.slice(0, end);
   const point = BigInt(exponent) + BigInt(significant.length - fraction.length);
-  // Use the same fixed/scientific notation thresholds as JSON.stringify.
-  if (point > -6n && point <= 21n) {
+  // Ordinary evidence follows JSON.stringify’s fixed/scientific notation thresholds.
+  if (point > -6n && point <= BigInt(fixedDigits)) {
     const split = Number(point);
     if (split <= 0) return sign + "0." + "0".repeat(-split) + digits;
     if (split >= digits.length) return sign + digits.padEnd(split, "0");
@@ -89,8 +89,10 @@ function platformId(value: unknown): string | undefined {
   let id = value;
   if (wireJson.isRawJSON(value)) {
     const token = value.rawJSON;
-    // Keep positive integer literals as digits even outside the ordinary notation range.
-    id = /^[1-9][0-9]*$/u.test(token) ? token : canonicalNumber(token);
+    // IDs stay in decimal form. Beyond int64, retain digits supplied on the wire without expanding unbounded exponents.
+    id = /^[1-9][0-9]*$/u.test(token)
+      ? token
+      : canonicalNumber(token, Math.max(21, token.length));
   } else if (typeof value === "number" && Number.isSafeInteger(value)) {
     id = String(value);
   }
@@ -161,6 +163,14 @@ export function normalizeSelectedSemgrepPlatformFindings(options: {
   const projectPath = decodeURIComponent(
     new URL(scope.project.url).pathname,
   ).replace(/^\/|\/$/gu, "");
+  const projectNames = [
+    scope.project.name,
+    projectPath,
+    projectPath.replace(/\.git$/u, ""),
+  ];
+  const projectLabels = new Set(
+    projectNames.flatMap((name) => [name, name.split("/").at(-1)!]),
+  );
   for (const response of pages) {
     for (const finding of array(
       parseSemgrepResponse(response)["findings"],
@@ -179,17 +189,13 @@ export function normalizeSelectedSemgrepPlatformFindings(options: {
         repo["id"] == null ? undefined : requiredPlatformId(repo["id"]);
       const url = repo["url"];
       const name = repo["name"];
-      const fullName = scope.project.name;
-      const urlPathName =
-        typeof name === "string" &&
-        (name === projectPath || name + ".git" === projectPath);
-      const nameParts = typeof name === "string" ? name.split("/") : [];
+      const matchesName = typeof name === "string" && projectLabels.has(name);
       const qualifiedName =
-        nameParts.length > 1 &&
-        nameParts.every((part) => part && part !== "." && part !== "..") &&
-        (name === fullName || urlPathName);
-      const matchesName =
-        name === fullName || name === fullName.split("/").at(-1) || urlPathName;
+        typeof name === "string" &&
+        projectNames.includes(name) &&
+        name === relativePath(name) &&
+        name.includes("/") &&
+        name.split("/").every((part) => part.trim() && part !== ".");
       if (
         finding["ref"] !== scope.ref ||
         (repositoryId !== undefined && repositoryId !== scope.project.id) ||

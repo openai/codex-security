@@ -191,6 +191,8 @@ test("equivalent numeric IDs replay as integers while textual IDs stay exact", (
   for (const token of ['"8.0"', '"8e0"', "8.00000000000000001"])
     expect(() => select(token)).toThrow("missing");
   const large = "12345678901234567890123";
+  expect(select(large + ".0", large)).toEqual(select(large, large));
+  expect(select(large + "e0", large)).toEqual(select(large, large));
   expect(
     select(large, large).evidence.source_data?.["semgrepPlatformFindingJson"],
   ).toContain('"id":' + large + ",");
@@ -215,7 +217,7 @@ test("a URL-less row needs the matching project ID and full name, while an exact
     });
   }
   const name = "example/project";
-  for (const pseudo of ["./project", "../project"]) {
+  for (const pseudo of ["./project", "../project", " /project", "C:/project"]) {
     expect(() => select(pseudo, { id: 77, name: pseudo })).toThrow(
       "project and ref",
     );
@@ -234,6 +236,9 @@ test("a URL-less row needs the matching project ID and full name, while an exact
   }
   expect(select("project", { url, name }).findings).toHaveLength(1);
   expect(select("old-group/project", { url, name }).findings).toHaveLength(1);
+  expect(
+    select("group/old-name", { url, name: "project" }).findings,
+  ).toHaveLength(1);
   const encoded = "https://github.com/example/caf%C3%A9";
   expect(
     select("café", { url: encoded, name: "example/café" }, encoded).findings,
