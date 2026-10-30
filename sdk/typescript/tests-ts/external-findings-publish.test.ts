@@ -715,7 +715,10 @@ test("Sonar replays the selected evidence locally and to Cloud without signing i
   const f = await fixture(source, repo);
   const checkout = join(f.root, "checkout");
   const git = promisify(execFile);
-  const environment = sonarGitTestEnvironment(f.cliDeps.environment);
+  const environment = sonarGitTestEnvironment({
+    ...f.cliDeps.environment,
+    CODEX_SECURITY_CLOUD_BASE_URL: "https://cloud.example.test",
+  });
   await git("git", ["init", "--quiet", checkout], { env: environment });
   await git("git", ["-C", checkout, "remote", "add", "origin", repo], {
     env: environment,
@@ -726,7 +729,7 @@ test("Sonar replays the selected evidence locally and to Cloud without signing i
     environment,
     currentDirectory: () => checkout,
     cloudFetch: (url: string, init: RequestInit) => {
-      paths.add(new URL(url).pathname.split("/external/")[1]!);
+      paths.add(new URL(url).pathname);
       return f.cliDeps.cloudFetch(url, init);
     },
   };
@@ -818,12 +821,12 @@ test("Sonar replays the selected evidence locally and to Cloud without signing i
   });
   expect(posted.items[0].source_finding_id).toBe("issue-1");
   const repository = f.destination();
-  const reportsPath = `v2/repository_connectors/${repository.repo_connector_id}/repositories/${repository.id}/source_reports`;
+  const reportsPath = `/external/v2/repository_connectors/${repository.repo_connector_id}/repositories/${repository.id}/source_reports`;
   expect(paths).toEqual(
     new Set([
-      "repositories",
+      "/external/repositories",
       reportsPath,
-      "v2/finding_imports",
+      "/external/v2/finding_imports",
       `${reportsPath}/${f.reports.get("issue-1")!.id}`,
     ]),
   );
