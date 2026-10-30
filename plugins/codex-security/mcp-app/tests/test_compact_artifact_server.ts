@@ -797,14 +797,14 @@ async function testSemanticScanDraftCompletion(
           handoffClaimToken,
         }),
       ).scan.progress;
-    assert.equal((await progress()).phase, "preflight");
+    assert.equal((await progress()).phase, "threat_model");
     requireSuccessfulTool(
       await call("update_codex_security_scan_progress", {
         scanId,
         handoffClaimToken,
         phaseItemsTotal: 1,
         phaseItemsCompleted: 1,
-        phaseProgressUnit: "checks",
+        phaseProgressUnit: "threat_surfaces",
       }),
     );
     const checkpoint = {
@@ -865,23 +865,15 @@ async function testSemanticScanDraftCompletion(
       `${runtimeLabel}: correct the same scan and accept exactly one draft`,
     );
     const savedManifest = await readJson(scanDirectory, "scan-manifest.json");
-    const savedCoverage = {
-      ...savedManifest.scan.reviewState,
-      mode: savedManifest.scan.mode,
-      inventoryStrategy: "directory",
-      openQuestions: [
-        { question: "Can a neighboring query API bypass parameterization?" },
-        reviewState.openQuestions[1],
-      ],
-      includePaths: savedManifest.scan.scope.includePaths,
-      excludePaths: savedManifest.scan.scope.excludePaths,
-    };
     assert.equal(savedManifest.scan.id, scanId);
+    const { deferred } = savedManifest.scan.reviewState;
     assert.deepEqual(drafted, {
       scanId,
       findingCount: 1,
       surfaceCount: 1,
-      reviewState: savedCoverage,
+      assignedDeferred: reviewState.deferred.flatMap((row, index) =>
+        "id" in row ? [] : [{ index, id: deferred[index].id }],
+      ),
       operation: "replace",
       status: "draft_written",
     });
@@ -990,7 +982,10 @@ async function testSemanticScanDraftCompletion(
         id: candidateCollisionDeferredId,
       },
     ]);
-    assert.deepEqual(retained.openQuestions, savedCoverage.openQuestions);
+    assert.deepEqual(retained.openQuestions, [
+      { question: "Can a neighboring query API bypass parameterization?" },
+      reviewState.openQuestions[1],
+    ]);
     assert.ok(
       (await readFile(path.join(scanDirectory, "report.md"), "utf8")).length >
         0,
@@ -1506,6 +1501,7 @@ async function testDiscoveryWorkerToolList(bundle: string) {
       findings: [],
       reviewState: {
         ...workerDraft([]).reviewState,
+        surfaces: [{ label: "API", disposition: "no_issue_found" }],
         explicitExclusions: [
           { pattern: "vendor/**", reason: "Third-party source." },
         ],
@@ -1547,15 +1543,52 @@ async function testDiscoveryWorkerToolList(bundle: string) {
     await assert.rejects(readFile(resultPath), { code: "ENOENT" });
 
     const result = await client.callTool({ name: tool.name, arguments: input });
+    const saved = await readJson(resultPath);
+    const savedSurface = saved.reviewState.surfaces[0];
+    assert.equal(typeof savedSurface.id, "string");
     assert.deepEqual(result.structuredContent, {
       scanId,
       findingCount: 0,
-      surfaceCount: 0,
-      reviewState: (await readJson(resultPath)).reviewState,
+      surfaceCount: 1,
+      assignedSurfaces: [{ index: 0, id: savedSurface.id }],
       operation: "replace",
       status: "draft_written",
     });
-    assert.deepEqual(await readJson(resultPath), input);
+    assert.deepEqual(
+      JSON.parse((result.content as TextContent[])[0].text),
+      result.structuredContent,
+    );
+    assert.deepEqual(saved, {
+      ...input,
+      reviewState: {
+        ...input.reviewState,
+        surfaces: [
+          {
+            ...input.reviewState.surfaces[0],
+            id: savedSurface.id,
+            receiptRefs: [],
+          },
+        ],
+      },
+    });
+    const next = await client.callTool({
+      name: tool.name,
+      arguments: {
+        ...input,
+        reviewState: { ...input.reviewState, surfaces: [], deferred: [] },
+      },
+    });
+    assert.deepEqual(next.structuredContent, {
+      scanId,
+      findingCount: 0,
+      surfaceCount: 1,
+      operation: "replace",
+      status: "draft_written",
+    });
+    assert.deepEqual(
+      (await readJson(resultPath)).reviewState,
+      saved.reviewState,
+    );
     for (const canonicalName of [
       "scan-manifest.json",
       "findings.json",

@@ -120,7 +120,7 @@ def test_headless_standard_scan_starts_without_setup_opt_out(tmp_path: Path) -> 
     assert workspace["userContext"] == user_context
     assert scan["mode"] == "standard"
     assert scan["progress"]["status"] == "running"
-    assert scan["progress"]["phase"] == "preflight"
+    assert scan["progress"]["phase"] == "threat_model"
     assert scan["handoffStatus"] == "delivered"
     assert scan["continuationThreadId"] == "thread-headless-standard-scan"
     assert str(uuid.UUID(str(scan["handoffClaimToken"]))) == scan["handoffClaimToken"]

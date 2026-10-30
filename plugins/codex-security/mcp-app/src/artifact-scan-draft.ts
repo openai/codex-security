@@ -133,6 +133,41 @@ export interface ScanDraftResult {
   warnings?: string[];
 }
 
+/** Return only IDs the caller needs to learn to update its submitted rows. */
+export function scanDraftToolResponse(
+  { reviewState, ...receipt }: ScanDraftResult,
+  input: ScanDraftInput,
+) {
+  const assigned = (
+    rows: { id?: string }[],
+    normalized: { id?: string }[],
+    saved: { id: string }[],
+  ) => {
+    const savedIds = new Set(saved.map(({ id }) => id));
+    return normalized.flatMap(({ id }, index) =>
+      id !== undefined && id !== rows[index]!.id && savedIds.has(id)
+        ? [{ index, id }]
+        : [],
+    );
+  };
+  const { surfaces, deferred } = input.reviewState;
+  const assignedSurfaces = assigned(
+    surfaces,
+    normalizeSurfaces(surfaces),
+    reviewState.surfaces as { id: string }[],
+  );
+  const assignedDeferred = assigned(
+    deferred,
+    normalizeDeferred(deferred),
+    reviewState.deferred as { id: string }[],
+  );
+  return {
+    ...receipt,
+    ...(assignedSurfaces.length ? { assignedSurfaces } : {}),
+    ...(assignedDeferred.length ? { assignedDeferred } : {}),
+  };
+}
+
 export interface CompletedScanResult {
   scanId: string;
   manifest: JsonObject;

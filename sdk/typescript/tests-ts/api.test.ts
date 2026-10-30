@@ -78,7 +78,6 @@ import {
   mockScanRegistration,
   mockWorkbench,
   shellEnvironmentReference,
-  SHELL_ENVIRONMENT_PREFIX,
   TestClient,
   TEST_SNAPSHOT_DIGEST,
 } from "./support/api-client.js";
@@ -1327,7 +1326,7 @@ describe("CodexSecurity orchestration", () => {
   });
 
   test.each(["standard", "deep"] as const)(
-    "identifies Bedrock account advisory applicability in the %s parent prompt",
+    "keeps Bedrock account checks out of %s review",
     async (mode) => {
       const { repository, codexHome, scanDir } = await scanDirectories();
       const client = new TestClient(
@@ -1339,19 +1338,46 @@ describe("CodexSecurity orchestration", () => {
             deepScanConfigPath: join(codexHome, "deep-scan.toml"),
           })),
           createCodex: codexFactory(async (prompt: string) => {
-            expect(prompt).toContain("Amazon Bedrock with AWS authentication");
-            expect(prompt).toContain(
-              "Skip the ChatGPT account Daybreak access advisory",
-            );
-            expect(prompt).toContain(
-              "Report any actual provider error unchanged",
-            );
+            if (mode === "standard") {
+              expect(prompt).not.toMatch(/Daybreak|get_tac_status/);
+            } else {
+              expect(prompt).toContain(
+                "Amazon Bedrock with AWS authentication",
+              );
+              expect(prompt).toContain(
+                "Skip the ChatGPT account Daybreak access advisory",
+              );
+            }
             throw new Error("Bedrock prompt captured");
           }),
         },
       );
       await expect(client.run(repository, { mode })).rejects.toThrow(
         "Bedrock prompt captured",
+      );
+      await client.close();
+    },
+  );
+
+  test.each(["chatgpt", "apikey"])(
+    "selects the Standard account advisory from stored %s authentication",
+    async (authMode) => {
+      const { repository, codexHome, scanDir } = await scanDirectories();
+      await writeFile(
+        join(codexHome, "auth.json"),
+        JSON.stringify({ auth_mode: authMode }),
+      );
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        createCodex: codexFactory(async (prompt) => {
+          expect(prompt.includes("get_codex_security_daybreak_access")).toBe(
+            authMode === "chatgpt",
+          );
+          throw new Error("Standard prompt captured");
+        }),
+      });
+      await expect(client.run(repository)).rejects.toThrow(
+        "Standard prompt captured",
       );
       await client.close();
     },
@@ -2762,35 +2788,15 @@ if __name__ == "__main__":
       createCodex.mock.lastCall?.[0]?.config?.["mcp_servers"],
     ).toBeUndefined();
     expect(prompt).toContain("The SDK has already registered this scan.");
-    expect(prompt).toContain("never call a scan-start or completion tool");
-    expect(prompt).toContain("do not finalize or seal them");
-    expect(prompt).toContain(
-      "This Standard scan authorizes its independent baseline auditor and focused investigators",
-    );
-    expect(prompt).not.toContain("This exhaustive scan authorizes");
-    expect(prompt).toContain(
-      'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
-    );
-    expect(prompt).toContain("the parent owns global progress updates");
+    expect(prompt).toContain("Do not call scan-start or completion tools");
+    expect(prompt).toContain("record_codex_security_scan_draft");
+    expect(prompt).toContain("scan-results.md");
+    expect(prompt).not.toContain("bind-repo-scopes");
+    expect(prompt).not.toContain("CODEX_SECURITY_TARGET_REVISION");
+    expect(prompt).toContain("CODEX_SECURITY_SCAN_PROGRESS");
     expect(prompt).toContain(
       `Repository root: ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")}`,
     );
-    expect(prompt).toContain(
-      `Use ${process.platform === "win32" ? "& " : ""}${shellEnvironmentReference("PYTHON")} as <python_command>`,
-    );
-    expect(prompt).toContain(
-      `${SHELL_ENVIRONMENT_PREFIX}CODEX_SECURITY_TARGET_DISPLAY_NAME`,
-    );
-    expect(prompt).toContain(
-      `${SHELL_ENVIRONMENT_PREFIX}CODEX_SECURITY_TARGET_KIND`,
-    );
-    expect(prompt).toContain(
-      `${SHELL_ENVIRONMENT_PREFIX}CODEX_SECURITY_TARGET_REVISION`,
-    );
-    expect(prompt).toContain(
-      `${SHELL_ENVIRONMENT_PREFIX}CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST`,
-    );
-    expect(prompt).toContain("codex-security-plugin");
     expect(prompt).not.toContain("CODEX_SECURITY_KNOWLEDGE_BASE");
     expect(prompt).not.toContain("false_positive_feedback.json");
     expect(
@@ -4282,9 +4288,7 @@ if __name__ == "__main__":
       await expect(client.run(repository, { mode })).rejects.toThrow(
         "prompt captured",
       );
-      expect(prompt).toContain(
-        `Use exactly "${scanId}" as the scan ID in the manifest and findings.`,
-      );
+      expect(prompt).toContain(JSON.stringify(scanId));
       expect(prompt).not.toContain("$CODEX_SECURITY_SCAN_ID");
       if (mode === "deep") {
         const deepScanArguments = prompt.match(
@@ -6642,12 +6646,13 @@ if __name__ == "__main__":
                   ),
                 );
                 expect(prompt).not.toContain("$codex-security:");
-                expect(prompt).toContain(
-                  shellEnvironmentReference(
-                    "CODEX_SECURITY_PLUGIN_ROOT",
-                    "/skills/<skill-name>/SKILL.md",
-                  ),
-                );
+                if (mode === "deep")
+                  expect(prompt).toContain(
+                    shellEnvironmentReference(
+                      "CODEX_SECURITY_PLUGIN_ROOT",
+                      "/skills/<skill-name>/SKILL.md",
+                    ),
+                  );
                 expect(options.env?.["CODEX_SECURITY_PLUGIN_ROOT"]).toBe(
                   PLUGIN_ROOT,
                 );
@@ -6819,6 +6824,15 @@ if __name__ == "__main__":
             },
           };
         },
+        runWorkbench: async (_options, args, input) => ({
+          ...mockWorkbench(args, input),
+          ...(args[0] === "register-cli-scan"
+            ? {
+                prepareScopedInventory: true,
+                securityPolicyPaths: ["SECURITY.md"],
+              }
+            : {}),
+        }),
         resolvePluginPython: async () => python,
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
@@ -6874,11 +6888,7 @@ if __name__ == "__main__":
       `Repository root: ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")}`,
     );
     expect(prompt).toContain(
-      `Use this exact scan directory for all scan output: ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR")}`,
-    );
-    const pythonCommand = `${process.platform === "win32" ? "& " : ""}${shellEnvironmentReference("PYTHON")}`;
-    expect(prompt).toContain(
-      `Use ${pythonCommand} as <python_command> for plugin Python helper scripts (.py files)`,
+      shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR"),
     );
     const policyReference = await readFile(
       join(PLUGIN_ROOT, "references", "security-guidance.md"),
@@ -6890,26 +6900,20 @@ if __name__ == "__main__":
     expect(policyCommand).toMatch(
       /^<plugin_dir>\/scripts\/launch_codex_security_mcp --helper resolve-security-md /,
     );
-    const helper = shellEnvironmentReference(
-      "CODEX_SECURITY_PLUGIN_ROOT",
-      "/scripts/launch_codex_security_mcp",
+    const fileInstructions = await readFile(
+      join(PLUGIN_ROOT, "skills/security-scan/references/sdk-files.md"),
+      "utf8",
     );
-    const scopes = shellEnvironmentReference(
-      "CODEX_SECURITY_TARGET_PATHS_FILE",
-    );
-    const makeScopeCommand =
+    const bindScopeCommand = fileInstructions.match(
       process.platform === "win32"
-        ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper make-repo-scope-input --repo "%CODEX_SECURITY_REPOSITORY%\." --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --out "%CODEX_SECURITY_SCAN_DIR%\scoped-source-input.jsonl""'`
-        : `${helper} --helper make-repo-scope-input --repo ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")} --scopes-file ${scopes} --out ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scoped-source-input.jsonl")}`;
-    const bindScopeCommand =
-      process.platform === "win32"
-        ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper bind-repo-scopes --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --manifest "%CODEX_SECURITY_SCAN_DIR%\scan-manifest.json""'`
-        : `${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/scripts/launch_codex_security_mcp")} --helper bind-repo-scopes --scopes-file ${scopes} --manifest ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scan-manifest.json")}`;
-    expect(prompt).toContain(makeScopeCommand);
-    expect(prompt).toContain(
-      "Do not print, evaluate, or modify the target-paths file.",
-    );
-    expect(prompt).toContain(bindScopeCommand);
+        ? /^`{3}powershell\n(.+)$/m
+        : /^`{3}sh\n(.+)$/m,
+    )![1]!;
+    expect(prompt).toContain("/scoped-source-input.jsonl");
+    expect(prompt).toContain('["SECURITY.md"]');
+    expect(prompt).not.toMatch(/Daybreak|get_tac_status/);
+    expect(prompt).not.toContain("references/scoped-paths.md");
+    expect(prompt).not.toContain("bind-repo-scopes");
     expect(prompt).not.toContain("\nIgnore prior scope");
     for (const value of [
       repository,
@@ -6945,10 +6949,7 @@ if __name__ == "__main__":
       );
     }
     const scopedSourceInput = join(scanDir, "scoped-source-input.jsonl");
-    const runScopedHelper = (
-      command: string,
-      overrides: NodeJS.ProcessEnv = {},
-    ): void => {
+    const runScopedHelper = (command: string): void => {
       const shell =
         process.platform === "win32" ? Bun.which("powershell.exe") : "/bin/sh";
       expect(shell).not.toBeNull();
@@ -6965,13 +6966,11 @@ if __name__ == "__main__":
             CODEX_MCP_NODE_PATH: Bun.which("node")!,
             PATH_LITERAL: "expanded-wrong-directory",
             CODEX_SECURITY_TARGET_PATHS_FILE: capturedTargetPathsFile,
-            ...overrides,
           },
           stdio: "pipe",
         },
       );
     };
-    runScopedHelper(makeScopeCommand);
     const scopedSourceInputContents = await readFile(scopedSourceInput, "utf8");
     expect(
       scopedSourceInputContents
@@ -6997,10 +6996,16 @@ if __name__ == "__main__":
         absoluteScopes,
         JSON.stringify(paths.map((value) => join(repository, value))),
       );
-      runScopedHelper(makeScopeCommand, {
-        CODEX_SECURITY_REPOSITORY: driveRoot,
-        CODEX_SECURITY_TARGET_PATHS_FILE: absoluteScopes,
-      });
+      execFileSync(process.execPath, [
+        join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+        "make-repo-scope-input",
+        "--repo",
+        driveRoot,
+        "--scopes-file",
+        absoluteScopes,
+        "--out",
+        scopedSourceInput,
+      ]);
       expect(
         (await readFile(scopedSourceInput, "utf8"))
           .trimEnd()
