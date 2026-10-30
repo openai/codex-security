@@ -5,6 +5,11 @@ import { join } from "node:path";
 import { Writable } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
 import { main, runCodexSkillCommand } from "../src/cli.js";
+import {
+  MAX_VERIFICATION_INPUT_CHARS,
+  planVerificationRequests,
+  remediationPrompt,
+} from "../src/remediation.js";
 import { VERSION } from "../src/version.js";
 import type { Finding, JsonObject } from "../src/index.js";
 import type { LinearClientFactory } from "../src/linear.js";
@@ -15,6 +20,23 @@ import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures("verify-fix-");
 afterEach(cleanup);
+
+const CODEX_INPUT_LIMIT = 1_048_576;
+
+function turnStartTextCharacters(prompt: string): number {
+  const request = JSON.stringify({
+    id: 3,
+    method: "turn/start",
+    params: {
+      threadId: "synthetic-thread",
+      input: [{ type: "text", text: prompt, text_elements: [] }],
+    },
+  });
+  const decoded = JSON.parse(request) as {
+    params: { input: [{ text: string }] };
+  };
+  return [...decoded.params.input[0].text].length;
+}
 
 async function linearIssue(identifier: string) {
   return {
@@ -36,6 +58,28 @@ async function linearIssue(identifier: string) {
 
 const linearClient = () =>
   ({ issue: linearIssue }) as ReturnType<LinearClientFactory>;
+
+function savedScanWithEvidence(
+  severities: readonly ("critical" | "high" | "medium" | "low")[],
+  evidence: string | ((index: number) => string),
+) {
+  const result = fakeResult(severities);
+  const findings = result.findings.findings as Finding[];
+  findings.forEach((finding, index) => {
+    Object.assign(finding, {
+      findingId: `csf_${index + 1}`,
+      occurrenceId: `occ_${index + 1}`,
+      title: `Finding ${index + 1}`,
+      codeEvidence: [
+        {
+          code: typeof evidence === "string" ? evidence : evidence(index),
+          path: `src/finding-${index + 1}.ts`,
+        },
+      ],
+    });
+  });
+  return { result, findings };
+}
 
 describe("read-only finding verification", () => {
   test("verifies imported Linear issues in a read-only sandbox without exposing credentials", async () => {
@@ -390,6 +434,314 @@ describe("read-only finding verification", () => {
       results: [{ id: "occ_1", status: "fixed", evidence }],
     });
   });
+
+  test("preserves every selected saved finding across bounded verification requests", async () => {
+    const evidence = `${'"quoted evidence"\n'.repeat(22_000)}🚀`;
+    const { result, findings } = savedScanWithEvidence(
+      ["high", "high", "high", "low"],
+      evidence,
+    );
+    const expected = [
+      {
+        id: "occ_1",
+        status: "fixed",
+        evidence: "The original exploit is rejected.",
+      },
+      {
+        id: "occ_2",
+        status: "still_vulnerable",
+        evidence: "The vulnerable path remains reachable.",
+      },
+      {
+        id: "occ_3",
+        status: "inconclusive",
+        evidence: "A required runtime dependency is unavailable.",
+      },
+    ];
+    const prompts: string[] = [];
+    const suppliedIds: string[] = [];
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    expect(
+      await runCli(
+        ["verify-fix", "--scan", "scan-large", "--severity", "high", "--json"],
+        dependencies({
+          result,
+          onWorkbench: () => ({
+            scan: {
+              scanId: "scan-large",
+              targetPath: "/saved/repository",
+              findings: findings as unknown as JsonObject[],
+            },
+          }),
+          onCodex: (_args, output) => {
+            const prompt = output!.appServer!.prompt;
+            prompts.push(prompt);
+            const actualCharacters = turnStartTextCharacters(prompt);
+            if (actualCharacters > CODEX_INPUT_LIMIT) {
+              output!.stderr.write(
+                `Input exceeds the maximum length of ${CODEX_INPUT_LIMIT} characters.\n`,
+              );
+              return 1;
+            }
+            const supplied = JSON.parse(
+              prompt.split("\n").at(-1)!,
+            ) as Finding[];
+            expect(
+              supplied.every(
+                (finding) => finding.codeEvidence?.[0]?.code === evidence,
+              ),
+            ).toBe(true);
+            suppliedIds.push(
+              ...supplied.map(({ occurrenceId }) => occurrenceId),
+            );
+            output!.stdout.write(
+              JSON.stringify({
+                results: supplied.map(({ occurrenceId }) =>
+                  expected.find(({ id }) => id === occurrenceId),
+                ),
+              }),
+            );
+            return 0;
+          },
+        }),
+      ),
+    ).toBe(2);
+
+    expect(prompts.length).toBeGreaterThan(1);
+    expect(
+      prompts.every(
+        (prompt) => turnStartTextCharacters(prompt) <= CODEX_INPUT_LIMIT,
+      ),
+    ).toBe(true);
+    expect(suppliedIds).toEqual(["occ_1", "occ_2", "occ_3"]);
+    expect(JSON.parse(stdout.text()).results).toEqual(expected);
+    expect(prompts.join("\n")).not.toContain("src/finding-4.ts");
+    expect(stderr.text()).not.toContain("quoted evidence");
+    expect(stderr.text()).not.toContain(
+      `Input exceeds the maximum length of ${CODEX_INPUT_LIMIT} characters.`,
+    );
+  });
+
+  test("uses the real prompt size at the Codex input boundary", async () => {
+    const contents = [
+      { occurrenceId: "occ_1", evidence: "small" },
+      { occurrenceId: "occ_2", evidence: "" },
+    ];
+    const verificationIds = ["occ_1", "occ_2"];
+    const base = await remediationPrompt({
+      operation: "verify",
+      pluginRoot: PLUGIN_ROOT,
+      contents,
+      verificationIds,
+    });
+    const padding =
+      MAX_VERIFICATION_INPUT_CHARS - 1 - turnStartTextCharacters(base);
+    expect(padding).toBeGreaterThan(0);
+    contents[1]!.evidence = "x".repeat(padding);
+
+    const below = await planVerificationRequests({
+      pluginRoot: PLUGIN_ROOT,
+      contents,
+      verificationIds,
+    });
+    expect(below).toHaveLength(1);
+    expect(below[0]!.inputCharacters).toBe(MAX_VERIFICATION_INPUT_CHARS - 1);
+    const belowPrompt = await remediationPrompt({
+      operation: "verify",
+      pluginRoot: PLUGIN_ROOT,
+      contents: below[0]!.contents,
+      verificationIds: below[0]!.identifiers,
+    });
+    expect(turnStartTextCharacters(belowPrompt)).toBe(
+      MAX_VERIFICATION_INPUT_CHARS - 1,
+    );
+
+    contents[1]!.evidence += "xx";
+    const combined = await remediationPrompt({
+      operation: "verify",
+      pluginRoot: PLUGIN_ROOT,
+      contents,
+      verificationIds,
+    });
+    expect(turnStartTextCharacters(combined)).toBe(
+      MAX_VERIFICATION_INPUT_CHARS + 1,
+    );
+    const above = await planVerificationRequests({
+      pluginRoot: PLUGIN_ROOT,
+      contents,
+      verificationIds,
+    });
+    expect(above).toHaveLength(2);
+    const abovePrompts = await Promise.all(
+      above.map(({ contents, identifiers }) =>
+        remediationPrompt({
+          operation: "verify",
+          pluginRoot: PLUGIN_ROOT,
+          contents,
+          verificationIds: identifiers,
+        }),
+      ),
+    );
+    expect(
+      above.every(
+        ({ inputCharacters }, index) =>
+          inputCharacters === turnStartTextCharacters(abovePrompts[index]!) &&
+          inputCharacters <= MAX_VERIFICATION_INPUT_CHARS,
+      ),
+    ).toBe(true);
+  });
+
+  test("rejects one oversized saved finding without exposing its evidence", async () => {
+    const sensitiveMarker = "SENSITIVE_FINDING_BODY";
+    const { result, findings } = savedScanWithEvidence(
+      ["high"],
+      sensitiveMarker.repeat(55_000),
+    );
+    const onCodex = mock(() => 0);
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    expect(
+      await runCli(
+        ["verify-fix", "--scan", "scan-oversized", "--json"],
+        dependencies({
+          result,
+          onWorkbench: () => ({
+            scan: {
+              scanId: "scan-oversized",
+              targetPath: "/saved/repository",
+              findings: findings as unknown as JsonObject[],
+            },
+          }),
+          onCodex,
+        }),
+      ),
+    ).toBe(2);
+
+    expect(onCodex).not.toHaveBeenCalled();
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      status: "failed",
+      code: "VERIFICATION_FAILED",
+      message: expect.stringContaining(
+        "cannot fit in one complete Codex verification request",
+      ),
+    });
+    expect(stderr.text()).not.toContain(sensitiveMarker);
+    expect(stdout.text()).not.toContain(sensitiveMarker);
+  });
+
+  test.each([
+    ["transport failure", "Synthetic middle transport failure."],
+    [
+      "wrong identifier",
+      "Codex did not return an evidence-backed verification result for every finding.",
+    ],
+  ])(
+    "fails atomically on a middle verification %s",
+    async (failure, message) => {
+      const { result, findings } = savedScanWithEvidence(
+        ["high", "high", "high"],
+        "x".repeat(525_000),
+      );
+      let calls = 0;
+      const { stdout, stderr, runCli } = createCliTest(main);
+
+      expect(
+        await runCli(
+          ["verify-fix", "--scan", "scan-failure", "--json"],
+          dependencies({
+            result,
+            onWorkbench: () => ({
+              scan: {
+                scanId: "scan-failure",
+                targetPath: "/saved/repository",
+                findings: findings as unknown as JsonObject[],
+              },
+            }),
+            onCodex: (_args, output) => {
+              calls += 1;
+              expect(
+                turnStartTextCharacters(output!.appServer!.prompt),
+              ).toBeLessThanOrEqual(CODEX_INPUT_LIMIT);
+              if (calls === 2 && failure === "transport failure") {
+                output!.stderr.write(`${message}\n`);
+                return 1;
+              }
+              const supplied = JSON.parse(
+                output!.appServer!.prompt.split("\n").at(-1)!,
+              ) as Finding[];
+              output!.stdout.write(
+                JSON.stringify({
+                  results: supplied.map(({ occurrenceId }) => ({
+                    id: calls === 2 ? "occ_wrong" : occurrenceId,
+                    status: "fixed",
+                    evidence: "Synthetic verification passed.",
+                  })),
+                }),
+              );
+              return 0;
+            },
+          }),
+        ),
+      ).toBe(2);
+
+      expect(calls).toBe(2);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        status: "failed",
+        code: "VERIFICATION_FAILED",
+        message,
+      });
+      expect(JSON.parse(stdout.text())).not.toHaveProperty("results");
+      expect(stderr.text()).toContain(message);
+    },
+  );
+
+  test.each([130, 143] as const)(
+    "preserves interrupted status %i from a middle verification request",
+    async (status) => {
+      const { result, findings } = savedScanWithEvidence(
+        ["high", "high", "high"],
+        "x".repeat(525_000),
+      );
+      let calls = 0;
+      const { stdout, runCli } = createCliTest(main);
+
+      expect(
+        await runCli(
+          ["verify-fix", "--scan", "scan-interrupted", "--json"],
+          dependencies({
+            result,
+            onWorkbench: () => ({
+              scan: {
+                scanId: "scan-interrupted",
+                targetPath: "/saved/repository",
+                findings: findings as unknown as JsonObject[],
+              },
+            }),
+            onCodex: (_args, output) => {
+              calls += 1;
+              if (calls === 2) return status;
+              const supplied = JSON.parse(
+                output!.appServer!.prompt.split("\n").at(-1)!,
+              ) as Finding[];
+              output!.stdout.write(
+                JSON.stringify({
+                  results: supplied.map(({ occurrenceId }) => ({
+                    id: occurrenceId,
+                    status: "fixed",
+                    evidence: "Synthetic verification passed.",
+                  })),
+                }),
+              );
+              return 0;
+            },
+          }),
+        ),
+      ).toBe(status);
+      expect(calls).toBe(2);
+      expect(stdout.text()).toBe("");
+    },
+  );
 
   test("reports inconclusive findings without treating them as fixed", async () => {
     const stdout = captureCli(main, "stdout");

@@ -23,6 +23,9 @@ export type FindingVerification = z.infer<typeof FindingVerificationSchema>;
 
 export const VerificationModeSchema = z.enum(["static", "standard"]);
 
+// Codex app-server rejects turn/start text above this decoded character limit.
+export const MAX_VERIFICATION_INPUT_CHARS = 1 << 20;
+
 export const STATIC_VERIFICATION_INSTRUCTIONS =
   "Verification mode: static. Follow the bundled skill's static scope throughout patch generation and verification, including repository and validation instructions. Do not install dependencies or run builds, tests, reproducers, or the application. Report source evidence and state that runtime checks were not performed. Missing runtime tooling alone is not a blocker; report material gaps in source evidence.";
 
@@ -36,6 +39,100 @@ export interface RemediationPromptInput {
   instructions?: string;
   validationInstructions?: string;
   verificationMode?: z.infer<typeof VerificationModeSchema>;
+}
+
+export interface VerificationRequest<Content = unknown> {
+  contents: readonly Content[];
+  identifiers: readonly string[];
+  inputCharacters: number;
+}
+
+function characterCount(value: string): number {
+  let count = 0;
+  for (const _character of value) count += 1;
+  return count;
+}
+
+function arrayElementJson(value: unknown): string {
+  const array = JSON.stringify([value]);
+  return array.slice(1, -1);
+}
+
+/** Plan exact prompts that fit Codex turn/start without dropping evidence. */
+export async function planVerificationRequests<Content>(
+  input: Omit<
+    RemediationPromptInput,
+    "operation" | "contents" | "verificationIds"
+  > & {
+    contents: readonly Content[];
+    verificationIds: readonly string[];
+  },
+): Promise<VerificationRequest<Content>[]> {
+  if (input.contents.length !== input.verificationIds.length) {
+    throw new CodexSecurityError(
+      "Verification findings and identifiers must have the same length.",
+    );
+  }
+  if (input.contents.length === 0) return [];
+
+  const emptyPrompt = await remediationPrompt({
+    ...input,
+    operation: "verify",
+    contents: [],
+    verificationIds: [],
+  });
+  // The two variable arrays are each serialized as [] in the empty prompt.
+  const fixedCharacters = characterCount(emptyPrompt) - 4;
+  const contentCharacters = input.contents.map((content) =>
+    characterCount(arrayElementJson(content)),
+  );
+  const identifierCharacters = input.verificationIds.map((identifier) =>
+    characterCount(arrayElementJson(identifier)),
+  );
+  const requests: VerificationRequest<Content>[] = [];
+  let start = 0;
+
+  while (start < input.contents.length) {
+    let end = start;
+    let batchContentCharacters = 2;
+    let batchIdentifierCharacters = 2;
+    while (end < input.contents.length) {
+      const nextContentCharacters = contentCharacters[end]!;
+      const nextIdentifierCharacters = identifierCharacters[end]!;
+      const nextCharacters =
+        fixedCharacters +
+        batchContentCharacters +
+        batchIdentifierCharacters +
+        nextContentCharacters +
+        nextIdentifierCharacters +
+        (end === start ? 0 : 2);
+      if (nextCharacters > MAX_VERIFICATION_INPUT_CHARS) break;
+      batchContentCharacters += nextContentCharacters + (end === start ? 0 : 1);
+      batchIdentifierCharacters +=
+        nextIdentifierCharacters + (end === start ? 0 : 1);
+      end += 1;
+    }
+
+    if (end === start) {
+      const singleCharacters =
+        fixedCharacters +
+        4 +
+        contentCharacters[start]! +
+        identifierCharacters[start]!;
+      throw new CodexSecurityError(
+        `A selected finding cannot fit in one complete Codex verification request. The request requires ${singleCharacters} characters, but Codex accepts at most ${MAX_VERIFICATION_INPUT_CHARS}. Run a narrower scan that records smaller evidence, then retry.`,
+      );
+    }
+
+    const contents = input.contents.slice(start, end);
+    const identifiers = input.verificationIds.slice(start, end);
+    const inputCharacters =
+      fixedCharacters + batchContentCharacters + batchIdentifierCharacters;
+    requests.push({ contents, identifiers, inputCharacters });
+    start = end;
+  }
+
+  return requests;
 }
 
 /** Local and hosted remediation use the same skills and result instructions. */

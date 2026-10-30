@@ -140,6 +140,7 @@ import { runValidationRecordsProtocol } from "./validation-records.js";
 import {
   FindingPatchSchema as findingPatchSchema,
   parseFindingVerifications,
+  planVerificationRequests,
   remediationPrompt,
   VerificationModeSchema,
   type FindingPatch,
@@ -5906,7 +5907,6 @@ export async function main(
               imports.length === 0
                 ? undefined
                 : withoutLinearCredentials(dependencies.environment);
-            const response = captureOutput();
             const progress = new FindingProgressPresenter(
               errorOutput,
               dependencies,
@@ -5925,38 +5925,64 @@ export async function main(
               },
             });
             try {
-              exitCode = await runSkill(
-                "verify-fix",
-                selected === undefined ? [...positionals, ...imports] : [],
-                options,
-                response.stream,
-                verificationErrors,
-                dependencies,
-                {
-                  directory: repository,
-                  ...(selected === undefined
-                    ? {}
-                    : { findings: selected.findings }),
-                  auth: options.auth,
-                  verificationIds: identifiers,
-                  verificationMode: options.verificationMode,
-                  environment,
-                  onEvent: progress.observe.bind(progress),
-                },
-              );
-              if (exitCode !== 0) {
-                if (exitCode === 130 || exitCode === 143) {
-                  frameworkExit = exitCode;
-                  return undefined;
+              const requests =
+                selected === undefined
+                  ? [
+                      {
+                        contents: undefined,
+                        identifiers,
+                      },
+                    ]
+                  : await planVerificationRequests({
+                      pluginRoot: await bundledPluginRoot(),
+                      contents: selected.findings,
+                      verificationIds: identifiers,
+                      verificationMode: options.verificationMode,
+                    });
+              for (const request of requests) {
+                const response = captureOutput();
+                const diagnosticsOffset = diagnostics.text().length;
+                exitCode = await runSkill(
+                  "verify-fix",
+                  selected === undefined ? [...positionals, ...imports] : [],
+                  options,
+                  response.stream,
+                  verificationErrors,
+                  dependencies,
+                  {
+                    directory: repository,
+                    ...(request.contents === undefined
+                      ? {}
+                      : { findings: request.contents }),
+                    auth: options.auth,
+                    verificationIds: request.identifiers,
+                    verificationMode: options.verificationMode,
+                    environment,
+                    onEvent: progress.observe.bind(progress),
+                  },
+                );
+                if (exitCode !== 0) {
+                  if (exitCode === 130 || exitCode === 143) {
+                    frameworkExit = exitCode;
+                    return undefined;
+                  }
+                  const invocationDiagnostics = diagnostics
+                    .text()
+                    .slice(diagnosticsOffset)
+                    .trim();
+                  failureReported = invocationDiagnostics.length > 0;
+                  throw new CodexSecurityError(
+                    invocationDiagnostics ||
+                      `Codex verification failed with exit code ${exitCode}.`,
+                  );
                 }
-                failureReported = diagnostics.text().trim().length > 0;
-                throw new CodexSecurityError(
-                  diagnostics.text().trim() ||
-                    `Codex verification failed with exit code ${exitCode}.`,
+                results.push(
+                  ...parseFindingVerifications(
+                    response.text(),
+                    request.identifiers,
+                  ),
                 );
               }
-
-              results = parseFindingVerifications(response.text(), identifiers);
               progress.complete(results);
               exitCode = results.some(({ status }) => status === "inconclusive")
                 ? 2
