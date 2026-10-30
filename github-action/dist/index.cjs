@@ -56311,7 +56311,6 @@ function assertSafeSarif(value) {
 
 // src/results.ts
 var REPORT_FILES = /* @__PURE__ */ new Set(["scan-manifest.json", "findings.json", "coverage.json", "exports/results.sarif"]);
-var SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3, informational: 4 };
 async function processReportFile(root, name, adapt) {
   if (!REPORT_FILES.has(name)) throw new Error("Unsupported report filename.");
   const absoluteRoot = (0, import_node_path5.resolve)(root);
@@ -56414,7 +56413,6 @@ async function analyzeResults(options) {
     result.errors.push(error2.message);
     return result;
   }
-  result.findings.sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity]);
   result.counts = { critical: 0, high: 0, medium: 0, low: 0, informational: 0 };
   for (const finding of result.findings) result.counts[finding.severity] += 1;
   const usage = value.turn?.usage;
@@ -99462,6 +99460,7 @@ function emitAnnotations(result) {
 }
 
 // src/main.ts
+var SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3, informational: 4 };
 var OUTPUT_NAMES = [
   "sarif-path",
   "json-path",
@@ -99647,8 +99646,12 @@ async function runAction(actionRoot, overrides = {}) {
         info(`Findings: ${result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(", ") : "unavailable"}.`);
         info(`Estimated cost: ${result.estimatedCost === void 0 ? "unavailable" : `$${result.estimatedCost.toFixed(4)}`}.`);
         for (const error2 of result.errors) log2(`Report diagnostic: ${error2}`);
-        finalSummary = resultSummary(result, inputs, target);
-        if (inputs.annotations) emitAnnotations(result);
+        const displayResult = {
+          ...result,
+          findings: [...result.findings].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity])
+        };
+        finalSummary = resultSummary(displayResult, inputs, target);
+        if (inputs.annotations) emitAnnotations(displayResult);
         success = result.reportStatus !== "failed" && result.scanStatus === "completed" && result.policyStatus === "passed";
         finalTitle = resultTitle(result, inputs);
       }
