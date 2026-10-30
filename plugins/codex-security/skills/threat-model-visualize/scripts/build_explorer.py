@@ -519,7 +519,7 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     try:
-        model = json.loads(args.model.read_text(encoding="utf-8"))
+        model = json.loads(args.model.read_text(encoding="utf-8-sig"))
         assessment = args.assessment.read_bytes().decode("utf-8")
         if args.output.exists():
             require(

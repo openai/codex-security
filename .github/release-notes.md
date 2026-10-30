@@ -15,6 +15,7 @@
 - track Veracode static application policy flaws ([#2099](https://github.com/openai/codex-security/pull/2099))
 - accept UTF-8 BOM in JSON project files ([#980](https://github.com/openai/codex-security/pull/980))
 - avoid duplicate plugin setup inspection and defer CLI YAML ([#2149](https://github.com/openai/codex-security/pull/2149))
+- accept UTF-8 BOMs in scan inputs and calibration datasets ([#2151](https://github.com/openai/codex-security/pull/2151))
 
 <!-- release-section: highlights:end -->
 

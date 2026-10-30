@@ -113,7 +113,7 @@ class ControlValidation(unittest.TestCase):
     def effect(self):
         return self.model["scenarios"][0]["controls"][0]["effect"]
 
-    def build_html(self, assessment, *, error=None, existing_html=None):
+    def build_html(self, assessment, *, error=None, existing_html=None, model_encoding="utf-8"):
         with tempfile.TemporaryDirectory() as folder:
             folder = Path(folder)
             model_file, source, output = (
@@ -121,7 +121,9 @@ class ControlValidation(unittest.TestCase):
                 folder / "assessment.md",
                 folder / "output.html",
             )
-            model_file.write_text(json.dumps(self.model, ensure_ascii=False), encoding="utf-8")
+            model_file.write_text(
+                json.dumps(self.model, ensure_ascii=False), encoding=model_encoding
+            )
             source.write_bytes(assessment.encode("utf-8"))
             if existing_html is not None:
                 output.write_text(existing_html, encoding="utf-8")
@@ -651,12 +653,14 @@ class ControlValidation(unittest.TestCase):
     def test_template_tokens_in_input_are_preserved_without_resubstitution(self):
         tokens = "__MODEL_JSON__ __ASSESSMENT_JSON__ __EXPLORER_JS__ __EXPLORER_CSS__"
         assessment = (
-            "policy denies this caller\n" + tokens + "\n</script><script>unsafe()</script> & café"
+            "\ufeffpolicy denies this caller\n"
+            + tokens
+            + "\n</script><script>unsafe()</script> & café"
         )
         self.model["title"] = tokens
         self.model["metadata"] = [{"label": "Scope", "value": "Quoted tokens"}]
         self.model["evidence"][0]["quote"] = assessment
-        html = self.build_html(assessment)
+        html = self.build_html(assessment, model_encoding="utf-8-sig")
         self.assertEqual(self.embedded_data(html, "model-data"), self.model)
         self.assertEqual(self.embedded_data(html, "assessment-data"), assessment)
         self.assertNotIn("</script><script>unsafe()</script>", html)
