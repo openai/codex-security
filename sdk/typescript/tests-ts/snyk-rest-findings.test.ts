@@ -1417,6 +1417,36 @@ test.each(
   },
 );
 
+test("a reader reference preserves Snyk aliases across sibling comparison platforms", async () => {
+  await using fixture = await localFindingsFixture();
+  const url = "https://scm.example.test/Group/project";
+  const row = (origin: string, remote: string) =>
+    normalizeSnykIssues(
+      {
+        ...envelope([issue({ key: origin })]),
+        sourceRepositoryUrl: url,
+        project: project({ origin, remote }),
+      },
+      "local",
+    ).findings[0]!;
+  const github = row("github-enterprise", url);
+  const gitlab = row("gitlab", url.replace("project", "proj%65ct"));
+  gitlab.source_finding_id = "blackduck-bom:" + "a".repeat(64);
+  const input = { read: 2, findings: [github, gitlab], excluded: [] };
+  const prepare = (sourceRepositories: ExternalSourceRepository[] = []) =>
+    prepareNormalizedLocalImport(
+      input,
+      {
+        provider: "snyk",
+        sourceKey: projectId,
+        repository: fixture.repository,
+      },
+      { environment: fixture.environment, sourceRepositories },
+    );
+  expect((await prepare()).preview.findings).toEqual(input.findings);
+  expect((await prepare([{ url }])).preview.findings).toEqual(input.findings);
+});
+
 test("local Snyk replay accepts the verified GitLab.com SSH alias and preserves namespace case", async () => {
   const url = "https://gitlab.com/Group/project";
   const remote = "git@gitlab.com:Group/project.git";

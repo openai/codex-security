@@ -1068,14 +1068,13 @@ export async function prepareLocalImport(
         evidence.source_data && snyk?.claims.get(evidence.source_data);
       if (
         !sameScannerRepositories(
-          claims.map((claim) =>
-            scannerRepository(
-              // Snyk already verified its native URL against this row's declared repository.
+          claims.map((claim) => {
+            // Snyk already verified its native URL against this row's declared repository.
+            const resolved =
               snykClaims?.find(({ nativeUrl }) => nativeUrl === claim)?.url ??
-                claim,
-              rowPlatform(claim),
-            ),
-          ),
+              claim;
+            return scannerRepository(resolved, rowPlatform(resolved));
+          }),
         )
       )
         throw new CodexSecurityError(
