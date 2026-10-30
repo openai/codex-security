@@ -4,6 +4,7 @@ import {
   chmod,
   copyFile,
   mkdir,
+  open,
   readFile,
   rm,
   stat,
@@ -115,6 +116,25 @@ test("preview snapshots caller-owned evidence and rejects changes to the retaine
     ).rejects.toThrow("saved Sonar capture has changed");
   }
 });
+
+test.skipIf(process.platform !== "linux")(
+  "previews a capture from an unlinked regular file descriptor",
+  async () => {
+    await using directory = await scopedTemporaryDirectory("sonar-fd-");
+    const { options, deps } = await fixture(directory.path);
+    const file = await open(options.capture, "r");
+    try {
+      await rm(options.capture);
+      const preview = await prepareSonarImport(
+        { ...options, to: "local", capture: `/proc/self/fd/${file.fd}` },
+        deps,
+      );
+      expect(preview.local.findings[0]!.source_finding_id).toBe("issue-1");
+    } finally {
+      await file.close();
+    }
+  },
+);
 
 test("confirming a local preview in another checkout requires previewing that checkout", async () => {
   await using directory = await scopedTemporaryDirectory("sonar-local-review-");

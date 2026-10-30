@@ -30,7 +30,11 @@ import {
   requireOutputOutsideRepositories,
   workbenchEnvironment,
 } from "./runtime.js";
-import { gitMarkerRoot, normalizeRepository } from "./targets.js";
+import {
+  gitMarkerRoot,
+  normalizeRepository,
+  nullIfMissingPath,
+} from "./targets.js";
 import { errorMessage } from "./errors.js";
 import { canonicalJson } from "./record.js";
 import {
@@ -109,12 +113,14 @@ export async function prepareSonarImport(
   const input =
     selectedPath &&
     join(await realpath(dirname(selectedPath)), basename(selectedPath));
-  // Resolve regular files before reading so an outside alias cannot hide a retained
-  // evidence digest. Streams such as /dev/stdin must be read by their device path.
+  // A regular-file descriptor can stay readable after its pathname is unlinked.
+  // Read the selected input, using its resolved name only to check evidence digests.
   const sourcePath =
-    input && (await stat(input)).isFile() ? await realpath(input) : input;
-  const raw = sourcePath
-    ? await readScannerJson(sourcePath)
+    input && (await stat(input)).isFile()
+      ? ((await realpath(input).catch(nullIfMissingPath)) ?? input)
+      : input;
+  const raw = input
+    ? await readScannerJson(input)
     : await (dependencies.collect ?? collectSonarIssues)({
         cwd: options.cwd,
         project: options.project,
