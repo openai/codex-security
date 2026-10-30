@@ -62,6 +62,24 @@ Install the package locally in your TypeScript project:
 npm install @openai/codex-security
 ```
 
+### Package and plugin versions
+
+For bug reports, run `npx @openai/codex-security info --json` in the project
+where the SDK is installed, or `codex-security info --json` for a global install.
+Include the npm version (`cliVersion` and `sdkVersion`), bundled plugin manifest
+version (`bundledPluginVersion`), and Codex runtime and SDK pins (`codexVersion`
+and `codexSdkVersion`). If you used a marketplace plugin, a plugin supplied by
+path, or a custom Codex executable, include its version separately.
+
+For example, `npm view @openai/codex-security@0.1.5 gitHead dist.integrity`
+shows the registry's source commit and tarball digest. Compare `gitHead` with
+the commit for tag `npm-v0.1.5`. `npm pack @openai/codex-security@0.1.5` downloads
+the archive, including `package/_bundled_plugin/.codex-plugin/plugin.json`.
+
+The [release workflow](https://github.com/openai/codex-security/blob/main/.github/workflows/node-github-release.yml)
+verifies the signed attestation that binds the tarball to the tagged commit.
+For `0.1.0` and `0.1.1`, npm omits `gitHead`. Use the commit from the verified attestation.
+
 ## Authentication
 
 Sign in with ChatGPT:
@@ -174,8 +192,8 @@ try {
 
 Omitting `outputDir` saves results in the private Codex Security state directory.
 To choose another location, use a new or empty directory outside the scanned
-repository and its enclosing Git worktree. On macOS and Linux, an existing output
-directory must be private to you (`chmod 700`).
+repository and its enclosing Git worktree. Existing output directories keep their
+permissions; newly created directories are private to you by default.
 
 ### Read results
 
@@ -667,6 +685,22 @@ options where supported, and changing formats can change record identities or
 replace richer evidence with less detail. See the
 [import guide](docs/cli.md#import-vendor-findings-locally) for format selection.
 
+For Amazon Inspector Code Security, use `--provider inspector` with a complete
+ListFindings JSON export and `--source-repository-url`. When the export identifies
+the repository by an ARN and name, pass `--inspector-project-arn ARN` with the ARN
+you verified for that Git URL in the SCM integration. See the
+[Inspector guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/inspector.md).
+
+For Black Duck SCA, use `--provider blackduck` with a BOM-6 vulnerable-components
+export for one project version. Map that version to its source repository with
+`--source-repository-url`. See the
+[Black Duck guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/blackduck.md).
+
+For Veracode Static Analysis policy findings, use `--provider veracode` with
+every Findings API page from one application. Set `--source-repository-url`
+to the source repository mapped to that application. See the
+[Veracode guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/veracode.md).
+
 For OpenGrep, use `--provider opengrep` with native JSON or gzip and an explicit
 `--source-repository-url`. Local and Cloud imports retain unassessed OpenGrep
 evidence through the existing Semgrep source-provider contract. See the
@@ -679,13 +713,13 @@ repository package vulnerabilities (SCA) only; it does not add SAST, CSPM or
 complete code-to-cloud coverage. Both formats support gzip. The acquisition path
 still needs validation with an authorized Wiz tenant.
 
-For GitHub, save complete JSON from `import github` or `import github-advisories`;
-the configured GitHub plugin can help select alerts before collection. The
-[separate readers and mappings](docs/cli.md#import-github-findings-locally-or-to-cloud)
-retain code-scanning evidence or GHSA disclosures. **GHSA import does not
-establish an installed dependency or applicability to the repository.** This
-integration does not import Dependabot or secret-scanning alerts or write back
-to GitHub.
+For GitHub code scanning and GHSA advisories, save complete JSON from
+`import github` or `import github-advisories`, respectively. **GHSA import
+does not establish an installed dependency or applicability to the repository.**
+For Dependabot, save the native REST alert records from one repository using the
+[Dependabot export guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/github-dependabot.md).
+The GitHub file reader accepts all three families. Secret-scanning alerts and
+writeback to GitHub are outside its scope.
 
 Use `publish findings FILE --to local --repository PATH --provider wiz
 --source-key KEY` to store the same vendor evidence in the local workbench SQLite
@@ -701,7 +735,7 @@ Use `--provider endor` with native Endor Finding JSON; existing endorctl SARIF i
 accepted as a lossy compatibility format. See
 [Endor imports](docs/cli.md#import-endor-labs-findings).
 
-For saved GitHub code-scanning alerts or GHSA advisories, use
+For saved GitHub code-scanning alerts, GHSA advisories, or Dependabot alerts, use
 `--provider github` with a separate stable source key for each finding family.
 See [local imports](docs/cli.md#import-vendor-findings-locally).
 

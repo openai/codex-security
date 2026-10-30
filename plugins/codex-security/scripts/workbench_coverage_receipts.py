@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import os
-import re
 from collections.abc import Callable, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -18,22 +17,6 @@ from finalize_scan_contract import (
     path_within_scope,
 )
 from workbench.saved_coverage import _project_worker_coverage_row, _saved_coverage_id
-
-
-def _checkpoint_head_directory(relative: str) -> Path | None:
-    path = Path(relative)
-    if path.name == "checkpoint-head.json":
-        return path.parent
-    if path.parent.name == "checkpoint-heads":
-        return path.parent.parent
-    return None
-
-
-def _is_source_order_snapshot(relative: str) -> bool:
-    path = Path(relative)
-    return path.parent == Path("source-order") and bool(
-        re.fullmatch(r"[0-9a-f]{64}\.json", path.name)
-    )
 
 
 def capture_receipt_checkpoints(

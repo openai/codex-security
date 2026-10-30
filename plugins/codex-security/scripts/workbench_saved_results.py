@@ -39,55 +39,7 @@ from finalize_scan_contract import (
 )
 from finalize_scan_contract import finding_candidate_id as finding_candidate_id
 from review_state import checkpoint_review_state, review_state, review_summary, uses_legacy_review
-from workbench.retained_coverage import (
-    _append_previous_finding as _append_previous_finding,
-)
-from workbench.retained_coverage import (
-    _coverage_rows as _coverage_rows,
-)
-from workbench.retained_coverage import (
-    _ensure_finding_identities as _ensure_finding_identities,
-)
-from workbench.retained_coverage import (
-    _ensure_finding_identity as _ensure_finding_identity,
-)
-from workbench.retained_coverage import (
-    _finding_content as _finding_content,
-)
-from workbench.retained_coverage import (
-    _finding_identity as _finding_identity,
-)
-from workbench.retained_coverage import (
-    _finding_key as _finding_key,
-)
-from workbench.retained_coverage import (
-    _has_candidate_metadata as _has_candidate_metadata,
-)
-from workbench.retained_coverage import (
-    _identity_candidate as _identity_candidate,
-)
-from workbench.retained_coverage import (
-    _inherit_coverage_sources as _inherit_coverage_sources,
-)
-from workbench.retained_coverage import (
-    _retained_findings as _retained_findings,
-)
-from workbench.retained_coverage import (
-    _semantic_identity_key as _semantic_identity_key,
-)
-from workbench.retained_coverage import (
-    _worker_candidate_key as _worker_candidate_key,
-)
 from workbench.retained_coverage import merge_saved_results as merge_saved_results
-from workbench.saved_coverage import (
-    _deferred_rows as _deferred_rows,
-)
-from workbench.saved_coverage import (
-    _merge_tied_parent_observations as _merge_tied_parent_observations,
-)
-from workbench.saved_coverage import (
-    _resolved_deferred_rows as _resolved_deferred_rows,
-)
 from workbench.saved_coverage import (
     _saved_coverage_id as _saved_coverage_id,
 )
@@ -116,27 +68,9 @@ from workbench.saved_sources import (
     _source_digests,
 )
 from workbench.saved_sources import (
-    _capture_parent_observation as _capture_parent_observation,
-)
-from workbench.saved_sources import (
-    _checkpoint_head_directory as _checkpoint_head_directory,
-)
-from workbench.saved_sources import (
     _digest as _digest,
 )
-from workbench.saved_sources import (
-    _latest_successful_reducer as _latest_successful_reducer,
-)
-from workbench.saved_sources import (
-    _parent_publication_ancestors as _parent_publication_ancestors,
-)
-from workbench.saved_sources import (
-    _worker_outputs as _worker_outputs,
-)
 from workbench_constants import PHASES
-from workbench_coverage_receipts import (
-    _deferred_candidate_id as _deferred_candidate_id,
-)
 from workbench_coverage_receipts import (
     _generic_surface_updates as _generic_surface_updates,
 )

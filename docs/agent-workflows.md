@@ -34,6 +34,7 @@ Codex plugin session.
 | Review a PR, commit, branch diff, or working-tree patch | [`$security-diff-scan`](../plugins/codex-security/skills/security-diff-scan/SKILL.md): review changes and trace their supporting code.                                                   | `cs scan . --diff origin/main` for committed changes, or `cs scan . --working-tree` for local changes.                                                                                                        |
 | Investigate a repository or paths deeply                | [`$deep-security-scan`](../plugins/codex-security/skills/deep-security-scan/SKILL.md): repeated independent audits; excludes diff reviews.                                               | `cs scan . --mode deep`.                                                                                                                                                                                      |
 | Triage supplied reports or claims                       | [`$triage-finding`](../plugins/codex-security/skills/triage-finding/SKILL.md): one static-evidence verdict per finding, with proof gaps.                                                 | `cs validate findings.json` also assesses supplied claims using static evidence; its output contract differs from plugin triage. See [validation](../sdk/typescript/docs/cli.md#validate-and-patch-findings). |
+| Resolve a vulnerable dependency                         | [`$resolve-dependency-alert`](../plugins/codex-security/skills/resolve-dependency-alert/SKILL.md) traces affected versions and prepares an upgrade or dismissal proposal.                | With external imports enabled, read saved alerts with `cs findings imported ./project --format json`.                                                                                                         |
 | Fix a security finding                                  | Explicitly request [`$fix-finding`](../plugins/codex-security/skills/fix-finding/SKILL.md) with the finding and affected repository.                                                     | `cs patch --scan SCAN_ID`; see [patching](../sdk/typescript/docs/cli.md#patch-existing-findings) for individual findings and options.                                                                         |
 | Check an existing security fix                          | Explicitly request [`$verify-fix`](../plugins/codex-security/skills/verify-fix/SKILL.md) with the original finding and current checkout. Verification leaves repository files unchanged. | `cs verify-fix --scan SCAN_ID`; see [fix verification](../sdk/typescript/docs/cli.md#verify-fixes).                                                                                                           |
 
@@ -68,6 +69,24 @@ Coverage gaps and investigation notes do not by themselves fail a completed
 scan. See [scan output](../sdk/typescript/docs/cli.md#scan-options-and-output)
 and [SDK results](../sdk/typescript/README.md#read-results) for the saved fields
 and failure output.
+
+### Check a revision-range scan for missing files
+
+If your scan retained `artifacts/02_discovery/in_scope_files.txt`, open it in
+the saved results directory. It lists the paths selected for discovery. For a
+scan between two commits, find `baseRevision` and `headRevision` under
+`scan.target` in the saved `scan-manifest.json`. In your Git client, compare
+the two commit trees directly (`base..head`). A three-dot PR comparison uses
+the merge base and can show different files when the commits have diverged.
+Current diff scans select regular text files regardless of extension. Git can
+also list changes to binary files, symlinks, and submodules.
+
+Plugin 0.1.32 could omit changed Perl files (`.cgi`, `.pl`, `.pm`, and `.t`).
+CLI 0.3.0 was the first release to bundle the fix. To repeat the scan with
+that version or later, use a clean, full checkout at the original head.
+Select the same two commits from your repository,
+passing the base to `--diff` and the head to `--head`. See the
+[CLI quick start](../README.md#quick-start).
 
 ## Give an agent CLI guidance
 

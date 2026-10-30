@@ -1,0 +1,139 @@
+name: Publish Wolfi scanner
+
+on:
+  workflow_dispatch:
+    inputs:
+      release-version:
+        description: Published scanner version receiving a Wolfi OS update.
+        type: string
+        required: true
+  workflow_call:
+    inputs:
+      artifact: {type: string, required: true}
+      digest: {type: string, required: true}
+      tag: {type: string, required: true}
+      sbom-sha: {type: string, required: true}
+
+permissions: {}
+
+env:
+  IMAGE: ghcr.io/openai/codex-security
+
+jobs:
+  os-update:
+    if: >-
+      inputs.release-version != '' && github.event_name == 'workflow_dispatch' &&
+      github.repository == 'openai/codex-security' && github.ref == 'refs/heads/main' && github.ref_protected
+    uses: ./.github/workflows/wolfi-build.yml
+    permissions:
+      contents: read
+      attestations: read
+    with:
+      release-version: ${{ inputs.release-version }}
+      os-update: true
+
+  authorize:
+    needs: os-update
+    if: needs.os-update.outputs.existing != 'true'
+    runs-on: ubuntu-24.04
+    environment: container
+    steps:
+      - name: Record approved Wolfi OS update
+        env:
+          TAG: ${{ needs.os-update.outputs.tag }}
+          DIGEST: ${{ needs.os-update.outputs.digest }}
+        run: printf 'Approved %s at %s\n' "$TAG" "$DIGEST"
+
+  publish:
+    name: Publish verified Wolfi variant
+    needs: [os-update, authorize]
+    if: >-
+      always() && !cancelled() && github.repository == 'openai/codex-security' &&
+      github.ref == 'refs/heads/main' && github.ref_protected &&
+      (needs.authorize.result == 'success' ||
+       (inputs.artifact != '' && github.workflow_ref == 'openai/codex-security/.github/workflows/node-github-release.yml@refs/heads/main'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    concurrency:
+      group: publish-wolfi-amd64
+      queue: max
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+      artifact-metadata: write
+    env:
+      DIGEST: ${{ inputs.digest || needs.os-update.outputs.digest }}
+      TAG: ${{ inputs.tag || needs.os-update.outputs.tag }}
+      SBOM_SHA: ${{ inputs.sbom-sha || needs.os-update.outputs.sbom-sha }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ inputs.artifact || needs.os-update.outputs.artifact }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/candidate
+      - name: Check the public package, immutable tag and local artifacts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ $TAG =~ ^[0-9]+\.[0-9]+\.[0-9]+-wolfi-amd64(-r[1-9][0-9]*)?$ && $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf '%s  %s\n' "$SBOM_SHA" "$RUNNER_TEMP/candidate/sbom.spdx.json" | sha256sum -c -
+          manifest=$RUNNER_TEMP/wolfi-manifest.json
+          skopeo inspect --raw "oci:$RUNNER_TEMP/candidate/layout:wolfi" > "$manifest"
+          printf '%s  %s\n' "${DIGEST#sha256:}" "$manifest" | sha256sum -c -
+          jq -e --arg tag "$TAG" '.annotations["io.openai.codex-security.release-tag"] == $tag' "$manifest" >/dev/null
+          package=orgs/openai/packages/container/codex-security
+          gh api "$package" | jq -e '.visibility == "public"' > /dev/null
+          existing=$(gh api --paginate --slurp "$package/versions?per_page=100" |
+            jq -r --arg tag "$TAG" '.[][] | select(any(.metadata.container.tags[]?; . == $tag)) | .name')
+          if [[ -n $existing && $existing != "$DIGEST" ]]; then
+            echo "::error::Refusing to replace $TAG ($existing) with $DIGEST"
+            exit 1
+          fi
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Upload by digest and verify an anonymous pull
+        shell: bash
+        run: |
+          set -euo pipefail
+          skopeo copy --preserve-digests "oci:$RUNNER_TEMP/candidate/layout:wolfi" "docker://$IMAGE@$DIGEST"
+          skopeo copy --src-no-creds --preserve-digests --digestfile "$RUNNER_TEMP/pulled.digest" \
+            "docker://$IMAGE@$DIGEST" "oci:$RUNNER_TEMP/pulled:wolfi"
+          [[ $(cat "$RUNNER_TEMP/pulled.digest") == "$DIGEST" ]]
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ env.DIGEST }}
+          push-to-registry: true
+      - name: Attest the SPDX inventory
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ env.DIGEST }}
+          sbom-path: ${{ runner.temp }}/candidate/sbom.spdx.json
+          push-to-registry: true
+      - name: Promote only the verified Wolfi tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for predicate in https://slsa.dev/provenance/v1 https://spdx.dev/Document/v2.3; do
+            gh attestation verify "oci://$IMAGE@$DIGEST" --repo "$GITHUB_REPOSITORY" --predicate-type "$predicate" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/publish-wolfi.yml" \
+              --source-ref refs/heads/main --source-digest "$GITHUB_SHA"
+          done
+          skopeo list-tags --no-creds "docker://$IMAGE" > "$RUNNER_TEMP/tags.json"
+          count=$(jq -er --arg tag "$TAG" '[.Tags[] | select(. == $tag)] | length' "$RUNNER_TEMP/tags.json")
+          if [[ $count == 0 ]]; then
+            skopeo copy --preserve-digests --src-no-creds "docker://$IMAGE@$DIGEST" "docker://$IMAGE:$TAG"
+          fi
+          skopeo inspect --no-creds --raw "docker://$IMAGE:$TAG" | sha256sum | cut -d' ' -f1 | grep -Fxq "${DIGEST#sha256:}"
+          printf 'Published \x60%s:%s\x60 at \x60%s\x60.\n' "$IMAGE" "$TAG" "$DIGEST" >> "$GITHUB_STEP_SUMMARY" || true

@@ -7,9 +7,11 @@ import {
   forwardExternalImportSetting,
   requireExternalImports,
 } from "./external-imports-feature.js";
-import type {
-  ExternalFindings,
-  ExternalSourceRepository,
+import {
+  snapshotImportOptions,
+  snapshotSourceRepositories,
+  type ExternalFindings,
+  type ExternalSourceRepository,
 } from "./external-findings.js";
 import {
   cloudRepositoryUrlKey,
@@ -20,8 +22,16 @@ import type {
   ExternalFindingEvidence,
   Provider,
 } from "./external-import-models.js";
-import { parseGitRemote } from "./git-remote.js";
+import { localFindingRepositories } from "./external-findings-read.js";
+import {
+  blackDuckReportRepositories,
+  projectedBlackDuckRepositoryUrl,
+} from "./blackduck-findings.js";
+import { isGitHubCloudHost, parseGitRemote } from "./git-remote.js";
+import { veracodeReportRepositories } from "./veracode-findings.js";
+import { inspectorReportRepository } from "./inspector-findings.js";
 import { isRecord } from "./record.js";
+import { dependabotRepository } from "./github-dependabot-findings.js";
 import {
   bundledPluginRoot,
   canonicalConfigPath,
@@ -61,6 +71,8 @@ export interface NormalizedLocalImportOptions {
   provider: Provider;
   /** Stable scanner organization/project/branch namespace across imports. */
   sourceKey: string;
+  /** Full Inspector project ARNs mapped to independently verified repository URLs. */
+  inspectorProjectMap?: ReadonlyMap<string, string>;
 }
 
 export interface LocalExternalImportDependencies {
@@ -101,34 +113,53 @@ function requireIdentity(
     );
 }
 
+const gitTransportPorts: Readonly<Record<string, string>> = {
+  "http:": "80",
+  "https:": "443",
+  "ssh:": "22",
+  "git+ssh:": "22",
+  "ssh+git:": "22",
+  "git:": "9418",
+  "ftp:": "21",
+  "ftps:": "990",
+};
+
 /** Compare transport forms without changing retained scanner evidence. */
-function remoteRepositoryKey(
+interface RemoteRepositoryIdentity {
+  key: string;
+  account?: string;
+  homeRelative?: boolean;
+}
+
+function remoteRepository(
   value: string,
   provider: Provider,
-): string | undefined {
+  bound: boolean,
+): RemoteRepositoryIdentity | undefined {
   if (/^[A-Za-z]:[\\/]/u.test(value)) return undefined;
+  const transport = bound
+    ? /^(?:ssh|git\+ssh|ssh\+git|git):\/\/([^/]*)(.*)$/isu.exec(value)
+    : null;
+  const authority = transport?.[1];
+  const http = bound && /^https?:\/\//iu.test(value.trimStart());
+  // Git decodes the authority before locating its path. An encoded delimiter
+  // cannot prove a match to another spelling through WHATWG URL's hostname.
+  if (
+    authority &&
+    (/%2f|[?#]/iu.test(authority) ||
+      authority.slice(authority.lastIndexOf("@") + 1).includes("%"))
+  )
+    return { key: value };
   let remote;
   try {
     remote = parseGitRemote(value);
   } catch {
-    return undefined;
+    return transport || http ? { key: "\0" + value } : undefined;
   }
-  if (
-    !remote ||
-    ![
-      "http:",
-      "https:",
-      "ssh:",
-      "git:",
-      "ftp:",
-      "ftps:",
-      "git+ssh:",
-      "ssh+git:",
-    ].includes(remote.url.protocol)
-  )
+  if (!remote || !Object.hasOwn(gitTransportPorts, remote.url.protocol))
     return undefined;
-  const url = remote.url;
-  const ssh = ["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol);
+  const { url, path, scpStyle } = remote;
+  const ssh = url.protocol.includes("ssh");
   const protocol = url.protocol === "http:" ? "http:" : "https:";
   const githubSshOverHttps =
     ssh &&
@@ -136,19 +167,130 @@ function remoteRepositoryKey(
     url.port === "443";
   const hostname = githubSshOverHttps ? "github.com" : url.hostname;
   const port =
-    githubSshOverHttps ||
-    (ssh && url.port === "22") ||
-    (url.protocol === "git:" && url.port === "9418") ||
-    (url.protocol === "ftp:" && url.port === "21") ||
-    (url.protocol === "ftps:" && url.port === "990")
+    githubSshOverHttps || url.port === gitTransportPorts[url.protocol]
       ? ""
       : url.port;
   // A GitHub source identifies a case-insensitive repository on custom Enterprise
   // hosts too; other providers can refer to VCS hosts with case-sensitive paths.
   const key = provider === "github" ? cloudRepositoryUrlKey : repositoryUrlKey;
-  return key(
-    `${protocol}//${hostname}${port ? `:${port}` : ""}/${remote.path}`,
+  const origin = `${protocol}//${hostname}${port ? `:${port}` : ""}/`;
+  if (!bound) return { key: key(origin + path) };
+
+  if (!ssh && url.protocol !== "git:") {
+    if (url.protocol === "http:" || url.protocol === "https:") {
+      // libcurl and WHATWG differ on backslashes and encoded dot segments.
+      const raw = /^https?:\/\/[^/\\?#\s]+(\/[^\\?#]*)?(?:[?#].*)?$/iu.exec(
+        value,
+      );
+      if (!raw || /\/(?:%2e|\.%2e|%2e\.|%2e%2e)(?:\/|$)/iu.test(raw[1] ?? ""))
+        return { key: "\0" + value };
+    }
+    const suffix = /[?#].*$/su.exec(value)?.[0] ?? "";
+    // HTTP sends the query and omits fragment text from repository requests.
+    if (suffix && !["http:", "https:"].includes(url.protocol))
+      return { key: key(origin + path) + "\0" };
+    return {
+      key:
+        key(origin + path) + suffix.replace(/#.*$/su, "#").replace(/\/$/u, ""),
+    };
+  }
+
+  // Git passes the original path (including dot segments, '?' and '#') to upload-pack.
+  const literal = (raw: string) => {
+    const bytes = Buffer.from(raw).toString("latin1");
+    return scpStyle
+      ? bytes
+      : bytes.replace(/%(?!00)([\da-f]{2})/giu, (_, hex: string) =>
+          String.fromCharCode(parseInt(hex, 16)),
+        );
+  };
+  if (!scpStyle && !transport) return { key: value };
+  const gitPath = literal(transport?.[2] ?? path);
+  const login = scpStyle
+    ? /^([^@/:\s?#]+)@/u.exec(value)?.[1]
+    : /^(.*)@/u.exec(authority ?? "")?.[1];
+  const homeRelative =
+    /^\/?~(?:\/|$)/u.test(gitPath) || (scpStyle && !/^[~/]/u.test(gitPath));
+  const suffix = /[?#].*$/su.exec(gitPath);
+  // Express upload-pack bytes as a URL path for comparison with the HTTP source.
+  const name = gitPath
+    .slice(0, suffix?.index)
+    .replace(/^\//u, "")
+    .replace(
+      /[%\x00-\x20\x7f-\xff]/gu,
+      (byte) =>
+        "%" + byte.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0"),
+    );
+  const repository = suffix
+    ? key(origin + name + "?") +
+      "\0" +
+      suffix[0].replace(/\/$/u, "").replace(/\.git$/u, "")
+    : key(origin + name);
+  return {
+    key: repository,
+    account: ssh && login ? literal(login) : undefined,
+    // GitHub serves the same repository path through its SCP and SSH URLs.
+    homeRelative:
+      ssh && provider !== "github" && !isGitHubCloudHost(hostname.toLowerCase())
+        ? homeRelative
+        : undefined,
+  };
+}
+
+function matchingRemote(
+  left: RemoteRepositoryIdentity,
+  right: RemoteRepositoryIdentity,
+) {
+  return (
+    left.key === right.key &&
+    (left.homeRelative === undefined ||
+      right.homeRelative === undefined ||
+      left.homeRelative === right.homeRelative) &&
+    ((left.homeRelative === false && right.homeRelative === false) ||
+      left.account === undefined ||
+      right.account === undefined ||
+      left.account === right.account)
   );
+}
+
+function localRepositoryPlatform(
+  provider: Provider,
+  sources: readonly ExternalSourceRepository[],
+  bound: boolean,
+) {
+  const githubKey = (url: string) =>
+    remoteRepository(url, "github", bound)?.key;
+  const githubRepositories = new Set(
+    sources.flatMap((source) => {
+      if (source.platform !== "github") return [];
+      const key = githubKey(source.url);
+      return key === undefined ? [] : [key];
+    }),
+  );
+  return (source: ExternalSourceRepository): Provider => {
+    if (source.platform === "github") return "github";
+    if (githubRepositories.size === 0) return provider;
+    const key = githubKey(source.url);
+    return key !== undefined && githubRepositories.has(key)
+      ? "github"
+      : provider;
+  };
+}
+
+function sameScannerRepositories(
+  remotes: Iterable<RemoteRepositoryIdentity>,
+): boolean {
+  let known: RemoteRepositoryIdentity | undefined;
+  for (const remote of remotes) {
+    if (known && !matchingRemote(known, remote)) return false;
+    // HTTPS does not specify the login or path interpretation carried by SSH.
+    known = {
+      key: remote.key,
+      account: remote.account ?? known?.account,
+      homeRelative: remote.homeRelative ?? known?.homeRelative,
+    };
+  }
+  return true;
 }
 
 async function bareMetadataRoots(
@@ -343,6 +485,8 @@ async function requireMatchingRepository(
   repository: string,
   provider: Provider,
   sources: readonly ExternalSourceRepository[],
+  strictSources: ReadonlyMap<string, Provider>,
+  strictPlatformFor: (source: ExternalSourceRepository) => Provider,
   protectedRoots: WorkbenchCommandOptions["protectedRoot"],
   environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
@@ -396,29 +540,21 @@ async function requireMatchingRepository(
     const urls = await readGit(["remote", "get-url", "--all", "--", name]);
     remotes.push(...urls.split(/\r?\n/u));
   }
-  const githubRepositories = new Set(
-    sources.flatMap((source) => {
-      if (source.platform !== "github") return [];
-      const key = remoteRepositoryKey(source.url, "github");
-      return key === undefined ? [] : [key];
-    }),
-  );
+  const boundProvider =
+    provider === "inspector" ||
+    provider === "blackduck" ||
+    provider === "veracode";
+  const loosePlatformFor = localRepositoryPlatform(provider, sources, false);
   for (const source of sources) {
-    const githubKey = remoteRepositoryKey(source.url, "github");
-    const sourceProvider =
-      source.platform === "github" ||
-      (githubKey !== undefined && githubRepositories.has(githubKey))
-        ? "github"
-        : provider;
-    const remoteKeys = new Set(
-      remotes.flatMap((remote) => {
-        const key = remoteRepositoryKey(remote, sourceProvider);
-        return key === undefined ? [] : [key];
-      }),
-    );
-    if (remoteKeys.size === 0) continue;
-    const key = remoteRepositoryKey(source.url, sourceProvider);
-    if (key === undefined || !remoteKeys.has(key))
+    const bound = boundProvider || strictSources.has(source.url);
+    const platform = bound
+      ? (strictSources.get(source.url) ?? strictPlatformFor(source))
+      : loosePlatformFor(source);
+    const identity = (url: string) => remoteRepository(url, platform, bound);
+    const targets = remotes.flatMap((remote) => identity(remote) ?? []);
+    if (!targets.length) continue;
+    const target = identity(source.url);
+    if (!target || !targets.some((remote) => matchingRemote(remote, target)))
       throw new CodexSecurityError(
         `Imported repository ${JSON.stringify(source.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
       );
@@ -489,9 +625,25 @@ export async function prepareNormalizedLocalImport(
 ): Promise<PreparedLocalExternalImport> {
   dependencies.signal?.throwIfAborted();
   requireExternalImports(dependencies.environment);
+  return prepareLocalImport(
+    input,
+    snapshotImportOptions(options),
+    dependencies,
+  );
+}
+
+/** @internal Prepare evidence using settings captured by either local import entrypoint. */
+export async function prepareLocalImport(
+  input: ExternalFindings,
+  options: NormalizedLocalImportOptions,
+  dependencies: LocalExternalImportDependencies,
+  readerSources = snapshotSourceRepositories(dependencies.sourceRepositories),
+  parsedSources: readonly ExternalSourceRepository[] = [],
+): Promise<PreparedLocalExternalImport> {
   requireIdentity(options.sourceKey, "Source key");
   const current = structuredClone(input);
   validateExternalReport(current.report);
+  let dependabotSource: string | undefined;
   const identities = new Set<string>();
   for (const finding of current.findings) {
     requireIdentity(finding.source_finding_id, "Source finding id");
@@ -502,25 +654,198 @@ export async function prepareNormalizedLocalImport(
     identities.add(finding.source_finding_id);
     if (!isRecord(finding.evidence))
       throw new CodexSecurityError("Imported evidence must be an object.");
+    if (options.provider !== "github") continue;
+    const native = dependabotRepository(finding);
+    if (!native) continue;
+    const claimed = finding.evidence.details?.repository?.url;
+    if (
+      claimed &&
+      cloudRepositoryUrlKey(claimed) !== cloudRepositoryUrlKey(native)
+    )
+      throw new CodexSecurityError(
+        "The normalized repository does not match the original Dependabot alert.",
+      );
+    if (dependabotSource && dependabotSource !== native)
+      throw new CodexSecurityError(
+        "Select Dependabot alerts from only one GitHub host and repository.",
+      );
+    dependabotSource = native;
   }
   const { repository, options: workbenchOptions } = await localContext(
     options.repository,
     dependencies,
   );
   const sources = new Map<string, ExternalSourceRepository>();
-  for (const { evidence } of current.findings) {
+  const references = [...readerSources, ...parsedSources];
+  const inspector = inspectorReportRepository(
+    options.provider,
+    current.findings,
+    "local",
+    options.inspectorProjectMap,
+  );
+  const projected =
+    options.provider === "blackduck"
+      ? []
+      : current.findings.filter((finding) =>
+          projectedBlackDuckRepositoryUrl(finding, "local"),
+        );
+  const mixed = projected.length > 0 && readerSources.length > 0;
+  const nativeSources = new Map(
+    (mixed ? current.findings : projected)
+      .filter(
+        ({ evidence }) =>
+          options.provider !== "endor" ||
+          isRecord(evidence.source_data?.["runContext"]),
+      )
+      .map(
+        (finding) =>
+          [
+            finding,
+            localFindingRepositories(options.provider, finding),
+          ] as const,
+      ),
+  );
+  const platformFor = localRepositoryPlatform(
+    options.provider,
+    options.inspectorProjectMap
+      ? []
+      : [
+          ...references,
+          ...Array.from(nativeSources.values()).flat(),
+          ...(inspector ? [inspector] : []),
+        ],
+    true,
+  );
+  const identify = (url: string) =>
+    remoteRepository(url, platformFor({ url }), true) ?? { key: url };
+  // A hint from an independent reader applies across projected rows. A native
+  // GitHub asset in one row only identifies the platform of that row's claims.
+  const operatorPlatform = localRepositoryPlatform(
+    options.provider,
+    readerSources,
+    true,
+  );
+  const sameRepositories = (urls: Iterable<string>) =>
+    sameScannerRepositories(Array.from(urls, identify));
+  const bound = blackDuckReportRepositories(
+    options.provider,
+    current.findings,
+    "local",
+    sameRepositories,
+  );
+  for (const source of veracodeReportRepositories(
+    options.provider,
+    current.findings,
+    "local",
+    sameRepositories,
+  ).values()) {
+    sources.set(source.url, source);
+  }
+  const strictSources = new Map<string, Provider>();
+  const known = new Set<string>(parsedSources.map(({ url }) => url));
+  for (const finding of current.findings) {
+    const { evidence, source_finding_id: id } = finding;
     const url = evidence.details?.repository?.url;
     if (url) sources.set(url, { url });
+    const retained = bound.get(id);
+    const native = nativeSources.get(finding) ?? [];
+    if (retained) {
+      const claims = [
+        retained.url,
+        ...(url ? [url] : []),
+        ...native.map((ref) => ref.url),
+      ];
+      const rowPlatform = (claim: string) =>
+        options.provider !== "wiz"
+          ? platformFor({ url: claim })
+          : native.some((source) => source.platform === "github")
+            ? "github"
+            : operatorPlatform({ url: claim });
+      if (
+        !sameScannerRepositories(
+          claims.map(
+            (claim) =>
+              remoteRepository(claim, rowPlatform(claim), true) ?? {
+                key: claim,
+              },
+          ),
+        )
+      )
+        throw new CodexSecurityError(
+          "The retained scanner repository does not match the original provider finding.",
+        );
+      for (const source of [retained, ...native])
+        sources.set(source.url, source);
+      for (const claim of claims) {
+        const platform = rowPlatform(claim);
+        if (!strictSources.has(claim) || platform !== "github")
+          strictSources.set(claim, platform);
+      }
+    }
+    for (const source of native) known.add(source.url);
   }
-  for (const source of dependencies.sourceRepositories ?? []) {
-    // A reader's explicit platform also applies to the same URL in typed evidence.
+  if (mixed) {
+    // A caller reference with no matching row spelling can still be a Git alias.
+    const rows = [...sources.keys(), ...known].map(identify);
+    const byKey = Map.groupBy(rows, (remote) => remote.key);
+    const represented = new Set(rows.map((remote) => JSON.stringify(remote)));
+    const aliases = readerSources
+      .map(({ url }) => identify(url))
+      .filter((remote) => !represented.has(JSON.stringify(remote)));
+    for (const [key, group] of Map.groupBy(aliases, (remote) => remote.key)) {
+      const candidates = byKey.get(key);
+      if (!candidates || !sameScannerRepositories([...candidates, ...group]))
+        throw new CodexSecurityError(
+          "Reader repository does not match a source in the normalized findings.",
+        );
+    }
+  }
+  if (strictSources.size && options.provider !== "blackduck") {
+    const keys = new Set(
+      Array.from(strictSources.keys(), (url) => identify(url).key),
+    );
+    for (const source of references)
+      if (!strictSources.has(source.url) && keys.has(identify(source.url).key))
+        strictSources.set(source.url, platformFor(source));
+  }
+  if (inspector) {
+    const platform = inspector.platform ?? options.provider;
+    const native = remoteRepository(inspector.url, platform, true);
+    for (const url of sources.keys()) {
+      if (!native || remoteRepository(url, platform, true)?.key !== native.key)
+        throw new CodexSecurityError(
+          `Imported repository ${JSON.stringify(url)} does not match the retained Inspector repository ${JSON.stringify(inspector.url)}.`,
+        );
+    }
+  }
+  for (const source of [...(inspector ? [inspector] : []), ...references]) {
+    // A reader's platform must not loosen an operator-supplied Inspector map.
     if (sources.get(source.url)?.platform !== "github")
-      sources.set(source.url, source);
+      sources.set(
+        source.url,
+        options.inspectorProjectMap ? { url: source.url } : source,
+      );
   }
+  if (
+    options.provider === "blackduck" &&
+    current.findings.length &&
+    sources.size > 1 &&
+    !sameScannerRepositories(Array.from(sources.keys(), identify))
+  )
+    throw new CodexSecurityError(
+      "Black Duck occurrences must belong to the same project version and source repository.",
+    );
+  if (dependabotSource)
+    sources.set(dependabotSource, {
+      url: dependabotSource,
+      platform: "github",
+    });
   await requireMatchingRepository(
     repository,
     options.provider,
     [...sources.values()],
+    strictSources,
+    platformFor,
     workbenchOptions.protectedRoot,
     workbenchOptions.environment,
     dependencies.signal,

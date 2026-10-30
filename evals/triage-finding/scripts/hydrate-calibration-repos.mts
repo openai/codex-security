@@ -3,6 +3,7 @@ import { runGit } from "../sastbench/scripts/hydrate-sastbench-repos.mts";
 
 import {
   DEFAULT_DATASET,
+  readCalibrationDataset,
   selectedVariants,
   variantCaseId,
 } from "./generate-calibration-tests.mts";
@@ -117,7 +118,7 @@ if (
   import.meta.filename === fs.realpathSync(process.argv[1])
 ) {
   const args = parseArgs(process.argv.slice(2));
-  const dataset = JSON.parse(fs.readFileSync(args.dataset, "utf8"));
+  const dataset = readCalibrationDataset(args.dataset);
   const jobs = plannedJobs(dataset, args);
   const variantWord = jobs.length === 1 ? "variant" : "variants";
   console.log(

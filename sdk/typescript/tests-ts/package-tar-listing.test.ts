@@ -1331,14 +1331,30 @@ describe("npm package tar listings", () => {
       const contractPath = join(root, "plugin contract.json");
       const logPath = join(root, "tar calls.jsonl");
       const adjacentTarMarker = join(root, "archive tar ran");
+      // A valid plugin inventory can exceed the Windows process command-line limit.
+      const extraFiles = Array.from(
+        { length: 256 },
+        (_, index) => `fixtures/generated-plugin-document-${index}.md`,
+      );
       const tarBytes = packageTar({
         compatibleLayout: true,
         rootDirectoryMode: 0o555,
         readmeMode: 0,
+        additionalRecords: extraFiles.map((file) =>
+          tarRecord(Buffer.alloc(0), {
+            name: `package/_bundled_plugin/${file}`,
+          }),
+        ),
       });
       const archiveContents = gzipSync(tarBytes, { level: 0 });
       writeFileSync(archivePath, archiveContents);
-      writeFileSync(contractPath, JSON.stringify(pluginContract));
+      writeFileSync(
+        contractPath,
+        JSON.stringify({
+          ...pluginContract,
+          shippedExact: [...pluginContract.shippedExact, ...extraFiles],
+        }),
+      );
 
       const environment: NodeJS.ProcessEnv = { ...process.env };
       delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];

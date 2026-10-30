@@ -74,7 +74,6 @@ import {
 } from "./artifact-export.js";
 export { exportEnvironment } from "./artifact-export.js";
 import { parse as parseToml } from "smol-toml";
-import { parse as parseYaml } from "yaml";
 import {
   classifyConnectionFailure,
   CodexSecurity,
@@ -114,6 +113,7 @@ import {
   type ExternalPublicationResult,
 } from "./external-findings-publish.js";
 import { prepareLocalExternalImport } from "./external-findings-import.js";
+import { validateInspectorProjectMapping } from "./inspector-findings.js";
 import {
   externalImportsDisabledMessage,
   externalImportsEnabled,
@@ -219,6 +219,7 @@ import {
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
+import { GHSA_ID } from "./github-identifiers.js";
 import {
   GITHUB_ADVISORY_STATES,
   importGitHubAdvisories,
@@ -3545,15 +3546,15 @@ export async function main(
   function registerFindingPublication() {
     publication.command("findings", {
       description:
-        "Preview and import selected Wiz, Snyk, Semgrep Code, OpenGrep, Endor, or GitHub findings locally or to Cloud.",
-      hint: "For Snyk Open Source SCA vulnerabilities only, prefer native snyk test JSON or an official plugin snyk-findings-export/v1 bundle; Open Source SARIF 2.1.0 is also supported. Snyk licenses, Code, Container, IaC and platform backlogs are unsupported. For Semgrep Code, supply native JSON or SARIF and --source-repository-url. For OpenGrep, supply native JSON and --source-repository-url; imports use the semgrep storage provider and preserve OpenGrep as the scanner origin. For Endor, supply native Finding JSON or endorctl SARIF 2.1.0. For GitHub, supply complete JSON/JSONL saved by import github or import github-advisories. GHSA advisories do not establish an installed dependency or applicability. For Wiz, prefer a native package vulnerability JSON report or named SAST/repository-secret/IaC JSON collections with repository metadata. Normalized JSONL and repository package-vulnerability CSV (SCA only, GitHub repositories) are also supported. Gzip is supported for each format; Wiz CSV does not cover SAST or cloud posture. Other Wiz CSV profiles, scan events, workload secrets, and cloud configuration exports are not supported. --to local stores unassessed evidence for a local repository path without Cloud login. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
+        "Preview and import a saved scanner report locally or to Cloud.",
+      hint: "Choose the reader with --provider and keep --source-key stable for reimports. See the scanner import guide for accepted formats, repository requirements and export examples: https://github.com/openai/codex-security/blob/main/docs/scanner-imports/schema-guide.md. Gzip is supported. --to local stores unassessed evidence without Cloud login. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
       destructive: true,
       mcp: false,
       args: z.object({
         file: z
           .string()
           .describe(
-            "Snyk native test JSON, plugin SCA bundle or Open Source SARIF; Semgrep Code JSON/SARIF; OpenGrep native JSON; Endor Finding JSON/endorctl SARIF; saved GitHub import output; native Wiz JSON, normalized JSONL, or repository package-vulnerability CSV.",
+            "Saved report in a format accepted by the selected reader.",
           ),
       }),
       options: z.object({
@@ -3566,12 +3567,17 @@ export async function main(
         provider: z
           .enum(EXTERNAL_FINDINGS_READERS)
           .describe(
-            "Report reader; OpenGrep uses the semgrep storage provider.",
+            "Select the file reader for this report. OpenGrep findings use the semgrep storage provider.",
           ),
         sourceRepositoryUrl: optionValue("--source-repository-url")
           .optional()
           .describe(
-            "Required for Semgrep and OpenGrep: source repository URL, checked against the Cloud destination or configured local Git remotes.",
+            "Source repository URL when required by the selected reader. Checked against the Cloud destination or configured local Git remotes.",
+          ),
+        inspectorProjectArn: optionValue("--inspector-project-arn")
+          .optional()
+          .describe(
+            "Full Inspector project ARN independently verified for --source-repository-url. Required when the report does not identify its repository by URL.",
           ),
         sourceKey: optionValue("--source-key").describe(
           "Stable vendor tenant and finding namespace; not a project selection filter.",
@@ -3673,24 +3679,38 @@ export async function main(
           try {
             if (!importsEnabled)
               throw new CodexSecurityError(externalImportsDisabledMessage);
+            const { inspectorProjectArn, ...readerOptions } = options;
+            let inspectorProjectMap: Map<string, string> | undefined;
+            if (inspectorProjectArn !== undefined) {
+              if (options.provider !== "inspector")
+                throw new CodexSecurityError(
+                  "--inspector-project-arn requires --provider inspector.",
+                );
+              const url = validateInspectorProjectMapping(
+                inspectorProjectArn,
+                options.sourceRepositoryUrl,
+              );
+              inspectorProjectMap = new Map([[inspectorProjectArn, url]]);
+            }
+            const directory = dependencies.currentDirectory();
+            const report = resolveCliPath(directory, args.file);
+            const repository =
+              options.to === "local"
+                ? resolveCliPath(directory, options.repository)
+                : options.repository;
+            const publicationOptions = {
+              ...readerOptions,
+              repository,
+              inspectorProjectMap,
+            };
             if (options.to === "local") {
               const prepared = await (
                 dependencies.prepareLocalExternalImport ??
                 prepareLocalExternalImport
-              )(
-                resolveCliPath(dependencies.currentDirectory(), args.file),
-                {
-                  ...options,
-                  repository: resolveCliPath(
-                    dependencies.currentDirectory(),
-                    options.repository,
-                  ),
-                },
-                {
-                  environment: dependencies.environment,
-                  signal: controller.signal,
-                },
-              );
+              )(report, publicationOptions, {
+                environment: dependencies.environment,
+                signal: controller.signal,
+              });
               const { preview } = prepared;
               const showPreview = () => {
                 showScannerReport(preview);
@@ -3727,8 +3747,8 @@ export async function main(
               return { ...result };
             }
             const prepared = await prepareExternalPublication(
-              resolveCliPath(dependencies.currentDirectory(), args.file),
-              options,
+              report,
+              publicationOptions,
               {
                 environment: dependencies.environment,
                 fetch: dependencies.cloudFetch,
@@ -3956,7 +3976,7 @@ export async function main(
         githubAdvisory: z
           .array(
             optionValue("--github-advisory").regex(
-              /^GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/iu,
+              GHSA_ID,
               "GitHub advisory IDs must use GHSA-xxxx-xxxx-xxxx form.",
             ),
           )
@@ -5098,10 +5118,12 @@ export async function main(
               ? options.component.map((path) => ({ name: path, paths: [path] }))
               : componentPlanSchema.parse(
                   JSON.parse(
-                    await readRegularInputFile(
-                      resolveCliPath(directory, options.componentsFile),
-                      repository,
-                    ),
+                    (
+                      await readRegularInputFile(
+                        resolveCliPath(directory, options.componentsFile),
+                        repository,
+                      )
+                    ).replace(/^\uFEFF/u, ""),
                   ),
                 ).components;
           if (
@@ -7089,7 +7111,7 @@ export async function main(
     } else {
       if (exitCode !== 0) return exitCode;
       errorOutput.write(
-        `codex-security: ${diagnosticLines(incurErrorMessage(frameworkOutput))}\n`,
+        `codex-security: ${diagnosticLines(await incurErrorMessage(frameworkOutput))}\n`,
       );
       return 2;
     }
@@ -9130,11 +9152,12 @@ export function skillCommandFailure(
   return detail || `${command} failed with exit code ${status}.`;
 }
 
-function incurErrorMessage(output: string): string {
+async function incurErrorMessage(output: string): Promise<string> {
   // YAML folds long strings across lines; JSON output keeps its serialized form.
   if (!output.startsWith("{")) {
+    const { parse } = await import("yaml");
     try {
-      const parsed: unknown = parseYaml(output);
+      const parsed: unknown = parse(output);
       if (isJsonObject(parsed) && typeof parsed["message"] === "string")
         return parsed["message"];
     } catch {
@@ -9501,7 +9524,7 @@ async function executeScan(
     );
     if (progress.interactive && !arguments_.dryRun && !verbose) {
       dashboard = new ScanDashboard(errorOutput, {
-        repository,
+        repository: resolveCliPath(directory, repository),
         mode: arguments_.mode,
         showCost,
         model: scanModelConfiguration(await mergedCodexConfig(config)),
@@ -10029,7 +10052,7 @@ async function executeScan(
             );
             if (validation["reportPath"] !== undefined) {
               errorOutput.write(
-                `Partial validation report: ${diagnosticValue(validation["reportPath"])}\n`,
+                `Validation report opened at ${diagnosticValue(validation["reportPath"])}\n`,
               );
             }
           }
@@ -10088,11 +10111,11 @@ async function executeScan(
   if (requestedSignal !== null) {
     diagnostic("scan.interrupted", {
       signal: requestedSignal,
-      partial_output: scanDir !== null,
     });
     if (result !== null && arguments_.validate) {
       const exitCode = requestedSignal === "SIGINT" ? 130 : 143;
-      const message = `Validation interrupted. Completed scan output was kept at ${errorMessage(result.scanDir)}.`;
+      const scanId = quoteCliPath(diagnosticValue(result.manifest.scan.id));
+      const message = `Validation interrupted. Original output directory: ${errorMessage(result.scanDir)}. Run codex-security scans show ${scanId} to inspect the completed scan.`;
       errorOutput.write(`codex-security: ${message}\n`);
       return {
         exitCode,
@@ -10103,6 +10126,7 @@ async function executeScan(
         },
       };
     }
+    if (failure instanceof ScanInterruptedError) scanDir ??= failure.scanDir;
     const exitCode = interruptedExit(requestedSignal, scanDir, errorOutput);
     printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
     return {
@@ -10132,7 +10156,6 @@ async function executeScan(
           : isLocalScanFailure(failure)
             ? "local"
             : classifyConnectionFailure(failure),
-      partial_output: scanDir !== null,
       max_cost_usd: costLimitFailure?.maxCostUsd,
       estimated_usd: costLimitFailure?.cost.estimatedUsd,
       cost_estimate:
@@ -10142,9 +10165,7 @@ async function executeScan(
     });
     errorOutput.write(`${message}\n`);
     if (!(failure instanceof ScanInterruptedError) && scanDir !== null) {
-      errorOutput.write(
-        `Partial output was kept at ${errorMessage(scanDir)}.\n`,
-      );
+      errorOutput.write(`Output directory: ${errorMessage(scanDir)}\n`);
     }
     printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
     return { exitCode: 2, error: message, data: failureData };
@@ -10693,7 +10714,7 @@ function printFailedScanReference(
     if (phase !== null)
       output.write(`Last observed phase: ${diagnosticValue(phase)}\n`);
     output.write(
-      `Retained results: ${diagnosticValue(scan["scanDir"])}\n` +
+      `Output directory: ${diagnosticValue(scan["scanDir"])}\n` +
         "Inspect the saved scan status before choosing resume or rerun.\n",
     );
     const prompts = [
@@ -10878,7 +10899,7 @@ function protectedRootErrorMessage(
     `  Reason:         ${reason}`,
     error.pathKind === "output"
       ? suggestion === undefined
-        ? "Choose a private output directory outside the protected root."
+        ? "Choose an output directory outside the protected root."
         : `Re-run with --output-dir ${quoteCliPath(suggestion)}.`
       : suggestion === undefined
         ? "Set TMPDIR (or TEMP on Windows) to a writable directory outside the protected root."
@@ -11267,11 +11288,11 @@ function interruptedExit(
   errorOutput.write(
     `codex-security: Scan ${ctrlC ? "canceled by Ctrl-C" : "terminated by SIGTERM"}.\n`,
   );
-  errorOutput.write(
-    scanDir === null
-      ? "codex-security: No partial output was kept.\n"
-      : `codex-security: Partial output was kept at ${errorMessage(scanDir)}.\n`,
-  );
+  if (scanDir) {
+    errorOutput.write(
+      `codex-security: Output directory: ${errorMessage(scanDir)}\n`,
+    );
+  }
   return ctrlC ? 130 : 143;
 }
 

@@ -34,6 +34,17 @@ const inventory = await importSource(
   },
 );
 
+// EUC-JP Perl source ("日本語コメント", "テスト", "こんにちは"), encoded as
+// bytes because Node has no EUC-JP encoder. Non-UTF-8 text must stay eligible.
+const EUC_JP_PERL_BASE = Buffer.from(
+  "2320c6fccbdcb8eca5b3a5e1a5f3a5c80a6d7920246e616d65203d2022a5c6a5b9a5c8223b0a7072696e7420226261736520246e616d655c6e223b0a",
+  "hex",
+);
+const EUC_JP_PERL_HEAD = Buffer.from(
+  "2320c6fccbdcb8eca5b3a5e1a5f3a5c80a6d7920246e616d65203d2022a5c6a5b9a5c8223b0a7072696e742022436f6e74656e742d547970653a20746578742f706c61696e5c6e5c6e223b0a7072696e742022a4b3a4f3a4cba4c1a4cf20246e616d655c6e223b0a",
+  "hex",
+);
+
 try {
   await testSchemasAreBoundAndExact();
   await testPrepareUsesTheExistingStandardGenerator();
@@ -42,6 +53,7 @@ try {
   await testPrepareListsIgnoredTrackedFilesOnce();
   await testPrepareExcludesGitMetadata();
   await testPrepareUsesOnlyAuthoritativeDiffChanges();
+  await testPrepareIncludesPerlSourceWithMixedEncodings();
   await testPrepareIncludesStagedAndUnstagedChanges();
   await testInventoryChildPreservesSettingsAndCwd();
   if (process.platform !== "win32") await testInventoryChildPreservesRawPaths();
@@ -543,6 +555,70 @@ async function testPrepareUsesOnlyAuthoritativeDiffChanges() {
   });
 }
 
+async function testPrepareIncludesPerlSourceWithMixedEncodings() {
+  const fixture = await createFixture("perl source extensions");
+  await runGit(fixture.repoRoot, "init", "-q");
+  const perlSources = [
+    "lib/Util.pm",
+    "t/basic.t",
+    "www/cgi-bin/app.pl",
+    "www/cgi-bin/index.cgi",
+  ];
+  for (const source of perlSources)
+    await fixture.writeRepositoryFile(source, "use strict;\n1;\n");
+  // Perl CGI scripts need not carry a Perl extension at all.
+  await fixture.writeRepositoryFile(
+    "www/cgi-bin/entrypoint",
+    "#!/usr/bin/env perl\nuse strict;\n1;\n",
+  );
+  await fixture.writeRepositoryFile("www/cgi-bin/legacy.cgi", EUC_JP_PERL_BASE);
+  // A NUL byte keeps this out even though `.pm` is a familiar source
+  // extension: selection is by content, not by suffix.
+  await fixture.writeRepositoryFile(
+    "www/cgi-bin/binary.pm",
+    Buffer.from([0x00, 0xff, 0x01]),
+  );
+  await runGit(fixture.repoRoot, "add", ".");
+  await runGit(fixture.repoRoot, "commit", "-qm", "base");
+  const baseRevision = await runGit(fixture.repoRoot, "rev-parse", "HEAD");
+
+  for (const source of perlSources)
+    await fixture.writeRepositoryFile(source, "use strict;\n2;\n");
+  await fixture.writeRepositoryFile(
+    "www/cgi-bin/entrypoint",
+    "#!/usr/bin/env perl\nuse strict;\n2;\n",
+  );
+  await fixture.writeRepositoryFile("www/cgi-bin/legacy.cgi", EUC_JP_PERL_HEAD);
+  await fixture.writeRepositoryFile(
+    "www/cgi-bin/binary.pm",
+    Buffer.from([0x00, 0xff, 0x02]),
+  );
+  await runGit(fixture.repoRoot, "add", ".");
+  await runGit(fixture.repoRoot, "commit", "-qm", "change");
+  const headRevision = await runGit(fixture.repoRoot, "rev-parse", "HEAD");
+  const context = {
+    ...fixture.scan,
+    mode: "diff",
+    targetContract: {
+      diffTarget: { kind: "range", baseRevision, headRevision },
+    },
+  };
+
+  assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
+    reviewItemsTotal: 6,
+  });
+  assert.deepEqual(await inventory.listCodexSecurityReviewItems(context), {
+    items: [
+      { path: "lib/Util.pm" },
+      { path: "t/basic.t" },
+      { path: "www/cgi-bin/app.pl" },
+      { path: "www/cgi-bin/entrypoint" },
+      { path: "www/cgi-bin/index.cgi" },
+      { path: "www/cgi-bin/legacy.cgi" },
+    ],
+  });
+}
+
 async function testPrepareIncludesStagedAndUnstagedChanges() {
   const fixture = await createFixture("selected working tree changes");
   await runGit(fixture.repoRoot, "init", "-q");
@@ -770,7 +846,7 @@ async function createFixture(label: string) {
   return {
     root,
     repoRoot,
-    async writeRepositoryFile(relativePath: string, source: string) {
+    async writeRepositoryFile(relativePath: string, source: string | Buffer) {
       return writeInventory(path.join(repoRoot, relativePath), source);
     },
     scanInventory: path.join(
@@ -801,7 +877,7 @@ async function createFixture(label: string) {
   };
 }
 
-async function writeInventory(destination: string, source: string) {
+async function writeInventory(destination: string, source: string | Buffer) {
   await mkdir(path.dirname(destination), { recursive: true });
   await writeFile(destination, source);
 }
