@@ -16,6 +16,7 @@
 - accept UTF-8 BOM in JSON project files ([#980](https://github.com/openai/codex-security/pull/980))
 - avoid duplicate plugin setup inspection and defer CLI YAML ([#2149](https://github.com/openai/codex-security/pull/2149))
 - accept UTF-8 BOMs in scan inputs and calibration datasets ([#2151](https://github.com/openai/codex-security/pull/2151))
+- preserve IPv6 verification URL brackets ([#232](https://github.com/openai/codex-security/pull/232))
 
 <!-- release-section: highlights:end -->
 
