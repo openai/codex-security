@@ -27,6 +27,7 @@
 - count only CR and LF as assessment line breaks ([#2147](https://github.com/openai/codex-security/pull/2147))
 - retain the reviewed surface count for completed Deep scans ([#2161](https://github.com/openai/codex-security/pull/2161))
 - show highest-severity findings first ([#2160](https://github.com/openai/codex-security/pull/2160))
+- bump taiki-e/install-action from 2.87.30 to 2.87.31 ([#2156](https://github.com/openai/codex-security/pull/2156))
 
 <!-- release-section: highlights:end -->
 
