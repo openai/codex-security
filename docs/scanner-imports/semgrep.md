@@ -156,7 +156,9 @@ report=$(mktemp ./semgrep-backlog.XXXXXX) &&
 
 Use `--semgrep-product sca` for Supply Chain or `ai_sast` for AI-powered
 detection. The default is `sast`. Use `--source-repository-url` on collection
-when the project has no repository URL. Save the complete output from a successful
+when the project has no repository URL. In that case the report records the mapping in
+`sourceRepositoryUrl`, and stored finding evidence retains a null native project URL.
+Save the complete output from a successful
 command; the local importer checks the recorded finding count and repository/ref
 claims. It retains each original finding as JSON text so large IDs survive replay. The reader also accepts saved v1 project exports with native object rows and decimal type witnesses.
 Supply Chain findings include native package versions, matching fix recommendations

@@ -4,7 +4,7 @@ import { isNumberObject } from "node:util/types";
 import {
   semgrepLegacyRepositoryWitnesses,
   semgrepPlatformFindingBinding,
-  semgrepPlatformReportRepository,
+  semgrepPlatformReportScope,
   semgrepPlatformRepositoryReference,
   semgrepReferenceMatches,
 } from "./semgrep-platform-findings.js";
@@ -767,7 +767,8 @@ export async function prepareLocalImport(
   }
   const strictSources = new Map<string, Provider>();
   const hostedSources = new Map<string, ExternalSourceRepository>();
-  const semgrepPlatformRepositoryUrl = semgrepPlatformReportRepository(current);
+  const semgrepReportScope = semgrepPlatformReportScope(current);
+  const semgrepPlatformRepositoryUrl = semgrepReportScope?.url;
   function addSemgrepSource(url: string) {
     if (options.provider !== "semgrep")
       throw new CodexSecurityError(
@@ -799,6 +800,7 @@ export async function prepareLocalImport(
       options.provider,
       readerSources,
       legacyWitnesses,
+      semgrepReportScope,
     );
     if (semgrep) {
       addSemgrepSource(semgrep.url);

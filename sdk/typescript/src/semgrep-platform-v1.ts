@@ -88,6 +88,7 @@ export function upgradeSemgrepPlatformReport(
     format: "semgrep-platform-findings/v2",
     deployment: report["deployment"],
     project: { id: semgrepV1Id(project["id"]), name, url },
+    ...(native === undefined && { sourceRepositoryUrl: url }),
     product: report["product"],
     ref: report["ref"],
     findingCount: report["findingCount"],
