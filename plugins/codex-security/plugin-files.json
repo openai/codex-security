@@ -121,6 +121,8 @@
     "skills/attack-path-analysis/agents/openai.yaml",
     "skills/attack-path-analysis/references/attack-path-facts.md",
     "skills/attack-path-analysis/references/severity-policy.md",
+    "skills/check-skills/SKILL.md",
+    "skills/check-skills/agents/openai.yaml",
     "skills/cloud-findings/SKILL.md",
     "skills/cloud-findings/agents/openai.yaml",
     "skills/deep-security-scan/SKILL.md",
