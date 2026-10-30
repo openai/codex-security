@@ -1,11 +1,12 @@
 import { hash } from "node:crypto";
-import { lstat, realpath } from "node:fs/promises";
+import { lstat, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { resolveConfigPath } from "./config-path.js";
 import { collectSonarIssues } from "./sonar-collector.js";
 import { normalizeSonarFindings, parseSonarCapture } from "./sonar-findings.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import {
+  configuredFetchRemotes,
   localGitProtectionRoots,
   prepareLocalImport,
 } from "./external-findings-local.js";
@@ -27,6 +28,7 @@ import {
   requirePrivateDirectory,
   requireSecureOutputAncestry,
   requireOutputOutsideRepositories,
+  workbenchEnvironment,
 } from "./runtime.js";
 import { gitMarkerRoot, normalizeRepository } from "./targets.js";
 import { errorMessage } from "./errors.js";
@@ -107,8 +109,12 @@ export async function prepareSonarImport(
   const input =
     selectedPath &&
     join(await realpath(dirname(selectedPath)), basename(selectedPath));
-  const raw = input
-    ? await readScannerJson(input)
+  // Resolve regular files before reading so an outside alias cannot hide a retained
+  // evidence digest. Streams such as /dev/stdin must be read by their device path.
+  const sourcePath =
+    input && (await stat(input)).isFile() ? await realpath(input) : input;
+  const raw = sourcePath
+    ? await readScannerJson(sourcePath)
     : await (dependencies.collect ?? collectSonarIssues)({
         cwd: options.cwd,
         project: options.project,
@@ -141,16 +147,24 @@ export async function prepareSonarImport(
     root,
     "Sonar capture directory",
   );
-  const retained =
-    input && dirname(input) === root
+  const retainedName = (path: string | undefined) =>
+    path && dirname(path) === root
       ? /^([a-f0-9]{64})(?:\.([a-f0-9]{64})(?:\.([a-f0-9]{64}))?)?\.json$/u.exec(
-          basename(input),
+          basename(path),
         )
       : undefined;
-  if (retained && hash("sha256", JSON.stringify(raw)) !== retained[1])
-    throw new Error(
-      "The saved Sonar capture has changed. Preview a fresh copy of the Sonar evidence.",
-    );
+  const retained = retainedName(input);
+  const target = sourcePath === input ? undefined : retainedName(sourcePath);
+  if (retained || target) {
+    const digest = hash("sha256", JSON.stringify(raw));
+    if (
+      (retained && retained[1] !== digest) ||
+      (target && target[1] !== digest)
+    )
+      throw new Error(
+        "The saved Sonar capture has changed. Preview a fresh copy of the Sonar evidence.",
+      );
+  }
   if (!report.repositoryUrl && options.sourceRepositoryUrl) {
     report = parseSonarCapture({
       ...report,
@@ -162,19 +176,32 @@ export async function prepareSonarImport(
     });
   }
   const evidenceDigest = hash("sha256", JSON.stringify(report));
-  // Only a retained selection for this evidence and checkout can restore a manual SSH mapping.
-  const mappedCheckout = (url: string) =>
-    hash("sha256", canonicalJson([repository, repositoryUrlKey(url)]));
-  const retainedSource =
-    report.repositoryUrl &&
-    retained?.[1] === evidenceDigest &&
-    retained[2] === mappedCheckout(report.repositoryUrl)
+  let checkout = hash("sha256", repository);
+  let sourceRepositoryUrl = options.sourceRepositoryUrl;
+  // A portable report can name a repository. Only a reviewed capture can
+  // restore the operator's mapping to this checkout's effective fetch URLs.
+  const mappedUrl =
+    sourceRepositoryUrl ??
+    (retained?.[1] === evidenceDigest && retained[2] && retained[2] !== checkout
       ? report.repositoryUrl
-      : undefined;
-  const sourceRepositoryUrl = options.sourceRepositoryUrl ?? retainedSource;
-  const checkout = sourceRepositoryUrl
-    ? mappedCheckout(sourceRepositoryUrl)
-    : hash("sha256", repository);
+      : undefined);
+  if (mappedUrl) {
+    const remotes = await configuredFetchRemotes(
+      repository,
+      "sonar",
+      protectedRoots,
+      workbenchEnvironment(environment),
+      signal,
+    );
+    const mapped = hash(
+      "sha256",
+      canonicalJson([repository, repositoryUrlKey(mappedUrl), remotes.sort()]),
+    );
+    if (sourceRepositoryUrl || mapped === retained?.[2]) {
+      sourceRepositoryUrl = mappedUrl;
+      checkout = mapped;
+    }
+  }
   const localCapture = join(root, `${evidenceDigest}.${checkout}.json`);
   if (
     options.to === "local" &&
@@ -240,7 +267,7 @@ export async function prepareSonarImport(
           "runtime",
         );
         const confirmedRepository =
-          local.matchesRepositoryRemote || options.sourceRepositoryUrl;
+          local.matchesRepositoryRemote || sourceRepositoryUrl;
         const bindingError =
           "This checkout has no matching Git remote. Verify the Sonar project's repository and pass --source-repository-url to preview Cloud publication.";
         if (!confirmedRepository && !reviewedCheckout)

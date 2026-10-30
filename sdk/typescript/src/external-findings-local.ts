@@ -187,11 +187,12 @@ function remoteRepository(
   let hostname = githubSshOverHttps ? "github.com" : url.hostname;
   // An unresolved SSH name can be a local Host alias. Only substitute the
   // supplied hostname when checking the path of an unverified manual mapping.
+  const sshHostname = hostname.toLowerCase().replace(/\.$/u, "");
   if (
     possibleSshHost &&
     ssh &&
-    !sonarHostedGit(hostname.toLowerCase()) &&
-    !["ssh.github.com", "ssh.dev.azure.com"].includes(hostname.toLowerCase())
+    !sonarHostedGit(sshHostname) &&
+    !["ssh.github.com", "ssh.dev.azure.com"].includes(sshHostname)
   )
     hostname = possibleSshHost;
   const port =
@@ -587,19 +588,15 @@ async function hasGitMetadata(
   );
 }
 
-async function requireMatchingRepository(
+/** @internal Effective fetch URLs from the selected, protected checkout. */
+export async function configuredFetchRemotes(
   repository: string,
   provider: Provider,
-  sources: readonly ExternalSourceRepository[],
-  strictSources: ReadonlyMap<string, Provider>,
-  strictPlatformFor: (source: ExternalSourceRepository) => Provider,
   protectedRoots: WorkbenchCommandOptions["protectedRoot"],
   environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
-  sourceRepositoryUrl?: string,
-): Promise<boolean> {
-  if (sources.length === 0) return false;
-  if (!(await hasGitMetadata(repository, signal))) return false;
+): Promise<string[]> {
+  if (!(await hasGitMetadata(repository, signal))) return [];
   const gitProtectedRoots = [
     ...(typeof protectedRoots === "string"
       ? [protectedRoots]
@@ -619,7 +616,7 @@ async function requireMatchingRepository(
       signal,
     ))
   )
-    return false;
+    return [];
   const readGit = (args: readonly string[]) =>
     abortable(
       () =>
@@ -653,7 +650,7 @@ async function requireMatchingRepository(
           error.stderr.trimEnd(),
         ))
     )
-      return false;
+      return [];
     throw error;
   }
   const remotes: string[] = [];
@@ -680,6 +677,28 @@ async function requireMatchingRepository(
     }
     remotes.push(...values);
   }
+  return remotes;
+}
+
+async function requireMatchingRepository(
+  repository: string,
+  provider: Provider,
+  sources: readonly ExternalSourceRepository[],
+  strictSources: ReadonlyMap<string, Provider>,
+  strictPlatformFor: (source: ExternalSourceRepository) => Provider,
+  protectedRoots: WorkbenchCommandOptions["protectedRoot"],
+  environment: WorkbenchCommandOptions["environment"],
+  signal?: AbortSignal,
+  possibleSshHost?: string,
+): Promise<boolean> {
+  if (sources.length === 0) return false;
+  const remotes = await configuredFetchRemotes(
+    repository,
+    provider,
+    protectedRoots,
+    environment,
+    signal,
+  );
   const boundProvider =
     provider === "sonar" ||
     provider === "inspector" ||
@@ -695,10 +714,6 @@ async function requireMatchingRepository(
     else if (!/[\s\\\p{Cc}?#]/u.test(remote)) unverified.push(remote);
   }
   let allSourcesMatched = true;
-  const manualSource =
-    provider === "sonar" && sourceRepositoryUrl
-      ? declaredScannerRepositoryUrl(sourceRepositoryUrl, "Sonar", "local")
-      : undefined;
   for (const source of sources) {
     const bound = boundProvider || strictSources.has(source.url);
     const platform = bound
@@ -712,13 +727,6 @@ async function requireMatchingRepository(
     allSourcesMatched = false;
     // A custom SSH upstream can agree with a manual mapping even when a
     // recognized HTTPS remote points at a fork. It cannot prove a Cloud binding.
-    const selected =
-      manualSource &&
-      repositoryUrlKey(source.url) === repositoryUrlKey(manualSource)
-        ? new URL(manualSource)
-        : undefined;
-    const possibleSshHost =
-      selected?.protocol === "https:" ? selected.hostname : undefined;
     const configured = unverified.flatMap(
       (remote) =>
         remoteRepository(remote, platform, bound, possibleSshHost) ?? [],
@@ -1023,11 +1031,22 @@ export async function prepareLocalImport(
     current.report,
     "local",
   );
+  const manualSource =
+    options.provider === "sonar" && options.sourceRepositoryUrl
+      ? declaredScannerRepositoryUrl(
+          options.sourceRepositoryUrl,
+          "Sonar",
+          "local",
+        )
+      : undefined;
+  if (manualSource) sonarSources.add(manualSource);
   for (const url of sonarSources)
     if (!sources.has(url)) sources.set(url, { url });
   if (sonarSources.size && !sameRepositories(sources.keys()))
     throw new CodexSecurityError(
-      "The retained Sonar repository does not match the other source repository claims.",
+      manualSource
+        ? "The Sonar evidence does not match the declared source repository."
+        : "The retained Sonar repository does not match the other source repository claims.",
     );
   if (
     options.provider === "blackduck" &&
@@ -1043,6 +1062,7 @@ export async function prepareLocalImport(
       url: dependabotSource,
       platform: "github",
     });
+  const selected = manualSource ? new URL(manualSource) : undefined;
   const matchesRepositoryRemote = await requireMatchingRepository(
     repository,
     options.provider,
@@ -1052,7 +1072,7 @@ export async function prepareLocalImport(
     workbenchOptions.protectedRoot,
     workbenchOptions.environment,
     dependencies.signal,
-    options.sourceRepositoryUrl,
+    selected?.protocol === "https:" ? selected.hostname : undefined,
   );
   dependencies.signal?.throwIfAborted();
   const preview = {

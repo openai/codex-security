@@ -100,6 +100,11 @@ test("preview snapshots caller-owned evidence and rejects changes to the retaine
     ),
   ).rejects.toThrow("saved Sonar capture has changed");
   if (process.platform !== "win32") {
+    const outsideAlias = join(directory.path, "latest.json");
+    await symlink(info.capture, outsideAlias);
+    await expect(
+      prepareSonarImport({ ...selection, capture: outsideAlias }, deps),
+    ).rejects.toThrow("saved Sonar capture has changed");
     await rm(info.capture);
     await symlink(changed.info.capture, info.capture);
     await expect(
@@ -326,10 +331,15 @@ test("Cloud confirmation verifies the retained evidence, account and assigned en
     await readFile(alternate.info.capture, "utf8"),
   );
   f.git("remote", "set-url", "origin", "git@work:example/project.git");
-  const manual = await prepareSonarImport(
-    { ...selection, sourceRepositoryUrl: repositoryUrl },
+  const mappedLocal = await prepareSonarImport(
+    { ...selection, to: "local", sourceRepositoryUrl: repositoryUrl },
     deps,
   );
+  const manual = await prepareSonarImport(
+    { ...selection, capture: mappedLocal.info.capture },
+    deps,
+  );
+  expect(manual.cloudError).toBeUndefined();
   expect(
     (
       await prepareSonarImport(
@@ -396,6 +406,22 @@ test("only an explicit Sonar source can map a checkout's SSH alias", async () =>
   );
   expect(replay.info.capture).toBe(preview.info.capture);
   expect(replay.local.read).toBe(1);
+  git("remote", "set-url", "upstream", "git@another-host:example/project.git");
+  await expect(
+    prepareSonarImport(
+      { ...selected, capture: preview.info.capture, dryRun: false, yes: true },
+      deps,
+    ),
+  ).rejects.toThrow("has not been reviewed for this checkout");
+  const renewed = await prepareSonarImport(
+    {
+      ...selected,
+      capture: preview.info.capture,
+      sourceRepositoryUrl: repositoryUrl,
+    },
+    deps,
+  );
+  expect(renewed.info.capture).not.toBe(preview.info.capture);
 });
 
 test("replays a manually bound capture using the native branch as its identity", async () => {
