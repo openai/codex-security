@@ -320,6 +320,14 @@ test("a fractional source position cannot round to an integer during projection"
 });
 
 test("only repository-relative files are projected and original paths remain in evidence", () => {
+  const evidenceFor = (path: string) =>
+    normalizeSelectedSemgrepPlatformFindings({
+      ...source,
+      findingIds: ["8"],
+      findingsResponses: page("8").replace("src/app.ts", path),
+    }).findings[0]!.evidence;
+  const literal = "src/vendor://app.ts";
+  expect(evidenceFor(literal).locations).toEqual([{ path: literal, line: 2 }]);
   for (const path of [
     "file:src/app.ts",
     "data:text/plain,hello",
@@ -329,14 +337,10 @@ test("only repository-relative files are projected and original paths remain in 
     ".",
     "src/",
   ]) {
-    const result = normalizeSelectedSemgrepPlatformFindings({
-      ...source,
-      findingIds: ["8"],
-      findingsResponses: page("8").replace("src/app.ts", path),
-    }).findings[0]!;
-    expect(result.evidence.locations).toEqual([]);
-    expect(
-      result.evidence.source_data?.["semgrepPlatformFindingJson"],
-    ).toContain(JSON.stringify(path));
+    const evidence = evidenceFor(path);
+    expect(evidence.locations).toEqual([]);
+    expect(evidence.source_data?.["semgrepPlatformFindingJson"]).toContain(
+      JSON.stringify(path),
+    );
   }
 });

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { semgrepJson } from "./support/semgrep-import-fixtures.js";
+import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import { prepareNormalizedExternalPublication } from "../src/external-findings-publish.js";
 import { bundledPluginRoot, runWorkbench } from "../src/runtime.js";
@@ -79,6 +80,56 @@ test("strongly bound current SAST rows have identical selection and backlog excl
   expect(weak.findings[2]!.evidence.details!.code!.end_line).toBe(3);
 });
 
+test("a GitHub mapping reprojects generated severity when a backlog finding becomes selectable", async () => {
+  const url = "https://git.example.test/Team/Repo";
+  const native = {
+    ...code,
+    id: 12,
+    repository: { id: 10, name: "team/repo" },
+    severity: "informational",
+  };
+  const report = {
+    ...scope,
+    project: { ...scope.project, name: "Project", url },
+    format: "semgrep-platform-findings/v2",
+    repositoryAliases: [native.repository.name],
+    findingCount: 1,
+    findings: [JSON.stringify(native)],
+  };
+  const batch = normalizeSemgrepFindings(report, {}, "local");
+  expect(batch.findings[0]!.evidence).toMatchObject({
+    severity: "informational",
+    source_data: { format: report.format },
+  });
+  const source = { provider: "semgrep" as const, sourceKey: "demo/topic" };
+  await using fixture = await localReportFixture("semgrep.json", source, {
+    remote: url,
+  });
+  const options = { ...source, repository: fixture.repository };
+  const dependencies = {
+    environment: fixture.environment,
+    sourceRepositories: [{ url, platform: "github" as const }],
+  };
+  await fixture.writeJson(report);
+  const file = await prepareLocalExternalImport(
+    fixture.file,
+    options,
+    dependencies,
+  );
+  const direct = () =>
+    prepareNormalizedLocalImport(batch, options, dependencies);
+  expect(file.preview.findings[0]!.evidence).toMatchObject({
+    severity: "unknown",
+    source_data: { format: "semgrep-platform-selection/v1" },
+  });
+  expect((await file.import()).counts.created).toBe(1);
+  expect((await (await direct()).import()).counts.unchanged).toBe(1);
+  expect((await file.import()).counts.unchanged).toBe(1);
+  expect((await fixture.read())[0]!.version).toBe(1);
+  batch.findings[0]!.evidence.severity = "high";
+  expect((await direct()).preview.findings[0]!.evidence.severity).toBe("high");
+});
+
 test.each(["sca", "weak SAST", "selected SAST"])(
   "%s file and normalized SDK replays retain equivalent native number values once",
   async (kind) => {
@@ -108,12 +159,7 @@ test.each(["sca", "weak SAST", "selected SAST"])(
     expect((await initial.import()).counts.created).toBe(1);
     const result = normalizeSemgrepFindings(report(native), {}, "local");
     const data = result.findings[0]!.evidence.source_data!;
-    const prepare = () =>
-      prepareNormalizedLocalImport(
-        result,
-        { ...source, repository: fixture.repository },
-        { environment: fixture.environment },
-      );
+    const prepare = () => fixture.prepareNormalized(result);
     const unchanged = { created: 0, updated: 0, unchanged: 1 };
     data["semgrepPlatformFindingJson"] = equivalent;
     for (const format of strong
@@ -215,10 +261,16 @@ test("a v1 project SSH URL requires a matching GitHub Enterprise reader referenc
   const report = {
     ...scope,
     format: "semgrep-platform-findings/v1",
-    sourceRepositoryUrl: source.url,
-    project: { ...scope.project, url: "git@git.example.test:team/service.git" },
+    sourceRepositoryUrl: source.url + ".git",
+    project: { ...scope.project, url: "git@git.example.test:team/service" },
     findingCount: 1,
-    findings: [{ id: 12, rule_name: "example.rule" }],
+    findings: [
+      {
+        id: 12,
+        rule_name: "example.rule",
+        repository: { name: "service.git" },
+      },
+    ],
   };
   const read = (sourceRepositories: (typeof source)[]) =>
     normalizeSemgrepFindings(report, { sourceRepositories }, "local");
@@ -228,6 +280,26 @@ test("a v1 project SSH URL requires a matching GitHub Enterprise reader referenc
     "ssh://git@git.example.test/team/service",
   ]) {
     expect(read([{ ...source, url: reference }]).findings).toHaveLength(1);
+  }
+  const [stored] = read([source]).findings;
+  expect(semgrepPlatformFindingRepository(stored!, "semgrep", [source])).toBe(
+    source.url,
+  );
+  stored!.evidence.source_data = { ...report, finding: report.findings[0] };
+  expect(semgrepPlatformFindingRepository(stored!, "semgrep", [source])).toBe(
+    source.url,
+  );
+  for (const repository of [
+    { name: "unrelated.git" },
+    { name: "service.git", id: 999 },
+  ]) {
+    expect(() =>
+      normalizeSemgrepFindings(
+        { ...report, findings: [{ ...report.findings[0], repository }] },
+        { sourceRepositories: [source] },
+        "local",
+      ),
+    ).toThrow(/repository/);
   }
   expect(() => read([])).toThrow(/repository/);
   for (const foreign of [
@@ -263,12 +335,7 @@ test("legacy SSH repository projections replay unchanged alongside file imports"
   evidence.details!.repository!.url = url;
   evidence.locations = [];
   evidence.details!.code!.end_line = null;
-  const prepare = () =>
-    prepareNormalizedLocalImport(
-      batch,
-      { ...source, repository: fixture.repository },
-      { environment: fixture.environment },
-    );
+  const prepare = () => fixture.prepareNormalized(batch);
   const direct = await prepare();
   expect(direct.preview.findings[0]!.evidence.details).toMatchObject({
     code: { end_line: 4 },
@@ -284,6 +351,19 @@ test("legacy SSH repository projections replay unchanged alongside file imports"
   ).toBe(override);
   evidence.details!.repository!.url = "https://github.com/example/other";
   await expect(prepare()).rejects.toThrow(/repository and ref/);
+  // Replaying the same unmapped archive with a matching declaration keeps its version.
+  const { sourceRepositoryUrl: _saved, ...unmapped } = original;
+  await fixture.writeJson({ ...unmapped, findings: [row], findingCount: 1 });
+  for (const [i, declared] of [undefined, url, undefined].entries()) {
+    const replay = await fixture.prepare({ sourceRepositoryUrl: declared });
+    expect(replay.preview.findings[0]!.evidence.source_data).not.toHaveProperty(
+      "sourceRepositoryUrl",
+    );
+    expect((await replay.import()).counts).toMatchObject({
+      created: 0,
+      unchanged: i === 0 ? 0 : 1,
+    });
+  }
 });
 
 test("v1 files preserve native JSON numbers without witnesses and reject a rounded finding count", async () => {
@@ -454,15 +534,22 @@ test("v1 files, original projected rows and v2 share one local occurrence versio
     { ...code, id: 12, repository: { name: "display", id: "10" } },
     { ...code, id: "13", repository: { name: "display" } },
   ];
-  const report = { ...scope, repositoryAliases: ["display"], findingCount: 2 };
+  // In a Git HTTP path these escapes are repository name bytes, never a query or a fragment.
+  const project = { ...scope.project, url: url + "%23topic%3Fone" };
+  const report = {
+    ...scope,
+    project,
+    repositoryAliases: ["display"],
+    findingCount: 2,
+  };
   const source = { provider: "semgrep" as const, sourceKey: "demo/topic" };
   await using fixture = await localReportFixture("semgrep.json", source, {
-    remote: url,
+    remote: project.url,
   });
   await fixture.writeJson({
     ...report,
     format: "semgrep-platform-findings/v1",
-    sourceRepositoryUrl: "https://github.com/Example/Project.git",
+    sourceRepositoryUrl: "https://github.com/Example/Project%23topic%3Fone.git",
     findings: rows,
   });
   const original = await fixture.prepare();
@@ -475,17 +562,13 @@ test("v1 files, original projected rows and v2 share one local occurrence versio
   for (const [i, finding] of projected.findings.entries()) {
     finding.evidence.source_data = {
       ...scope,
+      project,
       format: "semgrep-platform-findings/v1",
       repositoryAliases: report.repositoryAliases,
       finding: rows[i],
     };
   }
-  const prepareProjected = () =>
-    prepareNormalizedLocalImport(
-      projected,
-      { ...source, repository: fixture.repository },
-      { environment: fixture.environment },
-    );
+  const prepareProjected = () => fixture.prepareNormalized(projected);
   const unchanged = { created: 0, updated: 0, unchanged: 2 };
   expect((await (await prepareProjected()).import()).counts).toEqual(unchanged);
   expect((await (await fixture.prepare()).import()).counts).toEqual(unchanged);
@@ -542,12 +625,7 @@ test("original v1 normalized rows can bind a name-only alias through a sibling i
   await using fixture = await localReportFixture("v1.json", source, {
     remote: url,
   });
-  const prepare = (input: typeof batch) =>
-    prepareNormalizedLocalImport(
-      input,
-      { ...source, repository: fixture.repository },
-      { environment: fixture.environment },
-    );
+  const prepare = fixture.prepareNormalized;
   const retained = {
     ...legacy,
     finding: native[0],
@@ -685,11 +763,11 @@ test("a stored decimal witness remains equivalent to its canonical binding on lo
     repositoryWitnessJson: JSON.stringify({ name: "display", id: "1e1" }),
   });
   expect(semgrepPlatformFindingRepository(previous, "semgrep")).toBe(url);
-  const direct = await prepareNormalizedLocalImport(
-    { read: 1, findings: [previous], excluded: [] },
-    { ...source, repository: fixture.repository },
-    { environment: fixture.environment },
-  );
+  const direct = await fixture.prepareNormalized({
+    read: 1,
+    findings: [previous],
+    excluded: [],
+  });
   expect((await direct.import()).counts).toEqual({
     created: 0,
     updated: 0,
@@ -742,7 +820,7 @@ test("a legacy report verifies each display label against that row's repository 
   }
 });
 
-test("early v1 repository labels retain decodeURI spellings without trusting unrelated labels", () => {
+test("v1 repository labels retain decodeURI spellings without trusting unrelated labels", () => {
   const archive = {
     ...scope,
     format: "semgrep-platform-findings/v1",
@@ -756,17 +834,24 @@ test("early v1 repository labels retain decodeURI spellings without trusting unr
   const name = "group/Répo%2B";
   const row = { ...code, id: 12, repository: { name } };
   const source = { ...archive, findings: [row] };
-  const [finding] = normalizeSemgrepFindings(source, {}, "local").findings;
-  expect(semgrepPlatformFindingRepository(finding!, "semgrep")).toBe(
-    archive.project.url,
-  );
-  finding!.evidence.source_data = { ...archive, finding: row };
-  expect(semgrepPlatformFindingRepository(finding!, "semgrep")).toBe(
-    archive.project.url,
-  );
+  for (const aliases of [{}, { repositoryAliases: [name] }]) {
+    const [finding] = normalizeSemgrepFindings(
+      { ...source, ...aliases },
+      {},
+      "local",
+    ).findings;
+    expect(semgrepPlatformFindingRepository(finding!, "semgrep")).toBe(
+      archive.project.url,
+    );
+    finding!.evidence.source_data = { ...archive, ...aliases, finding: row };
+    expect(semgrepPlatformFindingRepository(finding!, "semgrep")).toBe(
+      archive.project.url,
+    );
+  }
   for (const invalid of [
     {
       ...source,
+      repositoryAliases: ["group/Other%2B"],
       findings: [{ ...row, repository: { name: "group/Other%2B" } }],
     },
     { ...source, findings: [{ ...row, repository: { name, id: 11 } }] },
@@ -992,10 +1077,11 @@ test("v2 files require exact counts and string project IDs", async () => {
 });
 
 const historicalPaths = [
-  ["src\\service.ts", null, "src/service.ts", false],
-  ["src\\backlog.ts", null, "src/backlog.ts", true],
-  ["pkg:service.ts", "pkg:service.ts", null, false],
-  ["src/", "src/", null, false],
+  ["src\\service.ts", null, "src/service.ts", "numeric"],
+  ["src\\backlog.ts", null, "src/backlog.ts", "backlog quoted"],
+  ["src\\strong.ts", null, "src/strong.ts", "legacy quoted"],
+  ["pkg:service.ts", "pkg:service.ts", null, "numeric"],
+  ["src/", "src/", null, "numeric"],
 ] as const;
 
 test.each(historicalPaths)(
@@ -1007,8 +1093,10 @@ async function verifyLegacyLocationReplay(
   path: string,
   oldPath: string | null,
   newPath: string | null,
-  backlogOnly: boolean,
+  coordinates: "numeric" | "legacy quoted" | "backlog quoted",
 ) {
+  const backlogOnly = coordinates === "backlog quoted";
+  const legacyOnly = coordinates === "legacy quoted";
   const locations = (path: string | null) => (path ? [{ path, line: 3 }] : []);
 
   const source = { provider: "semgrep" as const, sourceKey: "demo/topic" };
@@ -1023,8 +1111,8 @@ async function verifyLegacyLocationReplay(
     severity: "HIGH",
     location: {
       file_path: path,
-      line: backlogOnly ? "3" : 3,
-      end_line: backlogOnly ? "5" : 5,
+      line: coordinates === "numeric" ? 3 : "3",
+      end_line: coordinates === "numeric" ? 5 : "5",
     },
   };
   const legacy = {
@@ -1084,11 +1172,7 @@ async function verifyLegacyLocationReplay(
     evidence: { severity: "unknown", locations: locations(oldPath) },
   });
   const direct = (finding = original) =>
-    prepareNormalizedLocalImport(
-      { read: 1, excluded: [], findings: [finding] },
-      { ...source, repository: fixture.repository },
-      { environment: fixture.environment },
-    );
+    fixture.prepareNormalized({ read: 1, excluded: [], findings: [finding] });
   const next = await direct();
   expect((await next.import()).counts).toEqual({
     created: 0,
@@ -1129,7 +1213,18 @@ async function verifyLegacyLocationReplay(
   ]) {
     await fixture.writeJson(report);
     const file = await fixture.prepare();
-    expect((await file.import()).counts).toEqual(unchanged);
+    if (legacyOnly && report !== legacy) {
+      expect(file.preview.excluded.map((row) => row.reason)).toEqual([
+        "Semgrep source line must be a positive integer.",
+      ]);
+      expect((await file.import()).counts).toEqual({
+        created: 0,
+        updated: 0,
+        unchanged: 0,
+      });
+    } else {
+      expect((await file.import()).counts).toEqual(unchanged);
+    }
     if (backlogOnly && report === modern)
       expect(
         (await (await direct(file.preview.findings[0]!)).import()).counts,
@@ -1145,19 +1240,21 @@ async function verifyLegacyLocationReplay(
     ).toEqual(extended.evidence.locations);
   }
   const custom = structuredClone(original);
-  custom.evidence.severity = "low";
+  if (!legacyOnly) custom.evidence.severity = "low";
   custom.evidence.locations = [{ path: "manual.ts", line: 7 }];
   custom.evidence.details!.code!.end_line = 9;
   const manual = (await direct(custom)).preview.findings[0]!.evidence;
   expect(manual).toMatchObject({
-    severity: "low",
+    severity: legacyOnly ? "high" : "low",
     locations: custom.evidence.locations,
     details: { code: { end_line: 9 } },
   });
-  await fixture.writeJson({
-    ...modern,
-    findings: [JSON.stringify({ ...row, severity: "CRITICAL" })],
-  });
+  const changed = { ...row, severity: "CRITICAL" };
+  await fixture.writeJson(
+    legacyOnly
+      ? { ...legacy, findings: [changed] }
+      : { ...modern, findings: [JSON.stringify(changed)] },
+  );
   expect((await (await fixture.prepare()).import()).counts).toEqual({
     created: 0,
     updated: 1,
