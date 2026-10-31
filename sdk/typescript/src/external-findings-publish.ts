@@ -48,6 +48,7 @@ import {
   type SnykIssuesFindings,
   isSnykRestFinding,
   isSnykRestFormat,
+  snykRestCheckpointFindingId,
   snykRestImportRepository,
   snykRestRepositoryMatches,
 } from "./snyk-rest-findings.js";
@@ -589,7 +590,7 @@ function hostedRepositoryMatcher(
           input.sourceRepositoryUrl,
           "Semgrep source repository",
         );
-  const reportScope = semgrepPlatformReportScope(input, provider);
+  const reportScope = semgrepPlatformReportScope(input, provider, references);
   const hasNativeSource =
     reportScope !== undefined ||
     input.findings.some((finding) =>
@@ -597,17 +598,14 @@ function hostedRepositoryMatcher(
     );
   const claims = new Set<string>();
   let original: string | undefined;
-  const nativeRows: ExternalFindings["findings"] = [];
+  const nativeRows = [];
   for (const finding of input.findings) {
     const typed = finding.evidence.details?.repository?.url;
     if (typed) claims.add(typed);
     const data = finding.evidence.source_data;
-    const document = data?.["documentContext"];
-    if (
-      hasNativeSource ||
-      (isRecord(document) && document["version"] === "2.1.0")
-    )
-      for (const { url } of semgrepSarifRepositories(finding)) claims.add(url);
+    const sarif = semgrepSarifRepositories(finding, hasNativeSource);
+    for (const { url } of sarif)
+      claims.add(hostedRepositoryUrl(url, "Semgrep source repository"));
     const project = data?.["project"];
     if (
       !allowOpaqueLegacyRows ||
@@ -621,7 +619,7 @@ function hostedRepositoryMatcher(
         ((isRecord(data["finding"]) && data["finding"]["id"] != null) ||
           typeof data["semgrepPlatformFindingJson"] === "string"))
     ) {
-      nativeRows.push(finding);
+      nativeRows.push({ finding, sarif });
       continue;
     }
     // Released SDKs could save partial native records. Retain any source still
@@ -676,19 +674,19 @@ function hostedRepositoryMatcher(
     }
   }
   const witnesses = semgrepLegacyRepositoryWitnesses(
-    nativeRows,
+    nativeRows.map(({ finding }) => finding),
     provider,
     references,
     "cloud",
   );
-  for (const finding of nativeRows) {
+  for (const { finding, sarif } of nativeRows) {
     const native = semgrepPlatformFindingBinding(
       finding,
       provider,
       references,
       witnesses,
       reportScope,
-      [projectedBlackDuckRepositoryUrl(finding, "cloud")],
+      [{ url: projectedBlackDuckRepositoryUrl(finding, "cloud") }, ...sarif],
       "cloud",
     )?.url;
     if (native) {
@@ -731,11 +729,10 @@ function normalizedPublicationInput(
 ): ExternalPublicationInput {
   // Validation adds Cloud defaults; leave the caller's objects unchanged.
   const { report, ...parsed } = input;
-  if (!Object.hasOwn(parsed, "sourceFormat") && "sourceFormat" in input)
-    Object.assign(parsed, { sourceFormat: input.sourceFormat });
-  // Read the Snyk discriminator even when the caller selected another provider.
-  if (!Object.hasOwn(parsed, "snykRestContext") && "snykRestContext" in input)
-    parsed.snykRestContext = input.snykRestContext;
+  // Read native declarations from SDK class getters as well as plain JSON.
+  for (const key of ["sourceFormat", "semgrepPlatformScope", "snykRestContext"])
+    if (!Object.hasOwn(parsed, key) && key in input)
+      Object.assign(parsed, { [key]: Reflect.get(input, key) });
   if (parsed.snykRestContext !== undefined) {
     if (provider !== "snyk")
       throw new CodexSecurityError(
@@ -756,23 +753,14 @@ function normalizedPublicationInput(
         Object.assign(parsed, { [key]: input[key] });
     }
   }
-  if (
-    "sourceFormat" in parsed &&
-    isSemgrepPlatformFormat(parsed.sourceFormat)
-  ) {
-    if (provider !== "semgrep")
-      throw new CodexSecurityError(
-        "Semgrep Platform evidence requires the semgrep provider.",
-      );
-    if (
-      !Object.hasOwn(parsed, "semgrepPlatformScope") &&
-      "semgrepPlatformScope" in input
-    )
-      Object.assign(parsed, {
-        semgrepPlatformScope: input.semgrepPlatformScope,
-      });
+  const markedSemgrep =
+    "sourceFormat" in parsed && isSemgrepPlatformFormat(parsed.sourceFormat);
+  if (markedSemgrep && provider !== "semgrep")
+    throw new CodexSecurityError(
+      "Semgrep Platform evidence requires the semgrep provider.",
+    );
+  if (markedSemgrep || "semgrepPlatformScope" in parsed)
     semgrepPlatformReportScope(parsed, provider);
-  }
   const current: ExternalFindings = structuredClone(parsed);
   if (report !== undefined) {
     current.report = structuredClone(report);
@@ -824,23 +812,36 @@ function* hostedPublicationProjections(
 ): Generator<ResolvedPublicationInput> {
   const current: ExternalFindings & Partial<SnykIssuesFindings> = input.current;
   if (provider === "snyk") {
-    if (current.snykRestContext === undefined) return;
-    // An earlier publisher may have approved the selected issues without their report context.
+    const first = current.findings.find(isSnykRestFinding);
+    if (!first && current.snykRestContext === undefined) return;
+    // A previous publisher may have approved the exact raw selection.
     yield input;
+    const originalUrl =
+      current.snykRestContext?.["sourceRepositoryUrl"] ??
+      current.sourceRepositoryUrl ??
+      first?.evidence.source_data?.["sourceRepositoryUrl"];
+    // The original spelling reconstructs a lookup key after a catalog rename.
+    // Admission validates the input against the saved approval or live destination.
     const retained = structuredClone(current);
-    snykRestImportRepository(
-      retained,
-      provider,
-      [],
-      hostedSourceReferences(
-        readerSources,
-        destination.url,
-        current.sourceRepositoryPlatform,
-      ),
-      (finding, source) => {
-        finding.evidence.source_data = source;
-      },
-    );
+    try {
+      snykRestImportRepository(
+        retained,
+        provider,
+        [],
+        hostedSourceReferences(
+          readerSources,
+          typeof originalUrl === "string" ? originalUrl : destination.url,
+          current.sourceRepositoryPlatform,
+        ),
+        (finding, source) => {
+          finding.evidence.source_data = source;
+        },
+      );
+    } catch (error) {
+      // A headerless input can still identify an already-approved opaque request.
+      if (current.snykRestContext !== undefined) throw error;
+      return;
+    }
     yield {
       ...input,
       current: retained,
@@ -851,7 +852,10 @@ function* hostedPublicationProjections(
   const originalRow = (finding: ExternalFindings["findings"][number]) =>
     isRecord(finding.evidence.source_data?.["finding"]) &&
     isSemgrepPlatformEvidence(finding, "semgrep");
-  const first = current.findings.find(originalRow);
+  const currentBulkRow = (finding: ExternalFindings["findings"][number]) =>
+    finding.evidence.source_data?.["format"] === semgrepPlatformFormat;
+  const first =
+    current.findings.find(originalRow) ?? current.findings.find(currentBulkRow);
   if (!first) return;
   const reportScope = semgrepPlatformReportScope(current, "semgrep");
   const retained = first.evidence.source_data;
@@ -877,7 +881,8 @@ function* hostedPublicationProjections(
         "cloud",
       );
       const findings = current.findings.map((finding) => {
-        if (!originalRow(finding)) return finding;
+        const original = originalRow(finding);
+        if (!original && !currentBulkRow(finding)) return finding;
         const binding = semgrepPlatformFindingBinding(
           finding,
           "semgrep",
@@ -887,7 +892,9 @@ function* hostedPublicationProjections(
           undefined,
           "cloud",
         );
-        return binding?.sourceData
+        // The authenticated repository can make an offline backlog row selectable.
+        return binding?.sourceData &&
+          (original || binding.sourceData["format"] !== semgrepPlatformFormat)
           ? {
               ...finding,
               evidence: {
@@ -1166,74 +1173,82 @@ async function preparePublicationInput(
         ...row,
         evidence: { ...row.evidence, source_data: undefined },
       });
-    const hasNativeEvidence = (row: (typeof findings)[number]) =>
-      isHosted({ ...row, source_finding_id: "" });
+    const hasNativeEvidence = (row: (typeof findings)[number]) => {
+      const data = row.evidence.source_data;
+      // A discriminator alone cannot identify a native occurrence.
+      return (
+        data &&
+        isHosted({
+          source_finding_id: "",
+          evidence: {
+            ...row.evidence,
+            source_data: { ...data, format: undefined },
+          },
+        })
+      );
+    };
+    const previousNative = findings.filter(hasNativeEvidence);
     const next = parsed.findings.filter(hasNativeEvidence);
-    // Released SDKs also accepted scanner IDs with missing or partial native evidence.
-    const submitted = new Set(
-      findings
-        .filter(
-          (row) =>
-            !Object.keys(row.evidence.source_data ?? {}).length ||
-            hasNativeEvidence(row),
-        )
-        .map(({ source_finding_id }) => source_finding_id),
+    const selected = new Set(
+      parsed.findings.map((row) => row.source_finding_id),
     );
-    const sameScannerId = next.some(
-      (row) => scannerId(row) && submitted.has(row.source_finding_id),
+    // The Cloud source identity survives a caller projecting away native evidence.
+    const scopedReport =
+      semgrep &&
+      "sourceFormat" in parsed &&
+      isSemgrepPlatformFormat(parsed.sourceFormat);
+    const sameSubmittedId =
+      (scopedReport || previousNative.length > 0 || next.length > 0) &&
+      findings.some((row) => selected.has(row.source_finding_id));
+    const references = hostedSourceReferences(
+      readerSources,
+      content.approvedRepositoryUrl ?? destination.url,
+      content.approvedRepositoryPlatform,
     );
-    if (content.approvedRepositoryUrl && !projection.retainedHostedSelection) {
-      // A request can have succeeded before its acknowledgement reached the client.
-      // Only the exact retry can reuse its bytes while these occurrences are pending.
-      const approved = content.approvedRepositoryUrl;
-      const references = hostedSourceReferences(
-        readerSources,
-        approved,
-        content.approvedRepositoryPlatform,
-      );
-      const occurrenceIds = (rows: typeof findings) => {
-        const ids = new Set<string>();
-        let unresolved = false;
-        for (const row of rows) {
-          ids.add(row.source_finding_id);
-          if (
-            semgrep &&
-            typeof row.evidence.source_data?.["semgrepPlatformFindingJson"] ===
-              "string"
-          ) {
-            try {
-              const binding = semgrepPlatformFindingBinding(
-                row,
-                "semgrep",
-                references,
-                undefined,
-                undefined,
-                undefined,
-                "cloud",
-              );
-              if (binding) {
-                ids.add(binding.nativeId);
-                continue;
-              }
-            } catch {
-              // The earlier SDK may have accepted a partial native projection.
+    const occurrenceIds = (rows: typeof findings) => {
+      const ids = new Set<string>();
+      let unresolved = false;
+      for (const row of rows) {
+        ids.add(row.source_finding_id);
+        if (semgrep || !scannerId(row)) {
+          try {
+            const nativeId = semgrep
+              ? semgrepPlatformFindingBinding(
+                  row,
+                  "semgrep",
+                  references,
+                  undefined,
+                  undefined,
+                  undefined,
+                  "cloud",
+                )?.nativeId
+              : snykRestCheckpointFindingId(row, references);
+            if (nativeId) {
+              ids.add(nativeId);
+              continue;
             }
+          } catch {
+            // The earlier SDK may have accepted a partial native projection.
           }
-          if (!scannerId(row)) unresolved = true;
         }
-        return { ids, unresolved };
-      };
-      const previous = occurrenceIds(findings.filter(hasNativeEvidence));
-      const requested = occurrenceIds(next);
-      const overlaps = Array.from(requested.ids).some((id) =>
-        previous.ids.has(id),
-      );
-      const unresolved =
-        identity &&
-        previous.ids.size &&
-        requested.ids.size &&
-        (previous.unresolved || requested.unresolved);
-      if (!sameScannerId && !overlaps && !unresolved) return false;
+        if (!scannerId(row)) unresolved = true;
+      }
+      return { ids, unresolved };
+    };
+    const previous = occurrenceIds(previousNative);
+    const requested = occurrenceIds(next);
+    const overlaps = Array.from(requested.ids).some((id) =>
+      previous.ids.has(id),
+    );
+    // Caller metadata can disappear on retry even when native evidence is incomplete.
+    const couldOverlap =
+      sameSubmittedId ||
+      overlaps ||
+      (previous.ids.size > 0 &&
+        requested.ids.size > 0 &&
+        (previous.unresolved || requested.unresolved));
+    if (content.approvedRepositoryUrl && !projection.retainedHostedSelection) {
+      if (!couldOverlap) return false;
       if (identity)
         return projection.inputDigest === digest(identity) && "verified";
       // The filename includes metadata omitted from the saved request. A reproducible
@@ -1246,52 +1261,7 @@ async function preparePublicationInput(
     if (identity && projection.inputDigest !== digest(identity))
       return "verified";
 
-    const selected = new Set(
-      parsed.findings.map((row) => row.source_finding_id),
-    );
-    const sameIds =
-      findings.length === selected.size &&
-      findings.every((row) => selected.has(row.source_finding_id));
-    const callerAssigned = next.some((row) => !scannerId(row));
-    const native = findings.some(({ source_finding_id, evidence }) => {
-      const data = evidence.source_data;
-      if (!data || !isRecord(data[semgrep ? "finding" : "issue"])) return false;
-      const expected = semgrep
-        ? "semgrep-platform-findings/v1"
-        : "snyk-rest-issues/v1";
-      const tagged = data["format"] === expected;
-      if (identity && tagged && sameIds) return true;
-      // A verified earlier source can hold a whole batch. For other old SDK
-      // projections the overlapping occurrence itself must retain native evidence.
-      if (
-        !selected.has(source_finding_id) &&
-        (identity || !tagged || !isRecord(data["project"]))
-      ) {
-        // A native v1 row may have been submitted with a caller-assigned ID.
-        // Finish that source's authenticated request before switching to scanner IDs.
-        if (
-          !identity ||
-          !next.length ||
-          !isRecord(data["project"]) ||
-          (scannerId({ source_finding_id, evidence }) && !callerAssigned)
-        )
-          return false;
-      }
-      const { project, finding, deployment, ref, product, issue } = data;
-      const evidenceOnly = {
-        source_finding_id: "",
-        evidence: {
-          ...evidence,
-          source_data: semgrep
-            ? { project, finding, deployment, ref, product }
-            : { issue },
-        },
-      };
-      return semgrep
-        ? isSemgrepPlatformEvidence(evidenceOnly, "semgrep")
-        : isSnykRestFinding(evidenceOnly);
-    });
-    if (!native && !sameScannerId) return false;
+    if (!couldOverlap) return false;
     if (!identity) {
       // If the saved selections reconstruct an old input digest but not its scoped
       // filename, the pending request belongs to another deployment. The #2085
@@ -1557,10 +1527,23 @@ async function preparePublicationInput(
     options.provider === "semgrep" &&
     projection !== resolved &&
     saved?.approvedRepositoryPlatform === "other";
+  // Native Semgrep and OpenGrep files include their required source URL in every
+  // saved finding. An exact replay by repository ID survives a catalog rename.
+  const recordedFileSource =
+    saved &&
+    !saved.approvedRepositoryUrl &&
+    options.provider === "semgrep" &&
+    typeof input !== "function" &&
+    declaredUrl !== undefined &&
+    saved.requests.every(({ items }) =>
+      items.every(
+        ({ evidence }) => evidence.details?.repository?.url === declaredUrl,
+      ),
+    );
   const declaredSource =
     recheckOriginal ||
     readerSources.length > 0 ||
-    declaredUrl !== undefined ||
+    (declaredUrl !== undefined && !recordedFileSource) ||
     report.sourceRepositoryUrl !== undefined ||
     report.sourceRepositoryPlatform !== undefined ||
     report.snykRestContext !== undefined;
@@ -1684,14 +1667,16 @@ async function preparePublicationInput(
     const approved = hosted ? saved?.approvedRepositoryUrl : undefined;
     const sameCatalog =
       approved !== undefined &&
-      hostedRepositoryUrlKey(approved, true) ===
-        hostedRepositoryUrlKey(destination.url, true);
+      cloudSourceKey(approved, "github") ===
+        cloudSourceKey(destination.url, "github");
     const comparisonUrl = sameCatalog ? approved : destination.url;
     const key = sameCatalog
       ? (url: string) =>
-          hostedRepositoryUrlKey(
+          cloudSourceKey(
             url,
-            saved?.approvedRepositoryPlatform !== "other",
+            saved?.approvedRepositoryPlatform === "other"
+              ? undefined
+              : "github",
           )
       : cloudRepositoryUrlKey;
     function requireDestination(id: string, url: string | null | undefined) {

@@ -88,6 +88,10 @@ const scmOrigins = new Map<string, readonly string[]>([
   ["github-server-app", ["github-server"]],
   ["gitlab", ["gitlab"]],
 ]);
+function concreteDeployment(deployments: readonly string[] | undefined) {
+  return deployments?.length === 1 ? deployments[0] : undefined;
+}
+
 const openSourceProjects = new Set([
   "cargo",
   "cocoapods",
@@ -215,10 +219,14 @@ function jsonApi(input: unknown, label: string) {
   return document;
 }
 
-function resourceId(resource: Resource, type: string) {
+function resourceIdentifier(resource: Resource, type: string) {
   if (resource["type"] !== type)
     throw new Error(`Expected a Snyk ${type} resource.`);
-  return uuid(resource["id"], `Snyk ${type} ID`);
+  return resource["id"];
+}
+
+function resourceId(resource: Resource, type: string) {
+  return uuid(resourceIdentifier(resource, type), `Snyk ${type} ID`);
 }
 
 function relationship(relationships: Resource, name: string) {
@@ -398,6 +406,12 @@ function checkRemote(
   };
 }
 
+function projectProduct(manager: unknown): SnykIssuesProduct | undefined {
+  if (manager === "sast") return "code";
+  if (typeof manager === "string" && openSourceProjects.has(manager))
+    return "open-source";
+}
+
 function projectContext(project: Resource, selected: Scope) {
   if (resourceId(project, "project") !== selected.projectId)
     throw new Error(
@@ -409,9 +423,7 @@ function projectContext(project: Resource, selected: Scope) {
   const scm = scmOrigins.has(origin);
   if (
     (!scm && origin !== "cli" && origin !== "api") ||
-    (selected.product === "code"
-      ? manager !== "sast"
-      : !openSourceProjects.has(manager))
+    projectProduct(manager) !== selected.product
   )
     throw new Error(
       `Snyk project type ${manager} from ${origin} is not a supported ${selected.product} project.`,
@@ -420,7 +432,7 @@ function projectContext(project: Resource, selected: Scope) {
     manager,
     scm,
     origin,
-    manifest: scm ? hostedRepositoryPath(attributes["target_file"]) : null,
+    targetFile: scm ? attributes["target_file"] : null,
   };
   const relationships =
     project["relationships"] === undefined
@@ -438,7 +450,7 @@ function projectContext(project: Resource, selected: Scope) {
       targetId: undefined,
       lookupTargetId: undefined,
       expandedUrl: undefined,
-      integrationId: undefined,
+      integration: undefined,
     };
   const link = record(linkage, "Snyk target linkage");
   const expandedUrl =
@@ -446,11 +458,11 @@ function projectContext(project: Resource, selected: Scope) {
       ? undefined
       : record(link["attributes"], "Snyk expanded target attributes")["url"];
   const targetId = resourceId(link, "target");
-  const integrationId = checkTargetRelationships(link, selected, origin);
+  const integration = checkTargetRelationships(link, selected, origin);
   return {
     ...context,
     targetId,
-    integrationId,
+    integration,
     lookupTargetId:
       expandedUrl == null || expandedUrl === "" ? targetId : undefined,
     expandedUrl,
@@ -464,7 +476,7 @@ function checkTarget(
     expandedUrl,
     lookupTargetId,
     origin,
-    integrationId,
+    integration,
   }: ReturnType<typeof projectContext>,
   references: readonly ExternalSourceRepository[] = [],
 ) {
@@ -475,7 +487,8 @@ function checkTarget(
       );
     return {
       ...checkRemote(expandedUrl ?? null, selected, origin, references),
-      integrationId,
+      integrationId: integration?.id,
+      deployment: integration?.deployment,
     };
   }
   const target = record(value, "Snyk target resource");
@@ -483,16 +496,13 @@ function checkTarget(
     throw new Error(
       "Snyk target does not match the selected project's target.",
     );
-  const fetchedIntegrationId = checkTargetRelationships(
+  const fetched = checkTargetRelationships(
     target,
     selected,
     origin,
+    integration?.deployment,
   );
-  if (
-    integrationId !== undefined &&
-    fetchedIntegrationId !== undefined &&
-    integrationId !== fetchedIntegrationId
-  )
+  if (integration?.id && fetched?.id && integration.id !== fetched.id)
     throw new Error(
       "The fetched Snyk target names a different integration than the project's target.",
     );
@@ -502,13 +512,18 @@ function checkTarget(
     origin,
     references,
   );
-  return { ...remote, integrationId: fetchedIntegrationId ?? integrationId };
+  return {
+    ...remote,
+    integrationId: fetched?.id ?? integration?.id,
+    deployment: fetched?.deployment ?? integration?.deployment,
+  };
 }
 
 function checkTargetRelationships(
   target: Resource,
   selected: Scope,
   origin: string,
+  linkedDeployment?: string,
 ) {
   if (target["relationships"] === undefined) return;
   const relationships = record(
@@ -532,22 +547,30 @@ function checkTargetRelationships(
     attributes === undefined || integration["id"] !== null
       ? uuid(integration["id"], "Snyk integration ID")
       : undefined;
-  if (attributes === undefined) return id;
+  if (attributes === undefined) return { id };
   const type = requiredText(
     record(attributes, "Snyk integration attributes")["integration_type"],
     "Snyk integration type",
   );
   const deployments = scmOrigins.get(origin);
+  const claimed = scmOrigins.get(type);
   if (
     deployments &&
-    !scmOrigins
-      .get(type)
-      ?.some((deployment) => deployments.includes(deployment))
-  )
+    !claimed?.some(
+      (candidate) =>
+        deployments.includes(candidate) &&
+        (linkedDeployment === undefined || linkedDeployment === candidate),
+    )
+  ) {
+    const source = linkedDeployment ? "target linkage" : `${origin} origin`;
     throw new Error(
-      `Snyk target integration ${type} must be a supported SCM integration for the project's ${origin} origin.`,
+      `Snyk target integration ${type} must be a supported SCM integration for the project's ${source}.`,
     );
-  return id;
+  }
+  return {
+    id,
+    deployment: deployments && concreteDeployment(claimed),
+  };
 }
 
 function pageLinkCursor(
@@ -617,14 +640,20 @@ function scopedIssue(value: unknown, selected: Scope) {
   return issue;
 }
 
-function selectedIssue(issue: Resource, selected: Scope) {
-  const id = resourceId(issue, "issue");
+function selectedIssueAttributes(issue: Resource, selected: Scope) {
   const attributes = record(issue["attributes"], "Snyk issue attributes");
   if (attributes["type"] !== issueTypes[selected.product])
     throw new Error(
       `Only ${issueTypes[selected.product]} issues are supported for this Snyk project selection.`,
     );
-  return { id, attributes };
+  return attributes;
+}
+
+function selectedIssue(issue: Resource, selected: Scope) {
+  return {
+    id: resourceId(issue, "issue"),
+    attributes: selectedIssueAttributes(issue, selected),
+  };
 }
 
 function snykIssueId(
@@ -797,13 +826,14 @@ function savedContext(
     context,
     repository: {
       scope: selected,
+      scm: context.scm,
       targetId: context.targetId,
       integrationId: remote.integrationId,
+      deployment: remote.deployment,
       url: selected.sourceRepositoryUrl,
       platform,
       ...(gitlab && { gitlab: true }),
-      ...(nativeUrl &&
-        nativeUrl !== selected.sourceRepositoryUrl && { nativeUrl }),
+      ...(nativeUrl && { nativeUrl }),
     },
   };
 }
@@ -881,6 +911,7 @@ function retainedRelationship(
   const links = resource?.["relationships"];
   const relation = isRecord(links) ? links[name] : undefined;
   const data = isRecord(relation) ? relation["data"] : undefined;
+  if (data === null) return null;
   if (
     isRecord(data) &&
     (data["type"] === name ||
@@ -892,7 +923,7 @@ function retainedRelationship(
 /** Read only vendor-typed claims still present in an already-approved request. */
 function retainedSnykAssets(data: Resource) {
   const assets = [];
-  const id = (resource?: Resource) => {
+  const id = (resource?: Resource | null) => {
     const value = resource?.["id"];
     return isUuid(value) ? value.toLowerCase() : undefined;
   };
@@ -902,15 +933,19 @@ function retainedSnykAssets(data: Resource) {
     if (project?.["type"] === "project") {
       const attributes = project["attributes"];
       const origin = isRecord(attributes) ? attributes["origin"] : undefined;
+      expanded = retainedRelationship(project, "target");
       assets.push({
         projectId: id(project),
+        product: projectProduct(
+          isRecord(attributes) ? attributes["type"] : undefined,
+        ),
+        targetId: expanded === null ? null : undefined,
         organizationId: id(retainedRelationship(project, "organization")),
         origin:
           typeof origin === "string" && scmOrigins.has(origin)
             ? origin
             : undefined,
       });
-      expanded = retainedRelationship(project, "target");
     }
     for (const target of [
       expanded,
@@ -919,10 +954,19 @@ function retainedSnykAssets(data: Resource) {
       if (target?.["type"] !== "target") continue;
       const attributes = target["attributes"];
       const url = isRecord(attributes) ? attributes["url"] : undefined;
+      const integration = retainedRelationship(target, "integration");
+      const integrationAttributes = integration?.["attributes"];
+      const type = isRecord(integrationAttributes)
+        ? integrationAttributes["integration_type"]
+        : undefined;
       assets.push({
         url: typeof url === "string" ? url : undefined,
         targetId: id(target),
-        integrationId: id(retainedRelationship(target, "integration")),
+        integrationId: id(integration),
+        deployment:
+          typeof type === "string"
+            ? concreteDeployment(scmOrigins.get(type))
+            : undefined,
         organizationId: id(retainedRelationship(target, "organization")),
       });
     }
@@ -943,6 +987,22 @@ function snykRowEvidence(finding: ExternalFinding, hostedReport = false) {
 
 export function isSnykRestFinding(finding: ExternalFinding): boolean {
   return snykRowEvidence(finding) !== undefined;
+}
+
+/** Recover the native occurrence from an earlier normalized submission with a caller-assigned ID. */
+export function snykRestCheckpointFindingId(
+  finding: ExternalFinding,
+  references: readonly ExternalSourceRepository[],
+) {
+  const data = finding.evidence.source_data;
+  const issue = snykRowEvidence(finding)?.v2?.issue;
+  if (!data || !issue) return;
+  const { source } = savedContext(
+    { ...data, format: data["format"] ?? SNYK_REST_ISSUES_FORMAT },
+    references,
+  );
+  const { attributes } = selectedIssue(scopedIssue(issue, source), source);
+  return snykIssueId(attributes, source, data["snykRestIssueKey"]);
 }
 
 export function snykRestFindingRepository(
@@ -999,15 +1059,17 @@ function bindSnykFinding(
   );
   verifySnykFindingId(finding, attributes, source);
   projectSnykIssue(attributes, asset, { ...retained, format }, "local");
-  if (retain && format === SNYK_REST_ISSUES_V1 && projected) {
+  if (retain && format === SNYK_REST_ISSUES_V1) {
     // The legacy witness stores the original decimal token, including its spelling.
-    const context = encodeSnykV1File({
-      ...repository.scope,
-      apiVersion: source.apiVersion,
-      format,
-      project: asset.project,
-      target: asset.target,
-    });
+    const context: Resource = projected
+      ? encodeSnykV1File({
+          ...repository.scope,
+          apiVersion: source.apiVersion,
+          format,
+          project: asset.project,
+          target: asset.target,
+        })
+      : { format };
     retain(finding, {
       ...retained,
       ...context,
@@ -1094,10 +1156,18 @@ function problemIds(entries: Resource[], type?: string) {
   return [...ids];
 }
 
+function findingFilePath(value: unknown, v2: boolean) {
+  const path = hostedRepositoryPath(value);
+  const filename = path?.split("/").at(-1);
+  return v2 && (!filename || filename === ".") ? null : path;
+}
+
 function packageEvidence(
   coordinates: Resource[],
-  { manager, manifest }: ReturnType<typeof projectContext>,
+  { manager, targetFile }: ReturnType<typeof projectContext>,
+  v2: boolean,
 ) {
+  const manifest = findingFilePath(targetFile, v2);
   const packages: ImportedPackage[] = [];
   for (const coordinate of coordinates) {
     const fixed = records(coordinate, "remedies").flatMap((remedy) => {
@@ -1138,11 +1208,7 @@ function codeStartLine(region: unknown): number | null {
   return isSafeNonNegativeInteger(line) && line > 0 ? line : null;
 }
 
-function codeEvidence(
-  coordinates: Resource[],
-  scm: boolean,
-  includeLines: boolean,
-) {
+function codeEvidence(coordinates: Resource[], scm: boolean, v2: boolean) {
   const locations: { path: string; line?: number | null }[] = [];
   const revisions = new Set<string | null>();
   for (const coordinate of coordinates) {
@@ -1152,13 +1218,10 @@ function codeEvidence(
       if (value === undefined) continue;
       const location = record(value, "Snyk source location");
       revisions.add(text(location["commit_id"]));
-      const path = hostedRepositoryPath(location["file"]);
-      const filename = path?.split("/").at(-1);
-      if (scm && path && (!includeLines || (filename && filename !== ".")))
+      const path = findingFilePath(location["file"], v2);
+      if (scm && path)
         locations.push(
-          includeLines
-            ? { path, line: codeStartLine(location["region"]) }
-            : { path },
+          v2 ? { path, line: codeStartLine(location["region"]) } : { path },
         );
     }
   }
@@ -1175,6 +1238,7 @@ function projectSnykIssue(
   target: ExternalImportTarget,
 ) {
   const code = source.product === "code";
+  const v2 = sourceData["format"] !== SNYK_REST_ISSUES_V1;
   const status = attributes["status"];
   if (
     (status !== "open" && status !== "resolved") ||
@@ -1209,13 +1273,9 @@ function projectSnykIssue(
         severity === "info" ? "informational" : scannerSeverity(severity),
       advisory_ids: code ? [] : problemIds(problems),
       ...(code
-        ? codeEvidence(
-            activeCoordinates,
-            context.scm,
-            sourceData["format"] !== SNYK_REST_ISSUES_V1,
-          )
+        ? codeEvidence(activeCoordinates, context.scm, v2)
         : {
-            packages: packageEvidence(activeCoordinates, context),
+            packages: packageEvidence(activeCoordinates, context, v2),
           }),
       source_updated_at: Math.floor(updated / 1000),
       source_data: sourceData,
@@ -1265,13 +1325,18 @@ export function normalizeSnykIssues(
       return projectSnykIssue(attributes, asset, sourceData, target);
     },
     ({ issue }) => {
-      const id = resourceId(issue, "issue");
+      const identifier = resourceIdentifier(issue, "issue");
       const raw = issue["attributes"];
       const product = isRecord(raw) ? raw["type"] : undefined;
       // A missing product cannot establish that this resource belongs to another selection.
-      if (!text(product) || product === issueTypes[source.product])
+      if (
+        isUuid(identifier) &&
+        (!text(product) || product === issueTypes[source.product])
+      ) {
+        const id = identifier.toLowerCase();
         resourceCounts.set(id, (resourceCounts.get(id) ?? 0) + 1);
-      return snykIssueId(selectedIssue(issue, source).attributes, source);
+      }
+      return snykIssueId(selectedIssueAttributes(issue, source), source);
     },
     target,
   );
@@ -1351,15 +1416,31 @@ export function snykRestImportRepository(
   if (provider !== "snyk")
     throw new Error("Use the snyk provider for Snyk REST issues.");
 
-  if (project?.repository.targetId && boundRows.some((row) => !row.targetId))
+  if (
+    project &&
+    boundRows.some(
+      (row) =>
+        (project.repository.targetId && !row.targetId) ||
+        (project.repository.nativeUrl && !row.nativeUrl),
+    )
+  )
     throw new Error(
       "The selected Snyk finding is missing the report's native target. Keep its full project or omit the project to use the report context.",
     );
   const retainedAssets = retainedRows.flatMap(retainedSnykAssets);
-  const monitorBindings = [...bindings, ...retainedAssets];
-  for (const key of ["targetId", "integrationId"] as const) {
+  const monitorBindings: {
+    targetId?: string | null;
+    integrationId?: string;
+    deployment?: string;
+  }[] = [...bindings, ...retainedAssets];
+  for (const key of ["targetId", "integrationId", "deployment"] as const) {
+    // Sparse targets can contradict a verified SCM deployment but cannot establish one.
+    if (key === "deployment" && !bindings.some((binding) => binding.deployment))
+      continue;
     const ids = new Set(
-      monitorBindings.flatMap((binding) => binding[key] ?? []),
+      monitorBindings
+        .map((binding) => binding[key])
+        .filter((id) => id !== undefined),
     );
     if (ids.size > 1)
       throw new Error(
@@ -1369,7 +1450,13 @@ export function snykRestImportRepository(
   const scopes = boundRows.map(({ scope }) => scope);
   const claims = new Set(bindings.map((binding) => binding.url));
   const retainedScms = [];
-  for (const { url, origin, projectId, organizationId } of retainedAssets) {
+  for (const {
+    url,
+    origin,
+    product,
+    projectId,
+    organizationId,
+  } of retainedAssets) {
     if (url) claims.add(url);
     if (origin) retainedScms.push(reportedScm(repositoryUrl, origin));
     if (selected)
@@ -1377,6 +1464,7 @@ export function snykRestImportRepository(
         ...selected,
         projectId: projectId ?? selected.projectId,
         organizationId: organizationId ?? selected.organizationId,
+        product: product ?? selected.product,
       });
   }
   // Already-approved rows can lack the original project while retaining a
@@ -1402,14 +1490,15 @@ export function snykRestImportRepository(
     }
   }
   if (
-    selected &&
-    scopes.some(
-      (scope) =>
-        scope.apiOrigin !== selected.apiOrigin ||
-        scope.organizationId !== selected.organizationId ||
-        scope.projectId !== selected.projectId ||
-        scope.product !== selected.product,
-    )
+    bindings.some((binding) => binding.scm !== bindings[0]?.scm) ||
+    (selected &&
+      scopes.some(
+        (scope) =>
+          scope.apiOrigin !== selected.apiOrigin ||
+          scope.organizationId !== selected.organizationId ||
+          scope.projectId !== selected.projectId ||
+          scope.product !== selected.product,
+      ))
   )
     throw new Error(
       "The normalized finding does not match the retained Snyk project scope.",

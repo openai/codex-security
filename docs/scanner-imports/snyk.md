@@ -15,14 +15,15 @@ is the default. For a Snyk Code project, add `--snyk-product code`. For a
 regional deployment, set `--snyk-api-origin` to its documented API origin.
 
 Run the commands from a trusted directory outside the project checkout. The
-example saves the report there and imports it into the checkout at `./project`.
+example saves a fresh report there and imports it into the checkout at `./project`.
 
 ```sh
-codex-security import snyk PROJECT_ID --snyk-org ORG_ID \
-  --source-repository-url https://github.com/example/project \
-  --format json > snyk-issues.json &&
-codex-security publish findings snyk-issues.json --to local --provider snyk \
-  --source-key ORG_ID/PROJECT_ID --repository ./project --dry-run
+report=$(mktemp ./snyk-issues.XXXXXX) &&
+  codex-security import snyk PROJECT_ID --snyk-org ORG_ID \
+    --source-repository-url https://github.com/example/project \
+    --format json > "$report" &&
+  codex-security publish findings "$report" --to local --provider snyk \
+    --source-key ORG_ID/PROJECT_ID --repository ./project --dry-run
 ```
 
 Confirm the preview, then repeat the publish command without `--dry-run`.
@@ -56,19 +57,27 @@ the native issue and its generated ID. The verified report context can supply
 the monitored project for a row that retains only its original issue. The Cloud
 preview includes the verified project and any captured target in the evidence it
 will publish.
-For a v1 row, keep `source_data.issue` and its `source_data.numericFields.issue` when
-present. V1 uses those fields together to distinguish exact numbers from
-strings with the same spelling. For a v2 row, keep `source_data.issueJson`.
+
+For a v1 row, keep `source_data.issue` and the original `source_data.numericFields`
+when present. If you trim the metadata, keep its matching entries for every
+`issue`, `project`, and `target` object you retain. V1 uses those entries to
+distinguish exact numbers from strings with the same spelling. For a v2 row,
+keep `source_data.issueJson`.
 The local workbench stores the verified project and target with that issue,
 so the stored row can be imported again. All selected issues must share the
-report’s API region, organization, project and product. If the report names a
-target, each supplied project must name that target.
+report’s API region, organization, project and product. Keep SCM-integrated
+findings separate from CLI- or API-monitored findings. If the report identifies
+a native target or its repository URL, retain that evidence in the selected
+project and target. Snyk’s optional integration relationship is retained when
+the target supplies it.
 
 SDK readers that define their own findings and IDs can use the ordinary
 normalized Snyk import with their own evidence and no hosted report context.
 
 The offline reader can interpret SCM aliases recorded in an archived project.
-Local import independently compares the source to the checkout before writing.
+Local import compares the source to the checkout’s configured external Git
+remotes. For a checkout with only filesystem remotes or none, the selected
+directory is the import destination.
 For private source-control hosts, use the same repository URL as the checkout.
 SDK callers that have independently verified a GitHub Enterprise or GitLab
 repository can pass its canonical HTTPS URL and platform to local or Cloud

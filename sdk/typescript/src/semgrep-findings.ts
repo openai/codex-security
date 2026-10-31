@@ -199,6 +199,10 @@ export function normalizeSemgrepFindings(
   );
 }
 
+export function isSemgrepSarifDriver(name: string): boolean {
+  return ["semgrep", "semgrep oss", "semgrep pro"].includes(name.toLowerCase());
+}
+
 export function normalizeSemgrepSarif(
   input: unknown,
   options: SemgrepImportOptions,
@@ -227,11 +231,7 @@ export function normalizeSemgrepSarif(
     }
     const tool = record(run["tool"], "SARIF tool");
     const driver = record(tool["driver"], "SARIF driver");
-    if (
-      !["semgrep", "semgrep oss", "semgrep pro"].includes(
-        requiredText(driver["name"], "SARIF producer").toLowerCase(),
-      )
-    )
+    if (!isSemgrepSarifDriver(requiredText(driver["name"], "SARIF producer")))
       throw new Error("Expected a Semgrep SARIF producer.");
     if (
       hasSarifExternalPropertyReferences(run["externalPropertyFileReferences"])

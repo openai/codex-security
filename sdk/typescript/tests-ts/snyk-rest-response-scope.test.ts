@@ -91,6 +91,20 @@ test("a saved target accepts unexpanded integration linkage and checks a supplie
     normalizedTarget(target({ integration_type: "gitlab" }).data),
   ).toThrow("project's github origin");
 
+  Object.assign(linked.data, {
+    attributes: { integration_type: "github-cloud-app" },
+  });
+  const server = target({ integration_type: "github-server-app" });
+  await expect(
+    capture(project, server, { data: [snykIssue(false)] }),
+  ).rejects.toThrow("target linkage");
+  expect(() =>
+    normalizeSnykIssues({
+      ...saved,
+      projectJson: JSON.stringify(project.data),
+      targetJson: JSON.stringify(server.data),
+    }),
+  ).toThrow("target linkage");
   const replaced = target({ integration_type: "github" });
   replaced.data.relationships.integration.data.id =
     "99999999-9999-4999-8999-999999999999";
@@ -368,4 +382,28 @@ test("direct SDK projections can edit display fields but must retain an importab
       locations: [{ path: "src/reader.ts" }],
     },
   });
+});
+
+test("a selected Snyk row retains the target URL supplied by its report", async () => {
+  const project = snykProject("npm", "");
+  const target = project.data.relationships.target.data;
+  const read = async (url: string | null) =>
+    normalizeSnykIssues(
+      await capture(
+        project,
+        { data: { ...target, attributes: { url } } },
+        { data: [snykIssue(false)] },
+      ),
+    );
+  const url = snykOptions.sourceRepositoryUrl;
+  const report = await read(url);
+  const withoutUrl = await read(null);
+  await using f = await snykLocalFixture({ remote: url });
+  await f.prepareNormalized(withoutUrl);
+  await (await f.prepareNormalized(report)).import();
+  const stored = await f.read();
+  await expect(
+    f.prepareNormalized({ ...report, findings: withoutUrl.findings }),
+  ).rejects.toThrow("missing the report's native target");
+  expect(await f.read()).toEqual(stored);
 });

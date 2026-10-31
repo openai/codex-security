@@ -520,13 +520,19 @@ async function requireMatchingRepository(
       : (protectedRoots ?? [])),
     await abortable(() => canonicalConfigPath(process.cwd()), signal),
   ];
-  if (snyk) {
-    const remotes = await readHostedGitRemotes(
-      repository,
-      gitProtectedRoots,
-      environment,
+  const readHostedRemotes = () =>
+    abortable(
+      () =>
+        readHostedGitRemotes(
+          repository,
+          gitProtectedRoots,
+          environment,
+          signal,
+        ),
       signal,
     );
+  if (snyk) {
+    const remotes = await readHostedRemotes();
     if (
       remotes &&
       !remotes.some((remote) => snykRestCheckoutMatches(snyk, remote))
@@ -537,16 +543,7 @@ async function requireMatchingRepository(
     return;
   }
   if (hostedSources.size > 0) {
-    const remotes = await abortable(
-      () =>
-        readHostedGitRemotes(
-          repository,
-          gitProtectedRoots,
-          environment,
-          signal,
-        ),
-      signal,
-    );
+    const remotes = await readHostedRemotes();
     if (remotes) {
       for (const source of hostedSources.values())
         if (!remotes.some((remote) => hostedRepositoryMatches(source, remote)))
@@ -812,6 +809,7 @@ export async function prepareLocalImport(
   const semgrepReportScope = semgrepPlatformReportScope(
     current,
     options.provider,
+    readerSources,
   );
   const semgrepPlatformRepositoryUrl = semgrepReportScope?.url;
   function addSemgrepSource(url: string) {
@@ -838,35 +836,25 @@ export async function prepareLocalImport(
     options.provider,
     readerSources,
   );
-  const separatePlatformReferences =
+  const hasPlatformEvidence =
     options.provider === "semgrep" &&
-    references.length > 0 &&
     (semgrepReportScope !== undefined ||
       current.findings.some((row) =>
         isSemgrepPlatformEvidence(row, options.provider),
       ));
-  const sarifSources = new Set<string>();
-  const suppliedSarif = new Set<ExternalSourceRepository>();
   let hasOrdinaryRows = false;
   let ordinaryRowNeedsReferences = false;
   for (const finding of current.findings) {
     const retained = bound.get(finding.source_finding_id);
     const native = nativeSources.get(finding) ?? [];
-    const sarif =
-      separatePlatformReferences || semgrepReportScope
-        ? semgrepSarifRepositories(finding)
-        : [];
+    const sarif = hasPlatformEvidence ? semgrepSarifRepositories(finding) : [];
     const semgrep = semgrepPlatformFindingBinding(
       finding,
       options.provider,
       readerSources,
       legacyWitnesses,
       semgrepReportScope,
-      [
-        retained?.url,
-        ...native.map(({ url }) => url),
-        ...sarif.map(({ url }) => url),
-      ],
+      [retained, ...native, ...sarif],
     );
     if (semgrep) {
       addSemgrepSource(semgrep.url);
@@ -877,17 +865,19 @@ export async function prepareLocalImport(
     const url = evidence.details?.repository?.url;
     // A selected row's projected URL was already verified against its hosted source.
     if (!semgrep && url) sources.set(url, { url });
-    if (separatePlatformReferences && !semgrep) {
-      for (const source of sarif) sarifSources.add(source.url);
-      if (!url && !retained && !native.length) {
-        const claims = sarif.map(({ url }) => identify(url));
-        const supplied = claims.length
-          ? references.filter((ref) =>
-              claims.some((claim) => matchingRemote(claim, identify(ref.url))),
-            )
-          : [];
-        if (!supplied.length) ordinaryRowNeedsReferences = true;
-        for (const ref of supplied) suppliedSarif.add(ref);
+    if (hasPlatformEvidence && !semgrep && !retained && !native.length) {
+      for (const source of sarif) sources.set(source.url, source);
+      if (!url && !sarif.length) ordinaryRowNeedsReferences = true;
+      if (!url && references.length) {
+        for (const source of sarif) {
+          const claim = identify(source.url);
+          if (
+            !references.some((ref) => matchingRemote(claim, identify(ref.url)))
+          )
+            throw new CodexSecurityError(
+              `The reader must supply the projected Semgrep SARIF repository ${JSON.stringify(source.url)} for the configured remote.`,
+            );
+        }
       }
     }
     if (retained) {
@@ -932,28 +922,19 @@ export async function prepareLocalImport(
       hosted.some((source) => semgrepReferenceMatches(source, ref.url)),
     ),
   );
-  // A reference can belong to both a Platform project and an ordinary row, whose
-  // retained SARIF provenance can differ from its projected repository URL.
-  const ordinaryClaims = [...sources.keys(), ...sarifSources];
-  const sharedProjects = hosted.filter((project) =>
-    ordinaryClaims.some((url) => semgrepReferenceMatches(project, url)),
-  );
+  // A Platform fetch alias is shared only when the ordinary reader recognizes that transport.
+  const ordinaryClaims = hostedReferences.size
+    ? Array.from(sources.keys(), identify)
+    : [];
   const hostedOnlyReferences = new Set(
-    [...hostedReferences].filter(
-      (ref) =>
-        !suppliedSarif.has(ref) &&
-        !sharedProjects.some((project) =>
-          semgrepReferenceMatches(project, ref.url),
-        ),
-    ),
+    [...hostedReferences].filter((ref) => {
+      const alias = identify(ref.url);
+      return !ordinaryClaims.some((claim) => matchingRemote(claim, alias));
+    }),
   );
   if (mixed) {
     // Other caller references must identify an ordinary row or one of its Git aliases.
-    const rows = [
-      ...sources.keys(),
-      ...known,
-      ...(hosted.length ? sarifSources : []),
-    ].map(identify);
+    const rows = [...sources.keys(), ...known].map(identify);
     const byKey = Map.groupBy(rows, (remote) => remote.key);
     const represented = new Set(rows.map((remote) => JSON.stringify(remote)));
     const aliases = readerSources

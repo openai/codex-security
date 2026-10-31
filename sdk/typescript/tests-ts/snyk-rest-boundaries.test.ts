@@ -719,16 +719,22 @@ test("rows from a different Snyk monitor cannot use the report's source key even
   capture.targetJson = JSON.stringify({
     ...target,
     relationships: {
-      integration: { data: { type: "integration", id: integrationId } },
+      integration: {
+        data: {
+          type: "integration",
+          id: integrationId,
+          attributes: { integration_type: "github-cloud-app" },
+        },
+      },
     },
   });
   const report = normalizeSnykIssues(capture);
   const code = snykRestFixture("code");
   const otherId = "aaaa0000-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-  const replace = (old: string) =>
+  const replace = (old: string, replacement = otherId) =>
     JSON.parse(
       JSON.stringify(capture)
-        .replaceAll(old, otherId)
+        .replaceAll(old, replacement)
         .replace(snykIssue(false).attributes.key, "other-issue-key")
         .replace(snykIssue(false).id, otherId),
     ) as typeof capture;
@@ -741,6 +747,7 @@ test("rows from a different Snyk monitor cannot use the report's source key even
     replace(capture.projectId),
     replace(target.id),
     replace(integrationId),
+    replace("github-cloud-app", "github-server-app"),
     code,
     { ...capture, apiOrigin: "https://api.au.snyk.io" },
   ]) {
@@ -794,6 +801,17 @@ test("rows from a different Snyk monitor cannot use the report's source key even
       "conflicting targets or integrations",
     );
   }
+  saved.evidence.source_data = {
+    format: capture.format,
+    targetJson: capture.targetJson.replace(`"${integrationId}"`, "null"),
+  };
+  expect(checkSaved(capture)?.url).toBe(capture.sourceRepositoryUrl);
+  expect(checkSaved(replace("github-cloud-app", "github"))?.url).toBe(
+    capture.sourceRepositoryUrl,
+  );
+  expect(() =>
+    checkSaved(replace("github-cloud-app", "github-server-app")),
+  ).toThrow("conflicting targets or integrations");
   expect(await f.read()).toHaveLength(0);
 });
 
@@ -846,6 +864,28 @@ test("a sparse approved Snyk record still checks its retained repository URLs", 
       "does not match the original Snyk project",
     );
   }
+});
+
+test("a sparse approved project retains its known product and target linkage", () => {
+  const report = normalizeSnykIssues(snykRestFixture("code"));
+  const row = report.findings[0]!;
+  row.source_finding_id = "reader-selected";
+  const project = JSON.parse(String(report.snykRestContext!["projectJson"]));
+  const check = () => {
+    row.evidence.source_data = {
+      format: "snyk-rest-issues/v2",
+      projectJson: JSON.stringify(project),
+    };
+    return snykRestImportRepository(report, "snyk", [], [], undefined, true);
+  };
+  expect(check()?.url).toBe(report.sourceRepositoryUrl);
+  project.attributes.type = "npm";
+  expect(check).toThrow("retained Snyk project scope");
+  delete project.attributes.type;
+  project.relationships.target.data = null;
+  expect(check).toThrow("conflicting targets");
+  delete project.relationships.target;
+  expect(check()?.url).toBe(report.sourceRepositoryUrl);
 });
 
 test("opaque legacy issues retain sibling scope checks on a checkpoint retry", () => {

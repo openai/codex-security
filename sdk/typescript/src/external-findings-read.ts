@@ -7,7 +7,10 @@ import type {
 import type { Provider } from "./external-import-models.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
-import { readSemgrepFindings } from "./semgrep-findings.js";
+import {
+  isSemgrepSarifDriver,
+  readSemgrepFindings,
+} from "./semgrep-findings.js";
 import { semgrepPlatformReportRepository } from "./semgrep-platform-findings.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
@@ -81,10 +84,23 @@ export function localFindingRepositories(
 }
 
 /** Repository claims retained by the Semgrep SARIF reader. */
-export function semgrepSarifRepositories({
-  evidence,
-}: ExternalFinding): ExternalSourceRepository[] {
-  const context = evidence.source_data?.["runContext"];
+export function semgrepSarifRepositories(
+  { evidence }: ExternalFinding,
+  allowPartialCloudUrl = false,
+): { url: string; branch?: string }[] {
+  const data = evidence.source_data;
+  const document = data?.["documentContext"];
+  const driver = data?.["driverContext"];
+  const partial = allowPartialCloudUrl && document === undefined;
+  if (
+    (!partial && (!isRecord(document) || document["version"] !== "2.1.0")) ||
+    !isRecord(driver) ||
+    typeof driver["name"] !== "string" ||
+    !isSemgrepSarifDriver(driver["name"]) ||
+    !isRecord(data?.["result"])
+  )
+    return [];
+  const context = data["runContext"];
   const references = isRecord(context)
     ? context["versionControlProvenance"]
     : undefined;
@@ -93,7 +109,15 @@ export function semgrepSarifRepositories({
         isRecord(reference) &&
         typeof reference["repositoryUri"] === "string" &&
         reference["repositoryUri"].trim()
-          ? [{ url: reference["repositoryUri"] }]
+          ? [
+              {
+                url: reference["repositoryUri"],
+                ...(!partial &&
+                  typeof reference["branch"] === "string" && {
+                    branch: reference["branch"],
+                  }),
+              },
+            ]
           : [],
       )
     : [];
@@ -140,8 +164,8 @@ export async function readExternalFindings(
       target,
     );
     if (semgrepPlatformReportRepository(findings)) return { findings };
-    const sourceRepositories = findings.findings.flatMap(
-      semgrepSarifRepositories,
+    const sourceRepositories = findings.findings.flatMap((finding) =>
+      semgrepSarifRepositories(finding),
     );
     return { findings, sourceRepositories };
   }

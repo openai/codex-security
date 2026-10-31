@@ -817,9 +817,7 @@ export async function gitOutput(
         (args.length === 2 || (args[2] === "--" && args.length === 4))) ||
       args[0] === "ls-files" ||
       (args[0] === "remote" &&
-        (args.length === 1 ||
-          (args[1] === "get-url" &&
-            (args[2] === "--all" || args[2] === "--")))),
+        (args.length === 1 || (args[1] === "get-url" && args[2] === "--all"))),
     sourceEnvironment,
     protectedRoots,
     signal,

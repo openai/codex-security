@@ -8,12 +8,7 @@ import {
   isLocalGitRemote,
   isWindowsGitDrive,
 } from "./hosted-git-repository.js";
-import {
-  abortable,
-  gitOutput,
-  nullIfMissingPath,
-  trustedGitCommand,
-} from "./targets.js";
+import { abortable, gitOutput, trustedGitCommand } from "./targets.js";
 
 async function recognizedCurlHelper(
   name: string,
@@ -75,6 +70,22 @@ async function recognizedCurlHelper(
     selected.dev === standard.dev &&
     selected.ino === standard.ino
   );
+}
+
+async function emptyLegacyRemotes(
+  common: string | undefined,
+): Promise<boolean> {
+  if (!common) return false;
+  for (const folder of ["remotes", "branches"]) {
+    const dir = join(common, folder);
+    try {
+      if (!(await lstat(dir)).isDirectory() || (await readdir(dir)).length)
+        return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+    }
+  }
+  return true;
 }
 
 /** Read effective external Git URLs without invoking a transport. An empty result means none could be verified. */
@@ -145,32 +156,36 @@ export async function readHostedGitRemotes(
       return;
     throw error;
   }
-  const remoteConfig = (
-    await readGit([
-      "config",
-      "--null",
-      "--get-regexp",
-      "^remote\\..*\\.vcs$",
-    ]).catch((error: unknown) => {
-      if (error instanceof Error && "code" in error && error.code === 1)
-        return "";
-      throw error;
-    })
-  ).split("\0");
+  const config = await readGit([
+    "config",
+    "--null",
+    "--get-regexp",
+    "^remote\\..*\\.(url|vcs)$",
+  ]).catch((error: unknown) => {
+    if (error instanceof Error && "code" in error && error.code === 1)
+      return "";
+    throw error;
+  });
+  const settings = new Map<string, string>();
+  for (const entry of config.split("\0")) {
+    const end = entry.indexOf("\n");
+    if (end < 0) continue;
+    const key = entry.slice(0, end);
+    // A fetch uses the first URL and the last configured transport helper.
+    if (!settings.has(key) || key.endsWith(".vcs"))
+      settings.set(key, entry.slice(end + 1));
+  }
   const remotes: string[] = [];
   let hasUnverifiedRemote = false;
-  // The default fetch can resolve an unlisted legacy source even when other remotes are named.
-  const resolved = new Set<string>();
-  const missingUrls = new Set([
-    "fatal: No remote configured to list refs from.",
-    "fatal: remote (null) has no configured URL", // Git 2.43 when the default only names a helper.
-  ]);
-  const listed = new Set(remoteNames.split("\n").filter(Boolean));
   async function* candidates() {
-    yield* listed;
-    yield "";
-    if (hasUnverifiedRemote || remotes.length) return;
-    // Git's legacy metadata directories hold unlisted remote names. Let Git interpret each file.
+    const fallbackNames: string[] = [];
+    for (const name of remoteNames.split("\n").filter(Boolean)) {
+      if (settings.get(`remote.${name}.url`)) yield name;
+      else fallbackNames.push(name);
+    }
+    if (remotes.length && !fallbackNames.length) return;
+
+    // An implicit fetch can open legacy descriptors. Inspect directory metadata only.
     const common = utf8(
       await readGit([
         "rev-parse",
@@ -178,19 +193,15 @@ export async function readHostedGitRemotes(
         "--git-common-dir",
       ]),
     );
-    if (!common) return;
-    for (const folder of ["remotes", "branches"]) {
-      const dir = join(common, folder);
-      if (!(await lstat(dir).catch(nullIfMissingPath))?.isDirectory()) continue;
-      const entries = await abortable(
-        () => readdir(dir, { withFileTypes: true }),
-        signal,
-      );
-      for (const entry of entries) {
-        const raw = Buffer.from(entry.name).toString("latin1");
-        if (entry.isFile() && !listed.has(raw)) yield raw;
-      }
+    if (!(await abortable(() => emptyLegacyRemotes(common), signal))) {
+      if (!remotes.length)
+        throw new Error(
+          "Configure a named Git fetch URL (for example, git remote add scanner-origin <verified-url>) to import into this checkout with legacy or unreadable Git remote metadata.",
+        );
+      return;
     }
+    yield* fallbackNames;
+    if (!remotes.length && !hasUnverifiedRemote) yield "";
   }
   for await (const rawName of candidates()) {
     const name = utf8(rawName);
@@ -198,46 +209,33 @@ export async function readHostedGitRemotes(
       hasUnverifiedRemote = true;
       continue;
     }
-    const vcsKey = `remote.${rawName}.vcs\n`;
-    const configuredHelper = remoteConfig
-      .findLast((entry) => entry.startsWith(vcsKey))
-      ?.slice(vcsKey.length);
-    if (configuredHelper !== undefined)
-      missingUrls.add(`fatal: remote ${name} has no configured URL`);
+    const configuredHelper = settings.get(`remote.${rawName}.vcs`);
+    const missingUrl = name
+      ? `fatal: remote ${name} has no configured URL`
+      : "fatal: No remote configured to list refs from.";
     // Resolve the same first URL as a fetch, including rewrites on an implicit local remote name.
     // --get-url exits before Git connects to a transport.
-    const legacy = name !== "" && !listed.has(rawName);
-    const query = legacy
-      ? ["remote", "get-url", "--", name]
-      : ["ls-remote", "--get-url", ...(name ? ["--", name] : [])];
-    const rawUrl = await readGit(query).catch((error: unknown) => {
-      // Only Git can distinguish a historical remote from an unrelated file in the same directory.
-      if (
-        legacy &&
-        error instanceof Error &&
-        "code" in error &&
-        error.code === 2
-      )
-        return undefined;
+    const rawUrl = await readGit([
+      "ls-remote",
+      "--get-url",
+      ...(name ? ["--", name] : []),
+    ]).catch((error: unknown) => {
       if (
         error instanceof Error &&
         "code" in error &&
         error.code === 128 &&
         "stderr" in error &&
         typeof error.stderr === "string" &&
-        error.stderr.split(/\r?\n/u).some((line) => missingUrls.has(line))
+        error.stderr.split(/\r?\n/u).includes(missingUrl)
       )
         return undefined;
       throw error;
     });
     if (rawUrl === undefined) {
-      if (name && !legacy) hasUnverifiedRemote = true;
+      if (name) hasUnverifiedRemote = true;
       continue;
     }
     // Explicit helper:: takes precedence over remote.<name>.vcs.
-    // A named remote's configured helper also governs an identical default fetch URL.
-    if (!name && resolved.has(rawUrl)) continue;
-    resolved.add(rawUrl);
     const explicit = /^([a-z0-9][a-z0-9+.-]*)::/iu.exec(rawUrl);
     const helper = explicit?.[1] ?? configuredHelper;
     const address = explicit ? rawUrl.slice(explicit[0].length) : rawUrl;

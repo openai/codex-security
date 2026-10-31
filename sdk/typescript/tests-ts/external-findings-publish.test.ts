@@ -53,6 +53,7 @@ import {
   semgrepPlatformFormat,
 } from "../src/semgrep-platform-findings.js";
 import { normalizeSemgrepFindings } from "../src/semgrep-findings.js";
+import { collectSemgrepPlatformFindings } from "../src/semgrep-platform-collector.js";
 import { normalizeSnykIssues } from "../src/snyk-rest-findings.js";
 import releasedSnykCheckpoints from "./fixtures/snyk-released-checkpoints.json" with { type: "json" };
 import { snykRestFixture } from "./support/snyk-rest-fixtures.js";
@@ -804,6 +805,57 @@ function selectedSemgrepReport(
   });
 }
 
+test("a projected Snyk issue resumes its approved private repository after a rename", async () => {
+  const url = "https://git.example.test/Team/OldProject";
+  const renamed = "https://git.example.test/Team/NewProject";
+  const capture = snykRestFixture("open-source", { sourceRepositoryUrl: url });
+  const project = JSON.parse(capture.projectJson);
+  project.attributes.origin = "cli";
+  project.relationships.target.data.attributes.url =
+    "git@git.example.test:team/oldproject.git";
+  capture.projectJson = JSON.stringify(project);
+  const report = normalizeSnykIssues(capture, "cloud", [
+    { url, platform: "github" },
+  ]);
+  const row = report.findings[0]!;
+  row.evidence.source_data = {
+    issueJson: row.evidence.source_data!["issueJson"],
+  };
+  const f = await hostedFixture("snyk", capture, url);
+  await f.loseResponse(await f.prepareNormalized(report));
+  f.state.repositoryUrl = renamed;
+  const resumed = await f.prepareNormalized(report);
+  expect(resumed.preview.resumed).toBe(true);
+  await resumed.publish();
+  expect(f.posts[1]).toBe(f.posts[0]);
+  const fresh = await hostedFixture("snyk", capture, renamed);
+  await expect(fresh.prepareNormalized(report)).rejects.toThrow(
+    "Snyk target URL",
+  );
+  expect(fresh.posts).toHaveLength(0);
+});
+
+test("a self-contained Snyk issue keeps its Cloud identity with or without a report header", async () => {
+  const capture = snykRestFixture("open-source");
+  const report = normalizeSnykIssues(capture);
+  const { read, findings, excluded } = report;
+  const data = findings[0]!.evidence.source_data!;
+  data["issueJson"] = JSON.stringify(
+    JSON.parse(String(data["issueJson"])),
+    null,
+    2,
+  );
+  const f = await hostedFixture("snyk", capture, capture.sourceRepositoryUrl);
+  await f.loseResponse(await f.prepareNormalized(report));
+  const resumed = await f.prepareNormalized({ read, findings, excluded });
+  expect(resumed.preview.resumed).toBe(true);
+  await resumed.publish();
+  expect(f.posts[1]).toBe(f.posts[0]);
+  expect(
+    (await (await f.prepareNormalized(report)).publish()).counts.unchanged,
+  ).toBe(1);
+});
+
 test("a pending projected Snyk issue keeps its generated ID bound to the original API region", async () => {
   const capture = snykRestFixture("open-source");
   const report = normalizeSnykIssues(capture);
@@ -945,6 +997,73 @@ test("a Semgrep file retry preserves the approved private repository's case", as
   expect(f.posts[1]).toBe(f.posts[0]);
   expect(f.receipts.size).toBe(1);
 });
+
+test.each(["file", "SDK"] as const)(
+  "a private GitHub repository recognizes an offline Semgrep capture on a %s retry",
+  async (first) => {
+    const url = "https://scm.example.test/Org/Repo";
+    const project = { name: "Org/Repo", id: 77, url };
+    const ref = "refs/heads/topic";
+    const native = {
+      id: 23,
+      ref,
+      repository: { id: project.id, name: "org/repo" },
+      rule: { name: "example.rule", message: "Example issue" },
+      location: { file_path: "src/example.ts", line: 2 },
+      severity: "informational",
+    };
+    const report = await collectSemgrepPlatformFindings(
+      {
+        project: project.name,
+        deployment: "example",
+        ref,
+        token: "synthetic-token",
+      },
+      {
+        environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+        fetch: async (url) =>
+          Response.json(
+            url.pathname.endsWith("/findings")
+              ? { findings: [native] }
+              : { project },
+          ),
+      },
+    );
+    const offline = normalizeSemgrepPlatformFindings(report);
+    const row = offline.findings[0]!;
+    expect(row.evidence.source_data?.["format"]).toBe(semgrepPlatformFormat);
+    const f = await hostedFixture("semgrep", report, url);
+    const sdk = () => f.prepareNormalized(offline);
+    const file = await f.prepareFile();
+    expect(file.preview.findings[0]?.evidence.source_data?.["format"]).toBe(
+      "semgrep-platform-selection/v1",
+    );
+    expect((await sdk()).preview.findings).toEqual(file.preview.findings);
+    await f.loseResponse(first === "file" ? file : await sdk());
+    const retry = await (first === "file" ? sdk() : f.prepareFile());
+    expect(retry.preview.resumed).toBe(true);
+    await retry.publish();
+    expect(f.posts[1]).toBe(f.posts[0]);
+    expect(f.receipts.size).toBe(1);
+    expect((await (await sdk()).publish()).counts.unchanged).toBe(1);
+    expect(f.reports.size).toBe(1);
+
+    row.source_finding_id = "custom-occurrence";
+    row.evidence.severity = "high";
+    row.evidence.source_data!["reviewNote"] = "Keep This Case";
+    expect((await sdk()).preview.findings[0]).toMatchObject({
+      source_finding_id: "custom-occurrence",
+      evidence: {
+        severity: "high",
+        source_data: {
+          reviewNote: "Keep This Case",
+          semgrepPlatformFindingJson:
+            row.evidence.source_data!["semgrepPlatformFindingJson"],
+        },
+      },
+    });
+  },
+);
 
 test("an independent GitLab mapping preserves Semgrep repository case on a private host", async () => {
   const url = "https://scm.example.test/Team/Project";
@@ -1489,17 +1608,45 @@ test("Semgrep Cloud validates a normalized report's monitored scope on import an
   const file = await f.prepareFile();
   const { semgrepPlatformScope, ...normalized } =
     normalizeSemgrepPlatformFindings(report, {}, "cloud");
+  const sarif = semgrepSarif();
+  Object.assign(sarif.runs[0]!, {
+    versionControlProvenance: [{ repositoryUri: url, branch: "other" }],
+  });
+  const findings = normalized.findings.concat(
+    normalizeSemgrepFindings(sarif, { sourceRepositoryUrl: url }).findings,
+  );
+  const mixed = {
+    ...normalized,
+    semgrepPlatformScope,
+    read: findings.length,
+    findings,
+  };
+  expect((await f.prepareNormalized(mixed)).preview.findings).toHaveLength(2);
+  await expect(
+    f.prepareNormalized({ ...mixed, sourceFormat: semgrepPlatformFormat }),
+  ).rejects.toThrow(/branch.*ref/i);
   const other = (change: Partial<typeof semgrepPlatformScope>) =>
     f.prepareNormalized({
       ...normalized,
       semgrepPlatformScope: { ...semgrepPlatformScope, ...change },
     });
+  const { sourceFormat: _format, ...withoutFormat } = normalized;
+  Object.defineProperty(withoutFormat, "semgrepPlatformScope", {
+    get: () => semgrepPlatformScope,
+  });
+  for (const provider of ["semgrep", "wiz"] as const)
+    await expect(f.prepareNormalized(withoutFormat, provider)).rejects.toThrow(
+      /requires its source format/,
+    );
   await expect(other({ projectId: "15" })).rejects.toThrow(
     /scope does not match/,
   );
   expect(f.posts).toHaveLength(0);
 
   await f.loseResponse(file);
+  await expect(
+    f.prepareNormalized({ ...withoutFormat, semgrepPlatformScope }),
+  ).rejects.toThrow(/requires its source format/);
   await expect(other({ ref: "refs/heads/other" })).rejects.toThrow(
     /scope does not match/,
   );
@@ -1510,6 +1657,19 @@ test("Semgrep Cloud validates a normalized report's monitored scope on import an
   expect(retry.preview.requests).toEqual(file.preview.requests);
   expect((await retry.publish()).verified).toBe(1);
   expect(f.posts[1]).toBe(f.posts[0]);
+
+  const projected = (title: string) =>
+    f.prepareNormalized({
+      ...normalized,
+      semgrepPlatformScope,
+      findings: [
+        { source_finding_id: "ticket", evidence: { title, severity: "high" } },
+      ],
+    });
+  await f.loseResponse(await projected("Initial title"));
+  await expect(projected("New title")).rejects.toThrow(
+    "pending hosted Cloud request",
+  );
 });
 
 test("Semgrep checks an alias witness before excluding it from the Cloud preview", async () => {
@@ -2132,6 +2292,33 @@ test.each(["semgrep", "snyk"] as const)(
   },
 );
 
+test.each(["semgrep", "snyk"] as const)(
+  "a projected Black Duck finding cannot resume under a different %s catalog authority",
+  async (provider) => {
+    const url = "https://127.0.0.1:443/Org/Project";
+    const f = await hostedFixture(provider, [], url);
+    const bare = normalizeBlackDuckFindings([blackDuckBomRow()], url);
+    bare.findings[0]!.evidence.source_data = { sourceRepositoryUrl: url };
+    const declared = { ...bare, sourceRepositoryUrl: url };
+    const pending = await f.loseResponse(await f.prepareNormalized(bare));
+    await useReleasedCheckpoint(pending);
+    expect((await f.prepareNormalized(declared)).preview.resumed).toBe(true);
+    const saved = await readFile(pending);
+
+    f.state.repositoryUrl = "https://0177.1.:443/Org/Project";
+    await expect(f.prepareNormalized(bare)).rejects.toThrow(/does not match/);
+    await expect(f.prepareNormalized(declared)).rejects.toThrow(
+      /does not match/,
+    );
+    expect(await readFile(pending)).toEqual(saved);
+    expect(f.posts).toHaveLength(1);
+
+    f.state.repositoryUrl = url;
+    await (await f.prepareNormalized(declared)).publish();
+    expect(f.posts[1]).toBe(f.posts[0]);
+  },
+);
+
 test("a private Snyk GitHub project uses its authenticated catalog alias", async () => {
   const url = "https://scm.example.test/Team/Project";
   const report = snykRestFixture("code", { sourceRepositoryUrl: url });
@@ -2335,6 +2522,8 @@ test.each(["semgrep", "snyk"] as const)(
       sourceRepositoryUrl: url,
       report: { capture: "example" },
     };
+    if (provider === "semgrep")
+      original.findings[0]!.source_finding_id = "caller-selected";
     const changed = structuredClone(original);
     changed.findings[0]!.evidence.title += " updated";
     const stale = await f.prepareNormalized(changed);
@@ -2365,6 +2554,13 @@ test.each(["semgrep", "snyk"] as const)(
       observer.restore();
     }
     const bytes = await readFile(pending, "utf8");
+    if (provider === "semgrep") {
+      const projected = structuredClone(changed);
+      delete projected.findings[0]!.evidence.source_data;
+      await expect(f.prepareNormalized(projected)).rejects.toThrow(
+        "pending hosted Cloud request",
+      );
+    }
     await expect(stale.publish()).rejects.toThrow("reset markers");
 
     await expect(f.prepareFile()).rejects.toThrow(
@@ -2395,6 +2591,8 @@ test.each([
   ["semgrep", "native"],
   ["semgrep", "SDK metadata and assigned IDs"],
   ["semgrep", "released assigned IDs"],
+  ["semgrep", "released assigned JSON row"],
+  ["snyk", "released assigned JSON row"],
   ["snyk", "released assigned IDs"],
   ["semgrep", "per-finding metadata"],
   ["semgrep", "projected metadata"],
@@ -2455,7 +2653,13 @@ test.each([
               response: JSON.parse(responseJson),
             })),
           };
-    const f = await hostedFixture(provider, report, url);
+    const f = await hostedFixture(
+      provider,
+      provider === "snyk" && mode === "released assigned JSON row"
+        ? snykRestFixture("code", { sourceRepositoryUrl: url })
+        : report,
+      url,
+    );
     // The legacy filename below belongs to the default Cloud deployment.
     Reflect.deleteProperty(f.environment, "CODEX_SECURITY_CLOUD_BASE_URL");
     const prior = await f.prepareFile();
@@ -2466,18 +2670,23 @@ test.each([
     delete pending.approvedRepositoryPlatform;
     const request = pending.requests[0] as FindingImportRequest;
     const rows = request.items.map(({ source_finding_id, evidence }, index) => {
-      if (provider === "semgrep")
+      if (provider === "semgrep" && mode !== "released assigned JSON row")
         evidence.source_data = { ...semgrep, finding: nativeFindings[index] };
       return { source_finding_id, evidence };
     });
+    const omittedMetadata =
+      mode === "released compact issue JSON" ||
+      (provider === "semgrep" && mode === "released without format");
     const metadata =
-      mode === "SDK metadata and assigned IDs"
+      mode === "SDK metadata and assigned IDs" || omittedMetadata
         ? { batch: "example" }
         : undefined;
     const assigned =
       metadata ||
       mode === "projected metadata" ||
-      mode === "released assigned IDs";
+      mode === "released assigned IDs" ||
+      mode === "released assigned JSON row" ||
+      mode === "released unrelated evidence";
     if (assigned)
       rows.forEach((row, index) => {
         request.items[index]!.source_finding_id = row.source_finding_id =
@@ -2581,11 +2790,9 @@ test.each([
     const prepareRows = (findings: ExternalFindings["findings"]) =>
       f.prepareNormalized({ ...input, read: findings.length, findings });
     const retry = metadata ? () => f.prepareNormalized(input) : f.prepareFile;
-    if (mode === "released assigned IDs") {
+    if (mode === "released assigned IDs" || omittedMetadata) {
       // The scanner now generates different IDs for the original native rows.
-      await expect(f.prepareFile()).rejects.toThrow(
-        "pending hosted Cloud request",
-      );
+      await expect(f.prepareFile()).rejects.toThrow("pending hosted");
       expect(await readFile(oldPath, "utf8")).toBe(bytes);
       expect(f.posts).toHaveLength(1);
       return;
@@ -2688,7 +2895,8 @@ test.each([
       ).rejects.toThrow(older);
     }
     const disjoint = prepareRows([unrelated]);
-    if (released) expect((await disjoint).preview.resumed).toBe(false);
+    if (released || mode === "per-finding metadata")
+      expect((await disjoint).preview.resumed).toBe(false);
     else await expect(disjoint).rejects.toThrow(older);
     expect(f.posts).toHaveLength(1);
     expect(await readFile(oldPath, "utf8")).toBe(bytes);
@@ -6540,6 +6748,37 @@ test("Semgrep publication preserves identity across JSON and SARIF with explicit
     result: semgrepSarif().runs[0]!.results[0],
   });
 });
+
+test.each([
+  ["semgrep", semgrepJson],
+  ["opengrep", opengrepJson],
+] as const)(
+  "%s file retries a released request with its original source URL after a rename",
+  async (provider, scannerOutput) => {
+    const f = await fixture(scannerOutput());
+    const originalUrl = f.destination().url;
+    const prepare = (sourceRepositoryUrl: string) =>
+      prepareExternalPublication(
+        f.file,
+        { ...options, provider, sourceRepositoryUrl },
+        f.deps,
+      );
+    const original = await prepare(originalUrl);
+    const pending = await f.loseResponse(original);
+    await useReleasedCheckpoint(pending);
+    f.state.repositoryUrl = "https://github.com/example/renamed";
+
+    await expect(prepare("https://github.com/other/project")).rejects.toThrow(
+      /does not match/,
+    );
+    const retry = await prepare(originalUrl);
+    expect(retry.preview.resumed).toBe(true);
+    expect(retry.preview.requests).toEqual(original.preview.requests);
+    await retry.publish();
+    expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+    expect(f.receipts.size).toBe(1);
+  },
+);
 
 test("OpenGrep publication retains grouped evidence through Cloud readback and replay", async () => {
   const input = opengrepTraceJson();

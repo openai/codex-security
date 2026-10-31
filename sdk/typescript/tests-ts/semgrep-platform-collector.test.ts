@@ -47,30 +47,78 @@ function responses(...pages: Response[]) {
   };
 }
 
-test("the hosted collector preserves encoded query and fragment characters in a Git path", async () => {
-  const native = {
-    ...project,
-    url: "https://git.example.test/team/tool%3Fone%23two",
-  };
-  const report = await collectSemgrepPlatformFindings(options, {
-    environment,
-    fetch: async (endpoint) =>
-      Response.json(
-        endpoint.pathname.endsWith("/findings")
-          ? { findings: [] }
-          : { project: native },
-      ),
-  });
-  expect(report.project.url).toBe(native.url);
-  expect(() =>
-    selectSemgrepPlatformFindings({
+test.each(["%23", "%3F"])(
+  "a Git project path containing %s stays in the complete report",
+  async (encoded) => {
+    const native = {
+      ...project,
+      url: `https://git.example.test/team/tool${encoded}one`,
+    };
+    const numeric = {
+      id: 23,
+      ref: options.ref,
+      repository: { url: native.url },
+      rule_name: "example.rule",
+      severity: "informational",
+      location: { file_path: "src/main.ts", line: 2 },
+    };
+    const quoted = {
+      ...numeric,
+      id: 24,
+      location: { ...numeric.location, line: "2" },
+    };
+    const rows = [numeric, quoted];
+    const report = await collectSemgrepPlatformFindings(options, {
+      environment,
+      fetch: async (endpoint) =>
+        Response.json(
+          endpoint.pathname.endsWith("/findings")
+            ? { findings: rows }
+            : { project: native },
+        ),
+    });
+    const input = {
       ...options,
       projectResponse: JSON.stringify({ project: native }),
-      findingsResponses: [],
-      findingIds: ["23"],
-    }),
-  ).toThrow(/repository path/);
-});
+      findingsResponses: [JSON.stringify({ findings: rows })],
+      findingIds: ["23", "24"],
+    };
+    expect(() => selectSemgrepPlatformFindings(input)).toThrow(
+      /repository path/,
+    );
+    expect(() =>
+      normalizeSelectedSemgrepPlatformFindings({
+        ...input,
+        sourceRepositoryUrl: native.url,
+      }),
+    ).toThrow(/repository path/);
+    expect(() =>
+      normalizeSemgrepPlatformFindings({
+        ...report,
+        format: "semgrep-platform-selection/v1",
+      }),
+    ).toThrow(/repository path/);
+    const batch = normalizeSemgrepPlatformFindings(report);
+    expect(batch.excluded).toEqual([]);
+    expect(batch.findings).toHaveLength(2);
+    for (const row of batch.findings) {
+      expect(row.evidence).toMatchObject({
+        severity: "informational",
+        locations: [{ path: "src/main.ts", line: 2 }],
+        source_data: { format: report.format },
+      });
+      expect(semgrepPlatformFindingRepository(row, "semgrep")).toBe(native.url);
+    }
+    const legacy = normalizeSemgrepPlatformFindings({
+      ...report,
+      format: "semgrep-platform-findings/v1",
+      project: native,
+      findings: rows,
+    });
+    expect(legacy.excluded.map((item) => item.position)).toEqual([2]);
+    expect(legacy.findings).toEqual([batch.findings[0]!]);
+  },
+);
 
 test("a supplied empty repository URL remains bulk-only on capture and replay", async () => {
   const row = {
@@ -232,6 +280,36 @@ test("a normalized Platform report binds native rows even when both projects hav
     },
   );
   const prepare = fixture.prepareNormalized;
+  const nativeProject = { ...report.project, url: upstream };
+  const row = {
+    id: 9,
+    rule_name: "example.rule",
+    ref: report.ref,
+    repository: { id: nativeProject.id, url: nativeProject.url },
+  };
+  const selection = normalizeSemgrepPlatformFindings(
+    selectSemgrepPlatformFindings({
+      deployment: report.deployment,
+      ref: report.ref,
+      projectResponse: JSON.stringify({ project: nativeProject }),
+      findingsResponses: JSON.stringify({ findings: [row] }),
+      findingIds: ["9"],
+    }),
+  );
+  const strong = normalizeSemgrepPlatformFindings({
+    ...report,
+    project: nativeProject,
+    findings: [JSON.stringify(row)],
+  });
+  expect((await prepare(upstreamReport)).preview.findings).toHaveLength(1);
+  expect(
+    (await prepare({ ...selection, findings: strong.findings })).preview
+      .findings,
+  ).toEqual(selection.findings);
+  await expect(
+    prepare({ ...selection, findings: upstreamReport.findings }),
+  ).rejects.toThrow(/selected project and ref/i);
+
   await expect(
     prepare({ ...upstreamReport, findings: forkReport.findings }),
   ).rejects.toThrow(/report repository/i);
@@ -257,6 +335,14 @@ test("a normalized Platform report binds native rows even when both projects hav
   ordinary.source_finding_id = "ordinary";
   delete ordinary.evidence.source_data;
   ordinary.evidence.branch = "topic";
+  await expect(
+    prepareNormalizedLocalImport(
+      { ...incomplete, findings: [ordinary] },
+      { ...source, provider: "wiz", repository: fixture.repository },
+      { environment: fixture.environment },
+    ),
+  ).rejects.toThrow(/scope.*source format/i);
+
   expect(
     (
       await prepare({
@@ -266,6 +352,36 @@ test("a normalized Platform report binds native rows even when both projects hav
       })
     ).preview.findings,
   ).toHaveLength(2);
+  const matching = normalizeSemgrepFindings(
+    semgrepSarif(),
+    { sourceRepositoryUrl: upstream },
+    "local",
+  ).findings[0]!;
+  const combined = {
+    ...upstreamReport,
+    read: 2,
+    findings: [...upstreamReport.findings, matching],
+  };
+  await expect(
+    prepareNormalizedLocalImport(
+      combined,
+      { ...source, repository: fixture.repository },
+      {
+        environment: fixture.environment,
+        sourceRepositories: [{ url: upstream }, { url: fork }],
+      },
+    ),
+  ).rejects.toThrow(/source repository.*selected Semgrep project/i);
+  const supplyChain = normalize(upstream, "77", { product: "sca" });
+  const nativeAdvisory = structuredClone(supplyChain.findings[0]!);
+  nativeAdvisory.evidence.details = matching.evidence.details;
+  await expect(
+    prepare({ read: 1, excluded: [], findings: [nativeAdvisory] }),
+  ).rejects.toThrow(/product/);
+
+  await expect(
+    prepare({ ...supplyChain, findings: [matching] }),
+  ).rejects.toThrow(/product/);
   for (const claim of [{ url: fork }, { branch: "refs/heads/other" }]) {
     const projected = structuredClone(ordinary);
     if (claim.url) projected.evidence.details!.repository!.url = claim.url;
@@ -280,6 +396,38 @@ test("a normalized Platform report binds native rows even when both projects hav
       /repository|scope|branch|ref/i,
     );
   }
+  const retainedBranch = (branch: string) => {
+    const sarif = semgrepSarif();
+    Object.assign(sarif.runs[0]!, {
+      versionControlProvenance: [{ repositoryUri: upstream, branch }],
+    });
+    return normalizeSemgrepFindings(
+      sarif,
+      { sourceRepositoryUrl: upstream },
+      "local",
+    ).findings[0]!;
+  };
+  const sarifRow = retainedBranch("topic");
+  expect(sarifRow.evidence.branch ?? null).toBeNull();
+  expect(
+    (await prepare({ ...upstreamReport, findings: [sarifRow] })).preview
+      .findings,
+  ).toHaveLength(1);
+  const tagRow = retainedBranch("refs/tags/topic");
+  await expect(
+    prepare({ ...upstreamReport, findings: [tagRow] }),
+  ).rejects.toThrow(/branch.*ref/);
+  await expect(
+    prepare({ ...upstreamReport, findings: [retainedBranch("main")] }),
+  ).rejects.toThrow(/branch.*ref/);
+  const tagScope = normalize(upstream, "77", { ref: "refs/tags/topic" });
+  expect(
+    (await prepare({ ...tagScope, findings: [tagRow] })).preview.findings,
+  ).toHaveLength(1);
+  expect(
+    (await prepare({ read: 1, excluded: [], findings: [tagRow] })).preview
+      .findings,
+  ).toHaveLength(1);
   const duck = structuredClone(ordinary);
   duck.source_finding_id = `blackduck-bom:${"a".repeat(64)}`;
   duck.evidence.source_data = { sourceRepositoryUrl: fork };
@@ -1418,16 +1566,16 @@ test("CLI escapes human-readable output while retaining native JSON and YAML", a
   }
 });
 
-test("CLI escapes bidirectional controls in Semgrep error diagnostics", async () => {
+test("CLI preserves native Semgrep error details in structured output and escapes the terminal diagnostic", async () => {
   const cli = createCliTest(main);
-  const code = await cli.runCli(cliArgs, {
+  const detail = "scope \u202edenied\npermissions:\tread";
+  const code = await cli.runCli([...cliArgs, "--full-output"], {
     ...dependencies({ environment }),
-    hostedScannerFetch: responses(
-      new Response("scope \u202edenied", { status: 403 }),
-    ).fetch,
+    hostedScannerFetch: responses(new Response(detail, { status: 403 })).fetch,
   });
   expect(code).toBe(2);
-  expect(cli.stderr.text()).toContain("scope \\u202edenied");
+  expect(cli.stderr.text()).toContain("scope \\u202edenied permissions: read");
+  expect(JSON.parse(cli.stdout.text()).error.message).toContain(detail);
 });
 
 test("CLI checks opt-in and token origin before fetching", async () => {
@@ -1648,6 +1796,36 @@ test("a verified alias remains replayable with or without a reader platform hint
     await expect(
       prepareNormalizedLocalImport(forged, settings, dependencies),
     ).rejects.toThrow(/alias|repository/);
+  }
+
+  // This target's own name establishes the name, so it needs no witness.
+  const target = read({
+    ...report,
+    project: { ...report.project, id: "20", name: repository.name },
+    findings: [report.findings[0]!],
+    findingCount: 1,
+  }).findings[0]!;
+  target.source_finding_id = "caller-managed";
+  const data = target.evidence.source_data!;
+  const prepare = () =>
+    prepareNormalizedLocalImport(
+      { read: 1, findings: [target], excluded: [] },
+      settings,
+      dependencies,
+    );
+  const firstTarget = await prepare();
+  expect((await firstTarget.import()).counts.created).toBe(1);
+  data["repositoryWitnessJson"] = JSON.stringify({ ...repository, id: "20" });
+  expect((await (await prepare()).import()).counts.unchanged).toBe(1);
+  for (const raw of [
+    row.evidence.source_data!["repositoryWitnessJson"],
+    JSON.stringify({
+      ...repository,
+      url: "https://git.example.test/Other/Project",
+    }),
+  ]) {
+    data["repositoryWitnessJson"] = raw;
+    await expect(prepare()).rejects.toThrow(/repository/);
   }
 });
 
