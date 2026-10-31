@@ -532,60 +532,69 @@ test.skipIf(process.platform === "win32")(
   },
 );
 
-test("an unlisted legacy origin uses Git's effective default fetch URL", async () => {
-  await using fixture = await localReportFixture();
-  await fixture.writeJson(selectedRepository(url, url));
-  expect((await fixture.prepare()).preview.findings).toHaveLength(1);
-  const remotes = join(fixture.repository, ".git", "remotes");
-  await mkdir(remotes, { recursive: true });
-  const origin = join(remotes, "origin");
-  await writeFile(join(remotes, ".keep"), "");
-  expect((await fixture.prepare()).preview.findings).toHaveLength(1);
-  await writeFile(origin, "URL: " + url + "\n");
-  // Git versions that retain the remotes/ format expose it via ls-remote --get-url.
-  if (
-    fixture.git("ls-remote", "--get-url", "--", "origin").toString().trim() ===
-    "origin"
-  )
-    return;
-  expect((await fixture.prepare()).preview.findings).toHaveLength(1);
-  await writeFile(origin, "URL: https://github.com/wrong/project\n");
-  await expect(fixture.prepare()).rejects.toThrow("configured remote");
-  fixture.git("symbolic-ref", "HEAD", "refs/heads/selected");
-  fixture.git("config", "branch.selected.remote", "origin");
-  fixture.git(
-    "config",
-    "remote.backup.pushurl",
-    "https://github.com/wrong/push",
-  );
-  await expect(fixture.prepare()).rejects.toThrow("configured remote");
-  await writeFile(origin, "URL: " + url + "\n");
-  expect((await fixture.prepare()).preview.findings).toHaveLength(1);
-});
-
-test("Git's nondefault legacy source is checked for an otherwise unbound checkout", async () => {
-  await using fixture = await localReportFixture();
-  await fixture.writeJson(selectedRepository(url, url));
-  const dir = join(fixture.repository, ".git", "remotes");
-  await mkdir(dir, { recursive: true });
-  const source = join(dir, "upstream");
-  const file =
-    process.platform === "win32"
-      ? source
-      : join(fixture.repository, ".git", "legacy-descriptor");
-  if (file !== source) await symlink(file, source);
-  await writeFile(file, "URL: https://github.com/wrong/project\n");
-  if (
-    fixture
-      .git("ls-remote", "--get-url", "--", "upstream")
+test.each(["remotes", "branches"])(
+  "legacy .git/%s entries require a named fetch URL",
+  async (kind) => {
+    await using fixture = await localReportFixture();
+    await fixture.writeJson(selectedRepository(url, url));
+    const dir = join(fixture.repository, ".git", kind);
+    await mkdir(dir, { recursive: true });
+    expect((await fixture.prepare()).preview.findings).toHaveLength(1);
+    const branch = fixture
+      .git("symbolic-ref", "--short", "HEAD")
       .toString()
-      .trim() === "upstream"
-  )
-    return;
-  await expect(fixture.prepare()).rejects.toThrow("configured remote");
-  await writeFile(file, "URL: " + url + "\n");
-  expect((await fixture.prepare()).preview.findings).toHaveLength(1);
-});
+      .trim();
+    fixture.git("config", `branch.${branch}.remote`, url + "-other");
+    await expect(fixture.prepare()).rejects.toThrow(
+      "does not match a configured remote",
+    );
+    fixture.git("config", `branch.${branch}.remote`, url);
+    expect((await fixture.prepare()).preview.findings).toHaveLength(1);
+    await writeFile(
+      join(dir, "origin"),
+      kind === "remotes" ? `URL: ${url}\n` : url,
+    );
+    await expect(fixture.prepare()).rejects.toThrow(
+      "Configure a named Git fetch URL",
+    );
+    fixture.git("remote", "add", "scanner-origin", url);
+    expect((await fixture.prepare()).preview.findings).toHaveLength(1);
+    fixture.git("remote", "set-url", "scanner-origin", url + "-other");
+    await expect(fixture.prepare()).rejects.toThrow(
+      "does not match a configured remote",
+    );
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "legacy remote links and FIFOs require a named fetch URL",
+  async () => {
+    await using fixture = await localReportFixture();
+    await fixture.writeJson(selectedRepository(url, url));
+    const dir = join(fixture.repository, ".git", "remotes");
+    const empty = join(fixture.root, "empty");
+    const fifo = join(fixture.root, "fifo");
+    const origin = join(dir, "origin");
+    const expectNamedUrl = () =>
+      expect(fixture.prepare()).rejects.toThrow(
+        "Configure a named Git fetch URL",
+      );
+    await mkdir(empty);
+    await symlink(empty, dir);
+    await expectNamedUrl();
+    await unlink(dir);
+    await mkdir(dir);
+    execFileSync("mkfifo", [fifo, origin]);
+    await expectNamedUrl();
+    for (const target of [fixture.file, fifo]) {
+      await unlink(origin);
+      await symlink(target, origin);
+      await expectNamedUrl();
+    }
+    fixture.git("remote", "add", "scanner-origin", url);
+    expect((await fixture.prepare()).preview.findings).toHaveLength(1);
+  },
+);
 
 test.each([
   ["127.0.0.1", "127.0.0.1", true],

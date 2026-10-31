@@ -74,12 +74,11 @@ Pass the response text directly to the selector to preserve numeric IDs and
 other numeric evidence exactly. Keep the responses and selection together in a
 private directory outside the checkout. Run this example in that directory
 with the SDK installed. Local preview compares the project URL with Git’s
-named remotes and the branch’s default fetch URL offline. For an otherwise
-unbound checkout, it also asks Git about its legacy remote files. To use an
-additional legacy source in a checkout that already has a network remote,
-configure that source as a named Git remote or the branch’s default fetch
-source. SSH command overrides and DNS routing are controlled by the local
-Git and SSH clients.
+named fetch URLs offline. If a checkout only has legacy or unreadable Git remote
+metadata, configure a normal named fetch URL first, for example
+`git remote add scanner-origin <verified-url>`. Checkouts with empty or absent
+legacy remote directories can also use Git's default fetch source. The local
+Git and SSH clients control SSH command overrides and DNS routing.
 
 ```js
 import { readFile, writeFile } from "node:fs/promises";
