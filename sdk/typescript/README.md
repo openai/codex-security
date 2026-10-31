@@ -13,7 +13,7 @@ security plugin, and TypeScript declarations. It uses ES modules.
   findings to Linear or a findings service.
 - Import [Snyk findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md) from
   official plugin JSON or native CLI JSON locally or into Cloud; Open Source
-  SARIF is also supported. Import existing Snyk Open Source or Code issues locally with `import snyk`.
+  SARIF is also supported. Collect existing Snyk Open Source or Code issues with `import snyk` and publish them locally or to Cloud.
   For a private repository with a verified SCM, the local SDK accepts its URL
   and `platform: "gitlab"` or `"github"` in `sourceRepositories` to match
   standard SSH clone URLs.
