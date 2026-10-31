@@ -3,17 +3,26 @@ import type { HostDiagnosticBatch } from "./host-protocol.js";
 
 const maxRecords = 64;
 
+/** Node resolves the private import only when the host activates this condition. */
+export function severityDiagnosticsEnabled(): boolean {
+  try {
+    import.meta.resolve("#classify-severity-records-logs");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** The host receives the CLI's original JSON lines on existing protocol writes. */
 export function createSeverityDiagnostics(now: () => number) {
   let records: string[] = [];
-  let accepted = 0;
   let dropped = 0;
 
   function emit(code: SeverityDiagnosticCode, ordinal?: number) {
-    // Reserve a record for the terminal result, even for large SDK batches.
+    // Reserve space in the pending frame for the terminal result.
     if (
-      accepted >= maxRecords ||
-      (accepted >= maxRecords - 1 && !code.startsWith("exit_"))
+      records.length >= maxRecords ||
+      (records.length >= maxRecords - 1 && !code.startsWith("exit_"))
     ) {
       dropped++;
       return;
@@ -27,7 +36,6 @@ export function createSeverityDiagnostics(now: () => number) {
           ordinal,
         }),
       );
-      accepted++;
     } catch {
       dropped++;
     }

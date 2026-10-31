@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { PassThrough } from "node:stream";
+import { runCommand } from "./support/shell.js";
 import { createSeverityDiagnostics } from "../src/classify-severity-diagnostics.js";
 import { runHostRecordsProtocol } from "../src/host-records-protocol.js";
 import type { HostDiagnosticBatch } from "../src/host-protocol.js";
@@ -90,16 +91,20 @@ test.each([false, true])(
   },
 );
 
-test("bounds diagnostics across writes and reserves the final record", () => {
+test("bounds pending diagnostics and keeps later review failures after a flush", () => {
   const diagnostics = createSeverityDiagnostics(() => timestamp);
   for (let i = 0; i < 1536; i++) diagnostics.emit("review_requested", 1);
   const request = diagnostics.take({ method: "review.run" })!;
   expect(request.records).toHaveLength(63);
   expect(request.dropped).toBe(1474);
   expect(diagnostics.take({ method: "review.run" })).toBeUndefined();
+  diagnostics.emit("review_failed", 2);
   expect(
     diagnostics.take({ error: { code: -32800, message: "private-sentinel" } }),
-  ).toEqual({ records: [original("exit_cancelled")], dropped: 0 });
+  ).toEqual({
+    records: [original("review_failed", 2), original("exit_cancelled")],
+    dropped: 0,
+  });
 });
 
 test("diagnostic clock failures only affect the reported drop count", () => {
@@ -108,3 +113,36 @@ test("diagnostic clock failures only affect the reported drop count", () => {
     diagnostics.take({ error: { code: -32602, message: "private-sentinel" } }),
   ).toEqual({ records: [], dropped: 2 });
 });
+
+test.each([
+  ["long", ["--conditions=codex-security-records-logs-v1"], "", true],
+  ["separate", ["--conditions", "codex-security-records-logs-v1"], "", true],
+  ["short", ["-C", "codex-security-records-logs-v1"], "", true],
+  ["environment", [], "--conditions=codex-security-records-logs-v1", true],
+  ["unrelated", ["--conditions=another-feature"], "", false],
+] as const)(
+  "resolves the %s Node condition",
+  async (_name, flags, options, enabled) => {
+    const source = new URL(
+      "../src/classify-severity-diagnostics.ts",
+      import.meta.url,
+    ).href;
+    const js = `import { severityDiagnosticsEnabled } from ${JSON.stringify(source)}; console.log(severityDiagnosticsEnabled());`;
+    const { status, stdout } = await runCommand(
+      "node",
+      [
+        "--no-warnings",
+        "--experimental-strip-types",
+        ...flags,
+        "--input-type=module",
+        "-e",
+        js,
+      ],
+      {
+        env: { ...process.env, NODE_OPTIONS: options },
+      },
+    );
+    expect(status).toBe(0);
+    expect(stdout.trim()).toBe(String(enabled));
+  },
+);

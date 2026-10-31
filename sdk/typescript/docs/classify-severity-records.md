@@ -63,7 +63,7 @@ The CLI attaches `cliDiagnostics` to its existing review requests and final resu
 
 Hosts should process the optional field before their usual response validation. A host may discard it. Hosts that omit the Node condition receive the original wire format. Older CLIs ignore the condition. A host can use the same launch command during an upgrade. No extra frame or acknowledgment is required.
 
-The CLI emits at most 64 records per invocation, reserving room for the final outcome. Each batch reports how many records were dropped since the previous batch. If the process or connection disappears before the next write, its pending records cannot be delivered. Native startup or usage errors can still appear on stderr.
+Each outgoing frame can carry at most 64 records, reserving room for the final outcome. Sending a batch frees space for later reviews. Each batch includes the number dropped since the preceding write. If the process or connection disappears before the next write, its pending records cannot be delivered. Native startup or usage errors can still appear on stderr.
 
 ## Host execution contract
 
