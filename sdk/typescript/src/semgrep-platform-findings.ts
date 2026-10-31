@@ -7,6 +7,7 @@ import {
   normalizeRecords,
   record,
   relativePath,
+  repositoryFilePath,
   requiredText,
   stableId,
   text,
@@ -68,18 +69,8 @@ function parseSemgrepResponse(json: string): Record<string, unknown> {
   return responseRecord(
     JSON.parse(
       json.replace(/^\uFEFF/u, ""),
-      (_key: string, value: unknown, context?: { source?: string }) => {
-        if (typeof value === "number")
-          return wireJson.rawJSON(context!.source!);
-        // Vendor object order can change between reads without a finding changing.
-        if (isRecord(value))
-          return Object.fromEntries(
-            Object.keys(value)
-              .sort()
-              .map((key) => [key, value[key]]),
-          );
-        return value;
-      },
+      (_key: string, value: unknown, context?: { source?: string }) =>
+        typeof value === "number" ? wireJson.rawJSON(context!.source!) : value,
     ),
     "Semgrep API response",
   );
@@ -225,6 +216,7 @@ export function normalizeSelectedSemgrepPlatformFindings(options: {
     (finding) => {
       const rule = responseRecord(finding["rule"] ?? {}, "Semgrep rule");
       const name = text(rule["name"]) ?? text(finding["rule_name"]);
+      const severity = text(finding["severity"])?.toLowerCase() ?? "";
       const description =
         text(rule["message"]) ?? text(finding["rule_message"]);
       const location = responseRecord(
@@ -232,13 +224,11 @@ export function normalizeSelectedSemgrepPlatformFindings(options: {
         "Semgrep location",
       );
       const relative = relativePath(location["file_path"]);
-      const filename = relative?.split("/").at(-1);
       const path =
         relative &&
-        filename &&
-        filename !== "." &&
-        !/^[a-z][a-z\d+.-]*:/iu.test(relative) &&
-        !relative.includes("://")
+        !relative.endsWith("/.") &&
+        !relative.includes("://") &&
+        repositoryFilePath(relative)
           ? relative
           : null;
       const startLine = path ? sourceLine(location["line"]) : null;
@@ -246,7 +236,9 @@ export function normalizeSelectedSemgrepPlatformFindings(options: {
         {
           title: requiredText(name ?? description, "Semgrep finding title"),
           description,
-          severity: text(finding["severity"])?.toLowerCase() ?? "unknown",
+          severity: ["low", "medium", "high", "critical"].includes(severity)
+            ? severity
+            : "unknown",
           locations: path ? [{ path, line: startLine }] : [],
           branch: scope.ref,
           details: {
@@ -264,19 +256,23 @@ export function normalizeSelectedSemgrepPlatformFindings(options: {
           source_data: {
             format: "semgrep-platform-selection/v1",
             ...scope,
-            project: { ...scope.project },
+            project: {
+              ...scope.project,
+              id: text(native["id"]) ?? scope.project.id,
+            },
             semgrepPlatformFindingJson: JSON.stringify(
               finding,
-              function (key, value: unknown) {
-                if (!wireJson.isRawJSON(value)) return value;
-                const nativeId =
-                  key === "id" &&
-                  (this === finding || this === finding["repository"]);
-                return wireJson.rawJSON(
-                  nativeId
-                    ? requiredPlatformId(value)
-                    : canonicalNumber(value.rawJSON),
-                );
+              (_key, value: unknown) => {
+                if (wireJson.isRawJSON(value))
+                  return wireJson.rawJSON(canonicalNumber(value.rawJSON));
+                // Native object key order can vary across otherwise identical reads.
+                if (isRecord(value))
+                  return Object.fromEntries(
+                    Object.keys(value)
+                      .sort()
+                      .map((key) => [key, value[key]]),
+                  );
+                return value;
               },
             ),
           },
