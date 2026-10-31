@@ -23,18 +23,21 @@ const page = (id: string, branch = ref, repo = url) =>
   `{"findings":[{"id":${id},"ref":"${branch}","repository":{"url":"${repo}"},"rule":{"name":"example.rule"},"severity":"medium","location":{"file_path":"src/app.ts","line":2},"score":1.00000000000000001,"units":9007199254740993,"magnitude":1e100000}]}`;
 
 test("reimporting two selected IDs from a non-default branch leaves both SQLite records unchanged", async () => {
-  await using fixture = await localFindingsFixture({ remote: url });
-  execFileSync("git", [
-    "-C",
-    fixture.repository,
-    "switch",
-    "--quiet",
-    "--orphan",
-    "topic",
-  ]);
+  await using fixture = await localFindingsFixture({
+    remote: url,
+    isolatedGit: true,
+  });
+  execFileSync(
+    "git",
+    ["-C", fixture.repository, "switch", "--quiet", "--orphan", "topic"],
+    {
+      env: fixture.environment,
+    },
+  );
   expect(
     execFileSync("git", ["-C", fixture.repository, "symbolic-ref", "HEAD"], {
       encoding: "utf8",
+      env: fixture.environment,
     }).trim(),
   ).toBe(ref);
   const options = {
@@ -190,12 +193,19 @@ test("equivalent numeric IDs replay as integers while textual IDs stay exact", (
   expect(select("8e0", "8", "77e0")).toEqual(original);
   for (const token of ['"8.0"', '"8e0"', "8.00000000000000001"])
     expect(() => select(token)).toThrow("missing");
+  const int64Max = "9223372036854775807";
+  expect(select("9.223372036854775807e18", int64Max)).toEqual(
+    select(int64Max, int64Max),
+  );
   const large = "12345678901234567890123";
   expect(select(large + ".0", large)).toEqual(select(large, large));
   expect(select(large + "e0", large)).toEqual(select(large, large));
   expect(
     select(large, large).evidence.source_data?.["semgrepPlatformFindingJson"],
-  ).toContain('"id":' + large + ",");
+  ).toContain('"id":1.2345678901234567890123e+22,');
+  const power = "1000000000000000000000";
+  expect(select("1e21", power)).toEqual(select(power, power));
+  expect(() => select("1.0000000000000000000001e21", power)).toThrow("missing");
 });
 
 test("a URL-less row needs the matching project ID and full name, while an exact URL identifies the path of a short-named project", () => {
@@ -217,11 +227,9 @@ test("a URL-less row needs the matching project ID and full name, while an exact
     });
   }
   const name = "example/project";
-  for (const pseudo of ["./project", "../project", " /project", "C:/project"]) {
-    expect(() => select(pseudo, { id: 77, name: pseudo })).toThrow(
-      "project and ref",
-    );
-  }
+  expect(() =>
+    select("old-group/project", { id: 77, name: "old-group/project" }),
+  ).toThrow("project and ref");
   expect(select(name, { id: 77, name }).findings).toHaveLength(1);
   expect(select("project", { id: 77, name }).findings).toHaveLength(1);
   expect(() => select("project", { id: 77, name: "project" })).toThrow(
@@ -272,5 +280,25 @@ test("a fractional source position cannot round to an integer during projection"
     });
     expect(result.findings).toHaveLength(0);
     expect(result.excluded).toHaveLength(1);
+  }
+});
+
+test("only repository-relative files are projected and original paths remain in evidence", () => {
+  for (const path of [
+    "file:src/app.ts",
+    "data:text/plain,hello",
+    "generated:/api.ts",
+    ".",
+    "src/",
+  ]) {
+    const result = normalizeSelectedSemgrepPlatformFindings({
+      ...source,
+      findingIds: ["8"],
+      findingsResponses: page("8").replace("src/app.ts", path),
+    }).findings[0]!;
+    expect(result.evidence.locations).toEqual([]);
+    expect(
+      result.evidence.source_data?.["semgrepPlatformFindingJson"],
+    ).toContain(JSON.stringify(path));
   }
 });

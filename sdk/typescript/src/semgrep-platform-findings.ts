@@ -25,7 +25,7 @@ function responseRecord(value: unknown, label: string) {
 }
 
 // Normalize equivalent JSON numbers exactly. Keep very large exponents compact.
-function canonicalNumber(token: string, fixedDigits = 21): string {
+function canonicalNumber(token: string): string {
   const [, sign = "", integer, fraction = "", exponent = "0"] =
     /^(-?)(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/iu.exec(token)!;
   const significant = (integer + fraction).replace(/^0+/u, "");
@@ -35,7 +35,7 @@ function canonicalNumber(token: string, fixedDigits = 21): string {
   const digits = significant.slice(0, end);
   const point = BigInt(exponent) + BigInt(significant.length - fraction.length);
   // Ordinary evidence follows JSON.stringify’s fixed/scientific notation thresholds.
-  if (point > -6n && point <= BigInt(fixedDigits)) {
+  if (point > -6n && point <= 21n) {
     const split = Number(point);
     if (split <= 0) return sign + "0." + "0".repeat(-split) + digits;
     if (split >= digits.length) return sign + digits.padEnd(split, "0");
@@ -86,17 +86,20 @@ function parseSemgrepResponse(json: string): Record<string, unknown> {
 }
 
 function platformId(value: unknown): string | undefined {
-  let id = value;
-  if (wireJson.isRawJSON(value)) {
-    const token = value.rawJSON;
-    // IDs stay in decimal form. Beyond int64, retain digits supplied on the wire without expanding unbounded exponents.
-    id = /^[1-9][0-9]*$/u.test(token)
-      ? token
-      : canonicalNumber(token, Math.max(21, token.length));
-  } else if (typeof value === "number" && Number.isSafeInteger(value)) {
-    id = String(value);
-  }
-  return typeof id === "string" && /^[1-9][0-9]*$/u.test(id) ? id : undefined;
+  if (typeof value === "number")
+    return Number.isSafeInteger(value) && value > 0 ? String(value) : undefined;
+  let token: string;
+  if (wireJson.isRawJSON(value)) token = value.rawJSON;
+  else if (typeof value === "string" && /^[1-9][0-9]*$/u.test(value))
+    token = value;
+  else return undefined;
+  const id = canonicalNumber(token);
+  if (/^[1-9][0-9]*$/u.test(id)) return id;
+  // A large scientific value is an integer only when every significant digit lies left of its decimal point.
+  const scientific = /^[1-9](?:\.(\d+))?e\+(\d+)$/u.exec(id);
+  return scientific && BigInt(scientific[2]!) >= (scientific[1]?.length ?? 0)
+    ? id
+    : undefined;
 }
 
 function requiredPlatformId(value: unknown): string {
@@ -163,13 +166,13 @@ export function normalizeSelectedSemgrepPlatformFindings(options: {
   const projectPath = decodeURIComponent(
     new URL(scope.project.url).pathname,
   ).replace(/^\/|\/$/gu, "");
-  const projectNames = [scope.project.name, projectPath];
-  // Short clone display labels accompany an exact URL; URL-less rows need the original name or path.
+  // Short clone display labels accompany an exact native URL.
   const projectLabels = new Set(
-    [...projectNames, projectPath.replace(/\.git$/u, "")].flatMap((name) => [
-      name,
-      name.split("/").at(-1)!,
-    ]),
+    [
+      scope.project.name,
+      projectPath,
+      projectPath.replace(/\.git$/u, ""),
+    ].flatMap((name) => [name, name.split("/").at(-1)!]),
   );
   for (const response of pages) {
     for (const finding of array(
@@ -190,19 +193,15 @@ export function normalizeSelectedSemgrepPlatformFindings(options: {
       const url = repo["url"];
       const name = repo["name"];
       const matchesName = typeof name === "string" && projectLabels.has(name);
-      const qualifiedName =
-        typeof name === "string" &&
-        projectNames.includes(name) &&
-        name === relativePath(name) &&
-        name.includes("/") &&
-        name.split("/").every((part) => part.trim() && part !== ".");
+      const matchesQualifiedPath =
+        name === projectPath && projectPath.includes("/");
       if (
         finding["ref"] !== scope.ref ||
         (repositoryId !== undefined && repositoryId !== scope.project.id) ||
         (repositoryId === undefined && name != null && !matchesName) ||
         (url != null
           ? url !== scope.project.url
-          : repositoryId === undefined || !qualifiedName)
+          : repositoryId === undefined || !matchesQualifiedPath)
       )
         throw new Error(
           "Selected Semgrep finding does not belong to the selected project and ref.",
@@ -240,13 +239,16 @@ export function normalizeSelectedSemgrepPlatformFindings(options: {
         finding["location"] ?? {},
         "Semgrep location",
       );
-      const filePath = text(location["file_path"]);
+      const relative = relativePath(location["file_path"]);
+      const filename = relative?.split("/").at(-1);
       const path =
-        filePath &&
-        (/^[a-z][a-z0-9+.-]*:[/\\]/iu.test(filePath) ||
-          filePath.includes("://"))
-          ? null
-          : relativePath(filePath);
+        relative &&
+        filename &&
+        filename !== "." &&
+        !/^[a-z][a-z\d+.-]*:/iu.test(relative) &&
+        !relative.includes("://")
+          ? relative
+          : null;
       const startLine = path ? sourceLine(location["line"]) : null;
       return validateExternalEvidence(
         {

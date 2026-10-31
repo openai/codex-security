@@ -126,7 +126,7 @@ Capture the project lookup and Findings API pages as original response text.
 Pass a fully qualified ref, such as `refs/heads/topic` or `refs/tags/topic`, exactly as it appears in the findings.
 Supply the HTTP(S) repository URL you independently associate with the target checkout.
 The project response and any finding URL must match this spelling. A finding without a URL
-must carry the native project ID and a namespace-qualified repository name matching the project name or repository URL path. The local importer checks the checkout using its existing repository rules.
+must carry the native project ID and a namespace-qualified repository name matching the decoded path in that URL. A project display alias with a different path needs the finding URL. The local importer checks the checkout using its existing repository rules.
 
 ```ts
 const selected = normalizeSelectedSemgrepPlatformFindings({
@@ -149,4 +149,4 @@ if (prepared.preview.excluded.length) {
 }
 ```
 
-Keep the same source key on replay. Finding identity includes the deployment, project ID, SAST product, full ref, and native finding ID. The adapter retains native JSON values with exact numeric precision. Changes to key order or equivalent number spellings such as `2` and `2.0` leave the stored record unchanged.
+Keep the same source key on replay. Finding identity includes the deployment, project ID, SAST product, full ref, and native finding ID. Semgrep’s native finding ID is a 64-bit integer. The adapter retains exact numeric values, and changes to key order or equivalent number spellings such as `2` and `2.0` leave the stored record unchanged. Only repository-relative files become locations. Names with URI-like prefixes and directory-only paths remain in the native evidence.
