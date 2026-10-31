@@ -114,8 +114,6 @@ export function parseSemgrepResponse(json: string): Record<string, unknown> {
 }
 
 function platformId(value: unknown): string | undefined {
-  if (typeof value === "number")
-    return Number.isSafeInteger(value) && value > 0 ? String(value) : undefined;
   let token: string;
   if (wireJson.isRawJSON(value)) token = value.rawJSON;
   else if (typeof value === "string" && /^[1-9][0-9]*$/u.test(value))
@@ -174,7 +172,12 @@ export function semgrepReferenceMatches(
   url: string,
 ): boolean {
   // A standard explicit Git HTTP(S) helper carries the same fetch URL.
-  url = url.replace(/^(https?)::(?=\1:\/\/)/u, "");
+  const helper = /^(https?)::(?=([a-zA-Z]+):\/\/)/u.exec(url);
+  if (helper)
+    return (
+      helper[1] === helper[2]!.toLowerCase() &&
+      hostedRepositoryMatches(source, url.slice(helper[0].length))
+    );
   if (hostedRepositoryMatches(source, url)) return true;
   try {
     // Serialize only a valid repository link. Git checkout URLs retain their original bytes.
@@ -256,40 +259,21 @@ function checkRow(
     repo["url"] == null
       ? null
       : declaredScannerRepositoryUrl(repo["url"], "Semgrep finding", "local");
-  const fullName = repository.name(scope.project.name);
   const name = repo["name"];
   const rowName = typeof name === "string" ? repository.name(name) : null;
-  // Source URLs were checked segment-by-segment before matching display names.
   const encodedPath = new URL(scope.project.url).pathname.replace(
     /^\/|\/$/gu,
     "",
   );
-  const paths = [encodedPath, decodeURIComponent(encodedPath)].map(
-    repository.name,
-  );
-  const originalNames = [fullName, ...paths];
-  // A short or clone label accompanies an independently checked URL. A URL-less row needs the original qualified name or path.
-  const labels = [
-    ...originalNames,
-    ...paths.map((path) => path.replace(/\.git$/u, "")),
-  ];
-  const matchedName = labels.some(
-    (label) => label === rowName || label.split("/").at(-1) === rowName,
-  );
+  // Archived captures may retain the encoded path spelling as their repository name.
   const qualifiedName =
-    rowName !== null &&
-    (capture
-      ? rowName === repository.name(decodeURIComponent(encodedPath)) &&
-        rowName.includes("/")
-      : originalNames.includes(rowName) &&
-        rowName === relativePath(rowName) &&
-        rowName.includes("/") &&
-        rowName.split("/").every((part) => part.trim() && part !== "."));
+    rowName?.includes("/") &&
+    (rowName === repository.name(decodeURIComponent(encodedPath)) ||
+      (!capture && rowName === repository.name(encodedPath)));
   if (
     finding["ref"] !== scope.ref ||
     (repositoryId !== undefined &&
       repositoryId !== semgrepPlatformId(wireJson.rawJSON(scope.project.id))) ||
-    (repositoryId === undefined && name != null && !matchedName) ||
     (url !== null
       ? repository.key(url) !== repository.key(scope.project.url)
       : repositoryId === undefined || !qualifiedName)
@@ -348,7 +332,11 @@ function selectedRows(
       "Use a fully qualified Semgrep ref such as refs/heads/topic.",
     );
   const repository = repositoryFor(scope);
-  const wanted = new Set(options.findingIds.map(semgrepPlatformId));
+  const wanted = new Set(
+    options.findingIds.map((id) =>
+      semgrepPlatformId(requiredText(id, "Selected Semgrep finding ID")),
+    ),
+  );
   if (!wanted.size) throw new Error("Select at least one Semgrep finding ID.");
   const selected = new Map<string, Record<string, unknown>>();
   const pages =
@@ -577,8 +565,7 @@ function normalizeSelectionRows(
       const startLine = path ? sourceLine(location["line"]) : null;
       return validateExternalEvidence(
         {
-          title:
-            name ?? description ?? `Semgrep finding ${idOf(finding["id"])}`,
+          title: requiredText(name ?? description, "Semgrep finding title"),
           description,
           severity: text(finding["severity"])?.toLowerCase() ?? "unknown",
           locations: path ? [{ path, line: startLine }] : [],
