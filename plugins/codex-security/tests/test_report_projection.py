@@ -803,6 +803,20 @@ def test_projection_escapes_raw_html_in_markdown() -> None:
     assert r'\<img src="x" onerror="alert(1)"\>' in markdown_text
 
 
+def test_projection_keeps_ranges_links_and_strikethrough_tildes() -> None:
+    manifest, findings, coverage = canonical_documents()
+    url = "https://example.test/~alice?version=~1"
+    findings["findings"][0]["summary"] = f"Retries 3–5 times, then 5–10 times. See {url}"
+    findings["findings"][0]["remediation"] = (
+        "Use the unstruck command: chmod 0~777 or chmod 0~600 key.pem"
+    )
+
+    markdown_text = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert f"Retries 3–5 times, then 5–10 times. See {url}" in markdown_text
+    assert "chmod 0~777 or chmod 0~600 key.pem" in markdown_text
+
+
 def test_projection_keeps_html_entities_literal_in_markdown() -> None:
     manifest, findings, coverage = canonical_documents()
     findings["findings"][0]["summary"] = "Sanitizer decodes &#x3C;script&#x3E; and &amp;lt;"
