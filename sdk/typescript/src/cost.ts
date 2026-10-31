@@ -254,7 +254,7 @@ export class ScanCostTracker {
       this.#options.onActivity === undefined
         ? undefined
         : this.#options.repository;
-    const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
+    const unreadable = new Map<SessionUsage, unknown>();
     for await (const path of sessionFiles(
       join(this.#options.codexHome, "sessions"),
     )) {
@@ -266,8 +266,7 @@ export class ScanCostTracker {
       try {
         await readSessionUsage(path, session, repository);
       } catch (error) {
-        if (session.threadId === null) throw error;
-        unreadable.push({ session, error });
+        unreadable.set(session, error);
       }
     }
 
@@ -311,8 +310,12 @@ export class ScanCostTracker {
         }
       }
     } while (included.size !== previousSize);
-    for (const { session, error } of unreadable) {
-      if (included.has(session.threadId!)) throw error;
+    let failure: { error: unknown } | undefined;
+    for (const [session, error] of unreadable) {
+      if (session.threadId === null || included.has(session.threadId)) {
+        failure = { error };
+        break;
+      }
     }
 
     const usages = new Map(this.#receipts);
@@ -322,13 +325,19 @@ export class ScanCostTracker {
       let session = tracked;
       if (
         this.#options.onSessionEvent !== undefined &&
-        session.events === undefined
+        session.events === undefined &&
+        !unreadable.has(session)
       ) {
         // Replay only newly associated sessions, including their early events.
-        session = createSessionUsage(observeUsage);
-        session.events = [];
-        await readSessionUsage(path, session, repository);
-        this.#sessions.set(path, session);
+        const replayed: SessionUsage = createSessionUsage(observeUsage);
+        replayed.events = [];
+        try {
+          await readSessionUsage(path, replayed, repository);
+          session = replayed;
+          this.#sessions.set(path, session);
+        } catch (error) {
+          failure ??= { error };
+        }
       }
       let worker: number | undefined;
       if (threadId !== this.#threadId) {
@@ -373,7 +382,7 @@ export class ScanCostTracker {
       }
     }
     let usage: ScanTokenUsage | null = null;
-    let complete = true;
+    let complete = failure === undefined;
     for (const value of usages.values()) {
       if (value === null) {
         complete = false;
@@ -383,13 +392,16 @@ export class ScanCostTracker {
     }
     if (observeUsage) this.#reportUsageObservation(usages, complete);
     if (!complete) this.#snapshot = { usage: null, cost: null };
-    if (usage === null) return;
-    const cost = estimateScanCost(this.#options.model, usage);
-    if (complete) {
-      this.#snapshot = { usage, cost };
-      this.#reportUsage(usage);
+    if (usage !== null) {
+      const cost = estimateScanCost(this.#options.model, usage);
+      if (complete) {
+        this.#snapshot = { usage, cost };
+        this.#reportUsage(usage);
+      }
+      this.#reportCost(cost, complete);
     }
-    this.#reportCost(cost, complete);
+    // Keep healthy observations flowing before reporting unavailable accounting.
+    if (failure) throw failure.error;
   }
 
   #reportUsageObservation(

@@ -1096,6 +1096,177 @@ describe("live scan cost tracking", () => {
     }
   });
 
+  test.each([
+    ["EACCES", true],
+    ["EACCES", false],
+    ["EPERM", true],
+    ["EPERM", false],
+  ] as const)(
+    "keeps healthy worker observations when another log fails with %s (already identified: %j)",
+    async (code, identified) => {
+      const home = await codexHome();
+      const usage = (input_tokens: number) => ({
+        input_tokens,
+        output_tokens: 0,
+      });
+      await writeSession(home, "scan-thread", usage(10));
+      const healthy = await writeSession(home, "healthy-worker", usage(30), {
+        parent: "scan-thread",
+      });
+      const blocked = await writeSession(home, "blocked-worker", usage(20), {
+        parent: "scan-thread",
+      });
+      let denied = !identified;
+      const failure = Object.assign(new Error(`Synthetic ${code}`), {
+        code,
+        syscall: "open",
+        path: blocked,
+      });
+      const opened = filesystem.open;
+      const opening = spyOn(filesystem, "open").mockImplementation(
+        async (...args: Parameters<typeof filesystem.open>) => {
+          if (String(args[0]) === blocked && denied) throw failure;
+          return await opened(...args);
+        },
+      );
+      const activities: ScanActivity[] = [];
+      const progress: ScanProgress[] = [];
+      const events: ScanSessionEvent[] = [];
+      const costs: { tokens: number; complete: boolean }[] = [];
+      const tracker = costTracker(home, {
+        maxCostUsd: 1,
+        repository: home,
+        onActivity: (activity) => activities.push(activity),
+        onProgress: (update) => progress.push(update),
+        onSessionEvent: (event) => events.push(event),
+        onCost: (cost, complete) =>
+          costs.push({ tokens: cost.inputTokens, complete }),
+      });
+      tracker.start("scan-thread");
+      try {
+        if (identified) {
+          expect((await tracker.refresh()).cost?.inputTokens).toBe(60);
+        } else {
+          await expect(tracker.refresh()).rejects.toBe(failure);
+        }
+        denied = true;
+        const output = {
+          id: "healthy-output",
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "output_text",
+              text: "Healthy worker continues reviewing source.",
+            },
+          ],
+        };
+        await appendSessionItem(healthy, output);
+        await appendSessionItem(healthy, progressMessage(1));
+        await appendFile(
+          blocked,
+          `${JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: usage(1_000_000) } } })}\n`,
+        );
+        await expect(tracker.refresh()).rejects.toBe(failure);
+        await expect(tracker.refresh()).rejects.toBe(failure);
+
+        expect(activities).toContainEqual(
+          expect.objectContaining({
+            kind: "message",
+            description: "Healthy worker continues reviewing source.",
+          }),
+        );
+        expect(progress).toContainEqual(
+          expect.objectContaining({ filesCompleted: 1, filesTotal: 8 }),
+        );
+        expect(
+          events.filter(
+            (event) =>
+              event.threadId === "healthy-worker" &&
+              JSON.stringify(event.event["payload"]) === JSON.stringify(output),
+          ),
+        ).toHaveLength(1);
+        expect(costs.some((cost) => !cost.complete && cost.tokens >= 40)).toBe(
+          true,
+        );
+
+        denied = false;
+        const snapshot = await tracker.stop();
+        expect(snapshot.cost?.inputTokens).toBe(1_000_040);
+        expect(snapshot.cost!.estimatedUsd).toBeGreaterThan(1);
+        expect(costs.at(-1)).toEqual({ tokens: 1_000_040, complete: true });
+      } finally {
+        denied = false;
+        await tracker.stop().catch(() => {});
+        opening.mockRestore();
+      }
+    },
+  );
+
+  test("keeps healthy observations when replaying a newly associated log fails", async () => {
+    const home = await codexHome();
+    const usage = { input_tokens: 10, output_tokens: 0 };
+    await writeSession(home, "scan-thread", usage);
+    const blocked = await writeSession(home, "blocked-worker", usage, {
+      parent: "scan-thread",
+    });
+    const healthy = await writeSession(home, "healthy-worker", usage, {
+      parent: "scan-thread",
+    });
+    const output = {
+      id: "healthy-output",
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "Healthy worker output." }],
+    };
+    await appendSessionItem(healthy, output);
+    const failure = Object.assign(new Error("Synthetic replay denial"), {
+      code: "EACCES",
+      syscall: "open",
+      path: blocked,
+    });
+    let denied = true;
+    let opens = 0;
+    const opened = filesystem.open;
+    const opening = spyOn(filesystem, "open").mockImplementation(
+      async (...args: Parameters<typeof filesystem.open>) => {
+        if (String(args[0]) === blocked && ++opens > 1 && denied) throw failure;
+        return await opened(...args);
+      },
+    );
+    const activities: ScanActivity[] = [];
+    const events: ScanSessionEvent[] = [];
+    const complete: boolean[] = [];
+    const tracker = costTracker(home, {
+      repository: home,
+      onActivity: (activity) => activities.push(activity),
+      onSessionEvent: (event) => events.push(event),
+      onCost: (_cost, allUsageKnown) => complete.push(allUsageKnown),
+    });
+    tracker.start("scan-thread");
+    try {
+      await expect(tracker.refresh()).rejects.toBe(failure);
+      expect(activities).toContainEqual(
+        expect.objectContaining({ description: "Healthy worker output." }),
+      );
+      expect(complete.at(-1)).toBe(false);
+      denied = false;
+      expect((await tracker.stop()).cost?.inputTokens).toBe(30);
+      expect(complete.at(-1)).toBe(true);
+      expect(
+        events.filter(
+          (event) =>
+            event.threadId === "healthy-worker" &&
+            JSON.stringify(event.event["payload"]) === JSON.stringify(output),
+        ),
+      ).toHaveLength(1);
+    } finally {
+      denied = false;
+      await tracker.stop().catch(() => {});
+      opening.mockRestore();
+    }
+  });
+
   test.each([...parentFields])(
     "observes worker metadata without status markers or usage via %s",
     async (parentField) => {
