@@ -3,6 +3,7 @@ import { defaultSeverityRubric } from "./default-severity-rubric.js";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { abortable } from "./targets.js";
+import { notify } from "./value.js";
 import {
   parseSeverityDecision,
   reviewSeverity,
@@ -83,7 +84,26 @@ export interface SeverityClassificationReviewRequest {
   schema: unknown;
 }
 
+export type SeverityRecordDiagnosticCode =
+  | "input_validated"
+  | "input_rejected"
+  | "review_requested"
+  | "review_accepted"
+  | "review_failed"
+  | "invalid_assessment"
+  | "vote_resolved";
+
+export type SeverityDiagnosticCode =
+  | SeverityRecordDiagnosticCode
+  | "invocation_started"
+  | "exit_completed"
+  | "exit_unresolved"
+  | "exit_error"
+  | "exit_cancelled";
+
 export interface ClassifySeverityRecordsOptions {
+  /** Content-free operational events; omitted for ordinary SDK calls. */
+  onDiagnostic?: (code: SeverityRecordDiagnosticCode, ordinal?: number) => void;
   /** Independent reviews per record: integer 1–10, default 3. */
   classificationRuns?: number;
   reviewRunner: {
@@ -128,18 +148,13 @@ function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-/**
- * Classify immutable host-provided reports. No filesystem, auth, local model,
- * repository access, retries, or persistence. The host owns those lifecycles.
- */
-export async function classifySeverityRecords(
+function validateRecords(
   input: ClassifySeverityRecordsInput,
-  options: ClassifySeverityRecordsOptions,
-): Promise<ClassifySeverityRecordsResult> {
-  options.signal?.throwIfAborted();
+  requestedRuns?: number,
+) {
   const classificationRuns = classificationRunsSchema
     .default(3)
-    .parse(options.classificationRuns);
+    .parse(requestedRuns);
   const data = classifySeverityRecordsInputSchema.parse(structuredClone(input));
   const rubric = data.rubric ?? {
     revision: 1,
@@ -161,6 +176,32 @@ export async function classifySeverityRecords(
         "The report findingId must equal its canonical record ID.",
       );
   }
+  return { classificationRuns, data, rubric };
+}
+
+/**
+ * Classify immutable host-provided reports. No filesystem, auth, local model,
+ * repository access, retries, or persistence. The host owns those lifecycles.
+ */
+export async function classifySeverityRecords(
+  input: ClassifySeverityRecordsInput,
+  options: ClassifySeverityRecordsOptions,
+): Promise<ClassifySeverityRecordsResult> {
+  options.signal?.throwIfAborted();
+  const emit = (code: SeverityRecordDiagnosticCode, ordinal?: number) => {
+    if ("onDiagnostic" in options)
+      notify(() => options.onDiagnostic?.(code, ordinal));
+    options.signal?.throwIfAborted();
+  };
+  let validated: ReturnType<typeof validateRecords>;
+  try {
+    validated = validateRecords(input, options.classificationRuns);
+  } catch (error) {
+    emit("input_rejected");
+    throw error;
+  }
+  const { classificationRuns, data, rubric } = validated;
+  emit("input_validated");
   const binding: RecordsResultBinding = {
     classificationRuns,
     version: 1,
@@ -169,12 +210,16 @@ export async function classifySeverityRecords(
   const assessments: CanonicalSeverityAssessment[] = [];
   for (const record of data.records) {
     options.signal?.throwIfAborted();
+    let ordinal = 0;
     let code: "review_failed" | "invalid_assessment" = "review_failed";
     try {
       const { findingId: _findingId, ...decision } = await reviewSeverity(
         async () => {
           code = "review_failed";
           const response = await abortable(() => {
+            options.signal?.throwIfAborted();
+            ordinal++;
+            emit("review_requested", ordinal);
             options.signal?.throwIfAborted();
             return options.reviewRunner.run(
               {
@@ -191,11 +236,14 @@ export async function classifySeverityRecords(
           }, options.signal);
           options.signal?.throwIfAborted();
           code = "invalid_assessment";
-          return parseSeverityDecision(response, record.id);
+          const decision = parseSeverityDecision(response, record.id);
+          emit("review_accepted", ordinal);
+          return decision;
         },
         classificationRuns,
       );
       options.signal?.throwIfAborted();
+      emit("vote_resolved");
       assessments.push({
         ...decision,
         id: record.id,
@@ -204,6 +252,7 @@ export async function classifySeverityRecords(
       });
     } catch (error) {
       options.signal?.throwIfAborted();
+      emit(code, ordinal);
       return {
         ...binding,
         status: "unresolved",

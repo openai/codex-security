@@ -1,5 +1,5 @@
 import type { Readable } from "node:stream";
-import { runHostProtocol } from "./host-protocol.js";
+import { runHostProtocol, type TakeHostDiagnostics } from "./host-protocol.js";
 
 export type RecordsProtocolOutput = Parameters<typeof runHostProtocol>[1];
 
@@ -18,6 +18,7 @@ export function runHostRecordsProtocol<
     },
   ) => Promise<Result>,
   signal?: AbortSignal,
+  takeDiagnostics?: TakeHostDiagnostics,
 ): Promise<number> {
   return runHostProtocol(
     input,
@@ -25,6 +26,7 @@ export function runHostRecordsProtocol<
     {
       label: "Records processing",
       requestMethod: "review.run",
+      takeDiagnostics,
       run: (params, execute, signal) =>
         run(params, {
           signal,

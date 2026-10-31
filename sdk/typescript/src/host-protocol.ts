@@ -41,6 +41,14 @@ type Output = Pick<NodeJS.WriteStream, "write"> & {
   on?(event: "error", listener: (error: Error) => void): unknown;
   off?(event: "error", listener: (error: Error) => void): unknown;
 };
+export interface HostDiagnosticBatch {
+  records: string[];
+  dropped: number;
+}
+export type TakeHostDiagnostics = (
+  message: object,
+) => HostDiagnosticBatch | undefined;
+
 type Execute = (
   id: string,
   request: unknown,
@@ -55,6 +63,7 @@ export async function runHostProtocol(
   operation: {
     label: string;
     requestMethod: string;
+    takeDiagnostics?: TakeHostDiagnostics;
     progressMethod?: string;
     /** Scan cancellation must retain the host's eventual receipt and usage. */
     awaitCancellationReceipt?: boolean;
@@ -104,7 +113,16 @@ export async function runHostProtocol(
     terminal: false,
   });
   const send = async (message: object, onFlushed?: () => void) => {
-    const line = `${JSON.stringify(message)}\n`;
+    // Optional metadata rides the required write. It never opens another
+    // process or stream and cannot hold the protocol open at exit.
+    let diagnostics: HostDiagnosticBatch | undefined;
+    try {
+      diagnostics = operation.takeDiagnostics?.(message);
+    } catch {}
+    const frame = diagnostics
+      ? { ...message, cliDiagnostics: diagnostics }
+      : message;
+    const line = `${JSON.stringify(frame)}\n`;
     if (output instanceof Writable) {
       if (output.destroyed) throw new Error("Host output is closed.");
       await new Promise<void>((resolve, reject) => {
