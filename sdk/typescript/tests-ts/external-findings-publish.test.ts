@@ -17,6 +17,7 @@ import {
   semgrepSarif,
 } from "./support/semgrep-import-fixtures.js";
 import { endorFinding, endorSarif } from "./support/endor-import-fixtures.js";
+import { sonarGitTestEnvironment } from "./support/sonar-import-fixtures.js";
 import { normalizeEndorFindings } from "../src/endor-findings.js";
 import { createServer, type ServerResponse } from "node:http";
 import { execFile } from "node:child_process";
@@ -673,6 +674,247 @@ async function fixture(
   };
 }
 
+test("Sonar replays the selected evidence locally and to Cloud without signing in to Sonar again", async () => {
+  const repo = "https://github.com/example/project";
+  const source = {
+    format: "sonar-issues/v1" as const,
+    server: "https://sonarcloud.io",
+    organization: "example",
+    project: "example_project",
+    branch: "main",
+    projectBase: "",
+    repositoryUrl: repo,
+    pages: [
+      {
+        paging: { pageIndex: 1, pageSize: 100, total: 1 },
+        issues: [
+          {
+            key: "issue-1",
+            project: "example_project",
+            component: "file",
+            rule: "example:R1",
+            message: "Review input handling",
+            type: "VULNERABILITY",
+            severity: "CRITICAL",
+            flows: [
+              {
+                locations: [
+                  {
+                    component: "file",
+                    textRange: { startLine: 2, endLine: 3 },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        components: [{ key: "file", path: "src/example.ts" }],
+      },
+    ],
+  };
+  const f = await fixture(source, repo);
+  const checkout = join(f.root, "checkout");
+  const git = promisify(execFile);
+  const environment = sonarGitTestEnvironment({
+    ...f.cliDeps.environment,
+    CODEX_SECURITY_CLOUD_BASE_URL: "https://cloud.example.test",
+  });
+  await git("git", ["init", "--quiet", checkout], { env: environment });
+  await git("git", ["-C", checkout, "remote", "add", "origin", repo], {
+    env: environment,
+  });
+  const paths = new Set<string>();
+  const deps = {
+    ...f.cliDeps,
+    environment,
+    currentDirectory: () => checkout,
+    cloudFetch: (url: string, init: RequestInit) => {
+      paths.add(new URL(url).pathname);
+      return f.cliDeps.cloudFetch(url, init);
+    },
+  };
+  const first = createCliTest(main);
+  const previewExit = await first.runCli(
+    [
+      "import",
+      "sonar",
+      "--sonar-project",
+      source.project,
+      "--sonar-branch",
+      source.branch,
+      "--sonar-issue",
+      "issue-1",
+      "--dry-run",
+      "--format",
+      "json",
+    ],
+    {
+      ...deps,
+      collectSonarIssues: async (selection) => {
+        expect(selection.issueKeys).toEqual(["issue-1"]);
+        return source;
+      },
+    },
+  );
+  expect(previewExit, first.stderr.text()).toBe(0);
+  expect(f.posts).toHaveLength(0);
+  const capture: string = JSON.parse(first.stdout.text()).capture;
+  expect(JSON.parse(await readFile(capture, "utf8"))).toEqual(source);
+  const previewArgs = [
+    "import",
+    "sonar",
+    capture,
+    "--to",
+    "cloud",
+    "--format",
+    "json",
+  ];
+
+  const outside = join(f.root, "without-remotes");
+  await mkdir(outside);
+  const noRemotes = createCliTest(main);
+  expect(
+    await noRemotes.runCli([...previewArgs, "--dry-run"], {
+      ...deps,
+      currentDirectory: () => outside,
+    }),
+  ).toBe(2);
+  expect(noRemotes.stderr.text()).toContain("--source-repository-url");
+  expect(f.posts).toHaveLength(0);
+
+  const cloudPreview = createCliTest(main);
+  expect(await cloudPreview.runCli([...previewArgs, "--dry-run"], deps)).toBe(
+    0,
+  );
+  const reviewed = JSON.parse(cloudPreview.stdout.text());
+  expect(reviewed.cloud.destination.url).toBe(repo);
+  expect(reviewed.capture).not.toBe(capture);
+  expect(f.posts).toHaveLength(0);
+  const args = [
+    "import",
+    "sonar",
+    reviewed.capture,
+    "--to",
+    "cloud",
+    "--format",
+    "json",
+  ];
+
+  const unavailable = createCliTest(main);
+  expect(
+    await unavailable.runCli([...args, "--yes"], {
+      ...deps,
+      cloudFetch: async () => new Response("Unknown account", { status: 403 }),
+    }),
+  ).toBe(2);
+  expect(JSON.parse(unavailable.stdout.text()).local.counts.created).toBe(1);
+
+  const replay = createCliTest(main);
+  expect(await replay.runCli([...args, "--yes"], deps)).toBe(0);
+  const result = JSON.parse(replay.stdout.text());
+  expect(result.local.counts.unchanged).toBe(1);
+  expect(result.cloud.verified).toBe(1);
+  const posted = JSON.parse(f.posts[0]!);
+  expect(posted.source).toEqual({
+    provider: "sonar",
+    source_key: result.sourceKey,
+  });
+  expect(posted.items[0].source_finding_id).toBe("issue-1");
+  const repository = f.destination();
+  const reportsPath = `/external/v2/repository_connectors/${repository.repo_connector_id}/repositories/${repository.id}/source_reports`;
+  expect(paths).toEqual(
+    new Set([
+      "/external/repositories",
+      reportsPath,
+      "/external/v2/finding_imports",
+      `${reportsPath}/${f.reports.get("issue-1")!.id}`,
+    ]),
+  );
+  expect(posted.items[0].evidence.source_data.issue.flows).toEqual(
+    source.pages[0]!.issues[0]!.flows,
+  );
+});
+
+test("normalized Sonar publication checks retained bindings on preview and retry", async () => {
+  const f = await fixture();
+  const repository = f.state.repositoryUrl;
+  const foreign = repository + "-other";
+  const selected = { ...options, provider: "sonar" as const };
+  const context = { format: "sonar-issues/v1", repositoryUrl: repository };
+  const finding = {
+    source_finding_id: "issue-1",
+    evidence: {
+      title: "Review input handling",
+      severity: "high" as const,
+      source_data: { ...context, issue: { key: "issue-1" } },
+    },
+  };
+  const rows = { read: 1, findings: [finding], excluded: [] };
+  const named = {
+    source_finding_id: "issue-2",
+    evidence: {
+      ...finding.evidence,
+      branch: "main",
+      source_data: { ...context, branch: "main", issue: { key: "issue-2" } },
+    },
+  };
+  const selection = { read: 2, findings: [finding, named], excluded: [] };
+  const prepare = () =>
+    prepareNormalizedExternalPublication(
+      { ...selection, report: { ...context, branch: "main" } },
+      selected,
+      f.deps,
+    );
+  await expect(
+    prepareNormalizedExternalPublication(selection, selected, f.deps),
+  ).rejects.toThrow("without a ref");
+  await expect(
+    prepareNormalizedExternalPublication(
+      {
+        ...rows,
+        report: { ...context, branch: "main" },
+        findings: [
+          {
+            ...finding,
+            evidence: { ...finding.evidence, branch: "unrelated" },
+          },
+        ],
+      },
+      selected,
+      f.deps,
+    ),
+  ).rejects.toThrow("retained Sonar branch");
+  await expect(
+    prepareNormalizedExternalPublication(
+      { ...rows, report: { ...context, repositoryUrl: foreign } },
+      selected,
+      f.deps,
+    ),
+  ).rejects.toThrow("does not match the selected Cloud repository");
+  f.state.loseResponse = true;
+  await expect((await prepare()).publish()).rejects.toThrow(
+    "resume the saved request",
+  );
+  await expect(
+    prepareNormalizedExternalPublication(
+      { ...selection, report: { ...context, branch: "other" } },
+      selected,
+      f.deps,
+    ),
+  ).rejects.toThrow("conflicting branch");
+  f.state.repositoryUrl = foreign;
+  await expect(prepare()).rejects.toThrow(
+    "does not match the selected Cloud repository",
+  );
+  expect(f.posts).toHaveLength(1);
+  f.state.repositoryUrl = repository;
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  await retry.publish();
+  expect(f.posts).toHaveLength(2);
+  expect(f.posts[1]).toBe(f.posts[0]);
+});
+
 test("Wiz occurrence mapping preserves original evidence without inventing repository provenance", async () => {
   const record = {
     id: "wiz-occurrence",
@@ -1192,35 +1434,38 @@ test("publishing an Inspector retry adopts its project map without changing the 
   expect(f.posts).toEqual([body, body, body]);
 });
 
-test("a normalized Inspector retry checks its typed repository without native evidence", async () => {
-  const f = await fixture();
-  const finding = {
-    source_finding_id: "vendor-1",
-    evidence: {
-      title: "Synthetic code finding",
-      severity: "high" as const,
-      details: {
-        kind: "sast" as const,
-        repository: { url: inspectorRepositoryUrl },
+test.each(["inspector", "sonar"] as const)(
+  "a normalized %s retry checks its typed repository without native evidence",
+  async (provider) => {
+    const f = await fixture();
+    const finding = {
+      source_finding_id: "vendor-1",
+      evidence: {
+        title: "Synthetic code finding",
+        severity: "high" as const,
+        details: {
+          kind: "sast" as const,
+          repository: { url: inspectorRepositoryUrl },
+        },
       },
-    },
-  };
-  const prepare = () =>
-    prepareNormalizedExternalPublication(
-      { read: 1, findings: [finding], excluded: [] },
-      inspectorOptions,
-      f.deps,
+    };
+    const prepare = () =>
+      prepareNormalizedExternalPublication(
+        { read: 1, findings: [finding], excluded: [] },
+        { ...options, provider },
+        f.deps,
+      );
+    f.state.loseResponse = true;
+    await expect((await prepare()).publish()).rejects.toThrow(
+      "resume the saved request",
     );
-  f.state.loseResponse = true;
-  await expect((await prepare()).publish()).rejects.toThrow(
-    "resume the saved request",
-  );
-  f.state.repositoryUrl = "https://github.com/different/project";
-  await expect(prepare()).rejects.toThrow(
-    "does not match the selected Cloud repository",
-  );
-  expect(f.posts).toHaveLength(1);
-});
+    f.state.repositoryUrl = "https://github.com/different/project";
+    await expect(prepare()).rejects.toThrow(
+      "does not match the selected Cloud repository",
+    );
+    expect(f.posts).toHaveLength(1);
+  },
+);
 
 const savedBlackDuckEvidence = {
   data: { format: "blackduck-bom-6" },
@@ -3315,6 +3560,7 @@ test("Cloud deployment routing covers every request and isolates saved retries",
   expect(requested.some((url) => url.includes("/source_reports?"))).toBe(true);
   expect(requested.some((url) => url.endsWith("/finding_imports"))).toBe(true);
   expect(requested.some((url) => url.includes("/source_reports/"))).toBe(true);
+  expect(requested.some((url) => url.includes("/external/v2/"))).toBe(false);
 });
 
 test.each(["localhost", "127.0.0.1", "127.0.0.2", "[::1]"])(
