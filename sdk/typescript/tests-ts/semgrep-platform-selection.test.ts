@@ -109,6 +109,19 @@ test("reimporting two selected IDs from a non-default branch leaves both SQLite 
     updated: 0,
     unchanged: 0,
   });
+  const identityOnly = await prepare(
+    ids.map((id) =>
+      JSON.stringify({
+        findings: [{ id, ref, repository: { url } }],
+      }),
+    ),
+  );
+  expect(identityOnly.preview.excluded).toHaveLength(2);
+  expect((await identityOnly.import()).counts).toEqual({
+    created: 0,
+    updated: 0,
+    unchanged: 0,
+  });
   expect(await listLocalExternalFindings(options, dependencies)).toEqual(
     original,
   );
@@ -124,6 +137,14 @@ test("each selected finding must match the independently named project, ref, and
     });
   const unrelated = '{"findings":[{"rule_name":"no-id"},{"id":2.5}]}';
   expect(select([first, unrelated, second]).findings).toHaveLength(2);
+  const unknown = select([
+    first,
+    second.replace('"severity":"medium"', '"severity":"WARNING"'),
+  ]).findings[1]!;
+  expect(unknown.evidence.severity).toBe("unknown");
+  expect(
+    unknown.evidence.source_data?.["semgrepPlatformFindingJson"],
+  ).toContain('"severity":"WARNING"');
   expect(() => select([first, unrelated])).toThrow(ids[1]);
   expect(() => select([first, second, second])).toThrow("Duplicate");
   expect(() => select([first, page(ids[1]!, "refs/heads/main")])).toThrow(
@@ -193,6 +214,9 @@ test("equivalent numeric IDs replay as integers while textual IDs stay exact", (
   expect(select("8e0", "8", "77e0")).toEqual(original);
   for (const token of ['"8.0"', '"8e0"', "8.00000000000000001"])
     expect(() => select(token)).toThrow("missing");
+  expect(() => select("8", JSON.parse("[8.00000000000000001]")[0])).toThrow(
+    "must be nonempty text",
+  );
   const int64Max = "9223372036854775807";
   expect(select("9.223372036854775807e18", int64Max)).toEqual(
     select(int64Max, int64Max),
@@ -203,6 +227,13 @@ test("equivalent numeric IDs replay as integers while textual IDs stay exact", (
   expect(
     select(large, large).evidence.source_data?.["semgrepPlatformFindingJson"],
   ).toContain('"id":1.2345678901234567890123e+22,');
+  const textualProject = select("8", "8", JSON.stringify(large));
+  expect(textualProject.evidence.source_data?.["project"]).toMatchObject({
+    id: large,
+  });
+  expect(textualProject.source_finding_id).toBe(
+    select("8", "8", large).source_finding_id,
+  );
   const power = "1000000000000000000000";
   expect(select("1e21", power)).toEqual(select(power, power));
   expect(() => select("1.0000000000000000000001e21", power)).toThrow("missing");
@@ -222,7 +253,9 @@ test("a URL-less row needs the matching project ID and full name, while an exact
       }),
       findingIds: ["8"],
       findingsResponses: [
-        JSON.stringify({ findings: [{ id: 8, ref, repository }] }),
+        JSON.stringify({
+          findings: [{ id: 8, ref, repository, rule_name: "example.rule" }],
+        }),
       ],
     });
   }
@@ -263,9 +296,12 @@ test("a URL-less row needs the matching project ID and full name, while an exact
   expect(
     select("project", { url: cloneUrl, name }, cloneUrl).findings,
   ).toHaveLength(1);
-  expect(() => select("project", { url, name: "other/project" })).toThrow(
-    "project and ref",
-  );
+  expect(
+    select("project", { url, name: "other/project" }).findings,
+  ).toHaveLength(1);
+  expect(() =>
+    select("project", { url, id: 78, name: "other/project" }),
+  ).toThrow("project and ref");
 });
 
 test("a fractional source position cannot round to an integer during projection", () => {
@@ -288,6 +324,8 @@ test("only repository-relative files are projected and original paths remain in 
     "file:src/app.ts",
     "data:text/plain,hello",
     "generated:/api.ts",
+    "./C:/work/app.ts",
+    "git@host:team/repo/app.ts",
     ".",
     "src/",
   ]) {

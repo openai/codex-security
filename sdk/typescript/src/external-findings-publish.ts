@@ -364,7 +364,7 @@ function rejectLocalScannerReports(
   provider: string,
 ): void {
   if (
-    semgrepPlatformReportRepository(input) ||
+    semgrepPlatformReportRepository(input, provider) ||
     input.findings.some((finding) =>
       isSemgrepPlatformEvidence(finding, provider),
     )

@@ -1,13 +1,21 @@
 import { expect, mock, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { link, mkdir, stat, unlink, writeFile } from "node:fs/promises";
+import {
+  link,
+  mkdir,
+  stat,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import type { ExternalSourceRepository } from "../src/external-findings.js";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import { prepareNormalizedExternalPublication } from "../src/external-findings-publish.js";
 import { normalizeSemgrepFindings } from "../src/semgrep-findings.js";
 import { selectSemgrepPlatformFindings } from "../src/semgrep-platform-findings.js";
+import { semgrepSarif } from "./support/semgrep-import-fixtures.js";
 import { localReportFixture as reportFixture } from "./external-findings-local-helpers.js";
 
 function localReportFixture(remote?: string) {
@@ -45,7 +53,15 @@ const selectRow = (fields: Record<string, unknown>) =>
   selection(
     [
       JSON.stringify({
-        findings: [{ id: 8, ref, repository: project, ...fields }],
+        findings: [
+          {
+            id: 8,
+            ref,
+            rule: { name: "example.rule" },
+            repository: project,
+            ...fields,
+          },
+        ],
       }),
     ],
     ["8"],
@@ -74,7 +90,7 @@ test("rechecks decimal native IDs when other evidence uses scientific notation",
     deployment: "example",
     ref,
     projectResponse: `{"project":{"url":"${url}","name":"example/project","id":${projectId}}}`,
-    findingsResponses: `{"findings":[{"id":${findingId},"ref":"${ref}","repository":{"id":${projectId},"url":"${url}"},"size":1e40}]}`,
+    findingsResponses: `{"findings":[{"id":${findingId},"ref":"${ref}","repository":{"id":${projectId},"url":"${url}"},"rule":{"name":"example.rule"},"size":1e40}]}`,
     findingIds: [findingId],
   });
   await using fixture = await localReportFixture(url);
@@ -89,7 +105,7 @@ test.each(["", ".0", "e0"])(
   "an archived selection keeps its original occurrence ID for an integer token with suffix %s",
   (suffix) => {
     const finding =
-      '{"id":1000000000000000000001,"ref":"refs/heads/release","repository":{"id":1000000000000000000002,"url":"https://github.com/example/project"}}'.replace(
+      '{"id":1000000000000000000001,"ref":"refs/heads/release","rule":{"name":"example.rule"},"repository":{"id":1000000000000000000002,"url":"https://github.com/example/project"}}'.replace(
         "1000000000000000000001,",
         "1000000000000000000001" + suffix + ",",
       );
@@ -106,7 +122,7 @@ test.each(["", ".0", "e0"])(
     expect(row.source_finding_id).toBe(
       "semgrep-platform:702c8f5d11896dc0316d2cc74426c02af20b6292374c3e08b0cf7e717c6fce4a",
     );
-    expect(row.evidence.title).toBe("Semgrep finding 1000000000000000000001");
+    expect(row.evidence.title).toBe("example.rule");
     expect(row.evidence.source_data![rawFindingKey]).toContain(
       '"id":1000000000000000000001',
     );
@@ -183,9 +199,7 @@ test("two selected Platform SAST IDs from separate pages replay unchanged in SQL
 test("native IDs and source URLs can identify a row with an empty display name", () => {
   const report = selectRow({ repository: { id: project.id, url, name: "" } });
   expect(report.findings).toHaveLength(1);
-  expect(() => selectRow({ repository: { url, name: "" } })).toThrow(
-    "project and ref",
-  );
+  expect(selectRow({ repository: { url, name: "" } }).findings).toHaveLength(1);
 });
 
 test("a short project name accepts a qualified display name on the same encoded clone URL", () => {
@@ -228,6 +242,17 @@ test("a URL-less name must identify the exact project path on a private server",
   );
 });
 
+test("an archived display name does not bind a URL-less row to a different checkout", () => {
+  const archived = selectRow({
+    repository: { id: project.id, name: project.name },
+  });
+  const other = "https://github.com/another/project";
+  const changed = { ...archived, project: { ...archived.project, url: other } };
+  expect(() =>
+    normalizeSemgrepFindings(changed, { sourceRepositoryUrl: other }, "local"),
+  ).toThrow("project and ref");
+});
+
 test("contradictory private SCM mappings fail regardless of their order", () => {
   const web = "https://scm.example.test/team/project";
   const refs: ExternalSourceRepository[] = [
@@ -241,6 +266,23 @@ test("contradictory private SCM mappings fail regardless of their order", () => 
         "Conflicting SCM",
       );
   }
+});
+
+test("a saved identity without a rule name or message cannot replace stored evidence", async () => {
+  await using fixture = await localReportFixture(url);
+  await fixture.writeJson(selectRow({}));
+  expect((await (await fixture.prepare()).import()).counts.created).toBe(1);
+  const original = await fixture.read();
+  await fixture.writeJson(selectRow({ rule: {} }));
+  const incomplete = await fixture.prepare();
+  expect(incomplete.preview.findings).toHaveLength(0);
+  expect(incomplete.preview.excluded[0]?.reason).toContain("title");
+  expect((await incomplete.import()).counts).toEqual({
+    created: 0,
+    updated: 0,
+    unchanged: 0,
+  });
+  expect(await fixture.read()).toEqual(original);
 });
 
 test("an empty saved selection reports the missing native findings", () => {
@@ -417,6 +459,39 @@ test.each([
       await link(lower, upper);
     }
     expect((await fixture.prepare()).preview.findings).toHaveLength(1);
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "mixed-case Git helper lookup follows POSIX symlinks and exec-path entries",
+  async () => {
+    await using fixture = await localReportFixture(
+      "HTTPS://github.com/example/project",
+    );
+    await fixture.writeJson(selectedRepository(url, url));
+    const core = join(fixture.root, "git-core");
+    await mkdir(core);
+    await writeFile(join(core, "git-remote-https"), "#!/bin/sh\nexit 1\n", {
+      mode: 0o700,
+    });
+    if (!(await stat(join(core, "git-remote-HTTPS")).catch(() => undefined)))
+      await link(
+        join(core, "git-remote-https"),
+        join(core, "git-remote-HTTPS"),
+      );
+    Object.assign(fixture.environment, {
+      GIT_EXEC_PATH: join(fixture.root, "missing") + ":" + core,
+    });
+    expect((await fixture.prepare()).preview.findings).toHaveLength(1);
+    const deep = join(fixture.root, "actual", "deep");
+    await mkdir(deep, { recursive: true });
+    const alias = join(fixture.root, "lexical");
+    await symlink(deep, alias);
+    Object.assign(fixture.environment, {
+      GIT_EXEC_PATH: alias + "/../git-core",
+    });
+    // The helpers under the lexically shortened path are not on this Git search path.
+    await expect(fixture.prepare()).rejects.toThrow("configured remote");
   },
 );
 
@@ -624,10 +699,27 @@ test("a trusted private GitLab SSH remote uses the DNS host actually passed to O
   }
 });
 
+test("an explicit Git helper uses the checkout's literal request path", () => {
+  const web = "https://git.example.test/group/repo%7Bone%7D";
+  const typed = (path: string) => [
+    {
+      url: "https::https://git.example.test/group/" + path,
+      platform: "gitlab" as const,
+    },
+  ];
+  expect(
+    selectedRepository(web, web, typed("repo%7Bone%7D.git")).findings,
+  ).toHaveLength(1);
+  expect(() => selectedRepository(web, web, typed("repo{one}.git"))).toThrow(
+    "source repository",
+  );
+});
+
 test.each([
   "https://git.example.test/group/project.git",
   "git@git.example.test:group/project.git",
   "https::https://git.example.test/group/project.git",
+  "https::HTTPS://git.example.test/group/project.git",
 ])("a trusted private GitLab mapping accepts clone %s", async (checkout) => {
   const web = "https://git.example.test/group/project";
   const clone = web + ".git";
@@ -688,9 +780,9 @@ test("a row without a repository URL needs the same project ID and name", () => 
   expect(
     selectRow({ repository: { name: "project", url } }).findings,
   ).toHaveLength(1);
-  expect(() =>
-    selectRow({ repository: { name: "another-project", url } }),
-  ).toThrow("project and ref");
+  expect(
+    selectRow({ repository: { name: "another-project", url } }).findings,
+  ).toHaveLength(1);
   const repository = { name: project.name, url: null };
   expect(() => selectRow({ repository })).toThrow("project and ref");
   expect(
@@ -1123,4 +1215,49 @@ test("a projected Black Duck row and a hosted Platform row validate their own re
     },
   );
   await expect(prepare(projected)).rejects.toThrow("configured remote");
+});
+
+test("a selected project preserves an ordinary row's shared SARIF provenance", async () => {
+  const native = "https://git.example.test/team/Project";
+  const projected = native.toLowerCase();
+  const hosted = normalizeSemgrepFindings(
+    selectedRepository(native, native),
+    { sourceRepositoryUrl: native },
+    "local",
+  ).findings;
+  const sarif = semgrepSarif();
+  Object.assign(sarif.runs[0]!, {
+    versionControlProvenance: [{ repositoryUri: native }],
+  });
+  const ordinary = normalizeSemgrepFindings(
+    sarif,
+    { sourceRepositoryUrl: projected },
+    "local",
+  ).findings;
+  await using fixture = await localReportFixture(projected);
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-C", fixture.repository, ...args], {
+      env: fixture.environment,
+    });
+  git("remote", "add", "platform", "https::" + native);
+  const prepare = (findings: typeof hosted, url: string) =>
+    prepareNormalizedLocalImport(
+      { read: findings.length, findings, excluded: [] },
+      { ...platformSource, repository: fixture.repository },
+      { environment: fixture.environment, sourceRepositories: [{ url }] },
+    );
+  for (const url of [
+    native,
+    native.replace("git.example.test", "GIT.EXAMPLE.TEST"),
+  ]) {
+    expect((await prepare(hosted, url)).preview.findings).toHaveLength(1);
+    await expect(prepare(ordinary, url)).rejects.toThrow("configured remote");
+    await expect(prepare([...hosted, ...ordinary], url)).rejects.toThrow(
+      "configured remote",
+    );
+  }
+  git("remote", "set-url", "platform", native);
+  expect(
+    (await prepare([...hosted, ...ordinary], native)).preview.findings,
+  ).toHaveLength(2);
 });
