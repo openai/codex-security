@@ -263,6 +263,11 @@ only for branches that do not use a merge queue. The Action
 does not support `merge_group` events, so this workflow cannot provide the required
 check for a merge queue.
 
+When migrating from the previous example, let the new target-specific check run,
+then replace the old **Codex Security** required check with the matching
+**Codex Security / <target-branch>** check. Keeping the old requirement leaves a
+check pending that this workflow no longer produces.
+
 The check name includes the target branch because GitHub can evaluate checks on
 the shared head commit when a test merge commit has no status. The workflow uses
 read-only pull request and Git-ref access on the triggering GitHub host to verify
@@ -492,8 +497,10 @@ artifact upload that fails still fails the job.
 ### GitHub code scanning
 
 Grant the job `security-events: write` and, for private repositories,
-`actions: read`, alongside `contents: read`. Set `id: security` on the scan step,
-then add this step after it:
+`actions: read`, alongside `contents: read`. When extending the pull-request
+workflow, retain `pull-requests: read` in the job's permissions map for its
+snapshot checks; a job-level map replaces the workflow-level permissions.
+Set `id: security` on the scan step, then add this step after it:
 
 ```yaml
 - name: Upload security findings
