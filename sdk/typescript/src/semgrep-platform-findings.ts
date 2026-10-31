@@ -225,10 +225,7 @@ export function normalizeSelectedSemgrepPlatformFindings(options: {
       );
       const relative = relativePath(location["file_path"]);
       const path =
-        relative &&
-        !relative.endsWith("/.") &&
-        !relative.includes("://") &&
-        repositoryFilePath(relative)
+        relative && !relative.endsWith("/.") && repositoryFilePath(relative)
           ? relative
           : null;
       const startLine = path ? sourceLine(location["line"]) : null;
