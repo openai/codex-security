@@ -160,7 +160,7 @@ export async function readHostedGitRemotes(
     "config",
     "--null",
     "--get-regexp",
-    "^remote\\..*\\.(url|vcs)$",
+    "^(remote\\..*\\.(url|vcs)|branch\\..*\\.remote)$",
   ]).catch((error: unknown) => {
     if (error instanceof Error && "code" in error && error.code === 1)
       return "";
@@ -171,19 +171,36 @@ export async function readHostedGitRemotes(
     const end = entry.indexOf("\n");
     if (end < 0) continue;
     const key = entry.slice(0, end);
-    // A fetch uses the first URL and the last configured transport helper.
-    if (!settings.has(key) || key.endsWith(".vcs"))
-      settings.set(key, entry.slice(end + 1));
+    settings.set(key, entry.slice(end + 1));
+  }
+  const listed = new Set(remoteNames.split("\n").filter(Boolean));
+  const unlistedDefaults = new Set<string>();
+  for (const [key, remote] of settings) {
+    if (key.startsWith("branch.") && remote && !listed.has(remote))
+      unlistedDefaults.add(
+        "refs/heads/" + key.slice("branch.".length, -".remote".length),
+      );
   }
   const remotes: string[] = [];
   let hasUnverifiedRemote = false;
   async function* candidates() {
     const fallbackNames: string[] = [];
-    for (const name of remoteNames.split("\n").filter(Boolean)) {
+    for (const name of listed) {
+      // A nonempty last URL makes named resolution safe even on Git versions where an empty value resets earlier URLs.
       if (settings.get(`remote.${name}.url`)) yield name;
       else fallbackNames.push(name);
     }
-    if (remotes.length && !fallbackNames.length) return;
+    const branch = unlistedDefaults.size
+      ? await readGit(["symbolic-ref", "--quiet", "HEAD"]).catch(
+          (error: unknown) => {
+            if (error instanceof Error && "code" in error && error.code === 1)
+              return "";
+            throw error;
+          },
+        )
+      : "";
+    const additionalDefault = unlistedDefaults.has(branch);
+    if (remotes.length && !fallbackNames.length && !additionalDefault) return;
 
     // An implicit fetch can open legacy descriptors. Inspect directory metadata only.
     const common = utf8(
@@ -201,7 +218,8 @@ export async function readHostedGitRemotes(
       return;
     }
     yield* fallbackNames;
-    if (!remotes.length && !hasUnverifiedRemote) yield "";
+    if (additionalDefault || (!remotes.length && !hasUnverifiedRemote))
+      yield "";
   }
   for await (const rawName of candidates()) {
     const name = utf8(rawName);
