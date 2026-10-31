@@ -422,7 +422,7 @@ function projectContext(project: Resource, selected: Scope) {
     manager,
     scm,
     origin,
-    manifest: scm ? hostedRepositoryPath(attributes["target_file"]) : null,
+    targetFile: scm ? attributes["target_file"] : null,
   };
   const relationships =
     project["relationships"] === undefined
@@ -800,6 +800,7 @@ function savedContext(
     context,
     repository: {
       scope: selected,
+      scm: context.scm,
       targetId: context.targetId,
       integrationId: remote.integrationId,
       deployment: remote.deployment,
@@ -1050,10 +1051,18 @@ function problemIds(entries: Resource[], type?: string) {
   return [...ids];
 }
 
+function findingFilePath(value: unknown, v2: boolean) {
+  const path = hostedRepositoryPath(value);
+  const filename = path?.split("/").at(-1);
+  return v2 && (!filename || filename === ".") ? null : path;
+}
+
 function packageEvidence(
   coordinates: Resource[],
-  { manager, manifest }: ReturnType<typeof projectContext>,
+  { manager, targetFile }: ReturnType<typeof projectContext>,
+  v2: boolean,
 ) {
+  const manifest = findingFilePath(targetFile, v2);
   const packages: ImportedPackage[] = [];
   for (const coordinate of coordinates) {
     const fixed = records(coordinate, "remedies").flatMap((remedy) => {
@@ -1094,11 +1103,7 @@ function codeStartLine(region: unknown): number | null {
   return isSafeNonNegativeInteger(line) && line > 0 ? line : null;
 }
 
-function codeEvidence(
-  coordinates: Resource[],
-  scm: boolean,
-  includeLines: boolean,
-) {
+function codeEvidence(coordinates: Resource[], scm: boolean, v2: boolean) {
   const locations: { path: string; line?: number | null }[] = [];
   const revisions = new Set<string | null>();
   for (const coordinate of coordinates) {
@@ -1108,13 +1113,10 @@ function codeEvidence(
       if (value === undefined) continue;
       const location = record(value, "Snyk source location");
       revisions.add(text(location["commit_id"]));
-      const path = hostedRepositoryPath(location["file"]);
-      const filename = path?.split("/").at(-1);
-      if (scm && path && (!includeLines || (filename && filename !== ".")))
+      const path = findingFilePath(location["file"], v2);
+      if (scm && path)
         locations.push(
-          includeLines
-            ? { path, line: codeStartLine(location["region"]) }
-            : { path },
+          v2 ? { path, line: codeStartLine(location["region"]) } : { path },
         );
     }
   }
@@ -1131,6 +1133,7 @@ function projectSnykIssue(
   target: ExternalImportTarget,
 ) {
   const code = source.product === "code";
+  const v2 = sourceData["format"] !== SNYK_REST_ISSUES_V1;
   const status = attributes["status"];
   if (
     (status !== "open" && status !== "resolved") ||
@@ -1165,13 +1168,9 @@ function projectSnykIssue(
         severity === "info" ? "informational" : scannerSeverity(severity),
       advisory_ids: code ? [] : problemIds(problems),
       ...(code
-        ? codeEvidence(
-            activeCoordinates,
-            context.scm,
-            sourceData["format"] !== SNYK_REST_ISSUES_V1,
-          )
+        ? codeEvidence(activeCoordinates, context.scm, v2)
         : {
-            packages: packageEvidence(activeCoordinates, context),
+            packages: packageEvidence(activeCoordinates, context, v2),
           }),
       source_updated_at: Math.floor(updated / 1000),
       source_data: sourceData,
@@ -1305,8 +1304,9 @@ export function snykRestImportRepository(
   }
   if (
     selected &&
-    boundRows.some(
-      ({ scope }) =>
+    bindings.some(
+      ({ scope, scm }) =>
+        scm !== sourceBinding.scm ||
         scope.apiOrigin !== selected.apiOrigin ||
         scope.organizationId !== selected.organizationId ||
         scope.projectId !== selected.projectId ||

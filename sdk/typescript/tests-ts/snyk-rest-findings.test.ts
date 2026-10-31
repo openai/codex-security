@@ -347,6 +347,55 @@ test("a malformed copy of a scoped issue cannot update its stored evidence", asy
   }
 });
 
+test("Snyk selections keep SCM coordinates out of CLI and API projects", async () => {
+  async function capture(origin: string, independent = false) {
+    const asset = project("sast");
+    asset.data.attributes.origin = origin;
+    const row = issue(true);
+    if (independent) {
+      row.id = "55555555-5555-4555-8555-555555555555";
+      row.attributes.key = "independent";
+    }
+    const report = await transport(asset, { data: [row] }).collect({
+      ...options,
+      product: "code",
+    });
+    return normalizeSnykIssues(report);
+  }
+
+  const cli = await capture("cli");
+  const scm = await capture("github");
+  const api = await capture("api", true);
+  await using fixture = await snykLocalFixture({
+    remote: options.sourceRepositoryUrl,
+  });
+  await (await fixture.prepareNormalized(cli)).import();
+  const saved = await fixture.read();
+  expect(saved[0]!.evidence.locations).toEqual([]);
+  expect(scm.findings[0]!.evidence.locations).toEqual([
+    { path: "src/app.ts", line: 3 },
+  ]);
+
+  await expect(
+    fixture.prepareNormalized({ ...cli, findings: scm.findings }),
+  ).rejects.toThrow("project scope");
+  await expect(
+    fixture.prepareNormalized({
+      read: 2,
+      excluded: [],
+      findings: [...scm.findings, ...api.findings],
+    }),
+  ).rejects.toThrow("project scope");
+  expect(await fixture.read()).toEqual(saved);
+  expect(
+    (
+      await (
+        await fixture.prepareNormalized({ ...cli, findings: api.findings })
+      ).import()
+    ).counts.created,
+  ).toBe(1);
+});
+
 test("normalized Snyk selections cannot import two keys for one native issue", async () => {
   const first = normalizeSnykIssues(snykRestFixture("open-source"));
   const nextIssue = issue(false);

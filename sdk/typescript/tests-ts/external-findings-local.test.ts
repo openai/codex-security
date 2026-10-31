@@ -640,7 +640,9 @@ describe("local normalized scanner findings", () => {
   test.each(pendingPaths)(
     "cancels %s resolution while its filesystem lookup is pending",
     async (operation) => {
-      const { repository, stateDirectory, environment } = await fixture();
+      const { repository, stateDirectory, environment } = await fixture({
+        isolatedGit: operation === "prepare-snyk-remotes",
+      });
       if (operation === "prepare-metadata")
         await rm(join(repository, ".git"), { recursive: true });
       const module = new URL(

@@ -21,6 +21,7 @@ test("replays a v1 Snyk export with its original evidence, then updates the same
   const token = "9007199254740993";
   const projectToken = "9007199254740993e1";
   const project = { ...snykProject().data, counter: projectToken };
+  project.attributes.target_file = "src/";
   const issue = snykIssue(false);
   const original = {
     ...issue,
@@ -45,6 +46,7 @@ test("replays a v1 Snyk export with its original evidence, then updates the same
   });
   await fixture.writeJson(v1);
   const stored = await createAndReplayFinding(fixture);
+  expect(stored.evidence.packages?.[0]?.manifest_path).toBe("src/");
   const source = stored.evidence.source_data!;
   expect(stored.evidence.description).toBeNull();
   expect(source).toEqual({
@@ -130,6 +132,7 @@ test("replays a v1 Snyk export with its original evidence, then updates the same
   );
   await fixture.writeJson(v2);
   const updated = await updateStoredFinding(fixture, stored);
+  expect(updated.evidence.packages?.[0]?.manifest_path).toBeNull();
   const retained = updated.evidence.source_data?.["issueJson"];
   expect(retained).toContain(`"description":${token}`);
   expect(retained).toContain(`"label":"${token}"`);

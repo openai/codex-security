@@ -15,14 +15,15 @@ is the default. For a Snyk Code project, add `--snyk-product code`. For a
 regional deployment, set `--snyk-api-origin` to its documented API origin.
 
 Run the commands from a trusted directory outside the project checkout. The
-example saves the report there and imports it into the checkout at `./project`.
+example saves a fresh report there and imports it into the checkout at `./project`.
 
 ```sh
-codex-security import snyk PROJECT_ID --snyk-org ORG_ID \
-  --source-repository-url https://github.com/example/project \
-  --format json > snyk-issues.json &&
-codex-security publish findings snyk-issues.json --to local --provider snyk \
-  --source-key ORG_ID/PROJECT_ID --repository ./project --dry-run
+report=$(mktemp ./snyk-issues.XXXXXX) &&
+  codex-security import snyk PROJECT_ID --snyk-org ORG_ID \
+    --source-repository-url https://github.com/example/project \
+    --format json > "$report" &&
+  codex-security publish findings "$report" --to local --provider snyk \
+    --source-key ORG_ID/PROJECT_ID --repository ./project --dry-run
 ```
 
 Confirm the preview, then repeat the publish command without `--dry-run`.
@@ -61,15 +62,19 @@ distinguish exact numbers from strings with the same spelling. For a v2 row,
 keep `source_data.issueJson`.
 The local workbench stores the verified project and target with that issue,
 so the stored row can be imported again. All selected issues must share the
-report’s API region, organization, project and product. If the report identifies
+report’s API region, organization, project and product. Keep SCM-integrated
+findings separate from CLI- or API-monitored findings. If the report identifies
 a native target or its repository URL, retain that evidence in the selected
-project and target.
+project and target. Snyk’s optional integration relationship is retained when
+the target supplies it.
 
 SDK readers that define their own findings and IDs can use the ordinary
 normalized Snyk import with their own evidence and no hosted report context.
 
 The offline reader can interpret SCM aliases recorded in an archived project.
-Local import independently compares the source to the checkout before writing.
+Local import compares the source to the checkout’s configured external Git
+remotes. For a checkout with only filesystem remotes or none, the selected
+directory is the import destination.
 For private source-control hosts, use the same repository URL as the checkout.
 SDK callers that have independently verified a GitHub Enterprise or GitLab
 repository can pass its canonical HTTPS URL and platform to the local importer.
