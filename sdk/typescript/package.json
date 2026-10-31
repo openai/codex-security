@@ -116,7 +116,7 @@
     "ink-testing-library": "4.0.0",
     "json-schema-to-typescript": "16.0.0",
     "json5": "2.2.3",
-    "minimatch": "10.2.6",
+    "minimatch": "11.0.1",
     "prettier": "3.9.10",
     "typescript": "7.0.2"
   }
