@@ -32,6 +32,7 @@ without running security analysis.
 - [Review one system across repositories](#review-one-system-across-repositories)
   or [run independent bulk scans](#bulk-scans).
 - [Import vendor findings locally](#import-vendor-findings-locally),
+  [import Sonar issues selected in Codex](#import-sonarqube-cloud-issues),
   [save findings as a scan](#import-findings-as-a-saved-scan), or
   [retrieve GitHub alerts](#import-alerts-from-the-cli).
 - [Inspect saved scans and rerun them](#scan-history-and-reruns),
@@ -460,8 +461,9 @@ explicit unsupported binary files are rejected. Bulk scans share this context
 with every repository.
 
 Use `--output-dir DIR` to choose where a scan saves its results. The directory
-must be empty and outside the scanned directory and enclosing Git worktree. On
-macOS/Linux, existing directories must be private (`chmod 700`).
+must be empty and outside the scanned directory and enclosing Git worktree.
+Existing directories keep their permissions; newly created directories are
+private to you by default.
 `--archive-existing` moves earlier output to
 `<output-dir>.previous-<timestamp>-<id>`; `--dry-run` previews the move.
 
@@ -642,6 +644,9 @@ Select a YAML or JSON file with `-c`, or set `CODEX_SECURITY_PROJECT_CONFIG`.
 Explicit `-c` wins. Without either, no file is discovered. `scan`, `bulk-scan`,
 `scan-components`, and `info` accept project files. SDK calls and saved reruns
 do not load them automatically.
+
+JSON project files and component plans (`--components-file`) accept UTF-8 with
+or without a leading byte-order mark.
 
 Treat the selected file as trusted operator configuration: native settings can
 start MCP processes and choose model-service destinations. Keep CI scanner
@@ -982,6 +987,15 @@ Finish older-version operations before upgrading. Never remove
 `.codex-security-scan.sqlite3` during an operation. Stop all operations using the
 credential home before manually removing an old `.codex-security-scan.lock`.
 
+If credential-home preparation fails, the error includes the underlying
+filesystem diagnostic. For permission or read-only filesystem errors, check
+the reported path or set `CODEX_SECURITY_STATE_DIR` to a private, writable
+directory outside the repository. A new state directory has separate history
+and does not migrate existing credentials or reports.
+
+Sandbox startup errors include the native diagnostic followed by a command to
+reproduce it. Linux namespace and AppArmor guidance appears only on Linux.
+
 On Windows, credential-home checks require trusted ownership and permissions
 through every ancestor, including the volume root. Codex Security can repair
 the credential home and its descendants; it does not change ancestor ownership
@@ -1006,8 +1020,9 @@ directory.
 
 ### Progress and cost
 
-Interactive scans show full-screen progress. CI, redirected output, `--headless`,
-and `--verbose` use plain status lines. Results go to stdout; progress and
+Interactive scans show full-screen progress. The dashboard title uses the resolved
+directory name, so `scan .` shows the current directory's name. CI, redirected output,
+`--headless`, and `--verbose` use plain status lines. Results go to stdout; progress and
 diagnostics go to stderr. Press `d` in the dashboard for details, then `a` for
 all sources, `m` for the main scan, or `1`–`9` for a worker.
 
@@ -1268,6 +1283,8 @@ Supply the validation prompt again when rerunning.
 
 ## Import vendor findings locally
 
+Use the [scanner file import schema and capability guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/schema-guide.md) to compare provider identities, mapped evidence and destination behavior before selecting a report.
+
 External finding imports are disabled by default. Opt in for the current shell:
 
 ```bash
@@ -1276,7 +1293,7 @@ export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
 
 In PowerShell, use `$env:CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS = '1'`.
 Only `1` enables the feature. Without it, `publish findings`, `findings imported`,
-and `import github-advisories` are absent from command help and schemas and cannot
+`import sonar`, and `import github-advisories` are absent from command help and schemas and cannot
 run. The SDK's external publication, local import/readback, and advisory
 acquisition APIs require the same flag in their effective environment. An explicit
 `dependencies.environment` is used instead of the process environment. Pure
@@ -1302,8 +1319,14 @@ Use the same vendor input and parser as Cloud publication, selecting a local
 repository path instead of a Cloud repository ID or URL. Supported inputs include
 Wiz findings, [Snyk Open Source JSON and SARIF](#import-snyk-open-source-findings),
 [Endor Labs Finding JSON and SARIF](#import-endor-labs-findings),
+[Amazon Inspector repository findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/inspector.md),
+[Black Duck SCA project-version vulnerabilities](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/blackduck.md),
+[Veracode Static Analysis policy findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/veracode.md),
 [Semgrep Code JSON and SARIF](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md),
-and [saved GitHub alerts and GHSA advisories](#import-github-findings-locally-or-to-cloud):
+[SonarQube Cloud issue-search pages](#import-sonarqube-cloud-issues),
+[OpenGrep native JSON](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/opengrep.md),
+[GitHub Dependabot repository alerts](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/github-dependabot.md),
+and [saved GitHub code-scanning alerts and GHSA advisories](#import-github-findings-locally-or-to-cloud):
 
 ```bash
 codex-security publish findings selected-wiz.json \
@@ -1335,8 +1358,18 @@ Repeated imports update the same record by repository, provider, source key, and
 source finding ID. The result reports created, updated, and unchanged counts.
 Keep the source key stable across exports. Records omitted from a later selection
 remain stored; omission does not resolve or delete a finding. Excluded records
-are reported, and an import with exclusions exits with status 1. The same
-supported vendor formats and evidence requirements apply locally and in Cloud.
+are reported, and an import with exclusions exits with status 1. Both destinations
+read the same vendor formats; Cloud's field, size and nesting limits do not apply
+to local file imports.
+
+For OpenGrep, use `--provider opengrep` and supply `--source-repository-url`.
+The reader supports native JSON and gzip for both destinations. It uses the
+existing `semgrep` source-provider contract while retaining `OpenGrep` as the
+scanner origin; keep a stable OpenGrep-specific source key. Review report
+diagnostics as well as findings: import completion does not establish scan
+coverage. The [OpenGrep guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/opengrep.md)
+covers evidence identity, empty reports, and assessing an imported finding with
+the existing SDK validator.
 
 `scan import --json` and `scan import --csv` remain separate commands for importing
 Codex Security's findings schema as a saved scan; they do not accept vendor
@@ -2268,6 +2301,33 @@ be unchanged since the scan. `--source-root` is supported only for SARIF.
 If export fails, it exits with `2`. Fix the reported error and rerun the export;
 the saved scan remains available, so you don't need to run another scan.
 
+### Export findings for ServiceNow
+
+Use `servicenow-avit` to prepare a CSV for ServiceNow Application Vulnerability
+Response. In ServiceNow, open **All > Manual AVIT Ingestion > Upload File UI**
+and download the CSV template. Keep the headers and a single row per template
+file. Fill in the exact ServiceNow application name, requester, assignee, and
+assignment group. Supply the application team, purpose, sensitive data types,
+compliance programs, technology stack, and URLs to test. Leave the finding
+columns blank and reuse this file for future exports of the same application. See the
+[example template](https://github.com/openai/codex-security/blob/main/examples/servicenow-avit-template.csv).
+
+```bash
+codex-security export --scan latest --export-format servicenow-avit \
+  --avit-template invoice-desk.csv --output findings-avit.csv
+```
+
+The command writes one row per saved finding. It fills the risk rating and uses
+the first CWE when available, otherwise the Codex finding ID. Technical details
+include that ID, the primary file and line, the summary, and remediation. For
+**Steps to reproduce**, review any recorded attack-path steps and complete blank
+cells before uploading. Both text fields have a 1,000-character limit. An ellipsis
+marks shortened text. Other template columns keep their original values.
+
+The output defaults to `servicenow-avit.csv`. Upload the completed file in the
+same ServiceNow screen. Each upload creates a new penetration-test form for the
+application. See [ServiceNow's upload instructions](https://www.servicenow.com/docs/r/security-management/application-vulnerability-response/ingest-vulnerabilities-manually-avr.html).
+
 ### Export a threat model
 
 To save a scan's threat model as Markdown, run:
@@ -2310,6 +2370,8 @@ console.log(exported.path, exported.provenance);
 ```
 
 Use `artifact: "findings"` with `format: "csv" | "json" | "sarif"` for findings.
+For ServiceNow, use `format: "servicenow-avit"` and set `avitTemplate` to the
+path of the application's populated CSV template.
 `output: "-"` streams stdout and returns null path/provenance. `pythonPath`
 selects an interpreter; `signal` cancels.
 
@@ -2383,6 +2445,33 @@ record absolute Node/CLI paths. If those change, back up and remove the verified
 generated hook, then reinstall with the same threshold. Restore the backup if
 installation fails. The installer respects `core.hooksPath`.
 
+## Import SonarQube Cloud issues
+
+Enable [external imports](#import-vendor-findings-locally) and run
+`codex-security import sonar` from the project's checkout to import open
+security issues from the active Sonar CLI connection. For issues selected in
+the SonarQube plugin, pass each issue key with `--sonar-issue`, its project
+with `--sonar-project`, and its branch or PR with `--sonar-branch` or
+`--sonar-pull-request`. The plugin and terminal use the same Sonar login.
+When you omit `--sonar-project`, Sonar must bind the checkout's Git origin to
+one project in that login's organization.
+
+```sh
+codex-security import sonar --sonar-project example_project --sonar-branch main \
+  --sonar-issue ISSUE_A --sonar-issue ISSUE_B --dry-run --format json
+codex-security import sonar "/path/from/capture.json" --yes
+```
+
+`--dry-run` saves the reviewed selection and returns its path in `capture`.
+The default destination is the local workbench. For both local import and
+Cloud publication, preview with `--to cloud` and confirm with the exact
+`capture` path from the successful Cloud preview and `--to cloud --yes`.
+If the checkout or Cloud destination changes, preview again. For a structured
+success or error envelope, use `--full-output` with `--format json` or
+`--format jsonl`. You can publish a local import later
+without reconnecting to Sonar. See [Sonar import and replay](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/sonar.md)
+for authentication, repository mapping, and native JSON input.
+
 ## Import GitHub findings locally or to Cloud
 
 Local and Cloud ingestion require the [external-import opt-in](#import-vendor-findings-locally).
@@ -2392,10 +2481,13 @@ Acquire code-scanning findings with the existing `import github` collector and
 save its complete JSON output. In Codex, the official
 [GitHub Codex plugin](https://github.com/openai/plugins/tree/main/plugins/github)
 can help select the repository, alert numbers and ref through GitHub's MCP
-server; pass that selection to the collector. This integration reads
-code-scanning alerts and GHSA advisories. It does not import Dependabot or
-secret-scanning alerts or write back to GitHub. Preview local storage with a
-repository path:
+server. Pass that selection to the collector. For Dependabot, use a token with
+**Dependabot alerts: read** and follow
+the [repository alert export guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/github-dependabot.md)
+to save the native REST records from one repository and preview them with
+`--provider github`. For GHSA disclosures, use the
+[advisory collector](#import-ghsa-advisories-separately).
+The following example previews local storage of a code-scanning export.
 
 ```bash
 codex-security import github example/project --format json > /path/outside/repository/alerts.json
@@ -2416,11 +2508,11 @@ The importer fetches every page, retrieves alert details, and retains the select
 ref's instance. It writes the saved input for publication; no website download or
 hand-written JSON mapping is needed. Use `--github-alert NUMBER` repeatedly for
 selected alerts or `--github-ref REF` for another ref. Defaults are open alerts on
-the default branch. MCP list calls are paginated separately, and raw MCP/API
-responses are not the saved import format accepted by `--provider github`.
+the default branch. MCP list calls are paginated separately. Code-scanning
+imports require the saved collector output, which includes the selected instance.
 
 The importer uses GitHub CLI authentication (`gh auth login`) and `GH_HOST`;
-the plugin's connection does not sign in `gh`. Reading alerts requires
+the plugin's connection does not sign in `gh`. Reading code-scanning alerts requires
 [code-scanning access](https://docs.github.com/en/rest/code-scanning/code-scanning#list-code-scanning-alerts-for-a-repository):
 **Code scanning alerts: read** for a fine-grained token, or `security_events` for
 a classic token (`public_repo` is sufficient for public repositories). The source
@@ -2635,6 +2727,9 @@ native structured output. The CLI also checks the completed JSON before writing
 stdout; it does not convert a prose assessment into JSON afterward. Invalid JSON
 or a schema mismatch fails with exit code 2 and no assessment on stdout.
 
+Save the output schema as UTF-8 without a byte-order mark so both the CLI and
+Codex can read it.
+
 Use a self-contained schema in the subset supported by the selected Codex model
 and provider. The local checker uses JSON Schema 2020-12, but accepting a schema
 locally does not guarantee provider support. Keep the schema small and use it only
@@ -2770,7 +2865,9 @@ patch-risk assessment still uses its read-only sandbox.
 
 `scan --patch` runs after a complete scan. `--patch-severity` defaults to `low`;
 `high` selects high and critical findings. Interactive users can select findings
-and add instructions. Patch results are `verified`, `no_change`, `blocked`, or
+and add instructions. The interactive finding browser lists critical, high,
+medium, then low findings, preserving scan order within each severity.
+Patch results are `verified`, `no_change`, `blocked`, or
 `failed`. Verified/already-fixed findings no longer fail the severity threshold.
 
 ### Create or resume a draft pull request
@@ -2849,7 +2946,7 @@ from the repository root with the published image:
 
 ```bash
 mkdir -p results state
-chmod 700 results state
+chmod 700 state
 export CODEX_SECURITY_USER="$(id -u):$(id -g)"
 export CODEX_SECURITY_IMAGE=ghcr.io/openai/codex-security:latest
 docker compose pull codex-security

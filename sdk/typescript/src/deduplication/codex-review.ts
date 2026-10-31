@@ -41,6 +41,7 @@ import {
 import {
   reviewErrorInstructions,
   reviewSubmissionInstructions,
+  missingSubmissionPrompt,
   sourceReviewInstructions,
 } from "./deduplication-prompts.js";
 import { retryDelay, waitForRetry } from "./retry.js";
@@ -657,9 +658,7 @@ export class CodexReviewRunner {
                 );
               if (turns === 1) {
                 state.attempts++;
-                startTurn(
-                  `Continue the original assigned review in this conversation. No submission was accepted.${validationFailure ? ` The last submission was rejected: ${validationFailure}` : ""} ${reviewSubmissionInstructions}`,
-                );
+                startTurn(missingSubmissionPrompt(validationFailure));
                 continue;
               }
               if (validationFailure) {

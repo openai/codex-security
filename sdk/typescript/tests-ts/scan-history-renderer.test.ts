@@ -343,39 +343,47 @@ describe("scan history renderer", () => {
     expect(output).not.toContain("Resolved");
   });
 
-  test("keeps repositories visible at narrow and wide terminal widths", () => {
-    const scans = [
+  test("fits repository names when multi-repository history switches to the wide table", () => {
+    const combining = "e\u0301".repeat(17);
+    const joined = "界".repeat(8) + "👩‍💻";
+    const repositories = [
+      { name: "service", cell: "service".padEnd(18) },
+      { name: `${combining}🚀-tail`, cell: `${combining} ` },
+      { name: `${joined}-tail`, cell: joined },
+      { name: "中", cell: "中" + " ".repeat(16) },
       {
-        scanId: "11111111-1111-4111-8111-111111111111",
-        targetPath: "/demo/juice-shop",
-        mode: "standard",
-        progress: { status: "complete" },
-        findingCount: 8,
-        startedAt: "2026-07-24T12:00:00Z",
-      },
-      {
-        scanId: "22222222-2222-4222-8222-222222222222",
-        targetPath: "/demo/payment-service",
-        mode: "deep",
-        progress: { status: "complete" },
-        findingCount: 2,
-        startedAt: "2026-07-23T12:00:00Z",
+        name: "界".repeat(45) + joined,
+        cell: "界".repeat(9),
+        compact: `7 findings  ·  ✓ COMPLETE\n    ${"界".repeat(45)}\n    ${joined}`,
       },
     ];
-
-    for (const columns of [72, 100]) {
-      const output = stripVTControlCharacters(
+    const scans = repositories.map(({ name }, index) => ({
+      scanId: String(index + 1).repeat(36),
+      targetPath: `/demo/${name}`,
+      mode: "standard",
+      progress: { status: "complete" },
+      findingCount: 7,
+      startedAt: "2026-07-24T12:00:00Z",
+    }));
+    const render = (columns: number) =>
+      stripVTControlCharacters(
         renderScanHistory({ scans }, "list", {
           columns,
           scanRoot: "/demo/results",
         }),
       );
-      expect(output).toContain("results");
-      expect(output).toContain("juice-shop");
-      expect(output).toContain("payment-service");
-      expect(output).toContain(scans[0]!.scanId);
-      expect(output).toContain(scans[1]!.scanId);
-      if (columns >= 96) expect(output).toContain("REPOSITORY");
+    const narrow = render(96);
+    const wide = render(97);
+    expect(narrow).toContain("results");
+    expect(narrow).not.toContain("REPOSITORY");
+    expect(wide).toContain("REPOSITORY         FINDINGS STATUS");
+    for (const [index, { name, cell, compact }] of repositories.entries()) {
+      const id = scans[index]!.scanId;
+      expect(narrow).toContain(id);
+      expect(narrow).toContain(compact ?? name);
+      expect(wide).toContain(
+        `${id} 2026-07-24 standard ${cell} 7        ✓ COMPLETE`,
+      );
     }
   });
 
