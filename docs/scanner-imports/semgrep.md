@@ -74,8 +74,12 @@ Pass the response text directly to the selector to preserve numeric IDs and
 other numeric evidence exactly. Keep the responses and selection together in a
 private directory outside the checkout. Run this example in that directory
 with the SDK installed. Local preview compares the project URL with Git’s
-configured fetch URLs offline. SSH command overrides and DNS routing are
-controlled by the local Git and SSH clients.
+named remotes and the branch’s default fetch URL offline. For an otherwise
+unbound checkout, it also asks Git about its legacy remote files. To use an
+additional legacy source in a checkout that already has a network remote,
+configure that source as a named Git remote or the branch’s default fetch
+source. SSH command overrides and DNS routing are controlled by the local
+Git and SSH clients.
 
 ```js
 import { readFile, writeFile } from "node:fs/promises";
@@ -176,6 +180,8 @@ claims. It retains each original finding as JSON text so large IDs survive repla
 
 To import a collected backlog with the TypeScript SDK, pass the normalized
 report to the local importer. Reuse the source key when replaying the report.
+You may filter the normalized findings array and retain the original read count.
+Only submitted findings are imported.
 
 ```ts
 const findings = normalizeSemgrepPlatformFindings(report);

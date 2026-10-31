@@ -232,6 +232,36 @@ test("a normalized Platform report binds native rows even when both projects hav
     },
   );
   const prepare = fixture.prepareNormalized;
+  const nativeProject = { ...report.project, url: upstream };
+  const row = {
+    id: 9,
+    rule_name: "example.rule",
+    ref: report.ref,
+    repository: { id: nativeProject.id, url: nativeProject.url },
+  };
+  const selection = normalizeSemgrepPlatformFindings(
+    selectSemgrepPlatformFindings({
+      deployment: report.deployment,
+      ref: report.ref,
+      projectResponse: JSON.stringify({ project: nativeProject }),
+      findingsResponses: JSON.stringify({ findings: [row] }),
+      findingIds: ["9"],
+    }),
+  );
+  const strong = normalizeSemgrepPlatformFindings({
+    ...report,
+    project: nativeProject,
+    findings: [JSON.stringify(row)],
+  });
+  expect((await prepare(upstreamReport)).preview.findings).toHaveLength(1);
+  expect(
+    (await prepare({ ...selection, findings: strong.findings })).preview
+      .findings,
+  ).toEqual(selection.findings);
+  await expect(
+    prepare({ ...selection, findings: upstreamReport.findings }),
+  ).rejects.toThrow(/selected project and ref/i);
+
   await expect(
     prepare({ ...upstreamReport, findings: forkReport.findings }),
   ).rejects.toThrow(/report repository/i);
@@ -266,6 +296,30 @@ test("a normalized Platform report binds native rows even when both projects hav
       })
     ).preview.findings,
   ).toHaveLength(2);
+  const matching = normalizeSemgrepFindings(
+    semgrepSarif(),
+    { sourceRepositoryUrl: upstream },
+    "local",
+  ).findings[0]!;
+  const combined = {
+    ...upstreamReport,
+    read: 2,
+    findings: [...upstreamReport.findings, matching],
+  };
+  await expect(
+    prepareNormalizedLocalImport(
+      combined,
+      { ...source, repository: fixture.repository },
+      {
+        environment: fixture.environment,
+        sourceRepositories: [{ url: upstream }, { url: fork }],
+      },
+    ),
+  ).rejects.toThrow(/source repository.*selected Semgrep project/i);
+  const supplyChain = normalize(upstream, "77", { product: "sca" });
+  await expect(
+    prepare({ ...supplyChain, findings: [matching] }),
+  ).rejects.toThrow(/product/);
   for (const claim of [{ url: fork }, { branch: "refs/heads/other" }]) {
     const projected = structuredClone(ordinary);
     if (claim.url) projected.evidence.details!.repository!.url = claim.url;
@@ -280,6 +334,38 @@ test("a normalized Platform report binds native rows even when both projects hav
       /repository|scope|branch|ref/i,
     );
   }
+  const retainedBranch = (branch: string) => {
+    const sarif = semgrepSarif();
+    Object.assign(sarif.runs[0]!, {
+      versionControlProvenance: [{ repositoryUri: upstream, branch }],
+    });
+    return normalizeSemgrepFindings(
+      sarif,
+      { sourceRepositoryUrl: upstream },
+      "local",
+    ).findings[0]!;
+  };
+  const sarifRow = retainedBranch("topic");
+  expect(sarifRow.evidence.branch ?? null).toBeNull();
+  expect(
+    (await prepare({ ...upstreamReport, findings: [sarifRow] })).preview
+      .findings,
+  ).toHaveLength(1);
+  const tagRow = retainedBranch("refs/tags/topic");
+  await expect(
+    prepare({ ...upstreamReport, findings: [tagRow] }),
+  ).rejects.toThrow(/branch.*ref/);
+  await expect(
+    prepare({ ...upstreamReport, findings: [retainedBranch("main")] }),
+  ).rejects.toThrow(/branch.*ref/);
+  const tagScope = normalize(upstream, "77", { ref: "refs/tags/topic" });
+  expect(
+    (await prepare({ ...tagScope, findings: [tagRow] })).preview.findings,
+  ).toHaveLength(1);
+  expect(
+    (await prepare({ read: 1, excluded: [], findings: [tagRow] })).preview
+      .findings,
+  ).toHaveLength(1);
   const duck = structuredClone(ordinary);
   duck.source_finding_id = `blackduck-bom:${"a".repeat(64)}`;
   duck.evidence.source_data = { sourceRepositoryUrl: fork };
