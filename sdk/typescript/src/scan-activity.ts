@@ -1,3 +1,4 @@
+import { win32 } from "node:path";
 import { isRecord } from "./record.js";
 import { parseJson } from "./value.js";
 
@@ -371,9 +372,34 @@ function sessionCallArguments(
   return isRecord(parsed) ? parsed : {};
 }
 
+function relativeRepositoryPath(
+  value: string,
+  repository: string,
+): string | null {
+  const normalized = repository.replaceAll("\\", "/");
+  const prefix = `${normalized.replace(/\/$/u, "")}/`;
+  if (value.startsWith(prefix)) return value.slice(prefix.length);
+
+  // A Windows drive or UNC volume can differ in case. Its descendant
+  // directories may be case-sensitive, even on Windows, so folding the whole
+  // repository prefix could attribute a different checkout's files to this one.
+  // Saved sessions can be read on other hosts and cannot prove file identity.
+  const root = win32.parse(normalized).root;
+  const valueRoot = win32.parse(value).root;
+  if (
+    win32.isAbsolute(normalized) &&
+    root.length > 1 &&
+    root.length === valueRoot.length &&
+    root.toLowerCase() === valueRoot.toLowerCase() &&
+    value.slice(root.length, prefix.length) === prefix.slice(root.length)
+  ) {
+    return value.slice(prefix.length);
+  }
+  return null;
+}
+
 function commandRepositoryPaths(command: string, repository: string): string[] {
   const paths = new Set<string>();
-  const repositoryPrefix = repository.replaceAll("\\", "/").replace(/\/$/u, "");
   for (const token of command.match(SHELL_TOKEN) ?? []) {
     let value = token;
     const singleQuoted = value.startsWith("'") && value.endsWith("'");
@@ -387,14 +413,14 @@ function commandRepositoryPaths(command: string, repository: string): string[] {
         "$CODEX_SECURITY_REPOSITORY/",
       );
     }
-    for (const prefix of [
-      "$CODEX_SECURITY_REPOSITORY/",
-      "${CODEX_SECURITY_REPOSITORY}/",
-      `${repositoryPrefix}/`,
+    for (const root of [
+      "$CODEX_SECURITY_REPOSITORY",
+      "${CODEX_SECURITY_REPOSITORY}",
+      repository,
     ]) {
-      if (!value.startsWith(prefix)) continue;
-      const path = value
-        .slice(prefix.length)
+      const relative = relativeRepositoryPath(value, root);
+      if (relative === null) continue;
+      const path = relative
         .replace(/["'\r\n].*$/u, "")
         .trim()
         .replace(/\/+$/u, "")
@@ -416,14 +442,13 @@ function argumentRepositoryPaths(value: unknown, repository: string): string[] {
   if (!isRecord(value)) return [];
   const candidates = [value["path"], value["file_path"], value["paths"]].flat();
   const paths = new Set<string>();
-  const prefix = `${repository.replaceAll("\\", "/").replace(/\/$/u, "")}/`;
   for (const candidate of candidates) {
     if (typeof candidate !== "string") continue;
-    const normalized = candidate.replaceAll("\\", "/");
-    if (normalized.startsWith(prefix)) {
-      const path = normalized.slice(prefix.length);
-      if (!path.split("/").includes("..")) paths.add(path);
-    }
+    const path = relativeRepositoryPath(
+      candidate.replaceAll("\\", "/"),
+      repository,
+    );
+    if (path !== null && !path.split("/").includes("..")) paths.add(path);
     if (paths.size >= MAX_ACTIVITY_PATHS) break;
   }
   return [...paths];
