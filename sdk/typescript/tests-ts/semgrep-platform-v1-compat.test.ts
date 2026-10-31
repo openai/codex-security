@@ -88,13 +88,22 @@ test("a GitHub mapping reprojects generated severity when a backlog finding beco
     repository: { id: 10, name: "team/repo" },
     severity: "informational",
   };
+  const rows = [
+    native,
+    { ...native, id: 13, location: { file_path: "src/service.ts", line: "3" } },
+    {
+      ...native,
+      id: 14,
+      location: { file_path: "src/service.ts", line: 3, end_line: "5" },
+    },
+  ];
   const report = {
     ...scope,
     project: { ...scope.project, name: "Project", url },
     format: "semgrep-platform-findings/v2",
     repositoryAliases: [native.repository.name],
-    findingCount: 1,
-    findings: [JSON.stringify(native)],
+    findingCount: rows.length,
+    findings: rows.map((row) => JSON.stringify(row)),
   };
   const batch = normalizeSemgrepFindings(report, {}, "local");
   expect(batch.findings[0]!.evidence).toMatchObject({
@@ -122,10 +131,18 @@ test("a GitHub mapping reprojects generated severity when a backlog finding beco
     severity: "unknown",
     source_data: { format: "semgrep-platform-selection/v1" },
   });
-  expect((await file.import()).counts.created).toBe(1);
-  expect((await (await direct()).import()).counts.unchanged).toBe(1);
-  expect((await file.import()).counts.unchanged).toBe(1);
-  expect((await fixture.read())[0]!.version).toBe(1);
+  for (const row of file.preview.findings.slice(1)) {
+    expect(row.evidence).toMatchObject({
+      severity: "informational",
+      locations: [{ path: "src/service.ts", line: 3 }],
+      source_data: { format: report.format },
+    });
+  }
+  expect(file.preview.excluded).toEqual([]);
+  expect((await file.import()).counts.created).toBe(rows.length);
+  expect((await (await direct()).import()).counts.unchanged).toBe(rows.length);
+  expect((await file.import()).counts.unchanged).toBe(rows.length);
+  expect((await fixture.read()).map((row) => row.version)).toEqual([1, 1, 1]);
   batch.findings[0]!.evidence.severity = "high";
   expect((await direct()).preview.findings[0]!.evidence.severity).toBe("high");
 });
@@ -1077,11 +1094,13 @@ test("v2 files require exact counts and string project IDs", async () => {
 });
 
 const historicalPaths = [
-  ["src\\service.ts", null, "src/service.ts", "numeric"],
-  ["src\\backlog.ts", null, "src/backlog.ts", "backlog quoted"],
-  ["src\\strong.ts", null, "src/strong.ts", "legacy quoted"],
-  ["pkg:service.ts", "pkg:service.ts", null, "numeric"],
-  ["src/", "src/", null, "numeric"],
+  ["src\\service.ts", null, "src/service.ts", "all", 3, 5],
+  ["src\\backlog.ts", null, "src/backlog.ts", "backlog", "3", "5"],
+  ["src\\strong.ts", null, "src/strong.ts", "legacy", "3", "5"],
+  ["src\\zero.ts", null, null, "legacy", 0, 5],
+  ["src\\reversed.ts", null, null, "legacy", 3, 2],
+  ["pkg:service.ts", "pkg:service.ts", null, "all", 3, 5],
+  ["src/", "src/", null, "all", 3, 5],
 ] as const;
 
 test.each(historicalPaths)(
@@ -1093,10 +1112,12 @@ async function verifyLegacyLocationReplay(
   path: string,
   oldPath: string | null,
   newPath: string | null,
-  coordinates: "numeric" | "legacy quoted" | "backlog quoted",
+  mode: "all" | "legacy" | "backlog",
+  line: string | number,
+  endLine: string | number,
 ) {
-  const backlogOnly = coordinates === "backlog quoted";
-  const legacyOnly = coordinates === "legacy quoted";
+  const backlogOnly = mode === "backlog";
+  const legacyOnly = mode === "legacy";
   const locations = (path: string | null) => (path ? [{ path, line: 3 }] : []);
 
   const source = { provider: "semgrep" as const, sourceKey: "demo/topic" };
@@ -1109,11 +1130,7 @@ async function verifyLegacyLocationReplay(
     ...(backlogOnly ? {} : { ref: scope.ref }),
     id: 12,
     severity: "HIGH",
-    location: {
-      file_path: path,
-      line: coordinates === "numeric" ? 3 : "3",
-      end_line: coordinates === "numeric" ? 5 : "5",
-    },
+    location: { file_path: path, line, end_line: endLine },
   };
   const legacy = {
     ...scope,
@@ -1215,7 +1232,9 @@ async function verifyLegacyLocationReplay(
     const file = await fixture.prepare();
     if (legacyOnly && report !== legacy) {
       expect(file.preview.excluded.map((row) => row.reason)).toEqual([
-        "Semgrep source line must be a positive integer.",
+        typeof endLine === "number" && endLine < Number(line)
+          ? "The code end line requires a first source location line and cannot precede it."
+          : "Semgrep source line must be a positive integer.",
       ]);
       expect((await file.import()).counts).toEqual({
         created: 0,
@@ -1230,6 +1249,22 @@ async function verifyLegacyLocationReplay(
         (await (await direct(file.preview.findings[0]!)).import()).counts,
       ).toEqual(unchanged);
     expect((await (await direct()).import()).counts).toEqual(unchanged);
+  }
+  if (legacyOnly && !newPath) {
+    // Both spellings were projected by the original reader and required valid coordinates.
+    for (const file_path of ["src/service.ts", "pkg:service.ts"]) {
+      await fixture.writeJson({
+        ...legacy,
+        findings: [{ ...row, location: { ...row.location, file_path } }],
+      });
+      const rejected = await fixture.prepare();
+      expect(rejected.preview.excluded).toHaveLength(1);
+      expect((await rejected.import()).counts).toEqual({
+        created: 0,
+        updated: 0,
+        unchanged: 0,
+      });
+    }
   }
   expect(await fixture.read()).toEqual([stored!]);
   if (oldPath) {
