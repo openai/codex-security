@@ -440,6 +440,23 @@ describe("interactive patch finding browser", () => {
     ]);
   });
 
+  test("keeps every details scroll step when keys arrive together", async () => {
+    const app = render(
+      createElement(PatchTui, {
+        repository: "/work/example",
+        findings: findings(["high"]),
+        color: false,
+        onComplete: () => {},
+      }),
+    );
+
+    await press(app, "\t");
+    await press(app, "\u001B[B".repeat(3));
+    expect(app.lastFrame()).toContain("DETAILS  4–16/");
+    await press(app, "\u001B[6~".repeat(2));
+    expect(app.lastFrame()).toContain("DETAILS  30–42/");
+  });
+
   test("allows selecting none and canceling without patching", async () => {
     for (const input of ["q", "\r"]) {
       const selected: (PatchSelection | null)[] = [];

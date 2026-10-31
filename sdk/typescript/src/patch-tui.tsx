@@ -504,15 +504,17 @@ export function PatchTui({
         setFocused(focusedFinding.current);
         setOffset(0);
       } else {
-        setOffset(Math.max(0, Math.min(maximumOffset, offset + direction)));
+        setOffset((previous) =>
+          Math.max(0, Math.min(maximumOffset, previous + direction)),
+        );
       }
     } else if (key.pageUp || key.pageDown) {
-      setOffset(
+      setOffset((previous) =>
         Math.max(
           0,
           Math.min(
             maximumOffset,
-            offset + (key.pageDown ? 1 : -1) * visibleRows,
+            previous + (key.pageDown ? 1 : -1) * visibleRows,
           ),
         ),
       );
