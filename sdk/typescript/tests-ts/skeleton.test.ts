@@ -350,7 +350,8 @@ describe("TypeScript package skeleton", () => {
       ["Typecheck", "static-checks"],
       ["Check formatting", "static-checks"],
       ["Check MCP formatting", "static-checks"],
-      ["Audit production dependencies", "static-checks"],
+      ["Audit SDK production dependencies", "static-checks"],
+      ["Audit MCP production dependencies", "static-checks"],
     ] as const) {
       expect(
         jobs[job]!.steps!.filter((step) => step.name === name),
@@ -554,19 +555,31 @@ describe("TypeScript package skeleton", () => {
     );
   });
 
-  test("blocks CI and releases when the production dependency audit fails", async () => {
-    for (const workflowName of ["node-ci.yml", "node-release.yml"]) {
-      const { jobs } = await workflow(workflowName);
-      const audits = Object.values(jobs)
-        .flatMap((job) => job.steps ?? [])
-        .filter((step) => step.name === "Audit production dependencies");
-      expect(audits.length).toBeGreaterThan(0);
-      for (const audit of audits) {
-        expect(audit).not.toHaveProperty("continue-on-error");
-        expect(audit.run).toMatch(
-          /^(?:sfw )?pnpm --dir sdk\/typescript run audit:prod$/u,
-        );
-      }
+  test("requires both production audits before CI and release verification", async () => {
+    for (const [filename, job, launcher] of [
+      ["node-ci.yml", "static-checks", "pnpm"],
+      ["node-release.yml", "verify", "sfw pnpm"],
+    ] as const) {
+      const audits = (await workflow(filename)).jobs[job]!.steps!.filter(
+        (step) =>
+          step.id === "sdk-audit" ||
+          step.name === "Audit MCP production dependencies",
+      );
+      expect(audits).toHaveLength(2);
+      const [sdk, mcp] = audits;
+      expect(sdk).toMatchObject({
+        id: "sdk-audit",
+        "working-directory": "sdk/typescript",
+        run: `${launcher} run audit:prod --config.lockfile-dir=.`,
+      });
+      expect(sdk).not.toHaveProperty("if");
+      expect(sdk).not.toHaveProperty("continue-on-error");
+      expect(mcp).toMatchObject({
+        if: "${{ !cancelled() && (steps.sdk-audit.outcome == 'success' || steps.sdk-audit.outcome == 'failure') }}",
+        "working-directory": "plugins/codex-security/mcp-app",
+        run: `${launcher} audit --prod --audit-level high --config.lockfile-dir=.`,
+      });
+      expect(mcp).not.toHaveProperty("continue-on-error");
     }
   });
 

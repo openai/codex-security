@@ -122,8 +122,14 @@ jobs:
         run: pnpm --dir sdk/typescript run format
       - name: Check MCP formatting
         run: pnpm --dir plugins/codex-security/mcp-app exec prettier --check "**/*.{cjs,cts,js,jsx,mjs,mts,ts,tsx}"
-      - name: Audit production dependencies
-        run: pnpm --dir sdk/typescript run audit:prod
+      - name: Audit SDK production dependencies
+        id: sdk-audit
+        working-directory: sdk/typescript
+        run: pnpm run audit:prod --config.lockfile-dir=.
+      - name: Audit MCP production dependencies
+        if: ${{ !cancelled() && (steps.sdk-audit.outcome == 'success' || steps.sdk-audit.outcome == 'failure') }}
+        working-directory: plugins/codex-security/mcp-app
+        run: pnpm audit --prod --audit-level high --config.lockfile-dir=.
 
   native:
     if: needs.classify-changes.outputs.package-required == 'true'
