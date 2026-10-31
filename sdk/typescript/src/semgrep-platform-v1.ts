@@ -65,7 +65,7 @@ export function upgradeSemgrepPlatformReport(
   const entries = array(report["findings"], "Semgrep findings");
   let aliases = report["repositoryAliases"];
   if (aliases === undefined) {
-    const derived = projectAliases(name, url, references);
+    const derived = projectAliases(name, url, references, true);
     const observed = new Set<string>();
     for (const entry of entries) {
       const row = record(entry, "Semgrep finding");

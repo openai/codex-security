@@ -771,7 +771,10 @@ export async function prepareLocalImport(
   }
   const strictSources = new Map<string, Provider>();
   const hostedSources = new Map<string, ExternalSourceRepository>();
-  const semgrepReportScope = semgrepPlatformReportScope(current);
+  const semgrepReportScope = semgrepPlatformReportScope(
+    current,
+    options.provider,
+  );
   const semgrepPlatformRepositoryUrl = semgrepReportScope?.url;
   function addSemgrepSource(url: string) {
     if (options.provider !== "semgrep")

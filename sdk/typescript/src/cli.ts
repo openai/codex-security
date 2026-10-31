@@ -4144,10 +4144,9 @@ export async function main(
           ),
       }),
       output: semgrepReport,
-      run: ({ args, options, error, format, formatExplicit }) => {
+      run: ({ args, options, error, format }) => {
         escapeSemgrepOutput =
-          format === "md" ||
-          (format === "toon" && !formatExplicit && output.isTTY === true);
+          format === "md" || (format === "toon" && output.isTTY === true);
         return collect("Semgrep", error, (signal) =>
           collectSemgrepPlatformFindings(
             {
