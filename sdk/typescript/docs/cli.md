@@ -1488,6 +1488,28 @@ network findings are not supported by this repository importer. Cloud destinatio
 currently support connected GitHub and GitHub Enterprise repositories, including
 custom Enterprise hostnames. Named Wiz exports do not add other VCS destinations.
 
+#### Review the Cloud destination
+
+The preview shows which Cloud destination will receive the selected records.
+When the deployment advertises private import for the scanner, the CLI puts a
+structured report in the signed-in account’s **private findings inbox**. It
+attaches the selected repository and connector as a suggested assessment
+target. Review the selection, exclusions, source key and destination before
+confirming.
+
+The job receipt contains the file and job identifiers and record counts. To
+share a finding, open it in Cloud, assess it against a pinned repository
+revision, and explicitly publish a reportable assessment. An import can
+finish with record errors. Check the error and unprocessed counts in the
+receipt.
+
+Repeat the same command to recover an interrupted private import. The CLI
+checks the report digest, reuses its saved request IDs, and reads an accepted
+job even when new uploads are disabled. Resetting the inbox requires a new
+preview and confirmation. Deployments and scanners using the repository
+publisher continue to show the repository destination and per-finding receipts.
+An in-flight repository publication resumes on its original protocol.
+
 #### Select findings and a destination
 
 Use an authorized [Wiz MCP](https://www.wiz.io/blog/introducing-wiz-mcp) or Wiz API

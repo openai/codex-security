@@ -11,6 +11,14 @@ see
 
 ## Choose the record and source key
 
+For private Cloud imports, the identity is the importing owner, provider,
+source key and vendor occurrence ID. Keep the source key stable across retries
+and unique to the vendor project or repository in which occurrence IDs are
+unique. Choosing a different assessment target does not create another source
+identity. The CLI sends the reviewed selection as `security.findings.v1` and
+reports a private import-job receipt. A canonical finding ID becomes available
+after explicit Cloud assessment and publication.
+
 A stored source record is scoped to **destination repository + provider + source
 key + source finding ID**. Choose the key for the stream you intend to replay,
 not the export date. A CVE or GHSA names an advisory; a CWE or rule ID describes
