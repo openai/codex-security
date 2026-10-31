@@ -282,7 +282,7 @@ test("a URL-less row needs the matching project ID and full name, while an exact
   ).toHaveLength(1);
   const encoded = "https://github.com/example/caf%C3%A9";
   expect(
-    select("café", { url: encoded, name: "example/café" }, encoded).findings,
+    select("café", { id: 77, name: "example/café" }, encoded).findings,
   ).toHaveLength(1);
   const literal = "https://scm.example.test/team/repo.git";
   expect(() =>
