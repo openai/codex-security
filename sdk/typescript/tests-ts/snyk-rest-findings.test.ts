@@ -53,6 +53,12 @@ test.each(["open-source", "code"] as const)(
     const code = product === "code";
     const asset = project(code ? "sast" : "npm");
     const record = issue(code);
+    if (code) {
+      const { representations } = record.attributes.coordinates[0]!;
+      const location = representations[0]!.sourceLocation!;
+      for (const file of [".", "src/", "src/.", "src\\app.ts"])
+        representations.push({ sourceLocation: { ...location, file } });
+    }
     const path = `/rest/orgs/${options.organizationId}/issues`;
     const cursor = "next+/=";
     const api = transport(
@@ -295,6 +301,46 @@ test("an invalid issue key cannot hide a duplicate resource UUID in saved pages"
     { position: 1, reason: expect.stringContaining("overlapping issue IDs") },
     { position: 2, reason: expect.stringContaining("Snyk issue key") },
   ]);
+});
+
+test("a malformed copy of a scoped issue cannot update its stored evidence", async () => {
+  const valid = issue(false);
+  const report = snykRestFixture("open-source");
+  await using fixture = await snykLocalFixture({
+    remote: options.sourceRepositoryUrl,
+  });
+  await fixture.writeJson(report);
+  const saved = await createAndReplayFinding(fixture);
+
+  const changed = {
+    ...valid,
+    attributes: { ...valid.attributes, title: "Changed" },
+  };
+  const { attributes, ...missing } = valid;
+  const independent = {
+    ...valid,
+    id: "55555555-5555-4555-8555-555555555555",
+    attributes: { ...attributes, key: "independent" },
+  };
+  // An explicitly different product remains a per-row exclusion.
+  const otherProduct = {
+    ...independent,
+    attributes: { ...independent.attributes, type: "code" },
+  };
+  const page = { data: [changed, missing, independent, otherProduct] };
+  report.pages[0]!.responseJson = JSON.stringify(page);
+  await fixture.writeJson(report);
+
+  const prepared = await fixture.prepare();
+  expect(prepared.preview.excluded.map((row) => row.position)).toEqual([
+    1, 2, 4,
+  ]);
+  expect((await prepared.import()).counts).toEqual({
+    created: 1,
+    updated: 0,
+    unchanged: 0,
+  });
+  expect(await fixture.read()).toContainEqual(saved);
 });
 
 test("normalized Snyk selections cannot import two keys for one native issue", async () => {

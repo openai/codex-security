@@ -119,7 +119,7 @@ test("CLI and API targets can have empty integration linkage", async () => {
   }
 });
 
-test("expanded integrations carry their own resource type and nullable UUID", async () => {
+test("expanded integrations verify resource type, nullable UUID, and SCM deployment", async () => {
   const project = snykProject();
   const target = project.data.relationships.target.data;
   const original = {
@@ -127,13 +127,35 @@ test("expanded integrations carry their own resource type and nullable UUID", as
     id: "88888888-8888-4888-8888-888888888888",
     attributes: { integration_type: "github" },
   };
-  for (const [identity, error] of [
+  const integration = (type: string) => ({
+    attributes: { integration_type: type },
+  });
+  for (const [identity, error, origin = "github"] of [
     [{ type: "project" }, "integration resource"],
     [{ type: undefined }, "integration resource"],
     [{ id: "invalid" }, "integration ID"],
     [{ id: undefined }, "integration ID"],
     [{ id: null }, undefined],
+    [
+      integration("bitbucket-cloud"),
+      "project's bitbucket-server",
+      "bitbucket-server",
+    ],
+    [
+      integration("bitbucket-server"),
+      "project's bitbucket-connect-app",
+      "bitbucket-connect-app",
+    ],
+    [integration("bitbucket-connect-app"), undefined, "bitbucket-cloud"],
+    [
+      integration("github-server-app"),
+      "project's github-cloud-app",
+      "github-cloud-app",
+    ],
+    [integration("github-cloud-app"), undefined, "github-enterprise"],
+    [integration("github-server-app"), undefined, "github-enterprise"],
   ] as const) {
+    project.data.attributes.origin = origin;
     Object.assign(target, {
       relationships: { integration: { data: { ...original, ...identity } } },
     });

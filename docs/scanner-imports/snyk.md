@@ -58,12 +58,15 @@ row, keep `source_data.issue` and its `source_data.numericFields.issue` when
 present. V1 uses those fields together to distinguish exact numbers from
 strings with the same spelling. For a v2 row, keep `source_data.issueJson`.
 The local workbench stores the verified project and target with that issue,
-so the stored row can be imported again. All selected issues must share an API
-region, organization, project and product.
+so the stored row can be imported again. All selected issues must share the
+report’s API region, organization, project and product. If the report names a
+target, each supplied project must name that target.
 
 SDK readers that define their own findings and IDs can use the ordinary
 normalized Snyk import with their own evidence and no hosted report context.
 
+The offline reader can interpret SCM aliases recorded in an archived project.
+Local import independently compares the source to the checkout before writing.
 For private source-control hosts, use the same repository URL as the checkout.
 SDK callers that have independently verified a GitHub Enterprise or GitLab
 repository can pass its canonical HTTPS URL and platform to the local importer.

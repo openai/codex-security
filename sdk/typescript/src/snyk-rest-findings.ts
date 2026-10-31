@@ -74,17 +74,19 @@ const origins = new Set([
   "https://api.eu.snyk.io",
   "https://api.au.snyk.io",
 ]);
-const scmOrigins = new Set([
-  "azure-repos",
-  "bitbucket-cloud",
-  "bitbucket-connect-app",
-  "bitbucket-server",
-  "github",
-  "github-app",
-  "github-cloud-app",
-  "github-enterprise",
-  "github-server-app",
-  "gitlab",
+// Some project origins name a provider, while app integrations identify a deployment.
+const githubDeployments = ["github-cloud", "github-server"];
+const scmOrigins = new Map<string, readonly string[]>([
+  ["azure-repos", ["azure-repos"]],
+  ["bitbucket-cloud", ["bitbucket-cloud"]],
+  ["bitbucket-connect-app", ["bitbucket-cloud"]],
+  ["bitbucket-server", ["bitbucket-server"]],
+  ["github", githubDeployments],
+  ["github-app", githubDeployments],
+  ["github-cloud-app", ["github-cloud"]],
+  ["github-enterprise", githubDeployments],
+  ["github-server-app", ["github-server"]],
+  ["gitlab", ["gitlab"]],
 ]);
 const openSourceProjects = new Set([
   "cargo",
@@ -533,9 +535,12 @@ function checkTargetRelationships(
     record(attributes, "Snyk integration attributes")["integration_type"],
     "Snyk integration type",
   );
+  const deployments = scmOrigins.get(origin);
   if (
-    scmOrigins.has(origin) &&
-    (!scmOrigins.has(type) || origin.split("-")[0] !== type.split("-")[0])
+    deployments &&
+    !scmOrigins
+      .get(type)
+      ?.some((deployment) => deployments.includes(deployment))
   )
     throw new Error(
       `Snyk target integration ${type} must be a supported SCM integration for the project's ${origin} origin.`,
@@ -826,30 +831,28 @@ function linkedSnykResources(
     )
       return { issue };
   }
-  const keyed = json && "snykRestIssueKey" in data;
-  const versioned = data["apiVersion"] === apiVersion;
-  if (!hosted && !keyed && !versioned) return;
+  if (!hosted && data["apiVersion"] !== apiVersion) return;
   const project = original("project");
   const attributes = project?.["attributes"];
-  if (
+  const nativeProject =
     project?.["type"] === "project" &&
     isUuid(project["id"]) &&
     isRecord(attributes) &&
     "origin" in attributes &&
-    "type" in attributes
-  ) {
-    if (hosted || keyed) return {};
-  } else {
-    const target = keyed && versioned ? original("target") : undefined;
+    "type" in attributes;
+  if (!nativeProject) {
+    const target = original("target");
     if (target?.["type"] !== "target" || !isUuid(target["id"])) return;
   }
-  // An unmarked v1 project or a keyed v2 target also needs the complete monitor scope.
-  try {
-    scope(data, data["apiOrigin"]);
-    return {};
-  } catch {
-    return;
+  if (!hosted) {
+    // A project or target alone only identifies an unmarked row with the complete monitor scope.
+    try {
+      scope(data, data["apiOrigin"]);
+    } catch {
+      return;
+    }
   }
+  return {};
 }
 
 function snykRowEvidence(finding: ExternalFinding, hostedReport = false) {
@@ -896,9 +899,9 @@ function bindSnykFinding(
     (format === SNYK_REST_ISSUES_V1 ? originals?.v2 : originals?.v1)
   )
     throw new Error(
-      "A normalized Snyk row cannot claim both v1 and v2 native issue and project representations.",
+      "A normalized Snyk row cannot claim both v1 and v2 native representations.",
     );
-  const document = readSnykRestDocument({ ...retained, format });
+  const document = readSnykRestDocument({ ...retained, format }, report);
   const issue =
     (format === SNYK_REST_ISSUES_FORMAT ? originals?.v2?.issue : undefined) ??
     parseHostedScannerJson(
@@ -951,7 +954,9 @@ function bindSnykFinding(
   } else if (retain && format === SNYK_REST_ISSUES_FORMAT) {
     retain(finding, {
       ...retained,
-      ...(projected && { ...source, snykRestIssueKey: attributes["key"] }),
+      ...(projected && source),
+      format,
+      snykRestIssueKey: attributes["key"],
       projectJson: source.projectJson,
       targetJson: source.targetJson,
       issueJson: stringifyHostedEvidence(issue),
@@ -1081,7 +1086,8 @@ function codeEvidence(
       const location = record(value, "Snyk source location");
       revisions.add(text(location["commit_id"]));
       const path = hostedRepositoryPath(location["file"]);
-      if (scm && path)
+      const filename = path?.split("/").at(-1);
+      if (scm && path && (!includeLines || (filename && filename !== ".")))
         locations.push(
           includeLines
             ? { path, line: codeStartLine(location["region"]) }
@@ -1194,9 +1200,13 @@ export function normalizeSnykIssues(
       return projectSnykIssue(attributes, asset, sourceData, target);
     },
     ({ issue }) => {
-      const { id, attributes } = selectedIssue(issue, source);
-      resourceCounts.set(id, (resourceCounts.get(id) ?? 0) + 1);
-      return snykIssueId(attributes, source);
+      const id = resourceId(issue, "issue");
+      const raw = issue["attributes"];
+      const product = isRecord(raw) ? raw["type"] : undefined;
+      // A missing product cannot establish that this resource belongs to another selection.
+      if (!text(product) || product === issueTypes[source.product])
+        resourceCounts.set(id, (resourceCounts.get(id) ?? 0) + 1);
+      return snykIssueId(selectedIssue(issue, source).attributes, source);
     },
     target,
   );
@@ -1247,6 +1257,10 @@ export function snykRestImportRepository(
   if (provider !== "snyk")
     throw new Error("Use the snyk provider for Snyk REST issues.");
 
+  if (project?.repository.targetId && boundRows.some((row) => !row.targetId))
+    throw new Error(
+      "The selected Snyk finding is missing the report's native target. Keep its full project or omit the project to use the report context.",
+    );
   for (const key of ["targetId", "integrationId"] as const) {
     const ids = new Set(bindings.flatMap((binding) => binding[key] ?? []));
     if (ids.size > 1)
