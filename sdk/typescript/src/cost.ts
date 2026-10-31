@@ -113,6 +113,14 @@ interface ScanCostSnapshot {
   cost: ScanCost | null;
 }
 
+// Access refusals that the process cannot clear by retrying, such as a rollout
+// left behind by another account. Any other open failure may be transient, so
+// it keeps being retried instead of retiring a session that could still be read.
+const PERMANENT_ACCESS_ERROR_CODES: ReadonlySet<string> = new Set([
+  "EACCES",
+  "EPERM",
+]);
+
 const COST_POLL_INTERVAL_MS = 100;
 const SESSION_READ_SIZE = 64 * 1_024;
 
@@ -533,6 +541,7 @@ async function readSessionUsage(
     file = await open(path, "r");
   } catch (error) {
     if (isMissingFile(error)) return;
+    if (isPermanentAccessError(error)) quarantineSession(session);
     throw error;
   }
   try {
@@ -556,8 +565,7 @@ async function readSessionUsage(
           session.pendingLine = [line];
         }
       } catch (error) {
-        session.unreadable = true;
-        session.pendingLine = [];
+        quarantineSession(session);
         throw error;
       }
     }
@@ -948,4 +956,18 @@ function subtractTokenUsage(
 
 function isMissingFile(error: unknown): boolean {
   return isRecord(error) && error["code"] === "ENOENT";
+}
+
+function isPermanentAccessError(error: unknown): boolean {
+  if (!isRecord(error)) return false;
+  const code = error["code"];
+  return typeof code === "string" && PERMANENT_ACCESS_ERROR_CODES.has(code);
+}
+
+// A retired session is reported once and then skipped, which is how the reader
+// already treats a log it cannot parse. Retiring it is what stops one bad file
+// from failing every later poll of the same scan.
+function quarantineSession(session: SessionUsage): void {
+  session.unreadable = true;
+  session.pendingLine = [];
 }
