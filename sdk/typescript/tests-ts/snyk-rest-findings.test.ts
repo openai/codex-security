@@ -338,6 +338,34 @@ test("normalized Snyk selections cannot import two keys for one native issue", a
   expect((await (await prepare()).import()).counts.unchanged).toBe(2);
 });
 
+test("a numeric Code coordinate is excluded without replacing the stored finding", async () => {
+  const report = snykRestFixture("code");
+  await using fixture = await snykLocalFixture({
+    remote: options.sourceRepositoryUrl,
+  });
+  await fixture.writeJson(report);
+  expect((await (await fixture.prepare()).import()).counts.created).toBe(1);
+  const stored = await fixture.read();
+
+  const malformed = issue(true);
+  report.pages[0]!.responseJson = JSON.stringify({
+    data: [
+      {
+        ...malformed,
+        attributes: { ...malformed.attributes, coordinates: [7] },
+      },
+    ],
+  });
+  await fixture.writeJson(report);
+  const prepared = await fixture.prepare();
+  expect((await prepared.import()).counts.updated).toBe(0);
+  expect(prepared.preview.findings).toBeEmpty();
+  expect(prepared.preview.excluded).toMatchObject([
+    { position: 1, reason: expect.stringContaining("must be an object") },
+  ]);
+  expect(await fixture.read()).toEqual(stored);
+});
+
 test("rejects mismatched project evidence before persisting a local import", async () => {
   const other = "https://github.com/example/other";
   const wrongProject = transport(project("npm", other));
@@ -359,16 +387,19 @@ test("retains numeric evidence exactly and identifies an issue by its vendor key
   const original = issue(false);
   const raw = JSON.stringify({
     data: [{ ...original, original_count: 0 }],
-  }).replace('"original_count":0', '"original_count":9007199254740993');
+  }).replace('"original_count":0', '"original_count":-90071992547409930e-1');
   const responses = [JSON.stringify(project()), raw];
   const report = await collectSnykIssues(options, {
     environment,
     fetch: async () => new Response(responses.shift()),
   });
+  expect(report.pages[0]!.responseJson).toContain(
+    '"original_count":-90071992547409930e-1',
+  );
   const row = normalizeSnykIssues(JSON.parse(JSON.stringify(report)))
     .findings[0]!;
   expect(row.evidence.source_data?.["issueJson"]).toContain(
-    '"original_count":9007199254740993',
+    '"original_count":-9007199254740993',
   );
   report.pages[0]!.responseJson = raw.replace(
     original.id,

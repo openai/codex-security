@@ -1005,9 +1005,12 @@ export async function prepareLocalImport(
         : [options.sourceRepositoryUrl]),
     ],
     readerSources,
+    (finding, source) => {
+      finding.evidence.source_data = source;
+    },
   );
   if (snyk) {
-    // Validate the submitted projection while preserving the reader's exact stored fields.
+    // Preserve reader display fields while validating their complete native evidence.
     for (const { evidence } of current.findings)
       validateExternalEvidence(structuredClone(evidence), "local");
   } else if (options.provider === "snyk" && current.sourceRepositoryUrl) {

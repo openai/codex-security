@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { writeFile } from "node:fs/promises";
 import { gzipSync } from "node:zlib";
+import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import {
   normalizeSnykIssues,
   snykRestFindingRepository,
@@ -19,7 +20,8 @@ import {
 
 test("replays a v1 Snyk export with its original evidence, then updates the same stored ID from v2", async () => {
   const token = "9007199254740993";
-  const project = { ...snykProject().data, counter: token };
+  const projectToken = "9007199254740993e1";
+  const project = { ...snykProject().data, counter: projectToken };
   const issue = snykIssue(false);
   const original = {
     ...issue,
@@ -35,7 +37,7 @@ test("replays a v1 Snyk export with its original evidence, then updates the same
     target: null,
     pages: [{ startingAfter: null, response: { data: [original] } }],
     numericFields: {
-      project: { counter: token },
+      project: { counter: projectToken },
       pages: { 0: { response: { data: { 0: issueFields } } } },
     },
   };
@@ -53,7 +55,7 @@ test("replays a v1 Snyk export with its original evidence, then updates the same
     project,
     target: null,
     issue: original,
-    numericFields: { project: { counter: token }, issue: issueFields },
+    numericFields: { project: { counter: projectToken }, issue: issueFields },
   });
   expect(
     snykRestFindingRepository({
@@ -61,9 +63,45 @@ test("replays a v1 Snyk export with its original evidence, then updates the same
       evidence: stored.evidence,
     }).url,
   ).toBe(snykOptions.sourceRepositoryUrl);
-  expect(normalizeSnykIssues(v1)).not.toHaveProperty(
-    "sourceRepositoryPlatform",
+  const selected = normalizeSnykIssues(v1);
+  expect(selected).not.toHaveProperty("sourceRepositoryPlatform");
+  const row = selected.findings[0]!;
+  row.evidence.source_data = {
+    issue: original,
+    numericFields: { issue: issueFields },
+  };
+  const options = {
+    provider: "snyk" as const,
+    sourceKey: fixture.sourceKey,
+    repository: fixture.repository,
+  };
+  const dependencies = { environment: fixture.environment };
+  const projected = await prepareNormalizedLocalImport(
+    selected,
+    options,
+    dependencies,
   );
+  expect((await projected.import()).counts.unchanged).toBe(1);
+  expect((await fixture.read())[0]).toEqual(stored);
+
+  // A historical native project still identifies a hosted report after a reader removes the issue and ID.
+  const assetOnly = { ...source };
+  delete assetOnly["format"];
+  delete assetOnly["issue"];
+  assetOnly["numericFields"] = { project: { counter: projectToken } };
+  row.source_finding_id = "reader-id";
+  row.evidence.source_data = assetOnly;
+  await expect(
+    prepareNormalizedLocalImport(
+      {
+        read: 1,
+        findings: [row],
+        excluded: [],
+      },
+      options,
+      dependencies,
+    ),
+  ).rejects.toThrow("Snyk original issue");
   expect(() =>
     normalizeSnykIssues({
       ...v1,
@@ -73,7 +111,7 @@ test("replays a v1 Snyk export with its original evidence, then updates the same
 
   // Earlier v1 files also used native numbers and no sidecar. Both forms replay the same row.
   const native = JSON.stringify({ ...v1, numericFields: undefined })
-    .replace(`"counter":"${token}"`, `"counter":${token}`)
+    .replace(`"counter":"${projectToken}"`, `"counter":${projectToken}`)
     .replace(`"description":"${token}"`, `"description":${token}`);
   await writeFile(fixture.file, gzipSync(native));
   expect((await (await fixture.prepare()).import()).counts).toEqual({
@@ -84,8 +122,8 @@ test("replays a v1 Snyk export with its original evidence, then updates the same
 
   const v2 = snykRestFixture("open-source");
   v2.projectJson = JSON.stringify(project).replace(
-    `"counter":"${token}"`,
-    `"counter":${token}`,
+    `"counter":"${projectToken}"`,
+    `"counter":${projectToken}`,
   );
   v2.pages[0]!.responseJson = JSON.stringify(v1.pages[0]!.response).replace(
     `"description":"${token}"`,

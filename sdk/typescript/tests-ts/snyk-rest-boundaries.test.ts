@@ -5,6 +5,7 @@ import { prepareNormalizedExternalPublication } from "../src/external-findings-p
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import { normalizeSnykIssues } from "../src/snyk-rest-findings.js";
 import {
+  snykIssue,
   snykLocalFixture,
   snykOptions,
   snykRestFixture,
@@ -273,8 +274,24 @@ test("unrelated Wiz evidence with Snyk-like field names remains importable local
   const credentials = mock(async () => {
     throw new Error("Reached Wiz Cloud credentials");
   });
-  for (const format of [undefined, "wiz-export/v1"]) {
-    if (format) source_data["format"] = format;
+  const original = snykIssue(true);
+  for (const [id, org, project] of [
+    [42, undefined, undefined],
+    ["ticket-42", snykOptions.organizationId, snykOptions.projectId],
+    [original.id, undefined, snykOptions.projectId],
+    [original.id, snykOptions.organizationId, undefined],
+  ]) {
+    const issue = {
+      ...original,
+      id,
+      relationships: {
+        organization: { data: { type: "organization", id: org } },
+        scan_item: { data: { type: "project", id: project } },
+      },
+    };
+    source_data["issue"] = issue;
+    source_data["issueJson"] = JSON.stringify(issue);
+    if (id === original.id) source_data["format"] = "wiz-export/v1";
     expect(
       (
         await prepareNormalizedLocalImport(input, options, {
@@ -289,7 +306,7 @@ test("unrelated Wiz evidence with Snyk-like field names remains importable local
       }),
     ).rejects.toThrow("Reached Wiz Cloud credentials");
   }
-  expect(credentials).toHaveBeenCalledTimes(2);
+  expect(credentials).toHaveBeenCalledTimes(4);
 });
 
 test("a reader may copy an optional hosted context from Snyk CLI JSON or SARIF", async () => {
@@ -735,18 +752,23 @@ test.each(["v1", "v2"] as const)(
     expect((await (await prepare()).import()).counts.created).toBe(1);
     expect((await (await prepare()).import()).counts.unchanged).toBe(1);
     const [stored] = await fixture.read();
+    const listed = {
+      read: 1,
+      findings: [
+        {
+          source_finding_id: stored!.sourceFindingId,
+          evidence: stored!.evidence,
+        },
+      ],
+      excluded: [],
+    };
+    const replay = await prepareNormalizedLocalImport(listed, options, {
+      environment: fixture.environment,
+    });
+    expect((await replay.import()).counts.unchanged).toBe(1);
     await expect(
       prepareNormalizedExternalPublication(
-        {
-          read: 1,
-          findings: [
-            {
-              source_finding_id: stored!.sourceFindingId,
-              evidence: stored!.evidence,
-            },
-          ],
-          excluded: [],
-        },
+        listed,
         { ...options, provider: "wiz" },
         { environment: fixture.environment, credentials },
       ),
@@ -787,4 +809,41 @@ test("unmarked native v1 rows survive unrelated issueJson data", async () => {
     { environment: fixture.environment },
   );
   expect((await result.import()).counts.created).toBe(1);
+});
+
+test("a complete SDK row replays with reformatted native JSON and reader annotations", async () => {
+  const wire = snykRestFixture("open-source");
+  const report = normalizeSnykIssues(wire);
+  const row = report.findings[0]!;
+  row.evidence.title = "Reader title";
+  const retained = row.evidence.source_data!;
+  retained["readerNote"] = "preserved";
+  await using fixture = await snykLocalFixture({
+    remote: snykOptions.sourceRepositoryUrl,
+  });
+  const prepare = () =>
+    prepareNormalizedLocalImport(
+      report,
+      {
+        provider: "snyk",
+        repository: fixture.repository,
+        sourceKey: fixture.sourceKey,
+      },
+      { environment: fixture.environment },
+    );
+  expect((await (await prepare()).import()).counts.created).toBe(1);
+  for (const field of ["projectJson", "issueJson"]) {
+    const entries = Object.entries(JSON.parse(String(retained[field])));
+    retained[field] = JSON.stringify(
+      Object.fromEntries(entries.reverse()),
+      null,
+      2,
+    );
+  }
+  retained["targetJson"] = " null\n";
+  expect((await (await prepare()).import()).counts.unchanged).toBe(1);
+  const [stored] = await fixture.read();
+  expect(stored!.version).toBe(1);
+  expect(stored!.evidence.title).toBe("Reader title");
+  expect(stored!.evidence.source_data!["readerNote"]).toBe("preserved");
 });

@@ -11,6 +11,7 @@ import {
 import type { ImportedPackage, Provider } from "./external-import-models.js";
 import {
   SNYK_REST_ISSUES_FORMAT,
+  encodeSnykV1File,
   isSnykRestFormat,
   SNYK_REST_ISSUES_V1,
   originalSnykEvidence,
@@ -32,6 +33,7 @@ import {
 import {
   hostedNumberToken,
   parseHostedScannerJson,
+  stringifyHostedEvidence,
   hostedScannerHttp,
   hostedRepositoryUrl,
   type HostedScannerHttpOptions,
@@ -145,12 +147,15 @@ export interface SnykIssuesExport extends SnykScope {
   pages: { startingAfter: string | null; responseJson: string }[];
 }
 
+function isUuid(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/iu.test(value)
+  );
+}
+
 function uuid(value: unknown, label: string): string {
-  if (
-    typeof value !== "string" ||
-    !/^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/iu.test(value)
-  )
-    throw new Error(`${label} must be a UUID.`);
+  if (!isUuid(value)) throw new Error(`${label} must be a UUID.`);
   return value.toLowerCase();
 }
 
@@ -565,9 +570,7 @@ function pageLinkCursor(
 
 function nextCursor(value: unknown, endpoint: URL, current: string | null) {
   if (value === undefined) return null;
-  if (hostedNumberToken(value) !== undefined)
-    throw new Error("Snyk issue page links must be an object.");
-  const links = record(value, "Snyk issue page links");
+  const links = nativeRecord(value, "Snyk issue page links");
   if (links["prev"] != null) {
     if (current === null)
       throw new Error("The first Snyk issue page has a previous page link.");
@@ -760,11 +763,13 @@ function savedContext(
         ? "other"
         : undefined;
   return {
+    project,
+    target,
     source: {
       ...formatVersion,
       ...selected,
-      projectJson: JSON.stringify(project),
-      targetJson: JSON.stringify(target),
+      projectJson: stringifyHostedEvidence(project),
+      targetJson: stringifyHostedEvidence(target),
     },
     context,
     repository: {
@@ -784,7 +789,7 @@ const snykRestId = /^snyk-rest:[0-9a-f]{64}$/u;
 function linkedSnykResources(
   data: Resource,
   json: boolean,
-  hostedReport: boolean,
+  hosted: boolean,
 ): { issue?: Resource } | undefined {
   const original = (field: string) => {
     const value = data[field + (json ? "Json" : "")];
@@ -798,19 +803,20 @@ function linkedSnykResources(
     }
   };
   const issue = original("issue");
-  if (issue?.["type"] === "issue" && "id" in issue) {
+  if (issue?.["type"] === "issue" && (hosted || isUuid(issue["id"]))) {
     const attributes = issue["attributes"];
     const links = issue["relationships"];
     const relationType = (name: string) => {
       const link = isRecord(links) ? links[name] : undefined;
-      return isRecord(link) && isRecord(link["data"])
-        ? link["data"]["type"]
+      const resource = isRecord(link) ? link["data"] : undefined;
+      return isRecord(resource) && (hosted || isUuid(resource["id"]))
+        ? resource["type"]
         : undefined;
     };
     if (
       isRecord(attributes) &&
       "key" in attributes &&
-      (hostedReport ||
+      (hosted ||
         attributes["type"] === issueTypes.code ||
         attributes["type"] === issueTypes["open-source"]) &&
       relationType("organization") === "organization" &&
@@ -818,7 +824,8 @@ function linkedSnykResources(
     )
       return { issue };
   }
-  if (json && "snykRestIssueKey" in data) {
+  const keyed = json && "snykRestIssueKey" in data;
+  if (keyed || data["apiVersion"] === apiVersion) {
     const project = original("project");
     const attributes = project?.["attributes"];
     if (
@@ -827,22 +834,30 @@ function linkedSnykResources(
       isRecord(attributes) &&
       "origin" in attributes &&
       "type" in attributes
-    )
+    ) {
+      if (!keyed) {
+        // Saved v1 rows have no issue-key marker. Their project and complete monitor scope identify them.
+        try {
+          uuid(project["id"], "Snyk project ID");
+          scope(data, data["apiOrigin"]);
+        } catch {
+          return;
+        }
+      }
       return {};
+    }
   }
 }
 
 function snykRowEvidence(finding: ExternalFinding, hostedReport = false) {
   const retained = finding.evidence.source_data;
-  const v1 = retained && linkedSnykResources(retained, false, hostedReport);
-  const v2 = retained && linkedSnykResources(retained, true, hostedReport);
-  if (
-    v1 ||
-    v2 ||
+  const marked =
     snykRestId.test(finding.source_finding_id) ||
-    isSnykRestFormat(retained?.["format"])
-  )
-    return { v1, v2 };
+    isSnykRestFormat(retained?.["format"]);
+  const hosted = hostedReport || marked;
+  const v1 = retained && linkedSnykResources(retained, false, hosted);
+  const v2 = retained && linkedSnykResources(retained, true, hosted);
+  if (v1 || v2 || marked) return { v1, v2 };
 }
 
 export function isSnykRestFinding(finding: ExternalFinding): boolean {
@@ -861,6 +876,7 @@ function bindSnykFinding(
   references: readonly ExternalSourceRepository[],
   originals: ReturnType<typeof snykRowEvidence>,
   report?: ReturnType<typeof savedContext>,
+  retain?: (finding: ExternalFinding, source: Resource) => void,
 ) {
   const retained = record(
     finding.evidence.source_data,
@@ -895,10 +911,10 @@ function bindSnykFinding(
       ? {
           ...report.source,
           ...document,
-          projectJson: report.source.projectJson,
+          projectJson: JSON.stringify(report.project),
           targetJson:
             document["targetJson"] === undefined
-              ? report.source.targetJson
+              ? JSON.stringify(report.target)
               : document["targetJson"],
         }
       : document,
@@ -919,6 +935,35 @@ function bindSnykFinding(
       "The normalized finding ID does not match the original Snyk issue key and project.",
     );
   projectSnykIssue(attributes, asset, { ...retained, format }, "local");
+  if (retain && format === SNYK_REST_ISSUES_V1 && projected) {
+    // The legacy witness stores the original decimal token, including its spelling.
+    const context = encodeSnykV1File({
+      ...repository.scope,
+      apiVersion: source.apiVersion,
+      format,
+      project: asset.project,
+      target: asset.target,
+    });
+    retain(finding, {
+      ...context,
+      ...retained,
+      format,
+      ...(isRecord(context["numericFields"]) && {
+        numericFields: {
+          ...context["numericFields"],
+          ...(isRecord(retained["numericFields"]) && retained["numericFields"]),
+        },
+      }),
+    });
+  } else if (retain && format === SNYK_REST_ISSUES_FORMAT) {
+    retain(finding, {
+      ...(projected && { ...source, snykRestIssueKey: attributes["key"] }),
+      ...retained,
+      projectJson: source.projectJson,
+      targetJson: source.targetJson,
+      issueJson: stringifyHostedEvidence(issue),
+    });
+  }
   return { ...repository, issueId };
 }
 
@@ -965,9 +1010,16 @@ function readIssues(document: Resource, selected: Scope) {
   return issues;
 }
 
+// Lossless parsing preserves JSON numbers in raw token objects.
+function nativeRecord(value: unknown, label: string): Resource {
+  return record(hostedNumberToken(value) ?? value, label);
+}
+
 function records(parent: Resource, field: string) {
   const label = `Snyk ${field}`;
-  return array(parent[field] ?? [], label).map((entry) => record(entry, label));
+  return array(parent[field] ?? [], label).map((entry) =>
+    nativeRecord(entry, label),
+  );
 }
 
 function problemIds(entries: Resource[], type?: string) {
@@ -1146,7 +1198,7 @@ export function normalizeSnykIssues(
         : {
             ...source,
             snykRestIssueKey: attributes["key"],
-            issueJson: JSON.stringify(issue),
+            issueJson: stringifyHostedEvidence(issue),
           };
       return projectSnykIssue(attributes, asset, sourceData, target);
     },
@@ -1173,6 +1225,7 @@ export function snykRestImportRepository(
   provider: Provider,
   urls: Iterable<string> = [],
   trustedSources: readonly ExternalSourceRepository[] = [],
+  retain?: (finding: ExternalFinding, source: Resource) => void,
 ): RepositoryBinding | undefined {
   const project =
     input.snykRestContext !== undefined
@@ -1189,7 +1242,7 @@ export function snykRestImportRepository(
   }));
   if (!project && !rows.some(({ originals }) => originals)) return;
   const boundRows = rows.map(({ finding, originals }) =>
-    bindSnykFinding(finding, trustedSources, originals, project),
+    bindSnykFinding(finding, trustedSources, originals, project, retain),
   );
   const selected = project?.repository.scope ?? boundRows[0]?.scope;
   const bindings = project ? [...boundRows, project.repository] : boundRows;

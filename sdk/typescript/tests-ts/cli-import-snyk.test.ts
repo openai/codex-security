@@ -92,7 +92,7 @@ test("import snyk requires opt-in and keeps failed collections out of redirected
 test("Snyk CLI escapes cursors in human output and retains the native JSON value", async () => {
   const cursor = "pré\u001b[2Jcursor";
   const report = snykRestFixture("open-source");
-  for (const format of ["md", "default", "json"] as const) {
+  for (const format of ["md", "default", "toon", "json"] as const) {
     const cli = createCliTest(main, { stdout: true });
     const args =
       format === "default" ? command.slice(0, -2) : command.with(-1, format);
