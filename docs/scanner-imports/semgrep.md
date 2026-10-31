@@ -125,8 +125,11 @@ See the [native output fields](https://docs.semgrep.dev/semgrep-appsec-platform/
 Capture the project lookup and Findings API pages as original response text.
 Pass a fully qualified ref, such as `refs/heads/topic` or `refs/tags/topic`, exactly as it appears in the findings.
 Supply the HTTP(S) repository URL you independently associate with the target checkout.
-The project response and any finding URL must match this spelling. A finding without a URL
-must carry the native project ID and a namespace-qualified repository name matching the decoded path in that URL. A project display alias with a different path needs the finding URL. The local importer checks the checkout using its existing repository rules.
+The project response and any finding URL must match this spelling. When a finding omits its URL,
+it must carry the project ID and its own repository name must match the namespace-qualified,
+decoded path in the operator-supplied URL. The project display name can differ from that path.
+A finding that uses a different display alias for its repository name needs the exact finding URL.
+The local importer checks the checkout using its existing repository rules.
 
 ```ts
 const selected = normalizeSelectedSemgrepPlatformFindings({
@@ -149,4 +152,11 @@ if (prepared.preview.excluded.length) {
 }
 ```
 
-Keep the same source key on replay. Finding identity includes the deployment, project ID, SAST product, full ref, and native finding ID. Semgrep’s native finding ID is a 64-bit integer. The adapter retains exact numeric values, and changes to key order or equivalent number spellings such as `2` and `2.0` leave the stored record unchanged. Only repository-relative files become locations. Names with URI-like prefixes and directory-only paths remain in the native evidence.
+Keep the same source key on replay. Finding identity includes the deployment, project ID,
+SAST product, full ref, and native finding ID. Pass selected finding IDs as positive
+decimal strings without leading zeros. Semgrep emits 64-bit finding IDs. The adapter
+also accepts larger positive integer IDs in saved responses without rounding.
+
+Changes to key order or equivalent numeric spellings such as `2` and `2.0` leave
+the stored record unchanged. Only repository-relative files become locations. Names
+with URI-like prefixes and directory-only paths remain in the native evidence.
