@@ -12,6 +12,8 @@ import { delimiter, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ExternalFindings } from "../src/external-findings.js";
+import { normalizeSnykIssues } from "../src/snyk-rest-findings.js";
+import { snykRestFixture } from "./support/snyk-rest-fixtures.js";
 import {
   listLocalExternalFindings,
   prepareNormalizedLocalImport,
@@ -628,7 +630,14 @@ describe("local normalized scanner findings", () => {
     },
   );
 
-  test.each(["repository", "prepare-state", "read-state", "prepare-metadata"])(
+  const pendingPaths = [
+    "repository",
+    "prepare-state",
+    "read-state",
+    "prepare-metadata",
+    "prepare-snyk-remotes",
+  ];
+  test.each(pendingPaths)(
     "cancels %s resolution while its filesystem lookup is pending",
     async (operation) => {
       const { repository, stateDirectory, environment } = await fixture();
@@ -648,7 +657,9 @@ describe("local normalized scanner findings", () => {
       const operation = ${JSON.stringify(operation)};
       const heldPath = operation === "repository" ? repository
         : operation === "prepare-metadata" ? ${JSON.stringify(join(repository, "HEAD"))}
+        : operation === "prepare-snyk-remotes" ? ${JSON.stringify(join(repository, ".git", "remotes"))}
         : ${JSON.stringify(stateDirectory)};
+      const holdLstat = operation === "prepare-metadata" || operation === "prepare-snyk-remotes";
       const originalRealpath = fs.realpath;
       const originalLstat = fs.lstat;
       let enteredLookup, releaseLookup;
@@ -656,13 +667,13 @@ describe("local normalized scanner findings", () => {
       const lookup = new Promise((_, reject) => { releaseLookup = reject; });
       mockFs(() => ({
         realpath: (path, ...args) => {
-          if (operation === "prepare-metadata" || path !== heldPath)
+          if (holdLstat || path !== heldPath)
             return originalRealpath(path, ...args);
           enteredLookup();
           return lookup;
         },
         lstat: (path, ...args) => {
-          if (operation !== "prepare-metadata" || path !== heldPath)
+          if (!holdLstat || path !== heldPath)
             return originalLstat(path, ...args);
           enteredLookup();
           return lookup;
@@ -675,7 +686,15 @@ describe("local normalized scanner findings", () => {
       let outcome;
       const pending = operation.startsWith("prepare-")
         ? prepareNormalizedLocalImport(
-            { read: 0, findings: [], excluded: [] },
+            ${JSON.stringify(
+              operation === "prepare-snyk-remotes"
+                ? normalizeSnykIssues(
+                    snykRestFixture("open-source", {
+                      sourceRepositoryUrl: "https://github.com/example/project",
+                    }),
+                  )
+                : { read: 0, findings: [], excluded: [] },
+            )},
             { repository, provider: "snyk", sourceKey: "synthetic-project" },
             { signal: controller.signal,
               sourceRepositories: [{ url: "https://github.com/example/project" }] },

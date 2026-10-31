@@ -327,20 +327,24 @@ test("a malformed copy of a scoped issue cannot update its stored evidence", asy
     ...independent,
     attributes: { ...independent.attributes, type: "code" },
   };
-  const page = { data: [changed, missing, independent, otherProduct] };
-  report.pages[0]!.responseJson = JSON.stringify(page);
-  await fixture.writeJson(report);
+  for (const malformed of [
+    missing,
+    { ...valid, id: undefined },
+    { ...valid, id: "invalid" },
+  ]) {
+    const page = { data: [changed, malformed, independent, otherProduct] };
+    report.pages[0]!.responseJson = JSON.stringify(page);
+    await fixture.writeJson(report);
 
-  const prepared = await fixture.prepare();
-  expect(prepared.preview.excluded.map((row) => row.position)).toEqual([
-    1, 2, 4,
-  ]);
-  expect((await prepared.import()).counts).toEqual({
-    created: 1,
-    updated: 0,
-    unchanged: 0,
-  });
-  expect(await fixture.read()).toContainEqual(saved);
+    const prepared = await fixture.prepare();
+    expect(prepared.preview.excluded.map((row) => row.position)).toEqual([
+      1, 2, 4,
+    ]);
+    expect((await prepared.import()).counts.updated).toBe(0);
+    const rows = await fixture.read();
+    expect(rows).toHaveLength(2);
+    expect(rows).toContainEqual(saved);
+  }
 });
 
 test("normalized Snyk selections cannot import two keys for one native issue", async () => {

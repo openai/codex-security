@@ -54,13 +54,16 @@ array. Keep the report’s `snykRestContext` and each selected finding’s
 `source_finding_id` and `evidence.source_data`. Every hosted row must retain
 the native issue and its generated ID. The verified report context can supply
 the monitored project for a row that retains only its original issue. For a v1
-row, keep `source_data.issue` and its `source_data.numericFields.issue` when
-present. V1 uses those fields together to distinguish exact numbers from
-strings with the same spelling. For a v2 row, keep `source_data.issueJson`.
+row, keep `source_data.issue` and the original `source_data.numericFields`
+when present. If you trim the metadata, keep its matching entries for every
+`issue`, `project`, and `target` object you retain. V1 uses those entries to
+distinguish exact numbers from strings with the same spelling. For a v2 row,
+keep `source_data.issueJson`.
 The local workbench stores the verified project and target with that issue,
 so the stored row can be imported again. All selected issues must share the
-report’s API region, organization, project and product. If the report names a
-target, each supplied project must name that target.
+report’s API region, organization, project and product. If the report identifies
+a native target or its repository URL, retain that evidence in the selected
+project and target.
 
 SDK readers that define their own findings and IDs can use the ordinary
 normalized Snyk import with their own evidence and no hosted report context.

@@ -215,10 +215,14 @@ function jsonApi(input: unknown, label: string) {
   return document;
 }
 
-function resourceId(resource: Resource, type: string) {
+function resourceIdentifier(resource: Resource, type: string) {
   if (resource["type"] !== type)
     throw new Error(`Expected a Snyk ${type} resource.`);
-  return uuid(resource["id"], `Snyk ${type} ID`);
+  return resource["id"];
+}
+
+function resourceId(resource: Resource, type: string) {
+  return uuid(resourceIdentifier(resource, type), `Snyk ${type} ID`);
 }
 
 function relationship(relationships: Resource, name: string) {
@@ -436,7 +440,7 @@ function projectContext(project: Resource, selected: Scope) {
       targetId: undefined,
       lookupTargetId: undefined,
       expandedUrl: undefined,
-      integrationId: undefined,
+      integration: undefined,
     };
   const link = record(linkage, "Snyk target linkage");
   const expandedUrl =
@@ -444,11 +448,11 @@ function projectContext(project: Resource, selected: Scope) {
       ? undefined
       : record(link["attributes"], "Snyk expanded target attributes")["url"];
   const targetId = resourceId(link, "target");
-  const integrationId = checkTargetRelationships(link, selected, origin);
+  const integration = checkTargetRelationships(link, selected, origin);
   return {
     ...context,
     targetId,
-    integrationId,
+    integration,
     lookupTargetId:
       expandedUrl == null || expandedUrl === "" ? targetId : undefined,
     expandedUrl,
@@ -462,7 +466,7 @@ function checkTarget(
     expandedUrl,
     lookupTargetId,
     origin,
-    integrationId,
+    integration,
   }: ReturnType<typeof projectContext>,
   references: readonly ExternalSourceRepository[] = [],
 ) {
@@ -473,7 +477,8 @@ function checkTarget(
       );
     return {
       ...checkRemote(expandedUrl ?? null, selected, origin, references),
-      integrationId,
+      integrationId: integration?.id,
+      deployment: integration?.deployment,
     };
   }
   const target = record(value, "Snyk target resource");
@@ -481,16 +486,13 @@ function checkTarget(
     throw new Error(
       "Snyk target does not match the selected project's target.",
     );
-  const fetchedIntegrationId = checkTargetRelationships(
+  const fetched = checkTargetRelationships(
     target,
     selected,
     origin,
+    integration?.deployment,
   );
-  if (
-    integrationId !== undefined &&
-    fetchedIntegrationId !== undefined &&
-    integrationId !== fetchedIntegrationId
-  )
+  if (integration?.id && fetched?.id && integration.id !== fetched.id)
     throw new Error(
       "The fetched Snyk target names a different integration than the project's target.",
     );
@@ -500,13 +502,18 @@ function checkTarget(
     origin,
     references,
   );
-  return { ...remote, integrationId: fetchedIntegrationId ?? integrationId };
+  return {
+    ...remote,
+    integrationId: fetched?.id ?? integration?.id,
+    deployment: fetched?.deployment ?? integration?.deployment,
+  };
 }
 
 function checkTargetRelationships(
   target: Resource,
   selected: Scope,
   origin: string,
+  linkedDeployment?: string,
 ) {
   if (target["relationships"] === undefined) return;
   const relationships = record(
@@ -530,22 +537,30 @@ function checkTargetRelationships(
     attributes === undefined || integration["id"] !== null
       ? uuid(integration["id"], "Snyk integration ID")
       : undefined;
-  if (attributes === undefined) return id;
+  if (attributes === undefined) return { id };
   const type = requiredText(
     record(attributes, "Snyk integration attributes")["integration_type"],
     "Snyk integration type",
   );
   const deployments = scmOrigins.get(origin);
+  const claimed = scmOrigins.get(type);
   if (
     deployments &&
-    !scmOrigins
-      .get(type)
-      ?.some((deployment) => deployments.includes(deployment))
-  )
+    !claimed?.some(
+      (candidate) =>
+        deployments.includes(candidate) &&
+        (linkedDeployment === undefined || linkedDeployment === candidate),
+    )
+  ) {
+    const source = linkedDeployment ? "target linkage" : `${origin} origin`;
     throw new Error(
-      `Snyk target integration ${type} must be a supported SCM integration for the project's ${origin} origin.`,
+      `Snyk target integration ${type} must be a supported SCM integration for the project's ${source}.`,
     );
-  return id;
+  }
+  return {
+    id,
+    deployment: deployments && claimed?.length === 1 ? claimed[0] : undefined,
+  };
 }
 
 function pageLinkCursor(
@@ -615,14 +630,20 @@ function scopedIssue(value: unknown, selected: Scope) {
   return issue;
 }
 
-function selectedIssue(issue: Resource, selected: Scope) {
-  const id = resourceId(issue, "issue");
+function selectedIssueAttributes(issue: Resource, selected: Scope) {
   const attributes = record(issue["attributes"], "Snyk issue attributes");
   if (attributes["type"] !== issueTypes[selected.product])
     throw new Error(
       `Only ${issueTypes[selected.product]} issues are supported for this Snyk project selection.`,
     );
-  return { id, attributes };
+  return attributes;
+}
+
+function selectedIssue(issue: Resource, selected: Scope) {
+  return {
+    id: resourceId(issue, "issue"),
+    attributes: selectedIssueAttributes(issue, selected),
+  };
 }
 
 function snykIssueId(
@@ -781,11 +802,11 @@ function savedContext(
       scope: selected,
       targetId: context.targetId,
       integrationId: remote.integrationId,
+      deployment: remote.deployment,
       url: selected.sourceRepositoryUrl,
       platform,
       ...(gitlab && { gitlab: true }),
-      ...(nativeUrl &&
-        nativeUrl !== selected.sourceRepositoryUrl && { nativeUrl }),
+      ...(nativeUrl && { nativeUrl }),
     },
   };
 }
@@ -932,15 +953,17 @@ function bindSnykFinding(
       "The normalized finding ID does not match the original Snyk issue key and project.",
     );
   projectSnykIssue(attributes, asset, { ...retained, format }, "local");
-  if (retain && format === SNYK_REST_ISSUES_V1 && projected) {
+  if (retain && format === SNYK_REST_ISSUES_V1) {
     // The legacy witness stores the original decimal token, including its spelling.
-    const context = encodeSnykV1File({
-      ...repository.scope,
-      apiVersion: source.apiVersion,
-      format,
-      project: asset.project,
-      target: asset.target,
-    });
+    const context: Resource = projected
+      ? encodeSnykV1File({
+          ...repository.scope,
+          apiVersion: source.apiVersion,
+          format,
+          project: asset.project,
+          target: asset.target,
+        })
+      : { format };
     retain(finding, {
       ...retained,
       ...context,
@@ -1200,13 +1223,18 @@ export function normalizeSnykIssues(
       return projectSnykIssue(attributes, asset, sourceData, target);
     },
     ({ issue }) => {
-      const id = resourceId(issue, "issue");
+      const identifier = resourceIdentifier(issue, "issue");
       const raw = issue["attributes"];
       const product = isRecord(raw) ? raw["type"] : undefined;
       // A missing product cannot establish that this resource belongs to another selection.
-      if (!text(product) || product === issueTypes[source.product])
+      if (
+        isUuid(identifier) &&
+        (!text(product) || product === issueTypes[source.product])
+      ) {
+        const id = identifier.toLowerCase();
         resourceCounts.set(id, (resourceCounts.get(id) ?? 0) + 1);
-      return snykIssueId(selectedIssue(issue, source).attributes, source);
+      }
+      return snykIssueId(selectedIssueAttributes(issue, source), source);
     },
     target,
   );
@@ -1257,11 +1285,18 @@ export function snykRestImportRepository(
   if (provider !== "snyk")
     throw new Error("Use the snyk provider for Snyk REST issues.");
 
-  if (project?.repository.targetId && boundRows.some((row) => !row.targetId))
+  if (
+    project &&
+    boundRows.some(
+      (row) =>
+        (project.repository.targetId && !row.targetId) ||
+        (project.repository.nativeUrl && !row.nativeUrl),
+    )
+  )
     throw new Error(
       "The selected Snyk finding is missing the report's native target. Keep its full project or omit the project to use the report context.",
     );
-  for (const key of ["targetId", "integrationId"] as const) {
+  for (const key of ["targetId", "integrationId", "deployment"] as const) {
     const ids = new Set(bindings.flatMap((binding) => binding[key] ?? []));
     if (ids.size > 1)
       throw new Error(

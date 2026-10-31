@@ -65,6 +65,10 @@ test("replays a v1 Snyk export with its original evidence, then updates the same
   const selected = normalizeSnykIssues(v1);
   expect(selected).not.toHaveProperty("sourceRepositoryPlatform");
   const row = selected.findings[0]!;
+  delete row.evidence.source_data!["format"];
+  const unmarked = await fixture.prepareNormalized(selected);
+  expect((await unmarked.import()).counts.unchanged).toBe(1);
+  expect((await fixture.read())[0]).toEqual(stored);
   row.evidence.source_data = {
     issue: original,
     project: undefined,

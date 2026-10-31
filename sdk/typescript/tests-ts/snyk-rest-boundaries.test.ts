@@ -658,16 +658,22 @@ test("rows from a different Snyk monitor cannot use the report's source key even
   capture.targetJson = JSON.stringify({
     ...target,
     relationships: {
-      integration: { data: { type: "integration", id: integrationId } },
+      integration: {
+        data: {
+          type: "integration",
+          id: integrationId,
+          attributes: { integration_type: "github-cloud-app" },
+        },
+      },
     },
   });
   const report = normalizeSnykIssues(capture);
   const code = snykRestFixture("code");
   const otherId = "aaaa0000-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-  const replace = (old: string) =>
+  const replace = (old: string, replacement = otherId) =>
     JSON.parse(
       JSON.stringify(capture)
-        .replaceAll(old, otherId)
+        .replaceAll(old, replacement)
         .replace(snykIssue(false).attributes.key, "other-issue-key")
         .replace(snykIssue(false).id, otherId),
     ) as typeof capture;
@@ -683,6 +689,7 @@ test("rows from a different Snyk monitor cannot use the report's source key even
     replace(capture.projectId),
     replace(target.id),
     replace(integrationId),
+    replace("github-cloud-app", "github-server-app"),
     code,
     { ...capture, apiOrigin: "https://api.au.snyk.io" },
   ]) {

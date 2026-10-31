@@ -520,13 +520,19 @@ async function requireMatchingRepository(
       : (protectedRoots ?? [])),
     await abortable(() => canonicalConfigPath(process.cwd()), signal),
   ];
-  if (snyk) {
-    const remotes = await readHostedGitRemotes(
-      repository,
-      gitProtectedRoots,
-      environment,
+  const readHostedRemotes = () =>
+    abortable(
+      () =>
+        readHostedGitRemotes(
+          repository,
+          gitProtectedRoots,
+          environment,
+          signal,
+        ),
       signal,
     );
+  if (snyk) {
+    const remotes = await readHostedRemotes();
     if (
       remotes &&
       !remotes.some((remote) => snykRestCheckoutMatches(snyk, remote))
@@ -537,16 +543,7 @@ async function requireMatchingRepository(
     return;
   }
   if (hostedSources.size > 0) {
-    const remotes = await abortable(
-      () =>
-        readHostedGitRemotes(
-          repository,
-          gitProtectedRoots,
-          environment,
-          signal,
-        ),
-      signal,
-    );
+    const remotes = await readHostedRemotes();
     if (remotes) {
       for (const source of hostedSources.values())
         if (!remotes.some((remote) => hostedRepositoryMatches(source, remote)))
