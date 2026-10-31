@@ -149,6 +149,33 @@ The publisher checks the original project's repository against the authorized de
 Supply Chain findings with no typed repository field. After reviewing the
 preview, repeat without `--dry-run`.
 
+To publish directly from the SDK, pass the `selected` report from the example
+above and the independently verified repository URL. The `"cloud"` target
+keeps the full finding message in the description when it needs a shorter title.
+
+```js
+import {
+  normalizeSemgrepPlatformFindings,
+  prepareNormalizedExternalPublication,
+} from "@openai/codex-security";
+
+const repository = "https://github.com/example/project";
+const findings = normalizeSemgrepPlatformFindings(
+  selected,
+  repository,
+  "cloud",
+);
+const publication = await prepareNormalizedExternalPublication(findings, {
+  provider: "semgrep",
+  repository,
+  sourceKey: "example/project/release/platform",
+});
+console.log(publication.preview);
+```
+
+Review the destination, findings and exclusions before calling
+`await publication.publish()`. Reuse the same source key for subsequent imports.
+
 ## Collect a Platform project and branch
 
 With a Web API token in `SEMGREP_APP_TOKEN`, collect all findings returned for a
