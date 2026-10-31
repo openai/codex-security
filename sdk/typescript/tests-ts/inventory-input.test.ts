@@ -161,6 +161,53 @@ test("committed binary detection agrees beyond the preview window", () => {
   ).toEqual(["visible.py"]);
 });
 
+test("repeated inventory scopes retain last-wins override behavior", () => {
+  const f = fixture();
+  f.write("broad/outside.py");
+  f.write("broad/narrow/selected.py");
+
+  expect(
+    f
+      .success("generate-in-scope-files", [
+        "--scope",
+        "broad",
+        "--scope",
+        "broad/narrow",
+      ])
+      .trim()
+      .split(/\r?\n/u),
+  ).toEqual(["broad/narrow/selected.py"]);
+});
+
+test("file-backed scopes union and deduplicate authoritative selections", () => {
+  const f = fixture();
+  f.write("outside.py");
+  f.write("src/source.py");
+  f.write("src/nested/source.py");
+  f.write("right/source.py");
+  const paths = (...scopes: string[]) =>
+    f
+      .rows("make-repo-scope-input", f.scopeArgs(scopes[0], ...scopes.slice(1)))
+      .map((row) => row.path);
+
+  expect(paths(".", "src")).toEqual([
+    "outside.py",
+    "right/source.py",
+    "src/nested/source.py",
+    "src/source.py",
+  ]);
+  expect(paths("src", "src/nested")).toEqual([
+    "src/nested/source.py",
+    "src/source.py",
+  ]);
+  expect(paths("src", "src", "right")).toEqual([
+    "right/source.py",
+    "src/nested/source.py",
+    "src/source.py",
+  ]);
+  expect(paths("src/source.py")).toEqual(["src/source.py"]);
+});
+
 test("revision previews use the same read window as local files", () => {
   const f = fixture();
   f.write("example.py", "def first():\n    pass\n");
@@ -723,6 +770,100 @@ test("make-repo-scope-input retains explicit and ignored tracked files without w
   ]);
 });
 
+test("scope input honors ripgrep-only ignore rules in Git repositories", () => {
+  const f = fixture();
+  f.write("selected/.ignore", "hidden.py\n");
+  f.write("selected/hidden.py");
+  f.write("selected/visible.py");
+  expect(
+    f
+      .rows("make-repo-scope-input", f.scopeArgs("selected"))
+      .map((row) => row.path),
+  ).toEqual(["selected/.ignore", "selected/visible.py"]);
+  expect(
+    f
+      .rows("make-repo-scope-input", f.scopeArgs("selected/hidden.py"))
+      .map((row) => row.path),
+  ).toEqual(["selected/hidden.py"]);
+});
+
+for (const ignoreName of [".ignore", ".rgignore"])
+  test(`scope input honors inherited ${ignoreName} rules for a selected child`, () => {
+    const f = fixture();
+    const selected = join(f.repo, "target");
+    f.write(ignoreName, "excluded/\n");
+    f.write("target/excluded/example.py");
+    const paths = (scope = ".") =>
+      f
+        .rows("make-repo-scope-input", [
+          "--repo",
+          selected,
+          ...f.scopeArgs(scope),
+        ])
+        .map((row) => row.path);
+
+    expect(paths()).toEqual([]);
+    expect(paths("excluded/example.py")).toEqual(["excluded/example.py"]);
+    f.write("target/included.py");
+    expect(paths()).toEqual(["included.py"]);
+  });
+
+test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+  "inherited ignore rules do not hide unreadable selected directories",
+  () => {
+    const f = fixture();
+    const selected = join(f.repo, "target");
+    f.write(".ignore", "excluded/\n");
+    f.write("target/excluded/example.py");
+    const excluded = join(selected, "excluded");
+    writeFileSync(f.out, "previous\n");
+    chmodSync(excluded, 0);
+    try {
+      const result = f.run("make-repo-scope-input", [
+        "--repo",
+        selected,
+        ...f.scopeArgs("."),
+      ]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/EACCES|permission denied/iu);
+      expect(readFileSync(f.out, "utf8")).toBe("previous\n");
+    } finally {
+      chmodSync(excluded, 0o700);
+    }
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "inherited ripgrep-only rules fail closed when standalone rg is unavailable",
+  () => {
+    const f = fixture();
+    const selected = join(f.repo, "target");
+    f.write(".ignore", "excluded/\n");
+    f.write("target/excluded/example.py");
+    const tools = join(f.root, "git-only-tools");
+    mkdirSync(tools);
+    const resolvedGit = spawnSync("sh", ["-c", "command -v git"], {
+      encoding: "utf8",
+    }).stdout.trim();
+    const selectedGit = join(tools, "git");
+    symlinkSync(resolvedGit, selectedGit);
+    writeFileSync(f.out, "previous\n");
+
+    const result = f.run(
+      "make-repo-scope-input",
+      ["--repo", selected, ...f.scopeArgs(".")],
+      {
+        ...f.toolEnvironment,
+        CODEX_SECURITY_GIT: selectedGit,
+        PATH: tools,
+      },
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("without Git or ripgrep");
+    expect(readFileSync(f.out, "utf8")).toBe("previous\n");
+  },
+);
+
 for (const mode of ["revisions", "local-patch"]) {
   test(`${mode} previews decode UTF-8 and UTF-16 and exclude binary files`, () => {
     const f = fixture();
@@ -865,6 +1006,7 @@ for (const [mode, undoStagedChange] of [
 ] as const) {
   test(`${mode} inventories type changes with staged change undone ${undoStagedChange}`, () => {
     const f = fixture();
+    git(f.repo, "config", "core.symlinks", "true");
     f.write("routes.py");
     const changed = join(f.repo, "changed.py");
     symlinkSync("routes.py", changed, "file");
@@ -1177,8 +1319,13 @@ test("failed inventory generation preserves the existing file", () => {
     expect(readFileSync(f.out, "utf8")).toBe("previous\n");
   }
   const absent = f.run("generate-in-scope-files", ["--scope", "."], {
-    ...process.env,
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(
+        ([key]) => key.toUpperCase() !== "PATH",
+      ),
+    ),
     PATH: f.root,
+    CODEX_SECURITY_GIT: "",
   });
   expect(absent.status).toBe(2);
   expect(readFileSync(f.out, "utf8")).toBe("previous\n");
