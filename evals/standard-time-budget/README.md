@@ -122,3 +122,14 @@ mocked model/workbench boundaries, verifying isolated state, completion, prompt
 capture, and parent-plus-worker usage. CI reuses its host native build, builds
 the plugin with `build_mcp_app.mjs --native host`, and links it at
 `sdk/typescript/_bundled_plugin`; universal release artifacts are not required.
+
+The finding-survival regression also runs the real Python workbench. Synthetic
+validated findings from all five fixture categories pass through an unfinished
+checkpoint, a terminal draft, completion, sealing, report generation, and final
+grading. It checks that finding identity, locations, validation details, and
+verbatim source evidence survive. A paired control mentions every candidate in
+discovery output but leaves one unverified in deferred work; that candidate
+must remain missing from final recall and retained in the archived checkpoint's
+deferred work, even though the scan completes. These checks exercise result
+retention and grading, not model discovery quality or
+the correctness of model-generated validation decisions.
