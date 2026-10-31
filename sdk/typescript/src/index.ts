@@ -349,6 +349,7 @@ export {
   normalizeSnykSarif,
   readSnykFindings,
 } from "./snyk-findings.js";
+export { normalizeSelectedSemgrepPlatformFindings } from "./semgrep-platform-findings.js";
 export {
   normalizeSemgrepFindings,
   normalizeSemgrepSarif,
