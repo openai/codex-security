@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
-import { access, stat } from "node:fs/promises";
-import { delimiter, isAbsolute, resolve } from "node:path";
+import { access, lstat, readdir, stat } from "node:fs/promises";
+import { delimiter, isAbsolute, join, resolve, sep } from "node:path";
 
 import { isUtf8 } from "node:buffer";
 import { environmentEntry } from "./auth.js";
@@ -8,7 +8,12 @@ import {
   isLocalGitRemote,
   isWindowsGitDrive,
 } from "./hosted-git-repository.js";
-import { abortable, gitOutput, trustedGitCommand } from "./targets.js";
+import {
+  abortable,
+  gitOutput,
+  nullIfMissingPath,
+  trustedGitCommand,
+} from "./targets.js";
 
 async function recognizedCurlHelper(
   name: string,
@@ -20,18 +25,21 @@ async function recognizedCurlHelper(
   if (!/^(?:https?|ftps?)$/u.test(lower)) return false;
   if (name === lower) return true;
 
-  // Git prepends its exec path before looking up git-remote-<transport>.
   const environment = await trustedEnvironment();
   const execPath = await readGit(["--exec-path"]);
   if (!execPath) return false;
+  // Git prepends its exec path at the invocation directory and again when dispatching from the worktree.
+  const cwd = resolve(
+    repository,
+    (await readGit(["rev-parse", "--show-cdup"])) ?? "",
+  );
+  const locations = (base: string) =>
+    (isAbsolute(execPath) ? execPath : base + sep + execPath).split(delimiter);
   const directories = [
-    ...execPath.split(delimiter),
+    ...locations(cwd),
+    ...(cwd === repository ? [] : locations(repository)),
     ...(environmentEntry(environment, "PATH") ?? "").split(delimiter),
   ];
-  // Git sets up the worktree before dispatching the fetch helper, even when run with -C subdir.
-  const cwd = directories.every(isAbsolute)
-    ? repository
-    : resolve(repository, (await readGit(["rev-parse", "--show-cdup"])) ?? "");
   const find = async (helper: string) => {
     for (const dir of directories) {
       // Git for Windows tries .exe before the extensionless helper, within each directory.
@@ -151,8 +159,40 @@ export async function readHostedGitRemotes(
   ).split("\0");
   const remotes: string[] = [];
   let hasUnverifiedRemote = false;
-  // Older Git versions can resolve a default fetch URL absent from the remote listing.
-  for (const rawName of remoteNames.split("\n")) {
+  // The default fetch can resolve an unlisted legacy source even when other remotes are named.
+  const resolved = new Set<string>();
+  const missingUrls = new Set([
+    "fatal: No remote configured to list refs from.",
+    "fatal: remote (null) has no configured URL", // Git 2.43 when the default only names a helper.
+  ]);
+  const listed = new Set(remoteNames.split("\n").filter(Boolean));
+  async function* candidates() {
+    yield* listed;
+    yield "";
+    if (hasUnverifiedRemote || remotes.length) return;
+    // Git's legacy metadata directories hold unlisted remote names. Let Git interpret each file.
+    const common = utf8(
+      await readGit([
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+      ]),
+    );
+    if (!common) return;
+    for (const folder of ["remotes", "branches"]) {
+      const dir = join(common, folder);
+      if (!(await lstat(dir).catch(nullIfMissingPath))?.isDirectory()) continue;
+      const entries = await abortable(
+        () => readdir(dir, { withFileTypes: true }),
+        signal,
+      );
+      for (const entry of entries) {
+        const raw = Buffer.from(entry.name).toString("latin1");
+        if (entry.isFile() && !listed.has(raw)) yield raw;
+      }
+    }
+  }
+  for await (const rawName of candidates()) {
     const name = utf8(rawName);
     if (name === undefined) {
       hasUnverifiedRemote = true;
@@ -162,35 +202,42 @@ export async function readHostedGitRemotes(
     const configuredHelper = remoteConfig
       .findLast((entry) => entry.startsWith(vcsKey))
       ?.slice(vcsKey.length);
+    if (configuredHelper !== undefined)
+      missingUrls.add(`fatal: remote ${name} has no configured URL`);
     // Resolve the same first URL as a fetch, including rewrites on an implicit local remote name.
     // --get-url exits before Git connects to a transport.
-    const query = name ? ["--", name] : [];
-    const rawUrl = await readGit(["ls-remote", "--get-url", ...query]).catch(
-      (error: unknown) => {
-        if (
-          (configuredHelper !== undefined || !name) &&
-          error instanceof Error &&
-          "code" in error &&
-          error.code === 128 &&
-          "stderr" in error &&
-          typeof error.stderr === "string" &&
-          error.stderr
-            .split(/\r?\n/u)
-            .includes(
-              name
-                ? `fatal: remote ${name} has no configured URL`
-                : "fatal: No remote configured to list refs from.",
-            )
-        )
-          return undefined;
-        throw error;
-      },
-    );
+    const legacy = name !== "" && !listed.has(rawName);
+    const query = legacy
+      ? ["remote", "get-url", "--", name]
+      : ["ls-remote", "--get-url", ...(name ? ["--", name] : [])];
+    const rawUrl = await readGit(query).catch((error: unknown) => {
+      // Only Git can distinguish a historical remote from an unrelated file in the same directory.
+      if (
+        legacy &&
+        error instanceof Error &&
+        "code" in error &&
+        error.code === 2
+      )
+        return undefined;
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        error.code === 128 &&
+        "stderr" in error &&
+        typeof error.stderr === "string" &&
+        error.stderr.split(/\r?\n/u).some((line) => missingUrls.has(line))
+      )
+        return undefined;
+      throw error;
+    });
     if (rawUrl === undefined) {
-      if (name) hasUnverifiedRemote = true;
+      if (name && !legacy) hasUnverifiedRemote = true;
       continue;
     }
     // Explicit helper:: takes precedence over remote.<name>.vcs.
+    // A named remote's configured helper also governs an identical default fetch URL.
+    if (!name && resolved.has(rawUrl)) continue;
+    resolved.add(rawUrl);
     const explicit = /^([a-z0-9][a-z0-9+.-]*)::/iu.exec(rawUrl);
     const helper = explicit?.[1] ?? configuredHelper;
     const address = explicit ? rawUrl.slice(explicit[0].length) : rawUrl;
