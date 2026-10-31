@@ -1,3 +1,4 @@
+import { hostedNumberToken } from "./hosted-scanner-http.js";
 import { hostedRepositoryUrl } from "./hosted-scanner-http.js";
 import {
   legacyDecimalInteger,
@@ -14,6 +15,9 @@ import {
 
 /** Early v1 exports also admitted positive integral decimal spellings stored as text. */
 export function semgrepV1Id(value: unknown): string {
+  const token = hostedNumberToken(value);
+  if (token !== undefined && !/^[1-9][0-9]*$/u.test(token))
+    return semgrepPlatformId(legacyDecimalInteger(token));
   return semgrepPlatformId(
     typeof value === "string" ? legacyDecimalInteger(value) : value,
   );
@@ -88,6 +92,7 @@ export function upgradeSemgrepPlatformReport(
     format: "semgrep-platform-findings/v2",
     deployment: report["deployment"],
     project: { id: semgrepV1Id(project["id"]), name, url },
+    ...(native === undefined && { sourceRepositoryUrl: url }),
     product: report["product"],
     ref: report["ref"],
     findingCount: report["findingCount"],

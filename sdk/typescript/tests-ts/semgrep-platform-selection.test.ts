@@ -129,9 +129,14 @@ test("each selected finding must match the independently named project, ref, and
   expect(() => select([first, page(ids[1]!, ref, url + ".git")])).toThrow(
     "project and ref",
   );
-  expect(() =>
-    select([first, second.replace('"id":', '"product":"sca","id":')]),
-  ).toThrow("SAST");
+  for (const product of ['"sca"', '["sast"]']) {
+    expect(() =>
+      select([
+        first,
+        second.replace('"id":', '"product":' + product + ',"id":'),
+      ]),
+    ).toThrow("SAST");
+  }
   expect(() =>
     normalizeSelectedSemgrepPlatformFindings({
       ...source,
@@ -159,7 +164,36 @@ test("the same native ID from distinct project IDs or refs has distinct occurren
       occurrence(77, "refs/tags/topic"),
     ]).size,
   ).toBe(3);
-  expect(() => occurrence(77, "topic")).toThrow(/ref/i);
+  for (const invalid of [
+    "topic",
+    "refs/heads/main~1",
+    "refs/heads/.hidden",
+    "refs/heads/a.lock",
+  ]) {
+    expect(() => occurrence(77, invalid)).toThrow(/ref/i);
+  }
+});
+
+test("equivalent numeric IDs replay as integers while textual IDs stay exact", () => {
+  const select = (token: string, wanted = "8", project = "77") =>
+    normalizeSelectedSemgrepPlatformFindings({
+      ...source,
+      projectResponse: source.projectResponse.replace(
+        '"id":77',
+        '"id":' + project,
+      ),
+      findingIds: [wanted],
+      findingsResponses: page(token),
+    }).findings[0]!;
+  const original = select("8");
+  expect(select("8.0", "8", "77.0")).toEqual(original);
+  expect(select("8e0", "8", "77e0")).toEqual(original);
+  for (const token of ['"8.0"', '"8e0"', "8.00000000000000001"])
+    expect(() => select(token)).toThrow("missing");
+  const large = "12345678901234567890123";
+  expect(
+    select(large, large).evidence.source_data?.["semgrepPlatformFindingJson"],
+  ).toContain('"id":' + large + ",");
 });
 
 test("a URL-less row needs the matching project ID and full name, while an exact URL identifies the path of a short-named project", () => {
@@ -181,6 +215,11 @@ test("a URL-less row needs the matching project ID and full name, while an exact
     });
   }
   const name = "example/project";
+  for (const pseudo of ["./project", "../project"]) {
+    expect(() => select(pseudo, { id: 77, name: pseudo })).toThrow(
+      "project and ref",
+    );
+  }
   expect(select(name, { id: 77, name }).findings).toHaveLength(1);
   expect(select("project", { id: 77, name }).findings).toHaveLength(1);
   expect(() => select("project", { id: 77, name: "project" })).toThrow(
@@ -194,6 +233,11 @@ test("a URL-less row needs the matching project ID and full name, while an exact
     expect(() => select(name, repository)).toThrow("project and ref");
   }
   expect(select("project", { url, name }).findings).toHaveLength(1);
+  expect(select("old-group/project", { url, name }).findings).toHaveLength(1);
+  const encoded = "https://github.com/example/caf%C3%A9";
+  expect(
+    select("café", { url: encoded, name: "example/café" }, encoded).findings,
+  ).toHaveLength(1);
   const cloneUrl = url + ".git";
   expect(
     select("project", { url: cloneUrl, name }, cloneUrl).findings,

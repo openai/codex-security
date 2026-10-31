@@ -5,6 +5,7 @@ import { collectSemgrepPlatformFindings } from "../src/semgrep-platform-collecto
 import { main } from "../src/cli.js";
 import {
   isSemgrepPlatformEvidence,
+  normalizeSelectedSemgrepPlatformFindings,
   normalizeSemgrepPlatformFindings,
   selectSemgrepPlatformFindings,
   semgrepPlatformFindingRepository,
@@ -58,6 +59,40 @@ test("an opaque bulk finding ID still requires the original native occurrence ID
   );
 });
 
+test("integer-valued native IDs replay identically through selected and bulk imports", async () => {
+  const page = `{"findings":[{"id":1e1,"repository":{"id":77.0,"url":"${url}"},"ref":"${options.ref}"}]}`;
+  const input = {
+    ...options,
+    projectResponse: JSON.stringify({ project }),
+    findingsResponses: [page],
+    findingIds: ["10"],
+    sourceRepositoryUrl: url,
+  };
+  const direct = normalizeSelectedSemgrepPlatformFindings(input);
+  expect(direct.excluded).toEqual([]);
+  expect(direct.findings).toHaveLength(1);
+  const finding = direct.findings[0]!;
+  expect(finding.evidence.source_data).toMatchObject({
+    format: "semgrep-platform-selection/v1",
+    semgrepPlatformFindingJson: JSON.stringify({
+      id: 10,
+      ref: options.ref,
+      repository: { id: 77, url },
+    }),
+  });
+  const selected = selectSemgrepPlatformFindings(input);
+  const bulk = await collectSemgrepPlatformFindings(
+    options,
+    responses(new Response(page)),
+  );
+  for (const saved of [selected, bulk]) {
+    const replay = normalizeSemgrepFindings(saved, {}, "local");
+    expect(replay.excluded).toEqual([]);
+    expect(replay.findings).toEqual(direct.findings);
+  }
+  expect(semgrepPlatformFindingRepository(finding, "semgrep")).toBe(url);
+});
+
 test("a retagged Semgrep row still requires its provider after assigning an opaque ID", async () => {
   const report = await collectSemgrepPlatformFindings(
     options,
@@ -99,9 +134,14 @@ test("a normalized Platform report binds native rows even when both projects hav
   );
   const upstream = "https://git.example.test/service/upstream";
   const fork = "https://git.example.test/service/fork";
-  const normalize = (url: string, id: string) =>
+  const normalize = (
+    url: string,
+    id: string,
+    scope: Partial<Pick<typeof report, "deployment" | "product" | "ref">> = {},
+  ) =>
     normalizeSemgrepPlatformFindings({
       ...report,
+      ...scope,
       project: { ...report.project, id, url },
     });
   const upstreamReport = normalize(upstream, "77");
@@ -126,6 +166,33 @@ test("a normalized Platform report binds native rows even when both projects hav
   await expect(
     prepare({ ...upstreamReport, findings: forkReport.findings }),
   ).rejects.toThrow(/report repository/i);
+  for (const foreign of [
+    normalize(upstream, "88"),
+    normalize(upstream, "77", { deployment: "other" }),
+    normalize(upstream, "77", { ref: "refs/heads/other" }),
+    normalize(upstream, "77", { product: "ai_sast" }),
+  ]) {
+    await expect(
+      prepare({
+        ...upstreamReport,
+        read: 2,
+        findings: [...upstreamReport.findings, ...foreign.findings],
+      }),
+    ).rejects.toThrow(/scope|project|deployment|product|ref/i);
+  }
+
+  const ordinary = structuredClone(upstreamReport.findings[0]!);
+  ordinary.source_finding_id = "ordinary";
+  delete ordinary.evidence.source_data;
+  expect(
+    (
+      await prepare({
+        ...upstreamReport,
+        read: 2,
+        findings: [...upstreamReport.findings, ordinary],
+      })
+    ).preview.findings,
+  ).toHaveLength(2);
   const batch = {
     read: 2,
     excluded: [],
@@ -176,6 +243,14 @@ test("file and normalized Platform reports keep their Git binding with no accept
     if (ready) continue;
 
     const native = normalizeSemgrepPlatformFindings(report);
+    expect(native).toMatchObject({
+      semgrepPlatformScope: {
+        deployment: report.deployment,
+        projectId: report.project.id,
+        product: report.product,
+        ref: report.ref,
+      },
+    });
     const replay = await prepare(JSON.parse(JSON.stringify(native)));
     expect(replay.preview.excluded).toHaveLength(excluded);
     expect((await replay.import()).counts).toEqual({
@@ -300,13 +375,19 @@ test("rejects failed, overlapping or wrong-scope pages without returning a parti
 });
 
 test("snapshots the requested project mapping and ref before the first request", async () => {
+  const row = {
+    id: 1,
+    rule_name: "example.rule",
+    ref: options.ref,
+    repository: { url },
+  };
   const requested = { ...options, sourceRepositoryUrl: url };
   const pending = collectSemgrepPlatformFindings(requested, {
     environment,
     fetch: async (endpoint) => {
       if (endpoint.pathname.endsWith("/findings")) {
         expect(endpoint.searchParams.get("ref")).toBe(options.ref);
-        return Response.json({ findings: [] });
+        return Response.json({ findings: [row] });
       }
       return Response.json({ project: { ...project, url: null } });
     },
@@ -317,6 +398,38 @@ test("snapshots the requested project mapping and ref before the first request",
   const saved = await pending;
   expect(saved.project).toEqual({ ...project, id: String(project.id) });
   expect(saved.ref).toBe(options.ref);
+  expect(saved).toMatchObject({ sourceRepositoryUrl: url });
+  const legacy = {
+    ...saved,
+    format: "semgrep-platform-findings/v1",
+    project: { ...saved.project, url: null },
+    findings: [row],
+  };
+  await using fixture = await localReportFixture(
+    "semgrep.json",
+    { provider: "semgrep", sourceKey: "example/topic" },
+    { remote: url },
+  );
+  for (const report of [saved, legacy]) {
+    await fixture.writeJson(report);
+    const prepared = await fixture.prepare();
+    expect(prepared.preview.findings[0]?.evidence).toMatchObject({
+      details: { repository: { url } },
+      source_data: { project: { url: null }, sourceRepositoryUrl: url },
+    });
+    expect((await prepared.import()).counts).toEqual(
+      report === saved
+        ? { created: 1, updated: 0, unchanged: 0 }
+        : { created: 0, updated: 0, unchanged: 1 },
+    );
+  }
+  expect(() =>
+    normalizeSemgrepFindings(
+      { ...saved, sourceRepositoryUrl: "https://github.com/other/service" },
+      {},
+      "local",
+    ),
+  ).toThrow(/repository/);
 });
 
 test("matches GitHub project-path aliases across casing in collected, v1 and normalized rows", async () => {
@@ -544,27 +657,45 @@ test("keeps unrelated valid findings on a page with missing or duplicate source 
 });
 
 test("replaying two native SAST findings across selected and full imports leaves SQLite unchanged", async () => {
-  const ids = ["9007199254740992", "9007199254740993"];
-  const repositories = [{ url }, { id: project.id, name: project.name }];
+  const ids = ["1000000000000000000000", "1000000000000000000001"];
+  const projectId = "1000000000000000000002";
+  const projectResponse = `{"project":{"id":${projectId},"name":"${project.name}","url":"${url}"}}`;
+  const repositories = [
+    JSON.stringify({ url }),
+    `{"id":${projectId},"name":"${project.name}"}`,
+  ];
   const rows = ids.map(
     (id, index) =>
-      `{"id":${id},"rule":{"name":"example.rule"},"status":"open","severity":"low","repository":${JSON.stringify(repositories[index])},"ref":"${options.ref}"}`,
+      `{"id":${id},"score":10,"rule":{"name":"example.rule"},"status":"open","severity":"low","repository":${repositories[index]},"ref":"${options.ref}"}`,
   );
   const page = `{"findings":[${rows.join(",")}]}`;
-  const selection = selectSemgrepPlatformFindings({
+  const input = {
     deployment: options.deployment,
     ref: options.ref,
-    projectResponse: JSON.stringify({ project }),
+    projectResponse,
     findingsResponses: [page],
     findingIds: ids,
+  };
+  const selection = selectSemgrepPlatformFindings(input);
+  const selected = normalizeSelectedSemgrepPlatformFindings({
+    ...input,
+    sourceRepositoryUrl: url,
   });
-  const report = await collectSemgrepPlatformFindings(
-    {
-      ...options,
-      sourceRepositoryUrl: "https://github.com/Example/Service.git",
-    },
-    responses(new Response(page)),
-  );
+  const collect = (data: string) =>
+    collectSemgrepPlatformFindings(
+      {
+        ...options,
+        sourceRepositoryUrl: "https://github.com/Example/Service.git",
+      },
+      {
+        environment,
+        fetch: async (endpoint) =>
+          new Response(
+            endpoint.pathname.endsWith("/findings") ? data : projectResponse,
+          ),
+      },
+    );
+  const report = await collect(page.replaceAll('"score":10', '"score":1e1'));
   await using fixture = await localReportFixture(
     "semgrep.json",
     {
@@ -582,6 +713,20 @@ test("replaying two native SAST findings across selected and full imports leaves
     updated: 0,
     unchanged: 0,
   });
+  const direct = await prepareNormalizedLocalImport(
+    selected,
+    {
+      provider: "semgrep",
+      sourceKey: fixture.sourceKey,
+      repository: fixture.repository,
+    },
+    { environment: fixture.environment, sourceRepositories: [{ url }] },
+  );
+  expect((await direct.import()).counts).toEqual({
+    created: 0,
+    updated: 0,
+    unchanged: 2,
+  });
   const saved = await fixture.read();
   expect(new Set(saved.map((row) => row.sourceFindingId)).size).toBe(2);
   for (const replay of [report, selection, report]) {
@@ -594,10 +739,7 @@ test("replaying two native SAST findings across selected and full imports leaves
   }
   expect(await fixture.read()).toEqual(saved);
   const changedPage = page.replace('"severity":"low"', '"severity":"high"');
-  const changed = await collectSemgrepPlatformFindings(
-    options,
-    responses(new Response(changedPage)),
-  );
+  const changed = await collect(changedPage);
   await fixture.writeJson(changed);
   expect((await (await fixture.prepare()).import()).counts).toEqual({
     created: 0,
@@ -745,9 +887,14 @@ test("CLI emits a replayable report for the requested product", async () => {
     rule_name: "example.rule",
   };
   const cli = createCliTest(main);
-  const code = await cli.runCli(cliArgs, {
+  const code = await cli.runCli([...cliArgs, "--source-repository-url", url], {
     ...dependencies({ environment }),
-    hostedScannerFetch: responses(Response.json({ findings: [row] })).fetch,
+    hostedScannerFetch: async (endpoint) =>
+      Response.json(
+        endpoint.pathname.endsWith("/findings")
+          ? { findings: [row] }
+          : { project: { ...project, url: null } },
+      ),
   });
   expect(code).toBe(0);
   expect(cli.stderr.text()).toBe("");
@@ -756,6 +903,7 @@ test("CLI emits a replayable report for the requested product", async () => {
     project: { id: "77", name: project.name, url },
     ref: options.ref,
     product: "ai_sast",
+    sourceRepositoryUrl: url,
     findingCount: 1,
   });
   expect(report.findings.map((raw: string) => JSON.parse(raw))).toEqual([row]);
@@ -791,6 +939,18 @@ test("CLI escapes human-readable output while retaining native JSON and YAML", a
       expect(JSON.parse(report.findings[0]).repository.name).toBe(alias);
     }
   }
+});
+
+test("CLI escapes bidirectional controls in Semgrep error diagnostics", async () => {
+  const cli = createCliTest(main);
+  const code = await cli.runCli(cliArgs, {
+    ...dependencies({ environment }),
+    hostedScannerFetch: responses(
+      new Response("scope \u202edenied", { status: 403 }),
+    ).fetch,
+  });
+  expect(code).toBe(2);
+  expect(cli.stderr.text()).toContain("scope \\u202edenied");
 });
 
 test("CLI checks opt-in and token origin before fetching", async () => {
