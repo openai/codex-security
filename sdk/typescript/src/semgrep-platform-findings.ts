@@ -126,7 +126,7 @@ const wireJson = JSON as JSON & {
 };
 
 // Normalize equivalent JSON numbers exactly. Keep very large exponents compact.
-function canonicalNumber(token: string): string {
+function canonicalNumber(token: string, fixedDigits = 21): string {
   const [, sign = "", integer, fraction = "", exponent = "0"] =
     /^(-?)(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/iu.exec(token)!;
   const significant = (integer + fraction).replace(/^0+/u, "");
@@ -135,8 +135,8 @@ function canonicalNumber(token: string): string {
   while (significant[end - 1] === "0") end--;
   const digits = significant.slice(0, end);
   const point = BigInt(exponent) + BigInt(significant.length - fraction.length);
-  // Use the same fixed/scientific notation thresholds as JSON.stringify.
-  if (point > -6n && point <= 21n) {
+  // Ordinary evidence follows JSON.stringify’s fixed/scientific notation thresholds.
+  if (point > -6n && point <= BigInt(fixedDigits)) {
     const split = Number(point);
     if (split <= 0) return sign + "0." + "0".repeat(-split) + digits;
     if (split >= digits.length) return sign + digits.padEnd(split, "0");
@@ -179,8 +179,10 @@ export function semgrepPlatformIdOrUndefined(
   let id = value;
   if (wireJson.isRawJSON(value)) {
     const token = value.rawJSON;
-    // Keep positive integer literals as digits even outside the ordinary notation range.
-    id = /^[1-9][0-9]*$/u.test(token) ? token : canonicalNumber(token);
+    // IDs stay in decimal form. Beyond int64, retain digits supplied on the wire without expanding unbounded exponents.
+    id = /^[1-9][0-9]*$/u.test(token)
+      ? token
+      : canonicalNumber(token, Math.max(21, token.length));
   } else if (typeof value === "number" && Number.isSafeInteger(value)) {
     id = String(value);
   }
@@ -286,11 +288,18 @@ export function semgrepPlatformRepositoryReference(
   if (isGitHubCloudHost(gitServiceHostname(URL.parse(url)?.hostname ?? ""))) {
     source.platform = "github";
   } else {
-    const hint = references.find(
-      ({ platform, url }) =>
-        platform && semgrepReferenceMatches({ url: projectUrl, platform }, url),
-    );
-    if (hint?.platform) source.platform = hint.platform;
+    for (const { url, platform } of references) {
+      if (
+        !platform ||
+        !semgrepReferenceMatches({ url: projectUrl, platform }, url)
+      )
+        continue;
+      if (source.platform && source.platform !== platform)
+        throw new Error(
+          "Conflicting SCM platforms for the selected Semgrep repository.",
+        );
+      source.platform = platform;
+    }
   }
   return source;
 }
@@ -405,22 +414,30 @@ export function checkSemgrepPlatformRow(
     (repositoryUrl === hostedRepositoryUrl || repo["url"] !== "");
   const full = repository.name(scope.project.name);
   const name = repo["name"];
-  const label = typeof name === "string" ? repository.name(name) : null;
-  const projectPath = repository.name(
-    decodeURIComponent(new URL(scope.project.url).pathname).replace(
-      /^\/|\/$/gu,
-      "",
-    ),
+  const rowName = typeof name === "string" ? repository.name(name) : null;
+  // Source URLs were checked segment-by-segment before matching display names.
+  const encodedPath = new URL(scope.project.url).pathname.replace(
+    /^\/|\/$/gu,
+    "",
   );
-  const urlPathName =
-    label !== null && (label === projectPath || label + ".git" === projectPath);
-  const nameParts = label?.split("/") ?? [];
+  const paths = [encodedPath, decodeURIComponent(encodedPath)].map(
+    repository.name,
+  );
+  const originalNames = [full, ...paths];
+  // A short or clone label accompanies an independently checked URL. A URL-less row needs the original qualified name or path.
+  const labels = [
+    ...originalNames,
+    ...paths.map((path) => path.replace(/\.git$/u, "")),
+  ];
+  const matchedName = labels.some(
+    (label) => label === rowName || label.split("/").at(-1) === rowName,
+  );
   const qualifiedName =
-    nameParts.length > 1 &&
-    nameParts.every((part) => part && part !== "." && part !== "..") &&
-    (label === full || urlPathName);
-  const matchedName =
-    label === full || label === full.split("/").at(-1) || urlPathName;
+    rowName !== null &&
+    originalNames.includes(rowName) &&
+    rowName === relativePath(rowName) &&
+    rowName.includes("/") &&
+    rowName.split("/").every((part) => part.trim() && part !== ".");
   const selectionRepositoryMatches = hasUrl
     ? repositoryId !== undefined || name == null || matchedName
     : repositoryId !== undefined && qualifiedName;
@@ -514,6 +531,22 @@ function selectedRows(
     options.ref,
     semgrepPlatformId,
   );
+  // git-check-ref-format distinguishes literal branch/tag names from revision expressions.
+  const refParts = scope.ref.split("/");
+  if (
+    refParts[0] !== "refs" ||
+    refParts.length < 2 ||
+    refParts.some(
+      (part) => !part || part.startsWith(".") || part.endsWith(".lock"),
+    ) ||
+    scope.ref.endsWith(".") ||
+    scope.ref.includes("..") ||
+    scope.ref.includes("@{") ||
+    /[\u0000-\u0020\u007f~^:?*\[\\]/u.test(scope.ref)
+  )
+    throw new Error(
+      "Use a fully qualified Semgrep ref such as refs/heads/topic.",
+    );
   const repository = repositoryFor(scope);
   const wanted = new Set(options.findingIds.map(semgrepPlatformId));
   if (!wanted.size) throw new Error("Select at least one Semgrep finding ID.");
@@ -580,22 +613,6 @@ export function normalizeSelectedSemgrepPlatformFindings(
   const { scope, rows } = selectedRows(
     options,
     (scope) => {
-      // git-check-ref-format distinguishes literal branch/tag names from revision expressions.
-      const refParts = scope.ref.split("/");
-      if (
-        refParts[0] !== "refs" ||
-        refParts.length < 2 ||
-        refParts.some(
-          (part) => !part || part.startsWith(".") || part.endsWith(".lock"),
-        ) ||
-        scope.ref.endsWith(".") ||
-        scope.ref.includes("..") ||
-        scope.ref.includes("@{") ||
-        /[\u0000-\u0020\u007f~^:?*\[\\]/u.test(scope.ref)
-      )
-        throw new Error(
-          "Use a fully qualified Semgrep ref such as refs/heads/topic.",
-        );
       if (scope.project.url !== url)
         throw new Error(
           "Selected Semgrep project does not match the operator's source repository URL.",

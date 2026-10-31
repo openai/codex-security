@@ -165,8 +165,9 @@ export async function readHostedGitRemotes(
           error.code === 128 &&
           "stderr" in error &&
           typeof error.stderr === "string" &&
-          error.stderr.trimEnd().split(/\r?\n/u).at(-1) ===
-            `fatal: remote ${name} has no configured URL`
+          error.stderr
+            .split(/\r?\n/u)
+            .includes(`fatal: remote ${name} has no configured URL`)
         )
           return undefined;
         throw error;

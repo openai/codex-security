@@ -174,6 +174,42 @@ test("a short project name accepts a qualified display name on the same encoded 
   expect(report.findings).toHaveLength(1);
 });
 
+test("a URL-less name must identify the exact project path on a private server", () => {
+  const label = (path: string, name: string) =>
+    selectSemgrepPlatformFindings({
+      deployment: "example",
+      ref,
+      findingIds: ["8"],
+      projectResponse: JSON.stringify({
+        project: {
+          ...project,
+          name: "renamed",
+          url: "https://scm.example.test/" + path,
+        },
+      }),
+      findingsResponses: JSON.stringify({
+        findings: [{ id: 8, ref, repository: { id: project.id, name } }],
+      }),
+    });
+  expect(() => label("team/project.git", "team/project")).toThrow(
+    "project and ref",
+  );
+  for (const name of ["team/proj%20one", "team/proj one"])
+    expect(label("team/proj%20one", name).findings).toHaveLength(1);
+});
+
+test("contradictory private SCM mappings fail regardless of their order", () => {
+  const web = "https://scm.example.test/team/project";
+  const refs: ExternalSourceRepository[] = [
+    { url: web, platform: "gitlab" },
+    { url: web, platform: "github" },
+  ];
+  for (const sources of [refs, [...refs].reverse()])
+    expect(() => selectedRepository(web, web, sources)).toThrow(
+      "Conflicting SCM",
+    );
+});
+
 test("replaying a saved selection requires the original string project ID", async () => {
   const report = selectedRepository(url, url);
   await using fixture = await localReportFixture(url);
@@ -182,6 +218,30 @@ test("replaying a saved selection requires the original string project ID", asyn
     JSON.stringify(report).replace('"id":"77"', '"id":77.00000000000000000001'),
   );
   await expect(fixture.prepare()).rejects.toThrow("selected project ID");
+});
+
+test("new captures require a fully qualified ref while an older file replays its original ref", async () => {
+  const branch = "release";
+  const pageWithRef = page("8", { ref: branch });
+  const input = {
+    deployment: "example",
+    ref: branch,
+    projectResponse: JSON.stringify({ project }),
+    findingsResponses: pageWithRef,
+    findingIds: ["8"],
+  };
+  expect(() => selectSemgrepPlatformFindings(input)).toThrow("fully qualified");
+  const prior = {
+    ...selectedRepository(url, url),
+    ref: branch,
+    findings: [JSON.stringify(JSON.parse(pageWithRef).findings[0])],
+  };
+  await using fixture = await localReportFixture(url);
+  await fixture.writeJson(prior);
+  const first = await fixture.prepare();
+  expect(first.preview.findings[0]?.evidence.branch).toBe(branch);
+  expect((await first.import()).counts.created).toBe(1);
+  expect((await (await fixture.prepare()).import()).counts.unchanged).toBe(1);
 });
 
 test("selection requires exact IDs from the selected source and ref", () => {
@@ -251,6 +311,9 @@ test.each([
   ["github.com", "https::HTTPS://github.com/example/project", true],
   ["github.com", "https://a@b@github.com/example/project", false],
   ["github.com", "https://a%40b@github.com/example/project", true],
+  ["github.com", "https://reader%0A@github.com/example/project", false],
+  ["github.com", "https://a:b%0a@github.com/example/project", false],
+  ["github.com", "https://a%00b@github.com/example/project", false],
   ["git.example.test", "https://git.example.test/example/project.git", false],
   ["git.example.test", "ssh://git@git.example.test/example/project", false],
   ["git.example.test", "ssh://git@git.example.test:443/example/project", false],
@@ -342,6 +405,7 @@ test.each([url, undefined])(
       GIT_CONFIG_COUNT: "1",
       GIT_CONFIG_KEY_0: "remote.backup.vcs",
       GIT_TRACE: "1",
+      GIT_TRACE_PERFORMANCE: "1",
       GIT_CONFIG_VALUE_0: "example",
     });
     if (origin)
@@ -495,11 +559,14 @@ test("a file and its projected SDK rows use the same declared GitHub repository 
   }
 });
 
-test("only a trusted GitLab mapping permits the HTTPS clone suffix on a private host", async () => {
+test.each([
+  "https://git.example.test/group/project.git",
+  "git@git.example.test:group/project.git",
+])("a trusted private GitLab mapping accepts clone %s", async (checkout) => {
   const web = "https://git.example.test/group/project";
   const clone = web + ".git";
   const source = { url: web, platform: "gitlab" as const };
-  await using fixture = await localReportFixture(clone);
+  await using fixture = await localReportFixture(checkout);
   await fixture.writeJson(selectedRepository(web, clone, [source]));
   const options = { ...platformSource, repository: fixture.repository };
   const deps = {
@@ -899,4 +966,44 @@ test("ordinary findings still validate the checkout when their URL equals the se
   await expect(
     prepareNormalizedLocalImport(report, options, deps),
   ).rejects.toThrow("configured remote");
+});
+
+test("an ordinary finding without a repository still checks the shared reader source", async () => {
+  const native = "https://gitlab.com/example/project";
+  const ssh = "ssh://git@altssh.gitlab.com:443/example/project.git";
+  const { findings } = normalizeSemgrepFindings(
+    selectedRepository(native, native),
+    { sourceRepositoryUrl: native },
+    "local",
+  );
+  const ordinary = {
+    source_finding_id: "ordinary",
+    evidence: { title: "Example", severity: "low" as const },
+  };
+  await using fixture = await localReportFixture(ssh);
+  const options = { ...platformSource, repository: fixture.repository };
+  const prepare = (rows: typeof findings) =>
+    prepareNormalizedLocalImport(
+      { read: rows.length, findings: rows, excluded: [] },
+      options,
+      {
+        environment: fixture.environment,
+        sourceRepositories: [{ url: native }],
+      },
+    );
+  expect((await prepare(findings)).preview.findings).toHaveLength(1);
+  await expect(prepare([ordinary])).rejects.toThrow("configured remote");
+  await expect(prepare([...findings, ordinary])).rejects.toThrow(
+    "configured remote",
+  );
+  execFileSync(
+    "git",
+    ["-C", fixture.repository, "remote", "add", "web", native],
+    {
+      env: fixture.environment,
+    },
+  );
+  expect(
+    (await prepare([...findings, ordinary])).preview.findings,
+  ).toHaveLength(2);
 });
