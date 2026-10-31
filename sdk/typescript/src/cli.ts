@@ -4008,7 +4008,9 @@ export async function main(
         const diagnostic = interrupted
           ? `${provider} import ${interrupted === 130 ? "canceled" : "terminated"}.`
           : message;
-        errorOutput.write(`codex-security: ${diagnostic}\n`);
+        errorOutput.write(
+          `codex-security: ${provider === "Semgrep" ? escapeTerminalText(diagnostic) : diagnostic}\n`,
+        );
         if (argv.includes("--full-output")) {
           structuredError = true;
           return fail({
@@ -4106,6 +4108,7 @@ export async function main(
       .object({
         format: z.literal(semgrepPlatformFormat),
         deployment: z.string(),
+        sourceRepositoryUrl: z.string().optional(),
         project: z.object({
           id: z.string(),
           name: z.string(),

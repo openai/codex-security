@@ -1,7 +1,6 @@
 import { expect, mock, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { devNull } from "node:os";
 import { link, mkdir, stat, unlink, writeFile } from "node:fs/promises";
 import type { ExternalSourceRepository } from "../src/external-findings.js";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
@@ -15,18 +14,9 @@ import {
 import { localReportFixture as reportFixture } from "./external-findings-local-helpers.js";
 
 function localReportFixture(remote?: string) {
-  const environment = Object.fromEntries(
-    Object.entries(process.env).filter(
-      ([key]) => !key.toUpperCase().startsWith("GIT_"),
-    ),
-  );
   return reportFixture("selected.json", platformSource, {
     remote,
-    environment: {
-      ...environment,
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_CONFIG_GLOBAL: devNull,
-    },
+    isolatedGit: true,
   });
 }
 

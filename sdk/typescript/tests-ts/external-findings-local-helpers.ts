@@ -7,17 +7,34 @@ import {
 import type { ExternalPublicationOptions } from "../src/external-findings-publish.js";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { devNull, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 /** Real Git checkout and separate state, shared by normalized and vendor import tests. */
-type Checkout = { remote?: string; environment?: NodeJS.ProcessEnv };
+type Checkout = {
+  remote?: string;
+  environment?: NodeJS.ProcessEnv;
+  isolatedGit?: boolean;
+};
 
 export async function localFindingsFixture(options: Checkout = {}) {
-  const environment = options.environment ?? process.env;
   const root = await mkdtemp(
     join(await realpath(tmpdir()), "codex-security-external-local-"),
   );
+  let environment = options.environment ?? process.env;
+  if (options.isolatedGit) {
+    const config = join(root, "global.gitconfig");
+    await writeFile(config, "");
+    environment = {
+      ...Object.fromEntries(
+        Object.entries(environment).filter(
+          ([name]) => !name.toUpperCase().startsWith("GIT_"),
+        ),
+      ),
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: config,
+    };
+  }
   const repository = join(root, "repository");
   await mkdir(repository);
   execFileSync("git", ["init", "--quiet", repository], { env: environment });
@@ -77,18 +94,9 @@ export function isolatedGitReportFixture(
   source: Omit<ExternalPublicationOptions, "repository">,
   checkout: Checkout = {},
 ) {
-  const environment = Object.fromEntries(
-    Object.entries(checkout.environment ?? process.env).filter(
-      ([key]) => !key.toUpperCase().startsWith("GIT_"),
-    ),
-  );
   return localReportFixture(filename, source, {
     ...checkout,
-    environment: {
-      ...environment,
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_CONFIG_GLOBAL: devNull,
-    },
+    isolatedGit: true,
   });
 }
 

@@ -42,6 +42,44 @@ test("Cloud shortens a long v1 message title using its original textual ID", () 
   ).toMatchObject({ title: "Semgrep finding 1.3e1", description });
 });
 
+test("strongly bound current SAST rows have identical selection and backlog exclusions", () => {
+  const location = { file_path: "src/service.ts", line: 2, end_line: 3 };
+  const rows = [
+    { ...code, id: 11, severity: "unrecognized" },
+    { ...code, id: 12, location: { ...location, line: "2" } },
+    { ...code, id: 13, location: { ...location, end_line: "3" } },
+  ];
+  const read = (format: string, findings: unknown[]) =>
+    normalizeSemgrepFindings(
+      {
+        ...scope,
+        format,
+        findingCount: findings.length,
+        findings,
+        repositoryAliases: [],
+      },
+      {},
+      "local",
+    );
+  const json = rows.map((row) => JSON.stringify(row));
+  const selection = read("semgrep-platform-selection/v1", json);
+  const backlog = read("semgrep-platform-findings/v2", json);
+  expect(selection.excluded.map((row) => row.position)).toEqual([1, 2, 3]);
+  expect(backlog.excluded).toEqual(selection.excluded);
+  expect(backlog.findings).toEqual([]);
+  const legacy = read("semgrep-platform-findings/v1", rows);
+  expect(legacy.excluded.map((row) => row.position)).toEqual([2, 3]);
+  expect(legacy.findings[0]!.evidence.severity).toBe("unknown");
+  const weak = read(
+    "semgrep-platform-findings/v2",
+    rows.map((row) => JSON.stringify({ ...row, ref: undefined })),
+  );
+  expect(weak.excluded).toEqual([]);
+  expect(weak.findings[0]!.evidence.severity).toBe("unknown");
+  expect(weak.findings[1]!.evidence.locations?.[0]?.line).toBe(2);
+  expect(weak.findings[2]!.evidence.details!.code!.end_line).toBe(3);
+});
+
 test.each(["sast", "ai_sast", "sca"])(
   "v1 %s requires the original title sources",
   (product) => {
@@ -389,8 +427,27 @@ test("original v1 normalized rows can bind a name-only alias through a sibling i
       { ...source, repository: fixture.repository },
       { environment: fixture.environment },
     );
+  const retained = {
+    ...legacy,
+    finding: native[0],
+    sourceRepositoryUrl: url,
+    operatorNote: "reviewed",
+    repositoryWitnessJson: "stale",
+    idEncoding: "stale",
+    project: {
+      ...scope.project,
+      url: null,
+      labels: { group: "demo", sequence: 1 },
+    },
+  };
+  batch.findings[0]!.evidence.source_data = retained;
   batch.findings[0]!.evidence.title = "Title chosen by the caller";
   const first = await prepare(batch);
+  const preparedData = first.preview.findings[0]!.evidence.source_data!;
+  expect(preparedData["repositoryWitnessJson"]).toBe(
+    JSON.stringify({ id: scope.project.id, name: label }),
+  );
+  expect(preparedData).not.toHaveProperty("idEncoding");
   expect((await first.import()).counts).toEqual({
     created: 2,
     updated: 0,
@@ -405,11 +462,37 @@ test("original v1 normalized rows can bind a name-only alias through a sibling i
     (await fixture.read()).find((row) => row.sourceFindingId === "retained-0"),
   ).toMatchObject({
     version: 1,
-    evidence: { title: "Title chosen by the caller" },
+    evidence: {
+      title: "Title chosen by the caller",
+      source_data: {
+        operatorNote: "reviewed",
+        sourceRepositoryUrl: url,
+        project: { url: null, labels: { group: "demo", sequence: 1 } },
+      },
+    },
   });
-  expect(batch.findings[0]!.evidence.source_data).toEqual({
-    ...legacy,
-    finding: native[0],
+  expect(batch.findings[0]!.evidence.source_data?.["finding"]).toEqual(
+    native[0],
+  );
+
+  retained.project.labels.sequence++;
+  expect((await (await prepare(batch)).import()).counts).toEqual({
+    created: 0,
+    updated: 1,
+    unchanged: 1,
+  });
+  expect((await (await prepare(batch)).import()).counts).toEqual({
+    created: 0,
+    updated: 0,
+    unchanged: 2,
+  });
+  expect(
+    (await fixture.read()).find((row) => row.sourceFindingId === "retained-0"),
+  ).toMatchObject({
+    version: 2,
+    evidence: {
+      source_data: { project: { labels: { group: "demo", sequence: 2 } } },
+    },
   });
 
   for (const other of [
@@ -441,21 +524,24 @@ test("original v1 normalized rows can bind a name-only alias through a sibling i
   }
 });
 
-test("v1 replays legacy decimal proof IDs and canonical bindings on dependent rows", () => {
-  const result = normalizeSemgrepFindings(
-    {
-      ...scope,
-      format: "semgrep-platform-findings/v1",
-      repositoryAliases: ["display"],
-      findingCount: 2,
-      findings: [
-        { ...code, id: 12, repository: { name: "display", id: "1e1" } },
-        { ...code, id: 13, repository: { name: "display" } },
-      ],
-    },
-    {},
-    "local",
-  );
+test("a stored decimal witness remains equivalent to its canonical binding on local replay", async () => {
+  const source = { provider: "semgrep" as const, sourceKey: "demo/topic" };
+  await using fixture = await localReportFixture("semgrep.json", source, {
+    remote: url,
+  });
+  await fixture.writeJson({
+    ...scope,
+    format: "semgrep-platform-findings/v1",
+    repositoryAliases: ["display"],
+    findingCount: 2,
+    findings: [
+      { ...code, id: 12, repository: { name: "display", id: "1e1" } },
+      { ...code, id: 13, repository: { name: "display" } },
+    ],
+  });
+  const saved = await fixture.prepare();
+  expect((await saved.import()).counts.created).toBe(2);
+  const result = saved.preview;
   expect(result.excluded).toEqual([]);
   expect(result.findings).toHaveLength(2);
   const [proof, dependent] = result.findings;
@@ -468,7 +554,6 @@ test("v1 replays legacy decimal proof IDs and canonical bindings on dependent ro
   for (const finding of result.findings)
     expect(semgrepPlatformFindingRepository(finding, "semgrep")).toBe(url);
 
-  // Previously saved name-only rows can still carry the proving row's decimal v1 repository ID.
   const previous = structuredClone(dependent!);
   Object.assign(previous.evidence.source_data!, {
     format: "semgrep-platform-findings/v1",
@@ -476,6 +561,26 @@ test("v1 replays legacy decimal proof IDs and canonical bindings on dependent ro
     repositoryWitnessJson: JSON.stringify({ name: "display", id: "1e1" }),
   });
   expect(semgrepPlatformFindingRepository(previous, "semgrep")).toBe(url);
+  const direct = await prepareNormalizedLocalImport(
+    { read: 1, findings: [previous], excluded: [] },
+    { ...source, repository: fixture.repository },
+    { environment: fixture.environment },
+  );
+  expect((await direct.import()).counts).toEqual({
+    created: 0,
+    updated: 0,
+    unchanged: 1,
+  });
+  expect((await (await fixture.prepare()).import()).counts).toEqual({
+    created: 0,
+    updated: 0,
+    unchanged: 2,
+  });
+  expect(
+    (await fixture.read()).find(
+      (row) => row.sourceFindingId === previous.source_finding_id,
+    )?.version,
+  ).toBe(1);
 });
 
 test("a legacy report verifies each display label against that row's repository ID or URL", async () => {

@@ -38,6 +38,8 @@ export interface SemgrepPlatformOptions {
 }
 
 export interface SemgrepPlatformReport extends SemgrepPlatformScope {
+  /** Set when the project lookup omitted its URL and the caller supplied the binding. */
+  sourceRepositoryUrl?: string;
   format: typeof semgrepPlatformFormat;
   findingCount: number;
   findings: string[];
@@ -179,6 +181,7 @@ export async function collectSemgrepPlatformFindings(
   return {
     format: semgrepPlatformFormat,
     ...scope,
+    ...(nativeUrl === undefined && { sourceRepositoryUrl: url }),
     repositoryAliases: [...observed].sort(),
     findingCount: findings.length,
     findings,

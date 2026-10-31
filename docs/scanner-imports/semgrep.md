@@ -168,13 +168,20 @@ report=$(mktemp ./semgrep-backlog.XXXXXX) &&
 
 Use `--semgrep-product sca` for Supply Chain or `ai_sast` for AI-powered
 detection. The default is `sast`. Use `--source-repository-url` on collection
-when the project has no repository URL. Save the complete output from a successful
-command. The importer checks the recorded finding count and repository/ref
+when the project has no repository URL. The report records that mapping in
+`sourceRepositoryUrl`, and the stored finding retains a null native project URL.
+Save the complete output from a successful command. The importer checks the recorded finding count and repository/ref
 claims. It retains each original finding as JSON text so large IDs survive replay. The reader also accepts saved v1 project exports with native object rows and decimal type witnesses.
 Supply Chain findings include native package versions, matching fix recommendations
 and advisory IDs when Semgrep supplies them. With the same source key, importing identical Code findings that qualify for individual
 selection reports them as unchanged when switching between a selection and a full collection.
 See the [Semgrep Findings API](https://docs.semgrep.dev/api-reference/v1/findingsservice/list-code-supply-chain-or-ai-powered-detection-findings).
+
+If you previously imported a v1 export with the development version that stored
+each finding as an object, the first replay updates the existing SQLite record
+to store the native finding as JSON text. Its local ID and source finding ID stay
+the same, and its version increases once. Replaying the same evidence again
+reports it as unchanged.
 
 ## Evidence and identity
 

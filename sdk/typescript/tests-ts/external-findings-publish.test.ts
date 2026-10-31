@@ -914,7 +914,7 @@ test("Cloud checks both native Semgrep rows when a projection retains both forma
   expect(f.posts).toHaveLength(0);
 });
 
-test("a URL-less Semgrep v1 project requires its own provider while opaque Wiz records can publish", async () => {
+test("marked Semgrep rows require their provider while unmarked Wiz records can publish", async () => {
   const url = "https://github.com/example/project";
   const f = await fixture([], url);
   const prepare = (
@@ -948,7 +948,10 @@ test("a URL-less Semgrep v1 project requires its own provider while opaque Wiz r
       { ...options, provider },
       f.deps,
     );
-  await expect(prepare("1.2e1", null)).rejects.toThrow(/semgrep provider/i);
+  await expect(
+    prepare("1.2e1", null, "wiz", "semgrep-platform-findings/v1"),
+  ).rejects.toThrow(/semgrep provider/i);
+  expect((await prepare("1.2e1", null)).preview.findings).toHaveLength(1);
   await expect(prepare(null, null, "semgrep")).rejects.toThrow(/Semgrep/i);
   expect(
     (await prepare(12, url, "wiz", "wiz-findings/v1")).preview.findings,
