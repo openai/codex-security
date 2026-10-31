@@ -27,7 +27,7 @@ for (const deferLast of [false, true]) {
     const pluginRoot = await bundledPluginRoot();
     const prepared = await prepareStandardEval(root, pluginRoot);
     const { positives, files } = prepared.fixture;
-    const findings = positives.map(({ id, path, line, cwes }) => ({
+    const candidates = positives.map(({ id, path, line, cwes }) => ({
       ruleId: id,
       identity: { anchor: id },
       title: `Synthetic ${id}`,
@@ -36,12 +36,6 @@ for (const deferLast of [false, true]) {
       confidence: { level: "high", rationale: "Source review." },
       taxonomy: { category: id, cwe: [cwes[0]] },
       locations: [{ path, startLine: line, role: "sink" }],
-      validation: {
-        disposition: "reportable",
-        method: "Static review",
-        summary: "Accepted in the checkpoint.",
-        limitations: ["Synthetic review."],
-      },
       codeEvidence: [
         {
           id,
@@ -53,16 +47,28 @@ for (const deferLast of [false, true]) {
         },
       ],
       remediation: "Use the corresponding safe control.",
-      provenance: { source: "local_plugin" },
     }));
-    const accepted = deferLast ? findings.slice(0, -1) : findings;
-    const withheld = positives.at(-1)!;
+    const accepted = (deferLast ? candidates.slice(0, -1) : candidates).map(
+      (candidate) => ({
+        ...candidate,
+        validation: {
+          disposition: "reportable",
+          method: "Static review",
+          summary: `Verified ${candidate.ruleId} against its cited sink.`,
+          limitations: ["Synthetic review."],
+        },
+        provenance: { source: "local_plugin", candidateId: candidate.ruleId },
+      }),
+    );
+    const withheld = candidates.at(-1)!;
     const deferred = deferLast
       ? [
           {
-            id: withheld.id,
+            id: withheld.ruleId,
+            candidateId: withheld.ruleId,
+            candidate: withheld,
             reason: "Awaiting verification.",
-            paths: [withheld.path],
+            paths: [withheld.locations[0]!.path],
           },
         ]
       : [];
@@ -78,7 +84,7 @@ for (const deferLast of [false, true]) {
         item: {
           type: "agent_message",
           id: "discovery",
-          text: JSON.stringify({ findings }),
+          text: JSON.stringify({ findings: candidates }),
         },
       };
       const client = await startMcpClient(
@@ -98,7 +104,11 @@ for (const deferLast of [false, true]) {
               complete,
               threatModel: { summary: "Synthetic account portal." },
               findings: complete ? [] : accepted,
-              reviewState: { surfaces: [], explicitExclusions: [], deferred },
+              reviewState: {
+                surfaces: [],
+                explicitExclusions: [],
+                deferred: complete ? [] : deferred,
+              },
             },
             _meta: { "openai/threadId": threadId },
           });
@@ -126,6 +136,7 @@ for (const deferLast of [false, true]) {
       outputRoot: join(root, "results"),
       environment: {
         PATH: process.env.PATH,
+        PYTHON: process.env.PYTHON,
         SystemRoot: process.env.SystemRoot,
         HOME: root,
         USERPROFILE: root,
@@ -145,7 +156,11 @@ for (const deferLast of [false, true]) {
                 marketplaceName: "codex-security-sdk",
                 ...(await pluginMetadata(pluginRoot)),
               },
-              environment: {},
+              environment: Object.fromEntries(
+                Object.entries(dependencies.environment).filter(
+                  (entry): entry is [string, string] => entry[1] !== undefined,
+                ),
+              ),
               credentialsAvailable: true,
             }),
           },
@@ -188,6 +203,10 @@ for (const deferLast of [false, true]) {
         ({ ruleId }) => ruleId === expected.ruleId,
       );
       assert.ok(retained, expected.ruleId);
+      assert.equal(
+        retained.provenance.candidateId,
+        expected.provenance.candidateId,
+      );
       for (const field of [
         "identity",
         "locations",
@@ -197,7 +216,7 @@ for (const deferLast of [false, true]) {
         assert.deepEqual(retained[field], expected[field]);
       assert.ok(markdown.includes(expected.title), expected.title);
     }
-    if (deferLast) assert.ok(!markdown.includes(findings.at(-1)!.title));
+    if (deferLast) assert.ok(!markdown.includes(withheld.title));
     const { scan } = await readJson(scanDir, "scan-manifest.json");
     assert.equal(scan.id, report.scanId);
     assert.equal(scan.status, "completed");
