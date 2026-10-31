@@ -463,7 +463,7 @@ test("a contradictory integration label cannot alias a distinct Azure repository
   ).rejects.toThrow("target URL");
 });
 
-test("checks projected Snyk repository URLs when an SDK caller omits original evidence", async () => {
+test("checks typed Snyk repository URLs against original evidence and the checkout", async () => {
   const sourceRepositoryUrl = "https://gitlab.com/Team/Repo";
   const asset = project("sast", sourceRepositoryUrl);
   asset.data.attributes.origin = "gitlab";
@@ -474,10 +474,7 @@ test("checks projected Snyk repository URLs when an SDK caller omits original ev
       sourceRepositoryUrl,
     }),
   );
-  const row = report.findings[0]!;
-  row.source_finding_id = "projected-issue";
-  const evidence = row.evidence;
-  delete evidence.source_data;
+  const evidence = report.findings[0]!.evidence;
   await using f = await snykLocalFixture({ remote: sourceRepositoryUrl });
   const settings = {
     provider: "snyk" as const,

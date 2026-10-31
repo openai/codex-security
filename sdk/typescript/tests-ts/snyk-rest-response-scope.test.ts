@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { readSnykFindings } from "../src/snyk-findings.js";
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import { isolatedGitReportFixture } from "./external-findings-local-helpers.js";
 import {
@@ -7,6 +8,7 @@ import {
 } from "../src/snyk-rest-findings.js";
 import {
   snykIssue,
+  snykLocalFixture,
   snykOptions,
   snykProject,
   snykRestFixture,
@@ -24,6 +26,34 @@ function capture(...responses: unknown[]) {
     },
   );
 }
+
+test("project and target JSON formatting preserves exact native numbers and text", () => {
+  const project = snykProject("npm", "").data;
+  const target = {
+    ...project.relationships.target.data,
+    attributes: { url: snykOptions.sourceRepositoryUrl },
+  };
+  const report = snykRestFixture("open-source");
+  const source = (members: string) => {
+    const json = (resource: object) =>
+      JSON.stringify(resource).replace("{", `{${members},`);
+    return normalizeSnykIssues({
+      ...report,
+      projectJson: json(project),
+      targetJson: json(target),
+    }).findings[0]!.evidence.source_data!;
+  };
+  const token = "9007199254740993";
+  const original = source(`"amount":${token},"label":"${token}"`);
+  expect(
+    source(`
+ "label": "${token}", "amount": ${token}`),
+  ).toEqual(original);
+  for (const field of ["projectJson", "targetJson"]) {
+    expect(original[field]).toContain(`"amount":${token}`);
+    expect(original[field]).toContain(`"label":"${token}"`);
+  }
+});
 
 test("a saved target accepts unexpanded integration linkage and checks a supplied integration type", async () => {
   const project = snykProject("npm", "");
@@ -45,6 +75,10 @@ test("a saved target accepts unexpanded integration linkage and checks a supplie
       },
     },
   });
+  const linked = target().data.relationships.integration;
+  Object.assign(project.data.relationships.target.data, {
+    relationships: { integration: linked },
+  });
   const saved = await capture(project, target({ integration_type: "github" }), {
     data: [snykIssue(false)],
   });
@@ -57,6 +91,21 @@ test("a saved target accepts unexpanded integration linkage and checks a supplie
   expect(() =>
     normalizedTarget(target({ integration_type: "gitlab" }).data),
   ).toThrow("project's github origin");
+
+  const replaced = target({ integration_type: "github" });
+  replaced.data.relationships.integration.data.id =
+    "99999999-9999-4999-8999-999999999999";
+  await using fixture = await snykLocalFixture();
+  await fixture.writeJson({
+    ...saved,
+    targetJson: JSON.stringify(replaced.data),
+  });
+  await expect(readSnykFindings(fixture.file, "local")).rejects.toThrow(
+    "different integration",
+  );
+  await expect(
+    capture(project, replaced, { data: [snykIssue(false)] }),
+  ).rejects.toThrow("different integration");
 });
 
 test("CLI and API targets can have empty integration linkage", async () => {
@@ -290,8 +339,11 @@ test("direct SDK projections can edit display fields but must retain an importab
     retained["issueJson"] = JSON.stringify(issue);
     await expect(prepare()).rejects.toThrow(saved.excluded[0]!.reason);
   }
-  expect(await fixture.read()).toEqual(stored);
   retained["issueJson"] = original;
+  row.evidence.locations = [{ path: "../outside.ts" }];
+  await expect(prepare()).rejects.toThrow("repository-relative paths");
+  expect(await fixture.read()).toEqual(stored);
+  row.evidence.locations = [{ path: "src/reader.ts" }];
   expect((await (await prepare()).import()).counts).toEqual({
     created: 0,
     updated: 1,
@@ -299,6 +351,9 @@ test("direct SDK projections can edit display fields but must retain an importab
   });
   expect((await fixture.read())[0]).toMatchObject({
     id: stored[0]!.id,
-    evidence: { title: "Reader projection" },
+    evidence: {
+      title: "Reader projection",
+      locations: [{ path: "src/reader.ts" }],
+    },
   });
 });

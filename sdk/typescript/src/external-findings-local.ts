@@ -25,6 +25,7 @@ import {
 import {
   cloudRepositoryUrlKey,
   repositoryUrlKey,
+  validateExternalEvidence,
   validateExternalReport,
 } from "./external-import-contract.js";
 import type {
@@ -981,7 +982,11 @@ export async function prepareLocalImport(
     ],
     readerSources,
   );
-  if (!snyk && options.provider === "snyk" && current.sourceRepositoryUrl) {
+  if (snyk) {
+    // Validate the submitted projection while preserving the reader's exact stored fields.
+    for (const { evidence } of current.findings)
+      validateExternalEvidence(structuredClone(evidence), "local");
+  } else if (options.provider === "snyk" && current.sourceRepositoryUrl) {
     const declared = { url: current.sourceRepositoryUrl };
     const native = current.findings.flatMap((finding) =>
       localFindingRepositories("snyk", finding),

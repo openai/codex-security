@@ -62,9 +62,9 @@ test.each(["open-source", "code"] as const)(
 );
 
 test("import snyk requires opt-in and keeps failed collections out of redirected JSON", async () => {
-  const fetch = mock(async () => {
-    throw new Error("project could not be read");
-  });
+  const fetch = mock(
+    async () => new Response("projet refusé \u202edenied", { status: 403 }),
+  );
   const disabled = createCliTest(main);
   expect(
     await disabled.runCli(command, {
@@ -86,7 +86,7 @@ test("import snyk requires opt-in and keeps failed collections out of redirected
     }),
   ).toBe(2);
   expect(enabled.stdout.text()).toBe("");
-  expect(enabled.stderr.text()).toContain("project could not be read");
+  expect(enabled.stderr.text()).toContain("projet refusé \\u202edenied");
 });
 
 test("Snyk CLI escapes cursors in human output and retains the native JSON value", async () => {

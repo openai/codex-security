@@ -16,6 +16,8 @@ const clone = "git@scm.example.invalid:Team/Repo.git";
 
 test.each([
   { origin: "cli", platform: "github", empty: false },
+  { origin: "github", platform: "github", empty: false },
+  { origin: "github-app", platform: "github", empty: false },
   { origin: "api", platform: "gitlab", empty: true },
   { origin: "gitlab", platform: "gitlab", empty: false },
 ] as const)(
@@ -24,7 +26,7 @@ test.each([
     const report = snykRestFixture("open-source", { sourceRepositoryUrl: url });
     const project = JSON.parse(report.projectJson);
     project.attributes.origin = origin;
-    // CLI and API projects can report an SSH clone, while GitLab can omit its target.
+    // Private projects can report an SSH clone, while GitLab can omit its target.
     if (origin === "gitlab") delete project.relationships;
     else project.relationships.target.data.attributes.url = clone;
     if (empty) report.pages[0]!.responseJson = '{"data":[]}';
@@ -117,4 +119,30 @@ test("saved Snyk exports must still identify the collected product", () => {
   expect(() => normalizeSnykIssues(unscoped)).toThrow(
     "Snyk product must be open-source or code",
   );
+});
+
+test("a saved enterprise target cannot override a reader's verified GitLab repository", async () => {
+  const report = snykRestFixture("open-source", { sourceRepositoryUrl: url });
+  const project = JSON.parse(report.projectJson);
+  project.attributes.origin = "github-enterprise";
+  project.relationships.target.data.attributes.url = url.replace(
+    "Repo",
+    "repo",
+  );
+  await using f = await isolatedGitReportFixture(
+    "snyk.json",
+    { provider: "snyk", sourceKey: snykOptions.projectId },
+    { remote: url },
+  );
+  const read = (platform: "github" | "gitlab") =>
+    readSnykFindings(f.file, "local", [{ url, platform }]);
+  report.projectJson = JSON.stringify(project);
+  await f.writeJson(report);
+  expect((await read("github")).findings).toHaveLength(1);
+  await expect(read("gitlab")).rejects.toThrow("target URL");
+
+  project.relationships.target.data.attributes.url = url;
+  report.projectJson = JSON.stringify(project);
+  await f.writeJson(report);
+  expect((await read("gitlab")).findings).toHaveLength(1);
 });

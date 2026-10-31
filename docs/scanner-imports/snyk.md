@@ -30,27 +30,33 @@ Collection reads open and resolved issues across all pages, including ignored is
 For Open Source it requests package vulnerabilities. For Code it requests code issues.
 The SDK's `collectSnykIssues` defaults to Open Source and returns the same report.
 Passing the configured `SNYK_TOKEN` explicitly retains its configured regional
-API origin. Pass independently verified `sourceRepositories` in its dependencies when a private
-CLI- or API-monitored project uses an SSH target. The offline reader
+API origin. Pass independently verified `sourceRepositories` in its
+dependencies when a private repository uses an SSH target. The offline reader
 `readSnykFindings(path, "local")` accepts `snyk-rest-issues/v1` and
 `snyk-rest-issues/v2` reports from Snyk REST API version `2026-03-25`.
 The collector writes v2 and preserves the original project and issue evidence.
 For open Snyk Code issues from an SCM integration, both versions import
 repository-relative paths from open coordinates. V2 also imports each
-coordinate's reported start line when available. The finding’s
-`issueJson` retains source locations for resolved issues, closed coordinates,
-and projects monitored through the CLI or API.
+coordinate's reported start line when available. For resolved issues, closed
+coordinates, and projects monitored through the CLI or API, read the original
+location from `evidence.source_data.issue` in v1 or from the JSON text in
+`evidence.source_data.issueJson` in v2.
 
 Use the same source key on later imports. The issue key within the API
 origin, organization, project and product identifies the finding. Replaying the
-same evidence leaves the version unchanged. Importing a different capture for
+same evidence leaves the version unchanged. Whitespace and object key order
+in v2 native records do not affect replay. Importing a different capture for
 that issue updates the same row, even if the capture is older.
 
-When selecting a subset in the SDK, keep the report’s `snykRestContext` and
-each selected finding’s `source_data`. The importer verifies the original
-issue and its project and product before writing the finding under its generated
-Snyk ID. A batch of native rows must share an API region, organization, project
-and product, even when an SDK reader omits the report header.
+To select a subset in the SDK, filter the normalized report’s `findings`
+array. Keep the report’s `snykRestContext` and each selected finding’s
+`source_finding_id` and `evidence.source_data`. Every hosted row must retain
+the native issue and its generated ID. The verified report context can supply
+the monitored project for a row that retains only its original issue. All
+selected issues must share an API region, organization, project and product.
+
+SDK readers that define their own findings and IDs can use the ordinary
+normalized Snyk import with their own evidence and no hosted report context.
 
 For private source-control hosts, use the same repository URL as the checkout.
 SDK callers that have independently verified a GitHub Enterprise or GitLab

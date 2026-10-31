@@ -4008,9 +4008,11 @@ export async function main(
         const diagnostic = interrupted
           ? `${provider} import ${interrupted === 130 ? "canceled" : "terminated"}.`
           : message;
-        errorOutput.write(
-          `codex-security: ${provider === "Semgrep" ? escapeTerminalText(diagnostic) : diagnostic}\n`,
-        );
+        const terminalDiagnostic =
+          provider === "Semgrep" || provider === "Snyk"
+            ? escapeTerminalText(diagnostic)
+            : diagnostic;
+        errorOutput.write(`codex-security: ${terminalDiagnostic}\n`);
         if (argv.includes("--full-output")) {
           structuredError = true;
           return fail({
