@@ -60,10 +60,11 @@ export function checkSnykTokenOrigin(token: string, origin: string): void {
     );
 }
 
-/** Use a vendor environment token only at the origin configured for it. */
-export function snykEnvironmentToken(
+/** Keep the environment credential bound to its configured origin when an SDK caller forwards it. */
+export function snykApiToken(
   environment: NodeJS.ProcessEnv,
   origin: string,
+  explicitToken?: string,
 ): string | undefined {
   const tokenName = "SNYK_TOKEN";
   const originNames = [
@@ -74,8 +75,13 @@ export function snykEnvironmentToken(
     "SNYK_API",
     "SNYK_CFG_ENDPOINT",
   ];
-  const token = importEnvironmentSetting(environment, tokenName)?.value;
-  if (token) {
+  const environmentToken = importEnvironmentSetting(
+    environment,
+    tokenName,
+  )?.value;
+  const token = explicitToken ?? environmentToken;
+  // HTTP trims trailing whitespace from the Authorization header.
+  if (token && token.trim() === environmentToken?.trim()) {
     for (const name of originNames) {
       const configured = endpointSetting(environment, name);
       if (!configured) continue;

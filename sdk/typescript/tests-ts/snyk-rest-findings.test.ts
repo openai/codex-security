@@ -166,6 +166,37 @@ test.each([
   },
 );
 
+test("forwarding the environment token keeps its region while a separate SDK token chooses its own", async () => {
+  const calls: Array<[string, string | null]> = [];
+  const collect = (token: string, apiOrigin?: string) =>
+    collectSnykIssues(
+      { ...options, token, apiOrigin },
+      {
+        environment: { ...environment, SNYK_API: options.apiOrigin },
+        fetch: async (url, init) => {
+          calls.push([
+            url.origin,
+            new Headers(init.headers).get("authorization"),
+          ]);
+          return Response.json(
+            url.pathname.endsWith("/issues") ? { data: [] } : project(),
+          );
+        },
+      },
+    );
+  for (const token of [environment.SNYK_TOKEN, environment.SNYK_TOKEN + " "])
+    await expect(collect(token)).rejects.toThrow("SNYK_API");
+  expect(calls).toBeEmpty();
+  await collect(environment.SNYK_TOKEN, options.apiOrigin);
+  await collect("separate-token");
+  expect(calls).toEqual([
+    [options.apiOrigin, "token test-token"],
+    [options.apiOrigin, "token test-token"],
+    ["https://api.snyk.io", "token separate-token"],
+    ["https://api.snyk.io", "token separate-token"],
+  ]);
+});
+
 test("the Snyk token stays in its configured region and on the selected Issues route", async () => {
   const regional = transport();
   await expect(
@@ -232,6 +263,34 @@ test.each([
   },
 );
 
+test.each([
+  "https://api.snyk.io/rest/orgs/" +
+    options.organizationId +
+    "/issues?ending_before=opaque",
+  "/rest/orgs/another-organization/issues?ending_before=opaque",
+  "?scan_item.id=another-project&ending_before=opaque",
+  "?ending_before=first&ending_before=second",
+  "?starting_after=forward",
+])(
+  "rejects a later page with an out-of-scope previous link %s",
+  async (prev) => {
+    const first = { data: [], links: { next: "?starting_after=page-two" } };
+    const last = { data: [], links: { prev } };
+    const api = transport(project(), first, last);
+    await expect(api.collect()).rejects.toThrow("Snyk previous page link");
+    expect(api.calls).toHaveLength(3);
+
+    const report = snykRestFixture("open-source");
+    report.pages = [
+      { startingAfter: null, responseJson: JSON.stringify(first) },
+      { startingAfter: "page-two", responseJson: JSON.stringify(last) },
+    ];
+    expect(() => normalizeSnykIssues(report)).toThrow(
+      "Snyk previous page link",
+    );
+  },
+);
+
 test("an invalid issue key cannot hide a duplicate resource UUID in saved pages", async () => {
   const valid = issue(false);
   const invalid = { ...valid, attributes: { ...valid.attributes, key: null } };
@@ -248,6 +307,47 @@ test("an invalid issue key cannot hide a duplicate resource UUID in saved pages"
     { position: 1, reason: expect.stringContaining("overlapping issue IDs") },
     { position: 2, reason: expect.stringContaining("Snyk issue key") },
   ]);
+});
+
+test("normalized Snyk selections cannot import two keys for one native issue", async () => {
+  const first = normalizeSnykIssues(snykRestFixture("open-source"));
+  const nextIssue = issue(false);
+  nextIssue.attributes.key = "rekeyed";
+  const report = snykRestFixture("open-source");
+  report.pages[0]!.responseJson = JSON.stringify({ data: [nextIssue] });
+  const second = normalizeSnykIssues(report);
+  expect(first.findings[0]!.source_finding_id).not.toBe(
+    second.findings[0]!.source_finding_id,
+  );
+  await using fixture = await snykLocalFixture({
+    remote: options.sourceRepositoryUrl,
+  });
+  const selected = {
+    ...first,
+    read: 2,
+    findings: [...first.findings, ...second.findings],
+  };
+  const prepare = () =>
+    prepareNormalizedLocalImport(
+      selected,
+      {
+        provider: "snyk",
+        sourceKey: fixture.sourceKey,
+        repository: fixture.repository,
+      },
+      { environment: fixture.environment },
+    );
+  await expect(prepare()).rejects.toThrow("overlapping issue IDs");
+  expect(await fixture.read()).toBeEmpty();
+
+  nextIssue.id = "55555555-5555-4555-8555-555555555555";
+  report.pages[0]!.responseJson = JSON.stringify({ data: [nextIssue] });
+  selected.findings = [
+    ...first.findings,
+    ...normalizeSnykIssues(report).findings,
+  ];
+  expect((await (await prepare()).import()).counts.created).toBe(2);
+  expect((await (await prepare()).import()).counts.unchanged).toBe(2);
 });
 
 test("rejects mismatched project evidence before persisting a local import", async () => {

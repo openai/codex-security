@@ -1,4 +1,6 @@
 import { expect, mock, test } from "bun:test";
+import { readSnykFindings } from "../src/snyk-findings.js";
+import { snykJson, snykSarif } from "./support/snyk-import-fixtures.js";
 import { prepareNormalizedExternalPublication } from "../src/external-findings-publish.js";
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import {
@@ -290,7 +292,12 @@ test("unrelated Wiz evidence with Snyk-like field names remains importable local
     source_finding_id: "snyk-rest:ticket-42",
     evidence: { title: "Example", severity: "medium" as const, source_data },
   };
-  const input = { read: 1, findings: [finding], excluded: [] };
+  const input = {
+    read: 1,
+    findings: [finding],
+    excluded: [],
+    snykRestContext: undefined,
+  };
   const options = {
     provider: "wiz" as const,
     sourceKey: "example",
@@ -316,6 +323,43 @@ test("unrelated Wiz evidence with Snyk-like field names remains importable local
     ).rejects.toThrow("Reached Wiz Cloud credentials");
   }
   expect(credentials).toHaveBeenCalledTimes(2);
+});
+
+test("a reader may copy an optional hosted context from Snyk CLI JSON or SARIF", async () => {
+  await using f = await snykLocalFixture();
+  const options = {
+    provider: "snyk" as const,
+    repository: f.repository,
+    sourceKey: "example",
+  };
+  const credentials = mock(async () => {
+    throw new Error("Reached Snyk credentials");
+  });
+  for (const file of [snykJson(), snykSarif()]) {
+    await f.writeJson(file);
+    const report = await readSnykFindings(f.file, "local");
+    const dependencies = { environment: f.environment, credentials };
+    for (const input of [
+      report,
+      { ...report, snykRestContext: report.snykRestContext },
+    ]) {
+      expect(
+        (await prepareNormalizedLocalImport(input, options, dependencies))
+          .preview.findings,
+      ).toHaveLength(1);
+      await expect(
+        prepareNormalizedExternalPublication(input, options, dependencies),
+      ).rejects.toThrow("Reached Snyk credentials");
+    }
+    const malformed = { ...report, snykRestContext: null };
+    await expect(
+      prepareNormalizedLocalImport(malformed, options, dependencies),
+    ).rejects.toThrow(/Snyk report context/);
+    await expect(
+      prepareNormalizedExternalPublication(malformed, options, dependencies),
+    ).rejects.toThrow(/Snyk/);
+  }
+  expect(credentials).toHaveBeenCalledTimes(4);
 });
 
 test("a reader may use its own IDs for sparse Snyk projections, while the native namespace requires original evidence", async () => {
@@ -715,4 +759,82 @@ test("opaque legacy issues retain sibling scope checks on a checkpoint retry", (
     ),
   );
   expect(() => check(true)).toThrow("retained Snyk project scope");
+});
+
+test.each(["v1", "v2"] as const)(
+  "a linked %s issue projection uses its report's project and requires the Snyk provider",
+  async (version) => {
+    const report = normalizeSnykIssues(snykRestFixture("open-source"));
+    const row = report.findings[0]!;
+    const json = String(row.evidence.source_data!["issueJson"]);
+    const project = (id: string) => {
+      const issue = JSON.parse(json);
+      issue.relationships.scan_item.data.id = id;
+      return {
+        ...snykOptions,
+        ...(version === "v1"
+          ? { issue }
+          : { issueJson: JSON.stringify(issue) }),
+      };
+    };
+    row.source_finding_id = "reader-row";
+    row.evidence.source_data = project("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    await using fixture = await snykLocalFixture({
+      remote: snykOptions.sourceRepositoryUrl,
+    });
+    const options = {
+      provider: "snyk" as const,
+      sourceKey: fixture.sourceKey,
+      repository: fixture.repository,
+    };
+    const { read, findings, excluded } = report;
+    await expect(
+      prepareNormalizedExternalPublication(
+        { read, findings, excluded },
+        { ...options, repository: "repo-example", provider: "wiz" },
+        cloudCatalog(fixture.environment, snykOptions.sourceRepositoryUrl),
+      ),
+    ).rejects.toThrow(/requires the snyk provider/i);
+    const prepare = () =>
+      prepareNormalizedLocalImport(report, options, {
+        environment: fixture.environment,
+      });
+    await expect(prepare()).rejects.toThrow("selected project");
+    const retry = () => snykRestImportRepository(report, "snyk", [], [], true);
+    expect(retry).toThrow("selected project");
+    row.evidence.source_data = project(snykOptions.projectId);
+    expect(retry()?.url).toBe(snykOptions.sourceRepositoryUrl);
+    const ready = await prepare();
+    expect((await ready.import()).counts.created).toBe(1);
+    expect((await (await prepare()).import()).counts.unchanged).toBe(1);
+  },
+);
+
+test("unmarked native v1 rows survive unrelated issueJson data", async () => {
+  const { read, findings, excluded } = normalizeSnykIssues(
+    snykRestFixture("open-source"),
+  );
+  const row = findings[0]!;
+  const original = row.evidence.source_data!;
+  row.evidence.source_data = {
+    ...snykOptions,
+    apiVersion: original["apiVersion"],
+    project: JSON.parse(String(original["projectJson"])),
+    target: null,
+    issue: JSON.parse(String(original["issueJson"])),
+    issueJson: "{}",
+  };
+  await using fixture = await snykLocalFixture({
+    remote: snykOptions.sourceRepositoryUrl,
+  });
+  const result = await prepareNormalizedLocalImport(
+    { read, findings, excluded },
+    {
+      provider: "snyk",
+      sourceKey: fixture.sourceKey,
+      repository: fixture.repository,
+    },
+    { environment: fixture.environment },
+  );
+  expect((await result.import()).counts.created).toBe(1);
 });

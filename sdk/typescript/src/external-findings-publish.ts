@@ -658,7 +658,7 @@ function normalizedPublicationInput(
   // Read the Snyk discriminator even when the caller selected another provider.
   if (!Object.hasOwn(parsed, "snykRestContext") && "snykRestContext" in input)
     parsed.snykRestContext = input.snykRestContext;
-  if ("snykRestContext" in parsed) {
+  if (parsed.snykRestContext !== undefined) {
     if (provider !== "snyk")
       throw new CodexSecurityError(
         "Snyk REST evidence requires the snyk provider.",

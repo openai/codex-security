@@ -29,12 +29,15 @@ Confirm the preview, then repeat the publish command without `--dry-run`.
 Collection reads open and resolved issues across all pages, including ignored issues.
 For Open Source it requests package vulnerabilities. For Code it requests code issues.
 The SDK's `collectSnykIssues` defaults to Open Source and returns the same report.
-Pass independently verified `sourceRepositories` in its dependencies when a private
-CLI- or API-monitored project uses an SSH target. The reader
-`readSnykFindings(path, "local")` reads it offline. The v2 report preserves
-the original project and issue evidence. For open Snyk Code issues from an
-SCM integration, v2 imports project the repository-relative path from each open
-coordinate and its reported start line when available. The finding’s
+Passing the configured `SNYK_TOKEN` explicitly retains its configured regional
+API origin. Pass independently verified `sourceRepositories` in its dependencies when a private
+CLI- or API-monitored project uses an SSH target. The offline reader
+`readSnykFindings(path, "local")` accepts `snyk-rest-issues/v1` and
+`snyk-rest-issues/v2` reports from Snyk REST API version `2026-03-25`.
+The collector writes v2 and preserves the original project and issue evidence.
+For open Snyk Code issues from an SCM integration, both versions import
+repository-relative paths from open coordinates. V2 also imports each
+coordinate's reported start line when available. The finding’s
 `issueJson` retains source locations for resolved issues, closed coordinates,
 and projects monitored through the CLI or API.
 

@@ -917,6 +917,36 @@ test("Semgrep Cloud checks the original port on a selected finding's repository 
   expect(f.posts).toHaveLength(0);
 });
 
+test("an undefined optional Snyk context permits generic SDK evidence", async () => {
+  class Report {
+    snykRestContext?: Record<string, unknown>;
+    read = 1;
+    excluded = [];
+    findings = [
+      {
+        source_finding_id: "generic-1",
+        evidence: { title: "Example issue", severity: "high" as const },
+      },
+    ];
+  }
+  const f = await fixture();
+  const report = new Report();
+  const prepared = await prepareNormalizedExternalPublication(
+    report,
+    options,
+    f.deps,
+  );
+  expect((await prepared.publish()).counts.created).toBe(1);
+  report.snykRestContext = {};
+  await expect(
+    prepareNormalizedExternalPublication(
+      report,
+      { ...options, provider: "snyk" },
+      f.deps,
+    ),
+  ).rejects.toThrow("Expected a versioned Snyk REST report context");
+});
+
 test("a normalized Semgrep report checks the provider before Cloud credentials", async () => {
   const url = "https://github.com/example/project";
   const report = normalizeSemgrepFindings(

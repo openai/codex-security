@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import { isolatedGitReportFixture } from "./external-findings-local-helpers.js";
 import {
   collectSnykIssues,
@@ -247,3 +248,57 @@ test.each([
     ).toThrow("selected organization");
   },
 );
+
+test("direct SDK projections can edit display fields but must retain an importable native Snyk issue", async () => {
+  const captured = snykRestFixture("open-source");
+  const normalized = normalizeSnykIssues(captured);
+  const row = normalized.findings[0]!;
+  const retained = row.evidence.source_data!;
+  const original = String(retained["issueJson"]);
+  await using fixture = await isolatedGitReportFixture(
+    "snyk.json",
+    { provider: "snyk", sourceKey: snykOptions.projectId },
+    { remote: snykOptions.sourceRepositoryUrl },
+  );
+  await fixture.writeJson(captured);
+  await (await fixture.prepare()).import();
+  const stored = await fixture.read();
+  const prepare = () =>
+    prepareNormalizedLocalImport(
+      normalized,
+      {
+        provider: "snyk",
+        sourceKey: snykOptions.projectId,
+        repository: fixture.repository,
+      },
+      { environment: fixture.environment },
+    );
+  row.evidence.title = "Reader projection";
+  for (const [field, value] of [
+    ["status", "absent"],
+    ["ignored", null],
+    ["updated_at", ""],
+    ["effective_severity_level", null],
+    ["title", ""],
+    ["coordinates", {}],
+  ] as const) {
+    const issue = JSON.parse(original);
+    issue.attributes[field] = value;
+    captured.pages[0]!.responseJson = JSON.stringify({ data: [issue] });
+    const saved = normalizeSnykIssues(captured);
+    expect(saved.findings).toHaveLength(0);
+    retained["issueJson"] = JSON.stringify(issue);
+    await expect(prepare()).rejects.toThrow(saved.excluded[0]!.reason);
+  }
+  expect(await fixture.read()).toEqual(stored);
+  retained["issueJson"] = original;
+  expect((await (await prepare()).import()).counts).toEqual({
+    created: 0,
+    updated: 1,
+    unchanged: 0,
+  });
+  expect((await fixture.read())[0]).toMatchObject({
+    id: stored[0]!.id,
+    evidence: { title: "Reader projection" },
+  });
+});
