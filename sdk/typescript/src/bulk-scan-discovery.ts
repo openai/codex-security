@@ -146,7 +146,9 @@ export async function runBulkScanWizard(
     return null;
   }
 
-  prompt.write(`\nFound ${discovered.length} repositories.\n`);
+  prompt.write(
+    `\nFound ${discovered.length} ${discovered.length === 1 ? "repository" : "repositories"}.\n`,
+  );
   const repositories = await selectGitHubRepositories(
     discovered,
     prompt,
@@ -166,7 +168,7 @@ export async function runBulkScanWizard(
   const inputPath = join(outputDir, "repositories.csv");
   await validateWizardOutput(outputDir);
   prompt.write(
-    `\nReady to scan ${repositories.length} repositories?\n` +
+    `\nReady to scan ${repositories.length} ${repositories.length === 1 ? "repository" : "repositories"}?\n` +
       `Results: ${outputDir}\nRepository list: ${inputPath}\n`,
   );
   if (!(await prompt.confirm("Start scanning?", false, signal))) {

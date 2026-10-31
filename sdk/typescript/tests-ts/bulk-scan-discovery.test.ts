@@ -296,6 +296,20 @@ describe("bulk scan repository discovery", () => {
     expect(csv).not.toContain("unrelated");
   });
 
+  test("uses the singular for one repository", async () => {
+    const root = await temporaryDirectory();
+    const { dependencies, prompt } = discoveryDependencies(root, {
+      repositories: [{ fullName: "acme/owl" }],
+    });
+    prompt.confirms = [true];
+
+    await runBulkScanWizard(dependencies);
+
+    const messages = prompt.messages.join("");
+    expect(messages).toContain("Found 1 repository.");
+    expect(messages).toContain("Ready to scan 1 repository?");
+  });
+
   test.skipIf(process.platform !== "win32")(
     "expands a backslash home-relative output directory",
     async () => {
