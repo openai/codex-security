@@ -684,15 +684,28 @@ export async function prepareNormalizedLocalImport(
   );
 }
 
+// A scanner can repeat the same repository reference for every finding in a run.
+function distinctSources(sources: readonly ExternalSourceRepository[]) {
+  const seen = new Set<string>();
+  return sources.filter(({ url, platform }) => {
+    const key = JSON.stringify({ url, platform });
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 /** @internal Prepare evidence using settings captured by either local import entrypoint. */
 export async function prepareLocalImport(
   input: ExternalFindings & Partial<SnykIssuesFindings>,
   options: NormalizedLocalImportOptions & { sourceRepositoryUrl?: string },
   dependencies: LocalExternalImportDependencies,
-  readerSources = snapshotSourceRepositories(dependencies.sourceRepositories),
-  parsedSources: readonly ExternalSourceRepository[] = [],
+  readerInput = snapshotSourceRepositories(dependencies.sourceRepositories),
+  parsedInput: readonly ExternalSourceRepository[] = [],
 ): Promise<PreparedLocalExternalImport> {
   requireIdentity(options.sourceKey, "Source key");
+  const readerSources = distinctSources(readerInput);
+  const parsedSources = distinctSources(parsedInput);
   const current = structuredClone(input);
   // structuredClone omits inherited or non-enumerable SDK reader properties.
   if (!("snykRestContext" in current) && "snykRestContext" in input)
