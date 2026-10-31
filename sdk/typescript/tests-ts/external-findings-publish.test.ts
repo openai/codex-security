@@ -1658,16 +1658,20 @@ test("Semgrep Cloud validates a normalized report's monitored scope on import an
   expect((await retry.publish()).verified).toBe(1);
   expect(f.posts[1]).toBe(f.posts[0]);
 
-  const projected = (title: string) =>
+  const projected = (title: string, scoped = true) =>
     f.prepareNormalized({
-      ...normalized,
-      semgrepPlatformScope,
+      ...(scoped
+        ? { ...normalized, semgrepPlatformScope }
+        : { read: 1, excluded: [] }),
       findings: [
         { source_finding_id: "ticket", evidence: { title, severity: "high" } },
       ],
     });
   await f.loseResponse(await projected("Initial title"));
   await expect(projected("New title")).rejects.toThrow(
+    "pending hosted Cloud request",
+  );
+  await expect(projected("New title", false)).rejects.toThrow(
     "pending hosted Cloud request",
   );
 });
@@ -2591,6 +2595,7 @@ test.each([
   ["semgrep", "native"],
   ["semgrep", "SDK metadata and assigned IDs"],
   ["semgrep", "released assigned IDs"],
+  ["semgrep", "released ID only"],
   ["semgrep", "released assigned JSON row"],
   ["snyk", "released assigned JSON row"],
   ["snyk", "released assigned IDs"],
@@ -2715,7 +2720,11 @@ test.each([
           project: { label: "example" },
           [provider === "semgrep" ? "finding" : "issue"]: { note: "custom" },
         };
-    if (mode === "projected evidence" || mode === "projected metadata")
+    if (
+      mode === "projected evidence" ||
+      mode === "projected metadata" ||
+      mode === "released ID only"
+    )
       for (const { evidence } of rows) delete evidence.source_data;
     const partial =
       mode === "released partial object row" ||
@@ -2790,6 +2799,16 @@ test.each([
     const prepareRows = (findings: ExternalFindings["findings"]) =>
       f.prepareNormalized({ ...input, read: findings.length, findings });
     const retry = metadata ? () => f.prepareNormalized(input) : f.prepareFile;
+    if (mode === "released ID only") {
+      const assigned = input.findings.map((row, i) => ({
+        ...row,
+        source_finding_id: "ticket-" + i,
+      }));
+      await expect(prepareRows(assigned)).rejects.toThrow("pending hosted");
+      expect(await readFile(oldPath, "utf8")).toBe(bytes);
+      expect(f.posts).toHaveLength(1);
+      return;
+    }
     if (mode === "released assigned IDs" || omittedMetadata) {
       // The scanner now generates different IDs for the original native rows.
       await expect(f.prepareFile()).rejects.toThrow("pending hosted");

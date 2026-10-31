@@ -1102,6 +1102,10 @@ async function preparePublicationInput(
     legacyIdentity,
     recheckFileRepository,
   } = projection;
+  const scopedSemgrepReport =
+    options.provider === "semgrep" &&
+    "sourceFormat" in parsed &&
+    isSemgrepPlatformFormat(parsed.sourceFormat);
   const inputDigest = hash("sha256", canonicalJson(currentIdentity));
   const legacyInputDigest = hash("sha256", canonicalJson(legacyIdentity));
   const originalHostedRetry =
@@ -1187,65 +1191,54 @@ async function preparePublicationInput(
         })
       );
     };
-    const previousNative = findings.filter(hasNativeEvidence);
-    const next = parsed.findings.filter(hasNativeEvidence);
-    const selected = new Set(
-      parsed.findings.map((row) => row.source_finding_id),
-    );
-    // The Cloud source identity survives a caller projecting away native evidence.
-    const scopedReport =
-      semgrep &&
-      "sourceFormat" in parsed &&
-      isSemgrepPlatformFormat(parsed.sourceFormat);
-    const sameSubmittedId =
-      (scopedReport || previousNative.length > 0 || next.length > 0) &&
-      findings.some((row) => selected.has(row.source_finding_id));
     const references = hostedSourceReferences(
       readerSources,
       content.approvedRepositoryUrl ?? destination.url,
       content.approvedRepositoryPlatform,
     );
     const occurrenceIds = (rows: typeof findings) => {
-      const ids = new Set<string>();
+      const ids = new Set(rows.map((row) => row.source_finding_id));
+      let native = false;
       let unresolved = false;
       for (const row of rows) {
-        ids.add(row.source_finding_id);
-        if (semgrep || !scannerId(row)) {
-          try {
-            const nativeId = semgrep
-              ? semgrepPlatformFindingBinding(
-                  row,
-                  "semgrep",
-                  references,
-                  undefined,
-                  undefined,
-                  undefined,
-                  "cloud",
-                )?.nativeId
-              : snykRestCheckpointFindingId(row, references);
-            if (nativeId) {
-              ids.add(nativeId);
-              continue;
-            }
-          } catch {
-            // The earlier SDK may have accepted a partial native projection.
+        if (!hasNativeEvidence(row)) continue;
+        native = true;
+        try {
+          const id = semgrep
+            ? semgrepPlatformFindingBinding(
+                { ...row, source_finding_id: "" },
+                "semgrep",
+                references,
+                undefined,
+                undefined,
+                undefined,
+                "cloud",
+              )?.nativeId
+            : snykRestCheckpointFindingId(row, references);
+          if (id) {
+            ids.add(id);
+            continue;
           }
+        } catch {
+          // An earlier SDK may have accepted a partial native projection.
         }
         if (!scannerId(row)) unresolved = true;
       }
-      return { ids, unresolved };
+      return { ids, native, unresolved };
     };
-    const previous = occurrenceIds(previousNative);
-    const requested = occurrenceIds(next);
-    const overlaps = Array.from(requested.ids).some((id) =>
-      previous.ids.has(id),
-    );
-    // Caller metadata can disappear on retry even when native evidence is incomplete.
+    const previous = occurrenceIds(findings);
+    const requested = occurrenceIds(parsed.findings);
+    const hostedSelection =
+      projection.retainedHostedSelection ||
+      scopedSemgrepReport ||
+      previous.native ||
+      requested.native;
+    // Submitted and native IDs share one namespace even when one side drops its raw evidence.
     const couldOverlap =
-      sameSubmittedId ||
-      overlaps ||
-      (previous.ids.size > 0 &&
-        requested.ids.size > 0 &&
+      (hostedSelection &&
+        Array.from(requested.ids).some((id) => previous.ids.has(id))) ||
+      (previous.native &&
+        requested.native &&
         (previous.unresolved || requested.unresolved));
     if (content.approvedRepositoryUrl && !projection.retainedHostedSelection) {
       if (!couldOverlap) return false;
@@ -1259,7 +1252,9 @@ async function preparePublicationInput(
       );
     }
     if (identity && projection.inputDigest !== digest(identity))
-      return "verified";
+      return (
+        (couldOverlap || !previous.native || !requested.native) && "verified"
+      );
 
     if (!couldOverlap) return false;
     if (!identity) {
@@ -1867,6 +1862,7 @@ async function preparePublicationInput(
     requests,
     receipts: saved?.receipts,
     inputProjection: saved?.inputProjection ?? {
+      ...(scopedSemgrepReport && { retainedHostedSelection: true }),
       inputDigest,
       savedEvidenceDigest: hash(
         "sha256",

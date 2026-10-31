@@ -995,11 +995,18 @@ export function snykRestCheckpointFindingId(
   references: readonly ExternalSourceRepository[],
 ) {
   const data = finding.evidence.source_data;
-  const issue = snykRowEvidence(finding)?.v2?.issue;
-  if (!data || !issue) return;
-  const { source } = savedContext(
-    { ...data, format: data["format"] ?? SNYK_REST_ISSUES_FORMAT },
-    references,
+  const evidence = snykRowEvidence(finding);
+  if (!data || (!evidence?.v1?.issue && !evidence?.v2?.issue)) return;
+  const format = evidence.v2?.issue
+    ? SNYK_REST_ISSUES_FORMAT
+    : SNYK_REST_ISSUES_V1;
+  const document = readSnykRestDocument({
+    ...data,
+    format: data["format"] ?? format,
+  });
+  const { source } = savedContext(document, references);
+  const issue = parseHostedScannerJson(
+    requiredText(document["issueJson"], "Snyk original issue"),
   );
   const { attributes } = selectedIssue(scopedIssue(issue, source), source);
   return snykIssueId(attributes, source, data["snykRestIssueKey"]);

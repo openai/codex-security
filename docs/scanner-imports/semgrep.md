@@ -77,7 +77,8 @@ with the SDK installed. Local preview compares the project URL with Git’s
 named fetch URLs offline. If a checkout only has legacy or unreadable Git remote
 metadata, configure a normal named fetch URL first, for example
 `git remote add scanner-origin <verified-url>`. Checkouts with empty or absent
-legacy remote directories can also use Git's default fetch source. The local
+legacy remote directories can also use Git's default fetch source. With legacy
+metadata present, use a named remote with a nonempty final URL entry. The local
 Git and SSH clients control SSH command overrides and DNS routing.
 
 ```js
@@ -106,11 +107,17 @@ codex-security publish findings /path/to/private/selected.json --to local --prov
 
 After review, repeat without `--dry-run` and confirm the import. Reusing the
 same source key updates the same records, keyed by deployment, project ID,
-product, ref and finding ID. Semgrep's native 64-bit IDs match across the SDK
-and file workflows. Older captures can retain a different identity spelling
-for larger IDs. Replay preserves the exact ref of an existing
-selection, including a short ref in an older file. The archive reader compares
-the stored ref as literal identity text and never evaluates it as a Git revision.
+product, ref and finding ID. Semgrep's native signed 64-bit IDs match across the SDK
+and file workflows. For synthetic IDs above that range, the two workflows can
+produce different keys, even from a new capture. To replay those IDs, use the
+same workflow and preserve the original ID spelling and JSON type (number or
+string).
+
+Replay preserves the exact ref of an existing selection, including an older
+short ref. The archive reader compares the stored ref as literal identity text
+and never evaluates it as a Git revision. For URL-less rows with a matching
+native repository ID and ref, the saved-file reader also accepts the complete
+percent-encoded repository path. New captures require the decoded path.
 Importing the same findings reports unchanged
 records even if the API reordered JSON object keys. Use a separate source key
 for CLI scans. The selected native finding is retained as JSON text in
@@ -138,8 +145,7 @@ codex-security publish findings selected.json --to cloud --provider semgrep \
   --repository https://github.com/example/project --source-key example/project/release/platform --dry-run
 ```
 
-Use the same Cloud command for a collected backlog. The publisher checks the
-original project's repository against the authorized destination, including
+The publisher checks the original project's repository against the authorized destination, including
 Supply Chain findings with no typed repository field. After reviewing the
 preview, repeat without `--dry-run`.
 
@@ -178,6 +184,13 @@ report=$(mktemp ./semgrep-backlog.XXXXXX) &&
     --semgrep-ref refs/heads/topic --semgrep-product sast --format json > "$report" &&
   codex-security publish findings "$report" --to local --repository /path/to/project \
     --provider semgrep --source-key example/project/topic --dry-run --format json
+```
+
+To preview this saved backlog in Cloud, keep its source key and choose the authorized repository.
+
+```sh
+codex-security publish findings "$report" --to cloud --provider semgrep \
+  --repository https://github.com/example/project --source-key example/project/topic --dry-run
 ```
 
 Use `--semgrep-product sca` for Supply Chain or `ai_sast` for AI-powered

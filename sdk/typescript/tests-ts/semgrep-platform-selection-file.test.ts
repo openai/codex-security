@@ -558,6 +558,41 @@ test.skipIf(process.platform === "win32")(
   },
 );
 
+test("a literal branch default and a named backup have independent transports", async () => {
+  await using fixture = await localReportFixture(url + "-backup");
+  await fixture.writeJson(selectedRepository(url, url));
+  fixture.git("symbolic-ref", "HEAD", "refs/heads/active");
+  fixture.git("config", "branch.inactive.remote", url);
+  await expect(fixture.prepare()).rejects.toThrow("configured remote");
+  fixture.git("config", "branch.active.remote", url);
+  expect((await fixture.prepare()).preview.findings).toHaveLength(1);
+  fixture.git("config", "remote.origin.vcs", "custom");
+  expect((await fixture.prepare()).preview.findings).toHaveLength(1);
+  fixture.git("config", "branch.active.remote", "origin");
+  fixture.git("remote", "set-url", "origin", url);
+  await expect(fixture.prepare()).rejects.toThrow("configured remote");
+});
+
+test("Git resolves an effective named fetch URL after an empty config value", async () => {
+  await using fixture = await localReportFixture();
+  await fixture.writeJson(selectedRepository(url, url));
+  fixture.git("config", "--add", "remote.origin.url", "");
+  fixture.git("config", "--add", "remote.origin.url", url);
+  const effective = fixture
+    .git("ls-remote", "--get-url", "--", "origin")
+    .toString()
+    .trim();
+  const dir = join(fixture.repository, ".git", "remotes");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "origin"), "URL: " + url + "-legacy\n");
+  if (effective === url)
+    expect((await fixture.prepare()).preview.findings).toHaveLength(1);
+  else
+    await expect(fixture.prepare()).rejects.toThrow(
+      "Configure a named Git fetch URL",
+    );
+});
+
 test.each(["remotes", "branches"])(
   "legacy .git/%s entries require a named fetch URL",
   async (kind) => {
@@ -611,6 +646,9 @@ test.skipIf(process.platform === "win32")(
     await unlink(dir);
     await mkdir(dir);
     execFileSync("mkfifo", [fifo, origin]);
+    await expectNamedUrl();
+    fixture.git("config", "--add", "remote.origin.url", url);
+    fixture.git("config", "--add", "remote.origin.url", "");
     await expectNamedUrl();
     for (const target of [fixture.file, fifo]) {
       await unlink(origin);

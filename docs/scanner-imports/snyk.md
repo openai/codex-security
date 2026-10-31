@@ -92,7 +92,7 @@ third argument to `readSnykFindings(path, "local", sourceRepositories)`.
 To preview the saved issues in Cloud, use the same source key and an authorized repository:
 
 ```sh
-codex-security publish findings snyk-issues.json --to cloud --provider snyk \
+codex-security publish findings "$report" --to cloud --provider snyk \
   --source-key ORG_ID/PROJECT_ID --repository https://github.com/example/project --dry-run
 ```
 

@@ -1184,8 +1184,13 @@ function qualifiedBranch(ref: string) {
 function checkProjectedProduct(
   finding: ExternalFinding,
   product?: SemgrepPlatformProduct,
+  native = false,
 ) {
-  if (product === "sca" && finding.evidence.details?.kind === "sast")
+  const kind = finding.evidence.details?.kind;
+  if (
+    (product === "sca" && kind === "sast") ||
+    (native && (kind === "secret" || kind === "iac"))
+  )
     throw new Error(
       "The projected finding kind does not match the Semgrep report product.",
     );
@@ -1239,7 +1244,7 @@ export function semgrepPlatformFindingBinding(
     throw new Error("Missing the original Semgrep finding evidence.");
   const { data, legacy, original, scope, aliases, repository, row } =
     nativeOccurrence(retained, references, target);
-  checkProjectedProduct(finding, scope.product);
+  checkProjectedProduct(finding, scope.product, true);
   if (
     reportScope?.deployment !== undefined &&
     (scope.deployment !== reportScope.deployment ||

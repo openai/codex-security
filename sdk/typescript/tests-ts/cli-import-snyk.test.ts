@@ -62,9 +62,13 @@ test.each(["open-source", "code"] as const)(
 );
 
 test("import snyk requires opt-in and keeps failed collections out of redirected JSON", async () => {
-  const fetch = mock(
-    async () => new Response("projet refusé \u202edenied", { status: 403 }),
-  );
+  const detail = "projet refusé \u202edenied\npermissions:\tread";
+  const fetch = mock(async (_url: URL, init: RequestInit) => {
+    expect(new Headers(init.headers).get("authorization")).toBe(
+      "token synthetic",
+    );
+    return new Response(detail, { status: 403 });
+  });
   const disabled = createCliTest(main);
   expect(
     await disabled.runCli(command, {
@@ -86,7 +90,19 @@ test("import snyk requires opt-in and keeps failed collections out of redirected
     }),
   ).toBe(2);
   expect(enabled.stdout.text()).toBe("");
-  expect(enabled.stderr.text()).toContain("projet refusé \\u202edenied");
+  expect(enabled.stderr.text()).toContain(
+    "projet refusé \\u202edenied permissions: read",
+  );
+
+  const full = createCliTest(main, { stdout: true, stderr: true });
+  expect(
+    await full.runCli([...command, "--full-output"], {
+      ...dependencies({ environment }),
+      hostedScannerFetch: fetch,
+    }),
+  ).toBe(2);
+  expect(JSON.parse(full.stdout.text()).error.message).toContain(detail);
+  expect(full.stderr.text()).toBe(enabled.stderr.text());
 });
 
 test("Snyk CLI escapes cursors in human output and retains the native JSON value", async () => {
