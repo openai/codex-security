@@ -16,6 +16,8 @@ import {
 
 /** Early v1 exports also admitted positive integral decimal spellings stored as text. */
 export function semgrepV1Id(value: unknown): string {
+  if (typeof value === "number" && Number.isSafeInteger(value))
+    return semgrepPlatformId(String(value));
   const token = hostedNumberToken(value);
   if (token !== undefined && !/^[1-9][0-9]*$/u.test(token))
     return semgrepPlatformId(legacyDecimalInteger(token));

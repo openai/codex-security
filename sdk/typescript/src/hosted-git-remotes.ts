@@ -22,18 +22,24 @@ async function recognizedCurlHelper(
 
   // Git prepends its exec path before looking up git-remote-<transport>.
   const environment = await trustedEnvironment();
-  const execPath =
-    environmentEntry(environment, "GIT_EXEC_PATH") || (await gitExecPath());
+  const execPath = await gitExecPath();
   if (!execPath) return false;
   const directories = [
-    execPath,
+    ...execPath.split(delimiter),
     ...(environmentEntry(environment, "PATH") ?? "").split(delimiter),
   ];
   const find = async (helper: string) => {
     for (const dir of directories) {
       // Git for Windows tries .exe before the extensionless helper, within each directory.
       for (const suffix of process.platform === "win32" ? [".exe", ""] : [""]) {
-        const path = resolve(repository, dir, "git-remote-" + helper + suffix);
+        const filename = "git-remote-" + helper + suffix;
+        // POSIX resolves symlinks before a following '..', as Git does during PATH lookup.
+        const path =
+          process.platform === "win32"
+            ? resolve(repository, dir, filename)
+            : (dir.startsWith("/") ? dir : repository + "/" + dir) +
+              "/" +
+              filename;
         try {
           await access(
             path,

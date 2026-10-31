@@ -56,9 +56,16 @@ test("strongly bound current SAST rows have identical selection and backlog excl
   const json = rows.map((row) => JSON.stringify(row));
   const selection = read("semgrep-platform-selection/v1", json);
   const backlog = read("semgrep-platform-findings/v2", json);
-  expect(selection.excluded.map((row) => row.position)).toEqual([1, 2, 3]);
+  expect(selection.excluded.map((row) => row.position)).toEqual([2, 3]);
   expect(backlog.excluded).toEqual(selection.excluded);
-  expect(backlog.findings).toEqual([]);
+  expect(backlog.findings).toEqual(selection.findings);
+  expect(selection.findings).toHaveLength(1);
+  const evidence = selection.findings[0]!.evidence;
+  expect(evidence.severity).toBe("unknown");
+  expect(
+    JSON.parse(String(evidence.source_data?.["semgrepPlatformFindingJson"]))
+      .severity,
+  ).toBe("unrecognized");
   const legacy = read("semgrep-platform-findings/v1", rows);
   expect(legacy.excluded.map((row) => row.position)).toEqual([2, 3]);
   expect(legacy.findings[0]!.evidence.severity).toBe("unknown");
@@ -80,9 +87,10 @@ test.each(["sca", "weak SAST", "selected SAST"])(
     const id = strong ? "12" : "1.2e1";
     const repository = strong ? JSON.stringify({ id: 10, url }) : '{"id":1e1}';
     const ref = strong ? `,"ref":${JSON.stringify(scope.ref)}` : "";
-    const native = `{"id":${id},"repository":${repository},"metadata":{"source":"demo","score":10.0}${ref}}`;
+    const rule = product === "sast" ? ',"rule_name":"example.rule"' : "";
+    const native = `{"id":${id}${rule},"repository":${repository},"metadata":{"source":"demo","score":10.0}${ref}}`;
     const replayRepository = strong ? repository : '{"id":10.0}';
-    const equivalent = `{"metadata":{"score":1e1,"source":"demo"},"repository":${replayRepository},"id":12${ref}}`;
+    const equivalent = `{"metadata":{"score":1e1,"source":"demo"},"repository":${replayRepository},"id":12${rule}${ref}}`;
     const report = (row: string) => ({
       ...scope,
       format: "semgrep-platform-findings/v2",
@@ -189,7 +197,12 @@ test.each(["sast", "ai_sast", "sca"])(
         {},
         "local",
       );
-      expect(current.findings[0]?.evidence.title).toBe("Semgrep finding 11");
+      if (product === "sast") {
+        expect(current.findings).toEqual([]);
+        expect(current.excluded).toEqual(legacy.excluded);
+      } else {
+        expect(current.findings[0]?.evidence.title).toBe("Semgrep finding 11");
+      }
     }
   },
 );

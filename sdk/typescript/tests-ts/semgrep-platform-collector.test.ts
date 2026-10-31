@@ -50,7 +50,9 @@ function responses(...pages: Response[]) {
 test("an opaque bulk finding ID still requires the original native occurrence ID", async () => {
   const report = await collectSemgrepPlatformFindings(
     options,
-    responses(Response.json({ findings: [{ id: 9 }] })),
+    responses(
+      Response.json({ findings: [{ id: 9, rule_name: "example.rule" }] }),
+    ),
   );
   const row = normalizeSemgrepFindings(report, {}, "local").findings[0]!;
   row.source_finding_id = "assigned-id";
@@ -62,7 +64,7 @@ test("an opaque bulk finding ID still requires the original native occurrence ID
 });
 
 test("integer-valued native IDs replay identically through selected and bulk imports", async () => {
-  const page = `{"findings":[{"id":1e1,"repository":{"id":77.0,"url":"${url}"},"ref":"${options.ref}"}]}`;
+  const page = `{"findings":[{"id":1e1,"repository":{"id":77.0,"url":"${url}"},"ref":"${options.ref}","rule_name":"example.rule"}]}`;
   const input = {
     ...options,
     projectResponse: JSON.stringify({ project }),
@@ -80,6 +82,7 @@ test("integer-valued native IDs replay identically through selected and bulk imp
       id: 10,
       ref: options.ref,
       repository: { id: 77, url },
+      rule_name: "example.rule",
     }),
   });
   const selected = selectSemgrepPlatformFindings(input);
@@ -100,7 +103,14 @@ test("a retagged Semgrep row still requires its provider after assigning an opaq
     options,
     responses(
       Response.json({
-        findings: [{ id: 9, ref: options.ref, repository: project }],
+        findings: [
+          {
+            id: 9,
+            ref: options.ref,
+            repository: project,
+            rule_name: "example.rule",
+          },
+        ],
       }),
     ),
   );
@@ -132,7 +142,9 @@ test("a retagged Semgrep row still requires its provider after assigning an opaq
 test("a normalized Platform report binds native rows even when both projects have checkout remotes", async () => {
   const report = await collectSemgrepPlatformFindings(
     options,
-    responses(Response.json({ findings: [{ id: 9 }] })),
+    responses(
+      Response.json({ findings: [{ id: 9, rule_name: "example.rule" }] }),
+    ),
   );
   const upstream = "https://git.example.test/service/upstream";
   const fork = "https://git.example.test/service/fork";
@@ -672,6 +684,57 @@ test("matches GitHub project-path aliases across casing in collected, v1 and nor
         options.sourceRepositories,
       ),
     ).toBe(custom);
+  }
+});
+
+test("a URL-less SAST row uses its Git path for selection and keeps other verified labels in the full report", () => {
+  const project = {
+    id: "77",
+    name: "Logical/Service",
+    url: "https://github.com/team/service%2Bapi",
+  };
+  const selection = "semgrep-platform-selection/v1";
+  const full = "semgrep-platform-findings/v2";
+  for (const [name, expectedFormat, captureAllowed] of [
+    ["team/service+api", selection, true],
+    ["team/service%2Bapi", selection, false],
+    [project.name, full, false],
+  ] as const) {
+    const row = {
+      id: 8,
+      ref: options.ref,
+      rule_name: "example.rule",
+      repository: { id: 77, name },
+    };
+    const saved = {
+      ...options,
+      project,
+      product: "sast",
+      format: full,
+      repositoryAliases: [name],
+      findingCount: 1,
+      findings: [JSON.stringify(row)],
+    };
+    const read = (report: unknown) =>
+      normalizeSemgrepFindings(report, {}, "local");
+    const finding = read(saved).findings[0]!;
+    expect(finding.evidence.source_data?.["format"]).toBe(expectedFormat);
+    expect(semgrepPlatformFindingRepository(finding, "semgrep")).toBe(
+      project.url,
+    );
+    const archive = () => read({ ...saved, format: selection });
+    if (expectedFormat === selection)
+      expect(archive().findings).toEqual([finding]);
+    else expect(archive).toThrow("project and ref");
+    const capture = () =>
+      selectSemgrepPlatformFindings({
+        ...options,
+        projectResponse: JSON.stringify({ project }),
+        findingsResponses: [JSON.stringify({ findings: [row] })],
+        findingIds: ["8"],
+      });
+    if (captureAllowed) expect(read(capture()).findings).toEqual([finding]);
+    else expect(capture).toThrow("project and ref");
   }
 });
 
@@ -1387,9 +1450,13 @@ test("saved v1 findings keep exact source IDs and original JSON numeric types on
 test("changing the proof for an alias leaves its dependent SQLite finding unchanged", async () => {
   const label = "display label";
   const id = "9007199254740993";
-  const byUrl = JSON.stringify({ id: 1, repository: { name: label, url } });
-  const byId = `{"id":2,"repository":{"name":"${label}","id":${id}}}`;
-  const both = `{"id":3,"repository":{"metadata":"vendor-only","id":${id},"name":"${label}","url":"${url}"}}`;
+  const byUrl = JSON.stringify({
+    id: 1,
+    rule_name: "example.url",
+    repository: { name: label, url },
+  });
+  const byId = `{"id":2,"rule_name":"example.id","repository":{"name":"${label}","id":${id}}}`;
+  const both = `{"id":3,"rule_name":"example.both","repository":{"metadata":"vendor-only","id":${id},"name":"${label}","url":"${url}"}}`;
   const dependent = (message: string) =>
     JSON.stringify({
       id: 4,
@@ -1439,9 +1506,8 @@ test("changing the proof for an alias leaves its dependent SQLite finding unchan
   }
   const stored = await fixture.read();
   expect(stored.find((row) => row.id === initial.id)).toEqual(initial);
-  const native = stored.find(
-    (row) => row.evidence.title === "Semgrep finding 3",
-  )!.evidence.source_data?.["semgrepPlatformFindingJson"];
+  const native = stored.find((row) => row.evidence.title === "example.both")!
+    .evidence.source_data?.["semgrepPlatformFindingJson"];
   expect(native).toContain('"metadata":"vendor-only"');
   expect(native).toContain(`"id":${id}`);
 

@@ -22,6 +22,7 @@ import {
   normalizeRecords,
   record,
   relativePath,
+  repositoryFilePath,
   scannerSeverity,
   strings,
   requiredText,
@@ -33,7 +34,6 @@ import {
   hostedNumberToken,
   hostedNativeRepositoryUrl,
   hostedRepositoryUrl,
-  parseHostedScannerJson,
 } from "./hosted-scanner-http.js";
 import { isRecord } from "./record.js";
 import {
@@ -185,7 +185,11 @@ function sourceLine(value: unknown, coerceStrings: boolean): number | null {
 
 export function parseSemgrepResponse(json: string): Record<string, unknown> {
   return responseRecord(
-    parseHostedScannerJson(json.replace(/^\uFEFF/u, "")),
+    JSON.parse(
+      json.replace(/^\uFEFF/u, ""),
+      (_key: string, value: unknown, context?: { source?: string }) =>
+        typeof value === "number" ? wireJson.rawJSON(context!.source!) : value,
+    ),
     "Semgrep API response",
   );
 }
@@ -193,8 +197,6 @@ export function parseSemgrepResponse(json: string): Record<string, unknown> {
 export function semgrepPlatformIdOrUndefined(
   value: unknown,
 ): string | undefined {
-  if (typeof value === "number")
-    return Number.isSafeInteger(value) && value > 0 ? String(value) : undefined;
   let token: string;
   if (wireJson.isRawJSON(value)) token = value.rawJSON;
   else if (typeof value === "string" && /^[1-9][0-9]*$/u.test(value))
@@ -241,10 +243,11 @@ function scopeOf(
   readId = semgrepPlatformId,
 ) {
   const row = responseRecord(project, "Semgrep project");
+  const id = readId(row["id"]);
   return {
     deployment: requiredText(deployment, "Semgrep deployment"),
     project: {
-      id: readId(row["id"]),
+      id: text(row["id"]) ?? id,
       name: requiredText(row["name"], "Semgrep project name"),
       url: hostedRepositoryUrl(row["url"], "Semgrep Platform"),
     },
@@ -327,7 +330,12 @@ export function semgrepReferenceMatches(
   url: string,
 ): boolean {
   // A standard explicit Git HTTP(S) helper carries the same fetch URL.
-  url = url.replace(/^(https?)::(?=\1:\/\/)/u, "");
+  const helper = /^(https?)::(?=([a-zA-Z]+):\/\/)/u.exec(url);
+  if (helper)
+    return (
+      helper[1] === helper[2]!.toLowerCase() &&
+      hostedRepositoryMatches(source, url.slice(helper[0].length))
+    );
   if (hostedRepositoryMatches(source, url)) return true;
   try {
     // Serialize only a valid repository link. Git checkout URLs retain their original bytes.
@@ -492,40 +500,19 @@ export function checkSemgrepPlatformRow(
   const hasUrl =
     repo["url"] != null &&
     (repositoryUrl === hostedRepositoryUrl || repo["url"] !== "");
-  const full = scope.project.name;
   const name = repo["name"];
   const rowName = typeof name === "string" ? repository.name(name) : null;
-  // Source URLs were checked segment-by-segment before matching display names.
   const encodedPath = new URL(scope.project.url).pathname.replace(
     /^\/|\/$/gu,
     "",
   );
-  const paths = [encodedPath, decodeURIComponent(encodedPath)].map(
-    repository.name,
-  );
-  // A short or clone label accompanies an independently checked URL. A URL-less row needs the original qualified name or path.
-  const labels = [
-    ...paths,
-    ...paths.map((path) => path.replace(/\.git$/u, "")),
-  ];
-  const matchedName =
-    name === full ||
-    name === full.split("/").at(-1) ||
-    labels.some(
-      (label) => label === rowName || label.split("/").at(-1) === rowName,
-    );
+  // Archived captures may retain the encoded path spelling as their repository name.
   const qualifiedName =
-    rowName !== null &&
-    (capture || aliases
-      ? rowName === repository.name(decodeURIComponent(encodedPath)) &&
-        rowName.includes("/")
-      : (name === full || paths.includes(rowName)) &&
-        rowName === relativePath(rowName) &&
-        rowName.includes("/") &&
-        rowName.split("/").every((part) => part.trim() && part !== "."));
-  const selectionRepositoryMatches = hasUrl
-    ? repositoryId !== undefined || name == null || matchedName
-    : repositoryId !== undefined && qualifiedName;
+    rowName?.includes("/") &&
+    (rowName === repository.name(decodeURIComponent(encodedPath)) ||
+      (!capture && rowName === repository.name(encodedPath)));
+  const selectionRepositoryMatches =
+    hasUrl || (repositoryId !== undefined && !!qualifiedName);
   if (!aliases) {
     readId(finding["id"]);
     if (!selectionRepositoryMatches)
@@ -641,7 +628,11 @@ function selectedRows(
       "Use a fully qualified Semgrep ref such as refs/heads/topic.",
     );
   const repository = repositoryFor(scope);
-  const wanted = new Set(options.findingIds.map(semgrepPlatformId));
+  const wanted = new Set(
+    options.findingIds.map((id) =>
+      semgrepPlatformId(requiredText(id, "Selected Semgrep finding ID")),
+    ),
+  );
   if (!wanted.size) throw new Error("Select at least one Semgrep finding ID.");
   const selected = new Map<string, Record<string, unknown>>();
   const pages =
@@ -733,7 +724,7 @@ function sourceId(
     Number.isSafeInteger(Number(id)) ? Number(id) : id;
   return stableId("semgrep-platform", [
     scope.deployment,
-    exact(scope.project.id),
+    exact(readId(wireJson.rawJSON(scope.project.id))),
     scope.product,
     scope.ref,
     exact(readId(finding["id"])),
@@ -1024,12 +1015,10 @@ export function semgrepPlatformFindingRepository(
 
 function platformLocationPath(value: unknown) {
   const path = relativePath(value);
-  const filename = path?.split("/").at(-1);
   return path &&
-    filename &&
-    filename !== "." &&
-    !/^[a-z][a-z\d+.-]*:/iu.test(path) &&
-    !path.includes("://")
+    !path.endsWith("/.") &&
+    !path.includes("://") &&
+    repositoryFilePath(path)
     ? path
     : null;
 }
@@ -1365,12 +1354,20 @@ export function stringifySemgrepFinding(
   finding: Record<string, unknown>,
   idOf: (id: unknown) => string | undefined = semgrepPlatformIdOrUndefined,
 ): string {
-  return JSON.stringify(finding, function (this: unknown, key, value: unknown) {
-    if (!wireJson.isRawJSON(value)) return value;
-    const nativeId =
-      key === "id" && (this === finding || this === finding["repository"]);
-    const id = nativeId ? idOf(value) : undefined;
-    return wireJson.rawJSON(id ?? canonicalNumber(value.rawJSON));
+  const repo = finding["repository"];
+  const nativeIds = [finding["id"], isRecord(repo) ? repo["id"] : undefined];
+  return JSON.stringify(finding, (_key, value: unknown) => {
+    if (wireJson.isRawJSON(value)) {
+      const id = nativeIds.includes(value) ? idOf(value) : undefined;
+      return wireJson.rawJSON(id ?? canonicalNumber(value.rawJSON));
+    }
+    if (isRecord(value))
+      return Object.fromEntries(
+        Object.keys(value)
+          .sort()
+          .map((key) => [key, value[key]]),
+      );
+    return value;
   });
 }
 
@@ -1463,11 +1460,11 @@ function normalizePlatformRows(
         : null;
       const nativeSeverity =
         text(finding["severity"])?.toLowerCase() ?? "unknown";
-      // Older exports accepted additional severity labels as unknown.
-      const severity =
-        legacy || backlogOnly
-          ? scannerSeverity(nativeSeverity)
-          : nativeSeverity;
+      const severity = scannerSeverity(
+        selectable && nativeSeverity === "informational"
+          ? null
+          : nativeSeverity,
+      );
       const namedOnly =
         bulk && repositoryWithOnlyAlias(finding, bulk.projectNames);
       const common = {
@@ -1486,7 +1483,9 @@ function normalizePlatformRows(
       };
       const messageTitle =
         description ??
-        (legacy ? null : `Semgrep finding ${readId(finding["id"])}`);
+        (legacy || scope.product === "sast"
+          ? null
+          : `Semgrep finding ${readId(finding["id"])}`);
       if (scope.product === "sca") {
         const dependency = responseRecord(
           finding["found_dependency"] ?? {},

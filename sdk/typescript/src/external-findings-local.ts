@@ -31,7 +31,10 @@ import type {
   ExternalFindingEvidence,
   Provider,
 } from "./external-import-models.js";
-import { localFindingRepositories } from "./external-findings-read.js";
+import {
+  localFindingRepositories,
+  semgrepSarifRepositories,
+} from "./external-findings-read.js";
 import {
   blackDuckReportRepositories,
   projectedBlackDuckRepositoryUrl,
@@ -800,6 +803,7 @@ export async function prepareLocalImport(
     options.provider,
     readerSources,
   );
+  const sarifSources = new Set<string>();
   let hasOrdinaryRows = false;
   let ordinaryRowNeedsReferences = false;
   for (const finding of current.findings) {
@@ -818,7 +822,12 @@ export async function prepareLocalImport(
     const { evidence, source_finding_id: id } = finding;
     const url = evidence.details?.repository?.url;
     // A selected row's projected URL was already verified against its hosted source.
-    if (url && !semgrep) sources.set(url, { url });
+    if (!semgrep) {
+      if (url) sources.set(url, { url });
+      if (options.provider === "semgrep")
+        for (const { url } of semgrepSarifRepositories(finding))
+          sarifSources.add(url);
+    }
     const retained = bound.get(id);
     const native = nativeSources.get(finding) ?? [];
     if (!semgrep && !url && !retained && !native.length)
@@ -916,9 +925,21 @@ export async function prepareLocalImport(
     throw new CodexSecurityError(
       "The reader's source repository does not match the selected Semgrep project.",
     );
+  // A reference can belong to both a Platform project and an ordinary row, whose
+  // retained SARIF provenance can differ from its projected repository URL.
+  const ordinaryClaims = [...sources.keys(), ...sarifSources];
+  const sharedProjects = hosted.filter((project) =>
+    ordinaryClaims.some((url) => semgrepReferenceMatches(project, url)),
+  );
   for (const source of [...(inspector ? [inspector] : []), ...references]) {
-    // A row without its own repository depends on the reader references for its checkout check.
-    if (!ordinaryRowNeedsReferences && hostedReferences.has(source)) continue;
+    if (
+      !ordinaryRowNeedsReferences &&
+      hostedReferences.has(source) &&
+      !sharedProjects.some((project) =>
+        semgrepReferenceMatches(project, source.url),
+      )
+    )
+      continue;
     // A reader's platform must not loosen an operator-supplied Inspector map.
     if (sources.get(source.url)?.platform !== "github")
       sources.set(
