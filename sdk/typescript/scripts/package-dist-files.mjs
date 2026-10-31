@@ -38,6 +38,7 @@ const distModules = [
   "native-json-findings",
   "opengrep-findings",
   "external-findings-publish",
+  "private-finding-import",
   "external-import-contract",
   "external-import-models",
   "external-imports-feature",
