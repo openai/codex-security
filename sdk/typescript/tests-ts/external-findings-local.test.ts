@@ -1597,6 +1597,289 @@ describe("local normalized scanner findings", () => {
     },
   );
 
+  test.each(["\nhttps://github.com/other/repo", "\r"])(
+    "a line break in the primary Git URL cannot establish a repository match: %j",
+    async (suffix) => {
+      const url = "https://github.com/example/project";
+      const { repository, environment } = await fixture({
+        remote: url + suffix,
+      });
+      await expect(
+        prepareNormalizedLocalImport(
+          input(),
+          { repository, ...source, provider: "sonar" },
+          {
+            environment,
+            sourceRepositories: [{ url }],
+          },
+        ),
+      ).rejects.toThrow("remote URL contains a line break");
+    },
+  );
+
+  test.each([
+    ["git@github-work:team/project.git", "https://github.com/team/project"],
+    [
+      "git@git.work.example:team/project.git",
+      "https://github.com/team/project",
+    ],
+    [
+      "ssh://git@github-work/team/project.git",
+      "https://github.com/team/project",
+    ],
+  ])(
+    "allows a manual Sonar mapping for %s alongside an HTTPS fork",
+    async (upstream, url) => {
+      const { repository, environment } = await fixture({
+        remote: "https://fork.example.invalid/team/project.git",
+      });
+      execFileSync(
+        "git",
+        ["-C", repository, "remote", "add", "upstream", upstream],
+        { env: environment },
+      );
+      const prepare = (sourceUrl: string, sourceRepositoryUrl?: string) =>
+        prepareNormalizedLocalImport(
+          input(),
+          { repository, ...source, provider: "sonar", sourceRepositoryUrl },
+          { environment, sourceRepositories: [{ url: sourceUrl }] },
+        );
+      await expect(prepare(url)).rejects.toThrow(
+        "does not match a configured remote",
+      );
+      await expect(prepare(url, url + "-other")).rejects.toThrow(
+        "does not match the declared source repository",
+      );
+      expect((await prepare(url, url)).matchesRepositoryRemote).toBe(false);
+      await expect(prepare(url + "-other", url + "-other")).rejects.toThrow(
+        "does not match a configured remote",
+      );
+    },
+  );
+
+  test.each([
+    ["git@gitlab.com.:team/project.git", "https://gitlab.com/team/project"],
+    ["git@gitlab.com.:team/project.git", "https://gitlab.com./team/project"],
+    ["git@work:team/project.git", "https://gitlab.com./team/project"],
+    [
+      "ssh://git@ssh.github.com.:443/team/project.git",
+      "https://github.com/team/project",
+    ],
+    [
+      "git@ssh.dev.azure.com.:v3/team/project/repo",
+      "https://dev.azure.com/team/project/_git/repo",
+    ],
+  ])(
+    "an explicit Sonar mapping accepts the dotted provider host in %s",
+    async (remote, url) => {
+      const { repository, environment } = await fixture({ remote });
+      const prepared = await prepareNormalizedLocalImport(
+        input(),
+        { repository, ...source, provider: "sonar", sourceRepositoryUrl: url },
+        { environment, sourceRepositories: [{ url }] },
+      );
+      expect(prepared.matchesRepositoryRemote).toBe(false);
+    },
+  );
+
+  test.each([
+    "git@gitlab.com:team/project.git",
+    "ssh://gitlab.com/team/project.git",
+    "git@gitlab.com.:team/project.git",
+    "git@ssh.dev.azure.com.:team/project.git",
+  ])(
+    "a recognized Sonar SSH host cannot be remapped to another provider: %s",
+    async (remote) => {
+      const { repository, environment } = await fixture({
+        remote,
+      });
+      await expect(
+        prepareNormalizedLocalImport(
+          input(),
+          {
+            repository,
+            ...source,
+            provider: "sonar",
+            sourceRepositoryUrl: "https://github.com/team/project",
+          },
+          {
+            environment,
+            sourceRepositories: [{ url: "https://github.com/team/project" }],
+          },
+        ),
+      ).rejects.toThrow("does not match a configured remote");
+    },
+  );
+
+  test.each([
+    [
+      "git@github.com.:team/project.git",
+      "https://github.com/team/project",
+      false,
+    ],
+    [
+      "git@github.com:team/project.git",
+      "https://github.com./team/project",
+      true,
+    ],
+    [
+      "ssh://git@ssh.github.com.:443/team/project.git",
+      "https://github.com./team/project",
+      false,
+    ],
+  ] as const)(
+    "a GitHub reader hint preserves a dotted Sonar mapping for %s and %s",
+    async (remote, url, verified) => {
+      const { repository, environment } = await fixture({ remote });
+      const prepared = await prepareNormalizedLocalImport(
+        input(),
+        { repository, ...source, provider: "sonar", sourceRepositoryUrl: url },
+        { environment, sourceRepositories: [{ url, platform: "github" }] },
+      );
+      expect(prepared.matchesRepositoryRemote).toBe(verified);
+    },
+  );
+
+  test.each([
+    "ssh://gitlab.com/team/project.git",
+    "git@gitlab.com.:team/project.git",
+  ])(
+    "a GitHub reader hint cannot remap a recognized GitLab SSH host: %s",
+    async (remote) => {
+      const { repository, environment } = await fixture({ remote });
+      const url = "https://github.com/team/project";
+      await expect(
+        prepareNormalizedLocalImport(
+          input(),
+          {
+            repository,
+            ...source,
+            provider: "sonar",
+            sourceRepositoryUrl: url,
+          },
+          { environment, sourceRepositories: [{ url, platform: "github" }] },
+        ),
+      ).rejects.toThrow("does not match a configured remote");
+    },
+  );
+
+  test("the normalized Sonar repository selection must agree with retained and reader sources, even outside Git", async () => {
+    const url = "https://github.com/example/project";
+    const { repository, root, environment } = await fixture({ remote: url });
+    const directory = join(root, "plain");
+    await mkdir(directory);
+    const retained = {
+      ...input(),
+      report: { format: "sonar-issues/v1", repositoryUrl: url },
+    };
+    for (const checkout of [repository, directory]) {
+      const options = {
+        repository: checkout,
+        ...source,
+        provider: "sonar" as const,
+        sourceRepositoryUrl: url + "-other",
+      };
+      await expect(
+        prepareNormalizedLocalImport(retained, options, { environment }),
+      ).rejects.toThrow("does not match the declared source repository");
+      await expect(
+        prepareNormalizedLocalImport(input(), options, {
+          environment,
+          sourceRepositories: [{ url }],
+        }),
+      ).rejects.toThrow("does not match the declared source repository");
+    }
+  });
+
+  test("an explicit HTTPS mapping accepts an equivalent SCP reader claim for a checkout SSH alias", async () => {
+    const { repository, environment } = await fixture({
+      remote: "git@work:team/project.git",
+    });
+    const prepared = await prepareNormalizedLocalImport(
+      input(),
+      {
+        repository,
+        ...source,
+        provider: "sonar",
+        sourceRepositoryUrl: "https://github.com/team/project",
+      },
+      {
+        environment,
+        sourceRepositories: [{ url: "git@github.com:team/project.git" }],
+      },
+    );
+    expect(prepared.matchesRepositoryRemote).toBe(false);
+  });
+
+  test.each([
+    "https://git.example.invalid/team/project",
+    "git@git.example.invalid:team/project.git",
+  ])("a custom SSH remote must match the claimed project: %s", async (url) => {
+    const { repository, environment } = await fixture({
+      remote: "git@git.example.invalid:team/other.git",
+    });
+    await expect(
+      prepareNormalizedLocalImport(
+        input(),
+        { repository, ...source, provider: "sonar" },
+        {
+          environment,
+          sourceRepositories: [{ url }],
+        },
+      ),
+    ).rejects.toThrow("does not match a configured remote");
+    execFileSync(
+      "git",
+      [
+        "-C",
+        repository,
+        "remote",
+        "set-url",
+        "origin",
+        "git@git.example.invalid:team/project.git",
+      ],
+      { env: environment },
+    );
+    expect(
+      (
+        await prepareNormalizedLocalImport(
+          input(),
+          { repository, ...source, provider: "sonar" },
+          { environment, sourceRepositories: [{ url }] },
+        )
+      ).matchesRepositoryRemote,
+    ).toBe(false);
+  });
+
+  test.each([
+    [
+      "ftp://example.invalid/team/project",
+      "https://example.invalid/team/project",
+      false,
+    ],
+    [
+      "https://example.invalid/team/pro\tject",
+      "https://example.invalid/team/project",
+      false,
+    ],
+    [
+      "git@ssh.dev.azure.com:v3/example/My%20Project/repo",
+      "https://dev.azure.com/example/My%20Project/_git/repo",
+      true,
+    ],
+  ] as const)(
+    "checks the same Sonar binding for replay of %s as for discovery",
+    async (remote, url, matches) => {
+      const { repository, environment } = await fixture({ remote });
+      const prepared = await prepareNormalizedLocalImport(
+        input(),
+        { repository, ...source, provider: "sonar" },
+        { environment, sourceRepositories: [{ url }] },
+      );
+      expect(prepared.matchesRepositoryRemote).toBe(matches);
+    },
+  );
+
   test.each(["local", "global"])(
     "matches all effective fetch URLs with %s Git URL rewrites",
     async (scope) => {

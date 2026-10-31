@@ -31,6 +31,7 @@
 - align Unicode repository columns ([#2148](https://github.com/openai/codex-security/pull/2148))
 - link Markdown evidence to plain source lines ([#2032](https://github.com/openai/codex-security/pull/2032))
 - update MCP SDK to 1.32.2 and Stryker to 10.1.1 ([#2170](https://github.com/openai/codex-security/pull/2170))
+- import SonarQube Cloud security findings ([#2162](https://github.com/openai/codex-security/pull/2162))
 
 <!-- release-section: highlights:end -->
 

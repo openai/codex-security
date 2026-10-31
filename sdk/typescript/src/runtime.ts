@@ -404,14 +404,14 @@ export async function preparePolicyOutputDirectory(
   );
 }
 
-async function requirePrivateDirectory(
+export async function requirePrivateDirectory(
   metadata: Pick<Stats, "mode" | "uid">,
   path: string,
   description: string,
   options: {
     platform?: NodeJS.Platform;
     secureWindowsHome?: (path: string) => Promise<void>;
-  },
+  } = {},
 ): Promise<void> {
   if ((options.platform ?? process.platform) !== "win32") {
     requirePrivateOutputDirectory(metadata, path);
