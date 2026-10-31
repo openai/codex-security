@@ -1292,7 +1292,7 @@ export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
 
 In PowerShell, use `$env:CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS = '1'`.
 Only `1` enables the feature. Without it, `publish findings`, `findings imported`,
-`import github-advisories` and `import semgrep` are absent from command help and schemas and cannot
+`import github-advisories`, `import semgrep` and `import snyk` are absent from command help and schemas and cannot
 run. The SDK's external publication, local import/readback, and advisory
 acquisition APIs require the same flag in their effective environment. An explicit
 `dependencies.environment` is used instead of the process environment. Pure
@@ -1418,8 +1418,14 @@ confirmation and retry flow below.
 
 ### Import Snyk Open Source findings
 
-Import **Open Source SCA vulnerabilities only**. Licenses, Code, Container, IaC,
-SBOM results and platform backlog ingestion are outside this adapter.
+For an existing monitored Snyk project, use
+`codex-security import snyk PROJECT_ID --snyk-org ORG_ID --source-repository-url URL --format json`
+and save its output for `publish findings --to local --provider snyk`. Set
+`SNYK_TOKEN` with read access. The default product is Open Source. Select
+`--snyk-product code` for Code and `--snyk-api-origin` for a regional API
+(default `https://api.snyk.io`). See the [hosted import example](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md#existing-issues-from-snyk).
+
+The following workspace scan formats cover Open Source SCA vulnerabilities.
 
 Use the [official Snyk Codex plugin](https://github.com/snyk/studio-recipes/tree/main/plugins/codex)
 with its `snyk-findings-export` skill to collect SCA findings from the repository's

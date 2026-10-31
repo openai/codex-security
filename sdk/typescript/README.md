@@ -11,9 +11,12 @@ security plugin, and TypeScript declarations. It uses ES modules.
 - Review saved findings, identify duplicates, classify severity, and suggest owners.
 - Import GitHub code scanning alerts, export SARIF, JSON, or CSV, and publish
   findings to Linear or a findings service.
-- Import [Snyk Open Source findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md) from
+- Import [Snyk findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md) from
   official plugin JSON or native CLI JSON locally or into Cloud; Open Source
-  SARIF is also supported. License findings and other Snyk products are excluded.
+  SARIF is also supported. Import existing Snyk Open Source or Code issues locally with `import snyk`.
+  For a private repository with a verified SCM, the local SDK accepts its URL
+  and `platform: "gitlab"` or `"github"` in `sourceRepositories` to match
+  standard SSH clone URLs.
 - Automate scans across repositories and project components.
 
 See the [CLI reference](docs/cli.md),
@@ -726,9 +729,10 @@ Use `publish findings FILE --to local --repository PATH --provider wiz
 database. Preview with `--dry-run --format json`, then confirm interactively or
 use `--yes`. Read it with `findings imported [REPOSITORY] --format json`; the
 repository defaults to the current directory. No Cloud login or model call is
-needed. Use `--provider snyk` for native CLI JSON, a Snyk plugin SCA bundle or
-Open Source SARIF. Prefer JSON, and keep one format and stable source key per scan
-target; switching formats creates separate source identities. See
+needed. Use `--provider snyk` for a saved `import snyk` report, native CLI JSON,
+a Snyk plugin SCA bundle or Open Source SARIF. Prefer JSON, and keep one format
+and stable source key per scan target; switching formats creates separate source
+identities. See
 [local imports](docs/cli.md#import-vendor-findings-locally).
 
 Use `--provider endor` with native Endor Finding JSON; existing endorctl SARIF is
