@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { execFileSync } from "node:child_process";
 import {
   mkdir,
@@ -22,7 +23,6 @@ import type { FindingsDocument } from "../src/models.js";
 import { ScanResult } from "../src/result.js";
 import { runWorkbench } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-import { runCommand } from "./support/shell.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting } from "./support/errors.js";
@@ -55,10 +55,10 @@ const csvColumns = [
   "end_line",
 ];
 
-function csvSource(): string {
-  const rows = sourceOccurrenceIds.map((occurrenceId, index) => [
-    occurrenceId,
-    `csf_00000000000000000000000${index + 1}`,
+function csvSource(paths = ["src/extract.ts", "src/extract.ts"]): string {
+  const rows = paths.map((path, index) => [
+    `occ_${String(index + 1).padStart(24, "0")}`,
+    `csf_${String(index + 1).padStart(24, "0")}`,
     "Reported archive extraction issue",
     description,
     "high",
@@ -67,7 +67,7 @@ function csvSource(): string {
     "",
     "",
     "Validate archive entry destinations.",
-    "src/extract.ts",
+    path,
     "41",
     "44",
   ]);
@@ -98,7 +98,7 @@ async function fixture(format: "csv" | "json" = "csv") {
   if (format === "json") {
     const example = JSON.parse(
       await readFile(
-        join(PLUGIN_ROOT, "examples", "completed-scan", "findings.json"),
+        join(PLUGIN_ROOT, "examples", "legacy-completed-scan", "findings.json"),
         "utf8",
       ),
     ) as FindingsDocument;
@@ -127,7 +127,6 @@ async function fixture(format: "csv" | "json" = "csv") {
       // Import persistence uses real Python; runtime tests cover interpreter discovery.
       resolvePluginPython: async () => python!,
     },
-    python: python!,
     source,
     options,
     workbenchOptions: { python: python!, pluginRoot: PLUGIN_ROOT, environment },
@@ -140,31 +139,27 @@ function completed(result: Awaited<ReturnType<typeof importScan>>): ScanResult {
   return result;
 }
 
-async function storedScans(context: Awaited<ReturnType<typeof fixture>>) {
-  const result = await runCommand(
-    context.python,
-    [
-      "-c",
-      [
-        "import json, sqlite3, sys",
-        "connection = sqlite3.connect(sys.argv[1])",
-        "connection.row_factory = sqlite3.Row",
-        'rows = connection.execute("SELECT id, status, target_path, scan_dir, (SELECT COUNT(*) FROM finding_occurrences WHERE scan_id = scans.id) AS occurrence_count FROM scans ORDER BY created_at, id")',
-        'print(json.dumps([dict(row, summaries=[summary for (summary,) in connection.execute("SELECT summary FROM finding_occurrences WHERE scan_id = ?", (row["id"],))]) for row in rows]))',
-      ].join("\n"),
-      join(context.stateDirectory, "workbench.sqlite3"),
-    ],
-    { timeout: 30_000 },
+function storedScans(context: Awaited<ReturnType<typeof fixture>>) {
+  using database = new Database(
+    join(context.stateDirectory, "workbench.sqlite3"),
+    { readwrite: true, create: false },
   );
-  expect(result.status, result.stderr).toBe(0);
-  return JSON.parse(result.stdout) as Array<{
-    id: string;
-    status: string;
-    target_path: string;
-    scan_dir: string;
-    occurrence_count: number;
-    summaries: string[];
-  }>;
+  database.exec("PRAGMA query_only = ON");
+  const scans = database
+    .query<
+      { id: string; status: string; target_path: string; scan_dir: string },
+      []
+    >(
+      "SELECT id, status, target_path, scan_dir FROM scans ORDER BY created_at, id",
+    )
+    .all();
+  const occurrences = database.query<{ summary: string }, [string]>(
+    "SELECT summary FROM finding_occurrences WHERE scan_id = ?",
+  );
+  return scans.map((scan) => {
+    const summaries = occurrences.all(scan.id).map((row) => row.summary);
+    return { ...scan, occurrence_count: summaries.length, summaries };
+  });
 }
 
 test.each(["completed", "failed", "interrupted", "preview"] as const)(
@@ -241,7 +236,7 @@ test.each(["completed", "failed", "interrupted", "preview"] as const)(
           code: "ENOENT",
         });
       } else {
-        const scans = await storedScans(context);
+        const scans = storedScans(context);
         expect(scans).toHaveLength(1);
         expect(scans[0]!.status).toBe(
           outcome === "completed" ? "complete" : "failed",
@@ -330,10 +325,11 @@ test.each(["csv", "json"] as const)(
     expect(result.manifest.scan.sealedAt).toBeTruthy();
     expect(result.manifest.scan.target.kind).toBe("directory_snapshot");
     expect(result.manifest.scan.scope.runtimeStatus).toBe("imported");
-    expect(result.coverage).not.toHaveProperty("completeness");
-    expect(result.coverage.surfaces).toMatchObject([
-      { disposition: "reported" },
-    ]);
+    expect(result.review).not.toHaveProperty("status");
+    expect(result.review).toEqual({ excludedPaths: [] });
+    expect(
+      result.manifest.scan.artifacts.map((artifact) => artifact.path),
+    ).not.toContain("coverage.json");
     expect(result.turnResult["imported"]).toBe(true);
     expect(result.threadId).toBe("");
     expect(await readFile(result.reportPath, "utf8")).toContain(
@@ -344,7 +340,8 @@ test.each(["csv", "json"] as const)(
     ).toEqual({
       manifest: result.manifest,
       findings: result.findings,
-      coverage: result.coverage,
+      review: result.review,
+      mode: result.mode,
     });
     const sourceRef = `artifacts/import/source.${format}`;
     expect(result.manifest.scan["extensions"]).toMatchObject({
@@ -361,7 +358,7 @@ test.each(["csv", "json"] as const)(
     expect(await readFile(context.options.sourcePath, "utf8")).toBe(
       context.source,
     );
-    const [stored] = await storedScans(context);
+    const [stored] = storedScans(context);
     expect(stored).toMatchObject({
       id: result.manifest.scan.id,
       status: "complete",
@@ -411,48 +408,60 @@ test("CSV import seals and reloads non-whitespace byte order marks in required t
   expect(await readFile(context.options.sourcePath, "utf8")).toBe(source);
 });
 
-test.each(["\u00A0", "\u2028", "\u2029", "src/a\u2028b.py", "src/a\u2029b.py"])(
-  "CSV import retains literal fields without replaying source decisions for %j",
-  async (path) => {
-    const context = await fixture();
-    const source =
-      "\uFEFF" +
-      context.source
-        .replaceAll('"title"', '"candidate_id","title"')
-        .replaceAll(
-          '"Reported archive extraction issue"',
-          '"\uFEFF","Reported archive extraction issue"',
-        )
-        .replaceAll('"open","",""', '"closed","false_positive"," \uFEFF "')
-        .replaceAll('"src/extract.ts"', `"${path}"`);
-    await writeFile(context.options.sourcePath, source);
-    const result = completed(
-      await importScan(context.options, context.dependencies),
-    );
-    const loaded = await loadContract(result.scanDir, {
-      pluginRoot: PLUGIN_ROOT,
+test("CSV import retains literal fields without replaying source decisions", async () => {
+  const paths = [
+    "\u00A0",
+    "\u2028",
+    "\u2029",
+    "src/a\u2028b.py",
+    "src/a\u2029b.py",
+  ];
+  const context = await fixture();
+  const source =
+    "\uFEFF" +
+    csvSource(paths)
+      .replaceAll('"title"', '"candidate_id","title"')
+      .replaceAll(
+        '"Reported archive extraction issue"',
+        '"\uFEFF","Reported archive extraction issue"',
+      )
+      .replaceAll('"open","",""', '"closed","false_positive"," \uFEFF "');
+  await writeFile(context.options.sourcePath, source);
+  const result = completed(
+    await importScan(context.options, context.dependencies),
+  );
+  const loaded = await loadContract(result.scanDir, {
+    pluginRoot: PLUGIN_ROOT,
+  });
+  expect(
+    loaded.findings.findings
+      .map((finding) => finding.locations[0]!.path)
+      .sort(),
+  ).toEqual(paths.sort());
+  for (const finding of loaded.findings.findings) {
+    expect(finding.extensions?.["candidateId"]).toBe("\uFEFF");
+    expect(finding.validation).toMatchObject({
+      method: "Source-reported CSV import metadata",
+      status: "closed",
+      summary: expect.stringContaining(
+        "Source close reason: false_positive\nSource note:  \uFEFF ",
+      ),
     });
-    for (const finding of loaded.findings.findings) {
-      expect(finding.locations[0]!.path).toBe(path);
-      expect(finding.extensions?.["candidateId"]).toBe("\uFEFF");
-      expect(finding.validation).toMatchObject({
-        method: "Source-reported CSV import metadata",
-        status: "closed",
-        summary: expect.stringContaining(
-          "Source close reason: false_positive\nSource note:  \uFEFF ",
-        ),
-      });
-    }
-    const decisions = await runCommand(context.python, [
-      "-c",
-      "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); print(c.execute('SELECT COUNT(*) FROM finding_decisions').fetchone()[0], c.execute('SELECT COUNT(*) FROM finding_triage').fetchone()[0])",
-      join(context.stateDirectory, "workbench.sqlite3"),
-    ]);
-    expect(decisions.status, decisions.stderr).toBe(0);
-    expect(decisions.stdout.trim()).toBe("0 0");
-    expect(await readFile(context.options.sourcePath, "utf8")).toBe(source);
-  },
-);
+  }
+  using database = new Database(
+    join(context.stateDirectory, "workbench.sqlite3"),
+    { readwrite: true, create: false },
+  );
+  database.exec("PRAGMA query_only = ON");
+  expect(
+    database
+      .query(
+        "SELECT (SELECT COUNT(*) FROM finding_decisions) AS decisions, (SELECT COUNT(*) FROM finding_triage) AS triage",
+      )
+      .get(),
+  ).toEqual({ decisions: 0, triage: 0 });
+  expect(await readFile(context.options.sourcePath, "utf8")).toBe(source);
+});
 
 test.each(["csv", "json"] as const)(
   "empty %s imports preserve source integrity without claiming an analyzed surface",
@@ -468,9 +477,7 @@ test.each(["csv", "json"] as const)(
     );
     expect(result.manifest.scan.status).toBe("completed");
     expect(result.findings.findings).toEqual([]);
-    expect(result.coverage).toMatchObject({
-      surfaces: [],
-    });
+    expect(result.review).toEqual({ excludedPaths: [] });
     const sourceRef = `artifacts/import/source.${format}`;
     expect(result.manifest.scan["extensions"]).toMatchObject({
       import: { format, sourceRef, findingCount: 0 },
@@ -482,7 +489,7 @@ test.each(["csv", "json"] as const)(
     ).toHaveLength(1);
     const retainedSource = join(result.scanDir, sourceRef);
     expect(await readFile(retainedSource, "utf8")).toBe(source);
-    expect((await storedScans(context))[0]).toMatchObject({
+    expect(storedScans(context)[0]).toMatchObject({
       status: "complete",
       occurrence_count: 0,
     });
@@ -695,9 +702,9 @@ test("reimporting the retained source preserves finding identities with new scan
       (finding) => !previousOccurrences.has(finding.occurrenceId),
     ),
   ).toBe(true);
-  expect(
-    (await storedScans(context)).map((scan) => scan.occurrence_count),
-  ).toEqual([2, 2]);
+  expect(storedScans(context).map((scan) => scan.occurrence_count)).toEqual([
+    2, 2,
+  ]);
 });
 
 const evidence = {
@@ -721,6 +728,19 @@ for (const dryRun of [false, true]) {
       },
     ],
     ["duplicate evidence ID", { codeEvidence: [evidence, evidence] }],
+    [
+      "unsafe secondary location",
+      {
+        locations: [
+          { path: "src/extract.ts", startLine: 41 },
+          { path: "../outside.ts", startLine: 1 },
+        ],
+      },
+    ],
+    [
+      "unsafe evidence path",
+      { codeEvidence: [{ ...evidence, path: "../outside.ts" }] },
+    ],
   ] as const)(
     `rejects %s before import persistence (dryRun: ${dryRun})`,
     async (_name, details) => {
@@ -807,7 +827,7 @@ test("imports archive prior output without replacing its saved findings", async 
       context.dependencies,
     ),
   );
-  const scans = await storedScans(context);
+  const scans = storedScans(context);
   expect(scans).toHaveLength(2);
   const archived = scans.find((scan) => scan.id === first.manifest.scan.id)!;
   expect(archived.scan_dir).not.toBe(second.scanDir);
@@ -917,16 +937,10 @@ test.each(["active scan", "missing parent"])(
     const first = completed(await importScan(options, context.dependencies));
     const manifest = await readFile(first.manifestPath, "utf8");
     if (reason === "active scan") {
-      const update = await runCommand(
-        context.python,
-        [
-          "-c",
-          "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE scans SET status='running'\"); c.commit()",
-          join(context.stateDirectory, "workbench.sqlite3"),
-        ],
-        { timeout: 30_000 },
+      using database = new Database(
+        join(context.stateDirectory, "workbench.sqlite3"),
       );
-      expect(update.status, update.stderr).toBe(0);
+      database.run("UPDATE scans SET status='running'");
     }
     await expect(
       importScan(
@@ -943,8 +957,7 @@ test.each(["active scan", "missing parent"])(
       reason === "active scan" ? "running scan" : "scan not found",
     );
     expect(await readFile(first.manifestPath, "utf8")).toBe(manifest);
-    expect(await storedScans(context)).toHaveLength(1);
-    expect((await storedScans(context))[0]?.scan_dir).toBe(first.scanDir);
+    expect(storedScans(context)).toMatchObject([{ scan_dir: first.scanDir }]);
   },
 );
 
@@ -972,7 +985,7 @@ test("registration preserves archived output when its response is lost after com
       { ...context.dependencies, runWorkbench: loseRegistrationReply },
     ),
   ).rejects.toThrow("Synthetic response lost after commit");
-  const scans = await storedScans(context);
+  const scans = storedScans(context);
   expect(scans).toHaveLength(2);
   const archived = scans.find((scan) => scan.id === first.manifest.scan.id)!;
   expect(archived.scan_dir).not.toBe(first.scanDir);
@@ -1009,7 +1022,7 @@ test.each(["failure", "abort"] as const)(
     if (mode === "abort")
       await expect(operation).rejects.toBeInstanceOf(ScanInterruptedError);
     else await expect(operation).rejects.toThrow(failureMessage);
-    const scans = await storedScans(context);
+    const scans = storedScans(context);
     expect(scans).toHaveLength(1);
     expect(scans[0]!.status).toBe("failed");
     if (mode === "failure") {

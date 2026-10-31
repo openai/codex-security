@@ -53,7 +53,7 @@ async function runReducer({
   transport: protocol = "stdio",
 }: ReducerPagingEvalOptions) {
   assert.ok(mode === "deterministic" || mode === "model");
-  const fixture = await createReducerPagingFixture(root);
+  const fixture = await createReducerPagingFixture(root, protocol, mode);
   const tracePath = path.join(root, "tool-trace.jsonl");
   const serverConfigPath = path.join(root, "server-config.json");
   const serverPath = path.join(root, "artifact-server.cjs");
@@ -173,7 +173,7 @@ async function runReducer({
       ...fixture.measurements,
       ...gradeReducerPagingTrace(
         trace,
-        fixture.measurements.ipcFrameLimitBytes,
+        fixture.measurements.responseLimitBytes,
       ),
       ...(transport
         ? {
@@ -194,7 +194,7 @@ async function runReducer({
 /** Grade the captured I/O independently of model wording or another model run. */
 export function gradeReducerPagingTrace(
   trace: ReducerTraceEvent[],
-  ipcFrameLimitBytes: number,
+  responseLimitBytes: number,
 ) {
   assert.ok(trace.length > 0, "The reducer produced no tool trace.");
   const reads = trace.filter(
@@ -205,7 +205,7 @@ export function gradeReducerPagingTrace(
   const readsById = new Map(reads.map((event) => [event.id, event]));
   const injected = trace.filter((event) => event.injected);
   assert.equal(injected.length, 1);
-  assert.ok(injected[0].bytes! > ipcFrameLimitBytes);
+  assert.ok(injected[0].bytes! > responseLimitBytes);
   const failed = reads.find((event) => event.id === injected[0].id);
   const retried = reads.find((event) => event.id > failed!.id);
   assert.ok(retried, "the reducer must recover from the oversized response");

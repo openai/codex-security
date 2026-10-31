@@ -648,7 +648,7 @@ describe("publish scan to custom", () => {
 describe("publish check", () => {
   test("escapes contract property controls at the CLI boundary without changing the SDK error", async () => {
     const scanDir = join(await publicationDirectory(), "scan");
-    await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
+    await cp(join(PLUGIN_ROOT, "examples", "legacy-completed-scan"), scanDir, {
       recursive: true,
     });
     if (process.platform !== "win32") await chmod(scanDir, 0o700);
@@ -2146,6 +2146,58 @@ describe("publish scan", () => {
     expect(JSON.parse(stdout.text())).toEqual(publicationResult());
   });
 
+  test.each([
+    ["exact ASCII", "a".repeat(113), "a".repeat(113)],
+    ["exact emoji", `${"a".repeat(111)}😀`, `${"a".repeat(111)}😀`],
+    ["wide text", "界".repeat(60), `${"界".repeat(56)}…`],
+    ["halfwidth text", "ｶ".repeat(113), "ｶ".repeat(113)],
+    ["wide vowel mark", "ー".repeat(60), `${"ー".repeat(56)}…`],
+    ["lone surrogate", `${"a".repeat(113)}\uD800`, `${"a".repeat(112)}…`],
+    [
+      "combining marks",
+      `${"a".repeat(111)}e\u0301 tail`,
+      `${"a".repeat(111)}e\u0301…`,
+    ],
+    ["joined emoji", `${"a".repeat(110)}👩‍💻 tail`, `${"a".repeat(110)}👩‍💻…`],
+    ["flag at cutoff", `${"a".repeat(111)}🇺🇸 tail`, `${"a".repeat(111)}…`],
+  ])(
+    "fits noninteractive progress without splitting graphemes: %s",
+    async (_name, text, expected) => {
+      const { stderr, runCli } = createCliTest(main);
+
+      const deps = dependencies();
+      deps.publishScan = async (_scanDirectory, options) => {
+        options.onProgress?.({
+          type: "codex_event",
+          event: {
+            type: "item.completed",
+            item: {
+              id: "reasoning-1",
+              type: "reasoning",
+              text,
+            },
+          },
+        });
+        return publicationResult();
+      };
+
+      expect(
+        await runCli(
+          [
+            "publish",
+            "scan",
+            "completed-scan",
+            ...DESTINATION_OPTIONS,
+            "--json",
+          ],
+          deps,
+        ),
+      ).toBe(0);
+
+      expect(stderr.text()).toBe(`Codex: ${expected}\n`);
+    },
+  );
+
   test("hides source-bearing handoff commands in plain and full-screen progress", async () => {
     for (const interactive of [false, true]) {
       const { stdout, stderr, runCli } = createCliTest(main, {
@@ -2439,8 +2491,8 @@ describe("publish scan", () => {
 
   test("omits deleted, replaced, and linked scan directories without changing valid scan order", async () => {
     const directory = await publicationDirectory();
-    const firstDirectory = join(directory, "first-completed-scan");
-    const selectedDirectory = join(directory, "selected-completed-scan");
+    const firstDirectory = join(directory, "first-legacy-completed-scan");
+    const selectedDirectory = join(directory, "selected-legacy-completed-scan");
     const deletedDirectory = join(directory, "deleted-scan");
     const replacedDirectory = join(directory, "replaced-scan");
     const linkedDirectory = join(directory, "linked-scan");
@@ -2464,7 +2516,7 @@ describe("publish scan", () => {
       { id: "deleted-scan", directory: deletedDirectory },
       { id: "replaced-scan", directory: replacedDirectory },
       { id: "linked-scan", directory: linkedDirectory },
-      { id: "selected-scan", directory: "selected-completed-scan" },
+      { id: "selected-scan", directory: "selected-legacy-completed-scan" },
     ];
     const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
 

@@ -612,11 +612,12 @@ for (const resume of [false, true]) {
       await mkdir(repository);
       await mkdir(scan, { mode: 0o700 });
       await mkdir(home, { mode: 0o700 });
-      await cp(PLUGIN_ROOT, plugin, { recursive: true });
-      const manifestPath = join(plugin, ".codex-plugin", "plugin.json");
-      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-      manifest.codexSecurity = capabilities;
-      await writeFile(manifestPath, JSON.stringify(manifest));
+      const manifestDirectory = join(plugin, ".codex-plugin");
+      await mkdir(manifestDirectory, { recursive: true });
+      await writeFile(
+        join(manifestDirectory, "plugin.json"),
+        JSON.stringify({ codexSecurity: capabilities }),
+      );
       const runtime = preparedRuntime(home);
       const createCodex = mock(() => {
         throw new Error("Model execution must not begin.");

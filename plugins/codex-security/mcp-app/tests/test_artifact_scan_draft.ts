@@ -68,7 +68,7 @@ try {
     },
   };
 
-  const coverage = {
+  const reviewState = {
     surfaces: [
       {
         id: "surface_archive-extraction",
@@ -89,7 +89,7 @@ try {
     scope: { summary: "Archive handling" },
     threatModel: { summary: "Untrusted users may upload archives." },
     findings: [finding],
-    coverage,
+    reviewState,
   };
 
   const findingInput = (changes: Record<string, unknown>) => ({
@@ -98,7 +98,7 @@ try {
   });
   const coverageInput = (changes: Record<string, unknown>) => ({
     ...input,
-    coverage: { ...coverage, ...changes },
+    reviewState: { ...reviewState, ...changes },
   });
 
   const rejectsDraft = (
@@ -137,7 +137,7 @@ try {
     scope: { summary: "Archive handling" },
     threatModel: { summary: "Untrusted users may upload archives." },
     findings: [finding],
-    coverage,
+    reviewState,
   };
   const partialWorkerInput = (
     deferred: Record<string, unknown>,
@@ -146,8 +146,8 @@ try {
     ...workerInput,
     complete: false,
     findings: [],
-    coverage: {
-      ...coverage,
+    reviewState: {
+      ...reviewState,
 
       surfaces,
       deferred: [deferred],
@@ -206,8 +206,8 @@ try {
       ...workerInput,
       complete: false,
       findings: [interruptedFinding],
-      coverage: {
-        ...coverage,
+      reviewState: {
+        ...reviewState,
         deferred: [
           {
             candidateId: "interrupted-review",
@@ -225,7 +225,7 @@ try {
   const interruptedResult = await readJson(interruptedRoot, "result.json");
   assert.deepEqual(interruptedResult.findings, [interruptedFinding]);
   assert.equal(
-    interruptedResult.coverage.deferred.some(
+    interruptedResult.reviewState.deferred.some(
       (item: FixtureFinding) => item.candidateId === "interrupted-review",
     ),
     true,
@@ -273,7 +273,7 @@ try {
   assert.deepEqual(acceptedHeadDraft.findings, [finding]);
   const acceptedResult = await readJson(rejectedIncompleteRoot, "result.json");
   assert.equal(
-    acceptedResult.coverage.deferred.some(
+    acceptedResult.reviewState.deferred.some(
       (item: FixtureFinding) => item.candidateId === "late-incomplete-review",
     ),
     true,
@@ -302,7 +302,7 @@ try {
   assert.deepEqual(
     deferredDoesNotReject.findings,
     [finding],
-    "deferred coverage is not an explicit rejection of an already validated finding",
+    "deferred reviewState is not an explicit rejection of an already validated finding",
   );
 
   const rejection = {
@@ -314,11 +314,11 @@ try {
   await recordCodexSecurityWorkerScanDraft(checkpointContext, {
     ...workerInput,
     findings: [],
-    coverage: { ...coverage, surfaces: [rejection] },
+    reviewState: { ...reviewState, surfaces: [rejection] },
   });
   const rejectedCheckpoint = await readJson(checkpointRoot, "result.json");
   assert.equal(rejectedCheckpoint.findings.length, 0);
-  assert.deepEqual(rejectedCheckpoint.coverage.surfaces[0].finding, finding);
+  assert.deepEqual(rejectedCheckpoint.reviewState.surfaces[0].finding, finding);
 
   const rejectionWithoutNotesContext = await createWorkerContext(
     "rejection-without-notes-worker",
@@ -332,14 +332,17 @@ try {
   await recordCodexSecurityWorkerScanDraft(rejectionWithoutNotesContext, {
     ...workerInput,
     findings: [],
-    coverage: { ...coverage, surfaces: [rejectionWithoutNotes] },
+    reviewState: { ...reviewState, surfaces: [rejectionWithoutNotes] },
   });
   const rejectedWithoutNotes = await readJson(
     rejectionWithoutNotesRoot,
     "result.json",
   );
   assert.equal(rejectedWithoutNotes.findings.length, 0);
-  assert.deepEqual(rejectedWithoutNotes.coverage.surfaces[0].finding, finding);
+  assert.deepEqual(
+    rejectedWithoutNotes.reviewState.surfaces[0].finding,
+    finding,
+  );
 
   const carriedContext = await createWorkerContext("carried-context-worker");
   const carriedContextRoot = carriedContext.root;
@@ -356,7 +359,7 @@ try {
   assert.deepEqual(carriedWorker.threatModel, workerInput.threatModel);
 
   const coverageProgressContext = await createWorkerContext(
-    "coverage-progress-worker",
+    "reviewState-progress-worker",
   );
   const coverageProgressRoot = coverageProgressContext.root;
   const pendingQuestion =
@@ -364,8 +367,8 @@ try {
   await recordCodexSecurityWorkerScanDraft(coverageProgressContext, {
     ...workerInput,
     complete: false,
-    coverage: {
-      ...coverage,
+    reviewState: {
+      ...reviewState,
       surfaces: [
         {
           id: "surface-archive",
@@ -379,8 +382,8 @@ try {
   });
   await recordCodexSecurityWorkerScanDraft(coverageProgressContext, {
     ...workerInput,
-    coverage: {
-      ...coverage,
+    reviewState: {
+      ...reviewState,
       surfaces: [
         {
           id: "surface-archive",
@@ -393,14 +396,14 @@ try {
   });
   const progressedCoverage = (
     await readJson(coverageProgressRoot, "result.json")
-  ).coverage;
+  ).reviewState;
   assert.deepEqual(progressedCoverage.surfaces.map(surfaceDisposition), [
     { id: "surface-archive", disposition: "reported" },
   ]);
   assert.deepEqual(progressedCoverage.openQuestions ?? [], []);
 
   const renamedProgressContext = await createWorkerContext(
-    "renamed-coverage-progress-worker",
+    "renamed-reviewState-progress-worker",
   );
   const renamedProgressRoot = renamedProgressContext.root;
   const staleSurfaces = [
@@ -417,7 +420,7 @@ try {
     },
   ];
   const resolvedCoverage = {
-    ...coverage,
+    ...reviewState,
     surfaces: [
       {
         id: "surface-validated-archive",
@@ -441,11 +444,11 @@ try {
   await recordCodexSecurityWorkerScanDraft(renamedProgressContext, {
     ...workerInput,
     complete: false,
-    coverage: resolvedCoverage,
+    reviewState: resolvedCoverage,
   });
   const resolvedProgress = await readJson(renamedProgressRoot, "result.json");
   assert.deepEqual(
-    resolvedProgress.coverage.surfaces,
+    resolvedProgress.reviewState.surfaces,
     resolvedCoverage.surfaces,
   );
 
@@ -454,7 +457,7 @@ try {
     {
       ...workerInput,
       complete: false,
-      coverage: {
+      reviewState: {
         ...resolvedCoverage,
         surfaces: [...resolvedCoverage.surfaces, ...staleSurfaces],
       },
@@ -464,10 +467,13 @@ try {
   await recordCodexSecurityWorkerScanDraft(renamedProgressContext, {
     ...workerInput,
     complete: true,
-    coverage: resolvedCoverage,
+    reviewState: resolvedCoverage,
   });
   const finalProgress = await readJson(renamedProgressRoot, "result.json");
-  assert.deepEqual(finalProgress.coverage.surfaces, resolvedCoverage.surfaces);
+  assert.deepEqual(
+    finalProgress.reviewState.surfaces,
+    resolvedCoverage.surfaces,
+  );
 
   const anchorContext = await createWorkerContext(
     "anchor-is-not-candidate-worker",
@@ -499,7 +505,7 @@ try {
   const anchorResult = await readJson(anchorRoot, "result.json");
   assert.equal(anchorResult.findings.length, 1);
   assert.deepEqual(anchorResult.findings[0].identity, { anchor });
-  assert.equal("finding" in anchorResult.coverage.deferred[0], false);
+  assert.equal("finding" in anchorResult.reviewState.deferred[0], false);
 
   const parentCheckpointRoot = path.join(root, "checkpoint-parent");
   await mkdir(parentCheckpointRoot);
@@ -556,21 +562,21 @@ try {
     },
   ];
   const pendingCoverage = {
-    ...coverage,
+    ...reviewState,
     deferred: [closeout, unresolved, ...pendingCandidates],
   };
   await recordCodexSecurityScanDraft(unresolvedContext, {
     ...input,
     complete: false,
     findings: [],
-    coverage: pendingCoverage,
+    reviewState: pendingCoverage,
   });
   const closingDraft = {
     ...input,
     complete: true,
     findings: [],
-    coverage: {
-      ...coverage,
+    reviewState: {
+      ...reviewState,
       resolvedDeferred: [
         { id: closeout.id, reason: "Final review decisions are recorded." },
       ],
@@ -599,8 +605,8 @@ try {
     [
       {
         ...closingDraft,
-        coverage: {
-          ...coverage,
+        reviewState: {
+          ...reviewState,
           resolvedDeferred: [{ id: "unknown-review", reason: "Done." }],
         },
       },
@@ -609,8 +615,8 @@ try {
     ...pendingCandidates.map((row: { candidateId?: string; id?: string }) => [
       {
         ...closingDraft,
-        coverage: {
-          ...coverage,
+        reviewState: {
+          ...reviewState,
           resolvedDeferred: [
             { id: row.candidateId ?? row.id, reason: "Done." },
           ],
@@ -621,9 +627,9 @@ try {
     [
       {
         ...closingDraft,
-        coverage: {
+        reviewState: {
           ...pendingCoverage,
-          resolvedDeferred: closingDraft.coverage.resolvedDeferred,
+          resolvedDeferred: closingDraft.reviewState.resolvedDeferred,
         },
       },
       /still active/,
@@ -665,8 +671,8 @@ try {
       ...input,
       complete: false,
       findings: [interruptedFinding],
-      coverage: {
-        ...coverage,
+      reviewState: {
+        ...reviewState,
         deferred: [
           {
             candidateId: "interrupted-parent-review",
@@ -735,8 +741,8 @@ try {
     ...input,
     complete: false,
     findings: [obsoleteFinding],
-    coverage: {
-      ...coverage,
+    reviewState: {
+      ...reviewState,
       surfaces: [
         {
           label: "Old upload handler",
@@ -784,7 +790,7 @@ try {
   const acceptedDeepDraft = {
     ...input,
     complete: true,
-    coverage: workerDraft([]).coverage,
+    reviewState: workerDraft([]).reviewState,
   };
   await recordCodexSecurityScanDraft(deepParentContext, acceptedDeepDraft);
   const acceptedDeepFindings = await readJson(deepParentRoot, "findings.json");
@@ -803,7 +809,7 @@ try {
   assert.deepEqual(
     acceptedDeepCoverage.surfaces,
     [],
-    "accepted Deep coverage does not inherit obsolete parent review work",
+    "accepted Deep reviewState does not inherit obsolete parent review work",
   );
   assert.deepEqual(acceptedDeepCoverage.explicitExclusions, []);
   assert.deepEqual(acceptedDeepCoverage.includePaths, ["src", "lib"]);
@@ -846,7 +852,7 @@ try {
     assert.deepEqual(staged.deepScanPublication, deepPublication);
     assert.equal(stagedCheckpoint.deepScanPublication, undefined);
     assert.deepEqual(staged.findings, acceptedDeepFindings);
-    assert.deepEqual(staged.coverage, acceptedDeepCoverage);
+    assert.deepEqual(staged.reviewState, acceptedDeepCoverage);
     assert.deepEqual(stagedCheckpoint.findings, acceptedDeepDraft.findings);
     assert.equal(stagedCheckpoint.handoffClaimToken, undefined);
   });
@@ -878,7 +884,7 @@ try {
   await recordCodexSecurityWorkerScanDraft(pendingContext, pending);
   await recordCodexSecurityWorkerScanDraft(pendingContext, workerInput);
   const resolved = await readJson(pendingRoot, "result.json");
-  assert.deepEqual(resolved.coverage.deferred, []);
+  assert.deepEqual(resolved.reviewState.deferred, []);
 
   assert.deepEqual(resolved.findings[0].provenance.originalCandidates, [
     candidate,
@@ -889,11 +895,14 @@ try {
   await recordCodexSecurityWorkerScanDraft(pendingContext, {
     ...workerInput,
     findings: [],
-    coverage: { ...coverage, surfaces: [rejection] },
+    reviewState: { ...reviewState, surfaces: [rejection] },
   });
   const resolvedRejection = await readJson(pendingRoot, "result.json");
-  assert.deepEqual(resolvedRejection.coverage.deferred, []);
-  assert.deepEqual(resolvedRejection.coverage.surfaces[0].candidate, candidate);
+  assert.deepEqual(resolvedRejection.reviewState.deferred, []);
+  assert.deepEqual(
+    resolvedRejection.reviewState.surfaces[0].candidate,
+    candidate,
+  );
 
   const undefinedCandidateContext = await createWorkerContext(
     "undefined-candidate-worker",
@@ -912,15 +921,15 @@ try {
     ...workerInput,
     complete: false,
     findings: [literalUndefinedFinding],
-    coverage: { ...coverage, surfaces: [] },
+    reviewState: { ...reviewState, surfaces: [] },
   });
   const undefinedCandidateResult = await readJson(
     undefinedCandidateRoot,
     "result.json",
   );
-  assert.equal(undefinedCandidateResult.coverage.deferred.length, 1);
+  assert.equal(undefinedCandidateResult.reviewState.deferred.length, 1);
   assert.equal(
-    undefinedCandidateResult.coverage.deferred[0].reason,
+    undefinedCandidateResult.reviewState.deferred[0].reason,
     "An unrelated anonymous review item remains pending.",
   );
 
@@ -977,8 +986,8 @@ try {
     limitedWorkerContext,
     {
       ...workerInput,
-      coverage: {
-        ...coverage,
+      reviewState: {
+        ...reviewState,
         explicitExclusions: [
           { pattern: "vendor/**", reason: "Third-party source." },
         ],
@@ -989,9 +998,9 @@ try {
     },
   );
 
-  assert.equal((limitedWorker.coverage.deferred as unknown[]).length, 1);
+  assert.equal((limitedWorker.reviewState.deferred as unknown[]).length, 1);
   assert.equal(
-    (limitedWorker.coverage.explicitExclusions as unknown[]).length,
+    (limitedWorker.reviewState.explicitExclusions as unknown[]).length,
     1,
   );
   assert.deepEqual(
@@ -1000,7 +1009,7 @@ try {
       scanId,
       findingCount: 1,
       surfaceCount: 1,
-      coverage: (await readJson(workerResultPath)).coverage,
+      reviewState: (await readJson(workerResultPath)).reviewState,
       operation: "replace",
       status: "draft_written",
     },
@@ -1053,7 +1062,7 @@ try {
       scanId,
       findingCount: 1,
       surfaceCount: 1,
-      coverage: (await readJson(workerResultPath)).coverage,
+      reviewState: (await readJson(workerResultPath)).reviewState,
       operation: "replace",
       status: "draft_written",
     },
@@ -1073,7 +1082,7 @@ try {
       scanId,
       findingCount: 1,
       surfaceCount: 1,
-      coverage: (await readJson(workerResultPath)).coverage,
+      reviewState: (await readJson(workerResultPath)).reviewState,
       operation: "replace",
       status: "draft_written",
     },
@@ -1092,7 +1101,7 @@ try {
       scanId,
       findingCount: 3,
       surfaceCount: 1,
-      coverage: (await readJson(workerResultPath)).coverage,
+      reviewState: (await readJson(workerResultPath)).reviewState,
       operation: "replace",
       status: "draft_written",
     },
@@ -1116,7 +1125,7 @@ try {
     preventiveControls: ["Use the shared archive-path containment helper."],
   };
   const semanticCoverage = {
-    ...coverage,
+    ...reviewState,
     deferred: [
       {
         candidateId: "candidate-deferred-archive",
@@ -1156,7 +1165,7 @@ try {
   const semanticInput = {
     ...input,
     findings: [semanticFinding],
-    coverage: semanticCoverage,
+    reviewState: semanticCoverage,
   };
 
   const reasonOnlyDeferred = [
@@ -1260,19 +1269,19 @@ try {
       }),
     ],
     [
-      "coverage surfaces must use canonical labels and dispositions",
+      "reviewState surfaces must use canonical labels and dispositions",
       coverageInput({
         surfaces: [{ surface: "Archive extraction", outcome: "reported" }],
       }),
     ],
     [
-      "reason-only deferred coverage rejects a missing reason",
+      "reason-only deferred reviewState rejects a missing reason",
       coverageInput({
         deferred: [{ paths: ["src/extract.py"] }],
       }),
     ],
     [
-      "reason-only deferred coverage rejects a whitespace-only reason",
+      "reason-only deferred reviewState rejects a whitespace-only reason",
       coverageInput({
         deferred: [{ reason: "  \t\n  " }],
       }),
@@ -1317,7 +1326,7 @@ try {
       { ...input, scope: { excludePaths: ["vendor"] } },
     ],
     [
-      "coverage mode is derived by the authoritative scan",
+      "reviewState mode is derived by the authoritative scan",
       coverageInput({ mode: "repository" }),
     ],
     [
@@ -1325,15 +1334,15 @@ try {
       coverageInput({ inventoryStrategy: "repository" }),
     ],
     [
-      "coverage included paths are derived from the authoritative scope",
+      "reviewState included paths are derived from the authoritative scope",
       coverageInput({ includePaths: ["src"] }),
     ],
     [
-      "coverage excluded paths are derived from the authoritative scope",
+      "reviewState excluded paths are derived from the authoritative scope",
       coverageInput({ excludePaths: ["vendor"] }),
     ],
     [
-      "top-level receipt references are not semantic coverage inputs",
+      "top-level receipt references are not semantic reviewState inputs",
       coverageInput({
         receiptRefs: ["artifacts/02_discovery/candidate_ledger.jsonl"],
       }),
@@ -1392,12 +1401,12 @@ try {
   assert.equal(
     scanDraftInputSchema.safeParse(semanticInput).success,
     true,
-    "semantic coverage accepts candidate-only deferred rows and plain-string open questions",
+    "semantic reviewState accepts candidate-only deferred rows and plain-string open questions",
   );
   assert.equal(
     scanDraftInputSchema.safeParse(reasonOnlyInput).success,
     true,
-    "semantic coverage accepts meaningful reason-only deferred rows",
+    "semantic reviewState accepts meaningful reason-only deferred rows",
   );
   for (const [description, rejectedInput] of rejectedDraftInputs) {
     assert.equal(
@@ -1421,7 +1430,8 @@ try {
     true,
   );
   assert.equal(
-    scanDraftInputSchema.safeParse({ ...input, coverage: undefined }).success,
+    scanDraftInputSchema.safeParse({ ...input, reviewState: undefined })
+      .success,
     false,
   );
   assert.equal(
@@ -1608,8 +1618,8 @@ try {
   const staleCheckpoint = {
     ...input,
     complete: false,
-    coverage: {
-      ...coverage,
+    reviewState: {
+      ...reviewState,
       surfaces: [
         {
           id: "surface-archive",
@@ -1623,8 +1633,8 @@ try {
   const finalDraft = {
     ...input,
     complete: true,
-    coverage: {
-      ...coverage,
+    reviewState: {
+      ...reviewState,
       surfaces: [
         {
           id: "surface-archive",
@@ -1650,7 +1660,7 @@ try {
         );
       }
       assert.notEqual(staged.manifest.scan.complete, false);
-      assert.deepEqual(staged.coverage.surfaces.map(surfaceDisposition), [
+      assert.deepEqual(staged.reviewState.surfaces.map(surfaceDisposition), [
         { id: "surface-archive", disposition: "reported" },
       ]);
     },
@@ -1719,9 +1729,9 @@ try {
   assert.deepEqual(
     archivedResolutionResult.findings,
     [finding],
-    "deferred coverage does not reject a validated finding from an archived attempt",
+    "deferred reviewState does not reject a validated finding from an archived attempt",
   );
-  assert.deepEqual(archivedResolutionResult.coverage.deferred, []);
+  assert.deepEqual(archivedResolutionResult.reviewState.deferred, []);
 
   const repeatedCheckpoint = await createRetryWorker(
     "repeated-checkpoint-worker",
@@ -1785,8 +1795,8 @@ try {
     ...withoutScanContext(workerInput),
     complete: false,
     findings: [],
-    coverage: {
-      ...coverage,
+    reviewState: {
+      ...reviewState,
       surfaces: [],
       deferred: [demotedCandidate],
     },
@@ -1804,7 +1814,7 @@ try {
     "a newer archived deferred row cannot reject an older validated finding",
   );
   assert.deepEqual(
-    multiAttemptResult.coverage.deferred,
+    multiAttemptResult.reviewState.deferred,
     [],
     "the retained finding resolves the stale archived deferred row",
   );
@@ -1897,8 +1907,8 @@ try {
     ...workerInput,
     complete: false,
     findings: [],
-    coverage: {
-      ...coverage,
+    reviewState: {
+      ...reviewState,
       completeness: "partial",
       surfaces: [],
       deferred: [
@@ -1929,7 +1939,7 @@ try {
     resolvedPartialDeferred.findings[0].provenance.previousFindings,
     [partialDeferredFinding],
   );
-  assert.deepEqual(resolvedPartialDeferred.coverage.deferred, []);
+  assert.deepEqual(resolvedPartialDeferred.reviewState.deferred, []);
 
   for (const disposition of ["rejected", "not_applicable"]) {
     const dispositionRoot = path.join(root, `${disposition}-deferred-worker`);
@@ -1942,17 +1952,17 @@ try {
     await recordCodexSecurityWorkerScanDraft(dispositionContext, {
       ...workerInput,
       findings: [],
-      coverage: {
-        ...coverage,
+      reviewState: {
+        ...reviewState,
         surfaces: [{ ...rejection, disposition }],
       },
     });
     const resolved = JSON.parse(
       await readFile(path.join(dispositionRoot, "result.json"), "utf8"),
     );
-    assert.deepEqual(resolved.coverage.deferred, []);
-    assert.equal(resolved.coverage.completeness, undefined);
-    assert.equal(resolved.coverage.surfaces[0].disposition, disposition);
+    assert.deepEqual(resolved.reviewState.deferred, []);
+    assert.equal(resolved.reviewState.completeness, undefined);
+    assert.equal(resolved.reviewState.surfaces[0].disposition, disposition);
   }
 
   const recorded = await recordCodexSecurityScanDraft(context, input);
@@ -1960,7 +1970,7 @@ try {
     scanId,
     findingCount: 1,
     surfaceCount: 1,
-    coverage: await readJson(root, "coverage.json"),
+    reviewState: await readJson(root, "coverage.json"),
     operation: "replace",
     status: "draft_written",
   });
@@ -2014,7 +2024,7 @@ try {
       receiptRefs: [],
     },
   ]);
-  assert.deepEqual(writtenCoverage.extensions, coverage.extensions);
+  assert.deepEqual(writtenCoverage.extensions, reviewState.extensions);
 
   await recordCodexSecurityScanDraft(context, semanticInput);
   const normalizedSemanticCoverage = await readJson(root, "coverage.json");
@@ -2085,7 +2095,7 @@ try {
   for (const name of await readdir(path.join(root, "checkpoints"))) {
     const checkpoint = await readJson(path.join(root, "checkpoints"), name);
     assert.deepEqual(
-      checkpoint.coverage.deferred.map(({ id }: { id: string }) => id),
+      checkpoint.reviewState.deferred.map(({ id }: { id: string }) => id),
       generatedIds,
       "the first saved checkpoint already contains the published IDs",
     );
@@ -2593,7 +2603,7 @@ try {
       scanId,
       manifest: await readJson(literalRoot, "scan-manifest.json"),
       findings: await readJson(literalRoot, "findings.json"),
-      coverage: await readJson(literalRoot, "coverage.json"),
+      reviewState: await readJson(literalRoot, "coverage.json"),
     });
     assert.equal(reloaded.findings[0].summary, "Updated finding summary.");
     assert.equal(reloaded.findings[0].locations[0].path, literalPath);
@@ -2761,7 +2771,7 @@ try {
     for (const [index, artifact] of [
       "scan manifest",
       "findings",
-      "coverage",
+      "reviewState",
     ].entries()) {
       assert.equal(
         currentDraft[index],
@@ -2798,10 +2808,10 @@ try {
         ],
       }),
     );
-    assert.equal(parsed.coverage.completeness, undefined);
-    assert.equal(parsed.coverage.deferred.length, 1);
-    assert.equal(parsed.coverage.surfaces[0].disposition, "needs_follow_up");
-    assert.equal(parsed.coverage.explicitExclusions.length, 1);
+    assert.equal(parsed.reviewState.completeness, undefined);
+    assert.equal(parsed.reviewState.deferred.length, 1);
+    assert.equal(parsed.reviewState.surfaces[0].disposition, "needs_follow_up");
+    assert.equal(parsed.reviewState.explicitExclusions.length, 1);
   }
   assert.deepEqual(await snapshotScanDraft(root), originalDraft);
   await rejectsDraft(
@@ -2858,7 +2868,7 @@ try {
   assert.deepEqual(await snapshotScanDraft(root), originalDraft);
 
   const duplicateSurfaceCoverage = {
-    ...coverage,
+    ...reviewState,
     surfaces: [
       {
         id: "surface-web-ui",
@@ -2890,7 +2900,7 @@ try {
   );
   await recordFreshScanDraft(context, {
     ...input,
-    coverage: duplicateSurfaceCoverage,
+    reviewState: duplicateSurfaceCoverage,
   });
   const normalizedDuplicateCoverage = await readJson(root, "coverage.json");
   const surfaceIds = normalizedDuplicateCoverage.surfaces.map(
@@ -2947,13 +2957,13 @@ try {
   };
   const repairedPartial = await recordFreshScanDraft(context, {
     ...input,
-    coverage: partialCoverage,
+    reviewState: partialCoverage,
   });
   assert.deepEqual(repairedPartial, {
     scanId,
     findingCount: 1,
     surfaceCount: 1,
-    coverage: await readJson(root, "coverage.json"),
+    reviewState: await readJson(root, "coverage.json"),
     operation: "replace",
     status: "draft_written",
   });
@@ -2969,7 +2979,7 @@ try {
   const noFindings = {
     ...input,
     findings: [],
-    coverage: workerDraft([]).coverage,
+    reviewState: workerDraft([]).reviewState,
   };
   const clean = await recordFreshScanDraft(context, noFindings);
   assert.equal(clean.findingCount, 0);
@@ -2992,7 +3002,12 @@ try {
     },
   };
   const sealedFindings = { scanId, findings: [] };
-  const sealedCoverage = { scanId, surfaces: [] };
+  const sealedCoverage = {
+    scanId,
+    surfaces: [],
+    completeness: "complete",
+    explicitExclusions: [],
+  };
   await writeJsonLine(path.join(root, "scan-manifest.json"), sealedManifest);
   await writeJsonLine(path.join(root, "findings.json"), sealedFindings);
   await writeJsonLine(path.join(root, "coverage.json"), sealedCoverage);
@@ -3007,7 +3022,7 @@ try {
       scanId,
       manifest: sealedManifest,
       findings: sealedFindings,
-      coverage: sealedCoverage,
+      review: { excludedPaths: [] },
     },
   );
 

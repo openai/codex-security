@@ -51,7 +51,7 @@ Generated models may include `origin: "generated"` and known `scope` (`includePa
 | `securityObjectives` | Enforceable invariants, including user-requested settings and limits |
 | `assumptions` | Prerequisites, exclusions, documentation/implementation discrepancies, and unknowns |
 
-Keep citations with the facts they support and label provided context. Use scenarios to direct investigation. Reconcile material scenarios with findings, source-backed dispositions, or open questions: put resolved control questions and rejections in `coverage.surfaces[].notes` with source anchors, and unresolved prerequisites in `coverage.openQuestions`. Retain established discrepancies even when no finding survives; do not create a separate speculative-finding registry.
+Keep citations with the facts they support and label provided context. Use scenarios to direct investigation. Reconcile material scenarios with findings, source-backed dispositions, or open questions: put resolved control questions and rejections in `reviewState.surfaces[].notes` with source anchors, and unresolved prerequisites in `reviewState.openQuestions`. Retain established discrepancies even when no finding survives; do not create a separate speculative-finding registry.
 
 ## Standalone Model
 

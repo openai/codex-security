@@ -1,5 +1,7 @@
-import { gitText } from "./support/shell.js";
-import { cpSync, readFileSync } from "node:fs";
+import { gitText, nodeCommand, runCommand } from "./support/shell.js";
+import { cpSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { check } from "prettier";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
@@ -52,6 +54,12 @@ type GitHubClient = {
   repositoryUrl: string;
   request: (method: string, path: string, body?: Body) => Promise<unknown>;
   list: (path: string) => Promise<unknown[]>;
+  releaseReviewPage: (
+    number: number,
+    branch: string,
+    after: string | null,
+    openAfter: string | null,
+  ) => Promise<unknown>;
 };
 type Fetcher = (url: string, options: RequestInit) => Promise<Response>;
 type Pull = {
@@ -100,11 +108,15 @@ const {
       };
     } | null,
   ) => Plan;
-  createGitRepository: (directory: string) => GitRepository;
+  createGitRepository: (
+    directory: string,
+    env?: NodeJS.ProcessEnv,
+  ) => GitRepository;
   createGitHubClient: (
     repository: string,
     token: string,
     fetcher?: Fetcher,
+    sleep?: (milliseconds: number) => Promise<void>,
   ) => GitHubClient;
   readReleaseHistory: (
     repo: GitRepository,
@@ -115,6 +127,7 @@ const {
     repo: GitRepository;
     github: GitHubClient;
     dryRun?: boolean;
+    waitForHead?: (ms: number) => Promise<void>;
   }) => Promise<{
     action: string;
     reason?: string;
@@ -136,7 +149,7 @@ const workflow = readFileSync(
   new URL("../../../.github/workflows/node-release-pr.yml", import.meta.url),
   "utf8",
 );
-const directories = createTemporaryDirectoriesSync();
+const directories = createTemporaryDirectoriesSync(true);
 afterEach(directories.cleanup);
 const templates = createTemporaryDirectoriesSync();
 afterAll(templates.cleanup);
@@ -227,10 +240,33 @@ function apiError(status: number) {
 }
 
 class Fixture {
-  static async withInitialPull() {
+  private static initialPull?: ReturnType<typeof Fixture.createInitialPull>;
+
+  private static async createInitialPull() {
     const fixture = new Fixture();
     fixture.merge("feat: initial feature");
     const first = await fixture.run();
+    const directory = templates.create("initial release proposal ");
+    cpSync(fixture.directory, directory, { recursive: true });
+    const { pulls, commitPulls, comments, writes } = fixture.github;
+    return {
+      directory,
+      first,
+      state: { pulls, commitPulls, comments, writes },
+    };
+  }
+
+  static async withInitialPull() {
+    Fixture.initialPull ??= Fixture.createInitialPull().catch((error) => {
+      Fixture.initialPull = undefined;
+      throw error;
+    });
+    // Clone the GitHub state together: commitPulls and pulls refer to the same objects.
+    const { directory, first, state } = structuredClone(
+      await Fixture.initialPull,
+    );
+    const fixture = new Fixture(directory);
+    Object.assign(fixture.github, state);
     const pull = fixture.github.pulls.find(
       (candidate) => candidate.number === first.pull,
     )!;
@@ -238,16 +274,25 @@ class Fixture {
   }
 
   readonly directory = directories.create("release pr test ");
-  readonly repo = createGitRepository(this.directory);
+  readonly environment: NodeJS.ProcessEnv = {
+    PATH: process.env["PATH"],
+    SystemRoot: process.env["SystemRoot"],
+    ComSpec: process.env["ComSpec"],
+    PATHEXT: process.env["PATHEXT"],
+    HOME: this.directory,
+    USERPROFILE: this.directory,
+    GIT_CONFIG_NOSYSTEM: "1",
+  };
+  readonly repo = createGitRepository(this.directory, this.environment);
   readonly github = new FakeGitHub(this);
   readonly git = this.repo.git;
 
-  constructor() {
-    if (baseRepository !== undefined) {
-      cpSync(baseRepository, this.directory, { recursive: true });
+  constructor(repositoryTemplate = baseRepository) {
+    if (repositoryTemplate !== undefined) {
+      cpSync(repositoryTemplate, this.directory, { recursive: true });
       return;
     }
-    this.git("init", "-b", "main");
+    this.git("init", "--template=", "-b", "main");
     this.git("config", "user.name", "Release Test");
     this.git("config", "user.email", "release-test@example.invalid");
     this.git("config", "commit.gpgsign", "false");
@@ -275,18 +320,28 @@ class Fixture {
   }
 
   tree(base: string | null, files: Record<string, string | null>) {
+    const entries = Object.entries(files);
+    if (base !== null && entries.length === 0)
+      return this.git("rev-parse", `${base}^{tree}`).trim();
+
     this.git("read-tree", base ?? "--empty");
-    for (const [path, content] of Object.entries(files)) {
+    const edits: string[] = [];
+    for (const [path, content] of entries) {
       if (content === null) {
-        this.git("update-index", "--force-remove", "--", path);
+        edits.push(`./${path}`);
       } else {
         const blob = gitText(["hash-object", "-w", "--stdin"], {
           cwd: this.directory,
+          env: this.environment,
           input: content,
           stdio: ["pipe", "pipe", "pipe"],
         }).trim();
-        this.git("update-index", "--add", "--cacheinfo", "100644", blob, path);
+        edits.push("--cacheinfo", "100644", blob, path);
       }
+    }
+    if (edits.length > 0) {
+      // --cacheinfo stages blobs; --force-remove applies to plain path arguments.
+      this.git("update-index", "--add", "--force-remove", ...edits);
     }
     return this.git("write-tree").trim();
   }
@@ -329,11 +384,12 @@ class Fixture {
     return sha;
   }
 
-  run(dryRun = false) {
+  run(dryRun = false, waitForHead?: (ms: number) => Promise<void>) {
     return reconcileReleasePullRequest({
       repo: this.repo,
       github: this.github,
       dryRun,
+      ...(waitForHead && { waitForHead }),
     });
   }
 }
@@ -346,6 +402,9 @@ class FakeGitHub {
   readonly commitPulls = new Map<string, Pull[]>();
   readonly comments = new Map<number, { body: string }[]>();
   readonly writes: { method: string; path: string; body: Body }[] = [];
+  releaseReviewPage: GitHubClient["releaseReviewPage"] = async () => {
+    throw new Error("Unexpected release head recovery");
+  };
   beforeRefWrite: (() => void) | undefined;
   afterCommit: (() => void) | undefined;
   failPullCreation = false;
@@ -494,7 +553,106 @@ class FakeGitHub {
   }
 }
 
+// The REST listing still shows the original pull head after the fake ref moves.
+async function laggingPull(title: string) {
+  const { fixture, first, pull } = await Fixture.withInitialPull();
+  const main = fixture.merge(title);
+  const { github } = fixture;
+  const comments = github.comments.get(pull.number)!;
+  const original = github.request.bind(github);
+  github.request = async (method, path, body) => {
+    if (method === "GET" && path === `pulls/${pull.number}`)
+      return structuredClone(pull);
+    return original(method, path, body);
+  };
+  const page = () => {
+    const branch = fixture.head(first.plan.branch)!;
+    const last = { hasNextPage: false, endCursor: null as string | null };
+    return {
+      main: { target: { oid: main } },
+      branch: { target: { oid: branch } as { oid: string } | null },
+      open: {
+        nodes: github.pulls
+          .filter((p) => p.state === "open")
+          .map((p) => ({
+            number: p.number,
+            title: p.title,
+            baseRefName: p.base.ref,
+            headRefName: p.head.ref,
+            headRefOid: p.head.sha,
+            headRepository: { nameWithOwner: p.head.repo.full_name },
+          })),
+        pageInfo: last,
+      },
+      pullRequest: {
+        state: "OPEN",
+        baseRefName: pull.base.ref,
+        headRefName: pull.head.ref,
+        headRefOid: branch,
+        headRepository: { nameWithOwner: github.repository },
+        comments: {
+          nodes: comments.map(({ body }, i) => ({ id: String(i + 1), body })),
+          pageInfo: last,
+        },
+      },
+    };
+  };
+  return { fixture, first, pull, comments, page, original };
+}
+
 describe("GitHub request transport", () => {
+  function retryClient(fetcher: Fetcher) {
+    const delays: number[] = [];
+    const github = createGitHubClient(
+      "example/release-fixture",
+      "synthetic-release-token",
+      fetcher,
+      async (milliseconds) => {
+        delays.push(milliseconds);
+      },
+    );
+    return { github, delays };
+  }
+
+  test("retries the same read-only review query and rejects a partial error response", async () => {
+    const requests: unknown[] = [];
+    const repository = { pullRequest: null };
+    const { github, delays } = retryClient(async (url, options) => {
+      expect(url).toBe("https://api.github.com/graphql");
+      expect(options.method).toBe("POST");
+      const { query, variables } = JSON.parse(String(options.body));
+      expect(query).toMatch(/^\s*query\b/u);
+      requests.push(variables);
+      if (requests.length === 1) return new Response(null, { status: 503 });
+      return Response.json({
+        data: { repository },
+        ...(requests.length === 3 && {
+          errors: [{ message: "Review page unavailable" }],
+        }),
+      });
+    });
+    const variables = {
+      owner: "example",
+      name: "release-fixture",
+      number: 42,
+      ref: "refs/heads/release/next",
+      after: "page-2",
+      openAfter: "open-3",
+    };
+    expect(
+      await github.releaseReviewPage(42, "release/next", "page-2", "open-3"),
+    ).toEqual(repository);
+    await expect(
+      github.releaseReviewPage(42, "release/next", null, null),
+    ).rejects.toThrow("Review page unavailable");
+    expect(requests).toEqual([
+      variables,
+      variables,
+      { ...variables, after: null, openAfter: null },
+    ]);
+    expect(delays).toEqual([1000]);
+  });
+
   const interruptedJsonResponse = (error: Error) =>
     new Response(
       new ReadableStream({
@@ -516,6 +674,8 @@ describe("GitHub request transport", () => {
     "recovers from %s without duplicating paginated results",
     async (failure) => {
       const pages: number[] = [];
+      const waiting = Promise.withResolvers<number>();
+      const resume = Promise.withResolvers<void>();
       const github = createGitHubClient(
         "example/release-fixture",
         "synthetic-release-token",
@@ -550,31 +710,33 @@ describe("GitHub request transport", () => {
                 : {},
           });
         },
+        (milliseconds) => {
+          waiting.resolve(milliseconds);
+          return resume.promise;
+        },
       );
-      expect(await github.list("pulls?per_page=1")).toEqual([
-        { number: 1 },
-        { number: 2 },
-      ]);
+      const result = github.list("pulls?per_page=1");
+      expect(await Promise.race([waiting.promise, result])).toBe(1000);
+      expect(pages).toEqual([1, 2]);
+      resume.resolve();
+      expect(await result).toEqual([{ number: 1 }, { number: 2 }]);
       expect(pages).toEqual([1, 2, 2]);
     },
   );
 
   test("recovers an interrupted successful request body", async () => {
     let requests = 0;
-    const github = createGitHubClient(
-      "example/release-fixture",
-      "synthetic-release-token",
-      async () => {
-        requests++;
-        return requests === 1
-          ? interruptedJsonResponse(new TypeError("terminated"))
-          : Response.json({ sha: "synthetic-main-sha" });
-      },
-    );
+    const { github, delays } = retryClient(async () => {
+      requests++;
+      return requests === 1
+        ? interruptedJsonResponse(new TypeError("terminated"))
+        : Response.json({ sha: "synthetic-main-sha" });
+    });
     expect(await github.request("GET", "git/ref/heads/main")).toEqual({
       sha: "synthetic-main-sha",
     });
     expect(requests).toBe(2);
+    expect(delays).toEqual([1000]);
   });
 
   test.each([false, true])(
@@ -586,21 +748,18 @@ describe("GitHub request transport", () => {
           code: "UND_ERR_SOCKET",
         }),
       });
-      const github = createGitHubClient(
-        "example/release-fixture",
-        "synthetic-release-token",
-        async () => {
-          requests++;
-          if (initialHttpError && requests === 1) {
-            return Response.json({ message: "Unavailable" }, { status: 503 });
-          }
-          throw error;
-        },
-      );
+      const { github, delays } = retryClient(async () => {
+        requests++;
+        if (initialHttpError && requests === 1) {
+          return Response.json({ message: "Unavailable" }, { status: 503 });
+        }
+        throw error;
+      });
       await expect(github.request("GET", "git/ref/heads/main")).rejects.toBe(
         error,
       );
       expect(requests).toBe(3);
+      expect(delays).toEqual([1000, 2000]);
     },
   );
 
@@ -613,22 +772,19 @@ describe("GitHub request transport", () => {
           code: "UND_ERR_SOCKET",
         }),
       });
-      const github = createGitHubClient(
-        "example/release-fixture",
-        "synthetic-release-token",
-        async () => {
-          requests++;
-          if (mixedFailures && requests === 1) {
-            return Response.json({ message: "Unavailable" }, { status: 503 });
-          }
-          if (mixedFailures && requests === 2) throw error;
-          return interruptedJsonResponse(error);
-        },
-      );
+      const { github, delays } = retryClient(async () => {
+        requests++;
+        if (mixedFailures && requests === 1) {
+          return Response.json({ message: "Unavailable" }, { status: 503 });
+        }
+        if (mixedFailures && requests === 2) throw error;
+        return interruptedJsonResponse(error);
+      });
       await expect(github.request("GET", "git/ref/heads/main")).rejects.toBe(
         error,
       );
       expect(requests).toBe(3);
+      expect(delays).toEqual([1000, 2000]);
     },
   );
 
@@ -644,17 +800,14 @@ describe("GitHub request transport", () => {
     async (method, failure) => {
       let requests = 0;
       const error = new TypeError("fetch failed");
-      const github = createGitHubClient(
-        "example/release-fixture",
-        "synthetic-release-token",
-        async () => {
-          requests++;
-          if (failure === "body") return interruptedJsonResponse(error);
-          throw error;
-        },
-      );
+      const { github, delays } = retryClient(async () => {
+        requests++;
+        if (failure === "body") return interruptedJsonResponse(error);
+        throw error;
+      });
       await expect(github.request(method, "pulls")).rejects.toBe(error);
       expect(requests).toBe(1);
+      expect(delays).toEqual([]);
     },
   );
 
@@ -662,41 +815,48 @@ describe("GitHub request transport", () => {
     "does not retry malformed JSON in a successful %s response",
     async (operation) => {
       let requests = 0;
-      const github = createGitHubClient(
-        "example/release-fixture",
-        "synthetic-release-token",
-        async () => {
-          requests++;
-          return new Response("{", { status: 200 });
-        },
-      );
+      const { github, delays } = retryClient(async () => {
+        requests++;
+        return new Response("{", { status: 200 });
+      });
       await expect(
         operation === "request"
           ? github.request("GET", "pulls")
           : github.list("pulls"),
       ).rejects.toBeInstanceOf(SyntaxError);
       expect(requests).toBe(1);
+      expect(delays).toEqual([]);
     },
   );
 
-  test("reports a persistent server error after bounded read retries", async () => {
-    let requests = 0;
-    const github = createGitHubClient(
-      "example/release-fixture",
-      "synthetic-release-token",
-      async () => {
+  test.each([
+    [null, [1000, 2000]],
+    ["1", [1000, 2000]],
+    ["120", []],
+    ["Fri, 01 Jan 2100 00:00:00 GMT", []],
+  ])(
+    "limits retries on HTTP 503 with Retry-After %j",
+    async (retryAfter, expectedDelays) => {
+      let requests = 0;
+      const { github, delays } = retryClient(async () => {
         requests++;
-        return Response.json({ message: "Unavailable" }, { status: 503 });
-      },
-    );
-    await expect(
-      github.request("GET", "git/ref/heads/main"),
-    ).rejects.toMatchObject({
-      status: 503,
-      message: "GitHub GET git/ref/heads/main failed with HTTP 503.",
-    });
-    expect(requests).toBe(3);
-  });
+        return new Response(null, {
+          status: 503,
+          headers: retryAfter ? { "Retry-After": retryAfter } : {},
+        });
+      });
+      await expect(
+        github.request("GET", "git/ref/heads/main"),
+      ).rejects.toMatchObject({
+        status: 503,
+        message:
+          "GitHub GET git/ref/heads/main failed with HTTP 503." +
+          (retryAfter ? ` Retry-After: ${retryAfter}.` : ""),
+      });
+      expect(requests).toBe(expectedDelays.length + 1);
+      expect(delays).toEqual(expectedDelays);
+    },
+  );
 
   test.each([
     ["POST", 500],
@@ -708,22 +868,19 @@ describe("GitHub request transport", () => {
     "does not replay a %s request that fails with HTTP %i",
     async (method, status) => {
       let requests = 0;
-      const github = createGitHubClient(
-        "example/release-fixture",
-        "synthetic-release-token",
-        async () => {
-          requests++;
-          return Response.json({ message: "Failed request" }, { status });
-        },
-      );
+      const { github, delays } = retryClient(async () => {
+        requests++;
+        return Response.json({ message: "Failed request" }, { status });
+      });
       await expect(github.request(method, "pulls")).rejects.toMatchObject({
         status,
       });
       expect(requests).toBe(1);
+      expect(delays).toEqual([]);
     },
   );
 
-  test("creates and updates a release PR through serialized requests, including a concurrent commit conflict", async () => {
+  test("publishes through a concurrent commit conflict", async () => {
     const fixture = new Fixture();
     fixture.merge("feat: initial feature");
     let conflicts = 0;
@@ -773,12 +930,13 @@ describe("GitHub request transport", () => {
     expect(fixture.github.writes).toHaveLength(0);
     const first = await run();
     fixture.merge("fix: later fix");
+    let humanSha = "";
     fixture.github.beforeRefWrite = () => {
       const notes = fixture.repo.readFile(
         fixture.head(first.plan.branch)!,
         notesPath,
       )!;
-      fixture.commit(
+      humanSha = fixture.commit(
         first.plan.branch,
         {
           [notesPath]: notes.replace(
@@ -797,11 +955,9 @@ describe("GitHub request transport", () => {
       "Human-reviewed release note",
     );
     expect(updated.reviewRequested).toBe(true);
-    fixture.git(
-      "merge-base",
-      "--is-ancestor",
-      first.headSha!,
-      updated.headSha!,
+    fixture.git("merge-base", "--is-ancestor", humanSha, updated.headSha!);
+    expect(fixture.github.comments.get(updated.pull!)!.at(-1)!.body).toContain(
+      "later fix",
     );
   });
 
@@ -842,18 +998,49 @@ describe("GitHub request transport", () => {
 });
 
 describe("release workflow controls", () => {
-  const { permissions, jobs } = Bun.YAML.parse(workflow) as {
+  const { permissions, jobs, concurrency } = Bun.YAML.parse(workflow) as {
     permissions: Record<string, string>;
+    concurrency: { group: string; "cancel-in-progress": boolean };
     jobs: Record<
       string,
       {
         if: string;
         permissions?: Record<string, string>;
+        concurrency?: { group: string; queue: string };
         env: { RELEASE_PR_DRY_RUN: string };
         steps: { id?: string; if?: string }[];
       }
     >;
   };
+
+  test("manual release runs keep their place during a burst of main pushes", () => {
+    const slot = (event_name: string, run_id: number) =>
+      concurrency.group.replace(/\$\{\{(.*?)\}\}/gu, (_, expression) =>
+        String(
+          new Function("github", `return (${expression})`)({
+            event_name,
+            run_id,
+          }),
+        ),
+      );
+    const push = slot("push", 10);
+    expect(slot("push", 11)).toBe(push);
+    const slots = [
+      push,
+      slot("workflow_dispatch", 12),
+      slot("workflow_dispatch", 13),
+    ];
+    expect(new Set(slots).size).toBe(slots.length);
+    expect(concurrency["cancel-in-progress"]).toBe(false);
+    expect(slots).not.toContain(jobs["reconcile"]?.concurrency?.group);
+    expect(jobs["reconcile"]?.concurrency).toEqual({
+      group: "node-release-pr",
+      queue: "max",
+    });
+    expect(jobs["preview"]?.concurrency).toEqual(
+      jobs["reconcile"]?.concurrency,
+    );
+  });
 
   test.each([
     { dryRun: "false", clientId: "", createsAppToken: false },
@@ -1237,6 +1424,48 @@ describe("human note ownership", () => {
   });
 });
 
+test("previews a pending release from the maintainer CLI without writing to Git or GitHub", async () => {
+  const fixture = new Fixture();
+  const main = fixture.merge("feat: initial feature");
+  const refs = fixture.git("show-ref");
+  const preload = join(fixture.directory, "github-reads.mjs");
+  writeFileSync(
+    preload,
+    `
+    globalThis.fetch = async (url, { method }) => {
+      if (method !== "GET") throw new Error("Unexpected GitHub write: " + method);
+      const path = new URL(url).pathname;
+      if (path.endsWith("/git/ref/heads/main")) return Response.json({ object: { sha: ${JSON.stringify(main)} } });
+      if (path.includes("/git/ref/heads/")) return new Response(null, { status: 404 });
+      if (path.endsWith("/pulls")) return Response.json([]);
+      throw new Error("Unexpected GitHub read: " + path);
+    };
+  `,
+  );
+  const result = await runCommand(
+    nodeCommand().command,
+    ["--import", pathToFileURL(preload).href, fileURLToPath(script)],
+    {
+      env: {
+        ...fixture.environment,
+        GH_TOKEN: "synthetic-release-token",
+        GITHUB_REPOSITORY: fixture.github.repository,
+        GIT_DIR: join(fixture.directory, ".git"),
+        GIT_WORK_TREE: fixture.directory,
+        RELEASE_PR_DRY_RUN: "true",
+      },
+      timeout: 30_000,
+    },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    action: "would-create",
+    dryRun: true,
+    plan: { version: "0.1.24", title: "chore(release): 0.1.24" },
+  });
+  expect(fixture.git("show-ref")).toBe(refs);
+});
+
 describe("rolling release reconciliation", () => {
   test("adds and refreshes the example pin from current main without introducing it into earlier history", async () => {
     const fixture = new Fixture();
@@ -1314,31 +1543,12 @@ describe("rolling release reconciliation", () => {
     expect((await fixture.run()).action).toBe("unchanged");
   });
 
-  test.each([true, false])(
-    "leaves an empty release cycle unchanged with dryRun=%p",
-    async (dryRun) => {
-      const fixture = new Fixture();
-      const result = await fixture.run(dryRun);
-      expect(result.action).toBe("unchanged");
-      expect(result.plan.changes).toHaveLength(0);
-      expect(result.pull).toBeUndefined();
-      expect(fixture.head(result.plan.branch)).toBeNull();
-      expect(fixture.github.writes).toHaveLength(0);
-      expect(fixture.github.pulls).toHaveLength(0);
-    },
-  );
-
-  test("previews without writes and then creates one ready PR, refreshes it, and reuses its branch", async () => {
+  test("creates one ready PR, refreshes it, and reuses its branch", async () => {
     const fixture = new Fixture();
     fixture.merge("feat: initial feature", {
       "plugins/codex-security/skills/example/SKILL.md":
         "Example plugin instructions.\n",
     });
-    const preview = await fixture.run(true);
-    expect(preview.action).toBe("would-create");
-    expect(preview.plan.version).toBe("0.1.24");
-    expect(preview.plan.title).toBe("chore(release): 0.1.24");
-    expect(fixture.github.writes).toHaveLength(0);
     const first = await fixture.run();
     expect(first.action).toBe("created");
     expect(first.reviewRequested).toBe(true);
@@ -1366,6 +1576,7 @@ describe("rolling release reconciliation", () => {
     ).toBe("chore(release): 0.2.0");
     expect(second.plan.branch).toBe(first.plan.branch);
     expect(pull.body).toBe(humanBody);
+    expect(pull.draft).toBe(false);
     expect(
       fixture.repo.readFile(second.headSha!, "sdk/typescript/src/example.ts"),
     ).toContain("next");
@@ -1387,18 +1598,10 @@ describe("rolling release reconciliation", () => {
   });
 
   test("retitles an existing release PR without changing an up-to-date branch", async () => {
-    const fixture = new Fixture();
-    fixture.merge("fix: initial fix");
-    const first = await fixture.run();
-    const pull = fixture.github.pulls.find(
-      (candidate) => candidate.number === first.pull,
-    )!;
+    const { fixture, first, pull } = await Fixture.withInitialPull();
     pull.title = "release: prepare the next Codex Security release";
     const body = pull.body;
     const writes = fixture.github.writes.length;
-    const preview = await fixture.run(true);
-    expect(preview.action).toBe("would-update");
-    expect(fixture.github.writes).toHaveLength(writes);
     const updated = await fixture.run();
     expect(updated.action).toBe("updated");
     expect(updated.headSha).toBe(first.headSha);
@@ -1493,28 +1696,157 @@ describe("rolling release reconciliation", () => {
   });
 
   test("recovers review on a manual rerun after GitHub exposes the updated head", async () => {
-    const { fixture, first } = await Fixture.withInitialPull();
-    fixture.merge("fix: later fix");
-    const request = fixture.github.request.bind(fixture.github);
-    let headLagged = true;
-    fixture.github.request = async (method, path, body) => {
-      const result = structuredClone(await request(method, path, body));
-      if (headLagged && method === "GET" && path === `pulls/${first.pull}`) {
-        (result as Pull).head.sha = first.headSha!;
-      }
-      return result;
+    const { fixture, first, pull, page, comments, original } =
+      await laggingPull("fix!: later fix");
+    fixture.github.releaseReviewPage = async () => {
+      const snapshot = page();
+      snapshot.pullRequest.headRefOid = first.headSha!;
+      return snapshot;
     };
-    const pending = await fixture.run();
+    const delays: number[] = [];
+    const pending = await fixture.run(false, async (ms) => {
+      expect(pull.title).toBe("chore(release): 0.2.0");
+      delays.push(ms);
+    });
     expect(pending.reviewRequested).toBe(false);
     expect(pending.reason).toContain("Rerun");
-    expect(fixture.github.comments.get(first.pull!)).toHaveLength(1);
-    headLagged = false;
+    expect(delays).toEqual([1000, 2000, 4000]);
+    expect(comments).toHaveLength(1);
+    const count = fixture.github.writes.length;
+    expect((await fixture.run()).reviewRequested).toBe(false); // No new ref write to wait for.
+    expect(fixture.github.writes).toHaveLength(count);
+    fixture.github.request = original;
     const recovered = await fixture.run();
     expect(recovered.action).toBe("unchanged");
     expect(recovered.headSha).toBe(pending.headSha);
     expect(recovered.reviewRequested).toBe(true);
-    expect(fixture.github.comments.get(first.pull!)).toHaveLength(2);
+    expect(comments).toHaveLength(2);
   });
+
+  test.each([
+    "changed plan",
+    "proposal",
+    "suggestions",
+    "same",
+    "release moved",
+    "main moved",
+    "retargeted",
+    "competing PR",
+    "competing head",
+  ])(
+    "checks the latest target and marker when the release PR head catches up: %s",
+    async (change) => {
+      const { fixture, first, pull, comments, page } = await laggingPull(
+        change === "changed plan"
+          ? "fix!: change the public interface"
+          : "test: more coverage",
+      );
+      const initial = comments[0]!.body;
+      const digest = change === "competing PR" ? "proposal" : change;
+      const newer = initial.replace(
+        new RegExp(`release-pr-${digest}: [a-f0-9]+`),
+        `release-pr-${digest}: ${"0".repeat(64)}`,
+      );
+      let visible = false;
+      const cursors: [string | null, string | null][] = [];
+      const writes = fixture.github.writes.length;
+      fixture.github.releaseReviewPage = async (
+        number,
+        branch,
+        after,
+        openAfter,
+      ) => {
+        expect([number, branch]).toEqual([pull.number, first.plan.branch]);
+        if (visible && after && change === "competing PR")
+          fixture.github.addPull(
+            "manual",
+            "release: alternate",
+            first.headSha!,
+          );
+        const snapshot = page();
+        const pr = snapshot.pullRequest;
+        if (!visible) {
+          pr.headRefOid = first.headSha!;
+          return snapshot;
+        }
+        cursors.push([after, openAfter]);
+        // Comments need two pages; a long open-PR list needs three. A new
+        // marker can arrive as the last comments page is read again.
+        if (change === "proposal" && openAfter !== "last") {
+          snapshot.open.nodes = [];
+          snapshot.open.pageInfo = {
+            hasNextPage: true,
+            endCursor: openAfter ? "last" : "more",
+          };
+        }
+        pr.comments.nodes = after
+          ? [{ id: "9007199254740992", body: initial }]
+          : [
+              {
+                id: "9007199254740993",
+                body: change === "proposal" ? initial : newer,
+              },
+            ];
+        if (openAfter === "last")
+          pr.comments.nodes.push({ id: "9007199254740994", body: newer });
+        if (!after)
+          pr.comments.pageInfo = { hasNextPage: true, endCursor: "older" };
+        else if (change === "release moved") snapshot.branch.target = null;
+        else if (change === "main moved")
+          snapshot.main.target.oid = first.headSha!;
+        else if (change === "retargeted") pr.baseRefName = "maintenance";
+        return snapshot;
+      };
+      const result = await fixture.run(false, async () => {
+        visible = true;
+        if (change === "changed plan")
+          expect(pull.title).toBe("chore(release): 0.2.0");
+        if (change === "competing head") pull.head.sha = "c".repeat(40);
+      });
+      expect(visible).toBe(true);
+      expect(
+        fixture.github.writes
+          .slice(writes)
+          .filter((w) => w.path.startsWith("git/refs")),
+      ).toHaveLength(1);
+      expect(cursors).toEqual(
+        change === "proposal"
+          ? [
+              [null, null],
+              ["older", "more"],
+              ["older", "last"],
+            ]
+          : change === "competing head"
+            ? [[null, null]]
+            : [
+                [null, null],
+                ["older", null],
+              ],
+      );
+      if (
+        ["changed plan", "proposal", "suggestions", "same"].includes(change)
+      ) {
+        const eligible = change === "proposal" || change === "changed plan";
+        expect(result.action).toBe("updated");
+        expect(result.reviewRequested).toBe(eligible);
+        expect(comments).toHaveLength(change === "same" ? 1 : 2);
+        if (change !== "same") {
+          expect(comments[1]!.body).toContain(
+            `<!-- release-pr-head: ${result.headSha} -->`,
+          );
+          expect(
+            comments[1]!.body.includes(
+              `@codex review the current head ${result.headSha}.`,
+            ),
+          ).toBe(eligible);
+        }
+      } else {
+        expect(result.action).toBe("held");
+        expect(result.reviewRequested).toBe(false);
+        expect(comments).toHaveLength(1);
+      }
+    },
+  );
 
   test("requests review when the proposal changes back to previously reviewed content", async () => {
     const fixture = new Fixture();
@@ -1529,35 +1861,6 @@ describe("rolling release reconciliation", () => {
     expect(restored.headSha).not.toBe(first.headSha);
     expect(restored.reviewRequested).toBe(true);
     expect(fixture.github.comments.get(first.pull!)).toHaveLength(3);
-  });
-
-  test("retries a concurrent human commit without dropping its notes or history", async () => {
-    const { fixture, first } = await Fixture.withInitialPull();
-    fixture.merge("fix: later fix");
-    let humanSha = "";
-    fixture.github.beforeRefWrite = () => {
-      const notes = fixture.repo.readFile(
-        fixture.head(first.plan.branch)!,
-        notesPath,
-      )!;
-      humanSha = fixture.commit(
-        first.plan.branch,
-        {
-          [notesPath]: notes.replace(
-            "initial feature",
-            "Human migration details",
-          ),
-        },
-        "docs: review release notes",
-      );
-    };
-    const result = await fixture.run();
-    expect(result.plan.humanOwned).toEqual(["highlights"]);
-    expect(result.plan.files[notesPath]).toContain("Human migration details");
-    fixture.git("merge-base", "--is-ancestor", humanSha, result.headSha!);
-    expect(fixture.github.comments.get(result.pull!)!.at(-1)!.body).toContain(
-      "later fix",
-    );
   });
 
   test("recomputes when main moves during the update", async () => {
@@ -1728,6 +2031,47 @@ describe("rolling release reconciliation", () => {
     expect(
       fixture.github.pulls.filter((pull) => pull.state === "open"),
     ).toHaveLength(1);
+  });
+});
+
+describe("read-only release previews and Git history", () => {
+  test.each([true, false])(
+    "leaves an empty release cycle unchanged with dryRun=%p",
+    async (dryRun) => {
+      const fixture = new Fixture();
+      const result = await fixture.run(dryRun);
+      expect(result.action).toBe("unchanged");
+      expect(result.plan.changes).toHaveLength(0);
+      expect(result.pull).toBeUndefined();
+      expect(fixture.head(result.plan.branch)).toBeNull();
+      expect(fixture.github.writes).toHaveLength(0);
+      expect(fixture.github.pulls).toHaveLength(0);
+    },
+  );
+
+  test("previews a title update and holds the proposal after an unrelated edit", async () => {
+    const { fixture, first, pull } = await Fixture.withInitialPull();
+    const previousTitle = "release: prepare the next Codex Security release";
+    pull.title = previousTitle;
+    const refs = fixture.git("show-ref");
+    const writes = fixture.github.writes.length;
+    const preview = await fixture.run(true);
+    expect(preview.action).toBe("would-update");
+    expect(preview.plan.title).toBe(first.plan.title);
+    expect(fixture.git("show-ref")).toBe(refs);
+
+    fixture.commit(
+      first.plan.branch,
+      { "sdk/typescript/src/example.ts": "export const changed = true;\n" },
+      "fix: unrelated source change",
+    );
+    const editedRefs = fixture.git("show-ref");
+    const held = await fixture.run(true);
+    expect(held.action).toBe("held");
+    expect(held.reason).toContain("other file edits");
+    expect(fixture.git("show-ref")).toBe(editedRefs);
+    expect(pull.title).toBe(previousTitle);
+    expect(fixture.github.writes).toHaveLength(writes);
   });
 
   test("deduplicates rebased PRs and recognizes breaking direct commits", async () => {
@@ -1913,25 +2257,15 @@ describe("release proposal pauses", () => {
     ).toHaveLength(1);
   });
 
-  test.each([false, true])(
-    "updates an existing proposal with draft=%p",
-    async (draft) => {
-      const { fixture, first, pull } = await Fixture.withInitialPull();
-      pull.draft = draft;
-      pull.body += "\nMaintainer review notes.\n";
-      const reviewedBody = pull.body;
-      const reviewedHead = fixture.head(first.plan.branch);
-      fixture.merge("feat!: later breaking change");
-      const updated = await fixture.run();
-      expect(updated.action).toBe("updated");
-      expect(updated.pull).toBe(first.pull);
-      expect(updated.plan.version).toBe("0.2.0");
-      expect(fixture.head(first.plan.branch)).not.toBe(reviewedHead);
-      expect(pull.title).toBe(updated.plan.title);
-      expect(pull.body).toBe(reviewedBody);
-      expect(pull.draft).toBe(draft);
-    },
-  );
+  test("keeps an existing release proposal in draft when updating it", async () => {
+    const { fixture, first, pull } = await Fixture.withInitialPull();
+    pull.draft = true;
+    fixture.merge("feat!: later breaking change");
+    const updated = await fixture.run();
+    expect(updated.action).toBe("updated");
+    expect(updated.pull).toBe(first.pull);
+    expect(pull.draft).toBe(true);
+  });
 
   test("does not advance a proposal closed during preparation", async () => {
     const { fixture, first, pull } = await Fixture.withInitialPull();

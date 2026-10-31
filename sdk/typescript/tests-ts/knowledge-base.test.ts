@@ -820,6 +820,19 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("Boundary &#x110000; case.\n");
   });
 
+  test("skips Office owner files while a document is open", async () => {
+    const root = await temporaryDirectory();
+    await writeFile(join(root, "policy.docx"), docx("Access policy."));
+    await writeFile(join(root, "~$policy.docx"), new Uint8Array(162).fill(1));
+
+    const knowledgeBase = await prepareKnowledgeBase([root]);
+    temporaryDirectories.track(knowledgeBase.path);
+
+    expect(await extractedDocuments(knowledgeBase.path)).toEqual([
+      "Access policy.\n",
+    ]);
+  });
+
   test("cleans up documents and rediscovers directory contents on later runs", async () => {
     const root = await temporaryDirectory();
     const source = join(root, "scope.md");

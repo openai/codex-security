@@ -18,6 +18,7 @@ from workbench_test_support import (
     fail_deep_scan,
     get_scan,
     preserve_scan_results,
+    read_review_state,
     replay_saved_results,
     run_workbench,
     saved_binding,
@@ -80,7 +81,7 @@ def test_late_head_changes_require_explicit_recovery(
     assert not any(
         row["id"] in {"review", f"{worker_id}/review"}
         or row.get("provenance", {}).get("sourceId") == "review"
-        for row in json.loads((scan_dir / "coverage.json").read_text())["deferred"]
+        for row in read_review_state(state, scan_dir)["deferred"]
     )
     assert get_scan(state, scan_id)["scan"]["resultsRecoveryNeeded"] is False
 
@@ -92,7 +93,7 @@ def test_late_head_changes_require_explicit_recovery(
     assert manifest_path.read_bytes() == first_manifest
     recovered = scan_command(state, "recover-scan-results", scan_id, environment=environment)
     assert recovered["scan"]["resultsRecoveryNeeded"] is False
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, scan_dir)
     expected = {"id": "review", "reason": "Review remains."}
     if has_result:
         expected.update(
@@ -592,7 +593,7 @@ def test_completion_checks_selected_parent_checkpoint(
     manifest["scan"]["scope"]["limitations"] = ["The dependency boundary is still unreviewed."]
     manifest["scan"]["threatModel"] = {"summary": "The earlier threat model."}
     manifest_path.write_text(json.dumps(manifest))
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, scan_dir)
     if complete is False:
         coverage.update(deferred=[{"id": "review", "reason": "Review reopened."}])
     draft = {
@@ -798,7 +799,7 @@ def test_head_snapshot_reads_content_and_time_from_one_descriptor(
     }
 
 
-def test_legacy_live_head_sources_keep_their_recorded_digest(
+def test_legacy_live_head_sources_convert_their_recorded_observation(
     tmp_path: Path, checkpoint_scan
 ) -> None:
     scan_id, pending, closed, binding = checkpoint_scan
@@ -819,7 +820,18 @@ def test_legacy_live_head_sources_keep_their_recorded_digest(
     )
     assert first is not None
     assert pending["coverage"]["deferred"][0] not in first[2]["deferred"]
-    assert first[0]["scan"]["preservedSources"] == frozen
+    published = first[0]["scan"]["preservedSources"]
+    assert "checkpoint-head.json" not in published
+    assert published[paths[0]] == frozen[paths[0]]
+    assert (
+        saved._read_saved_result(tmp_path, "checkpoint-head.json", scan_id)[1]
+        == frozen["checkpoint-head.json"]
+    )
+    snapshot = next(path for path in published if path.startswith("checkpoint-heads/"))
+    assert json.loads((tmp_path / snapshot).read_text()) == {
+        "checkpoint": checkpoint.name,
+        "observedAtNs": "200",
+    }
     select(tmp_path, checkpoint, 300)
     with pytest.raises(
         saved.ContractError, match="Frozen stopped-scan checkpoint set is incomplete"
@@ -834,6 +846,8 @@ def test_legacy_live_head_sources_keep_their_recorded_digest(
             reason="interrupted",
             frozen_source_digests=frozen,
         )
+    replayed = replay_saved_results(saved, first, tmp_path, scan_id, binding, [], stopped=True)
+    assert replayed[2] == first[2]
 
 
 @pytest.mark.parametrize("evidence", ["deferred", "reported"])
@@ -843,7 +857,6 @@ def test_legacy_live_head_sources_keep_their_recorded_digest(
         ("findings.json", 200),
         ("findings.json", 50),
         ("findings.json", 100),
-        ("coverage.json", 200),
         ("scan-manifest.json", 200),
     ],
 )
@@ -913,7 +926,7 @@ def test_parent_head_selection_matches_frozen_publication_retry(
     original_head = json.loads((scan_dir / "checkpoint-head.json").read_text())
     original_checkpoint = scan_dir / "checkpoints" / original_head["checkpoint"]
     os.utime(original_checkpoint, ns=(100, 100))
-    for filename in ("findings.json", "coverage.json", "scan-manifest.json"):
+    for filename in ("findings.json", "scan-manifest.json"):
         os.utime(scan_dir / filename, ns=(100, 100))
     select(scan_dir, original_checkpoint, 100)
 
@@ -949,10 +962,7 @@ def test_parent_head_selection_matches_frozen_publication_retry(
     assert terminal_checkpoint != original_checkpoint
     os.utime(terminal_checkpoint, ns=(head_time, head_time))
     select(scan_dir, terminal_checkpoint, head_time)
-    assert (
-        json.loads((scan_dir / "coverage.json").read_text())
-        == (terminal if destination == "scan-manifest.json" else initial)["coverage"]
-    )
+    assert read_review_state(state, scan_dir) == initial["coverage"]
 
     first = []
 
@@ -969,7 +979,7 @@ def test_parent_head_selection_matches_frozen_publication_retry(
     )
     replay = (
         json.loads((scan_dir / "findings.json").read_text()),
-        json.loads((scan_dir / "coverage.json").read_text()),
+        read_review_state(state, scan_dir),
     )
     projected_child_work = {
         **child_work,
@@ -1339,3 +1349,50 @@ def test_accepted_head_survives_superseded_terminal_timestamps(
     assert replay[1] == result[1]
     assert warnings == []
     assert all(path.read_bytes() == content for path, content in original.items())
+
+
+@pytest.mark.parametrize("scan_id", ["legacy-tied-head", "frozen-worker-heads"])
+def test_legacy_tied_worker_heads_keep_pending_work_on_replay(tmp_path: Path, scan_id: str) -> None:
+    pending, closed = drafts(scan_id)
+    binding = saved_binding("deep_repository", repository="synthetic")
+    output = tmp_path / "worker"
+    completed = write_checkpoint(output / "checkpoints", closed)
+    reopened = write_checkpoint(output / "checkpoints", pending)
+    frozen = {}
+    for checkpoint in (completed, reopened):
+        os.utime(checkpoint, ns=(100, 100))
+        select(output, checkpoint, 500)
+        frozen.update(
+            {
+                path: digest
+                for path, (digest, _) in saved._capture_saved_source(
+                    tmp_path, "worker/checkpoint-head.json", scan_id
+                ).items()
+            }
+        )
+    workers = [saved_discovery_worker(output, "worker", 1)]
+    first = saved.merge_saved_results(
+        tmp_path,
+        scan_id,
+        binding,
+        workers,
+        [],
+        stopped=True,
+        reason="interrupted",
+        frozen_source_digests=frozen,
+    )
+    replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, workers, stopped=True)
+    repeated = saved.merge_saved_results(
+        tmp_path,
+        scan_id,
+        binding,
+        workers,
+        [],
+        stopped=True,
+        reason="interrupted",
+        frozen_source_digests=replay[0]["scan"]["preservedSources"],
+        checkpoint_heads=replay[0]["scan"]["preservedCheckpointHeads"],
+    )
+    for documents in (first, replay, repeated):
+        assert pending["coverage"]["deferred"][0] in documents[2]["deferred"]
+        assert not documents[2].get("resolvedDeferred")

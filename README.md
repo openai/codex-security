@@ -188,7 +188,8 @@ cs export --scan SCAN_ID --artifact threat-model --output threatmodel.md
 
 Omit `--scan` to use the current repository's latest completed scan. The
 [export guide](sdk/typescript/docs/cli.md#exports-and-ci) also covers findings,
-SARIF output for CI, and the offline TypeScript API.
+SARIF output for CI, and the offline TypeScript API. For ServiceNow Application
+Vulnerability Response, see [Export findings for ServiceNow](sdk/typescript/docs/cli.md#export-findings-for-servicenow).
 
 ## GitHub Actions
 
@@ -269,6 +270,7 @@ for examples.
 - [Online documentation](https://learn.chatgpt.com/docs/security/cli)
 - [Agent workflows and recovery](docs/agent-workflows.md)
 - [CLI reference](sdk/typescript/docs/cli.md)
+- [Scanner file import schema and capability guide](docs/scanner-imports/schema-guide.md)
 - [Project configuration](docs/project-configuration.md)
 - [Examples](examples/README.md)
 

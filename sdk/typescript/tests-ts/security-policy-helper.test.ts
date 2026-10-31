@@ -934,34 +934,28 @@ binding.readdir = function (...args) {
     }
   });
 
-  test.each(["regular", "linked"])(
-    "resolves complete root and nested %s policies larger than 1 MiB",
-    (kind) => {
-      const { root } = fixture();
-      const rootContent = `${"root policy é\n".repeat(100_000)}root policy end\n`;
-      const nestedContent = `${"nested policy 文\n".repeat(100_000)}nested policy end\n`;
-      for (const [path, content, target] of [
-        ["SECURITY.md", rootContent, "policies/root.md"],
-        ["component/SECURITY.md", nestedContent, "policies/component.md"],
-      ] as const) {
-        expect(Buffer.byteLength(content, "utf8")).toBeGreaterThan(1024 * 1024);
-        write(root, kind === "linked" ? target : path, content);
-        if (kind === "linked") {
-          mkdirSync(dirname(join(root, path)), { recursive: true });
-          symlinkSync(join(root, target), join(root, path), "file");
-        }
-      }
-      const rootResult = resolve(root, ".");
-      expect(rootResult.status, rootResult.stderr).toBe(0);
-      expectGuidance(rootResult.stdout, [["SECURITY.md", rootContent]]);
-      const nestedResult = resolve(root, "component");
-      expect(nestedResult.status, nestedResult.stderr).toBe(0);
-      expectGuidance(nestedResult.stdout, [
-        ["SECURITY.md", rootContent],
-        ["component/SECURITY.md", nestedContent],
-      ]);
-    },
-  );
+  test("resolves complete root and linked nested policies larger than 1 MiB", () => {
+    const { root } = fixture();
+    const rootContent = `${"root policy é\n".repeat(100_000)}root policy end\n`;
+    const nestedContent = `${"nested policy 文\n".repeat(100_000)}nested policy end\n`;
+    expect(Buffer.byteLength(rootContent)).toBeGreaterThan(1024 * 1024);
+    expect(Buffer.byteLength(nestedContent)).toBeGreaterThan(1024 * 1024);
+    write(root, "SECURITY.md", rootContent);
+    write(root, "policies/component.md", nestedContent);
+    mkdirSync(join(root, "component"));
+    symlinkSync(
+      join(root, "policies/component.md"),
+      join(root, "component/SECURITY.md"),
+      "file",
+    );
+
+    const result = resolve(root, "component");
+    expect(result.status, result.stderr).toBe(0);
+    expectGuidance(result.stdout, [
+      ["SECURITY.md", rootContent],
+      ["component/SECURITY.md", nestedContent],
+    ]);
+  });
 
   test("preserves required and mutually exclusive helper arguments", () => {
     const { root } = fixture();

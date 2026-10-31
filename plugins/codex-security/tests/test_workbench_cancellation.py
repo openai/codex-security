@@ -6,6 +6,7 @@ from pathlib import Path
 from workbench_test_support import (
     cancel_scan,
     create_saved_workspace,
+    empty_target_paths,
     fail_scan,
     get_scan,
     mark_handoff_delivered,
@@ -18,9 +19,7 @@ from workbench_test_support import (
 
 
 def test_workbench_records_scan_failure(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_scan_command(
         state_dir, str(saved["id"]), "--scan-root", str(tmp_path / "scans")
@@ -41,9 +40,7 @@ def test_workbench_records_scan_failure(tmp_path: Path) -> None:
 
 
 def test_workbench_cancels_running_scan_and_rejects_late_updates(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     thread_id = "thread-cancel-owner"
     saved = create_saved_workspace(state_dir, target, thread_id=thread_id)
     started = start_scan_command(state_dir, str(saved["id"]))
@@ -91,9 +88,7 @@ def test_workbench_cancels_running_scan_and_rejects_late_updates(tmp_path: Path)
 
 
 def test_workbench_rejects_unconfirmed_cross_thread_handoff_delivery(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     thread_id = "thread-handoff-owner"
     saved = create_saved_workspace(state_dir, target, thread_id=thread_id)
     started = start_scan_command(state_dir, str(saved["id"]))
@@ -119,9 +114,7 @@ def test_workbench_rejects_unconfirmed_cross_thread_handoff_delivery(tmp_path: P
 
 
 def test_workbench_allows_user_confirmed_recovery_in_another_thread(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target, thread_id="thread-recovery-owner")
     started = start_scan_command(state_dir, str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
