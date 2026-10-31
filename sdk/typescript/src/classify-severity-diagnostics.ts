@@ -1,8 +1,6 @@
 import type { SeverityDiagnosticCode } from "./classify-severity-records.js";
 import type { HostDiagnosticBatch } from "./host-protocol.js";
 
-const maxRecords = 64;
-
 /** Node resolves the private import only when the host activates this condition. */
 export function severityDiagnosticsEnabled(): boolean {
   try {
@@ -19,14 +17,6 @@ export function createSeverityDiagnostics(now: () => number) {
   let dropped = 0;
 
   function emit(code: SeverityDiagnosticCode, ordinal?: number) {
-    // Reserve space in the pending frame for the terminal result.
-    if (
-      records.length >= maxRecords ||
-      (records.length >= maxRecords - 1 && !code.startsWith("exit_"))
-    ) {
-      dropped++;
-      return;
-    }
     try {
       records.push(
         JSON.stringify({

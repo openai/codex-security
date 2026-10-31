@@ -91,18 +91,12 @@ test.each([false, true])(
   },
 );
 
-test("bounds pending diagnostics and keeps later review failures after a flush", () => {
+test("records cancellation without including the host error message", () => {
   const diagnostics = createSeverityDiagnostics(() => timestamp);
-  for (let i = 0; i < 1536; i++) diagnostics.emit("review_requested", 1);
-  const request = diagnostics.take({ method: "review.run" })!;
-  expect(request.records).toHaveLength(63);
-  expect(request.dropped).toBe(1474);
-  expect(diagnostics.take({ method: "review.run" })).toBeUndefined();
-  diagnostics.emit("review_failed", 2);
   expect(
     diagnostics.take({ error: { code: -32800, message: "private-sentinel" } }),
   ).toEqual({
-    records: [original("review_failed", 2), original("exit_cancelled")],
+    records: [original("invocation_started"), original("exit_cancelled")],
     dropped: 0,
   });
 });

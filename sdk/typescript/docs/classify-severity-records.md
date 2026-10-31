@@ -56,14 +56,14 @@ numeric evidence that JavaScript cannot represent exactly.
 A host that can consume optional fields on outgoing JSON-RPC frames can opt in when launching the CLI:
 
 ```sh
-node --conditions=codex-security-records-logs-v1 /path/to/codex-security classify-severity --records
+node --conditions=codex-security-records-logs-v1 /path/to/node_modules/@openai/codex-security/bin/codex-security.mjs classify-severity --records
 ```
 
 The CLI attaches `cliDiagnostics` to its existing review requests and final result or error. Its `records` array contains original JSON lines. Each line has a schema, UTC timestamp and fixed event code. Review events also include the one-based candidate vote ordinal within the record. The CLI records input validation, review requests and outcomes, vote resolution and the process result. Diagnostic records omit prompts, finding data and review responses.
 
 Hosts should process the optional field before their usual response validation. A host may discard it. Hosts that omit the Node condition receive the original wire format. Older CLIs ignore the condition. A host can use the same launch command during an upgrade. No extra frame or acknowledgment is required.
 
-Each outgoing frame can carry at most 64 records, reserving room for the final outcome. Sending a batch frees space for later reviews. Each batch includes the number dropped since the preceding write. If the process or connection disappears before the next write, its pending records cannot be delivered. Native startup or usage errors can still appear on stderr.
+Each review request drains the events produced since the preceding write. The final frame delivers the remaining events and process outcome. Each batch includes the number of records that could not be serialized. If the process or connection disappears before the next write, its pending records cannot be delivered. Native startup or usage errors can still appear on stderr.
 
 ## Host execution contract
 
