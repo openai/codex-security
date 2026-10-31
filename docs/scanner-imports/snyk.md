@@ -53,10 +53,13 @@ To select a subset in the SDK, filter the normalized report’s `findings`
 array. Keep the report’s `snykRestContext` and each selected finding’s
 `source_finding_id` and `evidence.source_data`. Every hosted row must retain
 the native issue and its generated ID. The verified report context can supply
-the monitored project for a row that retains only its original issue. The local
-workbench stores the verified project and target with that issue, so the stored
-row can be imported again. All selected issues must share an API region,
-organization, project and product.
+the monitored project for a row that retains only its original issue. For a v1
+row, keep `source_data.issue` and its `source_data.numericFields.issue` when
+present. V1 uses those fields together to distinguish exact numbers from
+strings with the same spelling. For a v2 row, keep `source_data.issueJson`.
+The local workbench stores the verified project and target with that issue,
+so the stored row can be imported again. All selected issues must share an API
+region, organization, project and product.
 
 SDK readers that define their own findings and IDs can use the ordinary
 normalized Snyk import with their own evidence and no hosted report context.

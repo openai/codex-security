@@ -67,6 +67,8 @@ test("replays a v1 Snyk export with its original evidence, then updates the same
   const row = selected.findings[0]!;
   row.evidence.source_data = {
     issue: original,
+    project: undefined,
+    target: undefined,
     numericFields: { issue: issueFields },
   };
   const projected = await fixture.prepareNormalized(selected);

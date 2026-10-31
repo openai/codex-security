@@ -229,8 +229,13 @@ test("unrelated Wiz evidence with Snyk-like field names remains importable local
     ...snykOptions,
     snykRestIssueKey: "upstream-ticket",
     apiVersion: "2026-03-25",
-    projectJson: "{}",
+    projectJson: JSON.stringify({
+      type: "project",
+      id: "repo-name",
+      attributes: { origin: "github", type: "npm" },
+    }),
     issueJson: "{}",
+    targetJson: JSON.stringify({ type: "target", id: 42 }),
     project: { name: "sample" },
     issue: { name: "sample issue" },
   };
@@ -432,6 +437,10 @@ test("retagged original Snyk records remain scoped without a matching source ID 
       snykRestIssueKey: original["snykRestIssueKey"],
       targetJson: "null",
     },
+    {
+      snykRestIssueKey: original["snykRestIssueKey"],
+      targetJson: JSON.stringify(legacy.project.relationships.target.data),
+    },
   ]) {
     row.evidence.source_data = {
       ...snykOptions,
@@ -615,12 +624,26 @@ test("projected Snyk findings cannot change destination by losing the report for
 
 test("rows from a different Snyk monitor cannot use the report's source key even on the same Git URL", async () => {
   const capture = snykRestFixture("open-source");
+  const project = JSON.parse(capture.projectJson);
+  const target = project.relationships.target.data;
+  const integrationId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  project.relationships.target.data = { type: target.type, id: target.id };
+  capture.projectJson = JSON.stringify(project);
+  capture.targetJson = JSON.stringify({
+    ...target,
+    relationships: {
+      integration: { data: { type: "integration", id: integrationId } },
+    },
+  });
   const report = normalizeSnykIssues(capture);
   const code = snykRestFixture("code");
   const otherId = "aaaa0000-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const replace = (old: string) =>
     JSON.parse(
-      JSON.stringify(capture).replaceAll(old, otherId),
+      JSON.stringify(capture)
+        .replaceAll(old, otherId)
+        .replace(snykIssue(false).attributes.key, "other-issue-key")
+        .replace(snykIssue(false).id, otherId),
     ) as typeof capture;
   const credentials = mock(async () => {
     throw new Error("Unexpected credentials");
@@ -632,6 +655,8 @@ test("rows from a different Snyk monitor cannot use the report's source key even
   for (const other of [
     replace(capture.organizationId),
     replace(capture.projectId),
+    replace(target.id),
+    replace(integrationId),
     code,
     { ...capture, apiOrigin: "https://api.au.snyk.io" },
   ]) {
@@ -707,6 +732,41 @@ test.each(["v1", "v2"] as const)(
     row.evidence.source_data = project(snykOptions.projectId);
     await expect(prepare()).rejects.toThrow("normalized finding ID");
     row.source_finding_id = nativeId;
+    const issue = JSON.parse(json);
+    const foreign = snykRestFixture("open-source", {
+      sourceRepositoryUrl: "https://github.com/example/other",
+    });
+    const alternateId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const original = normalizeSnykIssues(
+      JSON.parse(
+        JSON.stringify(foreign).replaceAll(foreign.projectId, alternateId),
+      ),
+    ).snykRestContext!;
+    row.evidence.source_data =
+      version === "v1"
+        ? { issue, projectJson: original["projectJson"] }
+        : {
+            issueJson: json,
+            project: JSON.parse(String(original["projectJson"])),
+          };
+    await expect(prepare()).rejects.toThrow("both v1 and v2");
+    expect(await fixture.read()).toBeEmpty();
+    const asset = report.snykRestContext!;
+    const selected =
+      version === "v1"
+        ? {
+            issue,
+            project: JSON.parse(String(asset["projectJson"])),
+            target: null,
+          }
+        : {
+            issueJson: json,
+            projectJson: asset["projectJson"],
+            targetJson: asset["targetJson"],
+          };
+    row.evidence.source_data = { ...selected, projectId: alternateId };
+    await expect(prepare()).rejects.toThrow("project");
+    row.evidence.source_data = selected;
     expect((await (await prepare()).import()).counts.created).toBe(1);
     expect((await (await prepare()).import()).counts.unchanged).toBe(1);
     const [stored] = await fixture.read();
