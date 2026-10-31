@@ -7,7 +7,10 @@ import type {
 import type { Provider } from "./external-import-models.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
-import { readSemgrepFindings } from "./semgrep-findings.js";
+import {
+  isSemgrepSarifDriver,
+  readSemgrepFindings,
+} from "./semgrep-findings.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
@@ -79,11 +82,43 @@ export function localFindingRepositories(
   return [];
 }
 
+/** Repository claims retained by the Semgrep SARIF reader. */
+export function semgrepSarifRepositories({
+  evidence,
+}: ExternalFinding): ExternalSourceRepository[] {
+  const data = evidence.source_data;
+  const document = data?.["documentContext"];
+  const driver = data?.["driverContext"];
+  if (
+    !isRecord(document) ||
+    document["version"] !== "2.1.0" ||
+    !isRecord(driver) ||
+    typeof driver["name"] !== "string" ||
+    !isSemgrepSarifDriver(driver["name"]) ||
+    !isRecord(data?.["result"])
+  )
+    return [];
+  const context = data["runContext"];
+  const references = isRecord(context)
+    ? context["versionControlProvenance"]
+    : undefined;
+  return Array.isArray(references)
+    ? references.flatMap((reference) =>
+        isRecord(reference) &&
+        typeof reference["repositoryUri"] === "string" &&
+        reference["repositoryUri"].trim()
+          ? [{ url: reference["repositoryUri"] }]
+          : [],
+      )
+    : [];
+}
+
 /** @internal Read vendor evidence for the local and Cloud import entrypoints. */
 export async function readExternalFindings(
   path: string,
   options: ExternalFindingsReaderOptions,
   target: ExternalImportTarget = "cloud",
+  references: readonly ExternalSourceRepository[] = [],
 ): Promise<ReadExternalFindings> {
   if (options.provider === "opengrep") {
     const sourceRepositoryUrl = options.sourceRepositoryUrl ?? "";
@@ -114,24 +149,13 @@ export async function readExternalFindings(
       path,
       {
         sourceRepositoryUrl: options.sourceRepositoryUrl ?? "",
+        sourceRepositories: references,
       },
       target,
     );
-    const sourceRepositories = findings.findings.flatMap(({ evidence }) => {
-      const context = evidence.source_data?.["runContext"];
-      const references = isRecord(context)
-        ? context["versionControlProvenance"]
-        : undefined;
-      return Array.isArray(references)
-        ? references.flatMap((reference) =>
-            isRecord(reference) &&
-            typeof reference["repositoryUri"] === "string" &&
-            reference["repositoryUri"].trim()
-              ? [{ url: reference["repositoryUri"] }]
-              : [],
-          )
-        : [];
-    });
+    const sourceRepositories = findings.findings.flatMap(
+      semgrepSarifRepositories,
+    );
     return { findings, sourceRepositories };
   }
   if (options.provider === "github")

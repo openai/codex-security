@@ -33,6 +33,8 @@ const distModules = [
   "scanner-repository-url",
   "semgrep-findings",
   "semgrep-platform-findings",
+  "hosted-git-remotes",
+  "hosted-git-repository",
   "native-json-findings",
   "opengrep-findings",
   "external-findings-publish",
