@@ -1274,6 +1274,17 @@ async function verifyLegacyLocationReplay(
       (await direct(extended)).preview.findings[0]!.evidence.locations,
     ).toEqual(extended.evidence.locations);
   }
+  const authored = structuredClone(original);
+  authored.evidence.source_data!["finding"] = {
+    ...row,
+    severity: "informational",
+  };
+  authored.evidence.severity = "informational";
+  expect((await direct(authored)).preview.findings[0]!.evidence).toMatchObject({
+    severity: "informational",
+    locations: locations(newPath),
+    details: { code: { end_line: newPath ? 5 : null } },
+  });
   const custom = structuredClone(original);
   if (!legacyOnly) custom.evidence.severity = "low";
   custom.evidence.locations = [{ path: "manual.ts", line: 7 }];

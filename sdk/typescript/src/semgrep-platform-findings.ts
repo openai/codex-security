@@ -71,6 +71,7 @@ export function isSemgrepPlatformFormat(
 export function semgrepPlatformReportScope(
   input: ExternalFindings,
   provider?: string,
+  references: readonly ExternalSourceRepository[] = [],
 ) {
   const format = "sourceFormat" in input ? input.sourceFormat : undefined;
   if (
@@ -100,6 +101,13 @@ export function semgrepPlatformReportScope(
     "semgrepPlatformScope" in input ? input.semgrepPlatformScope : undefined,
     "Normalized Semgrep report scope",
   );
+  const url = hostedRepositoryUrl(
+    "sourceRepositoryUrl" in input ? input.sourceRepositoryUrl : undefined,
+    "Semgrep Platform",
+  );
+  if (format !== semgrepSelectionFormat && references.length)
+    selectionRepository(url, references);
+
   return {
     format,
     deployment: requiredText(scope["deployment"], "Semgrep deployment"),
@@ -108,10 +116,7 @@ export function semgrepPlatformReportScope(
     ),
     ref: requiredText(scope["ref"], "Semgrep ref"),
     product: scopeProduct(scope["product"], format !== semgrepSelectionFormat),
-    url: hostedRepositoryUrl(
-      "sourceRepositoryUrl" in input ? input.sourceRepositoryUrl : undefined,
-      "Semgrep Platform",
-    ),
+    url,
   };
 }
 
@@ -1175,28 +1180,45 @@ export function semgrepPlatformFindingBinding(
   references: SemgrepRepositoryReference = [],
   legacyWitnesses?: ReadonlyMap<string, string>,
   reportScope?: ReturnType<typeof semgrepPlatformReportScope>,
-  projectedRepositoryUrls: readonly (string | undefined)[] = [],
+  projectedSources: readonly (
+    { url?: string; branch?: string } | undefined
+  )[] = [],
 ) {
   const retained = finding.evidence.source_data;
   if (!isSemgrepPlatformEvidence(finding, provider)) {
     if (reportScope && reportScope.format !== semgrepSelectionFormat) {
       const source = repositoryContext(reportScope.url, references).source;
-      const urls = [
-        finding.evidence.details?.repository?.url,
-        ...projectedRepositoryUrls,
+      const claims = [
+        {
+          url: finding.evidence.details?.repository?.url,
+          branch: finding.evidence.branch,
+        },
+        ...projectedSources,
       ];
-      if (urls.some((url) => url && !semgrepReferenceMatches(source, url)))
+      if (
+        claims.some(
+          (claim) => claim?.url && !semgrepReferenceMatches(source, claim.url),
+        )
+      )
         throw new Error(
           "The projected repository does not match the Semgrep report repository.",
         );
-      const branch = finding.evidence.branch;
+      const ref = reportScope.ref && qualifiedBranch(reportScope.ref);
       if (
-        branch &&
-        reportScope.ref &&
-        qualifiedBranch(branch) !== qualifiedBranch(reportScope.ref)
+        ref &&
+        claims.some(
+          (claim) => claim?.branch && qualifiedBranch(claim.branch) !== ref,
+        )
       )
         throw new Error(
           "The projected branch does not match the Semgrep report ref.",
+        );
+      if (
+        reportScope.product === "sca" &&
+        finding.evidence.details?.kind === "sast"
+      )
+        throw new Error(
+          "The projected finding kind does not match the Semgrep report product.",
         );
     }
     return;
@@ -1223,6 +1245,10 @@ export function semgrepPlatformFindingBinding(
     repository,
     legacy ? semgrepV1Id : semgrepPlatformId,
   );
+  if (reportScope?.format === semgrepSelectionFormat && !selectable)
+    throw new Error(
+      "Semgrep finding does not belong to the selected project and ref.",
+    );
   let occurrenceId = legacy ? semgrepV1Id : semgrepPlatformId;
   const nativeId = sourceId(scope, row, occurrenceId);
   if (
@@ -1312,6 +1338,7 @@ export function semgrepPlatformFindingBinding(
       )
     : undefined;
   if (
+    !original &&
     data["format"] === semgrepPlatformFormat &&
     canonical.format === semgrepSelectionFormat
   ) {
