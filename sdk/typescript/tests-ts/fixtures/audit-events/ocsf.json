@@ -1,0 +1,51 @@
+{
+  "metadata": {
+    "version": "1.1.0",
+    "uid": "00000000-0000-4000-8000-000000000002",
+    "product": {
+      "name": "CloudTrail",
+      "vendor_name": "AWS",
+      "feature": {
+        "name": "Management"
+      }
+    }
+  },
+  "class_uid": 6003,
+  "class_name": "API Activity",
+  "category_uid": 6,
+  "activity_id": 3,
+  "activity_name": "Update",
+  "type_uid": 600303,
+  "type_name": "API Activity: Update",
+  "time": 1767268920000,
+  "severity_id": 1,
+  "status_id": 1,
+  "actor": {
+    "user": {
+      "uid": "arn:aws:sts::123456789012:assumed-role/example-deploy/deploy",
+      "type_id": 3
+    }
+  },
+  "api": {
+    "operation": "AttachRolePolicy",
+    "service": {
+      "name": "iam.amazonaws.com"
+    }
+  },
+  "cloud": {
+    "provider": "AWS",
+    "region": "us-east-1",
+    "account": {
+      "uid": "123456789012"
+    }
+  },
+  "src_endpoint": {
+    "ip": "192.0.2.10"
+  },
+  "unmapped": {
+    "requestParameters": {
+      "roleName": "example-deploy",
+      "policyArn": "arn:aws:iam::aws:policy/AdministratorAccess"
+    }
+  }
+}

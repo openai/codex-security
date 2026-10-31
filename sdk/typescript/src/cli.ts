@@ -48,7 +48,17 @@ import {
 } from "node:path";
 import { cwd } from "node:process";
 import { createInterface } from "node:readline";
-import { Readable, Writable as NodeWritable } from "node:stream";
+import {
+  addAbortSignal,
+  Readable,
+  Writable as NodeWritable,
+} from "node:stream";
+import { text as readStreamText } from "node:stream/consumers";
+import {
+  reviewSecurityEventsInternal,
+  parseSecurityEventInputText,
+  securityEventReviewSchema,
+} from "./review-events.js";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   isDeepStrictEqual,
@@ -354,6 +364,7 @@ import {
 
 import {
   readProjectConfig,
+  projectReviewEventSettings,
   resolveScanSettings,
   projectScopeTarget,
   configurationSources,
@@ -362,7 +373,10 @@ import {
   type ScopeProvenanceKey,
   type ProjectConfigProvenance,
 } from "./project-config.js";
-import type { ProjectScope } from "./project-config-schema.js";
+import {
+  ReviewEventSettingsSchema,
+  type ProjectScope,
+} from "./project-config-schema.js";
 import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
 import { deepScanOptions, resolveDeepScanConfig } from "./deep-config.js";
 import { SCAN_MODES } from "./scan-modes.js";
@@ -1256,6 +1270,7 @@ interface CliDependencies {
   classifyScanSeverity?: typeof classifyScanSeverityInternal;
   classifyScanDirectorySeverity?: typeof classifyScanDirectorySeverityInternal;
   suggestOwners?: typeof suggestOwnersInternal;
+  reviewSecurityEvents?: typeof reviewSecurityEventsInternal;
   recordsInput?: Readable;
   publishFindingsCsvToCloud?: typeof publishFindingsCsvToCloud;
   publishScanToCloud?: typeof publishScanToCloud;
@@ -4693,6 +4708,70 @@ export async function main(
         }
       },
     })
+    .command("review-events", {
+      description: "Review CEF audit records or a JSON batch from stdin.",
+      hint: "Pipe CEF records or a version 1 JSON batch into review-events --json. Use --screen-with-decisions to screen related events before a full review.",
+      mcp: false,
+      alias: { config: "c" },
+      options: z.object({
+        config: PROJECT_CONFIG_OPTION,
+        screenWithDecisions:
+          ReviewEventSettingsSchema.shape.screen_with_decisions,
+        decisionsCutoff: ReviewEventSettingsSchema.shape.decisions_cutoff,
+        cyberAccessProgram: ScanSettingsSchema.shape.cyberAccessProgram,
+        ...modelOptions(
+          "Model for full event reviews (default: configured Codex model).",
+          "Reasoning effort for full event reviews.",
+        ).shape,
+      }),
+      output: securityEventReviewSchema,
+      async run({ options }) {
+        const controller = new AbortController();
+        const removeSignals = listenForAbort(dependencies, controller);
+        try {
+          const project = await selectedProjectConfig(
+            options.config,
+            dependencies,
+          );
+          const settings = projectReviewEventSettings(
+            project?.input.review_events ?? {},
+          );
+          const input = parseSecurityEventInputText(
+            await readStreamText(
+              addAbortSignal(
+                controller.signal,
+                dependencies.recordsInput ?? process.stdin,
+              ),
+            ),
+          );
+          return await (
+            dependencies.reviewSecurityEvents ?? reviewSecurityEventsInternal
+          )(
+            input,
+            {
+              screenWithDecisions:
+                options.screenWithDecisions ?? settings.screenWithDecisions,
+              decisionsCutoff:
+                options.decisionsCutoff ?? settings.decisionsCutoff,
+              cyberAccessProgram: options.cyberAccessProgram,
+              model: options.model,
+              reasoningEffort: options.effort,
+              environment: dependencies.environment,
+              signal: controller.signal,
+            },
+            "cli",
+          );
+        } catch (error) {
+          exitCode = interruptedExitCode(controller.signal) ?? 2;
+          errorOutput.write(
+            `codex-security: ${controller.signal.aborted ? "Event review canceled." : diagnosticValue(error)}\n`,
+          );
+          throw error;
+        } finally {
+          removeSignals();
+        }
+      },
+    })
     .command("classify-severity", {
       description: "Assess severity for saved findings or canonical records.",
       hint: "Use --rubric to override the built-in policy or --records for host-provided classification.",
@@ -6930,7 +7009,10 @@ export async function main(
       command !== "verify-fix" &&
       command !== "patch" &&
       positionals.length >
-        (scanImport || command === "logout" || command === "info"
+        (scanImport ||
+        command === "logout" ||
+        command === "info" ||
+        command === "review-events"
           ? 0
           : subcommand === "compare" || subcommand === "match"
             ? 2

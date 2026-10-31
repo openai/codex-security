@@ -13,6 +13,24 @@
       "type": "string",
       "enum": ["auto", "chatgpt", "api-key"]
     },
+    "review_events": {
+      "type": "object",
+      "properties": {
+        "screen_with_decisions": {
+          "default": false,
+          "description": "Screen event groups with the OpenAI Decisions API (requires OPENAI_API_KEY).",
+          "type": "boolean"
+        },
+        "decisions_cutoff": {
+          "default": 0.95,
+          "description": "Minimum confidence for a routine Decisions answer to skip full review (0–1, default 0.95).",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "additionalProperties": false
+    },
     "scan": {
       "type": "object",
       "properties": {

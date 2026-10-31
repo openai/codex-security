@@ -11,6 +11,7 @@ const COMMAND_GROUPS: readonly Group[] = [
       "scans",
       "findings",
       "classify-severity",
+      "review-events",
       "dedupe",
       "suggest-owners",
       "export",

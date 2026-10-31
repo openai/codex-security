@@ -1892,6 +1892,77 @@ console.log(publication.scanId, publication.created.length);
 Options also include `projectId`, `linearApiKey`, and `assigneeId` (ID or email).
 `checkScanPublication()` takes the same destination options for a read-only check.
 
+## Review audit events
+
+Review native CEF records from stdin, one record per line, or a version 1 JSON batch.
+No event translation is required. The optional batch envelope groups related events
+and supplies earlier records as context. Each observation must cite a new event from
+its own group.
+
+```sh
+codex-security review-events --json < events.cef
+codex-security review-events --screen-with-decisions --json < events.cef
+codex-security review-events --json < batch.json
+```
+
+CEF 0 and 1 records retain their header, extensions, escaping, and optional syslog
+prefix. Header framing and severity are checked; extensions and syslog prefixes are
+preserved without full conformance validation. See the [runnable synthetic CEF
+examples](../../../examples/audit-events/README.md). These examples make no assumptions
+about a customer's sources or export formats and include no collector.
+
+The optional envelope remains `{schemaVersion: 1, source, serviceContext?, groups}`.
+Each group has a unique `id`, an `events` array of unchanged CEF strings, and an
+optional `contextEvents` array of earlier strings. Raw CEF uses group `events` and
+source `cef`; use the envelope for explicit source, grouping, and history.
+
+CEF's event class ID identifies a type, not an occurrence. Citations use `sha256:`
+plus SHA-256 of the exact UTF-8 record, including its optional syslog prefix and
+escaping but excluding the line terminator. Repeated identical records share an ID;
+changing content or formatting changes it. The model receives parallel `eventReferences`
+arrays. Citation IDs must be unique across new and historical events within a group.
+
+The SDK accepts a CEF string, an array of CEF strings, or a version 1 envelope.
+Existing CloudTrail 1.x records/`Records` exports, OCSF 1.x.y records, and legacy
+custom JSON events remain accepted for compatibility. Their original citation rules
+remain: CloudTrail `eventID`, OCSF `metadata.uid` (or a hash of recursively key-sorted
+JSON when absent), and legacy `id`. JSONL describes transport, not an event schema.
+
+By default each nonempty group gets one read-only Codex review. With `--screen-with-decisions`, the command sends that group's evidence and service context to the OpenAI Decisions API using `OPENAI_API_KEY`. This is an additional API call even when full reviews use a different Codex provider. The v1 screen uses `gpt-6-luna` and skips Codex only for a `routine` choice whose confidence meets or exceeds the cutoff. Set `--decisions-cutoff` to a number from 0 to 1 (default 0.95). Setting the cutoff alone leaves screening off. Uncertain or suspicious activity goes to Codex with the same evidence. Empty groups make no model calls.
+
+For repeated reviews, select a trusted project file with `-c FILE` or `CODEX_SECURITY_PROJECT_CONFIG`. Explicit CLI options take precedence over the file.
+
+```yaml
+review_events:
+  screen_with_decisions: true
+  decisions_cutoff: 0.98
+```
+
+```sh
+codex-security review-events -c review.yaml --json < batch.json
+codex-security review-events -c review.yaml --decisions-cutoff 0.99 --json < batch.json
+```
+
+Results report the source and each group's `id`, `status` (`empty`, `screened`, or `reviewed`), `screening` (choice and confidence when screened), and `observations`. A full review can return zero observations. Each observation carries a `review` or `page` disposition, `rationale`, and supporting `eventIds`. A refusal, API failure, or invalid result fails the batch. Advance your collector's cursor only after persisting a successful review. The caller owns scheduling, deduplication, and pager delivery.
+
+The TypeScript package exports the same operation and Zod schemas.
+
+```ts
+import {
+  reviewSecurityEvents,
+  securityEventInputSchema,
+} from "@openai/codex-security";
+
+const batch = securityEventInputSchema.parse(input);
+const result = await reviewSecurityEvents(batch, {
+  screenWithDecisions: true,
+  decisionsCutoff: 0.98,
+  cyberAccessProgram: "daybreak_blue",
+});
+```
+
+To reuse a YAML file in the SDK, pass `(await loadProjectConfig("review.yaml")).reviewEvents` as the options argument. An explicit `decisionsCutoff` after spreading those options overrides the file.
+
 ## Classify finding severity
 
 Apply a rubric to completed findings without repeating discovery:
