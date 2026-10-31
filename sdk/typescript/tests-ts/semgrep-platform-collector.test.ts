@@ -373,6 +373,38 @@ test("a normalized Platform report binds native rows even when both projects hav
     ),
   ).rejects.toThrow(/source repository.*selected Semgrep project/i);
   const supplyChain = normalize(upstream, "77", { product: "sca" });
+  for (const product of ["sast", "ai_sast", "sca"] as const) {
+    const branded = normalize(upstream, "77", { product }).findings[0]!;
+    const batch = { read: 1, excluded: [], findings: [branded] };
+    for (const kind of ["secret", "iac"] as const) {
+      branded.evidence.details = { kind, repository: { url: upstream } };
+      await expect(prepare(batch)).rejects.toThrow(/product/);
+    }
+    branded.evidence.advisory_ids = ["CVE-2025-0001"];
+    branded.evidence.details = {
+      kind: "advisory",
+      repository: { url: upstream },
+      advisory: { source: "repository" },
+    };
+    expect((await prepare(batch)).preview.findings[0]!.evidence).toMatchObject({
+      advisory_ids: branded.evidence.advisory_ids,
+      details: branded.evidence.details,
+    });
+  }
+  const genericSecret = structuredClone(ordinary);
+  genericSecret.evidence.details = {
+    kind: "secret",
+    repository: { url: upstream },
+  };
+  expect(
+    (
+      await prepare({
+        ...supplyChain,
+        read: 2,
+        findings: [...supplyChain.findings, genericSecret],
+      })
+    ).preview.findings,
+  ).toHaveLength(2);
   const nativeAdvisory = structuredClone(supplyChain.findings[0]!);
   nativeAdvisory.evidence.details = matching.evidence.details;
   await expect(

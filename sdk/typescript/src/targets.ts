@@ -807,6 +807,10 @@ export async function gitOutput(
   const command = await trustedGitCommand(
     repository,
     args[0] === "rev-parse" ||
+      (args[0] === "symbolic-ref" &&
+        args[1] === "--quiet" &&
+        args[2] === "HEAD" &&
+        args.length === 3) ||
       (args[0] === "--exec-path" && args.length === 1) ||
       args[0] === "config" ||
       (args[0] === "fetch-pack" &&
