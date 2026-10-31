@@ -2,6 +2,7 @@ import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { isNumberObject } from "node:util/types";
 import {
+  isSemgrepSelectionEvidence,
   semgrepReferenceMatches,
   semgrepSelectionRepository,
 } from "./semgrep-platform-findings.js";
@@ -772,6 +773,10 @@ export async function prepareLocalImport(
   const strictSources = new Map<string, Provider>();
   const hostedSources = new Map<string, ExternalSourceRepository>();
   const known = new Set<string>(parsedSources.map(({ url }) => url));
+  const separatePlatformReferences =
+    options.provider === "semgrep" &&
+    references.length > 0 &&
+    current.findings.some(isSemgrepSelectionEvidence);
   const sarifSources = new Set<string>();
   const suppliedSarif = new Set<ExternalSourceRepository>();
   let hasOrdinaryRows = false;
@@ -789,16 +794,17 @@ export async function prepareLocalImport(
     const retained = bound.get(id);
     const native = nativeSources.get(finding) ?? [];
     // A selected row's projected URL was already verified against its hosted source.
-    if (!semgrep) {
-      if (url) sources.set(url, { url });
-      const sarif =
-        options.provider === "semgrep" ? semgrepSarifRepositories(finding) : [];
+    if (!semgrep && url) sources.set(url, { url });
+    if (separatePlatformReferences && !semgrep) {
+      const sarif = semgrepSarifRepositories(finding);
       for (const source of sarif) sarifSources.add(source.url);
       if (!url && !retained && !native.length) {
         const claims = sarif.map(({ url }) => identify(url));
-        const supplied = references.filter((ref) =>
-          claims.some((claim) => matchingRemote(claim, identify(ref.url))),
-        );
+        const supplied = claims.length
+          ? references.filter((ref) =>
+              claims.some((claim) => matchingRemote(claim, identify(ref.url))),
+            )
+          : [];
         if (!supplied.length) ordinaryRowNeedsReferences = true;
         for (const ref of supplied) suppliedSarif.add(ref);
       }
