@@ -55,11 +55,10 @@ import {
   isSemgrepPlatformEvidence,
   isSemgrepPlatformFormat,
   semgrepLegacyRepositoryWitnesses,
+  semgrepNativeProjectUrl,
   semgrepPlatformFindingBinding,
-  semgrepPlatformFindingRepository,
   semgrepPlatformRepositoryReference,
-  semgrepPlatformReportRepository,
-  semgrepReferenceMatches,
+  semgrepPlatformReportScope,
 } from "./semgrep-platform-findings.js";
 import {
   hostedRepositoryUrlKey,
@@ -513,6 +512,17 @@ export async function prepareNormalizedExternalPublication(
   );
 }
 
+function cloudSourceKey(
+  url: string,
+  platform: ExternalSourceRepository["platform"],
+) {
+  return hostedRepositoryUrlKey(
+    url,
+    platform === "github",
+    platform === "gitlab",
+  );
+}
+
 /** Verify every source in a hosted selection, including SDK inputs containing typed-only rows. */
 function hostedRepositoryMatcher(
   input: ExternalFindings & Partial<SnykIssuesFindings>,
@@ -559,37 +569,74 @@ function hostedRepositoryMatcher(
           input.sourceRepositoryUrl,
           "Semgrep source repository",
         );
+  const reportScope = semgrepPlatformReportScope(input);
   const claims = new Set<string>();
   let original: string | undefined;
+  const nativeRows: ExternalFindings["findings"] = [];
+  for (const finding of input.findings) {
+    const typed = finding.evidence.details?.repository?.url;
+    if (typed) claims.add(typed);
+    for (const { url } of semgrepSarifRepositories(finding)) claims.add(url);
+
+    const data = finding.evidence.source_data;
+    const project = data?.["project"];
+    if (
+      !allowOpaqueLegacyRows ||
+      (isRecord(project) &&
+        project["id"] != null &&
+        project["name"] != null &&
+        data?.["deployment"] != null &&
+        data["ref"] != null &&
+        data["product"] != null &&
+        ((isRecord(data["finding"]) && data["finding"]["id"] != null) ||
+          typeof data["semgrepPlatformFindingJson"] === "string"))
+    ) {
+      nativeRows.push(finding);
+      continue;
+    }
+    // Released SDKs could save partial native records. Retain any source still
+    // identifiable on that row while validating complete siblings under the new mapping.
+    if (!data || !isSemgrepPlatformEvidence(finding, provider)) continue;
+    const native = isRecord(project)
+      ? semgrepNativeProjectUrl(project["url"], references)
+      : undefined;
+    for (const url of [native, data["sourceRepositoryUrl"]]) {
+      if (typeof url !== "string") continue;
+      original ??= url;
+      claims.add(url);
+    }
+  }
   const witnesses = semgrepLegacyRepositoryWitnesses(
-    input.findings,
+    nativeRows,
     provider,
     references,
+    "cloud",
   );
-  for (const finding of input.findings) {
-    const native = semgrepPlatformFindingRepository(
+  for (const finding of nativeRows) {
+    const native = semgrepPlatformFindingBinding(
       finding,
       provider,
       references,
       witnesses,
-    );
+      reportScope,
+      "cloud",
+    )?.url;
     if (native) {
       original ??= native;
       claims.add(native);
-    } else {
-      const typed = finding.evidence.details?.repository?.url;
-      if (typed) claims.add(typed);
     }
-    for (const { url } of semgrepSarifRepositories(finding)) claims.add(url);
   }
-  const source = original ?? declared;
+  const source =
+    original ??
+    declared ??
+    declaredUrl ??
+    (readerSources.length || input.sourceRepositoryPlatform !== undefined
+      ? destination.url
+      : undefined);
   if (source === undefined) return;
-  const repository = semgrepPlatformRepositoryReference(source, references);
-  const github = repository.platform === "github";
-  const gitlab = repository.platform === "gitlab";
-  const sourceKey = hostedRepositoryUrlKey(source, github, gitlab);
-  const matches = (url: string) =>
-    hostedRepositoryUrlKey(url, github, gitlab) === sourceKey;
+  const { platform } = semgrepPlatformRepositoryReference(source, references);
+  const expected = cloudSourceKey(source, platform);
+  const matches = (url: string) => cloudSourceKey(url, platform) === expected;
   if (declared !== undefined) claims.add(declared);
   if (declaredUrl !== undefined) claims.add(declaredUrl);
   for (const url of claims)
@@ -597,7 +644,7 @@ function hostedRepositoryMatcher(
       throw new CodexSecurityError(
         "The finding does not match the original Semgrep project repository.",
       );
-  return { github, matches };
+  return { github: platform === "github", matches };
 }
 
 function normalizedPublicationInput(
@@ -639,7 +686,14 @@ function normalizedPublicationInput(
       throw new CodexSecurityError(
         "Semgrep Platform evidence requires the semgrep provider.",
       );
-    semgrepPlatformReportRepository(parsed);
+    if (
+      !Object.hasOwn(parsed, "semgrepPlatformScope") &&
+      "semgrepPlatformScope" in input
+    )
+      Object.assign(parsed, {
+        semgrepPlatformScope: input.semgrepPlatformScope,
+      });
+    semgrepPlatformReportScope(parsed);
   }
   const current: ExternalFindings = structuredClone(parsed);
   if (report !== undefined) {
@@ -696,9 +750,12 @@ function canonicalSemgrepPublication(
     isSemgrepPlatformEvidence(finding, "semgrep");
   const first = current.findings.find(originalRow);
   if (!first) return input;
-  const project = first.evidence.source_data?.["project"];
+  const reportScope = semgrepPlatformReportScope(current);
+  const retained = first.evidence.source_data;
+  const project = retained?.["project"];
   const retainedUrl =
     current.sourceRepositoryUrl ??
+    retained?.["sourceRepositoryUrl"] ??
     (isRecord(project) ? project["url"] : undefined);
   // A renamed repository may need the original spelling to identify its checkpoint.
   // Preparation validates the unmodified report against the authenticated approval.
@@ -714,6 +771,7 @@ function canonicalSemgrepPublication(
         current.findings,
         "semgrep",
         references,
+        "cloud",
       );
       const findings = current.findings.map((finding) => {
         if (!originalRow(finding)) return finding;
@@ -722,6 +780,8 @@ function canonicalSemgrepPublication(
           "semgrep",
           references,
           witnesses,
+          reportScope,
+          "cloud",
         );
         return binding?.sourceData
           ? {
@@ -941,9 +1001,32 @@ async function preparePublicationInput(
       projection.savedEvidenceDigest !== hash("sha256", canonicalJson(findings))
     )
       return false;
-    const identities: unknown[] = [findings];
-    if (parsed.report !== undefined)
-      identities.push({ findings, report: reportForJson(parsed.report) });
+    const projections = [findings];
+    // Historical filenames include caller fields discarded by request validation.
+    // Reuse them by stable ID with the evidence and order of the approved request.
+    const metadata = new Map(
+      legacyParsed.findings
+        .filter((row) =>
+          Object.keys(row).some(
+            (key) => key !== "evidence" && key !== "source_finding_id",
+          ),
+        )
+        .map((row) => [row.source_finding_id, row]),
+    );
+    if (findings.some((row) => metadata.has(row.source_finding_id)))
+      projections.push(
+        findings.map((row) => ({
+          ...metadata.get(row.source_finding_id),
+          ...row,
+        })),
+      );
+    const identities: unknown[] = [...projections];
+    if (parsed.report !== undefined) {
+      const report = reportForJson(parsed.report);
+      identities.push(
+        ...projections.map((rows) => ({ findings: rows, report })),
+      );
+    }
     // Caller metadata on a normalized finding is part of the filename but not the
     // request body. An exact retry still supplies that original identity.
     if (filenameKey === keyFor(legacyIdentity))
@@ -953,6 +1036,12 @@ async function preparePublicationInput(
     if (identity && projection.inputDigest !== digest(identity))
       return "verified";
 
+    const selected = new Set(
+      parsed.findings.map((row) => row.source_finding_id),
+    );
+    const sameIds =
+      findings.length === selected.size &&
+      findings.every((row) => selected.delete(row.source_finding_id));
     const semgrep = options.provider === "semgrep";
     const native = findings.some(({ evidence }) => {
       const data = evidence.source_data;
@@ -965,7 +1054,7 @@ async function preparePublicationInput(
       if (identity && data["format"] === expected) return true;
       if (
         !isRecord(data["project"]) ||
-        (!identity && data["format"] !== expected)
+        (!identity && !sameIds && data["format"] !== expected)
       )
         return false;
       // Prove the actual native shape independently of a format label or a caller ID.
@@ -982,35 +1071,37 @@ async function preparePublicationInput(
       // If the saved selections reconstruct an old input digest but not its scoped
       // filename, the pending request belongs to another deployment. The #2085
       // writer included its original repository comparison flags in the digest.
-      const repository = destination.url;
+      const repositories = new Set([destination.url]);
+      for (const { evidence } of findings) {
+        const data = evidence.source_data;
+        const project = data?.["project"];
+        const retained =
+          semgrep && isRecord(project)
+            ? project["url"]
+            : data?.["sourceRepositoryUrl"];
+        if (typeof retained === "string") repositories.add(retained);
+      }
       const paths = semgrep ? [null, true] : [false, true];
       const suffixes = semgrep ? [false] : [false, true];
       for (const candidate of identities) {
         if (digest(candidate) === projection.inputDigest) return false;
         for (const strict of paths) {
           for (const suffix of suffixes) {
-            const url = hostedRepositoryUrlKey(repository, !strict, suffix);
-            if (
-              digest([candidate, [url, strict, suffix]]) ===
-              projection.inputDigest
-            )
-              return false;
+            for (const repository of repositories) {
+              const url = hostedRepositoryUrlKey(repository, !strict, suffix);
+              if (
+                digest([candidate, [url, strict, suffix]]) ===
+                projection.inputDigest
+              )
+                return false;
+            }
           }
         }
       }
       return "unidentified";
     }
     // The released normalized SDK can also retain native rows. Hold only its same IDs.
-    const selected = new Set(
-      parsed.findings.map(({ source_finding_id }) => source_finding_id),
-    );
-    return (
-      findings.length === selected.size &&
-      findings.every(({ source_finding_id }) =>
-        selected.delete(source_finding_id),
-      ) &&
-      "verified"
-    );
+    return sameIds && "verified";
   }
   function wasReset(content: SavedSubmission) {
     return content.requests.some(
@@ -1243,36 +1334,25 @@ async function preparePublicationInput(
       legacyTypedUrl = findings.find(
         ({ evidence }) => evidence.details?.repository?.url,
       )?.evidence.details?.repository?.url;
-    if (options.provider === "snyk") {
-      // Only the immutable saved rows can substantiate a new report-level project claim.
-      suppliedReport = { ...report, findings };
-    } else {
-      try {
-        hostedRepositoryMatcher(
-          { read: findings.length, excluded: [], findings },
-          options.provider,
-          undefined,
-          {
-            url: saved.approvedRepositoryUrl ?? destination.url,
-          },
-          readerSources,
-        );
-      } catch {
-        // The released normalized publisher accepted opaque records. Their exact request and
-        // digest have already been verified. Only the supplemental claims are new evidence.
-        suppliedReport = { ...report, findings: [] };
-      }
-    }
+    // Supplemental claims must agree with each verifiable row from the immutable request.
+    suppliedReport = { ...report, findings };
   }
   // The released request retained its typed finding URL, but only the authenticated
   // catalog or a previously recorded approval can bind a new source declaration.
   const approvedUrl = saved?.approvedRepositoryUrl ?? destination.url;
   if (
     hosted &&
-    readerSources.some(
-      ({ platform, url }) =>
-        !semgrepReferenceMatches({ url: approvedUrl, platform }, url),
-    )
+    readerSources.some(({ platform, url }) => {
+      const source = normalizeHostedGitRepositoryUrl(
+        url,
+        approvedUrl,
+        platform !== undefined,
+      );
+      return (
+        cloudSourceKey(source, platform) !==
+        cloudSourceKey(approvedUrl, platform)
+      );
+    })
   )
     throw new CodexSecurityError(
       "The reader's source repository does not match the selected Cloud repository.",

@@ -48,6 +48,7 @@ import {
 import { canonicalJson } from "../src/record.js";
 import { readGitHubFindings } from "../src/github-findings.js";
 import {
+  normalizeSemgrepPlatformFindings,
   selectSemgrepPlatformFindings,
   semgrepPlatformFormat,
 } from "../src/semgrep-platform-findings.js";
@@ -824,6 +825,59 @@ test("an independent GitLab mapping preserves Semgrep repository case on a priva
   expect(f.posts).toHaveLength(0);
 });
 
+test.each(["semgrep", "snyk"] as const)(
+  "%s checks typed-only repository evidence and reader ports against Cloud",
+  async (provider) => {
+    const url = "https://scm.example.test/Group/Project";
+    const f = await fixture([], url);
+    const prepare = (
+      typed: string,
+      reference: string,
+      platform: "github" | "gitlab",
+    ) =>
+      prepareNormalizedExternalPublication(
+        {
+          read: 1,
+          excluded: [],
+          findings: [
+            {
+              source_finding_id: "reader-1",
+              evidence: {
+                title: "Example issue",
+                severity: "high",
+                details: { kind: "sast", repository: { url: typed } },
+              },
+            },
+          ],
+        },
+        { ...options, provider },
+        { ...f.deps, sourceRepositories: [{ url: reference, platform }] },
+      );
+    await expect(prepare(url.toLowerCase(), url, "gitlab")).rejects.toThrow(
+      /repository|project/iu,
+    );
+    const withPort = url.replace(".test/", ".test:443/");
+    for (const scm of ["github", "gitlab"] as const) {
+      await expect(prepare(url, withPort, scm)).rejects.toThrow(
+        /repository|project/iu,
+      );
+    }
+    expect((await prepare(url, url, "gitlab")).preview.findings).toHaveLength(
+      1,
+    );
+    expect(
+      (await prepare(url.toLowerCase(), url, "github")).preview.findings,
+    ).toHaveLength(1);
+    f.state.repositoryUrl = withPort;
+    await expect(prepare(withPort, url, "gitlab")).rejects.toThrow(
+      /repository|project/iu,
+    );
+    expect(
+      (await prepare(withPort, withPort, "gitlab")).preview.findings,
+    ).toHaveLength(1);
+  },
+);
+
 test("Semgrep publication compares the operator's source URL with Cloud repository port semantics", async () => {
   const url = "https://scm.example.test/Team/Project";
   const report = selectedSemgrepReport(
@@ -848,6 +902,19 @@ test("Semgrep publication compares the operator's source URL with Cloud reposito
   );
   expect(f.posts).toHaveLength(1);
   expect((await prepare(url)).preview.resumed).toBe(true);
+});
+
+test("Semgrep Cloud checks the original port on a selected finding's repository URL", async () => {
+  const url = "https://scm.example.test/Team/Project";
+  const report = selectedSemgrepReport(
+    { name: "Team/Project", url },
+    { repository: { url: "https://scm.example.test:443/Team/Project" } },
+  );
+  const f = await hostedFixture("semgrep", report, url);
+  await expect(f.prepareFile()).rejects.toThrow(/repository/iu);
+  const sdk = normalizeSemgrepFindings(report, {}, "local");
+  await expect(f.prepareNormalized(sdk)).rejects.toThrow(/repository/iu);
+  expect(f.posts).toHaveLength(0);
 });
 
 test("a normalized Semgrep report checks the provider before Cloud credentials", async () => {
@@ -885,11 +952,12 @@ test("Cloud checks both native Semgrep rows when a projection retains both forma
   const input = { read: 1, excluded: [], findings };
   const raw = findings[0]!.evidence.source_data!;
   const json = String(raw["semgrepPlatformFindingJson"]);
-  const row = JSON.parse(json);
+  const row = { ...JSON.parse(json), attempts: 1, scoreRatio: 1.25 };
   raw["finding"] = { annotation: "operator note" };
   expect((await f.prepareNormalized(input)).preview.findings).toHaveLength(1);
   const score = "9007199254740993";
-  raw["semgrepPlatformFindingJson"] = `{"score":${score},${json.slice(1)}`;
+  raw["semgrepPlatformFindingJson"] =
+    `{"attempts":1.0,"scoreRatio":1.250,"score":${score},${json.slice(1)}`;
   raw["finding"] = { ...row, score };
   raw["numericFields"] = { finding: { score } };
   raw["format"] = "semgrep-platform-findings/v1";
@@ -913,6 +981,87 @@ test("Cloud checks both native Semgrep rows when a projection retains both forma
   );
   expect(f.posts).toHaveLength(0);
 });
+
+test("a witnessed v1 finding ID is checked even above the signed range", async () => {
+  const url = "https://github.com/example/project";
+  const report = selectedSemgrepReport(
+    { name: "example/project", url },
+    { rule_name: "sample.rule" },
+  );
+  const id = "1000000000000000000002";
+  report.findings[0] = report.findings[0]!.replace('"id":23', '"id":' + id);
+  const f = await hostedFixture("semgrep", report, url);
+  const { findings } = (await f.prepareFile()).preview;
+  const input = { read: 1, excluded: [], findings };
+  const raw = findings[0]!.evidence.source_data!;
+  const original = {
+    ...JSON.parse(String(raw["semgrepPlatformFindingJson"])),
+    id,
+  };
+  raw["numericFields"] = { finding: { id } };
+  raw["finding"] = {
+    ...original,
+    repository: { url: "https://github.com/foreign/project" },
+  };
+  await expect(f.prepareNormalized(input)).rejects.toThrow(
+    /Semgrep.*disagree/i,
+  );
+  raw["finding"] = original;
+  expect((await f.prepareNormalized(input)).preview.findings).toHaveLength(1);
+  const otherId = "1000000000000000000003";
+  raw["finding"] = { ...original, id: otherId };
+  raw["numericFields"] = { finding: { id: otherId } };
+  await expect(f.prepareNormalized(input)).rejects.toThrow(
+    /Semgrep.*disagree/i,
+  );
+  expect(f.posts).toHaveLength(0);
+});
+
+test.each([true, false])(
+  "a new Semgrep reader mapping rechecks the original saved SCA row (exact case %s)",
+  async (exact) => {
+    const url = "https://scm.example.test/Team/Project";
+    const report = {
+      format: semgrepPlatformFormat,
+      deployment: "example",
+      project: { id: "14", name: "Team/Project", url },
+      product: "sca",
+      ref: "refs/heads/topic",
+      repositoryAliases: [],
+      findingCount: 1,
+      findings: [
+        JSON.stringify({
+          id: 23,
+          rule_name: "sample.rule",
+          repository: { url: exact ? url : url.toLowerCase() },
+        }),
+      ],
+    };
+    const input = normalizeSemgrepFindings(
+      report,
+      { sourceRepositories: [{ url, platform: "github" }] },
+      "cloud",
+    );
+    const f = await hostedFixture("semgrep", report, url);
+    const strict = () =>
+      prepareNormalizedExternalPublication(
+        input,
+        { ...options, provider: "semgrep" },
+        {
+          ...f.deps,
+          sourceRepositories: [{ url, platform: "gitlab" }],
+        },
+      );
+    if (!exact) await expect(strict()).rejects.toThrow(/repository/iu);
+    const pending = await f.loseResponse(await f.prepareNormalized(input));
+    const approved = await readFile(pending, "utf8");
+    if (exact) expect((await strict()).preview.resumed).toBe(true);
+    else await expect(strict()).rejects.toThrow(/repository/iu);
+    expect(await readFile(pending, "utf8")).toBe(approved);
+    await (await f.prepareNormalized(input)).publish();
+    expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+  },
+);
 
 test("marked Semgrep rows require their provider while unmarked Wiz records can publish", async () => {
   const url = "https://github.com/example/project";
@@ -1106,6 +1255,39 @@ test.each(["semgrep", "snyk"] as const)(
     expect(f.reports.size).toBe(1);
   },
 );
+
+test("Semgrep Cloud validates a normalized report's monitored scope on import and retry", async () => {
+  const url = "https://github.com/example/project";
+  const report = selectedSemgrepReport(
+    { name: "example/project", url },
+    { rule_name: "example.rule" },
+  );
+  const f = await hostedFixture("semgrep", report, url);
+  const file = await f.prepareFile();
+  const { semgrepPlatformScope, ...normalized } =
+    normalizeSemgrepPlatformFindings(report, {}, "cloud");
+  const other = (change: Partial<typeof semgrepPlatformScope>) =>
+    f.prepareNormalized({
+      ...normalized,
+      semgrepPlatformScope: { ...semgrepPlatformScope, ...change },
+    });
+  await expect(other({ projectId: "15" })).rejects.toThrow(
+    /scope does not match/,
+  );
+  expect(f.posts).toHaveLength(0);
+
+  await f.loseResponse(file);
+  await expect(other({ ref: "refs/heads/other" })).rejects.toThrow(
+    /scope does not match/,
+  );
+  Object.defineProperty(normalized, "semgrepPlatformScope", {
+    get: () => semgrepPlatformScope,
+  });
+  const retry = await f.prepareNormalized(normalized);
+  expect(retry.preview.requests).toEqual(file.preview.requests);
+  expect((await retry.publish()).verified).toBe(1);
+  expect(f.posts[1]).toBe(f.posts[0]);
+});
 
 test("an original Semgrep v1 name-only finding needs a repository witness in the same batch and scope", async () => {
   const f = await fixture();
@@ -1692,7 +1874,8 @@ test.each(["interrupted file", "completed SDK"])(
     const scope = {
       format: "semgrep-platform-findings/v1",
       deployment: "example",
-      project: { id: 77, name: "Team/Project", url },
+      project: { id: 77, name: "Team/Project", url: null },
+      sourceRepositoryUrl: url,
       ref: "refs/heads/release",
       product: "sast",
       repositoryAliases: ["project"],
@@ -1715,12 +1898,18 @@ test.each(["interrupted file", "completed SDK"])(
       { sourceRepositories: [{ url, platform: "github" }] },
       "cloud",
     );
-    const sdk = { read, findings, excluded, sourceRepositoryUrl: url };
+    const sdk = { read, findings, excluded };
     findings[0]!.evidence.source_data = {
       ...scope,
       finding,
       numericFields: { finding: { id } },
     };
+    const otherPort = structuredClone(sdk);
+    otherPort.findings[0]!.evidence.source_data!["sourceRepositoryUrl"] =
+      url.replace(".test/", ".test:443/");
+    await expect(f.prepareNormalized(otherPort)).rejects.toThrow(
+      /repository/iu,
+    );
     if (first === "interrupted file") {
       await f.loseResponse(await f.prepareFile());
       f.state.repositoryUrl = "https://scm.example.test/Team/Renamed";
@@ -1746,6 +1935,8 @@ test.each([
   ["semgrep", "native"],
   ["semgrep", "SDK metadata and assigned IDs"],
   ["semgrep", "per-finding metadata"],
+  ["semgrep", "projected metadata"],
+  ["snyk", "released unmarked with metadata"],
   ["semgrep", "released normalized SDK"],
   ["semgrep", "released without format"],
   ["snyk", "released without format"],
@@ -1813,13 +2004,17 @@ test.each([
       mode === "SDK metadata and assigned IDs"
         ? { batch: "example" }
         : undefined;
-    if (metadata)
+    const assigned = metadata || mode === "projected metadata";
+    if (assigned)
       rows.forEach((row, index) => {
         request.items[index]!.source_finding_id = row.source_finding_id =
           "custom-" + index;
       });
     const released = mode.startsWith("released ");
-    if (mode === "released without format")
+    if (
+      mode === "released without format" ||
+      mode === "released unmarked with metadata"
+    )
       for (const { evidence } of rows) delete evidence.source_data!["format"];
     if (mode === "released unrelated evidence")
       for (const { evidence } of rows)
@@ -1827,11 +2022,13 @@ test.each([
           project: { label: "example" },
           [provider === "semgrep" ? "finding" : "issue"]: { note: "custom" },
         };
-    if (mode === "projected evidence")
+    if (mode === "projected evidence" || mode === "projected metadata")
       for (const { evidence } of rows) delete evidence.source_data;
     const originalRows =
-      mode === "per-finding metadata"
-        ? rows.map((row) => ({ ...row, ticket: "example" }))
+      mode === "per-finding metadata" ||
+      mode === "projected metadata" ||
+      mode === "released unmarked with metadata"
+        ? rows.map((row, index) => ({ ...row, ticket: "example-" + index }))
         : rows;
     const identity = metadata
       ? { findings: originalRows, report: metadata }
@@ -1841,7 +2038,10 @@ test.each([
       savedEvidenceDigest: digest(rows),
       inputDigest: released
         ? digest(identity)
-        : digest([identity, [url, false, false]]),
+        : digest([
+            identity,
+            [url, provider === "semgrep" ? null : false, false],
+          ]),
     };
     const oldKey = digest([
       pending.accountId,
@@ -1862,7 +2062,7 @@ test.each([
       sourceRepositoryUrl: url,
       ...(metadata && { report: metadata }),
     };
-    if (metadata)
+    if (assigned)
       input.findings.forEach((row, index) => {
         row.source_finding_id = rows[index]!.source_finding_id;
       });
@@ -1887,6 +2087,14 @@ test.each([
       });
     }
     const older = "Resume it with the SDK build that created it";
+    if (mode === "projected metadata") {
+      const edited = structuredClone(originalRows).reverse();
+      edited[0]!.evidence.title += " updated";
+      await expect(prepareRows(edited)).rejects.toThrow(older);
+      expect((await prepareRows(rows)).preview.resumed).toBe(false);
+      expect(await readFile(oldPath, "utf8")).toBe(bytes);
+      return;
+    }
     await expect(retry()).rejects.toThrow(older);
     // The exact projected path has a bare filename but a repository-bound payload digest.
     if (mode === "projected evidence")
@@ -1898,20 +2106,49 @@ test.each([
       source_finding_id: "unrelated",
       evidence: { title: "Another finding", severity: "high" as const },
     };
+    if (mode === "native") {
+      const other = "https://github.com/example/another";
+      f.state.repositoryUrl = other;
+      const otherInput = {
+        ...input,
+        read: 1,
+        findings: [unrelated],
+        sourceRepositoryUrl: other,
+      };
+      const fresh = await prepareNormalizedExternalPublication(
+        otherInput,
+        { ...options, provider },
+        {
+          ...f.deps,
+          environment: {
+            ...f.environment,
+            CODEX_SECURITY_CLOUD_BASE_URL:
+              "http://127.0.0.1:4200/backend-api/aardvark",
+          },
+        },
+      );
+      expect(fresh.preview.resumed).toBe(false);
+      f.state.repositoryUrl = url;
+    }
     const disjoint = prepareRows([unrelated]);
     if (released) expect((await disjoint).preview.resumed).toBe(false);
     else await expect(disjoint).rejects.toThrow(older);
     expect(f.posts).toHaveLength(1);
     expect(await readFile(oldPath, "utf8")).toBe(bytes);
     f.state.marker = "generation-2";
-    if (mode === "per-finding metadata") {
+    if (
+      mode === "per-finding metadata" ||
+      mode === "released unmarked with metadata"
+    ) {
       await expect(retry()).rejects.toThrow(
         "deployment could not be established",
       );
       expect(await readFile(oldPath, "utf8")).toBe(bytes);
     }
     const afterReset =
-      mode === "projected evidence" || mode === "per-finding metadata"
+      mode === "projected evidence" ||
+      mode === "per-finding metadata" ||
+      mode === "released unmarked with metadata"
         ? () => prepareRows(originalRows)
         : retry;
     await expect(afterReset()).rejects.toThrow("retired without uploading");

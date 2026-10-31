@@ -330,13 +330,15 @@ export function semgrepNativeProjectUrl(
 
 function referenceRepositoryKey(
   references: readonly ExternalSourceRepository[],
+  target: ExternalImportTarget = "local",
 ) {
-  return (url: string) => repositoryContext(url, references).key(url);
+  return (url: string) => repositoryContext(url, references, target).key(url);
 }
 
 function repositoryContext(
   projectUrl: string,
   references: SemgrepRepositoryReference = [],
+  target: ExternalImportTarget = "local",
 ) {
   const source = semgrepPlatformRepositoryReference(
     projectUrl,
@@ -349,7 +351,7 @@ function repositoryContext(
       typeof references === "function"
         ? references(nativeHttp(url))
         : hostedRepositoryUrlKey(
-            nativeHttp(url),
+            target === "cloud" ? url : nativeHttp(url),
             github,
             source.platform === "gitlab",
           ),
@@ -725,6 +727,7 @@ export function isSemgrepPlatformEvidence(
 function upgradeOriginalSemgrepFinding(
   data: Record<string, unknown>,
   references: SemgrepRepositoryReference,
+  target: ExternalImportTarget,
 ): Record<string, unknown> {
   const {
     numericFields: _witness,
@@ -736,7 +739,7 @@ function upgradeOriginalSemgrepFinding(
     undefined,
     typeof references === "function"
       ? references
-      : referenceRepositoryKey(references),
+      : referenceRepositoryKey(references, target),
     references,
   );
   return {
@@ -802,6 +805,7 @@ export function semgrepLegacyRepositoryWitnesses(
   findings: readonly ExternalFinding[],
   provider: string,
   references: SemgrepRepositoryReference = [],
+  target: ExternalImportTarget = "local",
 ): ReadonlyMap<string, string> {
   const witnesses = new Map<string, string>();
   for (const finding of findings) {
@@ -823,9 +827,9 @@ export function semgrepLegacyRepositoryWitnesses(
     )
       continue;
     // Restore the old numeric witnesses before deriving project IDs and copying the repository.
-    const upgraded = upgradeOriginalSemgrepFinding(data, references);
+    const upgraded = upgradeOriginalSemgrepFinding(data, references, target);
     const { scope } = readScope(upgraded);
-    const repository = repositoryContext(scope.project.url, references);
+    const repository = repositoryContext(scope.project.url, references, target);
     const raw = parseSemgrepResponse(
       requiredText(
         upgraded["semgrepPlatformFindingJson"],
@@ -865,6 +869,7 @@ export function semgrepPlatformFindingBinding(
   references: SemgrepRepositoryReference = [],
   legacyWitnesses?: ReadonlyMap<string, string>,
   reportScope?: ReturnType<typeof semgrepPlatformReportScope>,
+  target: ExternalImportTarget = "local",
 ) {
   const retained = finding.evidence.source_data;
   if (!isSemgrepPlatformEvidence(finding, provider)) return;
@@ -883,7 +888,7 @@ export function semgrepPlatformFindingBinding(
     : retained;
   const legacy = data["format"] === semgrepPlatformLegacyFormat;
   const original = legacy && !Object.hasOwn(data, "semgrepPlatformFindingJson");
-  if (original) data = upgradeOriginalSemgrepFinding(data, references);
+  if (original) data = upgradeOriginalSemgrepFinding(data, references, target);
   const { scope, aliases } = readScope(data);
   if (
     reportScope &&
@@ -896,18 +901,26 @@ export function semgrepPlatformFindingBinding(
       "The Semgrep report repository scope does not match the finding's deployment, project ID, ref, or product.",
     );
 
-  const repository = repositoryContext(scope.project.url, references);
+  const repository = repositoryContext(scope.project.url, references, target);
   const row = parseSemgrepResponse(
     requiredText(data["semgrepPlatformFindingJson"], "Semgrep finding JSON"),
   );
   const other = data["finding"];
   if (
     (legacy && Object.hasOwn(data, "finding")) ||
-    (isRecord(other) && isLegacyId(other["id"]))
+    (isRecord(other) && Object.hasOwn(other, "id"))
   ) {
     const restored = restoreLegacyHostedNumbers(data)["finding"];
     const originalRow = parseSemgrepResponse(JSON.stringify(restored));
-    if (JSON.stringify(originalRow) !== JSON.stringify(row))
+    const id = originalRow["id"];
+    const nativeId =
+      typeof id === "string"
+        ? legacyDecimalInteger(id)
+        : semgrepPlatformIdOrUndefined(id);
+    if (
+      (legacy || nativeId !== undefined) &&
+      stringifySemgrepFinding(originalRow) !== stringifySemgrepFinding(row)
+    )
       throw new Error("The retained Semgrep finding representations disagree.");
   }
   const selectable = checkSemgrepPlatformRow(
@@ -1005,20 +1018,7 @@ export function normalizeSemgrepPlatformFindings(
     ? upgradeSemgrepPlatformReport(
         saved,
         declaredUrl,
-        target === "cloud"
-          ? (url) => {
-              // The Cloud catalog distinguishes an explicit port in the native URL or mapping.
-              const { platform } = semgrepPlatformRepositoryReference(
-                url,
-                references,
-              );
-              return hostedRepositoryUrlKey(
-                url,
-                platform === "github",
-                platform === "gitlab",
-              );
-            }
-          : referenceRepositoryKey(references),
+        referenceRepositoryKey(references, target),
         references,
       )
     : saved;
