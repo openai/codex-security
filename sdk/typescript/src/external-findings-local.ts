@@ -806,6 +806,7 @@ export async function prepareLocalImport(
     if (semgrep) {
       addSemgrepSource(semgrep.url);
       if (semgrep.sourceData) finding.evidence.source_data = semgrep.sourceData;
+      if (semgrep.migration) Object.assign(finding.evidence, semgrep.migration);
     } else hasOrdinaryRows = true;
     const { evidence, source_finding_id: id } = finding;
     const url = evidence.details?.repository?.url;

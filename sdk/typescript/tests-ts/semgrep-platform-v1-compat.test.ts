@@ -6,7 +6,11 @@ import { gzipSync } from "node:zlib";
 import { semgrepJson } from "./support/semgrep-import-fixtures.js";
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import { prepareNormalizedExternalPublication } from "../src/external-findings-publish.js";
-import { cloudRepositoryUrlKey } from "../src/external-import-contract.js";
+import { bundledPluginRoot, runWorkbench } from "../src/runtime.js";
+import {
+  cloudRepositoryUrlKey,
+  validateExternalEvidence,
+} from "../src/external-import-contract.js";
 import { isolatedGitReportFixture as localReportFixture } from "./external-findings-local-helpers.js";
 import {
   normalizeSemgrepFindings,
@@ -67,6 +71,70 @@ test("strongly bound current SAST rows have identical selection and backlog excl
   expect(weak.findings[1]!.evidence.locations?.[0]?.line).toBe(2);
   expect(weak.findings[2]!.evidence.details!.code!.end_line).toBe(3);
 });
+
+test.each(["sca", "weak SAST", "selected SAST"])(
+  "%s file and normalized SDK replays retain equivalent native number values once",
+  async (kind) => {
+    const strong = kind === "selected SAST";
+    const product = kind === "sca" ? "sca" : "sast";
+    const id = strong ? "12" : "1.2e1";
+    const repository = strong ? JSON.stringify({ id: 10, url }) : '{"id":1e1}';
+    const ref = strong ? `,"ref":${JSON.stringify(scope.ref)}` : "";
+    const native = `{"id":${id},"repository":${repository},"metadata":{"source":"demo","score":10.0}${ref}}`;
+    const replayRepository = strong ? repository : '{"id":10.0}';
+    const equivalent = `{"metadata":{"score":1e1,"source":"demo"},"repository":${replayRepository},"id":12${ref}}`;
+    const report = (row: string) => ({
+      ...scope,
+      format: "semgrep-platform-findings/v2",
+      product,
+      repositoryAliases: [],
+      findingCount: 1,
+      findings: [row],
+    });
+    const source = { provider: "semgrep" as const, sourceKey: "demo/topic" };
+    await using fixture = await localReportFixture("semgrep.json", source, {
+      remote: url,
+    });
+    await fixture.writeJson(report(native));
+    const initial = await fixture.prepare();
+    expect((await initial.import()).counts.created).toBe(1);
+    const result = normalizeSemgrepFindings(report(native), {}, "local");
+    const data = result.findings[0]!.evidence.source_data!;
+    const prepare = () =>
+      prepareNormalizedLocalImport(
+        result,
+        { ...source, repository: fixture.repository },
+        { environment: fixture.environment },
+      );
+    const unchanged = { created: 0, updated: 0, unchanged: 1 };
+    data["semgrepPlatformFindingJson"] = equivalent;
+    for (const format of strong
+      ? [data["format"], undefined, "another-format"]
+      : [data["format"]]) {
+      if (format === undefined) delete data["format"];
+      else data["format"] = format;
+      expect((await (await prepare()).import()).counts).toEqual(unchanged);
+    }
+    await fixture.writeJson(report(equivalent));
+    expect((await (await fixture.prepare()).import()).counts).toEqual(
+      unchanged,
+    );
+    const [stored] = await fixture.read();
+    expect(stored?.version).toBe(1);
+    if (!strong) {
+      const raw = stored!.evidence.source_data!["semgrepPlatformFindingJson"];
+      expect(raw).toContain('"id":12,');
+      expect(raw).toContain('"repository":{"id":10}');
+    }
+
+    data["callerAnnotation"] = { group: "demo" };
+    expect((await (await prepare()).import()).counts.updated).toBe(1);
+    expect((await (await prepare()).import()).counts).toEqual(unchanged);
+    expect(
+      (await fixture.read())[0]?.evidence.source_data?.["callerAnnotation"],
+    ).toEqual({ group: "demo" });
+  },
+);
 
 test.each(["sast", "ai_sast", "sca"])(
   "v1 %s requires the original title sources",
@@ -279,7 +347,7 @@ test("textual decimal and exponent IDs stay specific to v1 artifacts", () => {
       ...scope,
       project: { ...scope.project, id: "1e1" },
       format: "semgrep-platform-findings/v1",
-      findings: [{ ...code, id: "1.2e1" }],
+      findings: [{ ...code, id: "1.2e1", repository: { url, id: "1e1" } }],
       findingCount: 1,
     },
     {},
@@ -297,11 +365,12 @@ test("textual decimal and exponent IDs stay specific to v1 artifacts", () => {
   expect(historical.findings[0]!.source_finding_id).toBe(
     modern.findings[0]!.source_finding_id,
   );
-  expect(
+  const raw =
     historical.findings[0]!.evidence.source_data?.[
       "semgrepPlatformFindingJson"
-    ],
-  ).toContain('"id":"1.2e1"');
+    ];
+  expect(raw).toContain('"id":"1.2e1"');
+  expect(raw).toContain('"id":"1e1"');
   expect(
     semgrepPlatformFindingRepository(historical.findings[0]!, "semgrep"),
   ).toBe(url);
@@ -400,6 +469,9 @@ test("original v1 normalized rows can bind a name-only alias through a sibling i
     {},
     "local",
   );
+  const currentWitness = structuredClone(
+    batch.findings[1]!.evidence.source_data!,
+  );
   for (const [i, finding] of batch.findings.entries()) {
     // #2085 stored the vendor object without the later per-row witness string.
     finding.evidence.source_data = { ...legacy, finding: native[i] };
@@ -441,6 +513,8 @@ test("original v1 normalized rows can bind a name-only alias through a sibling i
     updated: 0,
     unchanged: 0,
   });
+  // A partially migrated batch retains the same independent repository proof.
+  batch.findings[1]!.evidence.source_data = currentWitness;
   expect((await (await prepare(batch)).import()).counts).toEqual({
     created: 0,
     updated: 0,
@@ -484,6 +558,7 @@ test("original v1 normalized rows can bind a name-only alias through a sibling i
   });
 
   for (const other of [
+    { ...scope, deployment: "other" },
     { ...scope, project: { ...scope.project, id: "11" } },
     { ...scope, ref: "refs/heads/other" },
     {
@@ -803,4 +878,145 @@ test("v2 files require exact counts and string project IDs", async () => {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("migrates persisted Semgrep object evidence once across historical and current replays", async () => {
+  const source = { provider: "semgrep" as const, sourceKey: "demo/topic" };
+  await using fixture = await localReportFixture("semgrep.json", source, {
+    remote: url,
+  });
+  const row = {
+    ...code,
+    id: 12,
+    severity: "HIGH",
+    location: { file_path: "src\\service.ts", line: 3, end_line: 5 },
+  };
+  const legacy = {
+    ...scope,
+    project: { ...scope.project, id: 10 },
+    format: "semgrep-platform-findings/v1",
+    findingCount: 1,
+    findings: [row],
+  };
+  // The original object-row reader hashed numeric IDs, mapped HIGH to unknown, and left backslash paths unprojected.
+  const id =
+    "semgrep-platform:a7db3d7539422c25f776693a34ab2f916e31cc218f407c8c7faa7f209cad7ba3";
+  const original = {
+    source_finding_id: id,
+    evidence: validateExternalEvidence(
+      {
+        title: code.rule.name,
+        severity: "unknown",
+        branch: scope.ref,
+        locations: [],
+        details: {
+          kind: "sast",
+          scanner_origin: "Semgrep",
+          repository: { url },
+          rule: { id: code.rule.name },
+          code: { end_line: null },
+        },
+        source_data: {
+          format: legacy.format,
+          deployment: scope.deployment,
+          project: legacy.project,
+          ref: scope.ref,
+          product: scope.product,
+          finding: row,
+        },
+      },
+      "local",
+    ),
+  };
+  await runWorkbench(
+    {
+      pluginRoot: await bundledPluginRoot(),
+      environment: fixture.environment,
+      stateDirectory: fixture.stateDirectory,
+    },
+    ["store-external-findings"],
+    JSON.stringify({
+      ...source,
+      repository: fixture.repository,
+      findings: [original],
+    }),
+  );
+  const [historical] = await fixture.read();
+  expect(historical).toMatchObject({
+    sourceFindingId: id,
+    version: 1,
+    evidence: { severity: "unknown", locations: [] },
+  });
+  const direct = (finding = original) =>
+    prepareNormalizedLocalImport(
+      { read: 1, excluded: [], findings: [finding] },
+      { ...source, repository: fixture.repository },
+      { environment: fixture.environment },
+    );
+  const next = await direct();
+  expect((await next.import()).counts).toEqual({
+    created: 0,
+    updated: 1,
+    unchanged: 0,
+  });
+  const [stored] = await fixture.read();
+  expect(stored).toMatchObject({
+    id: historical!.id,
+    sourceFindingId: id,
+    version: 2,
+    evidence: {
+      severity: "high",
+      locations: [{ path: "src/service.ts", line: 3 }],
+      details: { code: { end_line: 5 } },
+    },
+  });
+  const modern = {
+    ...scope,
+    repositoryAliases: [],
+    findingCount: 1,
+    findings: [JSON.stringify(row)],
+    format: "semgrep-platform-findings/v2",
+  };
+  const unchanged = { created: 0, updated: 0, unchanged: 1 };
+  for (const report of [
+    legacy,
+    modern,
+    { ...modern, format: "semgrep-platform-selection/v1" },
+    legacy,
+  ]) {
+    await fixture.writeJson(report);
+    expect((await (await fixture.prepare()).import()).counts).toEqual(
+      unchanged,
+    );
+    expect((await (await direct()).import()).counts).toEqual(unchanged);
+  }
+  expect(await fixture.read()).toEqual([stored!]);
+  const custom = structuredClone(original);
+  custom.evidence.severity = "low";
+  custom.evidence.locations = [{ path: "manual.ts", line: 7 }];
+  custom.evidence.details!.code!.end_line = 9;
+  const manual = (await direct(custom)).preview.findings[0]!.evidence;
+  expect(manual).toMatchObject({
+    severity: "low",
+    locations: custom.evidence.locations,
+    details: { code: { end_line: 9 } },
+  });
+  await fixture.writeJson({
+    ...modern,
+    findings: [JSON.stringify({ ...row, severity: "CRITICAL" })],
+  });
+  expect((await (await fixture.prepare()).import()).counts).toEqual({
+    created: 0,
+    updated: 1,
+    unchanged: 0,
+  });
+  expect((await (await fixture.prepare()).import()).counts).toEqual(unchanged);
+  expect(await fixture.read()).toMatchObject([
+    {
+      id: historical!.id,
+      sourceFindingId: id,
+      version: 3,
+      evidence: { severity: "critical" },
+    },
+  ]);
 });

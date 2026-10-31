@@ -374,7 +374,13 @@ test("rejects failed, overlapping or wrong-scope pages without returning a parti
   }
 });
 
-test("snapshots the requested project mapping and ref before the first request", async () => {
+test.each([null, "git@github.com:example/service.git"])(
+  "snapshots the requested project mapping and ref for native URL %s",
+  checkProjectMapping,
+);
+
+async function checkProjectMapping(raw: string | null) {
+  const resolved = raw ? url + ".git" : url;
   const row = {
     id: 1,
     rule_name: "example.rule",
@@ -389,20 +395,29 @@ test("snapshots the requested project mapping and ref before the first request",
         expect(endpoint.searchParams.get("ref")).toBe(options.ref);
         return Response.json({ findings: [row] });
       }
-      return Response.json({ project: { ...project, url: null } });
+      return Response.json({ project: { ...project, url: raw } });
     },
   });
   requested.project = "other/service";
   requested.sourceRepositoryUrl = "https://github.com/other/service";
   requested.ref = "main";
   const saved = await pending;
-  expect(saved.project).toEqual({ ...project, id: String(project.id) });
+  expect(saved.project).toEqual({
+    ...project,
+    id: String(project.id),
+    url: resolved,
+  });
+  expect(saved.nativeProjectUrl).toBe(raw ?? undefined);
   expect(saved.ref).toBe(options.ref);
   expect(saved).toMatchObject({ sourceRepositoryUrl: url });
   const legacy = {
-    ...saved,
+    deployment: options.deployment,
+    ref: options.ref,
+    sourceRepositoryUrl: url,
+    product: "sast",
+    findingCount: 1,
     format: "semgrep-platform-findings/v1",
-    project: { ...saved.project, url: null },
+    project: { ...saved.project, url: raw },
     findings: [row],
   };
   await using fixture = await localReportFixture(
@@ -414,8 +429,8 @@ test("snapshots the requested project mapping and ref before the first request",
     await fixture.writeJson(report);
     const prepared = await fixture.prepare();
     expect(prepared.preview.findings[0]?.evidence).toMatchObject({
-      details: { repository: { url } },
-      source_data: { project: { url: null }, sourceRepositoryUrl: url },
+      details: { repository: { url: resolved } },
+      source_data: { project: { url: raw }, sourceRepositoryUrl: url },
     });
     expect((await prepared.import()).counts).toEqual(
       report === saved
@@ -423,6 +438,14 @@ test("snapshots the requested project mapping and ref before the first request",
         : { created: 0, updated: 0, unchanged: 1 },
     );
   }
+  if (raw)
+    expect(() =>
+      normalizeSemgrepFindings(
+        { ...saved, nativeProjectUrl: "git@github.com:other/project" },
+        {},
+        "local",
+      ),
+    ).toThrow(/repository/);
   expect(() =>
     normalizeSemgrepFindings(
       { ...saved, sourceRepositoryUrl: "https://github.com/other/service" },
@@ -430,10 +453,10 @@ test("snapshots the requested project mapping and ref before the first request",
       "local",
     ),
   ).toThrow(/repository/);
-});
+}
 
 test("matches GitHub project-path aliases across casing in collected, v1 and normalized rows", async () => {
-  const name = "Example/Service";
+  const name = "semgrep-logical/Prod";
   const native = {
     name,
     id: project.id,
@@ -442,9 +465,9 @@ test("matches GitHub project-path aliases across casing in collected, v1 and nor
   const row = {
     id: 1,
     rule_name: "example.rule",
-    repository: { name: name.toLowerCase() },
+    repository: { name: "example/service" },
   };
-  async function collect(projectUrl: string) {
+  async function collect(projectUrl: string, findings: unknown[] = [row]) {
     return collectSemgrepPlatformFindings(
       { ...options, project: name },
       {
@@ -452,7 +475,7 @@ test("matches GitHub project-path aliases across casing in collected, v1 and nor
         fetch: async (endpoint) =>
           Response.json(
             endpoint.pathname.endsWith("/findings")
-              ? { findings: [row] }
+              ? { findings }
               : { project: { ...native, url: projectUrl } },
           ),
       },
@@ -466,6 +489,43 @@ test("matches GitHub project-path aliases across casing in collected, v1 and nor
     format: "semgrep-platform-findings/v1",
     findings: [row],
   };
+  // The Semgrep project label and any witnessed display label retain their original casing.
+  const named = (name: string) => ({ ...row, repository: { name } });
+  const exact = await collect(native.url, [named("Prod")]);
+  expect(normalizeSemgrepFindings(exact, {}, "local").findings).toHaveLength(1);
+  const proof = { id: 2, repository: { name: "Prod", url: native.url } };
+  for (const label of ["prod", "SEMGREP-LOGICAL/PROD"]) {
+    const findings = [proof, named(label)];
+    await expect(collect(native.url, findings)).rejects.toThrow(/repository/);
+    expect(() =>
+      normalizeSemgrepFindings(
+        {
+          ...saved,
+          repositoryAliases: ["Prod", label],
+          findingCount: findings.length,
+          findings: findings.map((row) => JSON.stringify(row)),
+        },
+        {},
+        "local",
+      ),
+    ).toThrow(/repository/);
+    expect(() =>
+      selectSemgrepPlatformFindings({
+        ...options,
+        projectResponse: JSON.stringify({ project: native }),
+        findingIds: ["1"],
+        findingsResponses: JSON.stringify({
+          findings: [
+            {
+              ...row,
+              ref: options.ref,
+              repository: { name: label, id: native.id },
+            },
+          ],
+        }),
+      }),
+    ).toThrow(/repository/);
+  }
   const custom = "https://git.example.test/Example/Service";
   await expect(collect(custom)).rejects.toThrow(/repository/);
   for (const report of [saved, legacy]) {
@@ -576,6 +636,66 @@ test("repository path aliases retain a literal .git suffix and use verified GitH
     ).toThrow(/repository/);
   }
 });
+test("blank display names replay when a native ID or URL binds the repository", async () => {
+  const findings = [
+    { id: project.id, url, name: "" },
+    { id: project.id, name: "   " },
+    { url, name: "" },
+  ].map((repository, index) => ({
+    id: index + 1,
+    repository,
+    ref: options.ref,
+    rule_name: "example.rule",
+  }));
+  const page = JSON.stringify({ findings });
+  const saved = await collectSemgrepPlatformFindings(
+    options,
+    responses(new Response(page)),
+  );
+  expect(saved.repositoryAliases).toEqual([]);
+  const { repositoryAliases: _aliases, ...legacy } = saved;
+  const prior = {
+    ...legacy,
+    format: "semgrep-platform-findings/v1",
+    findings,
+    project,
+  };
+  for (const report of [saved, prior]) {
+    const normalized = normalizeSemgrepFindings(report, {}, "local");
+    expect(normalized.excluded).toEqual([]);
+    expect(
+      normalized.findings.map((row) =>
+        semgrepPlatformFindingRepository(row, "semgrep"),
+      ),
+    ).toEqual([url, url, url]);
+  }
+  const selected = {
+    ...options,
+    projectResponse: JSON.stringify({ project }),
+    findingsResponses: [page],
+  };
+  expect(
+    selectSemgrepPlatformFindings({ ...selected, findingIds: ["1"] }).findings,
+  ).toHaveLength(1);
+  expect(() =>
+    selectSemgrepPlatformFindings({ ...selected, findingIds: ["2"] }),
+  ).toThrow("project and ref");
+  for (const repository of [
+    { name: "" },
+    { id: 999, url, name: "" },
+    { id: project.id, url: "https://github.com/other/service", name: "" },
+  ]) {
+    await expect(
+      collectSemgrepPlatformFindings(
+        options,
+        responses(
+          Response.json({ findings: [{ ...findings[0], repository }] }),
+        ),
+      ),
+    ).rejects.toThrow(/repository/);
+  }
+});
+
 test("uses independently verified project aliases for name-only rows", async () => {
   const label = "display",
     alias = { name: label };
@@ -625,20 +745,26 @@ test("accepts a name-only repository alias verified on a later page", async () =
   expect(report.findingCount).toBe(3001);
 });
 
-test("detects a repeated ID-less finding on mixed pages despite reordered JSON members", async () => {
-  const matching = { vendor: { a: 1, b: 2 }, rule_name: "example.rule" };
-  const reordered = { rule_name: "example.rule", vendor: { b: 2, a: 1 } };
-  const first = [...fullPage.slice(1), matching];
-  await expect(
+test("cross-page ID-less findings compare original numeric values and member order", async () => {
+  const first = [
+    ...fullPage.slice(1),
+    { vendor: { score: 1 }, rule_name: "example.rule" },
+  ];
+  const collect = (score: string) =>
     collectSemgrepPlatformFindings(
       options,
       responses(
         Response.json({ findings: first }),
-        Response.json({ findings: [reordered, { id: 3001 }] }),
+        new Response(
+          `{"findings":[{"rule_name":"example.rule","vendor":{"score":${score}}},{"id":3001}]}`,
+        ),
         Response.json({ findings: first }),
       ),
-    ),
-  ).rejects.toThrow(/repeated findings across pages/);
+    );
+  await expect(collect("1.0")).rejects.toThrow(
+    /repeated findings across pages/,
+  );
+  expect((await collect("2")).findingCount).toBe(3002);
 });
 
 test("keeps unrelated valid findings on a page with missing or duplicate source IDs", async () => {
@@ -758,6 +884,29 @@ test("replaying two native SAST findings across selected and full imports leaves
   expect(await fixture.read()).toEqual(revised);
   for (const [index, id] of ids.entries())
     expect(report.findings[index]).toContain(`"id":${id}`);
+});
+
+test("excludes a numeric Supply Chain dependency while retaining a valid sibling", async () => {
+  const row = { id: 11, rule_name: "example.rule" };
+  const report = await collectSemgrepPlatformFindings(
+    { ...options, product: "sca" },
+    responses(
+      Response.json({
+        findings: [
+          { ...row, found_dependency: 42 },
+          { ...row, id: 12, found_dependency: { package: "example-package" } },
+        ],
+      }),
+    ),
+  );
+  const result = normalizeSemgrepFindings(report, {}, "local");
+  expect(result.excluded).toMatchObject([
+    { position: 1, reason: "Semgrep found dependency must be an object." },
+  ]);
+  expect(result.findings).toHaveLength(1);
+  expect(result.findings[0]?.evidence.packages?.[0]?.name).toBe(
+    "example-package",
+  );
 });
 
 test("projects Supply Chain evidence and distinguishes AI SAST from SAST on replay", async () => {
