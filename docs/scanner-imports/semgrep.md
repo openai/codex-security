@@ -67,7 +67,8 @@ For Git fetch URLs on an IP address, use its canonical spelling in the checkout
 (for example, `127.0.0.1` or `[::1]`) so the HTTP host identifies the same source.
 Each selected finding must match the requested ref. When the finding includes
 a repository URL or project ID, each must match the selected project. If the URL
-is absent, both the repository ID and namespace-qualified name must match.
+is absent, the native project ID and full repository name must match the decoded
+path of the project URL.
 
 Pass the response text directly to the selector to preserve numeric IDs and
 other numeric evidence exactly. Keep the responses and selection together in a
@@ -101,7 +102,9 @@ codex-security publish findings /path/to/private/selected.json --to local --prov
 After review, repeat without `--dry-run` and confirm the import. Reusing the
 same source key updates the same records, keyed by deployment, project ID,
 product, ref and finding ID. Replay preserves the exact ref of an existing
-selection, including a short ref in an older file. Importing the same findings reports unchanged
+selection, including a short ref in an older file. The archive reader compares
+the stored ref as literal identity text and never evaluates it as a Git revision.
+Importing the same findings reports unchanged
 records even if the API reordered JSON object keys. Use a separate source key
 for CLI scans. The selected native finding is retained as JSON text in
 `source_data.semgrepPlatformFindingJson`, including locations that cannot be mapped to the repository.
@@ -112,7 +115,9 @@ the path convention. For a custom GitHub Enterprise host, supply the trusted
 repository URL and `platform: "github"` in the SDK `sourceRepositories` option
 when selecting and preparing the records. For an independently known self-managed
 GitLab instance, `platform: "gitlab"` allows its HTTPS web and clone URLs to
-differ by the usual `.git` suffix.
+differ by the usual `.git` suffix. For an internationalized hostname, use its
+ASCII (Punycode) spelling in the Git SSH remote. OpenSSH can send the literal
+UTF-8 hostname to DNS while the HTTPS project URL uses its ASCII spelling.
 
 When passing normalized findings to the SDK, keep each generated Semgrep
 `source_finding_id` with the native row it identifies. To migrate a row to a
@@ -232,8 +237,11 @@ See the [native output fields](https://docs.semgrep.dev/semgrep-appsec-platform/
 Capture the project lookup and Findings API pages as original response text.
 Pass a fully qualified ref, such as `refs/heads/topic` or `refs/tags/topic`, exactly as it appears in the findings.
 Supply the HTTP(S) repository URL you independently associate with the target checkout.
-The project response and any finding URL must match this spelling. A finding without a URL
-must carry the native project ID and a namespace-qualified repository name matching the project name or repository URL path. The local importer checks the checkout using its existing repository rules.
+The project response and any finding URL must match this spelling. When a finding omits its URL,
+it must carry the project ID and its own repository name must match the namespace-qualified,
+decoded path in the operator-supplied URL. The project display name can differ from that path.
+A finding that uses a different display alias for its repository name needs the exact finding URL.
+The local importer checks the checkout using its existing repository rules.
 
 ```ts
 const selected = normalizeSelectedSemgrepPlatformFindings({
@@ -256,4 +264,11 @@ if (prepared.preview.excluded.length) {
 }
 ```
 
-Keep the same source key on replay. Finding identity includes the deployment, project ID, SAST product, full ref, and native finding ID. The adapter retains native JSON values with exact numeric precision. Changes to key order or equivalent number spellings such as `2` and `2.0` leave the stored record unchanged.
+Keep the same source key on replay. Finding identity includes the deployment, project ID,
+SAST product, full ref, and native finding ID. Pass selected finding IDs as positive
+decimal strings without leading zeros. Semgrep emits 64-bit finding IDs. The adapter
+also accepts larger positive integer IDs in saved responses without rounding.
+
+Changes to key order or equivalent numeric spellings such as `2` and `2.0` leave
+the stored record unchanged. Only repository-relative files become locations. Names
+with URI-like prefixes and directory-only paths remain in the native evidence.

@@ -510,10 +510,14 @@ async function requireMatchingRepository(
     await abortable(() => canonicalConfigPath(process.cwd()), signal),
   ];
   if (hostedSources.size > 0) {
-    const remotes = await readHostedGitRemotes(
-      repository,
-      gitProtectedRoots,
-      environment,
+    const remotes = await abortable(
+      () =>
+        readHostedGitRemotes(
+          repository,
+          gitProtectedRoots,
+          environment,
+          signal,
+        ),
       signal,
     );
     if (remotes) {
@@ -851,14 +855,20 @@ export async function prepareLocalImport(
     }
     for (const source of native) known.add(source.url);
   }
+  // Match references for native Platform rows using their hosted Git identity.
+  const hosted = Array.from(hostedSources.values());
+  const hostedReferences = new Set(
+    references.filter((ref) =>
+      hosted.some((source) => semgrepReferenceMatches(source, ref.url)),
+    ),
+  );
   if (mixed) {
-    // A caller reference with no matching row spelling can still be a Git alias.
-    const rows = [...sources.keys(), ...hostedSources.keys(), ...known].map(
-      identify,
-    );
+    // Other caller references must identify an ordinary row or one of its Git aliases.
+    const rows = [...sources.keys(), ...known].map(identify);
     const byKey = Map.groupBy(rows, (remote) => remote.key);
     const represented = new Set(rows.map((remote) => JSON.stringify(remote)));
     const aliases = readerSources
+      .filter((ref) => !hostedReferences.has(ref))
       .map(({ url }) => identify(url))
       .filter((remote) => !represented.has(JSON.stringify(remote)));
     for (const [key, group] of Map.groupBy(aliases, (remote) => remote.key)) {
@@ -888,15 +898,11 @@ export async function prepareLocalImport(
         );
     }
   }
-  // Native projects are covered by trusted references independently of ordinary rows.
-  // Keep ordinary references on the generic checkout path, including in mixed reports.
-  const hosted = Array.from(hostedSources.values());
-  const isHostedReference = (ref: ExternalSourceRepository) =>
-    hosted.some((source) => semgrepReferenceMatches(source, ref.url));
   if (
     readerSources.length &&
     hosted.length &&
-    ((!hasOrdinaryRows && !readerSources.every(isHostedReference)) ||
+    ((!hasOrdinaryRows &&
+      !readerSources.every((ref) => hostedReferences.has(ref))) ||
       hosted.some(
         (source) =>
           !readerSources.some((ref) =>
@@ -907,13 +913,9 @@ export async function prepareLocalImport(
     throw new CodexSecurityError(
       "The reader's source repository does not match the selected Semgrep project.",
     );
-  const hostedReferences: ExternalSourceRepository[] = [];
   for (const source of [...(inspector ? [inspector] : []), ...references]) {
     // A row without its own repository depends on the reader references for its checkout check.
-    if (!ordinaryRowNeedsReferences && isHostedReference(source)) {
-      hostedReferences.push(source);
-      continue;
-    }
+    if (!ordinaryRowNeedsReferences && hostedReferences.has(source)) continue;
     // A reader's platform must not loosen an operator-supplied Inspector map.
     if (sources.get(source.url)?.platform !== "github")
       sources.set(
