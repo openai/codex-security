@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
 import { readSnykFindings } from "../src/snyk-findings.js";
-import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import { isolatedGitReportFixture } from "./external-findings-local-helpers.js";
 import {
   collectSnykIssues,
@@ -312,16 +311,7 @@ test("direct SDK projections can edit display fields but must retain an importab
   await fixture.writeJson(captured);
   await (await fixture.prepare()).import();
   const stored = await fixture.read();
-  const prepare = () =>
-    prepareNormalizedLocalImport(
-      normalized,
-      {
-        provider: "snyk",
-        sourceKey: snykOptions.projectId,
-        repository: fixture.repository,
-      },
-      { environment: fixture.environment },
-    );
+  const prepare = () => fixture.prepareNormalized(normalized);
   row.evidence.title = "Reader projection";
   for (const [field, value] of [
     ["status", "absent"],

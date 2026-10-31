@@ -315,16 +315,7 @@ test("normalized Snyk selections cannot import two keys for one native issue", a
     read: 2,
     findings: [...first.findings, ...second.findings],
   };
-  const prepare = () =>
-    prepareNormalizedLocalImport(
-      selected,
-      {
-        provider: "snyk",
-        sourceKey: fixture.sourceKey,
-        repository: fixture.repository,
-      },
-      { environment: fixture.environment },
-    );
+  const prepare = () => fixture.prepareNormalized(selected);
   await expect(prepare()).rejects.toThrow("overlapping issue IDs");
   expect(await fixture.read()).toBeEmpty();
 
