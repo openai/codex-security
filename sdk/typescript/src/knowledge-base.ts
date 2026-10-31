@@ -324,12 +324,20 @@ function extractDocx(path: string, bytes: Uint8Array): string {
     const parser = new SaxesParser();
     let documentElement = false;
     let deletedDepth = 0;
+    let runTextDepth = 0;
     let instructionText = false;
+    // Word repeats modern text boxes in later mc:Choice or mc:Fallback
+    // elements. Keep only the first representation that produces text.
+    const alternates: { choice: boolean; text: boolean; skip: boolean }[] = [];
     const append = (value: string) => {
       if (deletedDepth > 0) return;
       const field = fields.at(-1);
-      if (field === undefined) text.push(value);
-      else if (!field.instructions) field.result.push(value);
+      if (field === undefined) {
+        text.push(value);
+        if (value.trim())
+          for (const alternate of alternates)
+            if (alternate.choice) alternate.text = true;
+      } else if (!field.instructions) field.result.push(value);
       else if (!instructionText) field.literal.push(value);
     };
     const finishField = (closed: boolean) => {
@@ -341,6 +349,19 @@ function extractDocx(path: string, bytes: Uint8Array): string {
     };
     parser.on("opentag", ({ name, attributes }) => {
       const localName = name.split(":").at(-1);
+      const alternate = alternates.at(-1);
+      if (localName === "AlternateContent")
+        alternates.push({ choice: false, text: false, skip: false });
+      else if (
+        (localName === "Choice" || localName === "Fallback") &&
+        alternate
+      ) {
+        if (alternate.text) {
+          alternate.skip = true;
+          deletedDepth++;
+        } else if (localName === "Choice") alternate.choice = true;
+      }
+      if (localName === "t" || localName === "instrText") runTextDepth++;
       if (
         localName === "del" ||
         localName === "delText" ||
@@ -387,9 +408,22 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       ) {
         deletedDepth--;
       }
+      if (localName === "t" || localName === "instrText") runTextDepth--;
+      const alternate = alternates.at(-1);
+      if ((localName === "Choice" || localName === "Fallback") && alternate) {
+        if (alternate.skip) {
+          alternate.skip = false;
+          deletedDepth--;
+        } else alternate.choice = false;
+      } else if (localName === "AlternateContent") alternates.pop();
     });
-    parser.on("text", (value) => append(decodeXml(value)));
-    parser.on("cdata", (value) => append(value.replaceAll("&amp;", "&")));
+    // Other character data, such as drawing positions, is layout metadata.
+    parser.on("text", (value) => {
+      if (runTextDepth > 0) append(decodeXml(value));
+    });
+    parser.on("cdata", (value) => {
+      if (runTextDepth > 0) append(value.replaceAll("&amp;", "&"));
+    });
     // Keep the existing entity decoder's handling of unusable references.
     // CDATA is literal text, so only undo this escaping in its handler.
     parser.write(xml.replaceAll("&", "&amp;")).close();
