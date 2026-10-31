@@ -29,6 +29,7 @@
 - show highest-severity findings first ([#2160](https://github.com/openai/codex-security/pull/2160))
 - bump taiki-e/install-action from 2.87.30 to 2.87.31 ([#2156](https://github.com/openai/codex-security/pull/2156))
 - align Unicode repository columns ([#2148](https://github.com/openai/codex-security/pull/2148))
+- link Markdown evidence to plain source lines ([#2032](https://github.com/openai/codex-security/pull/2032))
 
 <!-- release-section: highlights:end -->
 
