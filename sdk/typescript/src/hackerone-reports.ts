@@ -1,28 +1,62 @@
 import { randomUUID } from "node:crypto";
-import { link, open, readFile, unlink } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import {
+  link,
+  mkdir,
+  open,
+  readFile,
+  realpath,
+  rmdir,
+  unlink,
+} from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { z } from "zod";
+import {
+  createWindowsOutputDirectory,
+  requireSecureCredentialHome,
+  requireSecureOutputAncestry,
+} from "./runtime.js";
 
-const id = z.string().regex(/^[1-9][0-9]*$/u);
-const timestamp = z.iso.datetime({ offset: true }).nullish();
+const id = z
+  .string()
+  .max(100)
+  .regex(/^[1-9][0-9]*$/u);
+const display = (limit: number) =>
+  z
+    .string()
+    .refine(
+      (value) =>
+        value.trim().length > 0 &&
+        !value.includes("\0") &&
+        [...value].length <= limit,
+    );
+const timestamp = z.iso
+  .datetime({ offset: true })
+  .max(128)
+  .refine((value) => Date.parse(value) >= 0)
+  .nullish();
 const severity = z.object({
-  attributes: z.object({ rating: z.string().min(1).max(64) }),
+  attributes: z.object({ rating: display(64) }).optional(),
 });
 const scope = z.object({
   id,
-  attributes: z.object({ asset_type: z.string().min(1).max(128) }),
+  attributes: z.object({ asset_type: display(128) }).optional(),
 });
 const detail = z.object({
   id,
   type: z.literal("report"),
   attributes: z.object({
-    title: z.string().trim().min(1).max(1024),
-    state: z.string().min(1).max(128),
+    title: display(512),
+    state: display(128),
     created_at: timestamp,
     submitted_at: timestamp,
     last_activity_at: timestamp,
     cve_ids: z
-      .array(z.string().regex(/^CVE-[0-9]{4}-[0-9]{4,}$/u))
+      .array(
+        z
+          .string()
+          .max(512)
+          .regex(/^CVE-[0-9]{4}-[0-9]{4,}$/u),
+      )
       .max(100)
       .nullish(),
   }),
@@ -50,14 +84,14 @@ function project(raw: unknown, program: string, report: string) {
     id,
     title: attributes.title,
     state: attributes.state,
-    severity_rating: relationships.severity?.data?.attributes.rating,
+    severity_rating: relationships.severity?.data?.attributes?.rating,
     created_at: attributes.created_at ?? undefined,
     submitted_at: attributes.submitted_at ?? undefined,
     last_activity_at: attributes.last_activity_at ?? undefined,
     cve_ids: attributes.cve_ids?.length
       ? [...new Set(attributes.cve_ids)].sort()
       : undefined,
-    scope: target
+    scope: target?.attributes
       ? { id: target.id, asset_type: target.attributes.asset_type }
       : undefined,
   };
@@ -127,11 +161,11 @@ export async function exportHackerOneReports(options: {
     options.capture === undefined
       ? undefined
       : (await readFile(options.capture, "utf8")).trim();
-  if (
-    capture !== undefined &&
-    (!capture || capture.length > 32768 || /\s/u.test(capture))
-  )
+  if (capture !== undefined && (!capture || /\s/u.test(capture)))
     throw new Error("The capture file must contain one signed capture ticket.");
+  const parent = await realpath(dirname(options.output));
+  const destination = join(parent, basename(options.output));
+  await requireSecureOutputAncestry(destination);
   const authorization =
     "Basic " + Buffer.from(`${username}:${token}`, "utf8").toString("base64");
   const reports = [];
@@ -156,17 +190,36 @@ export async function exportHackerOneReports(options: {
     reports,
   };
   const contents = capture ? { capture, projection } : projection;
-  const temp = join(dirname(options.output), `.${randomUUID()}.json`);
-  const file = await open(temp, "wx", 0o600);
+  const staging = join(parent, `.hackerone-${randomUUID()}`);
+  if (process.platform === "win32")
+    await createWindowsOutputDirectory(staging, false);
+  else await mkdir(staging, { mode: 0o700 });
+  const temp = join(staging, "reports.json");
+  let createdFile = false;
+  let warning: string | undefined;
   try {
+    // Check the staging directory and its ancestors before it receives any report bytes.
+    await requireSecureCredentialHome(staging);
+    const file = await open(temp, "wx", 0o600);
+    createdFile = true;
     try {
       await file.writeFile(JSON.stringify(contents) + "\n");
     } finally {
       await file.close();
     }
-    await link(temp, options.output);
+    await link(temp, destination);
   } finally {
-    await unlink(temp);
+    try {
+      if (createdFile) await unlink(temp);
+      await rmdir(staging);
+    } catch {
+      // Preserve the original write error, or the successful exclusive link.
+      warning = `Could not remove temporary export at ${staging}.`;
+    }
   }
-  return { reports: reports.length, output: options.output };
+  return {
+    reports: reports.length,
+    output: options.output,
+    ...(warning ? { warnings: [warning] } : {}),
+  };
 }
