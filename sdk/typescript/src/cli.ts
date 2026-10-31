@@ -4020,7 +4020,8 @@ export async function main(
               provider === "GitHub advisory"
                 ? "GITHUB_IMPORT_FAILED"
                 : "HOSTED_IMPORT_FAILED",
-            message: provider === "Semgrep" ? errorMessage(error) : message,
+            message:
+              provider === "GitHub advisory" ? message : errorMessage(error),
             exitCode,
           });
         }
