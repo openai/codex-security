@@ -4,10 +4,11 @@ import {
   legacyDecimalInteger,
   restoreLegacyHostedNumbers,
 } from "./hosted-scanner-v1.js";
-import { array, record, requiredText } from "./scanner-import.js";
+import { array, record, requiredText, text } from "./scanner-import.js";
 import {
   projectAliases,
   semgrepNativeProjectUrl,
+  semgrepProjectUrlEvidence,
   type SemgrepRepositoryReference,
   semgrepPlatformId,
   semgrepRepositoryUrlKey,
@@ -72,10 +73,9 @@ export function upgradeSemgrepPlatformReport(
         row["repository"] ?? {},
         "Semgrep finding repository",
       );
-      if (repo["name"] == null) continue;
-      const label = requiredText(repo["name"], "Semgrep repository name");
-      // The normalizer checks the ID and URL on this row. An early export's
-      // display label alone cannot bind another row to this project.
+      const label = text(repo["name"]);
+      if (!label) continue;
+      // Without the later alias list, each row must independently identify the project.
       if (
         repo["id"] == null &&
         (repo["url"] == null || repo["url"] === "") &&
@@ -92,7 +92,7 @@ export function upgradeSemgrepPlatformReport(
     format: "semgrep-platform-findings/v2",
     deployment: report["deployment"],
     project: { id: semgrepV1Id(project["id"]), name, url },
-    ...(native === undefined && { sourceRepositoryUrl: url }),
+    ...semgrepProjectUrlEvidence(project["url"], native, bound),
     product: report["product"],
     ref: report["ref"],
     findingCount: report["findingCount"],

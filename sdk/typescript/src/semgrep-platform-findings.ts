@@ -36,6 +36,7 @@ import {
 } from "./hosted-scanner-http.js";
 import { isRecord } from "./record.js";
 import {
+  isLegacyWitness,
   legacyDecimalInteger,
   restoreLegacyHostedNumbers,
 } from "./hosted-scanner-v1.js";
@@ -77,7 +78,7 @@ export function semgrepPlatformReportScope(input: ExternalFindings) {
   );
   return {
     deployment: requiredText(scope["deployment"], "Semgrep deployment"),
-    projectId: semgrepPlatformId(
+    projectId: savedPlatformId(
       requiredText(scope["projectId"], "Semgrep project ID"),
     ),
     ref: requiredText(scope["ref"], "Semgrep ref"),
@@ -103,7 +104,10 @@ export interface SemgrepPlatformScope {
   product: SemgrepPlatformProduct;
 }
 
-type ResolvedScope = SemgrepPlatformScope & { sourceRepositoryUrl?: string };
+type ResolvedScope = SemgrepPlatformScope & {
+  sourceRepositoryUrl?: string;
+  nativeProjectUrl?: string;
+};
 
 export interface SemgrepPlatformSelection extends SemgrepPlatformScope {
   product: "sast";
@@ -126,7 +130,7 @@ const wireJson = JSON as JSON & {
 };
 
 // Normalize equivalent JSON numbers exactly. Keep very large exponents compact.
-function canonicalNumber(token: string): string {
+function canonicalNumber(token: string, fixedDigits = 21): string {
   const [, sign = "", integer, fraction = "", exponent = "0"] =
     /^(-?)(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/iu.exec(token)!;
   const significant = (integer + fraction).replace(/^0+/u, "");
@@ -135,8 +139,8 @@ function canonicalNumber(token: string): string {
   while (significant[end - 1] === "0") end--;
   const digits = significant.slice(0, end);
   const point = BigInt(exponent) + BigInt(significant.length - fraction.length);
-  // Use the same fixed/scientific notation thresholds as JSON.stringify.
-  if (point > -6n && point <= 21n) {
+  // Ordinary evidence follows JSON.stringify’s fixed/scientific notation thresholds.
+  if (point > -6n && point <= BigInt(fixedDigits)) {
     const split = Number(point);
     if (split <= 0) return sign + "0." + "0".repeat(-split) + digits;
     if (split >= digits.length) return sign + digits.padEnd(split, "0");
@@ -176,15 +180,20 @@ export function parseSemgrepResponse(json: string): Record<string, unknown> {
 export function semgrepPlatformIdOrUndefined(
   value: unknown,
 ): string | undefined {
-  let id = value;
-  if (wireJson.isRawJSON(value)) {
-    const token = value.rawJSON;
-    // Keep positive integer literals as digits even outside the ordinary notation range.
-    id = /^[1-9][0-9]*$/u.test(token) ? token : canonicalNumber(token);
-  } else if (typeof value === "number" && Number.isSafeInteger(value)) {
-    id = String(value);
-  }
-  return typeof id === "string" && /^[1-9][0-9]*$/u.test(id) ? id : undefined;
+  if (typeof value === "number")
+    return Number.isSafeInteger(value) && value > 0 ? String(value) : undefined;
+  let token: string;
+  if (wireJson.isRawJSON(value)) token = value.rawJSON;
+  else if (typeof value === "string" && /^[1-9][0-9]*$/u.test(value))
+    token = value;
+  else return undefined;
+  const id = canonicalNumber(token);
+  if (/^[1-9][0-9]*$/u.test(id)) return id;
+  // A large scientific value is an integer only when every significant digit lies left of its decimal point.
+  const scientific = /^[1-9](?:\.(\d+))?e\+(\d+)$/u.exec(id);
+  return scientific && BigInt(scientific[2]!) >= (scientific[1]?.length ?? 0)
+    ? id
+    : undefined;
 }
 
 export function semgrepPlatformId(value: unknown): string {
@@ -192,6 +201,24 @@ export function semgrepPlatformId(value: unknown): string {
   if (id === undefined)
     throw new Error("Expected an exact, positive Semgrep Platform ID.");
   return id;
+}
+
+// Older selections retained full decimal ID tokens beyond Semgrep's native int64 range.
+function archivedPlatformId(value: unknown): string {
+  const token = wireJson.isRawJSON(value)
+    ? canonicalNumber(value.rawJSON, Math.max(21, value.rawJSON.length))
+    : value;
+  return typeof token === "string" && /^[1-9][0-9]*$/u.test(token)
+    ? token
+    : semgrepPlatformId(value);
+}
+
+function savedPlatformId(value: unknown): string {
+  if (typeof value !== "string") return semgrepPlatformId(value);
+  const canonical = semgrepPlatformId(wireJson.rawJSON(value));
+  if (canonical !== value && !/^[1-9][0-9]*$/u.test(value))
+    throw new Error("Invalid saved Semgrep project ID.");
+  return value;
 }
 
 function scopeOf(
@@ -237,16 +264,19 @@ export function projectAliases(
     source.platform === "github" ||
     source.platform === "gitlab" ||
     publicGitHost(gitServiceHostname(new URL(url).hostname));
-  const names = [name, ...paths];
   if (knownGitSuffix)
-    names.push(...paths.map((path) => path.replace(/\.git$/u, "")));
-  const keys = new Set(
-    names.flatMap((name) => [
-      key(name),
-      key(name.slice(name.lastIndexOf("/") + 1)),
+    paths.push(...paths.map((path) => path.replace(/\.git$/u, "")));
+  const pathKeys = new Set(
+    paths.flatMap((path) => [
+      key(path),
+      key(path.slice(path.lastIndexOf("/") + 1)),
     ]),
   );
-  return { has: (label: string) => keys.has(key(label)) };
+  const shortName = name.slice(name.lastIndexOf("/") + 1);
+  return {
+    has: (label: string) =>
+      label === name || label === shortName || pathKeys.has(key(label)),
+  };
 }
 
 /** Compare HTTP origins canonically without folding paths on independent custom Git hosts. */
@@ -267,6 +297,8 @@ export function semgrepReferenceMatches(
   source: ExternalSourceRepository,
   url: string,
 ): boolean {
+  // A standard explicit Git HTTP(S) helper carries the same fetch URL.
+  url = url.replace(/^(https?)::(?=\1:\/\/)/u, "");
   if (hostedRepositoryMatches(source, url)) return true;
   try {
     // Serialize only a valid repository link. Git checkout URLs retain their original bytes.
@@ -283,16 +315,43 @@ export function semgrepPlatformRepositoryReference(
 ): ExternalSourceRepository {
   const projectUrl = nativeHttp(url);
   const source: ExternalSourceRepository = { url: projectUrl };
-  if (isGitHubCloudHost(gitServiceHostname(URL.parse(url)?.hostname ?? ""))) {
-    source.platform = "github";
-  } else {
-    const hint = references.find(
-      ({ platform, url }) =>
-        platform && semgrepReferenceMatches({ url: projectUrl, platform }, url),
-    );
-    if (hint?.platform) source.platform = hint.platform;
+  const nativeHost = gitServiceHostname(URL.parse(url)?.hostname ?? "");
+  const ownPlatformMatches = ({ url, platform }: ExternalSourceRepository) =>
+    platform !== undefined &&
+    semgrepReferenceMatches({ url: projectUrl, platform }, url);
+  const platform = isGitHubCloudHost(nativeHost)
+    ? "github"
+    : references.find(ownPlatformMatches)?.platform;
+  if (platform) {
+    source.platform = platform;
+    if (
+      references.some(
+        (ref) =>
+          ref.platform &&
+          ref.platform !== platform &&
+          (ownPlatformMatches(ref) || semgrepReferenceMatches(source, ref.url)),
+      )
+    )
+      throw new Error(
+        "Conflicting SCM platforms for the selected Semgrep repository.",
+      );
   }
   return source;
+}
+
+/** Keep provider transport spelling independently of its resolved HTTP repository. */
+export function semgrepProjectUrlEvidence(
+  raw: unknown,
+  resolved: string | undefined,
+  mapping: string | undefined,
+) {
+  if (resolved === undefined) return { sourceRepositoryUrl: mapping };
+  if (typeof raw === "string" && raw !== resolved)
+    return {
+      nativeProjectUrl: raw,
+      ...(mapping && { sourceRepositoryUrl: mapping }),
+    };
+  return {};
 }
 
 /** Interpret a project's native SSH spelling only when its Git host is known. */
@@ -394,6 +453,7 @@ export function checkSemgrepPlatformRow(
   repository = repositoryContext(scope.project.url),
   readId = semgrepPlatformId,
   repositoryUrl = hostedNativeRepositoryUrl,
+  capture = false,
 ) {
   const repo = responseRecord(
     finding["repository"] ?? (aliases ? {} : undefined),
@@ -403,24 +463,37 @@ export function checkSemgrepPlatformRow(
   const hasUrl =
     repo["url"] != null &&
     (repositoryUrl === hostedRepositoryUrl || repo["url"] !== "");
-  const full = repository.name(scope.project.name);
+  const full = scope.project.name;
   const name = repo["name"];
-  const label = typeof name === "string" ? repository.name(name) : null;
-  const projectPath = repository.name(
-    decodeURIComponent(new URL(scope.project.url).pathname).replace(
-      /^\/|\/$/gu,
-      "",
-    ),
+  const rowName = typeof name === "string" ? repository.name(name) : null;
+  // Source URLs were checked segment-by-segment before matching display names.
+  const encodedPath = new URL(scope.project.url).pathname.replace(
+    /^\/|\/$/gu,
+    "",
   );
-  const urlPathName =
-    label !== null && (label === projectPath || label + ".git" === projectPath);
-  const nameParts = label?.split("/") ?? [];
-  const qualifiedName =
-    nameParts.length > 1 &&
-    nameParts.every((part) => part && part !== "." && part !== "..") &&
-    (label === full || urlPathName);
+  const paths = [encodedPath, decodeURIComponent(encodedPath)].map(
+    repository.name,
+  );
+  // A short or clone label accompanies an independently checked URL. A URL-less row needs the original qualified name or path.
+  const labels = [
+    ...paths,
+    ...paths.map((path) => path.replace(/\.git$/u, "")),
+  ];
   const matchedName =
-    label === full || label === full.split("/").at(-1) || urlPathName;
+    name === full ||
+    name === full.split("/").at(-1) ||
+    labels.some(
+      (label) => label === rowName || label.split("/").at(-1) === rowName,
+    );
+  const qualifiedName =
+    rowName !== null &&
+    (capture || aliases
+      ? rowName === repository.name(decodeURIComponent(encodedPath)) &&
+        rowName.includes("/")
+      : (name === full || paths.includes(rowName)) &&
+        rowName === relativePath(rowName) &&
+        rowName.includes("/") &&
+        rowName.split("/").every((part) => part.trim() && part !== "."));
   const selectionRepositoryMatches = hasUrl
     ? repositoryId !== undefined || name == null || matchedName
     : repositoryId !== undefined && qualifiedName;
@@ -431,7 +504,10 @@ export function checkSemgrepPlatformRow(
         "Semgrep finding repository does not match the selected project and ref.",
       );
   }
-  if (repositoryId !== undefined && repositoryId !== scope.project.id)
+  if (
+    repositoryId !== undefined &&
+    repositoryId !== semgrepPlatformId(wireJson.rawJSON(scope.project.id))
+  )
     throw new Error(
       "Semgrep finding repository does not match the selected project and ref.",
     );
@@ -469,10 +545,15 @@ export function checkSemgrepPlatformRow(
         "Semgrep finding repository does not match the selected project and ref.",
       );
   }
+  // A verified ID or URL can identify a bulk row whose optional display name is blank.
+  const alias =
+    typeof name === "string" && (repositoryId !== undefined || hasUrl)
+      ? text(name)
+      : name;
   if (
     aliases &&
-    repo["name"] != null &&
-    !aliases.has(requiredText(repo["name"], "Semgrep repository name"))
+    alias != null &&
+    !aliases.has(requiredText(alias, "Semgrep repository name"))
   )
     throw new Error(
       "Semgrep finding repository does not match the selected project and ref.",
@@ -514,6 +595,22 @@ function selectedRows(
     options.ref,
     semgrepPlatformId,
   );
+  // git-check-ref-format distinguishes literal branch/tag names from revision expressions.
+  const refParts = scope.ref.split("/");
+  if (
+    refParts[0] !== "refs" ||
+    refParts.length < 2 ||
+    refParts.some(
+      (part) => !part || part.startsWith(".") || part.endsWith(".lock"),
+    ) ||
+    scope.ref.endsWith(".") ||
+    scope.ref.includes("..") ||
+    scope.ref.includes("@{") ||
+    /[\u0000-\u0020\u007f~^:?*\[\\]/u.test(scope.ref)
+  )
+    throw new Error(
+      "Use a fully qualified Semgrep ref such as refs/heads/topic.",
+    );
   const repository = repositoryFor(scope);
   const wanted = new Set(options.findingIds.map(semgrepPlatformId));
   if (!wanted.size) throw new Error("Select at least one Semgrep finding ID.");
@@ -539,6 +636,7 @@ function selectedRows(
         repository,
         semgrepPlatformId,
         repositoryUrl,
+        true,
       );
       selected.set(id, finding);
     }
@@ -566,7 +664,7 @@ export function selectSemgrepPlatformFindings(
   return {
     format: semgrepSelectionFormat,
     ...scope,
-    findings: rows.map((row) => JSON.stringify(row)),
+    findings: rows.map((row) => stringifySemgrepFinding(row)),
   };
 }
 
@@ -580,22 +678,6 @@ export function normalizeSelectedSemgrepPlatformFindings(
   const { scope, rows } = selectedRows(
     options,
     (scope) => {
-      // git-check-ref-format distinguishes literal branch/tag names from revision expressions.
-      const refParts = scope.ref.split("/");
-      if (
-        refParts[0] !== "refs" ||
-        refParts.length < 2 ||
-        refParts.some(
-          (part) => !part || part.startsWith(".") || part.endsWith(".lock"),
-        ) ||
-        scope.ref.endsWith(".") ||
-        scope.ref.includes("..") ||
-        scope.ref.includes("@{") ||
-        /[\u0000-\u0020\u007f~^:?*\[\\]/u.test(scope.ref)
-      )
-        throw new Error(
-          "Use a fully qualified Semgrep ref such as refs/heads/topic.",
-        );
       if (scope.project.url !== url)
         throw new Error(
           "Selected Semgrep project does not match the operator's source repository URL.",
@@ -638,7 +720,10 @@ function scopeProduct(native: unknown, complete: boolean) {
   return product;
 }
 
-function readScope(input: Record<string, unknown>) {
+function readScope(
+  input: Record<string, unknown>,
+  references: SemgrepRepositoryReference,
+) {
   const complete =
     input["format"] === semgrepPlatformFormat ||
     input["format"] === semgrepPlatformLegacyFormat;
@@ -659,18 +744,42 @@ function readScope(input: Record<string, unknown>) {
           "Semgrep source repository",
         )
       : undefined;
-  if (mapping && project["url"] != null && project["url"] !== mapping)
+  // Captures expose an HTTP URL; stored occurrences retain the provider's SSH spelling.
+  const projectUrl = project["url"];
+  const suppliedNative = complete ? input["nativeProjectUrl"] : undefined;
+  const raw =
+    suppliedNative !== undefined
+      ? requiredText(suppliedNative, "Semgrep native project URL")
+      : complete &&
+          typeof projectUrl === "string" &&
+          !/^https?:\/\//iu.test(projectUrl)
+        ? projectUrl
+        : undefined;
+  const native =
+    raw === undefined ? undefined : semgrepNativeProjectUrl(raw, references);
+  if (
+    suppliedNative !== undefined &&
+    (!native || native === raw || native !== projectUrl)
+  )
     throw new Error(
-      "Semgrep project does not match its recorded source repository URL.",
+      "Semgrep native project URL does not match its recorded HTTP repository.",
     );
+  if (mapping && projectUrl != null) {
+    const key = native && repositoryContext(native, references).key;
+    if (key ? key(native!) !== key(mapping) : projectUrl !== mapping)
+      throw new Error(
+        "Semgrep project does not match its recorded source repository URL.",
+      );
+  }
   const scope = {
     ...scopeOf(
       input["deployment"],
-      mapping ? { ...project, url: mapping } : project,
+      { ...project, url: native ?? mapping ?? project["url"] },
       input["ref"],
-      semgrepPlatformId,
+      savedPlatformId,
     ),
     ...(mapping && { sourceRepositoryUrl: mapping }),
+    ...(native && { nativeProjectUrl: raw }),
     product,
   };
   const aliases = complete
@@ -796,6 +905,34 @@ function legacyWitnessKey(
   ]);
 }
 
+function nativeOccurrence(
+  retained: Record<string, unknown>,
+  references: SemgrepRepositoryReference,
+) {
+  let data = !isSemgrepPlatformFormat(retained["format"])
+    ? {
+        ...retained,
+        format:
+          (!Object.hasOwn(retained, "semgrepPlatformFindingJson") &&
+            "finding" in retained) ||
+          retained["idEncoding"] === "v1-decimal"
+            ? semgrepPlatformLegacyFormat
+            : "repositoryAliases" in retained
+              ? semgrepPlatformFormat
+              : semgrepSelectionFormat,
+      }
+    : retained;
+  const legacy = data["format"] === semgrepPlatformLegacyFormat;
+  const original = legacy && !Object.hasOwn(data, "semgrepPlatformFindingJson");
+  if (original) data = upgradeOriginalSemgrepFinding(data, references);
+  const { scope, aliases } = readScope(data, references);
+  const repository = repositoryContext(scope.project.url, references);
+  const row = parseSemgrepResponse(
+    requiredText(data["semgrepPlatformFindingJson"], "Semgrep finding JSON"),
+  );
+  return { data, legacy, original, scope, aliases, repository, row };
+}
+
 /** Original v1 occurrences could keep only the observed repository label on a row. */
 export function semgrepLegacyRepositoryWitnesses(
   findings: readonly ExternalFinding[],
@@ -803,41 +940,34 @@ export function semgrepLegacyRepositoryWitnesses(
   references: SemgrepRepositoryReference = [],
 ): ReadonlyMap<string, string> {
   const witnesses = new Map<string, string>();
+  // Current occurrences carry their own witness. Only original rows need a sibling lookup.
+  if (
+    !findings.some(({ evidence }) =>
+      isRecord(evidence.source_data?.["finding"]),
+    )
+  )
+    return witnesses;
   for (const finding of findings) {
     const data = finding.evidence.source_data;
-    if (
-      !data ||
-      Object.hasOwn(data, "semgrepPlatformFindingJson") ||
-      (isSemgrepPlatformFormat(data["format"]) &&
-        data["format"] !== semgrepPlatformLegacyFormat) ||
-      !isSemgrepPlatformEvidence(finding, provider) ||
-      !isRecord(data["finding"])
-    )
-      continue;
-    const repo = data["finding"]["repository"];
-    if (
-      !isRecord(repo) ||
-      !text(repo["name"]) ||
-      (repo["id"] == null && !text(repo["url"]))
-    )
-      continue;
-    // Restore the old numeric witnesses before deriving project IDs and copying the repository.
-    const upgraded = upgradeOriginalSemgrepFinding(data, references);
-    const { scope } = readScope(upgraded);
-    const repository = repositoryContext(scope.project.url, references);
-    const raw = parseSemgrepResponse(
-      requiredText(
-        upgraded["semgrepPlatformFindingJson"],
-        "Semgrep finding JSON",
-      ),
+    if (!data || !isSemgrepPlatformEvidence(finding, provider)) continue;
+    const { scope, aliases, repository, row, legacy } = nativeOccurrence(
+      data,
+      references,
+    );
+    const repo = row["repository"];
+    if (!isRecord(repo)) continue;
+    const label = text(repo["name"]);
+    if (!label || (repo["id"] == null && !text(repo["url"]))) continue;
+    checkSemgrepPlatformRow(
+      row,
+      scope,
+      aliases,
+      repository,
+      legacy ? semgrepV1Id : semgrepPlatformId,
     );
     witnesses.set(
-      legacyWitnessKey(
-        scope,
-        repository.key(scope.project.url),
-        text(repo["name"])!,
-      ),
-      JSON.stringify(raw["repository"]),
+      legacyWitnessKey(scope, repository.key(scope.project.url), label),
+      JSON.stringify({ id: scope.project.id, name: label }),
     );
   }
   return witnesses;
@@ -858,6 +988,60 @@ export function semgrepPlatformFindingRepository(
   )?.url;
 }
 
+/** Upgrade only values produced by the original object-row reader; keep SDK-authored evidence. */
+function migrateLegacyProjection(
+  evidence: ExternalFinding["evidence"],
+  row: Record<string, unknown>,
+  scope: SemgrepPlatformScope,
+  selectable: boolean,
+  references: SemgrepRepositoryReference,
+) {
+  const severity = text(row["severity"]);
+  const oldSeverity = scannerSeverity(
+    severity === "informational" ? null : severity,
+  );
+  const upgradeSeverity =
+    evidence.severity === oldSeverity &&
+    oldSeverity !== scannerSeverity(severity?.toLowerCase());
+  const path = isRecord(row["location"]) && text(row["location"]["file_path"]);
+  // The object-row reader retained backslash paths only in the vendor finding.
+  const oldLocation =
+    !!path &&
+    path.includes("\\") &&
+    evidence.locations?.length === 0 &&
+    evidence.details?.code?.end_line == null;
+  if (!upgradeSeverity && !oldLocation) return;
+  const projected = normalizePlatformRows(
+    [{ finding: row, selectable }],
+    scope,
+    "local",
+    {
+      legacy: true,
+      projectNames: projectAliases(
+        scope.project.name,
+        scope.project.url,
+        references,
+      ),
+    },
+  ).findings[0]?.evidence;
+  if (!projected) return;
+  return {
+    ...(upgradeSeverity && { severity: projected.severity }),
+    ...(oldLocation && { locations: projected.locations }),
+    ...(oldLocation &&
+      evidence.details?.code &&
+      projected.details?.code && {
+        details: {
+          ...evidence.details,
+          code: {
+            ...evidence.details.code,
+            end_line: projected.details.code.end_line,
+          },
+        },
+      }),
+  };
+}
+
 export function semgrepPlatformFindingBinding(
   finding: ExternalFinding,
   provider: string,
@@ -869,21 +1053,8 @@ export function semgrepPlatformFindingBinding(
   if (!isSemgrepPlatformEvidence(finding, provider)) return;
   if (!retained)
     throw new Error("Missing the original Semgrep finding evidence.");
-  let data = !isSemgrepPlatformFormat(retained["format"])
-    ? {
-        ...retained,
-        format:
-          "finding" in retained || retained["idEncoding"] === "v1-decimal"
-            ? semgrepPlatformLegacyFormat
-            : "repositoryAliases" in retained
-              ? semgrepPlatformFormat
-              : semgrepSelectionFormat,
-      }
-    : retained;
-  const legacy = data["format"] === semgrepPlatformLegacyFormat;
-  const original = legacy && !Object.hasOwn(data, "semgrepPlatformFindingJson");
-  if (original) data = upgradeOriginalSemgrepFinding(data, references);
-  const { scope, aliases } = readScope(data);
+  const { data, legacy, original, scope, aliases, repository, row } =
+    nativeOccurrence(retained, references);
   if (
     reportScope &&
     (scope.deployment !== reportScope.deployment ||
@@ -895,10 +1066,6 @@ export function semgrepPlatformFindingBinding(
       "The Semgrep report repository scope does not match the finding's deployment, project ID, ref, or product.",
     );
 
-  const repository = repositoryContext(scope.project.url, references);
-  const row = parseSemgrepResponse(
-    requiredText(data["semgrepPlatformFindingJson"], "Semgrep finding JSON"),
-  );
   const selectable = checkSemgrepPlatformRow(
     row,
     scope,
@@ -906,18 +1073,21 @@ export function semgrepPlatformFindingBinding(
     repository,
     legacy ? semgrepV1Id : semgrepPlatformId,
   );
-  const nativeId = sourceId(
-    scope,
-    row,
-    legacy ? semgrepV1Id : semgrepPlatformId,
-  );
+  let occurrenceId = legacy ? semgrepV1Id : semgrepPlatformId;
+  const nativeId = sourceId(scope, row, occurrenceId);
   if (
     generatedId.test(finding.source_finding_id) &&
     finding.source_finding_id !== nativeId
-  )
-    throw new Error(
-      "The generated Semgrep finding ID does not match its native occurrence.",
-    );
+  ) {
+    if (
+      legacy ||
+      finding.source_finding_id !== sourceId(scope, row, archivedPlatformId)
+    )
+      throw new Error(
+        "The generated Semgrep finding ID does not match its native occurrence.",
+      );
+    occurrenceId = archivedPlatformId;
+  }
   const namedOnly =
     aliases &&
     repositoryWithOnlyAlias(
@@ -945,7 +1115,9 @@ export function semgrepPlatformFindingBinding(
       scope,
       aliases,
       repository,
-      legacy ? semgrepV1Id : semgrepPlatformId,
+      legacy
+        ? semgrepV1Id
+        : (id) => semgrepPlatformId(wireJson.rawJSON(savedPlatformId(id))),
     );
   }
   const claimed = finding.evidence.details?.repository?.url;
@@ -962,14 +1134,27 @@ export function semgrepPlatformFindingBinding(
     );
   return {
     url: scope.project.url,
-    sourceData:
-      original || namedOnly
-        ? canonicalSourceDataWithExtensions(
-            retained,
-            platformSourceData(row, scope, selectable, { legacy }, namedOnly),
-            original,
-          )
-        : undefined,
+    migration: original
+      ? migrateLegacyProjection(
+          finding.evidence,
+          row,
+          scope,
+          selectable,
+          references,
+        )
+      : undefined,
+    sourceData: canonicalSourceDataWithExtensions(
+      retained,
+      platformSourceData(
+        row,
+        scope,
+        selectable,
+        aliases ? { legacy } : undefined,
+        namedOnly,
+        occurrenceId,
+      ),
+      original,
+    ),
   };
 }
 
@@ -1000,7 +1185,7 @@ export function normalizeSemgrepPlatformFindings(
         references,
       )
     : saved;
-  const { scope, aliases } = readScope(input);
+  const { scope, aliases } = readScope(input, references);
   const repository = selectionRepository(scope.project.url, references);
   if (
     declaredUrl &&
@@ -1016,29 +1201,32 @@ export function normalizeSemgrepPlatformFindings(
     scope.project.url,
     references,
   );
-  const rows = array(input["findings"], "Semgrep Platform findings").map(
-    (value) => {
-      const raw = requiredText(value, "Semgrep finding JSON");
-      const finding = parseSemgrepResponse(raw);
-      const selectable = checkSemgrepPlatformRow(
-        finding,
-        scope,
-        aliases,
-        repository,
-        readId,
+  const entries = array(input["findings"], "Semgrep Platform findings");
+  if (!aliases && !entries.length)
+    throw new Error(
+      "A saved Semgrep selection must contain at least one finding.",
+    );
+  const rows = entries.map((value) => {
+    const raw = requiredText(value, "Semgrep finding JSON");
+    const finding = parseSemgrepResponse(raw);
+    const selectable = checkSemgrepPlatformRow(
+      finding,
+      scope,
+      aliases,
+      repository,
+      readId,
+    );
+    if (aliases) {
+      const repo = record(
+        finding["repository"] ?? {},
+        "Semgrep finding repository",
       );
-      if (aliases) {
-        const repo = record(
-          finding["repository"] ?? {},
-          "Semgrep finding repository",
-        );
-        const label = text(repo["name"]);
-        if (label && (repo["id"] != null || text(repo["url"])))
-          verifiedLabels.add(label);
-      }
-      return { finding, selectable };
-    },
-  );
+      const label = text(repo["name"]);
+      if (label && (repo["id"] != null || text(repo["url"])))
+        verifiedLabels.add(label);
+    }
+    return { finding, selectable };
+  });
   if (aliases && !matchesFindingCount(input["findingCount"], rows.length))
     throw new Error(
       "Incomplete Semgrep Platform export: finding count does not match.",
@@ -1056,6 +1244,7 @@ export function normalizeSemgrepPlatformFindings(
     scope,
     target,
     aliases ? { legacy, projectNames } : undefined,
+    aliases ? readId : archivedPlatformId,
   );
   return {
     ...result,
@@ -1070,14 +1259,29 @@ export function normalizeSemgrepPlatformFindings(
   };
 }
 
-function stringifySemgrepFinding(finding: Record<string, unknown>): string {
+// The original v1 numeric witness expressly retained a non-decimal spelling for some unsafe IDs.
+function witnessedIdToken(value: unknown): string | undefined {
+  const token = hostedNumberToken(value);
+  return token !== undefined &&
+    isLegacyWitness(token) &&
+    token !== semgrepV1Id(value)
+    ? token
+    : undefined;
+}
+
+export function stringifySemgrepFinding(
+  finding: Record<string, unknown>,
+  legacy = false,
+  idOf: (id: unknown) => string | undefined = semgrepPlatformIdOrUndefined,
+): string {
   return JSON.stringify(finding, function (this: unknown, key, value: unknown) {
     if (!wireJson.isRawJSON(value)) return value;
     const nativeId =
       key === "id" && (this === finding || this === finding["repository"]);
-    return wireJson.rawJSON(
-      nativeId ? semgrepPlatformId(value) : canonicalNumber(value.rawJSON),
-    );
+    const id = nativeId
+      ? ((legacy ? witnessedIdToken(value) : undefined) ?? idOf(value))
+      : undefined;
+    return wireJson.rawJSON(id ?? canonicalNumber(value.rawJSON));
   });
 }
 
@@ -1087,6 +1291,7 @@ function platformSourceData(
   selectable: boolean,
   bulk?: { legacy: boolean },
   namedOnly?: string | null,
+  idOf = semgrepPlatformId,
 ) {
   const repo = record(
     finding["repository"] ?? {},
@@ -1095,27 +1300,32 @@ function platformSourceData(
   const label = text(repo["name"]);
   // Ordinary v1 and v2 rows share one stored representation on replay.
   // Preserve the legacy discriminator only when reopening the raw IDs needs it.
+  const { nativeProjectUrl, ...evidenceScope } = scope;
+  const nativeBulkScope =
+    !selectable ||
+    scope.sourceRepositoryUrl !== undefined ||
+    nativeProjectUrl !== undefined;
   const needsLegacyId =
     bulk?.legacy &&
-    [finding["id"], repo["id"]].some(
-      (id) =>
-        typeof id === "string" &&
-        semgrepPlatformIdOrUndefined(id) === undefined,
+    [finding["id"], repo["id"]].some((id) =>
+      typeof id === "string"
+        ? semgrepPlatformIdOrUndefined(id) === undefined
+        : nativeBulkScope && witnessedIdToken(id) !== undefined,
     );
   // Native SAST rows with their own repository and ref replay identically in either import mode.
-  const needsBulkScope =
-    bulk &&
-    (!selectable || needsLegacyId || scope.sourceRepositoryUrl !== undefined);
+  const needsBulkScope = bulk && (nativeBulkScope || needsLegacyId);
   return {
     format: needsLegacyId
       ? semgrepPlatformLegacyFormat
       : needsBulkScope
         ? semgrepPlatformFormat
         : semgrepSelectionFormat,
-    ...scope,
+    ...evidenceScope,
     project: {
       ...scope.project,
-      url: scope.sourceRepositoryUrl ? null : scope.project.url,
+      url:
+        nativeProjectUrl ??
+        (scope.sourceRepositoryUrl ? null : scope.project.url),
     },
     ...(needsLegacyId && { idEncoding: "v1-decimal" }),
     ...(needsBulkScope && { repositoryAliases: label ? [label] : [] }),
@@ -1126,9 +1336,11 @@ function platformSourceData(
         name: namedOnly,
       }),
     }),
-    semgrepPlatformFindingJson: needsBulkScope
-      ? JSON.stringify(finding)
-      : stringifySemgrepFinding(finding),
+    semgrepPlatformFindingJson: stringifySemgrepFinding(
+      finding,
+      needsLegacyId,
+      idOf,
+    ),
   };
 }
 
@@ -1141,9 +1353,9 @@ function normalizePlatformRows(
     legacy: boolean;
     projectNames: ReturnType<typeof projectAliases>;
   },
+  readId = bulk?.legacy ? semgrepV1Id : semgrepPlatformId,
 ) {
   const legacy = bulk?.legacy;
-  const readId = legacy ? semgrepV1Id : semgrepPlatformId;
   return normalizeRecords(
     rows,
     ({ finding, selectable }) => {
@@ -1155,25 +1367,27 @@ function normalizePlatformRows(
         finding["location"] ?? {},
         "Semgrep location",
       );
-      const filePath = text(location["file_path"]);
+      const relative = relativePath(location["file_path"]);
+      const filename = relative?.split("/").at(-1);
       const path =
-        filePath &&
-        (/^[a-z][a-z0-9+.-]*:[/\\]/iu.test(filePath) ||
-          filePath.includes("://"))
-          ? null
-          : relativePath(filePath);
+        relative &&
+        filename &&
+        filename !== "." &&
+        !/^[a-z][a-z\d+.-]*:/iu.test(relative) &&
+        !relative.includes("://")
+          ? relative
+          : null;
       const coerceBulkValues = !!bulk && !legacy && !selectable;
       const startLine = path
         ? sourceLine(location["line"], coerceBulkValues)
         : null;
-      const nativeSeverity = text(finding["severity"]);
-      let severity = nativeSeverity?.toLowerCase() ?? "unknown";
-      if (legacy) {
-        // Historical object-row exports recognized only lowercase low through critical.
-        severity = scannerSeverity(
-          nativeSeverity === "informational" ? null : nativeSeverity,
-        );
-      } else if (coerceBulkValues) severity = scannerSeverity(severity);
+      const nativeSeverity =
+        text(finding["severity"])?.toLowerCase() ?? "unknown";
+      // Older exports accepted additional severity labels as unknown.
+      const severity =
+        legacy || coerceBulkValues
+          ? scannerSeverity(nativeSeverity)
+          : nativeSeverity;
       const namedOnly =
         bulk && repositoryWithOnlyAlias(finding, bulk.projectNames);
       const common = {
@@ -1187,13 +1401,14 @@ function normalizePlatformRows(
           selectable,
           bulk,
           namedOnly,
+          readId,
         ),
       };
       const messageTitle =
         description ??
         (legacy ? null : `Semgrep finding ${readId(finding["id"])}`);
       if (scope.product === "sca") {
-        const dependency = record(
+        const dependency = responseRecord(
           finding["found_dependency"] ?? {},
           "Semgrep found dependency",
         );

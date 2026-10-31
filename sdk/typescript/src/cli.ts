@@ -4108,6 +4108,7 @@ export async function main(
       .object({
         format: z.literal(semgrepPlatformFormat),
         deployment: z.string(),
+        nativeProjectUrl: z.string().optional(),
         sourceRepositoryUrl: z.string().optional(),
         project: z.object({
           id: z.string(),
