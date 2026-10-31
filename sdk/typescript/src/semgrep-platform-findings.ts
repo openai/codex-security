@@ -86,8 +86,6 @@ function parseSemgrepResponse(json: string): Record<string, unknown> {
 }
 
 function platformId(value: unknown): string | undefined {
-  if (typeof value === "number")
-    return Number.isSafeInteger(value) && value > 0 ? String(value) : undefined;
   let token: string;
   if (wireJson.isRawJSON(value)) token = value.rawJSON;
   else if (typeof value === "string" && /^[1-9][0-9]*$/u.test(value))
@@ -156,7 +154,11 @@ export function normalizeSelectedSemgrepPlatformFindings(options: {
     throw new Error(
       "Selected Semgrep project does not match the operator's source repository URL.",
     );
-  const wanted = new Set(options.findingIds.map(requiredPlatformId));
+  const wanted = new Set(
+    options.findingIds.map((id) =>
+      requiredPlatformId(requiredText(id, "Selected Semgrep finding ID")),
+    ),
+  );
   if (!wanted.size) throw new Error("Select at least one Semgrep finding ID.");
   const selected = new Map<string, Record<string, unknown>>();
   const pages =
@@ -166,14 +168,6 @@ export function normalizeSelectedSemgrepPlatformFindings(options: {
   const projectPath = decodeURIComponent(
     new URL(scope.project.url).pathname,
   ).replace(/^\/|\/$/gu, "");
-  // Short clone display labels accompany an exact native URL.
-  const projectLabels = new Set(
-    [
-      scope.project.name,
-      projectPath,
-      projectPath.replace(/\.git$/u, ""),
-    ].flatMap((name) => [name, name.split("/").at(-1)!]),
-  );
   for (const response of pages) {
     for (const finding of array(
       parseSemgrepResponse(response)["findings"],
@@ -192,13 +186,11 @@ export function normalizeSelectedSemgrepPlatformFindings(options: {
         repo["id"] == null ? undefined : requiredPlatformId(repo["id"]);
       const url = repo["url"];
       const name = repo["name"];
-      const matchesName = typeof name === "string" && projectLabels.has(name);
       const matchesQualifiedPath =
         name === projectPath && projectPath.includes("/");
       if (
         finding["ref"] !== scope.ref ||
         (repositoryId !== undefined && repositoryId !== scope.project.id) ||
-        (repositoryId === undefined && name != null && !matchesName) ||
         (url != null
           ? url !== scope.project.url
           : repositoryId === undefined || !matchesQualifiedPath)
@@ -252,10 +244,7 @@ export function normalizeSelectedSemgrepPlatformFindings(options: {
       const startLine = path ? sourceLine(location["line"]) : null;
       return validateExternalEvidence(
         {
-          title:
-            name ??
-            description ??
-            `Semgrep finding ${requiredPlatformId(finding["id"])}`,
+          title: requiredText(name ?? description, "Semgrep finding title"),
           description,
           severity: text(finding["severity"])?.toLowerCase() ?? "unknown",
           locations: path ? [{ path, line: startLine }] : [],
