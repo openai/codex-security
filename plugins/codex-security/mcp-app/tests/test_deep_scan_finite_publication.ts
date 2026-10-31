@@ -38,7 +38,11 @@ test("Deep engine preserves stopped results for an option-shaped thread ID", asy
   const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
   const start = registry.start.bind(registry);
   registry.start = (options: CoordinatorOptions) =>
-    start({ ...options, executor });
+    start({
+      ...options,
+      executor,
+      prepareReviewItems: async () => ({ reviewItemsTotal: 1 }),
+    });
   const calls: string[][] = [];
   const { coordinator } = await startDeepScanEngine({
     run: store.run,

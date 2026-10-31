@@ -14,6 +14,7 @@ import {
 } from "node:fs/promises";
 import { build } from "esbuild";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { importSource } from "./import-module.ts";
 
@@ -48,6 +49,13 @@ const EUC_JP_PERL_HEAD = Buffer.from(
 try {
   await testSchemasAreBoundAndExact();
   await testPrepareUsesTheExistingStandardGenerator();
+  await testPreflightUsesAuthoritativeRequestedPaths();
+  await testFailedTrackedFileDiscoveryIsNotEmpty();
+  await testAuthoritativeScopesWithoutRipgrep();
+  await testLargeAuthoritativeScopeTransport();
+  await testAuthoritativeLiteralTildePath();
+  if (process.platform !== "win32")
+    await testPreflightCancellationReapsHelper();
   if (!["win32", "darwin"].includes(process.platform))
     await testNonUtf8InventoryPaths();
   await testPrepareListsIgnoredTrackedFilesOnce();
@@ -55,12 +63,14 @@ try {
   await testPrepareUsesOnlyAuthoritativeDiffChanges();
   await testPrepareIncludesPerlSourceWithMixedEncodings();
   await testPrepareIncludesStagedAndUnstagedChanges();
+  await testEmptyDiffInventoryIsValid();
   await testInventoryChildPreservesSettingsAndCwd();
   if (process.platform !== "win32") await testInventoryChildPreservesRawPaths();
   await testInventoryChildFailuresPreserveOutput();
   await testWorkerReadsItsOwnBoundInventory();
   await testCursorDoesNotExceedInventory();
   await testEmptyInventoryIsValid();
+  await testEmptyChildDoesNotInheritParentGitFiles();
   await testUnsafeInventoryRowsAreRejected();
   await testSymlinkedInventoryIsRejected();
   await testInventoryReadErrorsAreReported();
@@ -188,6 +198,208 @@ async function testPrepareUsesTheExistingStandardGenerator() {
     { reviewItemsTotal: 1 },
   );
   assert.equal(await readFile(fixture.scanInventory, "utf8"), "-source.py\n");
+}
+
+async function testPreflightUsesAuthoritativeRequestedPaths() {
+  const fixture = await createFixture("authoritative requested paths");
+  await mkdir(path.join(fixture.repoRoot, "left", "nested"), {
+    recursive: true,
+  });
+  await mkdir(path.join(fixture.repoRoot, "right"), { recursive: true });
+  await fixture.writeRepositoryFile(
+    "outside-selection.py",
+    "# outside the requested scope\n",
+  );
+  await runGit(fixture.repoRoot, "init", "-q");
+  await runGit(fixture.repoRoot, "add", "outside-selection.py");
+  await runGit(fixture.repoRoot, "commit", "-qm", "root source");
+  const context = (requiredIncludePaths: string[]) => ({
+    ...fixture.scan,
+    targetContract: {
+      scope: { requiredIncludePaths, requiredExcludePaths: [] },
+    },
+  });
+  const prepare = async (requiredIncludePaths: string[]) => {
+    const selected = context(requiredIncludePaths);
+    return inventory.preflightCodexSecurityReviewItems(selected);
+  };
+
+  assert.deepEqual(await prepare(["left", "right"]), { reviewItemsTotal: 0 });
+
+  await fixture.writeRepositoryFile("left/left.py", "# left\n");
+  assert.deepEqual(await prepare(["left", "right"]), { reviewItemsTotal: 1 });
+
+  await unlink(path.join(fixture.repoRoot, "left", "left.py"));
+  await fixture.writeRepositoryFile("right/right.py", "# right\n");
+  assert.deepEqual(await prepare(["left", "right"]), { reviewItemsTotal: 1 });
+
+  await fixture.writeRepositoryFile("left/left.py", "# left\n");
+  assert.deepEqual(await prepare(["left", "right"]), { reviewItemsTotal: 2 });
+
+  await fixture.writeRepositoryFile("left/nested/source.py", "# nested\n");
+  assert.deepEqual(await prepare(["left", "left/nested"]), {
+    reviewItemsTotal: 2,
+  });
+  assert.deepEqual(await prepare(["left/left.py"]), { reviewItemsTotal: 1 });
+
+  assert.deepEqual(await prepare([".", "left"]), {
+    reviewItemsTotal: 4,
+  });
+
+  await writeInventory(fixture.scanInventory, "previous.py\n");
+  await assert.rejects(
+    inventory.preflightCodexSecurityReviewItems(context(["missing"])),
+    /scope.*does not exist|scope path not found|ENOENT/iu,
+  );
+  assert.equal(await readFile(fixture.scanInventory, "utf8"), "previous.py\n");
+}
+
+async function testAuthoritativeLiteralTildePath() {
+  const fixture = await createFixture("literal tilde requested path");
+  await fixture.writeRepositoryFile("~/selected.py", "# selected\n");
+  const context = {
+    ...fixture.scan,
+    targetContract: {
+      scope: {
+        requiredIncludePaths: ["~/selected.py"],
+        requiredExcludePaths: [],
+      },
+    },
+  };
+
+  assert.deepEqual(await inventory.preflightCodexSecurityReviewItems(context), {
+    reviewItemsTotal: 1,
+  });
+}
+
+async function testAuthoritativeScopesWithoutRipgrep() {
+  const fixture = await createFixture("standalone without ripgrep");
+  await fixture.writeRepositoryFile("selected/source.py", "# selected\n");
+  await runGit(fixture.repoRoot, "init", "-q");
+  await runGit(fixture.repoRoot, "add", ".");
+  await runGit(fixture.repoRoot, "commit", "-qm", "source");
+  const { stdout } = await execFile("sh", ["-c", "command -v git"], {
+    encoding: "utf8",
+  });
+  const tools = path.join(fixture.root, "git-only-tools");
+  await mkdir(tools);
+  const selectedGit = path.join(tools, "git");
+  await symlink(stdout.trim(), selectedGit);
+  const saved = {
+    PATH: process.env.PATH,
+    CODEX_SECURITY_GIT: process.env.CODEX_SECURITY_GIT,
+  };
+  process.env.PATH = tools;
+  process.env.CODEX_SECURITY_GIT = selectedGit;
+  try {
+    assert.deepEqual(
+      await inventory.preflightCodexSecurityReviewItems({
+        ...fixture.scan,
+        targetContract: {
+          scope: {
+            requiredIncludePaths: ["selected"],
+            requiredExcludePaths: [],
+          },
+        },
+      }),
+      { reviewItemsTotal: 1 },
+    );
+  } finally {
+    if (saved.PATH === undefined) delete process.env.PATH;
+    else process.env.PATH = saved.PATH;
+    if (saved.CODEX_SECURITY_GIT === undefined)
+      delete process.env.CODEX_SECURITY_GIT;
+    else process.env.CODEX_SECURITY_GIT = saved.CODEX_SECURITY_GIT;
+  }
+}
+
+async function testLargeAuthoritativeScopeTransport() {
+  const fixture = await createFixture("large authoritative scope transport");
+  const requested: string[] = [];
+  for (let index = 0; index < 400; index += 1) {
+    const selected = `selected-${index.toString().padStart(4, "0")}-${"x".repeat(80)}.py`;
+    requested.push(selected);
+    await fixture.writeRepositoryFile(selected, "# selected\n");
+  }
+  assert.ok(JSON.stringify(requested).length > 32_768);
+  assert.deepEqual(
+    await inventory.preflightCodexSecurityReviewItems({
+      ...fixture.scan,
+      targetContract: {
+        scope: {
+          requiredIncludePaths: requested,
+          requiredExcludePaths: [],
+        },
+      },
+    }),
+    { reviewItemsTotal: requested.length },
+  );
+}
+
+async function testPreflightCancellationReapsHelper() {
+  const fixture = await createFixture("cancel blocked preflight");
+  await fixture.writeRepositoryFile("selected.py", "# selected\n");
+  const pluginRoot = path.join(fixture.root, "blocked-plugin");
+  const helper = path.join(pluginRoot, "mcp", "helpers.mjs");
+  const marker = path.join(fixture.root, "blocked-helper.json");
+  await mkdir(path.dirname(helper), { recursive: true });
+  await writeFile(
+    helper,
+    `import {spawn} from "node:child_process";import {writeFileSync} from "node:fs";const child=spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{stdio:"ignore"});writeFileSync(${JSON.stringify(marker)},JSON.stringify({parent:process.pid,child:child.pid}));setInterval(()=>{},1000);`,
+  );
+  await writeInventory(fixture.scanInventory, "previous.py\n");
+  const controller = new AbortController();
+  const pending = inventory.preflightCodexSecurityReviewItems(
+    { ...fixture.scan, pluginRoot },
+    controller.signal,
+  );
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      await readFile(marker);
+      break;
+    } catch {
+      await delay(10);
+    }
+  }
+  const processes = JSON.parse(await readFile(marker, "utf8")) as {
+    parent: number;
+    child: number;
+  };
+  controller.abort(new Error("cancel blocked inventory"));
+  await assert.rejects(pending, /cancel blocked inventory/iu);
+  assert.equal(await readFile(fixture.scanInventory, "utf8"), "previous.py\n");
+  for (const pid of [processes.parent, processes.child]) {
+    await assertProcessExited(pid);
+  }
+}
+
+async function testFailedTrackedFileDiscoveryIsNotEmpty() {
+  const fixture = await createFixture("failed tracked discovery");
+  await runGit(fixture.repoRoot, "init", "-q");
+  await fixture.writeRepositoryFile("selected/hidden.py", "# tracked\n");
+  await runGit(fixture.repoRoot, "add", "selected/hidden.py");
+  await runGit(fixture.repoRoot, "commit", "-qm", "tracked source");
+  await writeFile(
+    path.join(fixture.repoRoot, ".git", "info", "exclude"),
+    "/selected/hidden.py\n",
+  );
+  await writeFile(path.join(fixture.repoRoot, ".git", "index"), "corrupt\n");
+  await writeInventory(fixture.scanInventory, "previous.py\n");
+  const context = {
+    ...fixture.scan,
+    targetContract: {
+      scope: {
+        requiredIncludePaths: ["selected"],
+        requiredExcludePaths: [],
+      },
+    },
+  };
+
+  await assert.rejects(
+    inventory.preflightCodexSecurityReviewItems(context),
+    /index|git.*(?:128|failed|error)/iu,
+  );
+  assert.equal(await readFile(fixture.scanInventory, "utf8"), "previous.py\n");
 }
 
 async function testInventoryChildPreservesSettingsAndCwd() {
@@ -667,6 +879,36 @@ async function testPrepareIncludesStagedAndUnstagedChanges() {
   });
 }
 
+async function testEmptyDiffInventoryIsValid() {
+  const fixture = await createFixture("empty selected diff");
+  await runGit(fixture.repoRoot, "init", "-q");
+  await fixture.writeRepositoryFile("src/app.ts", "export const app = 1;\n");
+  await runGit(fixture.repoRoot, "add", "src/app.ts");
+  await runGit(fixture.repoRoot, "commit", "-qm", "initial source");
+  const revision = await runGit(
+    fixture.repoRoot,
+    "rev-parse",
+    "--verify",
+    "HEAD",
+  );
+  const context = {
+    ...fixture.scan,
+    mode: "diff",
+    targetContract: {
+      diffTarget: {
+        kind: "range",
+        baseRevision: revision,
+        headRevision: revision,
+      },
+    },
+  };
+
+  assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
+    reviewItemsTotal: 0,
+  });
+  assert.equal(await readFile(fixture.scanInventory, "utf8"), "");
+}
+
 async function testWorkerReadsItsOwnBoundInventory() {
   const fixture = await createFixture("isolated worker inventory");
   await writeInventory(fixture.scanInventory, "./src/parent.ts\n");
@@ -702,6 +944,25 @@ async function testEmptyInventoryIsValid() {
   assert.deepEqual(await inventory.listCodexSecurityReviewItems(fixture.scan), {
     items: [],
   });
+}
+
+async function testEmptyChildDoesNotInheritParentGitFiles() {
+  const fixture = await createFixture("empty selected child");
+  const repository = path.dirname(fixture.repoRoot);
+  await runGit(repository, "init", "-q");
+  await writeFile(path.join(repository, "parent-source.ts"), "export {}\n");
+  await runGit(repository, "add", "parent-source.ts");
+  await runGit(repository, "commit", "-qm", "parent source");
+
+  assert.match(
+    await runGit(fixture.repoRoot, "rev-parse", "--verify", "HEAD"),
+    /^[0-9a-f]+$/u,
+  );
+  assert.deepEqual(
+    await inventory.prepareCodexSecurityReviewItems(fixture.scan),
+    { reviewItemsTotal: 0 },
+  );
+  assert.equal(await readFile(fixture.scanInventory, "utf8"), "");
 }
 
 async function testUnsafeInventoryRowsAreRejected() {
@@ -880,6 +1141,19 @@ async function createFixture(label: string) {
 async function writeInventory(destination: string, source: string | Buffer) {
   await mkdir(path.dirname(destination), { recursive: true });
   await writeFile(destination, source);
+}
+
+async function assertProcessExited(pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+      throw error;
+    }
+    await delay(10);
+  }
+  assert.fail(`inventory subprocess ${pid} was not reaped`);
 }
 
 async function runGit(repository: string, ...arguments_: string[]) {

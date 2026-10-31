@@ -121,7 +121,29 @@ function scopePath(
 async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
   if (regular(scope)) return [scope];
   const indexed = await directoryPaths(scope);
-  if (indexed !== undefined) return indexed;
+  const ripgrepIgnoreNames = [".ignore", ".rgignore"];
+  const ignoreBoundary =
+    indexed === undefined
+      ? repo
+      : ([...ancestors(scope)].find((path) =>
+          exists(append(path, ".git")),
+        ) ?? repo);
+  const usesRipgrepIgnoreRules =
+    [...ancestors(scope)].some((path) => {
+      try {
+        inside(ignoreBoundary, path);
+      } catch {
+        return false;
+      }
+      return ripgrepIgnoreNames.some((name) => regular(append(path, name)));
+    }) ||
+    (indexed?.some((path) =>
+      ripgrepIgnoreNames.some(
+        (name) => path.endsWith(sep + name) && regular(path),
+      ),
+    ) ??
+      false);
+  if (indexed !== undefined && !usesRipgrepIgnoreRules) return indexed;
   let result;
   try {
     result = await runRipgrep(
