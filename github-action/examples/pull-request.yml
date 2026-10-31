@@ -1,3 +1,4 @@
+# Required-check policy prerequisites, including merge-time freshness, are in the README.
 name: Codex Security PR
 on:
   pull_request:
@@ -33,9 +34,15 @@ jobs:
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          current=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '[.head.sha, .base.ref, .base.sha] | @tsv')
+          current=$(gh api --hostname "${GITHUB_SERVER_URL#https://}" "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '[.head.sha, .base.ref, .base.sha] | @tsv')
           expected=$(printf '%s\t%s\t%s' "$PR_HEAD_SHA" "$PR_BASE_REF" "$PR_BASE_SHA")
           if [ "$current" != "$expected" ]; then
+            echo 'The PR head or target changed. Run the workflow for the current PR snapshot.' >&2
+            exit 1
+          fi
+          base_ref=$(printf '%s' "$PR_BASE_REF" | jq -sRr @uri)
+          live_base=$(gh api --hostname "${GITHUB_SERVER_URL#https://}" "repos/$GITHUB_REPOSITORY/git/ref/heads/$base_ref" --jq '.object.sha')
+          if [ "$live_base" != "$PR_BASE_SHA" ]; then
             echo 'The PR head or target changed. Run the workflow for the current PR snapshot.' >&2
             exit 1
           fi

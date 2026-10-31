@@ -442,22 +442,28 @@ test('cleanup preserves reports and rejects arbitrary or symlink roots', async (
 });
 
 
-for (const aptExit of [0, 17]) test(`hosted install defers only PHP and removes its temporary override after exit ${aptExit}`, async t => {
+for (const hasNeedrestart of [true, false])
+for (const aptExit of [0, 17]) test(`hosted install with needrestart=${hasNeedrestart} cleans its PHP override after exit ${aptExit}`, async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-needrestart-')));
   t.after(() => rm(root, {recursive:true, force:true}));
   const existsSync = fs.existsSync;
   t.mock.method(fs, 'existsSync', (path: fs.PathLike) => path === '/.dockerenv' ? false : existsSync(path));
   const conf = join(root, 'conf.d');
-  await mkdir(conf);
-  await writeFile(join(conf, 'existing.conf'), 'existing configuration');
+  if (hasNeedrestart) {
+    await mkdir(conf);
+    await writeFile(join(conf, 'existing.conf'), 'existing configuration');
+  }
   const apt = join(root, 'apt');
   await writeFile(apt, `#!${process.execPath}
     const fs = require('node:fs'); const path = require('node:path'); const assert = require('node:assert/strict');
     const directory = ${JSON.stringify(conf)};
-    const overrides = fs.readdirSync(directory).filter(name => name.startsWith('codex-security-'));
-    assert.equal(overrides.length, 1);
-    const value = fs.readFileSync(path.join(directory, overrides[0]), 'utf8');
-    assert.equal(value, ${JSON.stringify('$nrconf{override_rc}{qr(^php8\\.3-fpm\\.service$)} = 0;\n')});
+    let value = '';
+    if (${hasNeedrestart}) {
+      const overrides = fs.readdirSync(directory).filter(name => name.startsWith('codex-security-'));
+      assert.equal(overrides.length, 1);
+      value = fs.readFileSync(path.join(directory, overrides[0]), 'utf8');
+      assert.equal(value, ${JSON.stringify('$nrconf{override_rc}{qr(^php8\\.3-fpm\\.service$)} = 0;\n')});
+    } else assert.equal(fs.existsSync(directory), false);
     assert.deepEqual(process.argv.slice(2), ['install', '--yes', 'bubblewrap', 'apparmor-profiles']);
     fs.writeFileSync(${JSON.stringify(join(root, 'apt-ran'))}, value);
     console.error('synthetic apt diagnostic'); process.exitCode = ${aptExit};
@@ -480,8 +486,10 @@ for (const aptExit of [0, 17]) test(`hosted install defers only PHP and removes 
   else await assert.rejects(result, error => error instanceof Error && error.cause === original
     && error.message.includes(original.message) && error.message.includes('synthetic apt diagnostic'));
   assert.equal(fs.existsSync(join(root, 'apt-ran')), true);
-  assert.deepEqual(fs.readdirSync(conf), ['existing.conf']);
-  assert.equal(await readFile(join(conf, 'existing.conf'), 'utf8'), 'existing configuration');
+  if (hasNeedrestart) {
+    assert.deepEqual(fs.readdirSync(conf), ['existing.conf']);
+    assert.equal(await readFile(join(conf, 'existing.conf'), 'utf8'), 'existing configuration');
+  } else assert.equal(fs.existsSync(conf), false);
   assert.equal(probes, aptExit === 0 ? 2 : 1);
   assert.equal(calls.length, aptExit === 0 ? 3 : 2);
 });

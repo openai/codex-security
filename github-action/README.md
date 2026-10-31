@@ -250,18 +250,26 @@ use an approved model ID and AWS provisioning as described in
 
 Use the same API-key secret and Action commit as above. The
 [pull-request workflow](examples/pull-request.yml) checks out the PR head with
-full history and requires a completed scan. For each protected target branch,
+full history and requires a completed scan of the event's snapshot. For each protected target branch,
 require its matching **Codex Security / <target-branch>** check (for example,
-**Codex Security / main** on `main`) from the GitHub Actions app. Require this
-check only for branches that do not use a merge queue. The Action
+**Codex Security / main** on `main`) from the GitHub Actions app as part of the
+branch's merge policy. An independent merge-time gate must require fresh scan
+qualification whenever the live base changes, including after this check passes.
+GitHub can reuse a successful head check after a base-only update, even with
+strict up-to-date checks when the new base is already an ancestor of the head.
+This example does not implement that merge-time gate: the named check alone
+cannot establish that the current merge diff was scanned. Require this check
+only for branches that do not use a merge queue. The Action
 does not support `merge_group` events, so this workflow cannot provide the required
 check for a merge queue.
 
 The check name includes the target branch because GitHub can evaluate checks on
 the shared head commit when a test merge commit has no status. The workflow uses
-read-only pull request access to verify the event's head and target before the
-scan and before accepting its result. Retargeted PRs get a new review, and stale
-reruns cannot cancel a different head/base snapshot or pass its required check.
+read-only pull request and Git-ref access on the triggering GitHub host to verify
+the event's head, target branch, and live base SHA before the scan and before
+accepting its result. The pull record's base SHA alone can lag the branch tip.
+Retargeted PRs get a new review. During a run, a changed snapshot fails verification;
+a stale rerun cannot cancel another event's scan.
 The concurrency group also includes the run ID because GitHub compares group
 names without case sensitivity. Separate workflow events can run concurrently.
 Run the workflow from the current PR event after retargeting. If the target has
@@ -269,14 +277,19 @@ advanced since that event, update the PR branch to trigger a fresh review.
 See GitHub's [required-check evaluation](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks)
 and [rerun semantics](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs).
 
-A pull request can change its workflow and still report the same check name.
-Before requiring this check, use an organization ruleset that runs a workflow
-from a protected ref, or require code owner approval for changes to
-`.github/workflows/` and `CODEOWNERS` and dismiss stale approvals.
+When the required check must establish which workflow ran, use an
+[organization ruleset that requires a workflow](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets#require-workflows-to-pass-before-merging)
+from a protected ref. Selecting the GitHub Actions app identifies the app, not a
+particular workflow or ref. Code owner approval for `.github/workflows/` and
+`CODEOWNERS`, together with dismissing stale approvals, protects edits in the PR
+being reviewed. It does not stop a workflow on another writable branch from
+creating a check with the same name and app on that PR's head, so it cannot
+substitute for the protected-ref workflow requirement.
 
 <!-- action-workflow:pull-request:start -->
 
 ```yaml
+# Required-check policy prerequisites, including merge-time freshness, are in the README.
 name: Codex Security PR
 on:
   pull_request:
@@ -312,9 +325,15 @@ jobs:
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          current=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '[.head.sha, .base.ref, .base.sha] | @tsv')
+          current=$(gh api --hostname "${GITHUB_SERVER_URL#https://}" "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '[.head.sha, .base.ref, .base.sha] | @tsv')
           expected=$(printf '%s\t%s\t%s' "$PR_HEAD_SHA" "$PR_BASE_REF" "$PR_BASE_SHA")
           if [ "$current" != "$expected" ]; then
+            echo 'The PR head or target changed. Run the workflow for the current PR snapshot.' >&2
+            exit 1
+          fi
+          base_ref=$(printf '%s' "$PR_BASE_REF" | jq -sRr @uri)
+          live_base=$(gh api --hostname "${GITHUB_SERVER_URL#https://}" "repos/$GITHUB_REPOSITORY/git/ref/heads/$base_ref" --jq '.object.sha')
+          if [ "$live_base" != "$PR_BASE_SHA" ]; then
             echo 'The PR head or target changed. Run the workflow for the current PR snapshot.' >&2
             exit 1
           fi

@@ -13,7 +13,7 @@ const gate = workflow.jobs['required-review'];
 const step = gate.steps.find((value: {name: string}) => value.name === 'Require a completed review or an empty diff');
 
 function context(action: string, changes: Record<string, unknown> = {}, fork = false) {
-  return {run_id: 42, token: 'synthetic-read-only-token', repository: 'example/repo', event: {
+  return {run_id: 42, token: 'synthetic-read-only-token', repository: 'example/repo', server_url: 'https://github.com', event: {
     action, changes, pull_request: {number: 7, head: {sha: 'a'.repeat(40), repo: {full_name: fork ? 'example/fork' : 'example/repo'}}, base: {ref: 'main', sha: 'b'.repeat(40)}},
   }};
 }
@@ -106,23 +106,38 @@ async function prBindingFixture(t: TestContext) {
   const gh = join(directory, 'gh');
   await writeFile(gh, `#!${process.execPath}
     const assert = require('node:assert/strict');
-    assert.deepEqual(process.argv.slice(2), ['api', 'repos/example/repo/pulls/7', '--jq', '[.head.sha, .base.ref, .base.sha] | @tsv']);
+    const args = process.argv.slice(2);
+    assert.equal(args.shift(), 'api');
+    const hostIndex = args.indexOf('--hostname');
+    const host = hostIndex < 0 ? 'github.com' : args.splice(hostIndex, 2)[1];
+    assert.equal(host, new URL(process.env.GITHUB_SERVER_URL).hostname);
     assert.equal(process.env.GH_TOKEN, 'synthetic-read-only-token');
-    console.log(process.env.SYNTHETIC_CURRENT_PR);
-    process.exitCode = Number(process.env.SYNTHETIC_API_EXIT);
+    if (args[0] === 'repos/example/repo/pulls/7') {
+      assert.deepEqual(args.slice(1), ['--jq', '[.head.sha, .base.ref, .base.sha] | @tsv']);
+      console.log(process.env.SYNTHETIC_CURRENT_PR);
+      process.exitCode = Number(process.env.SYNTHETIC_API_EXIT);
+    } else {
+      const ref = encodeURIComponent(process.env.PR_BASE_REF).replace(/[!'()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+      assert.deepEqual(args, ['repos/example/repo/git/ref/heads/' + ref, '--jq', '.object.sha']);
+      console.log(process.env.SYNTHETIC_LIVE_BASE);
+      process.exitCode = Number(process.env.SYNTHETIC_REF_API_EXIT);
+    }
   `, {mode:0o700});
   const before = scan.steps[0];
   const after = gate.steps[0];
   assert.equal(workflow.permissions['pull-requests'], 'read');
   assert.equal(before.name, 'Verify the PR still matches this scan');
   assert.deepEqual(after, before);
-  return (github: ReturnType<typeof context>, current: ReturnType<typeof context>, accepting = false, apiExit = 0) => {
+  return (github: ReturnType<typeof context>, current: ReturnType<typeof context>, accepting = false, apiExit = 0,
+    liveBase = current.event.pull_request.base.sha, refApiExit = 0) => {
     const pr = current.event.pull_request;
     const result = spawnSync('/bin/bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c',
       accepting ? gate.steps.map((value: {run: string}) => value.run).join('\n') : before.run], {
-      encoding:'utf8', env:{PATH:directory, GITHUB_REPOSITORY:github.repository,
+      encoding:'utf8', env:{PATH:`${directory}:${process.env.PATH}`, GITHUB_REPOSITORY:github.repository,
+        GITHUB_SERVER_URL:github.server_url, GH_HOST:'unrelated.example.invalid',
         ...Object.fromEntries(Object.entries(before.env).map(([key, value]) => [key, render(String(value), github)])),
         SYNTHETIC_CURRENT_PR:[pr.head.sha, pr.base.ref, pr.base.sha].join('\t'), SYNTHETIC_API_EXIT:String(apiExit),
+        SYNTHETIC_LIVE_BASE:liveBase, SYNTHETIC_REF_API_EXIT:String(refApiExit),
         SCAN_JOB_RESULT:'success', SCAN_STATUS:'completed', SKIP_REASON:''},
     });
     assert.ifError(result.error);
@@ -150,6 +165,33 @@ for (const [label, currentHead, currentRef, currentBase, apiExit, accepted] of [
     }
   });
 }
+
+for (const accepting of [false, true]) {
+  test(`a cached pull base cannot accept an advanced live branch (${accepting ? 'acceptance' : 'scan'})`, async t => {
+    const run = await prBindingFixture(t);
+    const original = context('opened');
+    assert.equal(run(original, original, accepting, 0, 'c'.repeat(40)).status, 1);
+    assert.notEqual(run(original, original, accepting, 0, original.event.pull_request.base.sha, 7).status, 0);
+  });
+
+  test(`PR verification uses the triggering enterprise host (${accepting ? 'acceptance' : 'scan'})`, async t => {
+    const run = await prBindingFixture(t);
+    const github = context('opened');
+    github.server_url = 'https://octocat.ghe.com';
+    const result = run(github, github, accepting);
+    assert.equal(result.status, 0, result.stderr);
+  });
+}
+
+test('live branch verification preserves slashes and URL-significant ref characters', async t => {
+  const run = await prBindingFixture(t);
+  const github = context('opened');
+  github.event.pull_request.base.ref = 'release/#canary%';
+  for (const accepting of [false, true]) {
+    const result = run(github, github, accepting);
+    assert.equal(result.status, 0, result.stderr);
+  }
+});
 
 test('case-only retargets isolate an old rerun and reject its completed result', async t => {
   const run = await prBindingFixture(t);

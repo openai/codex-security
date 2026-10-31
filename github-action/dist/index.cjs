@@ -56239,10 +56239,12 @@ async function ensureSandbox(options, probe, execute = runProcess) {
     ["-n", "/usr/bin/apt-get", "update"],
     // Defer only the hosted image's problematic PHP restart during this install.
     ["-n", "/bin/sh", "-eu", "-c", String.raw`
-      override=$(/usr/bin/mktemp /etc/needrestart/conf.d/codex-security-XXXXXX.conf)
-      trap '/usr/bin/rm -f "$override"' EXIT
-      trap 'exit 1' HUP INT TERM
-      printf '%s\n' '$nrconf{override_rc}{qr(^php8\.3-fpm\.service$)} = 0;' > "$override"
+      if [ -d /etc/needrestart/conf.d ]; then
+        override=$(/usr/bin/mktemp /etc/needrestart/conf.d/codex-security-XXXXXX.conf)
+        trap '/usr/bin/rm -f "$override"' EXIT
+        trap 'exit 1' HUP INT TERM
+        printf '%s\n' '$nrconf{override_rc}{qr(^php8\.3-fpm\.service$)} = 0;' > "$override"
+      fi
       /usr/bin/apt-get install --yes bubblewrap apparmor-profiles
     `],
     ["-n", "/usr/sbin/apparmor_parser", "-r", "/usr/share/apparmor/extra-profiles/bwrap-userns-restrict"]
