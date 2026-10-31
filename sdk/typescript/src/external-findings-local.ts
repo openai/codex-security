@@ -766,6 +766,7 @@ export async function prepareLocalImport(
   const hostedSources = new Map<string, ExternalSourceRepository>();
   const known = new Set<string>(parsedSources.map(({ url }) => url));
   let hasOrdinaryRows = false;
+  let ordinaryRowNeedsReferences = false;
   for (const finding of current.findings) {
     const semgrep = semgrepSelectionRepository(finding, readerSources);
     if (semgrep && options.provider !== "semgrep")
@@ -780,6 +781,8 @@ export async function prepareLocalImport(
     if (url && !semgrep) sources.set(url, { url });
     const retained = bound.get(id);
     const native = nativeSources.get(finding) ?? [];
+    if (!semgrep && !url && !retained && !native.length)
+      ordinaryRowNeedsReferences = true;
     if (retained) {
       const claims = [
         retained.url,
@@ -873,7 +876,8 @@ export async function prepareLocalImport(
     );
   const hostedReferences: ExternalSourceRepository[] = [];
   for (const source of [...(inspector ? [inspector] : []), ...references]) {
-    if (isHostedReference(source)) {
+    // A row without its own repository depends on the reader references for its checkout check.
+    if (!ordinaryRowNeedsReferences && isHostedReference(source)) {
       hostedReferences.push(source);
       continue;
     }

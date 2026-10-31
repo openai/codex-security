@@ -59,7 +59,8 @@ Use the SDK to select exact IDs from **Semgrep Code (SAST)**. The official
 can help identify them. For import, save the native
 [project response](https://docs.semgrep.dev/api-reference/v1/projectsservice/get-project-details)
 and the [Findings API pages](https://docs.semgrep.dev/api-reference/v1/findingsservice/list-code-supply-chain-or-ai-powered-detection-findings)
-for that deployment, project ID and exact ref, using `issue_type=sast` and
+for that deployment, project ID and fully qualified Git ref (for example,
+`refs/heads/release` or `refs/tags/release`), using `issue_type=sast` and
 `dedup=false`. Use a Web API token with read access. Read through the pages
 until you have the requested IDs. Use a project with an HTTP(S) repository URL.
 For Git fetch URLs on an IP address, use its canonical spelling in the checkout
@@ -99,7 +100,8 @@ codex-security publish findings /path/to/private/selected.json --to local --prov
 
 After review, repeat without `--dry-run` and confirm the import. Reusing the
 same source key updates the same records, keyed by deployment, project ID,
-product, ref and finding ID. Importing the same findings reports unchanged
+product, ref and finding ID. Replay preserves the exact ref of an existing
+selection, including a short ref in an older file. Importing the same findings reports unchanged
 records even if the API reordered JSON object keys. Use a separate source key
 for CLI scans. The selected native finding is retained as JSON text in
 `source_data.semgrepPlatformFindingJson`, including locations that cannot be mapped to the repository.

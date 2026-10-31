@@ -108,17 +108,17 @@ function matchesHttpsHost(url: string | undefined, hostname: string): boolean {
   );
 }
 
-/** Standard public SSH aliases, plus a GitHub host established by the caller. */
+/** Standard public SSH aliases, plus a hosted SCM established by the caller. */
 export function normalizeHostedGitRepositoryUrl(
   remote: string,
   source: string | undefined,
-  github: boolean,
+  trustedScm: boolean,
 ): string {
   // A projected single-project report may retain only its SSH spelling.
   return normalizeGitSshAlias(
     remote,
     (host) =>
-      (github || isPublicGitHost(gitServiceHostname(host))) &&
+      (trustedScm || isPublicGitHost(gitServiceHostname(host))) &&
       matchesHttpsHost(source ?? `https://${host}`, host),
   );
 }
@@ -257,7 +257,11 @@ export function hostedRepositoryMatches(
 ): boolean {
   if (!/^https?:\/\//iu.test(source.url)) return remote === source.url;
   const github = source.platform === "github";
-  const url = normalizeHostedGitRepositoryUrl(remote, source.url, github);
+  const url = normalizeHostedGitRepositoryUrl(
+    remote,
+    source.url,
+    github || source.platform === "gitlab",
+  );
   // Git passes raw URL paths to its HTTP transport. Do not turn backslashes,
   // controls or an encoded traversal into a match via web URL serialization.
   if (
@@ -265,6 +269,8 @@ export function hostedRepositoryMatches(
     /[\\\x00-\x20\x7f?#]/u.test(url) ||
     // libcurl accepts encoded userinfo but rejects multiple literal authority delimiters.
     /^https?:\/\/[^/?#]*@[^/?#]*@/iu.test(url) ||
+    // Git rejects a decoded line feed in credentials and libcurl rejects a NUL in usernames.
+    /^https?:\/\/(?:[^/?#@]*%0a[^/?#@]*|[^:/?#@]*%00[^/?#@]*)@/iu.test(url) ||
     ambiguousGitIpHost(url) ||
     ambiguousHostedHttpPath(url)
   )
