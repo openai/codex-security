@@ -20,6 +20,7 @@ import {
   normalizeRecords,
   record,
   relativePath,
+  repositoryFilePath,
   requiredText,
   stableId,
   text,
@@ -96,18 +97,8 @@ export function parseSemgrepResponse(json: string): Record<string, unknown> {
   return responseRecord(
     JSON.parse(
       json.replace(/^\uFEFF/u, ""),
-      (_key: string, value: unknown, context?: { source?: string }) => {
-        if (typeof value === "number")
-          return wireJson.rawJSON(context!.source!);
-        // Vendor object order can change between reads without a finding changing.
-        if (isRecord(value))
-          return Object.fromEntries(
-            Object.keys(value)
-              .sort()
-              .map((key) => [key, value[key]]),
-          );
-        return value;
-      },
+      (_key: string, value: unknown, context?: { source?: string }) =>
+        typeof value === "number" ? wireJson.rawJSON(context!.source!) : value,
     ),
     "Semgrep API response",
   );
@@ -150,10 +141,11 @@ function scopeOf(
   ref: unknown,
 ): SemgrepPlatformScope {
   const row = responseRecord(project, "Semgrep project");
+  const id = semgrepPlatformId(row["id"]);
   return {
     deployment: requiredText(deployment, "Semgrep deployment"),
     project: {
-      id: semgrepPlatformId(row["id"]),
+      id: text(row["id"]) ?? id,
       name: requiredText(row["name"], "Semgrep project name"),
       url: declaredScannerRepositoryUrl(
         row["url"],
@@ -416,7 +408,7 @@ function sourceId(
     Number.isSafeInteger(Number(id)) ? Number(id) : id;
   return stableId("semgrep-platform", [
     scope.deployment,
-    exact(scope.project.id),
+    exact(idOf(wireJson.rawJSON(scope.project.id))),
     scope.product,
     scope.ref,
     exact(idOf(finding["id"])),
@@ -525,13 +517,26 @@ function stringifySemgrepFinding(
   finding: Record<string, unknown>,
   idOf = semgrepPlatformId,
 ): string {
-  return JSON.stringify(finding, function (this: unknown, key, value: unknown) {
-    if (!wireJson.isRawJSON(value)) return value;
-    const nativeId =
-      key === "id" && (this === finding || this === finding["repository"]);
-    return wireJson.rawJSON(
-      nativeId ? idOf(value) : canonicalNumber(value.rawJSON),
-    );
+  const repository = responseRecord(
+    finding["repository"],
+    "Semgrep finding repository",
+  );
+  const nativeIds = [finding["id"], repository["id"]];
+  return JSON.stringify(finding, (_key, value: unknown) => {
+    if (wireJson.isRawJSON(value))
+      return wireJson.rawJSON(
+        nativeIds.includes(value)
+          ? idOf(value)
+          : canonicalNumber(value.rawJSON),
+      );
+    // Stable evidence only needs the retained row's object keys to be ordered.
+    if (isRecord(value))
+      return Object.fromEntries(
+        Object.keys(value)
+          .sort()
+          .map((key) => [key, value[key]]),
+      );
+    return value;
   });
 }
 
@@ -553,21 +558,22 @@ function normalizeSelectionRows(
         "Semgrep location",
       );
       const relative = relativePath(location["file_path"]);
-      const filename = relative?.split("/").at(-1);
       const path =
         relative &&
-        filename &&
-        filename !== "." &&
-        !/^[a-z][a-z\d+.-]*:/iu.test(relative) &&
-        !relative.includes("://")
+        !relative.endsWith("/.") &&
+        !relative.includes("://") &&
+        repositoryFilePath(relative)
           ? relative
           : null;
+      const severity = text(finding["severity"])?.toLowerCase() ?? "";
       const startLine = path ? sourceLine(location["line"]) : null;
       return validateExternalEvidence(
         {
           title: requiredText(name ?? description, "Semgrep finding title"),
           description,
-          severity: text(finding["severity"])?.toLowerCase() ?? "unknown",
+          severity: ["low", "medium", "high", "critical"].includes(severity)
+            ? severity
+            : "unknown",
           locations: path ? [{ path, line: startLine }] : [],
           branch: scope.ref,
           details: {

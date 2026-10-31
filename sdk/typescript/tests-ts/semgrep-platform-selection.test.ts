@@ -137,6 +137,14 @@ test("each selected finding must match the independently named project, ref, and
     });
   const unrelated = '{"findings":[{"rule_name":"no-id"},{"id":2.5}]}';
   expect(select([first, unrelated, second]).findings).toHaveLength(2);
+  const unknown = select([
+    first,
+    second.replace('"severity":"medium"', '"severity":"WARNING"'),
+  ]).findings[1]!;
+  expect(unknown.evidence.severity).toBe("unknown");
+  expect(
+    unknown.evidence.source_data?.["semgrepPlatformFindingJson"],
+  ).toContain('"severity":"WARNING"');
   expect(() => select([first, unrelated])).toThrow(ids[1]);
   expect(() => select([first, second, second])).toThrow("Duplicate");
   expect(() => select([first, page(ids[1]!, "refs/heads/main")])).toThrow(
@@ -219,6 +227,13 @@ test("equivalent numeric IDs replay as integers while textual IDs stay exact", (
   expect(
     select(large, large).evidence.source_data?.["semgrepPlatformFindingJson"],
   ).toContain('"id":1.2345678901234567890123e+22,');
+  const textualProject = select("8", "8", JSON.stringify(large));
+  expect(textualProject.evidence.source_data?.["project"]).toMatchObject({
+    id: large,
+  });
+  expect(textualProject.source_finding_id).toBe(
+    select("8", "8", large).source_finding_id,
+  );
   const power = "1000000000000000000000";
   expect(select("1e21", power)).toEqual(select(power, power));
   expect(() => select("1.0000000000000000000001e21", power)).toThrow("missing");
@@ -309,6 +324,8 @@ test("only repository-relative files are projected and original paths remain in 
     "file:src/app.ts",
     "data:text/plain,hello",
     "generated:/api.ts",
+    "./C:/work/app.ts",
+    "git@host:team/repo/app.ts",
     ".",
     "src/",
   ]) {
