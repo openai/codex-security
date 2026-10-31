@@ -823,13 +823,16 @@ export class CodexSecurity {
           expectedScanId: state.scanId,
           signal,
         });
-        await workflow.bind({ artifactDigest: scanArtifactDigest(contract) });
+        const verified = await workflow.bind({
+          artifactDigest: scanArtifactDigest(contract),
+        });
         metadata ??= { threadId: "", turnResult: { status: "completed" } };
         await workflow.complete("scan", metadata);
         return new ScanResult({
           ...contract,
           scanDir: state.scanDir,
           ...metadata,
+          recordedCost: verified.recordedCost,
           threatModelPath: await readThreatModelPath(state.scanDir, {
             pythonPath: this.config.pythonPath,
             protectedRoot: local.protectedRoot,

@@ -1227,7 +1227,7 @@ env_key = "CODEX_API_KEY"
         `CAPTURE_SYNTHETIC_OPENAI_AUTH\n${virtualenv === undefined ? "" : "CAPTURE_SYNTHETIC_PYTHON\n"}`,
       );
       const executor = new CodexSdkWorkerExecutor({
-        model: "gpt-daybreak-blue-latest",
+        model: "gpt-6.1-sol",
         parentSandbox: trustedParentSandbox,
       });
       for (const kind of ["discovery", "dedup"] as const) {
@@ -1250,11 +1250,7 @@ env_key = "CODEX_API_KEY"
             runtimeEnvironment.LD_LIBRARY_PATH,
           );
           assert.equal(invocation.codexHome, fixture.root);
-          assertFlagPair(
-            invocation.argv,
-            "--model",
-            "gpt-daybreak-blue-latest",
-          );
+          assertFlagPair(invocation.argv, "--model", "gpt-6.1-sol");
           assert.deepEqual(invocation.runtimeEnvironment, runtimeEnvironment);
           if (virtualenv !== undefined) {
             assert.equal(invocation.pythonPrefix, virtualenv);

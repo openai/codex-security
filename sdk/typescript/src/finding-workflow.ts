@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { isAbsolute, relative, sep } from "node:path";
 import type { JsonObject } from "./config.js";
 import type { LoadedContract } from "./contract.js";
+import type { ScanCost } from "./cost-model.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import { findingsBaseUrl } from "./findings-client.js";
 import type { FindingSearchScope } from "./finding-retrieval.js";
@@ -27,6 +28,7 @@ export interface WorkflowBinding {
 }
 export interface WorkflowState extends WorkflowBinding {
   id: string;
+  recordedCost?: ScanCost;
   stages: Record<
     WorkflowStage,
     {
