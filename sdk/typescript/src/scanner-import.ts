@@ -63,9 +63,10 @@ export function repositoryFilePath(value: unknown): string | null {
   const relative = relativePath(value);
   if (!relative) return null;
   const path = posix.normalize(relative);
+  // Anchor the SCP branch at the first eligible @ to avoid rescanning long filenames.
   return path === "." ||
     path.endsWith("/") ||
-    /^(?:[a-z][a-z\d+.-]*:|~[^/]*(?:\/|$)|[^/]+@[^/]+:)/iu.test(path)
+    /^(?:[a-z][a-z\d+.-]*:|~[^/]*(?:\/|$)|[^/][^/@]*@[^/]+:)/iu.test(path)
     ? null
     : path;
 }
