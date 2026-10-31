@@ -6,6 +6,7 @@ security plugin, and TypeScript declarations. It uses ES modules.
 
 - Scan repositories, selected paths, or Git changes. Deep scans run parallel
   discovery workers on repositories and selected paths.
+- Assess dependency advisories with a separately installed OSV-Scanner.
 - Validate findings, generate patches, and verify existing fixes.
 - Draft security policies and retain threat models.
 - Review saved findings, identify duplicates, classify severity, and suggest owners.
@@ -596,6 +597,26 @@ Scope exclusions and follow-up notes do not change a completed scan's exit code.
 
 The [CLI reference](docs/cli.md) covers scan history, reruns, bulk and component
 scans, custom validation, imports, patching, and integrations.
+
+### Assess dependencies
+
+Install OSV-Scanner separately on PATH, then run:
+
+```bash
+cs scan dependencies . --max-cost 5
+cs scan dependencies /path/to/repository --json
+```
+
+Omit the repository to assess the current directory. The command saves scanner
+evidence, all advisory matches, static assessments, and a Markdown report outside
+the repository. Completed runs return `0`, including runs with advisory matches;
+partial or failed runs return `2`. Assessments never remove advisory matches.
+
+The SDK provides `scanDependencies()`. See the
+[dependency assessment guide](docs/cli.md#dependency-assessment-sca-mvp) for
+supported inputs, settings, artifacts, and limitations. `dependencies` is now a
+reserved scan command; use `cs scan ./dependencies` for a source scan of a
+directory with that name.
 
 ### Generate a security policy
 
