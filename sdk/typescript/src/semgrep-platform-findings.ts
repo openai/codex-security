@@ -164,10 +164,10 @@ export function semgrepReferenceMatches(
   url: string,
 ): boolean {
   // A standard explicit Git HTTP(S) helper carries the same fetch URL.
-  const helper = /^(https?)::(?=([a-zA-Z]+):\/\/)/u.exec(url);
+  const helper = /^(?:https?|ftps?)::(?=([a-zA-Z]+):\/\/)/u.exec(url);
   if (helper)
     return (
-      helper[1] === helper[2]!.toLowerCase() &&
+      /^https?$/iu.test(helper[1]!) &&
       hostedRepositoryMatches(source, url.slice(helper[0].length))
     );
   if (hostedRepositoryMatches(source, url)) return true;
@@ -559,10 +559,7 @@ function normalizeSelectionRows(
       );
       const relative = relativePath(location["file_path"]);
       const path =
-        relative &&
-        !relative.endsWith("/.") &&
-        !relative.includes("://") &&
-        repositoryFilePath(relative)
+        relative && !relative.endsWith("/.") && repositoryFilePath(relative)
           ? relative
           : null;
       const severity = text(finding["severity"])?.toLowerCase() ?? "";

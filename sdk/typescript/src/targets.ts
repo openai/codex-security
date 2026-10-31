@@ -814,8 +814,7 @@ export async function gitOutput(
         args.length === 3) ||
       (args[0] === "ls-remote" &&
         args[1] === "--get-url" &&
-        args[2] === "--" &&
-        args.length === 4) ||
+        (args.length === 2 || (args[2] === "--" && args.length === 4))) ||
       args[0] === "ls-files" ||
       (args[0] === "remote" &&
         (args.length === 1 ||

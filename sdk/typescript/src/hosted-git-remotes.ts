@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
 import { access, stat } from "node:fs/promises";
-import { delimiter, resolve } from "node:path";
+import { delimiter, isAbsolute, resolve } from "node:path";
 
 import { isUtf8 } from "node:buffer";
 import { environmentEntry } from "./auth.js";
@@ -14,7 +14,7 @@ async function recognizedCurlHelper(
   name: string,
   repository: string,
   trustedEnvironment: () => Promise<NodeJS.ProcessEnv>,
-  gitExecPath: () => Promise<string | undefined>,
+  readGit: (args: readonly string[]) => Promise<string | undefined>,
 ): Promise<boolean> {
   const lower = name.toLowerCase();
   if (!/^(?:https?|ftps?)$/u.test(lower)) return false;
@@ -22,12 +22,16 @@ async function recognizedCurlHelper(
 
   // Git prepends its exec path before looking up git-remote-<transport>.
   const environment = await trustedEnvironment();
-  const execPath = await gitExecPath();
+  const execPath = await readGit(["--exec-path"]);
   if (!execPath) return false;
   const directories = [
     ...execPath.split(delimiter),
     ...(environmentEntry(environment, "PATH") ?? "").split(delimiter),
   ];
+  // Git sets up the worktree before dispatching the fetch helper, even when run with -C subdir.
+  const cwd = directories.every(isAbsolute)
+    ? repository
+    : resolve(repository, (await readGit(["rev-parse", "--show-cdup"])) ?? "");
   const find = async (helper: string) => {
     for (const dir of directories) {
       // Git for Windows tries .exe before the extensionless helper, within each directory.
@@ -36,10 +40,8 @@ async function recognizedCurlHelper(
         // POSIX resolves symlinks before a following '..', as Git does during PATH lookup.
         const path =
           process.platform === "win32"
-            ? resolve(repository, dir, filename)
-            : (dir.startsWith("/") ? dir : repository + "/" + dir) +
-              "/" +
-              filename;
+            ? resolve(cwd, dir, filename)
+            : (dir.startsWith("/") ? dir : cwd + "/" + dir) + "/" + filename;
         try {
           await access(
             path,
@@ -135,7 +137,6 @@ export async function readHostedGitRemotes(
       return;
     throw error;
   }
-  if (!remoteNames) return;
   const remoteConfig = (
     await readGit([
       "config",
@@ -150,7 +151,8 @@ export async function readHostedGitRemotes(
   ).split("\0");
   const remotes: string[] = [];
   let hasUnverifiedRemote = false;
-  for (const rawName of remoteNames.split("\n").filter(Boolean)) {
+  // Older Git versions can resolve a default fetch URL absent from the remote listing.
+  for (const rawName of remoteNames.split("\n")) {
     const name = utf8(rawName);
     if (name === undefined) {
       hasUnverifiedRemote = true;
@@ -162,10 +164,11 @@ export async function readHostedGitRemotes(
       ?.slice(vcsKey.length);
     // Resolve the same first URL as a fetch, including rewrites on an implicit local remote name.
     // --get-url exits before Git connects to a transport.
-    const rawUrl = await readGit(["ls-remote", "--get-url", "--", name]).catch(
+    const query = name ? ["--", name] : [];
+    const rawUrl = await readGit(["ls-remote", "--get-url", ...query]).catch(
       (error: unknown) => {
         if (
-          configuredHelper !== undefined &&
+          (configuredHelper !== undefined || !name) &&
           error instanceof Error &&
           "code" in error &&
           error.code === 128 &&
@@ -173,14 +176,18 @@ export async function readHostedGitRemotes(
           typeof error.stderr === "string" &&
           error.stderr
             .split(/\r?\n/u)
-            .includes(`fatal: remote ${name} has no configured URL`)
+            .includes(
+              name
+                ? `fatal: remote ${name} has no configured URL`
+                : "fatal: No remote configured to list refs from.",
+            )
         )
           return undefined;
         throw error;
       },
     );
     if (rawUrl === undefined) {
-      hasUnverifiedRemote = true;
+      if (name) hasUnverifiedRemote = true;
       continue;
     }
     // Explicit helper:: takes precedence over remote.<name>.vcs.
@@ -212,7 +219,7 @@ export async function readHostedGitRemotes(
                 signal,
               )
             ).environment,
-          async () => utf8(await readGit(["--exec-path"])),
+          async (args) => utf8(await readGit(args)),
         )
       : helper === undefined &&
         (!url.includes("://") ||
