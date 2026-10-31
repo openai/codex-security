@@ -55,6 +55,7 @@ import {
 import { workflowDigest } from "./finding-workflow.js";
 import type { ScanResult } from "./result.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
+import { isRecord } from "./record.js";
 
 const execFile = promisify(execFileCallback);
 const REQUIRED_ARTIFACTS = ["scan-manifest.json", "findings.json", "report.md"];
@@ -282,7 +283,9 @@ async function runCampaign(
   );
   const receipts = await readReceipts(
     ledger,
+    tasks,
     options.recoverScan !== undefined,
+    options.signal,
   );
   const pending: MultiscanTask[] = [];
   const rejectedCompleted = new Set<string>();
@@ -318,6 +321,13 @@ async function runCampaign(
     const artifactRoot = await ensureOutputDirectory(
       join(output, "artifacts", task.id),
     );
+    if (
+      options.recoverScan !== undefined &&
+      (await latestArtifactAttempt(artifactRoot)) > receipt.attempt
+    ) {
+      pending.push(task);
+      continue;
+    }
     const artifactOutput = join(artifactRoot, `attempt-${receipt.attempt}`);
     const selectedArtifactOutput = join(
       resolve(options.outputDir),
@@ -422,13 +432,9 @@ async function runCampaign(
       const artifactRoot = join(output, "artifacts", task.id);
       if (options.recoverScan !== undefined) {
         await ensureOutputDirectory(artifactRoot);
-        for (const name of await readdir(artifactRoot)) {
-          const match = /^attempt-([1-9][0-9]*)$/u.exec(name);
-          if (match && Number.isSafeInteger(Number(match[1]))) {
-            maxAttempt = Math.max(maxAttempt, Number(match[1]));
-            recoveryAttempt = Math.max(recoveryAttempt, Number(match[1]));
-          }
-        }
+        const latest = await latestArtifactAttempt(artifactRoot);
+        maxAttempt = Math.max(maxAttempt, latest);
+        recoveryAttempt = Math.max(recoveryAttempt, latest);
       }
       for (let retry = 0; retry < options.maxAttempts; retry += 1) {
         options.signal?.throwIfAborted();
@@ -1047,33 +1053,75 @@ async function ensureManifest(
 
 async function readReceipts(
   path: string,
-  preserveInterrupted = false,
+  tasks: readonly MultiscanTask[],
+  recover = false,
+  signal?: AbortSignal,
 ): Promise<Map<string, MultiscanHistory>> {
   let contents: Buffer;
   try {
-    contents = await readFile(path);
+    contents = await readFile(path, { signal });
   } catch (error) {
+    signal?.throwIfAborted();
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return new Map();
     throw error;
   }
-  const end = contents.lastIndexOf(10) + 1;
-  if (contents.at(-1) !== 10) {
-    const partial = contents.subarray(end);
-    if (preserveInterrupted) {
-      await writeFile(`${path}.interrupted-${randomUUID()}`, partial, {
-        flag: "wx",
-        mode: 0o600,
-      });
-    }
-    await truncate(path, end);
-  }
-  const lines = contents.subarray(0, end).toString("utf8").split("\n");
+  const committedEnd = contents.lastIndexOf(0x0a) + 1;
+  const retained: Buffer[] = [];
+  const tasksById = new Map(tasks.map((task) => [task.id.toLowerCase(), task]));
+  const rejectedAttempts = new Map<string, number | undefined>();
+  const rejectedKnowledgeAttempts = new Map<string, number | undefined>();
+  let unidentifiedReceipt = false;
+  let repaired = false;
+  let lineNumber = 0;
   const receipts = new Map<string, MultiscanHistory>();
-  for (const line of lines.filter(Boolean)) {
-    const saved = JSON.parse(line);
-    if (saved.status === "completed_with_incomplete_coverage")
-      saved.status = "completed";
-    const receipt = saved as MultiscanReceipt;
+  for (let start = 0; start < committedEnd;) {
+    signal?.throwIfAborted();
+    const end = contents.indexOf(0x0a, start);
+    const line = contents.subarray(start, end + 1);
+    start = end + 1;
+    lineNumber += 1;
+    if (line.length === 1) {
+      retained.push(line);
+      continue;
+    }
+    let value: unknown;
+    let receipt: MultiscanReceipt;
+    try {
+      value = JSON.parse(line.toString("utf8"));
+      receipt = parseMultiscanReceipt(value);
+    } catch (error) {
+      if (!recover)
+        throw new Error(
+          `${path}:${lineNumber}: invalid campaign receipt: ${errorMessage(error)}. Rerun with --recover to preserve the damaged ledger and recover saved attempts.`,
+          { cause: error },
+        );
+      const id =
+        isRecord(value) && typeof value["id"] === "string"
+          ? value["id"].toLowerCase()
+          : undefined;
+      if (id !== undefined && tasksById.has(id)) {
+        const attempt =
+          isRecord(value) &&
+          Number.isSafeInteger(value["attempt"]) &&
+          (value["attempt"] as number) > 0
+            ? (value["attempt"] as number)
+            : undefined;
+        const rejected =
+          isRecord(value) && value["knowledgeBaseFailure"] === true
+            ? rejectedKnowledgeAttempts
+            : rejectedAttempts;
+        const previous = rejected.get(id);
+        rejected.set(
+          id,
+          attempt === undefined ? previous : Math.max(previous ?? 0, attempt),
+        );
+      } else {
+        unidentifiedReceipt = true;
+      }
+      repaired = true;
+      continue;
+    }
+    retained.push(line);
     const id = receipt.id.toLowerCase();
     const previous = receipts.get(id);
     receipts.set(id, {
@@ -1082,7 +1130,137 @@ async function readReceipts(
       scan: receipt.knowledgeBaseFailure ? previous?.scan : receipt,
     });
   }
+  signal?.throwIfAborted();
+  if (repaired) {
+    const backup = join(dirname(path), `results.corrupt-${randomUUID()}.jsonl`);
+    const replacement = join(
+      dirname(path),
+      `.results.repair-${randomUUID()}.jsonl`,
+    );
+    await writeReceiptRepair(backup, contents);
+    for (const [id, task] of tasksById) {
+      const requiredAttempt = rejectedAttempts.get(id);
+      const requiredKnowledgeAttempt = rejectedKnowledgeAttempts.get(id);
+      signal?.throwIfAborted();
+      const history = receipts.get(id);
+      const retainedScan =
+        !rejectedAttempts.has(id) ||
+        includesAttempt(history?.scan?.attempt, requiredAttempt);
+      const retainedKnowledge =
+        !rejectedKnowledgeAttempts.has(id) ||
+        includesAttempt(history?.maxAttempt, requiredKnowledgeAttempt);
+      const retainedUnidentified =
+        !unidentifiedReceipt || history !== undefined;
+      if (retainedScan && retainedKnowledge && retainedUnidentified) continue;
+      const artifactRoot = join(dirname(path), "artifacts", task.id);
+      const existing = await lstat(artifactRoot).catch(undefinedIfMissingFile);
+      const savedAttempt =
+        existing === undefined
+          ? 0
+          : await latestArtifactAttempt(
+              await ensureOutputDirectory(artifactRoot),
+            );
+      const missingScan =
+        !retainedScan && !includesAttempt(savedAttempt, requiredAttempt);
+      const missingKnowledge =
+        !retainedKnowledge &&
+        !includesAttempt(savedAttempt, requiredKnowledgeAttempt);
+      const missingUnidentified = !retainedUnidentified && savedAttempt === 0;
+      if (!missingScan && !missingKnowledge && !missingUnidentified) continue;
+      const required = missingScan
+        ? requiredAttempt
+        : missingKnowledge
+          ? requiredKnowledgeAttempt
+          : undefined;
+      const evidence = missingScan ? "scan receipt" : "attempt history";
+      const missing =
+        required === undefined
+          ? `no retained ${evidence} or saved attempt artifacts identify its work`
+          : `no retained ${evidence} or saved attempt artifacts reach attempt ${required}`;
+      throw new Error(
+        `Cannot repair ${path}: unresolved attempted history for ${task.id}; ${missing}. The active ledger is unchanged. Repair the ledger manually using the original bytes in ${backup} before retrying recovery.`,
+      );
+    }
+    try {
+      await writeReceiptRepair(replacement, Buffer.concat(retained));
+      signal?.throwIfAborted();
+      await rename(replacement, path);
+    } finally {
+      await rm(replacement, { force: true });
+    }
+  } else if (committedEnd < contents.length) {
+    if (recover) {
+      await writeFile(
+        `${path}.interrupted-${randomUUID()}`,
+        contents.subarray(committedEnd),
+        { flag: "wx", mode: 0o600 },
+      );
+    }
+    signal?.throwIfAborted();
+    await truncate(path, committedEnd);
+  }
   return receipts;
+}
+
+function parseMultiscanReceipt(value: unknown): MultiscanReceipt {
+  if (
+    !isRecord(value) ||
+    typeof value["id"] !== "string" ||
+    value["id"].length === 0 ||
+    !Number.isSafeInteger(value["attempt"]) ||
+    (value["attempt"] as number) < 1 ||
+    !["completed", "completed_with_incomplete_coverage", "failed"].includes(
+      value["status"] as string,
+    ) ||
+    typeof value["outputDir"] !== "string" ||
+    value["outputDir"].length === 0 ||
+    (value["warnings"] !== undefined &&
+      (!Array.isArray(value["warnings"]) ||
+        !value["warnings"].every((warning) => typeof warning === "string"))) ||
+    (value["policyFailed"] !== undefined &&
+      typeof value["policyFailed"] !== "boolean") ||
+    (value["knowledgeBaseFailure"] !== undefined &&
+      typeof value["knowledgeBaseFailure"] !== "boolean")
+  ) {
+    throw new Error("Invalid receipt fields.");
+  }
+  if (value["status"] === "completed_with_incomplete_coverage")
+    value["status"] = "completed";
+  return value as unknown as MultiscanReceipt;
+}
+
+async function writeReceiptRepair(
+  path: string,
+  contents: Buffer,
+): Promise<void> {
+  const file = await open(path, "wx", 0o600);
+  try {
+    await file.writeFile(contents);
+    await file.sync();
+  } finally {
+    await file.close();
+  }
+}
+
+function includesAttempt(
+  latest: number | undefined,
+  required: number | undefined,
+): boolean {
+  return (
+    latest !== undefined &&
+    latest > 0 &&
+    (required === undefined || latest >= required)
+  );
+}
+
+async function latestArtifactAttempt(path: string): Promise<number> {
+  let latest = 0;
+  for (const name of await readdir(path)) {
+    const match = /^attempt-([1-9][0-9]*)$/u.exec(name);
+    if (match && Number.isSafeInteger(Number(match[1])))
+      latest = Math.max(latest, Number(match[1]));
+  }
+  return latest;
 }
 
 async function hasArtifacts(path: string): Promise<boolean> {

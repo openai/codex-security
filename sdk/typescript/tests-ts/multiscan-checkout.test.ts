@@ -545,11 +545,11 @@ describe("multiscan", () => {
       })}\n`,
     );
 
-    expect(await runMultiscan(configured)).toMatchObject({
-      completed: 1,
-      failed: 0,
-      skipped: 1,
-    });
+    const damaged = await readFile(ledger);
+    await expect(runMultiscan(configured)).rejects.toThrow(
+      "invalid campaign receipt",
+    );
+    expect(await readFile(ledger)).toEqual(damaged);
     expect(scans).toHaveBeenCalledTimes(1);
     expect(await readFile(preserved, "utf8")).toBe("preserved\n");
   });
