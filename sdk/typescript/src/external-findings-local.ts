@@ -6,6 +6,7 @@ import {
   semgrepPlatformFindingBinding,
   semgrepPlatformReportScope,
   semgrepPlatformRepositoryReference,
+  isSemgrepPlatformEvidence,
   semgrepReferenceMatches,
 } from "./semgrep-platform-findings.js";
 import { hostedRepositoryMatches } from "./hosted-git-repository.js";
@@ -837,19 +838,35 @@ export async function prepareLocalImport(
     options.provider,
     readerSources,
   );
+  const separatePlatformReferences =
+    options.provider === "semgrep" &&
+    references.length > 0 &&
+    (semgrepReportScope !== undefined ||
+      current.findings.some((row) =>
+        isSemgrepPlatformEvidence(row, options.provider),
+      ));
   const sarifSources = new Set<string>();
   const suppliedSarif = new Set<ExternalSourceRepository>();
   let hasOrdinaryRows = false;
   let ordinaryRowNeedsReferences = false;
   for (const finding of current.findings) {
     const retained = bound.get(finding.source_finding_id);
+    const native = nativeSources.get(finding) ?? [];
+    const sarif =
+      separatePlatformReferences || semgrepReportScope
+        ? semgrepSarifRepositories(finding)
+        : [];
     const semgrep = semgrepPlatformFindingBinding(
       finding,
       options.provider,
       readerSources,
       legacyWitnesses,
       semgrepReportScope,
-      retained?.url,
+      [
+        retained?.url,
+        ...native.map(({ url }) => url),
+        ...sarif.map(({ url }) => url),
+      ],
     );
     if (semgrep) {
       addSemgrepSource(semgrep.url);
@@ -858,18 +875,17 @@ export async function prepareLocalImport(
     } else hasOrdinaryRows = true;
     const { evidence } = finding;
     const url = evidence.details?.repository?.url;
-    const native = nativeSources.get(finding) ?? [];
     // A selected row's projected URL was already verified against its hosted source.
-    if (!semgrep) {
-      if (url) sources.set(url, { url });
-      const sarif =
-        options.provider === "semgrep" ? semgrepSarifRepositories(finding) : [];
+    if (!semgrep && url) sources.set(url, { url });
+    if (separatePlatformReferences && !semgrep) {
       for (const source of sarif) sarifSources.add(source.url);
       if (!url && !retained && !native.length) {
         const claims = sarif.map(({ url }) => identify(url));
-        const supplied = references.filter((ref) =>
-          claims.some((claim) => matchingRemote(claim, identify(ref.url))),
-        );
+        const supplied = claims.length
+          ? references.filter((ref) =>
+              claims.some((claim) => matchingRemote(claim, identify(ref.url))),
+            )
+          : [];
         if (!supplied.length) ordinaryRowNeedsReferences = true;
         for (const ref of supplied) suppliedSarif.add(ref);
       }

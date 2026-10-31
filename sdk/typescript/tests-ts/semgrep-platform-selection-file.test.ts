@@ -544,12 +544,17 @@ test.skipIf(process.platform === "win32")(
     const subdir = join(fixture.repository, "nested");
     await mkdir(subdir);
     Object.assign(fixture.environment, { GIT_EXEC_PATH: "../git-core" });
-    const nested = await prepareLocalExternalImport(
-      fixture.file,
-      { ...platformSource, repository: subdir },
-      { environment: fixture.environment },
-    );
-    expect(nested.preview.findings).toHaveLength(1);
+    const prepareNested = () =>
+      prepareLocalExternalImport(
+        fixture.file,
+        { ...platformSource, repository: subdir },
+        { environment: fixture.environment },
+      );
+    expect((await prepareNested()).preview.findings).toHaveLength(1);
+    // If the root-relative location is missing, Git still searches the exec path inherited from -C.
+    await symlink(core, join(subdir, "relative-helpers"));
+    Object.assign(fixture.environment, { GIT_EXEC_PATH: "relative-helpers" });
+    expect((await prepareNested()).preview.findings).toHaveLength(1);
   },
 );
 
@@ -560,6 +565,8 @@ test("an unlisted legacy origin uses Git's effective default fetch URL", async (
   const remotes = join(fixture.repository, ".git", "remotes");
   await mkdir(remotes, { recursive: true });
   const origin = join(remotes, "origin");
+  await writeFile(join(remotes, ".keep"), "");
+  expect((await fixture.prepare()).preview.findings).toHaveLength(1);
   await writeFile(origin, "URL: " + url + "\n");
   // Git versions that retain the remotes/ format expose it via ls-remote --get-url.
   if (
@@ -570,6 +577,35 @@ test("an unlisted legacy origin uses Git's effective default fetch URL", async (
   expect((await fixture.prepare()).preview.findings).toHaveLength(1);
   await writeFile(origin, "URL: https://github.com/wrong/project\n");
   await expect(fixture.prepare()).rejects.toThrow("configured remote");
+  fixture.git("symbolic-ref", "HEAD", "refs/heads/selected");
+  fixture.git("config", "branch.selected.remote", "origin");
+  fixture.git(
+    "config",
+    "remote.backup.pushurl",
+    "https://github.com/wrong/push",
+  );
+  await expect(fixture.prepare()).rejects.toThrow("configured remote");
+  await writeFile(origin, "URL: " + url + "\n");
+  expect((await fixture.prepare()).preview.findings).toHaveLength(1);
+});
+
+test("Git's nondefault legacy source is checked for an otherwise unbound checkout", async () => {
+  await using fixture = await localReportFixture();
+  await fixture.writeJson(selectedRepository(url, url));
+  const dir = join(fixture.repository, ".git", "remotes");
+  await mkdir(dir, { recursive: true });
+  const file = join(dir, "upstream");
+  await writeFile(file, "URL: https://github.com/wrong/project\n");
+  if (
+    fixture
+      .git("ls-remote", "--get-url", "--", "upstream")
+      .toString()
+      .trim() === "upstream"
+  )
+    return;
+  await expect(fixture.prepare()).rejects.toThrow("configured remote");
+  await writeFile(file, "URL: " + url + "\n");
+  expect((await fixture.prepare()).preview.findings).toHaveLength(1);
 });
 
 test.each([

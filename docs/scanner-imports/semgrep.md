@@ -185,6 +185,20 @@ For SSH projects, the report stores the original address in `nativeProjectUrl` a
 It records any supplied mapping separately. Save the complete output from a successful
 command. The importer checks the recorded finding count and repository/ref
 claims. It retains each original finding as JSON text so large IDs survive replay. The reader also accepts saved v1 project exports with native object rows and decimal type witnesses.
+
+To import a collected backlog with the TypeScript SDK, pass the normalized
+report to the local importer. Reuse the source key when replaying the report.
+
+```ts
+const findings = normalizeSemgrepPlatformFindings(report);
+const prepared = await prepareNormalizedLocalImport(findings, {
+  provider: "semgrep",
+  sourceKey: "example/project/topic",
+  repository: checkout,
+});
+await prepared.import();
+```
+
 Supply Chain findings include native package versions, matching fix recommendations
 and advisory IDs when Semgrep supplies them. With the same source key, importing identical Code findings that qualify for individual
 selection reports them as unchanged when switching between a selection and a full collection.

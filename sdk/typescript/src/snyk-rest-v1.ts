@@ -6,7 +6,7 @@ import {
   isLegacyWitness,
   restoreLegacyHostedNumbers,
 } from "./hosted-scanner-v1.js";
-import { isRecord } from "./record.js";
+import { canonicalJson, isRecord } from "./record.js";
 import { array, record } from "./scanner-import.js";
 
 type Resource = Record<string, unknown>;
@@ -54,8 +54,35 @@ export function encodeSnykV1File(document: Resource): Resource {
 }
 
 /** Read v1 exports, retained source records, and empty-report project contexts. */
-export function readSnykRestDocument(document: Resource): Resource {
+export function readSnykRestDocument(
+  document: Resource,
+  context?: Resource,
+): Resource {
   if (document["format"] !== SNYK_REST_ISSUES_V1) return document;
+  const fields = document["numericFields"];
+  if (context && isRecord(fields)) {
+    // A projected row may keep witnesses for assets that now come from its report.
+    const inline = { ...fields };
+    for (const field of ["project", "target"]) {
+      const json = context[field + "Json"];
+      if (
+        document[field] !== undefined ||
+        !(field in fields) ||
+        typeof json !== "string"
+      )
+        continue;
+      const asset = encodeSnykV1File({ [field]: parseHostedScannerJson(json) });
+      if (
+        canonicalJson(fields[field]) !==
+        canonicalJson(at(asset, "numericFields", field))
+      )
+        throw new Error(
+          "Invalid scanner numeric fields for the retained Snyk asset.",
+        );
+      delete inline[field];
+      document = { ...document, numericFields: inline };
+    }
+  }
   const exact = restoreLegacyHostedNumbers(document);
   return {
     ...exact,

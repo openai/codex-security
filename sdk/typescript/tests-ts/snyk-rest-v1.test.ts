@@ -69,11 +69,19 @@ test("replays a v1 Snyk export with its original evidence, then updates the same
     issue: original,
     project: undefined,
     target: undefined,
-    numericFields: { issue: issueFields },
   };
-  const projected = await fixture.prepareNormalized(selected);
-  expect((await projected.import()).counts.unchanged).toBe(1);
-  expect((await fixture.read())[0]).toEqual(stored);
+  for (const fields of [{ issue: issueFields }, source["numericFields"]]) {
+    row.evidence.source_data["numericFields"] = fields;
+    const projected = await fixture.prepareNormalized(selected);
+    expect((await projected.import()).counts.unchanged).toBe(1);
+    expect((await fixture.read())[0]).toEqual(stored);
+  }
+  row.evidence.source_data["numericFields"] = {
+    project: { counter: "9007199254740994" },
+  };
+  await expect(fixture.prepareNormalized(selected)).rejects.toThrow(
+    "Invalid scanner numeric fields",
+  );
 
   // A historical native project still identifies a hosted report after a reader removes the issue and ID.
   const assetOnly = { ...source };

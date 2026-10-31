@@ -590,6 +590,11 @@ function hostedRepositoryMatcher(
           "Semgrep source repository",
         );
   const reportScope = semgrepPlatformReportScope(input, provider);
+  const hasNativeSource =
+    reportScope !== undefined ||
+    input.findings.some((finding) =>
+      isSemgrepPlatformEvidence(finding, provider),
+    );
   const claims = new Set<string>();
   let original: string | undefined;
   const nativeRows: ExternalFindings["findings"] = [];
@@ -598,7 +603,10 @@ function hostedRepositoryMatcher(
     if (typed) claims.add(typed);
     const data = finding.evidence.source_data;
     const document = data?.["documentContext"];
-    if (isRecord(document) && document["version"] === "2.1.0")
+    if (
+      hasNativeSource ||
+      (isRecord(document) && document["version"] === "2.1.0")
+    )
       for (const { url } of semgrepSarifRepositories(finding)) claims.add(url);
     const project = data?.["project"];
     if (
@@ -680,7 +688,7 @@ function hostedRepositoryMatcher(
       references,
       witnesses,
       reportScope,
-      projectedBlackDuckRepositoryUrl(finding, "cloud"),
+      [projectedBlackDuckRepositoryUrl(finding, "cloud")],
       "cloud",
     )?.url;
     if (native) {

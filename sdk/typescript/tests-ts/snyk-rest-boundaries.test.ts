@@ -288,6 +288,16 @@ test("unrelated Wiz evidence with Snyk-like field names remains importable local
   const credentials = mock(async () => {
     throw new Error("Reached Wiz Cloud credentials");
   });
+  const sources: Record<string, unknown>[] = [
+    {
+      snykRestIssueKey: "upstream-ticket",
+      projectJson: JSON.stringify({
+        type: "project",
+        id: snykOptions.projectId,
+        attributes: { origin: "ticketing", type: "service" },
+      }),
+    },
+  ];
   const original = snykIssue(true);
   for (const [id, org, project] of [
     [42, undefined, undefined],
@@ -303,9 +313,15 @@ test("unrelated Wiz evidence with Snyk-like field names remains importable local
         scan_item: { data: { type: "project", id: project } },
       },
     };
-    source_data["issue"] = issue;
-    source_data["issueJson"] = JSON.stringify(issue);
-    if (id === original.id) source_data["format"] = "wiz-export/v1";
+    sources.push({
+      ...source_data,
+      issue,
+      issueJson: JSON.stringify(issue),
+      ...(id === original.id && { format: "wiz-export/v1" }),
+    });
+  }
+  for (const source of sources) {
+    finding.evidence.source_data = source;
     expect(
       (
         await prepareNormalizedLocalImport(input, options, {
@@ -320,7 +336,7 @@ test("unrelated Wiz evidence with Snyk-like field names remains importable local
       }),
     ).rejects.toThrow("Reached Wiz Cloud credentials");
   }
-  expect(credentials).toHaveBeenCalledTimes(4);
+  expect(credentials).toHaveBeenCalledTimes(sources.length);
 });
 
 test("a reader may copy an optional hosted context from Snyk CLI JSON or SARIF", async () => {
@@ -455,8 +471,10 @@ test("retagged original Snyk records remain scoped without a matching source ID 
     ).rejects.toThrow(/Snyk|snyk-rest/);
   }
   const mismatched = { ...legacy.project, id: snykOptions.organizationId };
+  const target = legacy.project.relationships.target.data;
   for (const resources of [
     { project: mismatched, issue: legacy.issue, target: null },
+    { target },
     {
       projectJson: JSON.stringify(mismatched),
       issueJson: original["issueJson"],
@@ -469,7 +487,7 @@ test("retagged original Snyk records remain scoped without a matching source ID 
     },
     {
       snykRestIssueKey: original["snykRestIssueKey"],
-      targetJson: JSON.stringify(legacy.project.relationships.target.data),
+      targetJson: JSON.stringify(target),
     },
   ]) {
     row.evidence.source_data = {
@@ -489,7 +507,9 @@ test("retagged original Snyk records remain scoped without a matching source ID 
         environment: f.environment,
       }),
     ).rejects.toThrow(
-      "snykRestIssueKey" in resources ? /Snyk/ : /different project/,
+      "issue" in resources || "issueJson" in resources
+        ? /different project/
+        : /Snyk/,
     );
   }
   for (const missing of ["issueJson", "projectJson"]) {
@@ -511,18 +531,24 @@ test("retagged original Snyk records remain scoped without a matching source ID 
   row.source_finding_id = normalizeSnykIssues(
     snykRestFixture("open-source"),
   ).findings[0]!.source_finding_id;
-  row.evidence.source_data = {
-    ...original,
-    project: legacy.project,
-    issue: legacy.issue,
+  const otherTarget = {
+    ...target,
+    id: snykOptions.organizationId,
+    attributes: { url: "https://github.com/example/another-repository" },
   };
-  await expect(
-    prepareNormalizedLocalImport(
-      projected,
-      { ...opts, provider: "snyk" },
-      { environment: f.environment },
-    ),
-  ).rejects.toThrow("both v1 and v2");
+  for (const extra of [
+    { project: legacy.project, issue: legacy.issue },
+    { target: otherTarget },
+  ]) {
+    row.evidence.source_data = { ...original, ...extra };
+    await expect(
+      prepareNormalizedLocalImport(
+        projected,
+        { ...opts, provider: "snyk" },
+        { environment: f.environment },
+      ),
+    ).rejects.toThrow("both v1 and v2");
+  }
 });
 
 test("an independently verified GitHub source applies to a CLI-monitored Snyk project", async () => {
@@ -902,6 +928,19 @@ test.each(["v1", "v2"] as const)(
     await expect(prepare()).rejects.toThrow("normalized finding ID");
     row.source_finding_id = nativeId;
     const issue = JSON.parse(json);
+    const targetlessProject = JSON.parse(
+      String(full.snykRestContext!["projectJson"]),
+    );
+    delete targetlessProject.relationships;
+    Object.assign(
+      row.evidence.source_data,
+      version === "v1"
+        ? { project: targetlessProject }
+        : { projectJson: JSON.stringify(targetlessProject) },
+    );
+    await expect(prepare()).rejects.toThrow(
+      "missing the report's native target",
+    );
     const foreign = snykRestFixture("open-source", {
       sourceRepositoryUrl: "https://github.com/example/other",
     });
@@ -1006,9 +1045,16 @@ test("a complete SDK row replays with reformatted native JSON and reader annotat
     );
   }
   retained["targetJson"] = " null\n";
+  const key = retained["snykRestIssueKey"];
+  delete retained["snykRestIssueKey"];
+  delete retained["format"];
   expect((await (await prepare()).import()).counts.unchanged).toBe(1);
   const [stored] = await fixture.read();
   expect(stored!.version).toBe(1);
   expect(stored!.evidence.title).toBe("Reader title");
-  expect(stored!.evidence.source_data!["readerNote"]).toBe("preserved");
+  expect(stored!.evidence.source_data).toMatchObject({
+    format: wire.format,
+    snykRestIssueKey: key,
+    readerNote: "preserved",
+  });
 });

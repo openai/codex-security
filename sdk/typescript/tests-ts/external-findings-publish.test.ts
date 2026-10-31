@@ -1671,6 +1671,8 @@ test("Semgrep Supply Chain binds package evidence to its case-sensitive source p
     const input = { ...mixed, sourceRepositoryUrl: url };
     return f.prepareNormalized(input);
   };
+  delete mixed.findings[0]!.evidence.source_data!["documentContext"];
+  await expect(prepareSarif(other)).rejects.toThrow(/does not match/);
   expect((await prepareSarif(url)).preview.findings).toHaveLength(2);
   for (const unsafe of [
     "https://synthetic@scm.example.test/Team/Project",
