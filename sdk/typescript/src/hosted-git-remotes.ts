@@ -188,7 +188,8 @@ export async function readHostedGitRemotes(
       );
       for (const entry of entries) {
         const raw = Buffer.from(entry.name).toString("latin1");
-        if (entry.isFile() && !listed.has(raw)) yield raw;
+        if ((entry.isFile() || entry.isSymbolicLink()) && !listed.has(raw))
+          yield raw;
       }
     }
   }

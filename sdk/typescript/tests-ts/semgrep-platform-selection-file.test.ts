@@ -568,7 +568,12 @@ test("Git's nondefault legacy source is checked for an otherwise unbound checkou
   await fixture.writeJson(selectedRepository(url, url));
   const dir = join(fixture.repository, ".git", "remotes");
   await mkdir(dir, { recursive: true });
-  const file = join(dir, "upstream");
+  const source = join(dir, "upstream");
+  const file =
+    process.platform === "win32"
+      ? source
+      : join(fixture.repository, ".git", "legacy-descriptor");
+  if (file !== source) await symlink(file, source);
   await writeFile(file, "URL: https://github.com/wrong/project\n");
   if (
     fixture
@@ -1235,6 +1240,21 @@ function projectedSarif(origin: string, sourceRepositoryUrl: string) {
     .findings;
 }
 
+function prepareMixed(
+  fixture: Awaited<ReturnType<typeof localReportFixture>>,
+  findings: ReturnType<typeof normalizedProject>["findings"],
+  ...urls: string[]
+) {
+  return prepareNormalizedLocalImport(
+    { read: findings.length, findings, excluded: [] },
+    { ...platformSource, repository: fixture.repository },
+    {
+      environment: fixture.environment,
+      sourceRepositories: urls.map((url) => ({ url })),
+    },
+  );
+}
+
 const projectedBlackDuck = (url: string) => ({
   source_finding_id: "blackduck-bom:" + "a".repeat(64),
   evidence: {
@@ -1309,20 +1329,23 @@ test("shared Platform aliases preserve the ordinary Black Duck SSH account check
   const git = "git@github.com:example/project.git";
   const deploy = "deploy@github.com:example/project.git";
   const prepare = (rows: typeof findings, urls: string[]) =>
-    prepareNormalizedLocalImport(
-      { read: rows.length, findings: rows, excluded: [] },
-      { ...platformSource, repository: fixture.repository },
-      {
-        environment: fixture.environment,
-        sourceRepositories: urls.map((url) => ({ url })),
-      },
-    );
+    prepareMixed(fixture, rows, ...urls);
   await expect(prepare([projected], [git, deploy])).rejects.toThrow(
     "Reader repository",
   );
   expect(
     (await prepare([...findings, projected], [git])).preview.findings,
   ).toHaveLength(2);
+  await expect(
+    prepare([...findings, projected], [git, deploy]),
+  ).rejects.toThrow("Reader repository");
+  Object.assign(projected.evidence.source_data, {
+    runContext: {
+      versionControlProvenance: [git, deploy].map((repositoryUri) => ({
+        repositoryUri,
+      })),
+    },
+  });
   await expect(
     prepare([...findings, projected], [git, deploy]),
   ).rejects.toThrow("Reader repository");
@@ -1339,14 +1362,7 @@ test("a projected SARIF finding uses its own supplied provenance alongside a sep
   );
   fixture.git("remote", "add", "ordinary", original);
   const prepare = (rows: typeof findings, urls: string[]) =>
-    prepareNormalizedLocalImport(
-      { read: rows.length, findings: rows, excluded: [] },
-      { ...platformSource, repository: fixture.repository },
-      {
-        environment: fixture.environment,
-        sourceRepositories: urls.map((url) => ({ url })),
-      },
-    );
+    prepareMixed(fixture, rows, ...urls);
   expect((await prepare(findings, [native])).preview.findings).toHaveLength(1);
   expect((await prepare(ordinary, [original])).preview.findings).toHaveLength(
     1,
@@ -1362,4 +1378,46 @@ test("a projected SARIF finding uses its own supplied provenance alongside a sep
   await expect(
     prepare([...findings, ...ordinary], [native, original]),
   ).rejects.toThrow("configured remote");
+});
+
+test("only the hosted reader needs to recognize GitLab's alternate SSH address", async () => {
+  const web = "https://gitlab.com/example/project";
+  const ssh = "ssh://git@altssh.gitlab.com:443/example/project.git";
+  const hosted = normalizedProject(web).findings;
+  await using fixture = await localReportFixture(web);
+  for (const row of [projectedBlackDuck(web), ...projectedSarif(web, web)]) {
+    expect(
+      (await prepareMixed(fixture, [row], web)).preview.findings,
+    ).toHaveLength(1);
+    expect(
+      (await prepareMixed(fixture, [...hosted, row], ssh, web)).preview
+        .findings,
+    ).toHaveLength(2);
+  }
+});
+
+test("a projected SARIF repository cannot be replaced by another row's matching HTTPS reference", async () => {
+  const a = "https://git.example.test/team/a";
+  const b = "https://git.example.test/team/b";
+  const ordinary = projectedSarif(b, b);
+  delete ordinary[0]!.evidence.details!.repository;
+  const rows = [...normalizedProject(a).findings, ...ordinary];
+  await using fixture = await localReportFixture(a);
+  await expect(prepareMixed(fixture, rows, a)).rejects.toThrow(
+    /repository|remote/i,
+  );
+  await expect(prepareMixed(fixture, rows, a, b)).rejects.toThrow(
+    /repository|remote/i,
+  );
+  await expect(prepareMixed(fixture, rows)).rejects.toThrow(
+    "configured remote",
+  );
+  fixture.git("remote", "add", "sarif", b);
+  expect((await prepareMixed(fixture, rows)).preview.findings).toHaveLength(2);
+  await expect(prepareMixed(fixture, rows, a)).rejects.toThrow(
+    /repository|remote/i,
+  );
+  expect(
+    (await prepareMixed(fixture, rows, a, b)).preview.findings,
+  ).toHaveLength(2);
 });
