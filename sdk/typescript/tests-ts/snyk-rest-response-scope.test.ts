@@ -47,7 +47,7 @@ test("project and target JSON formatting preserves exact native numbers and text
   const original = source(`"amount":${token},"label":"${token}"`);
   expect(
     source(`
- "label": "${token}", "amount": ${token}`),
+ "label": "${token}", "amount": ${token}e0`),
   ).toEqual(original);
   for (const field of ["projectJson", "targetJson"]) {
     expect(original[field]).toContain(`"amount":${token}`);

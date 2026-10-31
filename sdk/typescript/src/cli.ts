@@ -4101,10 +4101,9 @@ export async function main(
       environment: dependencies.environment,
       fetch: dependencies.hostedScannerFetch,
     };
-    function setHostedOutputFormat(format?: string, formatExplicit?: boolean) {
+    function setHostedOutputFormat(format?: string) {
       escapeHostedOutput =
-        format === "md" ||
-        (format === "toon" && !formatExplicit && output.isTTY === true);
+        format === "md" || (format === "toon" && output.isTTY === true);
     }
     const semgrepReport = z
       .object({
@@ -4170,8 +4169,8 @@ export async function main(
           ),
         })
         .optional(),
-      run: ({ args, options, error, format, formatExplicit }) => {
-        setHostedOutputFormat(format, formatExplicit);
+      run: ({ args, options, error, format }) => {
+        setHostedOutputFormat(format);
         return collect("Snyk", error, (signal) =>
           collectSnykIssues(
             {
@@ -4216,8 +4215,8 @@ export async function main(
           ),
       }),
       output: semgrepReport,
-      run: ({ args, options, error, format, formatExplicit }) => {
-        setHostedOutputFormat(format, formatExplicit);
+      run: ({ args, options, error, format }) => {
+        setHostedOutputFormat(format);
         return collect("Semgrep", error, (signal) =>
           collectSemgrepPlatformFindings(
             {

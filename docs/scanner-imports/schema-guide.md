@@ -193,18 +193,17 @@ recover:
   normalized findings and report metadata, omitting supplemental source
   repository declarations. A new declaration needs a matching current catalog
   entry or a URL recorded when the request was approved.
-- If the publisher identifies a pending hosted Semgrep or Snyk request from
-  an earlier SDK, finish it with the SDK build and input that created it.
-  A request staged with the older hosted repository binding holds other
-  selections for the same deployment, account, repository, connector, provider
-  and source key. For normalized requests with only the original v1 evidence,
-  this applies to selections that overlap a retained native finding ID. For
-  normalized SDK input, retain optional `report` metadata and custom per-finding
-  fields. Older requests can include those fields in the checkpoint filename
-  and omit them from the saved request. When the publisher cannot establish the deployment of an older
-  hosted request, resume it on the original deployment with the full input.
-  A repository reset retires an identified pending request and requires a
-  fresh approval.
+- If a hosted Semgrep or Snyk request is pending, rerun the original input to
+  finish it before submitting updated evidence for any of the same findings.
+  Selections with distinct scanner-issued IDs can proceed independently on the
+  same deployment, account, repository, connector, provider and source key.
+  When an older checkpoint establishes only the source, finish that request
+  before submitting another selection for that source. Use the SDK build that
+  created the request and include the original report context and caller-added
+  fields. Older SDKs included some fields in the checkpoint filename without
+  retaining them in the saved request. If the publisher cannot identify the
+  deployment of an older request, rerun it on its original deployment. An
+  identified repository reset retires the request and requires fresh approval.
 - **No resumable checkpoint:** a repository reset retires the old request, and
   an initial checkpoint-write failure may leave no request to resume. Inspect
   the destination and correct the error; run a fresh `--dry-run` and get fresh

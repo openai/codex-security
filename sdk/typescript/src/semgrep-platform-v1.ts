@@ -16,6 +16,8 @@ import {
 
 /** Early v1 exports also admitted positive integral decimal spellings stored as text. */
 export function semgrepV1Id(value: unknown): string {
+  if (typeof value === "number" && Number.isSafeInteger(value))
+    return semgrepPlatformId(String(value));
   const token = hostedNumberToken(value);
   if (token !== undefined && !/^[1-9][0-9]*$/u.test(token))
     return semgrepPlatformId(legacyDecimalInteger(token));
@@ -65,7 +67,7 @@ export function upgradeSemgrepPlatformReport(
   const entries = array(report["findings"], "Semgrep findings");
   let aliases = report["repositoryAliases"];
   if (aliases === undefined) {
-    const derived = projectAliases(name, url, references);
+    const derived = projectAliases(name, url, references, true);
     const observed = new Set<string>();
     for (const entry of entries) {
       const row = record(entry, "Semgrep finding");

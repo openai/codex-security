@@ -80,14 +80,11 @@ export function localFindingRepositories(
   return [];
 }
 
-/** Original run provenance survives a normalized caller dropping typed repository details. */
+/** Repository claims retained by the Semgrep SARIF reader. */
 export function semgrepSarifRepositories({
   evidence,
 }: ExternalFinding): ExternalSourceRepository[] {
-  const data = evidence.source_data;
-  const document = data?.["documentContext"];
-  if (!isRecord(document) || document["version"] !== "2.1.0") return [];
-  const context = data?.["runContext"];
+  const context = evidence.source_data?.["runContext"];
   const references = isRecord(context)
     ? context["versionControlProvenance"]
     : undefined;

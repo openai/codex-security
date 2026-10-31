@@ -101,7 +101,9 @@ codex-security publish findings /path/to/private/selected.json --to local --prov
 
 After review, repeat without `--dry-run` and confirm the import. Reusing the
 same source key updates the same records, keyed by deployment, project ID,
-product, ref and finding ID. Replay preserves the exact ref of an existing
+product, ref and finding ID. Semgrep's native 64-bit IDs match across the SDK
+and file workflows. Older captures can retain a different identity spelling
+for larger IDs. Replay preserves the exact ref of an existing
 selection, including a short ref in an older file. The archive reader compares
 the stored ref as literal identity text and never evaluates it as a Git revision.
 Importing the same findings reports unchanged
@@ -249,10 +251,10 @@ See the [native output fields](https://docs.semgrep.dev/semgrep-appsec-platform/
 Capture the project lookup and Findings API pages as original response text.
 Pass a fully qualified ref, such as `refs/heads/topic` or `refs/tags/topic`, exactly as it appears in the findings.
 Supply the HTTP(S) repository URL you independently associate with the target checkout.
-The project response and any finding URL must match this spelling. When a finding omits its URL,
-it must carry the project ID and its own repository name must match the namespace-qualified,
-decoded path in the operator-supplied URL. The project display name can differ from that path.
-A finding that uses a different display alias for its repository name needs the exact finding URL.
+The project URL and any finding URL must match this spelling. An exact finding URL
+identifies the repository even if its display label has changed. A finding without a URL
+must carry the project ID and a repository name that equals the namespace-qualified,
+decoded path in the operator-supplied URL. A conflicting project ID is always rejected.
 The local importer checks the checkout using its existing repository rules.
 
 ```ts
@@ -279,7 +281,9 @@ if (prepared.preview.excluded.length) {
 Keep the same source key on replay. Finding identity includes the deployment, project ID,
 SAST product, full ref, and native finding ID. Pass selected finding IDs as positive
 decimal strings without leading zeros. Semgrep emits 64-bit finding IDs. The adapter
-also accepts larger positive integer IDs in saved responses without rounding.
+also accepts larger positive integer IDs in saved responses without rounding. The
+stored evidence includes the selected finding and the project's ID, name and URL.
+A record without a native rule name or message is excluded during preview.
 
 Changes to key order or equivalent numeric spellings such as `2` and `2.0` leave
 the stored record unchanged. Only repository-relative files become locations. Names

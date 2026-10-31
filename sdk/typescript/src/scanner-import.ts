@@ -1,5 +1,6 @@
 import { hash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { posix } from "node:path";
 import { promisify } from "node:util";
 import { gunzip } from "node:zlib";
 import { CodexSecurityError, errorMessage } from "./errors.js";
@@ -56,6 +57,18 @@ export function hostedRepositoryPath(value: unknown) {
   return path && !path.includes("\\") && !path.includes("://")
     ? relativePath(path)
     : null;
+}
+
+export function repositoryFilePath(value: unknown): string | null {
+  const relative = relativePath(value);
+  if (!relative) return null;
+  const path = posix.normalize(relative);
+  // Anchor the SCP branch at the first eligible @ to avoid rescanning long filenames.
+  return path === "." ||
+    path.endsWith("/") ||
+    /^(?:[a-z][a-z\d+.-]*:|~[^/]*(?:\/|$)|[^/][^/@]*@[^/]+:)/iu.test(path)
+    ? null
+    : path;
 }
 
 export function stableId(prefix: string, fields: unknown[]): string {

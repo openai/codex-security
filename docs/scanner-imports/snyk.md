@@ -44,16 +44,19 @@ location from `evidence.source_data.issue` in v1 or from the JSON text in
 
 Use the same source key on later imports. The issue key within the API
 origin, organization, project and product identifies the finding. Replaying the
-same evidence leaves the version unchanged. Whitespace and object key order
-in v2 native records do not affect replay. Importing a different capture for
+same evidence leaves the version unchanged. Whitespace, object key order and
+equivalent JSON number spellings in v2 native records do not affect replay.
+JSON strings remain distinct from numbers. Importing a different capture for
 that issue updates the same row, even if the capture is older.
 
 To select a subset in the SDK, filter the normalized report’s `findings`
 array. Keep the report’s `snykRestContext` and each selected finding’s
 `source_finding_id` and `evidence.source_data`. Every hosted row must retain
 the native issue and its generated ID. The verified report context can supply
-the monitored project for a row that retains only its original issue. All
-selected issues must share an API region, organization, project and product.
+the monitored project for a row that retains only its original issue. The local
+workbench stores the verified project and target with that issue, so the stored
+row can be imported again. All selected issues must share an API region,
+organization, project and product.
 
 SDK readers that define their own findings and IDs can use the ordinary
 normalized Snyk import with their own evidence and no hosted report context.
