@@ -14,7 +14,8 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   privateImportClient,
-  privateReport,
+  selectPrivateReport,
+  type PrivateImportFormat,
   readPrivateCheckpoint,
   type PrivateImportJob,
 } from "./private-finding-import.js";
@@ -159,7 +160,12 @@ export interface ExternalPublicationPreview extends ExternalFindings {
   source: FindingImportRequest["source"];
   resumed: boolean;
   requests: FindingImportRequest[];
-  privateImport?: { contextVersion: string; sha256: string; bytes: number };
+  privateImport?: {
+    format: PrivateImportFormat;
+    contextVersion: string;
+    sha256: string;
+    bytes: number;
+  };
 }
 
 export interface PreparedExternalPublication {
@@ -388,6 +394,7 @@ export async function prepareExternalPublication(
     parsed.publication ?? normalizedPublicationInput(parsed.findings),
     { ...settings, provider: EXTERNAL_FINDINGS_PROVIDERS[settings.provider] },
     dependencies,
+    path,
   );
 }
 
@@ -453,6 +460,7 @@ async function preparePublicationInput(
   input: ExternalPublicationInput,
   options: NormalizedExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies,
+  nativePath?: string,
 ): Promise<PreparedExternalPublication> {
   const { inspectorProjectMap } = options;
   const progress = (event: ExternalPublicationProgress): void => {
@@ -889,8 +897,15 @@ async function preparePublicationInput(
       throw new CodexSecurityError(
         "A private source key cannot have leading or trailing whitespace.",
       );
-    const report = privateReport(parsed.findings, context.limits);
+    const report = await selectPrivateReport(
+      parsed,
+      source.provider,
+      nativePath,
+      context,
+      privateSaved,
+    );
     const binding = {
+      format: report.format,
       apiBaseUrl,
       accountId: credentials.account_id,
       source,
@@ -920,7 +935,7 @@ async function preparePublicationInput(
         (!savedJob &&
           ((!savedFile && !value.can_upload) ||
             !value.can_create_import_jobs ||
-            !value.formats.includes("security.findings.v1")))
+            !value.formats.includes(report.format)))
       )
         throw new CodexSecurityError(
           "Private findings import is unavailable for this account or report format.",
@@ -928,6 +943,7 @@ async function preparePublicationInput(
     }
     requireAccess(context, !!previous?.fileId, !!previous?.jobId);
     const privateImport = {
+      format: report.format,
       contextVersion: binding.contextVersion,
       sha256: report.digest,
       bytes: Buffer.byteLength(report.bytes),
@@ -998,6 +1014,7 @@ async function preparePublicationInput(
                 requestId: checkpoint.jobRequestId,
                 contextVersion: binding.contextVersion,
                 fileId: checkpoint.fileId,
+                format: report.format,
                 source,
                 repository: binding.repository,
                 jobId: checkpoint.jobId,

@@ -1492,7 +1492,11 @@ custom Enterprise hostnames. Named Wiz exports do not add other VCS destinations
 
 The preview shows which Cloud destination will receive the selected records.
 When the deployment advertises private import for the scanner, the CLI puts a
-structured report in the signed-in account’s **private findings inbox**. It
+report in the signed-in account’s **private findings inbox**. The preview
+identifies its format and byte count. For complete Endor findings and Wiz
+vulnerability JSON exports, the CLI sends the original bytes when Cloud
+advertises the format and every record matches the reviewed selection. Other
+selections and in-memory collectors use `security.findings.v1`. The CLI
 attaches the selected repository and connector as a suggested assessment
 target. Review the selection, exclusions, source key and destination before
 confirming.

@@ -46,7 +46,10 @@ import {
   type ExternalPublicationProgress,
   type PreparedExternalPublication,
 } from "../src/external-findings-publish.js";
-import { privateReport } from "../src/private-finding-import.js";
+import {
+  privateReport,
+  selectPrivateReport,
+} from "../src/private-finding-import.js";
 import { readGitHubFindings } from "../src/github-findings.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
 import {
@@ -5111,154 +5114,190 @@ test("publication rejects malformed options without writing findings", async () 
   expect(f.posts).toHaveLength(0);
 });
 
-test("a signed-in private import resumes lost upload and job responses without sharing a finding", async () => {
-  const f = await fixture(snykSarif());
-  f.state.environmentId = null;
-  const settings = { ...options, provider: "snyk" as const };
-  let contextVersion = "generation-a";
-  let advertised = true;
-  let canCreate = true;
-  let fileRequest: string | undefined;
-  let fileHash: string | undefined;
-  let fileBytes = 0;
-  let jobRequest: string | undefined;
-  const fileId = "aifile_" + "a".repeat(32);
-  const jobId = "import_" + "b".repeat(32);
-  const calls: string[] = [];
-  const fileMetadata = () => ({
-    object: "security.finding_import_file",
-    id: fileId,
-    purpose: "report",
-    sha256: fileHash,
-    bytes: fileBytes,
-  });
-  const job = (status: string) => ({
-    object: "security.finding_import_job",
-    id: jobId,
-    request_id: jobRequest,
-    source: { provider: "snyk", source_key: settings.sourceKey },
-    input: { type: "file", file_id: fileId, format: "security.findings.v1" },
-    default_targets: [
+test.each([
+  { provider: "snyk", format: "security.findings.v1", raw: snykSarif() },
+  {
+    provider: "endor",
+    format: "endor.findings_json.v1",
+    raw: { list: { objects: [endorFinding()] } },
+  },
+  {
+    provider: "wiz",
+    format: "wiz.vulnerability_json.v1",
+    raw: [
       {
-        type: "repository",
-        repo_id: options.repository,
-        repo_connector_id: "github",
+        id: "occurrence-1",
+        name: "CVE-2099-0001",
+        detailedName: "example-package",
+        vendorSeverity: "HIGH",
+        vulnerableAsset: { id: "asset-1" },
       },
     ],
-    status,
-    counts: {
-      total: 1,
-      discovered: 1,
-      created: 1,
-      updated: 0,
-      unchanged: 0,
-      error: 0,
-      unprocessed: 0,
-    },
-    poll_after_seconds: null,
-    error: null,
-  });
-  const deps = {
-    ...f.deps,
-    fetch: async (url: string, init: RequestInit) => {
-      const path = new URL(url).pathname.replace("/backend-api/aardvark", "");
-      expect(new Headers(init.headers).get("Authorization")).toBe(
-        "Bearer synthetic-token",
-      );
-      expect(new Headers(init.headers).get("ChatGPT-Account-ID")).toBe(
-        "synthetic-account",
-      );
-      expect(init.redirect).toBe("error");
-      calls.push(`${init.method} ${path}`);
-      if (path === "/external/repositories") {
-        const response = await f.deps.fetch(url, init);
-        return new Response(response.body, {
-          headers: advertised
-            ? { "Codex-Security-Private-Import-Providers": "snyk,github" }
-            : {},
-        });
-      }
-      if (path === "/finding-imports/context")
-        return Response.json({
-          object: "security.finding_import_context",
-          context_version: contextVersion,
-          can_upload: canCreate,
-          can_create_import_jobs: canCreate,
-          can_read: true,
-          formats: ["security.findings.v1"],
-          limits: {
-            max_direct_file_bytes: 32 * 1024 * 1024,
-            max_record_bytes: 1024 * 1024,
-          },
-        });
-      if (path === "/finding-imports/files") {
-        const form = init.body as FormData;
-        expect(form.get("context_version")).toBe(contextVersion);
-        expect(form.get("purpose")).toBe("report");
-        fileRequest = String(form.get("request_id"));
-        const bytes = await (form.get("file") as Blob).text();
-        const doc = JSON.parse(bytes);
-        expect(doc.format).toBe("security.findings.v1");
-        expect(doc.findings[0].source_finding_id).toBeTruthy();
-        expect(doc.findings[0].evidence.source_data).toBeTruthy();
-        fileHash = hash("sha256", bytes);
-        fileBytes = Buffer.byteLength(bytes);
-        throw new Error("lost upload response");
-      }
-      if (path === `/finding-imports/file-requests/${fileRequest}`)
-        return Response.json(fileMetadata());
-      if (path === "/finding-imports/jobs") {
-        const body = JSON.parse(String(init.body));
-        expect(body.request_id).not.toBe(fileRequest);
-        expect(body.input.file_id).toBe(fileId);
-        expect(body.default_targets).toEqual([
-          {
-            type: "repository",
-            repo_id: options.repository,
-            repo_connector_id: "github",
-          },
-        ]);
-        if (!jobRequest) {
-          jobRequest = body.request_id;
-          throw new Error("lost job response");
+  },
+] as const)(
+  "a signed-in $provider private import resumes lost upload and job responses",
+  async ({ provider, format, raw }) => {
+    const f = await fixture(raw);
+    const originalBytes = await readFile(f.file, "utf8");
+    f.state.environmentId = null;
+    const settings = { ...options, provider };
+    let contextVersion = "generation-a";
+    let advertised = true;
+    let canCreate = true;
+    let fileRequest: string | undefined;
+    let fileHash: string | undefined;
+    let fileBytes = 0;
+    let jobRequest: string | undefined;
+    const fileId = "aifile_" + "a".repeat(32);
+    const jobId = "import_" + "b".repeat(32);
+    const calls: string[] = [];
+    const fileMetadata = () => ({
+      object: "security.finding_import_file",
+      id: fileId,
+      purpose: "report",
+      sha256: fileHash,
+      bytes: fileBytes,
+    });
+    const job = (status: string) => ({
+      object: "security.finding_import_job",
+      id: jobId,
+      request_id: jobRequest,
+      source: { provider, source_key: settings.sourceKey },
+      input: { type: "file", file_id: fileId, format },
+      default_targets: [
+        {
+          type: "repository",
+          repo_id: options.repository,
+          repo_connector_id: "github",
+        },
+      ],
+      status,
+      counts: {
+        total: 1,
+        discovered: 1,
+        created: 1,
+        updated: 0,
+        unchanged: 0,
+        error: 0,
+        unprocessed: 0,
+      },
+      poll_after_seconds: null,
+      error: null,
+    });
+    const deps = {
+      ...f.deps,
+      fetch: async (url: string, init: RequestInit) => {
+        const path = new URL(url).pathname.replace("/backend-api/aardvark", "");
+        expect(new Headers(init.headers).get("Authorization")).toBe(
+          "Bearer synthetic-token",
+        );
+        expect(new Headers(init.headers).get("ChatGPT-Account-ID")).toBe(
+          "synthetic-account",
+        );
+        expect(init.redirect).toBe("error");
+        calls.push(`${init.method} ${path}`);
+        if (path === "/external/repositories") {
+          const response = await f.deps.fetch(url, init);
+          return new Response(response.body, {
+            headers: advertised
+              ? {
+                  "Codex-Security-Private-Import-Providers":
+                    "snyk,github,endor,wiz",
+                }
+              : {},
+          });
         }
-        expect(body.request_id).toBe(jobRequest);
-        return Response.json(job("queued"), {
-          headers: { "Retry-After": "0" },
-        });
-      }
-      if (path === `/finding-imports/jobs/${jobId}`)
-        return Response.json(job("completed"));
-      throw new Error("Unexpected route: " + path);
-    },
-  };
-  const prepare = () => prepareExternalPublication(f.file, settings, deps);
-  const original = await prepare();
-  expect(original.preview.privateImport?.sha256).toBeTruthy();
-  expect(calls.filter((call) => call.startsWith("POST"))).toEqual([]);
-  contextVersion = "generation-b";
-  await expect(original.publish()).rejects.toThrow("private inbox changed");
-  canCreate = false;
-  await expect(prepare()).rejects.toThrow("unavailable");
-  canCreate = true;
-  await expect((await prepare()).publish()).rejects.toThrow(
-    "lost upload response",
-  );
-  advertised = false;
-  await expect((await prepare()).publish()).rejects.toThrow(
-    "lost job response",
-  );
-  const completed = await (await prepare()).publish();
-  expect(completed.privateJob?.counts.created).toBe(1);
-  expect(completed.receipts).toEqual([]);
-  expect(completed.verified).toBe(0);
-  expect(
-    calls.filter((call) => call === "POST /finding-imports/files"),
-  ).toHaveLength(1);
-  canCreate = false;
-  expect((await (await prepare()).publish()).privateJob?.id).toBe(jobId);
-  expect(calls.at(-1)).toBe(`GET /finding-imports/jobs/${jobId}`);
-});
+        if (path === "/finding-imports/context")
+          return Response.json({
+            object: "security.finding_import_context",
+            context_version: contextVersion,
+            can_upload: canCreate,
+            can_create_import_jobs: canCreate,
+            can_read: true,
+            formats: [
+              "security.findings.v1",
+              "endor.findings_json.v1",
+              "wiz.vulnerability_json.v1",
+            ],
+            limits: {
+              max_direct_file_bytes: 32 * 1024 * 1024,
+              max_record_bytes: 1024 * 1024,
+            },
+          });
+        if (path === "/finding-imports/files") {
+          const form = init.body as FormData;
+          expect(form.get("context_version")).toBe(contextVersion);
+          expect(form.get("purpose")).toBe("report");
+          fileRequest = String(form.get("request_id"));
+          const bytes = await (form.get("file") as Blob).text();
+          if (format === "security.findings.v1") {
+            const doc = JSON.parse(bytes);
+            expect(doc.format).toBe(format);
+            expect(doc.findings[0].source_finding_id).toBeTruthy();
+            expect(doc.findings[0].evidence.source_data).toBeTruthy();
+          } else {
+            expect(bytes).toBe(originalBytes);
+          }
+          fileHash = hash("sha256", bytes);
+          fileBytes = Buffer.byteLength(bytes);
+          throw new Error("lost upload response");
+        }
+        if (path === `/finding-imports/file-requests/${fileRequest}`)
+          return Response.json(fileMetadata());
+        if (path === "/finding-imports/jobs") {
+          const body = JSON.parse(String(init.body));
+          expect(body.request_id).not.toBe(fileRequest);
+          expect(body.input).toEqual({ type: "file", file_id: fileId, format });
+          expect(body.default_targets).toEqual([
+            {
+              type: "repository",
+              repo_id: options.repository,
+              repo_connector_id: "github",
+            },
+          ]);
+          if (!jobRequest) {
+            jobRequest = body.request_id;
+            throw new Error("lost job response");
+          }
+          expect(body.request_id).toBe(jobRequest);
+          return Response.json(job("queued"), {
+            headers: { "Retry-After": "0" },
+          });
+        }
+        if (path === `/finding-imports/jobs/${jobId}`)
+          return Response.json(job("completed"));
+        throw new Error("Unexpected route: " + path);
+      },
+    };
+    const prepare = () => prepareExternalPublication(f.file, settings, deps);
+    const original = await prepare();
+    expect(original.preview.privateImport?.sha256).toBeTruthy();
+    expect(original.preview.privateImport?.format).toBe(format);
+    expect(calls.filter((call) => call.startsWith("POST"))).toEqual([]);
+    contextVersion = "generation-b";
+    await expect(original.publish()).rejects.toThrow("private inbox changed");
+    canCreate = false;
+    await expect(prepare()).rejects.toThrow("unavailable");
+    canCreate = true;
+    await expect((await prepare()).publish()).rejects.toThrow(
+      "lost upload response",
+    );
+    advertised = false;
+    await expect((await prepare()).publish()).rejects.toThrow(
+      "lost job response",
+    );
+    const completed = await (await prepare()).publish();
+    expect(completed.privateJob?.counts.created).toBe(1);
+    expect(completed.receipts).toEqual([]);
+    expect(completed.verified).toBe(0);
+    expect(
+      calls.filter((call) => call === "POST /finding-imports/files"),
+    ).toHaveLength(1);
+    canCreate = false;
+    expect((await (await prepare()).publish()).privateJob?.id).toBe(jobId);
+    expect(calls.at(-1)).toBe(`GET /finding-imports/jobs/${jobId}`);
+  },
+);
 
 test("a private structured report retains occurrence IDs, unknown severity and source lines", () => {
   const input = [
@@ -5290,4 +5329,55 @@ test("a private structured report retains occurrence IDs, unknown severity and s
   expect(() =>
     privateReport(input, { ...limits, max_record_bytes: 32 }),
   ).toThrow("record limit");
+});
+
+test("filtered, unsupported and changed files never upload an unreviewed native record", async () => {
+  const raw = endorFinding();
+  const f = await fixture(raw);
+  const selection = normalizeEndorFindings(raw);
+  const context = {
+    object: "security.finding_import_context" as const,
+    context_version: "v1",
+    can_upload: true,
+    can_create_import_jobs: true,
+    can_read: true,
+    formats: ["security.findings.v1", "endor.findings_json.v1"],
+    limits: {
+      max_direct_file_bytes: 32 * 1024 * 1024,
+      max_record_bytes: 1024 * 1024,
+    },
+  };
+  const select = (findings = selection, formats = context.formats) =>
+    selectPrivateReport(
+      findings,
+      "endor",
+      f.file,
+      { ...context, formats },
+      undefined,
+    );
+  expect((await select()).format).toBe("endor.findings_json.v1");
+  expect((await select(selection, ["security.findings.v1"])).format).toBe(
+    "security.findings.v1",
+  );
+  expect(
+    (
+      await select({
+        ...selection,
+        read: 2,
+        excluded: [
+          { position: 2, source_finding_id: null, reason: "excluded" },
+        ],
+      })
+    ).format,
+  ).toBe("security.findings.v1");
+  await writeFile(
+    f.file,
+    JSON.stringify({ list: { objects: [raw] }, unreviewed: "omitted" }),
+  );
+  expect((await select()).bytes).not.toContain("unreviewed");
+  await writeFile(
+    f.file,
+    JSON.stringify({ ...raw, meta: { ...raw.meta, name: "unreviewed" } }),
+  );
+  expect((await select()).bytes).not.toContain("unreviewed");
 });

@@ -1,12 +1,20 @@
 import { hash } from "node:crypto";
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
-import type { ExternalFinding } from "./external-findings.js";
+import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
 import type { ImportSource } from "./external-import-models.js";
-import { canonicalJson } from "./record.js";
+import { canonicalJson, isRecord } from "./record.js";
 
-const format = "security.findings.v1";
+const structuredFormat = "security.findings.v1";
+const privateFormat = z.enum([
+  structuredFormat,
+  "endor.findings_json.v1",
+  "wiz.vulnerability_json.v1",
+]);
+export type PrivateImportFormat = z.infer<typeof privateFormat>;
 const fileId = z.string().regex(/^aifile_[0-9a-f]{32}$/u);
 const contextSchema = z.object({
   object: z.literal("security.finding_import_context"),
@@ -35,7 +43,7 @@ const jobSchema = z.object({
   input: z.object({
     type: z.literal("file"),
     file_id: fileId,
-    format: z.literal(format),
+    format: privateFormat,
   }),
   default_targets: z.array(
     z.object({
@@ -101,15 +109,165 @@ export function privateReport(
       );
     return record;
   });
-  const bytes = canonicalJson({ format, findings: records });
+  const bytes = canonicalJson({ format: structuredFormat, findings: records });
   if (Buffer.byteLength(bytes) > limits.max_direct_file_bytes)
     throw new CodexSecurityError(
       "The selected report exceeds the Cloud direct-upload limit. Split this selection.",
     );
-  return { bytes, digest: hash("sha256", bytes) };
+  return {
+    format: structuredFormat as PrivateImportFormat,
+    bytes,
+    digest: hash("sha256", bytes),
+  };
+}
+
+const endorExport = z.strictObject({
+  list: z.strictObject({
+    objects: z.array(z.unknown()),
+    response: z
+      .strictObject({
+        next_page_id: z.literal(["", null]).optional(),
+        next_page_token: z.literal(["", "0", 0, null]).optional(),
+        total_size: z.union([z.string(), z.number()]).optional(),
+      })
+      .optional(),
+  }),
+});
+const wizExport = z.strictObject({
+  vulnerabilityFindings: z.strictObject({
+    nodes: z.array(z.unknown()),
+    pageInfo: z
+      .strictObject({
+        hasNextPage: z.literal(false).optional(),
+        hasPreviousPage: z.literal(false).optional(),
+        startCursor: z.string().nullable().optional(),
+        endCursor: z.string().nullable().optional(),
+      })
+      .optional(),
+  }),
+});
+
+// Only complete, known envelopes can be sent byte for byte. Unreviewed sibling
+// collections, metadata or partial pages keep the normalized projection.
+function nativeRecords(
+  payload: unknown,
+  provider: string,
+): unknown[] | undefined {
+  if (provider === "wiz" && Array.isArray(payload)) return payload;
+  if (!isRecord(payload)) return;
+  if (provider === "endor") {
+    if (isRecord(payload["spec"])) return [payload];
+    return endorExport.safeParse(payload).data?.list.objects;
+  }
+  if (typeof payload["id"] === "string") return [payload];
+  const data =
+    Object.keys(payload).length === 1 && "data" in payload
+      ? payload["data"]
+      : payload;
+  return wizExport.safeParse(data).data?.vulnerabilityFindings.nodes;
+}
+
+export async function selectPrivateReport(
+  selection: ExternalFindings,
+  provider: string,
+  path: string | undefined,
+  context: PrivateImportContext,
+  saved: string | undefined,
+): Promise<ReturnType<typeof privateReport>> {
+  const originalFormat =
+    saved === undefined
+      ? undefined
+      : checkpointSchema.parse(JSON.parse(saved)).format;
+  const format =
+    provider === "endor"
+      ? "endor.findings_json.v1"
+      : provider === "wiz"
+        ? "wiz.vulnerability_json.v1"
+        : undefined;
+  if (
+    format &&
+    path &&
+    selection.excluded.length === 0 &&
+    selection.read <= 10_000 &&
+    selection.findings.length === selection.read &&
+    (originalFormat
+      ? originalFormat === format
+      : context.formats.includes(format))
+  ) {
+    const handle = await open(
+      path,
+      constants.O_RDONLY | (constants.O_NONBLOCK ?? 0),
+    );
+    let bytes: string | undefined;
+    try {
+      const info = await handle.stat();
+      if (
+        info.isFile() &&
+        info.size > 0 &&
+        info.size <= context.limits.max_direct_file_bytes
+      ) {
+        const buffer = Buffer.alloc(info.size + 1);
+        let count = 0;
+        while (count < buffer.length) {
+          const { bytesRead } = await handle.read(
+            buffer,
+            count,
+            buffer.length - count,
+          );
+          if (bytesRead === 0) break;
+          count += bytesRead;
+        }
+        if (count === info.size) {
+          try {
+            bytes = new TextDecoder("utf-8", {
+              fatal: true,
+              ignoreBOM: true,
+            }).decode(buffer.subarray(0, count));
+          } catch {
+            /* Binary exports use the normalized selection. */
+          }
+        }
+      }
+    } finally {
+      await handle.close();
+    }
+    if (bytes !== undefined) {
+      let payload: unknown;
+      try {
+        payload = JSON.parse(bytes.replace(/^\uFEFF/u, ""));
+      } catch {
+        /* JSONL and other exports use the normalized selection. */
+      }
+      const records = nativeRecords(payload, provider);
+      if (
+        records &&
+        records.length === selection.findings.length &&
+        records.every((raw, index) => {
+          const reviewed = selection.findings[index]!;
+          if (!isRecord(raw)) return false;
+          const record = canonicalJson(raw);
+          return (
+            raw[provider === "endor" ? "uuid" : "id"] ===
+              reviewed.source_finding_id &&
+            reviewed.source_finding_id === reviewed.source_finding_id.trim() &&
+            reviewed.evidence.source_data != null &&
+            record === canonicalJson(reviewed.evidence.source_data) &&
+            Buffer.byteLength(record) <= context.limits.max_record_bytes
+          );
+        })
+      )
+        return { format, bytes, digest: hash("sha256", bytes) };
+    }
+  }
+  if (originalFormat && originalFormat !== structuredFormat)
+    throw new CodexSecurityError(
+      "The original native report is required to resume this private import.",
+    );
+  return privateReport(selection.findings, context.limits);
 }
 
 const checkpointSchema = z.object({
+  format: privateFormat.default(structuredFormat),
   apiBaseUrl: z.string(),
   accountId: z.string(),
   contextVersion: z.string(),
@@ -126,6 +284,7 @@ const checkpointSchema = z.object({
 export function readPrivateCheckpoint(
   serialized: string,
   expected: {
+    format: PrivateImportFormat;
     apiBaseUrl: string;
     accountId: string;
     contextVersion: string;
@@ -144,6 +303,7 @@ export function readPrivateCheckpoint(
     (receipt &&
       (receipt.id !== jobId ||
         receipt.request_id !== jobRequestId ||
+        receipt.input.format !== checkpoint.format ||
         receipt.input.file_id !== fileId)) ||
     uploadRequestId === jobRequestId
   )
@@ -252,6 +412,7 @@ export function privateImportClient(
         requestId: string;
         contextVersion: string;
         fileId: string;
+        format: PrivateImportFormat;
         source: ImportSource;
         repository: { id: string; repo_connector_id: string };
         jobId?: string;
@@ -267,7 +428,11 @@ export function privateImportClient(
               request_id: input.requestId,
               context_version: input.contextVersion,
               source: input.source,
-              input: { type: "file", file_id: input.fileId, format },
+              input: {
+                type: "file",
+                file_id: input.fileId,
+                format: input.format,
+              },
               default_targets: [
                 {
                   type: "repository",
@@ -283,6 +448,7 @@ export function privateImportClient(
           (id !== undefined && job.id !== id) ||
           job.request_id !== input.requestId ||
           job.input.file_id !== input.fileId ||
+          job.input.format !== input.format ||
           job.source.provider !== input.source.provider ||
           job.source.source_key !== input.source.source_key ||
           job.default_targets.length !== 1 ||
