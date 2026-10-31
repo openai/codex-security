@@ -564,22 +564,17 @@ def boundaries(repository: Path) -> dict:
     result["removedDirectory"] = excerpt(
         selected, repository, "src/nested/child.py", ["src"]
     )
-    calls = []
-    original = scopes.git_bytes
-
-    def observed(target: Path, *arguments: str):
-        calls.append(
-            (
-                os.environ.get("GIT_NO_LAZY_FETCH"),
-                os.environ.get("GIT_ALLOW_PROTOCOL"),
-                os.environ.get("GIT_NO_REPLACE_OBJECTS"),
-            )
-        )
-        return original(target, *arguments)
-
-    with patch.object(scopes, "git_bytes", observed):
+    scopes.tree_entries.cache_clear()
+    with patch.object(subprocess, "run", wraps=subprocess.run) as run:
         result["offline"] = excerpt(selected, repository, "src/public.py", ["src"])
-    assert calls and all(call == ("1", "", "1") for call in calls)
+    for command in ("ls-tree", "cat-file"):
+        reads = [call for call in run.call_args_list if command in call.args[0]]
+        assert reads, command
+        for call in reads:
+            env = call.kwargs["env"]
+            assert env["GIT_NO_LAZY_FETCH"] == "1"
+            assert env["GIT_ALLOW_PROTOCOL"] == ""
+            assert env["GIT_NO_REPLACE_OBJECTS"] == "1"
     with patch.object(excerpts, "offline_git_bytes", return_value=None):
         result["missingObject"] = excerpt(
             selected, repository, "src/public.py", ["src"]

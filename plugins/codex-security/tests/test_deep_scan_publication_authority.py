@@ -278,6 +278,7 @@ def emulate_windows_atomic_write(monkeypatch, finalizer, files, *, reparse_point
     backend = finalizer._windows_scan_local_files()
     paths = {}
     streams = {}
+    movable_directories = {}
     pending_deletions = set()
     next_directory_handle = -1
 
@@ -297,16 +298,25 @@ def emulate_windows_atomic_write(monkeypatch, finalizer, files, *, reparse_point
                 stream.close()
                 raise
         paths[descriptor] = path
+        if path.is_dir() and kwargs["share"] & backend._FILE_SHARE_DELETE:
+            movable_directories[descriptor] = path.stat()
         return backend._OwnedHandle(descriptor)
 
-    def rename_handle(handle, destination):
-        os.replace(paths[handle], destination)
+    def rename_handle(handle, destination, replace_existing):
+        if replace_existing:
+            os.replace(paths[handle], destination)
+        else:
+            os.link(paths[handle], destination)
+            paths[handle].unlink()
         paths[handle] = destination
 
     def close_handle(handle):
-        if handle >= 0:
-            streams[handle].close()
+        if handle in streams:
+            streams.pop(handle).close()
+        elif handle >= 0:
+            os.close(handle)
         if handle in pending_deletions:
+            pending_deletions.remove(handle)
             paths[handle].unlink()
 
     def attributes(handle):
@@ -321,12 +331,39 @@ def emulate_windows_atomic_write(monkeypatch, finalizer, files, *, reparse_point
     monkeypatch.setattr(backend, "_require_windows", lambda: None)
     monkeypatch.setattr(backend, "_validate_existing_output", lambda path: None)
     monkeypatch.setattr(backend, "_create_file", create_file)
+
+    def reopen_file(handle, *_):
+        fd = os.open(paths[handle], os.O_RDONLY) if handle < 0 else os.dup(handle)
+        paths[fd] = paths[handle]
+        return fd
+
+    monkeypatch.setattr(backend, "_ReOpenFile", reopen_file, raising=False)
+    monkeypatch.setattr(backend, "file_change_time", lambda fd: os.fstat(fd).st_ctime_ns)
+    monkeypatch.setattr(
+        backend,
+        "_msvcrt",
+        SimpleNamespace(
+            open_osfhandle=lambda handle, flags: (
+                os.open(paths[handle], flags) if handle < 0 else handle
+            )
+        ),
+    )
+    monkeypatch.setattr(os, "O_BINARY", getattr(os, "O_BINARY", 0), raising=False)
     monkeypatch.setattr(backend, "_close_handle", close_handle)
     monkeypatch.setattr(backend, "_attributes", attributes)
     monkeypatch.setattr(
         backend, "_GetFileType", lambda handle: backend._FILE_TYPE_DISK, raising=False
     )
-    monkeypatch.setattr(backend, "_final_path", lambda handle, **kwargs: str(paths[handle]))
+
+    def final_path(handle, **kwargs):
+        path = paths[handle]
+        if handle in movable_directories:
+            for sibling in path.parent.iterdir():
+                if os.path.samestat(movable_directories[handle], sibling.lstat()):
+                    return str(sibling)
+        return str(path)
+
+    monkeypatch.setattr(backend, "_final_path", final_path)
     monkeypatch.setattr(backend, "_write_all", os.write)
     monkeypatch.setattr(backend, "_rename_handle", rename_handle)
     monkeypatch.setattr(backend, "_mark_handle_for_deletion", pending_deletions.add)

@@ -2069,27 +2069,22 @@ def set_finding_remediation(
             raise SystemExit("This remediation host request is owned by a different action token.")
         remediation_state.require_transition(current["state"], args.state)
         remediation_state.require_pending_action(current, args.state)
-        patch_path = current["patch_path"]
-        if args.patch_path is not None:
-            requested_patch_path = require_scan_relative_file(scan, args.patch_path)
-            if patch_path is not None and requested_patch_path != patch_path:
-                raise SystemExit("A remediation attempt cannot replace its reviewed patch path.")
-            patch_path = requested_patch_path
-        patch_digest = current["patch_digest"]
-        if args.patch_digest is not None:
-            requested_patch_digest = require_sha256_digest(args.patch_digest, "patch-digest")
-            if patch_digest is not None and requested_patch_digest != patch_digest:
-                raise SystemExit("A remediation attempt cannot replace its reviewed patch digest.")
-            patch_digest = requested_patch_digest
+        patch = sys.stdin.buffer.read() if args.patch_stdin else None
+        patch_path, patch_digest = remediation_state.patch_metadata(
+            current, args, patch, partial(require_scan_relative_file, scan)
+        )
         base_revision = optional_text(args.base_revision, maximum=512)
         if args.state in {"generated", "applied", "verifying", "verified"}:
             if patch_path is None or patch_digest is None:
                 raise SystemExit(
                     "Generated remediation states require a scan-local patch path and digest."
                 )
-            require_matching_patch_digest(scan, patch_path, patch_digest)
+            if patch is None:
+                require_matching_patch_digest(scan, patch_path, patch_digest)
         if args.state == "generated":
             require_remediation_checkout_unchanged(scan, current, require_base_content=True)
+            if patch is not None:
+                remediation_state.require_valid_patch(Path(scan["target_path"]), patch)
         if args.state in {"applied", "verifying", "verified"}:
             if base_revision != current["base_revision"]:
                 raise SystemExit(
@@ -2110,59 +2105,80 @@ def set_finding_remediation(
                 current,
                 patch_path,
             )
-        connection.execute("BEGIN IMMEDIATE")
-        timestamp = now()
-        occurrence = require_occurrence(connection, args.occurrence_id)
-        require_finding_open(connection, occurrence["id"])
-        replace_failure_summary = current["state"] == "failed" and args.state != "failed"
-        updated = connection.execute(
-            """
-            UPDATE finding_remediation_attempts
-            SET state = ?, version = version + 1, patch_path = ?, patch_digest = ?,
-                applied_content_digest = ?,
-                pending_action = CASE
-                    WHEN ? IN ('verifying', 'failed') THEN pending_action ELSE NULL
-                END,
-                pending_action_claimed_at = CASE
-                    WHEN ? = 'verifying' THEN pending_action_claimed_at ELSE NULL
-                END,
-                pending_action_claim_token = CASE
-                    WHEN ? = 'verifying' THEN pending_action_claim_token ELSE NULL
-                END,
-                pending_action_delivered_at = CASE
-                    WHEN ? = 'verifying' THEN pending_action_delivered_at ELSE NULL
-                END,
-                summary = CASE WHEN ? THEN ? ELSE COALESCE(?, summary) END,
-                verification_summary = COALESCE(?, verification_summary),
-                updated_at = ?
-            WHERE request_id = ? AND occurrence_id = ? AND version = ?
-                AND pending_action_claim_token = ?
-            """,
-            (
-                args.state,
-                patch_path,
-                patch_digest,
-                applied_content_digest,
-                args.state,
-                args.state,
-                args.state,
-                args.state,
-                replace_failure_summary,
-                summary,
-                summary,
-                verification_summary,
-                timestamp,
-                request_id,
-                occurrence["id"],
-                args.expected_version,
-                action_token,
-            ),
-        )
-        if updated.rowcount != 1:
-            raise SystemExit(
-                "This remediation request changed. Refresh it before recording an update."
+
+        def record_update() -> None:
+            connection.execute("BEGIN IMMEDIATE")
+            timestamp = now()
+            occurrence = require_occurrence(connection, args.occurrence_id)
+            require_finding_open(connection, occurrence["id"])
+            replace_failure_summary = current["state"] == "failed" and args.state != "failed"
+            updated = connection.execute(
+                """
+                UPDATE finding_remediation_attempts
+                SET state = ?, version = version + 1, patch_path = ?, patch_digest = ?,
+                    applied_content_digest = ?,
+                    pending_action = CASE
+                        WHEN ? IN ('verifying', 'failed') THEN pending_action ELSE NULL
+                    END,
+                    pending_action_claimed_at = CASE
+                        WHEN ? = 'verifying' THEN pending_action_claimed_at ELSE NULL
+                    END,
+                    pending_action_claim_token = CASE
+                        WHEN ? = 'verifying' THEN pending_action_claim_token ELSE NULL
+                    END,
+                    pending_action_delivered_at = CASE
+                        WHEN ? = 'verifying' THEN pending_action_delivered_at ELSE NULL
+                    END,
+                    summary = CASE WHEN ? THEN ? ELSE COALESCE(?, summary) END,
+                    verification_summary = COALESCE(?, verification_summary),
+                    updated_at = ?
+                WHERE request_id = ? AND occurrence_id = ? AND version = ?
+                    AND pending_action_claim_token = ?
+                """,
+                (
+                    args.state,
+                    patch_path,
+                    patch_digest,
+                    applied_content_digest,
+                    args.state,
+                    args.state,
+                    args.state,
+                    args.state,
+                    replace_failure_summary,
+                    summary,
+                    summary,
+                    verification_summary,
+                    timestamp,
+                    request_id,
+                    occurrence["id"],
+                    args.expected_version,
+                    action_token,
+                ),
             )
-    return scan_context(connection, occurrence["scan_id"])
+            if updated.rowcount != 1:
+                raise SystemExit(
+                    "This remediation request changed. Refresh it before recording an update."
+                )
+
+        if patch is None:
+            record_update()
+        else:
+            try:
+                remediation_state.save_patch(
+                    _WORKBENCH_DB_CONTEXT,
+                    connection,
+                    scan["id"],
+                    current,
+                    patch_path,
+                    patch_digest,
+                    patch,
+                    record_update,
+                )
+            except (ContractError, OSError, SystemExit) as exc:
+                raise SystemExit(f"Could not save the remediation patch: {exc}") from exc
+    return scan_context(
+        connection, occurrence["scan_id"], occurrence["id"] if patch is not None else None
+    )
 
 
 def require_reviewed_patch_applied(
@@ -2276,20 +2292,6 @@ def require_remediation_checkout_unchanged(
         )
 
 
-def require_sha256_digest(value: str, label: str) -> str:
-    normalized = optional_text(value, maximum=71)
-    if (
-        normalized is None
-        or not normalized.startswith("sha256:")
-        or len(normalized) != 71
-        or any(
-            character not in "0123456789abcdef" for character in normalized.removeprefix("sha256:")
-        )
-    ):
-        raise SystemExit(f"{label} must use sha256:<64 lowercase hex characters>.")
-    return normalized
-
-
 def require_scan_relative_file(scan: sqlite3.Row, value: str) -> str:
     if len(value) > 4096:
         raise SystemExit("Text value must be no longer than 4096 characters.")
@@ -2303,11 +2305,7 @@ def require_scan_relative_file(scan: sqlite3.Row, value: str) -> str:
 
 
 def require_matching_patch_digest(scan: sqlite3.Row, patch_path: str, patch_digest: str) -> None:
-    digest = hashlib.sha256()
-    with open_scan_local_file(Path(scan["scan_dir"]), patch_path) as patch:
-        while chunk := patch.read(1024 * 1024):
-            digest.update(chunk)
-    if f"sha256:{digest.hexdigest()}" != patch_digest:
+    if scan_local_file_digest(Path(scan["scan_dir"]), patch_path) != patch_digest:
         raise SystemExit("Patch digest does not match the scan-local patch file.")
 
 
@@ -2416,7 +2414,11 @@ def scan_context(
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
     result = scan_result(connection, scan, occurrence_id=occurrence_id)
-    workspace_result = result if occurrence_id is None else scan_result(connection, scan)
+    workspace_result = result
+    if len(result["findings"]) > FINDINGS_RESULT_LIMIT:
+        workspace_result = dict(
+            result, findings=result["findings"][:FINDINGS_RESULT_LIMIT], findingsTruncated=True
+        )
     workspace = workspace_state(
         connection,
         scan["workspace_id"],
@@ -2518,11 +2520,12 @@ def scan_result(
     occurrence_rows = scan_history.finding_occurrence_rows(
         connection, scan["id"], offset=0, limit=FINDINGS_RESULT_LIMIT
     )
-    if occurrence_id is not None and all(row["id"] != occurrence_id for row in occurrence_rows):
+    if occurrence_id is not None:
         occurrence = require_occurrence(connection, occurrence_id)
         if occurrence["scan_id"] != scan["id"]:
             raise SystemExit("This finding does not belong to the selected scan.")
-        occurrence_rows.append(occurrence)
+        if all(row["id"] != occurrence["id"] for row in occurrence_rows):
+            occurrence_rows.append(occurrence)
     finding_count = connection.execute(
         "SELECT COUNT(*) FROM finding_occurrences WHERE scan_id = ?", (scan["id"],)
     ).fetchone()[0]

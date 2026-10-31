@@ -1107,6 +1107,10 @@ def test_completed_finding_triage_and_remediation_persist(tmp_path: Path, git_au
     assert generated["findings"][0]["remediationState"]["summary"] == (
         "Contained archive extraction under the selected output directory."
     )
+    selected = get_scan(state_dir, scan_id, "--occurrence-id", f" {occurrence_id}\t")
+    for result in (selected["scan"], selected["workspace"]["results"]):
+        assert result["findingCount"] == 1
+        assert result["findings"] == generated["findings"]
     apply_token = str(uuid.uuid4())
     apply_requested = request_remediation_action(
         state_dir, occurrence_id, request_id, "2", "apply", apply_token
@@ -3316,6 +3320,29 @@ def test_workbench_hides_missing_artifact_on_reopen(tmp_path: Path) -> None:
     reopened = get_scan(state_dir, scan_id)
     assert reopened["scan"]["reportAvailable"] is False
     assert "markdownReport" not in reopened["scan"]["artifacts"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="changes permissions on an open patch")
+def test_patch_digest_accepts_file_becoming_read_only(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "reviewed.patch"
+    patch = b"reviewed content\n"
+    path.write_bytes(patch)
+    path.chmod(0o600)
+    db = load_script("workbench_db")
+    with db.open_scan_local_file(tmp_path, path.name) as source:
+        read = source.read
+
+        def read_and_protect(size):
+            chunk = read(size)
+            os.fchmod(source.fileno(), 0o400)
+            return chunk
+
+        monkeypatch.setattr(source, "read", read_and_protect)
+        monkeypatch.setattr(db, "open_scan_local_file", lambda *_: source)
+        db.require_matching_patch_digest(
+            {"scan_dir": str(tmp_path)}, path.name, "sha256:" + hashlib.sha256(patch).hexdigest()
+        )
+    assert path.stat().st_mode & 0o777 == 0o400
 
 
 @pytest.mark.cross_platform

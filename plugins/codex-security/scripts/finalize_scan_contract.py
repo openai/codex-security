@@ -14,10 +14,11 @@ import json
 import math
 import os
 import re
-import secrets
 import stat
 import struct
 import sys
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple, TextIO
@@ -28,6 +29,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import report_projection
 import servicenow_avit
 import threat_model_projection
+from posix_scan_local_files import (
+    descriptor_relative_writes_available as _descriptor_relative_writes_available,
+)
+from posix_scan_local_files import managed_fd, stage_write
 from review_state import checkpoint_review_state, review_state, review_summary
 
 SCHEMA_VERSION = "1.0"
@@ -500,15 +505,6 @@ def _is_windows() -> bool:
     return os.name == "nt"
 
 
-def _descriptor_relative_writes_available() -> bool:
-    # os.replace accepts src_dir_fd/dst_dir_fd wherever descriptor-relative
-    # os.rename is supported, but Python lists only os.rename in supports_dir_fd.
-    required_operations = (os.mkdir, os.open, os.rename, os.stat, os.unlink)
-    return hasattr(os, "O_NOFOLLOW") and all(
-        operation in os.supports_dir_fd for operation in required_operations
-    )
-
-
 def _windows_scan_local_files() -> Any:
     """Load the Win32 backend and shared stream comparison lazily."""
     import windows_scan_local_files
@@ -560,16 +556,33 @@ def scan_root_identity(scan_dir: Path) -> tuple[Path, tuple[int, int]]:
         os.close(descriptor)
 
 
-def _open_scan_local_directory(root_fd: int, parts: tuple[str, ...], *, create: bool) -> int:
+def _open_scan_local_directory(
+    root_fd: int,
+    parts: tuple[str, ...],
+    *,
+    create: bool,
+    owner_read_write: bool = False,
+    sync_parents: bool = False,
+) -> int:
     descriptor = os.dup(root_fd)
     try:
         for part in parts:
+            if sync_parents:
+                os.fsync(descriptor)
             if create:
                 try:
                     os.mkdir(part, mode=0o700, dir_fd=descriptor)
                 except FileExistsError:
                     # The open below verifies that an existing entry is a real directory.
                     pass
+                else:
+                    if owner_read_write:
+                        mode = os.stat(part, dir_fd=descriptor, follow_symlinks=False).st_mode
+                        if mode & stat.S_IRWXU != stat.S_IRWXU:
+                            os.rmdir(part, dir_fd=descriptor)
+                            raise ScanLocalIOError(
+                                f"{part}: process umask prevents owner access to the new directory"
+                            )
             next_descriptor = os.open(
                 part,
                 os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
@@ -766,6 +779,40 @@ def _sha256_scan_local_file(scan_dir: Path, relative_path: str, context: str) ->
     return digest.hexdigest()
 
 
+def scan_local_file_version(descriptor: int) -> tuple[os.stat_result, int]:
+    metadata = os.fstat(descriptor)
+    changed = (
+        _windows_scan_local_files().file_change_time(descriptor)
+        if _is_windows()
+        else metadata.st_ctime_ns
+    )
+    return metadata, changed
+
+
+def _scan_local_write_path(
+    scan_dir: Path, relative_path: str, external_name: bool
+) -> tuple[Path, str]:
+    scan_dir = _require_scan_directory(scan_dir)
+    if external_name:
+        if relative_path in {"", ".", ".."} or "/" in relative_path or "\0" in relative_path:
+            raise ContractError("external output path: expected a safe file name")
+    else:
+        relative_path = _require_portable_relative_path(relative_path, "scan-local output path")
+    return scan_dir, relative_path
+
+
+@contextmanager
+def _windows_write_errors(backend: Any, relative_path: str) -> Iterator[None]:
+    try:
+        yield
+    except FileExistsError:
+        raise
+    except backend.WindowsScanLocalPathError as exc:
+        raise ContractError(f"{relative_path}: {exc}") from exc
+    except OSError as exc:
+        raise ScanLocalIOError(f"{relative_path}: {exc}") from exc
+
+
 def write_scan_local_bytes(
     scan_dir: Path,
     relative_path: str,
@@ -774,111 +821,96 @@ def write_scan_local_bytes(
     external_name: bool = False,
     expected_root_identity: tuple[int, int] | None = None,
     owner_read_write: bool = False,
+    replace_existing: bool = True,
 ) -> None:
-    scan_dir = _require_scan_directory(scan_dir)
-    if external_name:
-        if relative_path in {"", ".", ".."} or "/" in relative_path or "\0" in relative_path:
-            raise ContractError("external output path: expected a safe file name")
-    else:
-        relative_path = _require_portable_relative_path(relative_path, "scan-local output path")
-    path = scan_dir / relative_path
-    if not _descriptor_relative_writes_available():
-        if not _is_windows():
-            raise ContractError("scan-local output requires descriptor-relative file operations")
+    if _is_windows() and not _descriptor_relative_writes_available():
+        scan_dir, relative_path = _scan_local_write_path(scan_dir, relative_path, external_name)
         backend = _windows_scan_local_files()
-        try:
+        with _windows_write_errors(backend, relative_path):
             backend.atomic_write(
                 scan_dir,
                 relative_path,
                 payload,
                 expected_root_identity=expected_root_identity,
+                replace_existing=replace_existing,
             )
-        except backend.WindowsScanLocalPathError as exc:
-            raise ContractError(f"{relative_path}: {exc}") from exc
-        except OSError as exc:
-            raise ScanLocalIOError(f"{relative_path}: {exc}") from exc
         return
-    root_fd: int | None = None
-    parent_fd: int | None = None
-    temp_name: str | None = None
-    try:
-        root_fd = _open_verified_scan_directory(scan_dir, expected_root_identity)
+    with stage_scan_local_bytes(
+        scan_dir,
+        relative_path,
+        payload,
+        external_name=external_name,
+        expected_root_identity=expected_root_identity,
+        owner_read_write=owner_read_write,
+        replace_existing=replace_existing,
+    ) as publish:
+        publish()
+
+
+@contextmanager
+def stage_scan_local_bytes(
+    scan_dir: Path,
+    relative_path: str,
+    payload: bytes,
+    *,
+    external_name: bool = False,
+    expected_root_identity: tuple[int, int] | None = None,
+    owner_read_write: bool = False,
+    replace_existing: bool = False,
+) -> Iterator[Callable[..., tuple[os.stat_result, int]]]:
+    scan_dir, relative_path = _scan_local_write_path(scan_dir, relative_path, external_name)
+    if not _descriptor_relative_writes_available():
+        if not _is_windows():
+            raise ContractError("scan-local output requires descriptor-relative file operations")
+        backend = _windows_scan_local_files()
+        with _windows_write_errors(backend, relative_path):
+            with backend.stage_write(
+                scan_dir,
+                relative_path,
+                payload,
+                expected_root_identity=expected_root_identity,
+                replace_existing=replace_existing,
+            ) as publish:
+                yield publish
+        return
+    with managed_fd(_open_verified_scan_directory(scan_dir, expected_root_identity)) as root_fd:
         parts = PurePosixPath(relative_path).parts
         try:
-            parent_fd = _open_scan_local_directory(root_fd, parts[:-1], create=True)
+            parent_fd = _open_scan_local_directory(
+                root_fd, parts[:-1], create=True, owner_read_write=owner_read_write
+            )
         except OSError as exc:
             raise _scan_local_directory_error(
                 f"{relative_path}: expected a path inside the scan directory", exc
             ) from exc
-        # The held descriptor is the authority for the validated parent. A
-        # concurrent rename cannot redirect later operations through a
-        # replacement path or link.
-        try:
-            metadata = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            pass
-        else:
-            if not stat.S_ISREG(metadata.st_mode):
-                raise ContractError(f"{relative_path}: expected a regular non-symlink file")
-            try:
-                existing_fd = os.open(
-                    parts[-1],
-                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
-                    dir_fd=parent_fd,
-                )
-            except OSError as exc:
-                if exc.errno not in {errno.ENOENT, errno.EACCES, errno.EPERM}:
-                    raise
-            else:
-                try:
-                    opened = os.fstat(existing_fd)
-                    if not stat.S_ISREG(opened.st_mode):
-                        raise ContractError(f"{relative_path}: expected a regular non-symlink file")
-                    if (opened.st_dev, opened.st_ino) != (
-                        metadata.st_dev,
-                        metadata.st_ino,
-                    ):
-                        raise ContractError(f"{relative_path}: changed while it was being opened")
-                    if expected_root_identity is not None and opened.st_size == len(payload):
-                        try:
-                            with os.fdopen(existing_fd, "rb") as handle:
-                                existing_fd = -1
-                                if _windows_scan_local_files().stream_matches_payload(
-                                    handle, payload
-                                ):
-                                    return
-                        except OSError:
-                            # A failed content comparison still allows an atomic replacement.
-                            pass
-                finally:
-                    if existing_fd >= 0:
-                        os.close(existing_fd)
-        temp_name = f".{path.name}.{secrets.token_hex(8)}.tmp"
-        temp_fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent_fd)
-        with os.fdopen(temp_fd, "wb") as handle:
-            if owner_read_write:
-                # Generated Markdown must remain editable under a restrictive umask.
-                os.fchmod(handle.fileno(), 0o600)
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_name, parts[-1], src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-        temp_name = None
-    finally:
-        try:
-            if temp_name is not None and parent_fd is not None:
-                try:
-                    os.unlink(temp_name, dir_fd=parent_fd)
-                except FileNotFoundError:
-                    # The temporary file is already gone, so cleanup is complete.
-                    pass
-        finally:
-            try:
-                if parent_fd is not None:
-                    os.close(parent_fd)
-            finally:
-                if root_fd is not None:
-                    os.close(root_fd)
+
+        with managed_fd(parent_fd):
+
+            def check_parent(directory: Path) -> None:
+                # Admission can follow an archive while the staged parent stays open.
+                root = os.fstat(root_fd)
+                with (
+                    managed_fd(
+                        _open_verified_scan_directory(directory, (root.st_dev, root.st_ino))
+                    ) as current,
+                    managed_fd(
+                        _open_scan_local_directory(current, parts[:-1], create=False)
+                    ) as parent,
+                ):
+                    if not os.path.samestat(os.fstat(parent_fd), os.fstat(parent)):
+                        raise ContractError(f"{relative_path}: parent changed before publication")
+
+            with stage_write(
+                parent_fd,
+                relative_path,
+                payload,
+                owner_read_write=owner_read_write,
+                replace_existing=replace_existing,
+                compare_existing=expected_root_identity is not None,
+                check_parent=check_parent,
+                contract_error=ContractError,
+            ) as publish:
+                yield publish
 
 
 def _remove_scan_local_file_if_exists(scan_dir: Path, relative_path: str) -> None:

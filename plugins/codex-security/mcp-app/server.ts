@@ -411,6 +411,20 @@ const findingRemediationSchema = {
   baseRevision: requiredText.max(512).optional(),
   expectedVersion: positiveInteger,
   occurrenceId: occurrenceIdSchema,
+  patch: z
+    .union([
+      z
+        .string()
+        .refine(
+          (value) => value.isWellFormed(),
+          "Patch text contains an unpaired Unicode surrogate. Send the original bytes as base64.",
+        ),
+      z.object({ encoding: z.literal("base64"), content: z.base64() }),
+    ])
+    .optional()
+    .describe(
+      "For state generated, supply the exact unified diff as UTF-8 text or as base64 of its original bytes. The workbench saves it and computes its digest. For an existing scan-local file, supply patchPath and patchDigest without patch.",
+    ),
   patchDigest: z
     .string()
     .regex(/^sha256:[a-f0-9]{64}$/)
@@ -1833,36 +1847,17 @@ export function createCodexSecurityServer(): McpServer {
       annotations: nonIdempotentWritingAnnotations,
       _meta: modelActionMeta,
     },
-    async ({
-      occurrenceId,
-      requestId,
-      actionToken,
-      expectedVersion,
-      state,
-      summary,
-      patchPath,
-      patchDigest,
-      baseRevision,
-      verificationSummary,
-    }) =>
+    async ({ patch, ...fields }) =>
       scanActionResult(
-        await runWorkbench([
-          "set-finding-remediation",
-          "--occurrence-id",
-          occurrenceId,
-          "--request-id",
-          requestId,
-          ...optionalArg("--action-token", actionToken),
-          "--expected-version",
-          String(expectedVersion),
-          "--state",
-          state,
-          ...definedArg("--summary", summary),
-          ...definedArg("--patch-path", patchPath),
-          ...definedArg("--patch-digest", patchDigest),
-          ...definedArg("--base-revision", baseRevision),
-          ...definedArg("--verification-summary", verificationSummary),
-        ]),
+        await runWorkbench(
+          workbenchArgs("set-finding-remediation", {
+            ...fields,
+            patchStdin: patch !== undefined,
+          }),
+          typeof patch === "object"
+            ? Buffer.from(patch.content, patch.encoding)
+            : patch,
+        ),
         "Updated the local Codex Security finding remediation state.",
       ),
   );

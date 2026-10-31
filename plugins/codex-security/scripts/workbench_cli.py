@@ -302,6 +302,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
         "--state", choices=REMEDIATION_UPDATE_STATES, required=True
     )
     set_finding_remediation.add_argument("--summary")
+    set_finding_remediation.add_argument("--patch-stdin", action="store_true")
     set_finding_remediation.add_argument("--patch-path")
     set_finding_remediation.add_argument("--patch-digest")
     set_finding_remediation.add_argument("--base-revision")

@@ -519,8 +519,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(sys.argv[1]).parent))
 import finalize_scan_contract as finalizer
 original_open = finalizer._open_scan_local_directory
-def open_then_replace(root_fd, parts, *, create):
-    descriptor = original_open(root_fd, parts, create=create)
+def open_then_replace(root_fd, parts, *, create, **options):
+    descriptor = original_open(root_fd, parts, create=create, **options)
     if not create and parts == ("artifacts", "nested"):
         if ${JSON.stringify(replacement)} == "parent":
             os.rename(${JSON.stringify(parent)}, ${JSON.stringify(moved)})
@@ -869,8 +869,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(sys.argv[1]).parent))
 import finalize_scan_contract as finalizer
 original_open = finalizer._open_scan_local_directory
-def open_then_replace(root_fd, parts, *, create):
-    descriptor = original_open(root_fd, parts, create=create)
+def open_then_replace(root_fd, parts, **options):
+    descriptor = original_open(root_fd, parts, **options)
     if parts == ("artifacts", "nested"):
         os.rename(${JSON.stringify(parent)}, ${JSON.stringify(moved)})
         os.symlink(${JSON.stringify(outside)}, ${JSON.stringify(parent)})

@@ -530,6 +530,7 @@ def set_remediation(
     state: str,
     *extra: str,
     check: bool = True,
+    input_text: str | None = None,
 ) -> dict[str, object]:
     return run_workbench(
         state_dir,
@@ -546,6 +547,7 @@ def set_remediation(
         state,
         *extra,
         check=check,
+        input_text=input_text,
     )
 
 
@@ -984,10 +986,12 @@ def windows_file_backend() -> mock.Mock:
         payload: bytes,
         *,
         expected_root_identity: tuple[int, int] | None = None,
+        replace_existing: bool = True,
     ) -> None:
         path = scan_dir / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(payload)
+        with path.open("wb" if replace_existing else "xb") as handle:
+            handle.write(payload)
 
     def unlink_if_exists(scan_dir: Path, relative_path: str) -> None:
         (scan_dir / relative_path).unlink(missing_ok=True)
