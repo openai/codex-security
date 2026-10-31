@@ -327,16 +327,7 @@ test("normalized Snyk selections cannot import two keys for one native issue", a
     read: 2,
     findings: [...first.findings, ...second.findings],
   };
-  const prepare = () =>
-    prepareNormalizedLocalImport(
-      selected,
-      {
-        provider: "snyk",
-        sourceKey: fixture.sourceKey,
-        repository: fixture.repository,
-      },
-      { environment: fixture.environment },
-    );
+  const prepare = () => fixture.prepareNormalized(selected);
   await expect(prepare()).rejects.toThrow("overlapping issue IDs");
   expect(await fixture.read()).toBeEmpty();
 
@@ -350,7 +341,11 @@ test("normalized Snyk selections cannot import two keys for one native issue", a
   expect((await (await prepare()).import()).counts.unchanged).toBe(2);
 });
 
-test("a numeric Code coordinate is excluded without replacing the stored finding", async () => {
+const invalidCoordinates = [
+  7,
+  { state: "open", representations: [{ sourceLocation: 7 }] },
+];
+test.each(invalidCoordinates)("rejects numeric Code data %j", async (value) => {
   const report = snykRestFixture("code");
   await using fixture = await snykLocalFixture({
     remote: options.sourceRepositoryUrl,
@@ -364,7 +359,7 @@ test("a numeric Code coordinate is excluded without replacing the stored finding
     data: [
       {
         ...malformed,
-        attributes: { ...malformed.attributes, coordinates: [7] },
+        attributes: { ...malformed.attributes, coordinates: [value] },
       },
     ],
   });

@@ -67,16 +67,7 @@ test("a generic Snyk reader can import findings with an SSH repository URL", asy
   await using fixture = await snykLocalFixture({
     remote: snykOptions.sourceRepositoryUrl,
   });
-  const prepare = (checkout = fixture) =>
-    prepareNormalizedLocalImport(
-      report,
-      {
-        provider: "snyk",
-        sourceKey: checkout.sourceKey,
-        repository: checkout.repository,
-      },
-      { environment: checkout.environment },
-    );
+  const prepare = (checkout = fixture) => checkout.prepareNormalized(report);
   const first = await prepare();
   expect((await first.import()).counts.created).toBe(1);
   const second = await prepare();
@@ -164,15 +155,7 @@ test("Snyk Open Source rows still verify the native project after losing their f
     remote: "https://github.com/example/other",
   });
   await expect(
-    prepareNormalizedLocalImport(
-      { read, findings, excluded },
-      {
-        provider: "snyk",
-        sourceKey: f.sourceKey,
-        repository: f.repository,
-      },
-      { environment: f.environment },
-    ),
+    f.prepareNormalized({ read, findings, excluded }),
   ).rejects.toThrow("configured remote");
 
   // A changed ID and provider cannot relabel the original linked Snyk resources.
@@ -208,12 +191,7 @@ test("direct import rejects another Snyk issue’s evidence under a stored findi
   expect(second.findings[0]!.source_finding_id).not.toBe(oldId);
   const row = second.findings[0]!;
   row.source_finding_id = oldId;
-  const prepare = () =>
-    prepareNormalizedLocalImport(
-      second,
-      { provider: "snyk", sourceKey: f.sourceKey, repository: f.repository },
-      { environment: f.environment },
-    );
+  const prepare = () => f.prepareNormalized(second);
   await expect(prepare()).rejects.toThrow("Snyk issue key");
   row.source_finding_id =
     normalizeSnykIssues(report).findings[0]!.source_finding_id;
@@ -282,8 +260,13 @@ test("unrelated Wiz evidence with Snyk-like field names remains importable local
     ...snykOptions,
     snykRestIssueKey: "upstream-ticket",
     apiVersion: "2026-03-25",
-    projectJson: "{}",
+    projectJson: JSON.stringify({
+      type: "project",
+      id: "repo-name",
+      attributes: { origin: "github", type: "npm" },
+    }),
     issueJson: "{}",
+    targetJson: JSON.stringify({ type: "target", id: 42 }),
     project: { name: "sample" },
     issue: { name: "sample issue" },
   };
@@ -401,16 +384,7 @@ test("a hosted selection cannot store another normalized project's projected ass
   await using fixture = await snykLocalFixture({
     remote: report.sourceRepositoryUrl,
   });
-  const prepare = () =>
-    prepareNormalizedLocalImport(
-      report,
-      {
-        provider: "snyk",
-        repository: fixture.repository,
-        sourceKey: fixture.sourceKey,
-      },
-      { environment: fixture.environment },
-    );
+  const prepare = () => fixture.prepareNormalized(report);
   row.source_finding_id = "reader-row";
   for (const key of ["project", "target"]) {
     const json = String(native[key + "Json"]);
@@ -492,6 +466,10 @@ test("retagged original Snyk records remain scoped without a matching source ID 
       projectJson: JSON.stringify(mismatched),
       snykRestIssueKey: original["snykRestIssueKey"],
       targetJson: "null",
+    },
+    {
+      snykRestIssueKey: original["snykRestIssueKey"],
+      targetJson: JSON.stringify(legacy.project.relationships.target.data),
     },
   ]) {
     row.evidence.source_data = {
@@ -707,12 +685,26 @@ test("projected Snyk findings cannot change destination by losing the report for
 
 test("rows from a different Snyk monitor cannot use the report's source key even on the same Git URL", async () => {
   const capture = snykRestFixture("open-source");
+  const project = JSON.parse(capture.projectJson);
+  const target = project.relationships.target.data;
+  const integrationId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  project.relationships.target.data = { type: target.type, id: target.id };
+  capture.projectJson = JSON.stringify(project);
+  capture.targetJson = JSON.stringify({
+    ...target,
+    relationships: {
+      integration: { data: { type: "integration", id: integrationId } },
+    },
+  });
   const report = normalizeSnykIssues(capture);
   const code = snykRestFixture("code");
   const otherId = "aaaa0000-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const replace = (old: string) =>
     JSON.parse(
-      JSON.stringify(capture).replaceAll(old, otherId),
+      JSON.stringify(capture)
+        .replaceAll(old, otherId)
+        .replace(snykIssue(false).attributes.key, "other-issue-key")
+        .replace(snykIssue(false).id, otherId),
     ) as typeof capture;
   await using f = await snykLocalFixture({
     remote: report.sourceRepositoryUrl,
@@ -721,6 +713,8 @@ test("rows from a different Snyk monitor cannot use the report's source key even
   for (const other of [
     replace(capture.organizationId),
     replace(capture.projectId),
+    replace(target.id),
+    replace(integrationId),
     code,
     { ...capture, apiOrigin: "https://api.au.snyk.io" },
   ]) {
@@ -731,17 +725,9 @@ test("rows from a different Snyk monitor cannot use the report's source key even
       excluded: [],
     };
     for (const input of [report, rowsOnly]) {
-      await expect(
-        prepareNormalizedLocalImport(
-          input,
-          {
-            provider: "snyk",
-            sourceKey: f.sourceKey,
-            repository: f.repository,
-          },
-          { environment: f.environment },
-        ),
-      ).rejects.toThrow("Snyk project scope");
+      await expect(f.prepareNormalized(input)).rejects.toThrow(
+        "Snyk project scope",
+      );
       await expect(
         prepareNormalizedExternalPublication(
           input,
@@ -755,6 +741,33 @@ test("rows from a different Snyk monitor cannot use the report's source key even
       ).rejects.toThrow("Snyk project scope");
     }
   }
+  const saved = structuredClone(original);
+  saved.source_finding_id = "saved-reader-id";
+  saved.evidence.source_data = {
+    format: capture.format,
+    projectJson: capture.projectJson,
+    targetJson: capture.targetJson,
+  };
+  const checkSaved = (monitor: typeof capture) =>
+    snykRestImportRepository(
+      { ...normalizeSnykIssues(monitor), findings: [saved] },
+      "snyk",
+      [],
+      [],
+      undefined,
+      true,
+    );
+  expect(checkSaved(capture)?.url).toBe(capture.sourceRepositoryUrl);
+  for (const id of [capture.projectId, capture.organizationId]) {
+    expect(() => checkSaved(replace(id))).toThrow(
+      "retained Snyk project scope",
+    );
+  }
+  for (const id of [target.id, integrationId]) {
+    expect(() => checkSaved(replace(id))).toThrow(
+      "conflicting targets or integrations",
+    );
+  }
   expect(await f.read()).toHaveLength(0);
 });
 
@@ -764,10 +777,11 @@ test("a sparse approved Snyk record still checks its retained repository URLs", 
     sourceRepositoryUrl: url,
   });
   const project = JSON.parse(projectJson);
+  project.attributes.origin = "gitlab";
   const target = project.relationships.target.data;
   for (const source of [
     { format: "snyk-rest-issues/v2", sourceRepositoryUrl: url },
-    { format: "snyk-rest-issues/v2", projectJson },
+    { format: "snyk-rest-issues/v2", projectJson: JSON.stringify(project) },
     { format: "snyk-rest-issues/v2", targetJson: JSON.stringify(target) },
     { format: "snyk-rest-issues/v1", project },
     { format: "snyk-rest-issues/v1", target },
@@ -791,13 +805,17 @@ test("a sparse approved Snyk record still checks its retained repository URLs", 
         input,
         "snyk",
         [],
-        [],
+        destination ? [{ url: destination, platform: "github" }] : [],
         undefined,
         true,
         destination,
       );
     expect(check()).toBeUndefined();
     expect(check(url)?.url).toBe(url);
+    if ("project" in source || "projectJson" in source)
+      expect(() => check(url.toLowerCase())).toThrow(
+        "does not match the original Snyk project",
+      );
     expect(() => check("https://scm.example.test/Other/Project")).toThrow(
       "does not match the original Snyk project",
     );
@@ -874,10 +892,7 @@ test.each(["v1", "v2"] as const)(
         cloudCatalog(fixture.environment, snykOptions.sourceRepositoryUrl),
       ),
     ).rejects.toThrow(/requires the snyk provider/i);
-    const prepare = () =>
-      prepareNormalizedLocalImport(report, options, {
-        environment: fixture.environment,
-      });
+    const prepare = () => fixture.prepareNormalized(report);
     await expect(prepare()).rejects.toThrow("selected project");
     const retry = () =>
       snykRestImportRepository(report, "snyk", [], [], undefined, true);
@@ -886,6 +901,41 @@ test.each(["v1", "v2"] as const)(
     expect(retry()?.url).toBe(snykOptions.sourceRepositoryUrl);
     await expect(prepare()).rejects.toThrow("normalized finding ID");
     row.source_finding_id = nativeId;
+    const issue = JSON.parse(json);
+    const foreign = snykRestFixture("open-source", {
+      sourceRepositoryUrl: "https://github.com/example/other",
+    });
+    const alternateId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const original = normalizeSnykIssues(
+      JSON.parse(
+        JSON.stringify(foreign).replaceAll(foreign.projectId, alternateId),
+      ),
+    ).snykRestContext!;
+    row.evidence.source_data =
+      version === "v1"
+        ? { issue, projectJson: original["projectJson"] }
+        : {
+            issueJson: json,
+            project: JSON.parse(String(original["projectJson"])),
+          };
+    await expect(prepare()).rejects.toThrow("both v1 and v2");
+    expect(await fixture.read()).toBeEmpty();
+    const asset = report.snykRestContext!;
+    const selected =
+      version === "v1"
+        ? {
+            issue,
+            project: JSON.parse(String(asset["projectJson"])),
+            target: null,
+          }
+        : {
+            issueJson: json,
+            projectJson: asset["projectJson"],
+            targetJson: asset["targetJson"],
+          };
+    row.evidence.source_data = { ...selected, projectId: alternateId };
+    await expect(prepare()).rejects.toThrow("project");
+    row.evidence.source_data = selected;
     expect((await (await prepare()).import()).counts.created).toBe(1);
     expect((await (await prepare()).import()).counts.unchanged).toBe(1);
     const [stored] = await fixture.read();
@@ -899,9 +949,7 @@ test.each(["v1", "v2"] as const)(
       ],
       excluded: [],
     };
-    const replay = await prepareNormalizedLocalImport(listed, options, {
-      environment: fixture.environment,
-    });
+    const replay = await fixture.prepareNormalized(listed);
     expect((await replay.import()).counts.unchanged).toBe(1);
     await expect(
       prepareNormalizedExternalPublication(
@@ -910,9 +958,7 @@ test.each(["v1", "v2"] as const)(
         cloudCatalog(fixture.environment, snykOptions.sourceRepositoryUrl),
       ),
     ).rejects.toThrow(/requires the snyk provider/i);
-    const complete = await prepareNormalizedLocalImport(full, options, {
-      environment: fixture.environment,
-    });
+    const complete = await fixture.prepareNormalized(full);
     expect((await complete.import()).counts.created).toBe(0);
     expect(await fixture.read()).toHaveLength(1);
   },
@@ -935,15 +981,7 @@ test("unmarked native v1 rows survive unrelated issueJson data", async () => {
   await using fixture = await snykLocalFixture({
     remote: snykOptions.sourceRepositoryUrl,
   });
-  const result = await prepareNormalizedLocalImport(
-    { read, findings, excluded },
-    {
-      provider: "snyk",
-      sourceKey: fixture.sourceKey,
-      repository: fixture.repository,
-    },
-    { environment: fixture.environment },
-  );
+  const result = await fixture.prepareNormalized({ read, findings, excluded });
   expect((await result.import()).counts.created).toBe(1);
 });
 
@@ -957,16 +995,7 @@ test("a complete SDK row replays with reformatted native JSON and reader annotat
   await using fixture = await snykLocalFixture({
     remote: snykOptions.sourceRepositoryUrl,
   });
-  const prepare = () =>
-    prepareNormalizedLocalImport(
-      report,
-      {
-        provider: "snyk",
-        repository: fixture.repository,
-        sourceKey: fixture.sourceKey,
-      },
-      { environment: fixture.environment },
-    );
+  const prepare = () => fixture.prepareNormalized(report);
   expect((await (await prepare()).import()).counts.created).toBe(1);
   for (const field of ["projectJson", "issueJson"]) {
     const entries = Object.entries(JSON.parse(String(retained[field])));

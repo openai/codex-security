@@ -838,34 +838,42 @@ export async function prepareLocalImport(
     readerSources,
   );
   const sarifSources = new Set<string>();
+  const suppliedSarif = new Set<ExternalSourceRepository>();
   let hasOrdinaryRows = false;
   let ordinaryRowNeedsReferences = false;
   for (const finding of current.findings) {
+    const retained = bound.get(finding.source_finding_id);
     const semgrep = semgrepPlatformFindingBinding(
       finding,
       options.provider,
       readerSources,
       legacyWitnesses,
       semgrepReportScope,
+      retained?.url,
     );
     if (semgrep) {
       addSemgrepSource(semgrep.url);
       if (semgrep.sourceData) finding.evidence.source_data = semgrep.sourceData;
       if (semgrep.migration) Object.assign(finding.evidence, semgrep.migration);
     } else hasOrdinaryRows = true;
-    const { evidence, source_finding_id: id } = finding;
+    const { evidence } = finding;
     const url = evidence.details?.repository?.url;
+    const native = nativeSources.get(finding) ?? [];
     // A selected row's projected URL was already verified against its hosted source.
     if (!semgrep) {
       if (url) sources.set(url, { url });
-      if (options.provider === "semgrep")
-        for (const { url } of semgrepSarifRepositories(finding))
-          sarifSources.add(url);
+      const sarif =
+        options.provider === "semgrep" ? semgrepSarifRepositories(finding) : [];
+      for (const source of sarif) sarifSources.add(source.url);
+      if (!url && !retained && !native.length) {
+        const claims = sarif.map(({ url }) => identify(url));
+        const supplied = references.filter((ref) =>
+          claims.some((claim) => matchingRemote(claim, identify(ref.url))),
+        );
+        if (!supplied.length) ordinaryRowNeedsReferences = true;
+        for (const ref of supplied) suppliedSarif.add(ref);
+      }
     }
-    const retained = bound.get(id);
-    const native = nativeSources.get(finding) ?? [];
-    if (!semgrep && !url && !retained && !native.length)
-      ordinaryRowNeedsReferences = true;
     if (retained) {
       const claims = [
         retained.url,
@@ -908,13 +916,32 @@ export async function prepareLocalImport(
       hosted.some((source) => semgrepReferenceMatches(source, ref.url)),
     ),
   );
+  // A reference can belong to both a Platform project and an ordinary row, whose
+  // retained SARIF provenance can differ from its projected repository URL.
+  const ordinaryClaims = [...sources.keys(), ...sarifSources];
+  const sharedProjects = hosted.filter((project) =>
+    ordinaryClaims.some((url) => semgrepReferenceMatches(project, url)),
+  );
+  const hostedOnlyReferences = new Set(
+    [...hostedReferences].filter(
+      (ref) =>
+        !suppliedSarif.has(ref) &&
+        !sharedProjects.some((project) =>
+          semgrepReferenceMatches(project, ref.url),
+        ),
+    ),
+  );
   if (mixed) {
     // Other caller references must identify an ordinary row or one of its Git aliases.
-    const rows = [...sources.keys(), ...known].map(identify);
+    const rows = [
+      ...sources.keys(),
+      ...known,
+      ...(hosted.length ? sarifSources : []),
+    ].map(identify);
     const byKey = Map.groupBy(rows, (remote) => remote.key);
     const represented = new Set(rows.map((remote) => JSON.stringify(remote)));
     const aliases = readerSources
-      .filter((ref) => !hostedReferences.has(ref))
+      .filter((ref) => !hostedOnlyReferences.has(ref))
       .map(({ url }) => identify(url))
       .filter((remote) => !represented.has(JSON.stringify(remote)));
     for (const [key, group] of Map.groupBy(aliases, (remote) => remote.key)) {
@@ -959,20 +986,8 @@ export async function prepareLocalImport(
     throw new CodexSecurityError(
       "The reader's source repository does not match the selected Semgrep project.",
     );
-  // A reference can belong to both a Platform project and an ordinary row, whose
-  // retained SARIF provenance can differ from its projected repository URL.
-  const ordinaryClaims = [...sources.keys(), ...sarifSources];
-  const sharedProjects = hosted.filter((project) =>
-    ordinaryClaims.some((url) => semgrepReferenceMatches(project, url)),
-  );
   for (const source of [...(inspector ? [inspector] : []), ...references]) {
-    if (
-      !ordinaryRowNeedsReferences &&
-      hostedReferences.has(source) &&
-      !sharedProjects.some((project) =>
-        semgrepReferenceMatches(project, source.url),
-      )
-    )
+    if (!ordinaryRowNeedsReferences && hostedOnlyReferences.has(source))
       continue;
     // A reader's platform must not loosen an operator-supplied Inspector map.
     if (sources.get(source.url)?.platform !== "github")

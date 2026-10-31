@@ -46,7 +46,7 @@ import { regexes } from "zod/v4/core";
 import {
   array,
   normalizeRecords,
-  record,
+  record as scannerRecord,
   hostedRepositoryPath,
   requiredText,
   scannerSeverity,
@@ -433,6 +433,7 @@ function projectContext(project: Resource, selected: Scope) {
   if (linkage === null)
     return {
       ...context,
+      targetId: undefined,
       lookupTargetId: undefined,
       expandedUrl: undefined,
       integrationId: undefined,
@@ -445,8 +446,9 @@ function projectContext(project: Resource, selected: Scope) {
   const targetId = resourceId(link, "target");
   const integrationId = checkTargetRelationships(link, selected, origin);
   return {
-    integrationId,
     ...context,
+    targetId,
+    integrationId,
     lookupTargetId:
       expandedUrl == null || expandedUrl === "" ? targetId : undefined,
     expandedUrl,
@@ -469,9 +471,10 @@ function checkTarget(
       throw new Error(
         "Unexpected separate Snyk target without a project target lookup.",
       );
-    return expandedUrl == null
-      ? undefined
-      : checkRemote(expandedUrl, selected, origin, references);
+    return {
+      ...checkRemote(expandedUrl ?? null, selected, origin, references),
+      integrationId,
+    };
   }
   const target = record(value, "Snyk target resource");
   if (resourceId(target, "target") !== lookupTargetId)
@@ -491,12 +494,13 @@ function checkTarget(
     throw new Error(
       "The fetched Snyk target names a different integration than the project's target.",
     );
-  return checkRemote(
+  const remote = checkRemote(
     record(target["attributes"], "Snyk target attributes")["url"],
     selected,
     origin,
     references,
   );
+  return { ...remote, integrationId: fetchedIntegrationId ?? integrationId };
 }
 
 function checkTargetRelationships(
@@ -572,7 +576,7 @@ function pageLinkCursor(
 
 function nextCursor(value: unknown, endpoint: URL, current: string | null) {
   if (value === undefined) return null;
-  const links = nativeRecord(value, "Snyk issue page links");
+  const links = record(value, "Snyk issue page links");
   if (links["prev"] != null) {
     if (current === null)
       throw new Error("The first Snyk issue page has a previous page link.");
@@ -769,17 +773,13 @@ function savedContext(
     requiredText(document["targetJson"], "Snyk original target"),
   );
   const remote = checkTarget(target, selected, context, references);
-  const nativeUrl = remote?.nativeUrl;
+  const nativeUrl = remote.nativeUrl;
   const gitlab =
-    remote?.gitlab ??
+    remote.gitlab ??
     reportedScm(selected.sourceRepositoryUrl, context.origin).gitlab;
-  const github = remote?.github ?? context.origin.startsWith("github");
+  const github = remote.github ?? context.origin.startsWith("github");
   const platform: SnykIssuesFindings["sourceRepositoryPlatform"] =
-    remote?.enterprise
-      ? "github"
-      : context.scm && !github
-        ? "other"
-        : undefined;
+    remote.enterprise ? "github" : context.scm && !github ? "other" : undefined;
   return {
     project,
     target,
@@ -792,6 +792,8 @@ function savedContext(
     context,
     repository: {
       scope: selected,
+      targetId: context.targetId,
+      integrationId: remote.integrationId,
       url: selected.sourceRepositoryUrl,
       platform,
       ...(gitlab && { gitlab: true }),
@@ -844,49 +846,88 @@ function linkedSnykResources(
       return { issue };
   }
   const keyed = json && "snykRestIssueKey" in data;
-  if (keyed || data["apiVersion"] === apiVersion) {
-    const project = originalSnykResource(data, "project", json);
-    const attributes = project?.["attributes"];
-    if (
-      project?.["type"] === "project" &&
-      "id" in project &&
-      isRecord(attributes) &&
-      "origin" in attributes &&
-      "type" in attributes
-    ) {
-      if (!keyed) {
-        // Saved v1 rows have no issue-key marker. Their project and complete monitor scope identify them.
-        try {
-          uuid(project["id"], "Snyk project ID");
-          scope(data, data["apiOrigin"]);
-        } catch {
-          return;
-        }
-      }
-      return {};
-    }
+  const versioned = data["apiVersion"] === apiVersion;
+  if (!hosted && !keyed && !versioned) return;
+  const project = originalSnykResource(data, "project", json);
+  const attributes = project?.["attributes"];
+  if (
+    project?.["type"] === "project" &&
+    isUuid(project["id"]) &&
+    isRecord(attributes) &&
+    "origin" in attributes &&
+    "type" in attributes
+  ) {
+    if (hosted || keyed) return {};
+  } else {
+    const target =
+      keyed && versioned
+        ? originalSnykResource(data, "target", json)
+        : undefined;
+    if (target?.["type"] !== "target" || !isUuid(target["id"])) return;
+  }
+  // An unmarked v1 project or a keyed v2 target also needs the complete monitor scope.
+  try {
+    scope(data, data["apiOrigin"]);
+    return {};
+  } catch {
+    return;
   }
 }
 
-function retainedSnykTargetUrls(data: Resource): string[] {
-  const urls: string[] = [];
+function retainedRelationship(
+  resource: Resource | undefined,
+  name: "target" | "integration" | "organization",
+) {
+  const links = resource?.["relationships"];
+  const relation = isRecord(links) ? links[name] : undefined;
+  const data = isRecord(relation) ? relation["data"] : undefined;
+  if (
+    isRecord(data) &&
+    (data["type"] === name ||
+      (name === "organization" && data["type"] === "org"))
+  )
+    return data;
+}
+
+/** Read only vendor-typed claims still present in an already-approved request. */
+function retainedSnykAssets(data: Resource) {
+  const assets = [];
+  const id = (resource?: Resource) => {
+    const value = resource?.["id"];
+    return isUuid(value) ? value.toLowerCase() : undefined;
+  };
   for (const json of [false, true]) {
     const project = originalSnykResource(data, "project", json);
-    const links =
-      project?.["type"] === "project" ? project["relationships"] : undefined;
-    const relation = isRecord(links) ? links["target"] : undefined;
-    const expanded = isRecord(relation) ? relation["data"] : undefined;
+    let expanded;
+    if (project?.["type"] === "project") {
+      const attributes = project["attributes"];
+      const origin = isRecord(attributes) ? attributes["origin"] : undefined;
+      assets.push({
+        projectId: id(project),
+        organizationId: id(retainedRelationship(project, "organization")),
+        origin:
+          typeof origin === "string" && scmOrigins.has(origin)
+            ? origin
+            : undefined,
+      });
+      expanded = retainedRelationship(project, "target");
+    }
     for (const target of [
       expanded,
       originalSnykResource(data, "target", json),
     ]) {
-      if (!isRecord(target) || target["type"] !== "target") continue;
+      if (target?.["type"] !== "target") continue;
       const attributes = target["attributes"];
       const url = isRecord(attributes) ? attributes["url"] : undefined;
-      if (typeof url === "string" && url) urls.push(url);
+      assets.push({
+        url: typeof url === "string" ? url : undefined,
+        targetId: id(target),
+        integrationId: id(retainedRelationship(target, "integration")),
+        organizationId: id(retainedRelationship(target, "organization")),
+      });
     }
   }
-  return urls;
+  return assets;
 }
 
 function snykRowEvidence(finding: ExternalFinding, hostedReport = false) {
@@ -915,7 +956,7 @@ function bindSnykFinding(
   finding: ExternalFinding,
   references: readonly ExternalSourceRepository[],
   originals: ReturnType<typeof snykRowEvidence>,
-  report?: ReturnType<typeof savedContext>,
+  report?: Resource,
   retain?: (finding: ExternalFinding, source: Resource) => void,
 ) {
   const retained = record(
@@ -941,25 +982,16 @@ function bindSnykFinding(
     parseHostedScannerJson(
       requiredText(document["issueJson"], "Snyk original issue"),
     );
-  // A reader may omit a duplicated native project while retaining the original issue.
-  const projected =
-    report &&
-    document["projectJson"] === undefined &&
-    (originals?.v1?.issue || originals?.v2?.issue);
-  const asset = savedContext(
-    projected
-      ? {
-          ...report.source,
-          ...document,
-          projectJson: JSON.stringify(report.project),
-          targetJson:
-            document["targetJson"] === undefined
-              ? JSON.stringify(report.target)
-              : document["targetJson"],
-        }
-      : document,
-    references,
-  );
+  // A selected issue can retain any of its original monitor fields. Fill only those it omitted.
+  let projected = false;
+  if (report && (originals?.v1?.issue || originals?.v2?.issue)) {
+    for (const [field, value] of Object.entries(report)) {
+      if (document[field] !== undefined) continue;
+      document[field] = value;
+      projected = true;
+    }
+  }
+  const asset = savedContext(document, references);
   const { source, repository } = asset;
   const { id: issueId, attributes } = selectedIssue(
     scopedIssue(issue, source),
@@ -977,9 +1009,8 @@ function bindSnykFinding(
       target: asset.target,
     });
     retain(finding, {
-      ...context,
       ...retained,
-      format,
+      ...context,
       ...(isRecord(context["numericFields"]) && {
         numericFields: {
           ...context["numericFields"],
@@ -989,8 +1020,8 @@ function bindSnykFinding(
     });
   } else if (retain && format === SNYK_REST_ISSUES_FORMAT) {
     retain(finding, {
-      ...(projected && { ...source, snykRestIssueKey: attributes["key"] }),
       ...retained,
+      ...(projected && { ...source, snykRestIssueKey: attributes["key"] }),
       projectJson: source.projectJson,
       targetJson: source.targetJson,
       issueJson: stringifyHostedEvidence(issue),
@@ -1043,15 +1074,13 @@ function readIssues(document: Resource, selected: Scope) {
 }
 
 // Lossless parsing preserves JSON numbers in raw token objects.
-function nativeRecord(value: unknown, label: string): Resource {
-  return record(hostedNumberToken(value) ?? value, label);
+function record(value: unknown, label: string): Resource {
+  return scannerRecord(hostedNumberToken(value) ?? value, label);
 }
 
 function records(parent: Resource, field: string) {
   const label = `Snyk ${field}`;
-  return array(parent[field] ?? [], label).map((entry) =>
-    nativeRecord(entry, label),
-  );
+  return array(parent[field] ?? [], label).map((entry) => record(entry, label));
 }
 
 function problemIds(entries: Resource[], type?: string) {
@@ -1275,6 +1304,11 @@ export function snykRestImportRepository(
   const hosted =
     project !== undefined || rows.some(({ originals }) => originals);
   if (!hosted && !declaredCloudRepository) return;
+  const context = project && {
+    ...project.source,
+    projectJson: JSON.stringify(project.project),
+    targetJson: JSON.stringify(project.target),
+  };
   const retainedIssues: { finding: ExternalFinding; issue: Resource }[] = [];
   const retainedRows: Resource[] = [];
   const boundRows = hosted
@@ -1285,7 +1319,7 @@ export function snykRestImportRepository(
               finding,
               trustedSources,
               originals,
-              project,
+              context,
               retain,
             ),
           ];
@@ -1310,8 +1344,30 @@ export function snykRestImportRepository(
   if (provider !== "snyk")
     throw new Error("Use the snyk provider for Snyk REST issues.");
 
+  const retainedAssets = retainedRows.flatMap(retainedSnykAssets);
+  const monitorBindings = [...bindings, ...retainedAssets];
+  for (const key of ["targetId", "integrationId"] as const) {
+    const ids = new Set(
+      monitorBindings.flatMap((binding) => binding[key] ?? []),
+    );
+    if (ids.size > 1)
+      throw new Error(
+        "The Snyk project scope names conflicting targets or integrations.",
+      );
+  }
   const scopes = boundRows.map(({ scope }) => scope);
   const claims = new Set(bindings.map((binding) => binding.url));
+  const retainedScms = [];
+  for (const { url, origin, projectId, organizationId } of retainedAssets) {
+    if (url) claims.add(url);
+    if (origin) retainedScms.push(reportedScm(repositoryUrl, origin));
+    if (selected)
+      scopes.push({
+        ...selected,
+        projectId: projectId ?? selected.projectId,
+        organizationId: organizationId ?? selected.organizationId,
+      });
+  }
   // Already-approved rows can lack the original project while retaining a
   // monitored issue, partial scope, or source URL that contradicts a new claim.
   if (selected) {
@@ -1325,7 +1381,6 @@ export function snykRestImportRepository(
     }
   }
   for (const { sourceRepositoryUrl, ...fields } of retainedRows) {
-    for (const url of retainedSnykTargetUrls(fields)) claims.add(url);
     if (sourceRepositoryUrl !== undefined)
       claims.add(
         requiredText(sourceRepositoryUrl, "Snyk source repository URL"),
@@ -1373,10 +1428,12 @@ export function snykRestImportRepository(
     repositoryUrl,
     trustedSources,
     input.sourceRepositoryPlatform !== "other" &&
+      retainedScms.every(({ github }) => github) &&
       bindings.every(
         (binding) => binding.platform !== "other" && !binding.gitlab,
       ),
     input.sourceRepositoryPlatform !== "github" &&
+      retainedScms.every(({ gitlab }) => gitlab) &&
       bindings.every(
         (binding) => binding.gitlab || binding.platform === undefined,
       ),

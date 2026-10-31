@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { writeFile } from "node:fs/promises";
 import { gzipSync } from "node:zlib";
-import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import {
   normalizeSnykIssues,
   snykRestFindingRepository,
@@ -68,19 +67,11 @@ test("replays a v1 Snyk export with its original evidence, then updates the same
   const row = selected.findings[0]!;
   row.evidence.source_data = {
     issue: original,
+    project: undefined,
+    target: undefined,
     numericFields: { issue: issueFields },
   };
-  const options = {
-    provider: "snyk" as const,
-    sourceKey: fixture.sourceKey,
-    repository: fixture.repository,
-  };
-  const dependencies = { environment: fixture.environment };
-  const projected = await prepareNormalizedLocalImport(
-    selected,
-    options,
-    dependencies,
-  );
+  const projected = await fixture.prepareNormalized(selected);
   expect((await projected.import()).counts.unchanged).toBe(1);
   expect((await fixture.read())[0]).toEqual(stored);
 
@@ -92,15 +83,11 @@ test("replays a v1 Snyk export with its original evidence, then updates the same
   row.source_finding_id = "reader-id";
   row.evidence.source_data = assetOnly;
   await expect(
-    prepareNormalizedLocalImport(
-      {
-        read: 1,
-        findings: [row],
-        excluded: [],
-      },
-      options,
-      dependencies,
-    ),
+    fixture.prepareNormalized({
+      read: 1,
+      findings: [row],
+      excluded: [],
+    }),
   ).rejects.toThrow("Snyk original issue");
   expect(() =>
     normalizeSnykIssues({

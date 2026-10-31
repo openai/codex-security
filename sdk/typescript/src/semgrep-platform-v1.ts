@@ -6,7 +6,7 @@ import {
 } from "./hosted-scanner-v1.js";
 import { array, record, requiredText, text } from "./scanner-import.js";
 import {
-  projectAliases,
+  legacyProjectAliases,
   semgrepNativeProjectUrl,
   semgrepProjectUrlEvidence,
   type SemgrepRepositoryReference,
@@ -64,10 +64,23 @@ export function upgradeSemgrepPlatformReport(
         "Semgrep project does not match the declared source repository URL.",
       );
   }
+  // For a resolved native URL, retain only the mapping saved in the report.
+  const urlEvidence = semgrepProjectUrlEvidence(
+    project["url"],
+    native,
+    native === undefined || report["sourceRepositoryUrl"] != null
+      ? bound
+      : undefined,
+  );
   const entries = array(report["findings"], "Semgrep findings");
   let aliases = report["repositoryAliases"];
   if (aliases === undefined) {
-    const derived = projectAliases(name, url, references, true);
+    const derived = legacyProjectAliases(
+      name,
+      url,
+      references,
+      urlEvidence.sourceRepositoryUrl,
+    );
     const observed = new Set<string>();
     for (const entry of entries) {
       const row = record(entry, "Semgrep finding");
@@ -94,7 +107,7 @@ export function upgradeSemgrepPlatformReport(
     format: "semgrep-platform-findings/v2",
     deployment: report["deployment"],
     project: { id: semgrepV1Id(project["id"]), name, url },
-    ...semgrepProjectUrlEvidence(project["url"], native, bound),
+    ...urlEvidence,
     product: report["product"],
     ref: report["ref"],
     findingCount: report["findingCount"],

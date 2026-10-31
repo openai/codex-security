@@ -1,7 +1,10 @@
 import { expect } from "bun:test";
+import type { ExternalFindings } from "../src/external-findings.js";
+import { EXTERNAL_FINDINGS_PROVIDERS } from "../src/external-findings-read.js";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import {
   listLocalExternalFindings,
+  prepareNormalizedLocalImport,
   type StoredExternalFinding,
 } from "../src/external-findings-local.js";
 import type { ExternalPublicationOptions } from "../src/external-findings-publish.js";
@@ -73,6 +76,10 @@ export async function localReportFixture(
   const fixture = await localFindingsFixture(checkout);
   const file = join(fixture.root, filename);
   const options = { ...source, repository: fixture.repository };
+  const normalizedOptions = {
+    ...options,
+    provider: EXTERNAL_FINDINGS_PROVIDERS[source.provider],
+  };
   const dependencies = { environment: fixture.environment };
   return {
     ...fixture,
@@ -85,6 +92,8 @@ export async function localReportFixture(
         { ...options, ...overrides },
         dependencies,
       ),
+    prepareNormalized: (input: ExternalFindings) =>
+      prepareNormalizedLocalImport(input, normalizedOptions, dependencies),
     read: () => listLocalExternalFindings(options, dependencies),
   };
 }
