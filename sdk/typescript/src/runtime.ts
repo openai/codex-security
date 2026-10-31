@@ -290,8 +290,13 @@ export async function prepareCodexSecurityCredentialHome(
     return canonical;
   } catch (error) {
     if (error instanceof OutputDirectoryError) throw error;
+    const code = nodeErrorCode(error);
+    const recovery =
+      code === "EACCES" || code === "EPERM" || code === "EROFS"
+        ? "\nCheck permissions or set CODEX_SECURITY_STATE_DIR to a private, writable directory outside the repository."
+        : "";
     throw new OutputDirectoryError(
-      `Unable to prepare the Codex Security credential home: ${path}`,
+      `Unable to prepare the Codex Security credential home: ${path}\n${errorMessage(error)}${recovery}`,
       { cause: error },
     );
   }
@@ -399,14 +404,14 @@ export async function preparePolicyOutputDirectory(
   );
 }
 
-async function requirePrivateDirectory(
+export async function requirePrivateDirectory(
   metadata: Pick<Stats, "mode" | "uid">,
   path: string,
   description: string,
   options: {
     platform?: NodeJS.Platform;
     secureWindowsHome?: (path: string) => Promise<void>;
-  },
+  } = {},
 ): Promise<void> {
   if ((options.platform ?? process.platform) !== "win32") {
     requirePrivateOutputDirectory(metadata, path);
@@ -792,6 +797,31 @@ export async function streamWindowsCredentialAclDescriptors(
   }
 }
 
+// win32.parse stops at the UNC marker for extended-length share paths.
+const WINDOWS_CREDENTIAL_UNC_ROOT =
+  /^[\\/]{2}[?.][\\/]UNC[\\/][^\\/]+[\\/][^\\/]+[\\/]?/iu;
+
+function windowsCredentialRootLength(path: string): number {
+  const root =
+    WINDOWS_CREDENTIAL_UNC_ROOT.exec(path)?.[0] ?? win32.parse(path).root;
+  if (win32.isAbsolute(path) && win32.relative(root, path) === "") {
+    throw new Error(
+      "A private Windows directory must be below a volume or share root",
+    );
+  }
+  return root.length;
+}
+
+export function windowsCredentialAncestorAclScript(path: string): string {
+  const rootLength = windowsCredentialRootLength(path);
+  return [
+    "$path = $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
+    // Stop at the drive or UNC share root, then inspect the outermost ancestor first.
+    `$ancestors = @(while ($path.Length -gt ${rootLength}) { $parent = Microsoft.PowerShell.Management\\Split-Path -Path $path -Parent; if (-not $parent -or $parent -eq $path) { break }; $parent; $path = $parent })`,
+    "for ($i = $ancestors.Count - 1; $i -ge 0; $i--) { Write-CredentialAcl $ancestors[$i] }",
+  ].join("\n");
+}
+
 export async function inspectWindowsCredentialAclSnapshot(
   path: string,
   currentUserSid: string,
@@ -806,11 +836,16 @@ export async function inspectWindowsCredentialAclSnapshot(
   home: WindowsCredentialAcl;
   descendantsArePrivate: boolean;
 }> {
+  const rootLength = windowsCredentialRootLength(path);
   const ancestors: string[] = [];
-  for (let ancestor = dirname(path); ; ancestor = dirname(ancestor)) {
+  let ancestor = win32.dirname(path);
+  while (true) {
     ancestors.push(ancestor);
-    if (ancestor === dirname(ancestor)) break;
+    const parent = win32.dirname(ancestor);
+    if (ancestor.length <= rootLength || ancestor === parent) break;
+    ancestor = parent;
   }
+  ancestors.reverse();
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     let home: WindowsCredentialAcl | undefined;
@@ -860,10 +895,15 @@ export async function inspectWindowsCredentialAclSnapshot(
                 );
               }
             } catch (error) {
-              const guidance =
-                ancestorPath === dirname(ancestorPath)
-                  ? "This volume root is unsupported. Choose a location on a volume with trusted ancestry; another directory on the same volume will not resolve this."
-                  : "Choose a location outside this ancestor with trusted ownership and permissions.";
+              let guidance =
+                "Choose a location outside this ancestor with trusted ownership and permissions.";
+              if (index === 0) {
+                guidance = WINDOWS_CREDENTIAL_UNC_ROOT.test(
+                  win32.toNamespacedPath(ancestorPath),
+                )
+                  ? "This share root is unsupported. Choose a location outside this share with trusted ownership and permissions."
+                  : "This volume root is unsupported. Choose a location on a volume with trusted ancestry; another directory on the same volume will not resolve this.";
+              }
               throw new Error(
                 `Windows private-directory ancestor could not be trusted: ${ancestorPath}. ${errorMessage(error)}. ${guidance}`,
                 { cause: error },
@@ -922,6 +962,7 @@ export async function inspectWindowsCredentialAclSnapshot(
 }
 
 async function secureWindowsCredentialHome(path: string): Promise<void> {
+  const ancestorAclScript = windowsCredentialAncestorAclScript(path);
   const systemRoot = process.env["SystemRoot"] ?? "C:\\Windows";
   const systemDirectory = join(systemRoot, "System32");
   const powershell = join(
@@ -990,8 +1031,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     "    if ($entry.PSIsContainer) { Read-CredentialDescendants $entry.FullName }",
     "  }",
     "}",
-    "$path = $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
-    "while ($true) { $parent = Microsoft.PowerShell.Management\\Split-Path -Path $path -Parent; if (-not $parent -or $parent -eq $path) { break }; Write-CredentialAcl $parent; $path = $parent }",
+    ancestorAclScript,
     "Write-CredentialAcl $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
     "Read-CredentialDescendants $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
     `"${WINDOWS_CREDENTIAL_ACL_COMPLETE_PREFIX}$script:descriptorCount"`,
@@ -3338,8 +3378,12 @@ export async function probeCodexSandbox(
     signal?.throwIfAborted();
     detail = processErrorDetail(error);
   }
+  const guidance =
+    process.platform === "linux"
+      ? "\nOn Linux this usually means unprivileged user namespaces are restricted (kernel.apparmor_restrict_unprivileged_userns=1 on Ubuntu 24.04 and later), which Bubblewrap needs; inside the container image, use the AppArmor profile and Compose override from the SDK README."
+      : "";
   throw new SandboxUnavailableError(
-    `Codex could not run a command in its sandbox; reproduce with '${command.command} ${args.join(" ")}'. On Linux this usually means unprivileged user namespaces are restricted (kernel.apparmor_restrict_unprivileged_userns=1 on Ubuntu 24.04 and later), which Bubblewrap needs; inside the container image, use the AppArmor profile and Compose override from the SDK README. Codex reported: ${detail}`,
+    `Codex could not run a command in its sandbox: ${detail}\nTo reproduce, run '${command.command} ${args.join(" ")}'.${guidance}`,
   );
 }
 

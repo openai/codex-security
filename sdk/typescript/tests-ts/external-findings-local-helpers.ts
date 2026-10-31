@@ -9,6 +9,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { sonarGitTestEnvironment } from "./support/sonar-import-fixtures.js";
 
 /** Real Git checkout and separate state, shared by normalized and vendor import tests. */
 export async function localFindingsFixture(options: { remote?: string } = {}) {
@@ -16,17 +17,15 @@ export async function localFindingsFixture(options: { remote?: string } = {}) {
     join(await realpath(tmpdir()), "codex-security-external-local-"),
   );
   const repository = join(root, "repository");
+  const env = sonarGitTestEnvironment();
   await mkdir(repository);
-  execFileSync("git", ["init", "--quiet", repository]);
+  execFileSync("git", ["init", "--quiet", repository], { env });
   if (options.remote !== undefined)
-    execFileSync("git", [
-      "-C",
-      repository,
-      "remote",
-      "add",
-      "origin",
-      options.remote,
-    ]);
+    execFileSync(
+      "git",
+      ["-C", repository, "remote", "add", "origin", options.remote],
+      { env },
+    );
   const stateDirectory = join(root, "state");
   const dispose = () => rm(root, { recursive: true, force: true });
   return {
@@ -35,7 +34,7 @@ export async function localFindingsFixture(options: { remote?: string } = {}) {
     stateDirectory,
     environment: {
       ...Object.fromEntries(
-        Object.entries(process.env).filter(
+        Object.entries(env).filter(
           ([name]) =>
             name.toUpperCase() !== "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
         ),

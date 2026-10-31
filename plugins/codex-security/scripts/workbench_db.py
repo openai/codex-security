@@ -1268,13 +1268,23 @@ def complete_scan_locked(
             )
         warnings.extend(warning for warning in prepared.warnings if warning not in warnings)
         add_warning()
-        if warnings != json.loads(scan["completion_warnings_json"]):
-            # Persist all observed warnings before output writes can fail, so
-            # stopped-result publication and retries retain those diagnostics.
-            with connection:
+        with connection:
+            if warnings != json.loads(scan["completion_warnings_json"]):
+                # Retain pre-publication diagnostics even if output writes fail.
                 connection.execute(
                     "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",
                     (json.dumps(warnings), scan_id),
+                )
+            prepared_scan = prepared.manifest["scan"]
+            if scan["mode"] == "deep" and (
+                not prepared.was_sealed
+                or "coverageRef" in prepared_scan
+                or "surfaces" in prepared_scan.get("reviewState", {})
+            ):
+                # A summary-only seal omits surfaces. Keep the count from its first preparation.
+                connection.execute(
+                    "UPDATE deep_scan_runs SET terminal_reviewed_surface_count = ? WHERE scan_id = ?",
+                    (len(prepared.coverage["surfaces"]), scan_id),
                 )
         wrote = True
         manifest, findings, _ = _write_prepared_scan_finalization(
