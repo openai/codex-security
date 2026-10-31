@@ -26,6 +26,7 @@ to investigate records together, not instructions to merge them.
 | [Amazon Inspector Code Security ListFindings JSON](inspector.md)                                                                                                                                    | Full Inspector finding ARN                                                                                                                              | AWS account, Region and repository project |
 | [Snyk Open Source CLI JSON, plugin v1 or SARIF](snyk.md)                                                                                                                                            | CLI: manager, manifest, advisory, package/version and dependency path; plugin: supplied composite; SARIF: advisory, manifest set and project when known | Repository, branch, scan target and format |
 | [Semgrep Code CLI/CI JSON or SARIF](semgrep.md)                                                                                                                                                     | Fingerprint; otherwise rule, literal path and start/end lines and columns                                                                               | Organization, project and branch           |
+| [SonarQube Cloud capture or native issue-search pages](sonar.md)                                                                                                                                    | Sonar issue key                                                                                                                                         | Cloud instance, org, project and ref       |
 | [GitHub Dependabot repository REST alerts](github-dependabot.md)                                                                                                                                    | Host, repository and alert number                                                                                                                       | Host, repository and Dependabot family     |
 | [GitHub saved `import github` output](../../sdk/typescript/docs/cli.md#import-github-findings-locally-or-to-cloud)                                                                                  | Host, repository, alert number and hash of selected ref                                                                                                 | Host, repository and code-scanning family  |
 | [GitHub saved `import github-advisories` output](../../sdk/typescript/docs/cli.md#import-ghsa-advisories-separately)                                                                                | Host, repository **or** global scope, and GHSA ID                                                                                                       | Separate advisory stream from alerts       |
@@ -90,6 +91,11 @@ before preparing a fresh submission.
   envelopes and general Supply Chain/Secrets feeds are not Code CLI or SARIF exports.
 - **OpenGrep.** Use native JSON and supply `--source-repository-url`. The
   [OpenGrep guide](opengrep.md) covers export and occurrence identity.
+- **SonarQube Cloud.** Use [the Sonar import workflow](sonar.md) to capture
+  security issues for one project and branch or PR through the authenticated
+  Sonar CLI. Keep the capture to import and publish the same native evidence.
+  The issue key identifies the occurrence. The rule identifies the check that
+  raised it.
 - **GitHub:** For code scanning, the selected instance supplies path/range, ref
   and commit. The rule's `security_severity_level` supplies severity; diagnostic
   `error` alone means `unknown`. An alert-wide dismissal takes precedence over
