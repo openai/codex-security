@@ -81,7 +81,7 @@ fs.writeFileSync(path.join(bin, 'codex-security.mjs'), '// Synthetic installed C
 const packageRoot = path.dirname(bin);
 fs.writeFileSync(path.join(packageRoot, 'package.json'), '{"type":"module"}');
 fs.mkdirSync(path.join(packageRoot, 'dist'));
-fs.writeFileSync(path.join(packageRoot, 'dist/cli.js'), 'export const parseCodexOverrides = (_, model, effort, provider) => ({model, provider});');
+fs.writeFileSync(path.join(packageRoot, 'dist/cli.js'), 'export const parseCodexOverrides = (overrides, model, effort, provider) => ({overrides, model, provider});');
 fs.writeFileSync(path.join(packageRoot, 'dist/api.js'), 'export const scanRuntimeCodexConfig = config => config;');
 fs.writeFileSync(path.join(packageRoot, 'dist/config.js'), "export const writeCodexConfig = (file, config) => { process.env.PROBE_CONFIG = JSON.stringify(config); };");
 fs.writeFileSync(path.join(packageRoot, 'dist/runtime.js'), [
@@ -116,7 +116,7 @@ NODE
   const sandboxInvocation = JSON.parse(await readFile(join(repository, 'sandbox-invocation.json'), 'utf8'));
   assert.equal(sandboxInvocation.command.command, join(runtime.root, 'probe-home', 'synthetic-codex'));
   assert.equal(sandboxInvocation.env.CODEX_HOME, join(runtime.root, 'probe-home'));
-  assert.deepEqual(JSON.parse(sandboxInvocation.env.PROBE_CONFIG), {model:'example/model', provider:'openrouter'});
+  assert.deepEqual(JSON.parse(sandboxInvocation.env.PROBE_CONFIG), {overrides:['analytics.enabled=false'], model:'example/model', provider:'openrouter'});
   assert.equal(sandboxInvocation.env.PATH, invocation.env.PATH);
   assert.equal(sandboxInvocation.env.OPENAI_API_KEY, undefined);
   assert.equal(sandboxInvocation.env.ACTIONS_RUNTIME_TOKEN, undefined);
@@ -162,9 +162,11 @@ test('hosted Ubuntu sandbox setup uses system commands despite checkout PATH sha
   const calls = (await readFile(join(root, 'setup.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
   assert.deepEqual(calls.map(call => call.args), [
     ['-n','/usr/bin/apt-get','update'],
-    ['-n','/usr/bin/apt-get','install','--yes','bubblewrap','apparmor-profiles'],
+    ['-n','/bin/sh','-eu','-c',calls[1].args[4]],
     ['-n','/usr/sbin/apparmor_parser','-r','/usr/share/apparmor/extra-profiles/bwrap-userns-restrict'],
   ]);
+  assert.match(calls[1].args[4], /php8\\\.3-fpm/);
+  assert.match(calls[1].args[4], /\/usr\/bin\/apt-get install --yes bubblewrap apparmor-profiles/);
   for (const call of calls) {
     assert.equal(call.env.OPENAI_API_KEY, undefined);
     assert.equal(call.env.ACTIONS_RUNTIME_TOKEN, undefined);
@@ -437,4 +439,49 @@ test('cleanup preserves reports and rejects arbitrary or symlink roots', async (
     assert.ok((await stat(join(reports, 'report.sarif'))).isFile());
     await cleanupRuntime(owned, base);
   } finally { await rm(base, { recursive: true, force: true }); }
+});
+
+
+for (const aptExit of [0, 17]) test(`hosted install defers only PHP and removes its temporary override after exit ${aptExit}`, async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-needrestart-')));
+  t.after(() => rm(root, {recursive:true, force:true}));
+  const existsSync = fs.existsSync;
+  t.mock.method(fs, 'existsSync', (path: fs.PathLike) => path === '/.dockerenv' ? false : existsSync(path));
+  const conf = join(root, 'conf.d');
+  await mkdir(conf);
+  await writeFile(join(conf, 'existing.conf'), 'existing configuration');
+  const apt = join(root, 'apt');
+  await writeFile(apt, `#!${process.execPath}
+    const fs = require('node:fs'); const path = require('node:path'); const assert = require('node:assert/strict');
+    const directory = ${JSON.stringify(conf)};
+    const overrides = fs.readdirSync(directory).filter(name => name.startsWith('codex-security-'));
+    assert.equal(overrides.length, 1);
+    const value = fs.readFileSync(path.join(directory, overrides[0]), 'utf8');
+    assert.equal(value, ${JSON.stringify('$nrconf{override_rc}{qr(^php8\\.3-fpm\\.service$)} = 0;\n')});
+    assert.deepEqual(process.argv.slice(2), ['install', '--yes', 'bubblewrap', 'apparmor-profiles']);
+    fs.writeFileSync(${JSON.stringify(join(root, 'apt-ran'))}, value);
+    console.error('synthetic apt diagnostic'); process.exitCode = ${aptExit};
+  `, {mode:0o700});
+  const env = runtimeEnvironment({root,home:root,codexHome:root,stateDirectory:root});
+  const success = {exitCode:0,signal:null,stdout:'',stderr:'',timedOut:false,interrupted:false} as const;
+  const calls: readonly string[][] = [];
+  const execute: typeof runProcess = async (command, args, options) => {
+    assert.equal(command, '/usr/bin/sudo');
+    (calls as string[][]).push([...args]);
+    if (args[1] !== '/bin/sh') return success;
+    const script = args[4].replaceAll('/etc/needrestart/conf.d', conf).replaceAll('/usr/bin/apt-get', apt);
+    return runProcess('/bin/sh', ['-eu', '-c', script], options);
+  };
+  let probes = 0;
+  const original = new SandboxUnavailableError('original synthetic preflight detail sk-example-secret');
+  const result = ensureSandbox({cwd:root,env,runnerEnvironment:'github-hosted',imageOS:'ubuntu24'},
+    async () => { if (++probes === 1) throw original; }, execute);
+  if (aptExit === 0) await result;
+  else await assert.rejects(result, error => error instanceof Error && error.cause === original
+    && error.message.includes(original.message) && error.message.includes('synthetic apt diagnostic'));
+  assert.equal(fs.existsSync(join(root, 'apt-ran')), true);
+  assert.deepEqual(fs.readdirSync(conf), ['existing.conf']);
+  assert.equal(await readFile(join(conf, 'existing.conf'), 'utf8'), 'existing configuration');
+  assert.equal(probes, aptExit === 0 ? 2 : 1);
+  assert.equal(calls.length, aptExit === 0 ? 3 : 2);
 });

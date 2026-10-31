@@ -56226,16 +56226,25 @@ var SANDBOX_UNAVAILABLE_EXIT = 75;
 var SandboxUnavailableError = class extends Error {
 };
 async function ensureSandbox(options, probe, execute = runProcess) {
+  let initialError;
   try {
     await probe();
     return;
   } catch (error2) {
     if (!(error2 instanceof SandboxUnavailableError) || options.runnerEnvironment !== "github-hosted" || options.imageOS !== "ubuntu24" || import_node_fs.default.existsSync("/.dockerenv")) throw error2;
+    initialError = error2;
   }
   const sudo = "/usr/bin/sudo";
   for (const args of [
     ["-n", "/usr/bin/apt-get", "update"],
-    ["-n", "/usr/bin/apt-get", "install", "--yes", "bubblewrap", "apparmor-profiles"],
+    // Defer only the hosted image's problematic PHP restart during this install.
+    ["-n", "/bin/sh", "-eu", "-c", String.raw`
+      override=$(/usr/bin/mktemp /etc/needrestart/conf.d/codex-security-XXXXXX.conf)
+      trap '/usr/bin/rm -f "$override"' EXIT
+      trap 'exit 1' HUP INT TERM
+      printf '%s\n' '$nrconf{override_rc}{qr(^php8\.3-fpm\.service$)} = 0;' > "$override"
+      /usr/bin/apt-get install --yes bubblewrap apparmor-profiles
+    `],
     ["-n", "/usr/sbin/apparmor_parser", "-r", "/usr/share/apparmor/extra-profiles/bwrap-userns-restrict"]
   ]) {
     const result = await execute(sudo, args, options);
@@ -56248,7 +56257,8 @@ async function ensureSandbox(options, probe, execute = runProcess) {
     if (result.exitCode !== 0 || result.signal || result.interrupted || result.timedOut) {
       const details = safeLogLines([result.stderr, result.stdout].join("\n")).join("\n");
       throw new Error(`Ubuntu sandbox setup failed: sudo ${args.join(" ")} (exit ${result.exitCode}).
-${details}`);
+${details}
+Original sandbox preflight: ${initialError.message}`, { cause: initialError });
     }
   }
   await probe();
@@ -56263,7 +56273,7 @@ async function checkSandbox(nodePath, cliPath, options, env) {
     const { scanRuntimeCodexConfig } = await fromCli('api.js');
     const { writeCodexConfig } = await fromCli('config.js');
     const runtime = await fromCli('runtime.js');
-    const config = parseCodexOverrides([], model || undefined, undefined, provider);
+    const config = parseCodexOverrides(['analytics.enabled=false'], model || undefined, undefined, provider);
     await writeCodexConfig(join(process.env.CODEX_HOME, 'config.toml'), scanRuntimeCodexConfig(config, process.env.CODEX_HOME));
     const command = runtime.resolveCodexCommand(process.env);
     try { await runtime.probeCodexSandbox(command, process.env); }
@@ -56274,6 +56284,11 @@ async function checkSandbox(nodePath, cliPath, options, env) {
       // The feature list loads the native configuration without starting Bubblewrap.
       const config = await runtime.runCodexCommand(command, ['features', 'list'], process.env,
         undefined, AbortSignal.timeout(10_000));
+      if (!config.success) {
+        console.error('Codex configuration check failed (exit ' + config.exitCode + ').');
+        if (config.stdout) console.error(config.stdout);
+        if (config.stderr) console.error(config.stderr);
+      }
       process.exitCode = config.success ? ${SANDBOX_UNAVAILABLE_EXIT} : 1;
     }
   `, cliPath, options.provider, options.model], { cwd: options.repository, env });

@@ -250,10 +250,24 @@ use an approved model ID and AWS provisioning as described in
 
 Use the same API-key secret and Action commit as above. The
 [pull-request workflow](examples/pull-request.yml) checks out the PR head with
-full history and requires a completed scan. Make its **Codex Security** job a
-required status check only for branches that do not use a merge queue. The Action
+full history and requires a completed scan. For each protected target branch,
+require its matching **Codex Security / <target-branch>** check (for example,
+**Codex Security / main** on `main`) from the GitHub Actions app. Require this
+check only for branches that do not use a merge queue. The Action
 does not support `merge_group` events, so this workflow cannot provide the required
 check for a merge queue.
+
+The check name includes the target branch because GitHub can evaluate checks on
+the shared head commit when a test merge commit has no status. The workflow uses
+read-only pull request access to verify the event's head and target before the
+scan and before accepting its result. Retargeted PRs get a new review, and stale
+reruns cannot cancel a different head/base snapshot or pass its required check.
+The concurrency group also includes the run ID because GitHub compares group
+names without case sensitivity. Separate workflow events can run concurrently.
+Run the workflow from the current PR event after retargeting. If the target has
+advanced since that event, update the PR branch to trigger a fresh review.
+See GitHub's [required-check evaluation](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks)
+and [rerun semantics](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs).
 
 A pull request can change its workflow and still report the same check name.
 Before requiring this check, use an organization ruleset that runs a workflow
@@ -270,9 +284,11 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
-  group: codex-security-pr-${{ github.event.pull_request.number }}${{ github.event.action == 'edited' && github.event.changes.base == null && '-metadata' || '' }}
+  # Group names are case-insensitive; the run ID also separates case-only retargets.
+  group: codex-security-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -287,6 +303,21 @@ jobs:
       scan-status: ${{ steps.security.outputs.scan-status }}
       skip-reason: ${{ steps.security.outputs.skip-reason }}
     steps:
+      - &verify-current-pr
+        name: Verify the PR still matches this scan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          current=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '[.head.sha, .base.ref, .base.sha] | @tsv')
+          expected=$(printf '%s\t%s\t%s' "$PR_HEAD_SHA" "$PR_BASE_REF" "$PR_BASE_SHA")
+          if [ "$current" != "$expected" ]; then
+            echo 'The PR head or target changed. Run the workflow for the current PR snapshot.' >&2
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
@@ -305,11 +336,12 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
 
   required-review:
-    name: ${{ github.event.action == 'edited' && github.event.changes.base == null && 'metadata / ' || '' }}Codex Security
+    name: ${{ github.event.action == 'edited' && github.event.changes.base == null && 'metadata / ' || '' }}Codex Security / ${{ github.event.pull_request.base.ref }}
     needs: security
     if: always() && (github.event.action != 'edited' || github.event.changes.base != null)
     runs-on: ubuntu-24.04
     steps:
+      - *verify-current-pr
       - name: Require a completed review or an empty diff
         env:
           SCAN_JOB_RESULT: ${{ needs.security.result }}

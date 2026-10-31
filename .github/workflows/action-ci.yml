@@ -59,11 +59,6 @@ jobs:
         with:
           node-version: "24"
           package-manager-cache: false
-      - name: Defer the hosted image's PHP service restart
-        run: |
-          # The hosted image's unrelated PHP service times out during needrestart.
-          printf '%s\n' '$nrconf{override_rc}{qr(^php8\.3-fpm\.service$)} = 0;' \
-            | sudo tee /etc/needrestart/conf.d/action-ci.conf > /dev/null
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run validate
       - name: Set up Bun for Action release contracts
@@ -104,12 +99,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Run setup from the merge commit, then test the Action at its PR head.
+          # Test the Action at its PR head.
           fetch-depth: 2
           persist-credentials: false
       - *actions-setup-node
-      - name: Set up the Ubuntu sandbox
-        run: bash scripts/setup-ubuntu-sandbox.sh
       - name: Check out the PR head for the Action smoke tests
         if: github.event_name == 'pull_request'
         env:

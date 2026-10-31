@@ -323,6 +323,30 @@ try {
   await assert.rejects(probe, error => error instanceof Error && !(error instanceof SandboxUnavailableError) && error.message.includes('synthetic-undefined'));
   await writeFile(nativeProbe, '#!/bin/sh\n[ "$1" != sandbox ] && exec "$PROBE_CODEX" "$@"\n');
   await assert.rejects(probe, SandboxUnavailableError);
+  // Observe both real SDK child boundaries without invoking a sandbox or a model.
+  const probeInvocations = join(root, 'probe-invocations.jsonl');
+  for (const featuresExit of [0, 19]) {
+    await writeFile(probeInvocations, '');
+    await writeFile(nativeProbe, `#!${process.execPath}
+      const fs = require('node:fs'); const path = require('node:path');
+      fs.appendFileSync(${JSON.stringify(probeInvocations)}, JSON.stringify({args:process.argv.slice(2),
+        config:fs.readFileSync(path.join(process.env.CODEX_HOME, 'config.toml'), 'utf8')}) + '\\n');
+      if (process.argv[2] === 'sandbox') {
+        console.error('synthetic sandbox failure sk-example-original'); process.exitCode = 1;
+      } else {
+        console.log('synthetic configuration stdout'); console.error('synthetic configuration stderr');
+        process.exitCode = ${featuresExit};
+      }
+    `);
+    await assert.rejects(probe, error => error instanceof Error
+      && (error instanceof SandboxUnavailableError) === (featuresExit === 0)
+      && error.message.includes('synthetic sandbox failure sk-example-original')
+      && (featuresExit === 0 || (error.message.includes('synthetic configuration stdout')
+        && error.message.includes('synthetic configuration stderr') && error.message.includes('exit 19'))));
+    const invocations = (await readFile(probeInvocations, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(invocations.map(call => call.args[0]), ['sandbox', 'features']);
+    for (const call of invocations) assert.match(call.config, /\[analytics\]\s+enabled = false/);
+  }
   await writeFile(nativeProbe, `#!${process.execPath}\nprocess.on('SIGTERM', () => process.exit(0)); process.kill(process.ppid, 'SIGINT'); setInterval(() => {}, 1000);\n`);
   await assert.rejects(probe(nativeProbe), /sandbox preflight was interrupted/);
 

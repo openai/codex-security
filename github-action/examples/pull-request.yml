@@ -5,9 +5,11 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
-  group: codex-security-pr-${{ github.event.pull_request.number }}${{ github.event.action == 'edited' && github.event.changes.base == null && '-metadata' || '' }}
+  # Group names are case-insensitive; the run ID also separates case-only retargets.
+  group: codex-security-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -22,6 +24,21 @@ jobs:
       scan-status: ${{ steps.security.outputs.scan-status }}
       skip-reason: ${{ steps.security.outputs.skip-reason }}
     steps:
+      - &verify-current-pr
+        name: Verify the PR still matches this scan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          current=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '[.head.sha, .base.ref, .base.sha] | @tsv')
+          expected=$(printf '%s\t%s\t%s' "$PR_HEAD_SHA" "$PR_BASE_REF" "$PR_BASE_SHA")
+          if [ "$current" != "$expected" ]; then
+            echo 'The PR head or target changed. Run the workflow for the current PR snapshot.' >&2
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
@@ -40,11 +57,12 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
 
   required-review:
-    name: ${{ github.event.action == 'edited' && github.event.changes.base == null && 'metadata / ' || '' }}Codex Security
+    name: ${{ github.event.action == 'edited' && github.event.changes.base == null && 'metadata / ' || '' }}Codex Security / ${{ github.event.pull_request.base.ref }}
     needs: security
     if: always() && (github.event.action != 'edited' || github.event.changes.base != null)
     runs-on: ubuntu-24.04
     steps:
+      - *verify-current-pr
       - name: Require a completed review or an empty diff
         env:
           SCAN_JOB_RESULT: ${{ needs.security.result }}
