@@ -28,7 +28,6 @@ def run_script(name: str, *args: str) -> subprocess.CompletedProcess[str]:
         "snapshot_sqlite.py",
         "threat_model_projection.py",
         "validate_scan_contract.py",
-        "validate_tracking_source.py",
         "workbench_db.py",
         "workbench_publication.py",
     ),
