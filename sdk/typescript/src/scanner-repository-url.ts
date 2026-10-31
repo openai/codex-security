@@ -28,19 +28,15 @@ function repositorySegment(
   }
 }
 
-export function declaredScannerRepositoryUrl(
-  value: unknown,
-  provider: string,
-  target: ExternalImportTarget = "cloud",
-  {
-    allowEncodedQueryAndFragment = false,
-  }: { allowEncodedQueryAndFragment?: boolean } = {},
-): string {
-  const source = requiredText(value, `${provider} --source-repository-url`);
+export function validScannerRepositoryUrl(
+  source: string,
+  target: ExternalImportTarget,
+  allowEncodedQueryAndFragment = false,
+): boolean {
   const url = URL.parse(source);
   const parts = /^https?:\/\/([^/?#\\]+)\/([^?#\\]+)$/iu.exec(source);
   const segments = parts?.[2]?.replace(/\/$/u, "").split("/") ?? [];
-  if (
+  return !(
     !url ||
     !parts ||
     parts[1]!.includes("@") ||
@@ -51,7 +47,19 @@ export function declaredScannerRepositoryUrl(
     !segments.every((segment) =>
       repositorySegment(segment, allowEncodedQueryAndFragment),
     )
-  )
+  );
+}
+
+export function declaredScannerRepositoryUrl(
+  value: unknown,
+  provider: string,
+  target: ExternalImportTarget = "cloud",
+  {
+    allowEncodedQueryAndFragment = false,
+  }: { allowEncodedQueryAndFragment?: boolean } = {},
+): string {
+  const source = requiredText(value, `${provider} --source-repository-url`);
+  if (!validScannerRepositoryUrl(source, target, allowEncodedQueryAndFragment))
     throw new Error(
       `${provider} --source-repository-url requires an HTTP(S) repository path without credentials, query, fragment, or ambiguous path segments.`,
     );

@@ -37,7 +37,10 @@ import {
   hostedRepositoryUrl,
 } from "./hosted-scanner-http.js";
 import { isRecord } from "./record.js";
-import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
+import {
+  declaredScannerRepositoryUrl,
+  validScannerRepositoryUrl,
+} from "./scanner-repository-url.js";
 import {
   legacyDecimalInteger,
   restoreLegacyHostedNumbers,
@@ -67,6 +70,10 @@ export function isSemgrepPlatformFormat(
   );
 }
 
+function selectedProjectUrl(value: unknown, label: string) {
+  return declaredScannerRepositoryUrl(value, label, "local");
+}
+
 /** Recover the native collection scope, including when every row was excluded. */
 export function semgrepPlatformReportScope(
   input: ExternalFindings,
@@ -75,7 +82,6 @@ export function semgrepPlatformReportScope(
 ) {
   const format = "sourceFormat" in input ? input.sourceFormat : undefined;
   if (
-    provider === "semgrep" &&
     "semgrepPlatformScope" in input &&
     input.semgrepPlatformScope !== undefined &&
     !isSemgrepPlatformFormat(format)
@@ -101,7 +107,11 @@ export function semgrepPlatformReportScope(
     "semgrepPlatformScope" in input ? input.semgrepPlatformScope : undefined,
     "Normalized Semgrep report scope",
   );
-  const url = hostedRepositoryUrl(
+  const readUrl =
+    format === semgrepSelectionFormat
+      ? selectedProjectUrl
+      : hostedRepositoryUrl;
+  const url = readUrl(
     "sourceRepositoryUrl" in input ? input.sourceRepositoryUrl : undefined,
     "Semgrep Platform",
   );
@@ -476,6 +486,7 @@ function repositoryContext(
   const github = source.platform === "github";
   return {
     source,
+    selectableProject: validScannerRepositoryUrl(projectUrl, "local"),
     key: (url: string) =>
       typeof references === "function"
         ? references(nativeHttp(url))
@@ -624,6 +635,7 @@ export function checkSemgrepPlatformRow(
     throw new Error("Select Semgrep Code (SAST) findings.");
   return (
     scope.product === "sast" &&
+    repository.selectableProject &&
     // A replayable selection requires a repository on the native project response.
     (scope.sourceRepositoryUrl === undefined ||
       scope.nativeProjectUrl !== undefined) &&
@@ -661,7 +673,7 @@ function selectedRows(
     parseSemgrepResponse(options.projectResponse)["project"],
     options.ref,
     semgrepPlatformId,
-    (url, label) => declaredScannerRepositoryUrl(url, label, "local"),
+    selectedProjectUrl,
   );
   // git-check-ref-format distinguishes literal branch/tag names from revision expressions.
   const refParts = scope.ref.split("/");
@@ -755,7 +767,12 @@ export function normalizeSelectedSemgrepPlatformFindings(
           "Selected Semgrep project does not match the operator's source repository URL.",
         );
       const exact = (value: string) => value;
-      return { source: { url }, key: exact, name: exact };
+      return {
+        source: { url },
+        selectableProject: true,
+        key: exact,
+        name: exact,
+      };
     },
     hostedRepositoryUrl,
   );
@@ -849,6 +866,7 @@ function readScope(
       { ...project, url: native ?? mapping ?? project["url"] },
       input["ref"],
       savedPlatformId,
+      complete ? hostedRepositoryUrl : selectedProjectUrl,
     ),
     ...(mapping && { sourceRepositoryUrl: mapping }),
     ...(native && { nativeProjectUrl: raw }),
@@ -1174,6 +1192,16 @@ function qualifiedBranch(ref: string) {
   return ref.startsWith("refs/") ? ref : `refs/heads/${ref}`;
 }
 
+function checkProjectedProduct(
+  finding: ExternalFinding,
+  product?: SemgrepPlatformProduct,
+) {
+  if (product === "sca" && finding.evidence.details?.kind === "sast")
+    throw new Error(
+      "The projected finding kind does not match the Semgrep report product.",
+    );
+}
+
 export function semgrepPlatformFindingBinding(
   finding: ExternalFinding,
   provider: string,
@@ -1213,13 +1241,7 @@ export function semgrepPlatformFindingBinding(
         throw new Error(
           "The projected branch does not match the Semgrep report ref.",
         );
-      if (
-        reportScope.product === "sca" &&
-        finding.evidence.details?.kind === "sast"
-      )
-        throw new Error(
-          "The projected finding kind does not match the Semgrep report product.",
-        );
+      checkProjectedProduct(finding, reportScope.product);
     }
     return;
   }
@@ -1227,6 +1249,7 @@ export function semgrepPlatformFindingBinding(
     throw new Error("Missing the original Semgrep finding evidence.");
   const { data, legacy, original, scope, aliases, repository, row } =
     nativeOccurrence(retained, references);
+  checkProjectedProduct(finding, scope.product);
   if (
     reportScope?.deployment !== undefined &&
     (scope.deployment !== reportScope.deployment ||
@@ -1267,13 +1290,12 @@ export function semgrepPlatformFindingBinding(
   const { name, url } = scope.project;
   let namedOnly =
     aliases && repositoryWithOnlyAlias(row, projectAliases(name, url));
-  const raw =
-    namedOnly &&
-    (original
-      ? legacyWitnesses?.get(
-          legacyWitnessKey(scope, repository.key(url), namedOnly),
-        )
-      : data["repositoryWitnessJson"]);
+  const raw = original
+    ? namedOnly &&
+      legacyWitnesses?.get(
+        legacyWitnessKey(scope, repository.key(url), namedOnly),
+      )
+    : data["repositoryWitnessJson"];
   // Only rely on the reader's platform hint when there is no independent proof.
   if (
     namedOnly &&
@@ -1287,12 +1309,16 @@ export function semgrepPlatformFindingBinding(
     legacyProjectAliases(name, url, references, scope.sourceRepositoryUrl).has(
       namedOnly,
     );
-  if (namedOnly && !legacyPath) {
+  if (raw !== undefined || (namedOnly && !legacyPath)) {
+    const label = text(
+      record(row["repository"], "Semgrep finding repository")["name"],
+    );
     const witness = parseSemgrepResponse(
       requiredText(raw, "Semgrep repository alias witness"),
     );
     if (
-      witness["name"] !== namedOnly ||
+      !label ||
+      witness["name"] !== label ||
       (witness["id"] == null && !text(witness["url"]))
     )
       throw new Error(
@@ -1301,7 +1327,7 @@ export function semgrepPlatformFindingBinding(
     checkSemgrepPlatformRow(
       { repository: witness },
       scope,
-      aliases,
+      aliases ?? new Set([label]),
       repository,
       legacy
         ? semgrepV1Id
