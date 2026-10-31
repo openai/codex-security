@@ -4720,7 +4720,7 @@ export async function main(
           .boolean()
           .default(false)
           .describe(
-            "Classify canonical records through host-provided reviews over version 1 JSON-RPC; accepts --runs.",
+            "Classify canonical records through host-provided reviews over version 1 JSON-RPC. Accepts --runs. Hosts can enable CLI diagnostics with the Node condition codex-security-records-logs-v1.",
           ),
         reprocess: z
           .boolean()

@@ -346,6 +346,7 @@ test("records mode is discoverable and rejects saved-scan flags", async () => {
     ),
   ).toBe(0);
   expect(output.text()).toContain("--records");
+  expect(output.text()).toContain("codex-security-records-logs-v1");
   expect(
     await main(
       ["classify-severity", "--records", "--scan", "latest"],

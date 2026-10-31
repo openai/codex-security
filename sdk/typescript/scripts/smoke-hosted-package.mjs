@@ -8,6 +8,9 @@ import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 
+import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
+
+const { commandTimeoutMs } = packageSmokeTimeouts();
 const packageRoot = resolve(process.argv[2] ?? ".");
 const publicSdk = await import(
   pathToFileURL(join(packageRoot, "dist/index.js")).href
@@ -82,7 +85,7 @@ for (const enabled of [false, true]) {
     {
       stdio: ["pipe", "pipe", "inherit"],
       windowsHide: true,
-      timeout: 30_000,
+      timeout: commandTimeoutMs,
       killSignal: "SIGKILL",
       env: { ...process.env, NODE_OPTIONS: "" },
     },
