@@ -33,6 +33,25 @@ const publishLocal = [
   "--yes",
 ];
 
+test("Semgrep import advertises its saved report format and native finding JSON strings", async () => {
+  const cli = createCliTest(main);
+  const code = await cli.runCli(
+    ["import", "semgrep", "--schema", "--json"],
+    dependencies({
+      environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+    }),
+  );
+  expect(code).toBe(0);
+  expect(JSON.parse(cli.stdout.text()).output).toMatchObject({
+    properties: {
+      format: { const: "semgrep-platform-findings/v2" },
+      project: { properties: { id: { type: "string" } } },
+      product: { enum: ["sast", "sca", "ai_sast"] },
+      findings: { type: "array", items: { type: "string" } },
+    },
+  });
+});
+
 test("disabled commands distinguish discovery requests from filter values", async () => {
   const deps = dependencies({ environment: {} });
   for (const flag of ["--schema", "--llms-full", "--help"]) {
