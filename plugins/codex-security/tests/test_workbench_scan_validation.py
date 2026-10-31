@@ -11,6 +11,32 @@ from test_workbench_scan_history import create_cli_scan, run_workbench
 from workbench_test_support import initialize_git_repository
 
 
+@pytest.mark.skipif(
+    os.name == "nt" or getattr(os, "geteuid", lambda: 0)() == 0,
+    reason="Mode permissions require a non-root Unix user",
+)
+def test_snapshot_reports_unreadable_tracked_file(
+    tmp_path: Path, workbench_api, monkeypatch
+) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_repository(repository)
+    (repository / ".gitattributes").write_bytes(b"* invalid\x1b[2J\xff\n")
+    source = repository / "README.md"
+    source.write_text("Changed contents.\n")
+    mode = source.stat().st_mode
+    monkeypatch.setenv("LC_ALL", "C")
+    source.chmod(0)
+    try:
+        with pytest.raises(SystemExit) as error:
+            workbench_api["worktree_content_digest"](repository)
+    finally:
+        source.chmod(mode)
+    diagnostic = str(error.value)
+    assert "README.md" in diagnostic
+    assert "Permission denied" in diagnostic
+    assert r"invalid\x1b[2J\xff" in diagnostic
+
+
 @pytest.mark.parametrize("kind", ["directory", "git", "dirty", "working_tree", "refs"])
 def test_check_scan_target_matches_recorded_contents(tmp_path: Path, kind: str) -> None:
     repository = tmp_path / "repository"
