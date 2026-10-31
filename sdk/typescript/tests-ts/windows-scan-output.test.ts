@@ -12,6 +12,7 @@ import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, expect, test } from "bun:test";
 import { loadContract } from "../src/contract.js";
+import { exportHackerOneReports } from "../src/hackerone-reports.js";
 import * as runtime from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -395,4 +396,34 @@ test.skipIf(
     }
   },
   60_000,
+);
+
+windowsTest(
+  "HackerOne export keeps its private ACL in a shared-readable parent",
+  async () => {
+    const root = await temporaryDirectory();
+    await icacls(root, "/grant", "*S-1-1-0:(OI)(CI)R");
+    const before = await descriptor(root);
+    const output = join(root, "reports.json");
+    await exportHackerOneReports({
+      programId: "11",
+      reportIds: "7101",
+      output,
+      environment: {
+        HACKERONE_API_USERNAME: "example",
+        HACKERONE_API_TOKEN: "synthetic",
+      },
+      fetch: async () =>
+        Response.json({
+          data: {
+            id: "7101",
+            type: "report",
+            attributes: { title: "Example title", state: "triaged" },
+            relationships: { program: { data: { id: "11", type: "program" } } },
+          },
+        }),
+    });
+    expect(await descriptor(output)).not.toContain(";;;WD)");
+    expect(await descriptor(root)).toBe(before);
+  },
 );
