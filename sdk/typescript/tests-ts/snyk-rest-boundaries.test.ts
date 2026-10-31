@@ -2,6 +2,7 @@ import { expect, mock, test } from "bun:test";
 import { readSnykFindings } from "../src/snyk-findings.js";
 import { snykJson, snykSarif } from "./support/snyk-import-fixtures.js";
 import { prepareNormalizedExternalPublication } from "../src/external-findings-publish.js";
+import type { ExternalFindings } from "../src/external-findings.js";
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import {
   normalizeSnykIssues,
@@ -741,7 +742,31 @@ test("rows from a different Snyk monitor cannot use the report's source key even
   await using f = await snykLocalFixture({
     remote: report.sourceRepositoryUrl,
   });
+  const prepareCloud = (input: ExternalFindings) =>
+    prepareNormalizedExternalPublication(
+      input,
+      {
+        provider: "snyk",
+        sourceKey: f.sourceKey,
+        repository: report.sourceRepositoryUrl,
+      },
+      cloudCatalog(f.environment, report.sourceRepositoryUrl),
+    );
   const original = report.findings[0]!;
+  const sibling = normalizeSnykIssues(replace(snykIssue(false).id))
+    .findings[0]!;
+  const selected = { ...report, read: 2, findings: [original, sibling] };
+  expect(
+    (await (await f.prepareNormalized(selected)).import()).counts.created,
+  ).toBe(2);
+  const stored = await f.read();
+  const { projectJson, targetJson } = original.evidence.source_data!;
+  for (const row of stored)
+    expect(row.evidence.source_data).toMatchObject({ projectJson, targetJson });
+  sibling.evidence.source_data!["apiVersion"] = "unsupported";
+  await expect(prepareCloud(selected)).rejects.toThrow("API version");
+  await expect(f.prepareNormalized(selected)).rejects.toThrow("API version");
+
   for (const other of [
     replace(capture.organizationId),
     replace(capture.projectId),
@@ -761,17 +786,7 @@ test("rows from a different Snyk monitor cannot use the report's source key even
       await expect(f.prepareNormalized(input)).rejects.toThrow(
         "Snyk project scope",
       );
-      await expect(
-        prepareNormalizedExternalPublication(
-          input,
-          {
-            provider: "snyk",
-            sourceKey: f.sourceKey,
-            repository: report.sourceRepositoryUrl,
-          },
-          cloudCatalog(f.environment, report.sourceRepositoryUrl),
-        ),
-      ).rejects.toThrow("Snyk project scope");
+      await expect(prepareCloud(input)).rejects.toThrow("Snyk project scope");
     }
   }
   const saved = structuredClone(original);
@@ -812,7 +827,7 @@ test("rows from a different Snyk monitor cannot use the report's source key even
   expect(() =>
     checkSaved(replace("github-cloud-app", "github-server-app")),
   ).toThrow("conflicting targets or integrations");
-  expect(await f.read()).toHaveLength(0);
+  expect(await f.read()).toEqual(stored);
 });
 
 test("a sparse approved Snyk record still checks its retained repository URLs", () => {
