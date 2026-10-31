@@ -29,7 +29,7 @@ export function requiredText(value: unknown, label: string): string {
   return result;
 }
 
-export function scannerSeverity(value: string | null | undefined): string {
+export function scannerSeverity(value: string | null | undefined) {
   return SCAN_SEVERITIES.find((severity) => severity === value) ?? "unknown";
 }
 

@@ -807,19 +807,21 @@ export async function prepareLocalImport(
   let hasOrdinaryRows = false;
   let ordinaryRowNeedsReferences = false;
   for (const finding of current.findings) {
+    const retained = bound.get(finding.source_finding_id);
     const semgrep = semgrepPlatformFindingBinding(
       finding,
       options.provider,
       readerSources,
       legacyWitnesses,
       semgrepReportScope,
+      retained?.url,
     );
     if (semgrep) {
       addSemgrepSource(semgrep.url);
       if (semgrep.sourceData) finding.evidence.source_data = semgrep.sourceData;
       if (semgrep.migration) Object.assign(finding.evidence, semgrep.migration);
     } else hasOrdinaryRows = true;
-    const { evidence, source_finding_id: id } = finding;
+    const { evidence } = finding;
     const url = evidence.details?.repository?.url;
     // A selected row's projected URL was already verified against its hosted source.
     if (!semgrep) {
@@ -828,7 +830,6 @@ export async function prepareLocalImport(
         for (const { url } of semgrepSarifRepositories(finding))
           sarifSources.add(url);
     }
-    const retained = bound.get(id);
     const native = nativeSources.get(finding) ?? [];
     if (!semgrep && !url && !retained && !native.length)
       ordinaryRowNeedsReferences = true;

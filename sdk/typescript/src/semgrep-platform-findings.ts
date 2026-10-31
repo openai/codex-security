@@ -36,6 +36,7 @@ import {
   hostedRepositoryUrl,
 } from "./hosted-scanner-http.js";
 import { isRecord } from "./record.js";
+import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 import {
   legacyDecimalInteger,
   restoreLegacyHostedNumbers,
@@ -75,6 +76,7 @@ export function semgrepPlatformReportScope(
     format === undefined &&
     provider === "semgrep" &&
     "sourceRepositoryUrl" in input &&
+    input.sourceRepositoryUrl !== undefined &&
     (input.findings.length === 0 ||
       input.findings.some((row) => isSemgrepPlatformEvidence(row, provider)))
   ) {
@@ -241,6 +243,7 @@ function scopeOf(
   project: unknown,
   ref: unknown,
   readId = semgrepPlatformId,
+  readUrl = hostedRepositoryUrl,
 ) {
   const row = responseRecord(project, "Semgrep project");
   const id = readId(row["id"]);
@@ -249,7 +252,7 @@ function scopeOf(
     project: {
       id: text(row["id"]) ?? id,
       name: requiredText(row["name"], "Semgrep project name"),
-      url: hostedRepositoryUrl(row["url"], "Semgrep Platform"),
+      url: readUrl(row["url"], "Semgrep Platform"),
     },
     ref: requiredText(ref, "Semgrep ref"),
     product: "sast" as const,
@@ -294,20 +297,24 @@ export function projectAliases(
   const historicalPaths: string[] = [];
   if (earlyV1) {
     // Older exports used decodeURI, which preserves escaped reserved delimiters.
-    const historical = decodePath(decodeURI);
-    if (!publicGitHost(hostname)) historicalPaths.push(historical);
-    if (publicHost || source.platform === "github")
-      historicalPaths.push(historical.replace(/\.git$/u, ""));
+    for (const historical of [path, decodePath(decodeURI)]) {
+      if (!publicGitHost(hostname)) historicalPaths.push(historical);
+      if (publicHost || source.platform === "github")
+        historicalPaths.push(historical.replace(/\.git$/u, ""));
+    }
   }
+  const hasHistoricalPath = (label: string) =>
+    historicalPaths.some(
+      (path) =>
+        label === path || label === path.slice(path.lastIndexOf("/") + 1),
+    );
   return {
+    hasHistoricalPath,
     has: (label: string) =>
       label === name ||
       label === shortName ||
       pathKeys.has(key(label)) ||
-      historicalPaths.some(
-        (path) =>
-          label === path || label === path.slice(path.lastIndexOf("/") + 1),
-      ),
+      hasHistoricalPath(label),
   };
 }
 
@@ -400,7 +407,8 @@ export function semgrepNativeProjectUrl(
   const label = "Semgrep project repository";
   if (typeof value === "string" && typeof references !== "function") {
     for (const reference of references) {
-      if (reference.platform !== "github") continue;
+      if (reference.platform !== "github" && reference.platform !== "gitlab")
+        continue;
       let host: string | undefined;
       try {
         host = parseGitRemote(reference.url)?.url.hostname;
@@ -415,7 +423,7 @@ export function semgrepNativeProjectUrl(
       );
       if (
         /^https?:\/\//iu.test(url) &&
-        semgrepReferenceMatches({ url, platform: "github" }, value)
+        semgrepReferenceMatches({ url, platform: reference.platform }, value)
       )
         return hostedNativeRepositoryUrl(value, label, host);
     }
@@ -552,7 +560,8 @@ export function checkSemgrepPlatformRow(
     const url = repositoryUrl(
       repo["url"],
       "Semgrep finding repository",
-      repository.source.platform === "github"
+      repository.source.platform === "github" ||
+        repository.source.platform === "gitlab"
         ? new URL(repository.source.url).hostname
         : undefined,
     );
@@ -610,6 +619,7 @@ function selectedRows(
     parseSemgrepResponse(options.projectResponse)["project"],
     options.ref,
     semgrepPlatformId,
+    (url, label) => declaredScannerRepositoryUrl(url, label, "local"),
   );
   // git-check-ref-format distinguishes literal branch/tag names from revision expressions.
   const refParts = scope.ref.split("/");
@@ -1023,6 +1033,13 @@ function platformLocationPath(value: unknown) {
     : null;
 }
 
+function platformSeverity(value: unknown, selectable: boolean) {
+  const severity = text(value)?.toLowerCase();
+  return scannerSeverity(
+    selectable && severity === "informational" ? null : severity,
+  );
+}
+
 /** Upgrade only values produced by the original object-row reader; keep SDK-authored evidence. */
 function migrateLegacyProjection(
   evidence: ExternalFinding["evidence"],
@@ -1097,11 +1114,13 @@ export function semgrepPlatformFindingBinding(
   references: SemgrepRepositoryReference = [],
   legacyWitnesses?: ReadonlyMap<string, string>,
   reportScope?: ReturnType<typeof semgrepPlatformReportScope>,
+  projectedRepositoryUrl?: string,
 ) {
   const retained = finding.evidence.source_data;
   if (!isSemgrepPlatformEvidence(finding, provider)) {
     if (reportScope?.format && reportScope.format !== semgrepSelectionFormat) {
-      const url = finding.evidence.details?.repository?.url;
+      const url =
+        finding.evidence.details?.repository?.url ?? projectedRepositoryUrl;
       if (
         url &&
         !semgrepReferenceMatches(
@@ -1160,19 +1179,28 @@ export function semgrepPlatformFindingBinding(
       );
     occurrenceId = archivedPlatformId;
   }
-  const namedOnly =
-    aliases &&
-    repositoryWithOnlyAlias(
-      row,
-      projectAliases(scope.project.name, scope.project.url, references),
-    );
-  // The original reader already checked every name-only row in an early v1 archive.
-  if (namedOnly && !(original && retained["repositoryAliases"] === undefined)) {
-    const raw = original
+  const { name, url } = scope.project;
+  let namedOnly =
+    aliases && repositoryWithOnlyAlias(row, projectAliases(name, url));
+  const raw =
+    namedOnly &&
+    (original
       ? legacyWitnesses?.get(
-          legacyWitnessKey(scope, repository.key(scope.project.url), namedOnly),
+          legacyWitnessKey(scope, repository.key(url), namedOnly),
         )
-      : data["repositoryWitnessJson"];
+      : data["repositoryWitnessJson"]);
+  // Only rely on the reader's platform hint when there is no independent proof.
+  if (
+    namedOnly &&
+    raw === undefined &&
+    projectAliases(name, url, references).has(namedOnly)
+  )
+    namedOnly = undefined;
+  const legacyPath =
+    original &&
+    namedOnly &&
+    projectAliases(name, url, references, true).has(namedOnly);
+  if (namedOnly && !legacyPath) {
     const witness = parseSemgrepResponse(
       requiredText(raw, "Semgrep repository alias witness"),
     );
@@ -1205,7 +1233,15 @@ export function semgrepPlatformFindingBinding(
     throw new Error(
       "The normalized finding does not match its original Semgrep repository and ref.",
     );
-  const migration = original
+  const canonical = platformSourceData(
+    row,
+    scope,
+    selectable,
+    aliases ? { legacy } : undefined,
+    namedOnly,
+    occurrenceId,
+  );
+  let migration = original
     ? migrateLegacyProjection(
         finding.evidence,
         row,
@@ -1214,6 +1250,17 @@ export function semgrepPlatformFindingBinding(
         references,
       )
     : undefined;
+  if (
+    data["format"] === semgrepPlatformFormat &&
+    canonical.format === semgrepSelectionFormat
+  ) {
+    const selectedSeverity = platformSeverity(row["severity"], true);
+    if (
+      selectedSeverity !== finding.evidence.severity &&
+      finding.evidence.severity === platformSeverity(row["severity"], false)
+    )
+      migration = { severity: selectedSeverity };
+  }
   // The original reader projected the HTTP mapping when the native project URL used SSH.
   const oldMappedUrl =
     original &&
@@ -1236,14 +1283,7 @@ export function semgrepPlatformFindingBinding(
         : migration,
     sourceData: canonicalSourceDataWithExtensions(
       retained,
-      platformSourceData(
-        row,
-        scope,
-        selectable,
-        aliases ? { legacy } : undefined,
-        namedOnly,
-        occurrenceId,
-      ),
+      canonical,
       original,
     ),
   };
@@ -1322,19 +1362,35 @@ export function normalizeSemgrepPlatformFindings(
     throw new Error(
       "Incomplete Semgrep Platform export: finding count does not match.",
     );
-  if (aliases && !(legacy && saved["repositoryAliases"] === undefined))
+  if (aliases) {
+    // v1 also accepted decodeURI path labels. Keep a witness for their current-format replay.
+    const archiveNames = legacy
+      ? projectAliases(scope.project.name, scope.project.url, references, true)
+      : projectNames;
     for (const { finding } of rows) {
-      const name = repositoryWithOnlyAlias(finding, projectNames);
+      const name = repositoryWithOnlyAlias(finding, archiveNames);
       if (name && !verifiedLabels.has(name))
         throw new Error(
           "Semgrep finding repository lacks a matching project name, ID or URL.",
         );
     }
+  }
+  const unhintedNames = projectAliases(scope.project.name, scope.project.url);
   const result = normalizePlatformRows(
     rows,
     scope,
     target,
-    aliases ? { legacy, projectNames } : undefined,
+    aliases
+      ? {
+          legacy,
+          projectNames: {
+            has: (name) =>
+              (verifiedLabels.has(name) ? unhintedNames : projectNames).has(
+                name,
+              ),
+          },
+        }
+      : undefined,
     aliases ? readId : archivedPlatformId,
   );
   return {
@@ -1450,26 +1506,18 @@ function normalizePlatformRows(
         "Semgrep location",
       );
       const path = platformLocationPath(location["file_path"]);
-      const backlogOnly = !!bulk && !selectable;
       // The object-row reader never checked lines for paths it did not project.
       const coerceBulkLines =
-        backlogOnly &&
-        (!legacy || !hostedRepositoryPath(location["file_path"]));
+        !!bulk &&
+        (legacy ? !hostedRepositoryPath(location["file_path"]) : !selectable);
       const startLine = path
         ? sourceLine(location["line"], coerceBulkLines)
         : null;
-      const nativeSeverity =
-        text(finding["severity"])?.toLowerCase() ?? "unknown";
-      const severity = scannerSeverity(
-        selectable && nativeSeverity === "informational"
-          ? null
-          : nativeSeverity,
-      );
       const namedOnly =
         bulk && repositoryWithOnlyAlias(finding, bulk.projectNames);
       const common = {
         description,
-        severity,
+        severity: platformSeverity(finding["severity"], selectable),
         locations: path ? [{ path, line: startLine }] : [],
         branch: scope.ref,
         source_data: platformSourceData(

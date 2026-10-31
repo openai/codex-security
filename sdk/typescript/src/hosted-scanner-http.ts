@@ -38,7 +38,10 @@ export function parseHostedScannerJson(source: string): unknown {
 }
 
 export function hostedRepositoryUrl(value: unknown, label: string): string {
-  return declaredScannerRepositoryUrl(value, label, "local");
+  // Hosted Git URLs retain %23 and %3F as path bytes; a literal query or fragment is rejected.
+  return declaredScannerRepositoryUrl(value, label, "local", {
+    allowEncodedQueryAndFragment: true,
+  });
 }
 
 /** Normalize the provider's HTTP or independently identified SSH repository address. */

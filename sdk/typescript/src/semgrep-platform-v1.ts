@@ -64,10 +64,23 @@ export function upgradeSemgrepPlatformReport(
         "Semgrep project does not match the declared source repository URL.",
       );
   }
+  // For a resolved native URL, retain only the mapping saved in the report.
+  const urlEvidence = semgrepProjectUrlEvidence(
+    project["url"],
+    native,
+    native === undefined || report["sourceRepositoryUrl"] != null
+      ? bound
+      : undefined,
+  );
   const entries = array(report["findings"], "Semgrep findings");
   let aliases = report["repositoryAliases"];
   if (aliases === undefined) {
     const derived = projectAliases(name, url, references, true);
+    const mappingUrl = urlEvidence.sourceRepositoryUrl;
+    const historicalMapping =
+      mappingUrl && mappingUrl !== url
+        ? projectAliases(name, mappingUrl, references, true)
+        : undefined;
     const observed = new Set<string>();
     for (const entry of entries) {
       const row = record(entry, "Semgrep finding");
@@ -81,7 +94,8 @@ export function upgradeSemgrepPlatformReport(
       if (
         repo["id"] == null &&
         (repo["url"] == null || repo["url"] === "") &&
-        !derived.has(label)
+        !derived.has(label) &&
+        !historicalMapping?.hasHistoricalPath(label)
       )
         throw new Error(
           "Semgrep finding repository does not match the selected project.",
@@ -94,7 +108,7 @@ export function upgradeSemgrepPlatformReport(
     format: "semgrep-platform-findings/v2",
     deployment: report["deployment"],
     project: { id: semgrepV1Id(project["id"]), name, url },
-    ...semgrepProjectUrlEvidence(project["url"], native, bound),
+    ...urlEvidence,
     product: report["product"],
     ref: report["ref"],
     findingCount: report["findingCount"],
