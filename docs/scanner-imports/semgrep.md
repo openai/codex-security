@@ -73,7 +73,9 @@ path of the project URL.
 Pass the response text directly to the selector to preserve numeric IDs and
 other numeric evidence exactly. Keep the responses and selection together in a
 private directory outside the checkout. Run this example in that directory
-with the SDK installed.
+with the SDK installed. Local preview compares the project URL with Git’s
+configured fetch URLs offline. SSH command overrides and DNS routing are
+controlled by the local Git and SSH clients.
 
 ```js
 import { readFile, writeFile } from "node:fs/promises";

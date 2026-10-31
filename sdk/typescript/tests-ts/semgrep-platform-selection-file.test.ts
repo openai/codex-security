@@ -18,11 +18,18 @@ import { selectSemgrepPlatformFindings } from "../src/semgrep-platform-findings.
 import { semgrepSarif } from "./support/semgrep-import-fixtures.js";
 import { localReportFixture as reportFixture } from "./external-findings-local-helpers.js";
 
-function localReportFixture(remote?: string) {
-  return reportFixture("selected.json", platformSource, {
+async function localReportFixture(remote?: string) {
+  const fixture = await reportFixture("selected.json", platformSource, {
     remote,
     isolatedGit: true,
   });
+  return {
+    ...fixture,
+    git: (...args: string[]) =>
+      execFileSync("git", ["-C", fixture.repository, ...args], {
+        env: fixture.environment,
+      }),
+  };
 }
 
 const url = "https://github.com/example/project";
@@ -82,6 +89,14 @@ const selectedRepository = (
     findingIds: ["8"],
     sourceRepositories,
   });
+
+function normalizedProject(url: string) {
+  return normalizeSemgrepFindings(
+    selectedRepository(url, url),
+    { sourceRepositoryUrl: url },
+    "local",
+  );
+}
 
 test("rechecks decimal native IDs when other evidence uses scientific notation", async () => {
   const findingId = "1000000000000000000001";
@@ -491,9 +506,45 @@ test.skipIf(process.platform === "win32")(
       GIT_EXEC_PATH: alias + "/../git-core",
     });
     // The helpers under the lexically shortened path are not on this Git search path.
+    const bin = join(fixture.root, "bin");
+    await mkdir(bin);
+    const git = execFileSync("sh", ["-c", "command -v git"], {
+      env: fixture.environment,
+      encoding: "utf8",
+    }).trim();
+    await symlink(git, join(bin, "git"));
+    Object.assign(fixture.environment, { PATH: bin });
     await expect(fixture.prepare()).rejects.toThrow("configured remote");
+    const subdir = join(fixture.repository, "nested");
+    await mkdir(subdir);
+    Object.assign(fixture.environment, { GIT_EXEC_PATH: "../git-core" });
+    const nested = await prepareLocalExternalImport(
+      fixture.file,
+      { ...platformSource, repository: subdir },
+      { environment: fixture.environment },
+    );
+    expect(nested.preview.findings).toHaveLength(1);
   },
 );
+
+test("an unlisted legacy origin uses Git's effective default fetch URL", async () => {
+  await using fixture = await localReportFixture();
+  await fixture.writeJson(selectedRepository(url, url));
+  expect((await fixture.prepare()).preview.findings).toHaveLength(1);
+  const remotes = join(fixture.repository, ".git", "remotes");
+  await mkdir(remotes, { recursive: true });
+  const origin = join(remotes, "origin");
+  await writeFile(origin, "URL: " + url + "\n");
+  // Git versions that retain the remotes/ format expose it via ls-remote --get-url.
+  if (
+    fixture.git("ls-remote", "--get-url", "--", "origin").toString().trim() ===
+    "origin"
+  )
+    return;
+  expect((await fixture.prepare()).preview.findings).toHaveLength(1);
+  await writeFile(origin, "URL: https://github.com/wrong/project\n");
+  await expect(fixture.prepare()).rejects.toThrow("configured remote");
+});
 
 test.each([
   ["127.0.0.1", "127.0.0.1", true],
@@ -554,11 +605,7 @@ test("each named Git remote contributes only its active fetch URL", async () => 
     "https://github.com/example/other",
   );
   await fixture.writeJson(selectedRepository(url, url));
-  const git = (...args: string[]) =>
-    execFileSync("git", ["-C", fixture.repository, ...args], {
-      env: fixture.environment,
-    });
-  git(
+  fixture.git(
     "config",
     "--file",
     join(fixture.repository, ".git", "config"),
@@ -567,7 +614,7 @@ test("each named Git remote contributes only its active fetch URL", async () => 
     url,
   );
   await expect(fixture.prepare()).rejects.toThrow("configured remote");
-  git("remote", "add", "second", url);
+  fixture.git("remote", "add", "second", url);
   expect((await fixture.prepare()).preview.findings).toHaveLength(1);
 });
 
@@ -720,6 +767,7 @@ test.each([
   "git@git.example.test:group/project.git",
   "https::https://git.example.test/group/project.git",
   "https::HTTPS://git.example.test/group/project.git",
+  "http::https://git.example.test/group/project.git",
 ])("a trusted private GitLab mapping accepts clone %s", async (checkout) => {
   const web = "https://git.example.test/group/project";
   const clone = web + ".git";
@@ -1003,11 +1051,7 @@ test("every selected native project must have an independent reference when supp
 test("a hosted projected alias uses the same fetch match while a separate generic source still must match", async () => {
   const web = "https://gitlab.com/example/project";
   const native = web + ".git";
-  const report = normalizeSemgrepFindings(
-    selectedRepository(native, native),
-    { sourceRepositoryUrl: native },
-    "local",
-  );
+  const report = normalizedProject(native);
   const row = report.findings[0]!;
   row.evidence.details!.repository!.url = web;
   await using fixture = await localReportFixture(
@@ -1042,17 +1086,11 @@ test("a hosted projected alias uses the same fetch match while a separate generi
       prepareNormalizedLocalImport(report, options, reader),
     ).rejects.toThrow("configured remote");
   }
-  execFileSync(
-    "git",
-    [
-      "-C",
-      fixture.repository,
-      "remote",
-      "add",
-      "second",
-      generic.evidence.details!.repository!.url!,
-    ],
-    { env: fixture.environment },
+  fixture.git(
+    "remote",
+    "add",
+    "second",
+    generic.evidence.details!.repository!.url!,
   );
   expect(
     (await prepareNormalizedLocalImport(report, options, both)).preview
@@ -1099,11 +1137,7 @@ test("ordinary and Platform findings retain a shared GitHub Enterprise reader hi
 
 test("ordinary findings still validate the checkout when their URL equals the selected project's", async () => {
   const native = "https://gitlab.com/example/project";
-  const report = normalizeSemgrepFindings(
-    selectedRepository(native, native),
-    { sourceRepositoryUrl: native },
-    "local",
-  );
+  const report = normalizedProject(native);
   await using fixture = await localReportFixture(
     "ssh://git@altssh.gitlab.com:443/example/project.git",
   );
@@ -1129,11 +1163,7 @@ test("ordinary findings still validate the checkout when their URL equals the se
 test("an ordinary finding without a repository still checks the shared reader source", async () => {
   const native = "https://gitlab.com/example/project";
   const ssh = "ssh://git@altssh.gitlab.com:443/example/project.git";
-  const { findings } = normalizeSemgrepFindings(
-    selectedRepository(native, native),
-    { sourceRepositoryUrl: native },
-    "local",
-  );
+  const { findings } = normalizedProject(native);
   const ordinary = {
     source_finding_id: "ordinary",
     evidence: { title: "Example", severity: "low" as const },
@@ -1154,35 +1184,36 @@ test("an ordinary finding without a repository still checks the shared reader so
   await expect(prepare([...findings, ordinary])).rejects.toThrow(
     "configured remote",
   );
-  execFileSync(
-    "git",
-    ["-C", fixture.repository, "remote", "add", "web", native],
-    {
-      env: fixture.environment,
-    },
-  );
+  fixture.git("remote", "add", "web", native);
   expect(
     (await prepare([...findings, ordinary])).preview.findings,
   ).toHaveLength(2);
+});
+
+function projectedSarif(origin: string, sourceRepositoryUrl: string) {
+  const sarif = semgrepSarif();
+  Object.assign(sarif.runs[0]!, {
+    versionControlProvenance: [{ repositoryUri: origin }],
+  });
+  return normalizeSemgrepFindings(sarif, { sourceRepositoryUrl }, "local")
+    .findings;
+}
+
+const projectedBlackDuck = (url: string) => ({
+  source_finding_id: "blackduck-bom:" + "a".repeat(64),
+  evidence: {
+    title: "Projected finding",
+    severity: "low" as const,
+    source_data: { sourceRepositoryUrl: url },
+  },
 });
 
 test("a projected Black Duck row and a hosted Platform row validate their own reader references", async () => {
   const native = "https://gitlab.com/example/project";
   const ssh = "ssh://git@altssh.gitlab.com:443/example/project.git";
   const projected = "https://git.example.test/example/analysis";
-  const { findings } = normalizeSemgrepFindings(
-    selectedRepository(native, native),
-    { sourceRepositoryUrl: native },
-    "local",
-  );
-  findings.push({
-    source_finding_id: "blackduck-bom:" + "a".repeat(64),
-    evidence: {
-      title: "Projected finding",
-      severity: "low",
-      source_data: { sourceRepositoryUrl: projected },
-    },
-  });
+  const { findings } = normalizedProject(native);
+  findings.push(projectedBlackDuck(projected));
   await using fixture = await localReportFixture(ssh);
   const prepare = (reference: string) =>
     prepareNormalizedLocalImport(
@@ -1194,52 +1225,24 @@ test("a projected Black Duck row and a hosted Platform row validate their own re
       },
     );
   await expect(prepare(projected)).rejects.toThrow("configured remote");
-  execFileSync(
-    "git",
-    ["-C", fixture.repository, "remote", "add", "projected", projected],
-    {
-      env: fixture.environment,
-    },
-  );
+  fixture.git("remote", "add", "projected", projected);
   expect((await prepare(projected)).preview.findings).toHaveLength(2);
   for (const wrong of [
     projected + "-other",
     "deploy@gitlab.com:example/project.git",
   ])
     await expect(prepare(wrong)).rejects.toThrow("Reader repository");
-  execFileSync(
-    "git",
-    ["-C", fixture.repository, "remote", "remove", "origin"],
-    {
-      env: fixture.environment,
-    },
-  );
+  fixture.git("remote", "remove", "origin");
   await expect(prepare(projected)).rejects.toThrow("configured remote");
 });
 
 test("a selected project preserves an ordinary row's shared SARIF provenance", async () => {
   const native = "https://git.example.test/team/Project";
   const projected = native.toLowerCase();
-  const hosted = normalizeSemgrepFindings(
-    selectedRepository(native, native),
-    { sourceRepositoryUrl: native },
-    "local",
-  ).findings;
-  const sarif = semgrepSarif();
-  Object.assign(sarif.runs[0]!, {
-    versionControlProvenance: [{ repositoryUri: native }],
-  });
-  const ordinary = normalizeSemgrepFindings(
-    sarif,
-    { sourceRepositoryUrl: projected },
-    "local",
-  ).findings;
+  const hosted = normalizedProject(native).findings;
+  const ordinary = projectedSarif(native, projected);
   await using fixture = await localReportFixture(projected);
-  const git = (...args: string[]) =>
-    execFileSync("git", ["-C", fixture.repository, ...args], {
-      env: fixture.environment,
-    });
-  git("remote", "add", "platform", "https::" + native);
+  fixture.git("remote", "add", "platform", "https::" + native);
   const prepare = (findings: typeof hosted, url: string) =>
     prepareNormalizedLocalImport(
       { read: findings.length, findings, excluded: [] },
@@ -1256,8 +1259,71 @@ test("a selected project preserves an ordinary row's shared SARIF provenance", a
       "configured remote",
     );
   }
-  git("remote", "set-url", "platform", native);
+  fixture.git("remote", "set-url", "platform", native);
   expect(
     (await prepare([...hosted, ...ordinary], native)).preview.findings,
   ).toHaveLength(2);
+});
+
+test("shared Platform aliases preserve the ordinary Black Duck SSH account check", async () => {
+  const native = "https://github.com/example/project";
+  const { findings } = normalizedProject(native);
+  const projected = projectedBlackDuck(native);
+  await using fixture = await localReportFixture(native);
+  const git = "git@github.com:example/project.git";
+  const deploy = "deploy@github.com:example/project.git";
+  const prepare = (rows: typeof findings, urls: string[]) =>
+    prepareNormalizedLocalImport(
+      { read: rows.length, findings: rows, excluded: [] },
+      { ...platformSource, repository: fixture.repository },
+      {
+        environment: fixture.environment,
+        sourceRepositories: urls.map((url) => ({ url })),
+      },
+    );
+  await expect(prepare([projected], [git, deploy])).rejects.toThrow(
+    "Reader repository",
+  );
+  expect(
+    (await prepare([...findings, projected], [git])).preview.findings,
+  ).toHaveLength(2);
+  await expect(
+    prepare([...findings, projected], [git, deploy]),
+  ).rejects.toThrow("Reader repository");
+});
+
+test("a projected SARIF finding uses its own supplied provenance alongside a separate Platform reference", async () => {
+  const native = "https://gitlab.com/example/project";
+  const original = "https://git.example.test/team/repo";
+  const { findings } = normalizedProject(native);
+  const ordinary = projectedSarif(original, original);
+  delete ordinary[0]!.evidence.details!.repository;
+  await using fixture = await localReportFixture(
+    "ssh://git@altssh.gitlab.com:443/example/project.git",
+  );
+  fixture.git("remote", "add", "ordinary", original);
+  const prepare = (rows: typeof findings, urls: string[]) =>
+    prepareNormalizedLocalImport(
+      { read: rows.length, findings: rows, excluded: [] },
+      { ...platformSource, repository: fixture.repository },
+      {
+        environment: fixture.environment,
+        sourceRepositories: urls.map((url) => ({ url })),
+      },
+    );
+  expect((await prepare(findings, [native])).preview.findings).toHaveLength(1);
+  expect((await prepare(ordinary, [original])).preview.findings).toHaveLength(
+    1,
+  );
+  await expect(prepare([...findings, ...ordinary], [native])).rejects.toThrow(
+    "configured remote",
+  );
+  expect(
+    (await prepare([...findings, ...ordinary], [native, original])).preview
+      .findings,
+  ).toHaveLength(2);
+  fixture.git("remote", "remove", "ordinary");
+  await expect(
+    prepare([...findings, ...ordinary], [native, original]),
+  ).rejects.toThrow("configured remote");
 });

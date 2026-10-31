@@ -318,6 +318,24 @@ export function projectAliases(
   };
 }
 
+/** Older captures could derive a row label from their verified HTTP mapping for an SSH project. */
+export function legacyProjectAliases(
+  name: string,
+  url: string,
+  references: SemgrepRepositoryReference,
+  mapping: string | undefined,
+) {
+  const native = projectAliases(name, url, references, true);
+  const mapped =
+    mapping && mapping !== url
+      ? projectAliases(name, mapping, references, true)
+      : undefined;
+  return {
+    has: (label: string) =>
+      native.has(label) || !!mapped?.hasHistoricalPath(label),
+  };
+}
+
 /** Compare HTTP origins canonically without folding paths on independent custom Git hosts. */
 export function semgrepRepositoryUrlKey(value: string): string {
   return hostedRepositoryUrlKey(nativeHttp(value));
@@ -337,10 +355,10 @@ export function semgrepReferenceMatches(
   url: string,
 ): boolean {
   // A standard explicit Git HTTP(S) helper carries the same fetch URL.
-  const helper = /^(https?)::(?=([a-zA-Z]+):\/\/)/u.exec(url);
+  const helper = /^(?:https?|ftps?)::(?=([a-zA-Z]+):\/\/)/u.exec(url);
   if (helper)
     return (
-      helper[1] === helper[2]!.toLowerCase() &&
+      /^https?$/iu.test(helper[1]!) &&
       hostedRepositoryMatches(source, url.slice(helper[0].length))
     );
   if (hostedRepositoryMatches(source, url)) return true;
@@ -1025,12 +1043,7 @@ export function semgrepPlatformFindingRepository(
 
 function platformLocationPath(value: unknown) {
   const path = relativePath(value);
-  return path &&
-    !path.endsWith("/.") &&
-    !path.includes("://") &&
-    repositoryFilePath(path)
-    ? path
-    : null;
+  return path && !path.endsWith("/.") && repositoryFilePath(path) ? path : null;
 }
 
 function platformSeverity(value: unknown, selectable: boolean) {
@@ -1199,7 +1212,9 @@ export function semgrepPlatformFindingBinding(
   const legacyPath =
     original &&
     namedOnly &&
-    projectAliases(name, url, references, true).has(namedOnly);
+    legacyProjectAliases(name, url, references, scope.sourceRepositoryUrl).has(
+      namedOnly,
+    );
   if (namedOnly && !legacyPath) {
     const witness = parseSemgrepResponse(
       requiredText(raw, "Semgrep repository alias witness"),
@@ -1365,7 +1380,12 @@ export function normalizeSemgrepPlatformFindings(
   if (aliases) {
     // v1 also accepted decodeURI path labels. Keep a witness for their current-format replay.
     const archiveNames = legacy
-      ? projectAliases(scope.project.name, scope.project.url, references, true)
+      ? legacyProjectAliases(
+          scope.project.name,
+          scope.project.url,
+          references,
+          scope.sourceRepositoryUrl,
+        )
       : projectNames;
     for (const { finding } of rows) {
       const name = repositoryWithOnlyAlias(finding, archiveNames);
@@ -1489,7 +1509,7 @@ function normalizePlatformRows(
   target: ExternalImportTarget,
   bulk?: {
     legacy: boolean;
-    projectNames: ReturnType<typeof projectAliases>;
+    projectNames: Pick<ReadonlySet<string>, "has">;
   },
   readId = bulk?.legacy ? semgrepV1Id : semgrepPlatformId,
 ) {

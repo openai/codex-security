@@ -6,7 +6,7 @@ import {
 } from "./hosted-scanner-v1.js";
 import { array, record, requiredText, text } from "./scanner-import.js";
 import {
-  projectAliases,
+  legacyProjectAliases,
   semgrepNativeProjectUrl,
   semgrepProjectUrlEvidence,
   type SemgrepRepositoryReference,
@@ -75,12 +75,12 @@ export function upgradeSemgrepPlatformReport(
   const entries = array(report["findings"], "Semgrep findings");
   let aliases = report["repositoryAliases"];
   if (aliases === undefined) {
-    const derived = projectAliases(name, url, references, true);
-    const mappingUrl = urlEvidence.sourceRepositoryUrl;
-    const historicalMapping =
-      mappingUrl && mappingUrl !== url
-        ? projectAliases(name, mappingUrl, references, true)
-        : undefined;
+    const derived = legacyProjectAliases(
+      name,
+      url,
+      references,
+      urlEvidence.sourceRepositoryUrl,
+    );
     const observed = new Set<string>();
     for (const entry of entries) {
       const row = record(entry, "Semgrep finding");
@@ -94,8 +94,7 @@ export function upgradeSemgrepPlatformReport(
       if (
         repo["id"] == null &&
         (repo["url"] == null || repo["url"] === "") &&
-        !derived.has(label) &&
-        !historicalMapping?.hasHistoricalPath(label)
+        !derived.has(label)
       )
         throw new Error(
           "Semgrep finding repository does not match the selected project.",
