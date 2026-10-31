@@ -783,8 +783,8 @@ test("keeps unrelated valid findings on a page with missing or duplicate source 
 });
 
 test("replaying two native SAST findings across selected and full imports leaves SQLite unchanged", async () => {
-  const ids = ["1000000000000000000000", "1000000000000000000001"];
-  const projectId = "1000000000000000000002";
+  const ids = ["9223372036854775805", "9223372036854775806"];
+  const projectId = "9223372036854775807";
   const projectResponse = `{"project":{"id":${projectId},"name":"${project.name}","url":"${url}"}}`;
   const repositories = [
     JSON.stringify({ url }),
