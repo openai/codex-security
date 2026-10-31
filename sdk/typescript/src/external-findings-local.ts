@@ -689,9 +689,10 @@ export async function prepareLocalImport(
   requireIdentity(options.sourceKey, "Source key");
   const current = structuredClone(input);
   // structuredClone omits inherited or non-enumerable SDK reader properties.
-  if (options.provider === "snyk" || "snykRestContext" in input) {
+  if (!("snykRestContext" in current) && "snykRestContext" in input)
+    current.snykRestContext = structuredClone(input.snykRestContext);
+  if (options.provider === "snyk" || current.snykRestContext !== undefined) {
     for (const key of [
-      "snykRestContext",
       "sourceRepositoryUrl",
       "sourceRepositoryPlatform",
     ] as const)
