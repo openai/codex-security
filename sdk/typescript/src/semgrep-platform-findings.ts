@@ -114,23 +114,36 @@ export function parseSemgrepResponse(json: string): Record<string, unknown> {
 }
 
 function platformId(value: unknown): string | undefined {
-  let id = value;
-  if (wireJson.isRawJSON(value)) {
-    const token = value.rawJSON;
-    // IDs stay in decimal form. Beyond int64, retain digits supplied on the wire without expanding unbounded exponents.
-    id = /^[1-9][0-9]*$/u.test(token)
-      ? token
-      : canonicalNumber(token, Math.max(21, token.length));
-  } else if (typeof value === "number" && Number.isSafeInteger(value)) {
-    id = String(value);
-  }
-  return typeof id === "string" && /^[1-9][0-9]*$/u.test(id) ? id : undefined;
+  if (typeof value === "number")
+    return Number.isSafeInteger(value) && value > 0 ? String(value) : undefined;
+  let token: string;
+  if (wireJson.isRawJSON(value)) token = value.rawJSON;
+  else if (typeof value === "string" && /^[1-9][0-9]*$/u.test(value))
+    token = value;
+  else return undefined;
+  const id = canonicalNumber(token);
+  if (/^[1-9][0-9]*$/u.test(id)) return id;
+  // A large scientific value is an integer only when every significant digit lies left of its decimal point.
+  const scientific = /^[1-9](?:\.(\d+))?e\+(\d+)$/u.exec(id);
+  return scientific && BigInt(scientific[2]!) >= (scientific[1]?.length ?? 0)
+    ? id
+    : undefined;
 }
 
 export function semgrepPlatformId(value: unknown): string {
   const id = platformId(value);
   if (!id) throw new Error("Expected an exact, positive Semgrep Platform ID.");
   return id;
+}
+
+// Older selections retained full decimal ID tokens beyond Semgrep's native int64 range.
+function archivedPlatformId(value: unknown): string {
+  const token = wireJson.isRawJSON(value)
+    ? canonicalNumber(value.rawJSON, Math.max(21, value.rawJSON.length))
+    : value;
+  return typeof token === "string" && /^[1-9][0-9]*$/u.test(token)
+    ? token
+    : semgrepPlatformId(value);
 }
 
 function scopeOf(
@@ -160,6 +173,8 @@ export function semgrepReferenceMatches(
   source: ExternalSourceRepository,
   url: string,
 ): boolean {
+  // A standard explicit Git HTTP(S) helper carries the same fetch URL.
+  url = url.replace(/^(https?)::(?=\1:\/\/)/u, "");
   if (hostedRepositoryMatches(source, url)) return true;
   try {
     // Serialize only a valid repository link. Git checkout URLs retain their original bytes.
@@ -179,20 +194,25 @@ function repositoryContext(
   const projectUrl = http(scope.project.url);
   const source: ExternalSourceRepository = { url: projectUrl };
   const nativeHost = gitServiceHostname(new URL(projectUrl).hostname);
-  if (isGitHubCloudHost(nativeHost)) source.platform = "github";
-  else {
-    for (const { url, platform } of references) {
-      if (
-        !platform ||
-        !semgrepReferenceMatches({ url: projectUrl, platform }, url)
+  const ownPlatformMatches = ({ url, platform }: ExternalSourceRepository) =>
+    platform !== undefined &&
+    semgrepReferenceMatches({ url: projectUrl, platform }, url);
+  const platform = isGitHubCloudHost(nativeHost)
+    ? "github"
+    : references.find(ownPlatformMatches)?.platform;
+  if (platform) {
+    source.platform = platform;
+    if (
+      references.some(
+        (ref) =>
+          ref.platform &&
+          ref.platform !== platform &&
+          (ownPlatformMatches(ref) || semgrepReferenceMatches(source, ref.url)),
       )
-        continue;
-      if (source.platform && source.platform !== platform)
-        throw new Error(
-          "Conflicting SCM platforms for the selected Semgrep repository.",
-        );
-      source.platform = platform;
-    }
+    )
+      throw new Error(
+        "Conflicting SCM platforms for the selected Semgrep repository.",
+      );
   }
   const github = source.platform === "github";
   return {
@@ -223,6 +243,7 @@ function checkRow(
   finding: Record<string, unknown>,
   scope: SemgrepPlatformScope,
   repository: Pick<ReturnType<typeof repositoryContext>, "name" | "key">,
+  capture = false,
 ) {
   semgrepPlatformId(finding["id"]);
   const repo = responseRecord(
@@ -257,13 +278,17 @@ function checkRow(
   );
   const qualifiedName =
     rowName !== null &&
-    originalNames.includes(rowName) &&
-    rowName === relativePath(rowName) &&
-    rowName.includes("/") &&
-    rowName.split("/").every((part) => part.trim() && part !== ".");
+    (capture
+      ? rowName === repository.name(decodeURIComponent(encodedPath)) &&
+        rowName.includes("/")
+      : originalNames.includes(rowName) &&
+        rowName === relativePath(rowName) &&
+        rowName.includes("/") &&
+        rowName.split("/").every((part) => part.trim() && part !== "."));
   if (
     finding["ref"] !== scope.ref ||
-    (repositoryId !== undefined && repositoryId !== scope.project.id) ||
+    (repositoryId !== undefined &&
+      repositoryId !== semgrepPlatformId(wireJson.rawJSON(scope.project.id))) ||
     (repositoryId === undefined && name != null && !matchedName) ||
     (url !== null
       ? repository.key(url) !== repository.key(scope.project.url)
@@ -340,7 +365,7 @@ function selectedRows(
       if (!id || !wanted.has(id)) continue;
       if (selected.has(id))
         throw new Error(`Duplicate selected Semgrep finding ${id}.`);
-      checkRow(finding, scope, repository);
+      checkRow(finding, scope, repository, true);
       selected.set(id, finding);
     }
   }
@@ -367,7 +392,7 @@ export function selectSemgrepPlatformFindings(
   return {
     format: semgrepSelectionFormat,
     ...scope,
-    findings: rows.map((row) => JSON.stringify(row)),
+    findings: rows.map((row) => stringifySemgrepFinding(row)),
   };
 }
 
@@ -396,6 +421,7 @@ export function normalizeSelectedSemgrepPlatformFindings(
 function sourceId(
   scope: SemgrepPlatformScope,
   finding: Record<string, unknown>,
+  idOf = semgrepPlatformId,
 ) {
   // Keep the same tuple for a selected import and a subsequent scoped Platform collection.
   const exact = (id: string) =>
@@ -405,7 +431,7 @@ function sourceId(
     exact(scope.project.id),
     scope.product,
     scope.ref,
-    exact(semgrepPlatformId(finding["id"])),
+    exact(idOf(finding["id"])),
   ]);
 }
 
@@ -414,8 +440,16 @@ function readScope(input: Record<string, unknown>) {
     throw new Error("Select Semgrep Code (SAST) findings.");
   const project = record(input["project"], "Semgrep project");
   // The selector emits decimal strings; ordinary file JSON parsing would round numeric IDs.
-  requiredText(project["id"], "Semgrep selected project ID");
-  return scopeOf(input["deployment"], project, input["ref"]);
+  const id = requiredText(project["id"], "Semgrep selected project ID");
+  const scope = scopeOf(
+    input["deployment"],
+    { ...project, id: wireJson.rawJSON(id) },
+    input["ref"],
+  );
+  if (scope.project.id !== id && !/^[1-9][0-9]*$/u.test(id))
+    throw new Error("Invalid saved Semgrep project ID.");
+  scope.project.id = id;
+  return scope;
 }
 
 const generatedId = /^semgrep-platform:[0-9a-f]{64}$/u;
@@ -448,7 +482,8 @@ export function semgrepSelectionRepository(
   checkRow(row, scope, repository);
   if (
     generatedId.test(finding.source_finding_id) &&
-    finding.source_finding_id !== sourceId(scope, row)
+    finding.source_finding_id !== sourceId(scope, row) &&
+    finding.source_finding_id !== sourceId(scope, row, archivedPlatformId)
   )
     throw new Error(
       "The generated Semgrep finding ID does not match its native occurrence.",
@@ -484,24 +519,30 @@ export function normalizeSemgrepPlatformSelection(
     throw new Error(
       "Semgrep project does not match the declared source repository URL.",
     );
-  const rows = array(input["findings"], "Semgrep selected findings").map(
-    (value) => {
-      const raw = requiredText(value, "Semgrep finding JSON");
-      const finding = parseSemgrepResponse(raw);
-      checkRow(finding, scope, repository);
-      return finding;
-    },
-  );
-  return normalizeSelectionRows(rows, scope, target);
+  const selected = array(input["findings"], "Semgrep selected findings");
+  if (!selected.length)
+    throw new Error(
+      "A saved Semgrep selection must contain at least one finding.",
+    );
+  const rows = selected.map((value) => {
+    const raw = requiredText(value, "Semgrep finding JSON");
+    const finding = parseSemgrepResponse(raw);
+    checkRow(finding, scope, repository);
+    return finding;
+  });
+  return normalizeSelectionRows(rows, scope, target, archivedPlatformId);
 }
 
-function stringifySemgrepFinding(finding: Record<string, unknown>): string {
+function stringifySemgrepFinding(
+  finding: Record<string, unknown>,
+  idOf = semgrepPlatformId,
+): string {
   return JSON.stringify(finding, function (this: unknown, key, value: unknown) {
     if (!wireJson.isRawJSON(value)) return value;
     const nativeId =
       key === "id" && (this === finding || this === finding["repository"]);
     return wireJson.rawJSON(
-      nativeId ? semgrepPlatformId(value) : canonicalNumber(value.rawJSON),
+      nativeId ? idOf(value) : canonicalNumber(value.rawJSON),
     );
   });
 }
@@ -510,6 +551,7 @@ function normalizeSelectionRows(
   rows: Record<string, unknown>[],
   scope: SemgrepPlatformScope,
   target: ExternalImportTarget,
+  idOf = semgrepPlatformId,
 ) {
   return normalizeRecords(
     rows,
@@ -522,20 +564,21 @@ function normalizeSelectionRows(
         finding["location"] ?? {},
         "Semgrep location",
       );
-      const filePath = text(location["file_path"]);
+      const relative = relativePath(location["file_path"]);
+      const filename = relative?.split("/").at(-1);
       const path =
-        filePath &&
-        (/^[a-z][a-z0-9+.-]*:[/\\]/iu.test(filePath) ||
-          filePath.includes("://"))
-          ? null
-          : relativePath(filePath);
+        relative &&
+        filename &&
+        filename !== "." &&
+        !/^[a-z][a-z\d+.-]*:/iu.test(relative) &&
+        !relative.includes("://")
+          ? relative
+          : null;
       const startLine = path ? sourceLine(location["line"]) : null;
       return validateExternalEvidence(
         {
           title:
-            name ??
-            description ??
-            `Semgrep finding ${semgrepPlatformId(finding["id"])}`,
+            name ?? description ?? `Semgrep finding ${idOf(finding["id"])}`,
           description,
           severity: text(finding["severity"])?.toLowerCase() ?? "unknown",
           locations: path ? [{ path, line: startLine }] : [],
@@ -556,13 +599,13 @@ function normalizeSelectionRows(
             format: semgrepSelectionFormat,
             ...scope,
             project: { ...scope.project },
-            semgrepPlatformFindingJson: stringifySemgrepFinding(finding),
+            semgrepPlatformFindingJson: stringifySemgrepFinding(finding, idOf),
           },
         },
         target,
       );
     },
-    (finding) => sourceId(scope, finding),
+    (finding) => sourceId(scope, finding, idOf),
     target,
   );
 }
