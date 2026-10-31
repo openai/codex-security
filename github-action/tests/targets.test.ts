@@ -134,6 +134,20 @@ test('large diffs are nonempty without collecting every changed pathname', async
     assert.equal(target.emptyDiff, false);
   }
 });
+test('a changed submodule commit is nonempty even when Git ignores the submodule', async t => {
+  const f = await fixture(t);
+  await writeFile(join(f.path, '.gitmodules'), '[submodule "lib"]\n\tpath = lib\n\turl = ../lib.git\n\tignore = all\n');
+  await mkdir(join(f.path, 'lib'));
+  f.run('add', '.gitmodules');
+  f.run('update-index', '--add', '--cacheinfo', `160000,${f.base},lib`);
+  f.run('commit', '-m', 'Add submodule');
+  const base = f.run('rev-parse', 'HEAD');
+  f.run('update-index', '--cacheinfo', `160000,${base},lib`);
+  f.run('commit', '-m', 'Update submodule');
+  const event = f.event(f.run('rev-parse', 'HEAD'));
+  event.payload.pull_request.base.sha = base;
+  assert.equal((await resolveTarget(f.inputs(), event)).emptyDiff, false);
+});
 test('empty diff is a verified no-op and schedule has no PR dependency', async t => {
   const f=await fixture(t);
   assert.equal((await resolveTarget(f.inputs(),f.event(f.base))).emptyDiff,true);
@@ -169,7 +183,7 @@ test('wrong checkout, local changes, missing diff base and option revisions are 
 test('forks and privileged events fail eligibility',()=>{
   const event=eventContext();
   event.payload.pull_request.head.repo.full_name='fork/repo'; assert.throws(()=>validateEvent(event),/Fork PR/);
-  for(const eventName of ['pull_request_target','workflow_run']) assert.throws(()=>validateEvent({...event,eventName}),/Unsupported event/);
+  for(const eventName of ['pull_request_target','workflow_run','merge_group']) assert.throws(()=>validateEvent({...event,eventName}),/Unsupported event/);
 });
 test('persisted Git credentials and origin userinfo are refused without revealing secrets',async t=>{
   const f=await fixture(t);

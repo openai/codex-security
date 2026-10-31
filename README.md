@@ -197,7 +197,8 @@ Run scheduled, manual, or pull request scans with the GitHub Action. For a weekl
 repository scan, add an OpenAI API key as the repository secret
 `CODEX_SECURITY_API_KEY`, then save this workflow in
 `.github/workflows/codex-security.yml`. Replace `REPLACE_WITH_REVIEWED_COMMIT`
-with the full SHA of an Action commit.
+with the full SHA of an Action release that includes automatic Ubuntu sandbox setup.
+For older pins, including `action-v0.6.0`, keep the [manual sandbox setup](https://github.com/openai/codex-security/blob/action-v0.6.0/github-action/README.md#ubuntu-sandbox-setup).
 
 This workflow requests Daybreak Blue. Use an API key from a project with Blue
 enabled; without Daybreak access, omit `cyber-access-program` or set it to
@@ -217,12 +218,6 @@ jobs:
   security:
     runs-on: ubuntu-24.04
     steps:
-      # Configure Bubblewrap and AppArmor so Codex Security can run safely in its sandbox.
-      - name: Set up the Ubuntu sandbox
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap apparmor-profiles
-          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -234,6 +229,9 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
 ```
+
+The Action sets up and verifies the sandbox on GitHub-hosted Ubuntu 24.04 VMs.
+Self-hosted runners and job containers must provide a working Codex sandbox.
 
 Findings are report-only by default. Set a severity threshold to fail on reported
 findings at or above it. Scanner and required reporting errors fail the job;
