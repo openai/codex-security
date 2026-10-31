@@ -198,10 +198,10 @@ recover:
   A request staged with the older hosted repository binding holds other
   selections for the same deployment, account, repository, connector, provider
   and source key. For normalized requests with only the original v1 evidence,
-  this applies to the same finding IDs. For normalized SDK input, retain any
-  optional `report` metadata and custom per-finding fields. Older requests can
-  include those fields in the checkpoint filename and omit them from the saved
-  request. When the publisher cannot establish the deployment of an older
+  this applies to selections that overlap a retained native finding ID. For
+  normalized SDK input, retain optional `report` metadata and custom per-finding
+  fields. Older requests can include those fields in the checkpoint filename
+  and omit them from the saved request. When the publisher cannot establish the deployment of an older
   hosted request, resume it on the original deployment with the full input.
   A repository reset retires an identified pending request and requires a
   fresh approval.

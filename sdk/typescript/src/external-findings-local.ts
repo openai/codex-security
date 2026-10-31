@@ -25,6 +25,7 @@ import {
 import {
   cloudRepositoryUrlKey,
   repositoryUrlKey,
+  validateExternalEvidence,
   validateExternalReport,
 } from "./external-import-contract.js";
 import type {
@@ -532,10 +533,14 @@ async function requireMatchingRepository(
     return;
   }
   if (hostedSources.size > 0) {
-    const remotes = await readHostedGitRemotes(
-      repository,
-      gitProtectedRoots,
-      environment,
+    const remotes = await abortable(
+      () =>
+        readHostedGitRemotes(
+          repository,
+          gitProtectedRoots,
+          environment,
+          signal,
+        ),
       signal,
     );
     if (remotes) {
@@ -827,6 +832,7 @@ export async function prepareLocalImport(
     readerSources,
   );
   let hasOrdinaryRows = false;
+  let ordinaryRowNeedsReferences = false;
   for (const finding of current.findings) {
     const semgrep = semgrepPlatformFindingBinding(
       finding,
@@ -838,6 +844,7 @@ export async function prepareLocalImport(
     if (semgrep) {
       addSemgrepSource(semgrep.url);
       if (semgrep.sourceData) finding.evidence.source_data = semgrep.sourceData;
+      if (semgrep.migration) Object.assign(finding.evidence, semgrep.migration);
     } else hasOrdinaryRows = true;
     const { evidence, source_finding_id: id } = finding;
     const url = evidence.details?.repository?.url;
@@ -845,6 +852,8 @@ export async function prepareLocalImport(
     if (url && !semgrep) sources.set(url, { url });
     const retained = bound.get(id);
     const native = nativeSources.get(finding) ?? [];
+    if (!semgrep && !url && !retained && !native.length)
+      ordinaryRowNeedsReferences = true;
     if (retained) {
       const claims = [
         retained.url,
@@ -880,14 +889,20 @@ export async function prepareLocalImport(
     }
     for (const source of native) known.add(source.url);
   }
+  // Match references for native Platform rows using their hosted Git identity.
+  const hosted = Array.from(hostedSources.values());
+  const hostedReferences = new Set(
+    references.filter((ref) =>
+      hosted.some((source) => semgrepReferenceMatches(source, ref.url)),
+    ),
+  );
   if (mixed) {
-    // A caller reference with no matching row spelling can still be a Git alias.
-    const rows = [...sources.keys(), ...hostedSources.keys(), ...known].map(
-      identify,
-    );
+    // Other caller references must identify an ordinary row or one of its Git aliases.
+    const rows = [...sources.keys(), ...known].map(identify);
     const byKey = Map.groupBy(rows, (remote) => remote.key);
     const represented = new Set(rows.map((remote) => JSON.stringify(remote)));
     const aliases = readerSources
+      .filter((ref) => !hostedReferences.has(ref))
       .map(({ url }) => identify(url))
       .filter((remote) => !represented.has(JSON.stringify(remote)));
     for (const [key, group] of Map.groupBy(aliases, (remote) => remote.key)) {
@@ -917,15 +932,11 @@ export async function prepareLocalImport(
         );
     }
   }
-  // Native projects are covered by trusted references independently of ordinary rows.
-  // Keep ordinary references on the generic checkout path, including in mixed reports.
-  const hosted = Array.from(hostedSources.values());
-  const isHostedReference = (ref: ExternalSourceRepository) =>
-    hosted.some((source) => semgrepReferenceMatches(source, ref.url));
   if (
     readerSources.length &&
     hosted.length &&
-    ((!hasOrdinaryRows && !readerSources.every(isHostedReference)) ||
+    ((!hasOrdinaryRows &&
+      !readerSources.every((ref) => hostedReferences.has(ref))) ||
       hosted.some(
         (source) =>
           !readerSources.some((ref) =>
@@ -936,12 +947,9 @@ export async function prepareLocalImport(
     throw new CodexSecurityError(
       "The reader's source repository does not match the selected Semgrep project.",
     );
-  const hostedReferences: ExternalSourceRepository[] = [];
   for (const source of [...(inspector ? [inspector] : []), ...references]) {
-    if (isHostedReference(source)) {
-      hostedReferences.push(source);
-      continue;
-    }
+    // A row without its own repository depends on the reader references for its checkout check.
+    if (!ordinaryRowNeedsReferences && hostedReferences.has(source)) continue;
     // A reader's platform must not loosen an operator-supplied Inspector map.
     if (sources.get(source.url)?.platform !== "github")
       sources.set(
@@ -974,7 +982,11 @@ export async function prepareLocalImport(
     ],
     readerSources,
   );
-  if (!snyk && options.provider === "snyk" && current.sourceRepositoryUrl) {
+  if (snyk) {
+    // Validate the submitted projection while preserving the reader's exact stored fields.
+    for (const { evidence } of current.findings)
+      validateExternalEvidence(structuredClone(evidence), "local");
+  } else if (options.provider === "snyk" && current.sourceRepositoryUrl) {
     const declared = { url: current.sourceRepositoryUrl };
     const native = current.findings.flatMap((finding) =>
       localFindingRepositories("snyk", finding),

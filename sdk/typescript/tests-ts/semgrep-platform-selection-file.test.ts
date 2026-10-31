@@ -110,6 +110,34 @@ test("Semgrep message titles stay intact by default and fall back above 512 Clou
   });
 });
 
+test.each(["", ".0", "e0"])(
+  "an archived selection keeps its original occurrence ID for an integer token with suffix %s",
+  (suffix) => {
+    const finding =
+      '{"id":1000000000000000000001,"ref":"refs/heads/release","repository":{"id":1000000000000000000002,"url":"https://github.com/example/project"}}'.replace(
+        "1000000000000000000001,",
+        "1000000000000000000001" + suffix + ",",
+      );
+    const archived = {
+      ...selectedRepository(url, url),
+      project: { ...project, id: "1000000000000000000002" },
+      findings: [finding],
+    };
+    const row = normalizeSemgrepFindings(
+      archived,
+      { sourceRepositoryUrl: url },
+      "local",
+    ).findings[0]!;
+    expect(row.source_finding_id).toBe(
+      "semgrep-platform:702c8f5d11896dc0316d2cc74426c02af20b6292374c3e08b0cf7e717c6fce4a",
+    );
+    expect(row.evidence.title).toBe("Semgrep finding 1000000000000000000001");
+    expect(row.evidence.source_data![rawFindingKey]).toContain(
+      '"id":1000000000000000000001',
+    );
+  },
+);
+
 test("two selected Platform SAST IDs from separate pages replay unchanged in SQLite", async () => {
   const report = selection([
     page("8"),
@@ -200,6 +228,54 @@ test("a short project name accepts a qualified display name on the same encoded 
   expect(report.findings).toHaveLength(1);
 });
 
+test("a URL-less name must identify the exact project path on a private server", () => {
+  const label = (path: string, name: string) =>
+    selectSemgrepPlatformFindings({
+      deployment: "example",
+      ref,
+      findingIds: ["8"],
+      projectResponse: JSON.stringify({
+        project: {
+          ...project,
+          name: "renamed",
+          url: "https://scm.example.test/" + path,
+        },
+      }),
+      findingsResponses: JSON.stringify({
+        findings: [{ id: 8, ref, repository: { id: project.id, name } }],
+      }),
+    });
+  expect(() => label("team/project.git", "team/project")).toThrow(
+    "project and ref",
+  );
+  expect(label("team/proj%20one", "team/proj one").findings).toHaveLength(1);
+  expect(() => label("team/proj%20one", "team/proj%20one")).toThrow(
+    "project and ref",
+  );
+});
+
+test("contradictory private SCM mappings fail regardless of their order", () => {
+  const web = "https://scm.example.test/team/project";
+  const refs: ExternalSourceRepository[] = [
+    { url: web, platform: "gitlab" },
+    { url: web, platform: "github" },
+  ];
+  for (const alias of [web, web.replace("/team/project", "/Team/Project")]) {
+    refs[0] = { url: alias, platform: "gitlab" };
+    for (const sources of [refs, [...refs].reverse()])
+      expect(() => selectedRepository(web, web, sources)).toThrow(
+        "Conflicting SCM",
+      );
+  }
+});
+
+test("an empty saved selection reports the missing native findings", () => {
+  const empty = { ...selectedRepository(url, url), findings: [] };
+  expect(() =>
+    normalizeSemgrepFindings(empty, { sourceRepositoryUrl: url }, "local"),
+  ).toThrow("at least one");
+});
+
 test("replaying a saved selection requires the original string project ID", async () => {
   const report = selectedRepository(url, url);
   await using fixture = await localReportFixture(url);
@@ -209,6 +285,34 @@ test("replaying a saved selection requires the original string project ID", asyn
   );
   await expect(fixture.prepare()).rejects.toThrow("selected project ID");
 });
+
+test.each(["release", "refs/heads/topic~1"])(
+  "new captures reject %s while the archive replays its literal ref",
+  async (branch) => {
+    const pageWithRef = page("8", { ref: branch });
+    const input = {
+      deployment: "example",
+      ref: branch,
+      projectResponse: JSON.stringify({ project }),
+      findingsResponses: pageWithRef,
+      findingIds: ["8"],
+    };
+    expect(() => selectSemgrepPlatformFindings(input)).toThrow(
+      "fully qualified",
+    );
+    const prior = {
+      ...selectedRepository(url, url),
+      ref: branch,
+      findings: [JSON.stringify(JSON.parse(pageWithRef).findings[0])],
+    };
+    await using fixture = await localReportFixture(url);
+    await fixture.writeJson(prior);
+    const first = await fixture.prepare();
+    expect(first.preview.findings[0]?.evidence.branch).toBe(branch);
+    expect((await first.import()).counts.created).toBe(1);
+    expect((await (await fixture.prepare()).import()).counts.unchanged).toBe(1);
+  },
+);
 
 test("selection requires exact IDs from the selected source and ref", () => {
   const [first, second] = ids as [string, string];
@@ -277,6 +381,9 @@ test.each([
   ["github.com", "https::HTTPS://github.com/example/project", true],
   ["github.com", "https://a@b@github.com/example/project", false],
   ["github.com", "https://a%40b@github.com/example/project", true],
+  ["github.com", "https://reader%0A@github.com/example/project", false],
+  ["github.com", "https://a:b%0a@github.com/example/project", false],
+  ["github.com", "https://a%00b@github.com/example/project", false],
   ["git.example.test", "https://git.example.test/example/project.git", false],
   ["git.example.test", "ssh://git@git.example.test/example/project", false],
   ["git.example.test", "ssh://git@git.example.test:443/example/project", false],
@@ -368,6 +475,7 @@ test.each([url, undefined])(
       GIT_CONFIG_COUNT: "1",
       GIT_CONFIG_KEY_0: "remote.backup.vcs",
       GIT_TRACE: "1",
+      GIT_TRACE_PERFORMANCE: "1",
       GIT_CONFIG_VALUE_0: "example",
     });
     if (origin)
@@ -521,11 +629,36 @@ test("a file and its projected SDK rows use the same declared GitHub repository 
   }
 });
 
-test("only a trusted GitLab mapping permits the HTTPS clone suffix on a private host", async () => {
+test("a trusted private GitLab SSH remote uses the DNS host actually passed to OpenSSH", async () => {
+  const web = "https://bücher.example/group/project";
+  const hint = { url: web, platform: "gitlab" as const };
+  const report = selectedRepository(web, web, [hint]);
+  for (const host of ["xn--bcher-kva.example", "bücher.example"]) {
+    await using fixture = await localReportFixture(
+      `git@${host}:group/project.git`,
+    );
+    await fixture.writeJson(report);
+    const prepare = () =>
+      prepareLocalExternalImport(
+        fixture.file,
+        { ...platformSource, repository: fixture.repository },
+        { environment: fixture.environment, sourceRepositories: [hint] },
+      );
+    if (host.startsWith("xn--"))
+      expect((await prepare()).preview.findings).toHaveLength(1);
+    else await expect(prepare()).rejects.toThrow("configured remote");
+  }
+});
+
+test.each([
+  "https://git.example.test/group/project.git",
+  "git@git.example.test:group/project.git",
+  "https::https://git.example.test/group/project.git",
+])("a trusted private GitLab mapping accepts clone %s", async (checkout) => {
   const web = "https://git.example.test/group/project";
   const clone = web + ".git";
-  const source = { url: web, platform: "gitlab" as const };
-  await using fixture = await localReportFixture(clone);
+  const source = { url: checkout, platform: "gitlab" as const };
+  await using fixture = await localReportFixture(checkout);
   await fixture.writeJson(selectedRepository(web, clone, [source]));
   const options = { ...platformSource, repository: fixture.repository };
   const deps = {
@@ -905,4 +1038,95 @@ test("ordinary findings still validate the checkout when their URL equals the se
   await expect(
     prepareNormalizedLocalImport(report, options, deps),
   ).rejects.toThrow("configured remote");
+});
+
+test("an ordinary finding without a repository still checks the shared reader source", async () => {
+  const native = "https://gitlab.com/example/project";
+  const ssh = "ssh://git@altssh.gitlab.com:443/example/project.git";
+  const { findings } = normalizeSemgrepFindings(
+    selectedRepository(native, native),
+    { sourceRepositoryUrl: native },
+    "local",
+  );
+  const ordinary = {
+    source_finding_id: "ordinary",
+    evidence: { title: "Example", severity: "low" as const },
+  };
+  await using fixture = await localReportFixture(ssh);
+  const options = { ...platformSource, repository: fixture.repository };
+  const prepare = (rows: typeof findings) =>
+    prepareNormalizedLocalImport(
+      { read: rows.length, findings: rows, excluded: [] },
+      options,
+      {
+        environment: fixture.environment,
+        sourceRepositories: [{ url: native }],
+      },
+    );
+  expect((await prepare(findings)).preview.findings).toHaveLength(1);
+  await expect(prepare([ordinary])).rejects.toThrow("configured remote");
+  await expect(prepare([...findings, ordinary])).rejects.toThrow(
+    "configured remote",
+  );
+  execFileSync(
+    "git",
+    ["-C", fixture.repository, "remote", "add", "web", native],
+    {
+      env: fixture.environment,
+    },
+  );
+  expect(
+    (await prepare([...findings, ordinary])).preview.findings,
+  ).toHaveLength(2);
+});
+
+test("a projected Black Duck row and a hosted Platform row validate their own reader references", async () => {
+  const native = "https://gitlab.com/example/project";
+  const ssh = "ssh://git@altssh.gitlab.com:443/example/project.git";
+  const projected = "https://git.example.test/example/analysis";
+  const { findings } = normalizeSemgrepFindings(
+    selectedRepository(native, native),
+    { sourceRepositoryUrl: native },
+    "local",
+  );
+  findings.push({
+    source_finding_id: "blackduck-bom:" + "a".repeat(64),
+    evidence: {
+      title: "Projected finding",
+      severity: "low",
+      source_data: { sourceRepositoryUrl: projected },
+    },
+  });
+  await using fixture = await localReportFixture(ssh);
+  const prepare = (reference: string) =>
+    prepareNormalizedLocalImport(
+      { read: findings.length, findings, excluded: [] },
+      { ...platformSource, repository: fixture.repository },
+      {
+        environment: fixture.environment,
+        sourceRepositories: [{ url: ssh }, { url: reference }],
+      },
+    );
+  await expect(prepare(projected)).rejects.toThrow("configured remote");
+  execFileSync(
+    "git",
+    ["-C", fixture.repository, "remote", "add", "projected", projected],
+    {
+      env: fixture.environment,
+    },
+  );
+  expect((await prepare(projected)).preview.findings).toHaveLength(2);
+  for (const wrong of [
+    projected + "-other",
+    "deploy@gitlab.com:example/project.git",
+  ])
+    await expect(prepare(wrong)).rejects.toThrow("Reader repository");
+  execFileSync(
+    "git",
+    ["-C", fixture.repository, "remote", "remove", "origin"],
+    {
+      env: fixture.environment,
+    },
+  );
+  await expect(prepare(projected)).rejects.toThrow("configured remote");
 });

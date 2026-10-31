@@ -54,6 +54,7 @@ import {
 import {
   isSemgrepPlatformEvidence,
   isSemgrepPlatformFormat,
+  parseSemgrepResponse,
   semgrepLegacyRepositoryWitnesses,
   semgrepNativeProjectUrl,
   semgrepPlatformFindingBinding,
@@ -597,10 +598,24 @@ function hostedRepositoryMatcher(
     // Released SDKs could save partial native records. Retain any source still
     // identifiable on that row while validating complete siblings under the new mapping.
     if (!data || !isSemgrepPlatformEvidence(finding, provider)) continue;
-    const native = isRecord(project)
-      ? semgrepNativeProjectUrl(project["url"], references)
-      : undefined;
-    for (const url of [native, data["sourceRepositoryUrl"]]) {
+    const rows = [data["finding"]];
+    const raw = data["semgrepPlatformFindingJson"];
+    if (typeof raw === "string") {
+      try {
+        rows.push(parseSemgrepResponse(raw));
+      } catch {
+        // An unreadable historical row contributes no URL. Check the remaining claims.
+      }
+    }
+    const nativeUrls = [isRecord(project) ? project["url"] : undefined];
+    for (const row of rows) {
+      const repository = isRecord(row) ? row["repository"] : undefined;
+      if (isRecord(repository)) nativeUrls.push(repository["url"]);
+    }
+    const urls = nativeUrls.map((url) =>
+      semgrepNativeProjectUrl(url, references),
+    );
+    for (const url of [...urls, data["sourceRepositoryUrl"]]) {
       if (typeof url !== "string") continue;
       original ??= url;
       claims.add(url);
@@ -639,6 +654,14 @@ function hostedRepositoryMatcher(
   const matches = (url: string) => cloudSourceKey(url, platform) === expected;
   if (declared !== undefined) claims.add(declared);
   if (declaredUrl !== undefined) claims.add(declaredUrl);
+  for (const reader of readerSources)
+    claims.add(
+      normalizeHostedGitRepositoryUrl(
+        reader.url,
+        source,
+        reader.platform !== undefined,
+      ),
+    );
   for (const url of claims)
     if (!matches(hostedRepositoryUrl(url, "Semgrep source repository")))
       throw new CodexSecurityError(
@@ -739,17 +762,17 @@ function publicationIdentity(input: ExternalFindings) {
 // A v1 SDK retained native rows as objects; the file reader preserves them as
 // lossless JSON. Only change the current projection, so an approved old request
 // can still be recovered under its original evidence digest.
-function canonicalSemgrepPublication(
+function* semgrepPublicationProjections(
   input: ResolvedPublicationInput,
   destination: ImportRepository,
   readerSources: readonly ExternalSourceRepository[],
-): ResolvedPublicationInput {
+): Generator<ResolvedPublicationInput> {
   const current: ExternalFindings & Partial<SnykIssuesFindings> = input.current;
   const originalRow = (finding: ExternalFindings["findings"][number]) =>
     isRecord(finding.evidence.source_data?.["finding"]) &&
     isSemgrepPlatformEvidence(finding, "semgrep");
   const first = current.findings.find(originalRow);
-  if (!first) return input;
+  if (!first) return;
   const reportScope = semgrepPlatformReportScope(current);
   const retained = first.evidence.source_data;
   const project = retained?.["project"];
@@ -788,13 +811,14 @@ function canonicalSemgrepPublication(
               ...finding,
               evidence: {
                 ...finding.evidence,
+                ...binding.migration,
                 source_data: binding.sourceData,
               },
             }
           : finding;
       });
       const upgraded = { ...current, findings };
-      return {
+      yield {
         ...input,
         current: upgraded,
         currentIdentity: publicationIdentity(upgraded),
@@ -804,7 +828,7 @@ function canonicalSemgrepPublication(
       // identity as a fallback so its exact saved request remains recoverable.
     }
   }
-  return input;
+  yield input;
 }
 
 function requireFindings(
@@ -948,28 +972,35 @@ async function preparePublicationInput(
   ];
   const keyFor = (identity: unknown) =>
     hash("sha256", canonicalJson([...checkpointIdentity, identity]));
-  const canonical =
-    options.provider === "semgrep"
-      ? canonicalSemgrepPublication(resolved, destination, readerSources)
-      : resolved;
-  const canonicalKey = keyFor(canonical.currentIdentity);
-  const originalKey =
-    canonical === resolved ? canonicalKey : keyFor(resolved.currentIdentity);
-  // Keep an earlier SDK's immutable request at its original key. Moving it during a
-  // preview destroys the source witness used to recognize reordered same-ID retries.
-  const capturedOriginal =
-    originalKey !== canonicalKey &&
-    (await readOptionalFile(join(state, canonicalKey + ".pending.json"))) ===
-      undefined
-      ? await readOptionalFile(join(state, originalKey + ".pending.json"))
-      : undefined;
+  let projection = resolved;
+  let capturedPending: string | undefined;
+  const projectionKeys = new Set<string>();
+  if (options.provider === "semgrep") {
+    for (const candidate of semgrepPublicationProjections(
+      resolved,
+      destination,
+      readerSources,
+    )) {
+      const candidateKey = keyFor(candidate.currentIdentity);
+      if (projectionKeys.has(candidateKey)) continue;
+      // Keep the catalog projection for new imports. A pending key identifies the
+      // projection made before a rename, or an SDK's unmodified original request.
+      capturedPending = await readOptionalFile(
+        join(state, candidateKey + ".pending.json"),
+      );
+      if (!projectionKeys.size || capturedPending !== undefined)
+        projection = candidate;
+      projectionKeys.add(candidateKey);
+      if (capturedPending !== undefined) break;
+    }
+  }
   const {
     current: parsed,
     legacy: legacyParsed,
     currentIdentity,
     legacyIdentity,
     recheckFileRepository,
-  } = capturedOriginal === undefined ? canonical : resolved;
+  } = projection;
   const inputDigest = hash("sha256", canonicalJson(currentIdentity));
   const legacyInputDigest = hash("sha256", canonicalJson(legacyIdentity));
   const originalHostedRetry =
@@ -985,7 +1016,8 @@ async function preparePublicationInput(
       (options.provider !== "semgrep" && options.provider !== "snyk") ||
       content.accountId !== credentials.account_id ||
       (content.approvedRepositoryUrl !== undefined &&
-        !projection?.retainedHostedSelection) ||
+        !projection?.retainedHostedSelection &&
+        options.provider !== "semgrep") ||
       !projection ||
       !content.requests?.length ||
       !content.requests.every(
@@ -1033,6 +1065,50 @@ async function preparePublicationInput(
       identities.unshift(legacyIdentity);
     const identity = identities.find((value) => filenameKey === keyFor(value));
     const digest = (value: unknown) => hash("sha256", canonicalJson(value));
+    if (content.approvedRepositoryUrl && !projection.retainedHostedSelection) {
+      // The earlier Cloud writer could store Windows locations or severity differently.
+      // Finish its approved request before updating an overlapping native occurrence.
+      if (!identity || projection.inputDigest !== digest(identity))
+        return false;
+      const url = content.approvedRepositoryUrl;
+      const references = hostedSourceReferences(
+        readerSources,
+        url,
+        content.approvedRepositoryPlatform,
+      );
+      const { platform } = semgrepPlatformRepositoryReference(url, references);
+      const nativeIds = (rows: typeof findings, previous: boolean) =>
+        rows.flatMap((row) => {
+          if (
+            typeof row.evidence.source_data?.["semgrepPlatformFindingJson"] !==
+            "string"
+          )
+            return [];
+          const binding = semgrepPlatformFindingBinding(
+            row,
+            "semgrep",
+            references,
+            undefined,
+            undefined,
+            "cloud",
+            previous,
+          );
+          return binding &&
+            (!previous ||
+              binding.migration?.severity !== undefined ||
+              !!binding.migration?.locations?.length) &&
+            cloudSourceKey(binding.url, platform) ===
+              cloudSourceKey(url, platform)
+            ? [binding.nativeId]
+            : [];
+        });
+      const previous = new Set(nativeIds(findings, true));
+      return (
+        previous.size > 0 &&
+        nativeIds(parsed.findings, false).some((id) => previous.has(id)) &&
+        "verified"
+      );
+    }
     if (identity && projection.inputDigest !== digest(identity))
       return "verified";
 
@@ -1041,26 +1117,32 @@ async function preparePublicationInput(
     );
     const sameIds =
       findings.length === selected.size &&
-      findings.every((row) => selected.delete(row.source_finding_id));
+      findings.every((row) => selected.has(row.source_finding_id));
     const semgrep = options.provider === "semgrep";
-    const native = findings.some(({ evidence }) => {
+    const native = findings.some(({ source_finding_id, evidence }) => {
       const data = evidence.source_data;
       if (!data || !isRecord(data[semgrep ? "finding" : "issue"])) return false;
       const expected = semgrep
         ? "semgrep-platform-findings/v1"
         : "snyk-rest-issues/v1";
-      if (data["format"] !== undefined && data["format"] !== expected)
-        return false;
-      if (identity && data["format"] === expected) return true;
+      const tagged = data["format"] === expected;
+      if (identity && tagged && sameIds) return true;
+      // A verified earlier source can hold a whole batch. For other old SDK
+      // projections the overlapping occurrence itself must retain native evidence.
       if (
-        !isRecord(data["project"]) ||
-        (!identity && !sameIds && data["format"] !== expected)
+        !selected.has(source_finding_id) &&
+        (identity || !tagged || !isRecord(data["project"]))
       )
         return false;
-      // Prove the actual native shape independently of a format label or a caller ID.
+      const { project, finding, deployment, ref, product, issue } = data;
       const evidenceOnly = {
         source_finding_id: "",
-        evidence: { ...evidence, source_data: { ...data, format: undefined } },
+        evidence: {
+          ...evidence,
+          source_data: semgrep
+            ? { project, finding, deployment, ref, product }
+            : { issue },
+        },
       };
       return semgrep
         ? isSemgrepPlatformEvidence(evidenceOnly, "semgrep")
@@ -1076,9 +1158,8 @@ async function preparePublicationInput(
         const data = evidence.source_data;
         const project = data?.["project"];
         const retained =
-          semgrep && isRecord(project)
-            ? project["url"]
-            : data?.["sourceRepositoryUrl"];
+          (semgrep && isRecord(project) ? project["url"] : undefined) ??
+          data?.["sourceRepositoryUrl"];
         if (typeof retained === "string") repositories.add(retained);
       }
       const paths = semgrep ? [null, true] : [false, true];
@@ -1100,8 +1181,7 @@ async function preparePublicationInput(
       }
       return "unidentified";
     }
-    // The released normalized SDK can also retain native rows. Hold only its same IDs.
-    return sameIds && "verified";
+    return "verified";
   }
   function wasReset(content: SavedSubmission) {
     return content.requests.some(
@@ -1171,7 +1251,7 @@ async function preparePublicationInput(
     }
     return content;
   }
-  const key = capturedOriginal === undefined ? canonicalKey : originalKey;
+  const key = keyFor(currentIdentity);
   const pendingPath = join(state, `${key}.pending.json`);
   const historicalKey = hash(
     "sha256",
@@ -1294,7 +1374,7 @@ async function preparePublicationInput(
       );
     }
   }
-  const serialized = (await readOptionalFile(pendingPath)) ?? capturedOriginal;
+  const serialized = (await readOptionalFile(pendingPath)) ?? capturedPending;
   const saved =
     serialized === undefined ? recovered : validateSaved(serialized);
   if (!saved) await rejectUnidentifiedLegacyCheckpoint();
@@ -1700,15 +1780,17 @@ async function preparePublicationInput(
         // Re-read under the lock to keep checkpoints from another publisher.
         const pending = await readOptionalFile(pendingPath);
         if (pending === undefined && !saved) {
-          if (
-            originalKey !== key &&
-            (await readOptionalFile(
-              join(state, originalKey + ".pending.json"),
-            )) !== undefined
-          )
-            throw new CodexSecurityError(
-              "Another publication prepared this input. Run the command again to review and resume that saved request.",
-            );
+          for (const otherKey of projectionKeys) {
+            if (
+              otherKey !== key &&
+              (await readOptionalFile(
+                join(state, otherKey + ".pending.json"),
+              )) !== undefined
+            )
+              throw new CodexSecurityError(
+                "Another publication prepared this input. Run the command again to review and resume that saved request.",
+              );
+          }
           await rejectUnidentifiedLegacyCheckpoint();
         }
         const current =

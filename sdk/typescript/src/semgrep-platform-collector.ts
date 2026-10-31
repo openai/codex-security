@@ -16,8 +16,10 @@ import {
   semgrepPlatformFormat,
   selectionRepository,
   semgrepNativeProjectUrl,
+  semgrepProjectUrlEvidence,
   semgrepPlatformId,
   semgrepPlatformIdOrUndefined,
+  stringifySemgrepFinding,
   SEMGREP_PLATFORM_PRODUCTS,
   type SemgrepPlatformProduct,
   type SemgrepPlatformScope,
@@ -38,7 +40,9 @@ export interface SemgrepPlatformOptions {
 }
 
 export interface SemgrepPlatformReport extends SemgrepPlatformScope {
-  /** Set when the project lookup omitted its URL and the caller supplied the binding. */
+  /** The original transport address when the provider supplied an SSH repository. */
+  nativeProjectUrl?: string;
+  /** The operator's binding when the native URL is missing or uses SSH. */
   sourceRepositoryUrl?: string;
   format: typeof semgrepPlatformFormat;
   findingCount: number;
@@ -144,7 +148,12 @@ export async function collectSemgrepPlatformFindings(
       )
         witnessed.add(label);
       const raw = JSON.stringify(finding);
-      return { key: semgrepPlatformIdOrUndefined(finding["id"]) ?? raw, raw };
+      return {
+        key:
+          semgrepPlatformIdOrUndefined(finding["id"]) ??
+          stringifySemgrepFinding(finding),
+        raw,
+      };
     });
   }
 
@@ -181,7 +190,7 @@ export async function collectSemgrepPlatformFindings(
   return {
     format: semgrepPlatformFormat,
     ...scope,
-    ...(nativeUrl === undefined && { sourceRepositoryUrl: url }),
+    ...semgrepProjectUrlEvidence(native["url"], nativeUrl, sourceRepositoryUrl),
     repositoryAliases: [...observed].sort(),
     findingCount: findings.length,
     findings,
