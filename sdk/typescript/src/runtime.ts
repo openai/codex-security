@@ -83,9 +83,7 @@ import {
 } from "./trusted-executable.js";
 import {
   isWindowsUnsafePathComponent,
-  WINDOWS_NAMESPACED_UNC_ROOT,
   windowsUnsafePathComponent,
-  windowsVolumeRoot,
 } from "./windows-path.js";
 
 const execFile = promisify(execFileCallback);
@@ -799,8 +797,13 @@ export async function streamWindowsCredentialAclDescriptors(
   }
 }
 
+// win32.parse stops at the UNC marker for extended-length share paths.
+const WINDOWS_CREDENTIAL_UNC_ROOT =
+  /^[\\/]{2}[?.][\\/]UNC[\\/][^\\/]+[\\/][^\\/]+[\\/]?/iu;
+
 function windowsCredentialRootLength(path: string): number {
-  const root = windowsVolumeRoot(path);
+  const root =
+    WINDOWS_CREDENTIAL_UNC_ROOT.exec(path)?.[0] ?? win32.parse(path).root;
   if (win32.isAbsolute(path) && win32.relative(root, path) === "") {
     throw new Error(
       "A private Windows directory must be below a volume or share root",
@@ -895,7 +898,7 @@ export async function inspectWindowsCredentialAclSnapshot(
               let guidance =
                 "Choose a location outside this ancestor with trusted ownership and permissions.";
               if (index === 0) {
-                guidance = WINDOWS_NAMESPACED_UNC_ROOT.test(
+                guidance = WINDOWS_CREDENTIAL_UNC_ROOT.test(
                   win32.toNamespacedPath(ancestorPath),
                 )
                   ? "This share root is unsupported. Choose a location outside this share with trusted ownership and permissions."
