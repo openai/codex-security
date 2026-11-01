@@ -56,6 +56,7 @@ interface ActivityTestCase<
   expected: Partial<ScanActivity>;
   platform?: NodeJS.Platform;
   repository?: string;
+  shell?: string;
 }
 
 function commandActivityCase({
@@ -63,6 +64,7 @@ function commandActivityCase({
   expected,
   platform = process.platform,
   repository = "/code/project",
+  shell,
 }: ActivityTestCase) {
   const originalPlatform = Object.getOwnPropertyDescriptor(
     process,
@@ -71,14 +73,31 @@ function commandActivityCase({
   try {
     Object.defineProperty(process, "platform", { value: platform });
     for (const activity of [
-      scanActivityFromEvent(commandEvent("item.started", command), repository),
-      scanActivityFromEvent(toolEvent("exec", { cmd: command }), repository),
+      scanActivityFromEvent(
+        {
+          type: "item.started",
+          item: { id: "command-1", type: "command_execution", command, shell },
+        },
+        repository,
+      ),
+      scanActivityFromEvent(
+        toolEvent("exec", { cmd: command, shell }),
+        repository,
+      ),
       scanActivityFromSessionEvent(
         sessionEvent({
           type: "function_call",
           name: "exec_command",
           call_id: "worker-command-1",
-          arguments: JSON.stringify({ cmd: command }),
+          arguments: JSON.stringify({ cmd: command, shell }),
+        }),
+        repository,
+      ),
+      scanActivityFromSessionEvent(
+        sessionEvent({
+          type: "local_shell_call",
+          call_id: "local-shell-1",
+          action: { type: "exec", command, shell },
         }),
         repository,
       ),
@@ -173,7 +192,7 @@ describe("scan activity", () => {
     }
   });
 
-  test("removes shell launchers around commands with mixed nested quotes", () => {
+  test("keeps ambiguous mixed quoting unresolved", () => {
     const command =
       `/bin/zsh -c "rg -n '(router\\.|app\\.(get|post))' ` +
       `"$CODEX_SECURITY_REPOSITORY/server/src" | head -500'`;
@@ -183,10 +202,8 @@ describe("scan activity", () => {
         "/code/juice-shop",
       ),
     ).toMatchObject({
-      description:
-        `rg -n '(router\\.|app\\.(get|post))' ` +
-        `"$CODEX_SECURITY_REPOSITORY/server/src" | head -500'`,
-      paths: ["server/src"],
+      description: command,
+      paths: [],
     });
   });
 
@@ -202,8 +219,8 @@ describe("scan activity", () => {
     ]) {
       const command = `${launcher} -Command '${script}'`;
       const expected = {
-        description: process.platform === "win32" ? script : command,
-        paths: process.platform === "win32" ? ["example.txt"] : [],
+        description: script,
+        paths: ["example.txt"],
       };
       for (const type of ["item.started", "item.completed"] as const) {
         expect(
@@ -239,7 +256,7 @@ describe("scan activity", () => {
           "C:\\code\\project",
         ),
       ).toMatchObject({
-        description: process.platform === "win32" ? script : command,
+        description: script,
         paths: [],
       });
     }
@@ -331,7 +348,7 @@ describe("scan activity", () => {
       name: "does not decode escaped whitespace inside quoted POSIX paths",
       command: String.raw`cat '/code/project/src/my\ file.ts' "/code/project/src/other\ file.ts"`,
       repository: "/code/project",
-      expected: { paths: ["src/my/ file.ts", "src/other/ file.ts"] },
+      expected: { paths: ["src/my\\ file.ts", "src/other\\ file.ts"] },
       platform: "linux",
     },
     {
@@ -369,6 +386,134 @@ describe("scan activity", () => {
       expected: { paths: ["src/my file.ts"] },
       platform: "win32",
     },
+    {
+      name: "review regression explicit PowerShell metadata on Linux",
+      command: String.raw`Get-ChildItem /code/project/src\ -File`,
+      shell: "/usr/bin/pwsh",
+      platform: "linux",
+      expected: { paths: ["src"] },
+    },
+    {
+      name: "review regression POSIX launcher with separate flags",
+      command: "/bin/sh -e -c 'cat /code/project/app.ts'",
+      platform: "linux",
+      expected: { paths: ["app.ts"] },
+    },
+    {
+      name: "review regression Bash launcher with long options",
+      command: "/bin/bash --noprofile --norc -c 'cat /code/project/app.ts'",
+      platform: "linux",
+      expected: { paths: ["app.ts"] },
+    },
+    {
+      name: "review regression PowerShell Command consumes remaining text",
+      command: String.raw`pwsh -NoProfile -Command Get-Content -LiteralPath C:\code\project\app.ts`,
+      repository: String.raw`C:\code\project`,
+      platform: "win32",
+      expected: { paths: ["app.ts"] },
+    },
+    {
+      name: "review regression POSIX positional operands remain attributable",
+      command: `sh -c 'wc -c < "$1"' sh /repo/one.ts`,
+      repository: "/repo",
+      platform: "linux",
+      expected: { paths: ["one.ts"] },
+    },
+    {
+      name: "review regression Bash c double dash precedes script",
+      command: "bash -c -- 'cat /repo/one.ts'",
+      repository: "/repo",
+      platform: "linux",
+      expected: { paths: ["one.ts"] },
+    },
+    {
+      name: "review regression literal backslash cannot turn sibling into repository file",
+      command: String.raw`cat /code/repo\ files\\sibling.txt`,
+      repository: "/code/repo files",
+      platform: "linux",
+      expected: { paths: [] },
+    },
+    {
+      name: "review regression literal backslash remains part of POSIX filename",
+      command: String.raw`cat /code/project/a\\b.ts`,
+      platform: "linux",
+      expected: { paths: [String.raw`a\b.ts`] },
+    },
+    {
+      name: "review regression mixed quoting joins one repository path",
+      command: String.raw`cat /code/repo\ files/src/"login page.ts"`,
+      repository: "/code/repo files",
+      platform: "linux",
+      expected: { paths: ["src/login page.ts"] },
+    },
+    {
+      name: "review regression escaped leading filename space survives",
+      command: String.raw`cat /code/project/\ leading.ts`,
+      platform: "linux",
+      expected: { paths: [" leading.ts"] },
+    },
+    {
+      name: "review regression escaped final filename space survives",
+      command: "cat /code/project/trailing.ts\\ ",
+      platform: "linux",
+      expected: { paths: ["trailing.ts "] },
+    },
+    {
+      name: "review regression escaped boundary spaces survive inside script",
+      command: "/bin/sh -c 'cat /code/project/\\ both.ts\\ '",
+      platform: "linux",
+      expected: { paths: [" both.ts "] },
+    },
+    {
+      name: "review regression explicit POSIX metadata overrides Windows host",
+      command: String.raw`cat /code/project/my\ file.ts`,
+      shell: "/bin/sh",
+      platform: "win32",
+      expected: { paths: ["my file.ts"] },
+    },
+    {
+      name: "review regression unmatched quoting does not invent truncated path",
+      command: 'cat /code/project/"unfinished name.ts',
+      platform: "linux",
+      expected: { paths: [] },
+    },
+    {
+      name: "review regression shell script filename remains attributable",
+      command: "sh /code/project/script.sh",
+      platform: "linux",
+      expected: { paths: ["script.sh"] },
+    },
+    {
+      name: "review regression shell double dash retains script filename",
+      command: "bash -- /code/project/script.sh",
+      platform: "linux",
+      expected: { paths: ["script.sh"] },
+    },
+    {
+      name: "review regression later expansion retains resolved earlier paths",
+      command: 'cat /code/project/app.ts; echo "$(date)"',
+      platform: "linux",
+      expected: { paths: ["app.ts"] },
+    },
+    {
+      name: "review regression unknown shell cannot decode path fragments",
+      command: String.raw`cat /code/project/my\ file.ts`,
+      shell: "/bin/fish",
+      expected: { paths: [] },
+    },
+    {
+      name: "review regression POSIX backslash stays literal with Windows drive prefix",
+      command: String.raw`cat C:/repo\\sibling.txt`,
+      repository: "C:/repo",
+      shell: "/bin/sh",
+      expected: { paths: [] },
+    },
+    {
+      name: "review regression comment paths stay unresolved",
+      command: "echo ok # /code/project/comment.ts\ncat /code/project/app.ts",
+      platform: "linux",
+      expected: { paths: ["app.ts"] },
+    },
   ])("$name", commandActivityCase);
 
   test.each(["  ", "\u00a0"])(
@@ -401,8 +546,7 @@ describe("scan activity", () => {
           ),
         ]) {
           expect(activity).toMatchObject({
-            description:
-              'cat "/code/scan project/src/a b.ts" "$CODEX_SECURITY_REPOSITORY/src/a b.ts"',
+            description: script,
             paths: [`src/a${whitespace}b.ts`, "src/a b.ts"],
           });
         }
@@ -480,11 +624,12 @@ describe("scan activity", () => {
       expected: { paths: [] },
     },
     {
-      name: "cleans escaped quotes from real wrapped scan commands",
+      name: "leaves ambiguous POSIX escaped-quote commands unresolved",
+      shell: "/bin/sh",
       command:
         'nl -ba "$CODEX_SECURITY_REPOSITORY/commands.py\\" printf "next" "$CODEX_SECURITY_REPOSITORY/server.py\\"',
       repository: "/code/juice-shop",
-      expected: { paths: ["commands.py", "server.py"] },
+      expected: { paths: [] },
     },
     {
       name: "never reports paths escaping the scan repository",
@@ -849,6 +994,18 @@ describe("scan activity", () => {
 
   test.each<ActivityTestCase<readonly string[]>>([
     {
+      name: "review regression POSIX positional backslash cannot become drive separator",
+      command: ["sh", "-c", 'cat "$1"', "sh", String.raw`C:/repo\sibling.txt`],
+      repository: "C:/repo",
+      expected: { paths: [] },
+    },
+    {
+      name: "review regression combined option consumes its operand",
+      command: ["/bin/bash", "-oc", "nounset", "cat /code/project/app.ts"],
+      platform: "linux",
+      expected: { paths: ["app.ts"] },
+    },
+    {
       name: "keeps a trailing backslash separate from the next argument",
       command: ["grep", "-F", "foo\\", "/code/project/one.ts"],
       expected: { paths: ["one.ts"] },
@@ -868,7 +1025,7 @@ describe("scan activity", () => {
     {
       name: "does not decode a literal backslash before whitespace",
       command: ["cat", "/code/project/my\\ file.ts"],
-      expected: { paths: ["my/ file.ts"] },
+      expected: { paths: ["my\\ file.ts"] },
     },
     {
       name: "decodes escaped whitespace in a recorded POSIX shell script",
@@ -886,6 +1043,83 @@ describe("scan activity", () => {
       expected: { paths: ["app.ts"] },
       platform: "win32",
       repository: "C:\\code\\project",
+    },
+    {
+      name: "review regression separate flags before POSIX script",
+      command: ["/bin/sh", "-e", "-c", "cat /code/project/app.ts"],
+      platform: "linux",
+      expected: { paths: ["app.ts"] },
+    },
+    {
+      name: "review regression long Bash options before script",
+      command: [
+        "/bin/bash",
+        "--noprofile",
+        "--norc",
+        "-c",
+        "cat /code/project/app.ts",
+      ],
+      platform: "linux",
+      expected: { paths: ["app.ts"] },
+    },
+    {
+      name: "review regression Bash option operand before script",
+      command: ["bash", "-O", "extglob", "-c", "cat /code/project/app.ts"],
+      platform: "linux",
+      expected: { paths: ["app.ts"] },
+    },
+    {
+      name: "review regression PowerShell Command keeps all parts",
+      command: [
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "Get-Content",
+        "-LiteralPath",
+        String.raw`C:\code\project\app.ts`,
+      ],
+      repository: String.raw`C:\code\project`,
+      platform: "win32",
+      expected: {
+        paths: ["app.ts"],
+        description: String.raw`pwsh -NoProfile -Command Get-Content -LiteralPath "C:\\code\\project\\app.ts"`,
+      },
+    },
+    {
+      name: "review regression positional operands preserve complete argv",
+      command: ["sh", "-c", 'wc -c < "$1"', "sh", "/repo/one.ts"],
+      repository: "/repo",
+      platform: "linux",
+      expected: {
+        paths: ["one.ts"],
+        description: String.raw`sh -c "wc -c < \"$1\"" sh /repo/one.ts`,
+      },
+    },
+    {
+      name: "review regression Bash double dash preserves script",
+      command: ["bash", "-c", "--", "cat /repo/one.ts"],
+      repository: "/repo",
+      platform: "linux",
+      expected: {
+        paths: ["one.ts"],
+        description: 'bash -c -- "cat /repo/one.ts"',
+      },
+    },
+    {
+      name: "review regression empty and spaced arguments keep boundaries",
+      command: ["cat", "/code/project/my file.ts", ""],
+      platform: "linux",
+      expected: {
+        paths: ["my file.ts"],
+        description: 'cat "/code/project/my file.ts" ""',
+      },
+    },
+    {
+      name: "review regression literal backslash sibling stays outside repository",
+      command: ["cat", String.raw`/code/repo files\sibling.txt`],
+      repository: "/code/repo files",
+      platform: "linux",
+      expected: { paths: [] },
     },
   ])(
     "saved argv $name",
