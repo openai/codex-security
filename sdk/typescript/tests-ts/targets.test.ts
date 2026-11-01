@@ -7,6 +7,7 @@ import {
   mkdir,
   readFile,
   realpath,
+  rename,
   rm,
   symlink,
   utimes,
@@ -310,7 +311,7 @@ describe("scan target normalization", () => {
   );
 
   test.skipIf(process.platform === "win32").each(["node", "bun"])(
-    "rejects a Unix socket and its symlink in %s",
+    "identifies special file targets and their links in %s",
     async (runtime) => {
       const root = await temporaryDirectory("cs-target-");
       const build = await Bun.build({
@@ -323,7 +324,9 @@ describe("scan target normalization", () => {
         naming: "socket-target.mjs",
         target: "node",
       });
-      const result = await runCommand(runtime, [build.outputs[0]!.path, root]);
+      const result = await runCommand(runtime, [build.outputs[0]!.path, root], {
+        cwd: root,
+      });
       expect(result.status, result.stderr || result.error?.message).toBe(0);
     },
   );
@@ -356,12 +359,24 @@ describe("scan target normalization", () => {
   );
 
   test.each(
-    process.platform === "win32" ? ["removed"] : ["removed", "retargeted"],
+    process.platform === "win32"
+      ? ["removed"]
+      : ["removed", "retargeted", "replaced after resolution"],
   )("rejects a path %s during canonical resolution", async (change) => {
     const repo = await repository();
     const target = join(repo, "src", "app.ts");
-    if (change === "retargeted")
-      execFileSync("mkfifo", [join(repo, "pending")]);
+    if (change === "retargeted") {
+      const pending = join(repo, "pending");
+      execFileSync("mkfifo", [pending]);
+      if (process.platform === "linux") {
+        const raw = Buffer.concat([Buffer.from(pending), Buffer.from([0xff])]);
+        await rename(pending, raw);
+        await symlink(raw, pending);
+        await writeFile(raw.toString(), "regular sibling");
+      }
+    }
+    if (change === "replaced after resolution")
+      await writeFile(join(repo, "..", "outside-file"), "outside");
     const script = `
       import { mockFs } from ${JSON.stringify(fileURLToPath(new URL("./support/module-mocks.ts", import.meta.url)))};
       import { rmSync, symlinkSync } from "node:fs";
@@ -371,6 +386,12 @@ describe("scan target normalization", () => {
       const actualRealpath = original.realpath;
       mockFs(() => ({
         realpath: async (path, ...args) => {
+          if (path === target && change === "replaced after resolution") {
+            const canonical = await actualRealpath(path, ...args);
+            rmSync(target);
+            symlinkSync(join(repo, "..", "outside-file"), target);
+            return canonical;
+          }
           if (path === target) {
             rmSync(target);
             if (change === "retargeted") symlinkSync(join(repo, "pending"), target);
@@ -405,9 +426,9 @@ describe("scan target normalization", () => {
     );
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(
-      change === "retargeted"
-        ? "REJECTED true Path target is not a regular file or directory"
-        : "REJECTED true Path target does not exist",
+      change === "removed"
+        ? "REJECTED true Path target does not exist"
+        : "REJECTED true Path target is not a regular file or directory",
     );
   });
 

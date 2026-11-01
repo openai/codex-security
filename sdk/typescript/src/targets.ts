@@ -1,4 +1,5 @@
 import { isNonEmptyString } from "./value.js";
+import { isUtf8 } from "node:buffer";
 import { execFile as execFileCallback } from "node:child_process";
 import { realpathSync, type Stats } from "node:fs";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
@@ -577,24 +578,28 @@ export async function normalizeTarget(
       : resolve(root, expandHome(value));
     let canonical: string;
     try {
-      canonical = await abortable(() => realpath(candidate), signal).catch(
-        async (error: NodeJS.ErrnoException) => {
-          // Bun on macOS cannot realpath Unix sockets. Only use the original
-          // path to identify a special file, never as the accepted target.
-          if (error?.code === "EOPNOTSUPP" || error?.code === "ENOTSUP") {
-            const metadata = await abortable(
-              () => stat(candidate),
-              signal,
-            ).catch(() => undefined);
-            if (metadata) requireScanPathType(value, metadata, error);
-          }
-          throw error;
-        },
-      );
+      // Some runtimes cannot canonicalize special files to filesystem paths.
       requireScanPathType(
         value,
-        await abortable(() => stat(canonical), signal),
+        await abortable(() => stat(candidate), signal),
       );
+      const resolved = await abortable(
+        () => realpath(candidate, { encoding: "buffer" }),
+        signal,
+      );
+      canonical = resolved.toString();
+      if (!isAbsolute(canonical)) {
+        throw new InvalidTargetError(`Could not resolve path target: ${value}`);
+      }
+      requireScanPathType(
+        value,
+        await abortable(() => lstat(resolved), signal),
+      );
+      if (!isUtf8(resolved)) {
+        throw new InvalidTargetError(
+          `Path target cannot be represented as UTF-8: ${value}`,
+        );
+      }
     } catch (error) {
       throwIfAborted(signal);
       if (error instanceof InvalidTargetError) throw error;
@@ -622,15 +627,10 @@ export async function normalizeTarget(
   return { kind: "paths", paths: [...paths] };
 }
 
-function requireScanPathType(
-  value: string,
-  metadata: Stats,
-  cause?: unknown,
-): void {
+function requireScanPathType(value: string, metadata: Stats): void {
   if (!metadata.isFile() && !metadata.isDirectory()) {
     throw new InvalidTargetError(
       `Path target is not a regular file or directory: ${value}`,
-      { cause },
     );
   }
 }
