@@ -8,8 +8,10 @@ export function bashCommand(): string {
   const git = Bun.which("git");
   if (git === null) return "bash";
   const parent = dirname(dirname(git));
-  // Git for Windows exposes git.exe from cmd, bin, and mingw64/bin.
-  for (const root of [parent, dirname(parent)]) {
+  const nestedGit =
+    /[\\/](?:mingw32|mingw64|ucrt64|clangarm64)[\\/]bin[\\/]git\.exe$/iu;
+  const roots = nestedGit.test(git) ? [parent, dirname(parent)] : [parent];
+  for (const root of roots) {
     const gitBash = join(root, "bin", "bash.exe");
     if (existsSync(gitBash)) return gitBash;
   }

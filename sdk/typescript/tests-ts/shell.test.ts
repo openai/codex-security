@@ -1,31 +1,40 @@
-import { isAbsolute, join, resolve } from "node:path";
+import { join } from "node:path";
 import { expect, spyOn, test } from "bun:test";
-import { bashCommand, runCommand } from "./support/shell.js";
+import { bashCommand, runCommand, writeSource } from "./support/shell.js";
+import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
-test.skipIf(process.platform !== "win32").each(["cmd", "bin", "mingw64/bin"])(
-  "uses Git Bash when Git is found in %s",
-  async (directory) => {
-    const gitExecPath = await runCommand("git", ["--exec-path"], {
-      timeout: 10_000,
-    });
-    expect(gitExecPath.status).toBe(0);
-    const gitRoot = resolve(gitExecPath.stdout.trim(), "..", "..", "..");
-    const which = spyOn(Bun, "which").mockReturnValue(
-      join(gitRoot, directory, "git.exe"),
-    );
-    let bash: string;
-    try {
-      bash = bashCommand();
-    } finally {
-      which.mockRestore();
+test.skipIf(process.platform !== "win32")(
+  "uses Bash from the Git for Windows installation",
+  async () => {
+    const bash = bashCommand();
+    if (bash !== "bash") {
+      const result = await runCommand(bash, ["-c", 'test -n "$BASH_VERSION"']);
+      expect(result.status, result.stderr).toBe(0);
     }
 
-    expect(isAbsolute(bash)).toBe(true);
-    const result = await runCommand(bash, ["-c", "uname -s"], {
-      timeout: 10_000,
-    });
-    expect(result.status).toBe(0);
-    expect(result.stdout.trim()).toMatch(/^MINGW/u);
+    await using fixture = await scopedTemporaryDirectory("git-bash-layout-");
+    const root = join(fixture.path, "Git");
+    using which = spyOn(Bun, "which");
+    const bashForGitIn = (directory: string) => {
+      const git = join(directory, "git.exe");
+      writeSource(root, git, "");
+      which.mockReturnValue(join(root, git));
+      return bashCommand();
+    };
+
+    writeSource(fixture.path, "bin/bash.exe", "");
+    expect(bashForGitIn("cmd")).toBe("bash");
+    expect(bashForGitIn("bin")).toBe("bash");
+
+    const shell = join("bin", "bash.exe");
+    writeSource(root, shell, "");
+    const prefixes = ["mingw32", "mingw64", "ucrt64", "clangarm64"];
+    const bins = prefixes.map((prefix) => join(prefix, "bin"));
+    for (const directory of ["cmd", "bin", ...bins]) {
+      expect(bashForGitIn(directory)).toBe(join(root, shell));
+    }
+    writeSource(root, join("mingw64", shell), "");
+    expect(bashForGitIn("mingw64/bin")).toBe(join(root, "mingw64", shell));
   },
 );
 
