@@ -39,6 +39,7 @@
 - reuse Wiz replay projections for package reports ([#2193](https://github.com/openai/codex-security/pull/2193))
 - share local Git metadata discovery ([#2194](https://github.com/openai/codex-security/pull/2194))
 - require exhaustive scanner reader dispatch ([#2195](https://github.com/openai/codex-security/pull/2195))
+- normalize selected Semgrep Code findings for local import ([#2164](https://github.com/openai/codex-security/pull/2164))
 
 <!-- release-section: highlights:end -->
 
