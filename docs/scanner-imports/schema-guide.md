@@ -16,21 +16,21 @@ The reader derives the source finding ID from the export. The differences matter
 when a finding moves, an advisory affects several packages, or the export format
 changes.
 
-| Report                                                                                                                                  | What identifies one record                                                                                                                                                               |
-| --------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [Amazon Inspector](inspector.md), [Endor Labs](endor.md), [SonarQube Cloud](sonar.md)                                                   | Inspector finding ARN, Endor Finding UUID or Sonar issue key. Endor native JSON and SARIF use the same UUID.                                                                             |
-| [Wiz](../../sdk/typescript/docs/cli.md#import-wiz-findings)                                                                             | Package occurrence ID, or a SAST, repository-secret or IaC occurrence ID prefixed with its family. Normalized JSONL uses the supplied ID.                                                |
-| [GitHub Dependabot](github-dependabot.md), [code scanning](../../sdk/typescript/docs/cli.md#import-github-findings-locally-or-to-cloud) | Host, repository, alert family and alert number. Code scanning also includes the selected ref. Two alerts citing one GHSA remain separate.                                               |
-| [GitHub advisories](../../sdk/typescript/docs/cli.md#import-ghsa-advisories-separately)                                                 | Host, repository or global scope, and GHSA ID. This identifies a disclosure. Check installed packages separately.                                                                        |
-| [Snyk Open Source](snyk.md)                                                                                                             | Native CLI JSON distinguishes manifest, package manager, advisory, package name and version, and dependency path. Plugin and SARIF reports use different identities.                     |
-| [Black Duck SCA](blackduck.md), [Veracode Static Analysis](veracode.md)                                                                 | Black Duck combines project version, component version, origin and advisory identity. Veracode scopes a native issue ID to its API origin, application and context.                      |
-| [Semgrep Code](semgrep.md), [OpenGrep](opengrep.md)                                                                                     | Semgrep prefers a fingerprint and falls back to rule, path and range. OpenGrep groups traces by rule, path and range. Both store provider `semgrep`. Use a separate OpenGrep source key. |
+| Report                                                                                | What identifies one record                                                                                                                                                               |
+| ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [Amazon Inspector](inspector.md), [Endor Labs](endor.md), [SonarQube Cloud](sonar.md) | Inspector finding ARN, Endor Finding UUID or Sonar issue key. Endor native JSON and SARIF use the same UUID.                                                                             |
+| [Wiz](wiz.md)                                                                         | Package occurrence ID, or a SAST, repository-secret or IaC occurrence ID prefixed with its family. Normalized JSONL uses the supplied ID.                                                |
+| [GitHub Dependabot](github-dependabot.md), [code scanning](github-code-scanning.md)   | Host, repository, alert family and alert number. Code scanning also includes the selected ref. Two alerts citing one GHSA remain separate.                                               |
+| [GitHub advisories](github-security-advisories.md)                                    | Host, repository or global scope, and GHSA ID. This identifies a disclosure. Check installed packages separately.                                                                        |
+| [Snyk Open Source](snyk.md)                                                           | Native CLI JSON distinguishes manifest, package manager, advisory, package name and version, and dependency path. Plugin and SARIF reports use different identities.                     |
+| [Black Duck SCA](blackduck.md), [Veracode Static Analysis](veracode.md)               | Black Duck combines project version, component version, origin and advisory identity. Veracode scopes a native issue ID to its API origin, application and context.                      |
+| [Semgrep Code](semgrep.md), [OpenGrep](opengrep.md)                                   | Semgrep prefers a fingerprint and falls back to rule, path and range. OpenGrep groups traces by rule, path and range. Both store provider `semgrep`. Use a separate OpenGrep source key. |
 
 Repeat local imports replace changed evidence for the same identity. Identical
 evidence is unchanged, and records omitted from a later report remain stored.
 For example, importing Endor SARIF after native JSON for the same UUID can
-remove details from the stored snapshot. When a single export contains colliding IDs, inspect the reader’s
-exclusions or input error before retrying.
+remove details from the stored snapshot. If one export contains colliding IDs,
+inspect the reader’s exclusions or input error before retrying.
 
 ## Read the right field
 

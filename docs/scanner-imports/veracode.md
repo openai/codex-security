@@ -1,19 +1,16 @@
 # Import Veracode Static Analysis findings
 
-Import the Findings API policy backlog for one Veracode application that maps
-to one source repository. Choose the application context and `scan_type=STATIC`.
-An application that aggregates multiple repositories or binary modules cannot
-establish a mapping to one checkout.
+Import Findings API policy flaws from one Veracode application that maps to
+one source repository. Use the application context and `scan_type=STATIC`.
 
 ## Quick start
 
-With read access to the application and Results API,
-[export the complete Findings API pages](#export-findings-api-pages) to a private
-file outside the checkout. From the verified checkout root, replace the file path,
-Git URL, and source key with values for your application.
+[Enable external imports](README.md#preview-a-report) and
+[export the complete Findings API pages](#export-findings-api-pages) with read
+access to the application and Results API. From the matching checkout root,
+preview the file with its verified Git URL and a source key for this application.
 
 ```sh
-export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
 codex-security publish findings /private/path/policy-findings.json \
   --to local --repository . --provider veracode \
   --source-repository-url https://github.com/example/project \
@@ -23,23 +20,10 @@ codex-security publish findings /private/path/policy-findings.json \
 
 ## Import and verify
 
-Check the destination, count, and exclusions. The preview includes original
-evidence and any annotations in the selected rows. Remove `--dry-run` to
-import, then read the stored findings.
-
-```sh
-codex-security findings imported . --format json
-```
-
-Reuse the source key for exports from the same application and context. Local
-import compares the source URL with the checkout’s Git remotes when comparable
-remotes are configured. The application GUID alone cannot identify a Git URL.
-
-For Cloud, replace `--to local --repository .` with
-`--to cloud --repository CLOUD_REPOSITORY_ID` for the authorized GitHub
-repository on a deployment that accepts `veracode`. Preview again before
-confirming. For interrupted uploads, follow the
-[Cloud retry procedure](schema-guide.md#retry-a-cloud-submission).
+Verify the application represents the destination repository. An application
+GUID or a backlog aggregated from several repositories cannot establish the
+mapping. [Save or publish and verify](README.md#save-or-publish-and-verify)
+using the same source key for repeat exports from this application and context.
 
 ## Reference
 
@@ -80,15 +64,16 @@ page=0
 while :; do
   http --ignore-stdin --check-status --body --timeout 20 --auth-type veracode_hmac GET \
     "$api/appsec/v2/applications/$guid/findings" \
-    scan_type==STATIC page=="$page" size==100 > "$out/page.tmp"
+    scan_type==STATIC page=="$page" size==100 > "$out/page.tmp" || exit "$?"
   pages=$(jq -er --arg app "$application" --argjson n "$page" '
     select(._links.application.href == $app and .page.number == $n) |
-    .page.total_pages | numbers' "$out/page.tmp")
-  cat "$out/page.tmp" >> "$out/pages.stream"
+    .page.total_pages | numbers' "$out/page.tmp") || exit "$?"
+  cat "$out/page.tmp" >> "$out/pages.stream" || exit "$?"
   page=$((page + 1))
   [ "$page" -lt "$pages" ] || break
 done
-jq -s '.' "$out/pages.stream" > "$out/policy-findings.json"
+jq -s '.' "$out/pages.stream" > "$out/report.tmp" &&
+  mv "$out/report.tmp" "$out/policy-findings.json"
 ```
 
 Keep each page intact. Apply any Findings API filters when downloading the
