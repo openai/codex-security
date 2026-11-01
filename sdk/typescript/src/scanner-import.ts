@@ -133,13 +133,7 @@ const sarifArtifactLocationFields = new Set([
   "displayBase",
 ]);
 
-/** Keep original artifact indexes; omit only inventory unrelated to this finding. */
-export function sarifRunContextForResult(
-  runContext: Record<string, unknown>,
-  ...selectedEvidence: unknown[]
-): Record<string, unknown> {
-  const { artifacts, ...context } = runContext;
-  if (!Array.isArray(artifacts) || artifacts.length === 0) return runContext;
+function sarifArtifactReferences(evidence: unknown) {
   const locations: Record<string, unknown>[] = [];
   let hasArtifactLink = false;
   function visit(value: unknown): void {
@@ -164,28 +158,56 @@ export function sarifRunContextForResult(
         visit(child);
       }
   }
-  visit([context, ...selectedEvidence]);
-  if (hasArtifactLink) return runContext;
-  const unresolvedUri = /[%:\\]|(?:^|\/)\.\.?(?:\/|$)/u;
-  for (const location of locations) {
-    if (typeof location["index"] === "number" && location["index"] >= 0)
-      return runContext;
-    if (typeof location["uri"] !== "string") continue;
-    for (const artifact of artifacts) {
-      if (!isRecord(artifact) || !isRecord(artifact["location"])) continue;
-      const candidate = artifact["location"];
-      // Keep URI spellings that need resolution; evidence is never rewritten.
-      if (
-        location["uriBaseId"] !== candidate["uriBaseId"] ||
-        unresolvedUri.test(location["uri"]) ||
-        (typeof candidate["uri"] === "string" &&
-          unresolvedUri.test(candidate["uri"])) ||
-        location["uri"] === candidate["uri"]
-      )
-        return runContext;
-    }
+  visit(evidence);
+  return { locations, hasArtifactLink };
+}
+
+const unresolvedUri = /[%:\\]|(?:^|\/)\.\.?(?:\/|$)/u;
+
+function artifactUriMatcher(artifacts: unknown[]) {
+  const uris = new Set<string>();
+  let hasLocation = false;
+  let base: unknown;
+  for (const artifact of artifacts) {
+    if (!isRecord(artifact) || !isRecord(artifact["location"])) continue;
+    const { uri, uriBaseId } = artifact["location"];
+    // Mixed bases or a URI that needs resolution can match any direct reference.
+    if (
+      (hasLocation && uriBaseId !== base) ||
+      (typeof uri === "string" && unresolvedUri.test(uri))
+    )
+      return () => true;
+    hasLocation = true;
+    base = uriBaseId;
+    if (typeof uri === "string") uris.add(uri);
   }
-  return context;
+  return (uri: string, uriBaseId: unknown) =>
+    hasLocation &&
+    (uriBaseId !== base || unresolvedUri.test(uri) || uris.has(uri));
+}
+
+/** Keep original artifact indexes; omit only inventory unrelated to this finding. */
+export function sarifRunContextSelector(runContext: Record<string, unknown>) {
+  const { artifacts, ...context } = runContext;
+  if (!Array.isArray(artifacts) || artifacts.length === 0)
+    return () => runContext;
+  let matchesUri: ReturnType<typeof artifactUriMatcher> | undefined;
+  return (...selectedEvidence: unknown[]) => {
+    const { locations, hasArtifactLink } = sarifArtifactReferences([
+      context,
+      ...selectedEvidence,
+    ]);
+    if (hasArtifactLink) return runContext;
+    for (const location of locations) {
+      const { index, uri, uriBaseId } = location;
+      if (typeof index === "number" && index >= 0) return runContext;
+      if (typeof uri === "string") {
+        matchesUri ??= artifactUriMatcher(artifacts);
+        if (matchesUri(uri, uriBaseId)) return runContext;
+      }
+    }
+    return context;
+  };
 }
 
 /** Duplicate IDs cannot identify a single rule in this run. */
