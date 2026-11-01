@@ -263,6 +263,41 @@ function matchingRemote(
   );
 }
 
+// Within one fetch key and home-relative mode, matchingRemote can use any
+// account, the requested login, or an unspecified login.
+function fetchAliasMatcher(
+  rows: readonly { fetch: RemoteRepositoryIdentity }[],
+) {
+  const homes = Map.groupBy(rows, ({ fetch }) => fetch.homeRelative);
+  const accounts = Array.from(
+    homes.values(),
+    (group) => new Map(group.map(({ fetch }) => [fetch.account, fetch])),
+  );
+  return (fetch: RemoteRepositoryIdentity) =>
+    accounts.some((group) =>
+      [
+        group.values().next().value,
+        group.get(fetch.account),
+        group.get(undefined),
+      ].some(
+        (candidate) =>
+          candidate !== undefined && matchingRemote(fetch, candidate),
+      ),
+    );
+}
+
+function fetchAliasMatchers<
+  Row extends { fetch: RemoteRepositoryIdentity },
+  Key,
+>(rows: readonly Row[], key: (row: Row) => Key) {
+  return new Map(
+    Array.from(
+      Map.groupBy(rows, key),
+      ([name, group]) => [name, fetchAliasMatcher(group)] as const,
+    ),
+  );
+}
+
 function localRepositoryPlatform(
   provider: Provider,
   sources: readonly ExternalSourceRepository[],
@@ -850,23 +885,64 @@ export async function prepareLocalImport(
       hosted.some((source) => semgrepReferenceMatches(source, ref.url)),
     ),
   );
-  // A Platform fetch alias is shared only when the ordinary reader recognizes that transport.
-  const ordinaryClaims = hostedReferences.size
-    ? Array.from(sources.keys(), identify)
-    : [];
-  const hostedOnlyReferences = new Set(
-    [...hostedReferences].filter((ref) => {
-      const alias = identify(ref.url);
-      return !ordinaryClaims.some((claim) => matchingRemote(claim, alias));
-    }),
-  );
+  const sharedReferences = new Set<ExternalSourceRepository>();
+  const ordinaryReferences = new Set<ExternalSourceRepository>();
+  if (hostedReferences.size) {
+    const readerPlatform = localRepositoryPlatform(
+      options.provider,
+      [...sources.values(), ...references],
+      false,
+    );
+    const ordinaryIdentity = (url: string) =>
+      remoteRepository(url, readerPlatform({ url }), false) ?? { key: url };
+    const aliases = references.map((ref) => ({
+      ref,
+      fetch: identify(ref.url),
+      ordinary: ordinaryIdentity(ref.url).key,
+    }));
+    const claims = Map.groupBy(
+      Array.from(sources.keys(), (url) => ({
+        fetch: identify(url),
+        ordinary: strictSources.has(url)
+          ? undefined
+          : ordinaryIdentity(url).key,
+      })),
+      (claim) => claim.fetch.key,
+    );
+    for (const [key, refs] of Map.groupBy(
+      aliases,
+      (alias) => alias.fetch.key,
+    )) {
+      const hosted = refs.filter(({ ref }) => hostedReferences.has(ref));
+      const group = claims.get(key);
+      if (!hosted.length || !group) continue;
+      const shared = fetchAliasMatcher(group);
+      const readers = fetchAliasMatchers(refs, (alias) => alias.ordinary);
+      // Keep a sole fetch alias subject to checkout validation. A redundant
+      // Platform spelling can be dropped when another reference serves the reader.
+      const required = fetchAliasMatchers(group, ({ fetch, ordinary }) =>
+        ordinary !== undefined && readers.get(ordinary)?.(fetch)
+          ? ordinary
+          : undefined,
+      );
+      for (const alias of hosted) {
+        if (!shared(alias.fetch)) continue;
+        sharedReferences.add(alias.ref);
+        if (
+          required.get(undefined)?.(alias.fetch) ||
+          required.get(alias.ordinary)?.(alias.fetch)
+        )
+          ordinaryReferences.add(alias.ref);
+      }
+    }
+  }
   if (mixed) {
     // Other caller references must identify an ordinary row or one of its Git aliases.
     const rows = [...sources.keys(), ...known].map(identify);
     const byKey = Map.groupBy(rows, (remote) => remote.key);
     const represented = new Set(rows.map((remote) => JSON.stringify(remote)));
     const aliases = readerSources
-      .filter((ref) => !hostedOnlyReferences.has(ref))
+      .filter((ref) => !hostedReferences.has(ref) || sharedReferences.has(ref))
       .map(({ url }) => identify(url))
       .filter((remote) => !represented.has(JSON.stringify(remote)));
     for (const [key, group] of Map.groupBy(aliases, (remote) => remote.key)) {
@@ -882,8 +958,13 @@ export async function prepareLocalImport(
       Array.from(strictSources.keys(), (url) => identify(url).key),
     );
     for (const source of references)
-      if (!strictSources.has(source.url) && keys.has(identify(source.url).key))
+      if (
+        !strictSources.has(source.url) &&
+        keys.has(identify(source.url).key)
+      ) {
         strictSources.set(source.url, platformFor(source));
+        if (sharedReferences.has(source)) ordinaryReferences.add(source);
+      }
   }
   if (inspector) {
     const platform =
@@ -912,7 +993,11 @@ export async function prepareLocalImport(
       "The reader's source repository does not match the selected Semgrep project.",
     );
   for (const source of [...(inspector ? [inspector] : []), ...references]) {
-    if (!ordinaryRowNeedsReferences && hostedOnlyReferences.has(source))
+    if (
+      !ordinaryRowNeedsReferences &&
+      hostedReferences.has(source) &&
+      !ordinaryReferences.has(source)
+    )
       continue;
     // A reader's platform must not loosen an operator-supplied Inspector map.
     if (sources.get(source.url)?.platform !== "github")
