@@ -179,6 +179,143 @@ if (
   invalidTarEntry();
 }
 
+const contract = JSON.parse(readFileSync(contractPath, "utf8"));
+const pluginPaths = pluginContractFiles(contract);
+if (new Set(pluginPaths).size !== pluginPaths.length) {
+  throw new Error("Plugin projection contract contains duplicate paths.");
+}
+
+const allowedFiles = new Set([
+  ...required,
+  ...pluginPaths.map((file) => `package/_bundled_plugin/${file}`),
+  "package/dist/server/dashboard/index.html",
+  "package/dist/server/dashboard/app.js",
+  "package/dist/server/dashboard/app.css",
+  "package/dist/server/dashboard/THIRD_PARTY_NOTICES.txt",
+  ...[
+    "api",
+    "artifact-export",
+    "auth",
+    "bulk-scan-discovery",
+    "cli",
+    "cli-help",
+    "cli-scan-logs-json",
+    "cli-signals",
+    "classify-severity",
+    "classify-scan-severity",
+    "severity-store",
+    "cloud-publish",
+    "codex-prompt",
+    "codex-sdk-environment",
+    "component-plan",
+    "component-scan",
+    "config",
+    "config-path",
+    "contract",
+    "cost",
+    "cost-model",
+    "custom-validation",
+    "custom-validation-prompt",
+    "custom-publish",
+    "deep-progress",
+    "deep-config",
+    "deep-scan-defaults",
+    "project-config",
+    "project-config-schema",
+    "prompt-files",
+    "provider-profile",
+    "scan-modes",
+    "scan-settings",
+    "errors",
+    "feedback",
+    "finding-catalogue",
+    "findings-import",
+    "github",
+    "index",
+    "import-scan",
+    "knowledge-base",
+    "linear",
+    "models",
+    "multiscan",
+    "mock-scan",
+    "owner-evidence",
+    "patch-tui",
+    "publication",
+    "publication-events",
+    "publication-store",
+    "publish",
+    "result",
+    "record",
+    "runtime",
+    "scan-activity",
+    "scan-comparison",
+    "scan-dashboard",
+    "scan-history-renderer",
+    "scan-logs",
+    "security-policy",
+    "security-policy-cli",
+    "suggest-owners",
+    "scan-sessions",
+    "server/index",
+    "server/api",
+    "deduplication/codex-review",
+    "deduplication/checkpointed-review",
+    "deduplication/refusal",
+    "deduplication/retry",
+    "deduplication/deduplication",
+    "finding-retrieval",
+    "finding-workflow",
+    "findings-client",
+    "finding-dedupe-groups",
+    "deduplication/deduplication-prompts",
+    "deduplication/deduplication-reviewer",
+    "deduplication/diagnostics",
+    "deduplication/scan",
+    "deduplication/local",
+    "deduplication/finding-schema",
+    "deduplication/records",
+    "deduplication/records-protocol",
+    "deduplication/review",
+    "saved-scan",
+    "saved-scan-bootstrap",
+    "server/embeddings",
+    "server/dashboard",
+    "server/dashboard-types",
+    "server/errors",
+    "server/routes",
+    "server/server",
+    "server/serve",
+    "server/sqlite-store",
+    "server/storage",
+    "server/validation",
+    "target-drift",
+    "targets",
+    "thread-source",
+    "trusted-executable",
+    "value",
+    "version",
+    "windows-path",
+    "worker-progress",
+  ].flatMap((module) =>
+    ["js", "js.map", "d.ts", "d.ts.map"].map(
+      (extension) => `package/dist/${module}.${extension}`,
+    ),
+  ),
+]);
+for (const file of [...allowedFiles]) {
+  if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
+  const parts = file.split("/");
+  for (let index = 1; index < parts.length; index++) {
+    allowedFiles.add(`${parts.slice(0, index).join("/")}/`);
+  }
+}
+const unsafePath = /(?:^|\/)\.{1,2}(?:\/|$)/u;
+for (const file of files) {
+  if (!allowedFiles.has(file) || unsafePath.test(file) || file.includes("\\")) {
+    throw new Error(`npm tarball contains an unexpected file: ${file}.`);
+  }
+}
+
 const listing = tar(["--numeric-owner", "-tvzf", "-"], "utf8");
 const listingLines = regularTarListingLines(listing);
 if (

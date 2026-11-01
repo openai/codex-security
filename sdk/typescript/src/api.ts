@@ -273,6 +273,10 @@ import {
   validateMode,
 } from "./targets.js";
 import {
+  startHeadDriftMonitor,
+  type HeadDriftMonitor,
+} from "./target-drift.js";
+import {
   inspectTrustedExecutable,
   isWithin,
   type InspectedExecutable,
@@ -1983,6 +1987,7 @@ export class CodexSecurity {
       id: string;
       options: WorkbenchCommandOptions;
     } | null = null;
+    let headDriftMonitor: HeadDriftMonitor | null = null;
     const prepareArtifactRestorer =
       this.#dependencies.prepareScanArtifactRestorer ??
       prepareScanArtifactRestorer;
@@ -2276,11 +2281,11 @@ export class CodexSecurity {
         );
       }
       checkOpen();
+      const readRepositoryRevision =
+        this.#dependencies.repositoryRevision ?? repositoryRevision;
       const expectation: ScanExpectation = {
         repository: repo,
-        repositoryRevision: await (
-          this.#dependencies.repositoryRevision ?? repositoryRevision
-        )(repo, signal),
+        repositoryRevision: await readRepositoryRevision(repo, signal),
         target: normalized,
         mode,
         pluginVersion: runtime.plugin.version,
@@ -2675,6 +2680,26 @@ export class CodexSecurity {
         notifyObserver(options, "onOutputDirReady")(scanDir);
       }
       throwIfAborted(signal, scanDir);
+      const monitorsHeadDrift =
+        registeredRevision !== "unversioned" &&
+        (targetKind === "git_revision" ||
+          targetKind === "git_worktree" ||
+          (targetKind === "git_diff" && normalized.kind === "working_tree"));
+      if (monitorsHeadDrift) {
+        headDriftMonitor = startHeadDriftMonitor({
+          expectedRevision: registeredRevision,
+          readRevision: (revisionSignal) =>
+            readRepositoryRevision(repo, revisionSignal),
+          signal,
+          onDrift: () =>
+            notifyObserver(
+              options,
+              "onWarning",
+            )(
+              "Repository HEAD changed while the scan was running; results remain bound to the original revision.",
+            ),
+        });
+      }
       if (
         this.#dependencies.hostedScan === undefined &&
         ((mode !== "deep" && options.onProgress !== undefined) ||
@@ -3126,6 +3151,7 @@ export class CodexSecurity {
           ? []
           : ["--cost-json", JSON.stringify(completionCost)]),
       ]);
+      headDriftMonitor?.stop();
       activeScan = null;
       const completedScan = completion["scan"];
       await finalizeScanUsage(
@@ -3499,6 +3525,7 @@ export class CodexSecurity {
           ]);
         } catch {}
       }
+      headDriftMonitor?.stop();
       if (runPostScan !== null && !signal.aborted) {
         scanProgressTracker?.stop();
         try {
@@ -3526,6 +3553,7 @@ export class CodexSecurity {
       }
       throw failure;
     } finally {
+      headDriftMonitor?.stop();
       budgetAbortController.abort();
       scanProgressTracker?.stop();
       // Temporary-input cleanup must not replace the scan's outcome.
