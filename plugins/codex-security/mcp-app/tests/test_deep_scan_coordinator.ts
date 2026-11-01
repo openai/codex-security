@@ -3486,7 +3486,7 @@ async function testDiscoveryDeadlineDrainsActiveReducerAndPreservesFindings() {
   } finally {
     mock.timers.reset();
   }
-  const dispatchedAtDeadline = store.run.dispatchedCount;
+  const dispatchedAtDeadline = coordinator.snapshot().dispatchedCount;
   assert.equal(
     executor.runningDedup,
     1,
