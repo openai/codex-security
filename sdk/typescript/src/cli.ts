@@ -806,18 +806,12 @@ class PublicationProgressPresenter {
     }
 
     if (event.type === "codex_event") {
-      if (
-        typeof event.event !== "object" ||
-        event.event === null ||
-        Array.isArray(event.event)
-      ) {
-        return;
-      }
+      if (!isJsonObject(event.event)) return;
       for (const activity of scanActivitiesFromEvent(
-        event.event as Record<string, unknown>,
+        event.event,
         this.#repository,
       )) {
-        const item = (event.event as Record<string, unknown>)["item"];
+        const item = event.event["item"];
         const tool = isJsonObject(item) ? item["tool"] : undefined;
         const hidesShellCommand =
           activity.kind === "command" ||
@@ -841,11 +835,10 @@ class PublicationProgressPresenter {
         if (this.#seenActivities.has(key)) continue;
         this.#seenActivities.add(key);
         const label =
-          visibleActivity.kind === "reasoning"
+          visibleActivity.kind === "reasoning" ||
+          visibleActivity.kind === "message"
             ? "Codex"
-            : visibleActivity.kind === "message"
-              ? "Codex"
-              : "Tool";
+            : "Tool";
         this.#write(`${label}: ${visibleActivity.description}`, true);
       }
       return;
@@ -3247,7 +3240,6 @@ export async function main(
               { scanId: string; scanDir: string }
             >();
             const rows = scans.flatMap((scan) => {
-              if (!isJsonObject(scan)) return [];
               const progress = scan["progress"];
               const scanId = scan["scanId"];
               const directory = scan["scanDir"];
@@ -3314,20 +3306,17 @@ export async function main(
                 "No completed Codex Security scans are available to publish.",
               );
             }
-            const repositoryWidth = Math.max(
-              publicationDisplayWidth("REPOSITORY"),
-              ...rows.map(({ repository }) =>
-                publicationDisplayWidth(repository),
-              ),
-            );
-            const findingsWidth = Math.max(
-              publicationDisplayWidth("FINDINGS"),
-              ...rows.map(({ findings }) => publicationDisplayWidth(findings)),
-            );
-            const ageWidth = Math.max(
-              publicationDisplayWidth("AGE"),
-              ...rows.map(({ age }) => publicationDisplayWidth(age)),
-            );
+            const columnWidth = (
+              heading: string,
+              field: "repository" | "findings" | "age",
+            ) =>
+              Math.max(
+                publicationDisplayWidth(heading),
+                ...rows.map((row) => publicationDisplayWidth(row[field])),
+              );
+            const repositoryWidth = columnWidth("REPOSITORY", "repository");
+            const findingsWidth = columnWidth("FINDINGS", "findings");
+            const ageWidth = columnWidth("AGE", "age");
             const header = [
               padPublicationColumn("REPOSITORY", repositoryWidth),
               padPublicationColumn("FINDINGS", findingsWidth),
