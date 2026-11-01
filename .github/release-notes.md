@@ -34,6 +34,11 @@
 - import SonarQube Cloud security findings ([#2162](https://github.com/openai/codex-security/pull/2162))
 - share saved coverage logic and checkpoint fixtures ([#2185](https://github.com/openai/codex-security/pull/2185))
 - organize external scanner integration guides ([#2189](https://github.com/openai/codex-security/pull/2189))
+- index SARIF artifact URIs once per run ([#2191](https://github.com/openai/codex-security/pull/2191))
+- normalize GitHub scanner evidence for its destination ([#2192](https://github.com/openai/codex-security/pull/2192))
+- reuse Wiz replay projections for package reports ([#2193](https://github.com/openai/codex-security/pull/2193))
+- share local Git metadata discovery ([#2194](https://github.com/openai/codex-security/pull/2194))
+- require exhaustive scanner reader dispatch ([#2195](https://github.com/openai/codex-security/pull/2195))
 
 <!-- release-section: highlights:end -->
 

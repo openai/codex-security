@@ -8,9 +8,9 @@ import { requireExternalImports } from "./external-imports-feature.js";
 import {
   configuredFetchRemotes,
   type ConfiguredFetchRemote,
-  localGitProtectionRoots,
   prepareLocalImport,
 } from "./external-findings-local.js";
+import { localGitProtectionRoots } from "./local-git-metadata.js";
 import {
   ExternalPublicationError,
   externalPublicationStateDirectory,

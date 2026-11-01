@@ -11,7 +11,7 @@ import {
   record,
   relativePath,
   requiredText,
-  sarifRunContextForResult,
+  sarifRunContextSelector,
   strings,
   text,
 } from "./scanner-import.js";
@@ -206,9 +206,11 @@ export function normalizeEndorSarif(
     const { results: _results, tool: _tool, ...runContext } = run;
     const { rules: _rules, ...driverContext } = driver;
     const { driver: _driver, ...toolContext } = tool;
+    const selectRunContext = sarifRunContextSelector(runContext);
     return array(run["results"] ?? [], "Endor results").map((result) => ({
       result,
       rulesById,
+      selectRunContext,
       documentContext,
       runContext,
       driverContext,
@@ -217,7 +219,7 @@ export function normalizeEndorSarif(
   });
   return normalizeRecords(
     entries,
-    ({ result: value, rulesById, ...context }) => {
+    ({ result: value, rulesById, selectRunContext, ...context }) => {
       const result = record(value, "Endor result");
       const properties = record(
         result["properties"],
@@ -320,8 +322,7 @@ export function normalizeEndorSarif(
           ],
           source_data: structuredClone({
             ...context,
-            runContext: sarifRunContextForResult(
-              context.runContext,
+            runContext: selectRunContext(
               result,
               rule,
               context.documentContext,

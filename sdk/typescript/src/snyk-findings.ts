@@ -9,7 +9,7 @@ import {
   readScannerJson,
   record,
   requiredText,
-  sarifRunContextForResult,
+  sarifRunContextSelector,
   stableId,
   strings,
   text,
@@ -280,11 +280,12 @@ export function normalizeSnykSarif(
     );
     runContext["tool"] = toolContext;
     const { runs: _runs, ...documentContext } = document;
+    const selectRunContext = sarifRunContextSelector(runContext);
     return array(run["results"], "SARIF results").map((result) => ({
       result,
       rulesById,
       project,
-      runContext,
+      selectRunContext,
       driverContext,
       documentContext,
     }));
@@ -294,7 +295,7 @@ export function normalizeSnykSarif(
     ({
       result: value,
       rulesById,
-      runContext,
+      selectRunContext,
       driverContext,
       documentContext,
     }) => {
@@ -393,13 +394,7 @@ export function normalizeSnykSarif(
           locations: [],
           source_data: structuredClone({
             document: documentContext,
-            run: sarifRunContextForResult(
-              runContext,
-              result,
-              rule,
-              driverContext,
-              documentContext,
-            ),
+            run: selectRunContext(result, rule, driverContext, documentContext),
             driver: driverContext,
             rule,
             result,

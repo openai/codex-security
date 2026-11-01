@@ -76,6 +76,7 @@ const distModules = [
   "finding-catalogue",
   "findings-import",
   "git-remote",
+  "local-git-metadata",
   "github",
   "github-advisories",
   "github-dependabot-findings",
