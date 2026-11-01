@@ -1425,7 +1425,29 @@ describe("live scan cost tracking", () => {
         expect(progress).toEqual(capped ? [] : [1]);
         expect(reported).not.toContain(30);
         if (!capped && identified) {
-          newLog = await writeSession(home, "z-new-log", usage(500));
+          const directory = parse(worker).dir;
+          newLog = join(directory, "z-new-log.jsonl");
+          await writeFile(newLog, "{}\n");
+          const tail = join(directory, "zz-directory");
+          await filesystem.mkdir(tail);
+          const entries = await filesystem.readdir(directory, {
+            withFileTypes: true,
+          });
+          entries.sort((left, right) => left.name.localeCompare(right.name));
+          const readdir = filesystem.readdir;
+          using _knownFirst = spyOn(filesystem, "readdir").mockImplementation(
+            async (...args) => {
+              if (args[0] === tail)
+                throw Object.assign(new Error("Cannot list later directory"), {
+                  code,
+                  syscall: "scandir",
+                  path: tail,
+                });
+              return args[0] === directory
+                ? entries
+                : Reflect.apply(readdir, filesystem, args);
+            },
+          );
           await expect(tracker.refresh()).rejects.toMatchObject({
             code,
             path: newLog,

@@ -261,24 +261,29 @@ export class ScanCostTracker {
         this.#options.onSessionEvent !== undefined ||
         this.#options.onWorkerEvent !== undefined);
     const unreadable = new Map<SessionUsage, unknown>();
-    for await (const path of sessionFiles(
-      join(this.#options.codexHome, "sessions"),
-    )) {
-      let session = this.#sessions.get(path);
-      if (session === undefined) {
-        session = createSessionUsage(observeUsage);
-        this.#sessions.set(path, session);
+    let blocked: [SessionUsage, unknown] | undefined;
+    try {
+      for await (const path of sessionFiles(
+        join(this.#options.codexHome, "sessions"),
+      )) {
+        let session = this.#sessions.get(path);
+        if (session === undefined) {
+          session = createSessionUsage(observeUsage);
+          this.#sessions.set(path, session);
+        }
+        try {
+          await readSessionUsage(path, session, repository);
+        } catch (error) {
+          if (session.threadId === null) {
+            if (!observeHealthySessions || !isAccessDenied(error)) throw error;
+            blocked ??= [session, error];
+          }
+          unreadable.set(session, error);
+        }
       }
-      try {
-        await readSessionUsage(path, session, repository);
-      } catch (error) {
-        if (
-          session.threadId === null &&
-          (!observeHealthySessions || !isAccessDenied(error))
-        )
-          throw error;
-        unreadable.set(session, error);
-      }
+    } catch (error) {
+      // Traversal stopped. Preserve the read error that already blocked this poll.
+      if (!blocked) throw error;
     }
 
     const included = new Set([this.#threadId, ...this.#receipts.keys()]);
@@ -322,15 +327,12 @@ export class ScanCostTracker {
       }
     } while (included.size !== previousSize);
 
-    // An unidentified log can belong to this scan even without a known parent.
-    let blocked =
-      unreadable.entries().find(([session]) => session.threadId === null) ??
-      unreadable
-        .entries()
-        .find(
-          ([session]) =>
-            session.threadId !== null && included.has(session.threadId),
-        );
+    blocked ??= unreadable
+      .entries()
+      .find(
+        ([session]) =>
+          session.threadId !== null && included.has(session.threadId),
+      );
     if (blocked && !observeHealthySessions) throw blocked[1];
 
     const usages = new Map(this.#receipts);
