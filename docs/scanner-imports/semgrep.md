@@ -138,6 +138,19 @@ When passing normalized findings to the SDK, keep each generated Semgrep
 caller-managed identity, use an opaque ID of your own. The generated Semgrep ID
 requires the original scoped evidence on every import.
 
+In a marked Platform export or selection, a partial legacy v1 object in
+`source_data.finding` must retain its original collection scope when it
+contains a repository ID, URL or name, a `ref` value (including `null`), or a
+recognized `product` or `issue_type` (`sast`, `code`, `sca`, or `ai_sast`).
+A non-null `found_dependency` or `vulnerability_identifier` also identifies
+a Supply Chain finding, even when the row omits its product.
+Keep the deployment, project, ref and product alongside the native finding,
+including when you change its storage ID. For rows with canonical
+`source_data.semgrepPlatformFindingJson`, the SDK checks that serialized
+native finding. If unrelated SDK metadata uses the same v1 fields, move it to
+another key such as `source_data.ticket`, or submit those rows in an ordinary
+normalized batch without the Platform report marker or scope.
+
 ## Collect a Platform project and branch
 
 With a Web API token in `SEMGREP_APP_TOKEN`, collect all findings returned for a

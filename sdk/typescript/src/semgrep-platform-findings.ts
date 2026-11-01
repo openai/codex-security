@@ -501,6 +501,13 @@ function repositoryWithOnlyAlias(
     : undefined;
 }
 
+function hasSemgrepScaEvidence(finding: Record<string, unknown>): boolean {
+  return (
+    finding["found_dependency"] != null ||
+    finding["vulnerability_identifier"] != null
+  );
+}
+
 /** Complete reports record the repository labels returned by the project-ID-scoped request. */
 export function checkSemgrepPlatformRow(
   finding: Record<string, unknown>,
@@ -599,11 +606,7 @@ export function checkSemgrepPlatformRow(
     throw new Error(
       "Semgrep finding repository does not match the selected project and ref.",
     );
-  if (
-    scope.product !== "sca" &&
-    (finding["found_dependency"] != null ||
-      finding["vulnerability_identifier"] != null)
-  )
+  if (scope.product !== "sca" && hasSemgrepScaEvidence(finding))
     throw new Error("Select Semgrep Code (SAST) findings.");
   return (
     scope.product === "sast" &&
@@ -1179,6 +1182,29 @@ function checkProjectedProduct(
     );
 }
 
+/** A marked report reserves the v1 finding's repository, ref and product for Semgrep scope. */
+function hasRetainedSemgrepScope(finding: unknown): boolean {
+  if (!isRecord(finding)) return false;
+  const repository = finding["repository"];
+  if (
+    finding["ref"] !== undefined ||
+    hasSemgrepScaEvidence(finding) ||
+    (isRecord(repository) &&
+      (repository["id"] != null ||
+        !!text(repository["url"]) ||
+        !!text(repository["name"])))
+  )
+    return true;
+  return [finding["product"], finding["issue_type"]].some((value) => {
+    if (typeof value !== "string") return false;
+    const product = value.toLowerCase();
+    return (
+      product === "code" ||
+      SEMGREP_PLATFORM_PRODUCTS.some((known) => known === product)
+    );
+  });
+}
+
 export function semgrepPlatformFindingBinding(
   finding: ExternalFinding,
   provider: string,
@@ -1191,6 +1217,14 @@ export function semgrepPlatformFindingBinding(
 ) {
   const retained = finding.evidence.source_data;
   if (!isSemgrepPlatformEvidence(finding, provider)) {
+    if (
+      provider === "semgrep" &&
+      reportScope?.format !== undefined &&
+      hasRetainedSemgrepScope(retained?.["finding"])
+    )
+      throw new Error(
+        "Retained Semgrep finding scope requires the original collection scope in a marked Platform report.",
+      );
     if (reportScope && reportScope.format !== semgrepSelectionFormat) {
       const source = repositoryContext(reportScope.url, references).source;
       const claims = [
