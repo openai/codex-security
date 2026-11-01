@@ -284,6 +284,41 @@ describe("scan activity", () => {
 
   test.each<ActivityTestCase>([
     {
+      name: "review regression text shell operand expands repository variable",
+      command: 'sh "$CODEX_SECURITY_REPOSITORY/script.sh"',
+      shell: "/bin/sh",
+      platform: "linux",
+      expected: { paths: ["script.sh"] },
+    },
+    {
+      name: "review regression single-quoted command body remains parseable",
+      command: "bash -c '$CODEX_SECURITY_REPOSITORY/script.sh'",
+      shell: "/bin/sh",
+      platform: "linux",
+      expected: { paths: ["script.sh"] },
+    },
+    {
+      name: "review regression text shell positional repository variable",
+      command: `bash -c 'cat "$1"' bash "$CODEX_SECURITY_REPOSITORY/app.ts"`,
+      shell: "/bin/sh",
+      platform: "linux",
+      expected: { paths: ["app.ts"] },
+    },
+    {
+      name: "review regression single-quoted literal operand is not expanded",
+      command: "sh '$CODEX_SECURITY_REPOSITORY/script.sh'",
+      shell: "/bin/sh",
+      platform: "linux",
+      expected: { paths: [] },
+    },
+    {
+      name: "review regression trailing PowerShell wrapper newline",
+      command: "pwsh -Command 'Get-Content /code/project/app.ts'\n",
+      shell: "/usr/bin/pwsh",
+      platform: "linux",
+      expected: { paths: ["app.ts"] },
+    },
+    {
       name: "substitution regression maintainer reproducer",
       command: 'cat "$(printf /dev/null)" /repo/one.ts',
       repository: "/repo",
@@ -1079,6 +1114,20 @@ describe("scan activity", () => {
   });
 
   test.each<ActivityTestCase<readonly string[]>>([
+    {
+      name: "review regression PowerShell command tail is not a literal operand",
+      command: ["pwsh", "-Command", "Get-Content", "/code/project/app.ts;Write-Output done"],
+      repository: "/code/project",
+      platform: "linux",
+      expected: { paths: ["app.ts"] },
+    },
+    {
+      name: "review regression recorded argv repository variable stays literal",
+      command: ["cat", "$CODEX_SECURITY_REPOSITORY/app.ts"],
+      repository: "/code/project",
+      platform: "linux",
+      expected: { paths: [] },
+    },
     {
       name: "substitution regression unsupported parameter expansion cannot expose inner paths",
       command: [
