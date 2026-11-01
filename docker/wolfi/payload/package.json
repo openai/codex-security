@@ -1,0 +1,6 @@
+{
+  "name": "codex-security-image-payload",
+  "version": "0.7.0",
+  "private": true,
+  "dependencies": { "@openai/codex-security": "0.7.0" }
+}

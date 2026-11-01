@@ -28,12 +28,7 @@ export interface ScanCost {
   };
 }
 
-interface TokenPrices {
-  input: number;
-  cacheRead: number;
-  cacheWrite: number;
-  output: number;
-}
+type TokenPrices = ReturnType<typeof usdPerMillionTokens>;
 
 type ModelPricing = readonly [
   input: number,
@@ -88,6 +83,7 @@ const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
   // GPT-5.5 has no additional cache-write charge.
   "gpt-5.5": [5_000, 500, 5_000, 30_000],
   "gpt-5.5-2026-04-23": [5_000, 500, 5_000, 30_000],
+  "gpt-6-sol": [2_000, 200, 2_500, 10_000],
   "gpt-6.1-sol": [2_000, 100, 2_500, 10_000],
   "gpt-6-astra": [10_000, 1_000, 12_500, 50_000],
   "gpt-6-luna": [100, 10, 125, 500],
@@ -103,6 +99,7 @@ const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
 
 // Verified Standard rates: https://developers.openai.com/api/docs/pricing
 // GPT-5.5: https://developers.openai.com/api/docs/models/gpt-5.5
+// GPT-6 Sol: https://developers.openai.com/api/docs/models/gpt-6-sol
 // Do not infer tiers from aggregate scan tokens: the runtime does not report
 // which usage received long-context pricing. Cyber/Daybreak Red has no verified
 // long-context rate in the pricing table, so its upper estimate stays unavailable.
@@ -110,6 +107,7 @@ const LONG_CONTEXT_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> =
   {
     "gpt-5.5": [10_000, 1_000, 10_000, 45_000],
     "gpt-5.5-2026-04-23": [10_000, 1_000, 10_000, 45_000],
+    "gpt-6-sol": [4_000, 400, 5_000, 15_000],
     "gpt-6.1-sol": [4_000, 200, 5_000, 15_000],
     "gpt-6-astra": [20_000, 2_000, 25_000, 75_000],
     "gpt-6-luna": [200, 20, 250, 750],
@@ -120,10 +118,7 @@ const LONG_CONTEXT_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> =
     "gpt-daybreak-blue-latest": [8_000, 800, 10_000, 30_000],
   };
 
-function usdPerMillionTokens(
-  pricing: ModelPricing,
-  unitsPerUsd: number,
-): TokenPrices {
+function usdPerMillionTokens(pricing: ModelPricing, unitsPerUsd: number) {
   const [input, cacheRead, cacheWrite, output] = pricing;
   const unitsPerMillion = unitsPerUsd / 1_000_000;
   return {
@@ -181,13 +176,18 @@ export function estimateScanCost(
   usage: unknown,
 ): ScanCost | null {
   if (model === undefined) return null;
-  const bedrockPricing = BEDROCK_MODEL_PRICING[model];
+  const bedrockPricing = Object.hasOwn(BEDROCK_MODEL_PRICING, model)
+    ? BEDROCK_MODEL_PRICING[model]
+    : undefined;
   const unitsPerUsd = bedrockPricing?.unitsPerUsd ?? 1_000_000_000;
   const pricingModel = model.startsWith("openai.")
     ? model.slice("openai.".length)
     : model;
   const pricing =
-    bedrockPricing?.short ?? MODEL_PRICING_NANODOLLARS[pricingModel];
+    bedrockPricing?.short ??
+    (Object.hasOwn(MODEL_PRICING_NANODOLLARS, pricingModel)
+      ? MODEL_PRICING_NANODOLLARS[pricingModel]
+      : undefined);
   const normalized = tokenUsage(usage);
   if (pricing === undefined || normalized === null) return null;
   const [inputRate, cachedInputRate, cacheWriteInputRate, outputRate] = pricing;
@@ -245,14 +245,18 @@ export function estimateScanCost(
         ? bedrockPricing.source
         : pricingModel.startsWith("gpt-5.5")
           ? "https://developers.openai.com/api/docs/models/gpt-5.5"
-          : "https://developers.openai.com/api/docs/pricing",
+          : pricingModel === "gpt-6-sol"
+            ? "https://developers.openai.com/api/docs/models/gpt-6-sol"
+            : "https://developers.openai.com/api/docs/pricing",
       asOf: bedrockPricing
         ? bedrockPricing.asOf
-        : pricingModel === "gpt-5.6-cyber"
-          ? "2026-10-06"
-          : pricingModel === "gpt-6.1-sol" || pricingModel === "gpt-6-luna"
-            ? "2026-09-30"
-            : "2026-09-14",
+        : pricingModel === "gpt-6-sol"
+          ? "2026-10-10"
+          : pricingModel === "gpt-5.6-cyber"
+            ? "2026-10-06"
+            : pricingModel === "gpt-6.1-sol" || pricingModel === "gpt-6-luna"
+              ? "2026-09-30"
+              : "2026-09-14",
       serviceTier: "standard",
       context: "short",
       usdPerMillionTokens: usdPerMillionTokens(pricing, unitsPerUsd),

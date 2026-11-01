@@ -63,22 +63,23 @@ The optional publisher uses the `target` repository resource metadata, not the
 tooling repository's build metadata. Keep its alias and
 `advancedsecurity.publish.repository` in sync when adapting the YAML. This is
 Microsoft's [explicit multi-repository publishing mechanism](https://learn.microsoft.com/en-us/azure/devops/release-notes/2025/sprint-253-update#multi-repository-publishing-scenarios-supported-for-github-advanced-security-for-azure-devops).
-Full and diff results use separate categories so a partial diff does not replace
+Full and diff results use separate categories so a diff does not replace
 the full-scan baseline. A diff result is still a snapshot of that diff, not a
 complete repository inventory; use full scans to track the baseline over time.
 
 ## Results and failures
 
 The `codex-security` pipeline artifact contains `result.json`, available
-`report.md`, `coverage.json`, and `findings.json`, plus `results.sarif` after a
-successful export. Check the JSON/report for findings, coverage, runtime, and
-usage; missing or incomplete coverage is not a clean scan.
+`report.md`, `scan-manifest.json`, and `findings.json`, plus `results.sarif` after a
+successful export. Check the JSON/report for findings, scope, runtime, and
+usage. Scope exclusions and deferred investigations do not fail the scan or
+bypass the findings policy; exit `2` indicates an execution error.
 
 | Scan exit     | Pipeline behavior                                                                              |
 | ------------- | ---------------------------------------------------------------------------------------------- |
 | `0`           | Completed scan; export SARIF and retain reports.                                               |
 | `1`           | Severity policy failed; still export SARIF and retain reports, but keep the job failed.        |
-| Other nonzero | Scan failed or was incomplete; retain available reports without exporting or publishing SARIF. |
+| Other nonzero | Execution failed or was interrupted; retain available reports without exporting or publishing SARIF. |
 
 An export or publishing failure also fails the job. Cancellation skips the
 post-scan steps, so artifacts are not guaranteed for canceled runs. Native

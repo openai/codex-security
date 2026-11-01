@@ -7,14 +7,15 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
-  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, win32 } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { privateDirectoryProof } from "./proof-windows-acl.mjs";
+import { processProof } from "./proof-process-windows.mjs";
 import { wideProcessProof } from "./proof-windows-wide.mjs";
 import { windowsFileSystem } from "./windows-files.mjs";
 import {
@@ -250,10 +251,12 @@ function handleProof(root: string) {
     const junctionStat = files.stat(pathBytes(ancestor), false);
     assert(junctionStat.isDirectory());
     assert(junctionStat.isReparsePoint());
+    assert(junctionStat.isNameSurrogate());
     assert(!junctionStat.isSymbolicLink());
     const targetStat = files.stat(pathBytes(ancestor));
     assert(targetStat.isDirectory());
     assert(!targetStat.isReparsePoint());
+    assert(!targetStat.isNameSurrogate());
     samePath(
       checked(junction.finalPath(flags.FILE_NAME_OPENED)).path,
       ancestor,
@@ -380,7 +383,11 @@ async function ownershipProof(root: string): Promise<boolean> {
 const root = realpathSync.native(
   mkdtempSync(join(tmpdir(), "codex-security-windows-")),
 );
+let proofError: unknown;
 try {
+  const handles = handleProof(root);
+  const privateDirectories = privateDirectoryProof(root, native);
+  const wideProcessAndPaths = wideProcessProof(root);
   console.log(
     JSON.stringify(
       {
@@ -388,9 +395,15 @@ try {
         platform: process.platform,
         architecture: process.arch,
         nodeApi: 8,
-        handles: handleProof(root),
-        privateDirectories: privateDirectoryProof(root, native),
-        wideProcessAndPaths: wideProcessProof(root),
+        handles,
+        privateDirectories,
+        wideProcessAndPaths,
+        childProcesses: await processProof(
+          root,
+          wideProcessAndPaths[
+            "cachedSymlinkTagsIncludingDanglingDirectories"
+          ] === true,
+        ),
         garbageCollectionClosesHandle: await ownershipProof(root),
         fixture: basename(root),
       },
@@ -398,6 +411,23 @@ try {
       2,
     ),
   );
+} catch (error) {
+  proofError = error;
+  throw error;
 } finally {
-  rmSync(root, { recursive: true, force: true });
+  try {
+    await rm(root, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 100,
+    });
+  } catch (error) {
+    if (proofError !== undefined)
+      throw new AggregateError(
+        [proofError, error],
+        "Windows proof and cleanup failed",
+      );
+    throw error;
+  }
 }

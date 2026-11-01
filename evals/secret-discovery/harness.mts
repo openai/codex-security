@@ -94,8 +94,7 @@ export const outputSchema = object({
       remediation: text,
     }),
   ),
-  coverage: object({
-    completeness: { enum: ["complete", "partial", "unknown"] },
+  reviewState: object({
     surfaces: array(
       object({
         label: text,
@@ -138,7 +137,7 @@ export async function prepareEval(
     await cp(join(pluginRoot, name), join(runtime, name), { recursive: true });
   }
   const prompt = [
-    "Perform a complete static security audit of the repository below.",
+    "Perform a static security review of the repository below.",
     `Repository and authorized scope: ${repo}, all current files.`,
     `Plugin reference directory: ${runtime}. Bare reference filenames are relative to ${join(runtime, "references")}.`,
     "Applicable inherited SECURITY.md guidance: none; the caller checked the authorized scope and its ancestors.",
@@ -340,7 +339,7 @@ export async function runPreparedEval(
       ? "explicit"
       : "Codex default; SDK does not expose resolved model",
     promptSha256: prepared.promptSha256,
-    ...gradeResult(semanticResult, prepared.fixture, prepared.repo),
+    ...gradeResult(semanticResult, prepared.fixture),
     usage,
   };
   return { report, semanticResult };

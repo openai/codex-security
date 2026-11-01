@@ -34,6 +34,18 @@ def require_available(connection: sqlite3.Connection, args: Any, require_scan: A
         raise SystemExit(SCAN_STATUS_ERROR)
 
 
+def require_request(
+    connection: sqlite3.Connection, request_id: str, occurrence: sqlite3.Row
+) -> sqlite3.Row:
+    current = connection.execute(
+        "SELECT * FROM finding_remediation_attempts WHERE request_id = ?",
+        (request_id,),
+    ).fetchone()
+    if current is None or current["occurrence_id"] != occurrence["id"]:
+        raise SystemExit("Codex Security finding remediation request not found.")
+    return current
+
+
 def remediation_claim_is_active(remediation: sqlite3.Row) -> bool:
     if remediation["pending_action_claim_token"] is None:
         return False
@@ -135,7 +147,11 @@ def cancel_finding_remediation_request(
             connection.execute(
                 """
                 UPDATE finding_remediation_attempts
-                SET pending_action = NULL, pending_action_claimed_at = NULL,
+                SET state = CASE
+                        WHEN pending_action = 'verify' AND state = 'verifying' THEN 'applied'
+                        ELSE state
+                    END,
+                    pending_action = NULL, pending_action_claimed_at = NULL,
                     pending_action_claim_token = NULL, pending_action_delivered_at = NULL,
                     version = version + 1, updated_at = ?
                 WHERE request_id = ? AND pending_action_claim_token = ?

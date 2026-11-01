@@ -1,18 +1,3 @@
-[project]
-name = "codex-security"
-version = "0.1.0"
-requires-python = ">=3.10"
-
-[project.optional-dependencies]
-test = [
-    "jsonschema[format-nongpl]==4.26.0",
-    "packaging==26.3",
-    "pytest==9.1.1",
-    "pytest-xdist==3.8.0",
-    "PyYAML==6.0.3",
-    "ruff==0.16.9",
-]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
@@ -23,7 +8,7 @@ markers = [
 
 [tool.ruff]
 line-length = 100
-required-version = "==0.16.9"
+required-version = "==0.17.2"
 target-version = "py310"
 
 [tool.ruff.lint]
@@ -196,10 +181,3 @@ preview = true
 
 [tool.ruff.lint.isort]
 detect-same-package = false
-
-[tool.setuptools.packages.find]
-include = []
-
-[build-system]
-requires = ["setuptools>=84.0.0"]
-build-backend = "setuptools.build_meta"

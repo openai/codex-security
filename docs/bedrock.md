@@ -60,8 +60,11 @@ Codex dependency; a successful inference alone does not verify all model metadat
 
 Bedrock defaults `model_reasoning_summary` to `none` because some models reject
 `reasoning.summary`. This setting reaches Deep Scan discovery and reducer workers,
-including resumes. Reasoning effort is unchanged; an explicit summary override
-still takes precedence. See [provider configuration](../sdk/typescript/README.md#amazon-bedrock).
+including resumes. To request summaries from a model that supports them, add
+`--codex 'model_reasoning_summary="auto"'` to the scan command. This explicit
+override takes precedence over the default and does not change reasoning effort.
+See [native configuration overrides](../sdk/typescript/docs/cli.md#runtime-configuration-and-worker-limits)
+for the `--codex KEY=VALUE` syntax.
 
 ## Daybreak Blue and Red
 
@@ -128,7 +131,7 @@ qa_root="$(mktemp -d)"
 mkdir "$qa_root/repository" "$qa_root/codex-home"
 export CODEX_HOME="$qa_root/codex-home"
 export CODEX_SECURITY_STATE_DIR="$qa_root/state"
-unset OPENAI_API_KEY CODEX_API_KEY OPENROUTER_API_KEY FIREWORKS_API_KEY
+unset OPENAI_API_KEY CODEX_API_KEY OPENROUTER_API_KEY FIREWORKS_API_KEY CHEAPER_INFERENCE_API_KEY
 unset CODEX_CLI_PATH CODEX_SECURITY_PROJECT_CONFIG
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_BEARER_TOKEN_BEDROCK
 export AWS_PROFILE="security-scan"
@@ -206,9 +209,8 @@ is a separate path and does not establish crash recovery:
 
 Resume reads the saved model, provider, reasoning settings, and original output
 directory. Confirm discovery and reducer workers, including resumed workers, use
-those settings and AWS authentication. Check the final stop reason and coverage;
-a limit-triggered partial scan or unrecovered worker failure is not a complete
-test. If no resumable scan is available, record this check as not run.
+those settings and AWS authentication. Check the final stop reason and reported
+limitations. If no resumable scan is available, record this check as not run.
 
 Finally, view and export the saved result in a subshell without cloud credentials.
 The fresh credential files below exclude AWS profile credentials from this check:

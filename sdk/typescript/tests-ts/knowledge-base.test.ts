@@ -12,9 +12,13 @@ import {
 import * as filesystem from "node:fs/promises";
 import * as os from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
-import { prepareKnowledgeBase } from "../src/knowledge-base.js";
+import { ConfigurationError } from "../src/errors.js";
+import {
+  prepareKnowledgeBase,
+  readKnowledgeBaseSnapshot,
+} from "../src/knowledge-base.js";
 import { expandHome } from "../src/runtime.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
@@ -35,9 +39,15 @@ function docx(
   secondLine?: string,
   breakElement = "<w:br/>",
 ): Uint8Array {
+  return docxBody(
+    `<w:p><w:r><w:t>${text}</w:t>${secondLine === undefined ? "" : `${breakElement}<w:t>${secondLine}</w:t>`}</w:r></w:p>`,
+  );
+}
+
+function docxBody(body: string): Uint8Array {
   return zipSync({
     "word/document.xml": strToU8(
-      `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${text}</w:t></w:r>${secondLine === undefined ? "" : `${breakElement}<w:r><w:t>${secondLine}</w:t></w:r>`}</w:p></w:body></w:document>`,
+      `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}</w:body></w:document>`,
     ),
   });
 }
@@ -478,6 +488,30 @@ describe("scan knowledge bases", () => {
       join(root, "carriage-return.docx"),
       docx("Authentication", "Review sessions", "<w:cr/>"),
     );
+    await writeFile(
+      join(root, "paired-tab.docx"),
+      docx("Role", "Capability", "<w:tab></w:tab>"),
+    );
+    await writeFile(
+      join(root, "self-closing-tab.docx"),
+      docx("User", "Permission", "<w:tab/>"),
+    );
+    await writeFile(
+      join(root, "tracked-change.docx"),
+      docxBody(
+        '<w:p><w:r><w:t xml:space="preserve">Admin API is </w:t></w:r>' +
+          '<w:del w:id="1" w:author="Example Author"><w:r><w:delText>public</w:delText></w:r></w:del>' +
+          "<w:r><w:t>internal only</w:t></w:r></w:p>",
+      ),
+    );
+    await writeFile(
+      join(root, "field-code.docx"),
+      docxBody(
+        '<w:p><w:r><w:t xml:space="preserve">See </w:t><w:fldChar w:fldCharType="begin"/></w:r>' +
+          '<w:r><w:instrText xml:space="preserve"> HYPERLINK "https://example.com/runbook" </w:instrText></w:r>' +
+          '<w:r><w:fldChar w:fldCharType="separate"/><w:t>the runbook</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p>',
+      ),
+    );
 
     const knowledgeBase = await prepareKnowledgeBase([root]);
     temporaryDirectories.track(knowledgeBase.path);
@@ -487,6 +521,260 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("SSRF & IDOR\nReview authentication\n");
     expect(documents).toContain("Authorization\nReview permissions\n");
     expect(documents).toContain("Authentication\nReview sessions\n");
+    expect(documents).toContain("Role\tCapability\n");
+    expect(documents).toContain("User\tPermission\n");
+    expect(documents).toContain("Admin API is internal only\n");
+    expect(documents).toContain("See the runbook\n");
+  });
+
+  test.each([
+    [
+      "an unclosed text-box field inside a main-story field result",
+      '<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>HYPERLINK "https://example.com"</w:instrText>' +
+        '<w:fldChar w:fldCharType="separate"/><w:t>Main-before </w:t></w:r>' +
+        '<w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:rect id="TextBox1" style="width:180pt;height:72pt"><v:textbox><w:txbxContent>' +
+        '<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>AUTHOR</w:instrText><w:t>Text-box guidance.</w:t></w:r></w:p>' +
+        "</w:txbxContent></v:textbox></v:rect></w:pict></w:r>" +
+        '<w:r><w:fldChar w:fldCharType="end"/><w:instrText>Main-after</w:instrText></w:r></w:p>',
+      "Main-before Text-box guidance.\nMain-after\n",
+    ],
+    [
+      "independent fields in sibling text boxes",
+      "<w:p><w:r><w:t>Main-before </w:t></w:r>" +
+        '<w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:rect id="TextBox1" style="width:180pt;height:72pt"><v:textbox><w:txbxContent>' +
+        '<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>AUTHOR</w:instrText><w:t>First text-box guidance.</w:t></w:r></w:p>' +
+        "</w:txbxContent></v:textbox></v:rect></w:pict></w:r>" +
+        '<w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:rect id="TextBox2" style="width:180pt;height:72pt"><v:textbox><w:txbxContent>' +
+        '<w:p><w:r><w:t>Second text-box guidance.</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p>' +
+        "</w:txbxContent></v:textbox></v:rect></w:pict></w:r>" +
+        "<w:r><w:t>Main-after</w:t></w:r></w:p>",
+      "Main-before First text-box guidance.\nSecond text-box guidance.\nMain-after\n",
+    ],
+    [
+      "ordinary runs after an unclosed field",
+      '<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>AUTHOR</w:instrText></w:r></w:p>' +
+        "<w:p><w:r><w:t>Require authorization</w:t></w:r></w:p>",
+      "\nRequire authorization\n",
+    ],
+    [
+      "nested field results inside an unclosed field",
+      '<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>IF </w:instrText>' +
+        '<w:fldChar w:fldCharType="begin"/><w:instrText>AUTHOR</w:instrText>' +
+        '<w:fldChar w:fldCharType="separate"/><w:t>Example Author</w:t><w:fldChar w:fldCharType="end"/>' +
+        "<w:t> requires authorization</w:t></w:r></w:p>",
+      "Example Author requires authorization\n",
+    ],
+    [
+      "literal markup in standalone instruction text",
+      "<w:p><w:r><w:instrText><![CDATA[Require <authorization> &amp; audit]]></w:instrText></w:r></w:p>",
+      "Require <authorization> &amp; audit\n",
+    ],
+    [
+      "field markup in XML comments",
+      '<w:p><w:r><w:t>Require<!-- <w:fldChar w:fldCharType="begin"/> --></w:t>' +
+        "<w:instrText> authorization</w:instrText></w:r></w:p>",
+      "Require authorization\n",
+    ],
+    [
+      "CDATA instructions and character references in field attributes",
+      '<w:p><w:r><w:fldChar w:fldCharType="beg&#105;n"/>' +
+        '<w:instrText><![CDATA[HYPERLINK "https://example.com/runbook"]]></w:instrText>' +
+        '<w:fldChar w:fldCharType="separate"/><w:t>Read &amp; audit</w:t>' +
+        '<w:fldChar w:fldCharType="end"/></w:r></w:p>',
+      "Read & audit\n",
+    ],
+    [
+      "standalone instruction text",
+      "<w:p><w:r><w:t>Require </w:t><w:instrText>authorization</w:instrText><w:t> before access</w:t></w:r></w:p>",
+      "Require authorization before access\n",
+    ],
+    [
+      "instruction text used as a field result",
+      '<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>AUTHOR</w:instrText>' +
+        '<w:fldChar w:fldCharType="separate"/><w:instrText>Example Author</w:instrText>' +
+        '<w:fldChar w:fldCharType="end"/></w:r></w:p>',
+      "Example Author\n",
+    ],
+    [
+      "nested fields within outer instructions",
+      '<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>IF </w:instrText>' +
+        '<w:fldChar w:fldCharType="begin"/><w:instrText>AUTHOR</w:instrText>' +
+        '<w:fldChar w:fldCharType="separate"/><w:t>Example Author</w:t><w:fldChar w:fldCharType="end"/>' +
+        '<w:instrText> = "Example Author" "internal" "public"</w:instrText>' +
+        '<w:fldChar w:fldCharType="separate"/><w:t>internal</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p>',
+      "internal\n",
+    ],
+    [
+      "nested fields within an outer result",
+      '<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>IF 1 = 1</w:instrText>' +
+        '<w:fldChar w:fldCharType="separate"/><w:t>See </w:t>' +
+        '<w:fldChar w:fldCharType="begin"/><w:instrText>HYPERLINK "https://example.com/runbook"</w:instrText>' +
+        '<w:fldChar w:fldCharType="separate"/><w:t>the runbook</w:t><w:fldChar w:fldCharType="end"/>' +
+        '<w:instrText> before access</w:instrText><w:fldChar w:fldCharType="end"/></w:r></w:p>',
+      "See the runbook before access\n",
+    ],
+    [
+      "field results spanning paragraphs",
+      '<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>TOC</w:instrText>' +
+        '<w:fldChar w:fldCharType="separate"/><w:t>First result paragraph</w:t></w:r></w:p>' +
+        '<w:p><w:r><w:instrText>Second result paragraph</w:instrText><w:fldChar w:fldCharType="end"/></w:r></w:p>',
+      "First result paragraph\nSecond result paragraph\n",
+    ],
+    [
+      "a field without a result followed by standalone instruction text",
+      '<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>XE "authorization"</w:instrText>' +
+        '<w:fldChar w:fldCharType="end"/><w:instrText>Visible scope</w:instrText></w:r></w:p>',
+      "Visible scope\n",
+    ],
+    [
+      "deleted field separators and instructions",
+      '<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>IF </w:instrText></w:r>' +
+        '<w:del w:id="2" w:author="Example Author"><w:r><w:fldChar w:fldCharType="separate"/>' +
+        "<w:delInstrText>old instruction</w:delInstrText></w:r></w:del>" +
+        '<w:r><w:instrText>1 = 1 "internal" "public"</w:instrText><w:fldChar w:fldCharType="separate"/>' +
+        '<w:t>internal</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p>',
+      "internal\n",
+    ],
+    [
+      "deleted field beginnings before standalone instruction text",
+      '<w:p><w:del w:id="3" w:author="Example Author"><w:r><w:fldChar w:fldCharType="begin"/>' +
+        "<w:delInstrText>removed field</w:delInstrText></w:r></w:del>" +
+        "<w:r><w:instrText>Visible scope</w:instrText></w:r></w:p>",
+      "Visible scope\n",
+    ],
+  ])("preserves DOCX text with %s", async (_description, body, expected) => {
+    const root = await temporaryDirectory();
+    const source = join(root, "field-context.docx");
+    await writeFile(source, docxBody(body));
+
+    const snapshot = await readKnowledgeBaseSnapshot([source]);
+
+    expect(Object.values(snapshot.documents)).toEqual([expected]);
+  });
+
+  test.each([
+    [
+      "CDATA between text nodes",
+      "Require <![CDATA[authorization]]> before access",
+      "Require authorization before access",
+    ],
+    [
+      "comments containing markup",
+      "Require<!-- x > hidden <w:tab/> --> authorization",
+      "Require authorization",
+    ],
+    [
+      "processing instructions",
+      "Require<?note x > hidden?> authorization",
+      "Require authorization",
+    ],
+  ])("preserves DOCX text with %s", async (_name, xml, expected) => {
+    const root = await temporaryDirectory();
+    const source = join(root, "guide.docx");
+    await writeFile(source, docx(xml));
+
+    const prepared = await prepareKnowledgeBase([source]);
+    temporaryDirectories.track(prepared.path);
+    expect(await extractedDocuments(prepared.path)).toEqual([`${expected}\n`]);
+  });
+
+  test("keeps quoted XML attributes out of DOCX text", async () => {
+    const root = await temporaryDirectory();
+    const source = join(root, "guide.docx");
+    await writeFile(
+      source,
+      docx("Authorization", "Review permissions", '<w:br note="x > y"/>'),
+    );
+
+    const prepared = await prepareKnowledgeBase([source]);
+    temporaryDirectories.track(prepared.path);
+    expect(await extractedDocuments(prepared.path)).toEqual([
+      "Authorization\nReview permissions\n",
+    ]);
+  });
+
+  test.each([
+    ["preparation", prepareKnowledgeBase],
+    ["snapshot extraction", readKnowledgeBaseSnapshot],
+  ] as const)(
+    "preserves the local origin and cause of document parser failures during %s",
+    async (_name, prepare) => {
+      const root = await temporaryDirectory();
+      const source = join(root, "network-security.pdf");
+      await writeFile(source, pdf("Network design"));
+      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+      const cause = new Error("Synthetic parser failure.");
+      const parser = spyOn(pdfjs, "getDocument").mockImplementation(() => {
+        throw cause;
+      });
+
+      try {
+        const prepared = prepare([source]);
+        await expect(prepared).rejects.toBeInstanceOf(ConfigurationError);
+        await expect(prepared).rejects.toMatchObject({
+          message: `Cannot extract text from knowledge base PDF: ${source}`,
+          cause: { cause },
+        });
+      } finally {
+        parser.mockRestore();
+      }
+    },
+  );
+
+  test("cancels PDF extraction when the scan is aborted", async () => {
+    const root = await temporaryDirectory();
+    const source = join(root, "large.pdf");
+    await writeFile(source, pdf("Cancellable content"));
+    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const controller = new AbortController();
+    const reason = new Error("Synthetic cancellation.");
+    let pagesRead = 0;
+    const destroy = mock(async () => {});
+    const parser = spyOn(pdfjs, "getDocument").mockImplementation(
+      () =>
+        ({
+          promise: Promise.resolve({
+            numPages: 3,
+            getPage: async () => {
+              pagesRead += 1;
+              return {
+                getTextContent: async () => {
+                  controller.abort(reason);
+                  return { items: [{ str: "page" }] };
+                },
+              };
+            },
+          }),
+          destroy,
+        }) as never,
+    );
+
+    try {
+      const prepared = prepareKnowledgeBase([source], controller.signal);
+      await expect(prepared).rejects.toBe(reason);
+      expect(pagesRead).toBe(1);
+      expect(destroy).toHaveBeenCalledTimes(1);
+    } finally {
+      parser.mockRestore();
+    }
+  });
+
+  test("preserves the local origin and cause when snapshot staging fails", async () => {
+    const root = await temporaryDirectory();
+    const parent = join(root, "not-a-directory");
+    await writeFile(parent, "synthetic occupied path");
+    const prepared = prepareKnowledgeBase(
+      {
+        sources: [],
+        protectedRoots: [],
+        documents: { "0.txt": "Synthetic knowledge" },
+      },
+      undefined,
+      parent,
+    );
+    await expect(prepared).rejects.toBeInstanceOf(ConfigurationError);
+    await expect(prepared).rejects.toMatchObject({ cause: expect.any(Error) });
+    expect(await readFile(parent, "utf8")).toBe("synthetic occupied path");
   });
 
   test.each([
@@ -530,6 +818,19 @@ describe("scan knowledge bases", () => {
     expect(documents).toHaveLength(2);
     expect(documents).toContain("Authentication boundary notes");
     expect(documents).toContain("Boundary &#x110000; case.\n");
+  });
+
+  test("skips Office owner files while a document is open", async () => {
+    const root = await temporaryDirectory();
+    await writeFile(join(root, "policy.docx"), docx("Access policy."));
+    await writeFile(join(root, "~$policy.docx"), new Uint8Array(162).fill(1));
+
+    const knowledgeBase = await prepareKnowledgeBase([root]);
+    temporaryDirectories.track(knowledgeBase.path);
+
+    expect(await extractedDocuments(knowledgeBase.path)).toEqual([
+      "Access policy.\n",
+    ]);
   });
 
   test("cleans up documents and rediscovers directory contents on later runs", async () => {
