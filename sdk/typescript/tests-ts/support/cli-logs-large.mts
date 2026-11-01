@@ -59,7 +59,10 @@ const output = new Writable({
   },
 });
 const deps = dependencies({
-  environment: { CODEX_SECURITY_STATE_DIR: state },
+  environment: {
+    CODEX_SECURITY_STATE_DIR: state,
+    CODEX_HOME: join(state, "codex-home"),
+  },
   onWorkbench: () => ({
     scan: { scanId: "scan-1", continuationThreadId: "thread-1" },
   }),

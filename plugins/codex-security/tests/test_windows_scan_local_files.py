@@ -1,24 +1,16 @@
 from __future__ import annotations
 
-import importlib.util
 import os
+import shutil
+import subprocess
 from pathlib import Path
-from types import ModuleType
 
 import pytest
+from workbench_test_support import load_script
 
+pytestmark = pytest.mark.native_windows
 
-def load_windows_scan_local_files() -> ModuleType:
-    script = Path(__file__).resolve().parent.parent / "scripts" / "windows_scan_local_files.py"
-    spec = importlib.util.spec_from_file_location("windows_scan_local_files", script)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"could not load {script}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-WINDOWS_FILES = load_windows_scan_local_files()
+WINDOWS_FILES = load_script("windows_scan_local_files")
 
 
 @pytest.mark.parametrize(
@@ -46,6 +38,27 @@ def test_accepts_normal_scan_local_path() -> None:
     )
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires native Win32 security APIs")
+def test_directory_acl_copy_does_not_create_from_a_missing_source(tmp_path: Path) -> None:
+    destination = tmp_path / "replacement"
+    with pytest.raises(WINDOWS_FILES.WindowsScanLocalFileError):
+        WINDOWS_FILES.create_directory_with_same_dacl(destination, tmp_path / "missing")
+    assert not destination.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Win32 security APIs")
+def test_directory_acl_copy_does_not_reuse_an_existing_destination(tmp_path: Path) -> None:
+    source = tmp_path / "original"
+    destination = tmp_path / "replacement"
+    source.mkdir()
+    destination.mkdir()
+    marker = destination / "retained.txt"
+    marker.write_text("synthetic retained data", encoding="utf-8")
+    with pytest.raises(WINDOWS_FILES.WindowsScanLocalFileError):
+        WINDOWS_FILES.create_directory_with_same_dacl(destination, source)
+    assert marker.read_text(encoding="utf-8") == "synthetic retained data"
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires native Win32 file APIs")
 def test_native_windows_backend_writes_reads_replaces_and_deletes(tmp_path: Path) -> None:
     scan_dir = tmp_path / "scan"
@@ -57,6 +70,13 @@ def test_native_windows_backend_writes_reads_replaces_and_deletes(tmp_path: Path
     )
     with os.fdopen(descriptor, "rb") as handle:
         assert handle.read() == b"first"
+
+    descriptor, filename = WINDOWS_FILES.open_read_fd_with_path(
+        scan_dir, "exports/RESULTS.sarif", "native Windows spelling test"
+    )
+    with os.fdopen(descriptor, "rb") as handle:
+        assert handle.read() == b"first"
+    assert filename == "exports/results.sarif"
 
     WINDOWS_FILES.atomic_write(scan_dir, "exports/results.sarif", b"replacement")
     assert (scan_dir / "exports" / "results.sarif").read_bytes() == b"replacement"
@@ -80,3 +100,86 @@ def test_native_windows_backend_rejects_symlink_ancestor(tmp_path: Path) -> None
     with pytest.raises(WINDOWS_FILES.WindowsScanLocalFileError):
         WINDOWS_FILES.atomic_write(scan_dir, "exports/results.sarif", b"blocked")
     assert not (external_dir / "results.sarif").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Win32 junction APIs")
+@pytest.mark.parametrize("dangling", [False, True], ids=["unicode", "dangling"])
+def test_native_copy_junction_retains_raw_target_and_cleanup(
+    tmp_path: Path, dangling: bool
+) -> None:
+    target = tmp_path / "Mixed-Case-日本語"
+    target.mkdir()
+    source = tmp_path / "source"
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(source), str(target)], check=True)
+    if dangling:
+        target.rmdir()
+    else:
+        (target / "keep.txt").write_text("external contents\n")
+    copied_tree = tmp_path / "copy"
+    copied_tree.mkdir()
+    destination = copied_tree / "linked"
+    destination.mkdir()
+    WINDOWS_FILES.copy_directory_junction(source, destination)
+    assert os.readlink(destination) == os.readlink(source)
+    assert destination.lstat().st_reparse_tag == source.lstat().st_reparse_tag
+    shutil.rmtree(copied_tree)
+    if dangling:
+        assert not target.exists()
+    else:
+        assert (target / "keep.txt").read_text() == "external contents\n"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Win32 junction APIs")
+def test_native_copy_junction_rejects_nonempty_destination(tmp_path: Path) -> None:
+    target = tmp_path / "outside"
+    target.mkdir()
+    source = tmp_path / "source"
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(source), str(target)], check=True)
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    (destination / "keep.txt").write_text("placeholder contents\n")
+    with pytest.raises(WINDOWS_FILES.WindowsScanLocalFileError):
+        WINDOWS_FILES.copy_directory_junction(source, destination)
+    assert (destination / "keep.txt").read_text() == "placeholder contents\n"
+    assert not (target / "keep.txt").exists()
+
+
+@pytest.mark.parametrize("changed", ["root", "ancestor"])
+@pytest.mark.parametrize("replacement", ["missing", "file"])
+def test_native_directory_change_after_probe_remains_a_path_error(
+    tmp_path: Path, monkeypatch, changed: str, replacement: str
+) -> None:
+    finalizer = load_script("finalize_scan_contract")
+    ancestor = tmp_path / "ancestor"
+    scan_dir = ancestor / "scan"
+    scan_dir.mkdir(parents=True)
+    (scan_dir / "keep.txt").write_bytes(b"Accepted content")
+    finalizer.write_scan_local_bytes(scan_dir, "new-parent/receipt.json", b"Ordinary creation")
+    assert (scan_dir / "new-parent/receipt.json").read_bytes() == b"Ordinary creation"
+    moved = tmp_path / "retained"
+    target = scan_dir if changed == "root" else ancestor
+    retained_scan = moved if changed == "root" else moved / "scan"
+    mutated = False
+    # Windows exercises the actual CreateFileW boundary; POSIX is a native
+    # control at its existing directory-validation boundary.
+    owner = finalizer._windows_scan_local_files() if os.name == "nt" else finalizer
+    name = "_canonical_scan_directory" if os.name == "nt" else "_require_scan_directory"
+    original = getattr(owner, name)
+
+    def replace_after_probe(path):
+        nonlocal mutated
+        result = original(path)
+        if path == scan_dir and not mutated:
+            mutated = True
+            target.rename(moved)
+            if replacement == "file":
+                target.write_bytes(b"Replacement file")
+        return result
+
+    monkeypatch.setattr(owner, name, replace_after_probe)
+    with pytest.raises(finalizer.ContractError) as rejected:
+        finalizer.write_scan_local_bytes(scan_dir, "drafts/receipt.json", b"receipt")
+    assert not isinstance(rejected.value, finalizer.ScanLocalIOError)
+    assert mutated
+    assert (retained_scan / "keep.txt").read_bytes() == b"Accepted content"
+    assert not (retained_scan / "drafts/receipt.json").exists()

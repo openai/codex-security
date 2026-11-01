@@ -2,6 +2,11 @@ name: native-unix
 
 on:
   workflow_call:
+    inputs:
+      ref:
+        description: Source commit to build; defaults to the calling workflow commit.
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -43,22 +48,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
-      - name: Set up pnpm
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - name: Set up TypeScript tools
+        uses: ./.github/actions/setup-tools
         with:
-          package_json_file: package.json
-          cache: true
-          cache_dependency_path: sdk/typescript/pnpm-lock.yaml
-      - name: Set up Node.js 22
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "22.13.0"
-      - name: Compile TypeScript tools
-        working-directory: .
-        run: |
-          pnpm --dir sdk/typescript install --frozen-lockfile
-          pnpm --dir sdk/typescript run build:ci
+          compile: true
       - name: Set up Rust
         run: |
           # Rustup 1.29 retries component downloads, but not manifest checksums.
@@ -79,6 +74,13 @@ jobs:
       - name: Prepare shared native notices
         if: matrix.platform == 'linux' && matrix.arch == 'x64'
         run: node notices.mjs
+      - name: Pull pinned glibc image
+        if: matrix.platform == 'linux'
+        run: |
+          if ! docker pull "$NATIVE_IMAGE"; then
+            sleep 5
+            docker pull "$NATIVE_IMAGE"
+          fi
       - name: Build and verify Linux on glibc 2.28 with Node.js 22
         if: matrix.platform == 'linux'
         run: |
@@ -86,7 +88,7 @@ jobs:
           printf '#!/bin/sh\nexit 99\n' > "$RUNNER_TEMP/native-no-python/python"
           cp "$RUNNER_TEMP/native-no-python/python" "$RUNNER_TEMP/native-no-python/python3"
           chmod +x "$RUNNER_TEMP/native-no-python/"*
-          docker run --rm \
+          docker run --pull=never --rm \
             --volume "$PWD:/source" \
             --volume "$RUNNER_TEMP/native-cargo:/cargo" \
             --volume "${CARGO_HOME:-$HOME/.cargo}/registry:/cargo/registry:ro" \
@@ -107,15 +109,15 @@ jobs:
           node build.mjs
           node check.mjs
           native_node="$(command -v node)"
-          PATH= "$native_node" proof.mjs
+          PATH='' "$native_node" proof.mjs
       - name: Set up Node.js 20
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "20.0.0"
       - name: Verify the same Linux artifact with Node.js 20
         if: matrix.platform == 'linux'
         run: |
-          docker run --rm \
+          docker run --pull=never --rm \
             --volume "$PWD:/source:ro" \
             --volume "$(dirname "$(dirname "$(command -v node)")"):/node:ro" \
             --workdir /source "$NATIVE_IMAGE" /bin/bash -euc '
@@ -127,11 +129,11 @@ jobs:
         run: |
           node check.mjs
           native_node="$(command -v node)"
-          PATH= "$native_node" proof.mjs
+          PATH='' "$native_node" proof.mjs
       - name: Upload verified native artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: native-platform-${{ matrix.artifact }}-${{ github.sha }}
+          name: native-platform-${{ matrix.artifact }}-${{ inputs.ref || github.sha }}
           path: |
             plugins/codex-security/native/dist/*/*.node
             plugins/codex-security/native/dist/THIRD_PARTY_NOTICES.txt

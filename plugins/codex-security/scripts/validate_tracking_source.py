@@ -4,24 +4,14 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import sys
 from pathlib import Path
-from types import ModuleType
 from typing import Any
 
+# Keep sibling helpers importable when Python starts in isolated mode.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import validate_scan_contract as SCAN_CONTRACT
 
-def _load_scan_contract_validator() -> ModuleType:
-    script = Path(__file__).resolve().with_name("validate_scan_contract.py")
-    spec = importlib.util.spec_from_file_location("codex_security_scan_validator", script)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"could not load scan contract validator: {script}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-SCAN_CONTRACT = _load_scan_contract_validator()
 FINALIZER = SCAN_CONTRACT.FINALIZER
 validate_contract = SCAN_CONTRACT.validate_contract
 

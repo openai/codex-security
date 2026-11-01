@@ -22,6 +22,15 @@ Examples and templates for using Codex Security:
   validation script against a deliberately vulnerable API using synthetic data.
   Follow the demo's setup instructions, and do not deploy the example app.
 
+- [Invoice Desk walkthrough](invoice-desk/walkthrough.md): scan a standalone
+  synthetic invoice app, inspect saved findings and coverage, explicitly request
+  a patch, and verify the original boundary. The app has ten seeded scenarios
+  and no dependencies or external services. Its
+  [CI workflow](invoice-desk/README.md#ci-and-openai-scans) runs behavior tests,
+  manual PR evaluations, and scheduled OpenAI baselines. Guides and expected
+  findings stay outside the scan input; scan results include finding metrics and
+  downloadable reports.
+
 - [Azure Pipelines with Amazon Bedrock](azure-pipelines/README.md): centrally run
   manual full or committed-diff scans against Azure Repos, with OIDC credentials,
   report artifacts, and optional native SARIF publishing.
@@ -30,9 +39,9 @@ Examples and templates for using Codex Security:
 
 This top-level `examples/` directory is available in the repository only; it is
 not included in the `@openai/codex-security` npm package. The package is built
-from [`sdk/typescript`](../sdk/typescript/package.json), whose `files` list
-includes only the CLI launcher, compiled SDK, bundled plugin, license, and
-package README. The package check rejects files outside its expected contents.
+from [`sdk/typescript`](../sdk/typescript/package.json); its `files` list is the
+source of truth for included files. The package check rejects files outside its
+expected contents.
 
 The bundled plugin's own example artifacts are separate and remain part of the
 package.

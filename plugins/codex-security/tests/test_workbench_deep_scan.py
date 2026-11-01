@@ -14,17 +14,45 @@ from pathlib import Path
 
 import pytest
 from workbench_test_support import (
+    attach_continuation,
+    begin_deep_scan,
+    cancel_scan,
+    claim_deep_scan_dedup,
+    commit_deep_dedup,
     create_saved_workspace,
+    create_workspace,
+    empty_target_paths,
+    fail_scan,
+    finish_deep_scan,
+    get_deep_scan,
+    get_scan,
     mark_deep_coordinator_succeeded,
+    read_review_state,
+    resume_deep_scan,
     run_workbench,
+    save_workspace,
+    saved_draft,
+    scan_claim_command,
+    scan_command,
     stable_target_id,
     start_delivered_scan,
+    start_scan_command,
+    update_progress,
+    upsert_deep_worker,
+    worker_paths,
     write_completed_contract,
 )
 
 
 def deep_environment(codex_home: Path) -> dict[str, str]:
     return {"CODEX_HOME": str(codex_home)}
+
+
+def write_deep_config(codex_home: Path, content: str) -> Path:
+    config_path = codex_home / "codex-security" / "config.toml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(content)
+    return config_path
 
 
 def begin_target_scan(
@@ -34,11 +62,10 @@ def begin_target_scan(
     scan_root: Path,
     *,
     thread_id: str = "thread-deep-scan",
+    user_context: str | None = None,
 ) -> dict[str, object]:
-    return run_workbench(
+    return begin_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         thread_id,
         "--target-path",
         str(target),
@@ -48,8 +75,32 @@ def begin_target_scan(
         str(scan_root),
         "--available-parallelism",
         "16",
+        *(("--user-context-stdin",) if user_context is not None else ()),
         environment=deep_environment(codex_home),
+        input_text=user_context,
     )
+
+
+def start_empty_target_scan(
+    tmp_path: Path, *, config: str | None = None
+) -> tuple[Path, Path, str, Path]:
+    state_dir = tmp_path / "state"
+    codex_home = tmp_path / "codex-home"
+    if config is not None:
+        write_deep_config(codex_home, config)
+    target = tmp_path / "target"
+    target.mkdir()
+    run = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")["deepScan"]
+    return state_dir, codex_home, str(run["scanId"]), Path(str(run["scanDir"]))
+
+
+def restore_v53_schema(state_dir: Path) -> None:
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN terminal_reviewed_surface_count")
+        connection.execute("ALTER TABLE scans DROP COLUMN retained_checkpoint_heads_json")
+        connection.execute("ALTER TABLE workspaces DROP COLUMN deep_scan_config_json")
+        connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN pending_target_project_path")
+        connection.execute("DELETE FROM schema_migrations WHERE version > 53")
 
 
 def claim_deep_scan_coordinator(
@@ -60,11 +111,11 @@ def claim_deep_scan_coordinator(
     thread_id: str = "thread-deep-scan",
     handoff_claim_token: str | None = None,
     coordinator_generation: int | None = None,
+    check: bool = True,
 ) -> dict[str, object]:
-    return run_workbench(
+    return scan_command(
         state_dir,
         "claim-deep-scan-coordinator",
-        "--scan-id",
         scan_id,
         "--thread-id",
         thread_id,
@@ -75,6 +126,7 @@ def claim_deep_scan_coordinator(
             else ()
         ),
         environment=deep_environment(codex_home),
+        check=check,
     )
 
 
@@ -84,15 +136,6 @@ def expire_deep_scan_coordinator(state_dir: Path, scan_id: str) -> None:
             "UPDATE deep_scan_runs SET updated_at = ? WHERE scan_id = ?",
             ("2000-01-01T00:00:00Z", scan_id),
         )
-
-
-def worker_paths(scan_dir: Path, name: str) -> tuple[Path, Path, Path]:
-    artifact_dir = scan_dir / "artifacts" / "deep_discovery" / name
-    artifact_dir.mkdir(parents=True)
-    prompt_path = artifact_dir / "prompt.md"
-    prompt_path.write_text(f"Prompt for {name}\n")
-    result_path = artifact_dir / "result.json"
-    return prompt_path, artifact_dir, result_path
 
 
 def write_canonical_artifacts(scan_dir: Path) -> dict[str, Path]:
@@ -113,31 +156,24 @@ def upsert_worker(
     *,
     scan_id: str,
     worker_id: str,
-    kind: str,
-    status: str,
+    kind: str = "discovery",
+    status: str = "running",
     prompt_path: Path,
     artifact_dir: Path,
     result_path: Path | None = None,
-    attempt: int | None = None,
+    attempt: int | None = 1,
     thread_id: str | None = None,
     error: str | None = None,
     replaceable_failure_kind: str | None = None,
     coordinator_generation: int | None = None,
 ) -> dict[str, object]:
-    return run_workbench(
+    return upsert_deep_worker(
         state_dir,
-        "upsert-deep-scan-worker",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         worker_id,
-        "--kind",
         kind,
-        "--status",
         status,
-        "--prompt-path",
         str(prompt_path),
-        "--artifact-dir",
         str(artifact_dir),
         *(("--result-manifest-path", str(result_path)) if result_path is not None else ()),
         *(("--attempt", str(attempt)) if attempt is not None else ()),
@@ -174,11 +210,8 @@ def dispatch_discovery_worker(
         codex_home,
         scan_id=scan_id,
         worker_id=worker_id,
-        kind="discovery",
-        status="running",
         prompt_path=prompt_path,
         artifact_dir=artifact_dir,
-        attempt=1,
         coordinator_generation=coordinator_generation,
     )
     if succeed:
@@ -188,12 +221,10 @@ def dispatch_discovery_worker(
             codex_home,
             scan_id=scan_id,
             worker_id=worker_id,
-            kind="discovery",
             status="succeeded",
             prompt_path=prompt_path,
             artifact_dir=artifact_dir,
             result_path=result_path,
-            attempt=1,
             coordinator_generation=coordinator_generation,
         )
     return worker_id, prompt_path, artifact_dir, result_path
@@ -212,16 +243,11 @@ def commit_reducer(
 ) -> dict[str, object]:
     worker_id = str(uuid.uuid4())
     prompt_path, artifact_dir, result_path = worker_paths(scan_dir, name)
-    run_workbench(
+    claim_deep_scan_dedup(
         state_dir,
-        "claim-deep-scan-dedup",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         worker_id,
-        "--prompt-path",
         str(prompt_path),
-        "--artifact-dir",
         str(artifact_dir),
         *(item for input_id in input_worker_ids for item in ("--input-worker-id", input_id)),
         *(
@@ -237,24 +263,17 @@ def commit_reducer(
         scan_id=scan_id,
         worker_id=worker_id,
         kind="dedup",
-        status="running",
         prompt_path=prompt_path,
         artifact_dir=artifact_dir,
-        attempt=1,
         coordinator_generation=coordinator_generation,
     )
     write_canonical_artifacts(scan_dir)
     result_path.write_text("{}\n")
-    committed = run_workbench(
+    committed = commit_deep_dedup(
         state_dir,
-        "commit-deep-scan-dedup",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         worker_id,
-        "--result-manifest-path",
         str(result_path),
-        "--new-findings-count",
         str(new_findings_count),
         *(
             ("--coordinator-generation", str(coordinator_generation))
@@ -279,7 +298,7 @@ def test_existing_generation_safely_claims_and_reclaims_without_schema_migration
         return claim_deep_scan_coordinator(state_dir, codex_home, scan_id)
 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (41,)
+        schema_version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
     assert claim()["deepScan"]["coordinatorGeneration"] == 2
     assert claim()["coordinatorDisposition"] == "observing"
     expire_deep_scan_coordinator(state_dir, scan_id)
@@ -311,13 +330,15 @@ def test_existing_generation_safely_claims_and_reclaims_without_schema_migration
     assert sum(result["coordinatorDisposition"] == "adopted" for result in results) == 1
     assert sum(result["coordinatorDisposition"] == "observing" for result in results) == 3
     assert {result["deepScan"]["coordinatorGeneration"] for result in results} == {3}
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert (
+            connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
+            == schema_version
+        )
 
 
 def test_legacy_generation_with_active_worker_observes_grace_then_adopts(tmp_path: Path) -> None:
-    state_dir, codex_home, target = tmp_path / "state", tmp_path / "codex-home", tmp_path / "target"
-    target.mkdir()
-    run = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")["deepScan"]
-    scan_id, scan_dir = str(run["scanId"]), Path(str(run["scanDir"]))
+    state_dir, codex_home, scan_id, scan_dir = start_empty_target_scan(tmp_path)
     dispatch_discovery_worker(
         state_dir,
         codex_home,
@@ -366,22 +387,22 @@ def test_expired_coordinator_preserves_incomplete_setup(tmp_path: Path) -> None:
     assert not inventory.exists()
 
 
+@pytest.mark.cross_platform
 def test_paused_discovery_resumes_after_restart_with_original_handoff_claim(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state_dir, codex_home, target = tmp_path / "state", tmp_path / "codex-home", tmp_path / "target"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
     target.mkdir()
-    config = codex_home / "codex-security" / "config.toml"
-    config.parent.mkdir(parents=True)
-    config.write_text(
-        "[deep_scan]\nworkers = 1\nsubagents = 0\nstop_after_no_new = 2\nmax_discovery_runs = 2\n"
+    write_deep_config(
+        codex_home,
+        "[deep_scan]\nworkers = 1\nsubagents = 0\nstop_after_no_new = 2\nmax_discovery_runs = 2\n",
     )
     thread_id, handoff_claim_token = "track-c-continuation", str(uuid.uuid4())
     saved = create_saved_workspace(state_dir, target, thread_id="workspace-thread", mode="deep")
-    started = run_workbench(
+    started = start_scan_command(
         state_dir,
-        "start-scan",
-        "--workspace-id",
         str(saved["id"]),
         "--scan-root",
         str(tmp_path / "scans"),
@@ -399,13 +420,10 @@ def test_paused_discovery_resumes_after_restart_with_original_handoff_claim(
             ("--claim-token", handoff_claim_token, "--thread-id", thread_id),
         ),
     ):
-        run_workbench(state_dir, command, "--scan-id", scan_id, *arguments)
-    begun = run_workbench(
+        scan_command(state_dir, command, scan_id, *arguments)
+    begun = resume_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--scan-id",
         scan_id,
-        "--thread-id",
         thread_id,
         "--claim-token",
         handoff_claim_token,
@@ -413,10 +431,8 @@ def test_paused_discovery_resumes_after_restart_with_original_handoff_claim(
     )
     scan_dir = Path(str(begun["deepScan"]["scanDir"]))
     assert begun["deepScan"]["coordinatorGeneration"] == 1
-    run_workbench(
+    update_progress(
         state_dir,
-        "update-progress",
-        "--scan-id",
         scan_id,
         "--phase",
         "discovery",
@@ -431,7 +447,7 @@ def test_paused_discovery_resumes_after_restart_with_original_handoff_claim(
         scan_dir=scan_dir,
         name="track-c-completed-discovery",
     )[0]
-    paused = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    paused = get_scan(state_dir, scan_id)["scan"]
     assert (paused["progress"]["status"], paused["progress"]["phase"]) == ("running", "discovery")
     assert paused["progress"]["independentReviews"] == {
         "completed": 1,
@@ -448,37 +464,50 @@ def test_paused_discovery_resumes_after_restart_with_original_handoff_claim(
     assert not manifest.exists()
 
     expire_deep_scan_coordinator(state_dir, scan_id)
-    missing_claim = run_workbench(
-        state_dir,
-        "begin-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        thread_id,
-        check=False,
-        environment=deep_environment(codex_home),
+    missing_claim = resume_deep_scan(
+        state_dir, scan_id, thread_id, check=False, environment=deep_environment(codex_home)
     )
     assert "owned by another continuation" in str(missing_claim["stderr"])
-    resumed = run_workbench(
+    resumed = resume_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--scan-id",
         scan_id,
-        "--thread-id",
         thread_id,
         "--claim-token",
         handoff_claim_token,
         environment=deep_environment(codex_home),
     )
     assert resumed["startDisposition"] == "joined"
-    adopted = claim_deep_scan_coordinator(
-        state_dir,
-        codex_home,
-        scan_id,
-        thread_id=thread_id,
-        handoff_claim_token=handoff_claim_token,
-    )
+
+    def claim(token: str | None, *, check: bool = True) -> dict[str, object]:
+        return claim_deep_scan_coordinator(
+            state_dir,
+            codex_home,
+            scan_id,
+            thread_id=thread_id,
+            handoff_claim_token=token,
+            check=check,
+        )
+
+    rejected = claim(None, check=False)
+    assert rejected["returncode"] != 0
+    assert "another continuation" in rejected["stderr"]
+    adopted = claim(handoff_claim_token)
     assert adopted["coordinatorDisposition"] == "adopted"
+    assert claim(handoff_claim_token)["coordinatorDisposition"] == "observing"
+    stale = update_progress(
+        state_dir,
+        scan_id,
+        "--phase",
+        "discovery",
+        "--claim-token",
+        handoff_claim_token,
+        "--coordinator-generation",
+        "1",
+        check=False,
+        environment=deep_environment(codex_home),
+    )
+    assert stale["returncode"] != 0
+    assert "newer generation" in stale["stderr"]
     recovered = adopted["deepScan"]
     assert (recovered["status"], recovered["phase"], recovered["coordinatorGeneration"]) == (
         "running",
@@ -507,14 +536,10 @@ def test_paused_discovery_resumes_after_restart_with_original_handoff_claim(
     )
     assert reduced["noNewStreak"] == 2
     manifest.write_text('{"status":"succeeded"}\n')
-    finished = run_workbench(
+    finished = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "saturated",
-        "--manifest-path",
         str(manifest),
         "--coordinator-generation",
         "2",
@@ -526,10 +551,8 @@ def test_paused_discovery_resumes_after_restart_with_original_handoff_claim(
         str(manifest),
     )
     assert len([worker for worker in finished["workers"] if worker["kind"] == "discovery"]) == 2
-    parent = run_workbench(
+    parent = update_progress(
         state_dir,
-        "update-progress",
-        "--scan-id",
         scan_id,
         "--phase",
         "validation",
@@ -556,10 +579,7 @@ def test_paused_discovery_resumes_after_restart_with_original_handoff_claim(
 def test_expired_coordinator_recovers_reducer_publication_after_process_death(
     tmp_path: Path, crash_point: str, copy_publication: bool
 ) -> None:
-    state_dir, codex_home, target = tmp_path / "state", tmp_path / "codex-home", tmp_path / "target"
-    target.mkdir()
-    run = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")["deepScan"]
-    scan_id, scan_dir = str(run["scanId"]), Path(str(run["scanDir"]))
+    state_dir, codex_home, scan_id, scan_dir = start_empty_target_scan(tmp_path)
     claim_deep_scan_coordinator(state_dir, codex_home, scan_id)
     accepted = [
         dispatch_discovery_worker(
@@ -574,16 +594,11 @@ def test_expired_coordinator_recovers_reducer_publication_after_process_death(
     ]
     reducer_id = str(uuid.uuid4())
     prompt, artifact_dir, result = worker_paths(scan_dir, "crashed-reducer")
-    run_workbench(
+    claim_deep_scan_dedup(
         state_dir,
-        "claim-deep-scan-dedup",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         reducer_id,
-        "--prompt-path",
         str(prompt),
-        "--artifact-dir",
         str(artifact_dir),
         *(argument for worker_id in accepted for argument in ("--input-worker-id", worker_id)),
         "--coordinator-generation",
@@ -596,10 +611,8 @@ def test_expired_coordinator_recovers_reducer_publication_after_process_death(
         scan_id=scan_id,
         worker_id=reducer_id,
         kind="dedup",
-        status="running",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
-        attempt=1,
         coordinator_generation=2,
     )
     canonical = write_canonical_artifacts(scan_dir)["candidateLedgerPath"]
@@ -676,18 +689,14 @@ def test_expired_coordinator_recovers_reducer_publication_after_process_death(
     ("reducer_status", "replace_all_inputs", "should_finish"),
     (("running", True, True), ("failed", True, True), ("failed", False, False)),
 )
+@pytest.mark.cross_platform
 def test_expired_generation_preserves_receipts_and_recovers_abandoned_workers(
     tmp_path: Path, reducer_status: str, replace_all_inputs: bool, should_finish: bool
 ) -> None:
-    state_dir, codex_home, target = tmp_path / "state", tmp_path / "codex-home", tmp_path / "target"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(
-        "[deep_scan]\nworkers = 3\nsubagents = 0\nstop_after_no_new = 1\nmax_discovery_runs = 4\n"
+    state_dir, codex_home, scan_id, scan_dir = start_empty_target_scan(
+        tmp_path,
+        config="[deep_scan]\nworkers = 3\nsubagents = 0\nstop_after_no_new = 1\nmax_discovery_runs = 4\n",
     )
-    target.mkdir()
-    run = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")["deepScan"]
-    scan_id, scan_dir = str(run["scanId"]), Path(str(run["scanDir"]))
     claim_deep_scan_coordinator(state_dir, codex_home, scan_id)
     accepted = [
         dispatch_discovery_worker(
@@ -711,16 +720,11 @@ def test_expired_generation_preserves_receipts_and_recovers_abandoned_workers(
     )[0]
     reducer = str(uuid.uuid4())
     prompt, artifacts, _ = worker_paths(scan_dir, "abandoned-reducer")
-    run_workbench(
+    claim_deep_scan_dedup(
         state_dir,
-        "claim-deep-scan-dedup",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         reducer,
-        "--prompt-path",
         str(prompt),
-        "--artifact-dir",
         str(artifacts),
         *(item for worker in accepted for item in ("--input-worker-id", worker)),
         "--coordinator-generation",
@@ -737,7 +741,6 @@ def test_expired_generation_preserves_receipts_and_recovers_abandoned_workers(
             status="failed",
             prompt_path=prompt,
             artifact_dir=artifacts,
-            attempt=1,
             error="fixture reducer failure",
             coordinator_generation=2,
         )
@@ -764,14 +767,10 @@ def test_expired_generation_preserves_receipts_and_recovers_abandoned_workers(
     assert resumed["status"] == "running"
     manifest = scan_dir / "coordinator-manifest.json"
     manifest.write_text("{}\n")
-    result = run_workbench(
+    result = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "saturated",
-        "--manifest-path",
         str(manifest),
         "--coordinator-generation",
         "3",
@@ -794,10 +793,7 @@ def test_expired_generation_preserves_receipts_and_recovers_abandoned_workers(
 def test_expired_generation_refunds_shutdown_canceled_discovery(
     tmp_path: Path, legacy: bool
 ) -> None:
-    state_dir, codex_home, target = tmp_path / "state", tmp_path / "codex-home", tmp_path / "target"
-    target.mkdir()
-    run = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")["deepScan"]
-    scan_id, scan_dir = str(run["scanId"]), Path(str(run["scanDir"]))
+    state_dir, codex_home, scan_id, scan_dir = start_empty_target_scan(tmp_path)
     coordinator_generation = None if legacy else 2
     if not legacy:
         claim_deep_scan_coordinator(state_dir, codex_home, scan_id)
@@ -823,11 +819,9 @@ def test_expired_generation_refunds_shutdown_canceled_discovery(
         codex_home,
         scan_id=scan_id,
         worker_id=worker_id,
-        kind="discovery",
         status="canceled",
         prompt_path=prompt,
         artifact_dir=artifacts,
-        attempt=1,
         error=None if legacy else "coordinator_shutdown: mcp_transport_closed",
         coordinator_generation=coordinator_generation,
     )
@@ -845,14 +839,9 @@ def test_expired_generation_refunds_shutdown_canceled_discovery(
     )
 
 
-@pytest.mark.parametrize(
-    "mutation", ("worker", "progress", "failure", "dedup", "commit", "finish", "renewal")
-)
-def test_expired_generation_cannot_mutate_recovered_scan(tmp_path: Path, mutation: str) -> None:
-    state_dir, codex_home, target = tmp_path / "state", tmp_path / "codex-home", tmp_path / "target"
-    target.mkdir()
-    run = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")["deepScan"]
-    scan_id, scan_dir = str(run["scanId"]), Path(str(run["scanDir"]))
+@pytest.mark.cross_platform
+def test_expired_generation_cannot_mutate_recovered_scan(tmp_path: Path) -> None:
+    state_dir, codex_home, scan_id, scan_dir = start_empty_target_scan(tmp_path)
     claim_deep_scan_coordinator(state_dir, codex_home, scan_id)
     worker, prompt, artifacts, result = dispatch_discovery_worker(
         state_dir,
@@ -865,14 +854,10 @@ def test_expired_generation_cannot_mutate_recovered_scan(tmp_path: Path, mutatio
     )
     result.write_text("{}\n")
     expire_deep_scan_coordinator(state_dir, scan_id)
-    assert (
-        claim_deep_scan_coordinator(state_dir, codex_home, scan_id)["deepScan"][
-            "coordinatorGeneration"
-        ]
-        == 3
-    )
-    operations = {
-        "worker": (
+    recovered = claim_deep_scan_coordinator(state_dir, codex_home, scan_id)["deepScan"]
+    assert (recovered["status"], recovered["coordinatorGeneration"]) == ("running", 3)
+    operations = (
+        (
             "upsert-deep-scan-worker",
             "--worker-id",
             worker,
@@ -887,9 +872,9 @@ def test_expired_generation_cannot_mutate_recovered_scan(tmp_path: Path, mutatio
             "--result-manifest-path",
             str(result),
         ),
-        "progress": ("update-progress", "--phase", "discovery"),
-        "failure": ("fail-deep-scan", "--message", "stale coordinator"),
-        "dedup": (
+        ("update-progress", "--phase", "discovery"),
+        ("fail-deep-scan", "--message", "stale coordinator"),
+        (
             "claim-deep-scan-dedup",
             "--worker-id",
             str(uuid.uuid4()),
@@ -900,7 +885,7 @@ def test_expired_generation_cannot_mutate_recovered_scan(tmp_path: Path, mutatio
             "--input-worker-id",
             worker,
         ),
-        "commit": (
+        (
             "commit-deep-scan-dedup",
             "--worker-id",
             worker,
@@ -909,40 +894,32 @@ def test_expired_generation_cannot_mutate_recovered_scan(tmp_path: Path, mutatio
             "--new-findings-count",
             "0",
         ),
-        "finish": (
+        (
             "finish-deep-scan",
             "--terminal-reason",
             "capped",
             "--manifest-path",
             str(result),
         ),
-        "renewal": ("claim-deep-scan-coordinator", "--thread-id", "thread-deep-scan"),
-    }
-    command, *arguments = operations[mutation]
-    rejected = run_workbench(
-        state_dir,
-        command,
-        "--scan-id",
-        scan_id,
-        *arguments,
-        "--coordinator-generation",
-        "2",
-        check=False,
-        environment=deep_environment(codex_home),
+        ("claim-deep-scan-coordinator", "--thread-id", "thread-deep-scan"),
     )
-
-    assert rejected["returncode"] != 0
-    assert "coordinator" in str(rejected["stderr"]).lower()
-    persisted = run_workbench(
-        state_dir,
-        "get-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "thread-deep-scan",
-        environment=deep_environment(codex_home),
-    )["deepScan"]
-    assert (persisted["status"], persisted["coordinatorGeneration"]) == ("running", 3)
+    for command, *arguments in operations:
+        rejected = scan_command(
+            state_dir,
+            command,
+            scan_id,
+            *arguments,
+            "--coordinator-generation",
+            "2",
+            check=False,
+            environment=deep_environment(codex_home),
+        )
+        assert rejected["returncode"] != 0, command
+        assert "coordinator" in str(rejected["stderr"]).lower(), command
+        persisted = get_deep_scan(
+            state_dir, scan_id, "thread-deep-scan", environment=deep_environment(codex_home)
+        )["deepScan"]
+        assert persisted == recovered, command
 
 
 @pytest.mark.parametrize(
@@ -973,13 +950,7 @@ def test_expired_generation_cannot_mutate_recovered_scan(tmp_path: Path, mutatio
 def test_reducer_commit_requires_safe_standard_canonical_artifacts(
     tmp_path: Path, artifact_name: str, failure_kind: str, expected_error: str | None
 ) -> None:
-    state_dir = tmp_path / "state"
-    codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
-    begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
-    scan_id = str(begun["deepScan"]["scanId"])
-    scan_dir = Path(str(begun["deepScan"]["scanDir"]))
+    state_dir, codex_home, scan_id, scan_dir = start_empty_target_scan(tmp_path)
     input_worker_ids = [
         dispatch_discovery_worker(
             state_dir,
@@ -993,16 +964,11 @@ def test_reducer_commit_requires_safe_standard_canonical_artifacts(
 
     reducer_id = str(uuid.uuid4())
     prompt_path, artifact_dir, result_path = worker_paths(scan_dir, "canonical-reducer")
-    run_workbench(
+    claim_deep_scan_dedup(
         state_dir,
-        "claim-deep-scan-dedup",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         reducer_id,
-        "--prompt-path",
         str(prompt_path),
-        "--artifact-dir",
         str(artifact_dir),
         *(item for input_id in input_worker_ids for item in ("--input-worker-id", input_id)),
         environment=deep_environment(codex_home),
@@ -1013,10 +979,8 @@ def test_reducer_commit_requires_safe_standard_canonical_artifacts(
         scan_id=scan_id,
         worker_id=reducer_id,
         kind="dedup",
-        status="running",
         prompt_path=prompt_path,
         artifact_dir=artifact_dir,
-        attempt=1,
     )
 
     canonical = write_canonical_artifacts(scan_dir)
@@ -1099,16 +1063,10 @@ def test_reducer_commit_requires_safe_standard_canonical_artifacts(
 def test_scan_progress_projects_active_and_completed_independent_reviews(
     tmp_path: Path,
 ) -> None:
-    state_dir = tmp_path / "state"
-    codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
-    started = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
-    scan_id = str(started["deepScan"]["scanId"])
-    scan_dir = Path(str(started["deepScan"]["scanDir"]))
+    state_dir, codex_home, scan_id, scan_dir = start_empty_target_scan(tmp_path)
 
     def independent_reviews() -> dict[str, int | bool]:
-        context = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
+        context = get_scan(state_dir, scan_id)
         return context["scan"]["progress"]["independentReviews"]
 
     assert independent_reviews() == {
@@ -1127,22 +1085,16 @@ def test_scan_progress_projects_active_and_completed_independent_reviews(
         codex_home,
         scan_id=scan_id,
         worker_id=first_worker_id,
-        kind="discovery",
-        status="running",
         prompt_path=first_prompt,
         artifact_dir=first_artifacts,
-        attempt=1,
     )
     upsert_worker(
         state_dir,
         codex_home,
         scan_id=scan_id,
         worker_id=second_worker_id,
-        kind="discovery",
-        status="running",
         prompt_path=second_prompt,
         artifact_dir=second_artifacts,
-        attempt=1,
     )
     assert independent_reviews() == {
         "active": 2,
@@ -1157,12 +1109,10 @@ def test_scan_progress_projects_active_and_completed_independent_reviews(
         codex_home,
         scan_id=scan_id,
         worker_id=first_worker_id,
-        kind="discovery",
         status="succeeded",
         prompt_path=first_prompt,
         artifact_dir=first_artifacts,
         result_path=first_result,
-        attempt=1,
     )
     assert independent_reviews() == {
         "active": 1,
@@ -1176,11 +1126,9 @@ def test_scan_progress_projects_active_and_completed_independent_reviews(
         codex_home,
         scan_id=scan_id,
         worker_id=second_worker_id,
-        kind="discovery",
         status="canceled",
         prompt_path=second_prompt,
         artifact_dir=second_artifacts,
-        attempt=1,
     )
     assert independent_reviews() == {
         "active": 0,
@@ -1193,13 +1141,7 @@ def test_scan_progress_projects_active_and_completed_independent_reviews(
 def test_reducer_claim_updates_review_pass_once_and_projects_consolidation(
     tmp_path: Path,
 ) -> None:
-    state_dir = tmp_path / "state"
-    codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
-    started = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
-    scan_id = str(started["deepScan"]["scanId"])
-    scan_dir = Path(str(started["deepScan"]["scanDir"]))
+    state_dir, codex_home, scan_id, scan_dir = start_empty_target_scan(tmp_path)
     first_worker_id, _, _, _ = dispatch_discovery_worker(
         state_dir,
         codex_home,
@@ -1234,7 +1176,7 @@ def test_reducer_claim_updates_review_pass_once_and_projects_consolidation(
 
     for _ in range(2):
         run_workbench(state_dir, *claim_args, environment=deep_environment(codex_home))
-        progress = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["progress"]
+        progress = get_scan(state_dir, scan_id)["scan"]["progress"]
         assert progress["reviewPass"] == 1
         assert progress["independentReviews"] == {
             "active": 0,
@@ -1264,16 +1206,12 @@ def test_deep_scan_worker_defaults_do_not_depend_on_available_parallelism(
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
     if workers_configuration is not None:
-        config_path = codex_home / "codex-security" / "config.toml"
-        config_path.parent.mkdir(parents=True)
-        config_path.write_text("[deep_scan]\n" + workers_configuration)
+        write_deep_config(codex_home, "[deep_scan]\n" + workers_configuration)
     target = tmp_path / "target"
     target.mkdir()
 
-    deep_scan = run_workbench(
+    deep_scan = begin_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "thread-deep-scan",
         "--target-path",
         str(target),
@@ -1299,18 +1237,14 @@ def test_deep_scan_worker_defaults_do_not_depend_on_available_parallelism(
 def test_deep_scan_prefers_explicit_config_path(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    shared_config_path = codex_home / "codex-security" / "config.toml"
-    shared_config_path.parent.mkdir(parents=True)
-    shared_config_path.write_text("[deep_scan]\nworkers = 2\n")
+    write_deep_config(codex_home, "[deep_scan]\nworkers = 2\n")
     isolated_config_path = tmp_path / "isolated-deep-scan.toml"
     isolated_config_path.write_text("[deep_scan]\nworkers = 7\n")
     target = tmp_path / "target"
     target.mkdir()
 
-    deep_scan = run_workbench(
+    deep_scan = begin_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "thread-deep-scan",
         "--target-path",
         str(target),
@@ -1332,15 +1266,14 @@ def test_deep_scan_prefers_explicit_config_path(tmp_path: Path) -> None:
 def test_target_begin_is_atomic_idempotent_and_snapshots_config(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(
+    config_path = write_deep_config(
+        codex_home,
         "[deep_scan]\n"
         'workers = "auto"\n'
         "subagents = 2\n"
         "stop_after_no_new = 4\n"
         "max_discovery_runs = 12\n"
-        "max_time_hours = 2.5\n"
+        "max_time_hours = 2.5\n",
     )
     target = tmp_path / "target"
     target.mkdir()
@@ -1363,7 +1296,7 @@ def test_target_begin_is_atomic_idempotent_and_snapshots_config(tmp_path: Path) 
     assert deep_scan["workers"] == []
     scan_id = str(deep_scan["scanId"])
     scan_dir = Path(str(deep_scan["scanDir"]))
-    scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    scan = get_scan(state_dir, scan_id)["scan"]
     assert scan["contract"]["target"]["targetId"] == stable_target_id(target)
     assert scan["progress"]["coverage"]["filesTotal"] == 1
     assert deep_scan["canonicalArtifacts"] is None
@@ -1408,15 +1341,13 @@ def test_target_begin_is_atomic_idempotent_and_snapshots_config(tmp_path: Path) 
         relative_path="source.py",
         coverage_mode="deep_repository",
     )
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+    completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
     assert completed["progress"]["status"] == "complete"
 
 
 def test_sdk_scan_begin_claims_its_existing_scan(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "source.py").write_text("print('fixture')\n")
     scan_dir = tmp_path / "scan"
     scan_dir.mkdir(mode=0o700)
@@ -1443,40 +1374,32 @@ def test_sdk_scan_begin_claims_its_existing_scan(tmp_path: Path) -> None:
     )
     scan_id = str(registered["scanId"])
 
-    premature = run_workbench(
-        state_dir,
-        "complete-scan",
-        "--scan-id",
-        scan_id,
-        environment=deep_environment(codex_home),
-        check=False,
+    premature = scan_command(
+        state_dir, "complete-scan", scan_id, environment=deep_environment(codex_home), check=False
     )
     assert "orchestration must finish and persist its manifest" in str(premature["stderr"])
 
-    begun = run_workbench(
-        state_dir,
-        "begin-deep-scan",
-        "--thread-id",
-        "sdk-thread",
-        "--scan-id",
-        scan_id,
-        environment=deep_environment(codex_home),
+    begun = begin_deep_scan(
+        state_dir, "sdk-thread", "--scan-id", scan_id, environment=deep_environment(codex_home)
     )
 
     assert begun["deepScan"]["scanId"] == scan_id
     assert begun["deepScan"]["scanDir"] == str(scan_dir)
     assert begun["deepScan"]["userContext"] == user_context
+    restore_v53_schema(state_dir)
+    get_deep_scan(state_dir, scan_id, "sdk-thread", environment=deep_environment(codex_home))
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone() == (1,)
         assert connection.execute("SELECT thread_id FROM workspaces").fetchone() == ("sdk-thread",)
+        assert connection.execute(
+            "SELECT pending_target_project_path FROM deep_scan_runs"
+        ).fetchone() == (None,)
         assert connection.execute("SELECT deep_scan_owner_thread_id FROM scans").fetchone() == (
             "sdk-thread",
         )
 
-    rejected = run_workbench(
+    rejected = begin_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "another-thread",
         "--scan-id",
         scan_id,
@@ -1487,10 +1410,8 @@ def test_sdk_scan_begin_claims_its_existing_scan(tmp_path: Path) -> None:
 
 
 def test_sdk_scan_rejects_invalid_handoff_before_claiming_ownership(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     scan_dir = tmp_path / "scan"
     scan_dir.mkdir(mode=0o700)
     registered = run_workbench(
@@ -1518,10 +1439,8 @@ def test_sdk_scan_rejects_invalid_handoff_before_claiming_ownership(tmp_path: Pa
             (claim_token, scan_id),
         )
 
-    rejected = run_workbench(
+    rejected = begin_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "unauthorized-thread",
         "--scan-id",
         scan_id,
@@ -1536,10 +1455,8 @@ def test_sdk_scan_rejects_invalid_handoff_before_claiming_ownership(tmp_path: Pa
             None,
         )
 
-    begun = run_workbench(
+    begun = begin_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "authorized-thread",
         "--scan-id",
         scan_id,
@@ -1551,16 +1468,12 @@ def test_sdk_scan_rejects_invalid_handoff_before_claiming_ownership(tmp_path: Pa
 
 
 def test_target_begin_preserves_url_user_context(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "source.py").write_text("print('fixture')\n")
     user_context = "Repository: https://github.com/example/security-review"
-    begun = run_workbench(
+    begun = begin_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "thread-deep-url-context",
         "--target-path",
         str(target),
@@ -1601,9 +1514,7 @@ def test_discovery_error_threshold_defaults_to_three_independently_of_no_new_thr
 ) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(configuration)
+    write_deep_config(codex_home, configuration)
     target = tmp_path / "target"
     target.mkdir()
 
@@ -1620,11 +1531,10 @@ def test_deep_scan_snapshots_configured_discovery_time_limit(
 ) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(
+    write_deep_config(
+        codex_home,
         "[deep_scan]\n"
-        + ("" if configured_hours is None else f"max_time_hours = {configured_hours}\n")
+        + ("" if configured_hours is None else f"max_time_hours = {configured_hours}\n"),
     )
     target = tmp_path / "target"
     target.mkdir()
@@ -1641,13 +1551,7 @@ def test_deep_scan_snapshots_configured_discovery_time_limit(
 def test_replaceable_discovery_failures_count_once_and_reset_on_success(
     tmp_path: Path,
 ) -> None:
-    state_dir = tmp_path / "state"
-    codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
-    begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
-    scan_id = str(begun["deepScan"]["scanId"])
-    scan_dir = Path(str(begun["deepScan"]["scanDir"]))
+    state_dir, codex_home, scan_id, scan_dir = start_empty_target_scan(tmp_path)
     failed_id = str(uuid.uuid4())
     prompt, artifact_dir, _ = worker_paths(scan_dir, "refused-discovery")
     upsert_worker(
@@ -1655,11 +1559,8 @@ def test_replaceable_discovery_failures_count_once_and_reset_on_success(
         codex_home,
         scan_id=scan_id,
         worker_id=failed_id,
-        kind="discovery",
-        status="running",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
-        attempt=1,
     )
 
     for _ in range(2):
@@ -1668,11 +1569,9 @@ def test_replaceable_discovery_failures_count_once_and_reset_on_success(
             codex_home,
             scan_id=scan_id,
             worker_id=failed_id,
-            kind="discovery",
             status="canceled",
             prompt_path=prompt,
             artifact_dir=artifact_dir,
-            attempt=1,
             error="policy_refusal: request refused by cybersecurity policy",
             replaceable_failure_kind="policy_refusal",
         )["deepScan"]
@@ -1689,14 +1588,8 @@ def test_replaceable_discovery_failures_count_once_and_reset_on_success(
         scan_dir=scan_dir,
         name="successful-replacement",
     )
-    recovered = run_workbench(
-        state_dir,
-        "get-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "thread-deep-scan",
-        environment=deep_environment(codex_home),
+    recovered = get_deep_scan(
+        state_dir, scan_id, "thread-deep-scan", environment=deep_environment(codex_home)
     )["deepScan"]
     assert recovered["consecutiveErrors"] == 0
     assert recovered["dispatchedCount"] == 2
@@ -1704,22 +1597,21 @@ def test_replaceable_discovery_failures_count_once_and_reset_on_success(
     assert replacement["status"] == "succeeded"
 
 
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("deadline", [False, True], ids=["dispatch-limit", "deadline"])
 def test_failed_reducer_rebuffers_claimed_inputs_for_same_generation_replacement(
     tmp_path: Path,
+    deadline: bool,
 ) -> None:
-    state_dir = tmp_path / "state"
-    codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(
-        "[deep_scan]\nworkers = 3\nsubagents = 0\nstop_after_no_new = 6\nmax_discovery_runs = 6\n"
+    state_dir, codex_home, scan_id, scan_dir = start_empty_target_scan(
+        tmp_path,
+        config="[deep_scan]\nworkers = 3\nsubagents = 0\nstop_after_no_new = 6\nmax_discovery_runs = 6\n"
+        + ("max_time_hours = 0.5\n" if deadline else ""),
     )
-    target = tmp_path / "target"
-    target.mkdir()
-    begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")["deepScan"]
-    scan_id = str(begun["scanId"])
-    scan_dir = Path(str(begun["scanDir"]))
-    claim_deep_scan_coordinator(state_dir, codex_home, scan_id)
+    initial = claim_deep_scan_coordinator(state_dir, codex_home, scan_id)["deepScan"]
+    assert initial["config"]["maxDiscoveryRuns"] == 6
+    if deadline:
+        assert initial["config"]["maxTimeHours"] == 0.5
 
     previously_merged = [
         dispatch_discovery_worker(
@@ -1764,43 +1656,38 @@ def test_failed_reducer_rebuffers_claimed_inputs_for_same_generation_replacement
         name="unclaimed-discovery",
         coordinator_generation=2,
     )[0]
-    discovery_failure, discovery_prompt, discovery_dir, _ = dispatch_discovery_worker(
-        state_dir,
-        codex_home,
-        scan_id=scan_id,
-        scan_dir=scan_dir,
-        name="failed-discovery",
-        succeed=False,
-        coordinator_generation=2,
-    )
-    counter_before_failure = upsert_worker(
-        state_dir,
-        codex_home,
-        scan_id=scan_id,
-        worker_id=discovery_failure,
-        kind="discovery",
-        status="canceled",
-        prompt_path=discovery_prompt,
-        artifact_dir=discovery_dir,
-        attempt=1,
-        error="transient_error: fixture discovery failure",
-        replaceable_failure_kind="transient_error",
-        coordinator_generation=2,
-    )["deepScan"]["consecutiveErrors"]
-    assert counter_before_failure == 1
+    expected_errors = 0 if deadline else 1
+    if not deadline:
+        discovery_failure, discovery_prompt, discovery_dir, _ = dispatch_discovery_worker(
+            state_dir,
+            codex_home,
+            scan_id=scan_id,
+            scan_dir=scan_dir,
+            name="failed-discovery",
+            succeed=False,
+            coordinator_generation=2,
+        )
+        failure = upsert_worker(
+            state_dir,
+            codex_home,
+            scan_id=scan_id,
+            worker_id=discovery_failure,
+            status="canceled",
+            prompt_path=discovery_prompt,
+            artifact_dir=discovery_dir,
+            error="transient_error: fixture discovery failure",
+            replaceable_failure_kind="transient_error",
+            coordinator_generation=2,
+        )["deepScan"]
+        assert failure["consecutiveErrors"] == 1
 
     failed_reducer = str(uuid.uuid4())
     failed_prompt, failed_dir, _ = worker_paths(scan_dir, "failed-reducer")
-    run_workbench(
+    claim_deep_scan_dedup(
         state_dir,
-        "claim-deep-scan-dedup",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         failed_reducer,
-        "--prompt-path",
         str(failed_prompt),
-        "--artifact-dir",
         str(failed_dir),
         *(item for worker in claimed_inputs for item in ("--input-worker-id", worker)),
         "--coordinator-generation",
@@ -1813,10 +1700,8 @@ def test_failed_reducer_rebuffers_claimed_inputs_for_same_generation_replacement
         scan_id=scan_id,
         worker_id=failed_reducer,
         kind="dedup",
-        status="running",
         prompt_path=failed_prompt,
         artifact_dir=failed_dir,
-        attempt=1,
         coordinator_generation=2,
     )
 
@@ -1829,13 +1714,18 @@ def test_failed_reducer_rebuffers_claimed_inputs_for_same_generation_replacement
         status="failed",
         prompt_path=failed_prompt,
         artifact_dir=failed_dir,
-        attempt=1,
         error="fixture reducer exhausted its attempts",
         coordinator_generation=2,
     )["deepScan"]
     failed_workers = {worker["id"]: worker for worker in failed["workers"]}
+    assert failed["status"] == "running"
     assert failed["phase"] == "discovery"
-    assert failed["consecutiveErrors"] == counter_before_failure
+    assert failed["dispatchedCount"] == (5 if deadline else 6)
+    assert all(
+        failed_workers[worker]["status"] == "succeeded"
+        for worker in [*previously_merged, *claimed_inputs, unclaimed_input]
+    )
+    assert failed["consecutiveErrors"] == expected_errors
     assert all(failed_workers[worker]["mergeState"] == "merged" for worker in previously_merged)
     assert all(failed_workers[worker]["mergeState"] == "buffered" for worker in claimed_inputs)
     assert failed_workers[unclaimed_input]["mergeState"] == "buffered"
@@ -1848,16 +1738,11 @@ def test_failed_reducer_rebuffers_claimed_inputs_for_same_generation_replacement
         scan_dir, "replacement-reducer"
     )
     replacement_inputs = [*claimed_inputs, unclaimed_input]
-    claimed = run_workbench(
+    claimed = claim_deep_scan_dedup(
         state_dir,
-        "claim-deep-scan-dedup",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         replacement_reducer,
-        "--prompt-path",
         str(replacement_prompt),
-        "--artifact-dir",
         str(replacement_dir),
         *(item for worker in replacement_inputs for item in ("--input-worker-id", worker)),
         "--coordinator-generation",
@@ -1875,13 +1760,12 @@ def test_failed_reducer_rebuffers_claimed_inputs_for_same_generation_replacement
         status="failed",
         prompt_path=failed_prompt,
         artifact_dir=failed_dir,
-        attempt=1,
         error="fixture reducer exhausted its attempts",
         coordinator_generation=2,
     )["deepScan"]
     replayed_workers = {worker["id"]: worker for worker in replayed["workers"]}
     assert replayed["phase"] == "reducing"
-    assert replayed["consecutiveErrors"] == counter_before_failure
+    assert replayed["consecutiveErrors"] == expected_errors
     assert all(replayed_workers[worker]["mergeState"] == "merging" for worker in replacement_inputs)
 
     upsert_worker(
@@ -1890,30 +1774,23 @@ def test_failed_reducer_rebuffers_claimed_inputs_for_same_generation_replacement
         scan_id=scan_id,
         worker_id=replacement_reducer,
         kind="dedup",
-        status="running",
         prompt_path=replacement_prompt,
         artifact_dir=replacement_dir,
-        attempt=1,
         coordinator_generation=2,
     )
     replacement_result.write_text("{}\n")
-    committed = run_workbench(
+    committed = commit_deep_dedup(
         state_dir,
-        "commit-deep-scan-dedup",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         replacement_reducer,
-        "--result-manifest-path",
         str(replacement_result),
-        "--new-findings-count",
         "0",
         "--coordinator-generation",
         "2",
         environment=deep_environment(codex_home),
     )["deepScan"]
     committed_workers = {worker["id"]: worker for worker in committed["workers"]}
-    assert committed["consecutiveErrors"] == counter_before_failure
+    assert committed["consecutiveErrors"] == expected_errors
     assert all(
         committed_workers[worker]["mergeState"] == "merged"
         for worker in [*previously_merged, *replacement_inputs]
@@ -1931,33 +1808,40 @@ def test_failed_reducer_rebuffers_claimed_inputs_for_same_generation_replacement
 
     manifest = scan_dir / "coordinator-manifest.json"
     manifest.write_text("{}\n")
-    finished = run_workbench(
-        state_dir,
-        "finish-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--terminal-reason",
-        "capped",
-        "--manifest-path",
-        str(manifest),
-        "--coordinator-generation",
-        "2",
-        environment=deep_environment(codex_home),
-    )["deepScan"]
+
+    def finish(*, check: bool = True) -> dict[str, object]:
+        return finish_deep_scan(
+            state_dir,
+            scan_id,
+            "capped",
+            str(manifest),
+            "--coordinator-generation",
+            "2",
+            environment=deep_environment(codex_home),
+            check=check,
+        )
+
+    if deadline:
+        premature = finish(check=False)
+        assert premature["returncode"] != 0
+        assert "before reaching its configured maximum" in premature["stderr"]
+        assert canonical_ledger.read_text() == '{"candidate":"previously committed"}\n'
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE deep_scan_runs SET created_at = ? WHERE scan_id = ?",
+                ("2000-01-01T00:00:00+00:00", scan_id),
+            )
+    finished = finish()["deepScan"]
+    assert finished["terminalReason"] == "capped"
+    assert canonical_ledger.read_text() == '{"candidate":"previously committed"}\n'
     assert finished["status"] == "succeeded"
-    assert finished["consecutiveErrors"] == counter_before_failure
+    assert finished["consecutiveErrors"] == expected_errors
 
 
 def test_ordinary_discovery_cancellation_does_not_increment_failure_streak(
     tmp_path: Path,
 ) -> None:
-    state_dir = tmp_path / "state"
-    codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
-    begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
-    scan_id = str(begun["deepScan"]["scanId"])
-    scan_dir = Path(str(begun["deepScan"]["scanDir"]))
+    state_dir, codex_home, scan_id, scan_dir = start_empty_target_scan(tmp_path)
     worker_id = str(uuid.uuid4())
     prompt, artifact_dir, _ = worker_paths(scan_dir, "user-canceled-discovery")
     upsert_worker(
@@ -1965,11 +1849,8 @@ def test_ordinary_discovery_cancellation_does_not_increment_failure_streak(
         codex_home,
         scan_id=scan_id,
         worker_id=worker_id,
-        kind="discovery",
-        status="running",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
-        attempt=1,
     )
 
     result = upsert_worker(
@@ -1977,11 +1858,9 @@ def test_ordinary_discovery_cancellation_does_not_increment_failure_streak(
         codex_home,
         scan_id=scan_id,
         worker_id=worker_id,
-        kind="discovery",
         status="canceled",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
-        attempt=1,
     )["deepScan"]
 
     assert result["consecutiveErrors"] == 0
@@ -1993,16 +1872,14 @@ def test_invalid_discovery_error_threshold_fails_before_scan_creation(
 ) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(f"[deep_scan]\nstop_after_consecutive_errors = {invalid_threshold}\n")
+    write_deep_config(
+        codex_home, f"[deep_scan]\nstop_after_consecutive_errors = {invalid_threshold}\n"
+    )
     target = tmp_path / "target"
     target.mkdir()
 
-    failed = run_workbench(
+    failed = begin_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "thread-deep-scan",
         "--target-path",
         str(target),
@@ -2019,22 +1896,20 @@ def test_invalid_discovery_error_threshold_fails_before_scan_creation(
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone() == (0,)
 
 
-@pytest.mark.parametrize("invalid_hours", ("0", "-0.5", "true", '"2"', "nan", "inf", "96.5"))
+@pytest.mark.parametrize(
+    "invalid_hours", ("0", "-0.5", "true", '"2"', "nan", "inf", "96.5", "9" * 400)
+)
 def test_invalid_discovery_time_limit_fails_before_scan_creation(
     tmp_path: Path, invalid_hours: str
 ) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(f"[deep_scan]\nmax_time_hours = {invalid_hours}\n")
+    write_deep_config(codex_home, f"[deep_scan]\nmax_time_hours = {invalid_hours}\n")
     target = tmp_path / "target"
     target.mkdir()
 
-    failed = run_workbench(
+    failed = begin_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "thread-deep-scan",
         "--target-path",
         str(target),
@@ -2051,13 +1926,13 @@ def test_invalid_discovery_time_limit_fails_before_scan_creation(
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone() == (0,)
 
 
+@pytest.mark.parametrize("user_context", (None, "Review authentication only."))
 def test_target_continuation_reuses_terminal_coordinator_across_threads(
     tmp_path: Path,
+    user_context: str | None,
 ) -> None:
-    state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "fixture.py").write_text("print('stable snapshot')\n")
     scan_root = tmp_path / "scans"
 
@@ -2067,13 +1942,12 @@ def test_target_continuation_reuses_terminal_coordinator_across_threads(
         target,
         scan_root,
         thread_id="thread-before-continuation",
+        user_context=user_context,
     )
     scan_id = str(first["deepScan"]["scanId"])
     scan_dir = Path(str(first["deepScan"]["scanDir"]))
     manifest = mark_deep_coordinator_succeeded(state_dir, scan_id, scan_dir)
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text("[deep_scan]\nsubagents = -1\n")
+    write_deep_config(codex_home, "[deep_scan]\nsubagents = -1\n")
 
     continued = begin_target_scan(
         state_dir,
@@ -2081,10 +1955,18 @@ def test_target_continuation_reuses_terminal_coordinator_across_threads(
         target,
         scan_root,
         thread_id="thread-after-continuation",
+        user_context=user_context,
     )
     assert continued["startDisposition"] == "joined"
     assert continued["deepScan"]["scanId"] == scan_id
     assert continued["deepScan"]["manifestPath"] == str(manifest)
+    assert continued["deepScan"]["userContext"] == user_context
+    assert get_scan(state_dir, scan_id)["scan"]["progress"]["independentReviews"] == {
+        "active": 0,
+        "completed": 0,
+        "maximum": 40,
+        "consolidating": True,
+    }
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM workspaces").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone() == (1,)
@@ -2097,10 +1979,8 @@ def test_target_continuation_reuses_terminal_coordinator_across_threads(
 def test_target_continuation_does_not_reuse_a_different_snapshot(
     tmp_path: Path,
 ) -> None:
-    state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     fixture = target / "fixture.py"
     fixture.write_text("print('first snapshot')\n")
     scan_root = tmp_path / "scans"
@@ -2128,20 +2008,149 @@ def test_target_continuation_does_not_reuse_a_different_snapshot(
     assert changed["deepScan"]["scanId"] != first_scan_id
 
 
+def test_sealed_target_result_replays_only_the_pending_request(tmp_path: Path) -> None:
+    state_dir, target = tmp_path / "state", tmp_path / "target"
+    target.mkdir()
+    source = target / "source.py"
+    source.write_text("print('source')\n")
+    project = tmp_path / "selected.yaml"
+    project.write_text("scan: {max_time_minutes: 30}\n")
+    selected = "../selected.yaml"
+    owner, context = "owner-thread", "Review authentication."
+
+    def begin(thread: str, focus: str = context, selection: str = selected, *extra: str):
+        return begin_deep_scan(
+            state_dir,
+            thread,
+            "--target-path",
+            str(target),
+            "--scan-root",
+            str(tmp_path / "scans"),
+            "--user-context",
+            focus,
+            "--project-config-path",
+            selection,
+            *extra,
+            environment=deep_environment(tmp_path / "home"),
+        )
+
+    launched = begin(
+        owner,
+        context,
+        selected,
+        "--deep-scan-project-json",
+        json.dumps(
+            {
+                "path": str(project),
+                "settings": {"maxTimeHours": 0.5},
+            }
+        ),
+    )["deepScan"]
+    scan_id, scan_dir = launched["scanId"], Path(launched["scanDir"])
+    mark_deep_coordinator_succeeded(state_dir, scan_id, scan_dir)
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="source.py", coverage_mode="deep_repository"
+    )
+    assert scan_command(state_dir, "complete-scan", scan_id)["scan"]["reportAvailable"]
+    project.unlink()
+
+    # A probe neither reopens the selected file nor consumes the result.
+    for thread in [owner, "continuation-thread"]:
+        replay = begin(thread, context, selected, "--join-only")
+        assert replay["startDisposition"] == "joined"
+        assert replay["deepScan"]["scanId"] == scan_id
+        assert replay["deepScan"]["config"]["maxTimeHours"] == 0.5
+    new_target = {"newScanTarget": str(target)}
+    assert begin(owner, "Other context", selected, "--join-only") == new_target
+    assert begin(owner, context, "../other.yaml", "--join-only") == new_target
+    source.write_text("print('changed')\n")
+    assert begin(owner, context, selected, "--join-only") == new_target
+    source.write_text("print('source')\n")
+    assert begin(owner, context, selected, "--join-only")["deepScan"]["scanId"] == scan_id
+    scan_command(state_dir, "acknowledge-deep-scan-result", scan_id)
+    assert begin(owner, context, selected, "--join-only") == new_target
+
+
+@pytest.mark.parametrize("already_complete", (False, True))
+def test_v53_headless_target_recovers_its_unfinished_result_after_upgrade(
+    tmp_path: Path, already_complete: bool
+) -> None:
+    state_dir, target = tmp_path / "state", tmp_path / "target"
+    target.mkdir()
+    (target / "source.py").write_text("print('source')\n")
+    home, scan_root = tmp_path / "home", tmp_path / "scans"
+    run = begin_target_scan(state_dir, home, target, scan_root)["deepScan"]
+    scan_id, scan_dir = run["scanId"], Path(run["scanDir"])
+
+    def finish() -> None:
+        mark_deep_coordinator_succeeded(state_dir, scan_id, scan_dir)
+        write_completed_contract(
+            scan_dir, scan_id, target, relative_path="source.py", coverage_mode="deep_repository"
+        )
+        assert scan_command(state_dir, "complete-scan", scan_id)["scan"]["reportAvailable"]
+
+    if already_complete:
+        finish()
+    restore_v53_schema(state_dir)
+    if already_complete:
+        assert (
+            begin_target_scan(state_dir, home, target, scan_root)["startDisposition"] == "created"
+        )
+        return
+
+    assert begin_target_scan(state_dir, home, target, scan_root)["deepScan"]["scanId"] == scan_id
+    finish()
+    different = begin_deep_scan(
+        state_dir,
+        "replacement-thread",
+        "--target-path",
+        str(target),
+        "--project-config-path",
+        "another.yaml",
+        "--join-only",
+    )
+    assert different == {"newScanTarget": str(target)}
+    replay = begin_target_scan(state_dir, home, target, scan_root, thread_id="replacement-thread")
+    assert replay["startDisposition"] == "joined"
+    assert replay["deepScan"]["scanId"] == scan_id
+    scan_command(state_dir, "acknowledge-deep-scan-result", scan_id)
+    assert begin_target_scan(state_dir, home, target, scan_root)["startDisposition"] == "created"
+
+
+def test_sealed_target_prefers_its_own_pending_scan(tmp_path: Path) -> None:
+    target, state_dir, home = tmp_path / "target", tmp_path / "state", tmp_path / "home"
+    target.mkdir()
+    (target / "source.py").write_text("print('source')\n")
+    scan_root = tmp_path / "scans"
+    owners = ("first-thread", "second-thread")
+    runs = [
+        begin_target_scan(state_dir, home, target, scan_root, thread_id=thread)["deepScan"]
+        for thread in owners
+    ]
+    for run in runs:
+        scan_id, scan_dir = run["scanId"], Path(run["scanDir"])
+        mark_deep_coordinator_succeeded(state_dir, scan_id, scan_dir)
+        write_completed_contract(
+            scan_dir, scan_id, target, relative_path="source.py", coverage_mode="deep_repository"
+        )
+        scan_command(state_dir, "complete-scan", scan_id)
+    for thread, run in zip(owners, runs, strict=True):
+        replay = begin_target_scan(state_dir, home, target, scan_root, thread_id=thread)
+        assert replay["deepScan"]["scanId"] == run["scanId"]
+
+
+@pytest.mark.parametrize("sealed", (False, True))
 def test_target_continuation_does_not_reuse_another_threads_app_scan(
     tmp_path: Path,
+    sealed: bool,
 ) -> None:
-    state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "fixture.py").write_text("print('app scan')\n")
     scan_root = tmp_path / "scans"
     workspace_id = str(uuid.uuid4())
-    run_workbench(
+    create_workspace(
         state_dir,
-        "create-workspace",
-        "--workspace-id",
         workspace_id,
         "--thread-id",
         "app-thread",
@@ -2151,18 +2160,8 @@ def test_target_continuation_does_not_reuse_another_threads_app_scan(
         "deep",
         environment=deep_environment(codex_home),
     )
-    run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "deep",
-        environment=deep_environment(codex_home),
+    save_workspace(
+        state_dir, workspace_id, str(target), ".", "deep", environment=deep_environment(codex_home)
     )
     started = start_delivered_scan(
         state_dir,
@@ -2173,26 +2172,32 @@ def test_target_continuation_does_not_reuse_another_threads_app_scan(
         environment=deep_environment(codex_home),
     )
     app_scan_id = str(started["results"]["scanId"])
-    begun = run_workbench(
-        state_dir,
-        "begin-deep-scan",
-        "--thread-id",
-        "app-thread",
-        "--scan-id",
-        app_scan_id,
-        environment=deep_environment(codex_home),
+    begun = begin_deep_scan(
+        state_dir, "app-thread", "--scan-id", app_scan_id, environment=deep_environment(codex_home)
     )
     scan_dir = Path(str(begun["deepScan"]["scanDir"]))
     mark_deep_coordinator_succeeded(state_dir, app_scan_id, scan_dir)
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        connection.execute(
-            """
-            UPDATE scans
-            SET handoff_status = 'delivered', handoff_claim_token = ?
-            WHERE id = ?
-            """,
-            (str(uuid.uuid4()), app_scan_id),
+    if sealed:
+        # A tokenless desktop run remains ineligible through the upgrade and automatic sealing.
+        restore_v53_schema(state_dir)
+        write_completed_contract(
+            scan_dir,
+            app_scan_id,
+            target,
+            relative_path="fixture.py",
+            coverage_mode="deep_repository",
         )
+        scan_command(state_dir, "complete-scan", app_scan_id)
+    else:
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            connection.execute(
+                """
+                UPDATE scans
+                SET handoff_status = 'delivered', handoff_claim_token = ?
+                WHERE id = ?
+                """,
+                (str(uuid.uuid4()), app_scan_id),
+            )
 
     headless = begin_target_scan(
         state_dir,
@@ -2208,39 +2213,24 @@ def test_target_continuation_does_not_reuse_another_threads_app_scan(
 def test_parent_scan_cannot_complete_before_deep_orchestration_manifest(
     tmp_path: Path,
 ) -> None:
-    state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
     scan_id = str(begun["deepScan"]["scanId"])
 
-    rejected = run_workbench(
-        state_dir,
-        "complete-scan",
-        "--scan-id",
-        scan_id,
-        environment=deep_environment(codex_home),
-        check=False,
+    rejected = scan_command(
+        state_dir, "complete-scan", scan_id, environment=deep_environment(codex_home), check=False
     )
     assert "orchestration must finish and persist its manifest" in str(rejected["stderr"])
-    persisted = run_workbench(
-        state_dir,
-        "get-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "thread-deep-scan",
-        environment=deep_environment(codex_home),
+    persisted = get_deep_scan(
+        state_dir, scan_id, "thread-deep-scan", environment=deep_environment(codex_home)
     )["deepScan"]
     assert persisted["status"] == "running"
 
 
 def test_concurrent_target_begin_creates_one_scan(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     scan_root = tmp_path / "scans"
 
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -2258,16 +2248,12 @@ def test_concurrent_target_begin_creates_one_scan(tmp_path: Path) -> None:
 
 
 def test_app_workspaces_cannot_start_duplicate_owned_target_scans(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
     for workspace_id in workspace_ids:
-        run_workbench(
+        create_workspace(
             state_dir,
-            "create-workspace",
-            "--workspace-id",
             workspace_id,
             "--thread-id",
             "thread-owner",
@@ -2277,33 +2263,24 @@ def test_app_workspaces_cannot_start_duplicate_owned_target_scans(tmp_path: Path
             "deep",
             environment=deep_environment(codex_home),
         )
-        run_workbench(
+        save_workspace(
             state_dir,
-            "save-workspace",
-            "--workspace-id",
             workspace_id,
-            "--target-path",
             str(target),
-            "--scope",
             ".",
-            "--mode",
             "deep",
             environment=deep_environment(codex_home),
         )
 
-    first = run_workbench(
+    first = start_scan_command(
         state_dir,
-        "start-scan",
-        "--workspace-id",
         workspace_ids[0],
         "--scan-root",
         str(tmp_path / "scans"),
         environment=deep_environment(codex_home),
     )
-    duplicate = run_workbench(
+    duplicate = start_scan_command(
         state_dir,
-        "start-scan",
-        "--workspace-id",
         workspace_ids[1],
         "--scan-root",
         str(tmp_path / "scans"),
@@ -2312,19 +2289,14 @@ def test_app_workspaces_cannot_start_duplicate_owned_target_scans(tmp_path: Path
     )
     assert "already has an active Deep Scan" in str(duplicate["stderr"])
 
-    run_workbench(
+    cancel_scan(
         state_dir,
-        "cancel-scan",
-        "--scan-id",
         str(first["results"]["scanId"]),
-        "--thread-id",
         "thread-owner",
         environment=deep_environment(codex_home),
     )
-    second = run_workbench(
+    second = start_scan_command(
         state_dir,
-        "start-scan",
-        "--workspace-id",
         workspace_ids[1],
         "--scan-root",
         str(tmp_path / "scans"),
@@ -2334,15 +2306,11 @@ def test_app_workspaces_cannot_start_duplicate_owned_target_scans(tmp_path: Path
 
 
 def test_app_scan_begin_validates_mode_and_owner(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace_id = str(uuid.uuid4())
-    run_workbench(
+    create_workspace(
         state_dir,
-        "create-workspace",
-        "--workspace-id",
         workspace_id,
         "--thread-id",
         "thread-owner",
@@ -2352,23 +2320,11 @@ def test_app_scan_begin_validates_mode_and_owner(tmp_path: Path) -> None:
         "deep",
         environment=deep_environment(codex_home),
     )
-    run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "deep",
-        environment=deep_environment(codex_home),
+    save_workspace(
+        state_dir, workspace_id, str(target), ".", "deep", environment=deep_environment(codex_home)
     )
-    started = run_workbench(
+    started = start_scan_command(
         state_dir,
-        "start-scan",
-        "--workspace-id",
         workspace_id,
         "--scan-root",
         str(tmp_path / "scans"),
@@ -2376,25 +2332,12 @@ def test_app_scan_begin_validates_mode_and_owner(tmp_path: Path) -> None:
     )
     scan_id = str(started["results"]["scanId"])
     claim_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir, "claim-handoff-delivery", "--scan-id", scan_id, "--claim-token", claim_token
-    )
-    attached = run_workbench(
-        state_dir,
-        "attach-scan-continuation-thread",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        claim_token,
-        "--thread-id",
-        "thread-continuation",
-    )
+    scan_claim_command(state_dir, "claim-handoff-delivery", scan_id, claim_token)
+    attached = attach_continuation(state_dir, scan_id, claim_token, "thread-continuation")
     assert attached["results"]["continuationThreadId"] == "thread-continuation"
 
-    wrong_owner = run_workbench(
+    wrong_owner = begin_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "thread-owner",
         "--scan-id",
         scan_id,
@@ -2403,10 +2346,8 @@ def test_app_scan_begin_validates_mode_and_owner(tmp_path: Path) -> None:
     )
     assert "owning Codex thread" in str(wrong_owner["stderr"])
 
-    begun = run_workbench(
+    begun = begin_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "thread-continuation",
         "--scan-id",
         scan_id,
@@ -2427,9 +2368,9 @@ def test_app_scan_begin_validates_mode_and_owner(tmp_path: Path) -> None:
         scan_id=scan_id,
         worker_id=worker_id,
         kind="setup",
-        status="running",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
+        attempt=None,
     )
     setup_complete = upsert_worker(
         state_dir,
@@ -2440,6 +2381,7 @@ def test_app_scan_begin_validates_mode_and_owner(tmp_path: Path) -> None:
         status="succeeded",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
+        attempt=None,
     )
     assert setup_complete["deepScan"]["workers"][0]["status"] == "succeeded"
 
@@ -2448,15 +2390,11 @@ def test_app_scan_begin_validates_mode_and_owner(tmp_path: Path) -> None:
 def test_stale_deep_continuation_cannot_begin_after_handoff_transfer(
     tmp_path: Path, handoff_action: str
 ) -> None:
-    state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target, thread_id="workspace-thread", mode="deep")
-    started = run_workbench(
+    started = start_scan_command(
         state_dir,
-        "start-scan",
-        "--workspace-id",
         str(saved["id"]),
         "--scan-root",
         str(tmp_path / "scans"),
@@ -2482,28 +2420,17 @@ def test_stale_deep_continuation_cannot_begin_after_handoff_transfer(
             ),
         )
     if handoff_action == "release":
-        run_workbench(
-            state_dir,
-            "release-handoff-delivery",
-            "--scan-id",
-            scan_id,
-            "--claim-token",
-            stale_token,
-        )
-    run_workbench(
+        scan_claim_command(state_dir, "release-handoff-delivery", scan_id, stale_token)
+    scan_claim_command(
         state_dir,
         "claim-handoff-delivery",
-        "--scan-id",
         scan_id,
-        "--claim-token",
         replacement_token,
         *(("--take-over-stale",) if handoff_action == "takeover" else ()),
     )
 
-    stale_thread = run_workbench(
+    stale_thread = begin_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "stale-deep-continuation",
         "--scan-id",
         scan_id,
@@ -2512,10 +2439,8 @@ def test_stale_deep_continuation_cannot_begin_after_handoff_transfer(
         environment=deep_environment(codex_home),
         check=False,
     )
-    original_thread = run_workbench(
+    original_thread = begin_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "workspace-thread",
         "--scan-id",
         scan_id,
@@ -2524,10 +2449,8 @@ def test_stale_deep_continuation_cannot_begin_after_handoff_transfer(
         environment=deep_environment(codex_home),
         check=False,
     )
-    tokenless_original_thread = run_workbench(
+    tokenless_original_thread = begin_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "workspace-thread",
         "--scan-id",
         scan_id,
@@ -2550,20 +2473,9 @@ def test_stale_deep_continuation_cannot_begin_after_handoff_transfer(
         ).fetchone()
         assert (owner, coordinator_count) == (None, 0)
 
-    run_workbench(
+    attach_continuation(state_dir, scan_id, replacement_token, "replacement-deep-continuation")
+    begun = begin_deep_scan(
         state_dir,
-        "attach-scan-continuation-thread",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        replacement_token,
-        "--thread-id",
-        "replacement-deep-continuation",
-    )
-    begun = run_workbench(
-        state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "replacement-deep-continuation",
         "--scan-id",
         scan_id,
@@ -2576,15 +2488,11 @@ def test_stale_deep_continuation_cannot_begin_after_handoff_transfer(
 
 
 def test_pending_app_workspace_does_not_block_target_bootstrap(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace_id = str(uuid.uuid4())
-    run_workbench(
+    create_workspace(
         state_dir,
-        "create-workspace",
-        "--workspace-id",
         workspace_id,
         "--thread-id",
         "thread-deep-scan",
@@ -2614,9 +2522,7 @@ def test_maximum_one_discovery_run_allows_hard_cap_singleton_reducer(
 ) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text("[deep_scan]\nworkers = 1\nmax_discovery_runs = 1\n")
+    write_deep_config(codex_home, "[deep_scan]\nworkers = 1\nmax_discovery_runs = 1\n")
     target = tmp_path / "target"
     target.mkdir()
     begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
@@ -2624,44 +2530,20 @@ def test_maximum_one_discovery_run_allows_hard_cap_singleton_reducer(
     assert deep_scan["config"]["maxDiscoveryRuns"] == 1
     scan_id = str(deep_scan["scanId"])
     scan_dir = Path(str(deep_scan["scanDir"]))
-    worker_id = str(uuid.uuid4())
-    prompt, artifact_dir, result = worker_paths(scan_dir, "singleton-worker")
-    upsert_worker(
+    worker_id, prompt, artifact_dir, result = dispatch_discovery_worker(
         state_dir,
         codex_home,
         scan_id=scan_id,
-        worker_id=worker_id,
-        kind="discovery",
-        status="running",
-        prompt_path=prompt,
-        artifact_dir=artifact_dir,
-        attempt=1,
-    )
-    result.write_text("{}\n")
-    upsert_worker(
-        state_dir,
-        codex_home,
-        scan_id=scan_id,
-        worker_id=worker_id,
-        kind="discovery",
-        status="succeeded",
-        prompt_path=prompt,
-        artifact_dir=artifact_dir,
-        result_path=result,
-        attempt=1,
+        scan_dir=scan_dir,
+        name="singleton-worker",
     )
     reducer_id = str(uuid.uuid4())
     reducer_prompt, reducer_dir, reducer_result = worker_paths(scan_dir, "singleton-reducer")
-    claimed = run_workbench(
+    claimed = claim_deep_scan_dedup(
         state_dir,
-        "claim-deep-scan-dedup",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         reducer_id,
-        "--prompt-path",
         str(reducer_prompt),
-        "--artifact-dir",
         str(reducer_dir),
         "--input-worker-id",
         worker_id,
@@ -2676,37 +2558,26 @@ def test_maximum_one_discovery_run_allows_hard_cap_singleton_reducer(
         scan_id=scan_id,
         worker_id=reducer_id,
         kind="dedup",
-        status="running",
         prompt_path=reducer_prompt,
         artifact_dir=reducer_dir,
-        attempt=1,
     )
     write_canonical_artifacts(scan_dir)
     reducer_result.write_text("{}\n")
-    committed = run_workbench(
+    committed = commit_deep_dedup(
         state_dir,
-        "commit-deep-scan-dedup",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         reducer_id,
-        "--result-manifest-path",
         str(reducer_result),
-        "--new-findings-count",
         "1",
         environment=deep_environment(codex_home),
     )["deepScan"]
     assert committed["status"] == "running"
     manifest = scan_dir / "coordinator-manifest.json"
     manifest.write_text("{}\n")
-    below_threshold = run_workbench(
+    below_threshold = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "saturated",
-        "--manifest-path",
         str(manifest),
         environment=deep_environment(codex_home),
         check=False,
@@ -2720,10 +2591,8 @@ def test_maximum_one_discovery_run_allows_hard_cap_singleton_reducer(
         scan_id=scan_id,
         worker_id=failed_setup_id,
         kind="setup",
-        status="running",
         prompt_path=failed_setup_prompt,
         artifact_dir=failed_setup_dir,
-        attempt=1,
     )
     upsert_worker(
         state_dir,
@@ -2734,17 +2603,12 @@ def test_maximum_one_discovery_run_allows_hard_cap_singleton_reducer(
         status="failed",
         prompt_path=failed_setup_prompt,
         artifact_dir=failed_setup_dir,
-        attempt=1,
         error="Setup failed.",
     )
-    rejected = run_workbench(
+    rejected = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "capped",
-        "--manifest-path",
         str(manifest),
         environment=deep_environment(codex_home),
         check=False,
@@ -2752,16 +2616,8 @@ def test_maximum_one_discovery_run_allows_hard_cap_singleton_reducer(
     assert "after a worker has failed" in str(rejected["stderr"])
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute("DELETE FROM deep_scan_workers WHERE id = ?", (failed_setup_id,))
-    capped = run_workbench(
-        state_dir,
-        "finish-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--terminal-reason",
-        "capped",
-        "--manifest-path",
-        str(manifest),
-        environment=deep_environment(codex_home),
+    capped = finish_deep_scan(
+        state_dir, scan_id, "capped", str(manifest), environment=deep_environment(codex_home)
     )["deepScan"]
     assert capped["status"] == "succeeded"
     assert capped["terminalReason"] == "capped"
@@ -2787,11 +2643,10 @@ def test_discovery_deadline_caps_after_reducing_a_single_discovery_result(
 ) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(
+    write_deep_config(
+        codex_home,
         "[deep_scan]\nworkers = 1\nmax_discovery_runs = 3\n"
-        + ("" if configured_hours is None else f"max_time_hours = {configured_hours}\n")
+        + ("" if configured_hours is None else f"max_time_hours = {configured_hours}\n"),
     )
     target = tmp_path / "target"
     target.mkdir()
@@ -2816,14 +2671,10 @@ def test_discovery_deadline_caps_after_reducing_a_single_discovery_result(
 
     manifest = scan_dir / "coordinator-manifest.json"
     manifest.write_text("{}\n")
-    premature_completion = run_workbench(
+    premature_completion = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "capped",
-        "--manifest-path",
         str(manifest),
         environment=deep_environment(codex_home),
         check=False,
@@ -2831,16 +2682,11 @@ def test_discovery_deadline_caps_after_reducing_a_single_discovery_result(
     if not deadline_reached:
         assert "before reaching its configured maximum" in str(premature_completion["stderr"])
         reducer_prompt, reducer_dir, _ = worker_paths(scan_dir, "premature-reducer")
-        premature_reducer = run_workbench(
+        premature_reducer = claim_deep_scan_dedup(
             state_dir,
-            "claim-deep-scan-dedup",
-            "--scan-id",
             scan_id,
-            "--worker-id",
             str(uuid.uuid4()),
-            "--prompt-path",
             str(reducer_prompt),
-            "--artifact-dir",
             str(reducer_dir),
             "--input-worker-id",
             worker_id,
@@ -2866,16 +2712,8 @@ def test_discovery_deadline_caps_after_reducing_a_single_discovery_result(
     existing_finding = '{"title": "Finding recorded before the deadline"}\n'
     ledger_path.write_text(existing_finding)
 
-    capped = run_workbench(
-        state_dir,
-        "finish-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--terminal-reason",
-        "capped",
-        "--manifest-path",
-        str(manifest),
-        environment=deep_environment(codex_home),
+    capped = finish_deep_scan(
+        state_dir, scan_id, "capped", str(manifest), environment=deep_environment(codex_home)
     )["deepScan"]
     assert capped["status"] == "succeeded"
     assert capped["terminalReason"] == "capped"
@@ -2894,10 +2732,9 @@ def test_discovery_deadline_caps_without_a_completed_discovery(
 ) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(
-        f"[deep_scan]\nworkers = 1\nmax_discovery_runs = 3\nmax_time_hours = {configured_hours}\n"
+    write_deep_config(
+        codex_home,
+        f"[deep_scan]\nworkers = 1\nmax_discovery_runs = 3\nmax_time_hours = {configured_hours}\n",
     )
     target = tmp_path / "target"
     target.mkdir()
@@ -2924,33 +2761,21 @@ def test_discovery_deadline_caps_without_a_completed_discovery(
             codex_home,
             scan_id=scan_id,
             worker_id=worker_id,
-            kind="discovery",
             status="canceled",
             prompt_path=prompt,
             artifact_dir=artifact_dir,
-            attempt=1,
         )
 
-    running = run_workbench(
-        state_dir,
-        "get-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "thread-deep-scan",
-        environment=deep_environment(codex_home),
+    running = get_deep_scan(
+        state_dir, scan_id, "thread-deep-scan", environment=deep_environment(codex_home)
     )["deepScan"]
     assert running["status"] == "running"
     assert running["canonicalArtifacts"] is None
     if configured_hours > 1e-12:
-        premature = run_workbench(
+        premature = finish_deep_scan(
             state_dir,
-            "finish-deep-scan",
-            "--scan-id",
             scan_id,
-            "--terminal-reason",
             "capped",
-            "--manifest-path",
             str(manifest),
             environment=deep_environment(codex_home),
             check=False,
@@ -2970,16 +2795,8 @@ def test_discovery_deadline_caps_without_a_completed_discovery(
             ),
         )
 
-    capped = run_workbench(
-        state_dir,
-        "finish-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--terminal-reason",
-        "capped",
-        "--manifest-path",
-        str(manifest),
-        environment=deep_environment(codex_home),
+    capped = finish_deep_scan(
+        state_dir, scan_id, "capped", str(manifest), environment=deep_environment(codex_home)
     )["deepScan"]
     assert capped["status"] == "succeeded"
     assert capped["terminalReason"] == "capped"
@@ -2992,14 +2809,8 @@ def test_discovery_deadline_caps_without_a_completed_discovery(
         ["canceled"] if cancel_discovery else []
     )
 
-    persisted = run_workbench(
-        state_dir,
-        "get-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "thread-deep-scan",
-        environment=deep_environment(codex_home),
+    persisted = get_deep_scan(
+        state_dir, scan_id, "thread-deep-scan", environment=deep_environment(codex_home)
     )["deepScan"]
     assert persisted["canonicalArtifacts"] == capped["canonicalArtifacts"]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
@@ -3014,18 +2825,10 @@ def test_zero_discovery_deadline_rejects_nonempty_candidate_ledger(
     tmp_path: Path,
     candidate_ledger: str,
 ) -> None:
-    state_dir = tmp_path / "state"
-    codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(
-        "[deep_scan]\nworkers = 1\nmax_discovery_runs = 3\nmax_time_hours = 0.5\n"
+    state_dir, codex_home, scan_id, scan_dir = start_empty_target_scan(
+        tmp_path,
+        config="[deep_scan]\nworkers = 1\nmax_discovery_runs = 3\nmax_time_hours = 0.5\n",
     )
-    target = tmp_path / "target"
-    target.mkdir()
-    begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
-    scan_id = str(begun["deepScan"]["scanId"])
-    scan_dir = Path(str(begun["deepScan"]["scanDir"]))
     canonical = write_canonical_artifacts(scan_dir)
     canonical["candidateLedgerPath"].write_text(candidate_ledger)
     manifest = scan_dir / "coordinator-manifest.json"
@@ -3036,44 +2839,28 @@ def test_zero_discovery_deadline_rejects_nonempty_candidate_ledger(
             ((datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(), scan_id),
         )
 
-    rejected = run_workbench(
+    rejected = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "capped",
-        "--manifest-path",
         str(manifest),
         environment=deep_environment(codex_home),
         check=False,
     )
     assert "without a successful dedup worker" in str(rejected["stderr"])
     assert canonical["candidateLedgerPath"].read_text() == candidate_ledger
-    running = run_workbench(
-        state_dir,
-        "get-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "thread-deep-scan",
-        environment=deep_environment(codex_home),
+    running = get_deep_scan(
+        state_dir, scan_id, "thread-deep-scan", environment=deep_environment(codex_home)
     )["deepScan"]
     assert running["status"] == "running"
     assert running["canonicalArtifacts"] is None
 
 
 def test_capped_completion_requires_canonical_artifacts(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text("[deep_scan]\nworkers = 1\nmax_discovery_runs = 1\n")
-    target = tmp_path / "target"
-    target.mkdir()
-    begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
-    scan_id = str(begun["deepScan"]["scanId"])
-    scan_dir = Path(str(begun["deepScan"]["scanDir"]))
+    state_dir, codex_home, scan_id, scan_dir = start_empty_target_scan(
+        tmp_path,
+        config="[deep_scan]\nworkers = 1\nmax_discovery_runs = 1\n",
+    )
     worker_id = str(uuid.uuid4())
     prompt, artifact_dir, _ = worker_paths(scan_dir, "failed-discovery")
     upsert_worker(
@@ -3081,35 +2868,26 @@ def test_capped_completion_requires_canonical_artifacts(tmp_path: Path) -> None:
         codex_home,
         scan_id=scan_id,
         worker_id=worker_id,
-        kind="discovery",
-        status="running",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
-        attempt=1,
     )
     upsert_worker(
         state_dir,
         codex_home,
         scan_id=scan_id,
         worker_id=worker_id,
-        kind="discovery",
         status="failed",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
-        attempt=1,
         error="Retries exhausted.",
     )
     manifest = scan_dir / "coordinator-manifest.json"
     manifest.write_text("{}\n")
 
-    rejected = run_workbench(
+    rejected = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "capped",
-        "--manifest-path",
         str(manifest),
         environment=deep_environment(codex_home),
         check=False,
@@ -3118,18 +2896,10 @@ def test_capped_completion_requires_canonical_artifacts(tmp_path: Path) -> None:
 
 
 def test_capped_completion_rejects_buffered_workers_and_omissions(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(
-        "[deep_scan]\nworkers = 2\nstop_after_no_new = 10\nmax_discovery_runs = 3\n"
+    state_dir, codex_home, scan_id, scan_dir = start_empty_target_scan(
+        tmp_path,
+        config="[deep_scan]\nworkers = 2\nstop_after_no_new = 10\nmax_discovery_runs = 3\n",
     )
-    target = tmp_path / "target"
-    target.mkdir()
-    begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
-    scan_id = str(begun["deepScan"]["scanId"])
-    scan_dir = Path(str(begun["deepScan"]["scanDir"]))
     first_id, *_ = dispatch_discovery_worker(
         state_dir,
         codex_home,
@@ -3164,28 +2934,20 @@ def test_capped_completion_rejects_buffered_workers_and_omissions(tmp_path: Path
     manifest = scan_dir / "coordinator-manifest.json"
     manifest.write_text("{}\n")
 
-    buffered_rejected = run_workbench(
+    buffered_rejected = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "capped",
-        "--manifest-path",
         str(manifest),
         environment=deep_environment(codex_home),
         check=False,
     )
     assert "while discovery output remains buffered" in str(buffered_rejected["stderr"])
 
-    omitted_rejected = run_workbench(
+    omitted_rejected = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "capped",
-        "--manifest-path",
         str(manifest),
         "--omitted-worker-id",
         buffered_id,
@@ -3200,9 +2962,7 @@ def prepare_failure_capped_deep_scan(
 ) -> tuple[Path, Path, Path, str]:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text("[deep_scan]\nworkers = 2\nmax_discovery_runs = 10\n")
+    write_deep_config(codex_home, "[deep_scan]\nworkers = 2\nmax_discovery_runs = 10\n")
     target = tmp_path / "target"
     target.mkdir()
     begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
@@ -3234,7 +2994,6 @@ def prepare_failure_capped_deep_scan(
     write_completed_contract(scan_dir, scan_id, target, coverage_mode="deep_repository")
     coverage_path = scan_dir / "coverage.json"
     coverage = json.loads(coverage_path.read_text())
-    coverage["completeness"] = "partial"
     coverage["deferred"].append(
         {"reason": "Deep Scan stopped before completion: reducer retries were exhausted"}
     )
@@ -3242,7 +3001,102 @@ def prepare_failure_capped_deep_scan(
     return state_dir, codex_home, scan_dir, scan_id
 
 
-def test_failure_capped_completion_preserves_partial_results_and_exact_omissions(
+@pytest.mark.parametrize("worker_kind", ["discovery", "dedup"])
+@pytest.mark.parametrize("legacy_succeeded", [False, True], ids=["finish", "legacy-parent"])
+def test_capped_completion_cannot_use_review_notes_to_hide_worker_failures(
+    tmp_path: Path, worker_kind: str, legacy_succeeded: bool
+) -> None:
+    state_dir, codex_home, scan_dir, scan_id = prepare_failure_capped_deep_scan(tmp_path)
+    worker_id, prompt, artifact_dir, _ = dispatch_discovery_worker(
+        state_dir,
+        codex_home,
+        scan_id=scan_id,
+        scan_dir=scan_dir,
+        name="after-accepted-aggregate",
+        succeed=worker_kind == "dedup",
+    )
+    if worker_kind == "dedup":
+        discovery_id = worker_id
+        worker_id = str(uuid.uuid4())
+        prompt, artifact_dir, _ = worker_paths(scan_dir, "unrecovered-reducer")
+        claim_deep_scan_dedup(
+            state_dir,
+            scan_id,
+            worker_id,
+            str(prompt),
+            str(artifact_dir),
+            "--input-worker-id",
+            discovery_id,
+            environment=deep_environment(codex_home),
+        )
+        upsert_worker(
+            state_dir,
+            codex_home,
+            scan_id=scan_id,
+            worker_id=worker_id,
+            kind="dedup",
+            prompt_path=prompt,
+            artifact_dir=artifact_dir,
+        )
+    upsert_worker(
+        state_dir,
+        codex_home,
+        scan_id=scan_id,
+        worker_id=worker_id,
+        kind=worker_kind,
+        status="failed",
+        prompt_path=prompt,
+        artifact_dir=artifact_dir,
+        error="Worker retries exhausted.",
+    )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET max_discovery_runs = discovery_runs_dispatched WHERE scan_id = ?",
+            (scan_id,),
+        )
+    artifacts = {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json")
+    }
+    if legacy_succeeded:
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE deep_scan_runs SET status = 'succeeded', phase = 'terminal', "
+                "terminal_reason = 'capped', manifest_path = ? WHERE scan_id = ?",
+                (str(scan_dir / "scan-manifest.json"), scan_id),
+            )
+        rejected = scan_command(
+            state_dir,
+            "complete-scan",
+            scan_id,
+            environment=deep_environment(codex_home),
+            check=False,
+        )
+    else:
+        rejected = finish_deep_scan(
+            state_dir,
+            scan_id,
+            "capped",
+            str(scan_dir / "scan-manifest.json"),
+            environment=deep_environment(codex_home),
+            check=False,
+        )
+    assert "cannot finish after a worker has failed" in str(rejected["stderr"])
+    assert {name: (scan_dir / name).read_bytes() for name in artifacts} == artifacts
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT status FROM deep_scan_runs WHERE scan_id = ?",
+            (scan_id,),
+        ).fetchone() == ("succeeded" if legacy_succeeded else "running",)
+    stopped = fail_scan(
+        state_dir, scan_id, "Worker retries exhausted.", environment=deep_environment(codex_home)
+    )["scan"]
+    assert stopped["progress"]["status"] == "failed"
+    assert stopped["findingCount"] == 1
+    assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["status"] == "failed"
+
+
+def test_legacy_succeeded_capped_completion_replays_without_rewriting_artifacts(
     tmp_path: Path,
 ) -> None:
     state_dir, codex_home, scan_dir, scan_id = prepare_failure_capped_deep_scan(tmp_path)
@@ -3251,80 +3105,53 @@ def test_failure_capped_completion_preserves_partial_results_and_exact_omissions
         codex_home,
         scan_id=scan_id,
         scan_dir=scan_dir,
-        name="buffered-after-aggregate",
+        name="legacy-omitted",
     )
-    failed_id, failed_prompt, failed_dir, _ = dispatch_discovery_worker(
+    manifest_path = str(scan_dir / "scan-manifest.json")
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET status = 'succeeded', phase = 'terminal', "
+            "terminal_reason = 'capped', manifest_path = ? WHERE scan_id = ?",
+            (manifest_path, scan_id),
+        )
+    artifacts = {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json")
+    }
+    replayed = finish_deep_scan(
         state_dir,
-        codex_home,
-        scan_id=scan_id,
-        scan_dir=scan_dir,
-        name="terminal-failure",
-        succeed=False,
-    )
-    upsert_worker(
-        state_dir,
-        codex_home,
-        scan_id=scan_id,
-        worker_id=failed_id,
-        kind="discovery",
-        status="failed",
-        prompt_path=failed_prompt,
-        artifact_dir=failed_dir,
-        attempt=1,
-        error="Worker retries exhausted.",
-    )
-    finish_args = (
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "capped",
-        "--manifest-path",
-        str(scan_dir / "scan-manifest.json"),
-    )
-
-    without_omission = run_workbench(
-        state_dir, *finish_args, environment=deep_environment(codex_home), check=False
-    )
-    assert "exactly identify all buffered discovery workers" in str(without_omission["stderr"])
-
-    finished = run_workbench(
-        state_dir,
-        *finish_args,
+        manifest_path,
         "--omitted-worker-id",
         buffered_id,
         environment=deep_environment(codex_home),
     )["deepScan"]
-    assert finished["status"] == "succeeded"
-    assert finished["terminalReason"] == "capped"
-    assert finished["config"]["maxDiscoveryRuns"] == 10
-    assert finished["dispatchedCount"] == 4
-    assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == "partial"
-    assert len(json.loads((scan_dir / "findings.json").read_text())["findings"]) == 1
-    assert (
-        next(worker for worker in finished["workers"] if worker["id"] == failed_id)["status"]
-        == "failed"
-    )
-    assert (
-        next(worker for worker in finished["workers"] if worker["id"] == buffered_id)["mergeState"]
-        == "buffered"
-    )
-
-    replayed = run_workbench(
+    assert replayed["status"] == "succeeded"
+    assert {name: (scan_dir / name).read_bytes() for name in artifacts} == artifacts
+    rejected = finish_deep_scan(
         state_dir,
-        *finish_args,
-        "--omitted-worker-id",
-        buffered_id,
+        scan_id,
+        "capped",
+        manifest_path,
         environment=deep_environment(codex_home),
-    )["deepScan"]
-    assert replayed == finished
+        check=False,
+    )
+    assert "terminal state is immutable" in str(rejected["stderr"])
+    publication = scan_command(
+        state_dir,
+        "complete-scan",
+        scan_id,
+        environment=deep_environment(codex_home),
+        check=False,
+    )
+    assert "while discovery output remains buffered" in str(publication["stderr"])
+    assert {name: (scan_dir / name).read_bytes() for name in artifacts} == artifacts
 
 
 def test_late_worker_rejection_supersedes_stopped_checkpoint_finding(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
     scan_id = str(begun["deepScan"]["scanId"])
     scan_dir = Path(str(begun["deepScan"]["scanDir"]))
@@ -3336,7 +3163,7 @@ def test_late_worker_rejection_supersedes_stopped_checkpoint_finding(tmp_path: P
     findings_path.write_text(json.dumps(findings))
     coverage_path = scan_dir / "coverage.json"
     coverage = json.loads(coverage_path.read_text())
-    coverage["completeness"] = "partial"
+
     coverage["surfaces"] = []
     coverage_path.write_text(json.dumps(coverage))
 
@@ -3347,34 +3174,18 @@ def test_late_worker_rejection_supersedes_stopped_checkpoint_finding(tmp_path: P
         codex_home,
         scan_id=scan_id,
         worker_id=worker_id,
-        kind="discovery",
-        status="running",
         prompt_path=prompt_path,
         artifact_dir=artifact_dir,
-        attempt=1,
     )
-    checkpoint = {
-        "scanId": scan_id,
-        "complete": False,
-        "findings": [provisional],
-        "coverage": {
-            "completeness": "partial",
-            "surfaces": [],
-            "explicitExclusions": [],
-            "deferred": [],
-        },
-    }
+    checkpoint = saved_draft(scan_id, findings=[provisional])
     encoded = json.dumps(checkpoint).encode()
     checkpoint_dir = artifact_dir / "checkpoints"
     checkpoint_dir.mkdir()
     (checkpoint_dir / f"{hashlib.sha256(encoded).hexdigest()}.json").write_bytes(encoded)
 
-    stopped = run_workbench(
+    stopped = fail_scan(
         state_dir,
-        "fail-scan",
-        "--scan-id",
         scan_id,
-        "--message",
         "Stopped after the provisional checkpoint.",
         environment=deep_environment(codex_home),
     )["scan"]
@@ -3382,40 +3193,28 @@ def test_late_worker_rejection_supersedes_stopped_checkpoint_finding(tmp_path: P
 
     result_path.write_text(
         json.dumps(
-            {
-                "scanId": scan_id,
-                "complete": True,
-                "findings": [],
-                "coverage": {
-                    "completeness": "complete",
-                    "surfaces": [
-                        {
-                            "candidateId": "candidate-late-rejection",
-                            "label": "Late worker disposition",
-                            "disposition": "rejected",
-                            "receiptRefs": [],
-                        }
-                    ],
-                    "explicitExclusions": [],
-                    "deferred": [],
-                },
-            }
+            saved_draft(
+                scan_id,
+                surfaces=[
+                    {
+                        "candidateId": "candidate-late-rejection",
+                        "label": "Late worker disposition",
+                        "disposition": "rejected",
+                        "receiptRefs": [],
+                    }
+                ],
+                complete=True,
+            )
         )
     )
 
-    recovery_needed = run_workbench(
-        state_dir, "get-scan", "--scan-id", scan_id, environment=deep_environment(codex_home)
-    )["scan"]
+    recovery_needed = get_scan(state_dir, scan_id, environment=deep_environment(codex_home))["scan"]
     assert recovery_needed["resultsRecoveryNeeded"] is True
-    recovered = run_workbench(
-        state_dir,
-        "recover-scan-results",
-        "--scan-id",
-        scan_id,
-        environment=deep_environment(codex_home),
+    recovered = scan_command(
+        state_dir, "recover-scan-results", scan_id, environment=deep_environment(codex_home)
     )["scan"]
     final_findings = json.loads(findings_path.read_text())["findings"]
-    final_coverage = json.loads(coverage_path.read_text())
+    final_coverage = read_review_state(state_dir, scan_dir)
     assert recovered["findingCount"] == len(final_findings) == 0
     assert any(
         item.get("candidateId") == "candidate-late-rejection"
@@ -3424,7 +3223,7 @@ def test_late_worker_rejection_supersedes_stopped_checkpoint_finding(tmp_path: P
     )
 
 
-def test_failure_capped_completion_recovers_canceled_reducer_inputs(tmp_path: Path) -> None:
+def test_capped_completion_does_not_discard_canceled_reducer_inputs(tmp_path: Path) -> None:
     state_dir, codex_home, scan_dir, scan_id = prepare_failure_capped_deep_scan(tmp_path)
     buffered_id, *_ = dispatch_discovery_worker(
         state_dir,
@@ -3435,16 +3234,11 @@ def test_failure_capped_completion_recovers_canceled_reducer_inputs(tmp_path: Pa
     )
     reducer_id = str(uuid.uuid4())
     reducer_prompt, reducer_dir, _ = worker_paths(scan_dir, "canceled-reducer")
-    run_workbench(
+    claim_deep_scan_dedup(
         state_dir,
-        "claim-deep-scan-dedup",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         reducer_id,
-        "--prompt-path",
         str(reducer_prompt),
-        "--artifact-dir",
         str(reducer_dir),
         "--input-worker-id",
         buffered_id,
@@ -3456,11 +3250,14 @@ def test_failure_capped_completion_recovers_canceled_reducer_inputs(tmp_path: Pa
         scan_id=scan_id,
         worker_id=reducer_id,
         kind="dedup",
-        status="running",
         prompt_path=reducer_prompt,
         artifact_dir=reducer_dir,
-        attempt=1,
     )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET max_discovery_runs = discovery_runs_dispatched WHERE scan_id = ?",
+            (scan_id,),
+        )
     finish_args = (
         "finish-deep-scan",
         "--scan-id",
@@ -3486,74 +3283,74 @@ def test_failure_capped_completion_recovers_canceled_reducer_inputs(tmp_path: Pa
         status="canceled",
         prompt_path=reducer_prompt,
         artifact_dir=reducer_dir,
-        attempt=1,
     )
-    finished = run_workbench(state_dir, *finish_args, environment=deep_environment(codex_home))[
-        "deepScan"
-    ]
-    assert finished["status"] == "succeeded"
-    assert (
-        next(worker for worker in finished["workers"] if worker["id"] == reducer_id)["status"]
-        == "canceled"
+    rejected = run_workbench(
+        state_dir, *finish_args, environment=deep_environment(codex_home), check=False
     )
-    assert (
-        next(worker for worker in finished["workers"] if worker["id"] == buffered_id)["mergeState"]
-        == "buffered"
+    assert "while discovery output is merging" in str(rejected["stderr"])
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT status FROM deep_scan_runs WHERE scan_id = ?",
+            (scan_id,),
+        ).fetchone() == ("running",)
+        assert connection.execute(
+            "SELECT merge_state FROM deep_scan_workers WHERE id = ?",
+            (buffered_id,),
+        ).fetchone() == ("merging",)
+
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET status = 'succeeded', phase = 'terminal', "
+            "terminal_reason = 'capped', manifest_path = ? WHERE scan_id = ?",
+            (str(scan_dir / "scan-manifest.json"), scan_id),
+        )
+    publication = scan_command(
+        state_dir,
+        "complete-scan",
+        scan_id,
+        environment=deep_environment(codex_home),
+        check=False,
     )
+    assert "while discovery output is merging" in str(publication["stderr"])
 
 
-@pytest.mark.parametrize("invalid_case", ["ordinary_partial", "complete", "missing_coverage"])
-def test_failure_capped_completion_rejects_unmarked_or_missing_canonical_coverage(
-    tmp_path: Path, invalid_case: str
+@pytest.mark.parametrize(
+    "stop_note",
+    [
+        "Deep Scan stopped before completion: reducer retries were exhausted",
+        "Some source files were not reviewed.",
+        None,
+    ],
+)
+def test_capped_completion_uses_configured_limits_independently_of_review_notes(
+    tmp_path: Path, stop_note: str | None
 ) -> None:
     state_dir, codex_home, scan_dir, scan_id = prepare_failure_capped_deep_scan(tmp_path)
     coverage_path = scan_dir / "coverage.json"
     coverage = json.loads(coverage_path.read_text())
-    if invalid_case == "ordinary_partial":
-        coverage["deferred"] = [{"reason": "Some source files were not reviewed."}]
-    elif invalid_case == "complete":
-        coverage["completeness"] = "complete"
-    else:
-        coverage_path.unlink()
-    if invalid_case != "missing_coverage":
-        coverage_path.write_text(json.dumps(coverage))
-
-    rejected = run_workbench(
+    coverage["deferred"] = [{"reason": stop_note}] if stop_note else []
+    coverage_path.write_text(json.dumps(coverage))
+    rejected = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "capped",
-        "--manifest-path",
         str(scan_dir / "scan-manifest.json"),
         environment=deep_environment(codex_home),
         check=False,
     )
-    assert (
-        "Canonical parent coverage.json must be an existing path"
-        if invalid_case == "missing_coverage"
-        else "cannot finish capped before reaching its configured maximum"
-    ) in str(rejected["stderr"])
+    assert "cannot finish capped before reaching its configured maximum" in str(rejected["stderr"])
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute(
-            "SELECT status, manifest_path FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
+            "SELECT status, manifest_path FROM deep_scan_runs WHERE scan_id = ?",
+            (scan_id,),
         ).fetchone() == ("running", None)
 
 
 def test_saturated_completion_rejects_merging_workers(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(
-        "[deep_scan]\nworkers = 2\nstop_after_no_new = 2\nmax_discovery_runs = 3\n"
+    state_dir, codex_home, scan_id, scan_dir = start_empty_target_scan(
+        tmp_path,
+        config="[deep_scan]\nworkers = 2\nstop_after_no_new = 2\nmax_discovery_runs = 3\n",
     )
-    target = tmp_path / "target"
-    target.mkdir()
-    begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
-    scan_id = str(begun["deepScan"]["scanId"])
-    scan_dir = Path(str(begun["deepScan"]["scanDir"]))
     first_id, *_ = dispatch_discovery_worker(
         state_dir,
         codex_home,
@@ -3587,16 +3384,11 @@ def test_saturated_completion_rejects_merging_workers(tmp_path: Path) -> None:
     )
     reducer_id = str(uuid.uuid4())
     reducer_prompt, reducer_dir, _ = worker_paths(scan_dir, "abandoned-reducer")
-    run_workbench(
+    claim_deep_scan_dedup(
         state_dir,
-        "claim-deep-scan-dedup",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         reducer_id,
-        "--prompt-path",
         str(reducer_prompt),
-        "--artifact-dir",
         str(reducer_dir),
         "--input-worker-id",
         merging_id,
@@ -3611,18 +3403,15 @@ def test_saturated_completion_rejects_merging_workers(tmp_path: Path) -> None:
         status="canceled",
         prompt_path=reducer_prompt,
         artifact_dir=reducer_dir,
+        attempt=None,
     )
     manifest = scan_dir / "coordinator-manifest.json"
     manifest.write_text("{}\n")
 
-    rejected = run_workbench(
+    rejected = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "saturated",
-        "--manifest-path",
         str(manifest),
         environment=deep_environment(codex_home),
         check=False,
@@ -3631,10 +3420,8 @@ def test_saturated_completion_rejects_merging_workers(tmp_path: Path) -> None:
 
 
 def test_running_worker_updates_preserve_identity_and_dispatch_count(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
     scan_id = str(begun["deepScan"]["scanId"])
     scan_dir = Path(str(begun["deepScan"]["scanDir"]))
@@ -3643,11 +3430,8 @@ def test_running_worker_updates_preserve_identity_and_dispatch_count(tmp_path: P
     update = {
         "scan_id": scan_id,
         "worker_id": worker_id,
-        "kind": "discovery",
-        "status": "running",
         "prompt_path": prompt,
         "artifact_dir": artifact_dir,
-        "attempt": 1,
     }
 
     initial = upsert_worker(state_dir, codex_home, **update)["deepScan"]
@@ -3671,13 +3455,7 @@ def test_running_worker_updates_preserve_identity_and_dispatch_count(tmp_path: P
 
 
 def test_terminal_worker_updates_are_exact_idempotent_replays(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
-    begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
-    scan_id = str(begun["deepScan"]["scanId"])
-    scan_dir = Path(str(begun["deepScan"]["scanDir"]))
+    state_dir, codex_home, scan_id, scan_dir = start_empty_target_scan(tmp_path)
     worker_id = str(uuid.uuid4())
     prompt, artifact_dir, result = worker_paths(scan_dir, "terminal-worker")
     upsert_worker(
@@ -3685,11 +3463,8 @@ def test_terminal_worker_updates_are_exact_idempotent_replays(tmp_path: Path) ->
         codex_home,
         scan_id=scan_id,
         worker_id=worker_id,
-        kind="discovery",
-        status="running",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
-        attempt=1,
     )
     result.write_text("{}\n")
     accepted = upsert_worker(
@@ -3697,12 +3472,10 @@ def test_terminal_worker_updates_are_exact_idempotent_replays(tmp_path: Path) ->
         codex_home,
         scan_id=scan_id,
         worker_id=worker_id,
-        kind="discovery",
         status="succeeded",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
         result_path=result,
-        attempt=1,
     )["deepScan"]
     accepted_worker = next(worker for worker in accepted["workers"] if worker["id"] == worker_id)
     replayed = upsert_worker(
@@ -3710,32 +3483,23 @@ def test_terminal_worker_updates_are_exact_idempotent_replays(tmp_path: Path) ->
         codex_home,
         scan_id=scan_id,
         worker_id=worker_id,
-        kind="discovery",
         status="succeeded",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
         result_path=result,
-        attempt=1,
     )["deepScan"]
     replayed_worker = next(worker for worker in replayed["workers"] if worker["id"] == worker_id)
     assert replayed_worker == accepted_worker
 
     replacement_result = artifact_dir / "replacement-result.json"
     replacement_result.write_text("{}\n")
-    replacement = run_workbench(
+    replacement = upsert_deep_worker(
         state_dir,
-        "upsert-deep-scan-worker",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         worker_id,
-        "--kind",
         "discovery",
-        "--status",
         "succeeded",
-        "--prompt-path",
         str(prompt),
-        "--artifact-dir",
         str(artifact_dir),
         "--result-manifest-path",
         str(replacement_result),
@@ -3745,20 +3509,13 @@ def test_terminal_worker_updates_are_exact_idempotent_replays(tmp_path: Path) ->
         check=False,
     )
     assert "terminal state is immutable" in str(replacement["stderr"])
-    later_attempt = run_workbench(
+    later_attempt = upsert_deep_worker(
         state_dir,
-        "upsert-deep-scan-worker",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         worker_id,
-        "--kind",
         "discovery",
-        "--status",
         "succeeded",
-        "--prompt-path",
         str(prompt),
-        "--artifact-dir",
         str(artifact_dir),
         "--result-manifest-path",
         str(result),
@@ -3774,19 +3531,10 @@ def test_terminal_worker_updates_are_exact_idempotent_replays(tmp_path: Path) ->
 def test_discovery_buffer_prefix_dedup_and_saturation_are_transactional(
     tmp_path: Path,
 ) -> None:
-    state_dir = tmp_path / "state"
-    codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(
-        "[deep_scan]\nworkers = 2\nstop_after_no_new = 3\nmax_discovery_runs = 4\n"
+    state_dir, codex_home, scan_id, scan_dir = start_empty_target_scan(
+        tmp_path,
+        config="[deep_scan]\nworkers = 2\nstop_after_no_new = 3\nmax_discovery_runs = 4\n",
     )
-    target = tmp_path / "target"
-    target.mkdir()
-    begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
-    deep_scan = begun["deepScan"]
-    scan_id = str(deep_scan["scanId"])
-    scan_dir = Path(str(deep_scan["scanDir"]))
     for index in range(3):
         worker_id = str(uuid.uuid4())
         prompt, artifact_dir, result = worker_paths(scan_dir, f"worker-{index}")
@@ -3795,11 +3543,8 @@ def test_discovery_buffer_prefix_dedup_and_saturation_are_transactional(
             codex_home,
             scan_id=scan_id,
             worker_id=worker_id,
-            kind="discovery",
-            status="running",
             prompt_path=prompt,
             artifact_dir=artifact_dir,
-            attempt=1,
         )
         result.write_text("{}\n")
         accepted = upsert_worker(
@@ -3807,12 +3552,10 @@ def test_discovery_buffer_prefix_dedup_and_saturation_are_transactional(
             codex_home,
             scan_id=scan_id,
             worker_id=worker_id,
-            kind="discovery",
             status="succeeded",
             prompt_path=prompt,
             artifact_dir=artifact_dir,
             result_path=result,
-            attempt=1,
         )
         assert accepted["deepScan"]["workers"][-1]["mergeState"] == "buffered"
 
@@ -3823,16 +3566,11 @@ def test_discovery_buffer_prefix_dedup_and_saturation_are_transactional(
     assert [worker["completionSequence"] for worker in ordered_workers] == [1, 2, 3]
     reducer_id = str(uuid.uuid4())
     reducer_prompt, reducer_dir, reducer_result = worker_paths(scan_dir, "reducer")
-    claimed = run_workbench(
+    claimed = claim_deep_scan_dedup(
         state_dir,
-        "claim-deep-scan-dedup",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         reducer_id,
-        "--prompt-path",
         str(reducer_prompt),
-        "--artifact-dir",
         str(reducer_dir),
         *(item for worker in ordered_workers[:2] for item in ("--input-worker-id", worker["id"])),
         environment=deep_environment(codex_home),
@@ -3844,24 +3582,17 @@ def test_discovery_buffer_prefix_dedup_and_saturation_are_transactional(
         scan_id=scan_id,
         worker_id=reducer_id,
         kind="dedup",
-        status="running",
         prompt_path=reducer_prompt,
         artifact_dir=reducer_dir,
-        attempt=1,
         error="Transient reducer failure.",
     )
     write_canonical_artifacts(scan_dir)
     reducer_result.write_text("{}\n")
-    committed = run_workbench(
+    committed = commit_deep_dedup(
         state_dir,
-        "commit-deep-scan-dedup",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         reducer_id,
-        "--result-manifest-path",
         str(reducer_result),
-        "--new-findings-count",
         "0",
         environment=deep_environment(codex_home),
     )
@@ -3882,16 +3613,11 @@ def test_discovery_buffer_prefix_dedup_and_saturation_are_transactional(
     assert omitted["mergeState"] == "buffered"
     second_reducer_id = str(uuid.uuid4())
     second_prompt, second_dir, second_result = worker_paths(scan_dir, "second-reducer")
-    run_workbench(
+    claim_deep_scan_dedup(
         state_dir,
-        "claim-deep-scan-dedup",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         second_reducer_id,
-        "--prompt-path",
         str(second_prompt),
-        "--artifact-dir",
         str(second_dir),
         "--input-worker-id",
         str(omitted["id"]),
@@ -3903,10 +3629,8 @@ def test_discovery_buffer_prefix_dedup_and_saturation_are_transactional(
         scan_id=scan_id,
         worker_id=second_reducer_id,
         kind="dedup",
-        status="running",
         prompt_path=second_prompt,
         artifact_dir=second_dir,
-        attempt=1,
     )
     second_result.write_text("{}\n")
     late_worker_id, late_prompt, late_dir, late_result = dispatch_discovery_worker(
@@ -3917,16 +3641,11 @@ def test_discovery_buffer_prefix_dedup_and_saturation_are_transactional(
         name="late-worker",
         succeed=False,
     )
-    saturated_reduction = run_workbench(
+    saturated_reduction = commit_deep_dedup(
         state_dir,
-        "commit-deep-scan-dedup",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         second_reducer_id,
-        "--result-manifest-path",
         str(second_result),
-        "--new-findings-count",
         "0",
         environment=deep_environment(codex_home),
     )
@@ -3950,39 +3669,29 @@ def test_discovery_buffer_prefix_dedup_and_saturation_are_transactional(
         codex_home,
         scan_id=scan_id,
         worker_id=late_worker_id,
-        kind="discovery",
         status="succeeded",
         prompt_path=late_prompt,
         artifact_dir=late_dir,
         result_path=late_result,
-        attempt=1,
     )["deepScan"]
     accepted_late_worker = next(
         worker for worker in accepted_late["workers"] if worker["id"] == late_worker_id
     )
     assert accepted_late_worker["mergeState"] == "buffered"
 
-    omitted_rejected = run_workbench(
+    omitted_rejected = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "saturated",
-        "--manifest-path",
         str(manifest),
         environment=deep_environment(codex_home),
         check=False,
     )
     assert "exactly identify all buffered discovery workers" in str(omitted_rejected["stderr"])
-    finished = run_workbench(
+    finished = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "saturated",
-        "--manifest-path",
         str(manifest),
         "--omitted-worker-id",
         late_worker_id,
@@ -3991,28 +3700,20 @@ def test_discovery_buffer_prefix_dedup_and_saturation_are_transactional(
     assert finished["deepScan"]["status"] == "succeeded"
     assert finished["deepScan"]["terminalReason"] == "saturated"
     assert finished["deepScan"]["manifestPath"] == str(manifest)
-    replayed = run_workbench(
+    replayed = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "saturated",
-        "--manifest-path",
         str(manifest),
         "--omitted-worker-id",
         late_worker_id,
         environment=deep_environment(codex_home),
     )
     assert replayed == finished
-    mismatched_replay = run_workbench(
+    mismatched_replay = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "saturated",
-        "--manifest-path",
         str(manifest),
         environment=deep_environment(codex_home),
         check=False,
@@ -4023,13 +3724,7 @@ def test_discovery_buffer_prefix_dedup_and_saturation_are_transactional(
 def test_get_deep_scan_does_not_invent_compact_artifacts_for_legacy_success(
     tmp_path: Path,
 ) -> None:
-    state_dir = tmp_path / "state"
-    codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
-    begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
-    scan_id = str(begun["deepScan"]["scanId"])
-    scan_dir = Path(str(begun["deepScan"]["scanDir"]))
+    state_dir, codex_home, scan_id, scan_dir = start_empty_target_scan(tmp_path)
     committed = commit_reducer(
         state_dir,
         codex_home,
@@ -4090,14 +3785,8 @@ def test_get_deep_scan_does_not_invent_compact_artifacts_for_legacy_success(
             (*map(str, legacy_files.values()), str(manifest), scan_id),
         )
 
-    persisted = run_workbench(
-        state_dir,
-        "get-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "thread-deep-scan",
-        environment=deep_environment(codex_home),
+    persisted = get_deep_scan(
+        state_dir, scan_id, "thread-deep-scan", environment=deep_environment(codex_home)
     )["deepScan"]
     assert persisted["status"] == "succeeded"
     assert persisted["manifestPath"] == str(manifest)
@@ -4109,13 +3798,7 @@ def test_get_deep_scan_does_not_invent_compact_artifacts_for_legacy_success(
 def test_finish_preserves_legacy_succeeded_without_manifest_compatibility(
     tmp_path: Path,
 ) -> None:
-    state_dir = tmp_path / "state"
-    codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
-    begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
-    scan_id = str(begun["deepScan"]["scanId"])
-    scan_dir = Path(str(begun["deepScan"]["scanDir"]))
+    state_dir, codex_home, scan_id, scan_dir = start_empty_target_scan(tmp_path)
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute(
             """
@@ -4129,41 +3812,21 @@ def test_finish_preserves_legacy_succeeded_without_manifest_compatibility(
     manifest = scan_dir / "legacy-coordinator-manifest.json"
     manifest.write_text("{}\n")
 
-    finished = run_workbench(
-        state_dir,
-        "finish-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--terminal-reason",
-        "saturated",
-        "--manifest-path",
-        str(manifest),
-        environment=deep_environment(codex_home),
+    finished = finish_deep_scan(
+        state_dir, scan_id, "saturated", str(manifest), environment=deep_environment(codex_home)
     )
     assert finished["deepScan"]["manifestPath"] == str(manifest)
-    replayed = run_workbench(
-        state_dir,
-        "finish-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--terminal-reason",
-        "saturated",
-        "--manifest-path",
-        str(manifest),
-        environment=deep_environment(codex_home),
+    replayed = finish_deep_scan(
+        state_dir, scan_id, "saturated", str(manifest), environment=deep_environment(codex_home)
     )
     assert replayed == finished
 
     replacement = scan_dir / "replacement-manifest.json"
     replacement.write_text("{}\n")
-    mismatched = run_workbench(
+    mismatched = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "saturated",
-        "--manifest-path",
         str(replacement),
         environment=deep_environment(codex_home),
         check=False,
@@ -4172,14 +3835,7 @@ def test_finish_preserves_legacy_succeeded_without_manifest_compatibility(
 
 
 def test_cancel_scan_cancels_coordinator_and_active_workers(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
-    begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
-    deep_scan = begun["deepScan"]
-    scan_id = str(deep_scan["scanId"])
-    scan_dir = Path(str(deep_scan["scanDir"]))
+    state_dir, codex_home, scan_id, scan_dir = start_empty_target_scan(tmp_path)
     worker_id = str(uuid.uuid4())
     prompt, artifact_dir, _ = worker_paths(scan_dir, "worker")
     upsert_worker(
@@ -4187,30 +3843,13 @@ def test_cancel_scan_cancels_coordinator_and_active_workers(tmp_path: Path) -> N
         codex_home,
         scan_id=scan_id,
         worker_id=worker_id,
-        kind="discovery",
-        status="running",
         prompt_path=prompt,
         artifact_dir=artifact_dir,
-        attempt=1,
     )
 
-    run_workbench(
-        state_dir,
-        "cancel-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "thread-deep-scan",
-        environment=deep_environment(codex_home),
-    )
-    canceled = run_workbench(
-        state_dir,
-        "get-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "thread-deep-scan",
-        environment=deep_environment(codex_home),
+    cancel_scan(state_dir, scan_id, "thread-deep-scan", environment=deep_environment(codex_home))
+    canceled = get_deep_scan(
+        state_dir, scan_id, "thread-deep-scan", environment=deep_environment(codex_home)
     )["deepScan"]
     assert canceled["status"] == "canceled"
     assert canceled["phase"] == "terminal"
@@ -4221,10 +3860,8 @@ def test_cancel_scan_cancels_coordinator_and_active_workers(tmp_path: Path) -> N
 def test_failure_manifest_is_confined_persisted_and_exactly_replayable(
     tmp_path: Path,
 ) -> None:
-    state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
     scan_id = str(begun["deepScan"]["scanId"])
     scan_dir = Path(str(begun["deepScan"]["scanDir"]))
@@ -4238,10 +3875,9 @@ def test_failure_manifest_is_confined_persisted_and_exactly_replayable(
     )
     outside_manifest = tmp_path / "outside-failure-manifest.json"
     outside_manifest.write_text("{}\n")
-    confined = run_workbench(
+    confined = scan_command(
         state_dir,
         "fail-deep-scan",
-        "--scan-id",
         scan_id,
         "--message",
         "Coordinator failed.",
@@ -4254,10 +3890,9 @@ def test_failure_manifest_is_confined_persisted_and_exactly_replayable(
 
     manifest = scan_dir / "failure-manifest.json"
     manifest.write_text("{}\n")
-    failed = run_workbench(
+    failed = scan_command(
         state_dir,
         "fail-deep-scan",
-        "--scan-id",
         scan_id,
         "--message",
         "Coordinator failed.",
@@ -4272,20 +3907,13 @@ def test_failure_manifest_is_confined_persisted_and_exactly_replayable(
         next(worker for worker in deep_scan["workers"] if worker["id"] == worker_id)["status"]
         == "canceled"
     )
-    parent = run_workbench(
-        state_dir,
-        "get-scan",
-        "--scan-id",
-        scan_id,
-        environment=deep_environment(codex_home),
-    )["scan"]
+    parent = get_scan(state_dir, scan_id, environment=deep_environment(codex_home))["scan"]
     assert parent["progress"]["status"] == "failed"
     assert parent["failureMessage"] == "Coordinator failed."
 
-    replayed = run_workbench(
+    replayed = scan_command(
         state_dir,
         "fail-deep-scan",
-        "--scan-id",
         scan_id,
         "--message",
         "Coordinator failed.",
@@ -4309,10 +3937,9 @@ def test_failure_manifest_is_confined_persisted_and_exactly_replayable(
             str(manifest),
         ),
     ):
-        mismatched = run_workbench(
+        mismatched = scan_command(
             state_dir,
             "fail-deep-scan",
-            "--scan-id",
             scan_id,
             *extra_args,
             environment=deep_environment(codex_home),
@@ -4325,10 +3952,9 @@ def test_failure_manifest_is_confined_persisted_and_exactly_replayable(
             "UPDATE scans SET failure_message = 'Diverged parent failure.' WHERE id = ?",
             (scan_id,),
         )
-    incoherent_parent = run_workbench(
+    incoherent_parent = scan_command(
         state_dir,
         "fail-deep-scan",
-        "--scan-id",
         scan_id,
         "--message",
         "Coordinator failed.",
@@ -4344,10 +3970,8 @@ def test_failure_manifest_is_confined_persisted_and_exactly_replayable(
 def test_cancel_scan_overrides_succeeded_deep_run_during_parent_tail(
     tmp_path: Path, with_manifest: bool
 ) -> None:
-    state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
     deep_scan = begun["deepScan"]
     scan_id = str(deep_scan["scanId"])
@@ -4365,34 +3989,14 @@ def test_cancel_scan_overrides_succeeded_deep_run_during_parent_tail(
             (str(manifest) if with_manifest else None, scan_id),
         )
 
-    run_workbench(
-        state_dir,
-        "cancel-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "thread-deep-scan",
-        environment=deep_environment(codex_home),
-    )
-    canceled = run_workbench(
-        state_dir,
-        "get-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "thread-deep-scan",
-        environment=deep_environment(codex_home),
+    cancel_scan(state_dir, scan_id, "thread-deep-scan", environment=deep_environment(codex_home))
+    canceled = get_deep_scan(
+        state_dir, scan_id, "thread-deep-scan", environment=deep_environment(codex_home)
     )["deepScan"]
     assert canceled["status"] == "canceled"
     assert canceled["cancelRequested"] is True
     assert canceled["manifestPath"] == (str(manifest) if with_manifest else None)
-    scan = run_workbench(
-        state_dir,
-        "get-scan",
-        "--scan-id",
-        scan_id,
-        environment=deep_environment(codex_home),
-    )["scan"]
+    scan = get_scan(state_dir, scan_id, environment=deep_environment(codex_home))["scan"]
     assert scan["progress"]["status"] == "canceled"
 
 
@@ -4400,10 +4004,8 @@ def test_cancel_scan_overrides_succeeded_deep_run_during_parent_tail(
 def test_saturated_run_without_manifest_can_be_marked_failed_or_interrupted(
     tmp_path: Path, deep_status: str
 ) -> None:
-    state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
     scan_id = str(begun["deepScan"]["scanId"])
     database = state_dir / "workbench.sqlite3"
@@ -4419,10 +4021,9 @@ def test_saturated_run_without_manifest_can_be_marked_failed_or_interrupted(
         )
 
     message = f"The coordinator {deep_status} before its manifest was persisted."
-    terminal = run_workbench(
+    terminal = scan_command(
         state_dir,
         "fail-deep-scan",
-        "--scan-id",
         scan_id,
         "--deep-status",
         deep_status,
@@ -4432,22 +4033,14 @@ def test_saturated_run_without_manifest_can_be_marked_failed_or_interrupted(
     )["deepScan"]
     assert terminal["status"] == deep_status
     assert terminal["error"] == message
-    scan = run_workbench(
-        state_dir,
-        "get-scan",
-        "--scan-id",
-        scan_id,
-        environment=deep_environment(codex_home),
-    )["scan"]
+    scan = get_scan(state_dir, scan_id, environment=deep_environment(codex_home))["scan"]
     assert scan["progress"]["status"] == "failed"
     assert scan["failureMessage"] == terminal["error"]
 
 
 def test_succeeded_run_with_manifest_cannot_be_marked_interrupted(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     begun = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")
     deep_scan = begun["deepScan"]
     scan_id = str(deep_scan["scanId"])
@@ -4465,10 +4058,9 @@ def test_succeeded_run_with_manifest_cannot_be_marked_interrupted(tmp_path: Path
         )
 
     for deep_status in ("failed", "interrupted"):
-        rejected = run_workbench(
+        rejected = scan_command(
             state_dir,
             "fail-deep-scan",
-            "--scan-id",
             scan_id,
             "--deep-status",
             deep_status,
@@ -4478,14 +4070,8 @@ def test_succeeded_run_with_manifest_cannot_be_marked_interrupted(tmp_path: Path
             check=False,
         )
         assert "Only a running Deep Scan" in str(rejected["stderr"])
-    persisted = run_workbench(
-        state_dir,
-        "get-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "thread-deep-scan",
-        environment=deep_environment(codex_home),
+    persisted = get_deep_scan(
+        state_dir, scan_id, "thread-deep-scan", environment=deep_environment(codex_home)
     )["deepScan"]
     assert persisted["status"] == "succeeded"
     assert persisted["manifestPath"] == str(manifest)
@@ -4499,25 +4085,16 @@ def test_succeeded_run_with_manifest_cannot_be_marked_interrupted(tmp_path: Path
             """,
             (scan_id,),
         )
-    completed_cancel = run_workbench(
+    completed_cancel = cancel_scan(
         state_dir,
-        "cancel-scan",
-        "--scan-id",
         scan_id,
-        "--thread-id",
         "thread-deep-scan",
         environment=deep_environment(codex_home),
         check=False,
     )
     assert "Only a running scan can be canceled" in str(completed_cancel["stderr"])
-    unchanged = run_workbench(
-        state_dir,
-        "get-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "thread-deep-scan",
-        environment=deep_environment(codex_home),
+    unchanged = get_deep_scan(
+        state_dir, scan_id, "thread-deep-scan", environment=deep_environment(codex_home)
     )["deepScan"]
     assert unchanged["status"] == "succeeded"
     assert unchanged["manifestPath"] == str(manifest)
@@ -4526,16 +4103,12 @@ def test_succeeded_run_with_manifest_cannot_be_marked_interrupted(tmp_path: Path
 def test_invalid_user_configuration_fails_before_scan_creation(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    config_path = codex_home / "codex-security" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text("[deep_scan]\nsubagents = -1\n")
+    write_deep_config(codex_home, "[deep_scan]\nsubagents = -1\n")
     target = tmp_path / "target"
     target.mkdir()
 
-    failed = run_workbench(
+    failed = begin_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "thread-deep-scan",
         "--target-path",
         str(target),

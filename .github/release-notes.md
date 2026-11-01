@@ -1,35 +1,26 @@
-<!-- release-version: 0.1.29 -->
+<!-- release-version: 0.8.2 -->
 
 <!-- release-section: highlights:start -->
+
 ## Highlights
 
-- stream large saved scan JSON output ([#932](https://github.com/openai/codex-security/pull/932))
-- prefer complete saved rollout copies ([#933](https://github.com/openai/codex-security/pull/933))
-- support custom patch validation prompts ([#940](https://github.com/openai/codex-security/pull/940))
-- bump @opencode-ai/sdk from 1.18.29 to 1.18.30 in /plugins/codex-security/skills/triage-finding/evals in the third-party group across 1 directory ([#936](https://github.com/openai/codex-security/pull/936))
-- bump @linear/sdk from 93.0.1 to 94.0.0 in /sdk/typescript ([#937](https://github.com/openai/codex-security/pull/937))
-- seal drafts with empty artifact lists ([#941](https://github.com/openai/codex-security/pull/941))
-- include Terraform files in scan inventories ([#944](https://github.com/openai/codex-security/pull/944))
-- run README CLI commands with npx ([#945](https://github.com/openai/codex-security/pull/945))
-- resolve Git metadata outside its config ([#935](https://github.com/openai/codex-security/pull/935))
-- redirect findings service root to dashboard ([#948](https://github.com/openai/codex-security/pull/948))
-- bound source preview reads ([#947](https://github.com/openai/codex-security/pull/947))
-- align filter controls and dropdown carets ([#949](https://github.com/openai/codex-security/pull/949))
-- match filter control borders ([#957](https://github.com/openai/codex-security/pull/957))
-- make dashboard tables sortable ([#958](https://github.com/openai/codex-security/pull/958))
-- bump @linear/sdk from 94.0.0 to 95.0.0 in /sdk/typescript ([#955](https://github.com/openai/codex-security/pull/955))
-- tolerate transient setup failures and slow Windows runners ([#953](https://github.com/openai/codex-security/pull/953))
-- reject line breaks in inventory paths. ([#961](https://github.com/openai/codex-security/pull/961))
-- bump the third-party group across 3 directories with 7 updates ([#954](https://github.com/openai/codex-security/pull/954))
-- keep model-authored runtime status out of finalized reports ([#703](https://github.com/openai/codex-security/pull/703))
-- show progress while patching findings ([#931](https://github.com/openai/codex-security/pull/931))
-- deduplicate string-form openQuestions in merge\_saved\_results ([#951](https://github.com/openai/codex-security/pull/951))
-- emit structured JSON errors for failed scans ([#709](https://github.com/openai/codex-security/pull/709))
-- preserve undecided findings after model refusals ([#960](https://github.com/openai/codex-security/pull/960))
+Codex Security 0.8.2 adds threat-model explorers and Amazon Inspector imports, and improves scan progress and finding review.
+
+- **Threat-model explorers.** Turn an existing threat model into a shareable HTML explorer with interactive architecture, scenarios, controls, and source evidence. Export HTML or SVG from the bundled skill.
+- **Amazon Inspector imports.** With external imports enabled, import a complete Inspector Code Security repository findings export while retaining each finding's identity across imports. See the [Inspector import guide](https://github.com/openai/codex-security/blob/npm-v0.8.2/docs/scanner-imports/inspector.md).
+- **Dedupe corrections.** Hosted reviewers can correct rejected decisions in the original open review when the host supports pending-call validation.
+- **Interactive scans.** Finding review shows critical findings first, followed by high, medium, and low severity. Component tables show saved review progress, and scan titles resolve relative directory names.
+- **Output directories.** Existing scan output directories keep their permissions across scans, saved-result reads, and resume. Newly created directories remain private by default.
+- **Container releases.** The release workflow builds Debian and Wolfi images from the same verified scanner package and frozen runtime dependency lock. See the [container guide](https://github.com/openai/codex-security/blob/npm-v0.8.2/docker/README.md).
+
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
+
 ## Upgrade notes
 
-Review compatibility and document any required migration steps before releasing.
+No migration is required for existing CLI workflows. Hosted integrations that opt into pending-call validation must keep the original review session open until they handle the CLI's feedback; existing hosts can continue returning final results.
+
+Inspector imports remain opt-in. Cloud publication requires a connected GitHub repository and a deployment that accepts the Inspector provider. The import guide describes repository matching and complete-export requirements.
+
 <!-- release-section: upgrades:end -->

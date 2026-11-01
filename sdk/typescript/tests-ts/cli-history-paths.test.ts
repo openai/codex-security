@@ -1,9 +1,10 @@
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expect, test } from "bun:test";
+import { expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
-import { capture, dependencies } from "./cli-fixtures.js";
+import { dependencies } from "./cli-fixtures.js";
+import { captureCli } from "./support/cli-run.js";
 
 test.skipIf(process.platform !== "win32")(
   "rejects an aliased Windows scan root before querying history",
@@ -16,24 +17,21 @@ test.skipIf(process.platform !== "win32")(
       const ambiguous = join(root, "history.");
       await Promise.all([mkdir(scanRoot), mkdir(ambiguous)]);
       expect(await realpath(scanRoot)).not.toBe(await realpath(ambiguous));
-      let workbenchCalls = 0;
-      const stderr = capture();
+      const onWorkbench = mock(() => {
+        return { scans: [] };
+      });
+      const stderr = captureCli(main, "stderr");
 
       expect(
-        await main(
+        await stderr.run(
           ["scans", "list", "--scan-root", ambiguous],
-          capture().stream,
-          stderr.stream,
           dependencies({
             currentDirectory: root,
-            onWorkbench: () => {
-              workbenchCalls += 1;
-              return { scans: [] };
-            },
+            onWorkbench,
           }),
         ),
       ).toBe(2);
-      expect(workbenchCalls).toBe(0);
+      expect(onWorkbench).toHaveBeenCalledTimes(0);
       expect(stderr.text()).toContain("Windows-ambiguous components");
     } finally {
       await rm(root, { recursive: true, force: true });
