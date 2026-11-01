@@ -104,7 +104,8 @@ GitHub host.
 
 ### Import selected Semgrep Platform SAST findings with the SDK
 
-Capture the project lookup and findings pages as original [Semgrep Web API](https://docs.semgrep.dev/semgrep-appsec-platform/semgrep-api) response text.
+Request `issue_type=sast` and keep the project lookup and findings pages as original
+[Semgrep Web API](https://docs.semgrep.dev/semgrep-appsec-platform/semgrep-api) response text.
 [Guardian for Codex](https://docs.semgrep.dev/semgrep-guardian/ide-setup/codex) and
 [Semgrep MCP](https://github.com/semgrep/semgrep/blob/fe209763a4a2ccfcdf6434e6c332edc24a2f586e/cli/src/semgrep/mcp/server.py) return different records.
 Pass a fully qualified ref, such as `refs/heads/topic` or `refs/tags/topic`, exactly as it appears in the findings.

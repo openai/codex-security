@@ -14,6 +14,19 @@ import {
 } from "./scanner-import.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 
+// These v1 Findings API response fields belong only to AI detections or Supply Chain.
+const nonSastFields = [
+  "ai_impact",
+  "epss_score",
+  "fix_recommendations",
+  "found_dependency",
+  "is_malicious",
+  "reachability",
+  "reachable_condition",
+  "usage",
+  "vulnerability_identifier",
+];
+
 // Node 22 supports JSON source text and raw values. The SDK targets the ES2022 type library.
 const wireJson = JSON as JSON & {
   rawJSON(source: string): { rawJSON: string };
@@ -196,8 +209,7 @@ export function normalizeSelectedSemgrepPlatformFindings(options: {
             (typeof product !== "string" ||
               !["sast", "code"].includes(product.toLowerCase())),
         ) ||
-        finding["found_dependency"] != null ||
-        finding["vulnerability_identifier"] != null
+        nonSastFields.some((field) => finding[field] != null)
       )
         throw new Error("Select Semgrep Code (SAST) findings.");
       selected.set(id, finding);
@@ -223,10 +235,11 @@ export function normalizeSelectedSemgrepPlatformFindings(options: {
         finding["location"] ?? {},
         "Semgrep location",
       );
-      const relative = relativePath(location["file_path"]);
+      const rawPath = text(location["file_path"]);
+      const relative = relativePath(rawPath);
       const path =
         relative && !relative.endsWith("/.") && repositoryFilePath(relative)
-          ? relative
+          ? rawPath
           : null;
       const startLine = path ? sourceLine(location["line"]) : null;
       return validateExternalEvidence(

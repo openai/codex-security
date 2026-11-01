@@ -150,6 +150,28 @@ test("each selected finding must match the independently named project, ref, and
   expect(() => select([first, page(ids[1]!, ref, url + ".git")])).toThrow(
     "project and ref",
   );
+  for (const fields of [
+    { ai_impact: "Synthetic impact" },
+    { epss_score: { score: 0 } },
+    { fix_recommendations: [{ package: "example", version: "2.0.0" }] },
+    { found_dependency: { package: "example" } },
+    { is_malicious: false },
+    { reachability: "reachable" },
+    { reachable_condition: "imported" },
+    { usage: { location: { file_path: "src/app.ts" } } },
+    { vulnerability_identifier: "CVE-2099-0001" },
+  ]) {
+    const finding = {
+      id: ids[1],
+      ref,
+      repository: { url },
+      rule_name: "example.rule",
+      ...fields,
+    };
+    expect(() =>
+      select([first, JSON.stringify({ findings: [finding] })]),
+    ).toThrow("SAST");
+  }
   for (const product of ['"sca"', '["sast"]']) {
     expect(() =>
       select([
@@ -321,16 +343,21 @@ test("only repository-relative files are projected and original paths remain in 
     normalizeSelectedSemgrepPlatformFindings({
       ...source,
       findingIds: ["8"],
-      findingsResponses: page("8").replace("src/app.ts", path),
+      findingsResponses: page("8").replace(
+        '"src/app.ts"',
+        JSON.stringify(path),
+      ),
     }).findings[0]!.evidence;
-  const literal = "src/vendor://app.ts";
-  expect(evidenceFor(literal).locations).toEqual([{ path: literal, line: 2 }]);
+  for (const path of ["src/vendor://app.ts", "src/a\\b.ts", "src/a/b.ts"]) {
+    expect(evidenceFor(path).locations).toEqual([{ path, line: 2 }]);
+  }
   for (const path of [
     "file:src/app.ts",
     "data:text/plain,hello",
     "generated:/api.ts",
     "./C:/work/app.ts",
     "git@host:team/repo/app.ts",
+    "src\\..\\outside.ts",
     ".",
     "src/",
   ]) {
