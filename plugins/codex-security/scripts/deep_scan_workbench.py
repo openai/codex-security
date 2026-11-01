@@ -80,6 +80,7 @@ def register_subcommands(subparsers: Any, positive_int: Callable[[str], int]) ->
     upsert_deep_worker.add_argument("--attempt", type=non_negative_int)
     upsert_deep_worker.add_argument("--sdk-thread-id")
     upsert_deep_worker.add_argument("--error-message")
+    upsert_deep_worker.add_argument("--terminal-failure", action="store_true")
     upsert_deep_worker.add_argument(
         "--replaceable-failure-kind", choices=DEEP_SCAN_REPLACEABLE_FAILURE_KINDS
     )
@@ -1220,6 +1221,12 @@ def upsert_deep_scan_worker(
         existing = connection.execute(
             "SELECT * FROM deep_scan_workers WHERE id = ?", (worker_id,)
         ).fetchone()
+        if args.terminal_failure and (
+            args.status != "failed" or not optional_text(args.error_message)
+        ):
+            raise SystemExit(
+                "A terminal worker failure requires failed status and an error message."
+            )
         replaceable_failure_kind = args.replaceable_failure_kind
         if replaceable_failure_kind is not None and (
             args.kind != "discovery"
@@ -1434,6 +1441,13 @@ def upsert_deep_scan_worker(
                 worker_id,
             ),
         )
+        if args.terminal_failure:
+            # Persist the first terminal cause with its worker. An adopting coordinator
+            # completes the normal failure path after active workers have settled.
+            connection.execute(
+                "UPDATE deep_scan_runs SET error_message = ? WHERE scan_id = ? AND error_message IS NULL",
+                (error_message, scan_id),
+            )
     return deep_scan_result(connection, scan_id)
 
 
@@ -2061,7 +2075,7 @@ def cancel_from_parent_scan(connection: sqlite3.Connection, scan_id: str, timest
     connection.execute(
         """
         UPDATE deep_scan_runs
-        SET status = 'canceled', phase = 'terminal', cancel_requested = 1,
+        SET status = 'canceled', phase = 'terminal', cancel_requested = 1, error_message = NULL,
             terminal_reviewed_surface_count = NULL, completed_at = ?, updated_at = ?
         WHERE scan_id = ? AND status IN ('running', 'succeeded')
         """,

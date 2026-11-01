@@ -411,7 +411,8 @@ export class DeepScanWorkerRunner {
           subagents: input.subagents,
           signal,
           onNonRetryableError: (error) => {
-            if (!signal.aborted) nonRetryableError = error;
+            if (signal.aborted) return;
+            nonRetryableError = error;
             this.options.onNonRetryableError?.(error);
           },
           resumeThreadId: resumableThreadId,
@@ -486,6 +487,7 @@ export class DeepScanWorkerRunner {
                 : normalized,
             ),
             ...(replaceableFailureKind ? { replaceableFailureKind } : {}),
+            terminalFailure: nonRetryableError !== undefined,
           });
           return {
             status: "failed",
