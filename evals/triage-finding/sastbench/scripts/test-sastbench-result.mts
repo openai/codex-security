@@ -48,11 +48,7 @@ assert.throws(() => extractTriageResult(truncated), {
   message: "Could not find a parseable triage-finding/v0 JSON result",
 });
 const truncatedMetrics = addSastBenchMetrics(
-  extensionContext({
-    caseId: "sastbench-000000",
-    expectedGroundTruth: "true_positive",
-    output: truncated,
-  }),
+  extensionContext("sastbench-000000", "true_positive", { output: truncated }),
 ).result;
 assert.equal(truncatedMetrics.metadata.sastbench.status, "invalid_output");
 assert.equal(truncatedMetrics.namedScores.invalid_output, 1);
@@ -71,11 +67,7 @@ for (const output of [
     "confirmed",
   );
   const result = addSastBenchMetrics(
-    extensionContext({
-      caseId: "sastbench-000000",
-      expectedGroundTruth: "true_positive",
-      output,
-    }),
+    extensionContext("sastbench-000000", "true_positive", { output }),
   ).result;
   assert.equal(result.metadata.sastbench.status, "ok");
   assert.equal(result.namedScores.strict_tp, 1);
@@ -121,23 +113,16 @@ assert.equal(
   false,
 );
 
-function extensionContext({
-  caseId,
-  expectedGroundTruth,
-  output,
-  error,
-  sampleWeight,
-}: {
-  caseId: string;
-  expectedGroundTruth: string;
-  output?: string;
-  error?: string;
-  sampleWeight?: number;
-}) {
+function extensionContext(
+  caseId: string,
+  groundTruth: string,
+  { output, error }: { output?: string; error?: string },
+  sampleWeight?: number,
+) {
   return {
     test: {
       metadata: {
-        ground_truth: expectedGroundTruth,
+        ground_truth: groundTruth,
         ...(sampleWeight === undefined ? {} : { sample_weight: sampleWeight }),
       },
     },
@@ -159,43 +144,16 @@ function extensionContext({
   };
 }
 
-const outcomes = [
-  {
-    caseId: "tp-confirmed",
-    expectedGroundTruth: "true_positive",
-    verdict: "confirmed",
-  },
-  {
-    caseId: "tp-closed",
-    expectedGroundTruth: "true_positive",
-    verdict: "not_actionable",
-  },
-  {
-    caseId: "tp-review",
-    expectedGroundTruth: "true_positive",
-    verdict: "needs_review",
-  },
-  {
-    caseId: "fp-closed",
-    expectedGroundTruth: "false_positive",
-    verdict: "not_actionable",
-  },
-  {
-    caseId: "fp-confirmed",
-    expectedGroundTruth: "false_positive",
-    verdict: "confirmed",
-  },
-  {
-    caseId: "fp-review",
-    expectedGroundTruth: "false_positive",
-    verdict: "needs_review",
-  },
-];
-const nativeContexts = outcomes.map((outcome) =>
-  extensionContext({
-    caseId: outcome.caseId,
-    expectedGroundTruth: outcome.expectedGroundTruth,
-    output: JSON.stringify(triageResult(outcome.verdict, outcome.caseId)),
+const nativeContexts = [
+  ["tp-confirmed", "true_positive", "confirmed"],
+  ["tp-closed", "true_positive", "not_actionable"],
+  ["tp-review", "true_positive", "needs_review"],
+  ["fp-closed", "false_positive", "not_actionable"],
+  ["fp-confirmed", "false_positive", "confirmed"],
+  ["fp-review", "false_positive", "needs_review"],
+].map(([caseId, groundTruth, verdict]) =>
+  extensionContext(caseId, groundTruth, {
+    output: JSON.stringify(triageResult(verdict, caseId)),
   }),
 );
 const nativeMetricRows = nativeContexts.map(addSastBenchMetrics);
@@ -239,54 +197,33 @@ assert.equal(totals.execution_or_parse_error, 0);
 assert.equal(totals.existing_metric, 6);
 
 const positiveProviderError = addSastBenchMetrics(
-  extensionContext({
-    caseId: "tp-error",
-    expectedGroundTruth: "true_positive",
-    error: "provider failed",
-  }),
-);
-assert.equal(positiveProviderError.result.namedScores.strict_fn, 1);
-assert.equal(
-  positiveProviderError.result.namedScores.execution_or_parse_error,
-  1,
-);
-assert.equal(
-  positiveProviderError.result.namedScores.remaining_analyst_work,
-  1,
-);
-assert.equal(
-  positiveProviderError.result.metadata.sastbench.status,
-  "model_error",
-);
+  extensionContext("tp-error", "true_positive", { error: "provider failed" }),
+).result;
+assert.equal(positiveProviderError.namedScores.strict_fn, 1);
+assert.equal(positiveProviderError.namedScores.execution_or_parse_error, 1);
+assert.equal(positiveProviderError.namedScores.remaining_analyst_work, 1);
+assert.equal(positiveProviderError.metadata.sastbench.status, "model_error");
 
 const negativeInvalidOutput = addSastBenchMetrics(
-  extensionContext({
-    caseId: "fp-invalid",
-    expectedGroundTruth: "false_positive",
+  extensionContext("fp-invalid", "false_positive", {
     output: "not a triage result",
   }),
-);
-assert.equal(negativeInvalidOutput.result.namedScores.strict_fp, 1);
-assert.equal(
-  negativeInvalidOutput.result.namedScores.execution_or_parse_error,
-  1,
-);
-assert.equal(
-  negativeInvalidOutput.result.metadata.sastbench.status,
-  "invalid_output",
-);
+).result;
+assert.equal(negativeInvalidOutput.namedScores.strict_fp, 1);
+assert.equal(negativeInvalidOutput.namedScores.execution_or_parse_error, 1);
+assert.equal(negativeInvalidOutput.metadata.sastbench.status, "invalid_output");
 
 const weightedPositive = addSastBenchMetrics(
-  extensionContext({
-    caseId: "weighted-tp",
-    expectedGroundTruth: "true_positive",
-    output: JSON.stringify(triageResult("confirmed", "weighted-tp")),
-    sampleWeight: 2.5,
-  }),
-);
-assert.equal(weightedPositive.result.namedScores.strict_tp, 2.5);
-assert.equal(weightedPositive.result.namedScores.positive_cases, 2.5);
-assert.equal(weightedPositive.result.namedScores.existing_metric, 1);
+  extensionContext(
+    "weighted-tp",
+    "true_positive",
+    { output: JSON.stringify(triageResult("confirmed", "weighted-tp")) },
+    2.5,
+  ),
+).result;
+assert.equal(weightedPositive.namedScores.strict_tp, 2.5);
+assert.equal(weightedPositive.namedScores.positive_cases, 2.5);
+assert.equal(weightedPositive.namedScores.existing_metric, 1);
 
 const firstResult = nativeMetricRows[0].result;
 assert.equal(firstResult.metadata.sastbench.status, "ok");
@@ -295,12 +232,9 @@ assert.equal(firstResult.latencyMs, 1234);
 assert.equal(firstResult.cost, 0.25);
 assert.equal(firstResult.response, nativeContexts[0].result.response);
 assert.match(
-  negativeInvalidOutput.result.metadata.sastbench.error!,
+  negativeInvalidOutput.metadata.sastbench.error!,
   /triage-finding\/v0/,
 );
-assert.equal(
-  positiveProviderError.result.metadata.sastbench.error,
-  "provider failed",
-);
+assert.equal(positiveProviderError.metadata.sastbench.error, "provider failed");
 
 console.log("sastbench result and native metric tests passed");
