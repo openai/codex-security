@@ -2747,6 +2747,7 @@ test.each([80, 160])(
       "a".repeat(74),
       "界".repeat(37),
       "e\u0301".repeat(37),
+      "unpriced",
     ].map((name, index) => ({
       id: String(index),
       name,
@@ -2756,7 +2757,7 @@ test.each([80, 160])(
     }));
     dashboard.start();
     dashboard.setComponents(receipts);
-    for (const [index, receipt] of receipts.entries()) {
+    for (const [index, receipt] of receipts.slice(0, -1).entries()) {
       if (index < 2) {
         dashboard.updateComponent({ ...receipt, status: "started" });
         dashboard.recordComponentEvent({
@@ -2772,6 +2773,7 @@ test.each([80, 160])(
           },
         });
       }
+      const max = index === 2 ? 1 : 12.34;
       dashboard.recordComponentEvent({
         componentId: receipt.id,
         type: "cost",
@@ -2782,7 +2784,7 @@ test.each([80, 160])(
           cacheWriteInputTokens: 0,
           outputTokens: 1,
           estimatedUsd: 1,
-          estimatedUsdRange: { min: 1, max: 12.34, context: "unknown" },
+          estimatedUsdRange: { min: 1, max, context: "unknown" },
         },
       });
     }
@@ -2795,17 +2797,19 @@ test.each([80, 160])(
       /Status\s+Progress\s+Findings\s+Cost/u.test(line),
     );
     expect(header).toBeGreaterThanOrEqual(0);
-    const rows = lines.slice(header + 1, header + 4);
-    expect(rows).toHaveLength(3);
+    const rows = lines.slice(header + 1, header + 1 + receipts.length);
+    expect(rows).toHaveLength(receipts.length);
     expect(rows[0]).toContain("2/8 files");
     expect(rows[1]).toContain("1,234/12,345 reviews");
-    expect(rows[2]).toMatch(/Queued\s+—\s+—\s+\$1\.00/u);
-    for (const row of rows) expect(row).toContain("$1.00–$12.34");
-    expect(
-      new Set(
-        rows.map((row) => stringWidth(row.slice(0, row.indexOf("$1.00")))),
-      ).size,
-    ).toBe(1);
+    expect(rows[2]).toMatch(/Queued\s+—\s+—\s+\$1\.00(?:\s|$)/u);
+    const column = (line: string, value: string) =>
+      stringWidth(line.slice(0, line.lastIndexOf(value)));
+    const costColumn = column(lines[header]!, "Cost");
+    for (const row of rows.slice(0, 2)) expect(row).toContain("$1.00–$12.34");
+    for (const row of rows.slice(0, -1)) {
+      expect(column(row, "$1.00")).toBe(costColumn);
+    }
+    expect(column(rows.at(-1)!, "—")).toBe(costColumn);
     dashboard.stop();
   },
 );

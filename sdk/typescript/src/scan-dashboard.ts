@@ -970,7 +970,7 @@ export class ScanDashboard {
       findings: string,
       cost: string,
     ): string =>
-      `  ${marker} ${fitCell(terminalText(name), nameWidth)} ${fitCell(terminalText(status), statusWidth)} ${progress.padStart(progressWidth)} ${findings.padStart(8)}${this.#showCost ? ` ${cost.padStart(8)}` : ""}`;
+      `  ${marker} ${fitCell(terminalText(name), nameWidth)} ${fitCell(terminalText(status), statusWidth)} ${progress.padStart(progressWidth)} ${findings.padStart(8)}${this.#showCost ? ` ${cost}` : ""}`;
     const table = visible.map(
       ({ receipt, dashboard, status, progress }, index) =>
         row(
