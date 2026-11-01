@@ -254,6 +254,11 @@ const result = await security.run("/path/to/repository", {
 The exported `ScanOptions` type describes all options and callbacks. For full
 CLI behavior, see [scan options and output](docs/cli.md#scan-options-and-output).
 
+With the bundled plugin, a registered scan records caller or client cancellation
+when the runtime identifies it. A mid-write stop and a complete malformed event
+can produce the same SDK parser error. History retains that failure so saved
+checkpoints remain available for recovery.
+
 Set `ownerSuggestions: true` or run `codex-security scan --owner-suggestions`
 to write `owner-suggestions.json` beside a completed committed Git scan. Project
 files can set `scan.owner_suggestions: true`. The report uses the scan's finding

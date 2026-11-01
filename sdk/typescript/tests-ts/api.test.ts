@@ -3716,30 +3716,23 @@ if __name__ == "__main__":
   );
 
   test.each([
-    ["pending read", true],
-    ["between reads", false],
-    ["during cleanup", false],
-    ["independent AbortError", false],
+    ["native abort", true],
+    ["decoder failure", false],
+    ["late caller abort", false],
   ] as const)(
-    "records a stream failure with caller cancellation %s",
-    async (timing, canceled) => {
+    "records the registered scan disposition for a %s",
+    async (scenario, canceled) => {
       const { repository, codexHome, scanDir } = await scanDirectories();
       const controller = new AbortController();
-      const reading = Promise.withResolvers<void>();
-      const streamError =
-        timing === "independent AbortError"
-          ? new DOMException("subprocess interrupted", "AbortError")
-          : new Error('Failed to parse item: {"type":', {
-              cause: new SyntaxError("Unexpected end of JSON input"),
-            });
+      const nativeError =
+        scenario === "decoder failure"
+          ? new Error("Failed to parse item: NOT JSON", {
+              cause: new SyntaxError(),
+            })
+          : new DOMException("subprocess interrupted", "AbortError");
       async function* events(): AsyncGenerator<ThreadEvent> {
-        if (timing === "between reads")
-          yield { type: "thread.started", thread_id: "thread-1" };
-        if (timing === "pending read") {
-          reading.resolve();
-          await once(controller.signal, "abort");
-        }
-        throw streamError;
+        if (scenario !== "late caller abort") controller.abort();
+        throw nativeError;
       }
       let stopped: readonly string[] | undefined;
       await using client = TestClient.withDependencies({
@@ -3751,26 +3744,17 @@ if __name__ == "__main__":
           return mockWorkbench(args, input);
         },
       });
-      const scan = client.run(repository, {
-        signal: controller.signal,
-        onScanStarted() {
-          if (timing === "between reads") controller.abort();
-        },
-      });
-      if (timing === "pending read") {
-        await reading.promise;
-        controller.abort();
-      }
-      const error = await scan.catch((error: unknown) => error);
+      const error = await client
+        .run(repository, { signal: controller.signal })
+        .catch((error: unknown) => error);
       expect(error).toBeInstanceOf(ScanInterruptedError);
       const interrupted = error as ScanInterruptedError;
-      const abortedBeforeFailure =
-        timing === "between reads" || timing === "pending read";
+      const late = scenario === "late caller abort";
       expect(interrupted.cause).toBe(
-        abortedBeforeFailure ? streamError : controller.signal.reason,
+        late ? controller.signal.reason : nativeError,
       );
       expect(stopped).toContain(
-        `--message=${abortedBeforeFailure ? interrupted.message : streamError.message}`,
+        `--message=${late ? nativeError.message : interrupted.message}`,
       );
       expect(stopped?.includes("--canceled")).toBe(canceled);
     },

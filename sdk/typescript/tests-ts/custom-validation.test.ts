@@ -815,12 +815,17 @@ describe("custom validation", () => {
     "diff",
     "empty",
     "incomplete",
+    "malformed record before abort",
     "dismissed",
     "unfinished-source",
   ];
   test.each(completionScenarios)(
     "SDK owns real workbench completion: %s",
     async (scenario) => {
+      const lateAbort =
+        scenario === "malformed record before abort"
+          ? new AbortController()
+          : undefined;
       const diff = scenario === "diff";
       const maxTimeMinutes = scenario === "standard" || diff ? 5 : undefined;
       const count = scenario === "empty" ? 0 : 1;
@@ -1022,6 +1027,22 @@ describe("custom validation", () => {
                       "artifacts",
                     );
                     expect(turnOptions.outputSchema).toBeDefined();
+                    if (lateAbort) {
+                      async function* events(): AsyncGenerator<ThreadEvent> {
+                        try {
+                          JSON.parse("NOT JSON\n");
+                        } catch (cause) {
+                          throw new Error("Failed to parse item: NOT JSON", {
+                            cause,
+                          });
+                        } finally {
+                          // The SDK removes its output schema before next() settles.
+                          await Promise.resolve();
+                          lateAbort!.abort();
+                        }
+                      }
+                      return { events: events() };
+                    }
                     if (scenario === "dismissed") {
                       expect(prompt).toContain("untrusted reviewer feedback");
                       expect(prompt).toContain("reason still applies");
@@ -1119,6 +1140,7 @@ describe("custom validation", () => {
       );
       try {
         const pending = client.run(repository, {
+          signal: lateAbort?.signal,
           cyberAccessProgram: "daybreak_blue",
           maxTimeMinutes,
           ...(scenario === "standard"
@@ -1130,6 +1152,23 @@ describe("custom validation", () => {
             : {}),
           ...(diff ? { target: DiffTarget.workingTree({}) } : {}),
         });
+        if (lateAbort) {
+          await expect(pending).rejects.toMatchObject({
+            cause: {
+              cause: {
+                message: "Failed to parse item: NOT JSON",
+                cause: expect.any(SyntaxError),
+              },
+            },
+          });
+          expect(turns).toBe(2);
+          const saved = await workbench(["get-scan", "--scan-id", scanId]);
+          expect(saved["scan"]).toMatchObject({
+            canceledAt: null,
+            progress: { status: "failed" },
+          });
+          return;
+        }
         if (scenario === "unfinished-source") {
           await expect(pending).rejects.toThrow(
             "The latest saved scan draft is incomplete",

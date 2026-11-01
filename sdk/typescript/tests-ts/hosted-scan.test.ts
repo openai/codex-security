@@ -36,10 +36,9 @@ import {
 import { main } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { normalizeTarget } from "../src/targets.js";
-import { runWorkbench } from "../src/runtime.js";
 import { pythonExecutable } from "./support/python.js";
 import { git } from "./git-fixture.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { workbenchCommand } from "./support/workbench-command.js";
 import {
   createApiTestFixtures,
   removeTemporaryDirectory,
@@ -159,18 +158,12 @@ async function fixture(
 }
 
 function hostedWorkbench(input: HostedScanInput, args: string[]) {
-  return runWorkbench(
-    {
-      python: pythonExecutable()!,
-      pluginRoot: PLUGIN_ROOT,
-      environment: {
-        PATH: process.env["PATH"],
-        SYSTEMROOT: process.env["SYSTEMROOT"],
-        CODEX_SECURITY_STATE_DIR: input.stateDirectory,
-      },
-    },
-    args,
-  );
+  const workbench = workbenchCommand(pythonExecutable()!, () => ({
+    PATH: process.env["PATH"],
+    SYSTEMROOT: process.env["SYSTEMROOT"],
+    CODEX_SECURITY_STATE_DIR: input.stateDirectory,
+  }));
+  return workbench(args);
 }
 
 async function writeDraft(

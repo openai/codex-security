@@ -1966,7 +1966,6 @@ export class CodexSecurity {
     let costTracker: ScanCostTracker | null = null;
     let scanProgressTracker: ScanProgressTracker | null = null;
     let artifactRestorationFailure: OutputDirectoryError | null = null;
-    let interruptedEventRead: Error | undefined;
     let customValidationComplete = false;
     let completionCost: ScanCost | null = null;
     let scanTurnStatus: "in_progress" | "completed" | "failed" | null = null;
@@ -1989,26 +1988,6 @@ export class CodexSecurity {
       this.#dependencies.prepareScanArtifactRestorer ??
       prepareScanArtifactRestorer;
     const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
-    async function* observeEventReads(events: AsyncGenerator<ScanEvent>) {
-      let readingBeforeAbort = !signal.aborted;
-      try {
-        for await (const event of events) {
-          readingBeforeAbort = false;
-          yield event;
-          readingBeforeAbort = !signal.aborted;
-        }
-      } catch (error) {
-        // Stopping Codex during a JSONL write can expose an incomplete final event.
-        if (
-          readingBeforeAbort &&
-          signal.aborted &&
-          error instanceof Error &&
-          error.cause instanceof SyntaxError
-        )
-          interruptedEventRead = error;
-        throw error;
-      }
-    }
     const terminalScanTurnStatus = () =>
       scanTurnStatus === "completed" || scanTurnStatus === "failed"
         ? scanTurnStatus
@@ -2952,9 +2931,7 @@ export class CodexSecurity {
             prompt,
             signal,
           })
-        : observeEventReads(
-            (await thread.runStreamed(prompt, turnOptions)).events,
-          );
+        : (await thread.runStreamed(prompt, turnOptions)).events;
       scanTurnStatus = "in_progress";
       checkOpen();
 
@@ -3041,13 +3018,14 @@ export class CodexSecurity {
                   skipGitRepoCheck: true,
                   approvalPolicy,
                 });
-                const { events } = await validationThread.runStreamed(
-                  validationPrompt,
-                  { ...turnOptions, outputSchema },
-                );
                 const turn = await readCodexTurn({
                   thread: validationThread,
-                  events: observeEventReads(events),
+                  events: (
+                    await validationThread.runStreamed(validationPrompt, {
+                      ...turnOptions,
+                      outputSchema,
+                    })
+                  ).events,
                   onReconnect: (message, attempts) =>
                     notifyObserver(options, "onReconnect")(
                       ...attempts,
@@ -3222,7 +3200,7 @@ export class CodexSecurity {
           );
           const followUpResult = await runScanEvents({
             thread,
-            events: observeEventReads((await followUp()).events),
+            events: (await followUp()).events,
             signal,
             scanDir,
             scanId,
@@ -3379,7 +3357,6 @@ export class CodexSecurity {
         signal,
         this.#abortController.signal,
         costAbortController.signal,
-        interruptedEventRead,
       );
       const snapshot = await costTracker?.stop().catch(() => null);
       if (artifactRestorationFailure !== null) throw artifactRestorationFailure;
@@ -6359,7 +6336,6 @@ function isCancellationDerivedFailure(
   signal: AbortSignal,
   closeSignal: AbortSignal,
   costSignal?: AbortSignal,
-  interruptedEventRead?: Error,
 ): boolean {
   if (
     (!(failure instanceof ScanExecutionError) &&
@@ -6385,7 +6361,6 @@ function isCancellationDerivedFailure(
   }
   return (
     isStopReason(current) ||
-    (interruptedEventRead !== undefined && current === interruptedEventRead) ||
     (isRecord(current) &&
       current["name"] === "AbortError" &&
       (current["cause"] === undefined || isStopReason(current["cause"])))
