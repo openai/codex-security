@@ -6,7 +6,10 @@ import { expect, test } from "bun:test";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import { listLocalExternalFindings } from "../src/external-findings-local.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
-import { localFindingsFixture } from "./external-findings-local-helpers.js";
+import {
+  localFindingsFixture,
+  localReportFixture,
+} from "./external-findings-local-helpers.js";
 
 test("requires opt-in before reading the source file", async () => {
   await using fixture = await localFindingsFixture();
@@ -133,9 +136,33 @@ test("cancels preparation while the source file read is pending", async () => {
   await expect(access(fixture.stateDirectory)).rejects.toThrow();
 });
 
+const wizSource = {
+  provider: "wiz",
+  sourceKey: "example-project/main",
+} as const;
+
+async function writeWizPackage(file: string, record: unknown, format: string) {
+  const report =
+    format === "named GraphQL JSON"
+      ? { data: { vulnerabilityFindings: { nodes: [record] } } }
+      : [record];
+  const contents = JSON.stringify(report);
+  await writeFile(file, format === "gzip JSON" ? gzipSync(contents) : contents);
+  const parsed = await readVendorFindings(file, "local");
+  if (format.includes("normalized JSONL")) {
+    const normalized = parsed.findings
+      .map((finding) => JSON.stringify(finding))
+      .join("\n");
+    await writeFile(
+      file,
+      format.startsWith("gzip") ? gzipSync(normalized) : normalized,
+    );
+  }
+  return parsed;
+}
+
 test("Wiz JSON imports retain parsed evidence through SQLite readback and updates", async () => {
-  await using fixture = await localFindingsFixture();
-  const file = join(fixture.root, "wiz.json");
+  await using fixture = await localReportFixture("wiz.json", wizSource);
   const record = {
     id: "package-occurrence",
     name: "CVE-2026-0001",
@@ -145,33 +172,20 @@ test("Wiz JSON imports retain parsed evidence through SQLite readback and update
     vulnerableAsset: { id: "source-branch", type: "REPOSITORY_BRANCH" },
     sourceMetadata: { retained: true },
   };
-  await writeFile(file, JSON.stringify([record]));
-  const options = {
-    repository: fixture.repository,
-    provider: "wiz" as const,
-    sourceKey: "example-project/main",
-  };
-  const dependencies = { environment: fixture.environment };
-  const parsed = await readVendorFindings(file, "local");
-  const prepared = await prepareLocalExternalImport(
-    file,
-    options,
-    dependencies,
-  );
+  await fixture.writeJson([record]);
+  const parsed = await readVendorFindings(fixture.file, "local");
+  const prepared = await fixture.prepare();
   expect(prepared.preview.findings).toEqual(parsed.findings);
   expect(prepared.preview.source).toEqual({
     provider: "wiz",
-    source_key: options.sourceKey,
+    source_key: fixture.sourceKey,
   });
   await expect(
     access(join(fixture.stateDirectory, "workbench.sqlite3")),
   ).rejects.toThrow();
   const first = await prepared.import();
   expect(first.counts).toEqual({ created: 1, updated: 0, unchanged: 0 });
-  const stored = await listLocalExternalFindings(
-    { repository: fixture.repository },
-    dependencies,
-  );
+  const stored = await fixture.read();
   expect(stored).toEqual(first.findings);
   expect(stored[0]).toMatchObject({
     provider: "wiz",
@@ -186,28 +200,19 @@ test("Wiz JSON imports retain parsed evidence through SQLite readback and update
     },
   });
   expect(stored[0]!.evidence).toEqual(parsed.findings[0]!.evidence);
-  expect(
-    (
-      await (
-        await prepareLocalExternalImport(file, options, dependencies)
-      ).import()
-    ).counts,
-  ).toEqual({ created: 0, updated: 0, unchanged: 1 });
-  await writeFile(file, JSON.stringify([{ ...record, fixedVersion: "1.0.1" }]));
-  const changed = await (
-    await prepareLocalExternalImport(file, options, dependencies)
-  ).import();
+  expect((await (await fixture.prepare()).import()).counts).toEqual({
+    created: 0,
+    updated: 0,
+    unchanged: 1,
+  });
+  await fixture.writeJson([{ ...record, fixedVersion: "1.0.1" }]);
+  const changed = await (await fixture.prepare()).import();
   expect(changed.counts).toEqual({ created: 0, updated: 1, unchanged: 0 });
   expect(changed.findings[0]).toMatchObject({
     id: stored[0]!.id,
     version: 2,
   });
-  expect(
-    await listLocalExternalFindings(
-      { repository: fixture.repository },
-      dependencies,
-    ),
-  ).toEqual(changed.findings);
+  expect(await fixture.read()).toEqual(changed.findings);
 });
 
 test.each([
@@ -223,10 +228,9 @@ test.each([
 ] as const)(
   "Wiz package %s (%s on %s) binds repository-branch URLs before storing evidence",
   async (format, assetType, host) => {
-    await using fixture = await localFindingsFixture({
+    await using fixture = await localReportFixture("wiz.json", wizSource, {
       remote: `git@${host}:example/project.git`,
     });
-    const file = join(fixture.root, "wiz.json");
     const record = {
       id: "package-occurrence",
       name: "CVE-2026-0001",
@@ -240,53 +244,19 @@ test.each([
         cloudProviderURL: `https://${host}/example/other/tree/main`,
       },
     };
-    const options = {
-      repository: fixture.repository,
-      provider: "wiz" as const,
-      sourceKey: "example-project/main",
-    };
-    const dependencies = { environment: fixture.environment };
-    async function writeSelection() {
-      const contents = JSON.stringify(
-        format === "named GraphQL JSON"
-          ? { data: { vulnerabilityFindings: { nodes: [record] } } }
-          : [record],
-      );
-      await writeFile(
-        file,
-        format === "gzip JSON" ? gzipSync(contents) : contents,
-      );
-      const parsed = await readVendorFindings(file, "local");
-      if (format.includes("normalized JSONL")) {
-        const normalized = parsed.findings
-          .map((finding) => JSON.stringify(finding))
-          .join("\n");
-        await writeFile(
-          file,
-          format.startsWith("gzip") ? gzipSync(normalized) : normalized,
-        );
-      }
-      return parsed;
-    }
-    await writeSelection();
-    await expect(
-      prepareLocalExternalImport(file, options, dependencies),
-    ).rejects.toThrow("does not match");
+    await writeWizPackage(fixture.file, record, format);
+    await expect(fixture.prepare()).rejects.toThrow("does not match");
     await expect(
       access(join(fixture.stateDirectory, "workbench.sqlite3")),
     ).rejects.toThrow();
 
     record.vulnerableAsset.cloudProviderURL = `https://${host}/Example/Project/tree/feature/imports`;
-    const parsed = await writeSelection();
-    const prepared = await prepareLocalExternalImport(
-      file,
-      options,
-      dependencies,
-    );
+    const parsed = await writeWizPackage(fixture.file, record, format);
+    const prepared = await fixture.prepare();
     expect(prepared.preview.findings).toEqual(parsed.findings);
     const imported = await prepared.import();
     expect(imported.counts.created).toBe(1);
-    const [stored] = await listLocalExternalFindings(options, dependencies);
+    const [stored] = await fixture.read();
     expect(stored!.evidence).toEqual(parsed.findings[0]!.evidence);
     expect(stored!.evidence.source_data).toEqual(record);
     expect(stored!.evidence.code_revision).toBeNull();
@@ -296,10 +266,9 @@ test.each([
 test.each(["raw JSON", "normalized JSONL"])(
   "Wiz package %s retains generic repository URLs without guessing their platform",
   async (format) => {
-    await using fixture = await localFindingsFixture({
+    await using fixture = await localReportFixture("wiz.json", wizSource, {
       remote: "git@git.example.test:example/group/project.git",
     });
-    const file = join(fixture.root, "wiz.json");
     const record = {
       id: "package-occurrence",
       name: "CVE-2026-0001",
@@ -311,47 +280,25 @@ test.each(["raw JSON", "normalized JSONL"])(
         cloudProviderURL: "",
       },
     };
-    const options = {
-      repository: fixture.repository,
-      provider: "wiz" as const,
-      sourceKey: "example-project/main",
-    };
-    const dependencies = { environment: fixture.environment };
-    async function writeSelection(url: string) {
-      record.vulnerableAsset.cloudProviderURL = url;
-      await writeFile(file, JSON.stringify([record]));
-      const parsed = await readVendorFindings(file, "local");
-      if (format === "normalized JSONL")
-        await writeFile(
-          file,
-          parsed.findings.map((finding) => JSON.stringify(finding)).join("\n"),
-        );
-      return parsed;
-    }
     for (const path of [
       "example/group/other",
       "Example/Group/Project",
       "example/group/project/tree/main",
     ]) {
-      await writeSelection(`https://git.example.test/${path}`);
-      await expect(
-        prepareLocalExternalImport(file, options, dependencies),
-      ).rejects.toThrow("does not match");
+      record.vulnerableAsset.cloudProviderURL = `https://git.example.test/${path}`;
+      await writeWizPackage(fixture.file, record, format);
+      await expect(fixture.prepare()).rejects.toThrow("does not match");
       await expect(
         access(join(fixture.stateDirectory, "workbench.sqlite3")),
       ).rejects.toThrow();
     }
-    const parsed = await writeSelection(
-      "https://git.example.test/example/group/project",
-    );
-    const prepared = await prepareLocalExternalImport(
-      file,
-      options,
-      dependencies,
-    );
+    record.vulnerableAsset.cloudProviderURL =
+      "https://git.example.test/example/group/project";
+    const parsed = await writeWizPackage(fixture.file, record, format);
+    const prepared = await fixture.prepare();
     expect(prepared.preview.findings).toEqual(parsed.findings);
     expect((await prepared.import()).counts.created).toBe(1);
-    const [stored] = await listLocalExternalFindings(options, dependencies);
+    const [stored] = await fixture.read();
     expect(stored!.evidence.source_data).toEqual(record);
   },
 );
