@@ -146,7 +146,6 @@ async function completed(
   original.manifest.scan.id = scanId;
   original.findings.scanId = scanId;
   original.findings.findings = findings;
-  original.coverage.scanId = scanId;
   const result = new ScanResult({
     ...original,
     scanDir: options.outputDir!,
@@ -158,7 +157,6 @@ async function completed(
   for (const [name, value] of Object.entries({
     "scan-manifest.json": result.manifest,
     "findings.json": result.findings,
-    "coverage.json": result.coverage,
     "report.md": "Original report",
   })) {
     await writeFile(
@@ -178,6 +176,7 @@ function client(
   close = async () => {},
 ) {
   return () => ({
+    ...dependencies().createSecurity({}),
     run: async (repository: string, options: ScanOptions = {}) =>
       run(repository, options),
     preflight: async (repository: string) => fakePreflight(repository),
@@ -232,6 +231,16 @@ async function scopedInventory(paths: Fixture, scope: string) {
   const scopesFile = join(paths.root, "scopes.json");
   const output = join(paths.root, "scoped-source-input.jsonl");
   await writeFile(scopesFile, JSON.stringify([scope]));
+  execFileSync(nodeCommand().command, [
+    join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+    "make-repo-scope-input",
+    "--repo",
+    paths.repository,
+    "--scopes-file",
+    scopesFile,
+    "--out",
+    output,
+  ]);
   const stdout = execFileSync(
     python!,
     [
@@ -244,9 +253,7 @@ async function scopedInventory(paths: Fixture, scope: string) {
         "from pathlib import Path",
         "sys.path.insert(0, sys.argv[1])",
         "import workbench_target as target",
-        "from generate_rank_input import make_repo_scope_input",
         "repo, scope, scopes, output = sys.argv[2:]",
-        "make_repo_scope_input(Namespace(repo=repo, scopes_file=scopes, out=output))",
         "rows = [json.loads(line)['path'] for line in Path(output).read_text().splitlines()]",
         "count = target.directory_snapshot_regular_file_count((Path(repo) / scope).resolve())",
         "print(json.dumps({'paths': rows, 'count': count}))",
@@ -490,6 +497,10 @@ test("forwards scan events with their component identity without letting observe
     createSecurity: client(async (repository, options) => {
       expect(planned).toBe(true);
       const target = scope(repository, options);
+      options.onAuthentication?.({
+        method: "stored_credentials",
+        verified: false,
+      });
       options.onProgress?.({
         phase: "discovery",
         filesCompleted: 1,
@@ -516,6 +527,17 @@ test("forwards scan events with their component identity without letting observe
         reasoning_output_tokens: 0,
         total_tokens: 110,
       });
+      options.onUsageObservation?.({
+        tokensUpdatedAt: null,
+        accountRateLimits: [
+          {
+            limitId: target,
+            observedAt: "2026-01-01T00:00:00Z",
+            primary: { usedPercent: 75, windowMinutes: 300, resetsAt: null },
+            secondary: null,
+          },
+        ],
+      });
       options.onWorkerStatus?.({
         kind: "dispatch",
         phase: "validation",
@@ -536,16 +558,23 @@ test("forwards scan events with their component identity without letting observe
       ({ componentId }) => componentId === `component-${index + 1}`,
     );
     expect(received.map(({ type }) => type)).toEqual([
+      "authentication",
       "progress",
       "activity",
       "session",
       "cost",
       "usage",
+      "usage-observation",
       "workers",
       "warning",
     ]);
-    expect(received[1]).toMatchObject({
+    expect(received.find(({ type }) => type === "activity")).toMatchObject({
       value: { description: component.paths.join(",") },
+    });
+    expect(
+      received.find(({ type }) => type === "usage-observation"),
+    ).toMatchObject({
+      value: { accountRateLimits: [{ limitId: component.paths.join(",") }] },
     });
   }
 });
@@ -585,6 +614,24 @@ test.each([
         }),
         createSecurity: client(async (repository, options) => {
           expect(typeof options.onProgress).toBe("function");
+          options.onAuthentication?.({
+            method: "stored_credentials",
+            credentialType: presentation === "ci" ? "api_key" : "chatgpt",
+            verified: false,
+          });
+          if (presentation !== "dashboard")
+            expect(
+              stderr
+                .text()
+                .includes("apps/api | ChatGPT allowance not reported"),
+            ).toBe(presentation === "headless");
+          for (const filesTotal of [0, 2]) {
+            options.onProgress?.({
+              phase: "preflight",
+              filesCompleted: 0,
+              filesTotal,
+            });
+          }
           options.onProgress?.({
             phase: "validation",
             filesCompleted: 2,
@@ -597,6 +644,10 @@ test.each([
             output_tokens: 20,
             reasoning_output_tokens: 0,
             total_tokens: 120,
+          });
+          options.onUsageObservation?.({
+            tokensUpdatedAt: "2026-01-01T07:08:09Z",
+            accountRateLimits: [],
           });
           options.onCost?.({
             model: "gpt-5.6",
@@ -629,12 +680,15 @@ test.each([
       );
     } else expect(stderr.text()).toContain("apps/api completed");
     if (presentation !== "dashboard") {
+      expect(stderr.text()).toContain("apps/api preflight | File inventory: 0");
+      expect(stderr.text()).toContain("apps/api preflight | File inventory: 2");
       expect(stderr.text()).toContain(
         "apps/api validating findings | Files: 2/2",
       );
       expect(stderr.text()).toContain(
         "apps/api | Tokens: 90 uncached input, 10 cache reads, 0 cache writes, 20 output, 120 total",
       );
+      expect(stderr.text()).toMatch(/apps\/api \| .*07:08:09 UTC/u);
     }
     expect(
       [...signals.listeners.values()].every(
@@ -1559,6 +1613,14 @@ test("retains tracked Unicode aliases when scoped Git matching is incomplete", a
   await mkdir(join(paths.repository, nonCased));
   await writeFile(join(paths.repository, nonCased, "app.ts"), "export {};\n");
   execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+  execFileSync("git", [
+    "-C",
+    paths.repository,
+    "config",
+    "--local",
+    "core.autocrlf",
+    "false",
+  ]);
   execFileSync("git", ["-C", paths.repository, "add", "--force", "."]);
   expect(await scopedInventory(paths, nonCased)).toEqual({
     paths: [nonCased + "/app.ts"],
@@ -1834,13 +1896,11 @@ test.each([
             [
               'import { cpSync, existsSync, readFileSync, writeFileSync } from "node:fs";',
               'import { join } from "node:path";',
-              'import { createHash } from "node:crypto";',
               "for await (const chunk of process.stdin) {}",
               `const scan = process.env.CODEX_SECURITY_SCAN_DIR; cpSync(${JSON.stringify(join(PLUGIN_ROOT, "examples", "completed-scan"))}, scan, { recursive: true });`,
               'writeFileSync(join(scan, "report.md"), "# Synthetic scan\\n");',
-              'const coveragePath = join(scan, "coverage.json"); const coverage = JSON.parse(readFileSync(coveragePath, "utf8")); coverage.mode = "scoped_path";',
-              'const bytes = JSON.stringify(coverage); writeFileSync(coveragePath, bytes); const manifestPath = join(scan, "scan-manifest.json"); const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));',
-              'manifest.scan.artifacts.find(artifact => artifact.path === "coverage.json").sha256 = createHash("sha256").update(bytes).digest("hex"); writeFileSync(manifestPath, JSON.stringify(manifest));',
+              'const manifestPath = join(scan, "scan-manifest.json"); const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));',
+              'manifest.scan.mode = "scoped_path"; writeFileSync(manifestPath, JSON.stringify(manifest));',
               'const authPath = join(process.env.CODEX_HOME, "auth.json");',
               `writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ executable: process.execPath, home: process.env.CODEX_HOME, state: process.env.CODEX_SECURITY_STATE_DIR, key: process.env.CODEX_API_KEY ?? null, auth: existsSync(authPath) ? JSON.parse(readFileSync(authPath, "utf8")) : null, value: process.env.SYNTHETIC_COMPONENT, python: process.env.PYTHON, workerConfig: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH ? readFileSync(process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, "utf8") : null }));`,
               'console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-thread" }));',
@@ -1922,7 +1982,10 @@ test("CLI requires an explicitly selected API key before automatic planning", as
 test("CLI forwards scan settings and accepts legacy scope notes", async () => {
   const paths = await fixture();
   const planFile = join(paths.root, "plan.json");
-  await writeFile(planFile, JSON.stringify({ components: [components[0]] }));
+  await writeFile(
+    planFile,
+    `\uFEFF${JSON.stringify({ components: [components[0]] })}`,
+  );
   const signals = new FakeSignals();
   const createSecurity = mock((_value: unknown) => {
     return client(run)();

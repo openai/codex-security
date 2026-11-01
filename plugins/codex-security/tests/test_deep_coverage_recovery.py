@@ -91,6 +91,95 @@ def test_worker_projection_retains_independent_links_receipts_and_frozen_replay(
     assert all(p.read_bytes() == contents for p, contents in originals.items())
 
 
+def test_partial_root_rejections_close_worker_local_candidates_independently(tmp_path):
+    workers = []
+    for name in ("first", "second"):
+        task = {"id": "review", "candidateId": "local", "reason": f"Review {name}."}
+        source = worker(
+            tmp_path, name, saved_draft("coverage-scan", complete=True, deferred=[task])
+        )
+        source.update(
+            status="succeeded",
+            result_manifest_path=str(Path(source["artifact_dir"]) / "result.json"),
+        )
+        workers.append(source)
+
+    head = tmp_path / "checkpoint-head.json"
+    for name, observed, pending in [("first", 200, ["Review second."]), ("second", 300, [])]:
+        rejection = {
+            "id": name,
+            "label": f"Reviewed {name}.",
+            "candidateId": "local",
+            "disposition": "rejected",
+            "provenance": {"workerId": name, "attempt": 1, "candidateId": "local"},
+        }
+        checkpoint = write_checkpoint(
+            tmp_path / "checkpoints", saved_draft("coverage-scan", surfaces=[rejection])
+        )
+        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+        os.utime(head, ns=(observed, observed))
+        documents = recover(tmp_path, workers, project=True)
+        assert [
+            row["reason"] for row in documents[2]["deferred"] if row["id"] != "scan-stopped"
+        ] == pending
+    replay = recover(
+        tmp_path, workers, project=True, frozen=documents[0]["scan"]["preservedSources"]
+    )
+    assert replay[2] == documents[2]
+
+
+def test_accepted_attempt_reconciles_legacy_parent_worker_projection(tmp_path):
+    surface = {
+        "id": "api",
+        "label": "Worker review",
+        "disposition": "no_issue_found",
+        "receiptRefs": ["artifacts/review.md"],
+    }
+    task = {"id": "review", "reason": "Review remains.", "surfaceIds": ["api"]}
+    source = worker(
+        tmp_path,
+        "first",
+        saved_draft("coverage-scan", complete=True, surfaces=[surface], deferred=[task]),
+    )
+    source.update(
+        status="succeeded", result_manifest_path=str(Path(source["artifact_dir"]) / "result.json")
+    )
+    write_saved_parent(
+        tmp_path,
+        saved_draft(
+            "coverage-scan",
+            complete=True,
+            surfaces=[
+                {
+                    **surface,
+                    "id": "first/api",
+                    "workerId": "first",
+                    "receiptRefs": [
+                        "artifacts/deep_discovery/workers/first/output/artifacts/review.md"
+                    ],
+                }
+            ],
+            deferred=[
+                {**task, "id": "first/review", "workerId": "first", "surfaceIds": ["first/api"]}
+            ],
+        ),
+        200,
+    )
+    originals = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
+    first = recover(tmp_path, [source], project=True)
+    replay = recover(tmp_path, [source], project=True, frozen=first[0]["scan"]["preservedSources"])
+    for documents in (first, replay):
+        surfaces = documents[2]["surfaces"]
+        tasks = [row for row in documents[2]["deferred"] if row["id"] != "scan-stopped"]
+        assert len(surfaces) == len(tasks) == 1
+        assert surfaces[0]["provenance"] == {"workerId": "first", "attempt": 1, "sourceId": "api"}
+        assert tasks[0]["provenance"] == {"workerId": "first", "attempt": 1, "sourceId": "review"}
+        assert tasks[0]["surfaceIds"] == [surfaces[0]["id"]]
+        assert (tmp_path / surfaces[0]["receiptRefs"][0]).read_text() == "first source review\n"
+    assert replay[2] == first[2]
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
 def test_partial_parent_without_arrays_retains_closed_worker_surface_and_frozen_replay(tmp_path):
     surface = {"id": "api", "label": "API", "disposition": "needs_follow_up", "receiptRefs": []}
     pending = saved_draft(
@@ -136,6 +225,40 @@ def test_partial_parent_without_arrays_retains_closed_worker_surface_and_frozen_
         ]
         assert [row["id"] for row in coverage["deferred"]] == ["scan-stopped"]
     assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
+def test_finding_only_reducer_preserves_earlier_partial_root_coverage(tmp_path):
+    scan_id = "coverage-scan"
+    surface = {"id": "route", "label": "Route", "disposition": "no_issue_found", "receiptRefs": []}
+    question = {"question": "Which routes are public?"}
+    earlier = saved_draft(scan_id, surfaces=[surface])
+    earlier["coverage"]["openQuestions"] = [question]
+    head = tmp_path / "checkpoint-head.json"
+    for observed, draft in [(100_000, earlier), (200_000, saved_draft(scan_id))]:
+        checkpoint = write_checkpoint(tmp_path / "checkpoints", draft)
+        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+        os.utime(head, ns=(observed, observed))
+        saved._capture_saved_source(tmp_path, "checkpoint-head.json", scan_id)
+
+    finding_path = (
+        Path(saved.__file__).resolve().parents[1] / "examples/completed-scan/findings.json"
+    )
+    finding = json.loads(finding_path.read_text())["findings"][0]
+    result = {"scanId": scan_id, "findings": [finding]}
+    reducer = worker(tmp_path, "reducer", result)
+    output = Path(reducer["artifact_dir"])
+    write_checkpoint(output / "checkpoints", result)
+    os.utime(output / "result.json", ns=(300_000, 300_000))
+    reducer.update(
+        kind="dedup",
+        status="succeeded",
+        completed_at="2026-01-01T00:00:00Z",
+        result_manifest_path=str(output / "result.json"),
+    )
+
+    _, findings, coverage = recover(tmp_path, [reducer])
+    assert {row["title"] for row in findings["findings"]} == {finding["title"]}
+    assert (coverage["surfaces"], coverage.get("openQuestions", [])) == ([surface], [question])
 
 
 @pytest.mark.parametrize("collision", [False, True])
@@ -976,6 +1099,42 @@ def test_projection_normalizes_surface_receipts_without_rewriting_extension_meta
     assert json.loads((Path(source["artifact_dir"]) / "result.json").read_text()) == draft
 
 
+@pytest.mark.parametrize("prior", ["reported", "pending"])
+@pytest.mark.parametrize("earlier_name", ["Review.txt", "review.txt"])
+def test_anonymous_worker_receipt_precedes_another_workers_rejection(tmp_path, earlier_name, prior):
+    example = Path(__file__).resolve().parents[1] / "examples/completed-scan/findings.json"
+    finding = json.loads(example.read_text())["findings"][0]
+    finding["extensions"] = {"candidateId": "review"}
+    task = {"candidateId": "review", "reason": "Review is pending."}
+    records = {"findings": [finding]} if prior == "reported" else {"deferred": [task]}
+    earlier_ref = f"artifacts/{earlier_name}"
+    ref = "artifacts/review.txt"
+    early = {"label": "Review", "disposition": "no_issue_found", "receiptRefs": [earlier_ref]}
+    rejection = {**early, "candidateId": "review", "disposition": "rejected", "receiptRefs": [ref]}
+    first = worker(tmp_path, "first", saved_draft("coverage-scan", complete=True, surfaces=[early]))
+    second = worker(tmp_path, "second", saved_draft("coverage-scan", complete=True, **records))
+    for source in (first, second):
+        result = Path(source["artifact_dir"]) / "result.json"
+        source.update(status="succeeded", result_manifest_path=str(result))
+    for receipt in (earlier_ref, ref):
+        (tmp_path / receipt).write_text("Synthetic review.")
+    output = Path(second["artifact_dir"])
+    checkpoint = write_checkpoint(
+        output / "checkpoints", saved_draft("coverage-scan", complete=True, surfaces=[rejection])
+    )
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    os.utime(head, ns=(200, 200))
+
+    _, findings, coverage = recover(tmp_path, [first, second], project=True, warnings=[])
+    collision = earlier_ref != ref
+    assert len(findings["findings"]) == int(collision and prior == "reported")
+    candidates = [row.get("provenance", {}).get("candidateId") for row in coverage["deferred"]]
+    assert ("review" in candidates) == (collision and prior == "pending")
+    dispositions = [row["disposition"] for row in coverage["surfaces"]]
+    assert dispositions == ["no_issue_found", "needs_follow_up" if collision else "rejected"]
+
+
 @pytest.mark.parametrize("reverse_sources", [False, True])
 @pytest.mark.parametrize("reverse_surfaces", [False, True])
 def test_current_receipt_spelling_precedes_historical_receipts(
@@ -997,7 +1156,7 @@ def test_current_receipt_spelling_precedes_historical_receipts(
         }
 
     old = {
-        "coverage": {
+        "reviewState": {
             "surfaces": [
                 surface("reader", "needs_follow_up", "review.md"),
                 surface("writer", "needs_follow_up", "Review.md"),
@@ -1005,7 +1164,7 @@ def test_current_receipt_spelling_precedes_historical_receipts(
         }
     }
     current = {
-        "coverage": {
+        "reviewState": {
             "surfaces": [
                 surface("reader", "no_issue_found", "new-review.md"),
                 surface("writer", "no_issue_found", "Review.md"),
@@ -1014,7 +1173,7 @@ def test_current_receipt_spelling_precedes_historical_receipts(
     }
     if reverse_surfaces:
         for draft in (old, current):
-            draft["coverage"]["surfaces"].reverse()
+            draft["reviewState"]["surfaces"].reverse()
     sources = [("old", old, "first"), ("current", current, "first")]
     if reverse_sources:
         sources.reverse()
@@ -1025,7 +1184,6 @@ def test_current_receipt_spelling_precedes_historical_receipts(
     warnings = []
     _, updates = saved._generic_surface_updates(
         sources,
-        {"old": (0, 0), "current": (1, 0)},
         {("first", "review"): ((1, 0), {"id": "review", "reason": "Review completed."}, "current")},
         {},
         {},
@@ -1033,12 +1191,15 @@ def test_current_receipt_spelling_precedes_historical_receipts(
         schema,
         {"old": [task], "current": []},
         set(),
+        lambda _field, owner, row: (owner, row),
+        lambda relative, _owner, _row: {"old": (0, 0), "current": (1, 0)}[relative],
+        lambda _relative, row: row.get("receiptRefs", []),
         surface_is_retained=lambda _relative, _owner, _row: True,
         eligible_receipt_sources={"old", "current"},
         receipt_root=tmp_path,
         receipt_warnings=warnings,
     )
-    receipts = {row["id"]: row["receiptRefs"] for _, row, _ in updates}
+    receipts = {row["id"]: row["receiptRefs"] for _, _, _, row in updates}
     assert receipts == {"reader": [prefix + "new-review.md"], "writer": [prefix + "Review.md"]}
     assert any("duplicate artifact path" in warning for warning in warnings)
     scan = {

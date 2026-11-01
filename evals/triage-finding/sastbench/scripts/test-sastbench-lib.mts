@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import path from "node:path";
-import { buildHydrationPlan } from "./hydrate-sastbench-repos.mts";
+import { buildHydrationPlan, parseArgs } from "./hydrate-sastbench-repos.mts";
 
 import {
   REPRESENTATIVE_SAMPLE_SPEC,
@@ -119,15 +119,36 @@ assert.equal(
 );
 
 const stateId = repositoryStateId(positive);
-assert.match(stateId, /^state-[a-f0-9]{16}$/);
 assert.equal(repositoryStateId(negative), stateId);
 
-const jobs = buildHydrationPlan([positive, negative], { targetRoot });
-assert.equal(jobs.length, 1);
-assert.equal(jobs[0].caseCount, 2);
-assert.equal(jobs[0].repoUrl, positive.repo_url);
-assert.equal(jobs[0].commitHash, positive.commit_hash);
-assert.equal(jobs[0].targetDir, path.join(targetRoot, stateId));
+assert.equal(parseArgs(["--", "--dry-run"]).dryRun, true);
+const cacheRoot = path.resolve("/tmp/sastbench-git-cache");
+const otherRevision = { ...positive, commit_hash: "2".repeat(40) };
+const jobs = buildHydrationPlan([positive, negative, otherRevision], {
+  cacheRoot,
+  targetRoot,
+});
+assert.deepEqual(
+  jobs.map((job) => job.caseCount),
+  [2, 1],
+);
+for (const [index, record] of [positive, otherRevision].entries()) {
+  const job = jobs[index]!;
+  assert.equal(job.repoUrl, record.repo_url);
+  assert.equal(job.commitHash, record.commit_hash);
+  const target = repositoryStateId(record);
+  assert.match(target, /^state-[a-f0-9]{16}$/);
+  assert.equal(job.targetDir, path.join(targetRoot, target));
+  assert.equal(job.cacheDir, path.join(cacheRoot, "repo-acb9cf7430784a93.git"));
+}
+assert.throws(
+  () =>
+    buildHydrationPlan([
+      positive,
+      { ...otherRevision, repo_url: "https://github.com/example/other" },
+    ]),
+  /maps to multiple repository URLs/,
+);
 
 const promptVars = buildPromptVars(positive, 0, targetRoot);
 assert.equal(promptVars.case_id, "sastbench-000000");

@@ -77,7 +77,7 @@ const client = new CodexSecurity(
                     const plugin = env.CODEX_SECURITY_PLUGIN_ROOT;
                     const scanDir = env.CODEX_SECURITY_SCAN_DIR;
                     await cp(
-                      join(plugin, "examples", "completed-scan"),
+                      join(plugin, "examples", "legacy-completed-scan"),
                       scanDir,
                       { recursive: true },
                     );
@@ -174,31 +174,18 @@ try {
     await realpath(scanEnvironment.CODEX_SECURITY_PLUGIN_ROOT),
     await realpath(selectedPlugin),
   );
+  await assert.rejects(readFile(join(result.scanDir, "coverage.json")), {
+    code: "ENOENT",
+  });
+  assert.deepEqual(result.review, { excludedPaths: [] });
   assert.equal(result.manifest.scan.status, "completed");
   assert.ok(result.manifest.scan.sealedAt);
-  assert.deepEqual(
-    result.coverage.surfaces.map((surface) => surface.id),
-    ["http-api", "archive-surface"],
-  );
+  assert.equal(result.manifest.scan.coverageRef, undefined);
+  assert.equal(result.manifest.scan.reviewState, undefined);
   assert.equal(turns.length, 2);
   assert.equal(result.findings.findings.length, 1);
   assert.equal(result.findings.findings[0].locations[0].path, "src/extract.py");
   assert.equal(result.findings.findings[0].locations[0].role, "sink");
-  assert.equal(
-    result.coverage.surfaces[0].notes,
-    "Archive handling was reviewed.",
-  );
-  assert.equal(result.coverage.surfaces[0].riskArea, "filesystem");
-  assert.equal(result.coverage.completeness, undefined);
-  // Optional receipt references default to an empty list.
-  assert.equal(result.coverage.surfaces[1].disposition, "reported");
-  assert.deepEqual(result.coverage.surfaces[1].receiptRefs, []);
-  assert.ok(
-    result.coverage.openQuestions.length > 0 &&
-      result.coverage.openQuestions.every(
-        (entry) => entry.question === "What deployment controls apply?",
-      ),
-  );
   assert.equal(result.manifest.scan.scope.context, "Synthetic archive review.");
   assert.deepEqual(result.manifest.scan.threatModel.assumptions, [
     "Archive entry names are untrusted.",
@@ -221,7 +208,7 @@ try {
       scanDir: result.scanDir,
       turns: turns.length,
       status: saved.scan.progress.status,
-      coverageIds: result.coverage.surfaces.map((surface) => surface.id),
+      review: result.review,
     }),
   );
 } finally {

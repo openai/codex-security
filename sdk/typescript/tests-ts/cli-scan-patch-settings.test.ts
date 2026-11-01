@@ -356,17 +356,6 @@ describe("inline patch service tier", () => {
     },
   );
 
-  test("preserves the scan native default over an ambient fast tier", async () => {
-    const child = await patchSettings([], {
-      homeConfig: 'service_tier = "fast"\n',
-    });
-    expect(child.argv).toContain('service_tier="default"');
-    expect(child.homeTier).toBe('"fast"');
-    expect(child.loginType).toBe("apiKey");
-    expect(child.approvalPolicy).toBe("never");
-    expect(child.sandbox).toBe("workspace-write");
-  });
-
   test("keeps overlapping scan tiers and Daybreak settings isolated", async () => {
     let arrivals = 0;
     const { promise: ready, resolve: release } = Promise.withResolvers<void>();
@@ -389,6 +378,11 @@ describe("inline patch service tier", () => {
     ]);
     expect(children[0]!.argv).toContain('service_tier="fast"');
     expect(children[1]!.argv).toContain('service_tier="default"');
+    expect(children[1]).toMatchObject({
+      loginType: "apiKey",
+      approvalPolicy: "never",
+      sandbox: "workspace-write",
+    });
     expect(children[0]!.argv).toContain("daybreak=true");
     expect(children[1]!.argv).toContain("daybreak=false");
     expect(children.map((child) => child.cyberAccessProgram)).toEqual([

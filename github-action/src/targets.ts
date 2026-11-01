@@ -75,7 +75,7 @@ export async function containedPath(repository: string, input: string): Promise<
   return path;
 }
 
-function originMatches(url: string, repository: string, serverUrl: string): boolean {
+export function originMatches(url: string, repository: string, serverUrl: string): boolean {
   // Parse without printing potentially embedded tokens.
   try {
     const host = new URL(serverUrl).hostname;

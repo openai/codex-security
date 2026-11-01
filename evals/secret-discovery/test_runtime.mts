@@ -289,11 +289,9 @@ async function nativeFixture(
   await mkdir(dirname(executable), { recursive: true });
   const tools = join(dirname(dirname(executable)), "codex-path");
   await mkdir(tools);
-  await writeFile(
-    join(tools, "rg"),
-    `#!${process.execPath}\nconsole.log("synthetic rg");\n`,
-    { mode: 0o755 },
-  );
+  await writeFile(join(tools, "rg"), "#!/bin/sh\necho synthetic rg\n", {
+    mode: 0o755,
+  });
   const result = {
     findings: prepared.fixture.positives.map((expected) => ({
       taxonomy: { category: "hardcoded-credentials", cwe: [expected.cwes[0]] },

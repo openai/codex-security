@@ -2,27 +2,11 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 
-/** @type {import("../../src/remediation.js").FindingVerificationCheck[]} */
-export const passedChecks = [
-  {
-    name: "Authorization regression tests",
-    status: "passed",
-    command: "bun test tests/authorization.test.ts",
-    evidence: "Original request rejected; legitimate control passed.",
-  },
-  {
-    name: "Static assessment of equivalent authorization paths",
-    status: "passed",
-    evidence: "All handlers in guard.ts use the shared authorization check.",
-  },
-];
-
 /** @type {import("../../src/remediation.js").FindingVerification} */
 export const verificationResult = {
   id: "finding-1",
   status: "fixed",
   evidence: "Original request rejected; legitimate control passed.",
-  checks: passedChecks,
 };
 
 /**
@@ -80,7 +64,7 @@ export function remediationReceipt(request, overrides = {}) {
 }
 
 /**
- * Exercise the same pipe contract against source and installed SDK entrypoints.
+ * Exercise the same pipe contract against source and installed CLI entrypoints.
  * @param {string} node
  * @param {string} entrypoint
  * @param {import("../../src/hosted-remediation.js").HostedRemediationInput} input
@@ -95,9 +79,9 @@ export async function exerciseRemediationProtocol(
   const child = spawn(
     node,
     [
-      "--input-type=module",
-      "-e",
-      `import {runHostedRemediationProtocol} from ${JSON.stringify(entrypoint)}; process.exitCode = await runHostedRemediationProtocol(process.stdin, process.stdout);`,
+      entrypoint,
+      input.operation === "patch" ? "patch" : "verify-fix",
+      "--host",
     ],
     { stdio: ["pipe", "pipe", "pipe"] },
   );
@@ -167,10 +151,11 @@ export async function exerciseRemediationProtocol(
     if (!cancel) {
       if (input.operation === "patch")
         assert.equal(result.patch.status, "verified");
-      else {
-        assert.equal(result.verification.status, "fixed");
-        assert.deepEqual(result.verification.checks, passedChecks);
-      }
+      else
+        assert.deepEqual(result.verification, {
+          ...verificationResult,
+          id: input.finding.id,
+        });
     }
     return result;
   } finally {

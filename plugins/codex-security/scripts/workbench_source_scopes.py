@@ -275,7 +275,10 @@ def capture_source_scopes(
 def load_source_scopes(
     scan: sqlite3.Row, target: Path, requested: list[str]
 ) -> tuple[Path, str, list[dict[str, str]]] | None:
-    if "diff_target_kind" in scan.keys() and scan["diff_target_kind"] == "working_tree":
+    kind = scan["diff_target_kind"] if "diff_target_kind" in scan.keys() else None
+    if kind == "working_tree" or (
+        "mode" in scan.keys() and scan["mode"] == "diff" and kind not in ("commit", "range")
+    ):
         return None
     saved = scan["source_scopes_json"] if "source_scopes_json" in scan.keys() else None
     paths = {PurePosixPath(path).as_posix() for path in requested}

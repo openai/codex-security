@@ -7,28 +7,87 @@ on:
         description: Source commit to build; defaults to the calling workflow commit.
         type: string
         default: ""
+      reuse-verified:
+        description: Reuse this week's verified payload when all native build and proof inputs match.
+        type: boolean
+        default: false
+      cache-week:
+        description: UTC ISO year and week selected by the source CI classifier; zero uses the current week.
+        type: number
+        default: 0
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      cache-key: ${{ steps.key.outputs.key }}
+      cache-hit: ${{ steps.restore.outputs.cache-hit }}
+    steps:
+      - name: Checkout native inputs
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Identify native build and proof inputs
+        id: key
+        # Resolve the helper from this workflow even when the caller selects an older checkout.
+        uses: $/.github/actions/native-cache-key
+        env:
+          NATIVE_CACHE_WEEK: ${{ inputs.cache-week }}
+      - name: Restore verified native payload
+        if: inputs.reuse-verified
+        id: restore
+        continue-on-error: true
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: native
+          key: ${{ steps.key.outputs.key }}
+      - name: Upload reused native payload for this commit
+        if: steps.restore.outputs.cache-hit == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-universal-${{ inputs.ref || github.sha }}
+          path: native/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
   unix:
+    needs: prepare
+    if: needs.prepare.outputs.cache-hit != 'true'
     uses: ./.github/workflows/native-unix.yml
     with:
       ref: ${{ inputs.ref || github.sha }}
   windows:
+    needs: prepare
+    if: needs.prepare.outputs.cache-hit != 'true'
     uses: ./.github/workflows/native-windows.yml
     with:
       ref: ${{ inputs.ref || github.sha }}
   musl:
+    needs: prepare
+    if: needs.prepare.outputs.cache-hit != 'true'
     uses: ./.github/workflows/native-musl.yml
     with:
       ref: ${{ inputs.ref || github.sha }}
   bundle:
-    needs: [unix, windows, musl]
+    needs: [prepare, unix, windows, musl]
+    if: ${{ !cancelled() && (needs.prepare.result != 'success' || needs.prepare.outputs.cache-hit != 'true') }}
     runs-on: ubuntu-24.04
     steps:
+      - name: Require every native build to pass
+        shell: bash
+        env:
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          UNIX_RESULT: ${{ needs.unix.result }}
+          WINDOWS_RESULT: ${{ needs.windows.result }}
+          MUSL_RESULT: ${{ needs.musl.result }}
+        run: |
+          [[ "$PREPARE_RESULT" == success && "$UNIX_RESULT" == success &&
+             "$WINDOWS_RESULT" == success && "$MUSL_RESULT" == success ]]
       - name: Download verified platform payloads
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -43,3 +102,13 @@ jobs:
           if-no-files-found: error
           overwrite: true
           retention-days: 7
+      - name: Save verified native payload from main
+        if: >-
+          github.ref == 'refs/heads/main' &&
+          (github.event_name == 'push' || github.event_name == 'schedule') &&
+          (inputs.ref == '' || inputs.ref == github.sha)
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: native
+          key: ${{ needs.prepare.outputs.cache-key }}

@@ -42,6 +42,7 @@ import {
   enclosingGitWorktreeRoots,
   gitMetadataDirectories,
   gitObjectDirectories,
+  gitOutput,
   isGitMetadataDirectory,
   normalizeRepository,
   normalizeTarget,
@@ -178,8 +179,6 @@ export interface SecurityPolicyDraft
 const execFileAsync = promisify(execFile);
 const MANIFEST_NAME = "policy-draft.json";
 const ORIGINAL_NAME = "previous-SECURITY.md";
-// This is the input contract enforced by the resolve-security-md helper.
-const MAX_SECURITY_MD_BYTES = 1024 * 1024;
 // The define-security-policy skill asks at most three questions at once.
 const OWNER_QUESTION_BATCH_SIZE = 3;
 
@@ -262,21 +261,7 @@ async function readPolicyFile(
         `Security policy must not be a hard-linked file: ${path}. Copy it to a separate file.`,
       );
     }
-    validatePolicySize(metadata.size);
-    const bytes = Buffer.allocUnsafe(MAX_SECURITY_MD_BYTES + 1);
-    let length = 0;
-    while (length < bytes.length) {
-      const { bytesRead } = await file.read(
-        bytes,
-        length,
-        bytes.length - length,
-        null,
-      );
-      if (bytesRead === 0) break;
-      length += bytesRead;
-    }
-    validatePolicySize(length);
-    return decodePolicyText(bytes.subarray(0, length), path);
+    return decodePolicyText(await file.readFile(), path);
   } finally {
     await file.close();
   }
@@ -446,10 +431,13 @@ async function securityPolicyPaths(
   const gitDirectories = new Set<string>();
   const policies: string[] = [];
   const reportingPaths = new Set<string>();
+  const ignored = new Set<string>();
   const isGitData = (path: string): boolean =>
     [...gitDirectories].some(
       (directory) => !relativePathIsOutside(relative(directory, path)),
     );
+  const isIgnored = (path: string): boolean =>
+    ignored.has(path) || (dirname(path) !== path && isIgnored(dirname(path)));
   const addRoot = async (repository: string) => {
     if (knownRoots.has(repository)) return;
     knownRoots.add(repository);
@@ -460,6 +448,21 @@ async function securityPolicyPaths(
       gitDirectories.add(join(gitRoot, ".git"));
       for (const directory of await gitMetadataDirectories(gitRoot, signal))
         gitDirectories.add(directory);
+      // Like scans, skip Git-ignored files such as installed dependencies.
+      const ignoredPaths = await gitOutput(
+        gitRoot,
+        [
+          "ls-files",
+          "--others",
+          "--ignored",
+          "--exclude-standard",
+          "--directory",
+          "-z",
+        ],
+        signal,
+      );
+      for (const path of ignoredPaths.split("\0").filter(Boolean))
+        ignored.add(resolve(gitRoot, path));
     }
     for (const name of [".github", "docs"]) {
       let directory = join(repository, name);
@@ -523,7 +526,11 @@ async function securityPolicyPaths(
     gitDirectories.add(path);
   // Git storage can reference a directory visited earlier in the walk.
   return {
-    paths: [...policies, ...reportingPaths].filter((path) => !isGitData(path)),
+    paths: [...policies, ...reportingPaths].filter(
+      (path) =>
+        !isGitData(path) &&
+        (path === join(root, "SECURITY.md") || !isIgnored(path)),
+    ),
     gitMetadataPaths: [...gitDirectories],
   };
 }
@@ -1051,16 +1058,6 @@ function validatePolicyContent(
   if (!content.isWellFormed()) {
     throw new CodexSecurityError(
       `The ${stage === "policy" ? "security policy" : stage.replace("_", " ")} must contain valid Unicode text.`,
-    );
-  }
-  if (stage === "policy")
-    validatePolicySize(Buffer.byteLength(content, "utf8"));
-}
-
-function validatePolicySize(size: number): void {
-  if (size > MAX_SECURITY_MD_BYTES) {
-    throw new CodexSecurityError(
-      "SECURITY.md exceeds the policy resolver's 1 MiB limit.",
     );
   }
 }

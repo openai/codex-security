@@ -47,6 +47,19 @@ a required check that cannot run without repository changes is a proof gap,
 not permission to edit. Generation's ordinary skill checks and standalone
 verification are separate operations.
 
+Set `verificationMode: "static"` to review attack paths, bypasses, and legitimate
+behavior from source and diffs, without installing dependencies or executing
+builds, tests, reproducers, or the application. Select it for both `patch` and
+`verify` requests when both stages should be static. Omitted or `"standard"`
+retains the existing behavior.
+
+Static mode treats validation instructions as source-review questions. Missing
+runtime tooling alone is not a blocker; material proof gaps still produce
+`blocked` or `inconclusive`. Results must cite source evidence and state that
+runtime checks were not performed. Hosts should retain and display the selected
+mode with each attempt. This is an assessment policy; sandbox permissions remain
+unchanged and do not enforce the static scope.
+
 The executor receives one request with a unique `requestId`, operation,
 repository/revision, identity, finding ID, prompt, model, reasoning effort,
 `sandbox` (`workspace-write` for patch, `read-only` for verify), and
@@ -65,22 +78,22 @@ result validation finished; it does not imply that a patch fixed the finding:
   require a reason. The host must inspect the actual changes, collect the
   canonical diff, and run separate verification.
 - `verification` contains `id`, `status` (`fixed`, `still_vulnerable`, or
-  `inconclusive`), nonempty `evidence`, and a nonempty `checks` array. Each check
-  contains a nonempty `name`, `status` (`passed`, `failed`, or `not_run`),
-  nonempty `evidence`, and optional `command`. Names and evidence distinguish
-  static assessment from executed tests; `command` records an actual attempted
-  command, not a suggestion. A required check that could not be completed is
-  `not_run` with its blocker in `evidence`. An inconclusive result is preserved
-  as an assessment outcome rather than converted to execution failure.
+  `inconclusive`), and nonempty `evidence`, the same fields used by local
+  `verify-fix`. The finding ID must match the request. A `fixed` verdict needs
+  evidence that the original exploit path is closed and legitimate behavior
+  still works. If the selected mode cannot establish that, use `inconclusive`
+  unless the evidence shows the finding is still vulnerable.
 
-Hosted verification requests these checks explicitly and rejects a result with
-missing or empty checks, or a `fixed` verdict with a failed or unrun check. The
-model must report the required vulnerability and legitimate-behavior checks;
-the SDK does not reconstruct checks from prose. A malformed result retains the
-execution receipt and returns `status: "failed"` with `INVALID_RESULT`, rather
-than claiming verification succeeded. Shared result types keep `checks`
-optional for older and local results; the local CLI command and result contract
-are unchanged.
+Hosted and local verification use the same verdict parser and do not require
+`checks`. At the hosted boundary, a `fixed` verdict is rejected if a nonempty
+`checks` array matches the SDK 0.6.0 check format and reports a `failed` or
+`not_run` required check. Other extra fields are ignored.
+
+When upgrading from SDK 0.6.0, remove imports of `FindingVerificationCheck`
+and read `verification.status` and `verification.evidence`. The SDK no longer
+returns `verification.checks`. The executor's original report, when supplied,
+remains in `execution.finalResponse`. Invalid or contradictory verdicts return
+`INVALID_RESULT` with the execution receipt.
 
 The host owns durable attempts, cancellation/reconciliation, usage, artifact
 storage and publication. No operation publishes a pull request or marks a
@@ -88,15 +101,19 @@ finding closed. Retrying persistence must not resubmit execution.
 
 ## JSON-RPC launcher
 
-The SDK exports `runHostedRemediationProtocol`. An installed npm package can run it
-without adding any public CLI flag:
+Use the public CLI to run the hosted protocol:
 
-```sh
-node --input-type=module -e '
-import { runHostedRemediationProtocol } from "@openai/codex-security";
-process.exitCode = await runHostedRemediationProtocol(process.stdin, process.stdout);
-'
+```bash
+codex-security patch --host
+codex-security verify-fix --host
 ```
+
+Use `--host` alone with either command. The `run` request supplies all settings,
+and its `operation` must match the command: `patch` or `verify`, respectively.
+Neither command falls back to local inference. Ordinary patching and verification
+remain unchanged when `--host` is omitted.
+
+The SDK also exports `runHostedRemediationProtocol` for in-process hosts.
 
 Use the existing newline-delimited host transport: send one `run` request whose
 `params` are the input above; respond to `execution.run` with the executor
@@ -107,7 +124,9 @@ the final execution receipt so usage and session identity survive cancellation.
 The transport emits one terminal result. Preparation failures are JSON-RPC
 errors; a mismatched HEAD includes `error.data.reason: "revision_mismatch"`.
 
-Run the deterministic installed-package smoke check without model credentials:
+To run the deterministic installed-package smoke check, use a source checkout
+of this repository and run the following from `sdk/typescript`. The script is
+not included in the npm package and needs no model credentials:
 
 ```sh
 node scripts/smoke-hosted-remediation.mjs /path/to/node_modules/@openai/codex-security

@@ -173,7 +173,6 @@ function renderFindingDescription(
   uploadedAt: string,
   assessment?: SeverityAssessment,
 ): string {
-  const { coverage } = contract;
   const { scan } = contract.manifest;
   const lines = ["## Summary", "", finding.summary];
   if (assessment?.source === "rubric") {
@@ -263,8 +262,7 @@ function renderFindingDescription(
     ...(scan.scope.excludePaths.length === 0
       ? []
       : [`**Excluded scope:** ${scan.scope.excludePaths.join(", ")}`]),
-    `**Coverage mode:** ${coverage.mode}`,
-    `**Scan mode:** ${scanMode(coverage.mode)}`,
+    `**Scan mode:** ${scanMode(contract.mode)}`,
     `**Started:** ${scan.startedAt}`,
     `**Completed:** ${scan.completedAt}`,
     `**Uploaded:** ${uploadedAt}`,
@@ -296,7 +294,7 @@ function renderTargetIdentity(target: ScanTargetRecord): string[] {
   return lines;
 }
 
-function scanMode(mode: LoadedContract["coverage"]["mode"]): string {
+function scanMode(mode: LoadedContract["mode"]): string {
   if (mode === "deep_repository") return "deep";
   if (mode === "repository") return "standard";
   return mode;
@@ -503,8 +501,15 @@ function immutableSourceUrl(
   const repository = remote.pathname
     .replace(/\.git\/?$/, "")
     .replace(/\/$/, "");
-  const path = location.path.split("/").map(encodeURIComponent).join("/");
+  const segments = location.path.split("/");
+  const path = segments.map(encodeURIComponent).join("/");
   remote.pathname = `${repository}/blob/${target.revision}/${path}`;
+  // GitHub renders Markdown previews without source line anchors.
+  const markdownPath =
+    /\.(?:md|markdown|mdown|mdwn|mkd|mkdn|mkdown|mdx|litcoffee|livemd|ronn|scd|workbook)$/i;
+  if (markdownPath.test(location.path) || segments.at(-1) === "contents.lr") {
+    remote.search = "plain=1";
+  }
   remote.hash = `L${location.startLine}${
     location.endLine === undefined || location.endLine === location.startLine
       ? ""

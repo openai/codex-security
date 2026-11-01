@@ -21,6 +21,7 @@
         "status": {
           "enum": ["completed", "failed", "canceled", "interrupted"]
         },
+        "warnings": { "$ref": "#/$defs/stringList" },
         "startedAt": { "type": "string", "format": "date-time" },
         "completedAt": { "type": "string", "format": "date-time" },
         "sealedAt": { "type": "string", "format": "date-time" },
@@ -133,6 +134,28 @@
           "required": ["portfolioPath"]
         },
         "coverageRef": { "const": "coverage.json" },
+        "mode": {
+          "enum": [
+            "repository",
+            "scoped_path",
+            "diff",
+            "commit",
+            "branch_diff",
+            "working_tree",
+            "deep_repository"
+          ]
+        },
+        "review": {
+          "type": "object",
+          "properties": {
+            "excludedPaths": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["excludedPaths"]
+        },
+        "reviewState": {
+          "type": "object",
+          "propertyNames": { "type": "string" }
+        },
         "findingsRef": { "const": "findings.json" },
         "artifacts": {
           "minItems": 1,
@@ -161,7 +184,6 @@
         "sealedAt",
         "target",
         "scope",
-        "coverageRef",
         "findingsRef",
         "artifacts"
       ],
@@ -180,17 +202,21 @@
           }
         },
         {
-          "properties": {
-            "artifacts": {
-              "contains": {
-                "type": "object",
-                "required": ["path"],
-                "properties": { "path": { "const": "coverage.json" } }
-              },
-              "minContains": 1,
-              "maxContains": 1
+          "if": { "required": ["coverageRef"] },
+          "then": {
+            "properties": {
+              "artifacts": {
+                "contains": {
+                  "type": "object",
+                  "required": ["path"],
+                  "properties": { "path": { "const": "coverage.json" } }
+                },
+                "minContains": 1,
+                "maxContains": 1
+              }
             }
-          }
+          },
+          "else": { "required": ["mode", "review"] }
         }
       ]
     }

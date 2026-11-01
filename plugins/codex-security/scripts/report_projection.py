@@ -20,10 +20,36 @@ DISPOSITION_LABELS = {
     "needs_follow_up": "Needs follow-up",
 }
 WRITEUP_REPORT_PATH_RE = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
+INLINE_CODE_RE = r"(?<!`)`[^`\n]+`(?!`)"
+ENTITY_AMP_RE = r"&(?=(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]*);)"
+WWW_LINK_RE = r"(?<![^\s*_~(])(?i:www)\.[^\s<>]+"
 
 
 class ReportProjectionError(ValueError):
     """Raised when a canonical scan cannot be projected into a valid report."""
+
+
+def _escape_markdown(value: str) -> str:
+    # Locate whole URLs before matching code spans: a URL can contain backticks.
+    urls = [match.span() for match in re.finditer(WWW_LINK_RE, value)]
+    # Preserve protocol-relative and fuzzy links without a domain/TLD table.
+    for match in re.finditer(r"[^\s<>]+", value):
+        token = match[0]
+        dot = token.split("/", 1)[0].find(".")
+        if "//" in token or (dot >= 0 and re.search(r"[/?#]", token[dot + 1 :])):
+            urls.append(match.span())
+    punctuation = r"[\\`*_\[\]<>]|" + ENTITY_AMP_RE
+    pattern = f"(?P<code>{INLINE_CODE_RE})|{punctuation}"
+
+    def escape(match: re.Match[str]) -> str:
+        if match.lastgroup == "code":
+            return match[0]
+        # GFM autolinks retain backslashes literally, including in query strings.
+        if match[0] == "&" and any(start <= match.start() < end for start, end in urls):
+            return "&"
+        return "\\" + match[0]
+
+    return re.sub(pattern, escape, value)
 
 
 def _text(value: Any, fallback: str) -> str:
@@ -31,10 +57,7 @@ def _text(value: Any, fallback: str) -> str:
     normalized = " ".join(candidate.split())
     if re.match(r"^(?:#{1,6}\s|[-*+]\s|>\s|```|~~~|\d+[.)]\s|\|)", normalized):
         normalized = f"Text: {normalized}"
-    return "".join(
-        part if index % 2 else re.sub(r"([\\`*_\[\]<>])", r"\\\1", part)
-        for index, part in enumerate(re.split(r"((?<!`)`[^`\n]+`(?!`))", normalized))
-    )
+    return _escape_markdown(normalized)
 
 
 def _strings(value: Any) -> list[str]:
@@ -45,18 +68,19 @@ def _strings(value: Any) -> list[str]:
     return [text for item in value if (text := _text(item, ""))]
 
 
-def _path_label(value: str) -> str:
+def _path_label(value: str, *, ensure_ascii: bool = False) -> str:
     if "," in value or value != " ".join(value.split()) or any(ord(c) < 32 for c in value):
-        quoted = json.dumps(value, ensure_ascii=False)
+        quoted = json.dumps(value, ensure_ascii=ensure_ascii)
         return "".join(c if c.isprintable() else json.dumps(c)[1:-1] for c in quoted)
     return value
 
 
-def _path_text(value: str) -> str:
-    label = _path_label(value)
-    if label != value:
+def _path_text(value: str, *, ensure_ascii: bool = False) -> str:
+    label = _path_label(value, ensure_ascii=ensure_ascii)
+    if label != value or re.search(ENTITY_AMP_RE, value):
         marker = _code_fence(label, minimum=1)
-        return f"{marker}{label}{marker}"
+        padding = " " if label.startswith("`") or label.endswith("`") else ""
+        return f"{marker}{padding}{label}{padding}{marker}"
     return re.sub(r"([\\`*_\[\]<>])", r"\\\1", value)
 
 
@@ -763,6 +787,10 @@ def build_report_markdown(
     manifest: dict[str, Any], findings_document: dict[str, Any], coverage: dict[str, Any]
 ) -> str:
     scan = manifest["scan"]
+    if "review" in scan and "coverageRef" not in scan:
+        from review_state import review_state
+
+        coverage = review_state(scan)
     target = scan["target"]
     scope = scan["scope"]
     threat_model = scan.get("threatModel") if isinstance(scan.get("threatModel"), dict) else {}
@@ -808,7 +836,6 @@ def build_report_markdown(
         "",
         f"- Scan mode: {coverage['mode']}",
         *_target_scope_lines(target),
-        f"- Inventory strategy: {coverage['inventoryStrategy']}",
         f"- Included paths: {', '.join(include_paths) or 'none'}",
         f"- Excluded paths: {', '.join(exclude_paths) or 'none'}",
     ]
@@ -850,7 +877,7 @@ def build_report_markdown(
             *summary_count_lines,
             f"| Validation mode | {_cell(scope.get('validationMode', 'not recorded'))} |",
             "",
-            "Canonical artifacts: `scan-manifest.json`, `findings.json`, and `coverage.json`. This report is a deterministic projection of those files.",
+            "Canonical artifacts: `scan-manifest.json` and `findings.json`. This report is a deterministic projection of those files.",
             "",
             "## Threat Model",
             "",
@@ -988,10 +1015,10 @@ def build_report_markdown(
                 + " |"
             )
     open_questions = coverage.get("openQuestions", [])
-    questions = list(open_questions) if isinstance(open_questions, list) else []
+    deferred_questions = []
     deferred = coverage.get("deferred", [])
     if isinstance(deferred, list):
-        questions.extend(
+        deferred_questions = [
             {
                 "question": item.get("reason", "Deferred review requires follow-up."),
                 "followUpPrompt": " ".join(
@@ -1008,9 +1035,14 @@ def build_report_markdown(
             }
             for item in deferred
             if isinstance(item, dict)
-        )
-    if questions:
-        lines.extend(["", "## Open Questions And Follow Up", ""])
+        ]
+    for heading, questions in (
+        ("Deferred Requested Work", deferred_questions),
+        ("Open Questions And Follow Up", open_questions),
+    ):
+        if not isinstance(questions, list) or not questions:
+            continue
+        lines.extend(["", f"## {heading}", ""])
         for question in questions:
             if not isinstance(question, dict):
                 continue

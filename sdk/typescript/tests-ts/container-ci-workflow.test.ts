@@ -1,16 +1,16 @@
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { expect, test } from "bun:test";
-import { bashCommand } from "./support/shell.js";
 
-type Step = { name?: string; uses?: string; run?: string; if?: string };
 type Job = {
   uses?: string;
   needs?: string | string[];
   if?: string;
-  steps?: Step[];
+  steps?: Array<{ name?: string }>;
   strategy?: { matrix: { include: Array<{ architecture: string }> } };
 };
 
@@ -24,7 +24,6 @@ function workflow(name: string) {
 }
 
 const ci = workflow("node-ci");
-const bash = bashCommand();
 
 test("shares one native build and container matrix in automatic CI", () => {
   const container = workflow("container-ci");
@@ -41,7 +40,8 @@ test("shares one native build and container matrix in automatic CI", () => {
     ),
   ).toEqual([ci.jobs["container-validate"]!]);
   expect(ci.jobs["container-validate"]).toMatchObject({
-    needs: ["validate-title", "native"],
+    needs: ["classify-changes", "native", "static-checks"],
+    if: "needs.classify-changes.outputs.container-required == 'true'",
     uses: "./.github/workflows/container-validate.yml",
   });
   expect(container.jobs["container"]).toMatchObject({
@@ -67,98 +67,75 @@ test("shares one native build and container matrix in automatic CI", () => {
 test("keeps container validation available to forks and publication upstream-only", () => {
   const container = workflow("container-ci");
   const validation = workflow("container-validate");
-  const release = workflow("container-release");
+  const release = workflow("container-publish");
   expect(container.jobs["native"]).not.toHaveProperty("if");
   expect(container.jobs["container"]).not.toHaveProperty("if");
   expect(validation.jobs["validate"]).not.toHaveProperty("if");
-  for (const name of ["source", "validate", "authorize"]) {
-    expect(release.jobs[name]?.if).toBe(
-      "github.repository == 'openai/codex-security'",
-    );
-  }
-  expect(release.jobs["native"]?.if).toBe(
-    "github.repository == 'openai/codex-security' && needs.source.outputs.existing-digest == ''",
+  expect(Object.keys(release.on)).toEqual(["workflow_call"]);
+  expect(release.jobs["source"]?.if).toBe(
+    "github.workflow_ref == 'openai/codex-security/.github/workflows/node-github-release.yml@refs/heads/main'",
   );
-  expect(release.jobs["publish-platform"]?.needs).toBe("authorize");
+  expect(release.jobs["preflight"]?.needs).toContain("source");
+  expect(release.jobs["manifest"]?.needs).toContain("preflight");
 });
 
-test.each([
-  ["push", false, "README.md", true],
-  ["pull_request", true, "README.md", true],
-  ["pull_request", false, "README.md", false],
-  ["pull_request", false, "Dockerfile", true],
-  ["pull_request", false, ".github/workflows/container-ci.yml", true],
-  ["pull_request", false, ".github/workflows/container-validate.yml", true],
-  ["pull_request", false, ".github/workflows/container-release.yml", true],
-  ["pull_request", false, ".github/workflows/native-windows.yml", true],
-  ["pull_request", false, ".github/workflows/node-ci.yml", true],
-  ["pull_request", false, ".github/actions/setup-tools/action.yml", true],
-  ["pull_request", false, "sdk/typescript/src/index.ts", true],
-  [
-    "pull_request",
-    false,
-    "plugins/codex-security/skills/example/SKILL.md",
-    true,
-  ],
-] as const)(
-  "selects container validation for %s / retarget=%p / %s",
-  (eventName, baseChanged, path, selected) => {
-    const directory = mkdtempSync(join(tmpdir(), "container-ci-scope-"));
-    const output = join(directory, "outputs");
-    const script = ci.jobs["validate-title"]!.steps!.find(
-      (step) => step.name === "Select additional checks",
-    )!.run!;
-    try {
-      const result = spawnSync(
-        bash,
-        ["-c", `git() { printf '%s\\0' "$CHANGED_PATH"; }\n${script}`],
-        {
-          env: {
-            ...process.env,
-            EVENT_NAME: eventName,
-            BASE_CHANGED: String(baseChanged),
-            CHANGED_PATH: path,
-            GITHUB_OUTPUT: output,
-          },
-        },
+test("stages the verified scanner archive and retains its locked dependencies", () => {
+  const directories = createTemporaryDirectoriesSync();
+  try {
+    const root = directories.create("release image inputs ");
+    const archive = join(root, "release.tgz");
+    const runtimeLock = join(root, "runtime-lock.json");
+    const bytes = Buffer.from("verified npm archive");
+    const integrity =
+      "sha512-" + createHash("sha512").update(bytes).digest("base64");
+    const scanner = {
+      version: "1.2.3",
+      resolved: "https://registry.npmjs.org/scanner.tgz",
+      integrity,
+    };
+    const packages = {
+      "": { dependencies: { "@openai/codex-security": "1.2.3" } },
+      "node_modules/@openai/codex-security": scanner,
+      "node_modules/dependency": { version: "3.2.1", integrity: "unchanged" },
+    };
+    writeFileSync(archive, bytes);
+    writeFileSync(
+      runtimeLock,
+      JSON.stringify({ lockfileVersion: 3, packages }),
+    );
+    const prepare = () =>
+      execFileSync(
+        process.execPath,
+        [
+          fileURLToPath(
+            new URL(
+              "../../../docker/prepare-release-package.mjs",
+              import.meta.url,
+            ),
+          ),
+          archive,
+          runtimeLock,
+          root,
+        ],
+        { stdio: "pipe" },
       );
-      expect(result.status).toBe(0);
-      const outputs = Object.fromEntries(
-        readFileSync(output, "utf8")
-          .trim()
-          .split("\n")
-          .map((line) => line.split("=")),
-      );
-      expect(outputs["container-validate"]).toBe(String(selected));
-      if (path === ".github/actions/setup-tools/action.yml") {
-        expect(outputs["test-quality"]).toBe("true");
-      }
-    } finally {
-      rmSync(directory, { recursive: true, force: true });
-    }
-  },
-);
-
-test("required CI rejects failed, cancelled, or skipped selected container checks", () => {
-  const gate = ci.jobs["required-test"]!;
-  expect(gate.needs).toContain("container-validate");
-  expect(gate.if).toBe("always()");
-  const step = gate.steps!.find(
-    (step) => step.name === "Require selected container coverage",
-  )!;
-  expect(step.run).toBe("exit 1");
-  for (const selected of ["true", "false"]) {
-    for (const result of ["success", "failure", "cancelled", "skipped"]) {
-      const condition = step
-        .if!.replaceAll(
-          "needs.validate-title.outputs.container-validate",
-          `'${selected}'`,
-        )
-        .replaceAll("needs.container-validate.result", `'${result}'`);
-      const evaluation = spawnSync(bash, ["-c", `[[ ${condition} ]]`]);
-      expect(evaluation.status, `${selected}/${result}`).toBe(
-        selected === "true" && result !== "success" ? 0 : 1,
-      );
-    }
+    prepare();
+    expect(readFileSync(join(root, "scanner.tgz"))).toEqual(bytes);
+    expect(
+      JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8"))
+        .packages,
+    ).toEqual({
+      ...packages,
+      "node_modules/@openai/codex-security": {
+        ...scanner,
+        resolved: "file:scanner.tgz",
+      },
+    });
+    writeFileSync(archive, "changed scanner bytes");
+    expect(prepare).toThrow(
+      "Scanner archive differs from the release runtime lock",
+    );
+  } finally {
+    directories.cleanup();
   }
 });

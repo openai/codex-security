@@ -2,6 +2,7 @@
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import os
 import sqlite3
@@ -14,8 +15,15 @@ from urllib.parse import urlsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from finalize_scan_contract import ContractError, _prepare_scan_finalization
+from finalize_scan_contract import (
+    ContractError,
+    _prepare_scan_finalization,
+    _read_scan_local_json_bytes,
+    _read_sealed_scan,
+    manifest_is_sealed,
+)
 from report_projection import SEVERITY_ORDER
+from review_state import review_state
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
 from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
@@ -122,10 +130,7 @@ def cli_scan_resume(
         if manifest_path is not None:
             manifest = wb.read_json_object(manifest_path)
             manifest_scan = manifest.get("scan")
-            if isinstance(manifest_scan, dict) and (
-                manifest_scan.get("sealedAt") is not None
-                or manifest_scan.get("artifacts") is not None
-            ):
+            if isinstance(manifest_scan, dict) and manifest_is_sealed(manifest_scan):
                 try:
                     binding = wb.workbench_completion_binding(scan, scan["started_at"], manifest)
                     _prepare_scan_finalization(
@@ -137,6 +142,69 @@ def cli_scan_resume(
                 except ContractError as exc:
                     raise SystemExit(f"Cannot resume sealed scan: {exc}") from exc
     return result
+
+
+def coverage_summary_for_history(
+    wb: Any, scan: sqlite3.Row, canonical_scan_directory: Callable[[Path], Path]
+) -> dict[str, Any]:
+    scan_dir = canonical_scan_directory(Path(scan["scan_dir"]))
+    coverage_ref = "coverage.json"
+    try:
+        if scan["seal_manifest_digest"] is None:
+            # Older workbench rows can have valid seals without a pinned digest.
+            manifest, _, coverage, _ = _read_sealed_scan(scan_dir, None, "history coverage")
+            wb.verify_manifest_binding(scan, manifest)
+            if coverage["mode"] != wb.expected_coverage_mode(scan):
+                raise ContractError("coverage.mode: must match the workbench scan")
+        else:
+            # Completion already validated the full scan. History only needs the
+            # pinned manifest and any legacy coverage artifact, not findings or receipts.
+            manifest, manifest_bytes = _read_scan_local_json_bytes(
+                scan_dir, ARTIFACTS["manifest"], ARTIFACTS["manifest"]
+            )
+            if (
+                f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
+                != scan["seal_manifest_digest"]
+            ):
+                raise ContractError("The sealed scan manifest changed after completion.")
+            sealed_scan = manifest["scan"]
+            if sealed_scan["id"] != scan["id"] or not sealed_scan.get("sealedAt"):
+                raise ContractError("The sealed coverage does not belong to this scan.")
+            if "coverageRef" not in sealed_scan:
+                coverage = review_state(sealed_scan)
+                return {
+                    key: coverage[key]
+                    for key in ("mode", "includePaths", "excludePaths", "explicitExclusions")
+                }
+            if sealed_scan["coverageRef"] != coverage_ref:
+                raise ContractError("The sealed coverage does not belong to this scan.")
+            coverage, coverage_bytes = _read_scan_local_json_bytes(
+                scan_dir, coverage_ref, coverage_ref
+            )
+            expected = next(
+                (
+                    artifact["sha256"]
+                    for artifact in sealed_scan["artifacts"]
+                    if artifact["path"] == coverage_ref
+                ),
+                None,
+            )
+            if (
+                hashlib.sha256(coverage_bytes).hexdigest() != expected
+                or coverage.get("scanId") != scan["id"]
+            ):
+                raise ContractError("The sealed coverage changed after completion.")
+    except ContractError as exc:
+        raise SystemExit(str(exc)) from exc
+    return {
+        key: coverage[key]
+        for key in (
+            "mode",
+            "includePaths",
+            "excludePaths",
+            "explicitExclusions",
+        )
+    }
 
 
 def _windows_path_key(value: str) -> str:
@@ -202,8 +270,7 @@ def _repository_origin(target: Path) -> tuple[str, str] | None:
     return (host.lower(), path) if host and path else None
 
 
-SCAN_SUMMARY_QUERY = """
-SELECT
+SCAN_SUMMARY_COLUMNS = """
     scans.*,
     progress.reportable_findings_count,
     progress.scope_file_count,
@@ -215,6 +282,9 @@ SELECT
         FROM finding_occurrences AS occurrences
         WHERE occurrences.scan_id = scans.id
     ) AS finding_count
+"""
+SCAN_SUMMARY_QUERY = f"""
+SELECT {SCAN_SUMMARY_COLUMNS}
 FROM scans
 JOIN scan_progress AS progress ON progress.scan_id = scans.id
 """

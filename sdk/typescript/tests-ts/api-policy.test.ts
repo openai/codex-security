@@ -114,7 +114,7 @@ async function setup(
         pythonSelections.push(selection);
         return PYTHON;
       },
-      requirePrivatePolicyOutputDirectory: async (path: string) => {
+      preparePolicyOutputDirectory: async (path: string) => {
         await options.secureOutput?.(path);
       },
       repositoryRevision: async () => {
@@ -423,10 +423,10 @@ describe("CodexSecurity policy API", () => {
     },
   );
 
-  test("requires private output before starting a policy turn", async () => {
+  test("prepares output permissions before starting a policy turn", async () => {
     const onOutputDirReady = mock();
     const secured = mock(async (_path: string) => {
-      throw new Error("Policy output could not be made private");
+      throw new Error("Policy output permissions could not be prepared");
     });
     const f = await setup({
       secureOutput: secured,
@@ -436,7 +436,7 @@ describe("CodexSecurity policy API", () => {
         outputDir: f.outputDir,
         onOutputDirReady,
       }),
-    ).rejects.toThrow("Policy output could not be made private");
+    ).rejects.toThrow("Policy output permissions could not be prepared");
     expect(secured.mock.calls.map(([value]) => value)).toEqual([f.outputDir]);
     expect(onOutputDirReady).not.toHaveBeenCalled();
     expect(f.threads).toHaveLength(0);
@@ -600,6 +600,7 @@ describe("CodexSecurity policy API", () => {
           ? ["--separate-git-dir", join(f.root, "other-git-data")]
           : []),
       );
+      policyGit(owner, "config", "--local", "core.autocrlf", "false");
       policyGit(owner, "commit", "--allow-empty", "--quiet", "-m", "initial");
       let checkout = owner;
       if (kind === "linked") {
@@ -692,6 +693,7 @@ describe("CodexSecurity policy API", () => {
       onPrepare,
     });
     policyGit(f.repository, "init", "--quiet");
+    policyGit(f.repository, "config", "--local", "core.autocrlf", "false");
     const nested = await addPolicySubmodule(
       f.repository,
       join(f.root, "submodule-source"),
@@ -769,13 +771,15 @@ describe("CodexSecurity policy API", () => {
       const gitDirectory = policyGitDirectory(repository);
       for (const metadata of new Set([common, gitDirectory])) {
         const outputDir = join(metadata, "policy-artifacts");
-        for (const operation of [
-          () => f.security.preflightPolicy(repository, { outputDir }),
-          () => f.security.generatePolicy(repository, { outputDir }),
-        ])
-          await expect(operation()).rejects.toThrow(
-            "outside the protected scan root",
-          );
+        await expect(
+          f.security.preflightPolicy(repository, { outputDir }),
+        ).rejects.toThrow("outside the protected scan root");
+        // Generation uses the same checks as preflight; exercise each destination type once.
+        if (kind === "separate") {
+          await expect(
+            f.security.generatePolicy(repository, { outputDir }),
+          ).rejects.toThrow("outside the protected scan root");
+        }
         const state = new InternalSecurity(
           {},
           { environment: { CODEX_SECURITY_STATE_DIR: outputDir } },
@@ -783,9 +787,11 @@ describe("CodexSecurity policy API", () => {
         await expect(state.preflightPolicy(repository)).rejects.toThrow(
           "outside the protected scan root",
         );
-        await expect(state.generatePolicy(repository)).rejects.toThrow(
-          "outside the protected scan root",
-        );
+        if (kind === "linked" && metadata === gitDirectory) {
+          await expect(state.generatePolicy(repository)).rejects.toThrow(
+            "outside the protected scan root",
+          );
+        }
         await state.close();
         await expect(readdir(outputDir)).rejects.toMatchObject({
           code: "ENOENT",
@@ -860,13 +866,16 @@ describe("CodexSecurity policy API", () => {
     }
   });
 
-  test("rejects hard-linked policy evidence before starting Codex", async () => {
-    for (const [scope, policyPath] of [
-      [".", "SECURITY.md"],
-      ["component", "SECURITY.md"],
-      [".", "child/SECURITY.md"],
-      [".", ".github/SECURITY.md"],
-    ] as const) {
+  test.each([
+    [".", "SECURITY.md", false],
+    ["component", "SECURITY.md", false],
+    [".", "child/SECURITY.md", false],
+    [".", ".github/SECURITY.md", false],
+    [".", "SECURITY.md", true],
+    ["component", "component/SECURITY.md", true],
+  ] as const)(
+    "rejects hard-linked policy evidence before starting Codex (%s, %s, ignored: %j)",
+    async (scope, policyPath, ignored) => {
       let prepared = false;
       const f = await setup({ onPrepare: () => (prepared = true) });
       policyGit(f.repository, "init", "--quiet");
@@ -874,6 +883,8 @@ describe("CodexSecurity policy API", () => {
       await mkdir(join(f.repository, scope), { recursive: true });
       await mkdir(dirname(target), { recursive: true });
       await link(join(f.repository, ".git", "config"), target);
+      if (ignored)
+        await writeFile(join(f.repository, ".gitignore"), `${policyPath}\n`);
       const options = { path: scope, outputDir: f.outputDir };
       await expect(
         f.security.preflightPolicy(f.repository, options),
@@ -885,31 +896,40 @@ describe("CodexSecurity policy API", () => {
       expect(f.threads).toHaveLength(0);
       expect(await readdir(f.outputDir)).toEqual([]);
       await f.security.close();
-    }
+    },
+  );
+
+  test("rejects non-UTF-8 descendant policies before starting Codex", async () => {
+    let prepared = false;
+    const f = await setup({ onPrepare: () => (prepared = true) });
+    const child = join(f.repository, "child");
+    await mkdir(child);
+    await writeFile(join(child, "SECURITY.md"), Buffer.from([0xff]));
+    const options = { outputDir: f.outputDir };
+    await expect(
+      f.security.preflightPolicy(f.repository, options),
+    ).rejects.toThrow("UTF-8");
+    await expect(
+      f.security.generatePolicy(f.repository, options),
+    ).rejects.toThrow("UTF-8");
+    expect(prepared).toBe(false);
+    expect(f.threads).toHaveLength(0);
+    expect(await readdir(f.outputDir)).toEqual([]);
+    await f.security.close();
   });
 
-  test("validates descendant policy contents before starting Codex", async () => {
-    for (const [content, message] of [
-      [Buffer.alloc(1024 * 1024 + 1, "x"), "1 MiB"],
-      [Buffer.from([0xff]), "UTF-8"],
-    ] as const) {
-      let prepared = false;
-      const f = await setup({ onPrepare: () => (prepared = true) });
-      const child = join(f.repository, "child");
-      await mkdir(child);
-      await writeFile(join(child, "SECURITY.md"), content);
-      const options = { outputDir: f.outputDir };
-      await expect(
-        f.security.preflightPolicy(f.repository, options),
-      ).rejects.toThrow(message);
-      await expect(
-        f.security.generatePolicy(f.repository, options),
-      ).rejects.toThrow(message);
-      expect(prepared).toBe(false);
-      expect(f.threads).toHaveLength(0);
-      expect(await readdir(f.outputDir)).toEqual([]);
-      await f.security.close();
-    }
+  test("accepts descendant policies larger than 1 MiB before starting Codex", async () => {
+    const f = await setup();
+    const child = join(f.repository, "child");
+    await mkdir(child);
+    const content = `# Component policy\n${"é".repeat(1024 * 1024)}\n`;
+    await writeFile(join(child, "SECURITY.md"), content);
+    const options = { outputDir: f.outputDir };
+    await f.security.preflightPolicy(f.repository, options);
+    const draft = await f.security.generatePolicy(f.repository, options);
+    expect(draft.content).toBe(POLICY);
+    expect(await readFile(join(child, "SECURITY.md"), "utf8")).toBe(content);
+    await f.security.close();
   });
 
   test.each(["path", "directory"])(

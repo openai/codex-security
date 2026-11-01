@@ -14,7 +14,12 @@ import { stripVTControlCharacters } from "node:util";
 import type { Finding, JsonObject, SeverityLevel } from "../src/index.js";
 import { main } from "../src/cli.js";
 import type { LinearClientFactory } from "../src/linear.js";
-import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
+import {
+  capture,
+  dependencies,
+  fakeResult,
+  type OnCodex,
+} from "./cli-fixtures.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
 import { createCliTest } from "./support/cli-run.js";
@@ -427,6 +432,48 @@ describe("scan and patch workflow", () => {
       JSON.parse(schema.stdout).options.properties.validationPromptFile,
     ).toMatchObject({ type: "string" });
   });
+
+  test.each([false, true])(
+    "passes static verification to patching (saved findings: %p)",
+    async (saved) => {
+      const result = resultWithFindings(["high"]);
+      const report =
+        "Source review confirms the guard; runtime checks were not performed.";
+      const onCodex = mock<OnCodex>((_args, output) => {
+        expect(output?.appServer?.prompt).toContain(
+          "Verification mode: static",
+        );
+        output?.stdout.write(
+          saved
+            ? JSON.stringify({
+                patches: [
+                  {
+                    occurrenceId: "occ_1",
+                    status: "verified",
+                    files: ["guard.ts"],
+                    verification: report,
+                  },
+                ],
+              })
+            : report,
+        );
+        return 0;
+      });
+      const outcome = await runWorkflow(
+        [
+          "patch",
+          ...(saved ? ["--scan", "scan-1"] : ["Synthetic finding"]),
+          "--verification-mode",
+          "static",
+          "--json",
+        ],
+        { result, onWorkbench: () => savedScan(result), onCodex },
+      );
+      expect(outcome.exitCode).toBe(0);
+      expect(onCodex).toHaveBeenCalledTimes(1);
+      expect(outcome.stdout).toContain(report);
+    },
+  );
 
   test.each([
     [0, false, 0],
@@ -1517,9 +1564,7 @@ describe("scan and patch workflow", () => {
                 "--helper validate-patch-risk-assessment <assessment.json>",
               );
               expect(output.appServer?.prompt).toContain(
-                process.platform === "win32"
-                  ? "launch_codex_security_mcp.cmd"
-                  : "launch_codex_security_mcp",
+                "references/windows-validation.md",
               );
               const artifact = JSON.parse(
                 output
@@ -1773,6 +1818,7 @@ describe("scan and patch workflow", () => {
       ["--create-pr"],
       ["--assess-patch-risk"],
       ["--validation-prompt-file", "validation.md"],
+      ["--verification-mode", "static"],
       ["--external-sandbox"],
       ["occ_1"],
     ]) {

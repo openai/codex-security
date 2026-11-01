@@ -42,6 +42,7 @@ afterEach(cleanup);
 
 function createPolicyWorktree(repository: string, root: string, name: string) {
   policyGit(repository, "init", "--quiet");
+  policyGit(repository, "config", "--local", "core.autocrlf", "false");
   policyGit(repository, "commit", "--allow-empty", "--quiet", "-m", "initial");
   const linked = join(root, name);
   policyGit(
@@ -395,6 +396,44 @@ describe("security policy generation", () => {
     );
     expect(inventory.policyPaths).toEqual(["objects/SECURITY.md"]);
     expect(inventory.gitMetadataPaths).toEqual([]);
+  });
+
+  test("leaves Git-ignored dependencies out of the policy inventory", async () => {
+    const f = await fixture();
+    policyGit(f.repository, "init", "--quiet");
+    await writeFile(
+      join(f.repository, ".gitignore"),
+      "/SECURITY.md\nnode_modules/\n.venv/\n",
+    );
+    await writeFile(join(f.repository, "SECURITY.md"), POLICY);
+    for (const directory of [
+      "node_modules/dependency",
+      "node_modules/tracked",
+      ".venv/src/dependency",
+      "services/api",
+    ]) {
+      await mkdir(join(f.repository, directory), { recursive: true });
+      await writeFile(join(f.repository, directory, "SECURITY.md"), POLICY);
+    }
+    policyGit(join(f.repository, ".venv/src/dependency"), "init", "--quiet");
+    policyGit(f.repository, "add", "--force", "node_modules/tracked");
+    const inventory = await inspectSecurityPolicySources(
+      await resolveSecurityPolicyTarget(f.repository),
+    );
+    expect(inventory.policyPaths).toEqual([
+      "SECURITY.md",
+      "node_modules/tracked/SECURITY.md",
+      "services/api/SECURITY.md",
+    ]);
+    const selectedDependency = await inspectSecurityPolicySources(
+      await resolveSecurityPolicyTarget(
+        f.repository,
+        "node_modules/dependency",
+      ),
+    );
+    expect(selectedDependency.policyPaths).toEqual([
+      "node_modules/dependency/SECURITY.md",
+    ]);
   });
 
   test("recognizes shared Git storage without HEAD during policy discovery", async () => {
@@ -931,12 +970,7 @@ describe("security policy generation", () => {
   }
 
   test("retains completed evidence without saving invalid policy documents", async () => {
-    for (const markdown of [
-      "",
-      " \n\t",
-      "# Policy\n\ud800",
-      `# Policy\n${"x".repeat(1024 * 1024)}`,
-    ]) {
+    for (const markdown of ["", " \n\t", "# Policy\n\ud800"]) {
       const f = await fixture();
       await expect(
         f.generate({
@@ -953,18 +987,31 @@ describe("security policy generation", () => {
     }
   });
 
-  test("enforces the resolver byte limit on existing policies", async () => {
-    const header = "# Policy\n";
-    const maximum =
-      header + "x".repeat(1024 * 1024 - Buffer.byteLength(header));
-    const existing = await fixture();
-    const target = join(existing.repository, "SECURITY.md");
-    await writeFile(target, maximum);
-    expect(await readSecurityPolicy(target)).toBe(maximum);
-    await writeFile(target, `${maximum}x`);
-    await expect(existing.generate()).rejects.toThrow("1 MiB limit");
-    expect(await readdir(existing.outputDir)).toEqual([]);
-  });
+  test.each([".", "component"])(
+    "reads and generates policies larger than 1 MiB at %s",
+    async (scope) => {
+      const f = await fixture();
+      const directory = join(f.repository, scope);
+      await mkdir(directory, { recursive: true });
+      const target = join(directory, "SECURITY.md");
+      const previous = `# Existing policy\n${"é".repeat(1024 * 1024)}\n`;
+      const proposed = `# Proposed policy\n${"λ".repeat(1024 * 1024)}\n`;
+      await writeFile(target, previous);
+      expect(await readSecurityPolicy(target)).toBe(previous);
+
+      const draft = await f.generate({
+        path: scope,
+        run: async (stage) => stageResult(stage, proposed),
+      });
+      expect(draft.previousContent).toBe(previous);
+      expect(
+        await readFile(join(f.outputDir, "previous-SECURITY.md"), "utf8"),
+      ).toBe(previous);
+      expect(draft.content).toBe(proposed);
+      expect(await readFile(draft.draftPath, "utf8")).toBe(proposed);
+      expect(await readSecurityPolicy(target)).toBe(previous);
+    },
+  );
 
   test.each(["architecture", "threat_model"] as const)(
     "rejects malformed Unicode in %s evidence before saving it",
@@ -993,7 +1040,7 @@ describe("security policy generation", () => {
     },
   );
 
-  test("does not apply the policy byte limit to supporting evidence", async () => {
+  test("preserves supporting evidence larger than 1 MiB", async () => {
     const f = await fixture();
     const document = `# Evidence\n${"x".repeat(1024 * 1024)}`;
     const draft = await f.generate({

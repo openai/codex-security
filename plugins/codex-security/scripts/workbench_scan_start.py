@@ -30,7 +30,10 @@ from workbench_validation import optional_text
 
 
 def safe_segment(value: str) -> str:
-    return re.sub(r"[^\w.-]", "-", value).strip("-") or "scan"
+    segment = re.sub(r"[^\w.-]", "-", value)
+    if segment != value:
+        segment = segment.strip("-")
+    return segment or "scan"
 
 
 def compact_timestamp() -> str:

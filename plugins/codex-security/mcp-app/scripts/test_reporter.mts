@@ -1,4 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
+import { ReadableStream } from "node:stream/web";
 import { junit, tap, type TestEvent } from "node:test/reporters";
 
 export default async function* report(source: AsyncIterable<TestEvent>) {
