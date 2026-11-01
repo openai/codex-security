@@ -30,13 +30,10 @@ test("Snyk checks the remote helper used by fetch when GIT_CONFIG selects a diff
   const config = join(fixture.root, "empty-config");
   await writeFile(config, "");
   for (const helper of ["other", ""]) {
-    execFileSync("git", [
-      "config",
-      "--file",
-      join(fixture.repository, ".git", "config"),
-      "remote.origin.vcs",
-      helper,
-    ]);
+    execFileSync("git", ["config", "remote.origin.vcs", helper], {
+      cwd: fixture.repository,
+      env: fixture.environment,
+    });
     await expect(
       prepare(fixture, remote, { GIT_CONFIG: config }),
     ).rejects.toThrow("configured remote");
@@ -72,13 +69,9 @@ test("a later fetch URL on the same Git remote cannot bind a Snyk project", asyn
   await using fixture = await snykLocalFixture({
     remote: selected + "-different",
   });
-  execFileSync("git", [
-    "config",
-    "--file",
-    join(fixture.repository, ".git", "config"),
-    "--add",
-    "remote.origin.url",
-    selected,
-  ]);
+  execFileSync("git", ["config", "--add", "remote.origin.url", selected], {
+    cwd: fixture.repository,
+    env: fixture.environment,
+  });
   await expect(prepare(fixture, selected)).rejects.toThrow("configured remote");
 });

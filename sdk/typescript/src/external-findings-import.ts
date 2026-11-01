@@ -8,6 +8,7 @@ import {
   readExternalFindings,
 } from "./external-findings-read.js";
 import {
+  distinctSourceRepositories,
   prepareLocalImport,
   type LocalExternalImportDependencies,
 } from "./external-findings-local.js";
@@ -53,6 +54,7 @@ export async function prepareLocalExternalImport(
         cloudRepositoryUrlKey(url) === cloudRepositoryUrlKey(source),
     );
     const key = knownGitHub ? cloudRepositoryUrlKey : repositoryUrlKey;
+    sourceRepositories = distinctSourceRepositories(sourceRepositories);
     for (const reference of sourceRepositories) {
       if (key(reference.url) !== key(source))
         throw new Error(

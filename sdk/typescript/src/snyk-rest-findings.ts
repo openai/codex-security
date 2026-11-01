@@ -1023,7 +1023,7 @@ function bindSnykFinding(
   finding: ExternalFinding,
   references: readonly ExternalSourceRepository[],
   originals: ReturnType<typeof snykRowEvidence>,
-  report?: Resource,
+  report?: { fields: Resource; asset: ReturnType<typeof savedContext> },
   retain?: (finding: ExternalFinding, source: Resource) => void,
 ) {
   const retained = record(
@@ -1043,7 +1043,10 @@ function bindSnykFinding(
     throw new Error(
       "A normalized Snyk row cannot claim both v1 and v2 native representations.",
     );
-  const document = readSnykRestDocument({ ...retained, format }, report);
+  const document = readSnykRestDocument(
+    { ...retained, format },
+    report?.fields,
+  );
   const issue =
     (format === SNYK_REST_ISSUES_FORMAT ? originals?.v2?.issue : undefined) ??
     parseHostedScannerJson(
@@ -1052,13 +1055,21 @@ function bindSnykFinding(
   // A selected issue can retain any of its original monitor fields. Fill only those it omitted.
   let projected = false;
   if (report && (originals?.v1?.issue || originals?.v2?.issue)) {
-    for (const [field, value] of Object.entries(report)) {
+    for (const [field, value] of Object.entries(report.fields)) {
       if (document[field] !== undefined) continue;
       document[field] = value;
       projected = true;
     }
   }
-  const asset = savedContext(document, references);
+  // Complete v2 selections normally carry the same verified monitor and native assets on every row.
+  const asset =
+    format === SNYK_REST_ISSUES_FORMAT &&
+    report &&
+    Object.entries(report.fields).every(
+      ([key, value]) => document[key] === value,
+    )
+      ? report.asset
+      : savedContext(document, references);
   const { source, repository } = asset;
   const { id: issueId, attributes } = selectedIssue(
     scopedIssue(issue, source),
@@ -1384,9 +1395,12 @@ export function snykRestImportRepository(
     project !== undefined || rows.some(({ originals }) => originals);
   if (!hosted && !declaredCloudRepository) return;
   const context = project && {
-    ...project.source,
-    projectJson: JSON.stringify(project.project),
-    targetJson: JSON.stringify(project.target),
+    asset: project,
+    fields: {
+      ...project.source,
+      projectJson: JSON.stringify(project.project),
+      targetJson: JSON.stringify(project.target),
+    },
   };
   const retainedIssues: { finding: ExternalFinding; issue: Resource }[] = [];
   const retainedRows: Resource[] = [];

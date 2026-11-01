@@ -295,8 +295,9 @@ function sarifWithRepositories(urls: string[]) {
     runs: [
       {
         ...input.runs[0]!,
-        versionControlProvenance: urls.map((repositoryUri) => ({
+        versionControlProvenance: urls.map((repositoryUri, index) => ({
           repositoryUri,
+          branch: index === 0 ? "main" : "release",
         })),
       },
     ],
@@ -376,8 +377,9 @@ test.each([
     );
     expect(stored[0]!.evidence.source_data?.["runContext"]).toMatchObject({
       versionControlProvenance: [
-        { repositoryUri: sourceRepositoryUrl },
+        { repositoryUri: sourceRepositoryUrl, branch: "main" },
         {
+          branch: "release",
           repositoryUri:
             platform === "unknown host" ? sourceRepositoryUrl : originalUrl,
         },
