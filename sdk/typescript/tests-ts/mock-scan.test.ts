@@ -311,7 +311,7 @@ test("aborting mock generation leaves a terminal scan record", async () => {
       client.run(repository, {
         mock: true,
         signal: controller.signal,
-        onScanStarted: () => controller.abort(),
+        onScanStarted: () => controller.abort(Number.NaN),
       }),
     ).rejects.toThrow(ScanInterruptedError);
     const history = await runWorkbench(

@@ -3354,6 +3354,7 @@ export class CodexSecurity {
       const canceled = isCancellationDerivedFailure(
         error,
         signal,
+        this.#abortController.signal,
         costAbortController.signal,
       );
       const snapshot = await costTracker?.stop().catch(() => null);
@@ -4542,7 +4543,11 @@ export class CodexSecurity {
       return result;
     } catch (error) {
       if (activeScan !== undefined) {
-        const canceled = isCancellationDerivedFailure(error, signal);
+        const canceled = isCancellationDerivedFailure(
+          error,
+          signal,
+          this.#abortController.signal,
+        );
         await recordStoppedScan(workbench, activeScan, error, canceled).catch(
           () => undefined,
         );
@@ -6328,29 +6333,35 @@ async function recordStoppedScan(
 function isCancellationDerivedFailure(
   failure: unknown,
   signal: AbortSignal,
+  closeSignal: AbortSignal,
   costSignal?: AbortSignal,
 ): boolean {
   if (
     !signal.aborted ||
-    (costSignal?.aborted && costSignal.reason === signal.reason)
+    (costSignal?.aborted && Object.is(costSignal.reason, signal.reason))
   )
     return false;
+  const isStopReason = (value: unknown) =>
+    Object.is(value, signal.reason) ||
+    (closeSignal.aborted && Object.is(value, closeSignal.reason));
   let current = failure;
-  const seen = new Set<ScanInterruptedError>();
-  while (current instanceof ScanInterruptedError) {
+  const seen = new Set<CodexSecurityError>();
+  while (current instanceof CodexSecurityError) {
+    if (current instanceof ScanExecutionError)
+      return current.result.status === "canceled";
     if (current instanceof ScanCostLimitExceededError) return false;
-    if (current === signal.reason || current.cause === undefined) return true;
+    if (isStopReason(current)) return true;
+    if (current.cause === undefined)
+      return current instanceof ScanInterruptedError;
     if (seen.has(current)) return false;
     seen.add(current);
     current = current.cause;
   }
   return (
-    current === signal.reason ||
-    (current instanceof CodexSecurityError &&
-      current.cause === signal.reason) ||
+    isStopReason(current) ||
     (isRecord(current) &&
       current["name"] === "AbortError" &&
-      (current["cause"] === undefined || current["cause"] === signal.reason))
+      (current["cause"] === undefined || isStopReason(current["cause"])))
   );
 }
 

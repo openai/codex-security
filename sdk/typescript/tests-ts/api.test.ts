@@ -34,6 +34,7 @@ import {
   AuthenticationRequiredError,
   CodexSecurity,
   DiffTarget,
+  IncompleteScanError,
   InvalidTargetError,
   OutputDirectoryError,
   OutputInsideProtectedRootError,
@@ -3615,6 +3616,7 @@ if __name__ == "__main__":
     ["caller abort", true],
     ["nested interruption", true],
     ["client close", true],
+    ["caller abort then close", true],
     ["ordinary failure", false],
     ["independent abort", false],
     ["older plugin", false],
@@ -3637,6 +3639,8 @@ if __name__ == "__main__":
       }
 
       const controller = new AbortController();
+      const closes =
+        scenario === "client close" || scenario === "caller abort then close";
       const stopped = mock(
         (_args: readonly string[], _signal?: AbortSignal) => {},
       );
@@ -3647,7 +3651,9 @@ if __name__ == "__main__":
         runWorkbench: async (options, args, input) => {
           if (args[0] === "fail-scan") stopped(args, options.signal);
           if (args[0] === "get-scan-feedback") {
-            if (scenario === "client close") {
+            if (closes) {
+              if (scenario === "caller abort then close")
+                controller.abort("caller stopped");
               closing = client.close();
             } else if (scenario === "ordinary failure") {
               return Promise.reject(
@@ -3663,7 +3669,14 @@ if __name__ == "__main__":
                 throw error;
               }
               if (scenario === "nested interruption") {
-                let cause: unknown = controller.signal.reason;
+                const abort = new Error("validation subprocess aborted", {
+                  cause: controller.signal.reason,
+                });
+                abort.name = "AbortError";
+                let cause: unknown = new IncompleteScanError(
+                  "validation interrupted",
+                  { cause: abort },
+                );
                 for (let i = 0; i < 10; i++)
                   cause = new ScanInterruptedError(
                     "nested interruption",
@@ -3679,7 +3692,7 @@ if __name__ == "__main__":
         },
       });
       const scan = client.run(repository, { signal: controller.signal });
-      if (scenario === "client close") {
+      if (closes) {
         await expect(scan).rejects.toThrow("CodexSecurity is closed.");
         await closing;
       } else {
