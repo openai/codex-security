@@ -716,8 +716,7 @@ async function preparePublicationInput(
   // prove which numbers were approved.
   function readPreviousNumbers(
     record: SavedSubmission | null,
-    canonicalExists = false,
-  ): SavedSubmission | undefined {
+  ): SavedSubmission | "different-wire" | undefined {
     const content = readSaved(record);
     const projection = content.inputProjection;
     const savedWire = wireJson(submissionFindings(content.requests));
@@ -738,9 +737,8 @@ async function preparePublicationInput(
       throw unmatchedPreviousNumbers();
     if (savedWire !== wireJson(selected)) {
       // A genuinely empty object at this key is a separate ordinary selection.
-      if (canonicalExists || wireDigest === projection.savedEvidenceDigest)
-        return undefined;
-      throw unmatchedPreviousNumbers();
+      if (wireDigest === projection.savedEvidenceDigest) return undefined;
+      return "different-wire";
     }
     if (!verifiableLegacyMetadata(parsed, false))
       throw unmatchedPreviousNumbers();
@@ -764,15 +762,15 @@ async function preparePublicationInput(
   const lookupPath = join(state, `${key}.lookup.json`);
   // A lookup only suggests a regular file to validate. A missing or stale hint
   // leaves the same on-disk discovery available as before.
-  async function readLookupFile(path: string) {
+  async function readOptionalRegularFile(path: string) {
     try {
       if ((await lstat(path)).isFile()) return await readFile(path, "utf8");
     } catch {
-      // Optional lookup I/O must not prevent checking the actual checkpoints.
+      // Optional discovery must not veto an independently verified checkpoint.
     }
   }
   async function lookupFileKey() {
-    const serialized = await readLookupFile(lookupPath);
+    const serialized = await readOptionalRegularFile(lookupPath);
     return serialized?.trim().match(/^"([a-f0-9]{64})"$/u)?.[1];
   }
 
@@ -896,15 +894,19 @@ async function preparePublicationInput(
       [key, previousKey, knownFileKey].filter((value) => value !== undefined),
     );
     let unidentified = false;
+    let differentOldWire = false;
     let stagingPathOccupied = false;
     async function readCandidate(
       fileKey: string,
       selected?: Checkpoint,
       contents?: string,
     ): Promise<Checkpoint | undefined> {
+      const path = join(state, `${fileKey}.pending.json`);
       const serialized =
         contents ??
-        (await readOptionalFile(join(state, `${fileKey}.pending.json`)));
+        (selected?.fileKey === key && !known.has(fileKey)
+          ? await readOptionalRegularFile(path)
+          : await readOptionalFile(path));
       if (serialized === undefined) return selected;
       if (fileKey === (previousKey ?? key)) stagingPathOccupied = true;
       let record: SavedSubmission | null;
@@ -933,8 +935,13 @@ async function preparePublicationInput(
         return selected;
       }
       const content = historical
-        ? readPreviousNumbers(record, selected?.fileKey === key)
+        ? readPreviousNumbers(record)
         : validateSaved(record);
+      if (content === "different-wire") {
+        // Another spelling may already have a verified checkpoint for this wire value.
+        differentOldWire = true;
+        return selected;
+      }
       if (!content) return selected;
       if (selected)
         throw new CodexSecurityError(
@@ -949,7 +956,7 @@ async function preparePublicationInput(
     if (!selected && knownFileKey !== undefined) return undefined;
     const hint = await lookupFileKey();
     if (hint && !known.has(hint)) {
-      const contents = await readLookupFile(
+      const contents = await readOptionalRegularFile(
         join(state, `${hint}.pending.json`),
       );
       if (contents !== undefined) {
@@ -957,8 +964,15 @@ async function preparePublicationInput(
         known.add(hint);
       }
     }
-    // Before claiming an unmarked historical file, still look for a second authority.
-    if (selected && !selected.historical) return selected;
+    // A released publisher could stage the canonical request while another SDK
+    // tagged its old filename but had not yet written the optional lookup.
+    if (
+      selected &&
+      !selected.historical &&
+      (selected.fileKey !== key ||
+        selected.content.inputProjection?.identityFormat === 2)
+    )
+      return selected;
     const entries = await readdir(state, { withFileTypes: true }).catch(
       (error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT") return [];
@@ -972,6 +986,7 @@ async function preparePublicationInput(
       if (!known.has(fileKey))
         selected = await readCandidate(fileKey, selected);
     }
+    if (!selected && differentOldWire) throw unmatchedPreviousNumbers();
     if (!selected && stagingPathOccupied) throw occupiedCheckpoint();
     if (!selected && unidentified)
       throw new CodexSecurityError(

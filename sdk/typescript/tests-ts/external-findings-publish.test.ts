@@ -4415,7 +4415,7 @@ test("the original boxed approval keeps its filename, request and receipts on a 
 });
 
 test.each(["released", "current"])(
-  "a known %s pending retry does not read unrelated approvals",
+  "a known %s retry preserves its approval when unrelated checkpoints are unreadable",
   async (format) => {
     const released = format === "released";
     const { f, prepare, directory, request, path, saved } =
@@ -4456,12 +4456,12 @@ test.each(["released", "current"])(
       return read(...args);
     }) as typeof read);
     const operations = () => ({
-      listings: listings.mock.calls.filter(([path]) =>
+      listed: listings.mock.calls.some(([path]) =>
         statePaths.has(String(path)),
-      ).length,
-      unrelatedReads: reads.mock.calls.filter(([path]) =>
+      ),
+      readUnrelated: reads.mock.calls.some(([path]) =>
         unrelated.has(String(path)),
-      ).length,
+      ),
     });
     try {
       const retry = await prepare(2.5);
@@ -4470,11 +4470,15 @@ test.each(["released", "current"])(
       listings.mockClear();
       expect(retry.preview.resumed).toBe(true);
       expect((await retry.publish()).receipts[0]!.id).toBe(requestId);
-      expect(atPrepare).toEqual({ listings: 0, unrelatedReads: 0 });
-      expect(operations()).toEqual({ listings: 0, unrelatedReads: 0 });
+      // An unmarked released approval may have a separately tagged peer.
+      const expected = { listed: released, readUnrelated: released };
+      expect(atPrepare).toEqual(expected);
+      expect(operations()).toEqual(expected);
+      listings.mockClear();
+      reads.mockClear();
       // A fresh selection must discover possible historical approvals.
       await expect(prepare(4)).rejects.toThrow("Unreadable unrelated approval");
-      expect(operations().listings).toBe(1);
+      expect(operations()).toEqual({ listed: true, readUnrelated: true });
     } finally {
       listings.mockRestore();
       reads.mockRestore();
@@ -4485,6 +4489,7 @@ test.each(["released", "current"])(
 test("matching released primitive and boxed approvals preserve both requests", async () => {
   const primitive = await oldScoreApproval("unreported");
   const boxed = await oldScoreApproval("evidence", false);
+  const held = await primitive.prepare(2.5);
   const boxedPath = join(primitive.directory, boxed.filename);
   await writeFile(boxedPath, boxed.saved, { mode: 0o600 });
   await expect(primitive.prepare(new Number(2.5))).rejects.toThrow(
@@ -4501,13 +4506,18 @@ test("matching released primitive and boxed approvals preserve both requests", a
   const lookup = `${JSON.parse(tagged).wireKey}.lookup.json`;
   expect(await readdir(primitive.directory)).toContain(lookup);
   await writeFile(primitive.path, primitive.saved, { mode: 0o600 });
-  for (const score of [2.5, new Number(2.5)])
-    await expect(primitive.prepare(score)).rejects.toThrow(
-      "Two saved imports match",
-    );
-  expect(await readFile(primitive.path, "utf8")).toBe(primitive.saved);
-  expect(await readFile(boxedPath, "utf8")).toBe(tagged);
-  expect(primitive.f.posts).toEqual([]);
+  for (const hintAvailable of [true, false]) {
+    // A process can exit after writing the tagged approval and before saving its lookup.
+    if (!hintAvailable) await rm(join(primitive.directory, lookup));
+    for (const score of [2.5, new Number(2.5)])
+      await expect(primitive.prepare(score)).rejects.toThrow(
+        "Two saved imports match",
+      );
+    await expect(held.publish()).rejects.toThrow("Two saved imports match");
+    expect(await readFile(primitive.path, "utf8")).toBe(primitive.saved);
+    expect(await readFile(boxedPath, "utf8")).toBe(tagged);
+    expect(primitive.f.posts).toEqual([]);
+  }
 });
 
 test.each(["report", "mixed", "aliased"])(
@@ -5913,4 +5923,54 @@ test("a lookup write or cleanup failure leaves the approved request usable", asy
   expect(await Bun.file(lookup).exists()).toBe(true);
   expect((await prepare(2.5)).preview.resumed).toBe(false);
   expect(f.posts).toEqual([JSON.stringify(request), JSON.stringify(request)]);
+});
+
+test("partially unboxing an approved input resumes its verified wire request", async () => {
+  const { f, prepare, directory, request } = await oldScoreApproval(
+    "evidence",
+    false,
+  );
+  // This filename, projection and request ID came from the released SDK with b boxed.
+  const oldPath = join(
+    directory,
+    "ad0ce218fdfcfa75455f2fbda30dc6e248a79419190e5fa77a7c12005ead7926.pending.json",
+  );
+  request.request_id = "dd905f37-1437-44a3-b559-8c88fe873e52";
+  Object.assign(request.items[0]!.evidence.source_data, {
+    score: { a: 7, b: 99 },
+  });
+  const saved = JSON.stringify({
+    accountId: boxedNumberCheckpoints.accountId,
+    requests: [request],
+    inputProjection: {
+      inputDigest:
+        "232fbafeda24e0939a033a0d59479908389a8e167612feabc174e36f716303a5",
+      savedEvidenceDigest:
+        "3a5021a32dc41a1fe4b2d8e2f74abfd1238ef63cf5bfb4cf44cb28bb09e5bfad",
+    },
+  });
+  await writeFile(oldPath, saved, { mode: 0o600 });
+  const partial = () => prepare({ a: 7, b: new Number(2) });
+  await expect(partial()).rejects.toThrow("cannot be matched");
+
+  const approved = await prepare({ a: new Number(7), b: new Number(2) });
+  f.state.throttle = true;
+  await expect(approved.publish()).rejects.toThrow("Slow down");
+  f.state.throttle = false;
+  const body = JSON.stringify(approved.preview.requests[0]);
+  const hinted = await partial();
+  expect(hinted.preview.resumed).toBe(true);
+  expect(JSON.stringify(hinted.preview.requests[0])).toBe(body);
+  const lookup = (await readdir(directory)).find((name) =>
+    name.endsWith(".lookup.json"),
+  )!;
+  await rm(join(directory, lookup));
+  const retry = await partial();
+  expect(retry.preview.resumed).toBe(true);
+  expect(JSON.stringify(retry.preview.requests[0])).toBe(body);
+  expect((await retry.publish()).receipts[0]!.id).toBe(
+    approved.preview.requests[0]!.request_id,
+  );
+  expect(f.posts).toEqual([body, body]);
+  expect(await readFile(oldPath, "utf8")).toBe(saved);
 });
