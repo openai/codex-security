@@ -5085,9 +5085,6 @@ export async function runScanEvents(
     }
     return result;
   } catch (error) {
-    if (options.signal.reason instanceof ScanCostLimitExceededError) {
-      throw options.signal.reason;
-    }
     if (options.signal.aborted && !(error instanceof ScanInterruptedError)) {
       throw new ScanInterruptedError(
         `Codex Security scan was interrupted; output directory: ${options.scanDir}.`,
@@ -6351,8 +6348,8 @@ function isCancellationDerivedFailure(
   while (current instanceof CodexSecurityError) {
     if (current instanceof ScanExecutionError)
       return current.result.status === "canceled";
-    if (current instanceof ScanCostLimitExceededError) return false;
     if (isStopReason(current)) return true;
+    if (current instanceof ScanCostLimitExceededError) return false;
     if (current.cause === undefined)
       return current instanceof ScanInterruptedError;
     if (seen.has(current)) return false;

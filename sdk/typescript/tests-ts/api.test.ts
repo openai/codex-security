@@ -3715,23 +3715,29 @@ if __name__ == "__main__":
     },
   );
 
+  const otherScanBudget = new ScanCostLimitExceededError(
+    0.001,
+    estimateScanCost("gpt-5.6-sol", { input_tokens: 1_000, output_tokens: 0 })!,
+    "other-scan",
+  );
+  const nativeAbort = new DOMException("subprocess interrupted", "AbortError");
+  const decoderError = new Error("Failed to parse item: NOT JSON", {
+    cause: new SyntaxError(),
+  });
   test.each([
-    ["native abort", true],
-    ["decoder failure", false],
-    ["late caller abort", false],
+    ["native abort", nativeAbort, undefined, true],
+    ["decoder failure", decoderError, undefined, false],
+    ["forwarded budget stop", otherScanBudget, otherScanBudget, true],
+    ["decoder failure on external stop", decoderError, otherScanBudget, false],
+    ["late caller abort", nativeAbort, undefined, false],
   ] as const)(
     "records the registered scan disposition for a %s",
-    async (scenario, canceled) => {
+    async (scenario, nativeError, reason, canceled) => {
       const { repository, codexHome, scanDir } = await scanDirectories();
       const controller = new AbortController();
-      const nativeError =
-        scenario === "decoder failure"
-          ? new Error("Failed to parse item: NOT JSON", {
-              cause: new SyntaxError(),
-            })
-          : new DOMException("subprocess interrupted", "AbortError");
+      const late = scenario === "late caller abort";
       async function* events(): AsyncGenerator<ThreadEvent> {
-        if (scenario !== "late caller abort") controller.abort();
+        if (!late) controller.abort(reason);
         throw nativeError;
       }
       let stopped: readonly string[] | undefined;
@@ -3744,18 +3750,15 @@ if __name__ == "__main__":
           return mockWorkbench(args, input);
         },
       });
-      const error = await client
-        .run(repository, { signal: controller.signal })
-        .catch((error: unknown) => error);
+      const scan = client.run(repository, { signal: controller.signal });
+      const error = await scan.catch((error: unknown) => error);
       expect(error).toBeInstanceOf(ScanInterruptedError);
       const interrupted = error as ScanInterruptedError;
-      const late = scenario === "late caller abort";
-      expect(interrupted.cause).toBe(
-        late ? controller.signal.reason : nativeError,
-      );
-      expect(stopped).toContain(
-        `--message=${late ? nativeError.message : interrupted.message}`,
-      );
+      const cause = late ? controller.signal.reason : nativeError;
+      if (reason) expect(interrupted).toBe(reason);
+      else expect(interrupted.cause).toBe(cause);
+      const message = late ? nativeError.message : interrupted.message;
+      expect(stopped).toContain(`--message=${message}`);
       expect(stopped?.includes("--canceled")).toBe(canceled);
     },
   );
