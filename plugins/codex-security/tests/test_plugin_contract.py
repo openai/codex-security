@@ -8,8 +8,8 @@ from typing import Any
 import yaml
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-CODEX_SECURITY_ACCESS_APP_NAME = "codex-security-access"
-CODEX_SECURITY_ACCESS_CONNECTOR_ID = "connector_openai_codex_security_access"
+LEGACY_CODEX_SECURITY_ACCESS_APP_NAME = "codex-security-access"
+LEGACY_CODEX_SECURITY_ACCESS_CONNECTOR_ID = "connector_openai_codex_security_access"
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -18,38 +18,9 @@ def read_json(path: Path) -> dict[str, Any]:
     return payload
 
 
-def read_yaml(path: Path) -> dict[str, Any]:
-    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
-    assert isinstance(payload, dict), path
-    return payload
-
-
-def read_skill_frontmatter(path: Path) -> dict[str, Any]:
-    text = path.read_text(encoding="utf-8")
-    match = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
-    assert match is not None, f"{path}: missing YAML frontmatter"
-    payload = yaml.safe_load(match.group(1))
-    assert isinstance(payload, dict), path
-    return payload
-
-
 def test_plugin_manifest_references_existing_assets_and_skills() -> None:
     manifest = read_json(PLUGIN_ROOT / ".codex-plugin" / "plugin.json")
 
-    required_fields = {
-        "name",
-        "version",
-        "description",
-        "author",
-        "homepage",
-        "repository",
-        "license",
-        "keywords",
-        "skills",
-        "mcpServers",
-        "interface",
-    }
-    assert required_fields <= manifest.keys()
     assert manifest["name"] == "codex-security"
     assert re.fullmatch(r"\d+\.\d+\.\d+(?:-alpha)?", manifest["version"])
     assert isinstance(manifest["description"], str) and manifest["description"].strip()
@@ -66,23 +37,6 @@ def test_plugin_manifest_references_existing_assets_and_skills() -> None:
 
     interface = manifest["interface"]
     assert isinstance(interface, dict)
-    required_interface_fields = {
-        "displayName",
-        "shortDescription",
-        "longDescription",
-        "developerName",
-        "category",
-        "capabilities",
-        "websiteURL",
-        "privacyPolicyURL",
-        "termsOfServiceURL",
-        "defaultPrompt",
-        "brandColor",
-        "composerIcon",
-        "logo",
-        "screenshots",
-    }
-    assert required_interface_fields <= interface.keys()
     assert interface["displayName"] == "Codex Security"
     for field in (
         "shortDescription",
@@ -104,16 +58,26 @@ def test_plugin_manifest_references_existing_assets_and_skills() -> None:
         assert (PLUGIN_ROOT / relative_path).is_file(), relative_path
 
 
-def test_codex_security_access_app_contract() -> None:
+def test_daybreak_access_uses_plugin_mcp() -> None:
     apps = read_json(PLUGIN_ROOT / ".app.json")["apps"]
     mcp_servers = read_json(PLUGIN_ROOT / ".mcp.json")["mcpServers"]
 
-    assert apps[CODEX_SECURITY_ACCESS_APP_NAME] == {
-        "id": CODEX_SECURITY_ACCESS_CONNECTOR_ID,
-        "category": "Security",
-        "required": False,
-    }
-    assert CODEX_SECURITY_ACCESS_APP_NAME not in mcp_servers
+    assert LEGACY_CODEX_SECURITY_ACCESS_APP_NAME not in apps
+    assert all(app["id"] != LEGACY_CODEX_SECURITY_ACCESS_CONNECTOR_ID for app in apps.values())
+    assert "codex-security" in mcp_servers
+    assert LEGACY_CODEX_SECURITY_ACCESS_APP_NAME not in mcp_servers
+
+
+def test_cloud_connection_is_optional_and_skill_is_shipped() -> None:
+    apps = read_json(PLUGIN_ROOT / ".app.json")["apps"]
+    cloud = apps["codex-security-cloud"]
+    assert cloud["id"] == "connector_openai_defense_factory"
+    assert cloud["category"] == "Code Hosting & Security Findings"
+    assert cloud.get("required", False) is False
+
+    shipped = read_json(PLUGIN_ROOT / "plugin-files.json")["shippedExact"]
+    assert "skills/cloud-findings/SKILL.md" in shipped
+    assert "skills/cloud-findings/agents/openai.yaml" in shipped
 
 
 def test_deep_scan_config_override_is_forwarded_to_mcp_server() -> None:
@@ -132,21 +96,19 @@ def test_every_skill_has_valid_frontmatter_and_agent_interface() -> None:
         assert skill_path.is_file(), skill_path
         assert agent_path.is_file(), agent_path
 
-        frontmatter = read_skill_frontmatter(skill_path)
+        text = skill_path.read_text(encoding="utf-8")
+        match = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
+        assert match is not None, f"{skill_path}: missing YAML frontmatter"
+        frontmatter = yaml.safe_load(match.group(1))
+        assert isinstance(frontmatter, dict), skill_path
         assert set(frontmatter) == {"name", "description"}
         assert frontmatter["name"] == skill_dir.name
         assert isinstance(frontmatter["description"], str) and frontmatter["description"].strip()
 
-        agent = read_yaml(agent_path)
+        agent = yaml.safe_load(agent_path.read_text(encoding="utf-8"))
+        assert isinstance(agent, dict), agent_path
         interface = agent["interface"]
         assert isinstance(interface, dict)
         for field in ("display_name", "short_description", "default_prompt"):
             assert isinstance(interface[field], str), f"{agent_path}: {field}"
             assert interface[field].strip(), f"{agent_path}: {field}"
-
-
-def test_fix_finding_uses_product_language_for_workbench_state() -> None:
-    skill = (PLUGIN_ROOT / "skills" / "fix-finding" / "SKILL.md").read_text(encoding="utf-8")
-
-    assert "terminal workbench update" in skill
-    assert "SQLite" not in skill

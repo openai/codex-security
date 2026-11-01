@@ -1,392 +1,565 @@
 name: node-ci
+run-name: >-
+  ${{ github.event_name == 'pull_request' && format('{0} · PR #{1} → {2}', github.event.action == 'edited' && github.event.changes.base == null && 'PR edit CI' || 'Source CI', github.event.number, github.base_ref) || '' }}
 
 on:
   push:
     branches: [main]
   pull_request:
     types: [opened, edited, reopened, synchronize]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  # Metadata edits must not cancel source checks for the same pull request.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && '-metadata' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  validate-title:
-    name: validate pull request
+  classify-changes:
+    name: classify changes
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 40 || 10 }}
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     outputs:
-      ci-mode: ${{ steps.scope.outputs.ci-mode }}
-
+      native-cache-group: ${{ steps.native-cache.outputs.cold-group }}
+      native-cache-week: ${{ steps.native-cache.outputs.week }}
+      source-run: ${{ steps.proof.outputs.source-run }}
+      edit-attempt: ${{ steps.proof.outputs.edit-attempt }}
+      source-required: ${{ steps.scope.outputs.source-required }}
+      container-required: ${{ steps.scope.outputs.container-required }}
+      plugin-tests-required: ${{ steps.scope.outputs.plugin-tests-required }}
+      package-required: ${{ steps.scope.outputs.package-required }}
+      action-ci: ${{ steps.scope.outputs.action-ci }}
+      eval-contracts: ${{ steps.scope.outputs.eval-contracts }}
+      workflow-quality: ${{ steps.scope.outputs.workflow-quality }}
+      compatibility-matrix: ${{ steps.scope.outputs.compatibility-matrix }}
+      python-matrix: ${{ steps.scope.outputs.python-matrix }}
     steps:
-      - name: Checkout pull request for change classification
-        if: github.event_name == 'pull_request' && github.event.changes.base == null
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Checkout repository for change classification
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 2
           persist-credentials: false
-
-      - name: Decide CI mode
+      - name: Verify pull request source
+        id: proof
+        if: &metadata-edit github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/verify-pr-source.mjs
+      - name: Select required checks
         id: scope
-        shell: bash
+        if: steps.proof.outputs.source-run == ''
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_CHANGED: ${{ github.event.changes.base != null }}
-        run: |
-          set -euo pipefail
-          ci_mode=full
-          if [[ "$EVENT_NAME" == "pull_request" &&
-                "$BASE_CHANGED" != "true" ]]; then
-            changed_files="$(mktemp)"
-            trap 'rm -f "$changed_files"' EXIT
-            git diff --no-renames --name-only -z HEAD^1 HEAD > "$changed_files"
+          BASE_CHANGED: ${{ github.event.action == 'edited' }}
+        run: node .github/scripts/select-ci-checks.mjs
 
-            changed=false
-            markdown_only=true
-            while IFS= read -r -d '' path; do
-              changed=true
-              if [[ "$path" != *.md ||
-                    "$path" == sdk/typescript/_bundled_plugin/* ]]; then
-                markdown_only=false
-              fi
-            done < "$changed_files"
-            if [[ "$changed" == "true" && "$markdown_only" == "true" ]]; then
-              ci_mode=markdown
-            fi
-          fi
-          printf 'ci-mode=%s\n' "$ci_mode" >> "$GITHUB_OUTPUT"
-
-      - name: Require a Conventional Commit pull request title
-        if: github.event_name == 'pull_request'
-        shell: bash
+      - name: Group protected pushes waiting for the same native cache
+        id: native-cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected && github.run_attempt == 1
+        continue-on-error: true
         env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          set -euo pipefail
-          conventional_title='^([a-z][a-z0-9-]*)(\([a-z0-9][a-z0-9._/-]*\))?(!)?:[ ]([^[:space:]].*[^[:space:]]|[^[:space:]])$'
-          if [[ "$PR_TITLE" == *$'\n'* || "$PR_TITLE" == *$'\r'* ||
-                ! "$PR_TITLE" =~ $conventional_title ]]; then
-            echo "Pull request title must follow <type>[optional scope][!]: <description>." >&2
-            exit 1
-          fi
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/actions/native-cache-key/key.sh cold-group >> "$GITHUB_OUTPUT"
 
-      - name: Set up pnpm
-        if: steps.scope.outputs.ci-mode == 'markdown'
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+  workflow-quality:
+    needs: classify-changes
+    if: needs.classify-changes.outputs.workflow-quality == 'true'
+    uses: ./.github/workflows/workflow-quality.yml
+
+  action-ci:
+    needs: classify-changes
+    if: needs.classify-changes.outputs.action-ci == 'true'
+    uses: ./.github/workflows/action-ci.yml
+    with:
+      sdk-contracts: ${{ needs.classify-changes.outputs.source-required == 'false' }}
+
+  static-checks:
+    name: typecheck and formatting
+    if: needs.classify-changes.outputs.source-run == ''
+    needs: classify-changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          package_json_file: sdk/typescript/package.json
-          cache: true
-          cache_dependency_path: sdk/typescript/pnpm-lock.yaml
-
-      - name: Set up Node.js
-        if: steps.scope.outputs.ci-mode == 'markdown'
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+          fetch-depth: 2
+          persist-credentials: false
+      - &set-up-typescript-tools
+        name: Set up TypeScript tools
+        uses: ./.github/actions/setup-tools
         with:
-          node-version: "22.13.0"
-          cache: npm
-          cache-dependency-path: sdk/typescript/pnpm-lock.yaml
-
-      - name: Install dependencies
-        if: steps.scope.outputs.ci-mode == 'markdown'
-        run: pnpm --dir sdk/typescript install --frozen-lockfile
-
-      - name: Check Markdown formatting
-        if: steps.scope.outputs.ci-mode == 'markdown'
+          cache-dependency-path: |
+            sdk/typescript/pnpm-lock.yaml
+            plugins/codex-security/mcp-app/pnpm-lock.yaml
+      - &install-dependencies
+        name: Install dependencies
         shell: bash
         run: |
-          files=()
-          while IFS= read -r -d '' path; do
-            if [[ -f "$GITHUB_WORKSPACE/$path" &&
-                  ! -L "$GITHUB_WORKSPACE/$path" ]]; then
-              files+=("$GITHUB_WORKSPACE/$path")
-            fi
-          done < <(git diff --no-renames --name-only -z HEAD^1 HEAD)
-          if ((${#files[@]} > 0)); then
-            pnpm --dir sdk/typescript exec prettier --check "${files[@]}"
-          fi
+          pnpm --dir sdk/typescript install --frozen-lockfile
+          pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+      - name: Check devcontainer dependency cooldown
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node --experimental-strip-types sdk/typescript/scripts/check-devcontainer-cooldown.mts
+      - name: Test CI selection, result gating and the release guide
+        run: node --test .github/scripts/test-ci-selection.mjs .github/scripts/test-verify-pr-source.mjs .github/scripts/test-release-guide.mjs
+      - name: Typecheck
+        run: pnpm --dir sdk/typescript run types
+      - name: Check formatting
+        run: pnpm --dir sdk/typescript run format
+      - name: Check MCP formatting
+        run: pnpm --dir plugins/codex-security/mcp-app exec prettier --check "**/*.{cjs,cts,js,jsx,mjs,mts,ts,tsx}"
+      - name: Audit production dependencies
+        run: pnpm --dir sdk/typescript run audit:prod
+
+  native:
+    if: needs.classify-changes.outputs.package-required == 'true'
+    needs: classify-changes
+    # Hits and PRs keep a unique group. Every entrant restores or rebuilds on its own commit.
+    concurrency:
+      group: native-producer-${{ github.run_attempt == 1 && needs.classify-changes.outputs.native-cache-group || github.run_id }}
+      queue: max
+    uses: ./.github/workflows/native-artifacts.yml
+    with:
+      reuse-verified: true
+      cache-week: ${{ fromJSON(github.run_attempt == 1 && needs.classify-changes.outputs.native-cache-week || '0') }}
+
+  container-validate:
+    needs: [classify-changes, native, static-checks]
+    if: needs.classify-changes.outputs.container-required == 'true'
+    uses: ./.github/workflows/container-validate.yml
+
+  package:
+    if: needs.classify-changes.outputs.package-required == 'true'
+    name: build and check package
+    needs: [classify-changes, native]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - &checkout-repository
+        name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check plugin source boundary
+        run: node sdk/typescript/scripts/check-plugin-source.mjs
+      - name: Prepare native runtime
+        uses: ./.github/actions/download-native
+      - *set-up-typescript-tools
+      - *install-dependencies
+      - name: Pack
+        working-directory: sdk/typescript
+        run: pnpm pack --pack-destination ../../dist
+      - name: Inspect archive contents
+        working-directory: sdk/typescript
+        run: node scripts/check-package.mjs ../../dist/*.tgz ../../plugins/codex-security/plugin-files.json
+      - name: Upload package for this commit
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package-${{ github.sha }}
+          overwrite: true
+          path: dist/*.tgz
+          if-no-files-found: error
+          retention-days: 7
 
   test:
-    name: tests / ${{ matrix.os }} / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
-    needs: validate-title
-    if: needs.validate-title.outputs.ci-mode == 'full'
+    if: &run-sdk-shards >-
+      ${{ !cancelled() && needs.package.result == 'success' &&
+      needs['classify-changes'].outputs['source-required'] == 'true' &&
+      (github.event_name != 'pull_request' || github.event.action == 'edited' ||
+      needs['static-checks'].result == 'success') }}
+    name: tests / ${{ matrix.os }} / shard-${{ matrix.shard }}
+    needs: &sdk-shard-needs [classify-changes, package, static-checks]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        node: ["22.13.0"]
-        include:
-          - os: ubuntu-latest
-            node: "24.0.0"
-          - os: ubuntu-latest
-            node: "24"
-          - os: ubuntu-latest
-            node: "26.0.0"
-          - os: ubuntu-latest
-            node: "26"
-
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
-        with:
-          package_json_file: sdk/typescript/package.json
-          cache: true
-          cache_dependency_path: sdk/typescript/pnpm-lock.yaml
-
-      - name: Set up Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
-        with:
-          node-version: ${{ matrix.node }}
-          cache: npm
-          cache-dependency-path: plugins/codex-security/mcp-app/package-lock.json
-
-      - name: Check plugin source boundary
-        if: matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'
-        run: node sdk/typescript/scripts/check-plugin-source.mjs
-
-      - name: Set up Bun
+      - *checkout-repository
+      - *set-up-typescript-tools
+      - &set-up-bun
+        name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: "1.3.14"
-
-      - name: Install dependencies
+      - *install-dependencies
+      - &download-package-for-this-commit
+        name: Download package for this commit
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: package-${{ github.sha }}
+          path: dist
+      - &restore-sdk-test-plugin
+        name: Restore bundled plugin
+        shell: bash
         run: |
-          pnpm --dir sdk/typescript install --frozen-lockfile
-          npm ci --prefix plugins/codex-security/mcp-app --no-audit --no-fund
-
+          tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
+          cp -R sdk/typescript/_bundled_plugin/mcp/native/. plugins/codex-security/native/prebuilt
+          python3 -I -m compileall -q --invalidation-mode checked-hash sdk/typescript/_bundled_plugin/scripts
       - name: Install ripgrep
-        if: matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ripgrep
-
-      - name: Audit production dependencies
-        if: matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'
-        continue-on-error: true
-        run: pnpm --dir sdk/typescript run audit:prod
-
-      - name: Typecheck
-        if: matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'
-        run: pnpm --dir sdk/typescript run types
-
+        if: matrix.os == 'ubuntu-latest'
+        run: .github/scripts/install-ripgrep.sh
       - name: Test
-        timeout-minutes: 10
+        working-directory: sdk/typescript
         env:
           TEMP: ${{ runner.temp }}
           TMP: ${{ runner.temp }}
           TMPDIR: ${{ runner.temp }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
-        run: pnpm --dir sdk/typescript run ${{ matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0' && 'test:ci' || 'test' }}
-
-      - name: Test MCP app
-        if: matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'
-        run: pnpm --dir sdk/typescript run test:mcp
-
+          CODEX_SECURITY_TEST_MCP_WORKERS_SEPARATE: ${{ needs.classify-changes.outputs.plugin-tests-required }}
+        run: node --experimental-strip-types scripts/run-ci-tests.mts ${{ matrix.shard }}/6 --seed=${{ github.run_number }} ${{ matrix.os == 'ubuntu-latest' && '--coverage --coverage-reporter=text --coverage-reporter=lcov' || '' }}
       - name: Upload test reports
-        if: always() && matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'
+        if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: node-22-test-reports
+          name: bun-${{ runner.os }}-${{ matrix.shard }}
           overwrite: true
           path: |
-            sdk/typescript/reports/junit.xml
+            sdk/typescript/reports/junit-*.xml
             sdk/typescript/coverage/lcov.info
+            plugins/codex-security/mcp-app/reports/junit.xml
           if-no-files-found: warn
           retention-days: 14
 
-      - name: Check formatting
-        if: matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'
-        run: pnpm --dir sdk/typescript run format
-
-      - name: Pack
-        working-directory: sdk/typescript
-        run: pnpm pack --pack-destination ../../dist
-
-      - name: Inspect package
-        working-directory: sdk/typescript
-        shell: bash
-        run: pnpm run check:package ../../dist/*.tgz
-
-  plugin-source:
-    name: plugin source contracts
-    needs: validate-title
-    if: needs.validate-title.outputs.ci-mode == 'full'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: plugins/codex-security/pyproject.toml
-
-      - name: Install Python test dependencies
-        run: python -m pip install --disable-pip-version-check --no-input -e 'plugins/codex-security[test]'
-
-      - name: Install ripgrep
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ripgrep
-
-      - name: Test Python source contracts
-        run: python -m pytest plugins/codex-security/tests -q
-
-      - name: Set up Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
-        with:
-          node-version: "22.13.0"
-
-      - name: Test deterministic triage eval contracts
-        run: npm --prefix plugins/codex-security/skills/triage-finding/evals run test:deterministic
-
-  required-test:
-    name: ${{ matrix.os }} / node-22
-    needs: [validate-title, test, plugin-source]
-    if: always()
-    runs-on: ubuntu-latest
+  compatibility:
+    if: needs.classify-changes.outputs.package-required == 'true'
+    name: installed package / ${{ matrix.os }} / node-${{ matrix.node }}
+    needs: [classify-changes, package]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-
+      matrix: ${{ fromJSON(needs.classify-changes.outputs.compatibility-matrix) }}
     steps:
-      - name: Require every Unix coverage job
-        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.test.result != 'success' || needs.plugin-source.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
-        run: exit 1
+      - *checkout-repository
+      - name: Set up Python on Windows
+        if: runner.os == 'Windows'
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Set up Node.js
+        id: node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: sdk/typescript/pnpm-lock.yaml
+      - name: Resolve npm download cache
+        id: npm-cache
+        if: steps.node.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          PRIMARY_CACHE_KEY: ${{ steps.node.outputs.cache-primary-key }}
+        run: |
+          echo "path=$(npm config get cache)" >> "$GITHUB_OUTPUT"
+          echo "restore-prefix=${PRIMARY_CACHE_KEY%-*}-" >> "$GITHUB_OUTPUT"
+      - name: Restore previous npm downloads
+        if: steps.node.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.npm-cache.outputs.path }}
+          key: ${{ steps.node.outputs.cache-primary-key }}
+          restore-keys: ${{ steps.npm-cache.outputs.restore-prefix }}
+      - *download-package-for-this-commit
+      - name: Inspect installed package
+        working-directory: sdk/typescript
+        shell: bash
+        env:
+          # A successful main push can be tagged for release. Only PRs sample retries by runtime.
+          PACKAGE_DEEP_RETRY: ${{ github.event_name != 'pull_request' || matrix.node == '22.13.0' || strategy.job-total == 1 }}
+        run: node scripts/check-package.mjs ../../dist/*.tgz
 
-  windows-test:
-    name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / tests-${{ matrix.shard }}
-    needs: validate-title
-    if: needs.validate-title.outputs.ci-mode == 'full'
-    runs-on: windows-latest
+      - name: Check Action against the release candidate
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '24'
+        uses: ./.github/actions/check-action-candidate
+
+  mcp:
+    if: needs.classify-changes.outputs.plugin-tests-required == 'true'
+    name: MCP app tests (${{ matrix.shard }}/${{ strategy.job-total }})
+    needs: [classify-changes, package]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        node: ["22.13.0", "24"]
-        shard: [1, 2, 3, 4, 5, 6, 7]
-
+        shard: [1, 2]
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - *checkout-repository
+      - &set-up-mcp-tools
+        name: Set up TypeScript tools
+        uses: ./.github/actions/setup-tools
+        with:
+          cache-dependency-path: plugins/codex-security/mcp-app/pnpm-lock.yaml
+      - name: Install dependencies
+        run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+      - name: Install ripgrep
+        run: .github/scripts/install-ripgrep.sh
+      - *download-package-for-this-commit
+      - name: Restore bundled plugin
+        run: tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
+      - name: Test MCP app
+        working-directory: plugins/codex-security/mcp-app
+        run: >-
+          node --experimental-strip-types ../../../sdk/typescript/scripts/run-mcp-test-shard.mts
+          ${{ matrix.shard }} ${{ strategy.job-total }}
+      - name: Upload MCP test reports
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mcp-test-reports-${{ matrix.shard }}
+          overwrite: true
+          path: plugins/codex-security/mcp-app/reports/junit.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  plugin-host:
+    if: needs.classify-changes.outputs.plugin-tests-required == 'true'
+    name: standalone plugin / ${{ matrix.os }}
+    needs: classify-changes
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout plugin source without the SDK
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          sparse-checkout: |
+            plugins/codex-security
+            .github/actions/setup-tools
+      - *set-up-mcp-tools
+      - name: Install plugin dependencies
+        run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+      - name: Build and test the standalone host runtime
+        run: node --experimental-strip-types --test plugins/codex-security/mcp-app/scripts/test_host_build.mts
 
-      - name: Set up Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+  plugin-source:
+    if: needs.classify-changes.outputs.plugin-tests-required == 'true'
+    name: plugin source contracts / ${{ matrix.os }} / python-${{ matrix.python }}
+    needs: classify-changes
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.classify-changes.outputs.python-matrix) }}
+    steps:
+      - *checkout-repository
+      - name: Set up TypeScript tools
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        uses: ./.github/actions/setup-tools
         with:
-          node-version: ${{ matrix.node }}
-
-      - name: Set up pnpm
-        run: npm install --global pnpm@11.9.0 --no-audit --no-fund
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+          compile: true
+          cache-dependency-path: |
+            sdk/typescript/pnpm-lock.yaml
+            plugins/codex-security/mcp-app/pnpm-lock.yaml
+      - name: Install plugin dependencies
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          bun-version: "1.3.14"
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: plugins/codex-security/requirements-test.txt
+      - name: Install Python test dependencies
+        run: python -m pip install --disable-pip-version-check --no-input -r plugins/codex-security/requirements-test.txt
+      - name: Install ripgrep
+        if: runner.os == 'Linux'
+        run: .github/scripts/install-ripgrep.sh
+      - name: Check plugin source compatibility
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: |
+          python -m ruff check --config plugins/codex-security/pyproject.toml plugins/codex-security
+          python -m ruff format --check --config plugins/codex-security/pyproject.toml plugins/codex-security
+          node .github/scripts/check_plugin_source_compatibility.mjs
+      - name: Test source compatibility checker
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: node --test .github/scripts/test_check_plugin_source_compatibility.mjs
+      - name: Test the native Python report gate
+        if: matrix.python == '3.12'
+        run: python -m pytest -q .github/scripts/test_require_native_python_report.py
+      - name: Prepare private Windows test root
+        if: runner.os == 'Windows'
+        id: windows-temp
+        shell: pwsh
+        run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
+      - name: Test Python source contracts
+        shell: bash
+        env:
+          PYTEST_MARKERS: ${{ matrix.markers }}
+          WINDOWS_TEST_ROOT: ${{ steps.windows-temp.outputs.path }}
+        run: |
+          if [ -n "$WINDOWS_TEST_ROOT" ]; then
+            export TEMP="$WINDOWS_TEST_ROOT" TMP="$WINDOWS_TEST_ROOT" TMPDIR="$WINDOWS_TEST_ROOT"
+          fi
+          python -m pytest plugins/codex-security/tests -m "$PYTEST_MARKERS" -q -n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml
+      - name: Require native platform coverage
+        if: runner.os != 'Linux'
+        run: python .github/scripts/require_native_python_report.py
+      - name: Upload Python test reports
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: python-test-reports-${{ matrix.os }}-${{ matrix.python }}
+          overwrite: true
+          path: reports/python*.xml
+          if-no-files-found: warn
+          retention-days: 14
 
-      - name: Install dependencies
+  eval-contracts:
+    name: deterministic eval contracts
+    needs: classify-changes
+    if: needs.classify-changes.outputs.eval-contracts == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - *checkout-repository
+      - *set-up-bun
+      - name: Check the Codex version across the SDK, MCP app and evals
+        run: bun test sdk/typescript/tests-ts/codex-dependency-pins.test.ts
+      - name: Set up eval tools
+        uses: ./.github/actions/setup-tools
+        with:
+          node-version: "24.15.0"
+          cache-dependency-path: |
+            sdk/typescript/pnpm-lock.yaml
+            plugins/codex-security/mcp-app/pnpm-lock.yaml
+            evals/triage-finding/pnpm-lock.yaml
+      - &set-up-python
+        name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Set up eval dependencies and host runtime
         run: |
           pnpm --dir sdk/typescript install --frozen-lockfile
-          npm ci --prefix plugins/codex-security/mcp-app --no-audit --no-fund
+          pnpm --dir evals/triage-finding run setup
+      - name: Test deterministic triage eval contracts
+        working-directory: evals/triage-finding
+        run: node --run test:deterministic
+      - name: Test secret discovery eval contracts
+        run: node --experimental-strip-types --test evals/secret-discovery/test_*.mts
+      - name: Build host plugin for Standard eval integration
+        run: |
+          node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp --native host
+          ln -s ../../plugins/codex-security sdk/typescript/_bundled_plugin
+      - name: Test Standard time-budget eval contracts
+        run: node --experimental-strip-types --test evals/standard-time-budget/test_*.mts
+      - name: Test workflow routing eval contracts
+        run: node --experimental-strip-types --test evals/workflow-routing/test_*.mts
 
-      - name: Generate bundled plugin
-        run: pnpm --dir sdk/typescript run build:plugin
+  ci:
+    name: ci
+    needs:
+      [
+        classify-changes,
+        static-checks,
+        action-ci,
+        eval-contracts,
+        native,
+        package,
+        test,
+        compatibility,
+        mcp,
+        plugin-host,
+        plugin-source,
+        container-validate,
+        workflow-quality,
+        windows-test,
+      ]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    steps:
+      - *checkout-repository
+      - name: Require selected checks
+        env:
+          CI_RESULTS: ${{ toJSON(needs) }}
+        run: node .github/scripts/check-ci-results.mjs
+      - name: Confirm pull request target
+        if: *metadata-edit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERIFIED_SOURCE_RUN: ${{ needs.classify-changes.outputs.source-run }}
+          CLASSIFIER_ATTEMPT: ${{ needs.classify-changes.outputs.edit-attempt }}
+        run: node .github/scripts/verify-pr-source.mjs confirm-target
 
+  windows-test:
+    if: *run-sdk-shards
+    name: windows-latest / node-22 / tests-${{ matrix.shard }}
+    needs: *sdk-shard-needs
+    runs-on: windows-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+    steps:
+      - *checkout-repository
+      - *set-up-python
+      - *set-up-typescript-tools
+      - *set-up-bun
+      - *install-dependencies
+      - *download-package-for-this-commit
+      - *restore-sdk-test-plugin
       - name: Prepare private Windows test root
         id: windows-temp
         shell: pwsh
         run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
-
       - name: Test shard ${{ matrix.shard }}
-        timeout-minutes: 10
-        env:
+        env: &windows-shard-env
           TEMP: ${{ steps.windows-temp.outputs.path }}
           TMP: ${{ steps.windows-temp.outputs.path }}
           TMPDIR: ${{ steps.windows-temp.outputs.path }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
-        run: node sdk/typescript/scripts/run-windows-ci-tests.mjs ${{ matrix.shard }}
-
+        run: node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/14 --seed=${{ github.run_number }}
+      - name: Test MCP helper paths on Windows
+        if: matrix.shard == 1
+        working-directory: plugins/codex-security/mcp-app
+        env: *windows-shard-env
+        run: node --experimental-strip-types --test --test-reporter=tap tests/test_helper_files.ts
+      - name: Upload Windows test reports
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bun-Windows-${{ matrix.shard }}
+          overwrite: true
+          path: sdk/typescript/reports/junit-*.xml
+          if-no-files-found: warn
+          retention-days: 14
       - name: Test machine-wide PowerShell policy
         if: matrix.shard == 3 && runner.environment == 'github-hosted'
-        timeout-minutes: 5
+        timeout-minutes: 7
         working-directory: sdk/typescript
         env:
           TEMP: ${{ steps.windows-temp.outputs.path }}
           TMP: ${{ steps.windows-temp.outputs.path }}
           TMPDIR: ${{ steps.windows-temp.outputs.path }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "true"
-        run: bun test --timeout 120000 ./tests-ts/windows-machine-policy.test.ts
-
-  windows-verify:
-    name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / verify
-    needs: validate-title
-    if: needs.validate-title.outputs.ci-mode == 'full'
-    runs-on: windows-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        node: ["22.13.0", "24"]
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Set up Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
-        with:
-          node-version: ${{ matrix.node }}
-          cache: npm
-          cache-dependency-path: plugins/codex-security/mcp-app/package-lock.json
-
-      - name: Set up pnpm
-        run: npm install --global pnpm@11.9.0 --no-audit --no-fund
-
-      - name: Install dependencies
-        run: |
-          pnpm --dir sdk/typescript install --frozen-lockfile
-          npm ci --prefix plugins/codex-security/mcp-app --no-audit --no-fund
-
-      - name: Pack
-        working-directory: sdk/typescript
-        run: pnpm pack --pack-destination ../../dist
-
-      - name: Inspect package
-        working-directory: sdk/typescript
-        shell: bash
-        run: pnpm run check:package ../../dist/*.tgz
-
-  windows:
-    name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
-    runs-on: ubuntu-latest
-    if: always()
-    needs: [validate-title, windows-test, windows-verify]
-    strategy:
-      fail-fast: false
-      matrix:
-        node: ["22.13.0", "24"]
-
-    steps:
-      - name: Require every Windows coverage job
-        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
-        run: exit 1
+        run: bun test --timeout 360000 ./tests-ts/windows-machine-policy.test.ts

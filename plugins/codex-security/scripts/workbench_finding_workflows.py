@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import argparse
-import json
 import hashlib
+import json
 import sqlite3
+import stat
 import sys
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workbench_target import directory_content_digest, git_output, git_revision
+from workbench_target import (
+    UnreadableLocalFile,
+    UnsupportedLocalFileType,
+    directory_content_digest,
+    git_bytes,
+    git_revision,
+)
 
 WORKFLOW_BINDINGS = {
     "repositoryPath": "repository_path",
@@ -69,7 +76,9 @@ def save_workflow(connection: sqlite3.Connection, state: dict[str, Any], timesta
     if "pendingWrite" in state["stages"]["dedupe"]:
         results["dedupePendingWrite"] = state["stages"]["dedupe"]["pendingWrite"]
     values.update(
-        results_json=json.dumps(results, allow_nan=False), created_at=timestamp, updated_at=timestamp
+        results_json=json.dumps(results, allow_nan=False),
+        created_at=timestamp,
+        updated_at=timestamp,
     )
     updates = ", ".join(
         f"{column} = excluded.{column}" for column in values if column not in {"id", "created_at"}
@@ -121,13 +130,61 @@ def finding_workflow(
     if payload["action"] == "get":
         return {"workflow": read_workflow(connection, workflow_id)}
     if payload["action"] == "source":
-        target = Path(payload["repository"]).resolve(strict=True)
-        return {"source": {
-            "repository": str(target),
-            "revision": git_revision(target),
-            "refsDigest": hashlib.sha256((git_output(target, "show-ref") or "").encode()).hexdigest(),
-            "content": directory_content_digest(target, include_ignored=True),
-        }}
+        evidence = payload.get("evidence") is True
+        if evidence:
+            try:
+                target = Path(payload["repository"])
+                metadata = target.lstat()
+                if (
+                    not target.is_absolute()
+                    or not stat.S_ISDIR(metadata.st_mode)
+                    or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
+                    or target.resolve(strict=True) != target
+                ):
+                    raise UnreadableLocalFile("The validation evidence directory was replaced.")
+            except (OSError, RuntimeError, UnreadableLocalFile):
+                if payload.get("optional") is True:
+                    return {"source": None}
+                raise
+        else:
+            target = Path(payload["repository"]).resolve(strict=True)
+        private_paths = payload.get("privateStatePaths", [])
+        if not isinstance(private_paths, list) or any(
+            not isinstance(path, str) or not Path(path).is_absolute() for path in private_paths
+        ):
+            raise SystemExit("Private runtime paths must be absolute paths.")
+        excluded = tuple(sorted({Path(path).resolve() for path in private_paths}))
+        excluded = tuple(path for path in excluded if path.is_relative_to(target))
+        if target in excluded:
+            raise SystemExit("Private runtime storage must not exclude the repository root.")
+        try:
+            content = directory_content_digest(
+                target,
+                excluded=excluded,
+                include_ignored=True,
+                include_git_metadata=evidence,
+            )
+        except (UnsupportedLocalFileType, UnreadableLocalFile, OSError):
+            if payload.get("optional") is True:
+                return {"source": None}
+            raise
+        return {
+            "source": {
+                "repository": str(target),
+                "revision": (
+                    "unversioned"
+                    if evidence or payload.get("gitDisabled")
+                    else git_revision(target)
+                ),
+                "refsDigest": hashlib.sha256(
+                    b""
+                    if evidence or payload.get("gitDisabled")
+                    else (git_bytes(target, "show-ref") or b"").strip()
+                ).hexdigest(),
+                "content": content,
+                **({"privateStatePaths": [str(path) for path in excluded]} if excluded else {}),
+            }
+        }
     if payload["action"] == "get-review":
         row = connection.execute(
             "SELECT result_json FROM finding_workflow_reviews WHERE workflow_id = ? AND review_key = ?",
@@ -138,21 +195,38 @@ def finding_workflow(
         binding = payload["binding"]
         source = binding["source"]
         scope = binding["scope"]
+        on_conflict = (
+            "DO UPDATE SET result_json = excluded.result_json, created_at = excluded.created_at"
+            if payload.get("replace") is True and binding.get("stage") == "scan-validation"
+            else "DO NOTHING"
+        )
         with connection:
             connection.execute(
-                """INSERT INTO finding_workflow_reviews
+                f"""INSERT INTO finding_workflow_reviews
                 (workflow_id, review_key, review_contract_version, codex_version,
                  source_repository_path, source_revision, source_refs_digest, source_content_digest,
                  scope_repository_id, scope_all_repositories, model, effort, settings_digest,
                  prompt_digest, contract_digest, result_json, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(workflow_id, review_key) DO NOTHING""",
+                ON CONFLICT(workflow_id, review_key) {on_conflict}""",
                 (
-                    workflow_id, payload["key"], binding["version"], binding["codexVersion"],
-                    source["repository"], source["revision"], source["refsDigest"], source["content"],
-                    scope.get("repositoryId"), scope.get("allRepositories"), binding["model"],
-                    binding["effort"], binding.get("settingsDigest"), binding["promptDigest"],
-                    binding["contractDigest"], json.dumps(payload["result"], allow_nan=False), timestamp,
+                    workflow_id,
+                    payload["key"],
+                    binding["version"],
+                    binding["codexVersion"],
+                    source["repository"],
+                    source["revision"],
+                    source["refsDigest"],
+                    source["content"],
+                    scope.get("repositoryId"),
+                    scope.get("allRepositories"),
+                    binding["model"],
+                    binding["effort"],
+                    binding.get("settingsDigest"),
+                    binding["promptDigest"],
+                    binding["contractDigest"],
+                    json.dumps(payload["result"], allow_nan=False),
+                    timestamp,
                 ),
             )
         return {}
@@ -178,6 +252,8 @@ def finding_workflow(
                     state["stages"][stage] = {"status": "completed", "result": payload["result"]}
                 elif action == "fail":
                     current.update(status="failed", error=payload["error"])
+                    if "result" in payload:
+                        current["result"] = payload["result"]
                 elif action == "prepare-dedupe":
                     current.update(result=payload["result"], pendingWrite=payload["pendingWrite"])
                 else:

@@ -1,54 +1,40 @@
-import { mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { z } from "zod";
+import { stat } from "node:fs/promises";
 import { join } from "node:path";
+import { isRecord } from "./record.js";
 import { CodexSecurityError } from "./errors.js";
 import type { PreparedScanPublication } from "./publication.js";
 import type { PublishedScanIssue } from "./publish.js";
 import {
-  bundledPluginRoot,
   codexSecurityStateDirectory,
-  requireOutputOutsideRepository,
-  resolvePluginPython,
+  resolveWorkbenchRuntime,
   runWorkbench,
 } from "./runtime.js";
+
+type StoredIssue = PublishedScanIssue & { scanId: string };
 
 export async function inspectPublicationStore(
   publication: PreparedScanPublication,
   environment: NodeJS.ProcessEnv,
   signal?: AbortSignal,
 ): Promise<PublishedScanIssue[]> {
-  const result = await runPublicationWorkbench(
-    "inspect-linear-publication",
+  const receipts = await findingIssues(
+    "inspect",
     publication,
     environment,
-    undefined,
+    [],
     signal,
   );
-  const recorded = result["recorded"];
-  if (
-    !matchesPublication(result, publication) ||
-    result["findingCount"] !== publication.issues.length ||
-    !Array.isArray(recorded)
-  ) {
-    throw invalidPublicationRecords();
-  }
-  const expected = new Map(
-    publication.issues.map((issue) => [issue.findingId, issue.occurrenceId]),
-  );
-  const found = new Map<string, PublishedScanIssue>();
-  for (const value of recorded) {
-    const issue = readPublicationRecord(value);
-    if (
-      expected.get(issue.findingId) !== issue.occurrenceId ||
-      found.has(issue.findingId)
-    ) {
-      throw invalidPublicationRecords();
-    }
-    found.set(issue.findingId, issue);
-  }
-  return publication.issues.flatMap(({ findingId }) => {
-    const issue = found.get(findingId);
-    return issue === undefined ? [] : [issue];
+  return publication.issues.flatMap(({ findingId, occurrenceId }) => {
+    // Tracking can reuse an issue across scans. CLI skipping remains specific to
+    // the selected occurrence, irrespective of which workflow recorded it.
+    const receipt = receipts.find(
+      (issue) =>
+        issue.scanId === publication.scanId &&
+        issue.findingId === findingId &&
+        issue.occurrenceId === occurrenceId,
+    );
+    return receipt === undefined ? [] : [publishedIssue(receipt)];
   });
 }
 
@@ -56,19 +42,7 @@ export async function preparePublicationStore(
   publication: PreparedScanPublication,
   environment: NodeJS.ProcessEnv,
 ): Promise<void> {
-  const result = await runPublicationWorkbench(
-    "prepare-linear-publication",
-    publication,
-    environment,
-  );
-  if (
-    result["scanId"] !== publication.scanId ||
-    result["findingCount"] !== publication.issues.length
-  ) {
-    throw new CodexSecurityError(
-      "The workbench could not verify every finding selected for publication.",
-    );
-  }
+  await findingIssues("prepare", publication, environment);
 }
 
 export async function recordPublishedIssues(
@@ -76,118 +50,128 @@ export async function recordPublishedIssues(
   issues: readonly PublishedScanIssue[],
   environment: NodeJS.ProcessEnv,
 ): Promise<PublishedScanIssue[]> {
-  const result = await runPublicationWorkbench(
-    "record-linear-publications",
+  const receipts = await findingIssues(
+    "record",
     publication,
     environment,
     issues,
   );
-  const created = result["created"];
-  if (
-    !matchesPublication(result, publication) ||
-    !Array.isArray(created) ||
-    created.length !== issues.length
-  ) {
+  if (receipts.length !== issues.length) {
     throw invalidPublicationRecords();
   }
-
-  const expected = new Map(issues.map((issue) => [issue.findingId, issue]));
-  const ordered = publication.issues.flatMap((issue) => {
-    const record = expected.get(issue.findingId);
-    return record === undefined ? [] : [record];
-  });
-  if (expected.size !== issues.length || ordered.length !== issues.length) {
-    throw invalidPublicationRecords();
-  }
-
-  return created.map((value, index) => {
-    const expectedIssue = ordered[index];
-    const issue = readPublicationRecord(value);
+  const recorded = new Map<string, StoredIssue>();
+  for (const [index, receipt] of receipts.entries()) {
+    const expectedIssue = issues[index]!;
     if (
-      expectedIssue === undefined ||
-      issue.findingId !== expectedIssue.findingId ||
-      issue.occurrenceId !== expectedIssue.occurrenceId ||
-      issue.issueIdentifier !== expectedIssue.issueIdentifier ||
-      (expectedIssue.url !== undefined && issue.url !== expectedIssue.url)
+      receipt.scanId !== publication.scanId ||
+      receipt.findingId !== expectedIssue.findingId ||
+      receipt.occurrenceId !== expectedIssue.occurrenceId ||
+      receipt.issueIdentifier !== expectedIssue.issueIdentifier ||
+      (expectedIssue.url !== undefined && receipt.url !== expectedIssue.url) ||
+      recorded.has(receipt.findingId)
     ) {
       throw invalidPublicationRecords();
     }
-    return issue;
+    recorded.set(receipt.findingId, receipt);
+  }
+  const ordered = publication.issues.flatMap(({ findingId }) => {
+    const receipt = recorded.get(findingId);
+    return receipt === undefined ? [] : [publishedIssue(receipt)];
   });
+  if (ordered.length !== issues.length) throw invalidPublicationRecords();
+  return ordered;
 }
 
-async function runPublicationWorkbench(
-  command:
-    | "inspect-linear-publication"
-    | "prepare-linear-publication"
-    | "record-linear-publications",
+async function findingIssues(
+  action: "inspect" | "prepare" | "record",
   publication: PreparedScanPublication,
   environment: NodeJS.ProcessEnv,
-  issues?: readonly PublishedScanIssue[],
+  issues: readonly PublishedScanIssue[] = [],
   signal?: AbortSignal,
-): Promise<Record<string, unknown>> {
+): Promise<StoredIssue[]> {
   signal?.throwIfAborted();
   const stateDirectory = codexSecurityStateDirectory(environment);
   const database = join(stateDirectory, "workbench.sqlite3");
-  try {
-    if (!(await stat(database)).isFile()) throw new Error("not a regular file");
-  } catch (error) {
+  const metadata = await stat(database).catch((error: unknown) => {
+    if (!isRecord(error) || error["code"] !== "ENOENT") throw error;
     throw new CodexSecurityError(
       "Cannot publish findings because the local Codex Security scan-history database does not exist. Use the state directory where this scan was completed.",
       { cause: error },
     );
+  });
+  if (!metadata.isFile()) {
+    throw new CodexSecurityError(
+      "Cannot publish findings because the local Codex Security scan-history database is not a regular file.",
+    );
   }
-  const [python, pluginRoot] = await Promise.all([
-    resolvePluginPython({
-      environment,
-      protectedRoot: publication.scanDirectory,
-      ...(signal === undefined ? {} : { signal }),
-    }),
-    bundledPluginRoot(),
-  ]);
+  const [python, pluginRoot] = await resolveWorkbenchRuntime({
+    environment,
+    protectedRoot: publication.scanDirectory,
+    signal,
+  });
   signal?.throwIfAborted();
-  const findings = publication.issues.map(({ findingId, occurrenceId }) => ({
-    findingId,
-    occurrenceId,
-  }));
-  let temporaryRoot = stateDirectory;
-  if (command === "inspect-linear-publication") {
-    temporaryRoot = await realpath(tmpdir());
-    const scanRoot = await realpath(publication.scanDirectory);
-    requireOutputOutsideRepository(scanRoot, temporaryRoot, "temporary");
+  const result = await runWorkbench(
+    {
+      python,
+      pluginRoot,
+      environment,
+      signal,
+      failureMessage:
+        action === "record"
+          ? "Could not persist created Linear issues in the local Codex Security scan history"
+          : "Cannot publish findings without their existing local Codex Security scan history",
+    },
+    ["finding-issues"],
+    JSON.stringify({
+      action,
+      scanDirectory: publication.scanDirectory,
+      expectedScanId: publication.scanId,
+      destination: publication.destination,
+      findingIds: publication.issues.map(({ findingId }) => findingId),
+      requireHistory: true,
+      ...(action === "record"
+        ? {
+            receipts: issues.map((issue) => ({
+              ...issue,
+              operation: "create",
+            })),
+          }
+        : {}),
+    }),
+  );
+  const receipts = publicationRecordsSchema.safeParse(result["receipts"]);
+  if (
+    !matchesPublication(result, publication) ||
+    result["findingCount"] !== publication.issues.length ||
+    !receipts.success
+  ) {
+    throw invalidPublicationRecords();
   }
-  const directory = await mkdtemp(join(temporaryRoot, "publication-"));
-  try {
-    const input = join(directory, "publication.json");
-    await writeFile(
-      input,
-      JSON.stringify({
-        scanId: publication.scanId,
-        scanDirectory: publication.scanDirectory,
-        destination: publication.destination,
-        findings,
-        ...(issues === undefined ? {} : { publications: issues }),
-      }),
-      { encoding: "utf8", flag: "wx", mode: 0o600 },
-    );
-    return await runWorkbench(
-      {
-        python,
-        pluginRoot,
-        environment,
-        ...(signal === undefined ? {} : { signal }),
-        failureMessage:
-          command === "record-linear-publications"
-            ? "Could not persist created Linear issues in the local Codex Security scan history"
-            : "Cannot publish findings without their existing local Codex Security scan history",
-      },
-      [command, "--input-file", input],
-    );
-  } finally {
-    await rm(directory, { recursive: true, force: true }).catch(
-      () => undefined,
-    );
+  const selected = new Map(
+    publication.issues.map(({ findingId, occurrenceId }) => [
+      findingId,
+      occurrenceId,
+    ]),
+  );
+  for (const receipt of receipts.data) {
+    if (
+      !selected.has(receipt.findingId) ||
+      (receipt.scanId === publication.scanId &&
+        selected.get(receipt.findingId) !== receipt.occurrenceId)
+    ) {
+      throw invalidPublicationRecords();
+    }
   }
+  return receipts.data;
+}
+
+function publishedIssue(issue: StoredIssue): PublishedScanIssue {
+  return {
+    findingId: issue.findingId,
+    occurrenceId: issue.occurrenceId,
+    issueIdentifier: issue.issueIdentifier,
+    ...(issue.url === undefined ? {} : { url: issue.url }),
+  };
 }
 
 function matchesPublication(
@@ -204,31 +188,18 @@ function matchesPublication(
   );
 }
 
-function readPublicationRecord(value: unknown): PublishedScanIssue {
-  if (
-    !isRecord(value) ||
-    typeof value["findingId"] !== "string" ||
-    typeof value["occurrenceId"] !== "string" ||
-    typeof value["issueIdentifier"] !== "string" ||
-    !value["issueIdentifier"].trim() ||
-    (value["url"] !== undefined && typeof value["url"] !== "string")
-  ) {
-    throw invalidPublicationRecords();
-  }
-  return {
-    findingId: value["findingId"],
-    occurrenceId: value["occurrenceId"],
-    issueIdentifier: value["issueIdentifier"],
-    ...(typeof value["url"] === "string" ? { url: value["url"] } : {}),
-  };
-}
+const publicationRecordsSchema = z
+  .object({
+    scanId: z.string(),
+    findingId: z.string(),
+    occurrenceId: z.string(),
+    issueIdentifier: z.string().refine((value) => Boolean(value.trim())),
+    url: z.string().optional(),
+  })
+  .array();
 
 function invalidPublicationRecords(): CodexSecurityError {
   return new CodexSecurityError(
     "The workbench returned invalid persisted Linear publication records.",
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

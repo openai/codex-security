@@ -1,12 +1,15 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, relative, sep } from "node:path";
 import type { JsonObject } from "./config.js";
-import { CodexSecurityError, safeErrorMessage } from "./errors.js";
+import type { LoadedContract } from "./contract.js";
+import { CodexSecurityError, errorMessage } from "./errors.js";
+import { findingsBaseUrl } from "./findings-client.js";
 import type { FindingSearchScope } from "./finding-retrieval.js";
 import {
   bundledPluginRoot,
   canonicalizeModelSafePath,
   codexSecurityStateDirectory,
+  workbenchEnvironment,
   resolvePluginPython,
   runWorkbench,
   type WorkbenchCommandOptions,
@@ -30,9 +33,21 @@ export interface WorkflowState extends WorkflowBinding {
       status: "pending" | "running" | "failed" | "completed";
       result?: unknown;
       error?: string;
-      pendingWrite?: { groups: string[][] };
+      pendingWrite?: DedupePendingWrite;
     }
   >;
+}
+
+export interface DedupePendingWrite {
+  groups: string[][];
+  local?: { inputDigest: string; source: JsonObject; gitDisabled?: boolean };
+}
+
+interface SourceSnapshotOptions {
+  optional?: boolean;
+  gitDisabled?: boolean;
+  privateStatePaths?: readonly string[];
+  evidence?: boolean;
 }
 
 export function workflowDigest(value: unknown): string {
@@ -46,12 +61,19 @@ export function workflowDigest(value: unknown): string {
   return createHash("sha256").update(json).digest("hex");
 }
 
+export function scanArtifactDigest({
+  manifest,
+  findings,
+  review,
+}: Pick<LoadedContract, "manifest" | "findings" | "review">): string {
+  return workflowDigest({ manifest, findings, review });
+}
+
 export function workflowDestination(url: string): string {
-  const route = "v1/bulk/findings";
-  const destination = new URL(route, url.endsWith("/") ? url : `${url}/`);
+  const destination = findingsBaseUrl(url);
   destination.username = "";
   destination.password = "";
-  return destination.href.slice(0, -route.length);
+  return destination.href;
 }
 
 /** State lives in the workbench database, never in sealed scan artifacts. */
@@ -63,9 +85,15 @@ export class FindingWorkflow {
     private readonly environment: NodeJS.ProcessEnv = process.env,
     private readonly workbench: typeof runWorkbench = runWorkbench,
     private readonly pythonPath?: string,
+    private readonly selection: {
+      protectedRoot?: string;
+      workbenchOptions?: WorkbenchCommandOptions;
+    } = {},
   ) {
     if (!id.trim())
       throw new CodexSecurityError("workflowId must be a nonempty string.");
+    if (selection.workbenchOptions !== undefined)
+      this.options = Promise.resolve(selection.workbenchOptions);
   }
 
   async protectArtifacts(scanDir: string): Promise<void> {
@@ -104,11 +132,16 @@ export class FindingWorkflow {
     return (await this.command({ action: "complete", stage, result }))!;
   }
 
-  async fail(stage: WorkflowStage, error: unknown): Promise<void> {
+  async fail(
+    stage: WorkflowStage,
+    error: unknown,
+    result?: unknown,
+  ): Promise<void> {
     await this.command({
       action: "fail",
       stage,
-      error: safeErrorMessage(error),
+      error: errorMessage(error),
+      ...(result === undefined ? {} : { result }),
     }).catch(() => undefined);
   }
 
@@ -131,10 +164,30 @@ export class FindingWorkflow {
     return context["scan"] as JsonObject;
   }
 
-  async sourceSnapshot(repository: string): Promise<JsonObject> {
-    return (await this.request({ action: "source", repository }))[
-      "source"
-    ] as JsonObject;
+  async sourceSnapshot(
+    repository: string,
+    options?: SourceSnapshotOptions & { optional?: false },
+  ): Promise<JsonObject>;
+  async sourceSnapshot(
+    repository: string,
+    options: SourceSnapshotOptions & { optional: true },
+  ): Promise<JsonObject | null>;
+  async sourceSnapshot(
+    repository: string,
+    options: SourceSnapshotOptions = {},
+  ): Promise<JsonObject | null> {
+    return (
+      await this.request({
+        action: "source",
+        repository,
+        ...(options.optional ? { optional: true } : {}),
+        ...(options.gitDisabled ? { gitDisabled: true } : {}),
+        ...(options.evidence ? { evidence: true } : {}),
+        ...(options.privateStatePaths?.length
+          ? { privateStatePaths: options.privateStatePaths }
+          : {}),
+      })
+    )["source"] as JsonObject | null;
   }
 
   async getReview(key: string): Promise<unknown> {
@@ -145,13 +198,20 @@ export class FindingWorkflow {
     key: string,
     binding: object,
     result: unknown,
+    options: { replace?: boolean } = {},
   ): Promise<void> {
-    await this.request({ action: "save-review", key, binding, result });
+    await this.request({
+      action: "save-review",
+      key,
+      binding,
+      result,
+      ...(options.replace ? { replace: true } : {}),
+    });
   }
 
   async prepareDedupe(
     result: unknown,
-    pendingWrite: { groups: string[][] },
+    pendingWrite: DedupePendingWrite,
   ): Promise<void> {
     await this.command({
       action: "prepare-dedupe",
@@ -182,11 +242,9 @@ export class FindingWorkflow {
       python: await resolvePluginPython({
         environment: this.environment,
         configuredPath: this.pythonPath,
+        protectedRoot: this.selection.protectedRoot,
       }),
-      environment: {
-        ...this.environment,
-        CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(this.environment),
-      },
+      environment: workbenchEnvironment(this.environment),
       failureMessage: "Could not save or resume the findings workflow",
     }))();
     return await this.workbench(await this.options, args, input);

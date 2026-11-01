@@ -1,3 +1,6 @@
+import { isRecord } from "./record.js";
+import { parseJson } from "./value.js";
+
 const MAX_ACTIVITY_PATHS = 8;
 const MAX_PROSE_CHARACTERS = 1_000;
 const SHELL_TOKEN = /"(?:\\.|[^"\\])*"|'[^']*'|[^\s|;&<>]+/gu;
@@ -71,12 +74,12 @@ export function scanActivityFromEvent(
     item["type"] === "command_execution" &&
     typeof item["command"] === "string"
   ) {
-    const command = displayCommand(item["command"]);
+    const command = unwrapCommand(item["command"]);
     return {
       id: item["id"],
       kind: "command",
       status,
-      description: command,
+      description: command.replaceAll(/\s+/gu, " "),
       paths: commandRepositoryPaths(command, repository),
     };
   }
@@ -84,14 +87,14 @@ export function scanActivityFromEvent(
   if (item["type"] === "mcp_tool_call" && typeof item["tool"] === "string") {
     const arguments_ = isRecord(item["arguments"]) ? item["arguments"] : {};
     const value = arguments_["cmd"] ?? arguments_["command"];
-    const command = typeof value === "string" ? displayCommand(value) : null;
+    const command = typeof value === "string" ? unwrapCommand(value) : null;
     return {
       id: item["id"],
       kind: "tool",
       status,
       description:
         item["tool"] === "exec" && command !== null
-          ? command
+          ? command.replaceAll(/\s+/gu, " ")
           : toolDescription(item["tool"], arguments_, item["arguments"]),
       paths:
         item["tool"] === "exec" && command !== null
@@ -115,10 +118,24 @@ export function scanActivityFromEvent(
   return null;
 }
 
-function displayCommand(command: string): string {
-  const normalized = command.replaceAll(/\s+/gu, " ").trim();
+function unwrapCommand(command: string): string {
+  const normalized = command.trim();
+  const powershell =
+    process.platform === "win32"
+      ? /^(?:"([^"]+)"|([^\s"'|;&<>]+))\s+(?:-NoProfile\s+)?-Command\s+(['"])(.*)\3$/isu.exec(
+          normalized,
+        )
+      : null;
+  if (
+    powershell !== null &&
+    /(?:^|[\\/])(?:powershell|pwsh)(?:\.exe)?$/iu.test(
+      powershell[1] ?? powershell[2]!,
+    )
+  ) {
+    return powershell[4]!;
+  }
   const match =
-    /^(?:\/(?:usr\/)?bin\/)?(?:zsh|bash|sh)\s+-[a-z]*c[a-z]*\s+(['"])(.*)$/u.exec(
+    /^(?:\/(?:usr\/)?bin\/)?(?:zsh|bash|sh)\s+-[a-z]*c[a-z]*\s+(['"])(.*)$/su.exec(
       normalized,
     );
   if (match === null) return normalized;
@@ -155,10 +172,8 @@ export function scanActivityFromSessionEvent(
         ? payload["text"]
         : payload["message"];
     if (kind === null || typeof text !== "string") return null;
-    const timestamp =
-      typeof event["timestamp"] === "string" ? event["timestamp"] : "";
     return proseActivity(
-      `${type}:${timestamp}:${text}`,
+      `${type}:${typeof event["timestamp"] === "string" ? event["timestamp"] : ""}:${text}`,
       kind,
       delta ? "running" : "completed",
       text,
@@ -227,17 +242,30 @@ function sessionProse(
   kind: "reasoning" | "message",
   value: unknown,
 ): ScanActivity | null {
-  if (!Array.isArray(value)) return null;
-  const text = value
+  return proseActivity(
+    id,
+    kind,
+    "completed",
+    sessionContentText(value, ["summary_text", "output_text"], " "),
+  );
+}
+
+/** @internal */
+export function sessionContentText(
+  content: unknown,
+  types: readonly string[] = ["output_text"],
+  separator = "\n",
+): string {
+  if (!Array.isArray(content)) return "";
+  return content
     .filter(
       (item): item is Record<string, unknown> & { text: string } =>
         isRecord(item) &&
-        (item["type"] === "summary_text" || item["type"] === "output_text") &&
+        types.some((type) => item["type"] === type) &&
         typeof item["text"] === "string",
     )
-    .map((item) => item["text"])
-    .join(" ");
-  return proseActivity(id, kind, "completed", text);
+    .map((item) => item.text)
+    .join(separator);
 }
 
 function proseActivity(
@@ -264,7 +292,7 @@ function proseActivity(
 function prose(text: string, limit?: number): string {
   const normalized = text
     .split(
-      /(`{3,}[^\r\n]*(?:\r?\n[\s\S]*?(?:\r?\n[ \t]*`{3,}[ \t]*(?=\r?\n|$)|$)|$)|`[^`\r\n]+`)/gu,
+      /((?<!`)`{3,}[^`\r\n]*(?:\r?\n[\s\S]*?(?:\r?\n[ \t]*`{3,}[ \t]*(?=\r?\n|$)|$)|$)|`[^`\r\n]+`)/gu,
     )
     .reduce((result, part, index) => {
       if (index % 2 === 1) {
@@ -287,19 +315,13 @@ function prose(text: string, limit?: number): string {
 
 function customShellCommand(name: string, value: unknown): string | null {
   if (name !== "exec" || typeof value !== "string") return null;
-  const match =
+  const quoted =
     /\b(?:exec_command|shell_command)\s*\(\s*\{[\s\S]{0,1024}?\b(?:cmd|command)["']?\s*:\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`[^`]*`)/u.exec(
       value,
-    );
-  if (match?.[1] === undefined) return null;
-  const quoted = match[1];
+    )?.[1];
+  if (quoted === undefined) return null;
   if (quoted.startsWith('"')) {
-    try {
-      const parsed: unknown = JSON.parse(quoted);
-      return typeof parsed === "string" ? parsed : null;
-    } catch {
-      return null;
-    }
+    return parseJson(() => quoted) as string | null;
   }
   return quoted.slice(1, -1).replaceAll(/\\(['`\\])/gu, "$1");
 }
@@ -345,12 +367,8 @@ function sessionCallArguments(
   const value = payload["arguments"] ?? payload["input"];
   if (isRecord(value)) return value;
   if (typeof value !== "string") return {};
-  try {
-    const parsed: unknown = JSON.parse(value);
-    return isRecord(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
+  const parsed = parseJson(() => value);
+  return isRecord(parsed) ? parsed : {};
 }
 
 function commandRepositoryPaths(command: string, repository: string): string[] {
@@ -358,13 +376,17 @@ function commandRepositoryPaths(command: string, repository: string): string[] {
   const repositoryPrefix = repository.replaceAll("\\", "/").replace(/\/$/u, "");
   for (const token of command.match(SHELL_TOKEN) ?? []) {
     let value = token;
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
+    const singleQuoted = value.startsWith("'") && value.endsWith("'");
+    if ((value.startsWith('"') && value.endsWith('"')) || singleQuoted) {
       value = value.slice(1, -1);
     }
     value = value.replaceAll('\\"', '"').replaceAll("\\", "/");
+    if (process.platform === "win32" && !singleQuoted) {
+      value = value.replace(
+        /^\$(?:env:CODEX_SECURITY_REPOSITORY|\{env:CODEX_SECURITY_REPOSITORY\})\//iu,
+        "$CODEX_SECURITY_REPOSITORY/",
+      );
+    }
     for (const prefix of [
       "$CODEX_SECURITY_REPOSITORY/",
       "${CODEX_SECURITY_REPOSITORY}/",
@@ -405,8 +427,4 @@ function argumentRepositoryPaths(value: unknown, repository: string): string[] {
     if (paths.size >= MAX_ACTIVITY_PATHS) break;
   }
   return [...paths];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

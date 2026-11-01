@@ -1,20 +1,115 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import shlex
+import shutil
 import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 import uuid
+from contextlib import nullcontext
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import ModuleType
 from typing import Any
+from unittest import TestCase, mock
+
+BUDGET_COST = {
+    "model": "gpt-5.6-sol",
+    "inputTokens": 1250,
+    "cachedInputTokens": 200,
+    "cacheWriteInputTokens": 0,
+    "outputTokens": 30,
+    "estimatedUsd": 0.00625,
+}
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
 SNAPSHOT_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "snapshot_sqlite.py"
 PLUGIN_MANIFEST = Path(__file__).resolve().parents[1] / ".codex-plugin" / "plugin.json"
+
+
+def load_script(name: str, *, module_name: str | None = None) -> ModuleType:
+    script = SCRIPT.parent / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(module_name or name, script)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load {script}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def read_review_state(state_dir: Path | sqlite3.Connection, scan_dir: Path) -> dict[str, Any]:
+    """Reconstruct internal review state from the retained publication inputs."""
+    review = load_script("review_state")
+
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+    summary = manifest["scan"]
+    if review.uses_legacy_review(summary):
+        return json.loads((scan_dir / "coverage.json").read_text())
+    if "reviewState" in summary:
+        return review.review_state(summary)
+    if "preservedSources" not in summary:
+        head = json.loads((scan_dir / "checkpoint-head.json").read_text())
+        checkpoint = json.loads((scan_dir / "checkpoints" / head["checkpoint"]).read_text())
+        return review.review_state({**summary, "reviewState": checkpoint["reviewState"]})
+    db = load_script("workbench_db")
+    saved = load_script("workbench_saved_results")
+    with (
+        nullcontext(state_dir)
+        if isinstance(state_dir, sqlite3.Connection)
+        else sqlite3.connect(state_dir / "workbench.sqlite3")
+    ) as connection:
+        connection.row_factory = sqlite3.Row
+        scan = connection.execute("SELECT * FROM scans WHERE id = ?", (summary["id"],)).fetchone()
+        workers = connection.execute(
+            "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
+            (summary["id"],),
+        ).fetchall()
+    if summary["status"] == "completed" and scan["mode"] == "deep":
+        # Deep completion saves the accepted parent aggregate before sealing,
+        # including deadline recovery's validated records and pending tasks.
+        head = json.loads((scan_dir / "checkpoint-head.json").read_text())
+        checkpoint = json.loads((scan_dir / "checkpoints" / head["checkpoint"]).read_text())
+        return review.review_state({**summary, "reviewState": checkpoint["reviewState"]})
+    binding = db.workbench_completion_binding(scan, summary["completedAt"], manifest)
+    # This read-only helper reconstructs bookkeeping rather than reusing a sealed publication.
+    binding["status"] = "inspect-retained-review"
+    documents = saved.merge_saved_results(
+        scan_dir,
+        summary["id"],
+        binding,
+        workers,
+        [],
+        stopped=summary["status"] != "completed",
+        reason=(
+            f"Scan {summary['status']}; saved findings and pending review were preserved. {scan['failure_message'] or ''}"
+        ).strip(),
+        frozen_source_digests=summary["preservedSources"],
+        checkpoint_heads=summary.get("preservedCheckpointHeads", {}).copy(),
+        scan_mode=scan["mode"],
+        finding_scope=db.requested_finding_scope(scan) if scan["mode"] == "deep" else None,
+        project_worker_coverage=scan["mode"] == "deep",
+    )
+    assert documents is not None
+    binding["status"] = summary["status"]
+    return (
+        load_script("finalize_scan_contract")
+        ._prepare_scan_finalization(
+            scan_dir,
+            expected_coverage_mode=db.expected_coverage_mode(scan),
+            completion_binding=binding,
+            draft_documents=documents,
+            recover_unsealed=True,
+            allow_missing_writeups=summary["status"] == "completed",
+            finding_scope=db.requested_finding_scope(scan) if scan["mode"] == "deep" else None,
+        )
+        .coverage
+    )
 
 
 def source_plugin_version() -> str:
@@ -24,12 +119,107 @@ def source_plugin_version() -> str:
     return version
 
 
-def write_checkpoint(checkpoint_dir: Path, payload: Any) -> Path:
+def write_checkpoint(checkpoint_dir: Path, payload: Any, *, mtime_ns: int | None = None) -> Path:
     encoded = json.dumps(payload).encode()
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = checkpoint_dir / f"{hashlib.sha256(encoded).hexdigest()}.json"
     checkpoint_path.write_bytes(encoded)
+    if mtime_ns is not None:
+        os.utime(checkpoint_path, ns=(mtime_ns, mtime_ns))
     return checkpoint_path
+
+
+def select_checkpoint(output: Path, checkpoint: Path, *, mtime_ns: int | None = None) -> Path:
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    if mtime_ns is not None:
+        os.utime(head, ns=(mtime_ns, mtime_ns))
+    return head
+
+
+def write_result_draft(path: Path, draft: dict, *, mtime_ns: int) -> None:
+    path.write_text(json.dumps(draft))
+    os.utime(path, ns=(mtime_ns, mtime_ns))
+
+
+def sort_checkpoint_entries(monkeypatch, *, key=None, reverse=False):
+    from workbench import saved_sources
+
+    children = saved_sources._children
+    monkeypatch.setattr(
+        saved_sources,
+        "_children",
+        lambda root, relative: sorted(children(root, relative), key=key, reverse=reverse),
+    )
+
+
+def interrupt_publication(*args, **kwargs):
+    raise OSError("Synthetic publication interruption")
+
+
+def saved_coverage(*, deferred=(), surfaces=()):
+    return {
+        "surfaces": list(surfaces),
+        "explicitExclusions": [],
+        "deferred": list(deferred),
+    }
+
+
+def saved_draft(
+    scan_id: str,
+    *,
+    deferred=(),
+    surfaces=(),
+    closures=(),
+    complete=False,
+    findings=(),
+):
+    return {
+        "scanId": scan_id,
+        "complete": complete,
+        "findings": list(findings),
+        "coverage": {
+            **saved_coverage(deferred=deferred, surfaces=surfaces),
+            **({"resolvedDeferred": list(closures)} if closures else {}),
+        },
+    }
+
+
+def saved_binding(coverage_mode="repository", *, repository="test", status="interrupted"):
+    return {
+        "status": status,
+        "allowedTargetKinds": ["git_revision"],
+        "target": {"kind": "git_revision", "repository": repository, "revision": "head"},
+        "scope": {"includePaths": ["."], "excludePaths": []},
+        "coverageMode": coverage_mode,
+    }
+
+
+def saved_discovery_worker(output: Path, worker_id: str = "worker", attempt: int = 1) -> dict:
+    return {
+        "id": worker_id,
+        "kind": "discovery",
+        "status": "running",
+        "merge_state": "buffered",
+        "artifact_dir": str(output),
+        "result_manifest_path": None,
+        "attempt": attempt,
+    }
+
+
+def replay_saved_results(
+    module, documents, scan_dir, scan_id, binding, workers=(), *, stopped=True
+):
+    return module.merge_saved_results(
+        scan_dir,
+        scan_id,
+        binding,
+        list(workers),
+        [],
+        stopped=stopped,
+        reason="interrupted",
+        frozen_source_digests=documents[0]["scan"]["preservedSources"],
+    )
 
 
 def stable_target_id(target: Path) -> str:
@@ -86,28 +276,8 @@ def run_workbench(
     check: bool = True,
     environment: dict[str, str] | None = None,
     input_text: str | None = None,
-    deliver_unclaimed_scan_before_mutation: bool = True,
+    umask: int = -1,
 ) -> dict[str, object]:
-    state_database = state_dir / "workbench.sqlite3"
-    # Lifecycle tests that omit a capability model a delivered, non-handoff scan.
-    if (
-        deliver_unclaimed_scan_before_mutation
-        and args[0] in {"begin-deep-scan", "update-progress", "complete-scan", "fail-scan"}
-        and "--scan-id" in args
-        and "--claim-token" not in args
-        and state_database.exists()
-    ):
-        scan_id = args[args.index("--scan-id") + 1]
-        with sqlite3.connect(state_database) as connection:
-            connection.execute(
-                """
-                UPDATE scans
-                SET handoff_status = 'delivered'
-                WHERE id = ? AND status = 'running' AND handoff_status = 'pending'
-                    AND handoff_claim_token IS NULL AND continuation_thread_id IS NULL
-                """,
-                (scan_id,),
-            )
     completed = subprocess.run(
         [sys.executable, str(SCRIPT), *args],
         check=check,
@@ -119,10 +289,414 @@ def run_workbench(
         },
         input=input_text,
         text=True,
+        umask=umask,
     )
     if not check:
         return {"returncode": completed.returncode, "stderr": completed.stderr}
     return json.loads(completed.stdout)
+
+
+def begin_deep_scan(
+    state_dir: Path, thread_id: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return run_workbench(state_dir, "begin-deep-scan", "--thread-id", thread_id, *extra, **options)
+
+
+def resume_deep_scan(
+    state_dir: Path, scan_id: str, thread_id: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return scan_command(
+        state_dir, "begin-deep-scan", scan_id, "--thread-id", thread_id, *extra, **options
+    )
+
+
+def get_deep_scan(
+    state_dir: Path, scan_id: str, thread_id: str, **options: Any
+) -> dict[str, object]:
+    return scan_command(state_dir, "get-deep-scan", scan_id, "--thread-id", thread_id, **options)
+
+
+def upsert_deep_worker(
+    state_dir: Path,
+    scan_id: str,
+    worker_id: str,
+    kind: str,
+    status: str,
+    prompt_path: str,
+    artifact_dir: str,
+    *extra: str,
+    **options: Any,
+) -> dict[str, object]:
+    return scan_command(
+        state_dir,
+        "upsert-deep-scan-worker",
+        scan_id,
+        "--worker-id",
+        worker_id,
+        "--kind",
+        kind,
+        "--status",
+        status,
+        "--prompt-path",
+        prompt_path,
+        "--artifact-dir",
+        artifact_dir,
+        *extra,
+        **options,
+    )
+
+
+def claim_deep_scan_dedup(
+    state_dir: Path,
+    scan_id: str,
+    worker_id: str,
+    prompt_path: str,
+    artifact_dir: str,
+    *extra: str,
+    check: bool = True,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return scan_command(
+        state_dir,
+        "claim-deep-scan-dedup",
+        scan_id,
+        "--worker-id",
+        worker_id,
+        "--prompt-path",
+        prompt_path,
+        "--artifact-dir",
+        artifact_dir,
+        *extra,
+        check=check,
+        environment=environment,
+    )
+
+
+def commit_deep_dedup(
+    state_dir: Path,
+    scan_id: str,
+    worker_id: str,
+    result_manifest_path: str,
+    new_findings_count: str,
+    *extra: str,
+    **options: Any,
+) -> dict[str, object]:
+    return scan_command(
+        state_dir,
+        "commit-deep-scan-dedup",
+        scan_id,
+        "--worker-id",
+        worker_id,
+        "--result-manifest-path",
+        result_manifest_path,
+        "--new-findings-count",
+        new_findings_count,
+        *extra,
+        **options,
+    )
+
+
+def finish_deep_scan(
+    state_dir: Path,
+    scan_id: str,
+    terminal_reason: str,
+    manifest_path: str,
+    *extra: str,
+    check: bool = True,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return scan_command(
+        state_dir,
+        "finish-deep-scan",
+        scan_id,
+        "--terminal-reason",
+        terminal_reason,
+        "--manifest-path",
+        manifest_path,
+        *extra,
+        check=check,
+        environment=environment,
+    )
+
+
+def set_triage(
+    state_dir: Path, occurrence_id: str, status: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "set-finding-triage",
+        "--occurrence-id",
+        occurrence_id,
+        "--status",
+        status,
+        *extra,
+        **options,
+    )
+
+
+def mark_handoff_delivered(
+    state_dir: Path, scan_id: str, claim_token: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return scan_claim_command(
+        state_dir, "mark-handoff-delivered", scan_id, claim_token, *extra, **options
+    )
+
+
+def attach_continuation(
+    state_dir: Path, scan_id: str, claim_token: str, thread_id: str, **options: Any
+) -> dict[str, object]:
+    return scan_claim_command(
+        state_dir,
+        "attach-scan-continuation-thread",
+        scan_id,
+        claim_token,
+        "--thread-id",
+        thread_id,
+        **options,
+    )
+
+
+def cancel_scan(state_dir: Path, scan_id: str, thread_id: str, **options: Any) -> dict[str, object]:
+    return scan_command(state_dir, "cancel-scan", scan_id, "--thread-id", thread_id, **options)
+
+
+def preserve_scan_results(
+    state_dir: Path, scan_id: str, thread_id: str, **options: Any
+) -> dict[str, object]:
+    return scan_command(
+        state_dir, "preserve-scan-results", scan_id, "--thread-id", thread_id, **options
+    )
+
+
+def start_scan_command(
+    state_dir: Path, workspace_id: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return workspace_command(state_dir, "start-scan", workspace_id, *extra, **options)
+
+
+def get_scan(state_dir: Path, scan_id: str, *extra: str, **options: Any) -> dict[str, object]:
+    return scan_command(state_dir, "get-scan", scan_id, *extra, **options)
+
+
+def fail_scan(
+    state_dir: Path, scan_id: str, message: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return scan_command(state_dir, "fail-scan", scan_id, "--message", message, *extra, **options)
+
+
+def scan_command(
+    state_dir: Path, command: str, scan_id: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return run_workbench(state_dir, command, "--scan-id", scan_id, *extra, **options)
+
+
+def scan_claim_command(
+    state_dir: Path, command: str, scan_id: str, claim_token: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir, command, "--scan-id", scan_id, "--claim-token", claim_token, *extra, **options
+    )
+
+
+def workspace_command(
+    state_dir: Path, command: str, workspace_id: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return run_workbench(state_dir, command, "--workspace-id", workspace_id, *extra, **options)
+
+
+def write_remediation_patch(patch_path: Path, **text_options: Any) -> None:
+    patch_path.write_text(
+        "diff --git a/source.txt b/source.txt\n"
+        "--- a/source.txt\n"
+        "+++ b/source.txt\n"
+        "@@ -1 +1 @@\n"
+        "-vulnerable\n"
+        "+fixed\n",
+        **text_options,
+    )
+
+
+@dataclass(frozen=True)
+class RemediationRequest:
+    state_dir: Path
+    occurrence_id: str
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+    def _run(self, command: str, *args: str, check: bool = True) -> dict[str, object]:
+        return run_workbench(
+            self.state_dir,
+            command,
+            "--occurrence-id",
+            self.occurrence_id,
+            "--request-id",
+            self.id,
+            *args,
+            check=check,
+        )
+
+    def start(self, token: str, *, check: bool = True) -> dict[str, object]:
+        return self._run("request-finding-remediation", "--action-token", token, check=check)
+
+    def update(
+        self, token: str, version: str, state: str, *args: str, check: bool = True
+    ) -> dict[str, object]:
+        return self._run(
+            "set-finding-remediation",
+            "--action-token",
+            token,
+            "--expected-version",
+            version,
+            "--state",
+            state,
+            *args,
+            check=check,
+        )
+
+    def generate(
+        self, token: str, patch: Path, *args: str, check: bool = True
+    ) -> dict[str, object]:
+        digest = hashlib.sha256(patch.read_bytes()).hexdigest()
+        return self.update(
+            token,
+            "1",
+            "generated",
+            "--patch-path",
+            patch.name,
+            "--patch-digest",
+            f"sha256:{digest}",
+            *args,
+            check=check,
+        )
+
+    def request_action(
+        self, version: str, action: str, token: str, *, check: bool = True
+    ) -> dict[str, object]:
+        return self._run(
+            "request-finding-remediation-action",
+            "--expected-version",
+            version,
+            "--action",
+            action,
+            "--action-token",
+            token,
+            check=check,
+        )
+
+    def claim_resend(self, token: str, *, check: bool = True) -> dict[str, object]:
+        return self._run("claim-finding-remediation-resend", "--action-token", token, check=check)
+
+    def cancel(self, token: str) -> dict[str, object]:
+        return self._run("cancel-finding-remediation-request", "--action-token", token)
+
+    def mark_delivered(self, token: str) -> dict[str, object]:
+        return self._run("mark-finding-remediation-delivered", "--action-token", token)
+
+    def release_claim(self, token: str) -> dict[str, object]:
+        return self._run("release-finding-remediation-claim", "--action-token", token)
+
+
+def save_workspace(
+    state_dir: Path,
+    workspace_id: str,
+    target_path: str,
+    scope: str,
+    mode: str,
+    *extra: str,
+    check: bool = True,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return workspace_command(
+        state_dir,
+        "save-workspace",
+        workspace_id,
+        "--target-path",
+        target_path,
+        "--scope",
+        scope,
+        "--mode",
+        mode,
+        *extra,
+        check=check,
+        environment=environment,
+    )
+
+
+def create_workspace(
+    state_dir: Path,
+    workspace_id: str,
+    *extra: str,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return workspace_command(
+        state_dir, "create-workspace", workspace_id, *extra, environment=environment
+    )
+
+
+def update_progress(
+    state_dir: Path,
+    scan_id: str,
+    *extra: str,
+    check: bool = True,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return scan_command(
+        state_dir, "update-progress", scan_id, *extra, check=check, environment=environment
+    )
+
+
+def fail_deep_scan(state_dir, codex_home, scan_id, *, message="Worker stopped.", deep_status=None):
+    return scan_command(
+        state_dir,
+        "fail-deep-scan",
+        scan_id,
+        "--message",
+        message,
+        *(["--deep-status", deep_status] if deep_status is not None else []),
+        environment={"CODEX_HOME": str(codex_home)},
+    )
+
+
+def start_delivered_scan(
+    state_dir: Path,
+    workspace_id: str,
+    *args: str,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    """Prepare an unclaimed, delivered scan for tests outside handoff ownership."""
+    scan = start_scan_command(state_dir, workspace_id, *args, environment=environment)["results"]
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET handoff_status = 'delivered' WHERE id = ?", (scan["scanId"],)
+        )
+    scan["handoffStatus"] = "delivered"
+    return scan
+
+
+def start_workspace_scan(state_dir: Path, workspace_id: str, scan_root: Path) -> tuple[str, Path]:
+    started = start_delivered_scan(
+        state_dir,
+        workspace_id,
+        "--scan-root",
+        str(scan_root),
+    )
+    return str(started["scanId"]), Path(str(started["scanDir"]))
+
+
+def start_saved_scan(state_dir: Path, target: Path, scan_root: Path) -> tuple[str, Path]:
+    saved = create_saved_workspace(state_dir, target)
+    return start_workspace_scan(state_dir, str(saved["id"]), scan_root)
+
+
+def empty_target_paths(tmp_path: Path) -> tuple[Path, Path]:
+    target = tmp_path / "target"
+    target.mkdir()
+    return tmp_path / "state", target
+
+
+def empty_target_scan(tmp_path: Path) -> tuple[Path, Path, str, Path]:
+    state_dir, target = empty_target_paths(tmp_path)
+    scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
+    return state_dir, target, scan_id, scan_dir
 
 
 def initialize_git_repository(target: Path) -> str:
@@ -155,10 +729,8 @@ def create_saved_workspace(
     state_dir: Path, target: Path, *, thread_id: str | None = None, mode: str = "standard"
 ) -> dict[str, object]:
     workspace_id = str(uuid.uuid4())
-    created = run_workbench(
+    created = create_workspace(
         state_dir,
-        "create-workspace",
-        "--workspace-id",
         workspace_id,
         *(["--thread-id", thread_id] if thread_id else []),
         "--target-path",
@@ -175,44 +747,32 @@ def create_saved_workspace(
         "isWorktree": False,
         "reviewChangesSupported": False,
     }
-    return run_workbench(
+    return save_workspace(
         state_dir,
-        "save-workspace",
-        "--workspace-id",
         workspace_id,
-        "--target-path",
         str(target),
-        "--scope",
         ".",
-        "--mode",
         mode,
         "--user-context",
         "Pay attention to uploaded archives.",
     )
 
 
-def create_saved_git_workspace(state_dir: Path, target: Path) -> dict[str, object]:
+def create_saved_git_workspace(
+    state_dir: Path, target: Path, *, mode: str = "standard"
+) -> dict[str, object]:
     workspace_id = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-    )
-    return run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "standard",
-    )
+    create_workspace(state_dir, workspace_id, "--target-path", str(target))
+    return save_workspace(state_dir, workspace_id, str(target), ".", mode)
+
+
+def worker_paths(scan_dir: Path, name: str) -> tuple[Path, Path, Path]:
+    artifact_dir = scan_dir / "artifacts" / "deep_discovery" / name
+    artifact_dir.mkdir(parents=True)
+    prompt_path = artifact_dir / "prompt.md"
+    prompt_path.write_text(f"Prompt for {name}\n")
+    result_path = artifact_dir / "result.json"
+    return prompt_path, artifact_dir, result_path
 
 
 def mark_deep_coordinator_succeeded(state_dir: Path, scan_id: str, scan_dir: Path) -> Path:
@@ -232,13 +792,19 @@ def mark_deep_coordinator_succeeded(state_dir: Path, scan_id: str, scan_dir: Pat
     return manifest
 
 
+def read_draft_documents(scan_dir: Path) -> dict:
+    return {
+        "manifest": json.loads((scan_dir / "scan-manifest.json").read_text()),
+        "findings": json.loads((scan_dir / "findings.json").read_text()),
+        "coverage": json.loads((scan_dir / "coverage.json").read_text()),
+    }
+
+
 def write_completed_contract(
     scan_dir: Path,
     scan_id: str,
     target: Path,
     *,
-    artifact_scan_id: str | None = None,
-    exclude_paths: list[str] | None = None,
     identity_anchor: str = "archive-entry-write-without-containment",
     include_paths: list[str] | None = None,
     relative_path: str = "src/extract.py",
@@ -247,16 +813,13 @@ def write_completed_contract(
     diff_base_revision: str | None = None,
     diff_head_revision: str | None = None,
     snapshot_digest: str | None = None,
-    target_id: str | None = None,
     coverage_mode: str = "repository",
     inventory_strategy: str = "repository",
 ) -> None:
-    artifact_scan_id = artifact_scan_id or scan_id
-    exclude_paths = exclude_paths or []
     include_paths = include_paths or ["."]
     target_contract = {
         "kind": target_kind,
-        "targetId": target_id or stable_target_id(target),
+        "targetId": stable_target_id(target),
         "displayName": target.name,
         "snapshotDigest": snapshot_digest
         or (
@@ -274,7 +837,7 @@ def write_completed_contract(
     findings = {
         "documentType": "codex-security.findings",
         "schemaVersion": "1.0",
-        "scanId": artifact_scan_id,
+        "scanId": scan_id,
         "findings": [
             {
                 "ruleId": "path-traversal.archive-extraction",
@@ -315,7 +878,7 @@ def write_completed_contract(
                 },
                 "evidenceExcerpt": "destination.write_bytes(entry.read())",
                 "attackPath": {
-                    "dataFlow": "archive entry -> destination path -> filesystem write",
+                    "dataflow": "archive entry -> destination path -> filesystem write",
                     "reachability": "An archive uploader can supply the crafted entry.",
                     "evidenceRefs": ["archive-write"],
                     "impact": {
@@ -338,12 +901,11 @@ def write_completed_contract(
     coverage = {
         "documentType": "codex-security.coverage",
         "schemaVersion": "1.0",
-        "scanId": artifact_scan_id,
+        "scanId": scan_id,
         "mode": coverage_mode,
-        "completeness": "complete",
         "inventoryStrategy": inventory_strategy,
         "includePaths": include_paths,
-        "excludePaths": exclude_paths,
+        "excludePaths": [],
         "surfaces": [
             {
                 "id": "surface_archive_extraction",
@@ -359,7 +921,7 @@ def write_completed_contract(
         "documentType": "codex-security.scan-manifest",
         "schemaVersion": "1.0",
         "scan": {
-            "id": artifact_scan_id,
+            "id": scan_id,
             "producer": {
                 "name": "codex-security-plugin",
                 "version": source_plugin_version(),
@@ -368,7 +930,7 @@ def write_completed_contract(
             "startedAt": "2026-06-02T18:00:00Z",
             "completedAt": "2026-06-02T18:09:00Z",
             "target": target_contract,
-            "scope": {"includePaths": include_paths, "excludePaths": exclude_paths},
+            "scope": {"includePaths": include_paths, "excludePaths": []},
             "coverageRef": "coverage.json",
             "findingsRef": "findings.json",
         },
@@ -377,3 +939,66 @@ def write_completed_contract(
     (scan_dir / "coverage.json").write_text(json.dumps(coverage))
     (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
     (scan_dir / "report.md").write_text("# Fixture report\n")
+
+
+def windows_file_backend() -> mock.Mock:
+    backend = mock.Mock()
+
+    def open_read_fd(scan_dir: Path, relative_path: str, _context: str) -> int:
+        return os.open(scan_dir / relative_path, os.O_RDONLY)
+
+    def atomic_write(
+        scan_dir: Path,
+        relative_path: str,
+        payload: bytes,
+        *,
+        expected_root_identity: tuple[int, int] | None = None,
+    ) -> None:
+        path = scan_dir / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+
+    def unlink_if_exists(scan_dir: Path, relative_path: str) -> None:
+        (scan_dir / relative_path).unlink(missing_ok=True)
+
+    backend.open_read_fd.side_effect = open_read_fd
+    backend.atomic_write.side_effect = atomic_write
+    backend.unlink_if_exists.side_effect = unlink_if_exists
+    return backend
+
+
+class ScanFixtureTestCase(TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.scan_dir = Path(self.temp_dir.name) / "scan"
+        shutil.copytree(self.example_scan, self.scan_dir)
+        manifest = json.loads((self.scan_dir / "scan-manifest.json").read_text())
+        findings = json.loads((self.scan_dir / "findings.json").read_text())
+        coverage = json.loads((self.scan_dir / "coverage.json").read_text())
+        report = self.validator.FINALIZER._generate_report_projection(manifest, findings, coverage)
+        (self.scan_dir / "report.md").write_bytes(report)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def read_json(self, name: str) -> dict[str, object]:
+        return json.loads((self.scan_dir / name).read_text(encoding="utf-8"))
+
+    def write_json(self, relative_path: str, payload: object) -> None:
+        path = self.scan_dir / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    def rewrite_sealed_artifact(self, relative_path: str, payload: object) -> None:
+        self.write_json(relative_path, payload)
+        manifest = self.read_json("scan-manifest.json")
+        for artifact in manifest["scan"]["artifacts"]:
+            if artifact["path"] == relative_path:
+                artifact["sha256"] = self.sha256_file(relative_path)
+                break
+        else:
+            raise AssertionError(f"missing sealed artifact: {relative_path}")
+        self.write_json("scan-manifest.json", manifest)
+
+    def sha256_file(self, name: str) -> str:
+        return hashlib.sha256((self.scan_dir / name).read_bytes()).hexdigest()

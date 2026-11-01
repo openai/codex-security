@@ -1,58 +1,36 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { runNodePython } from "./support/python-probe.js";
+import { pythonExecutable } from "./support/python.js";
+import { nodeCommand } from "./support/shell.js";
+import { windowsHelperFixture } from "./windows-helper-command.js";
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
+import { git } from "./git-fixture.js";
+import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
+  existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
-const temporaryRoots: string[] = [];
+const temporaryRoots = createTemporaryDirectoriesSync(true);
+const testPosix = process.platform === "win32" ? test.skip : test;
 
-function pythonExecutable(): string | null {
-  return (
-    process.env["PYTHON"] ??
-    Bun.which("python3") ??
-    Bun.which("python") ??
-    Bun.which("py")
-  );
-}
-
-afterEach(() => {
-  for (const root of temporaryRoots.splice(0)) {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-function git(repository: string, ...args: string[]): string {
-  return execFileSync(
-    "git",
-    [
-      "-c",
-      "user.name=Fixture",
-      "-c",
-      "user.email=fixture@example.com",
-      ...args,
-    ],
-    { cwd: repository, encoding: "utf8" },
-  ).trim();
-}
+afterEach(temporaryRoots.cleanup);
 
 test("diff previews stay inside the selected repository", () => {
-  const root = realpathSync(
-    mkdtempSync(join(tmpdir(), "codex-security-diff-rank-")),
-  );
-  temporaryRoots.push(root);
+  const root = temporaryRoots.create("codex-security-diff-rank-");
   const repository = join(root, "repository");
   const nested = join(repository, "src", "nested");
   mkdirSync(nested, { recursive: true });
   git(repository, "init", "-q");
+  git(repository, "config", "--local", "core.autocrlf", "false");
   writeFileSync(join(repository, "src", "handler.py"), "value = 1\n");
   writeFileSync(join(repository, "src", "deleted.py"), "removed = True\n");
   writeFileSync(join(repository, "src", "entry.py"), "handler.py");
@@ -89,14 +67,11 @@ test("diff previews stay inside the selected repository", () => {
   rmSync(nested, { recursive: true });
   symlinkSync(externalFixture, nested, "junction");
 
-  const python = pythonExecutable();
-  expect(python).not.toBeNull();
   const output = join(root, "rank-input.jsonl");
   const result = spawnSync(
-    python!,
+    nodeCommand().command,
     [
-      "-B",
-      join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+      join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
       "make-diff-rank-input",
       "--repo",
       repository,
@@ -132,14 +107,12 @@ test("diff previews stay inside the selected repository", () => {
 });
 
 test("preserves Unicode Git paths and legacy-encoded commit metadata", () => {
-  const root = realpathSync(
-    mkdtempSync(join(tmpdir(), "codex-security-diff-rank-unicode-")),
-  );
-  temporaryRoots.push(root);
+  const root = temporaryRoots.create("codex-security-diff-rank-unicode-");
   const repository = join(root, "repository-漢字");
   const source = join(repository, "src", "変更.py");
   mkdirSync(join(repository, "src"), { recursive: true });
   git(repository, "init", "-q");
+  git(repository, "config", "--local", "core.autocrlf", "false");
   writeFileSync(source, "value = 1\n");
   git(repository, "add", ".");
   git(repository, "commit", "-qm", "base");
@@ -162,15 +135,11 @@ test("preserves Unicode Git paths and legacy-encoded commit metadata", () => {
   );
   const legacyHead = git(repository, "rev-parse", "HEAD");
 
-  const python = pythonExecutable();
-  expect(python).not.toBeNull();
   const output = join(root, "rank-input.jsonl");
   const rank = spawnSync(
-    python!,
+    nodeCommand().command,
     [
-      "-I",
-      "-B",
-      join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+      join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
       "make-diff-rank-input",
       "--repo",
       repository,
@@ -194,19 +163,15 @@ test("preserves Unicode Git paths and legacy-encoded commit metadata", () => {
     "diff = db.require_diff_target(repo, 'commit', None, sys.argv[3], None)",
     "print(json.dumps({'root': str(root), 'pathspec': pathspec, 'subject': metadata['commitSubject'], 'diff': diff}))",
   ].join("\n");
-  const probe = spawnSync(
-    python!,
-    [
-      "-I",
-      "-B",
-      "-c",
-      probeSource,
-      join(PLUGIN_ROOT, "scripts"),
-      repository,
-      legacyHead,
-    ],
-    { encoding: "utf8" },
-  );
+  const python = pythonExecutable();
+  expect(python).not.toBeNull();
+  const probe = runNodePython(python!, [
+    "-c",
+    probeSource,
+    join(PLUGIN_ROOT, "scripts"),
+    repository,
+    legacyHead,
+  ]);
 
   expect(rank.status, `${rank.stderr}\n${String(rank.error ?? "")}`).toBe(0);
   expect(
@@ -230,3 +195,154 @@ test("preserves Unicode Git paths and legacy-encoded commit metadata", () => {
     diff: { kind: "commit", baseRevision: head, headRevision: legacyHead },
   });
 });
+
+testPosix(
+  "uses only the host-selected Git executable for rank and inventory helpers",
+  () => {
+    const root = temporaryRoots.create("codex-security-host-git-");
+    const repository = join(root, "repository");
+    const shimDirectory = join(repository, "tools");
+    const shim = join(shimDirectory, "git");
+    const externalBin = join(root, "external-bin");
+    const ripgrep = join(externalBin, "rg");
+    const marker = join(root, "shim-ran");
+    mkdirSync(shimDirectory, { recursive: true });
+    mkdirSync(externalBin);
+    git(repository, "init", "-q");
+    git(repository, "config", "--local", "core.autocrlf", "false");
+    writeFileSync(join(repository, "source.py"), "value = 1\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "base");
+    const base = git(repository, "rev-parse", "HEAD");
+    writeFileSync(join(repository, "source.py"), "value = 2\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "head");
+    const head = git(repository, "rev-parse", "HEAD");
+    writeFileSync(join(repository, ".gitignore"), "source.py\n");
+    writeFileSync(shim, '#!/bin/sh\n: > "$GIT_SHIM_MARKER"\nexit 99\n');
+    chmodSync(shim, 0o700);
+    symlinkSync(shim, join(externalBin, "git"));
+    writeFileSync(ripgrep, "#!/bin/sh\nexit 0\n");
+    chmodSync(ripgrep, 0o700);
+
+    const hostGit = Bun.which("git");
+    expect(hostGit).not.toBeNull();
+    const trustedGit = join(
+      realpathSync(dirname(hostGit!)),
+      basename(hostGit!),
+    );
+    const output = join(root, "output");
+    const run = (script: string, args: string[], binding = trustedGit) =>
+      spawnSync(
+        nodeCommand().command,
+        [
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          ...(script === "generate-in-scope-files" ? [script] : []),
+          ...args,
+          "--repo",
+          repository,
+          "--out",
+          output,
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: `${externalBin}:${process.env["PATH"] ?? ""}`,
+            GIT_SHIM_MARKER: marker,
+            CODEX_SECURITY_GIT: binding,
+          },
+        },
+      );
+    const rankArguments = [
+      "make-diff-rank-input",
+      "--base",
+      base,
+      "--head",
+      head,
+    ];
+    const unavailable = run("rank-input", rankArguments, "");
+    expect(unavailable.status).not.toBe(0);
+    const rejected = run("rank-input", rankArguments, shim);
+    expect(rejected.status).not.toBe(0);
+    expect(rejected.stderr).toContain("outside the protected repository");
+    const rank = run("rank-input", rankArguments);
+    expect(rank.status, rank.stderr).toBe(0);
+
+    for (const diff of [true, false]) {
+      const inventory = run("generate-in-scope-files", [
+        "--scope",
+        ".",
+        ...(diff ? ["--diff-base", base, "--diff-head", head] : []),
+      ]);
+      expect(inventory.status, inventory.stderr).toBe(0);
+      expect(readFileSync(output, "utf8")).toBe(
+        diff ? "source.py\n" : "./source.py\n",
+      );
+    }
+    expect(existsSync(marker)).toBe(false);
+  },
+);
+
+for (const mode of ["revisions", "local-patch"] as const)
+  test.skipIf(process.platform !== "win32")(
+    `documented Windows ${mode} ranking command preserves literal paths with resolved revisions`,
+    async () => {
+      const root = temporaryRoots.create("codex-security-diff-docs-");
+      const repository = join(root, "repository %USERNAME% !EXPAND! 雪's");
+      const discovery = join(root, "discovery %USERNAME% !EXPAND! 雪's");
+      mkdirSync(repository);
+      mkdirSync(discovery);
+      git(repository, "init", "-q");
+      const source = join(repository, "source.py");
+      writeFileSync(source, "before\n");
+      git(repository, "add", ".");
+      git(repository, "commit", "-qm", "Fixture base");
+      const base = "fixture-%USERNAME%-!EXPAND!-é's";
+      git(repository, "branch", base);
+      writeFileSync(source, "after\n");
+      if (mode === "revisions") {
+        git(repository, "add", ".");
+        git(repository, "commit", "-qm", "Fixture head");
+      }
+      const launcher = windowsHelperFixture(root, {
+        CODEX_SECURITY_GIT: Bun.which("git")!,
+      });
+      for (const powershell of launcher.powershells) {
+        const result = await launcher.run(
+          powershell,
+          "skills/security-scan/references/scan-artifacts-and-ledger.md",
+          {
+            "<plugin_dir>": launcher.plugin,
+            "<repo_root>": repository,
+            "<discovery_dir>": discovery,
+            "<resolved_base_object_id>": git(
+              repository,
+              "rev-parse",
+              "--verify",
+              "--end-of-options",
+              `${base}^{commit}`,
+            ),
+            "<resolved_head_object_id>": git(
+              repository,
+              "rev-parse",
+              "--verify",
+              "--end-of-options",
+              "HEAD^{commit}",
+            ),
+          },
+          undefined,
+          root,
+          undefined,
+          mode === "revisions" ? 1 : 2,
+        );
+        expect(result.status, result.diagnostics).toBe(0);
+        expect(result.stdout, result.diagnostics).not.toContain(
+          "expanded-plugin-used",
+        );
+        expect(
+          JSON.parse(readFileSync(join(discovery, "rank_input.jsonl"), "utf8")),
+        ).toMatchObject({ path: "source.py", preview: "after" });
+      }
+    },
+  );

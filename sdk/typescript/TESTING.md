@@ -1,11 +1,14 @@
 # Testing the SDK and CLI
 
 Use the pnpm version in `package.json` and Bun 1.3.14, matching required CI.
+Install both the SDK and MCP app dependencies before building or testing.
+Prepare the [universal native payload](../../plugins/codex-security/native/README.md#package-inputs)
+before running a command that builds the bundled plugin.
 Run these commands from `sdk/typescript`:
 
 ```sh
 pnpm install --frozen-lockfile
-npm ci --prefix ../../plugins/codex-security/mcp-app --no-audit --no-fund
+pnpm --dir ../../plugins/codex-security/mcp-app install --frozen-lockfile
 pnpm run check:plugin-source
 bun test --timeout 30000 ./tests-ts/worker-progress.test.ts
 pnpm run types
@@ -28,28 +31,93 @@ tracked by Git. Required CI runs the same check before installing dependencies.
 
 For CI's full archive inspection, pass the exact `.tgz` path printed by
 `pnpm pack` to `pnpm run check:package`.
+These checks include native Node contracts for SDK completion, cancellation,
+close cleanup, and CLI terminal sanitization. They use the installed package,
+controlled model output, and the real workbench without live model credentials.
+The installed-package checks also verify hosted SDK exports, input validation,
+and the `scan --host` protocol without preparing a repository or requiring Git.
+The hosted-scan tests cover real repository scans, scope, artifact seals, and
+executor receipts. To rerun just the installed-package check, use
+`node scripts/smoke-hosted-package.mjs /absolute/path/to/node_modules/@openai/codex-security`.
 
 Tests run in random order by default. To replay a failure, pass the seed from
 Bun's summary to `pnpm run test --seed 12345`.
 
+The SDK shards in `node-ci` use the workflow run number as their seed, so
+rerunning a job repeats its test order. To replay a shard locally, use its
+platform, shard selector, and seed, for example
+`node --experimental-strip-types scripts/run-ci-tests.mts 2/6 --seed=12345`.
+On Linux, if the original workflow ran the separate MCP tests, prefix that
+command with `CODEX_SECURITY_TEST_MCP_WORKERS_SEPARATE=true` to skip the four
+worker groups they cover. Leave it unset to replay a run that skipped MCP.
+
 The local test commands pass a 30-second per-test timeout explicitly. Windows
-CI and the Windows runner experiment allow 120 seconds for slower native
+CI and the Windows runner diagnostics allow 120 seconds for slower native
 credential and document checks. `test:ci` writes `reports/junit.xml` and
 `coverage/lcov.info`. Coverage measures loaded
 JavaScript and TypeScript, not the Python helpers or child processes. It is
 diagnostic for now. Use several successful CI runs to establish a baseline
 before proposing a coverage floor.
 
+## Native artifacts in fresh development environments
+
+SDK tests, including Ona's **Run tests** automation, require the eight verified
+native payloads. Installing Node and Python dependencies alone does not supply
+them. Select a successful native-artifacts or node-ci run built from this
+checkout's native sources and toolchain, then use the exact artifact name from
+that run (pull request artifacts use the tested merge commit):
+
+```sh
+gh run download <run-id> --name native-universal-<commit> --dir plugins/codex-security/native/prebuilt
+```
+
+Run this command from the repository root before starting the automation.
+Refresh the artifact after changing native source or toolchain. The standalone
+plugin supports a host-only build; that does not satisfy the SDK's universal
+packaging tests. See the [native build guide](../../plugins/codex-security/native/README.md).
+
+## Python test dependencies
+
+Use Python 3.10 or later. From the repository root, install the Python test and lint dependencies with:
+
+```sh
+python -m pip install --disable-pip-version-check --no-input -r plugins/codex-security/requirements-test.txt
+```
+
+This replaces `pip install -e 'plugins/codex-security[test]'`. Tests load the plugin scripts from source; the repository does not need an installed Python distribution.
+The requirements file is the single list of pinned Python test dependencies. Ruff and pytest settings remain in `plugins/codex-security/pyproject.toml`; the Ruff dependency and its `required-version` setting must agree.
+
 ## Writing tests
 
 - Test observable results, failures, cancellation, and cleanup. Prefer a
   regression case that fails before a fix over assertions about private calls
   or exact prose.
+- Pair a fault case with a healthy control when that shows the failure's cause.
+  For ordering bugs, coordinate the relevant events explicitly rather than
+  relying on sleeps: for example, persist a checkpoint before cancellation or
+  fail an operation before its cleanup runs.
 - Keep fixtures synthetic and independent. Use real temporary directories,
   Git repositories, SQLite databases, and installed packages when those
   boundaries are the behavior under test. Do not use live model credentials.
+- Follow the changed behavior through its consumer. Parser checks alone do not
+  prove public API output, persisted state, child-process settings, or installed
+  package behavior. Use the relevant boundary without repeating every test at
+  every layer. See the [source map](../../CONTRIBUTING.md#where-to-make-a-change).
+- When a result can be partial, assert what was retained and what remains
+  unknown. Distinguish empty results from unavailable results, and checkpointed
+  worker output from accepted results and published scan artifacts.
 - Use the typed `TestClient` and `createApiTestFixtures` helpers for API tests.
   Do not add a production abstraction solely to support a mock.
+- Test workflow retry, resume, and checkpoint permutations with the existing
+  injected workbench dependency. `scriptedWorkbench` rejects unexpected
+  requests; `checkpointWorkbench` stores review results without reproducing the
+  Python workflow engine. Keep real workbench calls in the focused workflow
+  integration file for process termination, migration, and source snapshots.
+- Test Python database behavior by calling the production functions in pytest.
+  The `workbench_db` fixture copies a migrated, empty schema into a fresh
+  in-memory SQLite database for each test, with foreign keys enabled. Use
+  file-backed databases for migrations, reopening, locking, and crash recovery;
+  an in-memory database cannot exercise those boundaries.
 - Restore spies, timers, and environment changes. Tests that change the process
   cwd or install persistent ESM module mocks use `runTestInSubprocess`.
   Per-file Bun isolation does not isolate process-wide state inside one file.
@@ -59,7 +127,8 @@ before proposing a coverage floor.
 - Add property tests for meaningful invariants, with accepted and rejected
   inputs. Keep example-based regression tests for readable failure cases.
 - Give parameterized cases distinct names. Use `%p`, `%j`, or `%#` for values
-  that are not strings. The JUnit comparison rejects duplicate identities.
+  that are not strings. Duplicate identities remain valid; the JUnit comparison
+  checks their occurrence and outcome counts.
 
 Property tests use a fixed default seed. Fast-check prints the seed, shrink
 path, and counterexample on failure. To replay one property, select its file
@@ -70,36 +139,113 @@ default to 100 cases; filesystem contract properties default to 20.
 
 ## GitHub Actions
 
-`node-ci` retains the required `ubuntu-latest / node-22`,
-`macos-latest / node-22`, and `windows-latest / node-22` checks. Its Ubuntu
-Node 22 job runs static checks and uploads JUnit and LCOV. All supported runtime
-lanes still test and inspect an installed package. Package inspection includes
-a strict NodeNext TypeScript consumer and the actual installed CLI. Failed
-tests block CI; a failed diagnostic upload does not.
+`node-ci` reports one `ci` gate for all selected required checks. The
+[CI guide](../../docs/ci.md) describes documentation-only routing,
+platform/version selection, and full scheduled qualification.
 
-The separate `test-quality` workflow runs weekly, can be dispatched manually,
-and runs on pull requests that change its workflow file. It compares Bun's
-default runner, `--isolate`, `--parallel=2`, and seven-way Windows sharding.
-Every mode uses the same seed for property cases and test ordering: pull
-requests replay seed 1; scheduled and manual runs use the workflow run number.
-The workflow compares test identities and outcomes against the unsharded
-default run and records timings, including failed shards, in the job summary.
-It is not a required check or part of the release trigger.
+For source qualification, CI builds and inspects one package archive, then passes
+that archive to jobs in the same workflow run, using the commit SHA in the
+artifact name. Selected Node runtimes install and inspect the package, including
+a strict NodeNext TypeScript consumer, the actual CLI, credential locking, and a
+nested Codex worker. The installed Deep Scan smoke exercises a real retry on
+one runtime per OS for PRs and main pushes, and on every scheduled or manual
+qualification lane. All selected runtimes still complete direct and detached scans.
+Native plugin-build tests remain in the shared Bun suite. Each supported OS
+exercises the maintainer release preview, Git branch and commit updates,
+concurrent ref conflicts, and preservation of maintainer edits.
+Typechecking and formatting run once in an independent required job, so package
+consumers do not wait for those checks. Package compilation and archive
+validation still finish before the test jobs start.
 
-Runner trials use Bun 1.3.13 to avoid the
-[async-module initialization bug in 1.3.14](https://github.com/oven-sh/bun/issues/31410)
-that breaks the Ink UI tests under isolation. Keep the trial pin until a newer
-release passes the full SDK suite in every mode. Required CI and the mutation
-trial remain on Bun 1.3.14.
+Source qualification runs the full Bun suite once per OS under Node 22: six
+file shards on Linux and macOS, and fourteen on Windows. GitHub runs the shards
+as separate jobs; each job uses Bun's default serial runner. The other selected
+Node versions run the installed-package checks instead of repeating the same
+Bun suite. MCP CI assigns files by measured duration and starts the longest
+files first, using two isolated Node test processes per job. From
+`plugins/codex-security/mcp-app`, replay shard 1
+with `node --experimental-strip-types ../../../sdk/typescript/scripts/run-mcp-test-shard.mts 1 2`.
+Local and release `test:mcp` commands run the full suite. Python tests run
+separately and use four
+isolated pytest-xdist workers with work stealing; worker crashes fail the run
+without automatic restarts.
 
-Keep the current file-balanced Windows runner until the native runner has
-matching inventories and acceptable Windows timings. Before promotion, compare
-native and file-balanced shards using the same commit and Bun version.
+`scripts/run-ci-tests.mts` discovers every shared test file and balances whole
+files using the platform's recorded durations in `scripts/test-timings.json`.
+It assigns longer files first to the shard with the least estimated work, then
+passes each shard's files directly to Bun. Every job uses the same checked-in
+snapshot. New files are included automatically with the mean known-file duration;
+deleted files in the timing snapshot are ignored. Timing hints never select or
+exclude tests, and adding or splitting tests does not require updating them.
+To reproduce one Windows shard locally after building the plugin, run
+`node --experimental-strip-types scripts/run-ci-tests.mts 3/14 --seed=12345`.
+
+Refresh timing hints from successful CI JUnit artifacts when shard runtimes
+become uneven. From the SDK directory, pass reports for one platform to
+`node --experimental-strip-types scripts/update-test-timings.mts win32 <junit.xml> ...`
+(use `linux` or `darwin` for the other platforms). The updater sums testcase
+durations for executed cases per file and uses their median across reports. A
+report that skipped every case in a file leaves its timing hint unchanged. Other
+platforms retain their hints. Review and commit the generated snapshot. The initial hints use runs
+`39521539826`, `39694506447`, and `39694510011`. Keep runner versions, coverage,
+timeouts, seeds, and platform-specific checks unchanged when comparing scheduling
+changes; compare complete JUnit inventories and outcomes as well as wall time.
+
+Every Bun lane uploads JUnit; Linux lanes also upload LCOV per shard. Python
+reports include case durations, and the MCP runner can upload its JUnit report.
+Coverage is diagnostic and split across shards, not a combined percentage.
+Failed tests and missing package artifacts block CI; failed diagnostic uploads
+do not. Use `python -m pytest -n 0` to reproduce Python failures serially.
+
+Each week `test-quality` runs the mutation trial on Linux. On Linux, macOS, and
+Windows it runs the test files that import the shared property options, using
+the workflow run number as the property seed. The filesystem properties read
+the plugin's checked-in schemas and example scan. Each platform uploads its JUnit
+report. To replay the weekly jobs, dispatch with `compare-layouts` disabled.
+Ordinary source pull requests run focused contracts for the shard runner, timing
+metadata, report comparator, and Windows test-root helper in the required SDK suite.
+
+Manual and reusable workflow runs default to comparing the previous layout
+(three shards on Linux/macOS,
+seven on Windows) with the expanded production layout (six on Linux/macOS,
+fourteen on Windows), for 39 sharded runner jobs. Both layouts use the same serial
+Bun runner and platform timing snapshot; the comparison combines all shards for
+each OS before checking inventory and outcomes. Local full-suite runs still cover
+unsharded cross-file ordering. More jobs add setup overhead, so compare required-green
+latency and summed runner time alongside shard test timings.
+
+The comparison uses the same seed for property cases and test ordering in every
+layout. Manual runs use the workflow run number. Calls from pull request workflows
+use seed 1. Reports have unique OS/layout/shard
+names. The workflow requires every expected shard report
+before accepting comparisons, then compares complete shard groups by test
+identity, outcome, assertion count, and occurrence count, retaining legitimate
+repeated names from parameterized tests while detecting missing or extra instances. It records every
+shard's timing, including failed shards, in the job summary. It is not a required
+check or part of the release trigger.
+
+Required CI and shard diagnostics use Bun 1.3.14 without `--parallel` or
+`--isolate`. Runtime upgrades and worker-based execution need separate
+qualification of process-failure propagation and report/coverage finalization
+before promotion.
+
+Both layouts use the same property seed and coverage settings. Required CI uses
+the default property seed and collects Linux coverage; diagnostics use the seed
+above and the same Linux LCOV instrumentation. Artifacts include JUnit and
+coverage in separate OS/layout/shard paths. The automated comparison checks JUnit
+inventories, outcomes, and assertion counts; LCOV remains available for covered-line
+comparison during qualification. Compare inventories across required CI and
+diagnostics, but measure scheduling changes between diagnostic layouts.
+Both workflows install ripgrep on Linux so the inventory-path test executes.
+
 Keep the machine-policy test serial. Do not replace the full required suite
 with `--changed`: Python files, schemas, fixtures, and workflows loaded at
 runtime are not necessarily part of Bun's import graph.
 
 ## Mutation testing
+
+Mutation tests require Node 22.18+ or 24.11+ because Stryker 10 uses Babel 8.
+CI runs this tooling on Node 24.15.0. The SDK itself still supports Node 22.13+.
 
 ```sh
 pnpm run test:mutation
