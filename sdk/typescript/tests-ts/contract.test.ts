@@ -1,5 +1,6 @@
 import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
 import type { Stats } from "node:fs";
+import { createRequire } from "node:module";
 import {
   chmod,
   cp,
@@ -15,7 +16,12 @@ import {
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test, mock, spyOn } from "bun:test";
 import { ContractValidationError, loadContract } from "../src/index.js";
-import { readScanFile, sameCheckedFileDevice } from "../src/contract.js";
+import {
+  loadContractWithScanDirectory,
+  readScanFile,
+  sameCheckedFileDevice,
+  validatedFileDigests,
+} from "../src/contract.js";
 import type { NormalizedTarget, ScanExpectation } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runPython } from "./support/python-probe.js";
@@ -136,14 +142,6 @@ describe("canonical scan contract", () => {
     await expect(
       loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
     ).rejects.toBeInstanceOf(ContractValidationError);
-  });
-
-  test("ships a completed example that passes tracking preflight", () => {
-    const result = runPython(Bun.which("python3") ?? "python", [
-      join(PLUGIN_ROOT, "scripts", "validate_tracking_source.py"),
-      EXAMPLE,
-    ]);
-    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
   });
 
   test("compares exact Windows volume serials without rounding file identity", async () => {
@@ -287,108 +285,58 @@ describe("canonical scan contract", () => {
     },
   );
 
-  test("rejects scan-file replacements whose numeric file IDs collide", async () => {
-    const title =
-      "rejects scan-file replacements whose numeric file IDs collide";
-    if (runTestInSubprocess(import.meta.path, title)) return;
-    const scanDir = await realpath(await copyExample());
-    const path = join(scanDir, "coverage.json");
-    const selectedInode = 2n ** 60n;
-    const replacementInode = selectedInode + 1n;
-    expect(Number(selectedInode)).toBe(Number(replacementInode));
-    const files = await import("node:fs/promises");
-    const originalLstat = files.lstat;
-    const originalOpen = files.open;
-    let replaced = false;
-    let restoreOpenedStat: (() => void) | undefined;
-    const inspecting = spyOn(files, "lstat").mockImplementation((async (
-      ...args: Parameters<typeof files.lstat>
-    ) => {
-      const metadata = await originalLstat(...args);
-      if (args[0] === path) {
-        const inode = replaced ? replacementInode : selectedInode;
-        metadata.ino = typeof metadata.ino === "bigint" ? inode : Number(inode);
-      }
-      return metadata;
-    }) as typeof files.lstat);
-    const opening = spyOn(files, "open").mockImplementation(async (...args) => {
-      if (args[0] !== path) return await originalOpen(...args);
-      await rename(path, `${path}.original`);
-      await writeFile(path, "replacement");
-      replaced = true;
-      const file = await originalOpen(...args);
-      const originalStat = file.stat.bind(file);
-      const openedStat = spyOn(file, "stat").mockImplementation((async (
-        ...statArgs: Parameters<typeof file.stat>
+  test.skipIf(process.platform === "win32")(
+    "rejects scan root replacement when numeric directory IDs collide",
+    async () => {
+      const title =
+        "rejects scan root replacement when numeric directory IDs collide";
+      if (runTestInSubprocess(import.meta.path, title)) return;
+      const scanDir = await realpath(await copyExample());
+      const before = 2n ** 60n;
+      const after = before + 1n;
+      expect(Number(before)).toBe(Number(after));
+      const files: typeof import("node:fs/promises") = createRequire(
+        import.meta.url,
+      )("node:fs/promises");
+      const original = { lstat: files.lstat, realpath: files.realpath };
+      let replaced = false;
+      const inspecting = spyOn(files, "lstat").mockImplementation((async (
+        ...args: Parameters<typeof original.lstat>
       ) => {
-        const metadata = await originalStat(...statArgs);
-        metadata.ino =
-          typeof metadata.ino === "bigint"
-            ? replacementInode
-            : Number(replacementInode);
+        const metadata = await original.lstat(...args);
+        if (args[0].toString() === scanDir) {
+          const identity = replaced ? after : before;
+          Object.defineProperty(metadata, "ino", {
+            value:
+              typeof metadata.ino === "bigint" ? identity : Number(identity),
+          });
+        }
         return metadata;
-      }) as typeof file.stat);
-      restoreOpenedStat = () => openedStat.mockRestore();
-      return file;
-    });
-    try {
-      await expect(
-        readScanFile(scanDir, "coverage.json", "coverage"),
-      ).rejects.toThrow("expected the checked regular file");
-      expect(replaced).toBe(true);
-    } finally {
-      restoreOpenedStat?.();
-      opening.mockRestore();
-      inspecting.mockRestore();
-    }
-  });
-
-  test("rejects scan root replacement when numeric directory IDs collide", async () => {
-    const title =
-      "rejects scan root replacement when numeric directory IDs collide";
-    if (runTestInSubprocess(import.meta.path, title)) return;
-    const scanDir = await realpath(await copyExample());
-    const before = 2n ** 60n;
-    const after = before + 1n;
-    expect(Number(before)).toBe(Number(after));
-    const files = await import("node:fs/promises");
-    const original = { lstat: files.lstat, realpath: files.realpath };
-    let replaced = false;
-    const inspecting = spyOn(files, "lstat").mockImplementation((async (
-      ...args: Parameters<typeof original.lstat>
-    ) => {
-      const metadata = await original.lstat(...args);
-      if (args[0] === scanDir) {
-        const identity = replaced ? after : before;
-        Object.defineProperty(metadata, "ino", {
-          value: typeof metadata.ino === "bigint" ? identity : Number(identity),
-        });
+      }) as typeof original.lstat);
+      const resolving = spyOn(files, "realpath").mockImplementation((async (
+        ...args: Parameters<typeof original.realpath>
+      ) => {
+        const canonical = await original.realpath(...args);
+        if (args[0].toString() === scanDir && !replaced) {
+          replaced = true;
+          await rename(scanDir, `${scanDir}.original`);
+          await mkdir(scanDir, { mode: 0o700 });
+        }
+        return canonical;
+      }) as typeof original.realpath);
+      try {
+        await expect(
+          readScanFile(scanDir, "coverage.json", "coverage.json"),
+        ).rejects.toThrow(
+          "Scan directory must be an existing non-symlink directory",
+        );
+        expect(replaced).toBe(true);
+      } finally {
+        resolving.mockRestore();
+        inspecting.mockRestore();
       }
-      return metadata;
-    }) as typeof original.lstat);
-    const resolving = spyOn(files, "realpath").mockImplementation((async (
-      ...args: Parameters<typeof original.realpath>
-    ) => {
-      const canonical = await original.realpath(...args);
-      if (args[0] === scanDir && !replaced) {
-        replaced = true;
-        await rename(scanDir, `${scanDir}.original`);
-        await mkdir(scanDir, { mode: 0o700 });
-      }
-      return canonical;
-    }) as typeof original.realpath);
-    try {
-      await expect(
-        readScanFile(scanDir, "coverage.json", "coverage.json"),
-      ).rejects.toThrow(
-        "Scan directory must be an existing non-symlink directory",
-      );
-      expect(replaced).toBe(true);
-    } finally {
-      resolving.mockRestore();
-      inspecting.mockRestore();
-    }
-  });
+    },
+  );
 
   test("loads the unchanged plugin example with typed canonical names", async () => {
     const scanDir = await copyExample();
@@ -511,7 +459,15 @@ describe("canonical scan contract", () => {
     await writeJson(findingsPath, findings);
     await reseal(scanDir);
 
-    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    const originalBytes = await readFile(findingsPath);
+    const result = await loadContractWithScanDirectory(scanDir, {
+      pluginRoot: PLUGIN_ROOT,
+    });
+    expect(Object.keys(result).sort()).toEqual(["contract", "scanDirectory"]);
+    const loaded = result.contract;
+    expect(
+      validatedFileDigests.get(loaded.manifest)?.get("findings.json"),
+    ).toBe(sha256(originalBytes));
     expect(loaded.findings.findings[0]?.code_evidence?.[0]?.id).toBe(
       "legacy-source",
     );

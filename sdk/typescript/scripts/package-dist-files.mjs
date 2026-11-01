@@ -124,6 +124,7 @@ const distModules = [
   "deduplication/deduplication",
   "finding-retrieval",
   "finding-normalization",
+  "contract-values",
   "workbench-arguments",
   "executable-path",
   "finding-workflow",
