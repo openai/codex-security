@@ -1,13 +1,9 @@
 import { waitForRetry } from "./deduplication/retry.js";
 import { CodexSecurityError } from "./errors.js";
-import { ambiguousHostedHttpPath } from "./external-import-contract.js";
+import { normalizeHostedGitRepositoryUrl } from "./hosted-git-repository.js";
 import { importEnvironmentSetting } from "./external-imports-feature.js";
 import { isRecord } from "./record.js";
-import {
-  decodeScannerJson,
-  parseHostedScannerJson,
-  requiredText,
-} from "./scanner-import.js";
+import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 
 export interface HostedScannerHttpOptions {
   environment?: NodeJS.ProcessEnv;
@@ -15,109 +11,107 @@ export interface HostedScannerHttpOptions {
   signal?: AbortSignal;
 }
 
-export function validateHostedRepositoryUrl(value: string): void {
-  if (
-    /[\x00-\x20\x7f]/u.test(value) &&
-    (/^https?:\/\//iu.test(value) ||
-      /^https?:$/u.test(URL.parse(value)?.protocol ?? ""))
-  )
-    throw new CodexSecurityError(
-      "HTTP(S) repository URLs must percent-encode spaces and control characters.",
-    );
-  if (ambiguousHostedHttpPath(value))
-    throw new CodexSecurityError(
-      "The repository URL has an HTTP path that does not match its Git path.",
-    );
+// Our minimum Node runtime provides source-aware JSON parsing. Our SDK targets ES2022 types.
+const wireJson = JSON as JSON & {
+  rawJSON(source: string): { rawJSON: string };
+  isRawJSON(value: unknown): value is { rawJSON: string };
+};
+export function hostedNumberToken(value: unknown): string | undefined {
+  return wireJson.isRawJSON(value) ? value.rawJSON : undefined;
+}
+
+// Normalize equivalent JSON numbers exactly. Keep very large exponents compact.
+export function canonicalNumber(token: string, fixedDigits = 21): string {
+  const [, sign = "", integer, fraction = "", exponent = "0"] =
+    /^(-?)(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/iu.exec(token)!;
+  const significant = (integer + fraction).replace(/^0+/u, "");
+  if (!significant) return "0";
+  let end = significant.length;
+  while (significant[end - 1] === "0") end--;
+  const digits = significant.slice(0, end);
+  const point = BigInt(exponent) + BigInt(significant.length - fraction.length);
+  // Ordinary evidence follows JSON.stringify’s fixed/scientific notation thresholds.
+  if (point > -6n && point <= BigInt(fixedDigits)) {
+    const split = Number(point);
+    if (split <= 0) return sign + "0." + "0".repeat(-split) + digits;
+    if (split >= digits.length) return sign + digits.padEnd(split, "0");
+    return sign + digits.slice(0, split) + "." + digits.slice(split);
+  }
+  const trailing = digits.slice(1);
+  const scientific = point - 1n;
+  return (
+    sign +
+    digits.charAt(0) +
+    (trailing ? "." + trailing : "") +
+    "e" +
+    (scientific >= 0n ? "+" : "") +
+    scientific
+  );
+}
+
+/** Store native evidence by exact numeric value, independently of its wire spelling. */
+export function stringifyHostedEvidence(value: unknown): string {
+  return JSON.stringify(value, (_key, field: unknown) =>
+    wireJson.isRawJSON(field)
+      ? wireJson.rawJSON(canonicalNumber(field.rawJSON))
+      : field,
+  );
+}
+
+/** Keep vendor numeric IDs and evidence exact when a response is saved as JSON. */
+export function parseHostedScannerJson(source: string): unknown {
+  return JSON.parse(
+    source,
+    (_key: string, value: unknown, context?: { source?: string }) => {
+      if (typeof value === "number") return wireJson.rawJSON(context!.source!);
+      // Identical vendor evidence can arrive with a different member order on replay.
+      return isRecord(value)
+        ? Object.fromEntries(
+            Object.keys(value)
+              .sort()
+              .map((key) => [key, value[key]]),
+          )
+        : value;
+    },
+  );
 }
 
 export function hostedRepositoryUrl(value: unknown, label: string): string {
-  const raw = requiredText(value, label);
-  validateHostedRepositoryUrl(raw);
-  const url = URL.parse(raw);
-  if (
-    !url ||
-    url.pathname === "/" ||
-    !/^https?:\/\/[^@/?#\\\s]+\/[^?#\\]+$/iu.test(raw)
-  )
-    throw new Error(
-      "Select an HTTP(S) source repository URL with a path and without credentials, query or fragment.",
-    );
-  return raw;
+  // Hosted Git URLs retain %23 and %3F as path bytes; a literal query or fragment is rejected.
+  return declaredScannerRepositoryUrl(value, label, "local", {
+    allowEncodedQueryAndFragment: true,
+  });
 }
 
-function endpointSetting(environment: NodeJS.ProcessEnv, name: string) {
-  if (name === "SNYK_API_V3_URL" || name === "SNYK_API_REST_URL") {
-    // snyk-config preserves key case and converts boolean literals before interpolation.
-    for (const key in environment) {
-      if (key !== name) continue;
-      const raw = environment[key];
-      if (raw === "false" || raw === "FALSE") return undefined;
-      return raw?.replace(
-        /\$\{([^}\r\n\u2028\u2029]*)\}?/gu,
-        (match, reference: string) => {
-          // Consume an unterminated reference once, leaving it literal.
-          if (!match.endsWith("}")) return match;
-          const requested =
-            process.platform === "win32" ? reference.toUpperCase() : reference;
-          const value = importEnvironmentSetting(environment, requested)?.value;
-          if (value === undefined)
-            throw new Error(
-              `${name} references missing environment variable ${reference}.`,
-            );
-          return value;
-        },
-      );
-    }
-    return undefined;
-  }
-  return importEnvironmentSetting(environment, name)?.value;
+/** Normalize the provider's HTTP or independently identified SSH repository address. */
+export function hostedNativeRepositoryUrl(
+  value: unknown,
+  label: string,
+  additionalGitHost?: string,
+): string {
+  const source = additionalGitHost ? `https://${additionalGitHost}` : undefined;
+  const normalized =
+    typeof value === "string" && value.trim() === value
+      ? normalizeHostedGitRepositoryUrl(value, source, source !== undefined)
+      : value;
+  return hostedRepositoryUrl(normalized, label);
 }
 
-function endpointOrigin(value: string, snykBase: boolean): string | undefined {
-  const url = URL.parse(value);
-  if (url?.protocol !== "https:") return undefined;
-  // Snyk derives its REST host from the general endpoint (e.g. app.eu.snyk.io).
-  if (snykBase && !url.hostname.startsWith("api."))
-    url.hostname = `api.${url.hostname.replace(/^app\./u, "")}`;
-  return url.origin;
-}
-
-export function checkSnykTokenOrigin(token: string, origin: string): void {
-  // Snyk user and service access tokens carry their API hostname in the h claim.
-  const payload =
-    /^snyk_(?:uat|sat)\.[a-z0-9]{8}\.([A-Za-z0-9_-]+)\.[A-Za-z0-9_-]+$/u.exec(
-      token.trim(),
-    )?.[1];
-  if (!payload) return;
-  let claims: unknown;
-  try {
-    claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-  } catch {
-    return;
-  }
-  const host = isRecord(claims) ? claims["h"] : undefined;
-  if (typeof host !== "string" || !host) return;
-  const base = host.startsWith("http") ? host : `https://${host}`;
-  if (endpointOrigin(base, true) !== origin)
-    throw new Error(
-      `The Snyk access token's API host does not match ${origin}. Select its API origin before collecting findings.`,
-    );
-}
-
-/** Use a vendor environment token only at the origin configured for it. */
-export function hostedEnvironmentToken(
+/** Use the selected vendor credential only with its configured service origin. */
+export function hostedScannerToken(
   environment: NodeJS.ProcessEnv,
   tokenName: string,
+  explicitToken: string | undefined,
   origin: string,
   ...originNames: string[]
 ): string | undefined {
-  const token = importEnvironmentSetting(environment, tokenName)?.value;
+  const token =
+    explicitToken ?? importEnvironmentSetting(environment, tokenName)?.value;
   if (token) {
     for (const name of originNames) {
-      const configured = endpointSetting(environment, name);
+      const configured = importEnvironmentSetting(environment, name)?.value;
       if (!configured) continue;
-      const snykBase = name === "SNYK_API" || name === "SNYK_CFG_ENDPOINT";
-      if (endpointOrigin(configured, snykBase) !== origin)
+      if (URL.parse(configured)?.origin !== origin)
         throw new Error(
           `${name} does not match ${origin}. Select a matching API origin and ${tokenName} before collecting findings.`,
         );
@@ -218,7 +212,9 @@ export function hostedScannerHttp(
       );
     }
     return parseHostedScannerJson(
-      decodeScannerJson(await response.arrayBuffer()),
+      new TextDecoder("utf-8", { fatal: true }).decode(
+        await response.arrayBuffer(),
+      ),
     );
   }
   return { signal, getJson };

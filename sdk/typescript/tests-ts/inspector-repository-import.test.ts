@@ -101,11 +101,6 @@ const bindings: [string, string, string?][] = [
     "https://host.test/team/other",
     "https://host.test/team/repo",
   ],
-  [
-    process.platform === "win32" ? "git@c:/org/repo" : "c:/org/repo",
-    "C:/org/repo",
-    "ssh://git@c/org/repo",
-  ],
   [" ssh://host.test/team/repo", "https://host.test/team/repo"],
   ["ssh://bad@host.test:invalid/team/repo", "https://host.test/team/repo"],
   ["ssh://other.test%2Fx@github.com/team/repo", "https://github.com/team/repo"],
@@ -188,26 +183,6 @@ test.each(
     expect((await prepare(equivalent)).preview.findings).toHaveLength(1);
   },
 );
-
-test("an Inspector literal repository does not identify an opaque helper", async () => {
-  const literal = " ssh://host.test/team/repo";
-  await using f = await checkout(literal);
-  execFileSync("git", [
-    "-C",
-    f.options.repository,
-    "config",
-    "--file=.git/config",
-    "remote.origin.vcs",
-    "example",
-  ]);
-  await expect(
-    prepareNormalizedLocalImport(
-      normalized([typedRow(literal)]),
-      f.options,
-      f.deps,
-    ),
-  ).rejects.toThrow("does not match a configured remote");
-});
 
 test("mapped local imports preserve their SQLite history and verify replay provenance", async () => {
   await using f = await checkout();

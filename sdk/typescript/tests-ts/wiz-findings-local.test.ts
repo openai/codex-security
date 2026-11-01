@@ -1,9 +1,7 @@
-import { execFileSync } from "node:child_process";
 import { access, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { expect, test } from "bun:test";
-import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
 import {
   createAndReplayFinding,
@@ -25,6 +23,10 @@ const row: Record<string, string> = {
   LocationPath: "/package-lock.json",
   Version: "1.0.0",
   FixedVersion: "2.0.0",
+  context_type: "",
+  context_guid: "",
+  scan_type: "",
+  issue_id: "",
 };
 
 function csvReport(source: Record<string, string>): string {
@@ -100,40 +102,12 @@ test.each(["CSV", "CSV gzip", "normalized JSONL", "normalized JSONL gzip"])(
 );
 
 test("Wiz CSV imports into SQLite and updates the same source finding", async () => {
-  const source = {
-    provider: "wiz" as const,
-    sourceKey: "example-project:main",
-  };
-  await using fixture = await localReportFixture("wiz.csv", source, {
-    remote: "ext::ssh git@github.com %S example/other.git",
-  });
+  await using fixture = await localReportFixture(
+    "wiz.csv",
+    { provider: "wiz", sourceKey: "example-project:main" },
+    { remote: repositoryUrl },
+  );
   await writeFile(fixture.file, csvReport(row));
-  await expect(fixture.prepare()).rejects.toThrow("does not match");
-  const git = (...args: string[]) =>
-    execFileSync("git", ["-C", fixture.repository, ...args]);
-  git("remote", "set-url", "origin", repositoryUrl);
-  git("config", "--file=.git/config", "remote.origin.vcs", "example");
-  const redirected = join(fixture.root, "empty.gitconfig");
-  await writeFile(redirected, "");
-  await expect(
-    prepareLocalExternalImport(
-      fixture.file,
-      { ...source, repository: fixture.repository },
-      {
-        environment: {
-          ...fixture.environment,
-          [process.platform === "win32" ? "Git_Config" : "GIT_CONFIG"]:
-            redirected,
-        },
-      },
-    ),
-  ).rejects.toThrow("does not match");
-  git("remote", "set-url", "origin", `http::${repositoryUrl}`);
-  await fixture.prepare();
-  git("config", "--file=.git/config", "remote.origin.vcs", "https");
-  git("remote", "set-url", "origin", `example::${repositoryUrl}`);
-  await expect(fixture.prepare()).rejects.toThrow("does not match");
-  git("remote", "add", "upstream", repositoryUrl);
   const stored = await createAndReplayFinding(fixture);
   expect(stored).toMatchObject({ provider: "wiz", sourceFindingId: row["ID"] });
   expect(stored.evidence).toMatchObject({

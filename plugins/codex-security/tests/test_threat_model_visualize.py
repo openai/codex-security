@@ -108,12 +108,14 @@ class ControlValidation(unittest.TestCase):
         }
 
     def check(self, model=None):
-        builder.validate(self.model if model is None else model, "policy denies this caller")
+        builder.validate(self.model if model is None else model, b"policy denies this caller")
 
     def effect(self):
         return self.model["scenarios"][0]["controls"][0]["effect"]
 
-    def build_html(self, assessment, *, error=None, existing_html=None):
+    def build_html(
+        self, assessment_bytes, *, error=None, existing_html=None, model_encoding="utf-8"
+    ):
         with tempfile.TemporaryDirectory() as folder:
             folder = Path(folder)
             model_file, source, output = (
@@ -121,8 +123,10 @@ class ControlValidation(unittest.TestCase):
                 folder / "assessment.md",
                 folder / "output.html",
             )
-            model_file.write_text(json.dumps(self.model, ensure_ascii=False), encoding="utf-8")
-            source.write_bytes(assessment.encode("utf-8"))
+            model_file.write_text(
+                json.dumps(self.model, ensure_ascii=False), encoding=model_encoding
+            )
+            source.write_bytes(assessment_bytes)
             if existing_html is not None:
                 output.write_text(existing_html, encoding="utf-8")
             original_model = model_file.read_bytes()
@@ -140,7 +144,7 @@ class ControlValidation(unittest.TestCase):
                 capture_output=True,
             )
             self.assertEqual(model_file.read_bytes(), original_model)
-            self.assertEqual(source.read_bytes(), assessment.encode("utf-8"))
+            self.assertEqual(source.read_bytes(), assessment_bytes)
             if error:
                 self.assertEqual(result.returncode, 2)
                 self.assertIn(error, result.stderr)
@@ -182,7 +186,7 @@ class ControlValidation(unittest.TestCase):
                 self.check(invalid)
         del self.model["scenarios"]
         self.build_html(
-            "policy denies this caller",
+            b"policy denies this caller",
             error="scenarios must be a list",
             existing_html="<html>Previous explorer</html>",
         )
@@ -261,7 +265,7 @@ class ControlValidation(unittest.TestCase):
                     self.check(model)
 
         self.model["nodes"][0]["title"] = None
-        self.build_html("policy denies this caller", error="a.title must be a string")
+        self.build_html(b"policy denies this caller", error="a.title must be a string")
 
     def test_builder_rejects_output_aliasing_either_input(self):
         for input_name in ("model", "assessment"):
@@ -322,6 +326,7 @@ class ControlValidation(unittest.TestCase):
         marker = effect + ("marker",)
         cases = [
             (("evidence", 0, "quote"), "policy allows this caller", "quotation is not exact"),
+            (("evidence", 0, "quote"), "\ud800", "quotation is not exact"),
             (("scenarios", 0, "steps", 0, "to"), "c", "step edge does not connect"),
             (effect + ("step",), 2, "must match"),
             (effect + ("edge",), "missing", "unresolved effect edge"),
@@ -614,7 +619,7 @@ class ControlValidation(unittest.TestCase):
     def test_builder_embeds_new_contract_and_assessment_in_standalone_html(self):
         self.effect()["traffic"] = "continues"
         assessment = "policy denies this caller"
-        html = self.build_html(assessment)
+        html = self.build_html(assessment.encode("utf-8"))
         assets = Path(builder.__file__).parents[1] / "assets"
         expected = [
             "control-effects.js",
@@ -651,41 +656,45 @@ class ControlValidation(unittest.TestCase):
     def test_template_tokens_in_input_are_preserved_without_resubstitution(self):
         tokens = "__MODEL_JSON__ __ASSESSMENT_JSON__ __EXPLORER_JS__ __EXPLORER_CSS__"
         assessment = (
-            "policy denies this caller\n" + tokens + "\n</script><script>unsafe()</script> & café"
+            "\ufeffpolicy denies this caller\n"
+            + tokens
+            + "\n</script><script>unsafe()</script> & café"
         )
         self.model["title"] = tokens
         self.model["metadata"] = [{"label": "Scope", "value": "Quoted tokens"}]
         self.model["evidence"][0]["quote"] = assessment
-        html = self.build_html(assessment)
+        html = self.build_html(assessment.encode("utf-8"), model_encoding="utf-8-sig")
         self.assertEqual(self.embedded_data(html, "model-data"), self.model)
         self.assertEqual(self.embedded_data(html, "assessment-data"), assessment)
         self.assertNotIn("</script><script>unsafe()</script>", html)
 
     def test_utf8_assessment_hash_and_ranged_quote_preserve_line_endings(self):
+        non_line_breaks = "\v\f\x1c\x1d\x1e\x85\u2028\u2029"
         for newline in ("\n", "\r\n", "\r"):
             with self.subTest(newline=repr(newline)):
-                assessment = newline.join(
-                    ["Context: café", "policy denies this caller", "Details: 日本語", ""]
-                )
+                quote = f"policy denies this caller{newline}Details: 日本語"
+                assessment = f"Context: café{non_line_breaks}continued{newline}{quote}{newline}"
+                assessment_bytes = assessment.encode("utf-8")
                 evidence = self.model["evidence"][0]
-                evidence.update(
-                    quote=newline.join(["policy denies this caller", "Details: 日本語"]),
-                    startLine=2,
-                    endLine=3,
-                )
-                self.model["assessmentSha256"] = hashlib.sha256(
-                    assessment.encode("utf-8")
-                ).hexdigest()
-                html = self.build_html(assessment)
+                evidence.update(quote=quote, startLine=2, endLine=3)
+                self.model["assessmentSha256"] = hashlib.sha256(assessment_bytes).hexdigest()
+                html = self.build_html(assessment_bytes)
                 self.assertEqual(self.embedded_data(html, "assessment-data"), assessment)
                 evidence["endLine"] = 2
                 with self.assertRaisesRegex(ValueError, "quotation outside stated range"):
-                    builder.validate(self.model, assessment)
+                    builder.validate(self.model, assessment_bytes)
+                # str.splitlines() incorrectly counts eight extra lines in the context.
+                evidence.update(startLine=10, endLine=11)
+                with self.assertRaisesRegex(ValueError, "invalid assessment line range"):
+                    builder.validate(self.model, assessment_bytes)
+
+    def test_builder_reports_invalid_utf8_before_checking_quotes(self):
+        self.build_html(b"x" * 8192 + b"\xff", error="byte 0xff in position 8192")
 
     def test_assessment_hash_does_not_accept_newline_normalization(self):
-        assessment = "policy denies this caller\r\n"
+        assessment = b"policy denies this caller\r\n"
         self.model["assessmentSha256"] = hashlib.sha256(
-            assessment.replace("\r\n", "\n").encode("utf-8")
+            assessment.replace(b"\r\n", b"\n")
         ).hexdigest()
         with self.assertRaisesRegex(ValueError, "Assessment SHA256 mismatch"):
             builder.validate(self.model, assessment)

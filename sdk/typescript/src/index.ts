@@ -234,7 +234,6 @@ export type {
 export type {
   ExternalFinding,
   ExternalFindings,
-  HostedExternalFindings,
   ExternalSourceRepository,
 } from "./external-findings.js";
 export type {
@@ -333,6 +332,14 @@ export {
   type OpenGrepImportOptions,
 } from "./opengrep-findings.js";
 export {
+  normalizeVeracodeFindings,
+  readVeracodeFindings,
+} from "./veracode-findings.js";
+export {
+  normalizeBlackDuckFindings,
+  readBlackDuckFindings,
+} from "./blackduck-findings.js";
+export {
   normalizeInspectorFindings,
   readInspectorFindings,
 } from "./inspector-findings.js";
@@ -345,8 +352,10 @@ export {
 export {
   collectSnykIssues,
   normalizeSnykIssues,
+  SNYK_REST_ISSUES_FORMAT,
   type CollectSnykIssuesOptions,
   type SnykIssuesExport,
+  type SnykIssuesFindings,
   type SnykIssuesProduct,
 } from "./snyk-rest-findings.js";
 export {
@@ -355,11 +364,17 @@ export {
   readSemgrepFindings,
   type SemgrepImportOptions,
 } from "./semgrep-findings.js";
+export { collectSemgrepPlatformFindings } from "./semgrep-platform-collector.js";
+export type {
+  SemgrepPlatformOptions,
+  SemgrepPlatformReport,
+} from "./semgrep-platform-collector.js";
+export type { HostedScannerHttpOptions } from "./hosted-scanner-http.js";
 export {
-  collectSemgrepPlatformFindings,
+  normalizeSelectedSemgrepPlatformFindings,
+  selectSemgrepPlatformFindings,
   normalizeSemgrepPlatformFindings,
-  type SemgrepPlatformOptions,
-  type SemgrepPlatformReport,
+  type SemgrepPlatformSelection,
 } from "./semgrep-platform-findings.js";
 export {
   normalizeEndorFindings,

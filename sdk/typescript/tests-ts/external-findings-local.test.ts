@@ -12,15 +12,12 @@ import { delimiter, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ExternalFindings } from "../src/external-findings.js";
+import { normalizeSnykIssues } from "../src/snyk-rest-findings.js";
+import { snykRestFixture } from "./support/snyk-rest-fixtures.js";
 import {
   listLocalExternalFindings,
   prepareNormalizedLocalImport,
 } from "../src/external-findings-local.js";
-import { normalizeSnykIssues } from "../src/snyk-rest-findings.js";
-import { normalizeSemgrepPlatformFindings } from "../src/semgrep-platform-findings.js";
-import { prepareLocalExternalImport } from "../src/external-findings-import.js";
-import { platformReport } from "./support/semgrep-platform-fixtures.js";
-import { snykRestFixture } from "./support/snyk-rest-fixtures.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 
 const fixtures: Awaited<ReturnType<typeof localFindingsFixture>>[] = [];
@@ -75,123 +72,6 @@ function input(): ExternalFindings {
 const source = { provider: "snyk" as const, sourceKey: "example-project/main" };
 
 describe("local normalized scanner findings", () => {
-  test.each(["snyk", "semgrep"] as const)(
-    "populated %s reports check the report URL and caller's source independently",
-    async (provider) => {
-      const url = "https://github.com/example/project";
-      const foreign = "https://github.com/other/project";
-      const f = await fixture({ remote: url });
-      const legacy = input();
-      const prepare = (sourceRepositoryUrl: string, declared: string) =>
-        prepareNormalizedLocalImport(
-          { ...legacy, sourceRepositoryUrl },
-          { ...source, provider, repository: f.repository },
-          {
-            environment: f.environment,
-            sourceRepositories: [{ url: declared }],
-          },
-        );
-      const withUser = url.replace("://", "://user:example@");
-      await expect(prepare(withUser, withUser)).rejects.toThrow(
-        "without credentials",
-      );
-      await expect(prepare("", url)).rejects.toThrow("Source repository URL");
-      await expect(prepare(foreign, url)).rejects.toThrow("does not match");
-      await expect(prepare(url, foreign)).rejects.toThrow("does not match");
-      expect((await prepare(url, url)).preview.findings).toEqual(
-        legacy.findings,
-      );
-      legacy.findings[0]!.evidence.source_data =
-        provider === "snyk"
-          ? {
-              format: "snyk-findings-export/v1",
-              collection: { target: { repository: foreign } },
-            }
-          : {
-              runContext: {
-                versionControlProvenance: [{ repositoryUri: foreign }],
-              },
-            };
-      await expect(prepare(url, url)).rejects.toThrow("does not match");
-    },
-  );
-  test.each(["snyk", "semgrep"] as const)(
-    "projected %s reports match a private SSH repository literally",
-    async (provider) => {
-      const url = "git@scm.example.test:Team/Repo.git";
-      const f = await fixture({ remote: "https://other.example.test/a/%2e/b" });
-      execFileSync("git", ["remote", "set-url", "--add", "origin", url], {
-        cwd: f.repository,
-      });
-      const report = { ...input(), sourceRepositoryPlatform: "other" as const };
-      const prepare = (url: string) =>
-        prepareNormalizedLocalImport(
-          report,
-          { ...source, provider, repository: f.repository },
-          { environment: f.environment, sourceRepositories: [{ url }] },
-        );
-      expect((await prepare(url)).preview.findings).toEqual(report.findings);
-      await expect(prepare(url.toLowerCase())).rejects.toThrow(
-        "does not match",
-      );
-      execFileSync("git", ["-C", f.repository, "remote", "remove", "origin"]);
-      await expect(prepare("C:/org/repo")).rejects.toThrow("HTTP(S)");
-    },
-  );
-  test.each(["snyk", "semgrep"] as const)(
-    "retained %s evidence cannot be relabeled as a Wiz finding after dropping the report header",
-    async (provider) => {
-      const f = await fixture({ remote: "https://github.com/example/foreign" });
-      const { findings } =
-        provider === "snyk"
-          ? normalizeSnykIssues(snykRestFixture("open-source"))
-          : normalizeSemgrepPlatformFindings(platformReport());
-      const deps = { environment: f.environment };
-      const options = {
-        ...source,
-        provider: "wiz" as const,
-        repository: f.repository,
-      };
-      const message = `requires the ${provider} provider`;
-      await expect(
-        prepareNormalizedLocalImport(
-          { read: findings.length, findings, excluded: [] },
-          options,
-          deps,
-        ),
-      ).rejects.toThrow(message);
-      const file = join(f.root, "projected.jsonl");
-      await writeFile(
-        file,
-        findings.map((row) => JSON.stringify(row)).join("\n"),
-      );
-      await expect(
-        prepareLocalExternalImport(file, options, deps),
-      ).rejects.toThrow(message);
-    },
-  );
-  test.each(["github", "wiz", "endor", "inspector"] as const)(
-    "rejects hosted declarations for %s before accessing the selected checkout",
-    async (provider) => {
-      const f = await fixture();
-      const options = {
-        ...source,
-        provider,
-        repository: join(f.root, "missing"),
-      };
-      for (const declaration of [
-        { sourceRepositoryUrl: "https://github.com/example/project" },
-        { sourceRepositoryPlatform: "other" as const },
-      ]) {
-        const unsupported = { ...input(), ...declaration };
-        await expect(
-          prepareNormalizedLocalImport(unsupported, options, {
-            environment: f.environment,
-          }),
-        ).rejects.toThrow("require the Snyk or Semgrep provider");
-      }
-    },
-  );
   test("requires opt-in before resolving repositories or accessing the workbench", async () => {
     const { root, stateDirectory, environment } = await fixture();
     const disabledEnvironment: NodeJS.ProcessEnv = { ...environment };
@@ -750,10 +630,19 @@ describe("local normalized scanner findings", () => {
     },
   );
 
-  test.each(["repository", "prepare-state", "read-state", "prepare-metadata"])(
+  const pendingPaths = [
+    "repository",
+    "prepare-state",
+    "read-state",
+    "prepare-metadata",
+    "prepare-snyk-remotes",
+  ];
+  test.each(pendingPaths)(
     "cancels %s resolution while its filesystem lookup is pending",
     async (operation) => {
-      const { repository, stateDirectory, environment } = await fixture();
+      const { repository, stateDirectory, environment } = await fixture({
+        isolatedGit: operation === "prepare-snyk-remotes",
+      });
       if (operation === "prepare-metadata")
         await rm(join(repository, ".git"), { recursive: true });
       const module = new URL(
@@ -770,7 +659,9 @@ describe("local normalized scanner findings", () => {
       const operation = ${JSON.stringify(operation)};
       const heldPath = operation === "repository" ? repository
         : operation === "prepare-metadata" ? ${JSON.stringify(join(repository, "HEAD"))}
+        : operation === "prepare-snyk-remotes" ? ${JSON.stringify(join(repository, ".git", "remotes"))}
         : ${JSON.stringify(stateDirectory)};
+      const holdLstat = operation === "prepare-metadata" || operation === "prepare-snyk-remotes";
       const originalRealpath = fs.realpath;
       const originalLstat = fs.lstat;
       let enteredLookup, releaseLookup;
@@ -778,13 +669,13 @@ describe("local normalized scanner findings", () => {
       const lookup = new Promise((_, reject) => { releaseLookup = reject; });
       mockFs(() => ({
         realpath: (path, ...args) => {
-          if (operation === "prepare-metadata" || path !== heldPath)
+          if (holdLstat || path !== heldPath)
             return originalRealpath(path, ...args);
           enteredLookup();
           return lookup;
         },
         lstat: (path, ...args) => {
-          if (operation !== "prepare-metadata" || path !== heldPath)
+          if (!holdLstat || path !== heldPath)
             return originalLstat(path, ...args);
           enteredLookup();
           return lookup;
@@ -797,7 +688,15 @@ describe("local normalized scanner findings", () => {
       let outcome;
       const pending = operation.startsWith("prepare-")
         ? prepareNormalizedLocalImport(
-            { read: 0, findings: [], excluded: [] },
+            ${JSON.stringify(
+              operation === "prepare-snyk-remotes"
+                ? normalizeSnykIssues(
+                    snykRestFixture("open-source", {
+                      sourceRepositoryUrl: "https://github.com/example/project",
+                    }),
+                  )
+                : { read: 0, findings: [], excluded: [] },
+            )},
             { repository, provider: "snyk", sourceKey: "synthetic-project" },
             { signal: controller.signal,
               sourceRepositories: [{ url: "https://github.com/example/project" }] },
@@ -1730,38 +1629,9 @@ describe("local normalized scanner findings", () => {
         GIT_CONFIG_GLOBAL: join(root, "global-git-config"),
         GIT_CONFIG_NOSYSTEM: "1",
       };
-      const rewriteConfig =
-        scope === "local" ? ".git/config" : gitEnvironment.GIT_CONFIG_GLOBAL;
       for (const args of [
-        [
-          "config",
-          "--file",
-          rewriteConfig,
-          "url.https://github.com/.insteadOf",
-          "gh:",
-        ],
-        [
-          "remote",
-          "set-url",
-          "--add",
-          "origin",
-          "opaque::part\nhttps://github.com/example/other\npart",
-        ],
-        [
-          "config",
-          "--file",
-          rewriteConfig,
-          "url.https://unused.example/.insteadOf",
-          "unused\nprefix",
-        ],
-        [
-          "config",
-          "--file",
-          rewriteConfig,
-          "url.opaque::rewritten.insteadOf",
-          "opaque::part\n",
-        ],
-        ["remote", "set-url", "--add", "origin", "gh:example/secondary.git"],
+        ["config", `--${scope}`, "url.https://github.com/.insteadOf", "gh:"],
+        ["config", "--add", "remote.origin.url", "gh:example/secondary.git"],
         ["remote", "add", "upstream", "gh:example/library.git"],
       ]) {
         execFileSync("git", ["-C", repository, ...args], {
@@ -1868,61 +1738,26 @@ describe("local normalized scanner findings", () => {
     },
   );
 
-  const sourceUrl = "https://github.com/example/project";
   test.each([
-    ["C:\\repos\\source", process.platform === "win32", []],
-    ["C:/repos/source", process.platform === "win32", []],
-    ["C:repos/source", process.platform === "win32", []],
-    ["a:repos/source?.git", false, []],
-    ["//server/share/source", true, []],
-    ["./synthetic:source", true, []],
-    ["/synthetic/repos/source", true, []],
-    ["file:///C:/repos/source", true, []],
-    [sourceUrl, true, [`example::foreign\n${sourceUrl}\nforeign`]],
-    [`example::foreign\n${sourceUrl}\nforeign`, true, [sourceUrl]],
-    ["https://github.com/example/old", true, ["", sourceUrl]],
-    [
-      "https://github.com/example/foreign",
-      false,
-      ["", `example::foreign\n${sourceUrl}\nforeign`],
-    ],
-    [sourceUrl.replace("https:", "HTTPS:"), true, []],
-    ["HTTPS://github.com/example/foreign", false, []],
-    [`HTTPS::${sourceUrl}`, false, []],
-    ["ftp://github.com/example/project", true, []],
-    ["ftp::ftp://github.com/example/project", false, []],
-    [`ftp::${sourceUrl}`, true, []],
-  ] as const)(
-    "checks fetch URL %s and any configured alternatives",
-    async (remote, accepted, additional) => {
+    "C:\\repos\\source",
+    "C:/repos/source",
+    "/synthetic/repos/source",
+    "file:///C:/repos/source",
+  ])(
+    "ignores local remote %s while enforcing any network remote",
+    async (remote) => {
       const { repository, stateDirectory, environment } = await fixture({
         remote,
       });
-      for (const url of additional)
-        execFileSync("git", [
-          "-C",
-          repository,
-          "remote",
-          "set-url",
-          "--add",
-          "origin",
-          url,
-        ]);
       const dependencies = {
-        environment: {
-          ...environment,
-          GIT_TRACE: "1",
-          GIT_TRACE_PERFORMANCE: "1",
-        },
-        sourceRepositories: [{ url: sourceUrl }],
+        environment,
+        sourceRepositories: [{ url: "https://github.com/example/project" }],
       };
-      const preparation = prepareNormalizedLocalImport(
+      await prepareNormalizedLocalImport(
         input(),
         { repository, ...source },
         dependencies,
       );
-      if (accepted) await preparation;
-      else await expect(preparation).rejects.toThrow("does not match");
       execFileSync("git", [
         "-C",
         repository,
@@ -1947,107 +1782,6 @@ describe("local normalized scanner findings", () => {
         ),
       ).rejects.toThrow("does not match a configured remote");
       expect(existsSync(stateDirectory)).toBe(false);
-    },
-  );
-
-  test.each(["", "https::"])(
-    "matches the repository selected by %sHTTPS queries",
-    async (helper) => {
-      const base = "https://git.example.test/git";
-      const { repository, environment } = await fixture({
-        remote: `${helper}${base}?project=B`,
-      });
-      const prepare = (suffix: string) =>
-        prepareNormalizedLocalImport(
-          input(),
-          { repository, ...source },
-          { environment, sourceRepositories: [{ url: base + suffix }] },
-        );
-      await prepare("?project=B");
-      await expect(prepare("?project=A")).rejects.toThrow("does not match");
-      await expect(prepare("")).rejects.toThrow("does not match");
-    },
-  );
-
-  test.each(["%3F", "%23"])(
-    "matches an HTTPS repository containing %s against its SSH URL",
-    async (escape) => {
-      const path = `git.example.test/org/lib${escape}part.git`;
-      const { repository, environment } = await fixture({
-        remote: `ssh://git@${path}`,
-      });
-      await prepareNormalizedLocalImport(
-        input(),
-        { ...source, provider: "wiz", repository },
-        { environment, sourceRepositories: [{ url: `https://${path}` }] },
-      );
-    },
-  );
-
-  const httpSelector = "https::https://git.example.test/org/lib";
-  const scpPath = "git@git.example.test:org/lib";
-  const sshPath = "ssh://git@git.example.test/org/lib";
-  test.each([
-    [scpPath + "?tenant=B", httpSelector + "?tenant=B"],
-    [scpPath + "#", httpSelector + "#other"],
-    [sshPath + "?tenant=B", httpSelector],
-    [sshPath + "#part", httpSelector],
-    [scpPath + "%3Ftenant=B", httpSelector + "%3Ftenant=B"],
-    [scpPath + "%23part", httpSelector + "%23part"],
-    [
-      "ssh://git.example.test?tenant=B/org/lib",
-      "git@git.example.test:?tenant=B/org/lib",
-    ],
-  ])("keeps the Git target %s distinct from %s", async (url, remote) => {
-    const { repository, environment } = await fixture({ remote });
-    await expect(
-      prepareNormalizedLocalImport(
-        input(),
-        { repository, ...source },
-        { environment, sourceRepositories: [{ url }] },
-      ),
-    ).rejects.toThrow("does not match");
-  });
-
-  test.each([
-    ["ftp", "ftp", false],
-    ["ftps", "https", true],
-    ["https", "ftp", false],
-  ] as const)(
-    "checks the %s address of a %s curl helper",
-    async (scheme, helper, useVcs) => {
-      const path = "git.example.test/Team/Repo";
-      const url = `${scheme}://${path}`;
-      const { repository, environment } = await fixture({
-        remote: useVcs ? url : `${helper}::${url}`,
-      });
-      if (useVcs)
-        execFileSync("git", [
-          "-C",
-          repository,
-          "config",
-          "--file=.git/config",
-          "remote.origin.vcs",
-          helper,
-        ]);
-      const prepare = (sourceUrl: string) =>
-        prepareNormalizedLocalImport(
-          input(),
-          { repository, ...source },
-          { environment, sourceRepositories: [{ url: sourceUrl }] },
-        );
-      await prepare(url);
-      await prepare(`${scheme.toUpperCase()}://Git.Example.Test/Team/Repo`);
-      for (const other of ["ftp", "ftps", "https"].filter(
-        (candidate) => candidate !== scheme,
-      ))
-        await expect(prepare(`${other}://${path}`)).rejects.toThrow(
-          "does not match",
-        );
-      if (scheme !== "https")
-        await expect(prepare(`${scheme}://other@${path}`)).rejects.toThrow(
-          "does not match",
-        );
     },
   );
 

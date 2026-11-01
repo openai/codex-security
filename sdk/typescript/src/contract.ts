@@ -11,7 +11,7 @@ import {
 } from "node:fs/promises";
 import { isAbsolute, join, posix, resolve } from "node:path";
 import Ajv2020, { type ErrorObject } from "ajv/dist/2020.js";
-import { validRfc3339DateTime } from "./timestamps.js";
+import { regexes } from "zod";
 import {
   ContractValidationError,
   abortReason,
@@ -1112,6 +1112,15 @@ export async function sameCheckedFileDevice(
 function throwIfAborted(signal?: AbortSignal): void {
   if (!signal?.aborted) return;
   throw abortReason(signal);
+}
+
+const RFC3339_DATE_TIME = new RegExp(
+  regexes.datetime({ offset: true }).source,
+  "i",
+);
+
+function validRfc3339DateTime(value: string): boolean {
+  return !value.startsWith("0000") && RFC3339_DATE_TIME.test(value);
 }
 
 function schemaError(

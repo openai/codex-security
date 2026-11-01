@@ -55940,43 +55940,23 @@ async function runProcess(executable, args, options) {
 }
 
 // ../sdk/typescript/src/git-remote.ts
-var scpRemote = /^(?:([^@/:\s?#]+)@)?(\[[^\]]+\]|[^@/:\s?#]+):(?!\/\/)(.+)$/u;
-function isLocalGitRemote(remote) {
-  if (remote.includes("://")) return remote.startsWith("file://");
-  const colon = remote.indexOf(":");
-  return colon < 0 || remote.slice(0, colon).includes("/");
-}
-function parseScpRemote(remote) {
-  return !isLocalGitRemote(remote) && !remote.includes("://") && !/^[a-z\d][a-z\d+.-]*::/iu.test(remote) ? scpRemote.exec(remote) : null;
-}
-function sshAuthority(host) {
-  if (/[\/\\?#@\s\x00-\x1f\x7f]/u.test(host)) return null;
-  const parse4 = (authority) => URL.parse("ssh://" + authority.replace(/:\+(\d+)$/u, ":$1"));
-  const parsed = parse4(host);
-  if (parsed) return parsed;
-  const bracketed = /^\[([^\]]+)\](?::(\+?\d*))?$/u.exec(host);
-  if (!bracketed || bracketed[1].endsWith(":")) return null;
-  const [, name, port] = bracketed;
-  return parse4(name + (port ? `:${port}` : ""));
-}
 function parseGitRemote(remote) {
   if (remote.includes("://")) {
-    const url3 = new URL(remote);
+    const url2 = new URL(remote);
     return {
-      url: url3,
-      path: url3.pathname.slice(1),
+      url: url2,
+      path: url2.pathname.slice(1),
       scpStyle: false
     };
   }
-  const scp = parseScpRemote(remote);
-  if (!scp) return void 0;
-  const url2 = sshAuthority(scp[2]);
-  if (!url2?.hostname) throw new TypeError("Invalid Git SCP authority.");
-  if (scp[1]) url2.username = scp[1];
+  const scp = /^((?:[^@/:\s?#]+@)?(?:\[[^\]]+\]|[^@/:\s?#]+)):(.+)$/u.exec(
+    remote
+  );
+  if (scp === null) return void 0;
   return {
-    url: url2,
+    url: new URL(`ssh://${scp[1]}`),
     // An SCP path's ?, #, and dot segments are literal Git path characters.
-    path: scp[3],
+    path: scp[2],
     scpStyle: true
   };
 }
@@ -99480,6 +99460,7 @@ function emitAnnotations(result) {
 }
 
 // src/main.ts
+var SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3, informational: 4 };
 var OUTPUT_NAMES = [
   "sarif-path",
   "json-path",
@@ -99665,8 +99646,12 @@ async function runAction(actionRoot, overrides = {}) {
         info(`Findings: ${result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(", ") : "unavailable"}.`);
         info(`Estimated cost: ${result.estimatedCost === void 0 ? "unavailable" : `$${result.estimatedCost.toFixed(4)}`}.`);
         for (const error2 of result.errors) log2(`Report diagnostic: ${error2}`);
-        finalSummary = resultSummary(result, inputs, target);
-        if (inputs.annotations) emitAnnotations(result);
+        const displayResult = {
+          ...result,
+          findings: [...result.findings].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity])
+        };
+        finalSummary = resultSummary(displayResult, inputs, target);
+        if (inputs.annotations) emitAnnotations(displayResult);
         success = result.reportStatus !== "failed" && result.scanStatus === "completed" && result.policyStatus === "passed";
         finalTitle = resultTitle(result, inputs);
       }

@@ -9,19 +9,6 @@ updates it, and what evidence a consumer can use. For setup and confirmation,
 see
 [import vendor findings locally](../../sdk/typescript/docs/cli.md#import-vendor-findings-locally).
 
-## Numeric fields in hosted exports
-
-The Snyk REST and Semgrep Platform collectors store unsafe integers and any
-number whose decimal value would change when written back to JSON as exact text.
-For example, `1e-400` retains its value and `1.0` stays a JSON number. The optional `numericFields` object
-mirrors the affected fields and array indices and repeats their numeric text.
-Keep it with the export. The reader uses it to validate a numeric ID as a number
-and a quoted title as text, even when they contain the same digits. Quoted
-digits without a marker carry no record of their original type. Semgrep accepts
-exact int64 ID strings. The project summary uses the canonical ID in the export
-and in `source_data.project`. For example, `"42"` and `42` both become `42`.
-Each finding retains its own raw evidence markers in `source_data.numericFields`.
-
 ## Choose the record and source key
 
 A stored source record is scoped to **destination repository + provider + source
@@ -38,16 +25,18 @@ to investigate records together, not instructions to merge them.
 | [Endor Finding JSON or endorctl SARIF](endor.md)                                                                                                                                                    | Finding `uuid` or SARIF `properties["finding-uuid"]`                                                                                                    | Namespace, project and context             |
 | [Amazon Inspector Code Security ListFindings JSON](inspector.md)                                                                                                                                    | Full Inspector finding ARN                                                                                                                              | AWS account, Region and repository project |
 | [Snyk Open Source CLI JSON, plugin v1 or SARIF](snyk.md)                                                                                                                                            | CLI: manager, manifest, advisory, package/version and dependency path; plugin: supplied composite; SARIF: advisory, manifest set and project when known | Repository, branch, scan target and format |
-| [Hosted Snyk Open Source or Code](snyk.md#hosted-open-source-and-code)                                                                                                                              | API origin, organization UUID, project UUID, product and issue key                                                                                      | Organization, project and product          |
 | [Semgrep Code CLI/CI JSON or SARIF](semgrep.md)                                                                                                                                                     | Fingerprint; otherwise rule, literal path and start/end lines and columns                                                                               | Organization, project and branch           |
-| [Semgrep Platform](semgrep.md#existing-platform-findings)                                                                                                                                           | Deployment, project ID, ref, product and numeric finding ID                                                                                             | Deployment, project, ref and product       |
 | [GitHub Dependabot repository REST alerts](github-dependabot.md)                                                                                                                                    | Host, repository and alert number                                                                                                                       | Host, repository and Dependabot family     |
 | [GitHub saved `import github` output](../../sdk/typescript/docs/cli.md#import-github-findings-locally-or-to-cloud)                                                                                  | Host, repository, alert number and hash of selected ref                                                                                                 | Host, repository and code-scanning family  |
 | [GitHub saved `import github-advisories` output](../../sdk/typescript/docs/cli.md#import-ghsa-advisories-separately)                                                                                | Host, repository **or** global scope, and GHSA ID                                                                                                       | Separate advisory stream from alerts       |
+| [Black Duck BOM-6 collection or selected rows](blackduck.md)                                                                                                                                        | Project version, component version, origin, advisory source and advisory name                                                                           | Deployment, project and version            |
+| [Veracode Static Analysis Findings API pages](veracode.md)                                                                                                                                          | API origin, application and context, and native issue ID                                                                                                | Deployment, application and static policy  |
 
 Within **one input**, duplicate IDs are ambiguous, not corroboration. Wiz and
 GitHub reject a selection with duplicate accepted IDs. Endor, Snyk and Semgrep
-exclude every record with the colliding identity. Inspect the source and select
+exclude every record with the colliding identity. Black Duck rejects duplicate occurrences in a complete collection, and excludes all colliding rows in an explicit selection.
+Veracode rejects a capture that repeats an issue ID for the same scan type.
+Inspect the source and select
 the intended occurrence; don't rename records simply to make them import. Across
 **separate local imports**, changed evidence updates the same record; omission
 does not delete or resolve it. Cloud publication sends an expected version;
@@ -99,6 +88,7 @@ before preparing a fresh submission.
   Critical from High; both become diagnostic `error`, mapped to High, in Semgrep
   SARIF. Inspect the selected result for trace/fix details. Platform/MCP
   envelopes and general Supply Chain/Secrets feeds are not Code CLI or SARIF exports.
+- **Semgrep Platform findings.** The local and Cloud readers bind each native finding ID to its deployment, project ID, ref and product. Individually selected Code findings and complete Code collections share the same identity. See the [Semgrep Platform examples](semgrep.md#existing-platform-findings).
 - **OpenGrep.** Use native JSON and supply `--source-repository-url`. The
   [OpenGrep guide](opengrep.md) covers export and occurrence identity.
 - **GitHub:** For code scanning, the selected instance supplies path/range, ref
@@ -197,15 +187,23 @@ recover:
 - **`savedSubmission` identifies an existing checkpoint:** rerun the same
   approved command with unchanged input, source key, destination and endpoint to
   resume its saved requests. This also applies if the initial request was saved
-  but persisting a later receipt failed. An upgrade can select additional rows
-  or distinguish values an earlier Snyk or Semgrep client rounded or stored as
-  text. In either case, resume the original selection with the earlier client or
-  its saved normalized findings before approving the new preview.
-  An older Snyk or Semgrep request saved without a repository binding needs a
-  matching current catalog URL if its evidence cannot identify the original
-  repository. Resume it before renaming. Ambiguous paths include those with a
-  literal `k` or `K` (as in `work`), a terminal `.` or `..` segment, or an
-  encoded clone suffix such as `proj%2Egit`.
+  but persisting a later receipt failed.
+  Older SDK checkpoints saved the destination repository ID without the catalog
+  URL. After a repository rename, retry those requests with the original
+  normalized findings and report metadata, omitting supplemental source
+  repository declarations. A new declaration needs a matching current catalog
+  entry or a URL recorded when the request was approved.
+- If a hosted Semgrep or Snyk request is pending, rerun the original input to
+  finish it before submitting updated evidence for any of the same findings.
+  Selections with distinct scanner-issued IDs can proceed independently on the
+  same deployment, account, repository, connector, provider and source key.
+  When an older checkpoint establishes only the source, finish that request
+  before submitting another selection for that source. Use the SDK build that
+  created the request and include the original report context and caller-added
+  fields. Older SDKs included some fields in the checkpoint filename without
+  retaining them in the saved request. If the publisher cannot identify the
+  deployment of an older request, rerun it on its original deployment. An
+  identified repository reset retires the request and requires fresh approval.
 - **No resumable checkpoint:** a repository reset retires the old request, and
   an initial checkpoint-write failure may leave no request to resume. Inspect
   the destination and correct the error; run a fresh `--dry-run` and get fresh

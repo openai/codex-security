@@ -644,6 +644,9 @@ Explicit `-c` wins. Without either, no file is discovered. `scan`, `bulk-scan`,
 `scan-components`, and `info` accept project files. SDK calls and saved reruns
 do not load them automatically.
 
+JSON project files and component plans (`--components-file`) accept UTF-8 with
+or without a leading byte-order mark.
+
 Treat the selected file as trusted operator configuration: native settings can
 start MCP processes and choose model-service destinations. Keep CI scanner
 configuration outside the untrusted checkout being assessed.
@@ -983,6 +986,15 @@ Finish older-version operations before upgrading. Never remove
 `.codex-security-scan.sqlite3` during an operation. Stop all operations using the
 credential home before manually removing an old `.codex-security-scan.lock`.
 
+If credential-home preparation fails, the error includes the underlying
+filesystem diagnostic. For permission or read-only filesystem errors, check
+the reported path or set `CODEX_SECURITY_STATE_DIR` to a private, writable
+directory outside the repository. A new state directory has separate history
+and does not migrate existing credentials or reports.
+
+Sandbox startup errors include the native diagnostic followed by a command to
+reproduce it. Linux namespace and AppArmor guidance appears only on Linux.
+
 On Windows, credential-home checks require trusted ownership and permissions
 through every ancestor, including the volume root. Codex Security can repair
 the credential home and its descendants; it does not change ancestor ownership
@@ -1280,9 +1292,9 @@ export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
 
 In PowerShell, use `$env:CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS = '1'`.
 Only `1` enables the feature. Without it, `publish findings`, `findings imported`,
-`import snyk`, `import semgrep` and `import github-advisories` are unavailable
-and hidden from command help and schemas. SDK external publication, local
-import/readback and hosted acquisition require the same flag. An explicit
+`import github-advisories`, `import semgrep` and `import snyk` are absent from command help and schemas and cannot
+run. The SDK's external publication, local import/readback, and advisory
+acquisition APIs require the same flag in their effective environment. An explicit
 `dependencies.environment` is used instead of the process environment. Pure
 normalizers and file readers remain available as library utilities.
 
@@ -1305,9 +1317,10 @@ evidence or deduplicate equivalent vulnerabilities across different source IDs.
 Use the same vendor input and parser as Cloud publication, selecting a local
 repository path instead of a Cloud repository ID or URL. Supported inputs include
 Wiz findings, [Snyk Open Source JSON and SARIF](#import-snyk-open-source-findings),
-[hosted Snyk and Semgrep reports](#collect-hosted-snyk-and-semgrep-findings),
 [Endor Labs Finding JSON and SARIF](#import-endor-labs-findings),
 [Amazon Inspector repository findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/inspector.md),
+[Black Duck SCA project-version vulnerabilities](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/blackduck.md),
+[Veracode Static Analysis policy findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/veracode.md),
 [Semgrep Code JSON and SARIF](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md),
 [OpenGrep native JSON](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/opengrep.md),
 [GitHub Dependabot repository alerts](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/github-dependabot.md),
@@ -1343,9 +1356,11 @@ Repeated imports update the same record by repository, provider, source key, and
 source finding ID. The result reports created, updated, and unchanged counts.
 Keep the source key stable across exports. Records omitted from a later selection
 remain stored; omission does not resolve or delete a finding. Excluded records
-are reported, and an import with exclusions exits with status 1. Both destinations
-read the same vendor formats; Cloud's field, size and nesting limits do not apply
-to local file imports.
+are reported, and an import with exclusions exits with status 1. For existing
+Semgrep Platform findings, use the SDK to select individual Code findings or
+`import semgrep PROJECT --semgrep-deployment SLUG --semgrep-ref REF [--semgrep-product sast|sca|ai_sast]`
+to collect one project and branch. Both can be saved for local or Cloud import. See the
+[Semgrep Platform workflows](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#existing-platform-findings).
 
 For OpenGrep, use `--provider opengrep` and supply `--source-repository-url`.
 The reader supports native JSON and gzip for both destinations. It uses the
@@ -1403,38 +1418,71 @@ confirmation and retry flow below.
 
 ### Import Snyk Open Source findings
 
-For a fresh SCA scan, use ungrouped native JSON from `snyk test` or a
-`snyk-findings-export/v1` bundle from the official plugin. Existing Open Source
-SARIF is also supported. For an existing monitored project use the
-[hosted collector](#collect-hosted-snyk-and-semgrep-findings).
+For an existing monitored Snyk project, use
+`codex-security import snyk PROJECT_ID --snyk-org ORG_ID --source-repository-url URL --format json`
+and save its output for `publish findings --provider snyk` with `--to local` or `--to cloud`. Set
+`SNYK_TOKEN` with read access. The default product is Open Source. Select
+`--snyk-product code` for Code and `--snyk-api-origin` for a regional API
+(default `https://api.snyk.io`). See the [hosted import example](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md#existing-issues-from-snyk).
+
+The following workspace scan formats cover Open Source SCA vulnerabilities.
+
+Use the [official Snyk Codex plugin](https://github.com/snyk/studio-recipes/tree/main/plugins/codex)
+with its `snyk-findings-export` skill to collect SCA findings from the repository's
+Git root. It runs a fresh local scan and writes a `snyk-findings-export/v1` bundle;
+it does not retrieve existing platform project findings.
+
+The same saved bundle supports [local import](#import-vendor-findings-locally)
+without a Cloud login:
 
 ```sh
-codex-security publish findings snyk-findings.json --to local --provider snyk \
-  --repository ./project --source-key github.com/example/project/main/root/plugin-sca --dry-run
+codex-security publish findings snyk-findings.json --to local \
+  --provider snyk --repository ./project \
+  --source-key github.com/example/project/main/root/plugin-sca --dry-run
 ```
 
-The same report can go to `--to cloud --repository URL_OR_ID`. Keep a separate
-source key for each repository, branch, scan target and acquisition format.
-The [Snyk import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md#local-open-source-scans)
-covers plugin setup, CLI exit codes, multi-project scans and evidence limits.
+Or preview publication to a connected Cloud repository:
 
-### Collect hosted Snyk and Semgrep findings
+```sh
+codex-security publish findings snyk-findings.json --to cloud \
+  --provider snyk --repository https://github.com/example/project \
+  --source-key github.com/example/project/main/root/plugin-sca --dry-run
+```
 
-Use the opt-in collectors to read existing findings. Save complete `--format json`
-output and pass it to `publish findings` only when collection succeeds. Field
-filters, token limits and `--full-output` change the saved format.
-The scanner's repository URL must resolve to the same path in a browser and in
-Git. For example, use `/team/repo%7Bone%7D` for an escaped brace path that
-both can request. Collection and replay reject a literal `/team/repo{one}`
-because browsers escape its braces while Git sends them literally.
+Check the collection's scan outcomes and limitations. Only Open Source SCA
+vulnerabilities are imported; other products and licenses are explicit exclusions.
+The importer retains the selected finding, native MCP record and collection
+context. MCP may shorten descriptions and omit dependency paths. Plugin paths
+remain in original evidence because v1 lacks their offset from the Git root.
 
-- `import snyk PROJECT_UUID --snyk-org ORG_UUID --source-repository-url URL`
-  reads Open Source issues by default. Select `--snyk-product code` for the Code
-  project's UUID. Set `SNYK_TOKEN` in the environment. [Snyk regions, token permissions and import example](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md#hosted-open-source-and-code).
-- `import semgrep PROJECT --semgrep-deployment SLUG --semgrep-ref REF` reads
-  Code by default. Set `SEMGREP_APP_TOKEN` to a Web API token. Use
-  `--semgrep-product sca` or `ai_sast` for other supported products.
-  [Semgrep project mapping and import example](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#existing-platform-findings).
+For automation, prefer native JSON from
+`snyk test --file=package.json --json-file-output=snyk.json`. Exit 1 means findings;
+stop on other nonzero exits before importing. The existing `--provider snyk`
+autodetects a single project object or an `--all-projects` array; any project error
+stops the import. Use default ungrouped output, without `--group-issues`.
+Native JSON preserves individual dependency paths and remediation fields. Its
+paths remain original evidence because it does not establish their Git-root offset.
+
+Open Source SARIF from `snyk test --sarif-file-output=snyk.sarif` remains supported
+for compatibility. Its target-relative manifest paths and synthetic line numbers
+remain original evidence, without being projected as repository locations or
+package manifest paths. All three formats accept either destination. Use a consistent
+format and stable source key per repository, branch and scan target, for example
+`github.com/example/project/main/root/native-sca` for native JSON. Their source
+identities differ: use separate keys when switching acquisition formats. Imports
+do not deduplicate across formats or remove earlier imported records.
+
+Known repository claims must
+match the selected Cloud repository or, when available, a configured local Git
+remote. Unknown repository context still requires selecting the correct target;
+the importer does not infer provenance from the current checkout.
+
+Remove `--dry-run` from the selected command to review and confirm the import, or
+use `--yes` after reviewing the preview. Read local records with
+`codex-security findings imported ./project --format json`. Imported source
+evidence is not a Codex assessment. No Snyk-side triage state is changed. See the
+[Snyk import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md) for format limits and
+acquisition details.
 
 ### Import Wiz findings
 
@@ -2657,6 +2705,9 @@ By default, `validate` prints a readable assessment without JSON-schema checking
 native structured output. The CLI also checks the completed JSON before writing
 stdout; it does not convert a prose assessment into JSON afterward. Invalid JSON
 or a schema mismatch fails with exit code 2 and no assessment on stdout.
+
+Save the output schema as UTF-8 without a byte-order mark so both the CLI and
+Codex can read it.
 
 Use a self-contained schema in the subset supported by the selected Codex model
 and provider. The local checker uses JSON Schema 2020-12, but accepting a schema

@@ -1,9 +1,11 @@
 import { hash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { posix } from "node:path";
 import { promisify } from "node:util";
 import { gunzip } from "node:zlib";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
+import { SCAN_SEVERITIES } from "./scan-settings.js";
 import { isRecord } from "./record.js";
 
 export function record(value: unknown, label: string): Record<string, unknown> {
@@ -27,10 +29,8 @@ export function requiredText(value: unknown, label: string): string {
   return result;
 }
 
-export function scannerSeverity(value: string | null | undefined): string {
-  return value && ["critical", "high", "medium", "low"].includes(value)
-    ? value
-    : "unknown";
+export function scannerSeverity(value: string | null | undefined) {
+  return SCAN_SEVERITIES.find((severity) => severity === value) ?? "unknown";
 }
 
 export function strings(value: unknown): string[] {
@@ -57,6 +57,18 @@ export function hostedRepositoryPath(value: unknown) {
   return path && !path.includes("\\") && !path.includes("://")
     ? relativePath(path)
     : null;
+}
+
+export function repositoryFilePath(value: unknown): string | null {
+  const relative = relativePath(value);
+  if (!relative) return null;
+  const path = posix.normalize(relative);
+  // Anchor the SCP branch at the first eligible @ to avoid rescanning long filenames.
+  return path === "." ||
+    path.endsWith("/") ||
+    /^(?:[a-z][a-z\d+.-]*:|~[^/]*(?:\/|$)|[^/][^/@]*@[^/]+:)/iu.test(path)
+    ? null
+    : path;
 }
 
 export function stableId(prefix: string, fields: unknown[]): string {
@@ -86,195 +98,22 @@ export function parseJsonOrJsonl(contents: string): unknown {
   }
 }
 
-export function decodeScannerJson(bytes: ArrayBuffer | Uint8Array): string {
+export async function readScannerJson(
+  path: string,
+  parse: (json: string) => unknown = JSON.parse,
+): Promise<unknown> {
+  const bytes = await readScannerBytes(path);
+  let decoded: string;
   try {
-    return strictUtf8.decode(bytes);
+    decoded = strictUtf8.decode(bytes);
   } catch (error) {
     throw new CodexSecurityError(
       `Scanner report is not valid UTF-8. ${errorMessage(error)}`,
       { cause: error },
     );
   }
-}
-
-const decimalToken = /^-?(0|[1-9]\d*)(?:\.(\d+))?(?:e([+-]?\d+))?$/iu;
-
-/** Compare decimal magnitudes without expanding scientific exponents. */
-function decimalMagnitude(source: string) {
-  const parts = decimalToken.exec(source);
-  if (!parts) return;
-  const fraction = parts[2] ?? "";
-  const digits = (parts[1]! + fraction).replace(/^0+/u, "");
-  const point = digits.length
-    ? digits.length - fraction.length + Number(parts[3] ?? 0)
-    : 0;
-  let end = digits.length;
-  while (end > 0 && digits[end - 1] === "0") end--;
-  return { digits: digits.slice(0, end), point };
-}
-
-/** Canonical decimal digits of a positive int64 JSON number without rounding it. */
-export function positiveInt64(source: string): string | undefined {
-  if (source.startsWith("-")) return;
-  const magnitude = decimalMagnitude(source);
-  if (!magnitude) return;
-  const { digits, point } = magnitude;
-  if (!digits || point < digits.length || point > 19) return;
-  const id = digits.padEnd(point, "0");
-  if (point < 19 || id <= "9223372036854775807") return id;
-}
-
-/** Sparse witness for original JSON numbers encoded as exact text in hosted exports. */
-export interface HostedNumericFields {
-  [key: string]: string | HostedNumericFields;
-}
-const numberFields = new WeakMap<object, HostedNumericFields>();
-
-function exactNumberText(value: number, source?: string): string | undefined {
-  const token = requiredText(source, "Exact scanner numeric value");
-  if (
-    !Number.isFinite(value) ||
-    (Number.isInteger(value) && !Number.isSafeInteger(value))
-  )
-    return token;
-  const serialized = String(value);
-  if (token !== serialized) {
-    const original = decimalMagnitude(token)!;
-    const rounded = decimalMagnitude(serialized)!;
-    if (original.point !== rounded.point || original.digits !== rounded.digits)
-      return token;
-  }
-}
-
-export function parseHostedScannerJson(source: string): unknown {
-  if (!possiblyUnsafeJsonNumber.test(source)) return JSON.parse(source);
-  return JSON.parse(
-    source,
-    function (
-      this: object,
-      key,
-      value: unknown,
-      context?: { source?: string },
-    ) {
-      const field =
-        typeof value === "number"
-          ? exactNumberText(value, context?.source)
-          : value && typeof value === "object"
-            ? numberFields.get(value)
-            : undefined;
-      if (field !== undefined) {
-        const fields: HostedNumericFields =
-          numberFields.get(this) ?? Object.create(null);
-        fields[key] = field;
-        numberFields.set(this, fields);
-      }
-      return value;
-    },
-  );
-}
-
-/** Use the exact token when a rounded value could pass an integer check. */
-export function hostedNumber(
-  record: Record<string, unknown>,
-  key: string,
-): unknown {
-  return numberFields.get(record)?.[key] ?? record[key];
-}
-
-function mapNumbers(data: unknown, fields: unknown, encode: boolean): object {
-  if (!data || typeof data !== "object" || !isRecord(fields))
-    throw new Error("Invalid scanner numeric fields.");
-  const copy = Array.isArray(data) ? [...data] : { ...data };
-  const values = copy as Record<string, unknown>;
-  const restored = {
-    ...numberFields.get(data),
-    ...fields,
-  } as HostedNumericFields;
-  for (const [key, field] of Object.entries(fields)) {
-    if (!Object.hasOwn(copy, key))
-      throw new Error(
-        "Incomplete scanner export: invalid scanner numeric field.",
-      );
-    if (typeof field === "string") {
-      if (
-        !encode &&
-        (values[key] !== field ||
-          !decimalToken.test(field) ||
-          !exactNumberText(Number(field), field))
-      )
-        throw new Error("Invalid exact scanner number.");
-      values[key] = encode ? field : Number(field);
-    } else {
-      const child = mapNumbers(values[key], field, encode);
-      values[key] = child;
-      if (!encode) restored[key] = numberFields.get(child)!;
-    }
-  }
-  if (!encode) numberFields.set(copy, restored);
-  return copy;
-}
-
-export function hostedWireValue<T>(
-  data: T,
-  metadata?: HostedNumericFields,
-  path: string[] = [],
-): T {
-  const fields = data && typeof data === "object" && numberFields.get(data);
-  if (!fields) return data;
-  if (metadata) {
-    for (const key of path.slice(0, -1))
-      metadata = (metadata[key] ??= Object.create(null)) as HostedNumericFields;
-    metadata[path.at(-1)!] = fields;
-  }
-  return mapNumbers(data, fields, true) as T;
-}
-
-/** Keep only the numeric type witnesses belonging to this row's vendor evidence. */
-export function hostedWireFields<T extends Record<string, unknown>>(
-  data: T,
-  shared?: HostedNumericFields,
-): T & { numericFields?: HostedNumericFields } {
-  const numericFields = { ...shared };
-  const values = Object.fromEntries(
-    Object.entries(data).map(([key, value]) => [
-      key,
-      hostedWireValue(value, numericFields, [key]),
-    ]),
-  ) as T;
-  return Object.keys(numericFields).length
-    ? { ...values, numericFields }
-    : values;
-}
-
-export function restoreHostedNumbers(
-  report: Record<string, unknown>,
-): Record<string, unknown> {
-  const fields = report["numericFields"];
-  if (fields === undefined) return report;
-  if (!isRecord(fields) || Object.hasOwn(fields, "numericFields"))
-    throw new Error("Invalid scanner numeric fields.");
-  return mapNumbers(report, fields, false) as Record<string, unknown>;
-}
-
-// Sixteen mantissa digits may lose precision even if the parsed integer is safe.
-// Scientific notation can overflow or underflow. A match inside a string only costs a parse.
-const possiblyUnsafeJsonNumber =
-  /(?:\[|[:,])\s*-?(?:(?:\d\.?){16}|\d+(?:\.\d+)?e[+-]?\d)/iu;
-
-export async function readScannerJson(
-  path: string,
-  hostedFormat?: string,
-): Promise<unknown> {
-  const decoded = decodeScannerJson(await readScannerBytes(path));
   try {
-    const json = decoded.replace(/^\uFEFF/u, "");
-    const report: unknown = JSON.parse(json);
-    return hostedFormat &&
-      isRecord(report) &&
-      report["format"] === hostedFormat &&
-      possiblyUnsafeJsonNumber.test(json)
-      ? parseHostedScannerJson(json)
-      : report;
+    return parse(decoded.replace(/^\uFEFF/u, ""));
   } catch (error) {
     throw new CodexSecurityError(
       `Scanner JSON could not be parsed. ${errorMessage(error)}`,
@@ -369,10 +208,10 @@ export function indexSarifRules(rules: Record<string, unknown>[]) {
     unknown,
     { rule: Record<string, unknown>; index: number } | null
   >();
-  rules.forEach((rule, index) => {
+  for (const [index, rule] of rules.entries()) {
     const id = rule["id"];
     byId.set(id, byId.has(id) ? null : { rule, index });
-  });
+  }
   return byId;
 }
 

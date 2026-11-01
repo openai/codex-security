@@ -1,13 +1,5 @@
 import { isIP } from "node:net";
 import { isNumberObject } from "node:util/types";
-import {
-  decodeUnreserved,
-  gitServiceHostname,
-  isGitHubCloudHost,
-  isPublicGitHost,
-  normalizeGitRepositoryUrl,
-} from "./git-remote.js";
-import type { ExternalSourceRepository } from "./external-findings.js";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import schema from "../schemas/external-findings.schema.json" with { type: "json" };
 import type {
@@ -51,9 +43,8 @@ const STRING_BYTE_LIMITS: Readonly<Record<string, number>> = {
 /** Compare repository URLs without changing the retained vendor evidence.
  * GitHub repository paths are case-insensitive; unknown VCS hosts stay strict.
  * Keep protocols and explicit ports distinct, matching the Cloud URL contract. */
-export function repositoryUrlKey(value: string, gitSuffix = true): string {
-  let normalized = value.replace(/\/$/u, "");
-  if (gitSuffix) normalized = normalized.replace(/\.git$/u, "");
+export function repositoryUrlKey(value: string): string {
+  const normalized = value.replace(/\/$/u, "").replace(/\.git$/u, "");
   const parts = /^(https?):\/\/([^/?#]+)((?:\/[^?#]*)?)((?:[?#].*)?)$/iu.exec(
     normalized,
   );
@@ -71,82 +62,6 @@ export function repositoryUrlKey(value: string, gitSuffix = true): string {
 // hosts. Match its case-insensitive URL identity without merging schemes or ports.
 export function cloudRepositoryUrlKey(value: string): string {
   return repositoryUrlKey(value).toLowerCase();
-}
-
-function hostedHttpAuthority(authority: string): string {
-  if (/[%@\\\s]/u.test(authority)) return authority;
-  const hostname = URL.parse(`https://${authority}/`)?.hostname;
-  // Hostname serialization handles IP literals and IDNA. The connector distinguishes explicit ports.
-  const port = /:\d*$/u.exec(authority)?.[0] ?? "";
-  return hostname ? hostname + port : authority;
-}
-
-function hostedHttpPath(path: string): string {
-  const segments: string[] = [];
-  for (const segment of path.split("/")) {
-    // Git's HTTP transport resolves literal dot segments before sending the path.
-    if (segment === "..") {
-      segments.pop();
-    } else if (segment !== ".") {
-      const spelling = segment.replace(/\P{ASCII}+/gu, (text) =>
-        encodeURIComponent(text.toWellFormed()),
-      );
-      const decoded = decodeUnreserved(spelling);
-      segments.push(
-        decoded === "." || decoded === ".." ? segment.toUpperCase() : decoded,
-      );
-    }
-  }
-  if (/(?:^|\/)\.{1,2}$/u.test(path)) segments.push("");
-  return segments.join("/");
-}
-
-/** Compare the HTTP request path a browser and Git would send for the same link. */
-export function ambiguousHostedHttpPath(value: string): boolean {
-  const path = /^https?:\/\/[^/?#]+\/([^?#]*)/iu.exec(value)?.[1];
-  if (path === undefined) return false;
-  const web = URL.parse(value)?.pathname.slice(1);
-  return (
-    web !== undefined &&
-    path !== web &&
-    hostedHttpPath(path) !== hostedHttpPath(web)
-  );
-}
-
-/** Compare hosted HTTP repository spellings without changing the retained evidence. */
-export function hostedRepositoryUrlKey(
-  value: string,
-  github = false,
-  knownGitSuffix = false,
-): string {
-  const url = value.replace(
-    /^(https?:\/\/)([^/?#]+)\/([^?#]*)/iu,
-    (_, scheme: string, authority: string, path: string) =>
-      scheme + hostedHttpAuthority(authority) + "/" + hostedHttpPath(path),
-  );
-  if (github) return cloudRepositoryUrlKey(url);
-  const host = URL.parse(url)?.hostname ?? "";
-  const service = /^https?:\/\//iu.test(url) ? gitServiceHostname(host) : host;
-  if (service !== host && isGitHubCloudHost(service))
-    return cloudRepositoryUrlKey(url);
-  // An arbitrary Git server can serve different repositories at /repo and /repo.git.
-  return repositoryUrlKey(url, knownGitSuffix || isPublicGitHost(service));
-}
-
-/** An independently identified GitHub repository can establish its SSH alias and casing. */
-export function isVerifiedGitHubRepository(
-  value: string,
-  references?: readonly ExternalSourceRepository[],
-): boolean {
-  const githubKey = hostedRepositoryUrlKey(value, true);
-  return (
-    references?.some(
-      ({ url, platform }) =>
-        platform === "github" &&
-        hostedRepositoryUrlKey(normalizeGitRepositoryUrl(url, value), true) ===
-          githubKey,
-    ) ?? false
-  );
 }
 
 // Cloud ImportModel applies these constraints to both requests and responses.
@@ -334,6 +249,16 @@ export function validateExternalReport(
   });
 }
 
+export function validateCodeLineRange(
+  firstLine: number | null | undefined,
+  endLine: number | null | undefined,
+) {
+  if (endLine != null && (firstLine == null || endLine < firstLine))
+    throw new Error(
+      "The code end line requires a first source location line and cannot precede it.",
+    );
+}
+
 export function validateExternalEvidence(
   input: unknown,
   target: ExternalImportTarget = "cloud",
@@ -370,14 +295,10 @@ export function validateExternalEvidence(
         throw new Error("Advisory source context requires advisory evidence.");
     }
   }
-  const endLine = result.details?.code?.end_line;
-  if (endLine !== null && endLine !== undefined) {
-    const firstLine = result.locations?.[0]?.line;
-    if (firstLine === null || firstLine === undefined || endLine < firstLine)
-      throw new Error(
-        "The code end line requires a first source location line and cannot precede it.",
-      );
-  }
+  validateCodeLineRange(
+    result.locations?.[0]?.line,
+    result.details?.code?.end_line,
+  );
   const urls = [
     result.url,
     result.details?.repository?.url,

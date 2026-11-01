@@ -1,82 +1,115 @@
-# Snyk finding imports
+# Import Snyk findings
 
 Vendor finding import and readback require `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`.
 See the [opt-in instructions](../../sdk/typescript/docs/cli.md#import-vendor-findings-locally)
 and [how saved scanner reports map to imported evidence](schema-guide.md).
 
-## Hosted Open Source and Code
+## Existing issues from Snyk
 
-Read issues from one monitored project with a regional `SNYK_TOKEN` in the
-environment. Snyk requires Enterprise API access and the token permissions
-`org.read`, `org.project.read` and `org.project.snapshot.read`.
-[API authentication](https://docs.snyk.io/developer-tools/snyk-api/authentication-for-api)
-and [Issues API](https://docs.snyk.io/developer-tools/snyk-api/reference/issues).
+To import a monitored project's existing issues into the local workbench, set
+`SNYK_TOKEN` to a read-authorized token for the selected region. See the
+[Snyk API access requirements](https://docs.snyk.io/developer-tools/snyk-api/authentication-for-api)
+and [Issues API permissions](https://docs.snyk.io/developer-tools/snyk-api/reference/issues).
+Select the organization ID, project ID and source repository URL. Open Source
+is the default. For a Snyk Code project, add `--snyk-product code`. For a
+regional deployment, set `--snyk-api-origin` to its documented API origin.
 
-To collect Open Source issues, set `ORG_UUID` and `PROJECT_UUID` to the
-organization and manifest project IDs. Supply the project's HTTP(S) Git URL.
+Run the commands from a trusted directory outside the project checkout. The
+example saves a fresh report there and imports it into the checkout at `./project`.
 
 ```sh
-codex-security import snyk "$PROJECT_UUID" --snyk-org "$ORG_UUID" \
-  --source-repository-url https://github.com/example/project \
-  --format json > snyk-hosted.json &&
-codex-security publish findings snyk-hosted.json --provider snyk --to local \
-  --repository ./project --source-key "$ORG_UUID/$PROJECT_UUID/open-source" --dry-run
+report=$(mktemp ./snyk-issues.XXXXXX) &&
+  codex-security import snyk PROJECT_ID --snyk-org ORG_ID \
+    --source-repository-url https://github.com/example/project \
+    --format json > "$report" &&
+  codex-security publish findings "$report" --to local --provider snyk \
+    --source-key ORG_ID/PROJECT_ID --repository ./project --dry-run
 ```
 
-For Code, use the `sast` project's ID, add `--snyk-product code` and choose a
-separate source key. The default API origin is `https://api.snyk.io`. Use
-`--snyk-api-origin` for `https://api.us.snyk.io`, `https://api.eu.snyk.io` or `https://api.au.snyk.io`.
-Before sending `SNYK_TOKEN`, the collector checks the selected region against
-the first enabled endpoint in [Snyk's REST configuration order](https://github.com/snyk/cli/blob/5f54805f14097c22cb13f11e064247c3c522dcda/src/lib/config/index.ts#L45-L60).
-From highest to lowest priority, the settings are
-`API_V3_URL`, `SNYK_API_V3_URL`, `API_REST_URL`, `SNYK_API_REST_URL`,
-`SNYK_API`, then `SNYK_CFG_ENDPOINT`. Snyk requires the exact uppercase names
-`SNYK_API_V3_URL` and `SNYK_API_REST_URL` even on Windows. A literal
-`false` or `FALSE` disables either override. Other values expand `${NAME}`
-references once from the caller's environment. For example,
-when a REST override points to Europe and the general endpoint points to the US, select
-`--snyk-api-origin https://api.eu.snyk.io`. If the region is saved only in
-the Snyk CLI configuration file, select it explicitly here as well.
-When a Snyk user or service access token carries an API host, that host must
-also match the selected region, including for tokens supplied through the SDK.
-
-The collector checks the selected repository URL against the project target
-when Snyk supplies one. Standard Git SSH targets can match HTTPS repository
-URLs on GitHub.com, GitHub Enterprise Cloud (`*.ghe.com`), GitLab.com, and
-Bitbucket.org. A custom GitHub Enterprise host also requires GitHub SCM
-provenance from the Snyk project. When a separately fetched target identifies
-its integration, an SCM project requires a supported integration from the same
-provider family, such as GitHub Enterprise and its GitHub Server App.
-On custom hosts, keep the exact `.git` suffix spelling unless the project
-supplies a matching target URL from its GitHub Enterprise or GitLab integration.
-
-For Open Source projects, Snyk CLI can record a local Git path and a hosted
-repository as the same HTTP target. The importer rejects these ambiguous
-targets during collection and saved-report replay. Set the project's target
-explicitly with
-[`snyk monitor --remote-repo-url=https://git.example.test/team/repo.git`](https://docs.snyk.io/developer-tools/snyk-cli/commands/monitor#--remote-repo-urlurl)
-and collect a new export. When Snyk supplies no target URL, the collector
-uses the repository selected with `--source-repository-url`.
-
-The collector uses Snyk REST version `2026-03-25` and reads every page of open
-and resolved issues for that project and product, including ignored issues.
-The SDK's `collectSnykIssues` returns the same `snyk-rest-issues/v1` report. `normalizeSnykIssues` and `readSnykFindings`
-can replay it offline. The export preserves [exact numeric values and their types](schema-guide.md#numeric-fields-in-hosted-exports). Keep the same source key across exports. The importer
-uses Snyk's issue key within the API origin, organization, project and product
-to identify updates. Duplicate keys in one export are excluded. When preparing
-a REST export yourself, keep the UTC marker or offset in `updated_at` so replay
-uses the same timestamp in every time zone.
+Confirm the preview, then repeat the publish command without `--dry-run`.
+Collection reads open and resolved issues across all pages, including ignored issues.
+For Open Source it requests package vulnerabilities. For Code it requests code issues.
+The SDK's `collectSnykIssues` defaults to Open Source and returns the same report.
+Passing the configured `SNYK_TOKEN` explicitly retains its configured regional
+API origin. Pass independently verified `sourceRepositories` in its
+dependencies when a private repository uses an SSH target. The offline reader
+`readSnykFindings(path, "local")` accepts `snyk-rest-issues/v1` and
+`snyk-rest-issues/v2` reports from Snyk REST API version `2026-03-25`.
+The collector writes v2 and preserves the original project and issue evidence.
+For open Snyk Code issues from an SCM integration, both versions import
+repository-relative paths from open coordinates. V2 also imports each
+coordinate's reported start line when available. For resolved issues, closed
+coordinates, and projects monitored through the CLI or API, read the original
+location from `evidence.source_data.issue` in v1 or from the JSON text in
+`evidence.source_data.issueJson` in v2.
 
 On HTTP 429, the collector retries the same GET once if `Retry-After` specifies
 a wait of 10 seconds or less, in whole seconds or as an HTTP date. Zero or a
 past date triggers an immediate retry. Cancellation stops the wait.
 
-Native evidence retains issue status, ignored state and coordinates. Package
-versions or Code locations are projected only when the issue and coordinate
-are both open. Code regions retain Snyk's original line numbering. Missing
-records on a later import leave earlier occurrences in place.
+Use the same source key on later imports. The issue key within the API
+origin, organization, project and product identifies the finding. Replaying the
+same evidence leaves the version unchanged. Whitespace, object key order and
+equivalent JSON number spellings in v2 native records do not affect replay.
+JSON strings remain distinct from numbers. Importing a different capture for
+that issue updates the same row, even if the capture is older.
 
-## Local Open Source scans
+To select a subset in the SDK, filter the normalized report’s `findings`
+array. Keep the report’s `snykRestContext` and each selected finding’s
+`source_finding_id` and `evidence.source_data`. Every hosted row must retain
+the native issue and its generated ID. The verified report context can supply
+the monitored project for a row that retains only its original issue. The Cloud
+preview includes the verified project and any captured target in the evidence it
+will publish.
+
+For a v1 row, keep `source_data.issue` and the original `source_data.numericFields`
+when present. If you trim the metadata, keep its matching entries for every
+`issue`, `project`, and `target` object you retain. V1 uses those entries to
+distinguish exact numbers from strings with the same spelling. For a v2 row,
+keep `source_data.issueJson`.
+The local workbench stores the verified project and target with that issue,
+so the stored row can be imported again. All selected issues must share the
+report’s API region, organization, project and product. Keep SCM-integrated
+findings separate from CLI- or API-monitored findings. If the report identifies
+a native target or its repository URL, retain that evidence in the selected
+project and target. Snyk’s optional integration relationship is retained when
+the target supplies it.
+
+SDK readers that define their own findings and IDs can use the ordinary
+normalized Snyk import with their own evidence and no hosted report context.
+
+The offline reader can interpret SCM aliases recorded in an archived project.
+Local import compares the source to the checkout’s configured external Git
+remotes. For a checkout with only filesystem remotes or none, the selected
+directory is the import destination.
+For private source-control hosts, use the same repository URL as the checkout.
+SDK callers that have independently verified a GitHub Enterprise or GitLab
+repository can pass its canonical HTTPS URL and platform to local or Cloud
+preparation. Cloud checks that source against the selected repository.
+This allows that repository's standard SSH clone URL and `.git` suffix. For
+example, a GitLab repository uses
+`sourceRepositories: [{ url: sourceRepositoryUrl, platform: "gitlab" }]`
+in the SDK dependencies. Use `platform: "github"` for GitHub Enterprise.
+When reading the saved file directly, pass the same verified sources as the
+third argument to `readSnykFindings(path, "local", sourceRepositories)`.
+
+To preview the saved issues in Cloud, use the same source key and an authorized repository:
+
+```sh
+codex-security publish findings "$report" --to cloud --provider snyk \
+  --source-key ORG_ID/PROJECT_ID --repository https://github.com/example/project --dry-run
+```
+
+Review the preview and repeat without `--dry-run` to publish. The original Snyk
+project must match the selected Cloud repository. If Cloud accepted a request
+but the response was lost, repeat the same command to resume the saved request.
+
+For a new normalized SDK import, keep the original Snyk issue and project
+evidence alongside its generated finding ID. If you build a projection without
+that evidence, supply your own stable finding ID and the source repository URL.
+An already approved, pending request resumes with its saved evidence.
+
+## Fresh Open Source scans
 
 Use the [official Snyk Codex plugin](https://github.com/snyk/studio-recipes/tree/main/plugins/codex)
 to collect a fresh workspace scan. The existing
@@ -85,9 +118,7 @@ accepts its `snyk-findings-export/v1` bundle with `--provider snyk` for local
 storage or Cloud publication. For CLI automation, prefer native JSON from
 `snyk test`; Open Source SARIF remains a compatibility input.
 
-**Local scan scope: Open Source SCA vulnerabilities only.** License findings,
-Snyk Code, Container, IaC and SBOM results are outside these three local scan
-formats. License records in otherwise supported reports appear as explicit
+The workspace scan formats below cover Open Source SCA vulnerabilities. License records in otherwise supported reports appear as explicit
 exclusions; they are not imported as vulnerabilities.
 
 ```sh
@@ -223,14 +254,13 @@ repository locations or package manifest paths. Snyk
 Code, Container, IaC, external SARIF property files and indexed or base-relative
 manifest locations are unsupported.
 
-## Identities and provenance
+### Identities and provenance
 
-All collection formats support either destination, but their source IDs differ. Use
+All three formats support either destination, but their source IDs differ. Use
 one acquisition format consistently for a repository, branch and scan target,
 with a stable source key. Use a separate key if switching formats; the importer
 does not guess equivalence between plugin occurrences, native JSON occurrences
-and SARIF advisory groups, or between workspace scans and hosted Issues.
-Switching does not remove earlier imported records.
+and SARIF advisory groups. Switching does not remove earlier imported records.
 
 Unsafe or absolute paths remain in original evidence. Known source repository
 claims must match the selected Cloud repository or, for local imports when Git

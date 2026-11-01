@@ -1,14 +1,6 @@
-import {
-  hostedRepositoryUrl,
-  validateHostedRepositoryUrl,
-} from "./hosted-scanner-http.js";
 import { CodexSecurityError } from "./errors.js";
-import { requiredText } from "./scanner-import.js";
 import type { ExternalPublicationOptions } from "./external-findings-publish.js";
-import type {
-  ExternalFindingEvidence,
-  Provider,
-} from "./external-import-models.js";
+import type { ExternalFindingEvidence } from "./external-import-models.js";
 
 /** A provider occurrence and its evidence, independent of a Codex assessment. */
 export interface ExternalFinding {
@@ -19,7 +11,7 @@ export interface ExternalFinding {
 /** Repository provenance retained by a reader outside the published evidence. */
 export interface ExternalSourceRepository {
   url: string;
-  platform?: "github";
+  platform?: "github" | "gitlab";
 }
 
 export function snapshotSourceRepositories(
@@ -40,97 +32,10 @@ export interface ExternalFindings {
   }[];
 }
 
-/** A Snyk or Semgrep report bound to one source repository, even when it has no findings. */
-export interface HostedExternalFindings extends ExternalFindings {
-  sourceRepositoryUrl?: string;
-  /** "other" requires exact repository path casing on custom hosts. */
-  sourceRepositoryPlatform?: "github" | "other";
-  /** Native project and target that verify an empty Snyk REST report. */
-  snykRestContext?: Record<string, unknown>;
-}
-
-export type NormalizedFindingsFor<P extends Provider> = P extends
-  "snyk" | "semgrep"
-  ? HostedExternalFindings
-  : ExternalFindings;
-
-export const HOSTED_FINDINGS_FORMATS = {
-  snyk: "snyk-rest-issues/v1",
-  semgrep: "semgrep-platform-findings/v1",
-} as const;
-
-/** Retained rows keep their scanner identity even if the report header is projected out. */
-export function checkHostedFindingProvider(
-  provider: Provider,
-  data: ExternalFindingEvidence["source_data"],
-): void {
-  const format = data?.["format"];
-  const native =
-    format === HOSTED_FINDINGS_FORMATS.snyk
-      ? "snyk"
-      : format === HOSTED_FINDINGS_FORMATS.semgrep
-        ? "semgrep"
-        : undefined;
-  if (native && native !== provider)
-    throw new CodexSecurityError(
-      `Retained ${native} evidence requires the ${native} provider.`,
-    );
-}
-
-/** Capture the public SDK fields once, including class accessors, before any asynchronous work. */
-export function snapshotExternalFindings(
-  input: HostedExternalFindings,
-  provider: Provider,
-): HostedExternalFindings {
-  const {
-    read,
-    findings,
-    excluded,
-    report,
-    sourceRepositoryUrl,
-    sourceRepositoryPlatform,
-    snykRestContext,
-    ...rest
-  } = input;
-  if (
-    (sourceRepositoryUrl !== undefined ||
-      sourceRepositoryPlatform !== undefined) &&
-    provider !== "snyk" &&
-    provider !== "semgrep"
-  )
-    throw new CodexSecurityError(
-      "Normalized report repository declarations require the Snyk or Semgrep provider.",
-    );
-  if (snykRestContext !== undefined && provider !== "snyk")
-    throw new CodexSecurityError(
-      "Retained snyk evidence requires the snyk provider.",
-    );
-  if (typeof sourceRepositoryUrl === "string") {
-    const label = "Source repository URL";
-    if (/^https?:\/\//iu.test(sourceRepositoryUrl))
-      hostedRepositoryUrl(sourceRepositoryUrl, label);
-    else validateHostedRepositoryUrl(requiredText(sourceRepositoryUrl, label));
-  }
-  const current: HostedExternalFindings = structuredClone({
-    ...rest,
-    read,
-    findings,
-    excluded,
-    ...(snykRestContext !== undefined && { snykRestContext }),
-    ...((sourceRepositoryUrl !== undefined ||
-      "sourceRepositoryUrl" in input) && { sourceRepositoryUrl }),
-    ...((sourceRepositoryPlatform !== undefined ||
-      "sourceRepositoryPlatform" in input) && { sourceRepositoryPlatform }),
-  });
-  // Report metadata may alias evidence that receives Cloud defaults.
-  if (report !== undefined) current.report = structuredClone(report);
-  return current;
-}
-
 /** @internal Keep earlier provider projections only for immutable request replay. */
 export interface ExternalPublicationInput {
-  current: HostedExternalFindings;
-  legacy: HostedExternalFindings;
+  current: ExternalFindings;
+  legacy: ExternalFindings;
   currentIdentity: unknown;
   legacyIdentity: unknown;
 }

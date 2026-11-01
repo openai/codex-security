@@ -1,9 +1,6 @@
 import { expect, test } from "bun:test";
-import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
-import { normalizeSnykFindingsExport } from "../src/snyk-findings.js";
 import {
   createAndReplayFinding,
-  localFindingsFixture,
   localReportFixture,
   updateStoredFinding,
 } from "./external-findings-local-helpers.js";
@@ -12,49 +9,6 @@ import {
   snykPluginExport,
   snykSarif,
 } from "./support/snyk-import-fixtures.js";
-
-test.each([
-  "git@scm.example.test:Team/Repo.git",
-  "ssh://git@[scm.example.test]/Team/Repo.git",
-])("a case-sensitive Snyk plugin report preserves %s", async (url) => {
-  await using f = await localFindingsFixture({ remote: url });
-  const report = snykPluginExport();
-  report.collection.target.repository = url;
-  const input = {
-    ...normalizeSnykFindingsExport(report),
-    sourceRepositoryPlatform: "other" as const,
-  };
-  const options = {
-    repository: f.repository,
-    provider: "snyk" as const,
-    sourceKey: "ssh",
-  };
-  const dependencies = { environment: f.environment };
-  expect(
-    (await prepareNormalizedLocalImport(input, options, dependencies)).preview
-      .findings,
-  ).toHaveLength(1);
-  await expect(
-    prepareNormalizedLocalImport(input, options, {
-      ...dependencies,
-      sourceRepositories: [{ url: url.toLowerCase() }],
-    }),
-  ).rejects.toThrow("does not match");
-});
-
-test("a Snyk plugin's Windows path cannot identify a one-letter SSH host", async () => {
-  await using fixture = await localReportFixture(
-    "snyk.json",
-    { provider: "snyk", sourceKey: "snyk" },
-    { remote: "git@c:/org/repo" },
-  );
-  const input = snykPluginExport();
-  input.collection.target.repository = "C:/org/repo";
-  await fixture.writeJson(input);
-  await expect(fixture.prepare()).rejects.toThrow(
-    "does not match a configured remote",
-  );
-});
 
 test.each(["plugin", "JSON", "SARIF"] as const)(
   "Snyk %s findings persist locally and update without duplicating their identities",

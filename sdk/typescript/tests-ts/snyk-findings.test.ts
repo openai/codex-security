@@ -8,6 +8,7 @@ import {
   normalizeSnykJson,
   normalizeSnykSarif,
   readSnykFindings,
+  snykRepositoryUrls,
 } from "../src/snyk-findings.js";
 import {
   snykJson,
@@ -777,3 +778,95 @@ test("direct SARIF manifest locations retain matching artifact metadata", () => 
   });
   expect(input).toEqual(original);
 });
+
+const snykRepositoryContexts: [string, string][] = [
+  [
+    "git@git.example.test:example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "ssh://git@git.example.test/example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "ssh://git@git.example.test:22/example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "tenant@tenant.ghe.com:example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant@tenant.ghe.com:22/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+];
+
+test.each(["\t", "\r", "\n"])(
+  "SSH repository claims retain literal hostname and path bytes: %j",
+  (control) => {
+    const repository = `ssh://git@github.${control}com/example/pro${control}ject.git`;
+    const input = snykPluginExport();
+    input.collection.target.repository = repository;
+    const source =
+      normalizeSnykFindingsExport(input).findings[0]!.evidence.source_data;
+    expect(
+      snykRepositoryUrls(source, {
+        cloudRepositoryUrl: "https://github.com/example/project",
+      }),
+    ).toEqual([repository]);
+    expect(snykRepositoryUrls(source)).toEqual([repository]);
+    expect(snykRepositoryUrls(source, { normalizeGitRemote: false })).toEqual([
+      repository,
+    ]);
+    expect(source).toMatchObject({ collection: input.collection });
+  },
+);
+
+test.each(snykRepositoryContexts)(
+  "Plugin repository claims stay raw without Cloud context or when normalization is disabled: %s",
+  (repository, cloudRepositoryUrl) => {
+    const input = snykPluginExport();
+    input.collection.target.repository = repository;
+    const source =
+      normalizeSnykFindingsExport(input).findings[0]!.evidence.source_data;
+    expect(snykRepositoryUrls(source)).toEqual([repository]);
+    expect(
+      snykRepositoryUrls(source, {
+        normalizeGitRemote: false,
+        cloudRepositoryUrl,
+      }),
+    ).toEqual([repository]);
+    expect(source).toMatchObject({ collection: input.collection });
+  },
+);
+
+test.each(snykRepositoryContexts)(
+  "SARIF repository claims stay raw without Cloud context or when normalization is disabled: %s",
+  (repository, cloudRepositoryUrl) => {
+    const sarif = snykSarif();
+    const provenance = [{ repositoryUri: repository }];
+    const input = {
+      ...sarif,
+      runs: sarif.runs.map((run) => ({
+        ...run,
+        versionControlProvenance: provenance,
+      })),
+    };
+    const source = normalizeSnykSarif(input).findings[0]!.evidence.source_data;
+    expect(snykRepositoryUrls(source)).toEqual([repository]);
+    expect(
+      snykRepositoryUrls(source, {
+        normalizeGitRemote: false,
+        cloudRepositoryUrl,
+      }),
+    ).toEqual([repository]);
+    expect(source).toMatchObject({
+      run: { versionControlProvenance: provenance },
+    });
+  },
+);

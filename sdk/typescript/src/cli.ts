@@ -57,6 +57,7 @@ import {
   stripVTControlCharacters,
 } from "node:util";
 import { Cli, z } from "incur";
+import stringWidth from "string-width";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import { formatCliHelp } from "./cli-help.js";
 import { formatCoverageScope } from "./coverage-presentation.js";
@@ -74,7 +75,6 @@ import {
 } from "./artifact-export.js";
 export { exportEnvironment } from "./artifact-export.js";
 import { parse as parseToml } from "smol-toml";
-import { parse as parseYaml } from "yaml";
 import {
   classifyConnectionFailure,
   CodexSecurity,
@@ -216,6 +216,7 @@ import {
   OutputDirectoryError,
   OutputInsideProtectedRootError,
   PluginPythonUnavailableError,
+  SandboxUnavailableError,
   errorMessage,
   ScanCostLimitExceededError,
   ScanInterruptedError,
@@ -225,12 +226,16 @@ import {
   GITHUB_ADVISORY_STATES,
   importGitHubAdvisories,
 } from "./github-advisories.js";
+import {
+  collectSnykIssues,
+  SNYK_REST_ISSUES_FORMAT,
+} from "./snyk-rest-findings.js";
 import type { HostedScannerHttpOptions } from "./hosted-scanner-http.js";
-import { collectSnykIssues } from "./snyk-rest-findings.js";
+import { semgrepPlatformFormat } from "./semgrep-platform-findings.js";
 import {
   collectSemgrepPlatformFindings,
   SEMGREP_PLATFORM_PRODUCTS,
-} from "./semgrep-platform-findings.js";
+} from "./semgrep-platform-collector.js";
 import {
   GITHUB_ALERT_STATES,
   importGitHubCodeScanningAlerts,
@@ -325,6 +330,7 @@ import {
   type PolicyPrompt,
   type PolicySecurity,
 } from "./security-policy-cli.js";
+import { formatSecurityPolicyText as escapeTerminalText } from "./security-policy.js";
 import type { PatchSelection } from "./patch-tui.js";
 import {
   scanPhaseLabel as scanPhase,
@@ -632,6 +638,21 @@ function padPublicationColumn(value: string, width: number): string {
   return `${value}${" ".repeat(width - publicationDisplayWidth(value))}`;
 }
 
+function fitProgressLine(line: string, width: number): string {
+  const plain = stripVTControlCharacters(line);
+  let ellipsisIndex = 0;
+  let used = 0;
+  for (const { index, segment } of PUBLICATION_GRAPHEME_SEGMENTER.segment(
+    plain,
+  )) {
+    used += stringWidth(segment.toWellFormed());
+    if (used > width)
+      return width > 0 ? `${plain.slice(0, ellipsisIndex)}…` : "";
+    if (used < width) ellipsisIndex = index + segment.length;
+  }
+  return line;
+}
+
 function publicationIssueUrl(value: string | undefined): string | undefined {
   if (
     value === undefined ||
@@ -882,10 +903,7 @@ class PublicationProgressPresenter {
       return;
     }
     const width = Math.max(24, Math.min(this.#stream.columns ?? 120, 160));
-    const visible =
-      sanitized.length <= width
-        ? sanitized
-        : `${sanitized.slice(0, width - 1)}…`;
+    const visible = fitProgressLine(sanitized, width);
     this.#stream.write(`${visible}\n`);
   }
 }
@@ -2028,6 +2046,7 @@ export async function main(
   let frameworkExit: number | undefined;
   const frameworkCapture = captureOutput();
   let rawExportOutput = false;
+  let escapeHostedOutput = false;
   let streamedLogs: Awaited<ReturnType<typeof readSavedScanLogs>> | undefined;
   let renderedOutput: string | undefined;
   let structuredError = false;
@@ -3884,7 +3903,7 @@ export async function main(
   });
   const imports = Cli.create("import", {
     description: importsEnabled
-      ? "Read hosted Snyk, Semgrep and GitHub findings without changing the provider."
+      ? "Read hosted Semgrep, Snyk and GitHub findings without changing the provider."
       : "Read GitHub code scanning alerts.",
   }).command("github", {
     description: "Read GitHub code scanning alerts without changing GitHub.",
@@ -3968,7 +3987,7 @@ export async function main(
   });
   function registerOptInCollectors() {
     async function collect<T>(
-      provider: "GitHub advisory" | "Snyk" | "Semgrep",
+      provider: "GitHub advisory" | "Semgrep" | "Snyk",
       fail: (error: {
         code: string;
         message: string;
@@ -3989,7 +4008,11 @@ export async function main(
         const diagnostic = interrupted
           ? `${provider} import ${interrupted === 130 ? "canceled" : "terminated"}.`
           : message;
-        errorOutput.write(`codex-security: ${diagnostic}\n`);
+        const terminalDiagnostic =
+          provider === "Semgrep" || provider === "Snyk"
+            ? escapeTerminalText(diagnostic)
+            : diagnostic;
+        errorOutput.write(`codex-security: ${terminalDiagnostic}\n`);
         if (argv.includes("--full-output")) {
           structuredError = true;
           return fail({
@@ -3997,7 +4020,8 @@ export async function main(
               provider === "GitHub advisory"
                 ? "GITHUB_IMPORT_FAILED"
                 : "HOSTED_IMPORT_FAILED",
-            message,
+            message:
+              provider === "GitHub advisory" ? message : errorMessage(error),
             exitCode,
           });
         }
@@ -4078,13 +4102,34 @@ export async function main(
       environment: dependencies.environment,
       fetch: dependencies.hostedScannerFetch,
     };
-    const output: z.ZodType<object | undefined> = z
-      .record(z.string(), z.unknown())
+    function setHostedOutputFormat(format?: string) {
+      escapeHostedOutput =
+        format === "md" || (format === "toon" && output.isTTY === true);
+    }
+    const semgrepReport = z
+      .object({
+        format: z.literal(semgrepPlatformFormat),
+        deployment: z.string(),
+        nativeProjectUrl: z.string().optional(),
+        sourceRepositoryUrl: z.string().optional(),
+        project: z.object({
+          id: z.string(),
+          name: z.string(),
+          url: z.string(),
+        }),
+        ref: z.string(),
+        product: z.enum(SEMGREP_PLATFORM_PRODUCTS),
+        repositoryAliases: z.array(z.string()),
+        findingCount: z.number().int().nonnegative(),
+        findings: z.array(
+          z.string().describe("JSON text of a native Semgrep finding."),
+        ),
+      })
       .optional();
     imports.command("snyk", {
       description:
         "Read Snyk Open Source or Code issues for one monitored project.",
-      hint: "Requires SNYK_TOKEN. Save complete --format json output and publish it with --provider snyk.",
+      hint: "Requires SNYK_TOKEN. Save the complete --format json output. Use publish findings --provider snyk with --to local or --to cloud.",
       destructive: false,
       mcp: false,
       args: z.object({
@@ -4105,9 +4150,29 @@ export async function main(
           "Explicit source-control repository mapping for the monitored project.",
         ),
       }),
-      output,
-      run: ({ args, options, error }) =>
-        collect("Snyk", error, (signal) =>
+      output: z
+        .object({
+          format: z.literal(SNYK_REST_ISSUES_FORMAT),
+          apiVersion: z.string(),
+          apiOrigin: z.string(),
+          organizationId: z.string(),
+          projectId: z.string(),
+          product: z.enum(["open-source", "code"]),
+          sourceRepositoryUrl: z.string(),
+          complete: z.literal(true),
+          projectJson: z.string(),
+          targetJson: z.string(),
+          pages: z.array(
+            z.object({
+              startingAfter: z.string().nullable(),
+              responseJson: z.string(),
+            }),
+          ),
+        })
+        .optional(),
+      run: ({ args, options, error, format }) => {
+        setHostedOutputFormat(format);
+        return collect("Snyk", error, (signal) =>
           collectSnykIssues(
             {
               projectId: args.project,
@@ -4119,11 +4184,12 @@ export async function main(
             },
             http,
           ),
-        ),
+        );
+      },
     });
     imports.command("semgrep", {
       description: "Read Semgrep Platform findings for one project and ref.",
-      hint: "Requires SEMGREP_APP_TOKEN with Web API access. Save complete --format json output and publish it with --provider semgrep.",
+      hint: "Requires SEMGREP_APP_TOKEN with Web API access. Save the complete --format json output. Use publish findings --provider semgrep with --to local or --to cloud.",
       destructive: false,
       mcp: false,
       args: z.object({
@@ -4149,9 +4215,10 @@ export async function main(
             "Explicit mapping when the Semgrep project has no SCM URL.",
           ),
       }),
-      output,
-      run: ({ args, options, error }) =>
-        collect("Semgrep", error, (signal) =>
+      output: semgrepReport,
+      run: ({ args, options, error, format }) => {
+        setHostedOutputFormat(format);
+        return collect("Semgrep", error, (signal) =>
           collectSemgrepPlatformFindings(
             {
               project: args.project,
@@ -4163,7 +4230,8 @@ export async function main(
             },
             http,
           ),
-        ),
+        );
+      },
     });
   }
   if (importsEnabled) registerOptInCollectors();
@@ -5227,10 +5295,12 @@ export async function main(
               ? options.component.map((path) => ({ name: path, paths: [path] }))
               : componentPlanSchema.parse(
                   JSON.parse(
-                    await readRegularInputFile(
-                      resolveCliPath(directory, options.componentsFile),
-                      repository,
-                    ),
+                    (
+                      await readRegularInputFile(
+                        resolveCliPath(directory, options.componentsFile),
+                        repository,
+                      )
+                    ).replace(/^\uFEFF/u, ""),
                   ),
                 ).components;
           if (
@@ -6921,7 +6991,7 @@ export async function main(
     const subcommand = nestedCommand ? argv[commandIndex + 1] : undefined;
     const optInCollector =
       command === "import" &&
-      ["github-advisories", "snyk", "semgrep"].includes(subcommand ?? "");
+      ["github-advisories", "semgrep", "snyk"].includes(subcommand ?? "");
     if (command === "import" && frameworkFlags.rawCollector) {
       // Incur's skill-sync notice turns a saved collector array into an object.
       cliOptions.sync = false;
@@ -7202,6 +7272,8 @@ export async function main(
     renderedOutput = failureOutput.text();
   }
   let frameworkOutput = frameworkCapture.text();
+  if (escapeHostedOutput)
+    frameworkOutput = escapeTerminalText(frameworkOutput, true);
   if (notice !== undefined) {
     try {
       errorOutput.write(formatUpdateNotice(notice));
@@ -7217,7 +7289,7 @@ export async function main(
     } else {
       if (exitCode !== 0) return exitCode;
       errorOutput.write(
-        `codex-security: ${diagnosticLines(incurErrorMessage(frameworkOutput))}\n`,
+        `codex-security: ${diagnosticLines(await incurErrorMessage(frameworkOutput))}\n`,
       );
       return 2;
     }
@@ -9258,11 +9330,12 @@ export function skillCommandFailure(
   return detail || `${command} failed with exit code ${status}.`;
 }
 
-function incurErrorMessage(output: string): string {
+async function incurErrorMessage(output: string): Promise<string> {
   // YAML folds long strings across lines; JSON output keeps its serialized form.
   if (!output.startsWith("{")) {
+    const { parse } = await import("yaml");
     try {
-      const parsed: unknown = parseYaml(output);
+      const parsed: unknown = parse(output);
       if (isJsonObject(parsed) && typeof parsed["message"] === "string")
         return parsed["message"];
     } catch {
@@ -10157,7 +10230,7 @@ async function executeScan(
             );
             if (validation["reportPath"] !== undefined) {
               errorOutput.write(
-                `Partial validation report: ${diagnosticValue(validation["reportPath"])}\n`,
+                `Validation report opened at ${diagnosticValue(validation["reportPath"])}\n`,
               );
             }
           }
@@ -10216,11 +10289,11 @@ async function executeScan(
   if (requestedSignal !== null) {
     diagnostic("scan.interrupted", {
       signal: requestedSignal,
-      partial_output: scanDir !== null,
     });
     if (result !== null && arguments_.validate) {
       const exitCode = requestedSignal === "SIGINT" ? 130 : 143;
-      const message = `Validation interrupted. Completed scan output was kept at ${errorMessage(result.scanDir)}.`;
+      const scanId = quoteCliPath(diagnosticValue(result.manifest.scan.id));
+      const message = `Validation interrupted. Original output directory: ${errorMessage(result.scanDir)}. Run codex-security scans show ${scanId} to inspect the completed scan.`;
       errorOutput.write(`codex-security: ${message}\n`);
       return {
         exitCode,
@@ -10231,6 +10304,7 @@ async function executeScan(
         },
       };
     }
+    if (failure instanceof ScanInterruptedError) scanDir ??= failure.scanDir;
     const exitCode = interruptedExit(requestedSignal, scanDir, errorOutput);
     printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
     return {
@@ -10260,7 +10334,6 @@ async function executeScan(
           : isLocalScanFailure(failure)
             ? "local"
             : classifyConnectionFailure(failure),
-      partial_output: scanDir !== null,
       max_cost_usd: costLimitFailure?.maxCostUsd,
       estimated_usd: costLimitFailure?.cost.estimatedUsd,
       cost_estimate:
@@ -10270,9 +10343,7 @@ async function executeScan(
     });
     errorOutput.write(`${message}\n`);
     if (!(failure instanceof ScanInterruptedError) && scanDir !== null) {
-      errorOutput.write(
-        `Partial output was kept at ${errorMessage(scanDir)}.\n`,
-      );
+      errorOutput.write(`Output directory: ${errorMessage(scanDir)}\n`);
     }
     printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
     return { exitCode: 2, error: message, data: failureData };
@@ -10542,7 +10613,8 @@ function isLocalScanFailure(error: unknown): boolean {
     error instanceof OutputDirectoryError ||
     error instanceof ConfigurationError ||
     error instanceof LocalPluginBootstrapError ||
-    error instanceof PluginPythonUnavailableError
+    error instanceof PluginPythonUnavailableError ||
+    error instanceof SandboxUnavailableError
   ) {
     return true;
   }
@@ -10821,7 +10893,7 @@ function printFailedScanReference(
     if (phase !== null)
       output.write(`Last observed phase: ${diagnosticValue(phase)}\n`);
     output.write(
-      `Retained results: ${diagnosticValue(scan["scanDir"])}\n` +
+      `Output directory: ${diagnosticValue(scan["scanDir"])}\n` +
         "Inspect the saved scan status before choosing resume or rerun.\n",
     );
     const prompts = [
@@ -11368,19 +11440,8 @@ export class Progress {
   }
 
   #renderTimer(message: string): void {
-    let line = this.#line(message);
     const width = Math.max(0, (this.#stream.columns ?? 80) - 1);
-    if (publicationDisplayWidth(line) > width) {
-      let visible = "";
-      let used = 0;
-      for (const { segment } of PUBLICATION_GRAPHEME_SEGMENTER.segment(line)) {
-        const segmentWidth = publicationDisplayWidth(segment);
-        if (used + segmentWidth >= width) break;
-        visible += segment;
-        used += segmentWidth;
-      }
-      line = width > 0 ? `${visible}…` : "";
-    }
+    const line = fitProgressLine(this.#line(message), width);
     this.#stream.write(`${this.#timerLineActive ? "\r\u001B[K" : ""}${line}`);
     this.#timerLineActive = true;
   }
@@ -11395,11 +11456,11 @@ function interruptedExit(
   errorOutput.write(
     `codex-security: Scan ${ctrlC ? "canceled by Ctrl-C" : "terminated by SIGTERM"}.\n`,
   );
-  errorOutput.write(
-    scanDir === null
-      ? "codex-security: No partial output was kept.\n"
-      : `codex-security: Partial output was kept at ${errorMessage(scanDir)}.\n`,
-  );
+  if (scanDir) {
+    errorOutput.write(
+      `codex-security: Output directory: ${errorMessage(scanDir)}\n`,
+    );
+  }
   return ctrlC ? 130 : 143;
 }
 
