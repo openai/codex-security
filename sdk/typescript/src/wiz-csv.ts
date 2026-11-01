@@ -1,5 +1,6 @@
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import Papa from "papaparse";
+import { text } from "./scanner-import.js";
 import { validateExternalEvidence } from "./external-import-contract.js";
 import type { ExternalFindingEvidence } from "./external-import-models.js";
 import type { VendorFinding } from "./wiz-findings.js";
@@ -14,10 +15,6 @@ const requiredHeaders = [
   "CloudPlatform",
   "CloudProviderURL",
 ];
-
-function text(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value : null;
-}
 
 /** Recognize the supported Wiz vulnerability CSV columns, retaining every cell. */
 export function readWizCsv(
