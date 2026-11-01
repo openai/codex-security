@@ -2116,7 +2116,8 @@ marks shortened text. Other template columns keep their original values.
 
 The output defaults to `servicenow-avit.csv`. Upload the completed file in the
 same ServiceNow screen. Each upload creates a new penetration-test form for the
-application. See [ServiceNow's upload instructions](https://www.servicenow.com/docs/r/security-management/application-vulnerability-response/ingest-vulnerabilities-manually-avr.html).
+application. If the submission result is unclear, check its status and log notes
+on the Vulnerability Integration Push Queues page before uploading again. See [ServiceNow's upload instructions](https://www.servicenow.com/docs/r/security-management/application-vulnerability-response/ingest-vulnerabilities-manually-avr.html).
 
 ### Export a threat model
 
