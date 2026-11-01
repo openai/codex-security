@@ -1,4 +1,5 @@
 import { isNonEmptyString } from "./value.js";
+import { isUtf8 } from "node:buffer";
 import { execFile as execFileCallback } from "node:child_process";
 import { realpathSync, type Stats } from "node:fs";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
@@ -575,22 +576,36 @@ export async function normalizeTarget(
     const candidate = isAbsolute(expandHome(value))
       ? resolve(expandHome(value))
       : resolve(root, expandHome(value));
-    let metadata: Stats;
     let canonical: string;
     try {
-      metadata = await abortable(() => stat(candidate), signal);
-      canonical = await abortable(() => realpath(candidate), signal);
+      // Some runtimes cannot canonicalize special files to filesystem paths.
+      requireScanPathType(
+        value,
+        await abortable(() => stat(candidate), signal),
+      );
+      const resolved = await abortable(
+        () => realpath(candidate, { encoding: "buffer" }),
+        signal,
+      );
+      canonical = resolved.toString();
+      if (!isAbsolute(canonical)) {
+        throw new InvalidTargetError(`Could not resolve path target: ${value}`);
+      }
+      requireScanPathType(
+        value,
+        await abortable(() => lstat(resolved), signal),
+      );
+      if (!isUtf8(resolved)) {
+        throw new InvalidTargetError(
+          `Path target cannot be represented as UTF-8: ${value}`,
+        );
+      }
     } catch (error) {
       throwIfAborted(signal);
+      if (error instanceof InvalidTargetError) throw error;
       throw new InvalidTargetError(`Path target does not exist: ${value}`, {
         cause: error,
       });
-    }
-    // Match the bundled scan scope resolver's supported filesystem types.
-    if (!metadata.isFile() && !metadata.isDirectory()) {
-      throw new InvalidTargetError(
-        `Path target is not a regular file or directory: ${value}`,
-      );
     }
     const relativePath = relative(root, canonical);
     if (relativePathIsOutside(relativePath)) {
@@ -610,6 +625,14 @@ export async function normalizeTarget(
     paths.add(normalized);
   }
   return { kind: "paths", paths: [...paths] };
+}
+
+function requireScanPathType(value: string, metadata: Stats): void {
+  if (!metadata.isFile() && !metadata.isDirectory()) {
+    throw new InvalidTargetError(
+      `Path target is not a regular file or directory: ${value}`,
+    );
+  }
 }
 
 export async function validateCommittedDiffCheckout(

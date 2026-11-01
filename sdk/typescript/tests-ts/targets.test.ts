@@ -7,6 +7,7 @@ import {
   mkdir,
   readFile,
   realpath,
+  rename,
   rm,
   symlink,
   utimes,
@@ -32,6 +33,7 @@ import {
   gitProtectionRoots,
 } from "../src/targets.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { runCommand } from "./support/shell.js";
 
 // @ts-expect-error DiffTarget is intentionally nominal; use its constructor helpers.
 const structurallyInvalidTarget: ScanTarget = {
@@ -308,6 +310,27 @@ describe("scan target normalization", () => {
     },
   );
 
+  test.skipIf(process.platform === "win32").each(["node", "bun"])(
+    "identifies special file targets and their links in %s",
+    async (runtime) => {
+      const root = await temporaryDirectory("cs-target-");
+      const build = await Bun.build({
+        entrypoints: [
+          fileURLToPath(
+            new URL("./fixtures/socket-target.ts", import.meta.url),
+          ),
+        ],
+        outdir: root,
+        naming: "socket-target.mjs",
+        target: "node",
+      });
+      const result = await runCommand(runtime, [build.outputs[0]!.path, root], {
+        cwd: root,
+      });
+      expect(result.status, result.stderr || result.error?.message).toBe(0);
+    },
+  );
+
   test.skipIf(process.platform !== "win32")(
     "rejects NTFS alternate streams before runtime initialization",
     async () => {
@@ -335,19 +358,44 @@ describe("scan target normalization", () => {
     },
   );
 
-  test("reports a path that disappears during normalization as invalid", async () => {
+  test.each(
+    process.platform === "win32"
+      ? ["removed"]
+      : ["removed", "retargeted", "replaced after resolution"],
+  )("rejects a path %s during canonical resolution", async (change) => {
     const repo = await repository();
+    const target = join(repo, "src", "app.ts");
+    if (change === "retargeted") {
+      const pending = join(repo, "pending");
+      execFileSync("mkfifo", [pending]);
+      if (process.platform === "linux") {
+        const raw = Buffer.concat([Buffer.from(pending), Buffer.from([0xff])]);
+        await rename(pending, raw);
+        await symlink(raw, pending);
+        await writeFile(raw.toString(), "regular sibling");
+      }
+    }
+    if (change === "replaced after resolution")
+      await writeFile(join(repo, "..", "outside-file"), "outside");
     const script = `
       import { mockFs } from ${JSON.stringify(fileURLToPath(new URL("./support/module-mocks.ts", import.meta.url)))};
-      import { rmSync } from "node:fs";
+      import { rmSync, symlinkSync } from "node:fs";
       import * as original from "node:fs/promises";
       import { join } from "node:path";
-      const [repo, targets] = process.argv.slice(1);
-      const target = join(repo, "src", "app.ts");
+      const [repo, targets, target, change] = process.argv.slice(1);
       const actualRealpath = original.realpath;
       mockFs(() => ({
         realpath: async (path, ...args) => {
-          if (path === target) rmSync(target);
+          if (path === target && change === "replaced after resolution") {
+            const canonical = await actualRealpath(path, ...args);
+            rmSync(target);
+            symlinkSync(join(repo, "..", "outside-file"), target);
+            return canonical;
+          }
+          if (path === target) {
+            rmSync(target);
+            if (change === "retargeted") symlinkSync(join(repo, "pending"), target);
+          }
           return await actualRealpath(path, ...args);
         },
       }));
@@ -371,11 +419,17 @@ describe("scan target normalization", () => {
         script,
         repo,
         fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
+        target,
+        change,
       ],
       { encoding: "utf8" },
     );
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain("REJECTED true Path target does not exist");
+    expect(result.stdout).toContain(
+      change === "removed"
+        ? "REJECTED true Path target does not exist"
+        : "REJECTED true Path target is not a regular file or directory",
+    );
   });
 
   test("binds ref and working-tree targets to commit IDs", async () => {
