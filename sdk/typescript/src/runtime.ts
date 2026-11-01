@@ -1,3 +1,4 @@
+import { forwardExternalImportSetting } from "./external-imports-feature.js";
 import { executablePathForSpawn } from "./executable-path.js";
 export { executablePathForSpawn } from "./executable-path.js";
 import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
@@ -12,8 +13,12 @@ import {
 import { randomUUID } from "node:crypto";
 import {
   chmodSync,
+  close as closeCallback,
   constants,
   createWriteStream,
+  fstat as fstatCallback,
+  open as openCallback,
+  read as readCallback,
   type BigIntStats,
   type Stats,
 } from "node:fs";
@@ -47,13 +52,14 @@ import {
   relative,
   resolve,
   sep,
+  win32,
 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { pipeline } from "node:stream/promises";
 import { crc32 } from "node:zlib";
 import { setTimeout as delay } from "node:timers/promises";
-import { openPromise as openZip } from "yauzl";
+import { fromFdPromise, type ZipFile } from "yauzl";
 import { parse } from "smol-toml";
 import {
   CodexSecurityError,
@@ -77,7 +83,9 @@ import {
 } from "./trusted-executable.js";
 import {
   isWindowsUnsafePathComponent,
+  WINDOWS_NAMESPACED_UNC_ROOT,
   windowsUnsafePathComponent,
+  windowsVolumeRoot,
 } from "./windows-path.js";
 
 const execFile = promisify(execFileCallback);
@@ -119,7 +127,6 @@ const CREDENTIAL_LOCK_HEARTBEAT_MILLISECONDS = 5_000;
 const CREDENTIAL_LOCK_POLL_MILLISECONDS = 25;
 const INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS = 30_000;
 const MAX_PROCESS_ID = 2_147_483_647;
-const MAX_WINDOWS_CREDENTIAL_ACL_STDERR = 64 * 1024;
 const SANDBOX_PROBE_TIMEOUT_MILLISECONDS = 10_000;
 const PLUGIN_HELPER_SECRET_ENVIRONMENT_VARIABLES = new Set([
   "OPENAI_API_KEY",
@@ -285,8 +292,13 @@ export async function prepareCodexSecurityCredentialHome(
     return canonical;
   } catch (error) {
     if (error instanceof OutputDirectoryError) throw error;
+    const code = nodeErrorCode(error);
+    const recovery =
+      code === "EACCES" || code === "EPERM" || code === "EROFS"
+        ? "\nCheck permissions or set CODEX_SECURITY_STATE_DIR to a private, writable directory outside the repository."
+        : "";
     throw new OutputDirectoryError(
-      `Unable to prepare the Codex Security credential home: ${path}`,
+      `Unable to prepare the Codex Security credential home: ${path}\n${errorMessage(error)}${recovery}`,
       { cause: error },
     );
   }
@@ -377,26 +389,31 @@ export async function requirePrivateCredentialHome(
   await requirePrivateDirectory(metadata, path, "credential home", options);
 }
 
-export async function requirePrivatePolicyOutputDirectory(
+export async function preparePolicyOutputDirectory(
   path: string,
   options: Parameters<typeof requirePrivateDirectory>[3] = {},
 ): Promise<void> {
+  const metadata = await lstat(path);
+  if ((options.platform ?? process.platform) !== "win32") {
+    requireOutputDirectoryOwnership(metadata, path);
+    return;
+  }
   await requirePrivateDirectory(
-    await lstat(path),
+    metadata,
     path,
     "policy output directory",
     options,
   );
 }
 
-async function requirePrivateDirectory(
+export async function requirePrivateDirectory(
   metadata: Pick<Stats, "mode" | "uid">,
   path: string,
   description: string,
   options: {
     platform?: NodeJS.Platform;
     secureWindowsHome?: (path: string) => Promise<void>;
-  },
+  } = {},
 ): Promise<void> {
   if ((options.platform ?? process.platform) !== "win32") {
     requirePrivateOutputDirectory(metadata, path);
@@ -423,10 +440,7 @@ function windowsCredentialAclFailure(error: unknown): string {
     typeof stderr === "string" && stderr.trim() !== ""
       ? stderr
       : errorMessage(error);
-  const normalized = errorMessage(detail)
-    .replace(/\s+/gu, " ")
-    .trim()
-    .slice(0, 512);
+  const normalized = errorMessage(detail).replace(/\s+/gu, " ").trim();
   return normalized === "" ? "" : `. ${normalized}`;
 }
 
@@ -725,8 +739,7 @@ export async function streamWindowsCredentialAclDescriptors(
   let stderr = "";
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk: string) => {
-    const remaining = MAX_WINDOWS_CREDENTIAL_ACL_STDERR - stderr.length;
-    if (remaining > 0) stderr += chunk.slice(0, remaining);
+    stderr += chunk;
   });
 
   let descendantsChanged = false;
@@ -786,6 +799,26 @@ export async function streamWindowsCredentialAclDescriptors(
   }
 }
 
+function windowsCredentialRootLength(path: string): number {
+  const root = windowsVolumeRoot(path);
+  if (win32.isAbsolute(path) && win32.relative(root, path) === "") {
+    throw new Error(
+      "A private Windows directory must be below a volume or share root",
+    );
+  }
+  return root.length;
+}
+
+export function windowsCredentialAncestorAclScript(path: string): string {
+  const rootLength = windowsCredentialRootLength(path);
+  return [
+    "$path = $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
+    // Stop at the drive or UNC share root, then inspect the outermost ancestor first.
+    `$ancestors = @(while ($path.Length -gt ${rootLength}) { $parent = Microsoft.PowerShell.Management\\Split-Path -Path $path -Parent; if (-not $parent -or $parent -eq $path) { break }; $parent; $path = $parent })`,
+    "for ($i = $ancestors.Count - 1; $i -ge 0; $i--) { Write-CredentialAcl $ancestors[$i] }",
+  ].join("\n");
+}
+
 export async function inspectWindowsCredentialAclSnapshot(
   path: string,
   currentUserSid: string,
@@ -800,11 +833,16 @@ export async function inspectWindowsCredentialAclSnapshot(
   home: WindowsCredentialAcl;
   descendantsArePrivate: boolean;
 }> {
-  let ancestors = 0;
-  for (let ancestor = dirname(path); ; ancestor = dirname(ancestor)) {
-    ancestors += 1;
-    if (ancestor === dirname(ancestor)) break;
+  const rootLength = windowsCredentialRootLength(path);
+  const ancestors: string[] = [];
+  let ancestor = win32.dirname(path);
+  while (true) {
+    ancestors.push(ancestor);
+    const parent = win32.dirname(ancestor);
+    if (ancestor.length <= rootLength || ancestor === parent) break;
+    ancestor = parent;
   }
+  ancestors.reverse();
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     let home: WindowsCredentialAcl | undefined;
@@ -837,24 +875,41 @@ export async function inspectWindowsCredentialAclSnapshot(
           inspected += 1;
           await options.resolveDescriptorAliases?.(descriptor);
 
-          if (index < ancestors) {
-            const ancestor = inspectWindowsCredentialAcl(
-              descriptor,
-              currentUserSid,
-              {
-                resolvedAliases: options.resolvedAliases,
-                scope: "ancestor",
-              },
-            );
-            if (ancestor.untrustedPrincipals.length !== 0) {
+          if (index < ancestors.length) {
+            const ancestorPath = ancestors[index]!;
+            try {
+              const ancestor = inspectWindowsCredentialAcl(
+                descriptor,
+                currentUserSid,
+                {
+                  resolvedAliases: options.resolvedAliases,
+                  scope: "ancestor",
+                },
+              );
+              if (ancestor.untrustedPrincipals.length !== 0) {
+                throw new Error(
+                  "Windows credential-home ancestor allows another identity to replace the directory",
+                );
+              }
+            } catch (error) {
+              let guidance =
+                "Choose a location outside this ancestor with trusted ownership and permissions.";
+              if (index === 0) {
+                guidance = WINDOWS_NAMESPACED_UNC_ROOT.test(
+                  win32.toNamespacedPath(ancestorPath),
+                )
+                  ? "This share root is unsupported. Choose a location outside this share with trusted ownership and permissions."
+                  : "This volume root is unsupported. Choose a location on a volume with trusted ancestry; another directory on the same volume will not resolve this.";
+              }
               throw new Error(
-                "Windows credential-home ancestor allows another identity to replace the directory",
+                `Windows private-directory ancestor could not be trusted: ${ancestorPath}. ${errorMessage(error)}. ${guidance}`,
+                { cause: error },
               );
             }
             return;
           }
 
-          if (index === ancestors) {
+          if (index === ancestors.length) {
             try {
               home = inspectWindowsCredentialAcl(descriptor, currentUserSid, {
                 resolvedAliases: options.resolvedAliases,
@@ -889,7 +944,7 @@ export async function inspectWindowsCredentialAclSnapshot(
       if (error instanceof WindowsCredentialDescendantsChangedError) continue;
       throw error;
     }
-    if (inspected <= ancestors) {
+    if (inspected <= ancestors.length) {
       throw new Error("Windows credential-home ancestry could not be verified");
     }
     if (!completed) {
@@ -904,6 +959,7 @@ export async function inspectWindowsCredentialAclSnapshot(
 }
 
 async function secureWindowsCredentialHome(path: string): Promise<void> {
+  const ancestorAclScript = windowsCredentialAncestorAclScript(path);
   const systemRoot = process.env["SystemRoot"] ?? "C:\\Windows";
   const systemDirectory = join(systemRoot, "System32");
   const powershell = join(
@@ -972,8 +1028,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     "    if ($entry.PSIsContainer) { Read-CredentialDescendants $entry.FullName }",
     "  }",
     "}",
-    "$path = $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
-    "while ($true) { $parent = Microsoft.PowerShell.Management\\Split-Path -Path $path -Parent; if (-not $parent -or $parent -eq $path) { break }; Write-CredentialAcl $parent; $path = $parent }",
+    ancestorAclScript,
     "Write-CredentialAcl $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
     "Read-CredentialDescendants $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
     `"${WINDOWS_CREDENTIAL_ACL_COMPLETE_PREFIX}$script:descriptorCount"`,
@@ -1621,6 +1676,8 @@ export async function runWorkbench(
       "database-info",
       "store-findings",
       "list-stored-findings",
+      "store-external-findings",
+      "list-external-findings",
       "find-potential-duplicates",
       "store-dedupe-groups",
       "list-dedupe-groups",
@@ -1653,9 +1710,8 @@ export async function runWorkbench(
       ? (options.stateDirectory ??
         codexSecurityStateDirectory(options.environment))
       : undefined;
-    // OS argv cannot carry NUL, but workbench text fields can.
-    const framedArguments =
-      !native && arguments_.some((argument) => argument.includes("\0"));
+    // Workbench text fields can contain NUL or exceed OS command-line limits.
+    const framedArguments = !native;
     let program = archiveHandshake ? ARCHIVE_REGISTRATION_PROGRAM : undefined;
     if (framedArguments)
       program =
@@ -1772,7 +1828,7 @@ export async function validateOutputDir(
       if (!archiveExisting && (await readdir(path)).length !== 0) {
         throw new OutputDirectoryNotEmptyError(path);
       }
-      requirePrivateOutputDirectory(metadata, path);
+      requireOutputDirectoryOwnership(metadata, path);
       await requireSecureOutputAncestry(path);
       const canonical = await realpath(path);
       requireModelSafeOutputDir(canonical);
@@ -1915,7 +1971,11 @@ export async function planOutputArchive(
   if (outputDirectory === null) return null;
   const entries = await readdir(outputDirectory).catch(nullIfMissingFileError);
   if (entries === null || entries.length === 0) return null;
-  return `${outputDirectory}.previous-${new Date()
+  return `${outputDirectory}${outputArchiveSuffix()}`;
+}
+
+function outputArchiveSuffix(): string {
+  return `.previous-${new Date()
     .toISOString()
     .replaceAll(/[-:]/g, "")
     .replace(/\.\d{3}Z$/, "")}-${randomUUID().slice(0, 8)}`;
@@ -2018,11 +2078,23 @@ async function prepareOutputDirectory(
   );
   validateLocation?.(path ?? (await realpath(temporaryRoot)));
   if (path === null) {
-    const created = await mkdtemp(
-      join(temporaryRoot, `codex-security-${safePrefix(repositoryName)}-`),
-    );
-    if ((process.umask() & 0o700) !== 0) await chmod(created, 0o700);
+    const prefix = `codex-security-${safePrefix(repositoryName)}`;
+    let created: string;
+    if (process.platform === "win32") {
+      const suffix = `-${randomUUID()}`;
+      // Reserve room within NTFS's 255-unit component limit for later archival.
+      // The SDK suffix is longer than the workbench's .previous-<tempname> suffix.
+      const prefixLength = 255 - suffix.length - outputArchiveSuffix().length;
+      created = join(
+        temporaryRoot,
+        `${prefix.slice(0, prefixLength)}${suffix}`,
+      );
+      await createWindowsOutputDirectory(created, false);
+    } else {
+      created = await mkdtemp(join(temporaryRoot, `${prefix}-`));
+    }
     try {
+      if ((process.umask() & 0o700) !== 0) await chmod(created, 0o700);
       return await validatePreparedOutputDir(created, validateLocation);
     } catch (error) {
       await rmdir(created).catch(() => undefined);
@@ -2041,7 +2113,10 @@ async function prepareOutputDirectory(
       }
     }
     if (existing === null) {
-      createdRoot = await mkdir(path, { recursive: true, mode: 0o700 });
+      createdRoot =
+        process.platform === "win32"
+          ? await createWindowsOutputDirectory(path, true)
+          : await mkdir(path, { recursive: true, mode: 0o700 });
       if ((process.umask() & 0o700) !== 0) await chmod(path, 0o700);
     }
     return await validatePreparedOutputDir(
@@ -2063,6 +2138,44 @@ async function prepareOutputDirectory(
   }
 }
 
+export async function createWindowsOutputDirectory(
+  path: string,
+  recursive: boolean,
+): Promise<string | undefined> {
+  const native = createRequire(import.meta.url)(
+    join(
+      await bundledPluginRoot(),
+      "mcp",
+      "native",
+      `win32-${process.arch}`,
+      "windows.node",
+    ),
+  ) as { createPrivateWindowsDirectory(path: Buffer): number };
+  const create = async (target: string): Promise<string | undefined> => {
+    const createOne = () =>
+      native.createPrivateWindowsDirectory(
+        Buffer.from(win32.toNamespacedPath(target), "utf16le"),
+      );
+    let error = createOne();
+    let firstCreated: string | undefined;
+    if (
+      recursive &&
+      (error === 2 || error === 3) &&
+      dirname(target) !== target
+    ) {
+      firstCreated = await create(dirname(target));
+      error = createOne();
+    }
+    if (error === 0) return firstCreated ?? target;
+    if (recursive && error === 183 && (await stat(target)).isDirectory())
+      return firstCreated;
+    throw new OutputDirectoryError(
+      `Unable to create private Windows output directory (Windows error ${error}): ${target}`,
+    );
+  };
+  return create(path);
+}
+
 export async function validatePreparedOutputDir(
   path: string,
   validateLocation?: (path: string) => void,
@@ -2081,7 +2194,7 @@ export async function validatePreparedOutputDir(
       `Scan output directory must be empty: ${path}`,
     );
   }
-  requirePrivateOutputDirectory(metadata, path);
+  requireOutputDirectoryOwnership(metadata, path);
   await requireSecureOutputAncestry(canonical);
   return canonical;
 }
@@ -2097,6 +2210,15 @@ export function requirePrivateOutputDirectory(
       `Scan output directory must not be accessible to other users (chmod 700): ${path}`,
     );
   }
+  requireOutputDirectoryOwnership(metadata, path, effectiveUid);
+}
+
+export function requireOutputDirectoryOwnership(
+  metadata: Pick<Stats, "uid">,
+  path: string,
+  effectiveUid = process.geteuid?.(),
+): void {
+  if (process.platform === "win32") return;
   if (effectiveUid !== undefined && metadata.uid !== effectiveUid) {
     throw new OutputDirectoryError(
       `Scan output directory must be owned by the current user: ${path}`,
@@ -2104,7 +2226,7 @@ export function requirePrivateOutputDirectory(
   }
 }
 
-/** Reject shared parents whose owner can rename or replace private scan output. */
+/** Reject shared parents whose owner can rename or replace scan output. */
 export async function requireSecureOutputAncestry(
   path: string,
   effectiveUid = process.geteuid?.(),
@@ -2286,11 +2408,10 @@ export async function extractPluginZip(
   );
   try {
     throwIfSignalAborted(signal);
-    await rejectBackslashZipNames(archivePath, signal);
     let expandedSize = 0;
     const paths = new Set<string>();
     const checksums: Array<{ path: string; checksum: number }> = [];
-    const zip = await openZip(archivePath, { strictFileNames: true });
+    const zip = await openPluginZip(archivePath, signal);
     try {
       for await (const entry of zip.eachEntry()) {
         throwIfSignalAborted(signal);
@@ -2373,19 +2494,23 @@ export async function extractPluginZip(
   }
 }
 
-async function rejectBackslashZipNames(
+async function openPluginZip(
   path: string,
   signal?: AbortSignal,
-): Promise<void> {
-  const handle = await open(path, "r");
+): Promise<ZipFile> {
+  const fd = await promisify(openCallback)(
+    path,
+    constants.O_RDONLY |
+      (process.platform === "win32" ? 0 : constants.O_NONBLOCK),
+  );
   try {
-    const metadata = await handle.stat();
+    const metadata = await promisify(fstatCallback)(fd);
     if (!metadata.isFile() || metadata.size < 22) {
       throw new Error("missing end of central directory");
     }
     const tailSize = Math.min(metadata.size, 65_557);
     const tail = await readExactly(
-      handle,
+      fd,
       tailSize,
       metadata.size - tailSize,
       signal,
@@ -2423,12 +2548,7 @@ async function rejectBackslashZipNames(
     if (centralOffset + centralSize > endOffset) {
       throw new Error("invalid central directory bounds");
     }
-    const central = await readExactly(
-      handle,
-      centralSize,
-      centralOffset,
-      signal,
-    );
+    const central = await readExactly(fd, centralSize, centralOffset, signal);
     let offset = 0;
     for (let index = 0; index < entries; index += 1) {
       if (
@@ -2455,8 +2575,14 @@ async function rejectBackslashZipNames(
     if (offset !== central.byteLength) {
       throw new Error("invalid central directory size");
     }
-  } finally {
-    await handle.close();
+    // Yauzl owns the descriptor only after construction succeeds.
+    return await fromFdPromise(fd, {
+      autoClose: true,
+      strictFileNames: true,
+    });
+  } catch (error) {
+    await promisify(closeCallback)(fd);
+    throw error;
   }
 }
 
@@ -3078,12 +3204,14 @@ export function pluginExecutionEnvironment(
   python: string,
   environment: ProcessEnvironment = process.env,
 ): ProcessEnvironment {
-  return {
+  const child = {
     ...pythonUtf8Environment(environment),
     PYTHON: python,
     CODEX_SECURITY_PYTHON_COMMAND: python,
     CODEX_CLI_PATH: resolveCodexCommand(environment).command,
   };
+  forwardExternalImportSetting(environment, child);
+  return child;
 }
 
 export function environmentWithGit(
@@ -3142,6 +3270,7 @@ export async function runCodexCommand(
 ): Promise<CodexCommandResult> {
   const cancellation = archiveHandshake ? new AbortController() : undefined;
   const abort = () => cancellation?.abort(signal?.reason);
+  const commandSignal = cancellation?.signal ?? signal;
   let awaitingArchive = archiveHandshake;
   const child = spawn(
     executablePathForSpawn(command.command),
@@ -3150,7 +3279,7 @@ export async function runCodexCommand(
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
-      signal: cancellation?.signal ?? signal,
+      signal: commandSignal,
     },
   );
   let stdout = "";
@@ -3191,6 +3320,17 @@ export async function runCodexCommand(
         : reject(processError),
     );
   });
+  const releaseCanceledPipes = () => {
+    if (!commandSignal?.aborted) return;
+    if (child.exitCode === null && child.signalCode === null) return;
+    child.stdin.destroy();
+    child.stdout.destroy();
+    child.stderr.destroy();
+  };
+  commandSignal?.addEventListener("abort", releaseCanceledPipes, {
+    once: true,
+  });
+  child.once("exit", releaseCanceledPipes);
   if (archiveHandshake) {
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
@@ -3202,6 +3342,8 @@ export async function runCodexCommand(
     return await completion;
   } finally {
     if (archiveHandshake) signal?.removeEventListener("abort", abort);
+    commandSignal?.removeEventListener("abort", releaseCanceledPipes);
+    child.removeListener("exit", releaseCanceledPipes);
   }
 }
 
@@ -3233,8 +3375,12 @@ export async function probeCodexSandbox(
     signal?.throwIfAborted();
     detail = processErrorDetail(error);
   }
+  const guidance =
+    process.platform === "linux"
+      ? "\nOn Linux this usually means unprivileged user namespaces are restricted (kernel.apparmor_restrict_unprivileged_userns=1 on Ubuntu 24.04 and later), which Bubblewrap needs; inside the container image, use the AppArmor profile and Compose override from the SDK README."
+      : "";
   throw new SandboxUnavailableError(
-    `Codex could not run a command in its sandbox; reproduce with '${command.command} ${args.join(" ")}'. On Linux this usually means unprivileged user namespaces are restricted (kernel.apparmor_restrict_unprivileged_userns=1 on Ubuntu 24.04 and later), which Bubblewrap needs; inside the container image, use the AppArmor profile and Compose override from the SDK README. Codex reported: ${detail}`,
+    `Codex could not run a command in its sandbox: ${detail}\nTo reproduce, run '${command.command} ${args.join(" ")}'.${guidance}`,
   );
 }
 
@@ -3320,7 +3466,7 @@ async function copyPluginTree(
 }
 
 async function readExactly(
-  handle: Awaited<ReturnType<typeof open>>,
+  fd: number,
   length: number,
   position: number,
   signal?: AbortSignal,
@@ -3329,7 +3475,8 @@ async function readExactly(
   let offset = 0;
   while (offset < length) {
     throwIfSignalAborted(signal);
-    const { bytesRead } = await handle.read(
+    const { bytesRead } = await promisify(readCallback)(
+      fd,
       buffer,
       offset,
       length - offset,
@@ -3409,7 +3556,8 @@ async function usablePython(
       {
         env: command.environment,
         encoding: "utf8",
-        timeout: 5_000,
+        // Cold Python startup can exceed five seconds on busy Windows hosts.
+        timeout: 30_000,
         windowsHide: true,
         signal,
       },

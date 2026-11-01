@@ -8,8 +8,8 @@ This file is the source of truth for portable deterministic, no-model Codex Secu
 - **Schema validation:** Draft 2020-12 validators and checked-in completed-scan examples are validated with `jsonschema`, including RFC 3339 formats.
 - **Plugin metadata:** the plugin manifest, referenced assets, skill frontmatter, and agent interface YAML are parsed and checked for required fields and file consistency.
 - **Prompt linting:** agent default prompts are required to be non-empty.
-- **CLI and harness dry runs:** every Python script supports `--help`; major command paths run against temporary repositories and scan bundles without a model call.
-- **Static checks:** Ruff checks the plugin scripts and tests; the `--help` smoke test exercises top-level Python script imports.
+- **CLI and harness dry runs:** Python command entry points support `--help`; major command paths run against temporary repositories and scan bundles without a model call.
+- **Static checks:** Ruff checks the plugin scripts and tests. An isolated Python interpreter imports every module in `scripts/`.
 
 - **MCP dependencies and templates:** CI installs the MCP package with its frozen lockfile; its deterministic tests exercise Deep Scan prompt-template rendering.
 

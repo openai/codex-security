@@ -23,7 +23,18 @@ const workflow = parse(
     ),
     "utf8",
   ),
-) as { env: Record<string, string>; jobs: { scan: { steps: Step[] } } };
+) as {
+  env: Record<string, string>;
+  concurrency?: unknown;
+  jobs: {
+    scan: {
+      needs: string;
+      if: string;
+      concurrency: { group: string; "cancel-in-progress": boolean };
+      steps: Step[];
+    };
+  };
+};
 const steps = workflow.jobs.scan.steps;
 const scan = steps.find((step) => step.id === "scan")!;
 const sarif = steps.find(
@@ -36,6 +47,36 @@ const sourceSha = "a".repeat(40);
 const temporaryDirectories = createTemporaryDirectoriesSync();
 
 afterEach(temporaryDirectories.cleanup);
+
+test("Invoice Desk cancels only duplicate scans of an eligible target revision", () => {
+  expect(workflow.concurrency).toBeUndefined();
+  const job = workflow.jobs.scan;
+  expect(job.needs).toBe("target");
+  const selected = new Function("needs", `return (${job.if});`);
+  expect(selected({ target: { outputs: { targets: "[]" } } })).toBe(false);
+  expect(
+    selected({
+      target: {
+        outputs: { targets: JSON.stringify([{ pr: 7, sha: sourceSha }]) },
+      },
+    }),
+  ).toBe(true);
+  expect(job.concurrency["cancel-in-progress"]).toBe(true);
+  const group = (pr: number, sha: string) =>
+    job.concurrency.group.replace(/\$\{\{(.*?)\}\}/g, (_, expression: string) =>
+      new Function("matrix", "format", `return (${expression});`)(
+        { target: { pr, sha } },
+        (template: string, value: unknown) =>
+          template.replace("{0}", String(value)),
+      ),
+    );
+  expect(group(7, sourceSha)).toBe(`invoice-desk-scan-pr-7-${sourceSha}`);
+  expect(group(7, sourceSha)).not.toBe(group(7, "b".repeat(40)));
+  expect(group(7, sourceSha)).not.toBe(group(8, sourceSha));
+  expect(group(7, sourceSha)).not.toBe(group(0, sourceSha));
+  expect(group(0, sourceSha)).toBe(`invoice-desk-scan-main-${sourceSha}`);
+  expect(group(0, sourceSha)).not.toBe(group(0, "b".repeat(40)));
+});
 
 function fixture() {
   const directory = temporaryDirectories.create("invoice workflow ");

@@ -126,18 +126,26 @@ function finding(
   } as Finding;
 }
 
+function scope(repository: string, options: ScanOptions): string {
+  return String(
+    (options.target as string[]).map((path) =>
+      relative(repository, path).split(sep).join("/"),
+    ),
+  );
+}
+
 async function completed(
+  repository: string,
   options: ScanOptions,
-  findings = [finding(String(options.target))],
+  findings = [finding(scope(repository, options))],
   coverage?: "complete" | "partial",
   threatModelPath: string | null = null,
 ) {
   const original = fakeResult([], coverage);
-  const scanId = String(options.target);
+  const scanId = scope(repository, options);
   original.manifest.scan.id = scanId;
   original.findings.scanId = scanId;
   original.findings.findings = findings;
-  original.coverage.scanId = scanId;
   const result = new ScanResult({
     ...original,
     scanDir: options.outputDir!,
@@ -149,7 +157,6 @@ async function completed(
   for (const [name, value] of Object.entries({
     "scan-manifest.json": result.manifest,
     "findings.json": result.findings,
-    "coverage.json": result.coverage,
     "report.md": "Original report",
   })) {
     await writeFile(
@@ -164,10 +171,12 @@ function client(
   run: (
     repository: string,
     options: ScanOptions,
-  ) => Promise<ScanResult> = async (_repository, options) => completed(options),
+  ) => Promise<ScanResult> = async (repository, options) =>
+    completed(repository, options),
   close = async () => {},
 ) {
   return () => ({
+    ...dependencies().createSecurity({}),
     run: async (repository: string, options: ScanOptions = {}) =>
       run(repository, options),
     preflight: async (repository: string) => fakePreflight(repository),
@@ -222,6 +231,16 @@ async function scopedInventory(paths: Fixture, scope: string) {
   const scopesFile = join(paths.root, "scopes.json");
   const output = join(paths.root, "scoped-source-input.jsonl");
   await writeFile(scopesFile, JSON.stringify([scope]));
+  execFileSync(nodeCommand().command, [
+    join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+    "make-repo-scope-input",
+    "--repo",
+    paths.repository,
+    "--scopes-file",
+    scopesFile,
+    "--out",
+    output,
+  ]);
   const stdout = execFileSync(
     python!,
     [
@@ -234,9 +253,7 @@ async function scopedInventory(paths: Fixture, scope: string) {
         "from pathlib import Path",
         "sys.path.insert(0, sys.argv[1])",
         "import workbench_target as target",
-        "from generate_rank_input import make_repo_scope_input",
         "repo, scope, scopes, output = sys.argv[2:]",
-        "make_repo_scope_input(Namespace(repo=repo, scopes_file=scopes, out=output))",
         "rows = [json.loads(line)['path'] for line in Path(output).read_text().splitlines()]",
         "count = target.directory_snapshot_regular_file_count((Path(repo) / scope).resolve())",
         "print(json.dumps({'paths': rows, 'count': count}))",
@@ -299,18 +316,19 @@ test("links independently scoped saved models including a failed component", asy
   try {
     summary = await scan(paths, {
       components: components.slice(0, 2),
-      createSecurity: client(async (_repository, options) => {
+      createSecurity: client(async (repository, options) => {
         await mkdir(options.outputDir!, { recursive: true });
-        const failed = String(options.target).includes("web");
+        const failed = scope(repository, options).includes("web");
         await writeFile(
           join(
             options.outputDir!,
             failed ? "THREAT_MODEL.md" : "threatmodel.md",
           ),
-          `# Model\n\nScope: ${String(options.target)}\n`,
+          `# Model\n\nScope: ${scope(repository, options)}\n`,
         );
         if (failed) throw new Error("Synthetic component failure");
         return completed(
+          repository,
           options,
           [],
           "complete",
@@ -401,12 +419,13 @@ test("bounds standard scans, continues after failure, and preserves partial resu
           scanPrompt: "Check access controls",
           maxCostUsd: 3,
         });
-        if (String(options.target) === "apps/api")
+        if (scope(repository, options) === "apps/api")
           throw new Error("Authorization: Bearer SYNTHETIC_SECRET_123");
         return await completed(
+          repository,
           options,
           undefined,
-          String(options.target) === "apps/web" ? "partial" : "complete",
+          scope(repository, options) === "apps/web" ? "partial" : "complete",
         );
       } finally {
         active--;
@@ -415,7 +434,9 @@ test("bounds standard scans, continues after failure, and preserves partial resu
   });
   expect([peak, close.mock.calls.length]).toEqual([2, 2]);
   expect(seen.map(({ target }) => target)).toEqual(
-    components.map(({ paths }) => paths),
+    components.map(({ paths: scopes }) =>
+      scopes.map((scope) => join(paths.repository, scope)),
+    ),
   );
   expect(summary).toMatchObject({
     total: 3,
@@ -473,9 +494,13 @@ test("forwards scan events with their component identity without letting observe
     onProgress(receipt) {
       receipt.paths[0] = "changed-by-observer";
     },
-    createSecurity: client(async (_repository, options) => {
+    createSecurity: client(async (repository, options) => {
       expect(planned).toBe(true);
-      const target = String(options.target);
+      const target = scope(repository, options);
+      options.onAuthentication?.({
+        method: "stored_credentials",
+        verified: false,
+      });
       options.onProgress?.({
         phase: "discovery",
         filesCompleted: 1,
@@ -502,6 +527,17 @@ test("forwards scan events with their component identity without letting observe
         reasoning_output_tokens: 0,
         total_tokens: 110,
       });
+      options.onUsageObservation?.({
+        tokensUpdatedAt: null,
+        accountRateLimits: [
+          {
+            limitId: target,
+            observedAt: "2026-01-01T00:00:00Z",
+            primary: { usedPercent: 75, windowMinutes: 300, resetsAt: null },
+            secondary: null,
+          },
+        ],
+      });
       options.onWorkerStatus?.({
         kind: "dispatch",
         phase: "validation",
@@ -509,7 +545,7 @@ test("forwards scan events with their component identity without letting observe
         started: 1,
       });
       options.onWarning?.("synthetic warning");
-      return completed(options);
+      return completed(repository, options);
     }),
   });
   expect(summary).toMatchObject({
@@ -522,16 +558,23 @@ test("forwards scan events with their component identity without letting observe
       ({ componentId }) => componentId === `component-${index + 1}`,
     );
     expect(received.map(({ type }) => type)).toEqual([
+      "authentication",
       "progress",
       "activity",
       "session",
       "cost",
       "usage",
+      "usage-observation",
       "workers",
       "warning",
     ]);
-    expect(received[1]).toMatchObject({
+    expect(received.find(({ type }) => type === "activity")).toMatchObject({
       value: { description: component.paths.join(",") },
+    });
+    expect(
+      received.find(({ type }) => type === "usage-observation"),
+    ).toMatchObject({
+      value: { accountRateLimits: [{ limitId: component.paths.join(",") }] },
     });
   }
 });
@@ -569,8 +612,26 @@ test.each([
           environment:
             presentation === "ci" ? { CI: "true" } : { NO_COLOR: "1" },
         }),
-        createSecurity: client(async (_repository, options) => {
+        createSecurity: client(async (repository, options) => {
           expect(typeof options.onProgress).toBe("function");
+          options.onAuthentication?.({
+            method: "stored_credentials",
+            credentialType: presentation === "ci" ? "api_key" : "chatgpt",
+            verified: false,
+          });
+          if (presentation !== "dashboard")
+            expect(
+              stderr
+                .text()
+                .includes("apps/api | ChatGPT allowance not reported"),
+            ).toBe(presentation === "headless");
+          for (const filesTotal of [0, 2]) {
+            options.onProgress?.({
+              phase: "preflight",
+              filesCompleted: 0,
+              filesTotal,
+            });
+          }
           options.onProgress?.({
             phase: "validation",
             filesCompleted: 2,
@@ -584,6 +645,10 @@ test.each([
             reasoning_output_tokens: 0,
             total_tokens: 120,
           });
+          options.onUsageObservation?.({
+            tokensUpdatedAt: "2026-01-01T07:08:09Z",
+            accountRateLimits: [],
+          });
           options.onCost?.({
             model: "gpt-5.6",
             inputTokens: 100,
@@ -592,7 +657,7 @@ test.each([
             outputTokens: 20,
             estimatedUsd: 0.00123,
           });
-          return completed(options);
+          return completed(repository, options);
         }),
       },
     );
@@ -615,12 +680,15 @@ test.each([
       );
     } else expect(stderr.text()).toContain("apps/api completed");
     if (presentation !== "dashboard") {
+      expect(stderr.text()).toContain("apps/api preflight | File inventory: 0");
+      expect(stderr.text()).toContain("apps/api preflight | File inventory: 2");
       expect(stderr.text()).toContain(
         "apps/api validating findings | Files: 2/2",
       );
       expect(stderr.text()).toContain(
         "apps/api | Tokens: 90 uncached input, 10 cache reads, 0 cache writes, 20 output, 120 total",
       );
+      expect(stderr.text()).toMatch(/apps\/api \| .*07:08:09 UTC/u);
     }
     expect(
       [...signals.listeners.values()].every(
@@ -683,8 +751,8 @@ test("CLI restores the dashboard and reports saved partial results on cancellati
     ],
     {
       ...dependencies({ currentDirectory: paths.root, signals }),
-      createSecurity: client(async (_repository, options) => {
-        const result = await completed(options);
+      createSecurity: client(async (repository, options) => {
+        const result = await completed(repository, options);
         signals.emit("SIGINT");
         return result;
       }),
@@ -724,8 +792,8 @@ test("merges confirmed root causes with complete evidence and the highest severi
   const summary = await scan(paths, {
     config,
     onDeduplicationStarted,
-    createSecurity: client(async (_repository, options) =>
-      completed(options, batches[batch++]),
+    createSecurity: client(async (repository, options) =>
+      completed(repository, options, batches[batch++]),
     ),
     matchFindings: matcher((input, options) => {
       inputs.push(input);
@@ -776,8 +844,10 @@ test("keeps uncertain findings separate even when their fingerprints match", asy
   const paths = await fixture();
   const summary = await scan(paths, {
     components: components.slice(0, 2),
-    createSecurity: client(async (_repository, options) =>
-      completed(options, [finding(String(options.target), "high", "same")]),
+    createSecurity: client(async (repository, options) =>
+      completed(repository, options, [
+        finding(scope(repository, options), "high", "same"),
+      ]),
     ),
     matchFindings: matcher(({ before, after }) => ({
       matches: [],
@@ -857,10 +927,11 @@ test.each([0, 1])(
     const paths = await fixture();
     const matchFindings = mock(rejecting("unexpected model call"));
     const summary = await scan(paths, {
-      createSecurity: client(async (_repository, options) =>
+      createSecurity: client(async (repository, options) =>
         completed(
+          repository,
           options,
-          populated && String(options.target) === "apps/web"
+          populated && scope(repository, options) === "apps/web"
             ? [finding("one")]
             : [],
         ),
@@ -885,9 +956,9 @@ test.each(["scan", "matching"])(
     await expect(
       scan(paths, {
         signal: controller.signal,
-        createSecurity: client(async (_repository, options) => {
+        createSecurity: client(async (repository, options) => {
           runs++;
-          const result = await completed(options);
+          const result = await completed(repository, options);
           if (phase === "scan") controller.abort();
           return result;
         }),
@@ -939,6 +1010,54 @@ test("rejects escaped component paths and output inside the enclosing worktree",
       components: [{ name: "API", paths: ["api"] }],
     }),
   ).rejects.toThrow();
+});
+
+test("keeps literal component paths through planning and execution", async () => {
+  const name = "keeps literal component paths through planning and execution";
+  if (runTestInSubprocess(import.meta.path, name)) return;
+  const paths = await fixture();
+  const home = join(paths.repository, "home");
+  const os = { ...(await import("node:os")) };
+  mock.module("node:os", () => ({ ...os, homedir: () => home }));
+  const literals = ["~/src", "$HOME/src", "%HOME%/src", "space name"];
+  for (const path of ["home/src", ...literals]) {
+    await mkdir(join(paths.repository, path), { recursive: true });
+    await writeFile(join(paths.repository, path, "app.ts"), "export {};\n");
+  }
+  const proposed = {
+    components: literals.map((path) => ({ name: path, paths: [path] })),
+  };
+  const plan = await normalizeComponentPlan(paths.repository, proposed);
+  expect(plan).toEqual(proposed);
+  expect(await normalizeComponentPlan(paths.repository, plan)).toEqual(plan);
+  expect(
+    await normalizeComponentPlan(paths.repository, {
+      components: [{ name: "Aliases", paths: ["./~/src", "~/src"] }],
+    }),
+  ).toEqual({ components: [{ name: "Aliases", paths: ["~/src"] }] });
+  expect(await normalizeTarget(paths.repository, ["~/src"])).toMatchObject({
+    paths: ["home/src"],
+  });
+  execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+  const automatic = await planComponents(paths.repository, {
+    codex: fakeCodex(() => ({ components: [proposed.components[0]] })),
+  });
+  expect(automatic.components[0]).toEqual(proposed.components[0]);
+  const observed: (readonly string[])[] = [];
+  const summary = await scan(paths, {
+    components: plan.components,
+    createSecurity: client(async (repository, options) => {
+      const target = await normalizeTarget(repository, options.target!);
+      observed.push(target.paths);
+      expect(options.target).toEqual(
+        target.paths.map((path) => join(repository, path)),
+      );
+      return await completed(repository, options, []);
+    }),
+  });
+  expect(summary).toMatchObject({ completed: literals.length, failed: 0 });
+  expect(observed).toEqual(literals.map((path) => [path]));
+  expect(await json(summary.planPath)).toEqual(proposed);
 });
 
 test("component inventory uses the shared Git runner without fsmonitor callbacks", async () => {
@@ -1494,6 +1613,14 @@ test("retains tracked Unicode aliases when scoped Git matching is incomplete", a
   await mkdir(join(paths.repository, nonCased));
   await writeFile(join(paths.repository, nonCased, "app.ts"), "export {};\n");
   execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+  execFileSync("git", [
+    "-C",
+    paths.repository,
+    "config",
+    "--local",
+    "core.autocrlf",
+    "false",
+  ]);
   execFileSync("git", ["-C", paths.repository, "add", "--force", "."]);
   expect(await scopedInventory(paths, nonCased)).toEqual({
     paths: [nonCased + "/app.ts"],
@@ -1626,10 +1753,10 @@ test.each(["auto", "chatgpt", "api-key"] as const)(
           planned = true;
           return { components: components.slice(0, 2) };
         },
-        createSecurity: client(async (_repository, options) => {
+        createSecurity: client(async (repository, options) => {
           expect(options.auth).toBe(auth);
           expect(options.cyberAccessProgram).toBe("daybreak_blue");
-          return completed(options);
+          return completed(repository, options);
         }),
         matchFindings: async (_input, options) => {
           expect(options?.auth).toBe(auth);
@@ -1769,13 +1896,11 @@ test.each([
             [
               'import { cpSync, existsSync, readFileSync, writeFileSync } from "node:fs";',
               'import { join } from "node:path";',
-              'import { createHash } from "node:crypto";',
               "for await (const chunk of process.stdin) {}",
               `const scan = process.env.CODEX_SECURITY_SCAN_DIR; cpSync(${JSON.stringify(join(PLUGIN_ROOT, "examples", "completed-scan"))}, scan, { recursive: true });`,
               'writeFileSync(join(scan, "report.md"), "# Synthetic scan\\n");',
-              'const coveragePath = join(scan, "coverage.json"); const coverage = JSON.parse(readFileSync(coveragePath, "utf8")); coverage.mode = "scoped_path";',
-              'const bytes = JSON.stringify(coverage); writeFileSync(coveragePath, bytes); const manifestPath = join(scan, "scan-manifest.json"); const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));',
-              'manifest.scan.artifacts.find(artifact => artifact.path === "coverage.json").sha256 = createHash("sha256").update(bytes).digest("hex"); writeFileSync(manifestPath, JSON.stringify(manifest));',
+              'const manifestPath = join(scan, "scan-manifest.json"); const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));',
+              'manifest.scan.mode = "scoped_path"; writeFileSync(manifestPath, JSON.stringify(manifest));',
               'const authPath = join(process.env.CODEX_HOME, "auth.json");',
               `writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ executable: process.execPath, home: process.env.CODEX_HOME, state: process.env.CODEX_SECURITY_STATE_DIR, key: process.env.CODEX_API_KEY ?? null, auth: existsSync(authPath) ? JSON.parse(readFileSync(authPath, "utf8")) : null, value: process.env.SYNTHETIC_COMPONENT, python: process.env.PYTHON, workerConfig: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH ? readFileSync(process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, "utf8") : null }));`,
               'console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-thread" }));',
@@ -1857,13 +1982,16 @@ test("CLI requires an explicitly selected API key before automatic planning", as
 test("CLI forwards scan settings and accepts legacy scope notes", async () => {
   const paths = await fixture();
   const planFile = join(paths.root, "plan.json");
-  await writeFile(planFile, JSON.stringify({ components: [components[0]] }));
+  await writeFile(
+    planFile,
+    `\uFEFF${JSON.stringify({ components: [components[0]] })}`,
+  );
   const signals = new FakeSignals();
   const createSecurity = mock((_value: unknown) => {
     return client(run)();
   });
-  const run = mock(async (_repository: string, options: ScanOptions) => {
-    return completed(options, [], "partial");
+  const run = mock(async (repository: string, options: ScanOptions) => {
+    return completed(repository, options, [], "partial");
   });
   const result = await cli(
     paths,
@@ -1887,7 +2015,7 @@ test("CLI forwards scan settings and accepts legacy scope notes", async () => {
     codexOverrides: { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
   });
   expect(run.mock.lastCall?.[1]).toMatchObject({
-    target: ["apps/api"],
+    target: [join(paths.repository, "apps/api")],
     mode: "standard",
     maxCostUsd: 2,
   });

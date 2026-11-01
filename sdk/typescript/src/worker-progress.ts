@@ -13,7 +13,7 @@ const workerPhaseSchema = z.enum([
 
 export type ScanWorkerPhase = z.infer<typeof workerPhaseSchema>;
 
-const scanPhaseSchema = z.enum([
+export const scanPhaseSchema = z.enum([
   "preflight",
   "threat_model",
   "discovery",
@@ -31,7 +31,25 @@ const dispatchSchema = z
   .object({ phase: workerPhaseSchema, planned: count, started: count })
   .refine(({ started, planned }) => started <= planned);
 
-export interface ScanProgress extends z.infer<typeof scanProgressSchema> {}
+export interface ScanProgress extends z.infer<typeof scanProgressSchema> {
+  /** Saved reviews or coverage surfaces; these are not necessarily files. */
+  reviewItems?: { completed: number; total: number };
+}
+
+export function scanProgressCount(progress: ScanProgress): {
+  label: "files" | "reviews";
+  completed: number;
+  total: number;
+} {
+  if (progress.reviewItems !== undefined && progress.reviewItems.total > 0) {
+    return { label: "reviews", ...progress.reviewItems };
+  }
+  return {
+    label: "files",
+    completed: progress.filesCompleted,
+    total: progress.filesTotal,
+  };
+}
 
 export function scanPhaseLabel(value: ScanWorkerPhase | ScanPhase): string {
   return {

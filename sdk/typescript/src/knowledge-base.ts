@@ -42,6 +42,20 @@ export interface KnowledgeBaseSnapshot {
   readonly documents: Readonly<Record<string, string>>;
 }
 
+export async function knowledgeBaseProtectedRoots(
+  snapshot: KnowledgeBaseSnapshot,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  return snapshot.protectedRoots === undefined
+    ? await Promise.all(
+        snapshot.sources.map(
+          async (source) =>
+            (await gitMarkerRoot(source, signal, "outermost")) ?? source,
+        ),
+      )
+    : [...snapshot.protectedRoots];
+}
+
 /** @internal Extract once so campaign identity and workers use identical inputs. */
 export async function readKnowledgeBaseSnapshot(
   paths: readonly string[],
@@ -113,15 +127,13 @@ export async function readKnowledgeBaseSnapshot(
       extracted[filename] = text;
       index++;
     }
-    return {
+    const snapshot = {
       sources: [...sources],
-      protectedRoots: await Promise.all(
-        [...sources].map(
-          async (source) =>
-            (await gitMarkerRoot(source, signal, "outermost")) ?? source,
-        ),
-      ),
       documents: extracted,
+    };
+    return {
+      ...snapshot,
+      protectedRoots: await knowledgeBaseProtectedRoots(snapshot, signal),
     };
   } catch (error) {
     if (signal?.aborted || error instanceof ConfigurationError) throw error;
@@ -139,15 +151,7 @@ export async function prepareKnowledgeBase(
       "documents" in input
         ? input
         : await readKnowledgeBaseSnapshot(input, signal);
-    const protectedRoots =
-      snapshot.protectedRoots === undefined
-        ? await Promise.all(
-            snapshot.sources.map(
-              async (source) =>
-                (await gitMarkerRoot(source, signal, "outermost")) ?? source,
-            ),
-          )
-        : [...snapshot.protectedRoots];
+    const protectedRoots = await knowledgeBaseProtectedRoots(snapshot, signal);
     const path = await mkdtemp(
       join(directory ?? tmpdir(), "codex-security-knowledge-"),
     );
@@ -222,6 +226,8 @@ async function discover(
         documents.push(document);
       }
     } else if (entry.isFile()) {
+      // Office keeps a "~$" owner file next to each open document.
+      if (entry.name.startsWith("~$")) continue;
       if (!DOCUMENT_EXTENSIONS.has(extname(path).toLowerCase())) {
         const bytes = await readFile(path, {
           flag: constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
@@ -267,10 +273,13 @@ async function extractPdf(
     });
     try {
       const document = await loadingTask.promise;
+      signal?.throwIfAborted();
       const pages: string[] = [];
       for (let number = 1; number <= document.numPages; number++) {
         signal?.throwIfAborted();
-        const content = await (await document.getPage(number)).getTextContent();
+        const page = await document.getPage(number);
+        signal?.throwIfAborted();
+        const content = await page.getTextContent();
         signal?.throwIfAborted();
         pages.push(
           content.items
@@ -281,9 +290,10 @@ async function extractPdf(
       return pages.join("\n");
     } finally {
       await loadingTask.destroy();
+      signal?.throwIfAborted();
     }
   } catch (error) {
-    if (signal?.aborted) throw error;
+    signal?.throwIfAborted();
     throw new Error(`Cannot extract text from knowledge base PDF: ${path}`, {
       cause: error,
     });

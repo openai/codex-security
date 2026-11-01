@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
 import type { ScanActivity } from "./scan-activity.js";
-import type { ScanProgress } from "./worker-progress.js";
+import { scanPhaseSchema, type ScanProgress } from "./worker-progress.js";
 
 /** One Standard scan. The host owns execution, persistence and reconciliation. */
 export interface ScanExecutionRequest {
@@ -57,16 +57,16 @@ export const ScanExecutionEventSchema = z.discriminatedUnion("type", [
   z.strictObject({
     type: z.literal("progress"),
     progress: z.strictObject({
-      phase: z.enum([
-        "preflight",
-        "threat_model",
-        "discovery",
-        "validation",
-        "attack_path",
-        "reporting",
-      ]),
+      phase: scanPhaseSchema,
       filesCompleted: z.number().int().nonnegative(),
       filesTotal: z.number().int().nonnegative(),
+      reviewItems: z
+        .strictObject({
+          completed: z.number().int().nonnegative(),
+          total: z.number().int().nonnegative(),
+        })
+        .refine(({ completed, total }) => completed <= total)
+        .optional(),
     }),
   }),
   z.strictObject({

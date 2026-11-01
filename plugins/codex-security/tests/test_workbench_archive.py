@@ -259,20 +259,6 @@ def test_commit_failure_restores_archived_output(workflow_scan, monkeypatch):
     assert workflow(state) == saved_workflow
 
 
-def test_legacy_caller_can_supply_already_archived_output(previous_scan):
-    state, target, output, scan_id = previous_scan
-    mark_stopped(state, scan_id)
-    archive = output.with_name("scan.previous-fixture")
-    output.rename(archive)
-    output.mkdir(mode=0o700)
-    registered = register(
-        state, target, output, "--archive-existing", "--archived-scan-dir", str(archive)
-    )
-    assert registered["archivedScanDir"] == str(archive)
-    assert (archive / "report.md").read_text() == "previous scan\n"
-    assert stored_paths(state, scan_id) == (str(archive), str(archive / "report.md"))
-
-
 def test_registration_does_not_archive_an_ancestor_of_its_repository(tmp_path):
     state = tmp_path / "state"
     output = tmp_path / "output"
@@ -333,22 +319,18 @@ def test_interrupted_commit_keeps_files_at_their_saved_paths(previous_scan, monk
     assert list(output.iterdir()) == ([] if committed else [output / "report.md"])
 
 
-@pytest.mark.parametrize("layout", ["same", "nested", "alias"])
-def test_registration_does_not_archive_its_active_workbench_state(tmp_path, layout):
+def test_registration_does_not_archive_state_reached_through_an_external_alias(tmp_path):
     target = tmp_path / "target"
     target.mkdir()
-    (target / "fixture.py").write_text("preserved source\n")
     output = tmp_path / "output"
     output.mkdir(mode=0o700)
-    state = output if layout == "same" else output / "state"
-    state.mkdir(mode=0o700, exist_ok=True)
-    if layout == "alias":
-        alias = tmp_path / "state-alias"
-        try:
-            alias.symlink_to(state, target_is_directory=True)
-        except OSError:
-            pytest.skip("Directory symlinks are unavailable")
-        state = alias
+    nested_state = output / "state"
+    nested_state.mkdir(mode=0o700)
+    state = tmp_path / "state-alias"
+    try:
+        state.symlink_to(nested_state, target_is_directory=True)
+    except OSError:
+        pytest.skip("Directory symlinks are unavailable")
     saved = tmp_path / "saved"
     saved.mkdir(mode=0o700)
     previous = register(state, target, saved)

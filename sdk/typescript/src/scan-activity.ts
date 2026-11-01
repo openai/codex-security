@@ -1,6 +1,7 @@
 import { win32 } from "node:path";
 import { isRecord } from "./record.js";
 import { parseJson } from "./value.js";
+import { windowsVolumeRoot } from "./windows-path.js";
 
 const MAX_ACTIVITY_PATHS = 8;
 const MAX_PROSE_CHARACTERS = 1_000;
@@ -75,12 +76,12 @@ export function scanActivityFromEvent(
     item["type"] === "command_execution" &&
     typeof item["command"] === "string"
   ) {
-    const command = displayCommand(item["command"]);
+    const command = unwrapCommand(item["command"]);
     return {
       id: item["id"],
       kind: "command",
       status,
-      description: command,
+      description: command.replaceAll(/\s+/gu, " "),
       paths: commandRepositoryPaths(command, repository),
     };
   }
@@ -88,14 +89,14 @@ export function scanActivityFromEvent(
   if (item["type"] === "mcp_tool_call" && typeof item["tool"] === "string") {
     const arguments_ = isRecord(item["arguments"]) ? item["arguments"] : {};
     const value = arguments_["cmd"] ?? arguments_["command"];
-    const command = typeof value === "string" ? displayCommand(value) : null;
+    const command = typeof value === "string" ? unwrapCommand(value) : null;
     return {
       id: item["id"],
       kind: "tool",
       status,
       description:
         item["tool"] === "exec" && command !== null
-          ? command
+          ? command.replaceAll(/\s+/gu, " ")
           : toolDescription(item["tool"], arguments_, item["arguments"]),
       paths:
         item["tool"] === "exec" && command !== null
@@ -119,11 +120,11 @@ export function scanActivityFromEvent(
   return null;
 }
 
-function displayCommand(command: string): string {
-  const normalized = command.replaceAll(/\s+/gu, " ").trim();
+function unwrapCommand(command: string): string {
+  const normalized = command.trim();
   const powershell =
     process.platform === "win32"
-      ? /^(?:"([^"]+)"|([^\s"'|;&<>]+))\s+(?:-NoProfile\s+)?-Command\s+(['"])(.*)\3$/iu.exec(
+      ? /^(?:"([^"]+)"|([^\s"'|;&<>]+))\s+(?:-NoProfile\s+)?-Command\s+(['"])(.*)\3$/isu.exec(
           normalized,
         )
       : null;
@@ -136,7 +137,7 @@ function displayCommand(command: string): string {
     return powershell[4]!;
   }
   const match =
-    /^(?:\/(?:usr\/)?bin\/)?(?:zsh|bash|sh)\s+-[a-z]*c[a-z]*\s+(['"])(.*)$/u.exec(
+    /^(?:\/(?:usr\/)?bin\/)?(?:zsh|bash|sh)\s+-[a-z]*c[a-z]*\s+(['"])(.*)$/su.exec(
       normalized,
     );
   if (match === null) return normalized;
@@ -380,22 +381,19 @@ function relativeRepositoryPath(
   const prefix = `${normalized.replace(/\/$/u, "")}/`;
   if (value.startsWith(prefix)) return value.slice(prefix.length);
 
-  // A Windows drive or UNC volume can differ in case. Its descendant
-  // directories may be case-sensitive, even on Windows, so folding the whole
-  // repository prefix could attribute a different checkout's files to this one.
-  // Saved sessions can be read on other hosts and cannot prove file identity.
-  const root = win32.parse(normalized).root;
-  const valueRoot = win32.parse(value).root;
+  // A saved Windows path may be displayed on another host. Only the volume
+  // can ignore case: differently cased directories can be distinct checkouts.
+  if (!win32.isAbsolute(normalized)) return null;
+  const volume = windowsVolumeRoot(prefix);
+  const valueVolume = windowsVolumeRoot(value);
   if (
-    win32.isAbsolute(normalized) &&
-    root.length > 1 &&
-    root.length === valueRoot.length &&
-    root.toLowerCase() === valueRoot.toLowerCase() &&
-    value.slice(root.length, prefix.length) === prefix.slice(root.length)
-  ) {
-    return value.slice(prefix.length);
-  }
-  return null;
+    volume.length <= 1 ||
+    valueVolume.length !== volume.length ||
+    valueVolume.toLowerCase() !== volume.toLowerCase() ||
+    !value.startsWith(prefix.slice(volume.length), volume.length)
+  )
+    return null;
+  return value.slice(prefix.length);
 }
 
 function commandRepositoryPaths(command: string, repository: string): string[] {

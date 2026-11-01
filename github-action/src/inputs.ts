@@ -53,7 +53,7 @@ export function parseInputs(read: (name: string) => string, workspace: string) {
     : undefined;
   return {
     repository: str('repository', workspace), scope, paths, diffBase, mode, cyberAccessProgram,
-    provider, model, effort: choice('effort', ['minimal','low','medium','high','xhigh','max'], 'xhigh'),
+    provider, model, effort: str('effort', 'xhigh'),
     maxCost: num('max-cost', false, Number.MIN_VALUE), maxTimeHours, failOnSeverity: choice('fail-on-severity', ['none','low','medium','high','critical'], 'none'),
     verbose: bool('verbose', true), dryRun,
     summary: bool('summary', true), annotations: bool('annotations', true),
@@ -67,11 +67,13 @@ export function scanArguments(inputs: Inputs, target: {repository: string; diffB
   // with our empty private credential home. Bedrock selects native AWS auth.
   const auth = inputs.dryRun || inputs.provider === 'amazon-bedrock' ? 'auto' : 'api-key';
   const args = ['scan', target.repository, '--auth', auth, '--provider', inputs.provider, '--mode', inputs.mode,
-    ...(inputs.model ? [`--model=${inputs.model}`] : []), '--effort', inputs.effort, '--headless',
+    ...(inputs.model ? [`--model=${inputs.model}`] : []), `--effort=${inputs.effort}`, '--headless',
     '--output-dir', resultsDirectory, '--format', 'json'];
   // Preserve the pinned CLI's sandbox and automatic approval-review defaults.
   // Forcing approval_policy="never" prevents recovery from hosted Linux sandbox errors.
-  args.push('--codex', 'analytics.enabled=false');
+  args.push('--codex', 'analytics.enabled=false',
+    '--codex', 'responses_api_metadata.codex_security_integration="github_action"',
+    '--codex', `responses_api_metadata.codex_security_provider=${JSON.stringify(inputs.provider)}`);
   // Bind the option value and keep it explicitly relative so the CLI treats
   // leading '-' and '~' as literal repository filenames.
   for (const path of inputs.paths) args.push(`--path=./${path}`);

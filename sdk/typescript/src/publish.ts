@@ -1,4 +1,6 @@
 import { findingEntry, notify } from "./value.js";
+import type { CodexSecuritySurface } from "./api.js";
+import { codexSecurityRequestContext } from "./request-metadata.js";
 import {
   spawn,
   spawnSync,
@@ -11,6 +13,7 @@ import {
   mkdtemp,
   open,
   readFile,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -173,6 +176,7 @@ export interface PublicationCodexResult {
 }
 
 export interface PublishScanDependencies {
+  surface?: CodexSecuritySurface;
   environment?: NodeJS.ProcessEnv;
   linearClient?: LinearClientFactory<"users" | "createIssue">;
   prepare?: typeof prepareScanPublication;
@@ -331,6 +335,15 @@ export async function publishScanInternal(
       options.signal,
     );
   } else {
+    const requestContext = codexSecurityRequestContext(
+      {},
+      {
+        surface: dependencies.surface ?? "sdk",
+        command: "publish",
+        // Native Codex resolves provider and metadata from all its config layers.
+        providerResolved: false,
+      },
+    );
     invocation = await (dependencies.runCodex ?? runPublicationCodex)(
       command!,
       [
@@ -339,6 +352,8 @@ export async function publishScanInternal(
         "gpt-5.6-luna",
         "-c",
         'model_reasoning_effort="low"',
+        "-c",
+        requestContext.configOverride,
         "--ephemeral",
         "--json",
         "--sandbox",
@@ -523,7 +538,7 @@ export async function publishScanInternal(
   try {
     await saveReceipt(result, environment);
   } catch (error) {
-    if (result.created.length === 0 || options.signal?.aborted) throw error;
+    if (result.created.length === 0) throw error;
     result.warnings = [
       ...(result.warnings ?? []),
       `Could not save the publication receipt: ${errorMessage(error)}. Linear issues were already created; do not retry publication.`,
@@ -721,15 +736,22 @@ async function publishLinearApiIssues(
   observer: PublishScanOptions["onProgress"],
   signal?: AbortSignal,
 ): Promise<void> {
-  let handoffWrites = Promise.resolve();
+  let handoffWrites = Promise.resolve("");
   let recorded = 0;
   const appendHandoff = async (
     record: Record<string, unknown>,
   ): Promise<void> => {
-    const pending = handoffWrites.then(async () => {
-      await appendFile(handoffFile, `${JSON.stringify(record)}\n`, "utf8");
+    const pending = handoffWrites.then(async (prefix) => {
+      await appendFile(
+        handoffFile,
+        `${prefix}${JSON.stringify(record)}\n`,
+        "utf8",
+      );
     });
-    handoffWrites = pending.catch(() => undefined);
+    handoffWrites = pending.then(
+      () => "",
+      () => "\n",
+    );
     await pending;
   };
   for (let index = 0; index < publication.issues.length; index += 20) {
@@ -881,28 +903,35 @@ async function createPublicationHandoff(
   await mkdir(root, { recursive: true, mode: 0o700 });
   const digest = createHash("sha256").update(publication.scanId).digest("hex");
   const directory = await mkdtemp(join(root, `${digest}-`));
-  const file = join(directory, "issues.jsonl");
-  const publicationFile = join(directory, "publication.json");
-  const issues = publication.issues.map((issue) => ({
-    findingId: issue.findingId,
-    occurrenceId: issue.occurrenceId,
-    arguments: linearPublicationArguments(publication.destination, issue),
-  }));
-  const batches = Array.from(
-    { length: Math.ceil(issues.length / 20) },
-    (_, index) => issues.slice(index * 20, index * 20 + 20),
-  );
-  await writeFile(file, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
-  await writeFile(
-    publicationFile,
-    JSON.stringify({
-      scanId: publication.scanId,
-      destination: publication.destination,
-      batches,
-    }),
-    { encoding: "utf8", flag: "wx", mode: 0o600 },
-  );
-  return { directory, file, publicationFile };
+  try {
+    const file = join(directory, "issues.jsonl");
+    const publicationFile = join(directory, "publication.json");
+    const issues = publication.issues.map((issue) => ({
+      findingId: issue.findingId,
+      occurrenceId: issue.occurrenceId,
+      arguments: linearPublicationArguments(publication.destination, issue),
+    }));
+    const batches = Array.from(
+      { length: Math.ceil(issues.length / 20) },
+      (_, index) => issues.slice(index * 20, index * 20 + 20),
+    );
+    await writeFile(file, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
+    await writeFile(
+      publicationFile,
+      JSON.stringify({
+        scanId: publication.scanId,
+        destination: publication.destination,
+        batches,
+      }),
+      { encoding: "utf8", flag: "wx", mode: 0o600 },
+    );
+    return { directory, file, publicationFile };
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true }).catch(
+      () => undefined,
+    );
+    throw error;
+  }
 }
 
 async function readPublicationHandoff(file: string): Promise<string> {
@@ -1583,7 +1612,7 @@ function forceTerminatePublicationProcess(
   terminatePublicationProcessGroup(child, "SIGKILL");
 }
 
-function terminatePublicationProcessGroup(
+export function terminatePublicationProcessGroup(
   child: ChildProcessWithoutNullStreams,
   signal: NodeJS.Signals,
 ): void {
@@ -1650,8 +1679,15 @@ async function writePublicationReceipt(
     flag: "wx",
     mode: 0o600,
   });
-  await writeFile(join(directory, `${name}.json`), contents, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+  const temporary = join(directory, `.${name}-${randomUUID()}.json.tmp`);
+  const handle = await open(temporary, "wx", 0o600);
+  try {
+    await handle.writeFile(contents, "utf8");
+    await handle.close();
+    await rename(temporary, join(directory, `${name}.json`));
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    await rm(temporary, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }

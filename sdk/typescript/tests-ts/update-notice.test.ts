@@ -1,5 +1,7 @@
 import { createCliTest, runCapturedCli } from "./support/cli-run.js";
 import { once } from "node:events";
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { resolving } from "./support/promises.js";
 import { describe, expect, test, mock } from "bun:test";
 import {
@@ -7,10 +9,11 @@ import {
   formatUpdateNotice,
   updateCommand,
 } from "../src/version.js";
-import { capture, dependencies } from "./cli-fixtures.js";
+import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 import { main } from "../src/cli.js";
 import { rejecting } from "./support/errors.js";
 import { responding } from "./support/responses.js";
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 
 function registryResponse(version: unknown) {
   return async () => new Response(JSON.stringify({ version }));
@@ -76,7 +79,7 @@ describe("CLI update notice", () => {
     const installed = "/workspace/node_modules/pkg/dist/version.js";
     const packageName = "@openai/codex-security@latest";
 
-    for (const [environment, entrypoint, command] of [
+    for (const [environment, entrypoint, command, nodeExecutable] of [
       [{ npm_command: "exec" }, installed, `npx ${packageName}`],
       [{}, "/cache/_npx/pkg", `npx ${packageName}`],
       [{}, installed, `npm install ${packageName}`],
@@ -85,6 +88,36 @@ describe("CLI update notice", () => {
         {},
         "C:\\AppData\\Roaming\\npm\\node_modules\\pkg",
         `npm install -g ${packageName}`,
+      ],
+      [
+        {},
+        "C:\\AppData\\Local\\nvm\\v22.20.0\\node_modules\\pkg",
+        `npm install -g ${packageName}`,
+        "C:\\AppData\\Local\\nvm\\v22.20.0\\node.exe",
+      ],
+      [
+        {},
+        "D:/Node Versions/v22.20.0/node_modules/pkg",
+        `npm install -g ${packageName}`,
+        "d:\\node versions\\v22.20.0\\node.exe",
+      ],
+      [
+        {},
+        "D:/Node Versions/v22.20.0/project/node_modules/pkg",
+        `npm install ${packageName}`,
+        "D:/Node Versions/v22.20.0/node.exe",
+      ],
+      [
+        { npm_command: "exec" },
+        "D:/Node Versions/v22.20.0/node_modules/pkg",
+        `npx ${packageName}`,
+        "D:/Node Versions/v22.20.0/node.exe",
+      ],
+      [
+        {},
+        "D:/release/.install/node_modules/pkg",
+        "download and extract the latest Codex Security release",
+        "D:/release/.install/node.exe",
       ],
       [
         { npm_config_user_agent: "pnpm/10.0.0" },
@@ -121,7 +154,34 @@ describe("CLI update notice", () => {
       ],
       [{}, "/workspace/src/version.ts", `npx ${packageName}`],
     ] as const) {
-      expect(updateCommand(environment, entrypoint)).toBe(command);
+      expect(updateCommand(environment, entrypoint, nodeExecutable)).toBe(
+        command,
+      );
+    }
+  });
+
+  test("recognizes Windows globals through a linked Node directory", () => {
+    const temporaryDirectories = createTemporaryDirectoriesSync(true);
+    const root = temporaryDirectories.create("codex-update-notice-");
+    const nodeDirectory = join(root, "Node Versions", "v22.20.0");
+    const nodeLink = join(root, "nodejs");
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    const execPath = Object.getOwnPropertyDescriptor(process, "execPath")!;
+
+    try {
+      mkdirSync(nodeDirectory, { recursive: true });
+      writeFileSync(join(nodeDirectory, "node.exe"), "");
+      symlinkSync(nodeDirectory, nodeLink, "junction");
+      Object.defineProperties(process, {
+        platform: { value: "win32" },
+        execPath: { value: join(nodeLink, "node.exe") },
+      });
+      expect(
+        updateCommand({}, join(nodeDirectory, "node_modules", "pkg")),
+      ).toBe("npm install -g @openai/codex-security@latest");
+    } finally {
+      Object.defineProperties(process, { platform, execPath });
+      temporaryDirectories.cleanup();
     }
   });
 
@@ -310,5 +370,110 @@ describe("CLI update notice", () => {
       cliVersion: expect.any(String),
     });
     expect(stderr.text()).toBe("");
+  });
+
+  const notice = {
+    currentVersion: "0.1.0",
+    latestVersion: "0.2.0",
+    command: "synthetic update command",
+  };
+
+  test("preserves JSON output when formatting the update banner fails", async () => {
+    const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
+    let attempts = 0;
+    expect(
+      await runCli(
+        ["info", "--json"],
+        dependencies({
+          onUpdateCheck: resolving({
+            ...notice,
+            get command(): string {
+              attempts += 1;
+              throw new Error("Synthetic update formatting failure");
+            },
+          }),
+        }),
+      ),
+    ).toBe(0);
+    expect(attempts).toBe(1);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      cliVersion: expect.any(String),
+    });
+    expect(stderr.text()).toBe("");
+  });
+
+  test.each([
+    ["success", 0, ""],
+    ["failure", 2, "Synthetic scan failure"],
+    ["SIGINT", 130, "Scan canceled by Ctrl-C."],
+    ["SIGTERM", 143, "Scan terminated by SIGTERM."],
+  ] as const)(
+    "preserves %s results when writing the update banner fails",
+    async (outcome, exitCode, message) => {
+      const stdout = capture();
+      const stderr = capture(true);
+      const signals = new FakeSignals();
+      let attempts = 0;
+      const write = stderr.stream.write;
+      stderr.stream.write = (chunk) => {
+        if (chunk.toString() === formatUpdateNotice(notice)) {
+          attempts += 1;
+          throw new Error("Synthetic update write failure");
+        }
+        return write(chunk);
+      };
+      const deps = dependencies({
+        signals,
+        onUpdateCheck: resolving(notice),
+        onRun: () => {
+          if (outcome === "SIGINT" || outcome === "SIGTERM")
+            signals.emit(outcome);
+          if (outcome === "failure") throw new Error(message);
+        },
+      });
+
+      expect(
+        await main(
+          outcome === "success" ? ["info", "--json"] : ["scan", ".", "--json"],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(exitCode);
+      expect(attempts).toBe(1);
+      expect(JSON.parse(stdout.text())).toMatchObject(
+        outcome === "success"
+          ? { cliVersion: expect.any(String) }
+          : { status: "failed", code: "SCAN_FAILED", message },
+      );
+      if (outcome !== "success") expect(stderr.text()).toContain(message);
+      expect(signals.listeners.get("SIGINT")?.size ?? 0).toBe(0);
+      expect(signals.listeners.get("SIGTERM")?.size ?? 0).toBe(0);
+    },
+  );
+
+  test("still reports required stdout failures after an update banner failure", async () => {
+    const stderr = capture(true);
+    const write = stderr.stream.write;
+    stderr.stream.write = (chunk) => {
+      if (chunk.toString() === formatUpdateNotice(notice))
+        throw new Error("Synthetic update write failure");
+      return write(chunk);
+    };
+
+    expect(
+      await main(
+        ["info", "--json"],
+        {
+          write() {
+            throw new Error("Synthetic stdout failure");
+          },
+        },
+        stderr.stream,
+        dependencies({ onUpdateCheck: resolving(notice) }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("Synthetic stdout failure");
+    expect(stderr.text()).not.toContain("Synthetic update write failure");
   });
 });

@@ -11,6 +11,7 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { InternalSecurity } from "./support/internal-security.js";
 import { VERSION } from "../src/version.js";
+import { requestMetadata } from "./support/request-metadata.js";
 
 const fixtures = createApiTestFixtures();
 
@@ -54,6 +55,8 @@ describe("delegated scan attribution", () => {
               : "gpt-5.6-sol"
             : undefined;
           const program = surface === "cli" ? programs[0] : programs[1];
+          const daybreak =
+            endpointSource === "unset" ? undefined : surface === "cli";
           const endpoint =
             endpointSource === "unset"
               ? undefined
@@ -93,9 +96,20 @@ describe("delegated scan attribution", () => {
             {
               pluginPath: PLUGIN_ROOT,
               codexOverrides: {
+                ...(daybreak === undefined || endpointSource === "profile-only"
+                  ? {}
+                  : {
+                      daybreak:
+                        endpointSource === "profile-override"
+                          ? !daybreak
+                          : daybreak,
+                    }),
                 analytics: { enabled: surface === "sdk" },
+                otel: { environment: `synthetic-${surface}` },
                 responses_api_metadata: {
                   custom_attribution: surface,
+                  "team.tag": `synthetic-${surface}`,
+                  codex_security_integration: "github_action",
                   codex_security_surface: "spoofed",
                   codex_security_command: "spoofed",
                   codex_security_package_version: "spoofed",
@@ -107,10 +121,15 @@ describe("delegated scan attribution", () => {
                   ? {
                       profile: "selected",
                       profiles: {
-                        selected:
-                          profileEndpoint === undefined
+                        selected: {
+                          ...(profileEndpoint === undefined
                             ? {}
-                            : { openai_base_url: profileEndpoint },
+                            : { openai_base_url: profileEndpoint }),
+                          ...(endpointSource === "profile-only" ||
+                          endpointSource === "profile-override"
+                            ? { daybreak }
+                            : {}),
+                        },
                         unselected: {
                           openai_base_url: "https://unused.example.test/v1",
                         },
@@ -199,16 +218,27 @@ describe("delegated scan attribution", () => {
                       expect(options.config?.["openai_base_url"]).toBe(
                         endpoint,
                       );
+                      expect(options.config?.["daybreak"]).toBe(daybreak);
                       expect(options.config).toMatchObject({
                         features,
                         ...(model === undefined ? {} : { model }),
                         analytics: { enabled: surface === "sdk" },
-                        responses_api_metadata: {
-                          custom_attribution: surface,
-                          codex_security_surface: surface,
-                          codex_security_command: "scan",
-                          codex_security_package_version: VERSION,
-                        },
+                        otel: { environment: `synthetic-${surface}` },
+                      });
+                      expect(options.config).not.toHaveProperty(
+                        "responses_api_metadata",
+                      );
+                      expect(
+                        requestMetadata(options.configOverrides),
+                      ).toMatchObject({
+                        custom_attribution: surface,
+                        "team.tag": `synthetic-${surface}`,
+                        codex_security_integration: "github_action",
+                        codex_security_surface: surface,
+                        codex_security_command: "scan",
+                        codex_security_package_version: VERSION,
+                        codex_security_provider: "openai",
+                        codex_security_scan_mode: mode,
                       });
                       const deepConfigPath =
                         options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
@@ -221,8 +251,10 @@ describe("delegated scan attribution", () => {
                           parseToml(deepConfig)["worker_runtime"],
                         ).toMatchObject({
                           analytics: { enabled: surface === "sdk" },
-                          responses_api_metadata:
-                            options.config?.["responses_api_metadata"],
+                          otel: { environment: `synthetic-${surface}` },
+                          responses_api_metadata: requestMetadata(
+                            options.configOverrides,
+                          ),
                         });
                       }
                       expect(threadOptions.threadSource).toBe("security_scan");
@@ -247,6 +279,7 @@ describe("delegated scan attribution", () => {
                         const workerRuntime = deepConfig[
                           "worker_runtime"
                         ] as Record<string, unknown>;
+                        expect(workerRuntime["daybreak"]).toBe(daybreak);
                         if (endpoint === undefined)
                           expect(workerRuntime).not.toHaveProperty(
                             "openai_base_url",
@@ -260,6 +293,7 @@ describe("delegated scan attribution", () => {
                         features,
                         ...(model === undefined ? {} : { model }),
                       });
+                      expect(runtimeConfig["daybreak"]).toBe(daybreak);
                       expect(initialConfig).not.toContain("openai_base_url");
                       expect(initialConfig).not.toContain("synthetic-password");
                       if (program === undefined) {
@@ -286,6 +320,7 @@ describe("delegated scan attribution", () => {
                       expect(sharedConfig).not.toHaveProperty(
                         "responses_api_metadata",
                       );
+                      expect(sharedConfig).not.toHaveProperty("otel");
                       expect(sharedConfig).not.toHaveProperty("model");
                       expect(sharedConfig).not.toHaveProperty("codex_security");
                       expect(sharedConfig).not.toHaveProperty("analytics");
