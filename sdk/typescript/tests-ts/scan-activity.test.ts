@@ -261,6 +261,45 @@ describe("scan activity", () => {
     ],
   ] as const)("%s", commandActivityCase);
 
+  test.each(["  ", "\u00a0"])(
+    "attributes literal whitespace in paths before formatting descriptions (%j)",
+    (whitespace) => {
+      const repository = `/code/scan${whitespace}project`;
+      const script = `cat  "${repository}/src/a${whitespace}b.ts"\n  "$CODEX_SECURITY_REPOSITORY/src/a b.ts"`;
+      const commands = [script, `/bin/sh -lc '${script}'`];
+      if (process.platform === "win32") {
+        commands.push(`pwsh -NoProfile -Command '${script}'`);
+      }
+      for (const command of commands) {
+        for (const activity of [
+          scanActivityFromEvent(
+            commandEvent("item.started", command),
+            repository,
+          ),
+          scanActivityFromEvent(
+            toolEvent("exec", { cmd: command }),
+            repository,
+          ),
+          scanActivityFromSessionEvent(
+            sessionEvent({
+              type: "function_call",
+              name: "exec_command",
+              call_id: "worker-command-1",
+              arguments: JSON.stringify({ cmd: command }),
+            }),
+            repository,
+          ),
+        ]) {
+          expect(activity).toMatchObject({
+            description:
+              'cat "/code/scan project/src/a b.ts" "$CODEX_SECURITY_REPOSITORY/src/a b.ts"',
+            paths: [`src/a${whitespace}b.ts`, "src/a b.ts"],
+          });
+        }
+      }
+    },
+  );
+
   test("recognizes repository paths generated for the current shell", () => {
     const command = `${process.platform === "win32" ? "Get-Content -LiteralPath" : "cat"} ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY", "/src/app.ts")}`;
     expect(

@@ -16,16 +16,63 @@ async function* deniedEvents(): AsyncGenerator<ThreadEvent> {
   yield { type: "turn.failed", error: { message: denied } };
 }
 
+function programGateProfile(root: boolean, selected: boolean | null) {
+  return {
+    profile: "selected",
+    features: { api_key_cyber_access_programs: root },
+    profiles: {
+      selected: { features: { api_key_cyber_access_programs: selected } },
+    },
+  };
+}
+
 test.each([
-  [undefined, {}, {}],
-  ["standard", {}, { api_key_cyber_access_programs: true }],
-  ["daybreak_blue", {}, { api_key_cyber_access_programs: true }],
-  ["daybreak_red", {}, { api_key_cyber_access_programs: true }],
+  [undefined, {}, undefined],
+  ["standard", {}, true],
+  ["daybreak_blue", {}, true],
+  ["daybreak_red", {}, true],
+  [undefined, { daybreak: true }, undefined],
+  [undefined, { daybreak: false }, undefined],
+  ["standard", { daybreak: true }, true],
+  ["daybreak_blue", { daybreak: false }, true],
+  [undefined, { daybreak: true, features: { cli_daybreak: false } }, undefined],
+  [
+    undefined,
+    {
+      daybreak: true,
+      features: { cli_daybreak: true },
+      profile: "selected",
+      profiles: { selected: { features: { cli_daybreak: false } } },
+    },
+    undefined,
+  ],
+  [
+    undefined,
+    {
+      daybreak: false,
+      features: { cli_daybreak: false },
+      profile: "selected",
+      profiles: { selected: { features: { cli_daybreak: true } } },
+    },
+    undefined,
+  ],
+  [
+    undefined,
+    {
+      daybreak: false,
+      profile: "selected",
+      profiles: { selected: { daybreak: true } },
+    },
+    undefined,
+  ],
   [
     "daybreak_blue",
     { features: { api_key_cyber_access_programs: false } },
-    { api_key_cyber_access_programs: false },
+    false,
   ],
+  ["daybreak_blue", programGateProfile(true, false), false],
+  ["daybreak_blue", programGateProfile(false, true), true],
+  ["daybreak_blue", programGateProfile(false, null), false],
   [
     "daybreak_blue",
     {
@@ -33,56 +80,11 @@ test.each([
       features: { api_key_model_discovery: true },
       profiles: { selected: { features: { api_key_model_discovery: false } } },
     },
-    { api_key_cyber_access_programs: true, api_key_model_discovery: false },
-  ],
-  [
-    "daybreak_blue",
-    {
-      profile: "selected",
-      features: { api_key_cyber_access_programs: true },
-      profiles: {
-        selected: { features: { api_key_cyber_access_programs: false } },
-      },
-    },
-    { api_key_cyber_access_programs: false },
-  ],
-  [
-    "daybreak_blue",
-    {
-      profile: "selected",
-      features: { api_key_cyber_access_programs: false },
-      profiles: {
-        selected: { features: { api_key_cyber_access_programs: true } },
-      },
-    },
-    { api_key_cyber_access_programs: true },
-  ],
-  [
-    "daybreak_blue",
-    {
-      profile: "selected",
-      features: { api_key_cyber_access_programs: false },
-      profiles: {
-        selected: { features: { api_key_model_discovery: false } },
-        unselected: { features: { api_key_cyber_access_programs: true } },
-      },
-    },
-    { api_key_cyber_access_programs: false, api_key_model_discovery: false },
-  ],
-  [
-    "daybreak_blue",
-    {
-      profile: "selected",
-      features: { api_key_cyber_access_programs: false },
-      profiles: {
-        selected: { features: { api_key_cyber_access_programs: null } },
-      },
-    },
-    { api_key_cyber_access_programs: false },
+    true,
   ],
 ] as const)(
   "forwards %s and preserves API-key gates %j",
-  async (program, overrides, expectedFeatures) => {
+  async (program, overrides, expectedGate) => {
     const root = await fixtures.temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -131,19 +133,24 @@ test.each([
       expect(recipe?.["cyberAccessProgram"]).toBe(program);
       expect(clientOptions?.apiKey).toBe("synthetic-api-key");
       const config = parseToml(await readFile(runtime.configPath, "utf8"));
-      for (const features of [
-        config["features"],
-        resolveCodexProfile(clientOptions!.config as JsonObject)["features"],
+      const resolved = resolveCodexProfile(overrides as JsonObject);
+      const requestedFeatures = resolved["features"] as JsonObject | undefined;
+      for (const snapshot of [
+        config,
+        clientOptions?.config,
+        recipe?.["config"] as JsonObject,
       ]) {
-        expect(features).toMatchObject(expectedFeatures);
-        for (const key of [
-          "api_key_cyber_access_programs",
-          "api_key_model_discovery",
-        ]) {
-          if (!(key in expectedFeatures)) {
-            expect(features).not.toHaveProperty(key);
-          }
-        }
+        expect(snapshot?.["daybreak"]).toBe(resolved["daybreak"]);
+        expect(
+          (snapshot?.["features"] as JsonObject | undefined)?.["cli_daybreak"],
+        ).toBe(requestedFeatures?.["cli_daybreak"]);
+      }
+      for (const snapshot of [config, clientOptions?.config]) {
+        const features = snapshot?.["features"] as JsonObject;
+        expect(features["api_key_cyber_access_programs"]).toBe(expectedGate);
+        expect(features["api_key_model_discovery"]).toBe(
+          requestedFeatures?.["api_key_model_discovery"],
+        );
       }
       if (program === undefined) {
         expect(config).not.toHaveProperty("codex_security");
@@ -151,8 +158,8 @@ test.each([
         expect(config["codex_security"]).toEqual({
           cyber_access_program: program,
         });
-        expect(recipe?.["config"]).not.toHaveProperty("codex_security");
       }
+      expect(recipe?.["config"]).not.toHaveProperty("codex_security");
     } finally {
       await client.close();
     }

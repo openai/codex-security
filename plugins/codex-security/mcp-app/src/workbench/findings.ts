@@ -1,6 +1,11 @@
 import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
-import { parseJson, stringifyJson } from "../helpers/json";
+import {
+  escapeControls,
+  parseJson,
+  requireFiniteNumbers,
+  stringifyJson,
+} from "../helpers/json";
 import { requireSqliteText } from "./database";
 import { transaction } from "./transaction";
 
@@ -19,13 +24,61 @@ export interface EmbeddedFinding {
 
 class FindingConflict extends Error {}
 
-function requireFiniteNumbers(value: unknown): void {
-  if (typeof value === "number" && !Number.isFinite(value))
-    throw new TypeError(
-      "Stored finding JSON cannot contain non-finite numbers.",
-    );
-  if (value !== null && typeof value === "object")
-    for (const item of Object.values(value)) requireFiniteNumbers(item);
+// The fresh document comes from stringifyJson after the command's finite-number
+// check. Keep this comparison private: it is not equality for arbitrary JSON pairs.
+function storedFindingJsonMatches(previous: string, fresh: string): boolean {
+  const numberTag = Symbol("finding number");
+  const outsideFreshRange = Symbol("outside fresh numeric range");
+  // Finite Number output has |exponent| <= 324; BigInt output has exponent 0.
+  // Normalizing either coefficient shifts its exponent by at most its document
+  // length. A larger old exponent cannot match fresh, even after cancellation.
+  const maxExponent = previous.length + fresh.length + 324;
+
+  function numberToken(source: string): unknown {
+    const [, sign, integer, fraction = "", exponentSign, exponentDigits = "0"] =
+      /^(-?)([0-9]+)(?:\.([0-9]+))?(?:[eE]([+-]?)([0-9]+))?$/u.exec(source)!;
+    const digits = integer + fraction;
+    let first = 0;
+    while (digits[first] === "0") first++;
+    if (first === digits.length) return [numberTag, "0", 0];
+    let last = digits.length;
+    while (digits[last - 1] === "0") last--;
+
+    const magnitude = Number(exponentDigits);
+    if (magnitude > maxExponent) return outsideFreshRange;
+    // Supported Node string lengths keep the bounded exponent and scale exact.
+    const exponent = (exponentSign === "-" ? -1 : 1) * magnitude;
+    const scale = exponent + digits.length - last - fraction.length;
+    return [numberTag, sign + digits.slice(first, last), scale];
+  }
+
+  function comparisonView(source: string): unknown {
+    try {
+      return JSON.parse(
+        source,
+        (_key, value: unknown, context?: { source?: string }) => {
+          if (typeof value !== "number") return value;
+          const source = context!.source!;
+          const token = numberToken(source);
+          // parseJson preserves unsafe plain integer tokens as BigInt. Other
+          // spellings must expose the same precision before we retain their text.
+          const readback =
+            !Number.isSafeInteger(value) && !/^-?[0-9]+$/u.test(source)
+              ? Number.isFinite(value) && Number.isInteger(value)
+                ? numberToken(String(BigInt(value)))
+                : value
+              : token;
+          return [token, readback];
+        },
+      );
+    } catch (error) {
+      if (error instanceof SyntaxError)
+        error.message = escapeControls(error.message);
+      throw error;
+    }
+  }
+
+  return isDeepStrictEqual(comparisonView(previous), comparisonView(fresh));
 }
 
 export function storeFindings(
@@ -72,7 +125,7 @@ export function storeFindings(
         const previous = stored.get(finding.findingId)?.details_json;
         if (
           typeof previous === "string" &&
-          isDeepStrictEqual(parseJson(previous), parseJson(details))
+          storedFindingJsonMatches(previous, details)
         )
           details = previous;
         const { changes } = upsert.run(

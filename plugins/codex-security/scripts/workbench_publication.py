@@ -332,7 +332,7 @@ def export_findings(
             "workspace": db.workspace_state(connection, scan["workspace_id"]),
         }
     try:
-        manifest, _, _ = finalize_scan(
+        manifest, findings_document, _ = finalize_scan(
             scan_dir,
             expected_coverage_mode=db.expected_coverage_mode(scan),
         )
@@ -350,7 +350,8 @@ def export_findings(
             raise SystemExit(str(exc)) from exc
         path = db.artifact_path(scan_dir, "exports/results.sarif", required=True)
     else:
-        path = write_csv_export(db, connection, scan)
+        path = write_csv_export(db, connection, scan, findings_document)
+    del findings_document
     if path is None:
         raise SystemExit(f"Could not export Codex Security findings as {args.format.upper()}.")
     return {
@@ -364,6 +365,7 @@ def write_csv_export(
     db: Any,
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
+    findings_document: dict[str, Any],
 ) -> Path:
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     output = io.StringIO(newline="")
@@ -371,7 +373,6 @@ def write_csv_export(
     deep_scan = scan["mode"] == "deep"
     candidate_ids_by_occurrence: dict[str, str] = {}
     if deep_scan:
-        findings_document = db.read_json_object(scan_dir / db.ARTIFACTS["findings"])
         findings = findings_document.get("findings")
         if not isinstance(findings, list):
             raise SystemExit("findings.json must contain a findings array.")

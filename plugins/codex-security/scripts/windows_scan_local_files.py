@@ -40,6 +40,10 @@ class WindowsScanLocalFileError(OSError):
     """Raised when a scan-local operation cannot be completed securely."""
 
 
+class WindowsScanLocalPathError(WindowsScanLocalFileError):
+    """Raised when a scan-local path fails an integrity check."""
+
+
 # CreateFile access and sharing flags.
 _DELETE = 0x00010000
 _FILE_READ_ATTRIBUTES = 0x00000080
@@ -71,7 +75,10 @@ _ERROR_ACCESS_DENIED = 5
 _ERROR_SHARING_VIOLATION = 32
 _ERROR_LOCK_VIOLATION = 33
 _ERROR_FILE_EXISTS = 80
+_ERROR_INSUFFICIENT_BUFFER = 122
 _ERROR_ALREADY_EXISTS = 183
+_ERROR_DIRECTORY = 267
+_DACL_SECURITY_INFORMATION = 0x00000004
 _MISSING_ERRORS = {_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND}
 _COLLISION_ERRORS = {_ERROR_FILE_EXISTS, _ERROR_ALREADY_EXISTS}
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
@@ -97,6 +104,14 @@ class _FileAttributeTagInfo(ctypes.Structure):
     _fields_ = [
         ("FileAttributes", wintypes.DWORD),
         ("ReparseTag", wintypes.DWORD),
+    ]
+
+
+class _SecurityAttributes(ctypes.Structure):
+    _fields_ = [
+        ("nLength", wintypes.DWORD),
+        ("lpSecurityDescriptor", wintypes.LPVOID),
+        ("bInheritHandle", wintypes.BOOL),
     ]
 
 
@@ -143,6 +158,17 @@ class _OwnedHandle:
 
 if os.name == "nt":
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+
+    _GetFileSecurityW = _advapi32.GetFileSecurityW
+    _GetFileSecurityW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _GetFileSecurityW.restype = wintypes.BOOL
 
     _CreateFileW = _kernel32.CreateFileW
     _CreateFileW.argtypes = [
@@ -240,8 +266,8 @@ def _raise_last_error(operation: str, path: Path | None = None) -> None:
     raise WindowsScanLocalFileError(error, f"{operation}{target}: {detail}", str(path or ""))
 
 
-def _invalid_path(path: Path | str, reason: str) -> WindowsScanLocalFileError:
-    return WindowsScanLocalFileError(errno.EINVAL, reason, str(path))
+def _invalid_path(path: Path | str, reason: str) -> WindowsScanLocalPathError:
+    return WindowsScanLocalPathError(errno.EINVAL, reason, str(path))
 
 
 def _validated_parts(relative_path: str) -> tuple[str, ...]:
@@ -408,21 +434,32 @@ def _canonical_scan_directory(scan_dir: Path) -> tuple[Path, tuple[int, int]]:
         expected = absolute.lstat()
         canonical = absolute.resolve(strict=True)
     except OSError as exc:
+        if exc.errno not in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+            raise
         raise _invalid_path(scan_dir, "expected an existing scan directory") from exc
     if _normalized_windows_path(absolute) != _normalized_windows_path(canonical):
         raise _invalid_path(scan_dir, "scan directory must be canonical and non-reparse")
     return canonical, (expected.st_dev, expected.st_ino)
 
 
-def _open_directory(path: Path, *, missing_ok: bool = False) -> _OwnedHandle | None:
-    handle = _create_file(
-        path,
-        access=_FILE_READ_ATTRIBUTES,
-        share=_FILE_SHARE_READ | _FILE_SHARE_WRITE,
-        disposition=_OPEN_EXISTING,
-        flags=_FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
-        missing_ok=missing_ok,
-    )
+def _open_directory(
+    path: Path, *, missing_ok: bool = False, missing_is_path_error: bool = True
+) -> _OwnedHandle | None:
+    try:
+        handle = _create_file(
+            path,
+            access=_FILE_READ_ATTRIBUTES,
+            share=_FILE_SHARE_READ | _FILE_SHARE_WRITE,
+            disposition=_OPEN_EXISTING,
+            flags=_FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
+            missing_ok=missing_ok,
+        )
+    except WindowsScanLocalFileError as exc:
+        if exc.errno != _ERROR_DIRECTORY and not (
+            missing_is_path_error and exc.errno in _MISSING_ERRORS
+        ):
+            raise
+        raise _invalid_path(path, f"could not open scan-local directory: {exc}") from exc
     if handle is not None:
         try:
             assert handle.value is not None
@@ -441,12 +478,34 @@ def _create_directory(path: Path) -> None:
         _raise_last_error("CreateDirectoryW", path)
 
 
+def create_directory_with_same_dacl(path: Path, source: Path) -> None:
+    """Create an archive replacement with the original directory's DACL."""
+    _require_windows()
+    source_path = _extended_path(source)
+    size = wintypes.DWORD()
+    _GetFileSecurityW(source_path, _DACL_SECURITY_INFORMATION, None, 0, ctypes.byref(size))
+    if ctypes.get_last_error() != _ERROR_INSUFFICIENT_BUFFER:
+        _raise_last_error("GetFileSecurityW", source)
+    descriptor = ctypes.create_string_buffer(size.value)
+    if not _GetFileSecurityW(
+        source_path, _DACL_SECURITY_INFORMATION, descriptor, size.value, ctypes.byref(size)
+    ):
+        _raise_last_error("GetFileSecurityW", source)
+    attributes = _SecurityAttributes(
+        ctypes.sizeof(_SecurityAttributes), ctypes.cast(descriptor, wintypes.LPVOID), False
+    )
+    # Supply the descriptor at creation, without an inherited-access window.
+    if not _CreateDirectoryW(_extended_path(path), ctypes.byref(attributes)):
+        _raise_last_error("CreateDirectoryW", path)
+
+
 @contextlib.contextmanager
 def _locked_parent(
     scan_dir: Path,
     relative_path: str,
     *,
     create: bool,
+    missing_is_path_error: bool = True,
     expected_root_identity: tuple[int, int] | None = None,
 ) -> Iterator[tuple[Path, str]]:
     """Hold non-deletable handles for every directory in the absolute target path."""
@@ -465,7 +524,14 @@ def _locked_parent(
             directory_handle = _open_directory(directory_path)
             assert directory_handle is not None
             handles.append(directory_handle)
-        current_root = root_path.lstat()
+        try:
+            current_root = root_path.lstat()
+        except OSError as exc:
+            if exc.errno not in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+                raise
+            raise _invalid_path(
+                scan_dir, f"scan directory changed while it was being opened: {exc}"
+            ) from exc
         current_root_identity = (current_root.st_dev, current_root.st_ino)
         if current_root_identity != observed_root_identity or (
             expected_root_identity is not None and current_root_identity != expected_root_identity
@@ -474,7 +540,9 @@ def _locked_parent(
         current_path = root_path
         for component in parts[:-1]:
             current_path /= component
-            child_handle = _open_directory(current_path, missing_ok=create)
+            child_handle = _open_directory(
+                current_path, missing_ok=create, missing_is_path_error=missing_is_path_error
+            )
             if child_handle is None:
                 _create_directory(current_path)
                 child_handle = _open_directory(current_path)
@@ -504,7 +572,10 @@ def open_read_fd_with_path(scan_dir: Path, relative_path: str, context: str) -> 
     """Return the descriptor and its filename while the verified parents are held."""
 
     try:
-        with _locked_parent(scan_dir, relative_path, create=False) as (parent_path, leaf_name):
+        with _locked_parent(scan_dir, relative_path, create=False, missing_is_path_error=False) as (
+            parent_path,
+            leaf_name,
+        ):
             path = parent_path / leaf_name
             handle = _create_file(
                 path,

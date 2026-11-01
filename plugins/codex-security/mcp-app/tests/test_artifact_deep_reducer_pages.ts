@@ -111,7 +111,7 @@ try {
     scanId,
     findings: [fresh],
     scope: { summary: largeText },
-    coverage: workerDraft([]).coverage,
+    reviewState: workerDraft([]).reviewState,
   };
   const previous = {
     scanId,

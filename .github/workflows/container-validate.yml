@@ -2,6 +2,22 @@ name: container-validate
 
 on:
   workflow_call:
+    inputs:
+      ref:
+        description: Source commit to validate; defaults to the calling workflow commit.
+        type: string
+        default: ""
+      release-version:
+        type: string
+      release-integrity:
+        type: string
+      release-tarball-artifact:
+        type: string
+      runtime-lock-artifact:
+        type: string
+      labels:
+        description: Release metadata for the OCI candidate. Omit for source validation.
+        type: string
 
 permissions:
   contents: read
@@ -24,9 +40,36 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
       - name: Prepare native runtime
-        uses: ./.github/actions/download-native
+        if: inputs.release-tarball-artifact == ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: native-universal-${{ inputs.ref || github.sha }}
+          path: plugins/codex-security/native/prebuilt
+
+      - name: Download the verified scanner and its runtime lock
+        if: inputs.release-tarball-artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ inputs.runtime-lock-artifact && format('{0},{1}', inputs.release-tarball-artifact, inputs.runtime-lock-artifact) || inputs.release-tarball-artifact }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/scanner-artifacts
+
+      - name: Prepare the locked scanner package
+        if: inputs.release-tarball-artifact != ''
+        env:
+          RELEASE_VERSION: ${{ inputs.release-version }}
+          RELEASE_INTEGRITY: ${{ inputs.release-integrity }}
+        run: |
+          lock=$RUNNER_TEMP/scanner-artifacts/package-lock.json
+          jq -e --arg version "$RELEASE_VERSION" --arg integrity "$RELEASE_INTEGRITY" '
+            .packages["node_modules/@openai/codex-security"] |
+            .version == $version and .integrity == $integrity
+          ' "$lock" > /dev/null
+          mkdir "$RUNNER_TEMP/release-inputs"
+          node docker/prepare-release-package.mjs "$RUNNER_TEMP"/scanner-artifacts/*.tgz "$lock" "$RUNNER_TEMP/release-inputs"
 
       - name: Verify customer build excludes secrets and scan data
         shell: bash
@@ -64,23 +107,60 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: ${{ !inputs.labels && 'provenance-add-gha=false' || '' }}
+
+      - name: Test release index assembly
+        if: matrix.architecture == 'amd64' && inputs.ref == '' && inputs.release-tarball-artifact == ''
+        run: bash docker/test-container-index.sh
 
       - name: Build native customer image
+        if: inputs.labels == ''
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         env:
           DOCKER_BUILD_RECORD_UPLOAD: "false"
         with:
           context: .
+          target: &target ${{ inputs.release-tarball-artifact && 'scanner-release' || '' }}
+          build-contexts: &release-inputs ${{ inputs.release-tarball-artifact && format('release-inputs={0}/release-inputs', runner.temp) || '' }}
           load: true
           platforms: linux/${{ matrix.architecture }}
           push: false
           tags: codex-security:release-candidate
-          cache-from: type=gha,scope=codex-security-${{ matrix.architecture }}
+          cache-from: &cache-from type=gha,scope=${{ inputs.release-tarball-artifact && 'codex-security-release' || 'codex-security' }}-${{ matrix.architecture }}
           cache-to: ${{ github.event_name != 'pull_request' && format('type=gha,mode=max,scope=codex-security-{0}', matrix.architecture) || '' }}
+
+      - name: Build the release candidate with provenance and SBOM
+        id: candidate
+        if: inputs.labels != ''
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: *target
+          build-contexts: *release-inputs
+          platforms: linux/${{ matrix.architecture }}
+          labels: ${{ inputs.labels }}
+          outputs: type=oci,dest=${{ runner.temp }}/image.tar,name=ghcr.io/${{ github.repository }}:${{ inputs.release-version }}
+          provenance: mode=max
+          sbom: true
+          cache-from: *cache-from
+          cache-to: type=gha,mode=max,scope=${{ inputs.release-tarball-artifact && 'codex-security-release' || 'codex-security' }}-${{ matrix.architecture }}
+
+      - name: Load the native image from the release artifact
+        if: inputs.labels != ''
+        env:
+          DIGEST: ${{ steps.candidate.outputs.digest }}
+        run: |
+          archive="oci-archive:$RUNNER_TEMP/image.tar"
+          skopeo inspect --raw "$archive" | sha256sum | cut -d' ' -f1 | grep -Fxq "${DIGEST#sha256:}"
+          skopeo copy "$archive" docker-daemon:codex-security:release-candidate
+          printf '%s\n' "$DIGEST" > "$RUNNER_TEMP/digest"
 
       - name: Verify native image
         env:
           EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+          EXPECTED_VERSION: ${{ inputs.release-version }}
+          EXPECTED_LABELS: ${{ inputs.labels }}
         shell: bash
         run: |
           set -euo pipefail
@@ -89,7 +169,15 @@ jobs:
             echo "Expected a native $EXPECTED_ARCHITECTURE image; found $actual_architecture." >&2
             exit 1
           fi
-          docker run --rm codex-security:release-candidate --version
+          if [[ -n "$EXPECTED_LABELS" ]]; then
+            docker image inspect --format '{{json .Config.Labels}}' codex-security:release-candidate |
+              jq -e --arg labels "$EXPECTED_LABELS" '
+                . as $actual | all($labels | split("\n")[] | select(length > 0) |
+                  capture("^(?<key>[^=]+)=(?<value>.*)$"); $actual[.key] == .value)
+              ' > /dev/null
+          fi
+          version=$(docker run --rm codex-security:release-candidate --version)
+          if [[ -n "$EXPECTED_VERSION" ]]; then test "$version" = "$EXPECTED_VERSION"; fi
           docker run --rm codex-security:release-candidate bulk-scan --help
           docker run --rm codex-security:release-candidate info --json
           [[ "$(docker run --rm --entrypoint id codex-security:release-candidate -u)" == 10001 ]]
@@ -200,6 +288,20 @@ jobs:
             fi
           '
 
-          "${compose[@]}" run --rm --entrypoint node codex-security \
-            /usr/local/lib/node_modules/@openai/codex-security/node_modules/@openai/codex/bin/codex.js \
-            sandbox /usr/bin/true
+          "${compose[@]}" run --rm --entrypoint /bin/sh codex-security -ec '
+            cd "$(dirname "$(readlink -f /usr/local/bin/codex-security)")"
+            exec npm exec --offline -- codex sandbox /usr/bin/true
+          '
+
+      - name: Retain the tested release candidate
+        if: inputs.labels != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: codex-security-oci-${{ matrix.architecture }}
+          path: |
+            ${{ runner.temp }}/image.tar
+            ${{ runner.temp }}/digest
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true

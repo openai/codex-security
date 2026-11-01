@@ -66,6 +66,7 @@ assert.deepEqual(
     restricted(
       [
         rootRead,
+        { path: { type: "path", path: "/repo" }, access: "write" },
         {
           path: { type: "path", path: "/repo/.env" },
           access: "deny",
@@ -189,6 +190,21 @@ assert.deepEqual(
     filesystemDenies: [],
   },
 );
+
+assert.throws(
+  () => resolveDeepWorkerParentSandbox({}),
+  /trusted parent sandbox metadata/,
+);
+for (const entry of [
+  { access: "deny", path: { type: "path", path: "relative/secret" } },
+  { access: "deny", path: { type: "special", value: { kind: "tmpdir" } } },
+  { access: "write", path: { type: "glob_pattern", pattern: "/repo/*" } },
+]) {
+  assert.throws(
+    () => resolveDeepWorkerParentSandbox(restricted([rootRead, entry])),
+    /cannot be preserved/,
+  );
+}
 
 for (const invalid of [
   undefined,
