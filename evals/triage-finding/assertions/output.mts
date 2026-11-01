@@ -1,5 +1,14 @@
 import type { TriageResult } from "../types.ts";
 
+export function gradeFailures(failures: string[], successReason: string) {
+  const pass = failures.length === 0;
+  return {
+    pass,
+    score: pass ? 1 : 0,
+    reason: pass ? successReason : failures.join("; "),
+  };
+}
+
 export function outputText(output: unknown) {
   return typeof output === "string" ? output : JSON.stringify(output);
 }
