@@ -147,6 +147,73 @@ interface CommandToken {
   quoted: boolean;
 }
 
+// Find a substitution's closing delimiter without interpreting its contents.
+// Unsupported shell grammar stays unresolved through the end of the command.
+function substitutionEnd(text: string, start: number): number | undefined {
+  const stack: { end: ")" | "`"; quote: "'" | '"' | null; depth: number }[] = [
+    { end: text[start] === "`" ? "`" : ")", quote: null, depth: 0 },
+  ];
+  for (
+    let index = start + (text[start] === "`" ? 1 : 2);
+    index < text.length;
+    index++
+  ) {
+    const frame = stack[stack.length - 1]!;
+    const char = text[index]!;
+    if (char === "\\" && frame.quote !== "'") {
+      // Escaped backticks can encode another legacy substitution layer.
+      if (frame.end === "`" && text[index + 1] === "`") return undefined;
+      index++;
+      continue;
+    }
+    if (char === frame.quote) {
+      frame.quote = null;
+      continue;
+    }
+    if (frame.quote === "'") continue;
+    // Parameter expansion has its own delimiters and quoting grammar.
+    if (text.startsWith("${", index)) return undefined;
+    if (frame.quote === null && (char === "'" || char === '"')) {
+      frame.quote = char;
+      continue;
+    }
+    if (frame.quote === null) {
+      // ANSI-C quoting has additional escape rules; do not guess its boundary.
+      if (text.startsWith("$'", index)) return undefined;
+      if (
+        text.startsWith("<<", index) ||
+        (/^case(?:\s|$)/u.test(text.slice(index)) &&
+          (index === 0 || /[\s;|(]/u.test(text[index - 1]!)))
+      )
+        return undefined;
+      if (char === "#" && /[\s;|(]/u.test(text[index - 1] ?? " ")) {
+        const newline = text.indexOf("\n", index);
+        if (newline === -1) return undefined;
+        index = newline;
+        continue;
+      }
+      if (char === frame.end && frame.depth === 0) {
+        stack.pop();
+        if (stack.length === 0) return index;
+        continue;
+      }
+      if (frame.end === ")" && char === "(") {
+        frame.depth++;
+        continue;
+      }
+      if (frame.end === ")" && char === ")") {
+        frame.depth--;
+        continue;
+      }
+    }
+    if (char === "`" || text.startsWith("$(", index)) {
+      stack.push({ end: char === "`" ? "`" : ")", quote: null, depth: 0 });
+      if (char !== "`") index++;
+    }
+  }
+  return undefined;
+}
+
 // Read whole shell words, including adjacent quoted pieces. Expansions whose
 // values are not recorded remain unresolved; this is not a shell evaluator.
 function posixTokens(text: string): CommandToken[] {
@@ -201,8 +268,14 @@ function posixTokens(text: string): CommandToken[] {
       }
       continue;
     }
-    if (quote !== "'" && (char === "`" || text.startsWith("$(", index)))
-      return tokens;
+    if (quote !== "'" && (char === "`" || text.startsWith("$(", index))) {
+      resolved = false;
+      const end = substitutionEnd(text, index);
+      if (end === undefined) return tokens;
+      value += text.slice(index, end + 1);
+      index = end;
+      continue;
+    }
     if (char === "$" && value === "" && quote !== "'") {
       const reference =
         /^\$(?:CODEX_SECURITY_REPOSITORY|\{CODEX_SECURITY_REPOSITORY\})(?=\/|$)/u.exec(

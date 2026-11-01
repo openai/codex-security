@@ -284,6 +284,92 @@ describe("scan activity", () => {
 
   test.each<ActivityTestCase>([
     {
+      name: "substitution regression maintainer reproducer",
+      command: 'cat "$(printf /dev/null)" /repo/one.ts',
+      repository: "/repo",
+      shell: "/bin/sh",
+      expected: { paths: ["one.ts"] },
+    },
+    {
+      name: "substitution regression earlier and later operands",
+      command: 'cat /repo/a.ts "$(printf /dev/null)" /repo/b.ts',
+      repository: "/repo",
+      shell: "/bin/sh",
+      expected: { paths: ["a.ts", "b.ts"] },
+    },
+    {
+      name: "substitution regression no inner speculative path",
+      command: 'cat "$(printf /repo/ghost.ts)"',
+      repository: "/repo",
+      shell: "/bin/sh",
+      expected: { paths: [] },
+    },
+    {
+      name: "substitution regression unresolved path word",
+      command: 'cat "/repo/$(printf ghost.ts)" /repo/real.ts',
+      repository: "/repo",
+      shell: "/bin/sh",
+      expected: { paths: ["real.ts"] },
+    },
+    {
+      name: "substitution regression nested quoted substitution",
+      command: 'cat "$(printf "%s" "$(printf /repo/ghost.ts)")" /repo/one.ts',
+      repository: "/repo",
+      shell: "/bin/sh",
+      expected: { paths: ["one.ts"] },
+    },
+    {
+      name: "substitution regression quoted closing delimiter",
+      command: "cat \"$(printf '/repo/ghost.ts)')\" /repo/one.ts",
+      repository: "/repo",
+      shell: "/bin/sh",
+      expected: { paths: ["one.ts"] },
+    },
+    {
+      name: "substitution regression backtick substitution",
+      command: "cat `printf /repo/ghost.ts` /repo/one.ts",
+      repository: "/repo",
+      shell: "/bin/sh",
+      expected: { paths: ["one.ts"] },
+    },
+    {
+      name: "substitution regression nested backtick substitution",
+      command: 'cat "$(printf "%s" `printf /repo/ghost.ts`)" /repo/one.ts',
+      repository: "/repo",
+      shell: "/bin/sh",
+      expected: { paths: ["one.ts"] },
+    },
+    {
+      name: "substitution regression malformed substitution",
+      command: 'cat /repo/a.ts "$(printf /repo/ghost.ts /repo/b.ts',
+      repository: "/repo",
+      shell: "/bin/sh",
+      expected: { paths: ["a.ts"] },
+    },
+    {
+      name: "substitution regression malformed outer quote",
+      command: 'cat "$(printf /dev/null) /repo/ghost.ts',
+      repository: "/repo",
+      shell: "/bin/sh",
+      expected: { paths: [] },
+    },
+    {
+      name: "substitution regression unsupported case grammar",
+      command:
+        "cat /repo/a.ts $(case x in x) echo /repo/ghost.ts;; esac) /repo/b.ts",
+      repository: "/repo",
+      shell: "/bin/sh",
+      expected: { paths: ["a.ts"] },
+    },
+    {
+      name: "substitution regression unsupported heredoc",
+      command:
+        "cat /repo/a.ts $(cat <<EOF\n) /repo/ghost.ts\nEOF\n) /repo/b.ts",
+      repository: "/repo",
+      shell: "/bin/sh",
+      expected: { paths: ["a.ts"] },
+    },
+    {
       name: "shows exact targeted file listing commands",
       command: 'rg --files "$CODEX_SECURITY_REPOSITORY/SECURITY.md"',
       repository: "/code/juice-shop",
@@ -993,6 +1079,32 @@ describe("scan activity", () => {
   });
 
   test.each<ActivityTestCase<readonly string[]>>([
+    {
+      name: "substitution regression unsupported parameter expansion cannot expose inner paths",
+      command: [
+        "bash",
+        "-c",
+        "cat $(printf ${x:-) /repo/ghost.ts }) /repo/real.ts",
+      ],
+      repository: "/repo",
+      expected: { paths: [] },
+    },
+    {
+      name: "substitution regression unsupported ANSI-C quoting cannot expose inner paths",
+      command: [
+        "bash",
+        "-c",
+        String.raw`cat $(printf $'\') /repo/ghost.ts ') /repo/real.ts`,
+      ],
+      repository: "/repo",
+      expected: { paths: [] },
+    },
+    {
+      name: "substitution regression saved argv maintainer reproducer",
+      command: ["/bin/sh", "-c", 'cat "$(printf /dev/null)" /repo/one.ts'],
+      repository: "/repo",
+      expected: { paths: ["one.ts"] },
+    },
     {
       name: "review regression POSIX positional backslash cannot become drive separator",
       command: ["sh", "-c", 'cat "$1"', "sh", String.raw`C:/repo\sibling.txt`],
