@@ -1,0 +1,7 @@
+# Development test and lint dependencies; install from the repository root.
+jsonschema[format-nongpl]==4.26.0
+packaging==26.3
+pytest==9.1.1
+pytest-xdist==3.8.0
+PyYAML==6.0.3
+ruff==0.17.2

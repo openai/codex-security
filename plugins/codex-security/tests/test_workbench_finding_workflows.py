@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 from contextlib import closing
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -11,14 +12,20 @@ import pytest
 TIMESTAMP = "2026-08-01T00:00:00Z"
 
 
-def workflow(api, connection, action, *, workflow_id="synthetic-workflow", **payload):
+def run_workflow(api, connection, action, *, workflow_id="synthetic-workflow", **payload):
     return api["finding_workflow"](
         connection, {"id": workflow_id, "action": action, **payload}, TIMESTAMP
     )
 
 
+@pytest.fixture
+def workflow(workbench_api, workbench_db):
+    return partial(run_workflow, workbench_api, workbench_db)
+
+
+@pytest.mark.parametrize("optional", [False, True])
 def test_source_snapshot_excludes_private_storage_without_hiding_source(
-    workbench_api, workbench_db, tmp_path, monkeypatch
+    workflow, tmp_path, monkeypatch, optional
 ):
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -38,11 +45,10 @@ def test_source_snapshot_excludes_private_storage_without_hiding_source(
 
     def snapshot():
         return workflow(
-            workbench_api,
-            workbench_db,
             "source",
             repository=str(repository),
             privateStatePaths=[str(private)],
+            optional=optional,
         )["source"]
 
     before = snapshot()
@@ -52,26 +58,14 @@ def test_source_snapshot_excludes_private_storage_without_hiding_source(
     source.write_text("changed source")
     assert snapshot()["content"] != before["content"]
     with pytest.raises(SystemExit, match="repository root"):
-        workflow(
-            workbench_api,
-            workbench_db,
-            "source",
-            repository=str(repository),
-            privateStatePaths=[str(repository)],
-        )
+        workflow("source", repository=str(repository), privateStatePaths=[str(repository)])
     with pytest.raises(SystemExit, match="absolute paths"):
-        workflow(
-            workbench_api,
-            workbench_db,
-            "source",
-            repository=str(repository),
-            privateStatePaths=["relative-state"],
-        )
+        workflow("source", repository=str(repository), privateStatePaths=["relative-state"])
 
 
 @pytest.mark.parametrize("location", ["root", "descendant"])
 def test_source_snapshot_preserves_unreadable_directory_errors(
-    workbench_api, workbench_db, tmp_path, monkeypatch, location
+    workflow, tmp_path, monkeypatch, location
 ):
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -93,8 +87,6 @@ def test_source_snapshot_preserves_unreadable_directory_errors(
 
     def snapshot(excluded):
         return workflow(
-            workbench_api,
-            workbench_db,
             "source",
             repository=str(repository),
             gitDisabled=True,
@@ -111,37 +103,25 @@ def test_source_snapshot_preserves_unreadable_directory_errors(
 
 
 @pytest.mark.parametrize("stage", ["scan", "publish", "dedupe"])
-def test_failed_stages_resume_and_completed_results_are_immutable(
-    workbench_api, workbench_db, stage
-):
-    assert workflow(workbench_api, workbench_db, "get") == {"workflow": None}
-    bound = workflow(workbench_api, workbench_db, "bind", binding={})["workflow"]
+def test_failed_stages_resume_and_completed_results_are_immutable(workflow, stage):
+    assert workflow("get") == {"workflow": None}
+    bound = workflow("bind", binding={})["workflow"]
     assert bound["stages"] == {
         name: {"status": "pending"} for name in ("scan", "publish", "dedupe")
     }
-    assert (
-        workflow(workbench_api, workbench_db, "begin", stage=stage)["workflow"]["stages"][stage][
-            "status"
-        ]
-        == "running"
-    )
-    failed = workflow(workbench_api, workbench_db, "fail", stage=stage, error="Synthetic failure")
+    assert workflow("begin", stage=stage)["workflow"]["stages"][stage]["status"] == "running"
+    failed = workflow("fail", stage=stage, error="Synthetic failure")
     assert failed["workflow"]["stages"][stage] == {"status": "failed", "error": "Synthetic failure"}
-    assert (
-        workflow(workbench_api, workbench_db, "begin", stage=stage)["workflow"]["stages"][stage][
-            "status"
-        ]
-        == "running"
-    )
+    assert workflow("begin", stage=stage)["workflow"]["stages"][stage]["status"] == "running"
     result = {"findingIds": [], "duplicateGroups": []}
-    completed = workflow(workbench_api, workbench_db, "complete", stage=stage, result=result)
+    completed = workflow("complete", stage=stage, result=result)
     assert completed["workflow"]["stages"][stage] == {"status": "completed", "result": result}
     for action, payload in [
         ("begin", {}),
-        ("fail", {"error": "Late failure"}),
+        ("fail", {"error": "Late failure", "result": {"unexpected": True}}),
         ("complete", {"result": {"unexpected": True}}),
     ]:
-        assert workflow(workbench_api, workbench_db, action, stage=stage, **payload) == completed
+        assert workflow(action, stage=stage, **payload) == completed
 
 
 @pytest.mark.parametrize(
@@ -154,59 +134,42 @@ def test_failed_stages_resume_and_completed_results_are_immutable(
         ({"scope": {"allRepositories": True}}, {"scope": {"repositoryId": "repository-a"}}),
     ],
 )
-def test_bindings_and_workflow_identities_remain_separate(
-    workbench_api, workbench_db, binding, changed
-):
-    workflow(workbench_api, workbench_db, "bind", binding=binding)
-    saved = workflow(
-        workbench_api, workbench_db, "complete", stage="dedupe", result={"duplicateGroups": []}
-    )
+def test_bindings_and_workflow_identities_remain_separate(workflow, workbench_db, binding, changed):
+    workflow("bind", binding=binding)
+    saved = workflow("complete", stage="dedupe", result={"duplicateGroups": []})
     with pytest.raises(SystemExit, match="already bound to a different"):
-        workflow(workbench_api, workbench_db, "bind", binding=changed)
+        workflow("bind", binding=changed)
     assert not workbench_db.in_transaction
-    assert workflow(workbench_api, workbench_db, "get") == saved
-    separate = workflow(
-        workbench_api, workbench_db, "bind", workflow_id="separate", binding=changed
-    )
+    assert workflow("get") == saved
+    separate = workflow("bind", workflow_id="separate", binding=changed)
     assert separate["workflow"]["id"] == "separate"
     assert separate["workflow"]["stages"]["dedupe"] == {"status": "pending"}
     for key, value in changed.items():
         assert separate["workflow"][key] == value
-    assert workflow(workbench_api, workbench_db, "get") == saved
+    assert workflow("get") == saved
 
 
 @pytest.mark.parametrize("result", [{"duplicateGroups": []}, {"duplicateGroups": [["a", "b"]]}])
-def test_pending_publication_payload_survives_failure_until_completion(
-    workbench_api, workbench_db, result
-):
-    workflow(workbench_api, workbench_db, "bind", binding={})
-    workflow(workbench_api, workbench_db, "begin", stage="dedupe")
+def test_pending_publication_payload_survives_failure_until_completion(workflow, result):
+    workflow("bind", binding={})
+    workflow("begin", stage="dedupe")
     pending = {"groups": result["duplicateGroups"]}
-    prepared = workflow(
-        workbench_api,
-        workbench_db,
-        "prepare-dedupe",
-        stage="dedupe",
-        result=result,
-        pendingWrite=pending,
-    )
+    prepared = workflow("prepare-dedupe", stage="dedupe", result=result, pendingWrite=pending)
     assert prepared["workflow"]["stages"]["dedupe"] == {
         "status": "running",
         "result": result,
         "pendingWrite": pending,
     }
-    workflow(workbench_api, workbench_db, "fail", stage="dedupe", error="Lost acknowledgement")
-    resumed = workflow(workbench_api, workbench_db, "begin", stage="dedupe")["workflow"]["stages"][
-        "dedupe"
-    ]
+    workflow("fail", stage="dedupe", error="Lost acknowledgement")
+    resumed = workflow("begin", stage="dedupe")["workflow"]["stages"]["dedupe"]
     assert resumed["result"] == result
     assert resumed["pendingWrite"] == pending
-    completed = workflow(workbench_api, workbench_db, "complete", stage="dedupe", result=result)
+    completed = workflow("complete", stage="dedupe", result=result)
     assert completed["workflow"]["stages"]["dedupe"] == {"status": "completed", "result": result}
 
 
 def test_review_checkpoints_keep_the_first_valid_result_and_enforce_workflow_ownership(
-    workbench_api, workbench_db
+    workflow, workbench_db
 ):
     binding = {
         "version": 1,
@@ -226,35 +189,29 @@ def test_review_checkpoints_keep_the_first_valid_result_and_enforce_workflow_own
     }
     result = {"decision": "DISTINCT", "rationale": "Independent corrections"}
     with pytest.raises(sqlite3.IntegrityError):
-        workflow(
-            workbench_api,
-            workbench_db,
-            "save-review",
-            key="review-1",
-            binding=binding,
-            result=result,
-        )
-    workflow(workbench_api, workbench_db, "bind", binding={})
-    assert workflow(workbench_api, workbench_db, "get-review", key="review-1") == {"review": None}
-    workflow(
-        workbench_api, workbench_db, "save-review", key="review-1", binding=binding, result=result
-    )
-    workflow(
-        workbench_api,
-        workbench_db,
-        "save-review",
-        key="review-1",
-        binding=binding,
-        result={"unexpected": True},
-    )
-    assert workflow(workbench_api, workbench_db, "get-review", key="review-1") == {"review": result}
-    assert workflow(
-        workbench_api, workbench_db, "get-review", workflow_id="another", key="review-1"
-    ) == {"review": None}
+        workflow("save-review", key="review-1", binding=binding, result=result)
+    workflow("bind", binding={})
+    assert workflow("get-review", key="review-1") == {"review": None}
+    workflow("save-review", key="review-1", binding=binding, result=result)
+    workflow("save-review", key="review-1", binding=binding, result={"unexpected": True})
+    assert workflow("get-review", key="review-1") == {"review": result}
+    assert workflow("get-review", workflow_id="another", key="review-1") == {"review": None}
     row = workbench_db.execute("SELECT * FROM finding_workflow_reviews").fetchone()
     assert row["source_repository_path"] == binding["source"]["repository"]
     assert row["settings_digest"] == binding["settingsDigest"]
     assert json.loads(row["result_json"]) == result
+
+    replacement = {"assessment": {"report": "Regenerated validation"}, "evidenceDigest": "new"}
+    workflow("save-review", key="review-1", binding=binding, result=replacement, replace=True)
+    assert workflow("get-review", key="review-1") == {"review": result}
+    workflow(
+        "save-review",
+        key="review-1",
+        binding={**binding, "stage": "scan-validation"},
+        result=replacement,
+        replace=True,
+    )
+    assert workflow("get-review", key="review-1") == {"review": replacement}
 
 
 @pytest.mark.parametrize(
@@ -266,13 +223,13 @@ def test_review_checkpoints_keep_the_first_valid_result_and_enforce_workflow_own
     ],
 )
 def test_rejected_workflow_mutations_roll_back_without_leaking_state(
-    workbench_api, workbench_db, payload
+    workflow, workbench_db, payload
 ):
-    saved = workflow(workbench_api, workbench_db, "bind", binding={})
+    saved = workflow("bind", binding={})
     with pytest.raises(SystemExit):
-        workflow(workbench_api, workbench_db, **payload)
+        workflow(**payload)
     assert not workbench_db.in_transaction
-    assert workflow(workbench_api, workbench_db, "get") == saved
+    assert workflow("get") == saved
 
 
 def test_workflow_column_migration_is_atomic_and_preserves_resume_state(workbench_api, tmp_path):
@@ -402,13 +359,10 @@ def test_workflow_column_migration_is_atomic_and_preserves_resume_state(workbenc
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     with closing(connection):
+        migrated_workflow = partial(run_workflow, workbench_api, connection)
         for state in (completed, unfinished, pending):
-            assert workflow(workbench_api, connection, "get", workflow_id=state["id"]) == {
-                "workflow": state
-            }
-        assert workflow(
-            workbench_api,
-            connection,
+            assert migrated_workflow("get", workflow_id=state["id"]) == {"workflow": state}
+        assert migrated_workflow(
             "bind",
             workflow_id=completed["id"],
             binding={"scanId": completed["scanId"], "scope": completed["scope"]},
@@ -416,22 +370,14 @@ def test_workflow_column_migration_is_atomic_and_preserves_resume_state(workbenc
         review = connection.execute("SELECT * FROM finding_workflow_reviews").fetchone()
         assert review["scope_repository_id"] == completed["scope"]["repositoryId"]
         assert review["prompt_digest"] == review_binding["promptDigest"]
-        assert workflow(
-            workbench_api,
-            connection,
-            "get-review",
-            workflow_id=completed["id"],
-            key="synthetic-review",
+        assert migrated_workflow(
+            "get-review", workflow_id=completed["id"], key="synthetic-review"
         ) == {"review": review_result}
         for stage in ("scan", "publish", "dedupe"):
-            state = workflow(
-                workbench_api, connection, "begin", workflow_id=completed["id"], stage=stage
-            )
+            state = migrated_workflow("begin", workflow_id=completed["id"], stage=stage)
             assert state == {"workflow": completed}
-        workflow(workbench_api, connection, "begin", workflow_id=unfinished["id"], stage="scan")
-        resumed = workflow(
-            workbench_api,
-            connection,
+        migrated_workflow("begin", workflow_id=unfinished["id"], stage="scan")
+        resumed = migrated_workflow(
             "complete",
             workflow_id=unfinished["id"],
             stage="scan",
@@ -441,3 +387,126 @@ def test_workflow_column_migration_is_atomic_and_preserves_resume_state(workbenc
             "status": "completed",
             "result": {"scanId": "resumed-scan"},
         }
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs require a Unix filesystem")
+def test_optional_review_snapshot_disables_cache_for_unsupported_file_types(workflow, tmp_path):
+    target = tmp_path / "repository"
+    target.mkdir()
+    source = target / "source.ts"
+    source.write_text("export const value = 1;\n", encoding="utf-8")
+    first = workflow("source", repository=str(target))
+    assert first["source"]["content"].startswith("codex-security-snapshot/v1:")
+    pipe = target / "pipe"
+    os.mkfifo(pipe)
+    with pytest.raises(SystemExit, match="Unsupported local file type: pipe"):
+        workflow("source", repository=str(target))
+    assert workflow("source", repository=str(target), optional=True) == {"source": None}
+    pipe.unlink()
+    assert workflow("source", repository=str(target), optional=True) == first
+    source.write_text("export const value = 2;\n", encoding="utf-8")
+    assert (
+        workflow("source", repository=str(target), optional=True)["source"]["content"]
+        != first["source"]["content"]
+    )
+    with pytest.raises(FileNotFoundError):
+        workflow("source", repository=str(target / "missing"), optional=True)
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or getattr(os, "geteuid", lambda: 0)() == 0,
+    reason="Mode permissions require a non-root Unix user",
+)
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_optional_review_snapshot_disables_cache_for_unreadable_entries(workflow, tmp_path, kind):
+    target = tmp_path / "repository"
+    target.mkdir()
+    (target / "source.ts").write_text("export const value = 1;\n", encoding="utf-8")
+    entry = target / "ignored-cache"
+    if kind == "directory":
+        entry.mkdir()
+        (entry / "cache.txt").write_text("Synthetic cache data.", encoding="utf-8")
+    else:
+        entry.write_text("Synthetic cache data.", encoding="utf-8")
+    first = workflow("source", repository=str(target), optional=True)
+    mode = entry.stat().st_mode
+    entry.chmod(0)
+    try:
+        with pytest.raises((PermissionError, SystemExit)):
+            workflow("source", repository=str(target))
+        assert workflow("source", repository=str(target), optional=True) == {"source": None}
+    finally:
+        entry.chmod(mode)
+    assert workflow("source", repository=str(target), optional=True) == first
+    with pytest.raises(FileNotFoundError):
+        workflow("source", repository=str(target / "missing"), optional=True)
+
+
+@pytest.mark.parametrize("metadata_name", [".git", ".svn"])
+def test_optional_evidence_snapshot_includes_source_metadata(workflow, tmp_path, metadata_name):
+    evidence = tmp_path / "evidence"
+    metadata = evidence / metadata_name
+    metadata.mkdir(parents=True)
+    (evidence / "proof.txt").write_text("Original proof.\n")
+    head = metadata / "HEAD"
+    head.write_text("Synthetic metadata.\n")
+    source = workflow("source", repository=str(evidence))
+    before = workflow("source", repository=str(evidence), evidence=True, optional=True)
+    head.write_text("Changed metadata.\n")
+    assert workflow("source", repository=str(evidence)) == source
+    assert workflow("source", repository=str(evidence), evidence=True, optional=True) != before
+    if hasattr(os, "mkfifo"):
+        pipe = metadata / "pipe"
+        os.mkfifo(pipe)
+        try:
+            assert workflow("source", repository=str(evidence), evidence=True, optional=True) == {
+                "source": None
+            }
+        finally:
+            pipe.unlink()
+
+
+def test_optional_evidence_snapshot_does_not_follow_directory_links(workflow, tmp_path):
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    source = outside / "proof.txt"
+    source.write_text("Outside contents.\n")
+    linked = evidence / "linked"
+    try:
+        linked.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        if os.name == "nt":
+            pytest.skip("Directory symlinks are unavailable on this Windows filesystem")
+        raise
+    before = workflow("source", repository=str(evidence), evidence=True, optional=True)
+    source.write_text("Changed outside contents.\n")
+    assert workflow("source", repository=str(evidence), evidence=True, optional=True) == before
+    evidence.rename(tmp_path / "original")
+    evidence.symlink_to(outside, target_is_directory=True)
+    assert workflow("source", repository=str(evidence), evidence=True, optional=True) == {
+        "source": None
+    }
+
+
+@pytest.mark.parametrize("kind", ["missing", "file", "unreadable"])
+def test_optional_evidence_snapshot_unavailable_roots(workflow, tmp_path, kind):
+    evidence = tmp_path / "evidence"
+    if kind == "file":
+        evidence.write_text("Not a directory.\n")
+    if kind == "unreadable":
+        if os.name == "nt" or getattr(os, "geteuid", lambda: 0)() == 0:
+            pytest.skip("Mode permissions require a non-root Unix user")
+        evidence.mkdir()
+        evidence.chmod(0)
+    try:
+        assert workflow("source", repository=str(evidence), evidence=True, optional=True) == {
+            "source": None
+        }
+        if kind == "missing":
+            with pytest.raises(FileNotFoundError):
+                workflow("source", repository=str(evidence), optional=True)
+    finally:
+        if kind == "unreadable":
+            evidence.chmod(0o700)

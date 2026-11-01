@@ -4,7 +4,7 @@ import { join } from 'node:path';
 export async function copyCompletedScan(destination: string): Promise<void> {
   await cp(new URL('./fixtures/completed-scan/', import.meta.url), destination, { recursive: true });
   for (const name of ['scan-manifest.json', 'findings.json', 'coverage.json']) {
-    await cp(new URL(`../../plugins/codex-security/examples/completed-scan/${name}`, import.meta.url), join(destination, name));
+    await cp(new URL(`../../plugins/codex-security/examples/legacy-completed-scan/${name}`, import.meta.url), join(destination, name));
   }
   const manifestPath = join(destination, 'scan-manifest.json');
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
