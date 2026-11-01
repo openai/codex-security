@@ -1,4 +1,5 @@
-import { readJson, writeJson } from "./support/json.ts";
+import { reducerAssignment } from "./support/reducer-assignment.ts";
+import { readJson, writeJson, writeJsonLine } from "./support/json.ts";
 import { sourceReferences } from "./support/source-references.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { finding, scanId, workerDraft } from "./scan-draft-fixture.ts";
@@ -56,13 +57,7 @@ const root = await temporaryDirectory("codex-security-deep-reducer-", true);
 try {
   await testRetainedFindingContent(root);
   const scanRoot = path.join(root, "scan");
-  const workersRoot = path.join(
-    scanRoot,
-    "artifacts",
-    "deep_discovery",
-    "workers",
-  );
-  const dedupRoot = path.join(scanRoot, "artifacts", "deep_discovery", "dedup");
+  const assignment = reducerAssignment(root, scanRoot);
 
   const shared = finding("shared", "src/shared.ts");
   const independent = finding("independent", "src/independent.ts");
@@ -92,38 +87,27 @@ try {
     ],
     openQuestions: ["Does the alternate upload handler use the guard?"],
   };
-  const first = await createWorker({
-    workersRoot,
-    label: "discovery-0001",
-    id: "worker-001",
-    result: workerDraft([shared], {
+  const first = await createWorker(
+    assignment.workerOutput("discovery-0001"),
+    "worker-001",
+    workerDraft([shared], {
       threatModel: { summary: "Requests may reach shared code." },
       reviewState: rejectedCoverage,
     }),
-  });
-  const second = await createWorker({
-    workersRoot,
-    label: "discovery-0002",
-    id: "worker-002",
-    result: workerDraft([shared, independent], {
+  );
+  const second = await createWorker(
+    assignment.workerOutput("discovery-0002"),
+    "worker-002",
+    workerDraft([shared, independent], {
       scope: { summary: "Shared and independent request handling." },
     }),
-  });
+  );
   const originalWorkerArtifacts = await Promise.all(
     [first, second].map((worker) => readFile(worker.resultPath, "utf8")),
   );
-  const outputRoot = path.join(dedupRoot, "dedup-0001", "output");
+  const outputRoot = assignment.reducerOutput("dedup-0001");
   await mkdir(outputRoot, { recursive: true });
-  const context = {
-    root: outputRoot,
-    repoRoot: root,
-    scanId,
-    layout: "reducer",
-    deepReducer: {
-      scanRoot,
-      claimedWorkers: [first, second],
-    },
-  };
+  const context = assignment.context(outputRoot, [first, second]);
 
   const inputs = await getCodexSecurityDeepReducerInputs(context);
   await assert.rejects(
@@ -234,19 +218,14 @@ try {
     ruleId: shared.ruleId,
     identity: shared.identity,
   };
-  const collisionWorker = await createWorker({
-    workersRoot,
-    label: "discovery-collision",
-    id: "worker-collision",
-    result: workerDraft([shared, collision]),
-  });
-  const collisionRoot = path.join(dedupRoot, "dedup-collision", "output");
+  const collisionWorker = await createWorker(
+    assignment.workerOutput("discovery-collision"),
+    "worker-collision",
+    workerDraft([shared, collision]),
+  );
+  const collisionRoot = assignment.reducerOutput("dedup-collision");
   await mkdir(collisionRoot, { recursive: true });
-  const collisionContext = {
-    ...context,
-    root: collisionRoot,
-    deepReducer: { scanRoot, claimedWorkers: [collisionWorker] },
-  };
+  const collisionContext = assignment.context(collisionRoot, [collisionWorker]);
   await assert.rejects(
     recordCodexSecurityDeepReduction(collisionContext, reduction([shared])),
     /ambiguous|unaccounted/,
@@ -303,25 +282,18 @@ try {
     { code: "ENOENT" },
   );
 
-  const third = await createWorker({
-    workersRoot,
-    label: "discovery-0003",
-    id: "worker-003",
-    result: workerDraft([shared]),
-  });
-  const nextOutputRoot = path.join(dedupRoot, "dedup-0002", "output");
+  const third = await createWorker(
+    assignment.workerOutput("discovery-0003"),
+    "worker-003",
+    workerDraft([shared]),
+  );
+  const nextOutputRoot = assignment.reducerOutput("dedup-0002");
   await mkdir(nextOutputRoot, { recursive: true });
-  const nextContext = {
-    root: nextOutputRoot,
-    repoRoot: root,
-    scanId,
-    layout: "reducer",
-    deepReducer: {
-      scanRoot,
-      claimedWorkers: [third],
-      previousReducerResultPath: path.join(outputRoot, "result.json"),
-    },
-  };
+  const nextContext = assignment.context(
+    nextOutputRoot,
+    [third],
+    path.join(outputRoot, "result.json"),
+  );
   const nextInputs = await getCodexSecurityDeepReducerInputs(nextContext);
   assert.deepEqual(nextInputs, {
     discoveries: [{ workerId: third.id, result: withSourceRefs(third) }],
@@ -452,7 +424,7 @@ console.log("artifact deep reducer tests passed");
 
 async function testRetainedFindingContent(root: string) {
   const scanRoot = path.join(root, "content");
-  const deepRoot = path.join(scanRoot, "artifacts", "deep_discovery");
+  const assignment = reducerAssignment(root, scanRoot);
   const original = {
     ...finding("retained", "src/handler.ts"),
     rootCause: { summary: "The response omits encoding of request input." },
@@ -461,21 +433,14 @@ async function testRetainedFindingContent(root: string) {
       description: "A crafted query is rendered as executable HTML.",
     },
   };
-  const worker = await createWorker({
-    workersRoot: path.join(deepRoot, "workers"),
-    label: "discovery-0001",
-    id: "worker-content",
-    result: workerDraft([original]),
-  });
-  const outputRoot = path.join(deepRoot, "dedup", "first", "output");
+  const worker = await createWorker(
+    assignment.workerOutput("discovery-0001"),
+    "worker-content",
+    workerDraft([original]),
+  );
+  const outputRoot = assignment.reducerOutput("first");
   await mkdir(outputRoot, { recursive: true });
-  const context = {
-    root: outputRoot,
-    repoRoot: root,
-    scanId,
-    layout: "reducer",
-    deepReducer: { scanRoot, claimedWorkers: [worker] },
-  };
+  const context = assignment.context(outputRoot, [worker]);
   const replacements = [
     { title: "X" },
     { summary: "X" },
@@ -505,23 +470,18 @@ async function testRetainedFindingContent(root: string) {
   accepted.findings[0].writeup.additionalProof =
     "A second response branch reaches the same vulnerable HTML sink.";
   await writeJson(path.join(outputRoot, "result.json"), accepted);
-  const empty = await createWorker({
-    workersRoot: path.join(deepRoot, "workers"),
-    label: "discovery-0002",
-    id: "worker-empty",
-    result: workerDraft([]),
-  });
-  const nextRoot = path.join(deepRoot, "dedup", "second", "output");
+  const empty = await createWorker(
+    assignment.workerOutput("discovery-0002"),
+    "worker-empty",
+    workerDraft([]),
+  );
+  const nextRoot = assignment.reducerOutput("second");
   await mkdir(nextRoot, { recursive: true });
-  const nextContext = {
-    ...context,
-    root: nextRoot,
-    deepReducer: {
-      scanRoot,
-      claimedWorkers: [empty],
-      previousReducerResultPath: path.join(outputRoot, "result.json"),
-    },
-  };
+  const nextContext = assignment.context(
+    nextRoot,
+    [empty],
+    path.join(outputRoot, "result.json"),
+  );
   await assert.rejects(
     recordCodexSecurityDeepReduction(
       nextContext,
@@ -546,13 +506,13 @@ async function testRetainedFindingContent(root: string) {
   );
   assert.deepEqual(
     (
-      await getCodexSecurityDeepReducerInputs({
-        ...nextContext,
-        deepReducer: {
-          ...nextContext.deepReducer,
-          previousReducerResultPath: path.join(nextRoot, "result.json"),
-        },
-      })
+      await getCodexSecurityDeepReducerInputs(
+        assignment.context(
+          nextRoot,
+          [empty],
+          path.join(nextRoot, "result.json"),
+        ),
+      )
     ).previous,
     accepted,
     "reopening the reduction retains substantive text and exact locations",
@@ -588,20 +548,15 @@ async function testRetainedFindingContent(root: string) {
       provenance: { ...original.provenance, sourceFindingIds: legacyRefs },
     };
     const previousReducerResultPath = path.join(
-      deepRoot,
+      scanRoot,
+      "artifacts",
+      "deep_discovery",
       "dedup",
       "legacy.json",
     );
     await writeJson(previousReducerResultPath, reduction([legacyFinding]));
     await recordCodexSecurityDeepReduction(
-      {
-        ...nextContext,
-        deepReducer: {
-          scanRoot,
-          claimedWorkers: [worker],
-          previousReducerResultPath,
-        },
-      },
+      assignment.context(nextRoot, [worker], previousReducerResultPath),
       reduction(
         [
           {
@@ -625,21 +580,14 @@ async function testRetainedFindingContent(root: string) {
   }
 }
 
-async function createWorker({
-  workersRoot,
-  label,
-  id,
-  result,
-}: {
-  workersRoot: string;
-  label: string;
-  id: string;
-  result: ReturnType<typeof workerDraft<Finding>>;
-}) {
-  const workerRoot = path.join(workersRoot, label, "output");
+async function createWorker(
+  workerRoot: string,
+  id: string,
+  result: ReturnType<typeof workerDraft<Finding>>,
+) {
   await mkdir(workerRoot, { recursive: true });
   const resultPath = path.join(workerRoot, "result.json");
-  await writeFile(resultPath, JSON.stringify(result) + "\n");
+  await writeJsonLine(resultPath, result);
   return { id, resultPath, result };
 }
 

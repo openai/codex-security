@@ -96,6 +96,19 @@ export type StoreInput<Method extends keyof DeepScanStore> = Parameters<
   DeepScanStore[Method]
 >[0];
 
+export function pausePoint() {
+  const entered = Promise.withResolvers<void>();
+  const released = Promise.withResolvers<void>();
+  return {
+    entered: entered.promise,
+    release: released.resolve,
+    pause() {
+      entered.resolve();
+      return released.promise;
+    },
+  };
+}
+
 export class FakeStore {
   run: DeepScanRunState;
   declare failProgressAt: number | undefined;
@@ -120,8 +133,7 @@ export class FakeStore {
   replacementCandidatesBeforeDedupRejection: string | undefined = undefined;
   dedupCommitResponseGate?: PromiseWithResolvers<void>;
   blockDiscoveryUpdate?: "failed" | "succeeded";
-  discoveryBlocked = Promise.withResolvers<void>();
-  discoveryGate = Promise.withResolvers<void>();
+  discoveryUpdate = pausePoint();
   dedupCommitted = Promise.withResolvers<void>();
   failNextTerminalGet = false;
   publicationFailureMessages: string[] = [];
@@ -153,8 +165,7 @@ export class FakeStore {
       update.kind === "discovery" &&
       update.status === this.blockDiscoveryUpdate
     ) {
-      this.discoveryBlocked.resolve();
-      await this.discoveryGate.promise;
+      await this.discoveryUpdate.pause();
       if (update.status === "succeeded" && this.run.status !== "running") {
         throw new Error(
           "Only a running Deep Scan can update orchestration state.",
@@ -755,10 +766,16 @@ type CoordinatorFinding = ReturnType<
   provenance: { sourceFindingIds?: string[] };
 };
 
-export function runCoordinator(...args: Parameters<typeof createCoordinator>) {
+export function startCoordinator(
+  ...args: Parameters<typeof createCoordinator>
+) {
   const coordinator = createCoordinator(...args);
   coordinator.start();
-  return coordinator.wait(undefined, 5_000);
+  return coordinator;
+}
+
+export function runCoordinator(...args: Parameters<typeof createCoordinator>) {
+  return startCoordinator(...args).wait(undefined, 5_000);
 }
 
 export function recordingClock(sleeps: number[]): DeepScanClock {

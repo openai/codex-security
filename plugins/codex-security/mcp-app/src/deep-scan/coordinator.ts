@@ -116,7 +116,6 @@ export class DeepScanCoordinator {
   private readonly cancellationReady = Promise.withResolvers<void>();
   private cancellationPersistence?: {
     promise: Promise<void>;
-    resolve: () => void;
     failure?: { error: unknown };
   };
   private started = false;
@@ -278,18 +277,12 @@ export class DeepScanCoordinator {
       this.state.status === "interrupted"
     )
       return await this.settled();
-    let resolve!: () => void;
-    let reject!: (error: unknown) => void;
-    const promise = new Promise<void>((resolvePromise, rejectPromise) => {
-      resolve = resolvePromise;
-      reject = rejectPromise;
-    });
+    const { promise, resolve, reject } = Promise.withResolvers<void>();
     // Cancellation callers share operation errors; terminal waiters inspect only
     // persistence failures below. Handle a rejection even with no joined caller.
     void promise.catch(() => {});
     const persistence: NonNullable<typeof this.cancellationPersistence> = {
       promise,
-      resolve,
     };
     this.cancellationPersistence = persistence;
     try {
@@ -336,7 +329,7 @@ export class DeepScanCoordinator {
     } finally {
       // Cleanup still inspects durable state and preserves results when the
       // process lost a committed response, then reports the persistence failure.
-      persistence.resolve();
+      resolve();
     }
     const settled = await this.settled();
     if (persistence.failure) throw persistence.failure.error;

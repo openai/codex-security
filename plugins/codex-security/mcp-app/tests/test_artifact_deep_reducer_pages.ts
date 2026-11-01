@@ -1,5 +1,10 @@
+import { reducerAssignment } from "./support/reducer-assignment.ts";
 import { readJson } from "./support/json.ts";
-import { workerDraft, finding as draftFinding } from "./scan-draft-fixture.ts";
+import {
+  scanId,
+  workerDraft,
+  finding as draftFinding,
+} from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import type { ArtifactContext } from "../src/artifact-io.js";
 import type {
@@ -46,34 +51,12 @@ assert.equal(
   false,
 );
 
-const scanId = "7fc17317-9594-49e0-b06a-d72fd7e14bba";
 const root = await temporaryDirectory("reducer-pages-", true);
 try {
-  const scanRoot = path.join(root, "scan");
-  const workerRoot = path.join(
-    scanRoot,
-    "artifacts",
-    "deep_discovery",
-    "workers",
-    "one",
-    "output",
-  );
-  const previousRoot = path.join(
-    scanRoot,
-    "artifacts",
-    "deep_discovery",
-    "dedup",
-    "previous",
-    "output",
-  );
-  const outputRoot = path.join(
-    scanRoot,
-    "artifacts",
-    "deep_discovery",
-    "dedup",
-    "current",
-    "output",
-  );
+  const assignment = reducerAssignment(root);
+  const workerRoot = assignment.workerOutput("one");
+  const previousRoot = assignment.reducerOutput("previous");
+  const outputRoot = assignment.reducerOutput("current");
   for (const directory of [workerRoot, previousRoot, outputRoot]) {
     await mkdir(directory, { recursive: true });
   }
@@ -122,17 +105,11 @@ try {
   const previousPath = path.join(previousRoot, "result.json");
   await writeFile(workerPath, JSON.stringify(worker));
   await writeFile(previousPath, JSON.stringify(previous));
-  const context = {
-    root: outputRoot,
-    repoRoot: root,
-    scanId,
-    layout: "reducer" as const,
-    deepReducer: {
-      scanRoot,
-      claimedWorkers: [{ id: "worker-one", resultPath: workerPath }],
-      previousReducerResultPath: previousPath,
-    },
-  };
+  const context = assignment.context(
+    outputRoot,
+    [{ id: "worker-one", resultPath: workerPath }],
+    previousPath,
+  );
 
   const full = await getCodexSecurityDeepReducerInputs(context);
   const projected = await readDocument(context);
@@ -157,26 +134,19 @@ try {
     ])
       assert.equal(field in entry.provenance, false);
   }
-  assert.deepEqual(
-    await readDocument(context, { findingRef: "source:worker-one:0" }),
-    full.discoveries[0].result.findings[0],
-  );
-  assert.deepEqual(
-    await readDocument(context, { findingRef: "source:original-worker:0" }),
-    original,
-  );
-  assert.deepEqual(
-    await readDocument(context, { findingRef: "previous:0" }),
-    canonical,
-  );
-  assert.deepEqual(
-    await readDocument(context, { findingRef: "source:previous:0" }),
-    legacyOriginal,
-  );
-  assert.deepEqual(
-    await readDocument(context, { findingRef: "source:previous:2" }),
-    noRefs,
-  );
+  for (const [findingRef, expected] of [
+    ["source:worker-one:0", full.discoveries[0].result.findings[0]],
+    ["source:original-worker:0", original],
+    ["previous:0", canonical],
+    ["source:previous:0", legacyOriginal],
+    ["source:previous:2", noRefs],
+  ] as const) {
+    assert.deepEqual(
+      await readDocument(context, { findingRef }),
+      expected,
+      findingRef,
+    );
+  }
 
   // Changing files cannot change the already-bound page stream or its references.
   await writeFile(workerPath, "unreadable replacement");

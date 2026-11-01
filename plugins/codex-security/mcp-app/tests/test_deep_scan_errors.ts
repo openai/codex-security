@@ -1,3 +1,4 @@
+import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { importModule } from "./import-module.ts";
@@ -13,21 +14,16 @@ const {
   ],
 });
 
-testOsErrorCodesRemainRetryable();
-testTextualMissingPathErrorsRemainRetryable();
-testWorkerErrorClassificationPreservesExplicitFailures();
-testUsageLimitClassification();
-
-function testOsErrorCodesRemainRetryable() {
+test(function testOsErrorCodesRemainRetryable() {
   for (const code of ["ENOENT", "EACCES", "ENOEXEC", "EPERM"]) {
     const original = Object.assign(new Error(`spawn codex ${code}`), { code });
     const classified = classifyCodexWorkerError(original);
     assert.equal(classified, original);
     assert.equal(classified.name, "Error");
   }
-}
+});
 
-function testTextualMissingPathErrorsRemainRetryable() {
+test(function testTextualMissingPathErrorsRemainRetryable() {
   for (const diagnostic of [
     "Error: No such file or directory (os error 2)",
     "Error: The system cannot find the file specified. (os error 2)",
@@ -38,9 +34,9 @@ function testTextualMissingPathErrorsRemainRetryable() {
     const classified = classifyCodexWorkerError(original);
     assert.equal(classified, original);
   }
-}
+});
 
-function testWorkerErrorClassificationPreservesExplicitFailures() {
+test(function testWorkerErrorClassificationPreservesExplicitFailures() {
   const explicit = new DeepScanNonRetryableError(
     "Explicitly rejected worker permission profile.",
   );
@@ -102,9 +98,9 @@ function testWorkerErrorClassificationPreservesExplicitFailures() {
     });
     assert.equal(classifyCodexWorkerError(original), original);
   }
-}
+});
 
-function testUsageLimitClassification() {
+test(function testUsageLimitClassification() {
   for (const message of [
     "Quota exceeded. Check your plan and billing details.",
     "Your workspace is out of credits. Add credits to continue.",
@@ -126,4 +122,4 @@ function testUsageLimitClassification() {
     assert.equal(error.name, "Error");
     assert.equal(error.message, message);
   }
-}
+});

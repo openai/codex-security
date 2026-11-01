@@ -8,6 +8,7 @@ import { importModule } from "./import-module.ts";
 import {
   DeepScanCoordinatorRegistry,
   FakeExecutor,
+  pausePoint,
   FakeStore,
   fixtureRun,
   immediateClock,
@@ -69,18 +70,14 @@ try {
       const registry = new DeepScanCoordinatorRegistry();
       const store = new FakeStore(fixture.run);
       const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
-      const entered = Promise.withResolvers<void>();
-      const release = Promise.withResolvers<void>();
+      const shutdown = pausePoint();
       const secondStarted = Promise.withResolvers<void>();
       const handlers: Promise<unknown>[] = [];
       const outcomes: unknown[] = [];
       const signals: AbortSignal[] = [];
       let claims = 0;
       let now = 0;
-      const hold = async () => {
-        entered.resolve();
-        await release.promise;
-      };
+      const hold = async () => await shutdown.pause();
       Object.assign(globalThis, {
         [fixtureKey]: {
           registry,
@@ -152,7 +149,7 @@ try {
       const requests = [invoke()];
       try {
         await Promise.race([
-          entered.promise,
+          shutdown.entered,
           requests[0].then(() =>
             assert.fail("Request settled before the held operation"),
           ),
@@ -163,7 +160,7 @@ try {
         }
         await client.close();
         assert.ok(signals.every((signal) => signal.aborted));
-        release.resolve();
+        shutdown.release();
         // Client rejection precedes handler completion when the transport closes.
         await Promise.allSettled(handlers);
         assert.equal(registry.get(fixture.run.scanId), undefined);
@@ -197,7 +194,7 @@ try {
           );
         }
       } finally {
-        release.resolve();
+        shutdown.release();
         await client.close();
         await Promise.allSettled([...handlers, ...requests]);
         const coordinator = registry.get(fixture.run.scanId);

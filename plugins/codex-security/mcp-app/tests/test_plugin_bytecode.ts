@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
 import test from "node:test";
-import { assertNoError } from "./assertions.ts";
 import { startRpcServer } from "./support/rpc-server.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
@@ -59,19 +58,15 @@ test("repeated MCP launches leave the installed plugin unchanged", async (t) => 
       },
     });
     try {
-      assertNoError(await server.initialize("plugin-bytecode-test"));
-      assertNoError(
-        await server.callTool(2, {
-          name: "inspect_codex_security_target",
-          arguments: { targetPath: target },
-        }),
-      );
-      assertNoError(
-        await server.callTool(3, {
-          name: "list_codex_security_scans",
-          arguments: {},
-        }),
-      );
+      await server.initialize("plugin-bytecode-test");
+      await server.callSuccessfulTool(2, {
+        name: "inspect_codex_security_target",
+        arguments: { targetPath: target },
+      });
+      await server.callSuccessfulTool(3, {
+        name: "list_codex_security_scans",
+        arguments: {},
+      });
     } finally {
       await server.stop();
     }

@@ -1,44 +1,22 @@
+import {
+  CodexSdkWorkerExecutor,
+  fakeCodexFixture,
+  workerRequest,
+  assertReadOnlyWorkerPolicy,
+  assertWorkerSubagentPolicy,
+} from "./deep_scan_executor_fixture.ts";
+import { restoreEnv } from "./support/fake-codex-source.ts";
 import assert from "node:assert/strict";
 import childProcess, { type SpawnOptions } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { stringify as stringifyToml } from "smol-toml";
-import type { CodexSdkWorkerExecutor as Executor } from "../src/deep-scan/executor.js";
-import type { DeepWorkerParentSandbox } from "../src/deep-scan/parent-sandbox.js";
-import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
-import { assertFlagPair } from "./assertions.ts";
+import { trustedParentSandbox as parentSandbox } from "./support/fake-codex-fixture.ts";
+import { assertFlagPair, assertConfigOverrides } from "./assertions.ts";
 import { readJson } from "./support/json.ts";
 
-export async function testWorkerCyberAccessSettings({
-  CodexSdkWorkerExecutor,
-  fakeCodexFixture,
-  parentSandbox,
-  workerRequest,
-  assertConfigOverrides,
-  assertReadOnlyWorkerPolicy,
-  assertWorkerSubagentPolicy,
-  restoreEnv,
-}: {
-  CodexSdkWorkerExecutor: typeof Executor;
-  fakeCodexFixture: () => Promise<{ root: string; executablePath: string }>;
-  parentSandbox: DeepWorkerParentSandbox;
-  workerRequest: (
-    promptPath: string,
-    workingDirectory: string,
-    options: Partial<CodexWorkerRequest>,
-  ) => CodexWorkerRequest;
-  assertConfigOverrides: (
-    args: readonly string[],
-    values: Record<string, string | number | boolean | undefined>,
-  ) => void;
-  assertReadOnlyWorkerPolicy: (args: readonly string[]) => void;
-  assertWorkerSubagentPolicy: (
-    args: readonly string[],
-    subagents: number,
-  ) => void;
-  restoreEnv: (name: string, value: string | undefined) => void;
-}) {
+export async function testWorkerCyberAccessSettings() {
   const cases: {
     name: string;
     configuration?: string;

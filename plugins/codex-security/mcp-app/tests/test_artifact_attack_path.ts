@@ -1,3 +1,4 @@
+import { after, test } from "node:test";
 import { jsonLines, readJson, readJsonLines } from "./support/json.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import type { RawDiscoveryCandidate } from "../src/artifact-discovery.js";
@@ -17,20 +18,9 @@ const {
 const scanId = "11111111-1111-4111-8111-111111111111";
 const temporaryDirectories = createTemporaryDirectories(true);
 
-try {
-  await testSchemaMatchesDocumentedAttackPathDecisions();
-  await testEligibleRowsKeepDiscoveryValidationAndOrder();
-  await testUnknownAndDuplicateCandidatesDoNotChangeLedger();
-  await testMissingEligibleCandidateDoesNotChangeLedger();
-  await testIneligibleCandidatesDoNotChangeLedger();
-  await testDuplicateStoredCandidatesDoNotChangeLedger();
-  await testMalformedLedgerIsNotReplaced();
-  await testEmptyLedgerAcceptsAnEmptyBatch();
-} finally {
-  await temporaryDirectories.cleanup();
-}
+after(() => temporaryDirectories.cleanup());
 
-async function testSchemaMatchesDocumentedAttackPathDecisions() {
+test(async function testSchemaMatchesDocumentedAttackPathDecisions() {
   const schema = await readJson(
     import.meta.dirname,
     "../../schemas/tools/candidate-attack-paths.schema.json",
@@ -86,9 +76,9 @@ async function testSchemaMatchesDocumentedAttackPathDecisions() {
     }).success,
     false,
   );
-}
+});
 
-async function testEligibleRowsKeepDiscoveryValidationAndOrder() {
+test(async function testEligibleRowsKeepDiscoveryValidationAndOrder() {
   const fixture = await createFixture("eligible candidates", [
     candidate("candidate-reportable", "reportable"),
     candidate("candidate-suppressed", "suppressed"),
@@ -123,9 +113,9 @@ async function testEligibleRowsKeepDiscoveryValidationAndOrder() {
     fixture.originalRows[3],
   ]);
   assert.deepEqual(Object.keys(result), ["kind", "operation", "rowsWritten"]);
-}
+});
 
-async function testUnknownAndDuplicateCandidatesDoNotChangeLedger() {
+test(async function testUnknownAndDuplicateCandidatesDoNotChangeLedger() {
   const fixture = await createFixture("unknown and duplicate", [
     candidate("candidate-1", "reportable"),
   ]);
@@ -150,9 +140,9 @@ async function testUnknownAndDuplicateCandidatesDoNotChangeLedger() {
     /repeats candidate candidate-1/,
   );
   await assertUnchanged(fixture);
-}
+});
 
-async function testMissingEligibleCandidateDoesNotChangeLedger() {
+test(async function testMissingEligibleCandidateDoesNotChangeLedger() {
   const fixture = await createFixture("missing eligible candidate", [
     candidate("candidate-reportable", "reportable"),
     candidate("candidate-deferred", "deferred"),
@@ -170,9 +160,9 @@ async function testMissingEligibleCandidateDoesNotChangeLedger() {
     /missing candidate-deferred/,
   );
   await assertUnchanged(fixture);
-}
+});
 
-async function testIneligibleCandidatesDoNotChangeLedger() {
+test(async function testIneligibleCandidatesDoNotChangeLedger() {
   const fixture = await createFixture("ineligible candidates", [
     candidate("candidate-suppressed", "suppressed"),
     candidate("candidate-not-applicable", "not_applicable"),
@@ -190,9 +180,9 @@ async function testIneligibleCandidatesDoNotChangeLedger() {
     );
     await assertUnchanged(fixture);
   }
-}
+});
 
-async function testDuplicateStoredCandidatesDoNotChangeLedger() {
+test(async function testDuplicateStoredCandidatesDoNotChangeLedger() {
   const fixture = await createFixture("duplicate ledger rows", [
     candidate("candidate-1", "reportable"),
     candidate("candidate-1", "deferred"),
@@ -205,9 +195,9 @@ async function testDuplicateStoredCandidatesDoNotChangeLedger() {
     /ledger repeats candidate candidate-1/,
   );
   await assertUnchanged(fixture);
-}
+});
 
-async function testMalformedLedgerIsNotReplaced() {
+test(async function testMalformedLedgerIsNotReplaced() {
   const fixture = await createFixture("malformed ledger", []);
   const malformed = "{not valid JSON}\n";
   await writeFile(fixture.ledgerPath, malformed, "utf8");
@@ -218,9 +208,9 @@ async function testMalformedLedgerIsNotReplaced() {
     }),
   );
   assert.equal(await readFile(fixture.ledgerPath, "utf8"), malformed);
-}
+});
 
-async function testEmptyLedgerAcceptsAnEmptyBatch() {
+test(async function testEmptyLedgerAcceptsAnEmptyBatch() {
   const fixture = await createFixture("no candidates", []);
 
   assert.deepEqual(
@@ -243,7 +233,7 @@ async function testEmptyLedgerAcceptsAnEmptyBatch() {
     /scan-bound artifact context/,
   );
   assert.equal(await readFile(fixture.ledgerPath, "utf8"), "");
-}
+});
 
 async function createFixture(
   label: string,
