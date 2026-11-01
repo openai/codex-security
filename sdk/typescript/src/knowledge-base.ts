@@ -322,22 +322,28 @@ function extractDocx(path: string, bytes: Uint8Array): string {
     }[] = [];
     const stories: { text: string[]; fields: typeof fields }[] = [];
     const parser = new SaxesParser();
+    const positions = new Set(["align", "posOffset"]);
+    const drawingLayout = new Map([
+      [
+        "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+        positions,
+      ],
+      ["http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing", positions],
+      [
+        "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing",
+        new Set(["pctPosHOffset", "pctPosVOffset", "pctWidth", "pctHeight"]),
+      ],
+    ]);
+    const declarations = new Map<string, (Set<string> | undefined)[]>();
+    const layout: boolean[] = [];
     let documentElement = false;
     let deletedDepth = 0;
-    let runTextDepth = 0;
     let instructionText = false;
-    // Word repeats modern text boxes in later mc:Choice or mc:Fallback
-    // elements. Keep only the first representation that produces text.
-    const alternates: { choice: boolean; text: boolean; skip: boolean }[] = [];
     const append = (value: string) => {
       if (deletedDepth > 0) return;
       const field = fields.at(-1);
-      if (field === undefined) {
-        text.push(value);
-        if (value.trim())
-          for (const alternate of alternates)
-            if (alternate.choice) alternate.text = true;
-      } else if (!field.instructions) field.result.push(value);
+      if (field === undefined) text.push(value);
+      else if (!field.instructions) field.result.push(value);
       else if (!instructionText) field.literal.push(value);
     };
     const finishField = (closed: boolean) => {
@@ -347,21 +353,19 @@ function extractDocx(path: string, bytes: Uint8Array): string {
         append((closed ? "" : field.literal.join("")) + field.result.join(""));
       }
     };
+    parser.on("attribute", ({ name, value }) => {
+      if (name !== "xmlns" && !name.startsWith("xmlns:")) return;
+      const bindings = declarations.get(name) ?? [];
+      bindings.push(drawingLayout.get(decodeXml(value)));
+      declarations.set(name, bindings);
+    });
     parser.on("opentag", ({ name, attributes }) => {
-      const localName = name.split(":").at(-1);
-      const alternate = alternates.at(-1);
-      if (localName === "AlternateContent")
-        alternates.push({ choice: false, text: false, skip: false });
-      else if (
-        (localName === "Choice" || localName === "Fallback") &&
-        alternate
-      ) {
-        if (alternate.text) {
-          alternate.skip = true;
-          deletedDepth++;
-        } else if (localName === "Choice") alternate.choice = true;
-      }
-      if (localName === "t" || localName === "instrText") runTextDepth++;
+      const colon = name.indexOf(":");
+      const declaration = colon < 0 ? "xmlns" : "xmlns:" + name.slice(0, colon);
+      const localName = name.split(":").at(-1)!;
+      layout.push(
+        declarations.get(declaration)?.at(-1)?.has(localName) ?? false,
+      );
       if (
         localName === "del" ||
         localName === "delText" ||
@@ -391,7 +395,14 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       } else if (localName === "br" || localName === "cr") append("\n");
       else if (localName === "tab") append("\t");
     });
-    parser.on("closetag", ({ name, isSelfClosing }) => {
+    parser.on("closetag", ({ name, attributes, isSelfClosing }) => {
+      layout.pop();
+      for (const key of Object.keys(attributes)) {
+        const bindings = declarations.get(key);
+        if (!bindings) continue;
+        bindings.pop();
+        if (!bindings.length) declarations.delete(key);
+      }
       const localName = name.split(":").at(-1);
       if (deletedDepth === 0 && localName === "txbxContent") {
         while (fields.length > 0) finishField(false);
@@ -408,22 +419,15 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       ) {
         deletedDepth--;
       }
-      if (localName === "t" || localName === "instrText") runTextDepth--;
-      const alternate = alternates.at(-1);
-      if ((localName === "Choice" || localName === "Fallback") && alternate) {
-        if (alternate.skip) {
-          alternate.skip = false;
-          deletedDepth--;
-        } else alternate.choice = false;
-      } else if (localName === "AlternateContent") alternates.pop();
     });
-    // Other character data, such as drawing positions, is layout metadata.
-    parser.on("text", (value) => {
-      if (runTextDepth > 0) append(decodeXml(value));
-    });
-    parser.on("cdata", (value) => {
-      if (runTextDepth > 0) append(value.replaceAll("&amp;", "&"));
-    });
+    // Word stores drawing positions and relative sizes as character data.
+    const appendCharacters = (value: string) => {
+      if (!layout.at(-1)) append(value);
+    };
+    parser.on("text", (value) => appendCharacters(decodeXml(value)));
+    parser.on("cdata", (value) =>
+      appendCharacters(value.replaceAll("&amp;", "&")),
+    );
     // Keep the existing entity decoder's handling of unusable references.
     // CDATA is literal text, so only undo this escaping in its handler.
     parser.write(xml.replaceAll("&", "&amp;")).close();

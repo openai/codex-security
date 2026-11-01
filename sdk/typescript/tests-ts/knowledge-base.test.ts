@@ -643,47 +643,17 @@ describe("scan knowledge bases", () => {
       "Visible scope\n",
     ],
     [
-      "a text box repeated in its compatibility fallback",
-      '<w:p><w:r><w:t>Before </w:t></w:r><w:r><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">' +
-        '<mc:Choice Requires="wps"><w:drawing><wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">' +
-        '<wp:positionH relativeFrom="column"><wp:align>center</wp:align></wp:positionH>' +
-        '<wp:positionV relativeFrom="paragraph"><wp:posOffset>12700</wp:posOffset></wp:positionV>' +
-        '<wps:txbx xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:txbxContent>' +
-        "<w:p><w:r><w:t>Admin tokens rotate daily.</w:t></w:r></w:p>" +
-        "</w:txbxContent></wps:txbx></wp:anchor></w:drawing></mc:Choice>" +
-        '<mc:Fallback><w:pict><v:textbox xmlns:v="urn:schemas-microsoft-com:vml"><w:txbxContent>' +
-        "<w:p><w:r><w:t>Admin tokens rotate daily.</w:t></w:r></w:p>" +
-        "</w:txbxContent></v:textbox></w:pict></mc:Fallback></mc:AlternateContent></w:r>" +
-        "<w:r><w:t>after.</w:t></w:r></w:p>",
-      "Before Admin tokens rotate daily.\nafter.\n",
-    ],
-    [
-      "fallback text when the preferred choice has none",
-      '<w:p><w:r><w:t>Before </w:t></w:r><w:r><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">' +
-        '<mc:Choice Requires="w14"><w:drawing/></mc:Choice>' +
-        '<mc:Fallback><w:pict><v:textbox xmlns:v="urn:schemas-microsoft-com:vml"><w:txbxContent>' +
-        "<w:p><w:r><w:t>Admin tokens rotate daily.</w:t></w:r></w:p>" +
-        "</w:txbxContent></v:textbox></w:pict></mc:Fallback></mc:AlternateContent></w:r>" +
-        "<w:r><w:t>after.</w:t></w:r></w:p>",
-      "Before Admin tokens rotate daily.\nafter.\n",
-    ],
-    [
-      "a text box repeated in a later compatibility choice",
-      '<w:p><w:r><w:t>Before </w:t></w:r><w:r><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">' +
-        '<mc:Choice Requires="wps"><w:txbxContent><w:p><w:r><w:t>Admin tokens rotate daily.</w:t></w:r></w:p></w:txbxContent></mc:Choice>' +
-        '<mc:Choice Requires="w14"><w:txbxContent><w:p><w:r><w:t>Admin tokens rotate daily.</w:t></w:r></w:p></w:txbxContent></mc:Choice>' +
-        "<mc:Fallback><w:txbxContent><w:p><w:r><w:t>Admin tokens rotate daily.</w:t></w:r></w:p></w:txbxContent></mc:Fallback>" +
-        "</mc:AlternateContent></w:r><w:r><w:t>after.</w:t></w:r></w:p>",
-      "Before Admin tokens rotate daily.\nafter.\n",
-    ],
-    [
-      "fallback text when the preferred choice has only field instructions",
-      '<w:p><w:r><w:t>Before </w:t></w:r><w:r><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">' +
-        '<mc:Choice Requires="wps"><w:txbxContent><w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
-        '<w:r><w:instrText>PAGE</w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:txbxContent></mc:Choice>' +
-        "<mc:Fallback><w:txbxContent><w:p><w:r><w:t>Admin tokens rotate daily.</w:t></w:r></w:p></w:txbxContent></mc:Fallback>" +
-        "</mc:AlternateContent></w:r><w:r><w:t>after.</w:t></w:r></w:p>",
-      "Before \nAdmin tokens rotate daily.\nafter.\n",
+      "drawing placement and relative dimensions around visible text",
+      '<w:p xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><w:r><w:t>Before </w:t>' +
+        '<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">' +
+        '<mc:Choice Requires="wps"><w:drawing><d:anchor><d:positionH relativeFrom="column"><d:align>center</d:align></d:positionH>' +
+        '<d:positionV relativeFrom="paragraph"><d:posOffset><![CDATA[12700]]></d:posOffset></d:positionV>' +
+        "<wps:txbx><w:txbxContent><w:p><w:r><w:t>Rule 12700.</w:t></w:r></w:p></w:txbxContent></wps:txbx>" +
+        '<sizeRelH xmlns="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"><pctWidth>75000</pctWidth></sizeRelH>' +
+        '</d:anchor></w:drawing></mc:Choice><mc:Fallback><w:pict><v:textbox xmlns:v="urn:schemas-microsoft-com:vml">' +
+        '<div xmlns:d="http://www.w3.org/1999/xhtml">Rule <d:b>12700.</d:b></div></v:textbox></w:pict></mc:Fallback></mc:AlternateContent>' +
+        "<w:t> After.</w:t></w:r></w:p>",
+      "Before Rule 12700.\nRule 12700. After.\n",
     ],
   ])("preserves DOCX text with %s", async (_description, body, expected) => {
     const root = await temporaryDirectory();
