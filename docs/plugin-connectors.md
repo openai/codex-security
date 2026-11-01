@@ -14,7 +14,7 @@ Finding tracking and CLI publication share issue associations when they use the 
 
 Connect the **Atlassian** app in the app directory. Existing Atlassian Rovo (Legacy) connections do not connect the new app; authorize it separately with the intended account and site.
 
-Intake and duplicate checks need read and search access. Creating or updating issues also needs write access. Before creating an issue, the tracking skill resolves the project, issue type, and required fields.
+For user-selected Jira CLI or Linear MCP reads, see the [ticket intake guide](../plugins/codex-security/skills/triage-finding/references/ticket-intake.md#retrieval). Intake and duplicate checks need read and search access. Creating or updating issues also needs write access. Before creating an issue, the tracking skill resolves the project, issue type, and required fields.
 
 Use the app's live schemas and discover deferred operations when needed. See Atlassian's [supported tools](https://developer.atlassian.com/cloud/rovo-mcp/guides/supported-tools/) and the skill's [Jira workflow](../plugins/codex-security/skills/track-findings/references/jira.md).
 
@@ -22,7 +22,7 @@ Use the app's live schemas and discover deferred operations when needed. See Atl
 
 Test the plugin build with synthetic findings in a selected QA project:
 
-- Verify that Jira calls use the new Atlassian app and the selected account and site.
+- Verify that Jira tracking uses the Atlassian app and that intake reads use the selected connection and account on the intended site or workspace.
 - Read a synthetic issue directly and through project-scoped JQL, including pagination.
 - Create one issue, reuse it without creating a duplicate, and update approved fields. Verify each write by reading the issue back.
 - Verify that missing connections and insufficient access produce recovery guidance without duplicate creates.

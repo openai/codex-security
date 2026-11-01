@@ -22,6 +22,8 @@ assert.match(
 );
 assert.match(ticketIntake, /natural-language search[\s\S]*discover[\s\S]*JQL/);
 assert.match(ticketIntake, /exhaust[\s\S]*pag(?:es|ination)/i);
+assert.match(ticketIntake, /workitem search .*--fields "\$fields" --paginate/);
+assert.match(ticketIntake, /workitem view .*--fields "\$fields"/);
 assert.match(ticketIntake, /missing connector|connector.*unavailable/i);
 assert.match(ticketIntake, /authentication|reauthorize/i);
 assert.match(ticketIntake, /insufficient permission|request access/i);
