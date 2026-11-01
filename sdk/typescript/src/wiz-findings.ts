@@ -4,7 +4,8 @@ import {
   validateExternalEvidence,
   type ExternalImportTarget,
 } from "./external-import-contract.js";
-import { parseJsonOrJsonl, readScannerText } from "./scanner-import.js";
+import { asRecord } from "./record.js";
+import { parseJsonOrJsonl, readScannerText, text } from "./scanner-import.js";
 import { isGitHubCloudHost } from "./git-remote.js";
 import { readWizCsv, wizCsvFinding, wizCsvRepositoryUrl } from "./wiz-csv.js";
 import type {
@@ -17,16 +18,6 @@ export type {
   ExternalFinding as VendorFinding,
   ExternalFindings as VendorFindings,
 } from "./external-findings.js";
-
-function object(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function text(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value : null;
-}
 
 function sourceFindingId(value: unknown, target: ExternalImportTarget): string {
   const id = text(value);
@@ -59,8 +50,8 @@ function wizFinding(
   const severity = (
     text(record["vendorSeverity"]) ?? text(record["severity"])
   )?.toLowerCase();
-  const asset = object(record["vulnerableAsset"]);
-  const artifact = object(record["artifactType"]);
+  const asset = asRecord(record["vulnerableAsset"]);
+  const artifact = asRecord(record["artifactType"]);
   if (!name || !packageName || !text(asset?.["id"])) {
     throw new Error(
       "Expected a Wiz package vulnerability finding with name, detailedName, and vulnerableAsset.id. Other finding classes need a separate mapping.",
@@ -239,21 +230,21 @@ function repositoryFinding(
   target: ExternalImportTarget = "cloud",
 ): VendorFinding {
   const id = sourceFindingId(record["id"], target);
-  const resource = object(record["resource"]);
+  const resource = asRecord(record["resource"]);
   if (kind === "secret" && resource?.["type"] !== "REPOSITORY_BRANCH")
     throw new Error(
       "Only repository-branch secret findings can be published to a repository. Workload secrets require a resource-scoped import and are not supported.",
     );
   const suppliedRepository =
     kind === "secret"
-      ? object(object(resource?.["typedProperties"])?.["repository"])
-      : object(record["repository"]);
+      ? asRecord(asRecord(resource?.["typedProperties"])?.["repository"])
+      : asRecord(record["repository"]);
   const repository = sourceRepository(suppliedRepository, repositories);
   const branch =
     kind === "secret"
       ? resource
-      : object(record[kind === "sast" ? "repositoryBranch" : "branch"]);
-  const rule = object(record["rule"]);
+      : asRecord(record[kind === "sast" ? "repositoryBranch" : "branch"]);
+  const rule = asRecord(record["rule"]);
   const path = text(record[kind === "secret" ? "path" : "filePath"]);
   const line = record[kind === "secret" ? "lineNumber" : "startLine"];
   const details = {
@@ -262,7 +253,9 @@ function repositoryFinding(
     source_status: text(record["status"]),
     scanner_origin: kind === "sast" ? text(record["origin"]) : null,
     scanner_verdict:
-      kind === "sast" ? text(object(record["aiAnalysis"])?.["verdict"]) : null,
+      kind === "sast"
+        ? text(asRecord(record["aiAnalysis"])?.["verdict"])
+        : null,
     rule: rule
       ? {
           id: text(rule["id"]),
@@ -272,7 +265,7 @@ function repositoryFinding(
       : null,
     weakness_ids:
       kind === "sast" && Array.isArray(record["weaknesses"])
-        ? record["weaknesses"].map((weakness) => object(weakness)?.["id"])
+        ? record["weaknesses"].map((weakness) => asRecord(weakness)?.["id"])
         : [],
     remediation_instructions:
       text(record["remediationInstructions"]) ??
@@ -295,7 +288,7 @@ function repositoryFinding(
             is_encrypted: record["isEncrypted"] ?? null,
             is_managed: record["isManaged"] ?? null,
             introduced_commit: text(
-              object(record["vcsDetails"])?.["initialCommitHash"],
+              asRecord(record["vcsDetails"])?.["initialCommitHash"],
             ),
           }
         : null,
@@ -343,14 +336,14 @@ function records(payload: unknown): FindingInput {
   const legacyRepositories: FindingInput["repositories"] = new Map();
   if (Array.isArray(payload))
     return { records: payload.map((value) => ({ value })), repositories };
-  const envelope = object(payload);
+  const envelope = asRecord(payload);
   if (!envelope)
     throw new Error(
       "Expected finding objects or a named Wiz finding collection.",
     );
   if (
-    object(envelope["scannersRunStatuses"]) &&
-    object(envelope["codeAnalyzerDetails"])
+    asRecord(envelope["scannersRunStatuses"]) &&
+    asRecord(envelope["codeAnalyzerDetails"])
   )
     throw new Error(
       "This is a Wiz Code & Build Scan event, which contains scan metadata rather than vulnerability records. In Vulnerability Findings, filter the repository and selection, then choose Save as → Report with JSON format and Detailed columns. Download that report instead of Raw Event.",
@@ -364,16 +357,16 @@ function records(payload: unknown): FindingInput {
     envelope["id"] !== undefined
   )
     return { records: [{ value: envelope }], repositories };
-  const data = object(envelope["data"]) ?? envelope;
-  const inventory = object(data["versionControlResources"]);
-  if (object(inventory?.["pageInfo"])?.["hasNextPage"] === true)
+  const data = asRecord(envelope["data"]) ?? envelope;
+  const inventory = asRecord(data["versionControlResources"]);
+  if (asRecord(inventory?.["pageInfo"])?.["hasNextPage"] === true)
     throw new Error(
       "Wiz repository inventory has another page. Finish the selected inventory before publishing.",
     );
   if (Array.isArray(inventory?.["nodes"])) {
     const entries = inventory["nodes"].flatMap((entry) => {
-      const node = object(entry);
-      const repository = object(node?.["repository"]);
+      const node = asRecord(entry);
+      const repository = asRecord(node?.["repository"]);
       const id = text(repository?.["id"]);
       const url = text(repository?.["url"]);
       return id && url
@@ -436,12 +429,12 @@ function records(payload: unknown): FindingInput {
   const selected: InputRecord[] = [];
   let found = false;
   for (const [root, kind] of Object.entries(collections)) {
-    const collection = object(data[root]);
+    const collection = asRecord(data[root]);
     if (!collection) continue;
     found = true;
     if (!Array.isArray(collection["nodes"]))
       throw new Error(`Wiz ${root}.nodes must be an array.`);
-    if (object(collection["pageInfo"])?.["hasNextPage"] === true)
+    if (asRecord(collection["pageInfo"])?.["hasNextPage"] === true)
       throw new Error(
         "Wiz response has another page. Complete the requested pages or save the explicitly selected records in their named collection before publishing.",
       );
@@ -465,7 +458,7 @@ export function wizFindingRepository(
 ): ExternalSourceRepository | undefined {
   const csvUrl = wizCsvRepositoryUrl(evidence);
   if (csvUrl) return { url: csvUrl, platform: "github" };
-  const asset = object(evidence.source_data?.["vulnerableAsset"]);
+  const asset = asRecord(evidence.source_data?.["vulnerableAsset"]);
   if (!asset || typeof asset["cloudProviderURL"] !== "string") return;
   const url = URL.parse(asset["cloudProviderURL"]);
   if (!url) return;
@@ -604,7 +597,7 @@ function normalizeFindings(
   };
   const identities = new Set<string>();
   for (const [index, item] of input.records.entries()) {
-    const record = object(item.value);
+    const record = asRecord(item.value);
     try {
       if (!record) throw new Error("Finding must be an object.");
       let finding: VendorFinding;
@@ -646,9 +639,9 @@ function normalizeFindings(
       } else {
         if (
           !item.kind &&
-          (object(record["repository"]) ||
-            object(record["repositoryBranch"]) ||
-            object(record["resource"]))
+          (asRecord(record["repository"]) ||
+            asRecord(record["repositoryBranch"]) ||
+            asRecord(record["resource"]))
         )
           throw new Error(
             "Raw SAST, secret, and IaC records require their named sastFindings, secretInstances, or iacFindings collection. Bare arrays do not identify the finding family; use normalized JSONL for an explicit mapping.",
