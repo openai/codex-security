@@ -10,12 +10,8 @@ import {
 import { loadContractWithScanDirectory } from "./contract.js";
 import { CodexSecurityError } from "./errors.js";
 import type { Finding } from "./models.js";
-import {
-  bundledPluginRoot,
-  codexSecurityStateDirectory,
-  resolvePluginPython,
-  runWorkbench,
-} from "./runtime.js";
+import { bundledPluginRoot } from "./runtime.js";
+import { savedScanWorkbench } from "./saved-scan-bootstrap.js";
 import {
   resolveCompletedScan,
   type SavedScanDependencies,
@@ -53,28 +49,19 @@ export async function classifyScanSeverityInternal(
   options.signal?.throwIfAborted();
   const environment = options.environment ?? process.env;
   const pluginRoot = await bundledPluginRoot();
+  const currentDirectory = dependencies.currentDirectory?.() ?? process.cwd();
+  const bootstrap = dependencies.runWorkbench
+    ? undefined
+    : await savedScanWorkbench(scanId, {
+        environment,
+        pluginRoot,
+        currentDirectory,
+        signal: options.signal,
+      });
   const scan = await resolveCompletedScan(scanId, {
-    currentDirectory: dependencies.currentDirectory ?? (() => process.cwd()),
-    runWorkbench:
-      dependencies.runWorkbench ??
-      (async (args) => {
-        const stateEnvironment = {
-          ...environment,
-          CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(environment),
-        };
-        return runWorkbench(
-          {
-            environment: stateEnvironment,
-            pluginRoot,
-            python: await resolvePluginPython({
-              environment: stateEnvironment,
-            }),
-            signal: options.signal,
-            failureMessage: "Could not read Codex Security scan history",
-          },
-          args,
-        );
-      }),
+    currentDirectory: () => currentDirectory,
+    runWorkbench: (args, input) =>
+      (dependencies.runWorkbench ?? bootstrap!)(args, input, options.signal),
   });
   if (
     options.expectedScanId !== undefined &&
@@ -86,6 +73,7 @@ export async function classifyScanSeverityInternal(
     scan.scanDir,
     { ...options, expectedScanId: scan.scanId },
     surface,
+    bootstrap?.protectedRoots,
   );
 }
 
@@ -102,6 +90,7 @@ export async function classifyScanDirectorySeverityInternal(
   requestedDirectory: string,
   options: ClassifyScanSeverityOptions = {},
   surface: "sdk" | "cli" = "sdk",
+  protectedRoots: readonly string[] = [],
 ): Promise<ScanSeverityClassification> {
   const { contract, scanDirectory } = await loadContractWithScanDirectory(
     requestedDirectory,
@@ -119,6 +108,7 @@ export async function classifyScanDirectorySeverityInternal(
     options.environment ?? process.env,
     scanDirectory,
     options.signal,
+    protectedRoots,
   );
   const result: ScanSeverityClassification = {
     ...(await classifySeverityInternal(

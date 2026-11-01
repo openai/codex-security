@@ -1,9 +1,10 @@
-import { describe, expect, test } from "bun:test";
+import { once } from "node:events";
+import { describe, expect, test, mock } from "bun:test";
 import {
-  DeepScanProgressTracker,
+  ScanProgressTracker,
   deepScanProgressFromWorkbench,
   type DeepScanProgress,
-} from "../src/deep-progress.js";
+} from "../src/scan-progress.js";
 
 function workbenchResult(
   independentReviews?: Record<string, unknown>,
@@ -28,7 +29,7 @@ describe("Deep Scan progress", () => {
           consolidating: false,
         }),
       ),
-    ).toEqual({ completed: 34, active: 2, maximum: 40 });
+    ).toEqual({ completed: 34, active: 2, maximum: 40, consolidating: false });
   });
 
   test("waits for the Deep Scan coordinator to create independent-review state", () => {
@@ -39,6 +40,8 @@ describe("Deep Scan progress", () => {
     { completed: -1, active: 0, maximum: 40 },
     { completed: 0, active: 0, maximum: 0 },
     { completed: 0, active: "two", maximum: 40 },
+    { completed: 2, active: 0, maximum: 40, consolidating: "false" },
+    { completed: 2, active: 0, maximum: 40, consolidating: null },
   ])("rejects invalid workbench progress %#", (independentReviews) => {
     expect(() =>
       deepScanProgressFromWorkbench(workbenchResult(independentReviews)),
@@ -53,13 +56,12 @@ describe("Deep Scan progress", () => {
       workbenchResult({ completed: 1, active: 1, maximum: 40 }),
     ];
     const progress: DeepScanProgress[] = [];
-    let readCount = 0;
-    const tracker = new DeepScanProgressTracker({
-      read: async () => {
-        readCount += 1;
-        return reads.shift() ?? workbenchResult();
-      },
-      onProgress: (update) => progress.push(update),
+    const read = mock(async () => {
+      return reads.shift() ?? workbenchResult();
+    });
+    const tracker = new ScanProgressTracker({
+      read,
+      onDeepProgress: (update) => progress.push(update),
     });
 
     await tracker.refresh();
@@ -73,30 +75,20 @@ describe("Deep Scan progress", () => {
       { completed: 0, active: 2, maximum: 40 },
       { completed: 1, active: 1, maximum: 40 },
     ]);
-    expect(readCount).toBe(4);
+    expect(read).toHaveBeenCalledTimes(4);
   });
 
   test("does not queue or await stalled polls during stop", async () => {
     const progress: DeepScanProgress[] = [];
-    let readCount = 0;
+    const read = mock(async (signal: AbortSignal) => {
+      await once(signal, "abort");
+      aborted = true;
+      return workbenchResult({ completed: 1, active: 0, maximum: 40 });
+    });
     let aborted = false;
-    const tracker = new DeepScanProgressTracker({
-      read: async (signal) => {
-        readCount += 1;
-        return await new Promise((resolve) => {
-          signal.addEventListener(
-            "abort",
-            () => {
-              aborted = true;
-              resolve(
-                workbenchResult({ completed: 1, active: 0, maximum: 40 }),
-              );
-            },
-            { once: true },
-          );
-        });
-      },
-      onProgress: (update) => progress.push(update),
+    const tracker = new ScanProgressTracker({
+      read,
+      onDeepProgress: (update) => progress.push(update),
     });
 
     const first = tracker.refresh();
@@ -105,8 +97,26 @@ describe("Deep Scan progress", () => {
     tracker.stop();
     await Promise.all([first, second]);
 
-    expect(readCount).toBe(1);
+    expect(read).toHaveBeenCalledTimes(1);
     expect(aborted).toBe(true);
     expect(progress).toEqual([]);
+  });
+
+  test("reports reduction transitions when review counts remain unchanged", async () => {
+    const reads = [false, true, true, false].map((consolidating) =>
+      workbenchResult({ completed: 2, active: 2, maximum: 40, consolidating }),
+    );
+    const progress: DeepScanProgress[] = [];
+    const tracker = new ScanProgressTracker({
+      read: async () => reads.shift(),
+      onDeepProgress: (update) => progress.push(update),
+    });
+    for (let index = 0; index < 4; index++) await tracker.refresh();
+    tracker.stop();
+    expect(progress.map((update) => update.consolidating)).toEqual([
+      false,
+      true,
+      false,
+    ]);
   });
 });

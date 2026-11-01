@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.ci.json",
+  "include": ["../../examples/custom-validation/*.mts"],
+  "compilerOptions": {
+    "rootDir": "../../examples/custom-validation"
+  }
+}

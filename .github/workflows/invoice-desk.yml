@@ -1,0 +1,34 @@
+name: Invoice Desk sample
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, edited]
+    paths:
+      - "examples/invoice-desk/**"
+      - ".github/workflows/invoice-desk*.yml"
+      - ".github/scripts/invoice-desk-*.mjs"
+      - "sdk/typescript/scripts/is-main.mjs"
+
+permissions:
+  contents: read
+
+jobs:
+  behavior:
+    if: github.event.action != 'edited' || github.event.changes.base != null
+    runs-on: ubuntu-latest
+    concurrency:
+      group: invoice-desk-behavior-${{ github.event.pull_request.number }}-${{ matrix.node }}
+      cancel-in-progress: true
+    strategy:
+      matrix:
+        node: ["22.13.0", "24"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Check application behavior and scan orchestration
+        run: node --test examples/invoice-desk/qa/app.test.mjs .github/scripts/invoice-desk-*.test.mjs

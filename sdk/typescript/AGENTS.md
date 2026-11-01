@@ -20,7 +20,10 @@ outside an approved path.
 - Reuse Codex APIs and shared helpers instead of adding extra trust gates or orchestration.
 - Root read and workspace write are enough for the sandbox.
 - Treat repository paths, symlinks, archives, and other repository-controlled data as untrusted.
-- Keep protections for credentials, unsafe paths, scan integrity, and settings the user explicitly requests.
+- Keep credential access, storage, and configuration protections, unsafe-path
+  checks, scan integrity, and settings the user explicitly requests.
+- Follow the root `AGENTS.md` diagnostic-text policy: do not reintroduce secret
+  redaction in CLI/SDK output or saved diagnostics, or add a setting to control it.
 - Do not add arbitrary size, count, depth, or buffering limits to local inputs or Codex output. Keep limits required by an actual security boundary or an upstream contract.
 - Do not let optional logging, progress, or cost tracking stop a scan. Still enforce limits the user requests, such as `--max-cost`.
 - Preserve completed scan artifacts and keep database migrations append-only.

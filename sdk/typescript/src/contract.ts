@@ -1,5 +1,7 @@
-import { createHash } from "node:crypto";
-import { constants, type Stats } from "node:fs";
+import { isDeepStrictEqual as sameArray } from "node:util";
+import { createHash, hash } from "node:crypto";
+import { normalizePersistedFindingDetails } from "./finding-normalization.js";
+import { constants, type BigIntStats, type Stats } from "node:fs";
 import {
   lstat,
   open,
@@ -7,19 +9,27 @@ import {
   realpath,
   type FileHandle,
 } from "node:fs/promises";
-import { isAbsolute, join, posix, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, posix, resolve } from "node:path";
 import Ajv2020, { type ErrorObject } from "ajv/dist/2020.js";
-import { ContractValidationError } from "./errors.js";
+import { regexes } from "zod";
+import {
+  ContractValidationError,
+  abortReason,
+  errorMessage,
+} from "./errors.js";
+import { isRecord } from "./record.js";
 import type {
   CoverageDocument,
+  Finding,
   FindingsDocument,
   ScanManifest,
 } from "./models.js";
 import {
-  requirePrivateOutputDirectory,
+  requireOutputDirectoryOwnership,
   requireSecureOutputAncestry,
 } from "./runtime.js";
 import type { NormalizedTarget, ScanMode } from "./targets.js";
+import { isWithin as isContained } from "./trusted-executable.js";
 import { isWindowsUnsafePathComponent } from "./windows-path.js";
 
 const DOCUMENTS = {
@@ -28,26 +38,15 @@ const DOCUMENTS = {
   "coverage.json": "coverage.schema.json",
 } as const;
 const PRODUCER_NAME = "codex-security-plugin";
-const SAFE_SCHEMA_ERROR_PROPERTIES = new Set([
-  "scan",
-  "target",
-  "remote",
-  "completedAt",
-  "sealedAt",
-  "artifacts",
-  "findings",
-  "coverage",
-  "scope",
-]);
 interface CheckedScanFile {
   path: string;
-  metadata: Stats;
-  parents: Array<{ path: string; metadata: Stats }>;
+  metadata: BigIntStats;
+  parents: Array<{ path: string; metadata: BigIntStats }>;
 }
 
 interface ScanRoot {
   path: string;
-  metadata: Stats;
+  metadata: BigIntStats;
 }
 
 export interface ScanExpectation {
@@ -59,10 +58,22 @@ export interface ScanExpectation {
 }
 
 export interface LoadedContract {
+  mode: NonNullable<ScanManifest["scan"]["mode"]>;
   manifest: ScanManifest;
   findings: FindingsDocument;
-  coverage: CoverageDocument;
+  review: NonNullable<ScanManifest["scan"]["review"]>;
 }
+
+// Hosted receipts compare reread files with the bytes that passed validation.
+export const validatedFileDigests = new WeakMap<
+  ScanManifest,
+  ReadonlyMap<string, string>
+>();
+
+export class ContractSchemaError extends ContractValidationError {}
+
+export const SEALED_DEFERRED_PATH_RULE = "invalidSealedDeferredPath";
+export const DEFERRED_PATH_LOCATION = /^\/deferred\/(\d+)\/paths\/(\d+)$/u;
 
 type LoadContractOptions = {
   pluginRoot: string;
@@ -83,78 +94,74 @@ export async function loadContractWithScanDirectory(
   scanDirectory: string,
   options: LoadContractOptions,
 ): Promise<{ contract: LoadedContract; scanDirectory: string }> {
+  const validators = await loadContractValidators(
+    options.pluginRoot,
+    options.signal,
+  );
   const scanRoot = await requireScanRoot(scanDirectory, options.signal);
   const scanDir = scanRoot.path;
-  const documentDigests = new Map<string, string>();
-  const payloads = {
-    "scan-manifest.json": await readScanJson(
+  const fileDigests = new Map<string, string>();
+  const payloads: Record<string, unknown> = {};
+  payloads["scan-manifest.json"] = await readScanJson(
+    scanDir,
+    "scan-manifest.json",
+    fileDigests,
+    options.signal,
+    scanRoot,
+  );
+  const rawManifest = payloads["scan-manifest.json"] as ScanManifest;
+  const documents = validators.filter(
+    ({ filename }) =>
+      filename !== "coverage.json" ||
+      rawManifest.scan?.coverageRef !== undefined,
+  );
+  for (const { filename } of documents) {
+    if (filename === "scan-manifest.json") continue;
+    payloads[filename] = await readScanJson(
       scanDir,
-      "scan-manifest.json",
-      documentDigests,
+      filename as keyof typeof DOCUMENTS,
+      fileDigests,
       options.signal,
       scanRoot,
-    ),
-    "findings.json": await readScanJson(
-      scanDir,
-      "findings.json",
-      documentDigests,
-      options.signal,
-      scanRoot,
-    ),
-    "coverage.json": await readScanJson(
-      scanDir,
-      "coverage.json",
-      documentDigests,
-      options.signal,
-      scanRoot,
-    ),
-  };
-  throwIfAborted(options.signal);
-  let findingsPayload: unknown = payloads["findings.json"];
-
-  const ajv = createValidator();
-  for (const [filename, schemaName] of Object.entries(DOCUMENTS)) {
-    const schema = await readJson(
-      join(options.pluginRoot, "schemas", schemaName),
-      options.signal,
     );
-    let validate: ReturnType<typeof ajv.compile>;
-    try {
-      validate = ajv.compile(schema);
-    } catch {
-      throw new ContractValidationError(`${schemaName}: invalid JSON Schema.`);
-    }
-    let payload: unknown =
-      filename === "findings.json"
-        ? findingsPayload
-        : payloads[filename as keyof typeof payloads];
+  }
+  throwIfAborted(options.signal);
+
+  for (const { filename, schemaName, validate } of documents) {
+    let payload: unknown;
     let valid: boolean;
     try {
-      const result = validate(payload);
-      if (typeof result !== "boolean") {
-        throw new Error("asynchronous JSON Schema validation is unsupported");
-      }
-      valid = result;
-      if (!valid && filename === "findings.json") {
-        payload = legacySealedFindingsForValidation(payload);
-        const compatibleResult = validate(payload);
-        if (typeof compatibleResult !== "boolean") {
+      payload = payloads[filename];
+      const validatePayload = (payload: unknown) => {
+        const result = validate(payload);
+        if (typeof result !== "boolean") {
           throw new Error("asynchronous JSON Schema validation is unsupported");
         }
-        valid = compatibleResult;
+        return result;
+      };
+      valid = validatePayload(payload);
+      if (!valid && filename === "findings.json") {
+        payload = normalizePersistedFindings(payload);
+        valid = validatePayload(payload);
       }
     } catch {
-      throw new ContractValidationError(`${schemaName}: invalid JSON Schema.`);
+      throw new ContractSchemaError(`${schemaName}: invalid JSON Schema.`);
     }
     if (!valid) {
       throw schemaError(filename, validate.errors ?? []);
     }
-    if (filename === "findings.json") findingsPayload = payload;
+    payloads[filename] = payload;
     throwIfAborted(options.signal);
   }
-  const manifest = payloads["scan-manifest.json"] as unknown as ScanManifest;
-  const findings = findingsPayload as FindingsDocument;
-  const coverage = payloads["coverage.json"] as unknown as CoverageDocument;
+  const manifest = payloads["scan-manifest.json"] as ScanManifest;
+  const findings = payloads["findings.json"] as FindingsDocument;
+  const coverage = payloads["coverage.json"] as CoverageDocument | undefined;
+  const mode = coverage?.mode ?? manifest.scan.mode!;
+  const review = coverage
+    ? {
+        excludedPaths: coverage.explicitExclusions.map((item) => item.pattern),
+      }
+    : manifest.scan.review!;
   if (
     options.expectedScanId !== undefined &&
     manifest.scan.id !== options.expectedScanId
@@ -165,270 +172,118 @@ export async function loadContractWithScanDirectory(
   }
   if (
     findings.scanId !== manifest.scan.id ||
-    coverage.scanId !== manifest.scan.id
+    (coverage !== undefined && coverage.scanId !== manifest.scan.id)
   ) {
     throw new ContractValidationError(
       "Canonical contract scan IDs do not match.",
     );
   }
-  if (!sameArray(coverage.includePaths, manifest.scan.scope.includePaths)) {
+  if (
+    coverage !== undefined &&
+    !sameArray(coverage.includePaths, manifest.scan.scope.includePaths)
+  ) {
     throw new ContractValidationError(
       "Coverage include paths do not match the manifest scope.",
     );
   }
-  if (!sameArray(coverage.excludePaths, manifest.scan.scope.excludePaths)) {
+  if (
+    coverage !== undefined &&
+    !sameArray(coverage.excludePaths, manifest.scan.scope.excludePaths)
+  ) {
     throw new ContractValidationError(
       "Coverage exclude paths do not match the manifest scope.",
     );
   }
 
-  validateCanonicalContract(manifest, findings);
+  validateCanonicalContract(manifest, findings, coverage);
 
   await validateSeal(
     scanDir,
     manifest,
     findings,
     coverage,
-    documentDigests,
+    fileDigests,
     options.signal,
     scanRoot,
   );
   if (options.expectation !== undefined) {
     validateExpectation(
       manifest,
-      coverage,
+      mode,
       options.expectation,
       options.workbenchValidated === true,
     );
   }
   await verifyScanRoot(scanRoot, options.signal);
+  validatedFileDigests.set(manifest, fileDigests);
   return {
-    contract: { manifest, findings, coverage },
+    contract: { manifest, findings, review, mode },
     scanDirectory: scanRoot.path,
   };
 }
 
-export async function requireCanonicalScanDirectory(
-  scanDirectory: string,
-  signal?: AbortSignal,
-): Promise<string> {
-  return (await requireScanRoot(scanDirectory, signal)).path;
-}
-
-type JsonRecord = Record<string, unknown>;
-
-function legacySealedFindingsForValidation(payload: unknown): unknown {
+/** Normalize optional legacy details on a copy, without changing saved artifacts. */
+function normalizePersistedFindings(payload: unknown): unknown {
   const compatible = structuredClone(payload);
-  if (!isJsonRecord(compatible) || !Array.isArray(compatible["findings"])) {
+  if (!isRecord(compatible) || !Array.isArray(compatible["findings"])) {
     return compatible;
   }
   for (const finding of compatible["findings"]) {
-    if (!isJsonRecord(finding)) continue;
-    const legacyEvidence = finding["code_evidence"];
-    if (Array.isArray(legacyEvidence)) {
-      const compatibleEvidence: JsonRecord[] = [];
-      for (const evidence of legacyEvidence) {
-        if (!isJsonRecord(evidence)) continue;
-        const id = evidence["id"];
-        const code = evidence["code"];
-        if (
-          typeof id !== "string" ||
-          id.length === 0 ||
-          typeof code !== "string" ||
-          code.length === 0
-        ) {
-          continue;
-        }
-        compatibleEvidence.push(evidence);
-      }
-      finding["code_evidence"] = compatibleEvidence;
-    } else if ("code_evidence" in finding && legacyEvidence !== null) {
-      delete finding["code_evidence"];
-    }
-
-    for (const [sectionName, listFields] of [
-      ["root_cause", ["evidenceRefs", "evidence_refs"]],
-      [
-        "validation",
-        [
-          "assertions",
-          "counterEvidence",
-          "evidenceRefs",
-          "evidence_refs",
-          "limitations",
-        ],
-      ],
-      [
-        "attackPath",
-        [
-          "assumptions",
-          "blindspots",
-          "controls",
-          "evidenceRefs",
-          "evidence_refs",
-          "limitations",
-          "preconditions",
-          "steps",
-        ],
-      ],
-    ] satisfies Array<[string, string[]]>) {
-      const section = finding[sectionName];
-      if (!isJsonRecord(section)) continue;
-      normalizeLegacyStringLists(section, listFields);
-    }
-
-    const legacyRootCause = finding["root_cause"];
-    if (isJsonRecord(legacyRootCause)) {
-      removeUnsupportedLegacyStrings(legacyRootCause, [
-        "summary",
-        "code",
-        "language",
-      ]);
-    } else if (
-      "root_cause" in finding &&
-      legacyRootCause !== null &&
-      typeof legacyRootCause !== "string"
-    ) {
-      delete finding["root_cause"];
-    }
-
-    const validation = finding["validation"];
-    if (isJsonRecord(validation)) {
-      normalizeLegacyStringOrList(validation, "evidence");
-      removeUnsupportedLegacyStrings(validation, ["method", "summary"]);
-      removeUnsupportedLegacyNullableStrings(validation, [
-        "status",
-        "disposition",
-        "result",
-      ]);
-    }
-
-    const attackPath = finding["attackPath"];
-    if (!isJsonRecord(attackPath)) continue;
-    removeUnsupportedLegacyStrings(attackPath, ["summary"]);
-    for (const field of ["dataFlow", "data_flow", "dataflow", "reachability"]) {
-      const detail = attackPath[field];
-      if (detail === null) {
-        delete attackPath[field];
-        continue;
-      }
-      if (typeof detail === "string") {
-        if (detail.length === 0) delete attackPath[field];
-        continue;
-      }
-      if (!isJsonRecord(detail)) {
-        if (field in attackPath) delete attackPath[field];
-        continue;
-      }
-      removeUnsupportedLegacyStrings(detail, [
-        "summary",
-        "source",
-        "sink",
-        "outcome",
-        ...(field === "reachability" ? ["attacker", "entrypoint"] : []),
-      ]);
-      normalizeLegacyStringLists(detail, [
-        "evidenceRefs",
-        "evidence_refs",
-        "transformations",
-        ...(field === "reachability" ? ["preconditions"] : []),
-      ]);
-    }
-    for (const field of ["impact", "likelihood"]) {
-      const detail = attackPath[field];
-      if (isJsonRecord(detail)) {
-        removeUnsupportedLegacyStrings(detail, ["level", "rationale", "why"]);
-      } else if (
-        detail !== undefined &&
-        detail !== null &&
-        (typeof detail !== "string" || detail.length === 0)
-      ) {
-        delete attackPath[field];
-      }
-    }
+    if (!isRecord(finding)) continue;
+    normalizePersistedFindingDetails(finding);
   }
   return compatible;
 }
 
-function isJsonRecord(value: unknown): value is JsonRecord {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function normalizeLegacyStringLists(
-  section: JsonRecord,
-  fields: string[],
-): void {
-  for (const field of fields) {
-    if (!(field in section)) continue;
-    const value = section[field];
-    if (Array.isArray(value)) {
-      section[field] = value.filter(
-        (item): item is string => typeof item === "string" && item.length > 0,
-      );
-    } else if (typeof value === "string" && value.length > 0) {
-      section[field] = [value];
-    } else {
-      delete section[field];
-    }
-  }
-}
-
-function normalizeLegacyStringOrList(section: JsonRecord, field: string): void {
-  if (!(field in section)) return;
-  const value = section[field];
-  if (typeof value === "string") {
-    if (value.length === 0) delete section[field];
-    return;
-  }
-  if (!Array.isArray(value)) {
-    delete section[field];
-    return;
-  }
-  const normalized = value.filter(
-    (item): item is string => typeof item === "string" && item.length > 0,
-  );
-  section[field] = normalized;
-}
-
-function removeUnsupportedLegacyStrings(
-  section: JsonRecord,
-  fields: string[],
-): void {
-  for (const field of fields) {
-    if (
-      field in section &&
-      (typeof section[field] !== "string" || section[field].length === 0)
-    ) {
-      delete section[field];
-    }
-  }
-}
-
-function removeUnsupportedLegacyNullableStrings(
-  section: JsonRecord,
-  fields: string[],
-): void {
-  for (const field of fields) {
-    if (
-      field in section &&
-      section[field] !== null &&
-      (typeof section[field] !== "string" || section[field].length === 0)
-    ) {
-      delete section[field];
-    }
-  }
+/** Match the producer's Python str.strip without changing saved text. */
+export function hasRequiredFindingText(value: string): boolean {
+  return !/^[\p{White_Space}\u001c-\u001f]*$/u.test(value);
 }
 
 function validateCanonicalContract(
   manifest: ScanManifest,
   findings: FindingsDocument,
+  coverage: CoverageDocument | undefined,
 ): void {
+  const requireText = (values: Record<string, string | undefined>) => {
+    for (const [context, value] of Object.entries(values)) {
+      if (value !== undefined && !hasRequiredFindingText(value))
+        throw new ContractValidationError(
+          `${context}: expected a non-empty string.`,
+        );
+    }
+  };
+  requireText({
+    "manifest.scan.id": manifest.scan.id,
+    "scan.target.targetId": manifest.scan.target.targetId,
+    "scan.target.displayName": manifest.scan.target.displayName,
+    "scan.target.revision":
+      manifest.scan.target.kind === "git_revision"
+        ? manifest.scan.target.revision
+        : undefined,
+    "scan.target.snapshotDigest":
+      manifest.scan.target.kind !== "git_revision"
+        ? manifest.scan.target.snapshotDigest
+        : undefined,
+    "manifest.scan.producer.name": manifest.scan.producer.name,
+    "manifest.scan.producer.version": manifest.scan.producer.version,
+    "coverage.inventoryStrategy": coverage?.inventoryStrategy,
+  });
+  for (const [index, surface] of (coverage?.surfaces ?? []).entries())
+    requireText({
+      [`coverage.surfaces[${index}].id`]: surface.id,
+      [`coverage.surfaces[${index}].label`]: surface.label,
+    });
   const remote = manifest.scan.target.remote;
   if (remote !== undefined) {
     const authority = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]+)/.exec(
       remote,
     )?.[1];
-    if (remote.includes("\\") || authority === undefined) {
+    if (
+      remote.includes("\\") ||
+      /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(remote) ||
+      authority === undefined
+    ) {
       throw new ContractValidationError(
         "scan.target.remote: expected a sanitized canonical absolute URL.",
       );
@@ -477,8 +332,40 @@ function validateCanonicalContract(
     }
   }
 
+  for (const [index, deferred] of (coverage?.deferred ?? []).entries()) {
+    for (const [pathIndex, path] of (deferred.paths ?? []).entries()) {
+      const context = `coverage.deferred[${index}].paths[${pathIndex}]`;
+      try {
+        safeRelativePath(path, context, true);
+      } catch (error) {
+        throw new ContractValidationError(
+          `${context}: expected a safe repository-relative POSIX path.`,
+          { cause: error },
+        );
+      }
+    }
+  }
+
+  const occurrenceIds = new Set<string>();
   for (const [findingIndex, finding] of findings.findings.entries()) {
     const context = `findings.findings[${findingIndex}]`;
+    requireText({
+      [`${context}.title`]: finding.title,
+      [`${context}.summary`]: finding.summary,
+      [`${context}.remediation`]: finding.remediation,
+      [`${context}.confidence.rationale`]: finding.confidence.rationale,
+      [`${context}.severity.scoringSystem`]:
+        finding.severity.score === undefined
+          ? undefined
+          : (finding.severity.scoringSystem ?? ""),
+      [`${context}.taxonomy.category`]: finding.taxonomy.category,
+      [`${context}.provenance.source`]: finding.provenance.source,
+    });
+    if (occurrenceIds.has(finding.occurrenceId))
+      throw new ContractValidationError(
+        `${context}: duplicate finding occurrence identity; use identity.instance to split siblings.`,
+      );
+    occurrenceIds.add(finding.occurrenceId);
     for (const [locationIndex, location] of finding.locations.entries()) {
       const locationContext = `${context}.locations[${locationIndex}]`;
       try {
@@ -489,21 +376,32 @@ function validateCanonicalContract(
           { cause: error },
         );
       }
+      if ((location.endLine ?? location.startLine) < location.startLine) {
+        throw new ContractValidationError(
+          `${locationContext}.endLine: expected an integer >= startLine.`,
+        );
+      }
+    }
+    for (const [evidenceIndex, evidence] of (
+      finding.codeEvidence ?? []
+    ).entries()) {
+      const evidenceContext = `${context}.codeEvidence[${evidenceIndex}].path`;
+      try {
+        safeRelativePath(evidence.path, evidenceContext);
+      } catch (error) {
+        throw new ContractValidationError(
+          `${evidenceContext}: expected a safe repository-relative POSIX path.`,
+          { cause: error },
+        );
+      }
     }
 
-    const fingerprint = `codex-security/v1:sha256:${sha256Text(
-      [
-        "codex-security/v1",
-        manifest.scan.target.targetId,
-        finding.ruleId,
-        finding.identity.anchor,
-        finding.identity.instance ?? "",
-      ].join("\0"),
-    )}`;
-    const findingId = `csf_${sha256Text(fingerprint).slice(0, 24)}`;
-    const occurrenceId = `occ_${sha256Text(
-      [manifest.scan.id, fingerprint].join("\0"),
-    ).slice(0, 24)}`;
+    const { findingId, occurrenceId, fingerprints } = deriveFindingIdentity(
+      manifest.scan.id,
+      manifest.scan.target.targetId,
+      finding.ruleId,
+      finding.identity,
+    );
     if (finding.findingId !== findingId) {
       throw new ContractValidationError(
         `${context}.findingId: does not match derived fingerprint identity.`,
@@ -514,16 +412,12 @@ function validateCanonicalContract(
         `${context}.occurrenceId: does not match scan occurrence identity.`,
       );
     }
-    if (finding.fingerprints.primary !== fingerprint) {
+    if (finding.fingerprints.primary !== fingerprints.primary) {
       throw new ContractValidationError(
         `${context}.fingerprints: does not match derived fingerprint.`,
       );
     }
   }
-}
-
-function sha256Text(value: string): string {
-  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 export async function requireScanFile(
@@ -581,25 +475,19 @@ async function requireCheckedScanFile(
     }
     const parents = [{ path: scanDir, metadata: rootMetadata }];
     throwIfAborted(signal);
-    if (
-      !parents[0]!.metadata.isDirectory() ||
-      parents[0]!.metadata.isSymbolicLink()
-    ) {
-      throw new Error("unsafe scan directory");
-    }
     for (const part of parts.slice(0, -1)) {
       current = join(current, part);
-      const metadata = await lstat(current);
+      const metadata = await lstat(current, { bigint: true });
       throwIfAborted(signal);
-      if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      if (!metadata.isDirectory()) {
         throw new Error("unsafe parent");
       }
       parents.push({ path: current, metadata });
     }
     const path = join(scanDir, ...parts);
-    const metadata = await lstat(path);
+    const metadata = await lstat(path, { bigint: true });
     throwIfAborted(signal);
-    if (metadata.isSymbolicLink() || !metadata.isFile()) {
+    if (!metadata.isFile()) {
       throw new ContractValidationError(
         `${context}: expected a regular non-symlink file.`,
       );
@@ -628,8 +516,8 @@ async function validateSeal(
   scanDir: string,
   manifest: ScanManifest,
   findings: FindingsDocument,
-  coverage: CoverageDocument,
-  documentDigests: ReadonlyMap<string, string>,
+  coverage: CoverageDocument | undefined,
+  fileDigests: Map<string, string>,
   signal?: AbortSignal,
   expectedRoot?: ScanRoot,
 ): Promise<void> {
@@ -655,7 +543,7 @@ async function validateSeal(
     artifactPaths.add(normalized);
     artifactCollisionKeys.add(collisionKey);
     const digest =
-      documentDigests.get(normalized) ??
+      fileDigests.get(normalized) ??
       (await sha256ScanFile(
         scanDir,
         normalized,
@@ -668,23 +556,35 @@ async function validateSeal(
         `${context}: sealed artifact changed or is missing.`,
       );
     }
+    fileDigests.set(artifact.path, digest);
   }
 
-  for (const surface of coverage.surfaces) {
-    for (const receipt of surface.receiptRefs) {
-      throwIfAborted(signal);
-      const normalized = portableRelativePath(receipt, "coverage receipt");
-      if (!normalized.startsWith("artifacts/")) {
-        throw new ContractValidationError(
-          `Coverage receipt must be under artifacts/: ${receipt}`,
-        );
-      }
-      if (!artifactPaths.has(normalized)) {
-        throw new ContractValidationError(
-          `Coverage receipt is missing from sealed artifacts: ${receipt}`,
-        );
-      }
+  const requireSealedReference = (reference: unknown, context: string) => {
+    throwIfAborted(signal);
+    if (typeof reference !== "string") {
+      throw new ContractValidationError(`${context}: expected a string.`);
     }
+    const normalized = portableRelativePath(reference, context.toLowerCase());
+    if (!normalized.startsWith("artifacts/")) {
+      throw new ContractValidationError(
+        `${context} must be under artifacts/: ${reference}`,
+      );
+    }
+    if (!artifactPaths.has(normalized)) {
+      throw new ContractValidationError(
+        `${context} is missing from sealed artifacts: ${reference}`,
+      );
+    }
+  };
+  for (const surface of coverage?.surfaces ?? []) {
+    for (const receipt of surface.receiptRefs) {
+      requireSealedReference(receipt, "Coverage receipt");
+    }
+  }
+  const extensions = scan["extensions"];
+  const imported = isRecord(extensions) ? extensions["import"] : undefined;
+  if (isRecord(imported) && "sourceRef" in imported) {
+    requireSealedReference(imported["sourceRef"], "Import source");
   }
 
   for (const [index, finding] of findings.findings.entries()) {
@@ -714,7 +614,7 @@ async function validateSeal(
 
 function validateExpectation(
   manifest: ScanManifest,
-  coverage: CoverageDocument,
+  mode: LoadedContract["mode"],
   expectation: ScanExpectation,
   workbenchValidated = false,
 ): void {
@@ -734,9 +634,9 @@ function validateExpectation(
     expectation.target,
     expectation.mode,
   );
-  if (coverage.mode !== expectedMode) {
+  if (mode !== expectedMode) {
     throw new ContractValidationError(
-      `Coverage mode must be ${expectedMode}, got ${coverage.mode}.`,
+      `Coverage mode must be ${expectedMode}, got ${mode}.`,
     );
   }
 
@@ -775,15 +675,15 @@ function validateExpectation(
   }
 
   if (requested.kind === "paths") {
-    const actual = scan.scope.includePaths.map(safeScopePath);
-    if (
-      actual.length !== new Set(actual).size ||
-      !sameSet(new Set(actual), new Set(requested.paths))
-    ) {
-      throw new ContractValidationError(
-        "Manifest include paths do not match the requested path target.",
-      );
+    const actualPaths = scan.scope.includePaths.map(safeScopePath);
+    const actual = new Set(actualPaths);
+    if (actualPaths.length === actual.size) {
+      const expected = new Set(requested.paths);
+      if (actual.size === expected.size && actual.isSubsetOf(expected)) return;
     }
+    throw new ContractValidationError(
+      "Manifest include paths do not match the requested path target.",
+    );
   }
 }
 
@@ -804,36 +704,33 @@ async function requireScanRoot(
   throwIfAborted(signal);
   const absolute = resolve(scanDirectory);
   try {
-    const metadata = await lstat(absolute);
+    const metadata = await lstat(absolute, { bigint: true });
     throwIfAborted(signal);
     const canonical = await realpath(absolute);
     throwIfAborted(signal);
-    const current = await lstat(absolute);
+    const current = await lstat(absolute, { bigint: true });
     throwIfAborted(signal);
-    const returned = await lstat(canonical);
+    const returned = await lstat(canonical, { bigint: true });
     throwIfAborted(signal);
     if (
       !metadata.isDirectory() ||
-      metadata.isSymbolicLink() ||
       !current.isDirectory() ||
-      current.isSymbolicLink() ||
       metadata.dev !== current.dev ||
       metadata.ino !== current.ino ||
       !returned.isDirectory() ||
-      returned.isSymbolicLink() ||
       metadata.dev !== returned.dev ||
       metadata.ino !== returned.ino
     ) {
       throw new Error("not a directory");
     }
     try {
-      requirePrivateOutputDirectory(returned, canonical);
+      requireOutputDirectoryOwnership({ uid: Number(returned.uid) }, canonical);
       await requireSecureOutputAncestry(canonical);
     } catch (error) {
       throw new ContractValidationError(
         error instanceof Error
           ? error.message
-          : "Scan directory must remain private to the current user.",
+          : "Scan directory must remain owned by the current user.",
         { cause: error },
       );
     }
@@ -853,17 +750,16 @@ async function verifyScanRoot(
   signal?: AbortSignal,
 ): Promise<void> {
   try {
-    const current = await lstat(root.path);
+    const current = await lstat(root.path, { bigint: true });
     throwIfAborted(signal);
     if (
       !current.isDirectory() ||
-      current.isSymbolicLink() ||
       current.dev !== root.metadata.dev ||
       current.ino !== root.metadata.ino
     ) {
       throw new Error("scan directory changed while reading");
     }
-    requirePrivateOutputDirectory(current, root.path);
+    requireOutputDirectoryOwnership({ uid: Number(current.uid) }, root.path);
     await requireSecureOutputAncestry(root.path);
   } catch (error) {
     throwIfAborted(signal);
@@ -874,12 +770,16 @@ async function verifyScanRoot(
   }
 }
 
-function safeRelativePath(value: string, context: string): string {
+function safeRelativePath(
+  value: string,
+  context: string,
+  allowDot = false,
+): string {
   const parts = value.split("/");
   if (
-    value.trim().length === 0 ||
-    !isWellFormedUnicode(value) ||
-    value === "." ||
+    value.length === 0 ||
+    Buffer.from(value, "utf8").toString("utf8") !== value ||
+    (!allowDot && value === ".") ||
     value.startsWith("/") ||
     /^[A-Za-z]:/.test(value) ||
     parts.includes("..") ||
@@ -892,7 +792,7 @@ function safeRelativePath(value: string, context: string): string {
   }
   const normalized = posix.normalize(value).replace(/\/+$/, "");
   if (
-    normalized === "." ||
+    (!allowDot && normalized === ".") ||
     normalized.startsWith("../") ||
     isAbsolute(normalized)
   ) {
@@ -905,7 +805,10 @@ function safeRelativePath(value: string, context: string): string {
 
 function portableRelativePath(value: string, context: string): string {
   const normalized = safeRelativePath(value, context);
-  if (value.split("/").some(isWindowsUnsafePathComponent)) {
+  if (
+    value.trim().length === 0 ||
+    value.split("/").some(isWindowsUnsafePathComponent)
+  ) {
     throw new ContractValidationError(
       `${context}: expected a safe scan-relative POSIX path.`,
     );
@@ -913,7 +816,7 @@ function portableRelativePath(value: string, context: string): string {
   return normalized;
 }
 
-function safeScopePath(value: string): string {
+export function safeScopePath(value: string): string {
   return value === "."
     ? value
     : safeRelativePath(value, "manifest scope include path");
@@ -922,7 +825,7 @@ function safeScopePath(value: string): string {
 async function readScanJson(
   scanDir: string,
   relativePath: keyof typeof DOCUMENTS,
-  documentDigests: Map<string, string>,
+  fileDigests: Map<string, string>,
   signal?: AbortSignal,
   expectedRoot?: ScanRoot,
 ): Promise<Record<string, unknown>> {
@@ -935,10 +838,7 @@ async function readScanJson(
   );
   try {
     const bytes = await file.readFile({ signal });
-    documentDigests.set(
-      relativePath,
-      createHash("sha256").update(bytes).digest("hex"),
-    );
+    fileDigests.set(relativePath, hash("sha256", bytes));
     return parseJson(join(scanDir, relativePath), bytes);
   } catch (error) {
     throwIfAborted(signal);
@@ -1012,7 +912,7 @@ function validateParsedJson(value: unknown, context: string): void {
     return;
   }
   if (typeof value === "string") {
-    if (!isWellFormedUnicode(value)) {
+    if (!value.isWellFormed()) {
       throw new ContractValidationError(
         `${context}: expected well-formed Unicode JSON strings.`,
       );
@@ -1027,30 +927,49 @@ function validateParsedJson(value: unknown, context: string): void {
   }
   if (isRecord(value)) {
     for (const [key, item] of Object.entries(value)) {
-      if (!isWellFormedUnicode(key)) {
+      if (!key.isWellFormed()) {
         throw new ContractValidationError(
           `${context}: expected well-formed Unicode JSON keys.`,
         );
       }
-      validateParsedJson(item, `${context}.<property>`);
+      validateParsedJson(item, `${context}[${JSON.stringify(key)}]`);
     }
   }
 }
 
-function isWellFormedUnicode(value: string): boolean {
-  return Buffer.from(value, "utf8").toString("utf8") === value;
-}
-
-function createValidator(): Ajv2020 {
+async function loadContractValidators(
+  pluginRoot: string,
+  signal?: AbortSignal,
+) {
   // The plugin schemas are the immutable v0 contract. They are valid Draft
   // 2020-12 but intentionally omit redundant local `type` keywords that Ajv's
   // optional strict-schema linter requires.
-  const ajv = new Ajv2020({ allErrors: false, strict: false });
+  const ajv = new Ajv2020({ allErrors: false, strict: false, verbose: true });
   ajv.addFormat("date-time", {
     type: "string",
     validate: validRfc3339DateTime,
   });
-  return ajv;
+  const validators = [];
+  for (const [filename, schemaName] of Object.entries(DOCUMENTS)) {
+    const schema = await readJson(
+      join(pluginRoot, "schemas", schemaName),
+      signal,
+    ).catch((error: unknown) => {
+      throwIfAborted(signal);
+      throw new ContractSchemaError(errorMessage(error), { cause: error });
+    });
+    try {
+      const validate = ajv.compile(schema);
+      if ("$async" in validate && validate.$async === true) {
+        throw new Error("asynchronous JSON Schema validation is unsupported");
+      }
+      validators.push({ filename, schemaName, validate });
+    } catch {
+      throw new ContractSchemaError(`${schemaName}: invalid JSON Schema.`);
+    }
+    throwIfAborted(signal);
+  }
+  return validators;
 }
 
 async function sha256ScanFile(
@@ -1104,7 +1023,7 @@ async function openCheckedScanFile(
       checked.path,
       constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
     );
-    const opened = await file.stat();
+    const opened = await file.stat({ bigint: true });
     throwIfAborted(signal);
     if (
       !opened.isFile() ||
@@ -1116,11 +1035,10 @@ async function openCheckedScanFile(
       );
     }
     for (const parent of checked.parents) {
-      const current = await lstat(parent.path);
+      const current = await lstat(parent.path, { bigint: true });
       throwIfAborted(signal);
       if (
         !current.isDirectory() ||
-        current.isSymbolicLink() ||
         current.dev !== parent.metadata.dev ||
         current.ino !== parent.metadata.ino
       ) {
@@ -1129,11 +1047,10 @@ async function openCheckedScanFile(
         );
       }
     }
-    const current = await lstat(checked.path);
+    const current = await lstat(checked.path, { bigint: true });
     throwIfAborted(signal);
     if (
       !current.isFile() ||
-      current.isSymbolicLink() ||
       current.dev !== checked.metadata.dev ||
       current.ino !== checked.metadata.ino
     ) {
@@ -1155,8 +1072,8 @@ async function openCheckedScanFile(
 
 export async function sameCheckedFileDevice(
   file: FileHandle,
-  checked: CheckedScanFile,
-  opened: Stats,
+  checked: { path: string; metadata: Pick<Stats | BigIntStats, "dev" | "ino"> },
+  opened: Pick<Stats | BigIntStats, "dev" | "ino">,
   platform: NodeJS.Platform = process.platform,
   openReference: (path: string, flags: number) => Promise<FileHandle> = open,
 ): Promise<boolean> {
@@ -1171,7 +1088,6 @@ export async function sameCheckedFileDevice(
   if (
     !openedIdentity.isFile() ||
     !checkedIdentity.isFile() ||
-    checkedIdentity.isSymbolicLink() ||
     openedIdentity.ino !== checkedIdentity.ino
   ) {
     return false;
@@ -1195,55 +1111,16 @@ export async function sameCheckedFileDevice(
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (!signal?.aborted) return;
-  throw (
-    signal.reason ??
-    new DOMException("The operation was aborted.", "AbortError")
-  );
+  throw abortReason(signal);
 }
 
+const RFC3339_DATE_TIME = new RegExp(
+  regexes.datetime({ offset: true }).source,
+  "i",
+);
+
 function validRfc3339DateTime(value: string): boolean {
-  const match =
-    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/i.exec(
-      value,
-    );
-  if (match === null) return false;
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const hour = Number(match[4]);
-  const minute = Number(match[5]);
-  const second = Number(match[6]);
-  const offsetHour = Number(match[7] ?? 0);
-  const offsetMinute = Number(match[8] ?? 0);
-  if (
-    year < 1 ||
-    month < 1 ||
-    month > 12 ||
-    day < 1 ||
-    hour > 23 ||
-    minute > 59 ||
-    second > 59 ||
-    offsetHour > 23 ||
-    offsetMinute > 59
-  ) {
-    return false;
-  }
-  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
-  const daysInMonth = [
-    31,
-    leapYear ? 29 : 28,
-    31,
-    30,
-    31,
-    30,
-    31,
-    31,
-    30,
-    31,
-    30,
-    31,
-  ][month - 1]!;
-  return day <= daysInMonth;
+  return !value.startsWith("0000") && RFC3339_DATE_TIME.test(value);
 }
 
 function schemaError(
@@ -1251,58 +1128,67 @@ function schemaError(
   errors: readonly ErrorObject[],
 ): ContractValidationError {
   const first = errors[0];
-  const segments = first?.instancePath.split("/").filter(Boolean) ?? [];
-  const location =
-    segments.length === 0
-      ? "<root>"
-      : segments
-          .map((segment) => {
-            if (/^(?:0|[1-9]\d{0,9})$/.test(segment)) return segment;
-            return SAFE_SCHEMA_ERROR_PROPERTIES.has(segment)
-              ? segment
-              : "<property>";
-          })
-          .join(".");
+  if (
+    filename === "coverage.json" &&
+    first?.keyword === "oneOf" &&
+    Array.isArray(first.schema) &&
+    first.schema.some(
+      (rule, index) =>
+        isRecord(rule) &&
+        rule["$comment"] === SEALED_DEFERRED_PATH_RULE &&
+        first.params["passingSchemas"]?.includes(index),
+    )
+  ) {
+    const match = DEFERRED_PATH_LOCATION.exec(first.instancePath);
+    if (match)
+      return new ContractValidationError(
+        `coverage.deferred[${match[1]}].paths[${match[2]}]: expected a safe repository-relative POSIX path.`,
+      );
+  }
+  const location = first?.instancePath
+    ? JSON.stringify(first.instancePath)
+    : "<root>";
   const keyword = first?.keyword ?? "unknown";
   const count = errors.length;
-  const format = first?.params["format"];
-  const detail =
-    keyword === "format" && format === "date-time" ? "; date-time" : "";
   return new ContractValidationError(
-    `${filename}:${location}: schema validation failed (${keyword}${detail}; ${count} ${count === 1 ? "error" : "errors"}).`,
+    `${filename}:${location}: schema validation failed (${keyword}${keyword === "format" && first?.params["format"] === "date-time" ? "; date-time" : ""}; ${count} ${count === 1 ? "error" : "errors"})${first?.message ? `: ${first.message}` : ""}.`,
   );
-}
-
-function sameArray(left: readonly string[], right: readonly string[]): boolean {
-  return (
-    left.length === right.length &&
-    left.every((value, index) => value === right[index])
-  );
-}
-
-function sameSet(
-  left: ReadonlySet<string>,
-  right: ReadonlySet<string>,
-): boolean {
-  return (
-    left.size === right.size && [...left].every((value) => right.has(value))
-  );
-}
-
-function isContained(root: string, candidate: string): boolean {
-  const child = relative(root, candidate);
-  return (
-    child === "" ||
-    (child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child))
-  );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function nodeErrorCode(error: unknown): string | undefined {
   return typeof error === "object" && error !== null && "code" in error
     ? String(error.code)
     : undefined;
+}
+
+/** @internal */
+export function sha256Text(value: string): string {
+  return hash("sha256", value);
+}
+
+export function deriveFindingIdentity(
+  scanId: string,
+  targetId: string,
+  ruleId: string,
+  identity: Finding["identity"],
+) {
+  const fingerprint = `codex-security/v1:sha256:${sha256Text(
+    [
+      "codex-security/v1",
+      targetId,
+      ruleId,
+      identity.anchor,
+      identity.instance ?? "",
+    ].join("\0"),
+  )}`;
+  return {
+    findingId: `csf_${sha256Text(fingerprint).slice(0, 24)}`,
+    occurrenceId: `occ_${sha256Text([scanId, fingerprint].join("\0")).slice(0, 24)}`,
+    ruleId,
+    identity,
+    fingerprints: {
+      algorithm: "codex-security/v1" as const,
+      primary: fingerprint,
+    },
+  };
 }
