@@ -251,10 +251,12 @@ function handleProof(root: string) {
     const junctionStat = files.stat(pathBytes(ancestor), false);
     assert(junctionStat.isDirectory());
     assert(junctionStat.isReparsePoint());
+    assert(junctionStat.isNameSurrogate());
     assert(!junctionStat.isSymbolicLink());
     const targetStat = files.stat(pathBytes(ancestor));
     assert(targetStat.isDirectory());
     assert(!targetStat.isReparsePoint());
+    assert(!targetStat.isNameSurrogate());
     samePath(
       checked(junction.finalPath(flags.FILE_NAME_OPENED)).path,
       ancestor,

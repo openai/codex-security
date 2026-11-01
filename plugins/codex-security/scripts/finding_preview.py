@@ -447,7 +447,9 @@ def consume_json_budget(budget: list[int], size: int) -> bool:
 
 
 def bounded_json_text(value: str, maximum_bytes: int) -> tuple[str, int]:
-    length = bisect_right(range(len(value) + 1), maximum_bytes, key=lambda n: json_size(value[:n]))
+    length = bisect_right(
+        range(min(len(value), maximum_bytes) + 1), maximum_bytes, key=lambda n: json_size(value[:n])
+    )
     selected = value[: max(0, length - 1)]
     return selected, json_size(selected)
 

@@ -1,3 +1,5 @@
+import { parseGitRemote } from "./git-remote.js";
+
 export interface PatchReviewRequest {
   branch: string;
   title: string;
@@ -96,9 +98,10 @@ export function createGitLabPatchPublisher({
   project: string;
   run: RunPatchReviewCommand;
 }): PatchReviewPublisher {
-  const repository = project.includes("://")
-    ? project
-    : `ssh://${project.replace(":", "/")}`;
+  const remote = parseGitRemote(project);
+  const repository = remote?.scpStyle
+    ? `${remote.url}/${remote.path}`
+    : project;
   return {
     label: "Merge request",
     findExisting: (branch) =>
@@ -146,6 +149,7 @@ function gitlabPatchDescription(body: string): string {
 }
 
 function remoteHost(remote: string): string | undefined {
-  if (remote.includes("://")) return new URL(remote).hostname.toLowerCase();
-  return /^(?:[^@/]+@)?([^:/]+):[^/]/u.exec(remote)?.[1]?.toLowerCase();
+  const parsed = parseGitRemote(remote);
+  if (parsed?.scpStyle && parsed.path.startsWith("/")) return undefined;
+  return parsed?.url.hostname.toLowerCase();
 }

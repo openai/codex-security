@@ -8,7 +8,7 @@ A sealed terminal bundle contains these files under `<scan_dir>`:
 
 - `scan-manifest.json`: immutable terminal scan receipt after finalization
 - `findings.json`: semantic finding records retained when the scan reached its terminal outcome
-- `coverage.json`: structured coverage summary with detailed receipt references
+- `scan.review`: additional excluded paths, stored in the manifest
 
 Keep detailed evidence in scan-local artifacts and reference it from the canonical summaries.
 
@@ -37,7 +37,9 @@ Producers should use UTC ISO 8601 timestamps in the native SDK or plugin format.
 | `canceled`    | The scan stopped after an explicit cancellation; retained artifacts may be partial.                             |
 | `interrupted` | The scan stopped before normal completion because execution was interrupted; retained artifacts may be partial. |
 
-Only `completed` supports a completed-scan conclusion. For every stopped outcome, consumers must preserve retained findings and coverage while treating absence of findings as inconclusive.
+Only `completed` supports a completed-scan conclusion. For every stopped outcome, consumers must preserve retained findings and review state while treating absence of findings as inconclusive.
+
+Optional `scan.warnings` records run-level diagnostics available when the bundle is first sealed. SARIF exports include these messages alongside deferred-task reasons in `toolExecutionNotifications`; warnings do not change `executionSuccessful`, which follows `scan.status`. Missing or empty warnings add no notifications. Existing sealed bundles remain unchanged, and export or publication warnings discovered afterward remain separate operation diagnostics.
 
 ### Stopped Result Recovery
 
@@ -66,8 +68,6 @@ A dirty checkout has `allowedKinds: ["git_worktree"]`: copy `requiredSnapshotDig
 | `directory_snapshot` | `snapshotDigest`                                                           |
 
 `targetId` identifies the stable repository or workspace. Prefer a digest of a sanitized canonical absolute remote URL when one exists. Otherwise use a digest of a stable local workspace identity. Never persist remote URL credentials, query parameters, fragments, or tokens.
-
-Remote URLs must not contain C0 or C1 control characters (`U+0000`–`U+001F`, `U+007F`–`U+009F`) or line separators (`U+2028`, `U+2029`). The producer and SDK reader reject these characters before URL parsing, which can discard tabs, line feeds, and carriage returns. Valid mixed-case hosts, default ports, and internationalized hostnames are preserved as supplied; a different parser serialization does not make a URL invalid.
 
 For dirty worktrees and working-tree diffs, calculate `snapshotDigest` from a deterministic representation of the reviewed content, including staged changes and reviewed untracked files where applicable. For committed or revision-range diffs, derive `snapshotDigest` from the authoritative diff kind and immutable base/head revisions. The workbench supplies it during finalization, so workbench-backed unsealed drafts may omit it. Previously sealed manifests retain their recorded digest. For directory snapshots, hash a sorted relative-path and file-hash inventory of the reviewed scope. Encode the result as `codex-security-snapshot/v1:sha256:<64 lowercase hex characters>`.
 
@@ -106,15 +106,15 @@ Examples:
 
 Use CWE taxonomy separately. Do not include file names, line numbers, scan IDs, or display numbering in `ruleId`.
 
-## Coverage
+## Review state
 
-`coverage.json` records scan scope and completion information. Standard and diff summaries also describe reviewed surfaces and outstanding work.
+New scans publish `scan-manifest.json` and `findings.json`. The manifest owns scan identity, mode, and configured scope. `scan.review` contains only `excludedPaths`, used when comparing scans. These values do not measure the percentage of files read.
 
 A Deep parent retains the configured paths and notes from accepted reviews. Worker IDs distinguish each review's surfaces and deferred items; receipt references point to the original evidence. Findings reduction does not clear pending review work. If the discovery deadline arrives before a review finishes, the host preserves valid checkpoint findings and pending work with the deadline reason. See [stopped-result recovery](#stopped-result-recovery).
 
-Each Deep worker writes an ordinary Standard result, including its own coverage. A reducer submits `record_codex_security_deep_reduction({ scanId, findings, scope?, threatModel? })`; its saved results and checkpoints contain the accepted findings and optional scope and threat-model context.
+For file-authored drafts, put `reviewState` inside `scan` in the unsealed manifest. Finalization preserves recovery details in checkpoints and replaces the draft state with the small `scan.review` summary. For tool-authored drafts, pass `reviewState` to `record_codex_security_scan_draft`.
 
-For Standard and diff scans, record:
+Deep reducers work on findings and do not need review state. Deep workers retain their own checkpoints. Comparison uses the later scan's execution status, configured scope, and additional exclusions before classifying an absent finding as resolved.
 
 - scan mode and inventory strategy
 - included and excluded paths
@@ -149,7 +149,7 @@ For a whole-repository Deep scan, keep `inventoryStrategy` as `repository`; repe
 | `directory`        | Deterministic non-Git directory inventory                 |
 | `custom`           | Producer-defined inventory described by detailed receipts |
 
-Coverage lists reviewed surfaces, exclusions, and follow-up work. The manifest records execution status. Existing sealed bundles retain legacy metadata unchanged.
+Review state lists reviewed surfaces, exclusions, and follow-up work. The manifest records execution status. Existing sealed bundles retain legacy metadata unchanged.
 
 Map detailed ledger closure into completed surface summaries in this order:
 
@@ -165,11 +165,11 @@ Record each explicit exclusion with a `pattern` and `reason`. Record each deferr
 
 Detailed ledgers remain under the numbered scan artifact directories.
 Receipt references must point to regular non-symlink files under `artifacts/`.
-`coverage.json` is the structured summary for adapters and comparison.
+`scan.review` retains additional exclusions for adapters and comparison. Legacy sealed scans continue to reference their original `coverage.json`.
 
 ## Canonical Report Semantics
 
-The three canonical JSON files are also the only semantic inputs to final report generation. Producers must not author `report.md`; finalization deterministically projects it after validating the canonical seal. The report remains an unsealed downstream projection and can be regenerated without changing canonical JSON or evidence artifacts.
+The two canonical JSON files are also the only semantic inputs to final report generation. Producers must not author `report.md`; finalization deterministically projects it after validating the canonical seal. The report remains an unsealed downstream projection and can be regenerated without changing canonical JSON or evidence artifacts.
 
 Record report-specific semantics without duplicating data already represented elsewhere:
 
@@ -182,8 +182,6 @@ Record report-specific semantics without duplicating data already represented el
 - finding `attackPath.reachability`: attacker, entry point, preconditions, outcome, and a concise reachability narrative.
 - finding `severity`: the assigned level plus rationale and the concrete evidence that would raise or lower it.
 - finding remediation: the existing minimal fix string plus optional tests and preventive controls.
-- coverage surfaces: optional `riskArea` and `notes` used by the Reviewed Surfaces table.
-- coverage `openQuestions`: concrete unresolved questions and optional copyable follow-up prompts.
 
 These fields are optional for compatibility with existing v1 canonical artifacts. When omitted, finalization emits explicit, deterministic fallback text derived only from the remaining canonical JSON. It never reads an existing report to recover missing semantics.
 
@@ -193,7 +191,7 @@ New completed findings must match `schemas/tools/scan-draft.schema.json`. Finali
 
 - `schemas/scan-manifest.schema.json`
 - `schemas/findings.schema.json`
-- `schemas/coverage.schema.json`
+- `schemas/coverage.schema.json` for legacy scans only
 
 V1 consumers ignore unknown properties for forward compatibility. Producers must still validate documented fields and should not emit undocumented properties casually.
 

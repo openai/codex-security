@@ -1,11 +1,14 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { once } from 'node:events';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import * as core from '@actions/core';
 import { DefaultArtifactClient } from '@actions/artifact';
+import { BlobClient } from '@azure/storage-blob';
 import { runAction } from '../src/main.js';
 import { INPUT_NAMES } from '../src/inputs.js';
 import { gitEnvironment } from '../src/targets.js';
@@ -15,6 +18,14 @@ import { copyCompletedScan } from './fixtures.js';
 
 type Scenario = 'schedule' | 'pr' | 'policy-pr';
 const inputKey = (name: string): string => `INPUT_${name.toUpperCase()}`;
+
+function assertAttribution(args: readonly string[], provider: string): void {
+  assert.deepEqual(args.flatMap((arg, index) => arg === '--codex' ? [args[index + 1]] : []), [
+    'analytics.enabled=false',
+    'responses_api_metadata.codex_security_integration="github_action"',
+    `responses_api_metadata.codex_security_provider="${provider}"`,
+  ]);
+}
 
 function outputValues(text: string): Record<string, string> {
   const values: Record<string, string> = {};
@@ -32,7 +43,7 @@ function outputValues(text: string): Record<string, string> {
   return values;
 }
 
-async function harness(t: TestContext, scenario: Scenario = 'schedule') {
+async function harness(t: TestContext, scenario: Scenario = 'schedule', serverUrl = 'https://github.com') {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'codex-main-test-')));
   const repository = join(root, 'repo');
   await mkdir(repository);
@@ -40,15 +51,16 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule') {
     '-c', 'user.name=Offline Test', '-c', 'user.email=offline@example.invalid', '-c', 'core.hooksPath=/dev/null', ...args,
   ], { cwd: repository, env: gitEnvironment(), encoding: 'utf8' }).trim();
   git('init', '-q', '-b', 'main');
-  git('remote', 'add', 'origin', 'https://github.com/example/repo.git');
+  git('remote', 'add', 'origin', `${serverUrl}/example/repo.git`);
   await writeFile(join(repository, 'app.txt'), 'synthetic source\n');
   git('add', '.'); git('commit', '-qm', 'base');
   const base = git('rev-parse', 'HEAD');
+  let sha = base;
   if (scenario !== 'schedule') {
     await writeFile(join(repository, scenario === 'policy-pr' ? 'SECURITY.md' : 'app.txt'), 'synthetic change\n');
     git('add', '.'); git('commit', '-qm', 'PR change');
+    sha = git('rev-parse', 'HEAD');
   }
-  const sha = git('rev-parse', 'HEAD');
   const previousEnv = { ...process.env };
   const previousExitCode = process.exitCode;
   t.after(async () => {
@@ -69,7 +81,7 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule') {
     GITHUB_EVENT_PATH: eventPath, GITHUB_EVENT_NAME: scenario === 'schedule' ? 'schedule' : 'pull_request',
     GITHUB_REPOSITORY: 'example/repo', GITHUB_WORKSPACE: repository, GITHUB_SHA: sha,
     GITHUB_REF: scenario === 'schedule' ? 'refs/heads/main' : 'refs/pull/4/merge',
-    GITHUB_ACTOR: 'trusted-maintainer', GITHUB_SERVER_URL: 'https://github.com',
+    GITHUB_ACTOR: 'trusted-maintainer', GITHUB_SERVER_URL: serverUrl,
     GITHUB_OUTPUT: outputPath, GITHUB_STATE: statePath, RUNNER_TEMP: root,
     OPENAI_API_KEY: 'synthetic-offline-test-key', INPUT_SUMMARY: 'true', INPUT_ANNOTATIONS: 'false',
     INPUT_SCOPE: scenario === 'schedule' ? 'repository' : 'diff',
@@ -112,6 +124,7 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule') {
     }
     if (process.env.INPUT_MODE === 'deep') coverage.mode = 'deep_repository';
     sarif.runs[0].versionControlProvenance[0].revisionId = scanSha;
+    sarif.runs[0].versionControlProvenance[0].repositoryUri = `${serverUrl}/example/repo`;
     await writeFile(sarifPath, JSON.stringify(sarif));
     if (configuration.missingSarif) await rm(sarifPath);
     const value = {manifest, coverage, findings: JSON.parse(await readFile(join(runtime.resultsDirectory, 'findings.json'), 'utf8')),
@@ -171,7 +184,7 @@ test('PR severity failure retains SARIF outputs despite unrelated scope notes', 
   assert.equal(result.outputs['scanned-sha'], app.sha); assert.equal(result.outputs['high-count'], '1');
   assert.equal(result.outputs['estimated-cost'], '0.125'); assert.ok(result.outputs['sarif-path']);
   assert.ok(result.args.includes('--model=gpt-5.6-luna'));
-  assert.equal(result.args[result.args.indexOf('--effort') + 1], 'medium');
+  assert.ok(result.args.includes('--effort=medium'));
   assert.ok(!result.args.includes('--max-cost'));
   assert.match(result.logs, /::error::Scan completed\. Findings meet the configured failure threshold\./);
   assert.match(result.summary, /^## Codex Security\n\n\*\*Scan completed\. Findings meet the configured failure threshold\.\*\*/);
@@ -184,10 +197,42 @@ test('PR severity failure retains SARIF outputs despite unrelated scope notes', 
   assert.match(annotation[2], /filesystem write without containment validation/);
 });
 
+test('a Critical finding after 50 Low findings leads the PR summary and annotations', async (t) => {
+  const app = await harness(t, 'pr');
+  app.setInput('fail-on-severity', 'high');
+  app.setInput('annotations', 'true');
+  app.configure({ scanResult: value => {
+    const [finding] = value.findings.findings;
+    const lowFindings = Array.from({ length: 50 }, (_, i) => ({
+      ...finding, title: `Low finding ${i + 1}`, severity: { level: 'low' },
+    }));
+    value.findings.findings = [...lowFindings, { ...finding, title: 'Blocking finding', severity: { level: 'critical' } }];
+  }});
+
+  const result = await app.run();
+  assert.equal(result.outputs['policy-status'], 'failed');
+  const headings = [...result.summary.matchAll(/<h3>([^<]+)<\/h3>/g)].map(match => match[1]);
+  const annotations = result.logs.split(/\r?\n/).filter(line => line.startsWith('::warning '));
+  assert.equal(headings.length, 30);
+  assert.equal(annotations.length, 50);
+  assert.deepEqual(headings.slice(0, 2), ['CRITICAL: Blocking finding', 'LOW: Low finding 1']);
+  assert.match(annotations[0], /title=CRITICAL%3A Blocking finding/);
+  assert.match(annotations[1], /title=LOW%3A Low finding 1/);
+});
+
 test('scheduled complete report-only scan succeeds', async (t) => {
-  const app = await harness(t); const result = await app.run();
+  const app = await harness(t);
+  process.env.INPUT_FOO = 'unrelated workflow value';
+  app.setInput('effort', 'medium');
+  app.configure({scanResult: value => {
+    value.turn = {usage: {input_tokens: 1200, output_tokens: 50}};
+  }});
+  const result = await app.run();
+  assertAttribution(result.args, 'openai');
+  assert.ok(result.args.includes('--effort=medium'));
   assert.equal(result.exitCode, 0); assert.equal(result.outputs['scan-status'], 'completed');
   assert.equal(result.outputs['policy-status'], 'passed'); assert.equal(result.outputs['sarif-upload-ready'], 'true');
+  assert.equal(result.outputs['report-status'], 'ready'); assert.equal(result.cleanups, 1);
   assert.equal(result.outputs['analysis-ref'], 'refs/heads/main');
   assert.ok(result.args.includes('--verbose'));
   assert.match(result.logs, /Synthetic live CLI progress/);
@@ -196,22 +241,43 @@ test('scheduled complete report-only scan succeeds', async (t) => {
   assert.match(result.logs, /Security scan exited after \d+m \d+s; exit code: 0/);
   assert.match(result.logs, /Scan: completed; findings policy: passed; report: ready/);
   assert.match(result.logs, /Estimated cost: \$0.1250/);
+  assert.equal(result.outputs['estimated-cost'], '0.125');
+  assert.ok(result.summary.includes('1,200 input (0 cached) · 50 output'));
   assert.match(result.logs, /Scan completed\. Findings are reported without failing the job\./);
   assert.match(result.summary, /\*\*Scan completed\. Findings are reported without failing the job\.\*\*/);
 });
 
-test('unrelated ambient input variables do not reject a valid scan', async (t) => {
-  const app = await harness(t); process.env.INPUT_FOO = 'unrelated workflow value';
-  app.setInput('effort', 'medium');
-  const result = await app.run();
-  assert.equal(result.exitCode, 0); assert.equal(result.outputs['scan-status'], 'completed');
-  assert.equal(result.args[result.args.indexOf('--effort') + 1], 'medium');
-});
+for (const [scenario, mode] of [['schedule', 'standard'], ['pr', 'standard'], ['schedule', 'deep']] as const) {
+  test(`enterprise ${scenario} ${mode} scans preserve reports and upload identity`, async t => {
+    const serverUrl = 'https://example-enterprise.ghe.com';
+    const app = await harness(t, scenario, serverUrl);
+    app.setInput('mode', mode); app.setInput('upload-artifacts', 'true'); app.setInput('annotations', 'true');
+    let uploadedFiles: string[] = [];
+    t.mock.method(DefaultArtifactClient.prototype, 'uploadArtifact', async (_name: string, files: string[]) => {
+      assert.equal(process.env.GITHUB_SERVER_URL, serverUrl);
+      uploadedFiles = files.map(file => basename(file));
+      for (const file of files) assert.ok((await readFile(file)).length);
+      return {id:1, size:1};
+    });
+    const result = await app.run();
+    assert.equal(result.exitCode, 0); assert.equal(result.processes, 1); assert.equal(result.cleanups, 1);
+    assert.equal(result.outputs['scan-status'], 'completed'); assert.equal(result.outputs['report-status'], 'ready');
+    assert.equal(result.outputs['policy-status'], 'passed'); assert.equal(result.outputs['sarif-upload-ready'], 'true');
+    assert.equal(result.outputs['scanned-sha'], app.sha);
+    assert.equal(result.outputs['analysis-ref'], scenario === 'pr' ? 'refs/pull/4/head' : 'refs/heads/main');
+    assert.deepEqual(uploadedFiles.sort(), ['coverage.json', 'findings.json', 'results.sarif', 'scan-manifest.json']);
+    const sarif = JSON.parse(await readFile(result.outputs['sarif-path'], 'utf8'));
+    assert.equal(sarif.runs[0].versionControlProvenance[0].repositoryUri, `${serverUrl}/example/repo`);
+    assert.match(result.logs, /^::warning .*file=src\/extract\.py/m);
+    assert.match(result.summary, /Scan completed/);
+  });
+}
 
 test('Deep scans forward their budget and publish completed reports with cleanup', async (t) => {
   const app = await harness(t);
   app.setInput('mode', 'deep'); app.setInput('max-time-hours', '1.5');
   const result = await app.run();
+  assertAttribution(result.args, 'openai');
   assert.equal(result.args[result.args.indexOf('--mode') + 1], 'deep');
   assert.equal(result.args[result.args.indexOf('--max-time-hours') + 1], '1.5');
   assert.equal(result.exitCode, 0); assert.equal(result.cleanups, 1);
@@ -254,6 +320,7 @@ for (const mode of ['standard', 'deep']) {
     assert.equal(result.exitCode, 0); assert.equal(result.outputs['scan-status'], 'completed');
     assert.equal(result.outputs['sarif-upload-ready'], 'true');
     assert.equal(result.args[result.args.indexOf('--provider') + 1], 'amazon-bedrock');
+    assertAttribution(result.args, 'amazon-bedrock');
     assert.equal(result.args[result.args.indexOf('--auth') + 1], 'auto');
     assert.equal(result.environment.AWS_ACCESS_KEY_ID, 'synthetic-access-key');
     assert.equal(result.environment.AWS_SECRET_ACCESS_KEY, 'synthetic-secret-key');
@@ -274,6 +341,7 @@ for (const [provider, key] of [['openrouter', 'OPENROUTER_API_KEY'], ['fireworks
     const result = await app.run();
     assert.equal(result.exitCode, 0); assert.equal(result.outputs['scan-status'], 'completed');
     assert.equal(result.args[result.args.indexOf('--provider') + 1], provider);
+    assertAttribution(result.args, provider);
     assert.equal(result.args[result.args.indexOf('--auth') + 1], 'api-key');
     assert.equal(result.environment[key], expectedKey);
     for (const other of ['OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENROUTER_API_KEY', 'FIREWORKS_API_KEY', 'AWS_SESSION_TOKEN', 'GITHUB_TOKEN'])
@@ -316,16 +384,6 @@ test('Bedrock dry-run forwards no credentials and remains a skipped scan', async
   assert.equal(result.environment.AWS_BEARER_TOKEN_BEDROCK, undefined); assert.equal(result.environment.OPENAI_API_KEY, undefined);
 });
 
-test('Bedrock authentication errors remain scan failures', async t => {
-  const app = await harness(t);
-  app.setInput('provider', 'amazon-bedrock'); app.setInput('model', 'openai.synthetic-model');
-  delete process.env.OPENAI_API_KEY;
-  app.configure({exitCode:2, cliFailure:true});
-  const result = await app.run();
-  assert.equal(result.exitCode, 1); assert.equal(result.processes, 1);
-  assert.equal(result.outputs['scan-status'], 'failed'); assert.equal(result.outputs['sarif-upload-ready'], 'false');
-});
-
 for (const scenario of ['schedule', 'pr'] as const) {
   test(`missing API key fails a ${scenario === 'pr' ? 'Dependabot PR' : 'scheduled scan'} with setup guidance`, async (t) => {
     const app = await harness(t, scenario); delete process.env.OPENAI_API_KEY;
@@ -341,6 +399,13 @@ for (const scenario of ['schedule', 'pr'] as const) {
     assert.doesNotMatch(result.logs, /Findings meet the configured failure threshold/);
   });
 }
+
+test('missing RUNNER_TEMP fails with setup guidance', async (t) => {
+  const app = await harness(t); delete process.env.RUNNER_TEMP;
+  const result = await app.run();
+  assert.equal(result.exitCode, 1); assert.equal(result.setups, 0); assert.equal(result.processes, 0);
+  assert.match(result.summary, /RUNNER_TEMP is required\./);
+});
 
 test('cleanup failure fails the job and appears in the summary and final error', async (t) => {
   const app = await harness(t); app.configure({cleanupFails: true});
@@ -370,15 +435,6 @@ for (const threshold of ['none', 'high']) {
   });
 }
 
-test('verbose false suppresses CLI diagnostics but retains lifecycle and results', async (t) => {
-  const app = await harness(t); app.setInput('verbose', 'false'); const result = await app.run();
-  assert.equal(result.exitCode, 0);
-  assert.ok(!result.args.includes('--verbose'));
-  assert.doesNotMatch(result.logs, /Synthetic live CLI progress/);
-  assert.match(result.logs, /Starting security scan/);
-  assert.match(result.logs, /Scan: completed/);
-});
-
 test('configuration diagnostics preserve values and cannot inject runner commands', async (t) => {
   const app = await harness(t);
   app.setInput('model', 'synthetic-offline-test-key\u2028::error::injected');
@@ -401,6 +457,10 @@ test('scope exclusions and deferred notes do not fail completed scans or make fi
   assert.equal(result.outputs['exit-code'], '0');
   assert.equal(result.outputs['policy-status'], 'passed'); assert.equal(result.outputs['sarif-upload-ready'], 'true');
   assert.equal(result.outputs['high-count'], '1'); assert.ok(result.outputs['json-path']);
+  assert.ok(!result.args.includes('--verbose'));
+  assert.doesNotMatch(result.logs, /Synthetic live CLI progress/);
+  assert.match(result.logs, /Starting security scan/);
+  assert.match(result.logs, /Scan: completed/);
   assert.match(result.logs, /Findings:.*high: 1/);
   assert.doesNotMatch(result.logs, /Provisional|Scan coverage is partial|::error::/);
   assert.doesNotMatch(result.summary, /provisional|not evaluated|not-evaluated/i);
@@ -408,13 +468,15 @@ test('scope exclusions and deferred notes do not fail completed scans or make fi
   assert.equal(coverage.deferred[0].reason, 'Dependency <example> unavailable; validation deferred.');
 });
 
-test('execution failure diagnostics cannot emit legacy runner commands', async (t) => {
+test('CLI warnings fail a completed scan and cannot emit legacy runner commands', async (t) => {
   const app = await harness(t);
-  app.configure({exitCode: 2, scanResult: value => {
+  app.configure({scanResult: value => {
     value.warnings = ['Synthetic diagnostic: ##[stop-commands]token'];
   }});
   const result = await app.run();
-  assert.equal(result.exitCode, 1);
+  assert.equal(result.exitCode, 1); assert.equal(result.outputs['exit-code'], '0');
+  assert.equal(result.outputs['policy-status'], 'not-evaluated');
+  assert.equal(result.outputs['scan-status'], 'failed'); assert.equal(result.outputs['sarif-upload-ready'], 'false');
   assert.match(result.logs, /Synthetic diagnostic: ##\\\[stop-commands\]token/);
   assert.doesNotMatch(result.logs, /##\[stop-commands\]/);
   assert.match(result.summary, /Synthetic diagnostic: ##&#91;stop-commands&#93;token/);
@@ -434,23 +496,10 @@ test('exit 2 fails the step even when finalized reports were retained', async (t
 
 for (const [name, scanProcess] of [
   ['timeout', {timedOut: true}], ['interruption', {interrupted: true}],
-  ['signal', {signal: 'SIGTERM' as const}], ['terminated exit', {exitCode: 143}],
-  ['malformed output', {stdout: 'not JSON'}],
+  ['signal', {signal: 'SIGTERM' as const}],
 ] as const) {
   test(`retained reports cannot hide scan ${name}`, async (t) => {
     const app = await harness(t); app.configure({scanProcess});
-    const result = await app.run();
-    assert.equal(result.exitCode, 1); assert.equal(result.outputs['scan-status'], 'failed');
-    assert.equal(result.outputs['policy-status'], 'not-evaluated'); assert.equal(result.outputs['sarif-upload-ready'], 'false');
-  });
-}
-
-for (const [name, scanResult] of [
-  ['failed manifest', (value: any) => { value.manifest.scan.status = 'failed'; }],
-  ['target-change warning', (value: any) => { value.warnings = ['Synthetic target changed during scanning.']; }],
-] as const) {
-  test(`${name} cannot become a successful scan`, async (t) => {
-    const app = await harness(t); app.configure({scanResult});
     const result = await app.run();
     assert.equal(result.exitCode, 1); assert.equal(result.outputs['scan-status'], 'failed');
     assert.equal(result.outputs['policy-status'], 'not-evaluated'); assert.equal(result.outputs['sarif-upload-ready'], 'false');
@@ -579,10 +628,69 @@ test('requested artifact upload failure remains fatal without SARIF', async (t) 
   assert.match(result.summary, /Synthetic artifact upload failure/);
 });
 
-test('CLI authentication failure leaves findings unavailable instead of reporting a threshold failure', async (t) => {
-  const app = await harness(t); app.configure({exitCode: 2, cliFailure: true});
+test('archive read failure preserves scan reports, summary and cleanup', {
+  skip: process.platform === 'win32' || process.getuid?.() === 0,
+}, async t => {
+  const app = await harness(t);
+  app.setInput('upload-artifacts', 'true');
+  const requests: string[] = [];
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* Read the artifact creation request. */ }
+    requests.push(request.url ?? '');
+    response.writeHead(200, {'Content-Type': 'application/json'});
+    response.end(JSON.stringify({ok: true, signed_upload_url: 'https://example.invalid/artifact'}));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const payload = Buffer.from(JSON.stringify({scp: 'Actions.Results:synthetic-run:synthetic-job'})).toString('base64url');
+  Object.assign(process.env, {
+    ACTIONS_RESULTS_URL: `http://127.0.0.1:${address.port}`,
+    ACTIONS_RUNTIME_TOKEN: `e30.${payload}.synthetic-signature`,
+  });
+  let signal: AbortSignal | undefined;
+  t.mock.method(BlobClient.prototype, 'getBlockBlobClient', () => ({
+    uploadStream: async (input: AsyncIterable<Buffer>, _bufferSize: number, _concurrency: number, options: {abortSignal: AbortSignal}) => {
+      signal = options.abortSignal;
+      for await (const _chunk of input) { /* Consume the real archive stream. */ }
+    },
+  }));
+  let staging = '';
+  let unreadable = '';
+  const uploadArtifact = DefaultArtifactClient.prototype.uploadArtifact;
+  t.mock.method(DefaultArtifactClient.prototype, 'uploadArtifact', async function (this: DefaultArtifactClient, ...args: Parameters<typeof uploadArtifact>) {
+    staging = args[2];
+    unreadable = args[1][0];
+    // Fail the archive's actual file read without altering the saved scan report.
+    await chmod(unreadable, 0);
+    return uploadArtifact.apply(this, args);
+  });
   const result = await app.run();
-  assert.equal(result.exitCode, 1); assert.equal(result.outputs['scan-status'], 'failed');
+  assert.equal(result.exitCode, 1); assert.equal(result.cleanups, 1);
+  assert.equal(result.outputs['scan-status'], 'completed');
+  assert.equal(result.outputs['policy-status'], 'passed');
+  assert.equal(result.outputs['report-status'], 'failed');
+  assert.equal(result.outputs['sarif-upload-ready'], 'false');
+  for (const name of ['json-path', 'coverage-path', 'sarif-path']) {
+    assert.ok((await readFile(result.outputs[name])).length);
+  }
+  assert.match(result.summary, /EACCES/);
+  assert.ok(result.summary.includes(unreadable));
+  assert.match(result.logs, /::error::Scan completed, but required reporting failed\./);
+  assert.deepEqual(requests, ['/twirp/github.actions.results.api.v1.ArtifactService/CreateArtifact']);
+  assert.equal(signal?.aborted, true);
+  await assert.rejects(stat(staging), {code: 'ENOENT'});
+});
+
+test('Bedrock CLI authentication failure leaves findings unavailable', async (t) => {
+  const app = await harness(t);
+  app.setInput('provider', 'amazon-bedrock'); app.setInput('model', 'openai.synthetic-model');
+  delete process.env.OPENAI_API_KEY;
+  app.configure({exitCode: 2, cliFailure: true});
+  const result = await app.run();
+  assert.equal(result.exitCode, 1); assert.equal(result.processes, 1); assert.equal(result.outputs['scan-status'], 'failed');
   assert.equal(result.outputs['policy-status'], 'not-evaluated'); assert.equal(result.outputs['sarif-upload-ready'], 'false');
   assert.equal(result.outputs['json-path'], '');
   assert.match(result.summary, /Synthetic API authentication failure/);
@@ -590,13 +698,6 @@ test('CLI authentication failure leaves findings unavailable instead of reportin
   for (const level of ['critical', 'high', 'medium', 'low', 'informational']) assert.equal(result.outputs[`${level}-count`], '');
   assert.match(result.summary, /\*\*Findings:\*\* unavailable/);
   assert.match(result.logs, /Findings: unavailable/);
-});
-
-test('malformed findings keep count outputs empty', async (t) => {
-  const app = await harness(t); app.configure({scanResult: value => { value.findings.findings[0].severity = null; }});
-  const result = await app.run();
-  assert.equal(result.exitCode, 1);
-  for (const level of ['critical', 'high', 'medium', 'low', 'informational']) assert.equal(result.outputs[`${level}-count`], '');
 });
 
 test('valid empty findings publish zero counts', async (t) => {

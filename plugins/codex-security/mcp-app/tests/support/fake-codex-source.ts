@@ -1,3 +1,4 @@
+import path from "node:path";
 import { jsonLineInputSource } from "./json-line-input-source.ts";
 
 export function fakeCodexSource(
@@ -5,17 +6,18 @@ export function fakeCodexSource(
   preflightAllowed: boolean,
   accountResult: unknown,
   preflightMarkerPath: string,
-) {
+): string {
   return `#!/usr/bin/env node
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 const preflightProfile = process.env.FAKE_CODEX_PREFLIGHT_PROFILE ? JSON.parse(process.env.FAKE_CODEX_PREFLIGHT_PROFILE) : ${JSON.stringify(preflightProfile)};
 const preflightAllowed = ${JSON.stringify(preflightAllowed)};
 const accountResult = ${JSON.stringify(accountResult)};
 const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};
+const temporaryEnvironment = Object.fromEntries(['TEMP', 'TMP'].map(name => [name, process.env[name]]));
 if (process.argv.includes('app-server')) {
-  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
+  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, stateDirectory: process.env.CODEX_SECURITY_STATE_DIR, temporaryEnvironment, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'HOME', 'NODE_OPTIONS', 'NODE_DEBUG', 'NODE_EXTRA_CA_CERTS', 'CODEX_MCP_NODE_PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
   writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
 ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
       if (message.method === 'config/read' || message.method === 'permissionProfile/list') {
@@ -25,6 +27,16 @@ ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
       let result;
       if (message.method === 'initialize') {
         result = { userAgent: 'fixture', codexHome: '/fixture', platformFamily: 'unix', platformOs: 'macos' };
+      } else if (message.method === 'thread/read') {
+        preflight.requests.push({ method: message.method, threadId: message.params.threadId });
+        writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
+        const failOncePath = join(process.env.CODEX_HOME, message.params.threadId + '.read-fails-once');
+        if (existsSync(failOncePath)) {
+          unlinkSync(failOncePath);
+          process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32603, message: 'synthetic parent read temporary failure' } }) + '\\n');
+          continue;
+        }
+        result = { thread: { id: message.params.threadId, path: join(process.env.CODEX_HOME, message.params.threadId + '.jsonl') } };
       } else if (message.method === 'config/read') {
         result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: preflightProfile } }, origins: {}, layers: null };
       } else if (message.method === 'permissionProfile/list') {
@@ -53,7 +65,7 @@ const profileIndex = process.argv.indexOf('--profile');
 const profileContents = profileIndex === -1 ? undefined : readFileSync(join(process.env.CODEX_HOME, process.argv[profileIndex + 1] + '.config.toml'), 'utf8');
 const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;
 const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;
-const runtimeEnvironment = Object.fromEntries(['PATH', 'HOME', 'PYTHON', 'PYTHONUTF8', 'LD_LIBRARY_PATH', 'DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'CODEX_SECURITY_STATE_DIR', 'RUNNER_TRACKING_ID'].map(name => [name, process.env[name]]));
+const runtimeEnvironment = Object.fromEntries(['PATH', 'HOME', 'PYTHON', 'PYTHONUTF8', 'CODEX_MCP_NODE_PATH', 'CODEX_BROWSER_USE_NODE_PATH', 'CODEX_ELECTRON_RESOURCES_PATH', 'LD_LIBRARY_PATH', 'DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'CODEX_SECURITY_STATE_DIR', 'CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS', 'RUNNER_TRACKING_ID'].map(name => [name, process.env[name]]));
 const toolProbe = stdin.includes('CAPTURE_SYNTHETIC_RG') ? spawnSync('rg', ['--version'], { encoding: 'utf8' }) : undefined;
 if (toolProbe && toolProbe.status !== 0) throw toolProbe.error ?? new Error(toolProbe.stderr);
 const pythonProbe = stdin.includes('CAPTURE_SYNTHETIC_PYTHON') ? spawnSync(process.env.PYTHON, ['-I', '-c', 'import json,os,sys; print(json.dumps([sys.prefix,os.environ.get("LD_LIBRARY_PATH")]))'], { encoding: 'utf8' }) : undefined;
@@ -61,23 +73,17 @@ if (pythonProbe && pythonProbe.status !== 0) throw new Error(pythonProbe.stderr 
 const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
 const knowledgePath = stdin.includes('synthetic worker configuration fixture') ? process.env.CODEX_SECURITY_KNOWLEDGE_BASE : undefined;
 const knowledgeDocuments = knowledgePath === undefined ? undefined : Object.fromEntries(readdirSync(knowledgePath).map(name => [name, readFileSync(join(knowledgePath, name), 'utf8')]));
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ ...(scopeInput === undefined ? {} : { scopeInput }), argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, mcpNodePath: process.env.CODEX_MCP_NODE_PATH, bundledTool: toolProbe?.stdout.trim(), pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
+const deepConfig = process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH ? readFileSync(process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, 'utf8') : undefined;
+writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ ...(scopeInput === undefined ? {} : { scopeInput }), argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, deepConfig, codexHome: process.env.CODEX_HOME, temporaryEnvironment, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'HOME', 'NODE_OPTIONS', 'NODE_DEBUG', 'NODE_EXTRA_CA_CERTS', 'CODEX_MCP_NODE_PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, mcpNodePath: process.env.CODEX_MCP_NODE_PATH, bundledTool: toolProbe?.stdout.trim(), pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
 if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => { if (!stdin.includes('IGNORE_TERMINATION')) setTimeout(() => process.exit(0), 100); });
 
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }
 if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }
-if (stdin.includes('MCP_STARTUP_TIMEOUT') || stdin.includes('CATALOG_AUTH_ONLY') || stdin.includes('SYNC_AUTH_ONLY')) {
-  const syncWarning = stdin.includes('SYNC_AUTH_WARNING') || stdin.includes('SYNC_AUTH_ONLY');
-  const bothWarnings = stdin.includes('BOTH_AUTH_WARNINGS');
-  if (!syncWarning || bothWarnings) console.error('chatgpt authentication required for remote plugin catalog; api key auth is not supported');
-  if (syncWarning || bothWarnings) console.error('chatgpt authentication required to sync remote plugins; api key auth is not supported');
-  if (!stdin.includes('CATALOG_AUTH_ONLY') && !stdin.includes('SYNC_AUTH_ONLY')) {
-    const serverName = stdin.includes('OTHER_MCP_STARTUP_TIMEOUT') ? 'other_server' : stdin.includes('LEGACY_ARTIFACT_MCP_STARTUP_TIMEOUT') ? 'codex_security_artifacts' : 'cs_artifacts';
-    const timeout = stdin.includes('REQUEST_TIMED_OUT') ? 'request timed out' : 'timed out handshaking with MCP server after 30s';
-    console.error('required MCP servers failed to initialize: ' + serverName + ': ' + timeout);
-  }
-  if (stdin.includes('WITH_MISSING_API_KEY')) console.error('missing API key');
-  if (stdin.includes('WITH_POLICY_REFUSAL')) console.error('Request blocked by cyberPolicy.');
+if (stdin.includes('ARTIFACT_MCP_STARTUP_TIMEOUT')) {
+  console.error('chatgpt authentication required to sync remote plugins; api key auth is not supported');
+  console.error('required MCP servers failed to initialize: cs_artifacts: request timed out');
+  console.error('missing API key');
+  console.error('Request blocked by cyberPolicy.');
   process.exit(1);
 }
 const resumeIndex = process.argv.indexOf('resume');
@@ -117,4 +123,104 @@ console.log(JSON.stringify({ type: 'turn.completed', usage: stdin.includes('NULL
 if (stdin.includes('COMPLETE_THEN_HANG')) { setInterval(() => {}, 1_000); await new Promise(() => {}); }
 }
 `;
+}
+
+export function workerGitEnvironment(root: string) {
+  return {
+    NODE_OPTIONS: "--no-warnings",
+    NODE_DEBUG: "synthetic-ambient-debug",
+    NODE_EXTRA_CA_CERTS: path.join(root, "ambient-ca.pem"),
+    CODEX_MCP_NODE_PATH: path.join(root, "inherited node"),
+    HOME: path.join(root, "inherited home"),
+    PATH: [path.join(root, "selected tools"), "../selected tools", ""].join(
+      path.delimiter,
+    ),
+    CODEX_SECURITY_GIT: path.join(root, "selected tools", "git"),
+    GIT_SSH_COMMAND: "synthetic-ssh --fixture",
+    GIT_CONFIG_GLOBAL: path.join(root, "operator.gitconfig"),
+  };
+}
+
+export function workerRuntimeEnvironment(root: string, virtualenv?: string) {
+  return {
+    PATH: [
+      virtualenv === undefined
+        ? path.join(root, "runner-tools")
+        : path.join(virtualenv, "bin"),
+      path.dirname(process.execPath),
+    ].join(path.delimiter),
+    HOME: path.join(root, "home"),
+    PYTHON:
+      virtualenv === undefined
+        ? path.join(root, "tools", "python3")
+        : "python3",
+    PYTHONUTF8: "1",
+    LD_LIBRARY_PATH:
+      (process.env.LD_LIBRARY_PATH === undefined
+        ? ""
+        : process.env.LD_LIBRARY_PATH + path.delimiter) +
+      path.join(root, "libraries"),
+    DYLD_LIBRARY_PATH: path.join(root, "dylibs"),
+    DYLD_FALLBACK_LIBRARY_PATH: path.join(root, "fallback-libraries"),
+    CODEX_SECURITY_STATE_DIR: path.join(root, "state"),
+    CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
+    RUNNER_TRACKING_ID: "synthetic-worker-job",
+  };
+}
+
+export const externalImports: {
+  inherited: string | undefined;
+  override?: string;
+}[] = [
+  { inherited: undefined },
+  { inherited: "1" },
+  { inherited: "0" },
+  { inherited: "0", override: "1" },
+  { inherited: "1", override: "0" },
+  { inherited: "" },
+];
+
+export function workerScanEnvironment(root: string, index: number) {
+  const { override } = externalImports[index];
+  return {
+    ...(override === undefined
+      ? {}
+      : { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: override }),
+    HOME: path.join(root, `scan home ${index}`),
+    PATH: path.join(root, `scan tools ${index}`),
+    NODE_OPTIONS: `--stack-trace-limit=${20 + index}`,
+    NODE_DEBUG: `synthetic-scan-debug-${index}`,
+    NODE_EXTRA_CA_CERTS: path.join(root, `scan-ca-${index}.pem`),
+    CODEX_MCP_NODE_PATH: path.join(root, `scan node ${index}`),
+  };
+}
+
+export const expectedGitEnvironment = (
+  gitEnvironment: ReturnType<typeof workerGitEnvironment>,
+  nodePath: string,
+  environment?: ReturnType<typeof workerScanEnvironment>,
+) => ({
+  ...gitEnvironment,
+  CODEX_MCP_NODE_PATH: nodePath,
+  ...(environment === undefined
+    ? {}
+    : {
+        HOME: environment.HOME,
+        PATH: environment.PATH,
+        NODE_OPTIONS: environment.NODE_OPTIONS,
+        NODE_DEBUG: environment.NODE_DEBUG,
+        NODE_EXTRA_CA_CERTS: environment.NODE_EXTRA_CA_CERTS,
+        CODEX_MCP_NODE_PATH: environment.CODEX_MCP_NODE_PATH,
+      }),
+});
+
+export function restoreEnv(name: string, value: string | undefined) {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
+
+export function nativeConfigOverrides(args: readonly string[]) {
+  return args.flatMap((arg, index) =>
+    arg === "--config" || arg === "-c" ? [args[index + 1]] : [],
+  );
 }

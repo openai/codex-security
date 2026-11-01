@@ -1,5 +1,5 @@
-name: Codex Security
-description: Scan code with Codex Security, enforce findings policy, and produce JSON, coverage, and SARIF reports.
+name: OpenAI Codex Security
+description: Scan code with Codex Security, enforce findings policy, and produce JSON and SARIF reports.
 branding:
   icon: shield
   color: black
@@ -25,7 +25,7 @@ inputs:
   cyber-access-program:
     description: 'Optional Cyber access program: standard, daybreak_blue, or daybreak_red. Unset preserves CLI defaults. Daybreak selections require approved organization and enabled API project access; model access is checked separately.'
   effort:
-    description: 'Reasoning effort: minimal, low, medium, high, xhigh, or max (subject to model support).'
+    description: 'Reasoning effort passed to Codex; supported values depend on the model and provider.'
     default: xhigh
   max-cost:
     description: Positive estimated USD stop threshold per invocation. In-flight requests can exceed it; unset means no cost limit.
@@ -60,8 +60,10 @@ outputs:
     description: Absolute validated SARIF file path, or empty when unavailable or withheld.
   json-path:
     description: Absolute canonical findings JSON path, or empty when unavailable or withheld.
+  manifest-path:
+    description: Absolute scan manifest path, including scan status and scope, or empty when unavailable or withheld.
   coverage-path:
-    description: Absolute coverage JSON path, or empty when unavailable or withheld.
+    description: Legacy coverage JSON path. Empty for current CLI results.
   results-directory:
     description: Runner-local reports directory; do not upload it recursively.
   scan-status:

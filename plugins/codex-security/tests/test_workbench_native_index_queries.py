@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import ntpath
+import sqlite3
 from argparse import Namespace
+from contextlib import closing
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from workbench_test_support import stable_target_id
@@ -330,28 +333,29 @@ def test_scan_list_returns_lightweight_running_first_summaries(workbench_api, in
     assert "findings" not in scans[0]
 
 
+@pytest.mark.parametrize(
+    "simulate_windows",
+    [
+        pytest.param(False, id="native", marks=pytest.mark.cross_platform),
+        pytest.param(True, id="ntpath"),
+    ],
+)
 def test_scan_root_filter_matches_windows_path_aliases(
-    workbench_api, indexed_collections, tmp_path, monkeypatch
+    workbench_api, indexed_collections, tmp_path, monkeypatch, simulate_windows
 ):
     connection, _ = indexed_collections
+    history = workbench_api["scan_history"]
+    if simulate_windows:
+        monkeypatch.setattr(history, "os", SimpleNamespace(name="nt", path=ntpath, sep="\\"))
     root = tmp_path / "Scan Results"
+    root.mkdir()
     for scan_id, directory in zip(
-        SCAN_IDS, (root / "first", tmp_path / "Scan Results Other", tmp_path / "unrelated")
+        SCAN_IDS, (f"{root}/first", tmp_path / "Scan Results Other", history.os.path.normpath(root))
     ):
         connection.execute("UPDATE scans SET scan_dir = ? WHERE id = ?", (str(directory), scan_id))
-    history = workbench_api["scan_history"]
-    monkeypatch.setattr(history, "os", SimpleNamespace(name="nt", path=ntpath, sep="\\"))
-    args = query_args(scan_root=str(root).upper(), limit=None)
-
-    assert [scan["scanId"] for scan in history.list_scans(connection, args)["scans"]] == [
-        SCAN_IDS[0]
-    ]
-    connection.execute(
-        "UPDATE scans SET scan_dir = ? WHERE id = ?", (ntpath.normpath(str(root)), SCAN_IDS[0])
-    )
-    assert [scan["scanId"] for scan in history.list_scans(connection, args)["scans"]] == [
-        SCAN_IDS[0]
-    ]
+    scan_root = str(root).upper() if history.os.name == "nt" else str(root)
+    scans = history.list_scans(connection, query_args(scan_root=scan_root, limit=None))["scans"]
+    assert {scan["scanId"] for scan in scans} == {SCAN_IDS[0], SCAN_IDS[2]}
 
 
 def test_scan_list_probes_requested_repository_once(
@@ -374,6 +378,32 @@ def test_scan_list_probes_requested_repository_once(
         ("rev-parse", "--path-format=absolute", "--git-common-dir"),
         ("remote", "get-url", "origin"),
     ]
+
+
+def test_unscanned_repositories_follow_scanned_rows_and_paginate(
+    workbench_api, indexed_collections, tmp_path, monkeypatch
+):
+    connection, _ = indexed_collections
+    indexes = workbench_api["native_indexes"]
+    query = indexes.list_repositories
+    scanned = query(connection)["repositories"]
+    unscanned = sorted(
+        workbench_api["ensure_security_target"](connection, str(tmp_path / name))
+        for name in ("needle-cedar", "needle-oak")
+    )
+    repositories = query(connection)["repositories"]
+    assert repositories[: len(scanned)] == scanned
+    assert [row["targetId"] for row in repositories[len(scanned) :]] == unscanned
+    probe = Mock(wraps=indexes.os.path.isdir)
+    monkeypatch.setattr(indexes.os.path, "isdir", probe)
+    for offset, target_id in enumerate(unscanned):
+        page = query(
+            connection, query_args(status="not_scanned", query="NeEdLe", limit=1, offset=offset)
+        )
+        assert [row["targetId"] for row in page["repositories"]] == [target_id]
+        assert page["nextOffset"] == (1 if offset == 0 else None)
+        probe.assert_called_once_with(page["repositories"][0]["targetPath"])
+        probe.reset_mock()
 
 
 @pytest.mark.parametrize(
@@ -480,3 +510,111 @@ def test_scan_start_chronology_keeps_latest_and_first_seen_queries_consistent(
     ]
     assert [scan["scanId"] for scan in history] == (SCAN_IDS[:2] if equal else SCAN_IDS[1::-1])
     assert list(connection.iterdump()) == before
+
+
+@pytest.mark.parametrize("in_transaction", [False, True])
+def test_repository_index_keeps_one_scan_cohort(
+    workbench_api, indexed_collections, tmp_path, in_transaction
+):
+    source, _ = indexed_collections
+    indexes = workbench_api["native_indexes"]
+    database = tmp_path / "history.sqlite"
+    new_id = "00000000-0000-4000-8000-999999999999"
+    # Hold one target's first completed scan and finding for the concurrent publication.
+    with source:
+        pending = [
+            (
+                table,
+                source.execute(f"SELECT * FROM {table} WHERE {key} = ?", (SCAN_IDS[1],)).fetchone(),
+            )
+            for table, key in (
+                ("scans", "id"),
+                ("scan_progress", "scan_id"),
+                ("finding_occurrences", "scan_id"),
+            )
+        ]
+        source.execute("DELETE FROM scans WHERE id = ?", (SCAN_IDS[1],))
+    with closing(sqlite3.connect(database)) as reader, closing(sqlite3.connect(database)) as writer:
+        source.backup(reader)
+        reader.row_factory = sqlite3.Row
+        assert reader.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        before = indexes.list_repositories(reader)
+        if in_transaction:
+            reader.execute("BEGIN")
+
+        def execute(sql, parameters=()):
+            cursor = reader.execute(sql, parameters)
+            if "FROM security_targets AS targets" not in sql:
+                return cursor
+            with writer:
+                writer.execute(
+                    "UPDATE security_targets SET display_name = 'renamed' "
+                    "WHERE id = (SELECT target_id FROM scans WHERE id = ?)",
+                    (SCAN_IDS[0],),
+                )
+                writer.execute(
+                    "INSERT INTO scans (id, workspace_id, target_id, target_path, target_revision, "
+                    "scope, mode, scan_dir, status, phase, started_at, created_at, updated_at) "
+                    "SELECT ?, workspace_id, target_id, target_path, target_revision, scope, mode, "
+                    "scan_dir || '/next', 'complete', 'reporting', ?, created_at, updated_at "
+                    "FROM scans WHERE id = ?",
+                    (new_id, "2030-01-01T00:00:00Z", SCAN_IDS[0]),
+                )
+                writer.execute(
+                    "INSERT INTO scan_progress (scan_id, updated_at) "
+                    "SELECT ?, updated_at FROM scan_progress WHERE scan_id = ?",
+                    (new_id, SCAN_IDS[0]),
+                )
+                for table, row in pending:
+                    writer.execute(
+                        f"INSERT INTO {table} VALUES ({','.join('?' for _ in row)})", row
+                    )
+            return cursor
+
+        proxy = SimpleNamespace(execute=execute, create_function=reader.create_function)
+        assert indexes.list_repositories(proxy) == before
+        assert reader.in_transaction is in_transaction
+        reader.commit()
+        after = indexes.list_repositories(reader)["repositories"]
+        assert after[0]["latestScan"]["scanId"] == new_id
+        assert after[0]["displayName"] == "renamed"
+        assert after[0]["scanCount"] == 2
+        first = next(row for row in after if row["latestScan"]["scanId"] == SCAN_IDS[1])
+        assert (first["scanCount"], first["openFindingsCount"]) == (1, 1)
+
+
+def test_repository_latest_keeps_sqlite_millisecond_ties(workbench_api, indexed_collections):
+    connection, targets = indexed_collections
+    target_id = stable_target_id(targets[0])
+    for scan_id, fraction in zip(SCAN_IDS[:2], ("123200", "123100")):
+        connection.execute(
+            "UPDATE scans SET target_id = ?, started_at = ? WHERE id = ?",
+            (target_id, f"2026-10-08T01:00:00.{fraction}Z", scan_id),
+        )
+    query = workbench_api["native_indexes"].list_repositories
+    repositories = query(connection)["repositories"]
+    assert repositories[0]["latestScan"]["scanId"] == SCAN_IDS[1]
+    assert repositories[0]["scanCount"] == 2
+
+    connection.execute("UPDATE scans SET cost_json = '{' WHERE id = ?", (SCAN_IDS[0],))
+    with pytest.raises(ValueError, match="Expecting property name"):
+        query(connection)
+
+
+def test_repository_summary_excludes_scans_without_progress(workbench_api, indexed_collections):
+    connection, targets = indexed_collections
+    target_id = stable_target_id(targets[0])
+    connection.execute("UPDATE scans SET target_id = ? WHERE id = ?", (target_id, SCAN_IDS[1]))
+    connection.execute("DELETE FROM scan_progress WHERE scan_id = ?", (SCAN_IDS[1],))
+    query = workbench_api["native_indexes"].list_repositories
+    repositories = query(connection, query_args(target_id=target_id))["repositories"]
+    assert len(repositories) == 1
+    assert repositories[0]["latestScan"]["scanId"] == SCAN_IDS[0]
+    assert repositories[0]["scanCount"] == 1
+    connection.execute("DELETE FROM scan_progress WHERE scan_id = ?", (SCAN_IDS[0],))
+    (unscanned,) = query(connection, query_args(target_id=target_id, status="not_scanned"))[
+        "repositories"
+    ]
+    assert unscanned["targetId"] == target_id
+    assert unscanned["scanCount"] == unscanned["openFindingsCount"] == 0
+    assert unscanned["latestScan"] is None

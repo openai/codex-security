@@ -141,6 +141,10 @@ for (const legacy of [false, true]) {
     await server.connect(serverTransport);
     await client.connect(clientTransport);
     try {
+      assert.equal(
+        client.getServerVersion()?.version,
+        (await readJson(import.meta.dirname, "../package.json")).version,
+      );
       const response = await client.callTool({
         name: "record_codex_security_scan_draft",
         arguments: {
