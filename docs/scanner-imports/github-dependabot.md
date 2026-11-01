@@ -44,26 +44,21 @@ and [security advisories](github-security-advisories.md) have separate guides.
 
 ### Export repository alerts
 
-Authenticate the GitHub CLI with a fine-grained token or GitHub App installation
-that has read access to Dependabot alerts for the repository. Replace `github.com`
-and `OWNER/REPO` with the alert host and repository.
+In Codex, replace the host, repository and private output path in this request:
 
-```bash
-out=$(mktemp -d) && (
-  set -eu
-  umask 077
-  gh api --hostname github.com --method GET --paginate \
-    -H 'Accept: application/vnd.github+json' \
-    -H 'X-GitHub-Api-Version: 2022-11-28' \
-    --jq 'if type == "array" then tojson else error("expected an alert page") end' \
-    'repos/OWNER/REPO/dependabot/alerts?per_page=100' > "$out/pages.tmp" &&
-    test -s "$out/pages.tmp" &&
-    mv "$out/pages.tmp" "$out/dependabot.jsonl"
-)
-```
+> Export all native Dependabot alerts for https://HOST/OWNER/REPO to
+> /private/path/dependabot.jsonl, across all states and classifications.
 
-The export contains one JSON array per line, including `[]` for an empty page.
-It follows every page and includes open, fixed, dismissed, and auto-dismissed
-alerts. The saved file is `$out/dependabot.jsonl`. See the
-[Dependabot alerts endpoint](https://docs.github.com/en/rest/dependabot/alerts#list-dependabot-alerts-for-a-repository)
-and [GitHub CLI pagination](https://cli.github.com/manual/gh_api).
+Follow the [scoped GitHub read procedure](../../plugins/codex-security/skills/triage-finding/references/github-rest-intake.md#github-finding-retrieval)
+for the selected transport and identity. Ask before changing either. A connected
+app must return complete native records and confirm it enumerated every matching
+page. For HTTPS, use a credential with Dependabot alerts read access to request
+`GET /repos/OWNER/REPO/dependabot/alerts?per_page=100` on the selected host's API. Omit `state` and `classification` to export every alert
+the deployment exposes. Note any unknown malware coverage. For HTTPS,
+reject redirects and rebuild each next page on the same API origin and repository
+endpoint with the requested filters. [Dependabot alerts endpoint](https://docs.github.com/en/rest/dependabot/alerts#list-dependabot-alerts-for-a-repository)
+
+Keep every field. Write each successful page as one compact JSON array per line,
+including `[]` for an empty page. Write to a private temporary file in the
+destination directory outside the checkout, then rename it to the requested
+output path only after all pages have been verified and saved.

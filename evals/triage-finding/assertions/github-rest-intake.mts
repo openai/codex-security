@@ -31,6 +31,15 @@ function escapedLiteralPattern(value: unknown) {
   return new RegExp(String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
 }
 
+function matchesRef(actual: unknown, expected: unknown) {
+  return (
+    typeof expected === "string" &&
+    (actual === expected ||
+      (expected.startsWith("refs/heads/") &&
+        actual === expected.slice("refs/heads/".length)))
+  );
+}
+
 function structuredAnswer(text: string) {
   try {
     return JSON.parse(
@@ -127,6 +136,8 @@ const checks: Record<
 
   code_scanning: (text, context) => {
     const answer = structuredAnswer(text);
+    const defaultRef = context.vars.expected_default_ref;
+    const alertsRef = answer?.alerts?.parameters?.ref;
     const repositories = [
       "{owner}/{repo}",
       repositoryName(context.vars.target_repo as string),
@@ -146,11 +157,15 @@ const checks: Record<
       [100, "100"].some((value) => value === request.parameters?.per_page);
     return [
       ...(!requestMatches(answer?.alerts, "") ||
-      answer?.alerts?.parameters?.state !== "open"
-        ? ["must describe open code scanning alerts with per_page=100"]
+      answer?.alerts?.parameters?.state !== "open" ||
+      !matchesRef(alertsRef, defaultRef)
+        ? ["must describe open default-branch alerts with per_page=100"]
         : []),
-      ...(!requestMatches(answer?.instances, "/{alert_number}/instances")
-        ? ["must describe per-alert instances with per_page=100"]
+      ...(!requestMatches(answer?.instances, "/{alert_number}/instances") ||
+      !matchesRef(answer?.instances?.parameters?.ref, defaultRef)
+        ? [
+            "must scope per-alert instances to the default ref with per_page=100",
+          ]
         : []),
       ...(answer?.source_type !== "sarif"
         ? ["must normalize code scanning as sarif"]
@@ -196,42 +211,22 @@ const checks: Record<
     ];
   },
 
-  explicit_connector: (text, context) => {
-    const repository = repositoryName(context.vars.target_repo as string);
+  transport: (text, { vars }) => {
     const decision = structuredAnswer(text);
-    if (!decision)
-      return ["must return the connector decision as a JSON object"];
-    const failures = [];
+    const fields = Object.entries(vars.expected_decision ?? {});
     if (
-      Object.keys(decision ?? {}).length !== 3 ||
-      Object.keys(decision?.scope ?? {}).length !== 2
+      !decision ||
+      !fields.length ||
+      Object.keys(decision).length !== fields.length
     )
-      failures.push(
-        "must return only transport, fallback, and scope with only account and repository",
-      );
-    if (decision?.transport !== "github_connector_read_only")
-      failures.push(
-        "must retrieve findings through the requested read-only GitHub Connector",
-      );
-    if (decision?.fallback !== "explain_and_request_rest_approval")
-      failures.push(
-        "must explain the limitation and request approval before REST fallback",
-      );
-    if (
-      decision?.scope?.account !== "user_specified_or_approved" ||
-      decision?.scope?.repository !== repository
-    )
-      failures.push(
-        "must scope the REST fallback to the specified account and exact repository",
-      );
-    return failures;
-  },
-
-  default_rest: (text) => {
-    const decision = structuredAnswer(text);
-    return decision?.transport === "rest" && Object.keys(decision).length === 1
-      ? []
-      : ["must select REST when the user has not requested the Connector"];
+      return ["must return only the requested GitHub decision fields"];
+    return fields
+      .filter(([key, value]) => {
+        if (key === "alerts_ref" || key === "instances_ref")
+          return !matchesRef(decision[key], value);
+        return decision[key] !== value;
+      })
+      .map(([key, value]) => `expected ${key} to be ${value}`);
   },
 
   explicit_issue: (text) => {
@@ -263,5 +258,5 @@ export default (output: unknown, context: AssertionContext) => {
     ? check(text, context)
     : [`unknown expected_github_rest_behavior: ${behavior}`];
 
-  return gradeFailures(failures, "GitHub REST intake behavior matched.");
+  return gradeFailures(failures, "GitHub intake behavior matched.");
 };
