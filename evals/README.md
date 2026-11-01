@@ -11,7 +11,13 @@ being embedded in its source tree or shipped npm runtime.
 - [Secret discovery](secret-discovery/README.md): checks whether the production
   core audit finds synthetic credentials in source and keeps them in its final
   findings, with deterministic grading and harness checks.
+- [Standard time budget](standard-time-budget/README.md): paired comparison of
+  production Standard scans with and without an advisory time allowance on
+  synthetic vulnerabilities and safe controls, with source-evidence grading.
+- [Workflow routing](workflow-routing/README.md): checks whether repository-installed
+  production skills route natural-language requests to the appropriate workflow,
+  stopping before workflow execution.
 
-Model runs are opt-in. CI runs the deterministic triage and secret-discovery
-helper checks and the real-IPC reducer regression through the normal MCP test
-suite.
+Model runs are opt-in. CI runs the deterministic triage, secret-discovery,
+time-budget, and workflow-routing helper checks and the real-IPC reducer
+regression through the normal MCP test suite.

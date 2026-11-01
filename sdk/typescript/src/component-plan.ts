@@ -1,7 +1,7 @@
 import { lstat, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, posix } from "node:path";
-import { z } from "incur";
+import { isAbsolute, join, posix, resolve } from "node:path";
+import { z } from "zod";
 import type { CodexSecuritySurface, ScanAuthMode } from "./api.js";
 import {
   runReadOnlyCodex,
@@ -53,8 +53,15 @@ export async function normalizeComponentPlan(
   signal?: AbortSignal,
 ): Promise<ComponentPlan> {
   const plan = componentPlanSchema.parse(value);
+  repository = await normalizeRepository(repository, signal);
   for (const component of plan.components) {
-    const target = await normalizeTarget(repository, component.paths, signal);
+    const target = await normalizeTarget(
+      repository,
+      component.paths.map((path) =>
+        isAbsolute(path) ? path : resolve(repository, path),
+      ),
+      signal,
+    );
     component.paths = [...target.paths];
   }
   return plan;

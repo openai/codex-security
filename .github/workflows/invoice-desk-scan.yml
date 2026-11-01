@@ -1,10 +1,9 @@
 name: Invoice Desk OpenAI scan
-run-name: "Invoice Desk scan — ${{ inputs.pr_number && format('PR #{0} @ {1}', inputs.pr_number, inputs.source_sha) || (github.event_name == 'workflow_run' && 'PR fallback' || 'main baseline') }}"
+run-name: "Invoice Desk scan — ${{ inputs.pr_number && format('PR #{0} @ {1}', inputs.pr_number, inputs.source_sha) || 'main baseline' }}"
 
 on:
-  workflow_run:
-    workflows: ["Invoice Desk sample"]
-    types: [completed]
+  schedule:
+    - cron: "17 3 * * 1"
   workflow_dispatch:
     inputs:
       pr_number:
@@ -19,10 +18,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: invoice-desk-scan-${{ github.event_name == 'workflow_dispatch' && (inputs.pr_number && format('pr-{0}-{1}', inputs.pr_number, inputs.source_sha) || 'main') || format('fallback-{0}', github.run_id) }}
-  cancel-in-progress: true
-
 env:
   CODEX_SECURITY_VERSION: "0.1.30"
 
@@ -31,13 +26,11 @@ jobs:
     # Only a workflow on protected main can request the inference environment.
     if: >-
       github.ref == 'refs/heads/main' && github.ref_protected &&
-      (github.event_name == 'workflow_dispatch' ||
-       github.event.workflow_run.event == 'pull_request')
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')
     runs-on: ubuntu-24.04
     # This job reads only trusted helpers and event metadata before caching public packages.
     cache-mode: write
     permissions:
-      actions: write
       contents: read
       pull-requests: read
     outputs:
@@ -93,6 +86,11 @@ jobs:
       fail-fast: false
       matrix:
         target: ${{ fromJSON(needs.target.outputs.targets) }}
+    # Rejected requests must not cancel an eligible scan or its approval request.
+    # A delayed target job must not cancel a scan of a different revision.
+    concurrency:
+      group: invoice-desk-scan-${{ matrix.target.pr && format('pr-{0}', matrix.target.pr) || 'main' }}-${{ matrix.target.sha }}
+      cancel-in-progress: true
     environment: codex-security-smoke-test
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -113,7 +111,7 @@ jobs:
           persist-credentials: false
       - *set-up-node-js
       - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: Restore CLI package download cache

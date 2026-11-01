@@ -19,6 +19,14 @@ export interface DirectDeepScanOptions {
   signal: AbortSignal;
 }
 
+// The direct coordinator records context but never calls a model itself.
+export const DIRECT_DEEP_SCAN_CONTROL_USAGE = {
+  input_tokens: 0,
+  cached_input_tokens: 0,
+  cache_write_input_tokens: 0,
+  output_tokens: 0,
+} as const;
+
 /** Run the same coordinator as the plugin, without a parent model turn. */
 export async function* runDeepScan(
   options: DirectDeepScanOptions,
@@ -95,12 +103,7 @@ export async function* runDeepScan(
   // existing scan tracker from the native sessions below this scan directory.
   yield {
     type: "turn.completed",
-    usage: {
-      input_tokens: 0,
-      cached_input_tokens: 0,
-      cache_write_input_tokens: 0,
-      output_tokens: 0,
-    },
+    usage: { ...DIRECT_DEEP_SCAN_CONTROL_USAGE },
   };
 }
 

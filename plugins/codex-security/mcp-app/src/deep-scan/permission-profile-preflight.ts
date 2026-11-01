@@ -1,4 +1,5 @@
 import type { JsonObject as JsonRecord } from "../types.js";
+import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { asRecord as record } from "../record.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
@@ -6,7 +7,7 @@ import { createReadStream } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import { version as MCP_APP_VERSION } from "../../package.json";
 import { DeepScanNonRetryableError } from "./errors.js";
-import { executablePathForSpawn } from "./executable-path.js";
+import { executablePathForSpawn } from "../executable-path.js";
 import { isPermissionProfileFallbackWarning } from "../../../scripts/codex_profile.mjs";
 
 /** The stable profile id selected by the worker's raw config overrides. */
@@ -49,6 +50,8 @@ type RuntimeConfigReadOptions = Pick<
   "codexPath" | "cwd" | "configOverrides" | "env" | "signal" | "context"
 > & {
   readonly commandArgs?: readonly string[];
+  /** Full app-server invocation for callers that already constructed its arguments. */
+  readonly appServerArgs?: readonly string[];
   readonly providerConfigOverrides?: readonly string[];
 };
 
@@ -64,6 +67,74 @@ export async function readDeepScanRuntimeConfig(
     const config = record(response.config);
     if (!config) throw malformedPreflightError(options.context);
     return config;
+  });
+}
+
+/** Read native origins and ordered layers without starting a thread. */
+export async function readDeepScanRuntimeConfigWithOrigins(
+  options: RuntimeConfigReadOptions,
+): Promise<JsonRecord> {
+  return withPreflightClient(options, (client) =>
+    client.request("config/read", { cwd: options.cwd, includeLayers: true }),
+  );
+}
+
+export interface DeepScanParentTurn {
+  readonly threadId: string;
+  readonly turnId: string;
+}
+
+/** Read the program of the exact parent turn that invoked the plugin. */
+export async function readDeepScanParentCyberAccessProgram(
+  options: RuntimeConfigReadOptions & {
+    readonly parentTurn: DeepScanParentTurn;
+  },
+): Promise<CyberAccessProgram | undefined> {
+  return withPreflightClient(options, async (client) => {
+    let response: JsonRecord;
+    try {
+      response = await client.request("thread/read", {
+        threadId: options.parentTurn.threadId,
+        includeTurns: false,
+      });
+    } catch (error) {
+      const nativeError = record(
+        error instanceof Error ? error.cause : undefined,
+      );
+      // Ephemeral parent threads have no persisted rollout for this separate client.
+      if (
+        nativeError?.code === -32600 &&
+        nativeError.message ===
+          `thread not loaded: ${options.parentTurn.threadId}`
+      )
+        return undefined;
+      throw error;
+    }
+    const thread = record(response.thread);
+    if (
+      thread?.id !== options.parentTurn.threadId ||
+      typeof thread.path !== "string"
+    )
+      return undefined;
+    const input = createReadStream(thread.path, { encoding: "utf8" });
+    const lines = createInterface({ input, crlfDelay: Infinity });
+    try {
+      for await (const line of lines) {
+        if (!line.trim()) continue;
+        const entry = record(JSON.parse(line));
+        if (entry?.type !== "turn_context") continue;
+        const context = record(entry.payload);
+        if (context?.turn_id !== options.parentTurn.turnId) continue;
+        const program = context.cyber_access_program;
+        return typeof program === "string"
+          ? (program as CyberAccessProgram)
+          : undefined;
+      }
+      return undefined;
+    } finally {
+      lines.close();
+      input.destroy();
+    }
   });
 }
 
@@ -227,17 +298,29 @@ class AppServerPreflightClient {
   private closed = false;
   private childClosed = false;
   private readonly removeAbortListener: () => void;
+  private readonly onStdioError = (error: Error): void => {
+    const failure = codexExecutableStdioError(
+      this.options.codexPath,
+      this.options.context,
+    );
+    failure.message += "\n" + error.message;
+    this.fail(failure);
+  };
 
   constructor(private readonly options: RuntimeConfigReadOptions) {
-    const args: string[] = [...(options.commandArgs ?? [])];
-    for (const override of options.configOverrides) {
-      args.push("--config", override);
+    const args: string[] = [
+      ...(options.appServerArgs ?? options.commandArgs ?? []),
+    ];
+    if (options.appServerArgs === undefined) {
+      for (const override of options.configOverrides) {
+        args.push("--config", override);
+      }
+      // App-server loads credential-free metadata; exec reads private provider profiles.
+      for (const override of options.providerConfigOverrides ?? []) {
+        args.push("--config", override);
+      }
+      args.push("app-server", "--stdio");
     }
-    // App-server loads credential-free metadata; exec reads private provider profiles.
-    for (const override of options.providerConfigOverrides ?? []) {
-      args.push("--config", override);
-    }
-    args.push("app-server", "--stdio");
 
     this.child = spawn(executablePathForSpawn(options.codexPath), args, {
       cwd: options.cwd,
@@ -257,16 +340,8 @@ class AppServerPreflightClient {
       crlfDelay: Infinity,
     });
     this.stdoutLines.on("line", (line) => this.consumeStdoutLine(line));
-    const onStdioError = (error: Error) => {
-      const failure = codexExecutableStdioError(
-        options.codexPath,
-        options.context,
-      );
-      failure.message += "\n" + error.message;
-      this.fail(failure);
-    };
-    this.stdoutLines.on("error", onStdioError);
-    this.child.stdin.on("error", onStdioError);
+    this.stdoutLines.on("error", this.onStdioError);
+    this.child.stdin.on("error", this.onStdioError);
     this.child.on("error", (error) => {
       this.fail(
         codexExecutableStartError(options.codexPath, error, options.context),
@@ -302,7 +377,7 @@ class AppServerPreflightClient {
     await this.request("initialize", {
       clientInfo: {
         name: "codex_security_deep_scan",
-        title: "Codex Security Local Deep Scan",
+        title: "Codex Security Deep Scan",
         version: MCP_APP_VERSION,
       },
       capabilities: { experimentalApi: true },
@@ -410,14 +485,7 @@ class AppServerPreflightClient {
       return;
     }
     this.child.stdin.write(`${JSON.stringify(message)}\n`, (error) => {
-      if (error) {
-        const failure = codexExecutableStdioError(
-          this.options.codexPath,
-          this.options.context,
-        );
-        failure.message += "\n" + error.message;
-        this.fail(failure);
-      }
+      if (error) this.onStdioError(error);
     });
   }
 
@@ -655,6 +723,7 @@ function jsonRpcPreflightError(
       subject(context) +
       " did not run." +
       (typeof error?.message === "string" ? "\n" + error.message : ""),
+    { cause: value },
   );
 }
 

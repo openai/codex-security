@@ -87,7 +87,7 @@ async function generate() {
 }
 
 generate().then((models) => {
-  const shared = ["workbench-arguments"].map((name) => [
+  const shared = ["workbench-arguments", "executable-path"].map((name) => [
     `${name}.ts`,
     `/* Generated from plugin ${name}.ts. Run \`pnpm generate:models\`. */\n` +
       readFileSync(

@@ -1,3 +1,4 @@
+import { requestMetadata } from "./support/request-metadata.js";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
@@ -142,12 +143,17 @@ describe("CodexSecurity headless patching", () => {
       repositoryPath: repository,
       finding: "Candidate finding",
     };
+    const projectTrustKey =
+      process.platform === "win32"
+        ? repository.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
+        : repository;
     return {
       client,
       options,
       captured,
       workbench,
       codexHome,
+      projectTrustKey,
     };
   }
 
@@ -300,8 +306,10 @@ describe("CodexSecurity headless patching", () => {
           model_reasoning_effort: "medium",
           features: { plugins: false },
           default_permissions: "codex_security_scan",
-          responses_api_metadata: { codex_security_surface: "sdk" },
         },
+      });
+      expect(requestMetadata(captured.codex?.configOverrides)).toMatchObject({
+        codex_security_surface: "sdk",
       });
       expect(captured.thread).not.toHaveProperty("sandboxMode");
       expect(captured.thread).not.toHaveProperty("networkAccessEnabled");
@@ -312,6 +320,34 @@ describe("CodexSecurity headless patching", () => {
       );
     },
   );
+
+  test("static verification scopes the patch assessment while preserving standard defaults and permissions", async () => {
+    const verificationReport =
+      "Source review shows bound query parameters preserve legitimate queries. Runtime checks were not performed.";
+    const { client, options, captured } = await patchClient(() =>
+      patchEvents({ ...verifiedResponse, verificationReport }),
+    );
+    await using security = client;
+    await security.patch(options);
+    const defaultPrompt = captured.prompt;
+    const defaultThread = captured.thread;
+    await security.patch({ ...options, verificationMode: "standard" });
+    expect(captured.prompt).toBe(defaultPrompt);
+    const result = await security.patch({
+      ...options,
+      verificationMode: "static",
+    });
+    expect(captured.prompt).toContain("Verification mode: static");
+    expect(captured.prompt).toContain("Do not install dependencies");
+    expect(captured.prompt).not.toContain(
+      "without running the relevant checks",
+    );
+    expect(captured.prompt).not.toContain(
+      "only when the original issue no longer reproduces",
+    );
+    expect(captured.thread).toEqual(defaultThread);
+    expect(result).toMatchObject({ status: "verified", verificationReport });
+  });
 
   test("inherits constructor settings after a per-call override and ignores observer failures", async () => {
     const { client, options, captured } = await patchClient();
@@ -357,10 +393,13 @@ describe("CodexSecurity headless patching", () => {
   });
 
   test("keeps the patch workspace untrusted across native config layers", async () => {
-    const { client, options, captured, codexHome } = await patchClient();
+    const { client, options, captured, codexHome, projectTrustKey } =
+      await patchClient();
     await using security = client;
     await security.patch(options);
-    expect(parseToml(captured.codex!.configOverrides!.join("\n"))).toEqual({
+    expect(
+      parseToml(captured.codex!.configOverrides!.join("\n")),
+    ).toMatchObject({
       permissions: {
         codex_security_scan: {
           filesystem: {
@@ -373,7 +412,7 @@ describe("CodexSecurity headless patching", () => {
         },
       },
       project_root_markers: [],
-      projects: { [options.repositoryPath]: { trust_level: "untrusted" } },
+      projects: { [projectTrustKey]: { trust_level: "untrusted" } },
     });
     expect(captured.thread?.workingDirectory).toBe(options.repositoryPath);
   });
@@ -392,9 +431,8 @@ describe("CodexSecurity headless patching", () => {
           refresh_interval_ms: 1000,
         },
       };
-      const { client, options, captured, codexHome } = await patchClient(
-        undefined,
-        {
+      const { client, options, captured, codexHome, projectTrustKey } =
+        await patchClient(undefined, {
           ...(selection === "profile"
             ? {
                 profile: "review",
@@ -402,8 +440,7 @@ describe("CodexSecurity headless patching", () => {
               }
             : { model_provider: "synthetic.provider" }),
           model_providers: { "synthetic.provider": provider },
-        },
-      );
+        });
       await using security = client;
       expect(await security.patch(options)).toMatchObject(verified);
       expect(captured.codex?.nativeProfile).toBeDefined();
@@ -417,7 +454,9 @@ describe("CodexSecurity headless patching", () => {
       ).toEqual({
         model_providers: { "synthetic.provider": provider },
       });
-      expect(parseToml(captured.codex!.configOverrides!.join("\n"))).toEqual({
+      expect(
+        parseToml(captured.codex!.configOverrides!.join("\n")),
+      ).toMatchObject({
         permissions: {
           codex_security_scan: {
             filesystem: {
@@ -430,7 +469,7 @@ describe("CodexSecurity headless patching", () => {
           },
         },
         project_root_markers: [],
-        projects: { [options.repositoryPath]: { trust_level: "untrusted" } },
+        projects: { [projectTrustKey]: { trust_level: "untrusted" } },
       });
       expect(captured.codex?.config).not.toHaveProperty("model_providers");
       expect(captured.codex?.apiKey).toBeUndefined();
@@ -521,6 +560,13 @@ describe("CodexSecurity headless patching", () => {
         model: " ",
       }),
     ).rejects.toThrow("model must be a nonempty string");
+    await expect(
+      localClient.patch({
+        repositoryPath,
+        finding: "Candidate",
+        verificationMode: "unsupported" as PatchOptions["verificationMode"],
+      }),
+    ).rejects.toThrow();
     expect(prepareRuntime).not.toHaveBeenCalled();
 
     for (const [response, complete, message] of [

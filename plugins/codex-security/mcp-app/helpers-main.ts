@@ -13,10 +13,8 @@ import {
   normalizeCandidateBatch,
   normalizeCandidatesCommand,
 } from "./src/helpers/normalize-candidates";
-import { validatePatchRiskAssessmentCommand } from "./src/helpers/validate-patch-risk-assessment";
 import { deepReviewInputCommand } from "./src/helpers/deep-review-input";
-import { rankShardsCommand } from "./src/helpers/rank-shards";
-import { rankPoolCommand } from "./src/helpers/rank-pool";
+import { inventoryCommand } from "./src/helpers/generate-inventory";
 import { bindRepoScopesCommand } from "./src/helpers/bind-repo-scopes";
 import { escapeControls, stringifyJson } from "./src/helpers/json";
 import { decodeUtf8 } from "./src/helpers/utf8";
@@ -67,6 +65,14 @@ function runHelper(): void {
       "Usage: store-findings\nReads a JSON object from stdin with an absolute stateDirectory and payload.entries containing finding and embedding records; payload.repositoryId is optional.",
     "list-stored-findings":
       "Usage: list-stored-findings\nReads a JSON object from stdin with an absolute stateDirectory, positive payload.limit and non-negative payload.offset.",
+    ...(process.env.CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS === "1"
+      ? {
+          "store-external-findings":
+            "Usage: store-external-findings\nReads a JSON object from stdin with an absolute stateDirectory and payload containing repository, provider, sourceKey and findings with source_finding_id and evidence.",
+          "list-external-findings":
+            "Usage: list-external-findings\nReads a JSON object from stdin with an absolute stateDirectory and payload.repository; payload.id optionally selects one external finding.",
+        }
+      : {}),
     "find-potential-duplicates":
       "Usage: find-potential-duplicates\nReads a JSON object from stdin with an absolute stateDirectory, payload.findingId and payload.scope containing either repositoryId or allRepositories: true.",
     "store-dedupe-groups":
@@ -78,29 +84,27 @@ function runHelper(): void {
     "read-severity-classification":
       "Usage: read-severity-classification --scan-id <id>\nReads a JSON object from stdin with an absolute stateDirectory. Reads saved assessments without updating the database.",
   };
-  if (command === "resolve-security-md") {
+  if (
+    command === "generate-in-scope-files" ||
+    command === "make-repo-scope-input" ||
+    command === "make-hosted-repo-scope-input" ||
+    command === "make-diff-rank-input"
+  ) {
+    void inventoryCommand(command, args).then((code) => {
+      process.exitCode = code;
+    });
+  } else if (command === "resolve-security-md") {
     process.exitCode = resolveSecurityMdCommand(args, posixHome);
   } else if (command === "normalize-candidates") {
     process.exitCode = normalizeCandidatesCommand(args, posixHome);
   } else if (command === "validate-patch-risk-assessment") {
-    process.exitCode = validatePatchRiskAssessmentCommand(args);
-  } else if (
-    command === "copy-deep-review-input" ||
-    command === "select-deep-review-input"
-  ) {
-    process.exitCode = deepReviewInputCommand(command, args, posixHome);
-  } else if (
-    command === "make-rank-shards" ||
-    command === "validate-rank-shard" ||
-    command === "merge-rank-outputs"
-  ) {
-    process.exitCode = rankShardsCommand(command, args, posixHome);
-  } else if (
-    command === "make-rank-pool-plan" ||
-    command === "validate-rank-worker" ||
-    command === "validate-rank-pool"
-  ) {
-    process.exitCode = rankPoolCommand(command, args, posixHome);
+    void import("./src/helpers/validate-patch-risk-assessment").then(
+      ({ validatePatchRiskAssessmentCommand }) => {
+        process.exitCode = validatePatchRiskAssessmentCommand(args);
+      },
+    );
+  } else if (command === "copy-deep-review-input") {
+    process.exitCode = deepReviewInputCommand(args, posixHome);
   } else if (command === "bind-repo-scopes") {
     process.exitCode = bindRepoScopesCommand(args, posixHome);
   } else if (Object.hasOwn(workbenchUsage, command)) {
@@ -149,7 +153,7 @@ function runHelper(): void {
     });
   } else {
     console.error(
-      `Usage: launch_codex_security_mcp[.cmd] --helper <resolve-security-md | normalize-candidates | validate-patch-risk-assessment | copy-deep-review-input | select-deep-review-input | make-rank-shards | validate-rank-shard | merge-rank-outputs | make-rank-pool-plan | validate-rank-worker | validate-rank-pool | bind-repo-scopes | ${Object.keys(workbenchUsage).join(" | ")}> [options]`,
+      `Usage: launch_codex_security_mcp[.cmd] --helper <generate-in-scope-files | make-repo-scope-input | make-diff-rank-input | resolve-security-md | normalize-candidates | validate-patch-risk-assessment | copy-deep-review-input | bind-repo-scopes | ${Object.keys(workbenchUsage).join(" | ")}> [options]`,
     );
     process.exitCode = 2;
   }

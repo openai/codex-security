@@ -21,6 +21,7 @@ import { resolveNpm } from "./package-smoke-npm.mjs";
 const {
   commandTimeoutMs: PACKAGE_SMOKE_TIMEOUT_MS,
   installTimeoutMs: PACKAGE_SMOKE_INSTALL_TIMEOUT_MS,
+  deepScanTimeoutMs: PACKAGE_SMOKE_DEEP_SCAN_TIMEOUT_MS,
 } = packageSmokeTimeouts();
 const packageRoot = fileURLToPath(new URL("../", import.meta.url));
 const packageManifest = JSON.parse(
@@ -334,7 +335,7 @@ try {
     [
       ...npm.args,
       "install",
-      "--prefer-offline",
+      "--prefer-online",
       "--include=optional",
       "--ignore-scripts",
       "--package-lock=false",
@@ -395,7 +396,7 @@ try {
       "--input-type=module",
       "--eval",
       `const sdk = await import(${JSON.stringify(packageManifest.name)});
-      for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "deduplicateRecords", "classifySeverity", "classifyScanSeverity", "classifyScanDirectorySeverity", "matchScanFindings", "securityPolicyDiff", "loadProjectConfig", "resolveProjectConfig"]) {
+      for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "deduplicateRecords", "classifySeverity", "classifyScanSeverity", "classifyScanDirectorySeverity", "matchScanFindings", "securityPolicyDiff", "loadProjectConfig", "resolveProjectConfig", "prepareExternalPublication", "prepareNormalizedExternalPublication", "normalizeOpenGrepFindings", "readOpenGrepFindings"]) {
         if (typeof sdk[name] !== "function") {
           throw new Error("The installed package does not export " + name + ".");
         }
@@ -800,6 +801,19 @@ try {
     ],
     { cwd: consumer },
   );
+  run(
+    process.execPath,
+    [join(packageRoot, "scripts", "smoke-hosted-package.mjs"), installedRoot],
+    { cwd: consumer },
+  );
+  run(
+    process.execPath,
+    [
+      join(packageRoot, "scripts", "smoke-hosted-remediation.mjs"),
+      installedRoot,
+    ],
+    { cwd: consumer },
+  );
   const selectedPlugin = join(consumer, "compatibility-selected-plugin");
   await cp(join(installedRoot, "_bundled_plugin"), selectedPlugin, {
     recursive: true,
@@ -836,12 +850,17 @@ try {
       join(packageRoot, "scripts", "fixtures", "package-deep-scan.mjs"),
       installedRoot,
     ],
-    { cwd: consumer },
+    { cwd: consumer, timeout: PACKAGE_SMOKE_DEEP_SCAN_TIMEOUT_MS },
   );
 
   console.log(
-    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, SDK lifecycle, credential locking, ${expectedPluginFiles.length} bundled plugin files, MCP initialization, bundled Codex version, and a nested worker without global codex.`,
+    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, SDK lifecycle, credential locking, hosted scans, ${expectedPluginFiles.length} bundled plugin files, MCP initialization, bundled Codex version, and a nested worker without global codex.`,
   );
+} catch (error) {
+  // A timed-out child can leave Windows handles open. Report the smoke failure
+  // before cleanup so an EBUSY error cannot hide its cause.
+  console.error(error);
+  throw error;
 } finally {
   await rm(consumer, {
     recursive: true,

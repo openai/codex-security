@@ -1,7 +1,7 @@
 {
   "name": "codex-security",
   "version": "0.1.95",
-  "description": "Codex Security Local workflows for security scans, analysis, and investigation.",
+  "description": "Codex Security workflows for security scans, analysis, and investigation.",
   "author": {
     "name": "OpenAI"
   },
@@ -20,12 +20,13 @@
   "mcpServers": "./.mcp.json",
   "codexSecurity": {
     "directDeepScanEngine": 1,
+    "hostedScopeInventory": 1,
     "workerProviderSnapshot": 4
   },
   "interface": {
-    "displayName": "Codex Security Local",
+    "displayName": "Codex Security",
     "shortDescription": "Security scanning for your codebase",
-    "longDescription": "Codex Security Local packages reusable workflows for security scans, analysis, validation, and investigation across code, diffs, and related artifacts.",
+    "longDescription": "Codex Security packages reusable workflows for security scans, analysis, validation, and investigation across code, diffs, and related artifacts.",
     "developerName": "OpenAI",
     "category": "Security",
     "capabilities": ["Interactive", "Read", "Write"],
@@ -33,8 +34,8 @@
     "privacyPolicyURL": "https://openai.com/policies/row-privacy-policy/",
     "termsOfServiceURL": "https://openai.com/policies/row-terms-of-use/",
     "defaultPrompt": [
-      "Run a Codex Security Local scan on this repository.",
-      "Run a Codex Security Local diff scan on this PR, commit, branch diff, or working-tree patch.",
+      "Run a Codex Security scan on this repository.",
+      "Run a Codex Security diff scan on this PR, commit, branch diff, or working-tree patch.",
       "Triage existing security findings against this repository."
     ],
     "brandColor": "#111111",

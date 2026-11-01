@@ -23,7 +23,6 @@ import {
   replaceArtifactText,
 } from "./artifact-io.js";
 import { artifactSchemaDocuments } from "./artifact-contracts.js";
-import { candidateSchemaV1 } from "./deep-scan/artifact-contracts.js";
 
 const discoveryComponents = ["artifacts", "02_discovery"] as const;
 const discoveryLabel = "discovery candidates";
