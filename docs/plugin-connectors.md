@@ -1,12 +1,13 @@
 # Plugin connectors
 
-Codex Security uses optional connected apps for ticket intake and finding tracking. Their identities are declared in `plugins/codex-security/.app.json`.
+Codex Security uses optional connected apps for saved Cloud findings, ticket intake, and finding tracking. Their identities are declared with `required: false` in `plugins/codex-security/.app.json`. Local scans do not require these connections. Connect an app when you want to use its workflow.
 
-| App       | Workflows                                         |
-| --------- | ------------------------------------------------- |
-| Linear    | Ticket intake and finding tracking                |
-| GitHub    | Finding intake, source lookup, and issue tracking |
-| Atlassian | Jira Cloud ticket intake and finding tracking     |
+| App                  | Workflows                                         |
+| -------------------- | ------------------------------------------------- |
+| Codex Security Cloud | Read saved Cloud findings                         |
+| Linear               | Ticket intake and finding tracking                |
+| GitHub               | Finding intake, source lookup, and issue tracking |
+| Atlassian            | Jira Cloud ticket intake and finding tracking     |
 
 Finding tracking and CLI publication share issue associations when they use the same local state directory, including reuse across scan occurrences. The tracking skill reads them with `get_codex_security_finding_issues` and records accepted writes or verified reuse with `record_codex_security_finding_issues`. Provider reads still confirm saved candidates and search for unrecorded duplicates. Accepted writes remain recorded even when follow-up reads fail. The tools accept sealed scan bundles without requiring their original local scan history and keep receipts outside those bundles.
 

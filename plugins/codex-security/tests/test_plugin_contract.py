@@ -73,7 +73,7 @@ def test_cloud_connection_is_optional_and_skill_is_shipped() -> None:
     cloud = apps["codex-security-cloud"]
     assert cloud["id"] == "connector_openai_defense_factory"
     assert cloud["category"] == "Code Hosting & Security Findings"
-    assert cloud.get("required", False) is False
+    assert cloud.get("required") is False
 
     shipped = read_json(PLUGIN_ROOT / "plugin-files.json")["shippedExact"]
     assert "skills/cloud-findings/SKILL.md" in shipped
