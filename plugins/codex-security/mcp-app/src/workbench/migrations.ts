@@ -129,6 +129,15 @@ function repairStableTargets(database: DatabaseSync): boolean {
   return true;
 }
 
+export function stableTargetId(path: string): string {
+  return (
+    "target_sha256_" +
+    createHash("sha256")
+      .update("local-workspace\0" + path)
+      .digest("hex")
+  );
+}
+
 function backfillTargets(database: DatabaseSync): void {
   const targets = database
     .prepare(
@@ -145,11 +154,7 @@ function backfillTargets(database: DatabaseSync): void {
     const path = String(row.target_path);
     let id = lookup.get(path)?.id;
     if (id === undefined) {
-      id =
-        "target_sha256_" +
-        createHash("sha256")
-          .update("local-workspace\0" + path)
-          .digest("hex");
+      id = stableTargetId(path);
       const timestamp = new Date().toISOString();
       insert.run(id, path, basename(path), timestamp, timestamp);
     }
