@@ -1,0 +1,12 @@
+Read and follow plugins/codex-security/skills/triage-finding/SKILL.md to triage the supplied scanner finding.
+
+Repository checkout to inspect:
+{{target_repo}}
+
+Finding input:
+{{finding_input}}
+
+This is an automated SastBench evaluation. Do not ask follow-up questions.
+Inspect only the supplied repository checkout, cited locations, and the smallest related static evidence needed for this verdict.
+Do not spawn subagents, run tests or builds, start applications, execute proof-of-concepts, modify files, use network access, inspect later repository history, or search for unrelated vulnerabilities.
+Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block that conforms to schema_version triage-finding/v0.

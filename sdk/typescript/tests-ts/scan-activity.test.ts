@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { shellEnvironmentReference } from "../src/codex-prompt.js";
 import {
   scanActivitiesFromEvent,
   scanActivityFromEvent,
@@ -44,6 +45,17 @@ function sessionEvent(
   payload: Record<string, unknown>,
 ): Record<string, unknown> {
   return { type: "response_item", payload };
+}
+
+function commandActivityCase(
+  _name: string,
+  command: string,
+  repository: string,
+  expected: object,
+) {
+  expect(
+    scanActivityFromEvent(commandEvent("item.started", command), repository),
+  ).toMatchObject(expected);
 }
 
 describe("scan activity", () => {
@@ -146,11 +158,71 @@ describe("scan activity", () => {
     });
   });
 
+  test("unwraps native PowerShell command events and persisted worker commands", () => {
+    const script =
+      'Get-Content -LiteralPath "$env:CODEX_SECURITY_REPOSITORY/example.txt"';
+    for (const launcher of [
+      '"C:\\\\tools\\\\pwsh.exe" -NoProfile',
+      '"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -NoProfile',
+      '"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile',
+      "PowerShell.EXE -noprofile",
+      "pwsh",
+    ]) {
+      const command = `${launcher} -Command '${script}'`;
+      const expected = {
+        description: process.platform === "win32" ? script : command,
+        paths: process.platform === "win32" ? ["example.txt"] : [],
+      };
+      for (const type of ["item.started", "item.completed"] as const) {
+        expect(
+          scanActivityFromEvent(
+            commandEvent(type, command),
+            "C:\\code\\project",
+          ),
+        ).toMatchObject(expected);
+      }
+      expect(
+        scanActivityFromSessionEvent(
+          sessionEvent({
+            type: "function_call",
+            name: "exec_command",
+            call_id: "worker-command-1",
+            arguments: JSON.stringify({ cmd: command }),
+          }),
+          "C:\\code\\project",
+        ),
+      ).toMatchObject(expected);
+    }
+  });
+
+  test("preserves inner PowerShell literals when removing the shell launcher", () => {
+    for (const [script, quote] of [
+      ["Write-Output '$env:CODEX_SECURITY_REPOSITORY/example.txt'", '"'],
+      ['Write-Output "`$env:CODEX_SECURITY_REPOSITORY/example.txt"', "'"],
+    ]) {
+      const command = `pwsh -NoProfile -Command ${quote}${script}${quote}`;
+      expect(
+        scanActivityFromEvent(
+          commandEvent("item.started", command),
+          "C:\\code\\project",
+        ),
+      ).toMatchObject({
+        description: process.platform === "win32" ? script : command,
+        paths: [],
+      });
+    }
+  });
+
   test("does not remove a shell that is part of the actual command", () => {
     for (const command of [
       "/bin/zsh -i",
       "/bin/zsh -lc unquoted-script",
       "echo '/bin/zsh -lc'",
+      "pwsh -NoProfile",
+      "pwsh -File 'example.ps1'",
+      "pwsh -EncodedCommand 'ZQB4AGEAbQBwAGwAZQA='",
+      "other.exe -Command 'example'",
+      "echo 'pwsh -Command'",
     ]) {
       expect(
         scanActivityFromEvent(
@@ -161,72 +233,154 @@ describe("scan activity", () => {
     }
   });
 
-  test("shows exact targeted file listing commands", () => {
-    expect(
-      scanActivityFromEvent(
-        commandEvent(
-          "item.started",
-          'rg --files "$CODEX_SECURITY_REPOSITORY/SECURITY.md"',
-        ),
-        "/code/juice-shop",
-      ),
-    ).toMatchObject({
-      description: 'rg --files "$CODEX_SECURITY_REPOSITORY/SECURITY.md"',
-      paths: ["SECURITY.md"],
-    });
-  });
-
-  test("does not present plugin instructions as repository files", () => {
-    expect(
-      scanActivityFromEvent(
-        commandEvent(
-          "item.started",
+  test.each([
+    [
+      "shows exact targeted file listing commands",
+      'rg --files "$CODEX_SECURITY_REPOSITORY/SECURITY.md"',
+      "/code/juice-shop",
+      {
+        description: 'rg --files "$CODEX_SECURITY_REPOSITORY/SECURITY.md"',
+        paths: ["SECURITY.md"],
+      },
+    ],
+    [
+      "does not present plugin instructions as repository files",
+      'sed -n 1,160p "$CODEX_SECURITY_PLUGIN_ROOT/skills/security-scan/SKILL.md"',
+      "/code/juice-shop",
+      {
+        description:
           'sed -n 1,160p "$CODEX_SECURITY_PLUGIN_ROOT/skills/security-scan/SKILL.md"',
-        ),
-        "/code/juice-shop",
-      ),
-    ).toMatchObject({
-      description:
-        'sed -n 1,160p "$CODEX_SECURITY_PLUGIN_ROOT/skills/security-scan/SKILL.md"',
-      paths: [],
-    });
-  });
+        paths: [],
+      },
+    ],
+    [
+      "preserves spaces in quoted repository file paths",
+      'nl -ba "$CODEX_SECURITY_REPOSITORY/routes/login page.ts"',
+      "/code/juice shop",
+      { paths: ["routes/login page.ts"] },
+    ],
+  ] as const)("%s", commandActivityCase);
 
-  test("preserves spaces in quoted repository file paths", () => {
+  test.each(["  ", "\u00a0"])(
+    "attributes literal whitespace in paths before formatting descriptions (%j)",
+    (whitespace) => {
+      const repository = `/code/scan${whitespace}project`;
+      const script = `cat  "${repository}/src/a${whitespace}b.ts"\n  "$CODEX_SECURITY_REPOSITORY/src/a b.ts"`;
+      const commands = [script, `/bin/sh -lc '${script}'`];
+      if (process.platform === "win32") {
+        commands.push(`pwsh -NoProfile -Command '${script}'`);
+      }
+      for (const command of commands) {
+        for (const activity of [
+          scanActivityFromEvent(
+            commandEvent("item.started", command),
+            repository,
+          ),
+          scanActivityFromEvent(
+            toolEvent("exec", { cmd: command }),
+            repository,
+          ),
+          scanActivityFromSessionEvent(
+            sessionEvent({
+              type: "function_call",
+              name: "exec_command",
+              call_id: "worker-command-1",
+              arguments: JSON.stringify({ cmd: command }),
+            }),
+            repository,
+          ),
+        ]) {
+          expect(activity).toMatchObject({
+            description:
+              'cat "/code/scan project/src/a b.ts" "$CODEX_SECURITY_REPOSITORY/src/a b.ts"',
+            paths: [`src/a${whitespace}b.ts`, "src/a b.ts"],
+          });
+        }
+      }
+    },
+  );
+
+  test("recognizes repository paths generated for the current shell", () => {
+    const command = `${process.platform === "win32" ? "Get-Content -LiteralPath" : "cat"} ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY", "/src/app.ts")}`;
     expect(
       scanActivityFromEvent(
-        commandEvent(
-          "item.started",
-          'nl -ba "$CODEX_SECURITY_REPOSITORY/routes/login page.ts"',
-        ),
-        "/code/juice shop",
+        commandEvent("item.started", command),
+        process.platform === "win32" ? "C:\\code\\project" : "/code/project",
       ),
-    ).toMatchObject({ paths: ["routes/login page.ts"] });
+    ).toMatchObject({ paths: ["src/app.ts"] });
   });
 
-  test("cleans escaped quotes from real wrapped scan commands", () => {
-    expect(
-      scanActivityFromEvent(
-        commandEvent(
-          "item.started",
-          'nl -ba "$CODEX_SECURITY_REPOSITORY/commands.py\\" printf "next" "$CODEX_SECURITY_REPOSITORY/server.py\\"',
+  test("recognizes Windows PowerShell repository environment references", () => {
+    for (const [argument, path] of [
+      ["$env:CODEX_SECURITY_REPOSITORY/src/app.ts", "src/app.ts"],
+      ['"$env:CODEX_SECURITY_REPOSITORY\\src\\app page.ts"', "src/app page.ts"],
+      ['"${env:CODEX_SECURITY_REPOSITORY}/src/app.ts"', "src/app.ts"],
+      ['"$Env:Codex_Security_Repository\\src\\App.ts"', "src/App.ts"],
+      ['"${ENV:codex_security_repository}\\src\\App.ts"', "src/App.ts"],
+    ]) {
+      const command = `Get-Content -LiteralPath ${argument}`;
+      const paths = process.platform === "win32" ? [path] : [];
+      expect(
+        scanActivityFromEvent(
+          commandEvent("item.started", command),
+          "C:\\code\\project",
         ),
-        "/code/juice-shop",
-      ),
-    ).toMatchObject({ paths: ["commands.py", "server.py"] });
+      ).toMatchObject({ paths });
+      expect(
+        scanActivityFromSessionEvent(
+          sessionEvent({
+            type: "function_call",
+            name: "exec_command",
+            call_id: "worker-command-1",
+            arguments: JSON.stringify({ cmd: command }),
+          }),
+          "C:\\code\\project",
+        ),
+      ).toMatchObject({ paths });
+    }
   });
 
-  test("never reports paths escaping the scan repository", () => {
-    expect(
-      scanActivityFromEvent(
-        commandEvent(
-          "item.started",
-          'cat "$CODEX_SECURITY_REPOSITORY/../credentials.json"',
+  test("does not mistake PowerShell literals or other variables for repository paths", () => {
+    for (const argument of [
+      "'$env:CODEX_SECURITY_REPOSITORY/src/app.ts'",
+      "'${env:CODEX_SECURITY_REPOSITORY}/src/app.ts'",
+      '"`$env:CODEX_SECURITY_REPOSITORY/src/app.ts"',
+      '"$env:CODEX_SECURITY_REPOSITORY_BACKUP/src/app.ts"',
+      '"${env:CODEX_SECURITY_REPOSITORY_BACKUP}/src/app.ts"',
+      '"$env:CODEX_SECURITY_PLUGIN_ROOT/skills/security-scan/SKILL.md"',
+      '"prefix$env:CODEX_SECURITY_REPOSITORY/src/app.ts"',
+      '"$env:CODEX_SECURITY_REPOSITORY/../credentials.json"',
+      '"${env:CODEX_SECURITY_REPOSITORY}\\src\\..\\..\\credentials.json"',
+    ]) {
+      expect(
+        scanActivityFromEvent(
+          commandEvent("item.started", `Get-Content -LiteralPath ${argument}`),
+          "C:\\code\\project",
         ),
-        "/code/juice-shop",
-      ),
-    ).toMatchObject({ paths: [] });
+      ).toMatchObject({ paths: [] });
+    }
   });
+
+  test.each([
+    [
+      "keeps POSIX environment names case-sensitive",
+      'cat "$codex_security_repository/src/app.ts" "${Codex_Security_Repository}/src/app.ts"',
+      "/code/project",
+      { paths: [] },
+    ],
+    [
+      "cleans escaped quotes from real wrapped scan commands",
+      'nl -ba "$CODEX_SECURITY_REPOSITORY/commands.py\\" printf "next" "$CODEX_SECURITY_REPOSITORY/server.py\\"',
+      "/code/juice-shop",
+      { paths: ["commands.py", "server.py"] },
+    ],
+    [
+      "never reports paths escaping the scan repository",
+      'cat "$CODEX_SECURITY_REPOSITORY/../credentials.json"',
+      "/code/juice-shop",
+      { paths: [] },
+    ],
+  ] as const)("%s", commandActivityCase);
 
   test("keeps Unix and Windows tool paths inside the repository", () => {
     for (const [repository, path, paths] of [
@@ -419,6 +573,23 @@ describe("scan activity", () => {
     ]) {
       expect(activity).toMatchObject({ description });
     }
+  });
+
+  test("preserves a backtick run followed by a bare carriage return", () => {
+    const run = "`".repeat(16_000);
+    expect(
+      scanActivityFromEvent(
+        {
+          type: "item.completed",
+          item: {
+            id: "backtick-run",
+            type: "agent_message",
+            text: `${run}\rAfter the run.`,
+          },
+        },
+        "/synthetic/repository",
+      ),
+    ).toMatchObject({ description: `${run} After the run.` });
   });
 
   test("removes internal progress markers from fenced assistant examples", () => {

@@ -1,0 +1,252 @@
+import { createHash } from "node:crypto";
+import { isAbsolute, relative, sep } from "node:path";
+import type { JsonObject } from "./config.js";
+import type { LoadedContract } from "./contract.js";
+import { CodexSecurityError, errorMessage } from "./errors.js";
+import { findingsBaseUrl } from "./findings-client.js";
+import type { FindingSearchScope } from "./finding-retrieval.js";
+import {
+  bundledPluginRoot,
+  canonicalizeModelSafePath,
+  codexSecurityStateDirectory,
+  workbenchEnvironment,
+  resolvePluginPython,
+  runWorkbench,
+  type WorkbenchCommandOptions,
+} from "./runtime.js";
+
+export type WorkflowStage = "scan" | "publish" | "dedupe";
+export interface WorkflowBinding {
+  repositoryPath?: string;
+  scanRequestDigest?: string;
+  scanId?: string;
+  scanDir?: string;
+  artifactDigest?: string;
+  destination?: string;
+  scope?: FindingSearchScope;
+}
+export interface WorkflowState extends WorkflowBinding {
+  id: string;
+  stages: Record<
+    WorkflowStage,
+    {
+      status: "pending" | "running" | "failed" | "completed";
+      result?: unknown;
+      error?: string;
+      pendingWrite?: DedupePendingWrite;
+    }
+  >;
+}
+
+export interface DedupePendingWrite {
+  groups: string[][];
+  local?: { inputDigest: string; source: JsonObject; gitDisabled?: boolean };
+}
+
+interface SourceSnapshotOptions {
+  optional?: boolean;
+  gitDisabled?: boolean;
+  privateStatePaths?: readonly string[];
+  evidence?: boolean;
+}
+
+export function workflowDigest(value: unknown): string {
+  const json = JSON.stringify(value, (_key, item: unknown) =>
+    item !== null && typeof item === "object" && !Array.isArray(item)
+      ? Object.fromEntries(
+          Object.entries(item).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+        )
+      : item,
+  );
+  return createHash("sha256").update(json).digest("hex");
+}
+
+export function scanArtifactDigest({
+  manifest,
+  findings,
+  review,
+}: Pick<LoadedContract, "manifest" | "findings" | "review">): string {
+  return workflowDigest({ manifest, findings, review });
+}
+
+export function workflowDestination(url: string): string {
+  const destination = findingsBaseUrl(url);
+  destination.username = "";
+  destination.password = "";
+  return destination.href;
+}
+
+/** State lives in the workbench database, never in sealed scan artifacts. */
+export class FindingWorkflow {
+  private options?: Promise<WorkbenchCommandOptions>;
+
+  constructor(
+    readonly id: string,
+    private readonly environment: NodeJS.ProcessEnv = process.env,
+    private readonly workbench: typeof runWorkbench = runWorkbench,
+    private readonly pythonPath?: string,
+    private readonly selection: {
+      protectedRoot?: string;
+      workbenchOptions?: WorkbenchCommandOptions;
+    } = {},
+  ) {
+    if (!id.trim())
+      throw new CodexSecurityError("workflowId must be a nonempty string.");
+    if (selection.workbenchOptions !== undefined)
+      this.options = Promise.resolve(selection.workbenchOptions);
+  }
+
+  async protectArtifacts(scanDir: string): Promise<void> {
+    const path = relative(
+      await canonicalizeModelSafePath(scanDir),
+      await canonicalizeModelSafePath(
+        codexSecurityStateDirectory(this.environment),
+      ),
+    );
+    if (
+      path === "" ||
+      (!isAbsolute(path) && path !== ".." && !path.startsWith(`..${sep}`))
+    ) {
+      throw new CodexSecurityError(
+        "Workflow state must be outside the sealed scan artifacts.",
+      );
+    }
+  }
+
+  async get(): Promise<WorkflowState | null> {
+    return (await this.command({ action: "get" })) as WorkflowState | null;
+  }
+
+  async bind(binding: WorkflowBinding): Promise<WorkflowState> {
+    return (await this.command({ action: "bind", binding }))!;
+  }
+
+  async begin(stage: WorkflowStage): Promise<WorkflowState> {
+    return (await this.command({ action: "begin", stage }))!;
+  }
+
+  async complete(
+    stage: WorkflowStage,
+    result: unknown,
+  ): Promise<WorkflowState> {
+    return (await this.command({ action: "complete", stage, result }))!;
+  }
+
+  async fail(
+    stage: WorkflowStage,
+    error: unknown,
+    result?: unknown,
+  ): Promise<void> {
+    await this.command({
+      action: "fail",
+      stage,
+      error: errorMessage(error),
+      ...(result === undefined ? {} : { result }),
+    }).catch(() => undefined);
+  }
+
+  async run<T>(stage: WorkflowStage, operation: () => Promise<T>): Promise<T> {
+    const state = await this.begin(stage);
+    if (state.stages[stage].status === "completed")
+      return state.stages[stage].result as T;
+    try {
+      const result = await operation();
+      await this.complete(stage, result);
+      return result;
+    } catch (error) {
+      await this.fail(stage, error);
+      throw error;
+    }
+  }
+
+  async registeredScan(scanId: string): Promise<JsonObject> {
+    const context = await this.call(["get-scan", "--scan-id", scanId]);
+    return context["scan"] as JsonObject;
+  }
+
+  async sourceSnapshot(
+    repository: string,
+    options?: SourceSnapshotOptions & { optional?: false },
+  ): Promise<JsonObject>;
+  async sourceSnapshot(
+    repository: string,
+    options: SourceSnapshotOptions & { optional: true },
+  ): Promise<JsonObject | null>;
+  async sourceSnapshot(
+    repository: string,
+    options: SourceSnapshotOptions = {},
+  ): Promise<JsonObject | null> {
+    return (
+      await this.request({
+        action: "source",
+        repository,
+        ...(options.optional ? { optional: true } : {}),
+        ...(options.gitDisabled ? { gitDisabled: true } : {}),
+        ...(options.evidence ? { evidence: true } : {}),
+        ...(options.privateStatePaths?.length
+          ? { privateStatePaths: options.privateStatePaths }
+          : {}),
+      })
+    )["source"] as JsonObject | null;
+  }
+
+  async getReview(key: string): Promise<unknown> {
+    return (await this.request({ action: "get-review", key }))["review"];
+  }
+
+  async saveReview(
+    key: string,
+    binding: object,
+    result: unknown,
+    options: { replace?: boolean } = {},
+  ): Promise<void> {
+    await this.request({
+      action: "save-review",
+      key,
+      binding,
+      result,
+      ...(options.replace ? { replace: true } : {}),
+    });
+  }
+
+  async prepareDedupe(
+    result: unknown,
+    pendingWrite: DedupePendingWrite,
+  ): Promise<void> {
+    await this.command({
+      action: "prepare-dedupe",
+      stage: "dedupe",
+      result,
+      pendingWrite,
+    });
+  }
+
+  private async command(payload: object): Promise<WorkflowState | null> {
+    const result = await this.request(payload);
+    return result["workflow"] as unknown as WorkflowState | null;
+  }
+
+  private async request(payload: object): Promise<JsonObject> {
+    return await this.call(
+      ["finding-workflow"],
+      JSON.stringify({ id: this.id, ...payload }),
+    );
+  }
+
+  private async call(
+    args: readonly string[],
+    input?: string,
+  ): Promise<JsonObject> {
+    this.options ??= (async () => ({
+      pluginRoot: await bundledPluginRoot(),
+      python: await resolvePluginPython({
+        environment: this.environment,
+        configuredPath: this.pythonPath,
+        protectedRoot: this.selection.protectedRoot,
+      }),
+      environment: workbenchEnvironment(this.environment),
+      failureMessage: "Could not save or resume the findings workflow",
+    }))();
+    return await this.workbench(await this.options, args, input);
+  }
+}

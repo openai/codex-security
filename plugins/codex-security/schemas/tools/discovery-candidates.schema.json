@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex-security://schemas/tools/discovery-candidates.schema.json",
+  "$defs": {
+    "workbenchRecordDiscoveryCandidatesInput": {
+      "type": "object",
+      "properties": {
+        "scanId": {
+          "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/nonEmptyText"
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/rawDiscoveryCandidate"
+          }
+        }
+      },
+      "required": ["scanId", "candidates"],
+      "additionalProperties": false
+    },
+    "workbenchListCandidatesInput": {
+      "type": "object",
+      "properties": {
+        "scanId": {
+          "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/nonEmptyText"
+        },
+        "cursor": { "type": "string", "pattern": "^(?:0|[1-9][0-9]*)$" },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 1000 }
+      },
+      "required": ["scanId"],
+      "additionalProperties": false
+    }
+  }
+}
