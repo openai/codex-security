@@ -3,7 +3,15 @@ import { parseJson } from "./value.js";
 
 const MAX_ACTIVITY_PATHS = 8;
 const MAX_PROSE_CHARACTERS = 1_000;
-const SHELL_TOKEN = /"(?:\\.|[^"\\])*"|'[^']*'|(?:\\\\|\\[ \t]|[^\s|;&<>])+/gu;
+const SHELL_TOKEN = /"(?:\\.|[^"\\])*"|'[^']*'|[^\s|;&<>]+/gu;
+const POSIX_SHELL_TOKEN =
+  /"(?:\\.|[^"\\])*"|'[^']*'|(?:\\\\|\\[ \t]|[^\s|;&<>])+/gu;
+
+interface ActivityCommand {
+  text: string;
+  posix: boolean;
+  argv?: readonly string[];
+}
 
 export type ScanActivityStatus = "running" | "completed" | "failed";
 
@@ -79,7 +87,7 @@ export function scanActivityFromEvent(
       id: item["id"],
       kind: "command",
       status,
-      description: command.replaceAll(/\s+/gu, " "),
+      description: command.text.replaceAll(/\s+/gu, " "),
       paths: commandRepositoryPaths(command, repository),
     };
   }
@@ -94,7 +102,7 @@ export function scanActivityFromEvent(
       status,
       description:
         item["tool"] === "exec" && command !== null
-          ? command.replaceAll(/\s+/gu, " ")
+          ? command.text.replaceAll(/\s+/gu, " ")
           : toolDescription(item["tool"], arguments_, item["arguments"]),
       paths:
         item["tool"] === "exec" && command !== null
@@ -118,7 +126,30 @@ export function scanActivityFromEvent(
   return null;
 }
 
-function unwrapCommand(command: string): string {
+function unwrapCommand(command: string | readonly string[]): ActivityCommand {
+  if (typeof command !== "string") {
+    const [shell, option, script] = command;
+    if (
+      shell !== undefined &&
+      /^(?:\/(?:usr\/)?bin\/)?(?:zsh|bash|sh)$/u.test(shell) &&
+      option !== undefined &&
+      /^-[a-z]*c[a-z]*$/u.test(option) &&
+      script !== undefined
+    ) {
+      return { text: script, posix: true };
+    }
+    const commandIndex = /^-NoProfile$/iu.test(option ?? "") ? 2 : 1;
+    if (
+      process.platform === "win32" &&
+      shell !== undefined &&
+      /(?:^|[\\/])(?:powershell|pwsh)(?:\.exe)?$/iu.test(shell) &&
+      /^-Command$/iu.test(command[commandIndex] ?? "") &&
+      command[commandIndex + 1] !== undefined
+    ) {
+      return { text: command[commandIndex + 1]!, posix: false };
+    }
+    return { text: command.join(" "), posix: false, argv: command };
+  }
   const normalized = command.trim();
   const powershell =
     process.platform === "win32"
@@ -132,16 +163,21 @@ function unwrapCommand(command: string): string {
       powershell[1] ?? powershell[2]!,
     )
   ) {
-    return powershell[4]!;
+    return { text: powershell[4]!, posix: false };
   }
   const match =
     /^(?:\/(?:usr\/)?bin\/)?(?:zsh|bash|sh)\s+-[a-z]*c[a-z]*\s+(['"])(.*)$/su.exec(
       normalized,
     );
-  if (match === null) return normalized;
+  if (match === null) {
+    return { text: normalized, posix: process.platform !== "win32" };
+  }
   const quote = match[1]!;
   const script = match[2]!;
-  return script.endsWith(quote) ? script.slice(0, -1) : script;
+  return {
+    text: script.endsWith(quote) ? script.slice(0, -1) : script,
+    posix: true,
+  };
 }
 
 export function scanActivityFromSessionEvent(
@@ -211,21 +247,21 @@ export function scanActivityFromSessionEvent(
     customShellCommand(name, payload["input"]);
   const command =
     typeof value === "string"
-      ? value
+      ? unwrapCommand(value)
       : Array.isArray(value) && value.every((part) => typeof part === "string")
-        ? value.join(" ")
+        ? unwrapCommand(value)
         : null;
   if (
     command !== null &&
     /^(?:exec|exec_command|shell_command|shell)$/u.test(name)
   ) {
-    return scanActivityFromEvent(
-      {
-        type: "item.started",
-        item: { id, type: "command_execution", command },
-      },
-      repository,
-    );
+    return {
+      id,
+      kind: "command",
+      status: "running",
+      description: command.text.replaceAll(/\s+/gu, " "),
+      paths: commandRepositoryPaths(command, repository),
+    };
   }
 
   return {
@@ -371,20 +407,33 @@ function sessionCallArguments(
   return isRecord(parsed) ? parsed : {};
 }
 
-function commandRepositoryPaths(command: string, repository: string): string[] {
+function commandRepositoryPaths(
+  command: ActivityCommand,
+  repository: string,
+): string[] {
   const paths = new Set<string>();
   const repositoryPrefix = repository.replaceAll("\\", "/").replace(/\/$/u, "");
-  for (const token of command.match(SHELL_TOKEN) ?? []) {
+  const tokens =
+    command.argv ??
+    command.text.match(command.posix ? POSIX_SHELL_TOKEN : SHELL_TOKEN) ??
+    [];
+  for (const token of tokens) {
     let value = token;
-    const singleQuoted = value.startsWith("'") && value.endsWith("'");
-    const doubleQuoted = value.startsWith('"') && value.endsWith('"');
-    if (doubleQuoted || singleQuoted) {
-      value = value.slice(1, -1);
-    } else {
-      // POSIX shell escapes keep spaces inside an unquoted argument.
-      value = value.replaceAll(/\\([ \t])/gu, "$1");
+    const singleQuoted =
+      command.argv === undefined &&
+      value.startsWith("'") &&
+      value.endsWith("'");
+    if (command.argv === undefined) {
+      const doubleQuoted = value.startsWith('"') && value.endsWith('"');
+      if (doubleQuoted || singleQuoted) {
+        value = value.slice(1, -1);
+      } else if (command.posix) {
+        // POSIX shell escapes keep whitespace inside an unquoted argument.
+        value = value.replaceAll(/\\([ \t])/gu, "$1");
+      }
+      value = value.replaceAll('\\"', '"');
     }
-    value = value.replaceAll('\\"', '"').replaceAll("\\", "/");
+    value = value.replaceAll("\\", "/");
     if (process.platform === "win32" && !singleQuoted) {
       value = value.replace(
         /^\$(?:env:CODEX_SECURITY_REPOSITORY|\{env:CODEX_SECURITY_REPOSITORY\})\//iu,
@@ -397,10 +446,12 @@ function commandRepositoryPaths(command: string, repository: string): string[] {
       `${repositoryPrefix}/`,
     ]) {
       if (!value.startsWith(prefix)) continue;
-      const path = value
-        .slice(prefix.length)
-        .replace(/["'\r\n].*$/u, "")
-        .trim()
+      const relative = value.slice(prefix.length);
+      const path = (
+        command.argv === undefined
+          ? relative.replace(/["'\r\n].*$/u, "").trim()
+          : relative
+      )
         .replace(/\/+$/u, "")
         .replace(/:\d+(?::\d+)?$/u, "");
       if (
