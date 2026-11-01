@@ -6,6 +6,7 @@ import {
   array,
   hasSarifExternalPropertyReferences,
   indexSarifRules,
+  matchesSarifRuleReference,
   normalizeRecords,
   readScannerJson,
   record,
@@ -201,7 +202,7 @@ export function normalizeEndorSarif(
     const rules = array(driver["rules"] ?? [], "Endor rules").map((r) =>
       record(r, "Endor rule"),
     );
-    const rulesById = indexSarifRules(rules);
+    const rulesById = indexSarifRules(rules.entries());
     const { runs: _runs, ...documentContext } = document;
     const { results: _results, tool: _tool, ...runContext } = run;
     const { rules: _rules, ...driverContext } = driver;
@@ -240,14 +241,7 @@ export function normalizeEndorSarif(
         throw new Error("Endor ruleIndex and ruleId disagree.");
       if (result["rule"] !== undefined) {
         const reference = record(result["rule"], "Endor rule reference");
-        if (
-          reference["toolComponent"] !== undefined ||
-          (reference["id"] !== undefined && reference["id"] !== ruleId) ||
-          (reference["index"] !== undefined &&
-            reference["index"] !== ruleIndex) ||
-          (reference["guid"] !== undefined &&
-            reference["guid"] !== rule["guid"])
-        )
+        if (!matchesSarifRuleReference(reference, ruleId, selectedRule))
           throw new Error("Inconsistent or external Endor rule reference.");
       }
       const message = record(result["message"], "Endor message");

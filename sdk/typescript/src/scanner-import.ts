@@ -210,17 +210,33 @@ export function sarifRunContextSelector(runContext: Record<string, unknown>) {
   };
 }
 
+type IndexedSarifRule = { rule: Record<string, unknown>; index: number };
+
 /** Duplicate IDs cannot identify a single rule in this run. */
-export function indexSarifRules(rules: Record<string, unknown>[]) {
-  const byId = new Map<
-    unknown,
-    { rule: Record<string, unknown>; index: number } | null
-  >();
-  for (const [index, rule] of rules.entries()) {
+export function indexSarifRules(
+  entries: Iterable<[number, Record<string, unknown>]>,
+) {
+  const byId = new Map<unknown, IndexedSarifRule | null>();
+  for (const [index, rule] of entries) {
     const id = rule["id"];
     byId.set(id, byId.has(id) ? null : { rule, index });
   }
   return byId;
+}
+
+export function matchesSarifRuleReference(
+  reference: Record<string, unknown>,
+  ruleId: string,
+  selected: IndexedSarifRule | undefined,
+) {
+  return (
+    reference["toolComponent"] === undefined &&
+    (reference["id"] === undefined || reference["id"] === ruleId) &&
+    (reference["index"] === undefined ||
+      reference["index"] === selected?.index) &&
+    (reference["guid"] === undefined ||
+      reference["guid"] === selected?.rule["guid"])
+  );
 }
 
 /** Exclude every colliding record: choosing the first could overwrite another occurrence. */
