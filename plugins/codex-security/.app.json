@@ -1,5 +1,9 @@
 {
   "apps": {
+    "codex-security-cloud": {
+      "id": "connector_openai_defense_factory",
+      "category": "Code Hosting & Security Findings"
+    },
     "linear": {
       "id": "asdk_app_69a089a326dc8191b32a3f2553f5be2c",
       "category": "Work Tracking & Coordination"

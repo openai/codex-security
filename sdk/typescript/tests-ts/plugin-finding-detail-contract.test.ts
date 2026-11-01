@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import Ajv, { type ValidateFunction } from "ajv";
+import type { ValidateFunction } from "ajv";
 import Ajv2020 from "ajv/dist/2020.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { readJson as readJsonFile } from "./support/json.js";
@@ -64,7 +64,7 @@ const scanDraftFinding = {
 const scanDraftInput = {
   scanId: "7b95abf2-dc04-47a9-9950-53b5c2057f49",
   findings: [scanDraftFinding],
-  coverage: {
+  reviewState: {
     completeness: "complete",
     surfaces: [],
     explicitExclusions: [],
@@ -157,7 +157,7 @@ describe("bundled plugin finding detail contracts", () => {
       );
       expect(tool).toBeDefined();
 
-      const validator = new Ajv({ strict: false });
+      const validator = new Ajv2020({ strict: false });
       validator.addFormat("uuid", /^[0-9a-f-]{36}$/iu);
       const validate = validator.compile(tool!["inputSchema"] as JsonObject);
 
@@ -171,7 +171,7 @@ describe("bundled plugin finding detail contracts", () => {
     const [schema, example] = await Promise.all([
       readJson(join(PLUGIN_ROOT, "schemas", "findings.schema.json")),
       readJson(
-        join(PLUGIN_ROOT, "examples", "completed-scan", "findings.json"),
+        join(PLUGIN_ROOT, "examples", "legacy-completed-scan", "findings.json"),
       ),
     ]);
     const validate = new Ajv2020({ strict: false }).compile(schema);

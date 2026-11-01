@@ -19,8 +19,8 @@ export async function collectReports(result: ScanResults): Promise<Map<string, B
 export async function uploadReports(reports: Map<string, Buffer>, inputs: Inputs, tempRoot: string): Promise<void> {
   if (!reports.size) throw new Error('Artifact upload requested, but no validated reports are available.');
   const staging = await mkdtemp(join(tempRoot, 'codex-security-upload-'));
-  await chmod(staging, 0o700);
   try {
+    await chmod(staging, 0o700);
     const files: string[] = [];
     for (const [name, bytes] of reports) {
       const dest = join(staging, name === 'exports/results.sarif' ? 'results.sarif' : name);

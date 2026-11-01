@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parse as parseToml } from "smol-toml";
 import { importModule } from "./import-module.ts";
 import type { WorkbenchDeepScanStore as Store } from "../src/deep-scan/store.js";
 import type { DeepScanWorkerRunner as Runner } from "../src/deep-scan/worker-runner.js";
@@ -54,44 +56,78 @@ export async function testDeepScanContextSnapshots({
     ),
   );
   const previousPath = process.env.CODEX_CLI_PATH;
+  const previousDeepConfig = process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
   process.env.CODEX_CLI_PATH = fixture.executablePath;
   const environment = {
     ...process.env,
     CODEX_HOME: path.join(fixture.root, "home"),
     CODEX_SECURITY_STATE_DIR: path.join(fixture.root, "state"),
   };
-  const command = async (args: string[], input?: string) => {
-    const result = spawnSync(
-      process.env.PYTHON?.trim() || "python3",
-      [path.join(pluginRoot, "scripts/workbench_db.py"), ...args],
-      { env: environment, input, encoding: "utf8" },
-    );
-    assert.equal(result.status, 0, result.stderr);
-    return JSON.parse(result.stdout);
-  };
   try {
     const targetPath = path.join(fixture.root, "target");
     await mkdir(targetPath);
     await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
-    await Promise.all(
+    const outcomes = await Promise.allSettled(
       ["Review authentication only.", undefined].map(
         async (userContext, index) => {
+          const deepConfig = path.join(fixture.root, `deep-${index}.toml`);
+          const maxTimeHours = 1.5 + index;
+          await writeFile(deepConfig, `[deep_scan]\nmax_time_hours = 48\n`);
+          const command = async (args: string[], input?: string) => {
+            const execution = promisify(execFile)(
+              process.env.PYTHON?.trim() || "python3",
+              [path.join(pluginRoot, "scripts/workbench_db.py"), ...args],
+              {
+                env: {
+                  ...environment,
+                  CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: deepConfig,
+                },
+              },
+            );
+            execution.child.stdin!.on("error", () => {});
+            execution.child.stdin!.end(input);
+            return JSON.parse((await execution).stdout);
+          };
           const threadId = `context-owner-${index}`;
+          const projectConfigPath = path.join(
+            fixture.root,
+            `selected-${index}.json`,
+          );
+          await writeFile(
+            projectConfigPath,
+            JSON.stringify({
+              scan: {
+                deep: {
+                  max_time_hours: maxTimeHours,
+                  subagents_per_worker: index,
+                },
+              },
+            }),
+          );
           let store = new WorkbenchDeepScanStore(command);
           let run = await store.begin({
             targetPath,
             scope: ".",
             threadId,
             userContext,
+            projectConfigPath,
             scanRoot: path.join(fixture.root, "scans"),
           });
+          const createdAt = run.createdAt;
+          assert.ok(createdAt);
+          assert.equal(run.config.maxTimeHours, maxTimeHours);
+          assert.equal(run.config.subagents, index);
           const invocations: {
             kind: DeepScanWorkerKind;
-            invocation: { argv: string[]; stdin: string };
+            invocation: { argv: string[]; stdin: string; deepConfig: string };
           }[] = [];
-          const sdk = new CodexSdkWorkerExecutor({ parentSandbox });
+          let sdk = new CodexSdkWorkerExecutor({
+            parentSandbox,
+            deepScanConfig: run.config,
+          });
           const executor = {
             async run(request: CodexWorkerRequest) {
+              process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH = deepConfig;
               const result = await sdk.run(request);
               invocations.push({
                 kind: request.kind,
@@ -111,8 +147,7 @@ export async function testDeepScanContextSnapshots({
                     findings: [],
                     ...(request.kind === "discovery"
                       ? {
-                          coverage: {
-                            completeness: "complete",
+                          reviewState: {
                             surfaces: [],
                             explicitExclusions: [],
                             deferred: [],
@@ -160,6 +195,12 @@ export async function testDeepScanContextSnapshots({
             threadId,
             scanRoot: path.join(fixture.root, "scans"),
           });
+          assert.equal(run.config.maxTimeHours, maxTimeHours);
+          assert.equal(run.createdAt, createdAt);
+          sdk = new CodexSdkWorkerExecutor({
+            parentSandbox,
+            deepScanConfig: run.config,
+          });
           const second = await runner().runDiscoveryWorker(
             randomUUID(),
             "after-edit",
@@ -184,6 +225,20 @@ export async function testDeepScanContextSnapshots({
             const resumed = invocations[offset + 1]!;
             assert.equal(fresh.invocation.argv.includes("resume"), false);
             assert.equal(resumed.invocation.argv.includes("resume"), true);
+            for (const { invocation } of [fresh, resumed]) {
+              assert.deepEqual(
+                { ...(parseToml(invocation.deepConfig).deep_scan as object) },
+                {
+                  workers: run.config.workers,
+                  subagents: index,
+                  stop_after_no_new: run.config.stopAfterNoNew,
+                  stop_after_consecutive_errors:
+                    run.config.stopAfterConsecutiveErrors,
+                  max_discovery_runs: run.config.maxDiscoveryRuns,
+                  max_time_hours: maxTimeHours,
+                },
+              );
+            }
             const context = JSON.parse(
               fresh.invocation.stdin.match(/```json\n([\s\S]*?)\n```/)![1],
             );
@@ -204,13 +259,27 @@ export async function testDeepScanContextSnapshots({
             );
             assert.match(resumed.invocation.stdin, /record_codex_security_/);
           }
+          await writeFile(deepConfig, "[deep_scan]\nmax_time_hours = 48\n");
+          const restarted = await new WorkbenchDeepScanStore(command).begin({
+            scanId: run.scanId,
+            threadId,
+            scanRoot: path.join(fixture.root, "scans"),
+          });
+          assert.equal(restarted.config.maxTimeHours, maxTimeHours);
+          assert.equal(restarted.createdAt, createdAt);
           const current = await command(["get-scan", "--scan-id", run.scanId]);
           assert.equal(current.scan.userContext, editedContext);
         },
       ),
     );
+    for (const outcome of outcomes) {
+      if (outcome.status === "rejected") throw outcome.reason;
+    }
   } finally {
     if (previousPath === undefined) delete process.env.CODEX_CLI_PATH;
     else process.env.CODEX_CLI_PATH = previousPath;
+    if (previousDeepConfig === undefined)
+      delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+    else process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH = previousDeepConfig;
   }
 }

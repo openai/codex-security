@@ -7,10 +7,7 @@ import { join, relative, resolve, win32 } from "node:path";
 import { parse, stringify } from "smol-toml";
 import { fileURLToPath } from "node:url";
 import { expect, mock, test } from "bun:test";
-import {
-  CodexReviewRunner,
-  type CodexReview,
-} from "../src/deduplication/codex-review.js";
+import { CodexReviewRunner } from "../src/deduplication/codex-review.js";
 import { DEFAULT_CODEX_CONFIG, type JsonObject } from "../src/config.js";
 import { CheckpointedReviewRunner } from "../src/deduplication/checkpointed-review.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
@@ -25,107 +22,11 @@ import type { CodexSecuritySurface } from "../src/api.js";
 import { VERSION } from "../src/version.js";
 import { workflowFixture } from "./support/workflow-fixture.js";
 import { readCodexHomeConfig } from "../src/auth.js";
-import {
-  CodexDeduplicationReviewer,
-  CodexGroupingReviewer,
-} from "../src/deduplication/deduplication-reviewer.js";
+import { CodexDeduplicationReviewer } from "../src/deduplication/deduplication-reviewer.js";
 
 const fixture = fileURLToPath(
   new URL("fixtures/codex-review.mjs", import.meta.url),
 );
-
-test("container review fixture accepts screening and pairs with repository context", async () => {
-  if (
-    runTestInSubprocess(
-      import.meta.path,
-      "container review fixture accepts screening and pairs with repository context",
-    )
-  )
-    return;
-  await using f = await workflowFixture();
-  process.env["CODEX_SECURITY_STATE_DIR"] = f.root;
-  await import(
-    new URL("../../../docker/fixtures/mock-reviews.mjs", import.meta.url).href
-  );
-  const modelHome = process.env["CODEX_HOME"]!;
-  try {
-    const config = parse(
-      await readFile(join(modelHome, "config.toml"), "utf8"),
-    ) as {
-      model_providers: { smoke: { base_url: string } };
-    };
-    const runner = {
-      async run<T>(review: CodexReview<T>): Promise<T> {
-        const response = await fetch(
-          `${config.model_providers.smoke.base_url}/responses`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              model: review.model,
-              reasoning: { effort: review.effort },
-              input: [
-                { content: [{ type: "input_text", text: review.prompt }] },
-                {
-                  type: "additional_tools",
-                  tools: [
-                    {
-                      type: "namespace",
-                      name: "review_validator",
-                      tools: [
-                        {
-                          type: "function",
-                          name: "submit_decisions",
-                          parameters: review.schema,
-                        },
-                      ],
-                    },
-                    {
-                      type: "namespace",
-                      name: "functions",
-                      tools: [
-                        { name: "exec", description: "### `exec_command`" },
-                      ],
-                    },
-                  ],
-                },
-              ],
-            }),
-          },
-        );
-        expect(response.status).toBe(200);
-        const completed = (await response.text())
-          .split("\n")
-          .filter((line) => line.startsWith("data: "))
-          .map((line) => JSON.parse(line.slice(6)))
-          .find((event) => event.type === "response.completed");
-        return review.validate(
-          JSON.parse(completed.response.output[0].arguments),
-        );
-      },
-    };
-    const findings = [1, 2, 3].map((index) => ({
-      ...f.document.findings[0]!,
-      findingId: `csf_${String(index).repeat(24)}`,
-    }));
-    for (const context of ["Synthetic repository context.\n\n", ""]) {
-      for (const Reviewer of [
-        CodexGroupingReviewer,
-        CodexDeduplicationReviewer,
-      ]) {
-        const reviewer = new Reviewer(runner, {}, () => context);
-        expect(
-          Object.keys((await reviewer.screen(findings)).decisions),
-        ).toEqual(["pair-1", "pair-2"]);
-        expect((await reviewer.reviewPair(findings.slice(0, 2))).decision).toBe(
-          "SAME",
-        );
-      }
-    }
-  } finally {
-    await rm(modelHome, { recursive: true, force: true });
-  }
-});
 
 test.each(["defaults", "configured", "luna-model", "legacy-profile"] as const)(
   "dedupe respects %s configuration and keeps review policy attached to stage",
@@ -228,6 +129,7 @@ const failureReasons: Record<string, string> = {
     "Required review check could not be completed: Request refused due to cybersecurity policy violation.",
   "text-only": "Codex did not submit a validated review",
   "failed-turn": "Rate limit exceeded",
+  "rate-limit-turn": "Rate limit reached",
   "server-error": "Provider temporarily unavailable",
   "connection-error": "Provider stream disconnected",
   "unauthorized-turn": "Authentication required",
@@ -246,18 +148,23 @@ const failureReasons: Record<string, string> = {
   "invalid-review-error":
     "Required review check could not be completed: Required source revision could not be read.",
   exit: "Codex exited before completing the review",
+  "exit-diagnostic":
+    "Permission profile synthetic_profile was rejected: café 🔒\n",
 };
 const retriedFailures = new Set([
   "text-only",
   "failed-turn",
+  "rate-limit-turn",
   "server-error",
   "connection-error",
   "invalid-json",
   "invalid-submission",
   "exit",
+  "exit-diagnostic",
 ]);
 const recoveredScenarios: Record<string, string> = {
   "recover-rate-limit": "failed-turn",
+  "recover-rate-limit-code": "rate-limit-turn",
   "recover-server-error": "server-error",
   "recover-connection-error": "connection-error",
   "recover-process-exit": "exit",
@@ -269,6 +176,7 @@ const modelFailures = new Set([
   "policy-turn-code",
   "policy-turn",
   "failed-turn",
+  "rate-limit-turn",
   "server-error",
   "connection-error",
   "unauthorized-turn",
@@ -286,7 +194,13 @@ const transportCases: {
   windowsConfig?: JsonObject;
   expectedWindowsSandbox?: string;
   surface?: CodexSecuritySurface;
+  permissionPathSuffix?: string;
 }[] = [
+  {
+    scenario: "correction",
+    name: "literal permission paths",
+    permissionPathSuffix: "literal.path-雪\u007f-",
+  },
   {
     scenario: "recover-server-error",
     name: "CLI attribution survives a retried review session",
@@ -360,12 +274,15 @@ for (const {
   windowsConfig,
   expectedWindowsSandbox,
   surface,
+  permissionPathSuffix = "",
 } of transportCases) {
   const runCase = test.skipIf(windowsOnly && process.platform !== "win32");
   runCase(`Codex review transport: ${name}`, async () => {
     const modelHome = await mkdtemp(join(tmpdir(), "codex-review-test-"));
     const checkout = await temporaryDirectory("codex-review-source-", true);
-    const ghConfig = await mkdtemp(join(tmpdir(), "codex-review-gh-"));
+    const ghConfig = await mkdtemp(
+      join(tmpdir(), `codex-review-gh-${permissionPathSuffix}`),
+    );
     const transcript = join(modelHome, "messages.jsonl");
     let child: ChildProcessWithoutNullStreams | undefined;
     let starts = 0;
@@ -658,12 +575,17 @@ for (const {
       const permissions = args.find((argument) =>
         argument.startsWith("permissions.codex_security_review="),
       );
-      expect(permissions).toContain(
-        `${JSON.stringify(resolve(modelHome))}="deny"`,
-      );
-      expect(permissions).toContain(
-        `${JSON.stringify(resolve(ghConfig))}="deny"`,
-      );
+      expect(parse(permissions!)).toMatchObject({
+        permissions: {
+          codex_security_review: {
+            extends: ":read-only",
+            filesystem: {
+              [resolve(modelHome)]: "deny",
+              [resolve(ghConfig)]: "deny",
+            },
+          },
+        },
+      });
       if (scenario !== "cancel") {
         const messages = parseJsonLines<{
           method?: string;

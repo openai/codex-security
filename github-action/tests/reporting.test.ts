@@ -10,6 +10,16 @@ test('credential-shaped text and encodings remain in diagnostics',()=>{
     assert.equal(plain(text),text);
   }
 });
+test('truncation drops only the first half of a split surrogate pair', () => {
+  const prefix = 'a'.repeat(199);
+  assert.equal(plain(prefix + '😀', 200), prefix);
+  assert.equal(plain(prefix + '😀', 201), prefix + '😀');
+
+  const unpaired = prefix + '\uD83D';
+  assert.equal(plain(unpaired), unpaired);
+  assert.equal(plain(unpaired, 200), unpaired);
+  assert.equal(plain(unpaired + 'x', 200), unpaired);
+});
 test('finding titles and messages cannot become Markdown links, images or raw HTML',()=>{
   const result = {scanStatus:'completed',policyStatus:'passed',reportStatus:'ready',counts:{critical:0,high:1,medium:0,low:0,informational:0},errors:[],
     findings:[{severity:'high',title:'![click](https://example.invalid) <img src=x> @someone',summary:'</pre><script>bad</script>',path:'src/app.ts',startLine:1}]} as unknown as ScanResults;
@@ -19,29 +29,24 @@ test('finding titles and messages cannot become Markdown links, images or raw HT
   assert.ok(!summary.includes('### HIGH:')); assert.ok(!summary.includes('<img'));
 });
 
-test('partial coverage summary preserves provisional findings and an unevaluated severity policy', () => {
-  const result = {scanStatus:'incomplete',policyStatus:'not-evaluated',reportStatus:'ready',counts:{critical:0,high:1,medium:0,low:0,informational:0},
-    errors:['Deferred work: Dependency implementation unavailable.'],findings:[{severity:'high',title:'Potential extraction issue',summary:'Validation needs dependency evidence.',path:'src/extract.ts',startLine:12}]} as ScanResults;
+test('completed findings are subject to severity policy without a coverage qualification', () => {
+  const result = {scanStatus:'completed',policyStatus:'failed',reportStatus:'ready',counts:{critical:0,high:1,medium:0,low:0,informational:0},
+    errors:[],findings:[{severity:'high',title:'Extraction issue',summary:'Archive traversal reaches files outside the destination.',path:'src/extract.ts',startLine:12}]} as unknown as ScanResults;
   const inputs = parseInputs((name) => name === 'fail-on-severity' ? 'high' : '', '/checkout');
   const summary = resultSummary(result, inputs, {repository:'/checkout',scannedSha:'a'.repeat(40),analysisRef:'refs/heads/main',publishable:true,emptyDiff:false});
-  assert.match(resultTitle(result, inputs), /coverage is partial.*findings are provisional/i);
-  assert.match(summary, /\*\*Scan:\*\* incomplete · \*\*Findings policy:\*\* not-evaluated/);
+  assert.match(resultTitle(result, inputs), /Findings meet the configured failure threshold/);
+  assert.match(summary, /\*\*Scan:\*\* completed · \*\*Findings policy:\*\* failed/);
   assert.match(summary, /\*\*Failure threshold:\*\* high and above/);
-  assert.match(summary, /Partial coverage alone does not fail the job/);
-  assert.match(summary, /findings policy was not evaluated/);
-  assert.match(summary, /This is not a completed scan/);
-  assert.match(summary, /Deferred work: Dependency implementation unavailable/);
-  assert.match(summary, /HIGH: Potential extraction issue/);
-  assert.doesNotMatch(summary, /No findings meet the failure threshold|Findings policy:\*\* passed/);
+  assert.match(summary, /HIGH: Extraction issue/);
+  assert.doesNotMatch(summary, /provisional|partial|unknown|not evaluated/i);
 });
 
-test('partial coverage cannot hide a required reporting failure in the title', () => {
+test('required reporting failures remain visible after a completed scan', () => {
   const inputs = parseInputs(() => '', '/checkout');
-  const result = {scanStatus:'incomplete',policyStatus:'not-evaluated',reportStatus:'failed'} as ScanResults;
-  assert.match(resultTitle(result, inputs), /coverage is partial, and required reporting failed/i);
+  const result = {scanStatus:'completed',policyStatus:'passed',reportStatus:'failed'} as ScanResults;
+  assert.match(resultTitle(result, inputs), /Scan completed, but required reporting failed/i);
   assert.match(resultTitle({...result, scanStatus:'failed'}, inputs), /Scan could not complete/);
 });
-
 
 test('multiline titles remain literal across blank lines without losing diagnostic text', () => {
   const result = {scanStatus:'completed',policyStatus:'passed',reportStatus:'ready',counts:{critical:0,high:1,medium:0,low:0,informational:0},errors:[],
@@ -67,4 +72,23 @@ test('report fields preserve Markdown punctuation as literal content', () => {
   assert.ok(summary.includes(`<code>pkg/${escaped}:2</code>`));
   assert.ok(summary.includes('<code>pkg/&#95;&#95;init&#95;&#95;.py</code>'));
   assert.ok(summary.includes('<code>pkg/&#95;&#95;init&#95;&#95;.py:1</code>'));
+});
+
+test('summary shows configured provider, measured tokens and available cost estimates', () => {
+  const inputs = parseInputs(name => name === 'provider' ? 'amazon-bedrock' : '', '/checkout');
+  const target = {repository:'/checkout',scannedSha:'a'.repeat(40),analysisRef:'refs/heads/main',publishable:true,emptyDiff:false};
+  const result = {scanStatus:'completed',policyStatus:'passed',reportStatus:'ready',errors:[],findings:[]} as unknown as ScanResults;
+  const usage = {input_tokens:1200,cached_input_tokens:200,output_tokens:50};
+  for (const [metrics, expected] of [
+    [{usage, estimatedCost:0.125}, '1,200 input (200 cached) · 50 output · **Estimated cost:** $0.1250'],
+    [{usage, estimatedCost:0.125, estimatedCostRange:{min:0.125,max:0.25}}, '1,200 input (200 cached) · 50 output · **Estimated cost:** $0.1250–$0.2500'],
+    [{usage, estimatedCost:0.125, estimatedCostRange:{min:0.125,max:null}}, '1,200 input (200 cached) · 50 output · **Estimated cost:** $0.1250 (upper estimate unavailable)'],
+    [{usage}, '1,200 input (200 cached) · 50 output · **Estimated cost:** unavailable'],
+    [{usage:{input_tokens:0,cached_input_tokens:0,output_tokens:0},estimatedCost:0,estimatedCostRange:{min:0,max:0}}, '0 input (0 cached) · 0 output · **Estimated cost:** $0.0000'],
+    [{}, 'unavailable · **Estimated cost:** unavailable'],
+  ] as const) {
+    const summary = resultSummary({...result, ...metrics}, inputs, target);
+    assert.ok(summary.includes('**Configured provider:** <code>amazon-bedrock</code>'));
+    assert.ok(summary.includes(`**Tokens:** ${expected}`));
+  }
 });

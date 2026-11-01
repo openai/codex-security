@@ -104,12 +104,7 @@ function discoveryDependencies(
     repositories?: Repository[];
     authenticated?: boolean;
   } = {},
-): {
-  dependencies: BulkScanDiscoveryDependencies;
-  prompt: FakePrompt;
-  hosts: string[];
-  requests: GitHubRequest[];
-} {
+) {
   const prompt = new FakePrompt();
   const host = options.host ?? "github.com";
   const repositories = options.repositories ?? [
@@ -120,114 +115,108 @@ function discoveryDependencies(
   const hosts: string[] = [];
   const requests: GitHubRequest[] = [];
 
-  return {
+  const dependencies: BulkScanDiscoveryDependencies = {
     prompt,
-    hosts,
-    requests,
-    dependencies: {
-      prompt,
-      now: () => NOW,
-      currentDirectory: () => root,
-      ...(options.host === undefined ? {} : { githubHost: host }),
-      createGitHub: async (githubHost) => {
-        hosts.push(githubHost);
-        if (options.authenticated === false) {
-          throw new Error(
-            "GitHub sign-in is required. Run 'gh auth login' first.",
-          );
-        }
+    now: () => NOW,
+    currentDirectory: () => root,
+    ...(options.host === undefined ? {} : { githubHost: host }),
+    createGitHub: async (githubHost) => {
+      hosts.push(githubHost);
+      if (options.authenticated === false) {
+        throw new Error(
+          "GitHub sign-in is required. Run 'gh auth login' first.",
+        );
+      }
 
-        return new Octokit({
-          auth: "test-token",
-          baseUrl:
-            githubHost === "github.com"
-              ? "https://api.github.com"
-              : `https://${githubHost}/api/v3`,
-          request: {
-            fetch: async (
-              resource: Parameters<typeof fetch>[0],
-              init?: Parameters<typeof fetch>[1],
-            ) => {
-              const url = new URL(
-                resource instanceof Request ? resource.url : resource,
+      return new Octokit({
+        auth: "test-token",
+        baseUrl:
+          githubHost === "github.com"
+            ? "https://api.github.com"
+            : `https://${githubHost}/api/v3`,
+        request: {
+          fetch: async (
+            resource: Parameters<typeof fetch>[0],
+            init?: Parameters<typeof fetch>[1],
+          ) => {
+            const url = new URL(
+              resource instanceof Request ? resource.url : resource,
+            );
+            const path = url.pathname.replace(/^\/api(?:\/v3)?/u, "");
+            const body =
+              init?.body === undefined
+                ? undefined
+                : (JSON.parse(String(init.body)) as {
+                    query: string;
+                    variables: GitHubRequest["variables"];
+                  });
+            requests.push({
+              path,
+              ...(body === undefined
+                ? {}
+                : { query: body.query, variables: body.variables }),
+            });
+
+            if (path === "/user/orgs") {
+              const organizations = options.organizations ?? [];
+              const page = Number(url.searchParams.get("page") ?? "1");
+              const perPage = Number(url.searchParams.get("per_page") ?? "30");
+              const offset = (page - 1) * perPage;
+              const next = new URL(url);
+              next.searchParams.set("page", String(page + 1));
+              return Response.json(
+                organizations
+                  .slice(offset, offset + perPage)
+                  .map((login) => ({ login })),
+                offset + perPage < organizations.length
+                  ? { headers: { link: `<${next.href}>; rel="next"` } }
+                  : undefined,
               );
-              const path = url.pathname.replace(/^\/api(?:\/v3)?/u, "");
-              const body =
-                init?.body === undefined
-                  ? undefined
-                  : (JSON.parse(String(init.body)) as {
-                      query: string;
-                      variables: GitHubRequest["variables"];
-                    });
-              requests.push({
-                path,
-                ...(body === undefined
-                  ? {}
-                  : { query: body.query, variables: body.variables }),
-              });
+            }
+            if (path === "/user") {
+              return Response.json({ login: "personal-account" });
+            }
+            if (path !== "/graphql" || body === undefined) {
+              throw new Error(`Unexpected GitHub request: ${path}`);
+            }
 
-              if (path === "/user/orgs") {
-                const organizations = options.organizations ?? [];
-                const page = Number(url.searchParams.get("page") ?? "1");
-                const perPage = Number(
-                  url.searchParams.get("per_page") ?? "30",
-                );
-                const offset = (page - 1) * perPage;
-                const next = new URL(url);
-                next.searchParams.set("page", String(page + 1));
-                return Response.json(
-                  organizations
-                    .slice(offset, offset + perPage)
-                    .map((login) => ({ login })),
-                  offset + perPage < organizations.length
-                    ? { headers: { link: `<${next.href}>; rel="next"` } }
-                    : undefined,
-                );
-              }
-              if (path === "/user") {
-                return Response.json({ login: "personal-account" });
-              }
-              if (path !== "/graphql" || body === undefined) {
-                throw new Error(`Unexpected GitHub request: ${path}`);
-              }
-
-              const visible = repositories.filter(
-                ({ archived, fork, affiliation }) =>
-                  !archived &&
-                  !fork &&
-                  !(
-                    affiliation === "COLLABORATOR" &&
-                    /ownerAffiliations:\s*\[OWNER\]/u.test(body.query)
-                  ),
-              );
-              const start = Number(body.variables?.cursor ?? 0);
-              const page = visible.slice(start, start + 100);
-              const next = start + page.length;
-              return Response.json({
-                data: {
-                  repositoryOwner: {
-                    repositories: {
-                      nodes: page.map((repository) => ({
-                        nameWithOwner: repository.fullName,
-                        pushedAt: repository.pushedAt ?? "2026-07-20T00:00:00Z",
-                        defaultBranchRef: repository.empty
-                          ? null
-                          : { target: { oid: REVISION } },
-                      })),
-                      pageInfo: {
-                        hasNextPage: next < visible.length,
-                        endCursor: next < visible.length ? String(next) : null,
-                      },
+            const visible = repositories.filter(
+              ({ archived, fork, affiliation }) =>
+                !archived &&
+                !fork &&
+                !(
+                  affiliation === "COLLABORATOR" &&
+                  /ownerAffiliations:\s*\[OWNER\]/u.test(body.query)
+                ),
+            );
+            const start = Number(body.variables?.cursor ?? 0);
+            const page = visible.slice(start, start + 100);
+            const next = start + page.length;
+            return Response.json({
+              data: {
+                repositoryOwner: {
+                  repositories: {
+                    nodes: page.map((repository) => ({
+                      nameWithOwner: repository.fullName,
+                      pushedAt: repository.pushedAt ?? "2026-07-20T00:00:00Z",
+                      defaultBranchRef: repository.empty
+                        ? null
+                        : { target: { oid: REVISION } },
+                    })),
+                    pageInfo: {
+                      hasNextPage: next < visible.length,
+                      endCursor: next < visible.length ? String(next) : null,
                     },
                   },
                 },
-              });
-            },
+              },
+            });
           },
-        });
-      },
+        },
+      });
     },
   };
+  return { prompt, hosts, requests, dependencies };
 }
 
 describe("bulk scan repository discovery", () => {

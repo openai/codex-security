@@ -13,6 +13,72 @@ import { throwing } from "./support/errors.js";
 import { createCliTest } from "./support/cli-run.js";
 
 describe("CLI diagnostics", () => {
+  test.each<string[]>([
+    ["publish", "scan", "completed-scan", "--to", "cloud"],
+    ["publish", "check", "completed-scan", "--to", "linear"],
+    ["import", "github", "example/repository"],
+    ["install-hook"],
+    ["suggest-owners", "findings.json"],
+    ["classify-severity", "--scan", "latest"],
+    ["scan-components", "--component", "api=src", "--output-dir", "out"],
+    ["bulk-scan", "repositories.csv", "--output-dir", "out"],
+    ["export", "completed-scan", "--output", "findings.json"],
+    ["validate", "Synthetic finding"],
+    ["verify-fix", "Synthetic finding"],
+    ["init"],
+  ])("does not format success after %j fails (case %#)", async (...command) => {
+    for (const flags of [["--full-output"], ["--token-count"]]) {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const deps = dependencies();
+      deps.currentDirectory = throwing("Synthetic command failure.");
+
+      expect(await runCli([...command, ...flags], deps)).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toBe(
+        "codex-security: Synthetic command failure.\n",
+      );
+    }
+  });
+
+  test("does not format a token count after patch fails", async () => {
+    const { stdout, stderr, runCli } = createCliTest(main);
+    const deps = dependencies();
+    deps.currentDirectory = throwing("Synthetic command failure.");
+
+    expect(
+      await runCli(["patch", "Synthetic finding", "--token-count"], deps),
+    ).toBe(2);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toBe("codex-security: Synthetic command failure.\n");
+  });
+
+  test.each<string[]>([["scan"], ["scans", "rerun", "scan-original"]])(
+    "rejects late Markdown selection for %j without a success result",
+    async (...command) => {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const fail = throwing("Must not load or execute a scan.");
+      const deps = dependencies({ onWorkbench: fail, onRun: fail });
+      deps.currentDirectory = fail;
+      expect(
+        await runCli(
+          [
+            ...command,
+            "--filter-output",
+            "--help",
+            "--format",
+            "md",
+            "--full-output",
+          ],
+          deps,
+        ),
+      ).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toBe(
+        "codex-security: Markdown output is not supported for scan results.\n",
+      );
+    },
+  );
+
   test.each([
     {
       command: "policy",
@@ -51,6 +117,11 @@ describe("CLI diagnostics", () => {
       structured: true,
     },
     {
+      command: "patch (full-output)",
+      args: ["patch", "Synthetic finding", "--json", "--full-output"],
+      structured: true,
+    },
+    {
       command: "scan import",
       args: ["--json", "scan", "import", "--csv", "findings.csv"],
       structured: false,
@@ -82,6 +153,7 @@ describe("CLI diagnostics", () => {
       expect(stderr.text()).not.toContain("\u001b");
       if (structured) {
         const result = JSON.parse(stdout.text());
+        expect(result.ok).toBe(false);
         expect(result.error?.message ?? result.message).toBe(message);
       }
     },

@@ -17,6 +17,9 @@ const { applyMigrations } = (await importSource(
   "src/workbench/migrations.ts",
 )) as typeof Migrations;
 const { parseJson, stringifyJson } = await importSource("src/helpers/json.ts");
+const { findPotentialDuplicates, listDedupeGroups } = (await importSource(
+  "src/workbench/duplicates.ts",
+)) as typeof import("../src/workbench/duplicates.ts");
 const temporary = createTemporaryDirectories(true);
 after(() => temporary.cleanup());
 
@@ -40,6 +43,30 @@ function entry(id: string): Findings.EmbeddedFinding {
     },
     embedding: { model: "synthetic-model", vector: [1, 0] },
   };
+}
+
+function pythonUpsert(path: string, finding: Findings.Finding | string): void {
+  execFileSync(
+    process.env.PYTHON ?? "python",
+    [
+      "-I",
+      "-X",
+      "utf8",
+      "-c",
+      `import json, sqlite3, sys
+sys.path.insert(0, sys.argv[1])
+from workbench_finding_index import upsert_finding
+with sqlite3.connect(sys.argv[2]) as db:
+    db.row_factory = sqlite3.Row
+    upsert_finding(db, json.load(sys.stdin), "python")`,
+      fileURLToPath(new URL("../../scripts/", import.meta.url)),
+      path,
+    ],
+    {
+      input: typeof finding === "string" ? finding : stringifyJson(finding),
+      encoding: "utf8",
+    },
+  );
 }
 
 for (const formatting of ["spaced", "reordered", "escaped"]) {
@@ -124,7 +151,8 @@ test("finding helper help exits without reading stdin", async () => {
     "find-potential-duplicates",
     "store-dedupe-groups",
     "list-dedupe-groups",
-    "dashboard",
+    "severity-classification",
+    "read-severity-classification",
   ];
   for (const command of commands) {
     // execFile leaves stdin open; help must exit without waiting for JSON.
@@ -202,6 +230,50 @@ test("import batches preserve identity, repository memberships and stable pages"
   assert.equal(listStoredFindings(database, { limit: 10, offset: 0 }).total, 2);
 });
 
+test("timestamp ordering keeps time zones, page boundaries, and stable ties", (t) => {
+  const database = open(t);
+  const timestamps = [
+    ["middle-b", "2026-10-08t01:00:01.123z"],
+    ["first", "2026-10-08T03:00:00+02:00"],
+    ["last", "2026-10-08T01:00:02.000001Z"],
+    ["middle-a", "2026-10-08T03:00:01.123000+02:00"],
+  ];
+  const expected = ["first", "middle-a", "middle-b", "last"];
+  for (const [id, timestamp] of timestamps) {
+    storeFindings(database, [entry(id)], timestamp, "repository");
+  }
+  for (const [id, timestamp] of timestamps) {
+    database
+      .prepare("INSERT INTO finding_dedupe_groups VALUES (?, ?)")
+      .run(id, timestamp);
+    database
+      .prepare("INSERT INTO finding_dedupe_group_members VALUES (?, 'first')")
+      .run(id);
+  }
+  assert.deepEqual(
+    expected.flatMap((_, offset) =>
+      listStoredFindings(database, { limit: 1, offset }).findings.map(
+        (finding) => finding.findingId,
+      ),
+    ),
+    expected,
+  );
+  assert.deepEqual(
+    listDedupeGroups(database, "first").groups.map((group) => group.groupId),
+    expected,
+  );
+  for (const repository of [undefined, "repository"]) {
+    const result = findPotentialDuplicates(database, "first", repository);
+    assert.ok(result.potentialDuplicates);
+    assert.deepEqual(
+      result.potentialDuplicates.map(
+        (finding) => (finding as Findings.Finding).findingId,
+      ),
+      expected.slice(1),
+    );
+  }
+});
+
 test("mixed writers retain unchanged Python embeddings and replace supplied Node embeddings", async (t) => {
   const directory = await temporary.create("workbench-findings-");
   const path = join(directory, "workbench.sqlite3");
@@ -216,32 +288,10 @@ test("mixed writers retain unchanged Python embeddings and replace supplied Node
       .get()!.details_json;
   const embedding = () =>
     database.prepare("SELECT model, vector_json FROM finding_embeddings").get();
-  const scripts = fileURLToPath(new URL("../../scripts/", import.meta.url));
-  const pythonUpsert = (finding: Findings.Finding | string) =>
-    execFileSync(
-      process.env.PYTHON ?? "python",
-      [
-        "-I",
-        "-X",
-        "utf8",
-        "-c",
-        `import json, sqlite3, sys
-sys.path.insert(0, sys.argv[1])
-from workbench_finding_index import upsert_finding
-with sqlite3.connect(sys.argv[2]) as db:
-    db.row_factory = sqlite3.Row
-    upsert_finding(db, json.load(sys.stdin), "python")`,
-        scripts,
-        path,
-      ],
-      {
-        input: typeof finding === "string" ? finding : stringifyJson(finding),
-        encoding: "utf8",
-      },
-    );
   const original = details();
   assert.match(String(original), /9007199254740993/u);
   pythonUpsert(
+    path,
     stringifyJson(
       Object.fromEntries(Object.entries(item.finding).reverse()),
     ).replace('"score": 10', '"score": 10.0'),
@@ -249,7 +299,7 @@ with sqlite3.connect(sys.argv[2]) as db:
   assert.equal(details(), original);
   assert.ok(embedding());
   const changed = { ...item.finding, title: "Updated finding" };
-  pythonUpsert(changed);
+  pythonUpsert(path, changed);
   assert.equal(embedding(), undefined);
   item.embedding = { model: "replacement-model", vector: [0, 1] };
   storeFindings(database, [{ ...item, finding: changed }], "node");
@@ -269,10 +319,193 @@ with sqlite3.connect(sys.argv[2]) as db:
       [{ ...item, finding: { ...changed, extensions: { foo: before } } }],
       "node",
     );
-    pythonUpsert({ ...changed, extensions: { foo: after } });
+    pythonUpsert(path, { ...changed, extensions: { foo: after } });
     assert.equal(JSON.parse(String(details())).extensions.foo, after);
     assert.equal(embedding(), undefined);
   }
+});
+
+for (const [name, previousValue, value, unchanged] of [
+  ["negative zero", "-0.0", 0, true],
+  ["exact exponent spelling", "1e+20", 1e20, true],
+  ["rounded exponent spelling", "1e+23", 1e23, true],
+  ["exact BigInt readback", "1e+23", 100000000000000000000000n, false],
+] as const) {
+  test(`stored finding numeric equality preserves Python ${name}`, async (t) => {
+    const directory = await temporary.create("workbench-numeric-finding-");
+    const path = join(directory, "workbench.sqlite3");
+    const database = open(t, path);
+    const item = entry("finding");
+    item.finding.extensions = { measurement: "numeric-placeholder" };
+    pythonUpsert(
+      path,
+      stringifyJson(item.finding).replace(
+        '"numeric-placeholder"',
+        previousValue,
+      ),
+    );
+    const previous = database
+      .prepare("SELECT details_json FROM findings")
+      .get()!.details_json;
+    assert.ok(String(previous).includes(previousValue));
+    database
+      .prepare(
+        "INSERT INTO local_finding_embeddings VALUES ('finding', 'local-model', '[1,0]', 'prepared-key')",
+      )
+      .run();
+    item.finding.extensions = { measurement: value };
+    storeFindings(database, [item], "native-import");
+    assert.equal(
+      database.prepare("SELECT details_json FROM findings").get()!.details_json,
+      unchanged ? previous : stringifyJson(item.finding, 0),
+    );
+    const readback = listStoredFindings(database, { limit: 10, offset: 0 })
+      .findings[0].extensions as { measurement: number | bigint };
+    assert.equal(BigInt(readback.measurement), BigInt(value));
+    assert.equal(
+      database.prepare("SELECT cache_key FROM local_finding_embeddings").get()
+        ?.cache_key,
+      unchanged ? "prepared-key" : undefined,
+    );
+    if (unchanged)
+      assert.deepEqual(
+        findPotentialDuplicates(database, "finding", undefined, {
+          finding: "prepared-key",
+        }).potentialDuplicates,
+        [],
+      );
+    assert.equal(
+      database.prepare("SELECT model FROM finding_embeddings").get()!.model,
+      item.embedding.model,
+    );
+  });
+}
+
+const numericCases: readonly [string, string, unknown, boolean][] = [
+  ["fractional integer", "10.000", 10, true],
+  ["negative zero exponent", "1e-0", 1, true],
+  ["positive zero exponent", "1e+000", 1, true],
+  ["cancelled integer scale", "10e-1", 1, true],
+  ["cancelled fractional scale", "0.10e1", 1, true],
+  ["shifted coefficient", "1000e-3", 1, true],
+  ["negative coefficient", "-1200e-3", -1.2, true],
+  ["large finite exponent", "1e308", 1e308, true],
+  ["smallest positive Number", "5e-324", Number.MIN_VALUE, true],
+  ["rounded subnormal neighbor", "4e-324", Number.MIN_VALUE, false],
+  [
+    "exact huge integer",
+    "123456789012345678901234567890",
+    123456789012345678901234567890n,
+    true,
+  ],
+  ["unsafe integer exponent", "9007199254740993e0", 9007199254740993n, false],
+  ["rounded unsafe integer", "1000000000000000000001e0", 1e21, false],
+  ["precise fraction", "1.00000000000000001", 1, false],
+  ["positive underflow", "1e-400", 0, false],
+  ["negative underflow", "-1e-400", 0, false],
+  ["adjacent huge integer", "9007199254740993", 9007199254740992n, false],
+  ["boolean", "true", 1, false],
+  ["string", '"1"', 1, false],
+  ["array", "[1]", 1, false],
+  ["duplicate members", '{"value":2,"value":1.000}', { value: 1 }, true],
+  ["empty member", '{"":-0.0}', { "": 0 }, true],
+  [
+    "nested objects and prototype member",
+    '{"z":[-0.0,10e-1],"a":{"__proto__":{"value":1}}}',
+    JSON.parse('{"a":{"__proto__":{"value":1}},"z":[0,1]}'),
+    true,
+  ],
+  ["huge zero exponent", `-0.0e${"9".repeat(65_536)}`, 0, true],
+  ["huge positive exponent", `1e${"9".repeat(65_536)}`, 1, false],
+  ["huge negative exponent", `1e-${"9".repeat(65_536)}`, 0, false],
+  ["exponent leading zeros", `1e+${"0".repeat(65_536)}1`, 10, true],
+  ["long precise fraction", `1.${"0".repeat(65_536)}1`, 1, false],
+  [
+    "long fractional scale cancellation",
+    `0.${"0".repeat(4096)}1e4097`,
+    1,
+    true,
+  ],
+  ["long integer scale cancellation", `1${"0".repeat(4096)}e-4096`, 1, true],
+];
+
+for (const [name, previousValue, value, equal] of numericCases) {
+  test(`stored finding numeric equality handles ${name}`, (t) => {
+    const database = open(t);
+    const item = entry("finding");
+    item.finding.extensions = { measurement: value };
+    storeFindings(database, [item], "initial");
+    const fresh = stringifyJson(item.finding, 0);
+    const previous = stringifyJson(
+      {
+        ...item.finding,
+        extensions: { measurement: "numeric-placeholder" },
+      },
+      0,
+    ).replace('"numeric-placeholder"', previousValue);
+    database.prepare("UPDATE findings SET details_json = ?").run(previous);
+    database
+      .prepare(
+        "INSERT INTO local_finding_embeddings VALUES ('finding', 'local-model', '[1,0]', 'prepared-key')",
+      )
+      .run();
+    storeFindings(database, [item], "updated");
+    assert.ok(
+      database.prepare("SELECT details_json FROM findings").get()!
+        .details_json === (equal ? previous : fresh),
+      `${name}: ${equal ? "retain the exact stored body" : "replace the changed numeric body"}`,
+    );
+    assert.equal(
+      database.prepare("SELECT cache_key FROM local_finding_embeddings").get()
+        ?.cache_key,
+      equal ? "prepared-key" : undefined,
+    );
+  });
+}
+
+test("stored finding numeric equality preserves malformed-row errors and batch rollback", (t) => {
+  const database = open(t);
+  const first = entry("first");
+  const corrupt = entry("corrupt");
+  storeFindings(database, [first, corrupt], "initial", "original-repository");
+  const malformed = '{"value":1e999999,"broken":"line\u001btail"}';
+  database
+    .prepare("UPDATE findings SET details_json = ? WHERE id = 'corrupt'")
+    .run(malformed);
+  database
+    .prepare(
+      "INSERT INTO local_finding_embeddings VALUES ('first', 'local-model', '[1,0]', 'prepared-key')",
+    )
+    .run();
+  const snapshot = () =>
+    [
+      "findings",
+      "finding_embeddings",
+      "finding_repositories",
+      "local_finding_embeddings",
+    ].map((table) =>
+      database.prepare(`SELECT * FROM ${table} ORDER BY 1`).all(),
+    );
+  const before = snapshot();
+  let expected: unknown;
+  try {
+    parseJson(malformed);
+  } catch (error) {
+    expected = error;
+  }
+  assert.ok(expected instanceof SyntaxError);
+  const expectedMessage = expected.message;
+  first.finding.title = "Changed before malformed later entry";
+  first.embedding = { model: "replacement-model", vector: [0, 1] };
+  assert.throws(
+    () => storeFindings(database, [first, corrupt], "later", "new-repository"),
+    (error: unknown) =>
+      error instanceof SyntaxError && error.message === expectedMessage,
+  );
+  assert.deepEqual(snapshot(), before);
+  assert.deepEqual(storeFindings(database, [first], "recovered"), {
+    findingIds: ["first"],
+  });
 });
 
 test("imports reject lossy SQLite keys and non-finite JSON atomically", (t) => {

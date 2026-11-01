@@ -384,39 +384,52 @@ test("reuses publication after dedupe failure and persists a successful empty du
   expect(await readFile(join(scanDir, "findings.json"), "utf8")).toBe(original);
 });
 
-test("an empty scan completes publication and dedupe and remains retrievable", async () => {
-  const { scanDir, environment, document, history } = await fixture();
-  document.findings = [];
-  const content = JSON.stringify(document);
-  await writeFile(join(scanDir, "findings.json"), content);
-  const manifestPath = join(scanDir, "scan-manifest.json");
-  const manifest = JSON.parse(
-    await readFile(manifestPath, "utf8"),
-  ) as ScanManifest;
-  manifest.scan.artifacts!.find(
-    (artifact) => artifact.path === "findings.json",
-  )!.sha256 = sha256(content);
-  await writeFile(manifestPath, JSON.stringify(manifest));
+test("an empty workflow preserves its result across cancellation at completion and on cached lookup", async () => {
+  const { environment, document, history } = await fixtureWithFindings(0);
   const options = {
     workflowId: "empty-scan",
     findingsUrl: "http://synthetic.test",
   };
-
-  const fetch = mock(async (_url: URL, init: RequestInit) => {
-    expect(JSON.parse(init.body as string).findings).toEqual([]);
-    return Response.json([]);
-  });
-  const result = await deduplicateScanInternal(document.scanId, options, {
-    environment,
-    runWorkbench: history,
-    fetch,
-  });
-  expect(result).toEqual({
+  const result = {
     scanId: document.scanId,
     uniqueFindingIds: [],
     duplicateGroups: [],
-    deduplicationStatus: "completed",
+    deduplicationStatus: "completed" as const,
+  };
+  const fetch = mock(async (url: URL, init: RequestInit) => {
+    expect(url.pathname).toBe("/v1/bulk/findings");
+    expect(JSON.parse(init.body as string).findings).toEqual([]);
+    return Response.json([]);
   });
+  const workflow = new FindingWorkflow(options.workflowId, environment);
+  for (const action of ["complete", "begin"]) {
+    const controller = new AbortController();
+    const reason = new Error(`Canceled after dedupe ${action}`);
+    await expect(
+      deduplicateScanInternal(
+        document.scanId,
+        { ...options, signal: controller.signal },
+        {
+          environment,
+          fetch,
+          runWorkbench: async (args, input) => {
+            const response = await history(args, input);
+            const payload = input ? JSON.parse(input) : {};
+            if (payload.stage === "dedupe" && payload.action === action)
+              controller.abort(reason);
+            return response;
+          },
+        },
+      ),
+    ).rejects.toThrow(reason.message);
+    expect((await workflow.get())?.stages).toMatchObject({
+      publish: {
+        status: "completed",
+        result: { findingIds: [], findingCount: 0 },
+      },
+      dedupe: { status: "completed", result },
+    });
+  }
   expect(
     await deduplicateScanInternal(document.scanId, options, {
       environment,
@@ -425,14 +438,75 @@ test("an empty scan completes publication and dedupe and remains retrievable", a
     }),
   ).toEqual(result);
   expect(fetch).toHaveBeenCalledTimes(1);
-  expect(
-    (await new FindingWorkflow(options.workflowId, environment).get())?.stages
-      .publish,
-  ).toMatchObject({
-    status: "completed",
-    result: { findingIds: [], findingCount: 0 },
-  });
 });
+
+test.each(["acknowledged", "interrupted", "without workflow"])(
+  "observes cancellation after the final group write (%s) without losing durable state",
+  async (outcome) => {
+    const { environment, document, history } = await fixtureWithFindings(2);
+    const controller = new AbortController();
+    const reason = new Error("Synthetic cancellation during group write");
+    const options = {
+      ...(outcome === "without workflow" ? {} : { workflowId: "final-write" }),
+      findingsUrl: "http://synthetic.test",
+    };
+    const groups = [
+      document.findings.map((finding) => finding.findingId).sort(),
+    ];
+    const writes: string[][][] = [];
+    const reviewer = {
+      screen: mock(async (findings: readonly Finding[]) => ({
+        decisions: Object.fromEntries(
+          findings.slice(1).map(screeningRecommendation),
+        ),
+      })),
+      reviewPair: mock(async () => sameRecommendation),
+    };
+    const dependencies = {
+      environment,
+      runWorkbench: history,
+      reviewer,
+      fetch: async (url: URL, init: RequestInit) => {
+        if (!url.pathname.endsWith("/dedupe-groups"))
+          return await findingFetch(document)(url);
+        writes.push(JSON.parse(init.body as string).groups);
+        if (writes.length === 1) {
+          controller.abort(reason);
+          if (outcome === "interrupted") throw reason;
+        }
+        return Response.json([]);
+      },
+    };
+    await expect(
+      deduplicateScanInternal(
+        document.scanId,
+        { ...options, signal: controller.signal },
+        dependencies,
+      ),
+    ).rejects.toThrow(reason.message);
+    expect(writes).toEqual([groups]);
+    if (options.workflowId === undefined) return;
+    const workflow = new FindingWorkflow(options.workflowId, environment);
+    const saved = (await workflow.get())!.stages.dedupe;
+    expect(saved.status).toBe(
+      outcome === "interrupted" ? "failed" : "completed",
+    );
+    expect(saved.result).toMatchObject({ duplicateGroups: groups });
+    expect(saved.pendingWrite).toEqual(
+      outcome === "interrupted" ? { groups } : undefined,
+    );
+    const reviewCalls = reviewer.reviewPair.mock.calls.length;
+    expect<unknown>(
+      await deduplicateScanInternal(document.scanId, options, dependencies),
+    ).toEqual(saved.result);
+    expect(reviewer.reviewPair).toHaveBeenCalledTimes(reviewCalls);
+    expect(writes).toHaveLength(outcome === "interrupted" ? 2 : 1);
+    expect((await workflow.get())!.stages.dedupe).toEqual({
+      status: "completed",
+      result: saved.result,
+    });
+  },
+);
 
 test("does not write workflow metadata into sealed artifacts", async () => {
   const { scanDir, environment } = await fixture();

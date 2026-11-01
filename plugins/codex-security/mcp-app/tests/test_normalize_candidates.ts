@@ -5,16 +5,17 @@ import { test } from "node:test";
 import { importSource } from "./import-module.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
-const { normalizeCandidatesCommand } = await importSource(
-  join(import.meta.dirname, "../src/helpers/normalize-candidates.ts"),
-);
+const { normalizeCandidateBatch, normalizeCandidatesCommand } =
+  await importSource(
+    join(import.meta.dirname, "../src/helpers/normalize-candidates.ts"),
+  );
 
 const cases = [
   {
-    name: "preserves a literal trailing carriage return",
-    files: ["file\r"],
-    inventory: "file\r\n",
-    candidate: "file\r",
+    name: "accepts LF inventories and preserves filename whitespace",
+    files: [" file.ts", "other.ts"],
+    inventory: "\n file.ts\nother.ts\n",
+    candidate: " file.ts",
   },
   {
     name: "accepts CRLF inventories",
@@ -23,84 +24,29 @@ const cases = [
     candidate: "file",
   },
   {
-    name: "uses independent CRLF evidence when filenames collide",
-    files: ["file", "file\r", "other"],
-    inventory: "file\r\nother\r\n",
+    name: "accepts an unterminated final row",
+    files: ["file", "other"],
+    inventory: "other\nfile",
     candidate: "file",
   },
   {
-    name: "preserves separately listed carriage-return filenames",
-    files: ["file", "file\r"],
-    inventory: "file\nfile\r\n",
-    candidate: "file\r",
-  },
-  {
-    name: "preserves an unterminated final literal filename",
-    files: ["file", "file\r", "other"],
-    inventory: "other\r\nfile\r",
-    candidate: "file\r",
-  },
-  {
-    name: "uses independent literal filename evidence",
-    files: ["file", "file\r", "literal\r"],
-    inventory: "file\r\nliteral\r\n",
-    candidate: "file\r",
-  },
-  {
-    name: "does not strip an unterminated missing literal filename",
-    files: ["file"],
-    inventory: "file\r",
-    candidate: "file",
-    error: /ENOENT/,
-  },
-  {
-    name: "keeps an unterminated missing literal outside a diff scope",
-    files: ["file"],
-    inventory: "file\r",
-    candidate: "file",
-    allowMissing: true,
-    error: /expected at least one in-scope file/,
-  },
-  {
-    name: "does not infer CRLF from an unterminated row",
-    files: ["file", "file\r", "other"],
-    inventory: "file\r\nother\r",
-    candidate: "file",
-    error: /ambiguous carriage-return paths/,
-  },
-  {
-    name: "rejects an ambiguous inventory without selecting another file",
-    files: ["file", "file\r"],
-    inventory: "file\r\n",
-    candidate: "file",
-    error: /ambiguous carriage-return paths/,
-  },
-  {
-    name: "keeps CRLF normalization for missing diff-scope files",
+    name: "keeps missing diff-scope files with CRLF inventories",
     files: ["file"],
     inventory: "file\r\ndeleted\r\n",
     candidate: "file",
     allowMissing: true,
   },
   {
-    name: "does not replace a missing CRLF path with its literal sibling",
-    files: ["file\r", "other"],
-    inventory: "file\r\nother\r\n",
-    candidate: "file\r",
-    allowMissing: true,
-    error: /ambiguous carriage-return paths/,
-  },
-  {
-    name: "preserves explicitly listed literal siblings in a diff scope",
-    files: ["file\r"],
-    inventory: "file\nfile\r\n",
-    candidate: "file\r",
-    allowMissing: true,
+    name: "rejects a missing file outside diff mode",
+    files: ["file"],
+    inventory: "deleted\nfile\n",
+    candidate: "file",
+    error: /ENOENT/,
   },
 ];
 
 for (const fixture of cases) {
-  test(fixture.name, { skip: process.platform === "win32" }, async (t) => {
+  test(fixture.name, async (t) => {
     const root = await temporaryDirectory("normalize-candidates-");
     t.after(() => rm(root, { recursive: true, force: true }));
     const repo = join(root, "repo");
@@ -152,3 +98,59 @@ for (const fixture of cases) {
     }
   });
 }
+
+test("reports the candidate field that invalidates the second batch row", async (t) => {
+  const root = await temporaryDirectory("normalize-candidates-");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const scopePath = join(root, "inventory.txt");
+  await writeFile(scopePath, "source.ts\n");
+  await writeFile(join(root, "source.ts"), "one\ntwo\n");
+  const location = { path: "source.ts", start_line: 2, role: "entrypoint" };
+  const valid = {
+    cwe_ids: ["CWE-89"],
+    locations: [location],
+    summary: "Synthetic candidate",
+    evidence: "Synthetic evidence",
+  };
+
+  for (const [change, error] of [
+    [{ cwe_ids: null }, "cwe_ids: expected an array"],
+    [{ cwe_ids: [12] }, "cwe_ids: expected CWE strings"],
+    [
+      { cwe_ids: ["SQL injection"] },
+      'cwe_ids: unsupported value "SQL injection"',
+    ],
+    [{ cwe_ids: ["CWE-0"] }, 'cwe_ids: unsupported value "CWE-0"'],
+    [{ locations: [] }, "locations: expected a non-empty array"],
+    [{ locations: [null] }, "locations: expected location objects"],
+    [
+      { locations: [{ ...location, end_line: 1 }] },
+      "end_line: must be greater than or equal to start_line",
+    ],
+    [
+      { locations: [{ ...location, role: "rootControl" }] },
+      "role: unsupported value rootControl",
+    ],
+    [
+      { locations: [{ ...location, line: 2 }] },
+      "locations: unsupported fields line",
+    ],
+    [{ disposition: "reportable" }, "unsupported fields disposition"],
+    [{ candidate_id: " " }, "candidate_id: expected a non-empty string"],
+    [{ summary: " \t\r\n" }, "summary: expected a non-empty string"],
+    [{ evidence: null }, "evidence: expected a non-empty string"],
+    [{ context: " " }, "context: expected a non-empty string"],
+    [{ instance: false }, "instance: expected a non-empty string"],
+  ] as const) {
+    assert.throws(
+      () =>
+        normalizeCandidateBatch({
+          repoRoot: root,
+          scopePath,
+          allowMissing: false,
+          candidates: [valid, { ...valid, ...change }],
+        }),
+      { message: `discovery candidates: candidate input row 2: ${error}` },
+    );
+  }
+});

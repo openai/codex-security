@@ -1,10 +1,12 @@
 import { build } from 'esbuild';
+import './apply-patches.mjs';
 import { readFile, readdir, mkdir, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { resolve, relative } from 'node:path';
 
 const check = process.argv.includes('--check');
 const root = resolve(import.meta.dirname, '..');
+const patches = (await readdir(resolve(root, 'patches'))).filter(name => name.endsWith('.patch')).sort();
 const hash = value => createHash('sha256').update(value).digest('hex');
 const bundle = await build({
   absWorkingDir: root, entryPoints: {index: 'src/entry.ts', post: 'src/post.ts'}, outdir: 'dist',
@@ -26,14 +28,14 @@ function components(packages, namespace) {
     ...(info.resolved ? {externalReferences: [{type: 'distribution', url: info.resolved}]} : {}),
   }));
 }
-const sourceFiles = (await readdir(resolve(root, 'src'))).filter(name => name.endsWith('.ts')).sort();
+const sourceFiles = Object.keys(bundle.metafile.inputs).filter(path => !path.includes('node_modules/')).sort();
 const sourceHash = createHash('sha256');
-for (const file of sourceFiles) sourceHash.update(file).update('\0').update(await readFile(resolve(root, 'src', file))).update('\0');
+for (const file of sourceFiles) sourceHash.update(file).update('\0').update(await readFile(resolve(root, file))).update('\0');
 const manifest = {
   actionVersion, status: 'unreleased', nodeRuntime: 'node24', platform: 'linux-x64', cliVersion,
   sourceSha256: sourceHash.digest('hex'), actionLockSha256: hash(await readFile(resolve(root, 'package-lock.json'))),
   runtimeLockSha256: hash(cliLockBytes),
-  buildInputs: Object.fromEntries(await Promise.all(['../action.yml', 'package.json', 'runtime/package.json', 'scripts/build.mjs'].map(async path => [path, {sha256: hash(await readFile(resolve(root, path)))}]))),
+  buildInputs: Object.fromEntries(await Promise.all(['../action.yml', 'package.json', 'runtime/package.json', 'scripts/build.mjs', 'scripts/apply-patches.mjs', ...patches.map(name => 'patches/' + name)].map(async path => [path, {sha256: hash(await readFile(resolve(root, path)))}]))),
   files: Object.fromEntries([...generated].map(([path, bytes]) => [path, {sha256: hash(bytes), bytes: bytes.length}])),
 };
 const sbom = {
