@@ -472,7 +472,7 @@ export async function collectSonarIssues(
     componentKeys: project,
     impactSoftwareQualities: "SECURITY",
     additionalFields: "rules",
-    ps: "100",
+    ps: "500",
   });
   if (branch !== undefined) query.set("branch", branch);
   if (pullRequest !== undefined) query.set("pullRequest", pullRequest);
