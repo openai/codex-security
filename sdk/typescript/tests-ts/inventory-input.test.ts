@@ -809,6 +809,19 @@ for (const ignoreName of [".ignore", ".rgignore"])
   });
 
 for (const ignoreName of [".ignore", ".rgignore"]) {
+  test(`scope input preserves case-only renames with inherited ${ignoreName}`, () => {
+    const f = fixture();
+    f.write(ignoreName, "unrelated/\n");
+    const original = f.write("selected/source.py");
+    git(f.repo, "add", "selected/source.py");
+    renameSync(original, join(f.repo, "selected", "SOURCE.py"));
+    expect(
+      f
+        .rows("make-repo-scope-input", f.scopeArgs("selected"))
+        .map((row) => row.path),
+    ).toEqual(["selected/SOURCE.py"]);
+  });
+
   test(`scope input honors ${ignoreName} above the Git worktree`, () => {
     const f = fixture();
     writeFileSync(join(f.root, ignoreName), "excluded/\n");
@@ -875,6 +888,128 @@ for (const ignoreName of [".ignore", ".rgignore"]) {
     );
   });
 }
+
+test("scope input checks only candidate ancestors for nested ignore rules", () => {
+  const f = fixture();
+  f.write(".gitignore", "selected/vendor/\n");
+  f.write("selected/visible.py");
+  f.write("selected/vendor/nested/.ignore", "hidden.py\n");
+  f.write("selected/vendor/nested/hidden.py");
+  git(f.repo, "add", "selected/visible.py");
+  const marker = join(f.root, "visited-excluded-directory");
+  const preload = join(f.root, "trace-directory-reads.cjs");
+  const binding = join(
+    PLUGIN_ROOT,
+    "mcp",
+    "native",
+    `win32-${process.arch}`,
+    "windows.node",
+  );
+  writeFileSync(
+    preload,
+    `
+const fs = require('node:fs');
+const observed = value => { if (String(value).replaceAll('\\\\', '/').endsWith('/selected/vendor')) fs.writeFileSync(${JSON.stringify(marker)}, 'visited'); };
+const readdir = fs.readdirSync;
+fs.readdirSync = (value, ...args) => { observed(value); return readdir(value, ...args); };
+if (process.platform === 'win32') {
+  const binding = require(${JSON.stringify(binding)});
+  const entries = binding.windowsDirectoryEntries;
+  binding.windowsDirectoryEntries = value => { observed(value.toString('utf16le')); return entries(value); };
+}
+require('node:module').syncBuiltinESMExports();
+`,
+  );
+  const result = f.run("make-repo-scope-input", f.scopeArgs("selected"), {
+    ...f.toolEnvironment,
+    NODE_OPTIONS: `${f.toolEnvironment["NODE_OPTIONS"] ?? ""} --require ${JSON.stringify(preload)}`,
+  });
+  expect(result.status, result.stderr).toBe(0);
+  expect(
+    readFileSync(f.out, "utf8")
+      .trim()
+      .split(/\r?\n/u)
+      .map((line) => JSON.parse(line).path),
+  ).toEqual(["selected/visible.py"]);
+  expect(readdirSync(f.root)).not.toContain("visited-excluded-directory");
+});
+
+test("scope input prunes only excluded directories with literal anchored globs", () => {
+  const f = fixture();
+  f.write(".ignore", "unrelated/\n");
+  f.write(".gitignore", "/selected/vendor/\n/selected/vendor\\[old\\]/\n");
+  f.write("selected/visible.py");
+  f.write("selected/kept/vendor/visible.py");
+  f.write("selected/kept/vendor[old]/visible.py");
+  f.write("selected/vendor/hidden.py");
+  f.write("selected/vendor[old]/hidden.py");
+  expect(
+    f
+      .rows("make-repo-scope-input", f.scopeArgs("selected"))
+      .map((row) => row.path),
+  ).toEqual([
+    "selected/kept/vendor/visible.py",
+    "selected/kept/vendor[old]/visible.py",
+    "selected/visible.py",
+  ]);
+});
+
+test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+  "scope input skips Git-excluded unreadable dependencies",
+  () => {
+    const f = fixture();
+    f.write(".ignore", "unrelated/\n");
+    f.write(".gitignore", "selected/vendor/\n");
+    f.write("selected/visible.py");
+    f.write("selected/vendor/source.py");
+    git(f.repo, "add", "selected/visible.py");
+    const blocked = join(f.repo, "selected", "vendor");
+    chmodSync(blocked, 0);
+    try {
+      expect(
+        f
+          .rows("make-repo-scope-input", f.scopeArgs("selected"))
+          .map((row) => row.path),
+      ).toEqual(["selected/visible.py"]);
+    } finally {
+      chmodSync(blocked, 0o700);
+    }
+  },
+);
+
+for (const kept of [false, true])
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    `scope input preserves Git warnings after ignore filtering with kept=${kept}`,
+    () => {
+      const f = fixture();
+      f.write(".ignore", "visible.py\nprivate/\n");
+      f.write("selected/visible.py");
+      git(f.repo, "add", "selected/visible.py");
+      f.write("selected/private/hidden.py");
+      if (kept) f.write("selected/kept.py");
+      const blocked = join(f.repo, "selected", "private");
+      writeFileSync(f.out, "previous\n");
+      chmodSync(blocked, 0);
+      try {
+        const result = f.run("make-repo-scope-input", f.scopeArgs("selected"));
+        if (kept) {
+          expect(result.status, result.stderr).toBe(0);
+          expect(
+            readFileSync(f.out, "utf8")
+              .trim()
+              .split(/\r?\n/u)
+              .map((line) => JSON.parse(line).path),
+          ).toEqual(["selected/kept.py"]);
+        } else {
+          expect(result.status).toBe(1);
+          expect(result.stderr).toMatch(/permission denied/iu);
+          expect(readFileSync(f.out, "utf8")).toBe("previous\n");
+        }
+      } finally {
+        chmodSync(blocked, 0o700);
+      }
+    },
+  );
 
 for (const readable of [false, true])
   test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(

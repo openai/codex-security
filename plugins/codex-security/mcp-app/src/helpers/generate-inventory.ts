@@ -6,14 +6,7 @@ import {
 } from "./helper-files";
 import { randomBytes } from "node:crypto";
 import { renameSync, unlinkSync } from "node:fs";
-import {
-  dirname,
-  isAbsolute,
-  normalize,
-  parse,
-  relative,
-  sep,
-} from "node:path";
+import { dirname, isAbsolute, parse, relative, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { mkdir, readFile, writeFile } from "./helper-files";
 import { expandHome, windowsFiles, windowsJoin } from "./resolve-security-md";
@@ -30,11 +23,14 @@ import {
   ancestors,
   append,
   directory,
+  directoryEntries,
   exists,
   fsPath,
+  fileIdentity,
   inside,
   lstat,
   regular,
+  sameFile,
   rejectStreams,
   stat,
   sourceMetadata,
@@ -127,7 +123,26 @@ function scopePath(
 
 async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
   if (regular(scope)) return [scope];
-  const indexed = await directoryPaths(scope);
+  const diagnostics: string[] = [];
+  const indexed = await directoryPaths(scope, diagnostics);
+  const finish = (paths: string[]) => {
+    if (diagnostics.length && !paths.some(regular))
+      throw new Error(diagnostics.join("\n"));
+    return paths;
+  };
+  const candidates = indexed?.filter(regular);
+  const parents = new Map<string, string>();
+  const visited = new Set<string>();
+  for (const path of candidates ?? [])
+    for (const parent of ancestors(dirname(path))) {
+      inside(scope, parent);
+      if (visited.has(parent)) break;
+      visited.add(parent);
+      const identity = fileIdentity(parent);
+      if (parents.has(identity)) break;
+      parents.set(identity, parent);
+      if (sameFile(parent, scope)) break;
+    }
   const ripgrepIgnoreNames = [".ignore", ".rgignore"];
   const isIgnoreFile = (path: string) => {
     try {
@@ -137,21 +152,32 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
       throw error;
     }
   };
-  let usesRipgrepIgnoreRules = [...ancestors(scope)].some((path) =>
+  const usesRipgrepIgnoreRules = [
+    ...new Set([...ancestors(scope), ...parents.values()]),
+  ].some((path) =>
     ripgrepIgnoreNames.some((name) => isIgnoreFile(append(path, name))),
   );
-  if (!usesRipgrepIgnoreRules && indexed !== undefined)
-    for (const path of walk(scope, true, true)) {
-      if (
-        ripgrepIgnoreNames.some(
-          (name) => path.endsWith(sep + name) && isIgnoreFile(path),
-        )
-      ) {
-        usesRipgrepIgnoreRules = true;
-        break;
+  if (
+    candidates !== undefined &&
+    (!usesRipgrepIgnoreRules || !candidates.length)
+  )
+    return finish(candidates);
+  const pruning: string[] = [];
+  if (indexed !== undefined) {
+    const selectedParents = [scope];
+    for (const parent of selectedParents)
+      for (const child of directoryEntries(parent, true)) {
+        const metadata = lstat(child);
+        if (!metadata.isDirectory()) continue;
+        if (
+          ("isNameSurrogate" in metadata && metadata.isNameSurrogate()) ||
+          !parents.has(fileIdentity(child))
+        ) {
+          const pattern = inside(repo, child).replace(/[\\*?[\]{}!]/gu, "\\$&");
+          pruning.push("--glob", `!/${pattern}`);
+        } else selectedParents.push(child);
       }
-    }
-  if (indexed !== undefined && !usesRipgrepIgnoreRules) return indexed;
+  }
   let result;
   try {
     result = await runRipgrep(
@@ -165,6 +191,7 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
         "!**/{.git,.svn}",
         "--glob",
         "!**/{.git,.svn}/**",
+        ...pruning,
         "--",
         relative(repo, scope) || ".",
       ],
@@ -205,13 +232,17 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
     throw new Error(
       `Could not enumerate scoped repository files${result.signal ? ` (${result.signal})` : ""}: ${result.stderr.trim()}`,
     );
-  const candidates = decodePosixBytes(result.stdout)
+  const selected = decodePosixBytes(result.stdout)
     .split("\0")
     .filter(Boolean)
     .map((path) => append(repo, path));
-  if (indexed === undefined) return candidates;
-  const included = new Set(indexed.map((path) => normalize(path)));
-  return candidates.filter((path) => included.has(normalize(path)));
+  if (candidates === undefined) return selected;
+  const included = new Set(candidates.map(fileIdentity));
+  return finish(
+    selected.filter(
+      (path) => regular(path) && included.has(fileIdentity(path)),
+    ),
+  );
 }
 
 function loadScopes(path: string): string[] {

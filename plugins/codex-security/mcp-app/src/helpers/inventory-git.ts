@@ -554,6 +554,7 @@ function requireSuccess(result: ToolResult): Buffer {
 
 export async function directoryPaths(
   target: string,
+  diagnostics?: string[],
 ): Promise<string[] | undefined> {
   const root = await git(target, ["rev-parse", "--show-toplevel"]);
   if (root.status !== 0 || !root.stdout.length) return undefined;
@@ -585,6 +586,8 @@ export async function directoryPaths(
     depth && !unicodeCase ? `:(icase,literal)${prefix}` : ".",
   ]);
   const listing = paths(requireSuccess(listingResult));
+  if (listingResult.stderr.trim())
+    diagnostics?.push(listingResult.stderr.trim());
   const found = new Set<string>(),
     matching = new Map<string, boolean>();
   for (const name of listing) {
@@ -615,7 +618,7 @@ export async function directoryPaths(
       const nestedRoot = await git(path, ["rev-parse", "--show-toplevel"]);
       const nested =
         nestedRoot.status === 0 && sameFile(gitLine(nestedRoot.stdout), path)
-          ? await directoryPaths(path)
+          ? await directoryPaths(path, diagnostics)
           : undefined;
       for (const child of nested ?? walk(path, true, true)) found.add(child);
     }

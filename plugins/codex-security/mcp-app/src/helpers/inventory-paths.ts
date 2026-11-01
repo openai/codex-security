@@ -105,29 +105,40 @@ export function linkedParent(scope: string, path: string): boolean {
   }
   return false;
 }
-export const sourceMetadata = new Set([".git", ".svn"]);
-export function* walk(
-  path: string,
-  skipMetadata = false,
-  ignoreDirectoryReadErrors = false,
-): Iterable<string> {
-  let names: Buffer[];
-  try {
-    names = windows
-      ? windowsFiles()
-          .entriesWithTypes(Buffer.from(path, "utf16le"))
-          .map((entry) => entry.name)
-      : readdirSync(fsPath(path), { encoding: "buffer" });
-  } catch (error) {
-    if (!ignoreDirectoryReadErrors) throw error;
-    return;
+export function fileIdentity(path: string): string {
+  if (windows) {
+    const value = windowsFiles().identity(Buffer.from(path, "utf16le"));
+    return `${value.volume}:${value.fileId.toString("hex")}`;
   }
-  const children = names
+  const value = statSync(fsPath(path), { bigint: true });
+  return `${value.dev}:${value.ino}`;
+}
+export const sourceMetadata = new Set([".git", ".svn"]);
+export function directoryEntries(path: string, skipMetadata = false): string[] {
+  const names = windows
+    ? windowsFiles()
+        .entriesWithTypes(Buffer.from(path, "utf16le"))
+        .map((entry) => entry.name)
+    : readdirSync(fsPath(path), { encoding: "buffer" });
+  return names
     .map((name) =>
       windows ? name.toString("utf16le") : decodePosixBytes(name),
     )
     .filter((name) => !skipMetadata || !sourceMetadata.has(name))
     .map((name) => append(path, name));
+}
+export function* walk(
+  path: string,
+  skipMetadata = false,
+  ignoreDirectoryReadErrors = false,
+): Iterable<string> {
+  let children: string[];
+  try {
+    children = directoryEntries(path, skipMetadata);
+  } catch (error) {
+    if (!ignoreDirectoryReadErrors) throw error;
+    return;
+  }
   yield* children;
   for (const child of children) {
     const info = lstat(child);
