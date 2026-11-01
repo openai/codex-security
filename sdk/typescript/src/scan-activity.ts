@@ -11,6 +11,7 @@ interface ActivityCommand {
   powershell: boolean;
   script?: string;
   argv?: readonly string[];
+  argvExpansion?: readonly boolean[];
 }
 
 export type ScanActivityStatus = "running" | "completed" | "failed";
@@ -145,6 +146,7 @@ interface CommandToken {
   value: string;
   resolved: boolean;
   quoted: boolean;
+  expand: boolean;
 }
 
 // Find a substitution's closing delimiter without interpreting its contents.
@@ -222,13 +224,20 @@ function posixTokens(text: string): CommandToken[] {
   let active = false;
   let resolved = true;
   let quoted = false;
+  let expand = false;
   let quote: "'" | '"' | null = null;
   const finish = () => {
     if (active)
-      tokens.push({ value, resolved: resolved && quote === null, quoted });
+      tokens.push({
+        value,
+        resolved: resolved && quote === null,
+        quoted,
+        expand,
+      });
     value = "";
     active = false;
     resolved = true;
+    expand = false;
   };
   for (let index = 0; index < text.length; index++) {
     const char = text[index]!;
@@ -283,11 +292,12 @@ function posixTokens(text: string): CommandToken[] {
         );
       if (reference) {
         value += reference[0];
+        expand = true;
         index += reference[0].length - 1;
         continue;
       }
     }
-    if (char === "$" && (quote !== "'" || value === "")) resolved = false;
+    if (char === "$" && quote !== "'") resolved = false;
     if (quote === null && /[*?\[\]{}]/u.test(char)) resolved = false;
     value += char;
   }
@@ -356,7 +366,9 @@ function unwrapCommand(
       argv:
         index === undefined
           ? command
-          : command.filter((_, position) => position !== index),
+          : command.filter((_, position) =>
+              launcher === "powershell" ? position < index : position !== index,
+            ),
     };
   }
   const normalized = command.trimStart();
@@ -370,11 +382,8 @@ function unwrapCommand(
     shellKind(powershell[1] ?? powershell[2]) === "powershell"
   ) {
     let script = powershell[3]!;
-    if (
-      (script.startsWith("'") && script.endsWith("'")) ||
-      (script.startsWith('"') && script.endsWith('"'))
-    )
-      script = script.slice(1, -1);
+    const wrapper = /^(['"])([\s\S]*)\1\s*$/u.exec(script);
+    if (wrapper) script = wrapper[2]!;
     return { text: script, posix: false, powershell: true };
   }
   if (/^(?:\/(?:usr\/)?bin\/)?(?:sh|bash|zsh)\s/u.test(normalized)) {
@@ -387,15 +396,15 @@ function unwrapCommand(
     if (script?.resolved) {
       const operands = tokens
         .slice(index! + 1)
-        .filter((token) => token.resolved)
-        .map((token) => token.value);
+        .filter((token) => token.resolved);
       return {
         text:
           operands.length === 0 && script.quoted ? script.value : normalized,
         script: script.value,
         posix: true,
         powershell: false,
-        argv: operands,
+        argv: operands.map((token) => token.value),
+        argvExpansion: operands.map((token) => token.expand),
       };
     }
     return {
@@ -405,6 +414,10 @@ function unwrapCommand(
       argv:
         index === undefined
           ? tokens.filter((token) => token.resolved).map((token) => token.value)
+          : [],
+      argvExpansion:
+        index === undefined
+          ? tokens.filter((token) => token.resolved).map((token) => token.expand)
           : [],
     };
   }
@@ -686,8 +699,12 @@ function commandRepositoryPaths(
     }
   }
   // Recorded arguments are literal values, never input to the shell lexer.
-  for (const value of command.argv ?? [])
-    candidates.push({ value, expand: false, posix: command.posix });
+  for (const [index, value] of (command.argv ?? []).entries())
+    candidates.push({
+      value,
+      expand: command.argvExpansion?.[index] ?? false,
+      posix: command.posix,
+    });
   for (const candidate of candidates) {
     const value = candidate.posix
       ? candidate.value
