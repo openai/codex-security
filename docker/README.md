@@ -80,8 +80,10 @@ Prepare the [universal native payload](../plugins/codex-security/native/README.m
    **Public**, and grant the repository **Write** under **Manage Actions access**.
    The workflow uses `GITHUB_TOKEN` and refuses missing, private, or unreadable
    packages. Verify `docker pull` works after logging out of GHCR.
-3. Protect the repository's `container` environment with required reviewers and
-   deployment rules for protected `main` and approved `container-v*` tags.
+3. Configure the protected `npm` environment with release reviewers authorized
+   for both npm and GHCR and limit it to `npm-v*` tags. For image backfills
+   and standalone Wolfi OS updates, protect the `container` environment with
+   required reviewers and deployment rules for `main` and approved `container-v*` tags.
    Allow the workflow's pinned actions, package writes, and OIDC attestations.
    Update branch-protection check names if they reference the old release jobs.
 
@@ -93,14 +95,14 @@ and [package access settings](https://docs.github.com/en/packages/learn-github-p
 After verifying the published npm tarball and installation, `node-github-release`
 publishes the matching Action. Its immutable `action-vX.Y.Z` tag preserves the
 runtime lock for future backfills. The workflow passes the verified archive and
-lock to `container-publish`. Debian builds on amd64 and arm64 using the
-Dockerfile at the scanner release commit. Wolfi builds on amd64 using the
-recipe at the protected `main` commit selected for the run. Review the build summaries, then
-approve one deployment to the protected `container` environment for both
-images. Publication uses the tested digests, verifies anonymous pulls, and
-attests the images before promoting their version tags. Debian carries BuildKit
-SBOMs and maximum-mode provenance. Wolfi carries build provenance and an SPDX
-inventory of its OS packages, installed npm packages, and native components.
+lock to `container-publish`. Debian builds on amd64 and arm64 and Wolfi builds
+on amd64, both using recipes from the scanner release commit. Approving
+**Publish npm and container images** in the `npm` environment authorizes both
+images for that release. Publication uses the tested digests, verifies
+anonymous pulls, and attests the images before promoting their version tags.
+Debian carries BuildKit SBOMs and maximum-mode provenance. Wolfi carries build
+provenance and an SPDX inventory of its OS packages, installed npm packages,
+and native components.
 
 To backfill a release, dispatch `node-github-release` on protected `main` with
 the original `npm-vX.Y.Z` tag. A manual `container-release` run on `main`
@@ -109,10 +111,13 @@ requests the coordinated release for the current package version. Pushing a
 The release source determines which images are required.
 Sources from 0.5.0 onward with a Dockerfile but predating coordinated Wolfi
 builds use the original Debian release path. Earlier releases skip image
-publication. On a backfill, Wolfi can use refreshed OS pins from protected
-`main` with the original scanner tarball and runtime lock. If the original Wolfi
-tag already passes the source, lock, and attestation checks, the workflow
-reuses its digest.
+publication. A default backfill uses the scanner release commit's recipes.
+If the Wolfi build needs updated OS pins, dispatch `node-github-release` with
+`refresh-wolfi-recipe=true` to use the recipe from protected `main` with the
+original scanner tarball and runtime lock. Review and approve the `container`
+deployment when publishing with a different recipe commit or recovering
+images for a release whose approval covered only npm. A backfill that
+verifies all existing tags finishes without a deployment approval.
 
 Promotion updates tags separately. If publication stops partway through, rerun
 the failed jobs to reuse the retained artifacts. The publisher verifies existing

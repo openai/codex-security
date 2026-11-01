@@ -9,6 +9,23 @@ import { isMain } from "../../sdk/typescript/scripts/is-main.mjs";
 
 const marker = "<!-- codex-security-release-progress -->";
 const workflows = ["node-ci", "node-release", "node-github-release"];
+const npmDeploymentJobs = {
+  "Publish npm and container images": {
+    stage: "Release approval and npm publication",
+    prompt:
+      "Approve the **npm** deployment to publish the npm package and its matching container images.",
+  },
+  "Verify existing npm release": {
+    stage: "Existing npm release verification",
+    prompt:
+      "Approve the **npm** deployment to verify the existing npm package and its signed provenance.",
+  },
+  publish: {
+    stage: "Protected npm publication",
+    prompt:
+      "Approve the protected **npm** deployment in the linked release run.",
+  },
+};
 
 function status(value) {
   if (!value) return "Not started";
@@ -66,7 +83,14 @@ export function renderProgress(
       job.name.startsWith("native /") ||
       job.name.startsWith("release tests /"),
   );
-  const publisher = npmJobs.find((job) => job.name === "publish");
+  const npmDeploymentJob = npmJobs.find((job) =>
+    Object.hasOwn(npmDeploymentJobs, job.name),
+  );
+  const npmDeployment = npmDeploymentJobs[npmDeploymentJob?.name] ?? {
+    stage: "npm deployment",
+    prompt:
+      "Open the linked release run to see what the waiting job will do before approving the **npm** deployment.",
+  };
   const verified = jobStatus(verification, npm);
   const actionPublisher = githubJobs.find(
     (job) => job.name === "publish matching Action",
@@ -112,15 +136,15 @@ export function renderProgress(
     row("npm release status", status(npm), npm, !npm && Boolean(github)),
     row(
       "Release verification",
-      verified === "Passed" && !publisher && !awaitingApproval
+      verified === "Passed" && !npmDeploymentJob && !awaitingApproval
         ? status(npm)
         : verified,
       npm,
       !npm && Boolean(github),
     ),
     row(
-      "Protected npm publication",
-      awaitingApproval ? "Waiting for npm approval" : status(publisher),
+      npmDeployment.stage,
+      awaitingApproval ? "Waiting for npm approval" : status(npmDeploymentJob),
       npm,
       !npm && Boolean(github),
     ),
@@ -186,7 +210,7 @@ export function renderProgress(
     ),
     "",
     awaitingApproval
-      ? "Approve the protected **npm** deployment in the linked release run."
+      ? npmDeployment.prompt
       : awaitingContainerApproval
         ? "Approve the protected **container** deployment in the linked release run."
         : "Progress updates do not change publication approvals or verification requirements.",

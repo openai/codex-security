@@ -71,6 +71,14 @@ def test_deadline_completion_preserves_existing_tasks_and_recovered_findings(
     )
     coverage = read_review_state(workbench_db, scan.scan_dir)
     assert task in coverage[task_state]
+    assert coverage["surfaces"] == []
+    assert (
+        workbench_db.execute(
+            "SELECT terminal_reviewed_surface_count FROM deep_scan_runs WHERE scan_id = ?",
+            (scan.scan_id,),
+        ).fetchone()[0]
+        == 0
+    )
     if task_state == "resolvedDeferred":
         assert coverage[task_state] == [task]
     assert any(

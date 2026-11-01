@@ -62,6 +62,15 @@ EMPTY_GIT_TREES = {
 }
 
 
+def optional_text(value: str | None, *, maximum: int | None = None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if maximum is not None and len(normalized) > maximum:
+        raise SystemExit(f"Text value must be no longer than {maximum} characters.")
+    return normalized or None
+
+
 def positive_int(value: str) -> int:
     parsed = int(value)
     if parsed < 1:

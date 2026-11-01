@@ -84,8 +84,8 @@
     "@inquirer/prompts": "8.7.4",
     "@linear/sdk": "99.0.0",
     "@octokit/core": "7.0.8",
-    "@openai/codex": "0.165.0",
-    "@openai/codex-sdk": "0.165.0",
+    "@openai/codex": "0.166.0",
+    "@openai/codex-sdk": "0.166.0",
     "ajv": "8.20.0",
     "fflate": "0.8.3",
     "incur": "0.7.1",
@@ -104,8 +104,8 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
-    "@stryker-mutator/core": "10.0.0",
-    "@types/bun": "1.4.3",
+    "@stryker-mutator/core": "10.1.1",
+    "@types/bun": "1.4.4",
     "@types/node": "26.6.5",
     "@types/papaparse": "5.5.2",
     "@types/react": "19.3.0",

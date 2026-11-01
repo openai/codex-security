@@ -32,6 +32,7 @@ without running security analysis.
 - [Review one system across repositories](#review-one-system-across-repositories)
   or [run independent bulk scans](#bulk-scans).
 - [Import vendor findings locally](#import-vendor-findings-locally),
+  [import Sonar issues selected in Codex](#import-sonarqube-cloud-issues),
   [save findings as a scan](#import-findings-as-a-saved-scan), or
   [retrieve GitHub alerts](#import-alerts-from-the-cli).
 - [Inspect saved scans and rerun them](#scan-history-and-reruns),
@@ -644,6 +645,9 @@ Explicit `-c` wins. Without either, no file is discovered. `scan`, `bulk-scan`,
 `scan-components`, and `info` accept project files. SDK calls and saved reruns
 do not load them automatically.
 
+JSON project files and component plans (`--components-file`) accept UTF-8 with
+or without a leading byte-order mark.
+
 Treat the selected file as trusted operator configuration: native settings can
 start MCP processes and choose model-service destinations. Keep CI scanner
 configuration outside the untrusted checkout being assessed.
@@ -983,6 +987,15 @@ Finish older-version operations before upgrading. Never remove
 `.codex-security-scan.sqlite3` during an operation. Stop all operations using the
 credential home before manually removing an old `.codex-security-scan.lock`.
 
+If credential-home preparation fails, the error includes the underlying
+filesystem diagnostic. For permission or read-only filesystem errors, check
+the reported path or set `CODEX_SECURITY_STATE_DIR` to a private, writable
+directory outside the repository. A new state directory has separate history
+and does not migrate existing credentials or reports.
+
+Sandbox startup errors include the native diagnostic followed by a command to
+reproduce it. Linux namespace and AppArmor guidance appears only on Linux.
+
 On Windows, credential-home checks require trusted ownership and permissions
 through every ancestor, including the volume root. Codex Security can repair
 the credential home and its descendants; it does not change ancestor ownership
@@ -1280,7 +1293,7 @@ export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
 
 In PowerShell, use `$env:CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS = '1'`.
 Only `1` enables the feature. Without it, `publish findings`, `findings imported`,
-and `import github-advisories` are absent from command help and schemas and cannot
+`import sonar`, and `import github-advisories` are absent from command help and schemas and cannot
 run. The SDK's external publication, local import/readback, and advisory
 acquisition APIs require the same flag in their effective environment. An explicit
 `dependencies.environment` is used instead of the process environment. Pure
@@ -1307,7 +1320,10 @@ repository path instead of a Cloud repository ID or URL. Supported inputs includ
 Wiz findings, [Snyk Open Source JSON and SARIF](#import-snyk-open-source-findings),
 [Endor Labs Finding JSON and SARIF](#import-endor-labs-findings),
 [Amazon Inspector repository findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/inspector.md),
+[Black Duck SCA project-version vulnerabilities](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/blackduck.md),
+[Veracode Static Analysis policy findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/veracode.md),
 [Semgrep Code JSON and SARIF](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md),
+[SonarQube Cloud issue-search pages](#import-sonarqube-cloud-issues),
 [OpenGrep native JSON](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/opengrep.md),
 [GitHub Dependabot repository alerts](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/github-dependabot.md),
 and [saved GitHub code-scanning alerts and GHSA advisories](#import-github-findings-locally-or-to-cloud):
@@ -2429,6 +2445,33 @@ record absolute Node/CLI paths. If those change, back up and remove the verified
 generated hook, then reinstall with the same threshold. Restore the backup if
 installation fails. The installer respects `core.hooksPath`.
 
+## Import SonarQube Cloud issues
+
+Enable [external imports](#import-vendor-findings-locally) and run
+`codex-security import sonar` from the project's checkout to import open
+security issues from the active Sonar CLI connection. For issues selected in
+the SonarQube plugin, pass each issue key with `--sonar-issue`, its project
+with `--sonar-project`, and its branch or PR with `--sonar-branch` or
+`--sonar-pull-request`. The plugin and terminal use the same Sonar login.
+When you omit `--sonar-project`, Sonar must bind the checkout's Git origin to
+one project in that login's organization.
+
+```sh
+codex-security import sonar --sonar-project example_project --sonar-branch main \
+  --sonar-issue ISSUE_A --sonar-issue ISSUE_B --dry-run --format json
+codex-security import sonar "/path/from/capture.json" --yes
+```
+
+`--dry-run` saves the reviewed selection and returns its path in `capture`.
+The default destination is the local workbench. For both local import and
+Cloud publication, preview with `--to cloud` and confirm with the exact
+`capture` path from the successful Cloud preview and `--to cloud --yes`.
+If the checkout or Cloud destination changes, preview again. For a structured
+success or error envelope, use `--full-output` with `--format json` or
+`--format jsonl`. You can publish a local import later
+without reconnecting to Sonar. See [Sonar import and replay](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/sonar.md)
+for authentication, repository mapping, and native JSON input.
+
 ## Import GitHub findings locally or to Cloud
 
 Local and Cloud ingestion require the [external-import opt-in](#import-vendor-findings-locally).
@@ -2683,6 +2726,9 @@ By default, `validate` prints a readable assessment without JSON-schema checking
 native structured output. The CLI also checks the completed JSON before writing
 stdout; it does not convert a prose assessment into JSON afterward. Invalid JSON
 or a schema mismatch fails with exit code 2 and no assessment on stdout.
+
+Save the output schema as UTF-8 without a byte-order mark so both the CLI and
+Codex can read it.
 
 Use a self-contained schema in the subset supported by the selected Codex model
 and provider. The local checker uses JSON Schema 2020-12, but accepting a schema

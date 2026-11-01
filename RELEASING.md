@@ -285,11 +285,13 @@ for that exact commit:
 
 1. `node-release-cut` verifies that the version increased, checks the reviewed
    summary, and creates the exact `npm-vX.Y.Z` tag.
-2. `node-release` installs the committed dependency graph, tests and packs the
-   package, publishes it to npm, and records npm provenance. Three TypeScript
-   test shards and the MCP tests run in parallel with package verification.
-   Every shard and package check must pass before the protected npm job can
-   publish the verified archive.
+2. `node-release` installs the committed dependency graph and packs the
+   package. Three TypeScript test shards and the MCP tests run in parallel
+   with package verification.
+   After every shard and package check passes, approve the **npm** deployment
+   for **Publish npm and container images**. This authorizes the npm archive
+   and the matching container images built from the tagged release. The job
+   publishes the verified archive to npm with signed provenance.
 3. `node-github-release` verifies the public package, provenance, tag, and
    archive before publishing the GitHub release. It prepends the reviewed
    summary to GitHub's categorized notes.
@@ -332,8 +334,8 @@ registry errors fail immediately.
 do not prepare a release by editing or committing files there.
 
 The merged release PR receives one progress comment covering post-merge CI,
-release verification, protected npm approval, public-package provenance,
-installation checks, Action publication, and container approval and publication.
+release verification and approval, public-package provenance, installation
+checks, and Action and container publication. It links to any pending deployment.
 The main CI completion handler requests the first update for a merged release
 PR, including when CI fails. Subsequent updates link to the relevant workflows
 and track each publication stage. Each automatic release dispatch starts
@@ -362,7 +364,6 @@ The automated release is complete when npm and GitHub publication, exact-version
 install checks, and applicable Action and container publication have succeeded.
 The final job summarizes each result and identifies Marketplace publication as a
 separate step. A successful workflow does not confirm a Marketplace listing.
-The protected npm publication gates and immutable `npm-vX.Y.Z` tag remain in place.
 
 The npm package and CLI GitHub release become public before the installation and
 Action and container checks finish. Use the final workflow result before
@@ -370,14 +371,16 @@ announcing that the automated release is complete.
 
 For new scanner releases, `node-github-release` publishes the matching Action
 before starting the Debian and Wolfi builders. The Action distribution records
-the runtime dependency lock used by both images with the verified npm tarball. Review the native
-build results for Debian (amd64 and arm64) and Wolfi (amd64), then approve one
-`container` deployment for both. The coordinated release requires both public
-version tags to pass verification.
+the runtime dependency lock used by both images with the verified npm tarball.
+Debian (amd64 and arm64) and Wolfi (amd64) use the tagged release recipes.
+After the native builds pass, the coordinator publishes the tested images
+under the release approval and verifies both public version tags.
 
 To recover a missing image, dispatch `node-github-release` on `main` with the
-original `npm-vX.Y.Z` tag. Recovery follows the capabilities of the tagged
-source. Releases from 0.5.0 with a Dockerfile but without coordinated Wolfi
+original `npm-vX.Y.Z` tag. The default backfill uses the release recipes.
+Publishing missing images for a historical npm-only approval, or using a
+different Wolfi recipe commit on request, requires a `container` approval.
+Releases from 0.5.0 with a Dockerfile but without coordinated Wolfi
 builds require only Debian. Earlier releases or releases without a Dockerfile
 skip containers. For retry instructions and independent Wolfi OS revisions, see
 [Container releases](docker/README.md#publishing).
@@ -461,6 +464,13 @@ from the repository. Omit the version to check `latest`.
 Do not retarget a release tag or publish a second package under the same
 version. The workflows are designed to recover from partial publication while
 keeping the original tag and package identity.
+
+When the package is already published, `node-release` requests **npm** approval
+for **Verify existing npm release**. This job verifies the original archive
+and its signed provenance. Container publication uses the approval from the
+run attempt that signed the package. If that attempt has no record of a
+combined approval, the coordinator requests **container** approval before
+publishing missing images.
 
 To retry GitHub publication, run `node-github-release` from `main` with the
 existing `npm-vX.Y.Z` tag. Supply the successful `node-release` run ID when

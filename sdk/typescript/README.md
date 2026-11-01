@@ -62,6 +62,24 @@ Install the package locally in your TypeScript project:
 npm install @openai/codex-security
 ```
 
+### Package and plugin versions
+
+For bug reports, run `npx @openai/codex-security info --json` in the project
+where the SDK is installed, or `codex-security info --json` for a global install.
+Include the npm version (`cliVersion` and `sdkVersion`), bundled plugin manifest
+version (`bundledPluginVersion`), and Codex runtime and SDK pins (`codexVersion`
+and `codexSdkVersion`). If you used a marketplace plugin, a plugin supplied by
+path, or a custom Codex executable, include its version separately.
+
+For example, `npm view @openai/codex-security@0.1.5 gitHead dist.integrity`
+shows the registry's source commit and tarball digest. Compare `gitHead` with
+the commit for tag `npm-v0.1.5`. `npm pack @openai/codex-security@0.1.5` downloads
+the archive, including `package/_bundled_plugin/.codex-plugin/plugin.json`.
+
+The [release workflow](https://github.com/openai/codex-security/blob/main/.github/workflows/node-github-release.yml)
+verifies the signed attestation that binds the tarball to the tagged commit.
+For `0.1.0` and `0.1.1`, npm omits `gitHead`. Use the commit from the verified attestation.
+
 ## Authentication
 
 Sign in with ChatGPT:
@@ -645,11 +663,16 @@ for setup and review steps, or [Linear publication](docs/cli.md#publish-complete
 for issue creation.
 
 External vendor imports are opt-in. Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`
-to enable `publish findings`, `findings imported`, `import github-advisories`, and
-the SDK's external publication, local import/readback, and advisory acquisition
+to enable `publish findings`, `findings imported`, `import sonar`, `import github-advisories`, and
+the SDK's external publication, local import/readback, Sonar issue collection, and advisory acquisition
 APIs. They are disabled otherwise; CLI commands are hidden from help and schemas.
 SDK callers can supply the flag through the existing per-call
-`dependencies.environment`. Pure normalizers and file readers remain available.
+`dependencies.environment`, or in `options.environment` for `collectSonarIssues(options)`.
+For an SDK import of selected Sonar issues, pass their keys in `options.issueKeys`.
+Omit `issueKeys` to collect the project's open security issues. An empty list is rejected.
+If you know the source repository, pass its Git URL in `options.sourceRepositoryUrl`
+to check the Sonar binding before fetching issues.
+Pure normalizers and file readers remain available.
 This does not affect scan publishing or the existing GitHub alert collector.
 
 The SDK also exposes `prepareExternalPublication(file, options)` for supported
@@ -667,11 +690,26 @@ options where supported, and changing formats can change record identities or
 replace richer evidence with less detail. See the
 [import guide](docs/cli.md#import-vendor-findings-locally) for format selection.
 
+For SonarQube Cloud, `codex-security import sonar` reads open security issues
+through the signed-in Sonar CLI. You can pass exact issue keys from the
+SonarQube plugin for Codex and save a local capture for later Cloud publication.
+See the [Sonar import commands](docs/cli.md#import-sonarqube-cloud-issues).
+
 For Amazon Inspector Code Security, use `--provider inspector` with a complete
 ListFindings JSON export and `--source-repository-url`. When the export identifies
 the repository by an ARN and name, pass `--inspector-project-arn ARN` with the ARN
 you verified for that Git URL in the SCM integration. See the
 [Inspector guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/inspector.md).
+
+For Black Duck SCA, use `--provider blackduck` with a BOM-6 vulnerable-components
+export for one project version. Map that version to its source repository with
+`--source-repository-url`. See the
+[Black Duck guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/blackduck.md).
+
+For Veracode Static Analysis policy findings, use `--provider veracode` with
+every Findings API page from one application. Set `--source-repository-url`
+to the source repository mapped to that application. See the
+[Veracode guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/veracode.md).
 
 For OpenGrep, use `--provider opengrep` with native JSON or gzip and an explicit
 `--source-repository-url`. Local and Cloud imports retain unassessed OpenGrep

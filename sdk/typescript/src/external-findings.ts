@@ -14,6 +14,12 @@ export interface ExternalSourceRepository {
   platform?: "github";
 }
 
+export function snapshotSourceRepositories(
+  references: readonly ExternalSourceRepository[] = [],
+): ExternalSourceRepository[] {
+  return references.map(({ url, platform }) => ({ url, platform }));
+}
+
 export interface ExternalFindings {
   read: number;
   /** Reader-retained run metadata, including diagnostics for empty reports. */
