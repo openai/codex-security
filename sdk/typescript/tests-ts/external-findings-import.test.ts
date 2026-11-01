@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { gzipSync } from "node:zlib";
 import { access, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -381,15 +381,11 @@ for (const kind of [
       const parsed = await readVendorFindings(file, "local");
       expect(parsed.findings).toHaveLength(1);
       expect(parsed.excluded).toHaveLength(1);
-      execFileSync(
-        "git",
-        [
-          "remote",
-          "set-url",
-          "origin",
-          "git@git.example.test:example/other.git",
-        ],
-        { cwd: fixture.repository },
+      fixture.git(
+        "remote",
+        "set-url",
+        "origin",
+        "git@git.example.test:example/other.git",
       );
       await expect(
         prepareLocalExternalImport(file, options, dependencies),
@@ -397,15 +393,11 @@ for (const kind of [
       await expect(
         access(join(fixture.stateDirectory, "workbench.sqlite3")),
       ).rejects.toThrow();
-      execFileSync(
-        "git",
-        [
-          "remote",
-          "set-url",
-          "origin",
-          "git@git.example.test:example/project.git",
-        ],
-        { cwd: fixture.repository },
+      fixture.git(
+        "remote",
+        "set-url",
+        "origin",
+        "git@git.example.test:example/project.git",
       );
       const prepared = await prepareLocalExternalImport(
         file,
@@ -436,26 +428,17 @@ for (const kind of [
         "git@git.example.test:example/other.git",
         "git@other.example.test:example/project.git",
       ]) {
-        execFileSync("git", [
-          "-C",
-          fixture.repository,
-          "remote",
-          "set-url",
-          "origin",
-          remote,
-        ]);
+        fixture.git("remote", "set-url", "origin", remote);
         await expect(
           prepareLocalExternalImport(file, options, dependencies),
         ).rejects.toThrow("does not match");
       }
-      execFileSync("git", [
-        "-C",
-        fixture.repository,
+      fixture.git(
         "remote",
         "set-url",
         "origin",
         "git@git.example.test:example/project.git",
-      ]);
+      );
       expect(await listLocalExternalFindings(options, dependencies)).toEqual(
         created.findings,
       );

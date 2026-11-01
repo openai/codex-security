@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
 import {
   listLocalExternalFindings,
   prepareNormalizedLocalImport,
@@ -24,19 +23,8 @@ const page = (id: string, branch = ref, repo = url) =>
 
 test("reimporting two selected IDs from a non-default branch leaves both SQLite records unchanged", async () => {
   await using fixture = await localFindingsFixture({ remote: url });
-  execFileSync(
-    "git",
-    ["-C", fixture.repository, "switch", "--quiet", "--orphan", "topic"],
-    {
-      env: fixture.environment,
-    },
-  );
-  expect(
-    execFileSync("git", ["-C", fixture.repository, "symbolic-ref", "HEAD"], {
-      encoding: "utf8",
-      env: fixture.environment,
-    }).trim(),
-  ).toBe(ref);
+  fixture.git("switch", "--quiet", "--orphan", "topic");
+  expect(fixture.git("symbolic-ref", "HEAD").trim()).toBe(ref);
   const options = {
     provider: "semgrep" as const,
     sourceKey: "demo/topic",
