@@ -48,10 +48,14 @@ defines the fields the reader can populate.
 | `source_data`                  | The vendor fields retained for this record. Keep the original export when you need scan-wide diagnostics or inventory.                                    |
 
 Use finite JSON numbers in evidence and report metadata. Supply integers outside
-JavaScript’s safe range as strings to preserve their value. For consistent SDK
-imports and JSON exports, put primitive numbers in plain data properties.
-The SDK captures the value held by a `Number` object. A vendor class’s custom
-`toJSON()` can also expose fields outside that snapshot.
+JavaScript’s safe range as strings to preserve their value. In SDK inputs, use
+primitive numbers in plain data fields for predictable JSON exports.
+
+When a vendor record contains a `Number` object with custom numeric or JSON
+conversion, the SDK captures the record before import. The native snapshot
+preserves the underlying number, evaluates getters, and copies a `Buffer` as a
+`Uint8Array`. If the record cannot be cloned, the SDK uses a JSON copy when one
+is available.
 
 ## Operate the two destinations
 

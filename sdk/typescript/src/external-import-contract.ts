@@ -347,88 +347,18 @@ export function validateExternalEvidenceJson(
 }
 
 function hasCustomNumberHooks(value: Number): boolean {
-  return (
-    Object.getPrototypeOf(value) !== Number.prototype ||
-    Object.hasOwn(value, "valueOf") ||
-    "toJSON" in value ||
-    Symbol.toPrimitive in value
-  );
-}
-
-/** Keep plain vendor fields and native SDK snapshots on the same numeric value. */
-function retainNumberValues<T>(input: T, parents: WeakSet<object>): T {
-  if (typeof input === "number") requireJsonNumber(input, "Evidence");
-  if (input === null || typeof input !== "object") return input;
-  if (isNumberObject(input)) {
-    requireJsonNumber(Number.prototype.valueOf.call(input), "Evidence");
-    if (!hasCustomNumberHooks(input)) return input;
-    const copy = structuredClone(input);
-    // Sibling getters can read vendor metadata attached to the number.
-    for (const key of Reflect.ownKeys(input)) {
-      if (
-        key !== "toJSON" &&
-        key !== "valueOf" &&
-        key !== "toString" &&
-        key !== Symbol.toPrimitive
-      )
-        Object.defineProperty(
-          copy,
-          key,
-          Object.getOwnPropertyDescriptor(input, key)!,
-        );
-    }
-    return copy;
-  }
-  const prototype: object | null = Object.getPrototypeOf(input);
-  const array = Array.isArray(input);
-  if (
-    !array &&
-    prototype &&
-    Object.getPrototypeOf(prototype) !== null &&
-    ("toJSON" in input ||
-      Symbol.toStringTag in input ||
-      Object.prototype.toString.call(input) !== "[object Object]")
-  )
-    return input;
-
-  let changes: Map<PropertyKey, unknown> | undefined;
-  const hasBoxedChild = parents.has(input);
-  let numberGetter = false;
-  function visit(key: string | number) {
-    const field = Object.getOwnPropertyDescriptor(input, key);
-    if (field?.get && hasBoxedChild) numberGetter = true;
-    if (!field || !("value" in field)) return;
-    const retained = retainNumberValues(field.value, parents);
-    if (retained !== field.value)
-      (changes ??= new Map()).set(String(key), retained);
-  }
-  if (array) {
-    for (let index = 0; index < input.length; index++) visit(index);
-  } else {
-    for (const key of Object.keys(input)) visit(key);
-  }
-  if (!changes && !numberGetter) return input;
-  const copy = array
-    ? Object.setPrototypeOf([], prototype)
-    : Object.create(prototype);
-  for (const key of Reflect.ownKeys(input)) {
-    const field = Object.getOwnPropertyDescriptor(input, key)!;
-    if (changes?.has(key)) field.value = changes.get(key);
-    if (field.get && numberGetter) {
-      const get = field.get;
-      field.get = function (this: unknown) {
-        return retainNumberValues(Reflect.apply(get, this, []), parents);
-      };
-    }
-    Object.defineProperty(copy, key, field);
-  }
-  return copy;
+  if ("toJSON" in value || Symbol.toPrimitive in value) return true;
+  let owner: object | null = value;
+  while (owner && !Object.hasOwn(owner, "valueOf"))
+    owner = Object.getPrototypeOf(owner);
+  return owner === value || !isNumberObject(owner);
 }
 
 function checkedEvidenceJson<T>(
   input: T,
   target: ExternalImportTarget,
   additionalCloudBytes: number,
+  captureNumbers = true,
 ): { retained: T; bytes: number } {
   // Preserve the native fast path and original circular-JSON diagnostics.
   let failedPreflight: { reason: unknown } | undefined;
@@ -440,9 +370,9 @@ function checkedEvidenceJson<T>(
     }
   }
   const ancestors: object[] = [];
-  let parents: WeakSet<object> | undefined;
+  let customNumber = false;
   const pending: [unknown, number][] = [[input, 0]];
-  while (pending.length > 0) {
+  while (pending.length) {
     const [value, depth] = pending.pop()!;
     if (target === "cloud" && depth > 20)
       throw new Error("Evidence exceeds the Cloud JSON depth limit of 20.");
@@ -450,29 +380,52 @@ function checkedEvidenceJson<T>(
       if (failedPreflight) {
         ancestors.length = depth;
         if (ancestors.includes(value)) throw failedPreflight.reason;
+        ancestors[depth] = value;
       }
       if (isNumberObject(value)) {
         requireJsonNumber(Number.prototype.valueOf.call(value), "Evidence");
-        if (hasCustomNumberHooks(value)) {
-          parents ??= new WeakSet();
-          if (depth) parents.add(ancestors[depth - 1]!);
-        }
+        if (captureNumbers) customNumber ||= hasCustomNumberHooks(value);
       }
-      ancestors[depth] = value;
       for (const child of Object.values(value))
         pending.push([child, depth + 1]);
     } else if (typeof value === "number") {
       requireJsonNumber(value, "Evidence");
     }
   }
-  const retained = parents ? retainNumberValues(input, parents) : input;
-  if (target === "local") {
-    if (failedPreflight) {
-      if (retained === input) throw failedPreflight.reason;
-      JSON.stringify(retained);
+  if (customNumber) {
+    if (target === "cloud") {
+      // Finish the provider read before capture, as a pending SDK request may
+      // already contain the next value returned by a vendor getter.
+      try {
+        JSON.stringify(input);
+      } catch {
+        /* the captured value is validated below */
+      }
     }
-    return { retained, bytes: 0 };
+    let snapshot: T;
+    try {
+      snapshot = structuredClone(input);
+    } catch (error) {
+      if (!(error instanceof DOMException) || error.name !== "DataCloneError")
+        throw error;
+      // An own function can supply JSON even when native SDK capture is unavailable.
+      snapshot = JSON.parse(
+        JSON.stringify(input, function (key, value: unknown) {
+          const raw: unknown = Object.getOwnPropertyDescriptor(
+            this,
+            key,
+          )?.value;
+          return isNumberObject(raw)
+            ? Number.prototype.valueOf.call(raw)
+            : value;
+        }),
+      ) as T;
+    }
+    return checkedEvidenceJson(snapshot, target, additionalCloudBytes, false);
   }
+  if (failedPreflight) throw failedPreflight.reason;
+  const retained = input;
+  if (target === "local") return { retained, bytes: 0 };
   let numericByteAdjustment = 0;
   const json = JSON.stringify(retained, (_key, value: unknown) => {
     // JSON.stringify invokes toJSON before unboxing a Number with ToNumber.

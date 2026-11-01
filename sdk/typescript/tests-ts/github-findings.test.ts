@@ -43,56 +43,73 @@ test.each(["local", "cloud"] as const)(
       unit: "ms",
       toJSON: () => 2 ** 53,
     });
-    const sibling = {
-      score,
+    class Score extends Number {
       get unit() {
-        return this.score.unit;
+        return "ms";
+      }
+    }
+    class Metrics {
+      #unit = "ms";
+      score = score;
+      get unit() {
+        return this.#unit;
+      }
+    }
+    const input = {
+      score,
+      elapsed: new Score(7),
+      metrics: new Metrics(),
+      get unit() {
+        return this.elapsed.unit;
       },
-      suffix: "short",
-      get label() {
-        return this.suffix;
+      get privateUnit() {
+        return this.metrics.unit;
       },
-      get metrics() {
-        return { score };
+      nested: {
+        get scores() {
+          return [score];
+        },
       },
       bytes: Buffer.from([1, 2]),
-      detail: { toJSON: () => "retained" },
     };
-    const getter = captured({
-      get score() {
-        return score;
-      },
+    // Capture from the original receivers, then return ordinary stored data.
+    const retained = captured(input);
+    expect(JSON.parse(JSON.stringify(retained))).toEqual({
+      score: 7,
+      elapsed: 7,
+      metrics: { score: 7 },
+      unit: "ms",
+      privateUnit: "ms",
+      nested: { scores: [7] },
+      bytes: { "0": 1, "1": 2 },
     });
-    expect(JSON.stringify(getter)).toBe('{"score":7}');
+    expect(JSON.stringify(input.score)).toBe(String(2 ** 53));
+    // An own serializer is not structured-cloneable but can provide JSON.
+    expect(
+      captured({
+        score,
+        bytes: input.bytes,
+        detail: { toJSON: () => "retained" },
+      }),
+    ).toEqual({
+      score: 7,
+      bytes: { type: "Buffer", data: [1, 2] },
+      detail: "retained",
+    });
     const throwing = Object.assign(new Number(7), {
       toJSON() {
         throw new Error("vendor numeric hook");
       },
     });
     expect(JSON.stringify(captured(throwing))).toBe("7");
-    const retained = captured(sibling) as typeof sibling;
-    retained.suffix = "long";
-    expect(sibling.suffix).toBe("short");
-    expect(retained.bytes).toBe(sibling.bytes);
-    expect(retained.detail).toBe(sibling.detail);
-    expect(JSON.stringify(sibling.score)).toBe(String(2 ** 53));
-    expect(JSON.parse(JSON.stringify(retained))).toEqual({
-      score: 7,
-      unit: "ms",
-      suffix: "long",
-      label: "long",
-      metrics: { score: 7 },
-      bytes: { type: "Buffer", data: [1, 2] },
-      detail: "retained",
-    });
-    class Metrics {
+    class SerializedMetrics {
       #unit = "ms";
       score = runInNewContext("new Number(7)");
       toJSON() {
         return { score: this.score, unit: this.#unit };
       }
     }
-    const metrics = new Metrics();
+    const metrics = new SerializedMetrics();
     expect(captured(metrics)).toBe(metrics);
     expect(JSON.parse(JSON.stringify(metrics))).toEqual({
       score: 7,
