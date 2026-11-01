@@ -1,0 +1,94 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { plain, resultSummary, resultTitle } from '../src/reporting.js';
+import { parseInputs } from '../src/inputs.js';
+import type { ScanResults } from '../src/results.js';
+
+test('credential-shaped text and encodings remain in diagnostics',()=>{
+  assert.equal(plain('CANA\x01RY_VALUE'),'CANARY_VALUE');
+  for(const text of ['CANARY_VALUE',Buffer.from('CANARY_VALUE').toString('base64'),encodeURIComponent('canary/key'), 'Synthetic diagnostic. '.repeat(400)]) {
+    assert.equal(plain(text),text);
+  }
+});
+test('truncation drops only the first half of a split surrogate pair', () => {
+  const prefix = 'a'.repeat(199);
+  assert.equal(plain(prefix + '😀', 200), prefix);
+  assert.equal(plain(prefix + '😀', 201), prefix + '😀');
+
+  const unpaired = prefix + '\uD83D';
+  assert.equal(plain(unpaired), unpaired);
+  assert.equal(plain(unpaired, 200), unpaired);
+  assert.equal(plain(unpaired + 'x', 200), unpaired);
+});
+test('finding titles and messages cannot become Markdown links, images or raw HTML',()=>{
+  const result = {scanStatus:'completed',policyStatus:'passed',reportStatus:'ready',counts:{critical:0,high:1,medium:0,low:0,informational:0},errors:[],
+    findings:[{severity:'high',title:'![click](https://example.invalid) <img src=x> @someone',summary:'</pre><script>bad</script>',path:'src/app.ts',startLine:1}]} as unknown as ScanResults;
+  const summary = resultSummary(result,parseInputs(()=>'', '/checkout'),{repository:'/checkout',scannedSha:'a'.repeat(40),analysisRef:'refs/heads/main',publishable:true,emptyDiff:false});
+  assert.ok(summary.includes('<h3>HIGH: !&#91;click&#93;(https://example.invalid) &lt;img src=x&gt; &#64;someone</h3>'));
+  assert.ok(summary.includes('&lt;/pre&gt;&lt;script&gt;bad&lt;/script&gt;'));
+  assert.ok(!summary.includes('### HIGH:')); assert.ok(!summary.includes('<img'));
+});
+
+test('completed findings are subject to severity policy without a coverage qualification', () => {
+  const result = {scanStatus:'completed',policyStatus:'failed',reportStatus:'ready',counts:{critical:0,high:1,medium:0,low:0,informational:0},
+    errors:[],findings:[{severity:'high',title:'Extraction issue',summary:'Archive traversal reaches files outside the destination.',path:'src/extract.ts',startLine:12}]} as unknown as ScanResults;
+  const inputs = parseInputs((name) => name === 'fail-on-severity' ? 'high' : '', '/checkout');
+  const summary = resultSummary(result, inputs, {repository:'/checkout',scannedSha:'a'.repeat(40),analysisRef:'refs/heads/main',publishable:true,emptyDiff:false});
+  assert.match(resultTitle(result, inputs), /Findings meet the configured failure threshold/);
+  assert.match(summary, /\*\*Scan:\*\* completed · \*\*Findings policy:\*\* failed/);
+  assert.match(summary, /\*\*Failure threshold:\*\* high and above/);
+  assert.match(summary, /HIGH: Extraction issue/);
+  assert.doesNotMatch(summary, /provisional|partial|unknown|not evaluated/i);
+});
+
+test('required reporting failures remain visible after a completed scan', () => {
+  const inputs = parseInputs(() => '', '/checkout');
+  const result = {scanStatus:'completed',policyStatus:'passed',reportStatus:'failed'} as ScanResults;
+  assert.match(resultTitle(result, inputs), /Scan completed, but required reporting failed/i);
+  assert.match(resultTitle({...result, scanStatus:'failed'}, inputs), /Scan could not complete/);
+});
+
+test('multiline titles remain literal across blank lines without losing diagnostic text', () => {
+  const result = {scanStatus:'completed',policyStatus:'passed',reportStatus:'ready',counts:{critical:0,high:1,medium:0,low:0,informational:0},errors:[],
+    findings:[{severity:'high',title:'Title\n\n![preview](https://example.invalid/image)\r\n\r\n[link](https://example.invalid)',summary:'First line\n\nNext line',path:'src/app.ts',startLine:1}]} as unknown as ScanResults;
+  const summary = resultSummary(result,parseInputs(()=>'', '/checkout'),{repository:'/checkout',scannedSha:'a'.repeat(40),analysisRef:'refs/heads/main',publishable:true,emptyDiff:false});
+  assert.ok(summary.includes('<h3>HIGH: Title&#10;&#10;!&#91;preview&#93;(https://example.invalid/image)&#13;&#10;&#13;&#10;&#91;link&#93;(https://example.invalid)</h3>'));
+  assert.ok(summary.includes('<pre>First line&#10;&#10;Next line</pre>'));
+  assert.doesNotMatch(summary, /<h3>[^]*?\n[^]*?<\/h3>/);
+});
+
+
+test('report fields preserve Markdown punctuation as literal content', () => {
+  const text = '_name_ *bold* [link](https://example.invalid) ![image](https://example.invalid/image) `code` ~~text~~';
+  const escaped = '&#95;name&#95; &#42;bold&#42; &#91;link&#93;(https://example.invalid) !&#91;image&#93;(https://example.invalid/image) &#96;code&#96; &#126;&#126;text&#126;&#126;';
+  const result = {scanStatus:'completed',policyStatus:'passed',reportStatus:'ready',counts:{critical:0,high:1,medium:0,low:0,informational:0},
+    errors:[text],findings:[{severity:'high',title:text,summary:text,path:'pkg/__init__.py',startLine:1},
+      {severity:'high',title:text,summary:text,path:`pkg/${text}`,startLine:2}]} as ScanResults;
+  const inputs = parseInputs(name => name === 'paths' ? 'pkg/__init__.py' : name === 'model' ? text : '', '/checkout');
+  const summary = resultSummary(result,inputs,{repository:'/checkout',scannedSha:'a'.repeat(40),analysisRef:'refs/heads/main',publishable:true,emptyDiff:false});
+  assert.ok(summary.includes(`<h3>HIGH: ${escaped}</h3>`));
+  assert.ok(summary.includes(`<pre>${escaped}</pre>`));
+  assert.ok(summary.includes(`<code>${escaped}</code>`));
+  assert.ok(summary.includes(`<code>pkg/${escaped}:2</code>`));
+  assert.ok(summary.includes('<code>pkg/&#95;&#95;init&#95;&#95;.py</code>'));
+  assert.ok(summary.includes('<code>pkg/&#95;&#95;init&#95;&#95;.py:1</code>'));
+});
+
+test('summary shows configured provider, measured tokens and available cost estimates', () => {
+  const inputs = parseInputs(name => name === 'provider' ? 'amazon-bedrock' : '', '/checkout');
+  const target = {repository:'/checkout',scannedSha:'a'.repeat(40),analysisRef:'refs/heads/main',publishable:true,emptyDiff:false};
+  const result = {scanStatus:'completed',policyStatus:'passed',reportStatus:'ready',errors:[],findings:[]} as unknown as ScanResults;
+  const usage = {input_tokens:1200,cached_input_tokens:200,output_tokens:50};
+  for (const [metrics, expected] of [
+    [{usage, estimatedCost:0.125}, '1,200 input (200 cached) · 50 output · **Estimated cost:** $0.1250'],
+    [{usage, estimatedCost:0.125, estimatedCostRange:{min:0.125,max:0.25}}, '1,200 input (200 cached) · 50 output · **Estimated cost:** $0.1250–$0.2500'],
+    [{usage, estimatedCost:0.125, estimatedCostRange:{min:0.125,max:null}}, '1,200 input (200 cached) · 50 output · **Estimated cost:** $0.1250 (upper estimate unavailable)'],
+    [{usage}, '1,200 input (200 cached) · 50 output · **Estimated cost:** unavailable'],
+    [{usage:{input_tokens:0,cached_input_tokens:0,output_tokens:0},estimatedCost:0,estimatedCostRange:{min:0,max:0}}, '0 input (0 cached) · 0 output · **Estimated cost:** $0.0000'],
+    [{}, 'unavailable · **Estimated cost:** unavailable'],
+  ] as const) {
+    const summary = resultSummary({...result, ...metrics}, inputs, target);
+    assert.ok(summary.includes('**Configured provider:** <code>amazon-bedrock</code>'));
+    assert.ok(summary.includes(`**Tokens:** ${expected}`));
+  }
+});

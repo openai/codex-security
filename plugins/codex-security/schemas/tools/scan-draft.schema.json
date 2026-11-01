@@ -1,0 +1,766 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex-security://schemas/tools/scan-draft.schema.json",
+  "title": "Codex Security semantic scan draft",
+  "$ref": "#/$defs/scanDraftInput",
+  "$defs": {
+    "text": {
+      "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+    },
+    "textList": {
+      "type": "array",
+      "items": {
+        "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+      }
+    },
+    "scanId": {
+      "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/scanId"
+    },
+    "handoffClaimToken": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|recovery_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+    },
+    "repositoryPath": {
+      "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/repositoryPath"
+    },
+    "location": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/repositoryPath"
+        },
+        "startLine": { "type": "integer", "minimum": 1 },
+        "endLine": { "type": "integer", "minimum": 1 },
+        "role": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        }
+      },
+      "required": ["path", "startLine"],
+      "additionalProperties": true
+    },
+    "identity": {
+      "type": "object",
+      "properties": {
+        "anchor": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._/-]*$" },
+        "instance": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._/-]*$" }
+      },
+      "required": ["anchor"],
+      "additionalProperties": true
+    },
+    "severity": {
+      "type": "object",
+      "properties": {
+        "level": {
+          "enum": ["critical", "high", "medium", "low", "informational"]
+        },
+        "score": { "type": "number", "minimum": 0, "maximum": 10 },
+        "scoringSystem": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "vector": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "rationale": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "changeConditions": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        }
+      },
+      "required": ["level"],
+      "additionalProperties": true
+    },
+    "confidence": {
+      "type": "object",
+      "properties": {
+        "level": { "enum": ["high", "medium", "low"] },
+        "rationale": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        }
+      },
+      "required": ["level", "rationale"],
+      "additionalProperties": true
+    },
+    "taxonomy": {
+      "type": "object",
+      "properties": {
+        "category": {
+          "description": "The actual primary broken security control, not a CWE identifier.",
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "cwe": {
+          "description": "Copy the reviewed candidate's exact cwe_ids array. Use an empty array when no CWE is established; do not invent one.",
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+        }
+      },
+      "required": ["category", "cwe"],
+      "additionalProperties": true
+    },
+    "codeEvidence": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._/-]*$" },
+        "label": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "path": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/repositoryPath"
+        },
+        "startLine": { "type": "integer", "minimum": 1 },
+        "endLine": { "type": "integer", "minimum": 1 },
+        "language": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "role": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "code": {
+          "description": "The genuine, nonempty source snippet at this evidence location.",
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "explanation": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        }
+      },
+      "required": ["id", "label", "path", "startLine", "code", "explanation"],
+      "additionalProperties": true
+    },
+    "findingAssessment": {
+      "anyOf": [
+        {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "level": {
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            },
+            "rationale": {
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            },
+            "why": {
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "textOrSummary": {
+      "anyOf": [
+        {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            },
+            "source": {
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            },
+            "sink": {
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            },
+            "outcome": {
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            },
+            "transformations": {
+              "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+            },
+            "evidenceRefs": {
+              "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+            },
+            "evidence_refs": false
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "findingReachability": {
+      "anyOf": [
+        {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            },
+            "attacker": {
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            },
+            "entrypoint": {
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            },
+            "source": {
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            },
+            "sink": {
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            },
+            "outcome": {
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            },
+            "preconditions": {
+              "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+            },
+            "evidenceRefs": {
+              "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+            },
+            "evidence_refs": false
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "findingValidation": {
+      "type": "object",
+      "properties": {
+        "assertions": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+        },
+        "counterEvidence": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+        },
+        "evidence": {
+          "anyOf": [
+            {
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            },
+            {
+              "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+            }
+          ]
+        },
+        "evidenceRefs": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+        },
+        "evidence_refs": false,
+        "limitations": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+        },
+        "method": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            },
+            { "type": "null" }
+          ]
+        },
+        "summary": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "disposition": {
+          "anyOf": [
+            {
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            },
+            { "type": "null" }
+          ]
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            },
+            { "type": "null" }
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "findingAttackPath": {
+      "type": "object",
+      "properties": {
+        "assumptions": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+        },
+        "blindspots": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+        },
+        "controls": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+        },
+        "dataFlow": false,
+        "data_flow": false,
+        "dataflow": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textOrSummary"
+        },
+        "evidenceRefs": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+        },
+        "evidence_refs": false,
+        "impact": {
+          "anyOf": [
+            {
+              "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/findingAssessment"
+            },
+            { "type": "null" }
+          ]
+        },
+        "likelihood": {
+          "anyOf": [
+            {
+              "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/findingAssessment"
+            },
+            { "type": "null" }
+          ]
+        },
+        "limitations": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+        },
+        "preconditions": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+        },
+        "reachability": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/findingReachability"
+        },
+        "steps": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+        },
+        "summary": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        }
+      },
+      "additionalProperties": true
+    },
+    "finding": {
+      "type": "object",
+      "properties": {
+        "findingId": false,
+        "occurrenceId": false,
+        "fingerprints": false,
+        "ruleId": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/-]*$",
+          "description": "A stable lowercase vulnerability-family slug, such as prototype-pollution.json-patch; a CWE is taxonomy, not a rule ID."
+        },
+        "identity": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/identity"
+        },
+        "title": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "summary": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "severity": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/severity"
+        },
+        "confidence": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/confidence"
+        },
+        "taxonomy": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/taxonomy"
+        },
+        "locations": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/location"
+          }
+        },
+        "writeup": {
+          "type": "object",
+          "properties": {
+            "reportPath": {
+              "type": "string",
+              "pattern": "^findings/([a-z0-9][a-z0-9._-]*)/\\1\\.md$"
+            }
+          },
+          "required": ["reportPath"],
+          "additionalProperties": true
+        },
+        "codeEvidence": {
+          "type": "array",
+          "items": {
+            "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/codeEvidence"
+          }
+        },
+        "code_evidence": false,
+        "rootCause": {
+          "anyOf": [
+            {
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "summary": {
+                  "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+                },
+                "code": false,
+                "language": false,
+                "evidenceRefs": {
+                  "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+                },
+                "evidence_refs": false
+              },
+              "required": ["summary"],
+              "additionalProperties": true
+            }
+          ]
+        },
+        "root_cause": false,
+        "remediation": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "validation": {
+          "anyOf": [
+            {
+              "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/findingValidation"
+            },
+            { "type": "null" }
+          ]
+        },
+        "attackPath": {
+          "anyOf": [
+            {
+              "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/findingAttackPath"
+            },
+            { "type": "null" }
+          ]
+        },
+        "remediationTests": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+        },
+        "preventiveControls": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+        },
+        "provenance": {
+          "type": "object",
+          "properties": {
+            "sourceFindingIds": {
+              "type": "array",
+              "items": {
+                "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+              },
+              "uniqueItems": true,
+              "description": "Host-provided source finding references represented by this Deep reduction. Preserve every assigned reference exactly once."
+            },
+            "sourceFindings": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+                  },
+                  "finding": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": true
+                  }
+                },
+                "required": ["id", "finding"],
+                "additionalProperties": false
+              },
+              "description": "Original source payloads retained by the host for lossless semantic merges."
+            },
+            "source": {
+              "description": "The actual finding producer. Use local_plugin only for a finding discovered by this plugin.",
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            }
+          },
+          "required": ["source"],
+          "additionalProperties": true
+        },
+        "extensions": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "ruleId",
+        "title",
+        "summary",
+        "severity",
+        "confidence",
+        "taxonomy",
+        "locations",
+        "remediation",
+        "provenance"
+      ],
+      "additionalProperties": true
+    },
+    "scope": {
+      "type": "object",
+      "properties": {
+        "includePaths": false,
+        "excludePaths": false,
+        "summary": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "artifactsReviewed": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+        },
+        "runtimeStatus": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "validationMode": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "context": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "limitations": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+        }
+      },
+      "additionalProperties": true
+    },
+    "threatModel": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            },
+            "assets": {
+              "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+            },
+            "trustBoundaries": {
+              "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+            },
+            "attackerCapabilities": {
+              "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+            },
+            "securityObjectives": {
+              "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+            },
+            "assumptions": {
+              "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+            }
+          },
+          "required": ["summary"],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "format": { "const": "markdown" },
+            "content": {
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            },
+            "scope": {
+              "type": "object",
+              "properties": {
+                "includePaths": {
+                  "type": "array",
+                  "items": { "type": "string", "minLength": 1 }
+                },
+                "excludePaths": {
+                  "type": "array",
+                  "items": { "type": "string", "minLength": 1 }
+                },
+                "summary": { "type": "string", "minLength": 1 }
+              },
+              "required": ["includePaths"],
+              "additionalProperties": true,
+              "description": "The modeled source scope, which may differ from the scan scope. Omit when unknown."
+            },
+            "origin": {
+              "enum": ["generated", "provided", "reconciled", "recovered"]
+            }
+          },
+          "required": ["format", "content"],
+          "additionalProperties": true
+        }
+      ],
+      "description": "Retained threat-model content. Existing structured models remain supported; Markdown documents preserve their complete original body."
+    },
+    "surface": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._/-]*$" },
+        "label": {
+          "description": "The meaningful name of the reviewed security surface.",
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "disposition": {
+          "enum": [
+            "reported",
+            "no_issue_found",
+            "rejected",
+            "not_applicable",
+            "needs_follow_up"
+          ],
+          "description": "The evidence-supported review result for this surface."
+        },
+        "receiptRefs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)artifacts/.+$"
+          }
+        },
+        "riskArea": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "notes": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        }
+      },
+      "required": ["label", "disposition"],
+      "additionalProperties": true
+    },
+    "reviewState": {
+      "type": "object",
+      "properties": {
+        "documentType": false,
+        "schemaVersion": false,
+        "scanId": false,
+        "mode": false,
+        "includePaths": false,
+        "excludePaths": false,
+        "receiptRefs": false,
+        "inventoryStrategy": false,
+        "surfaces": {
+          "type": "array",
+          "items": {
+            "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/surface"
+          }
+        },
+        "explicitExclusions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "pattern": {
+                "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+              },
+              "reason": {
+                "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+              }
+            },
+            "required": ["pattern", "reason"],
+            "additionalProperties": true
+          }
+        },
+        "deferred": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+              },
+              "candidateId": {
+                "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/candidateId"
+              },
+              "reason": {
+                "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+              },
+              "paths": {
+                "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+              },
+              "surfaceIds": {
+                "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
+              }
+            },
+            "required": ["reason"],
+            "additionalProperties": true
+          },
+          "description": "Each supplied id identifies one task and must be unique within this draft. Reuse saved IDs in later updates."
+        },
+        "resolvedDeferred": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+              },
+              "reason": {
+                "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+              }
+            },
+            "required": ["id", "reason"],
+            "additionalProperties": false
+          },
+          "description": "On final Standard or diff drafts, close generic tasks by saved ID and completion reason. Reuse saved surface IDs for updates. Candidate tasks need findings or dispositions; redundant closure entries for those outcomes are ignored."
+        },
+        "openQuestions": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "question": {
+                    "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+                  },
+                  "followUpPrompt": {
+                    "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+                  }
+                },
+                "required": ["question"],
+                "additionalProperties": true
+              }
+            ]
+          }
+        }
+      },
+      "required": ["surfaces", "explicitExclusions", "deferred"],
+      "additionalProperties": true
+    },
+    "scanDraftInput": {
+      "type": "object",
+      "properties": {
+        "complete": {
+          "type": "boolean",
+          "description": "Set false to save progress without declaring this worker or parent audit finished. Omit or set true only for the terminal result. Put provisional candidates in reviewState.deferred, not findings."
+        },
+        "scanId": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/scanId"
+        },
+        "handoffClaimToken": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/handoffClaimToken"
+        },
+        "scope": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/scope"
+        },
+        "threatModel": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/threatModel"
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/finding"
+          }
+        },
+        "reviewState": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/reviewState"
+        }
+      },
+      "required": ["scanId", "findings", "reviewState"],
+      "additionalProperties": false
+    },
+    "completedScanInput": {
+      "type": "object",
+      "properties": {
+        "scanId": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/scanId"
+        },
+        "handoffClaimToken": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/handoffClaimToken"
+        }
+      },
+      "required": ["scanId"],
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,19 +1,52 @@
 import { existsSync } from "node:fs";
+import { chmod, cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const sourcePlugin = new URL(
-  "../../../plugins/codex-security/",
-  import.meta.url,
-);
 const bundledPlugin = new URL("../_bundled_plugin/", import.meta.url);
-const hasSourcePlugin = existsSync(
-  new URL(".codex-plugin/plugin.json", sourcePlugin),
+const hasMonorepoSdk = existsSync(
+  new URL("../../../project/codex-security-sdk/src/", import.meta.url),
 );
 
-export const PLUGIN_ROOT = fileURLToPath(
-  hasSourcePlugin ? sourcePlugin : bundledPlugin,
-);
+export const PLUGIN_ROOT = fileURLToPath(bundledPlugin);
 
-export const INTEGRATION_TARGET = hasSourcePlugin
+// Credential tests run worker configuration and plugin refresh up to the Codex
+// client boundary, so copy the MCP descriptor and both platform launchers.
+export async function copyCredentialTestPlugin(root: string): Promise<string> {
+  const plugin = join(root, "plugin");
+  const manifest = ".codex-plugin/plugin.json";
+  const { name, version, skills, mcpServers, codexSecurity } = JSON.parse(
+    await readFile(new URL(manifest, bundledPlugin), "utf8"),
+  );
+  await mkdir(join(plugin, ".codex-plugin"), { recursive: true });
+  await writeFile(
+    join(plugin, manifest),
+    JSON.stringify({ name, version, skills, mcpServers, codexSecurity }),
+  );
+  for (const file of [
+    ".mcp.json",
+    "scripts/launch_codex_security_mcp",
+    "scripts/launch_codex_security_mcp.cmd",
+    "skills/security-scan/SKILL.md",
+  ]) {
+    await cp(new URL(file, bundledPlugin), join(plugin, file));
+  }
+  return plugin;
+}
+
+export const INTEGRATION_TARGET = hasMonorepoSdk
   ? "project/codex-security-sdk/src"
   : "sdk/typescript/src";
+
+export const copyCompletedScanFixture = (destination: string) =>
+  cp(new URL("examples/legacy-completed-scan/", bundledPlugin), destination, {
+    recursive: true,
+  });
+
+export async function copyCompletedScan(root: string): Promise<string> {
+  const scanDir = join(root, "scan");
+  await copyCompletedScanFixture(scanDir);
+  await chmod(scanDir, 0o700);
+  await writeFile(join(scanDir, "report.md"), "# Scan report\n");
+  return scanDir;
+}

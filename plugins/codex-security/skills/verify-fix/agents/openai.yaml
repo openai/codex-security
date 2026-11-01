@@ -1,0 +1,4 @@
+interface:
+  display_name: "Verify Fix"
+  short_description: "Verify security fixes without changing code"
+  default_prompt: "Use $verify-fix to verify that a reported security vulnerability is fixed without modifying the repository."

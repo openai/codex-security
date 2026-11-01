@@ -1,16 +1,13 @@
-import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat, mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { stdin } from "node:process";
 import { Writable } from "node:stream";
-import { promisify } from "node:util";
-import { confirm, input, search } from "@inquirer/prompts";
 import { Octokit } from "@octokit/core";
 import Papa from "papaparse";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
+import { createAuthenticatedGitHub } from "./github.js";
+import { expandHome } from "./runtime.js";
 
-const execFile = promisify(execFileCallback);
 const GITHUB_REPOSITORIES_QUERY = `
   query($owner: String!, $cursor: String) {
     repositoryOwner(login: $owner) {
@@ -19,6 +16,7 @@ const GITHUB_REPOSITORIES_QUERY = `
         after: $cursor
         isArchived: false
         isFork: false
+        ownerAffiliations: [OWNER]
         orderBy: { field: PUSHED_AT, direction: DESC }
       ) {
         nodes {
@@ -54,12 +52,28 @@ interface GitHubRepositoriesResponse {
 export interface BulkScanPrompt {
   isInteractive(): boolean;
   write(value: string): void;
-  confirm(question: string, defaultValue?: boolean): Promise<boolean>;
-  input(question: string, defaultValue?: string): Promise<string>;
+  confirm(
+    question: string,
+    defaultValue?: boolean,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
+  input(
+    question: string,
+    defaultValue?: string,
+    signal?: AbortSignal,
+  ): Promise<string>;
   select<Value extends string>(
     question: string,
-    options: readonly { label: string; value: Value }[],
+    options: readonly { label: string; value: Value; short?: string }[],
+    presentation?: { header?: string },
+    signal?: AbortSignal,
   ): Promise<Value>;
+  checkbox<Value extends string>(
+    question: string,
+    options: readonly { label: string; value: Value; short?: string }[],
+    presentation?: { header?: string; required?: boolean },
+    signal?: AbortSignal,
+  ): Promise<Value[]>;
 }
 
 export interface BulkScanDiscoveryDependencies {
@@ -79,6 +93,7 @@ export interface BulkScanWizardResult {
 interface PromptOutput {
   write(value: string): unknown;
   readonly isTTY?: boolean;
+  readonly columns?: number;
 }
 
 export function createBulkScanDiscoveryDependencies(options: {
@@ -93,43 +108,19 @@ export function createBulkScanDiscoveryDependencies(options: {
     ...(process.env["GH_HOST"]?.trim()
       ? { githubHost: process.env["GH_HOST"].trim() }
       : {}),
-    createGitHub: async (host, signal) => {
-      const trusted = await resolveTrustedExecutable(
-        "gh",
-        process.env,
-        options.currentDirectory(),
-      );
-      if (trusted === null) {
-        throw new Error(
-          "GitHub CLI is required. Install gh and sign in first.",
-        );
-      }
-
-      let token: string;
-      try {
-        const { stdout } = await execFile(
-          trusted.executable,
-          ["auth", "token", "--hostname", host],
-          { env: trusted.environment, signal },
-        );
-        token = stdout.trim();
-      } catch {
-        signal?.throwIfAborted();
-        throw new Error(
-          "GitHub sign-in is required. Run 'gh auth login' first.",
-        );
-      }
-      return new Octokit({
-        auth: token,
-        ...(host === "github.com" ? {} : { baseUrl: `https://${host}/api/v3` }),
-      });
-    },
+    createGitHub: (host, signal) =>
+      createAuthenticatedGitHub(host, {
+        environment: process.env,
+        currentDirectory: options.currentDirectory(),
+        signal,
+      }),
   };
 }
 
 export async function runBulkScanWizard(
   dependencies: BulkScanDiscoveryDependencies,
   signal?: AbortSignal,
+  defaultOutputDir = "./security-scans",
 ): Promise<BulkScanWizardResult | null> {
   const { prompt } = dependencies;
   if (!prompt.isInteractive()) {
@@ -156,13 +147,20 @@ export async function runBulkScanWizard(
   }
 
   prompt.write(`\nFound ${discovered.length} repositories.\n`);
-  const repositories = await selectGitHubRepositories(discovered, prompt);
+  const repositories = await selectGitHubRepositories(
+    discovered,
+    prompt,
+    signal,
+  );
 
   const outputDir = resolve(
     dependencies.currentDirectory(),
-    await prompt.input(
-      "Where should scan results be saved?",
-      "./security-scans",
+    expandHome(
+      await prompt.input(
+        "Where should scan results be saved?",
+        defaultOutputDir,
+        signal,
+      ),
     ),
   );
   const inputPath = join(outputDir, "repositories.csv");
@@ -171,7 +169,7 @@ export async function runBulkScanWizard(
     `\nReady to scan ${repositories.length} repositories?\n` +
       `Results: ${outputDir}\nRepository list: ${inputPath}\n`,
   );
-  if (!(await prompt.confirm("Start scanning?"))) {
+  if (!(await prompt.confirm("Start scanning?", false, signal))) {
     prompt.write("\nScan canceled.\n");
     return null;
   }
@@ -197,16 +195,30 @@ async function selectGitHubOwner(
   prompt: BulkScanPrompt,
   signal?: AbortSignal,
 ): Promise<string> {
-  const [orgs, user] = await Promise.all([
+  const [firstPage, user] = await Promise.all([
     github.request("GET /user/orgs", { per_page: 100, request: { signal } }),
     github.request("GET /user", { request: { signal } }),
   ]);
+  const organizations = [...firstPage.data];
+  let response = firstPage;
+  let page = 1;
+  while (response.headers.link?.includes('rel="next"')) {
+    signal?.throwIfAborted();
+    response = await github.request("GET /user/orgs", {
+      per_page: 100,
+      page: ++page,
+      request: { signal },
+    });
+    organizations.push(...response.data);
+  }
   const personal = user.data.login;
-  const owners = [personal, ...orgs.data.map(({ login }) => login)].sort();
+  const owners = [personal, ...organizations.map(({ login }) => login)].sort();
   if (owners.length > 1) {
     return await prompt.select(
       "Which account or organization should we scan?",
       owners.map((owner) => ({ label: owner, value: owner })),
+      undefined,
+      signal,
     );
   }
   prompt.write(`\nFinding repositories in ${personal}.\n`);
@@ -216,6 +228,7 @@ async function selectGitHubOwner(
 async function selectGitHubRepositories(
   repositories: GitHubRepository[],
   prompt: BulkScanPrompt,
+  signal?: AbortSignal,
 ): Promise<GitHubRepository[]> {
   const selected = new Set<string>();
   while (selected.size < repositories.length) {
@@ -232,6 +245,8 @@ async function selectGitHubRepositories(
           .filter(({ fullName }) => !selected.has(fullName))
           .map(({ fullName }) => ({ label: fullName, value: fullName })),
       ],
+      undefined,
+      signal,
     );
     if (!choice) break;
     selected.add(choice);
@@ -282,8 +297,7 @@ async function discoverGitHubRepositories(
 function repositoryId(fullName: string): string {
   const id = fullName.replace("/", "--");
   if (id.length <= 128) return id;
-  const hash = createHash("sha256").update(fullName).digest("hex").slice(0, 16);
-  return `${id.slice(0, 111)}-${hash}`;
+  return `${id.slice(0, 111)}-${createHash("sha256").update(fullName).digest("hex").slice(0, 16)}`;
 }
 
 async function validateWizardOutput(outputDir: string): Promise<void> {
@@ -311,38 +325,82 @@ async function validateWizardOutput(outputDir: string): Promise<void> {
   }
 }
 
-function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
-  const context = () => ({
-    input: stdin,
-    output: new Writable({
+export function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
+  const context = (signal?: AbortSignal) => {
+    const stream = new Writable({
       write(chunk: Buffer, _encoding, callback) {
         output.write(chunk.toString("utf8"));
         callback();
       },
-    }),
-  });
+    });
+    Object.defineProperty(stream, "columns", {
+      configurable: true,
+      get: () => output.columns,
+    });
+    return { input: stdin, output: stream, signal };
+  };
 
   return {
     isInteractive: () => stdin.isTTY === true && output.isTTY === true,
     write: (value) => {
       output.write(value);
     },
-    confirm: (message, defaultValue = false) =>
-      confirm({ message, default: defaultValue }, context()),
-    input: (message, defaultValue) =>
-      input({ message, default: defaultValue }, context()),
-    select: (message, options) =>
-      search(
+    async confirm(message, defaultValue = false, signal) {
+      const { confirm } = await import("@inquirer/prompts");
+      return confirm({ message, default: defaultValue }, context(signal));
+    },
+    async input(message, defaultValue, signal) {
+      const { input } = await import("@inquirer/prompts");
+      return input({ message, default: defaultValue }, context(signal));
+    },
+    async checkbox(message, options, presentation, signal) {
+      const { checkbox, Separator } = await import("@inquirer/prompts");
+      return checkbox(
         {
           message,
+          choices: [
+            ...(presentation?.header === undefined
+              ? []
+              : [new Separator(presentation.header)]),
+            ...options.map(({ label, value, short }) => ({
+              name: label,
+              value,
+              ...(short === undefined ? {} : { short }),
+            })),
+          ],
+          required: presentation?.required,
+        },
+        context(signal),
+      );
+    },
+    async select(message, options, presentation, signal) {
+      const { search } = await import("@inquirer/prompts");
+      return search(
+        {
+          message,
+          ...(presentation?.header === undefined
+            ? {}
+            : {
+                theme: {
+                  style: {
+                    searchTerm: (term: string) =>
+                      `${term}\n  ${presentation.header}`,
+                  },
+                },
+              }),
           source: (term) =>
             options
               .filter(({ label }) =>
                 label.toLowerCase().includes(term?.toLowerCase() ?? ""),
               )
-              .map(({ label, value }) => ({ name: label, value })),
+              .map(({ label, value, short }) => ({
+                name: label,
+                value,
+                ...(short === undefined ? {} : { short }),
+              })),
         },
-        context(),
-      ),
+        context(signal),
+      );
+    },
   };
 }
