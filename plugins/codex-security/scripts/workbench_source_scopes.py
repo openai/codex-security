@@ -120,9 +120,7 @@ def tree_entries(repository: Path, tree: str) -> dict[str, tuple[tuple[str, str,
     return {name: tuple(matches) for name, matches in entries.items()}
 
 
-def exact_tree_path(
-    repository: Path, tree: str, value: str, *, require_unambiguous: bool = False
-) -> tuple[str, str, str] | None:
+def exact_tree_path(repository: Path, tree: str, value: str) -> tuple[str, str, str] | None:
     path = relative_path(value)
     if path is None:
         return None
@@ -132,12 +130,11 @@ def exact_tree_path(
             return None
         entries = tree_entries(repository, object_id) or {}
         aliases = entries.get(normalized_path_component(name), ())
-        if require_unambiguous and len(aliases) != 1:
+        if len(aliases) != 1:
             return None
-        entry = next((entry for entry in aliases if entry[0] == name), None)
-        if entry is None:
+        entry_name, kind, object_id = aliases[0]
+        if entry_name != name:
             return None
-        _, kind, object_id = entry
     return path.as_posix(), kind, object_id
 
 
@@ -329,7 +326,7 @@ def load_source_scopes(
     repository, tree = context
     scopes = []
     for path in paths:
-        entry = exact_tree_path(repository, tree, path, require_unambiguous=True)
+        entry = exact_tree_path(repository, tree, path)
         if entry is None or entry[1] not in {"file", "directory"}:
             continue
         kind = entry[1]
@@ -375,7 +372,7 @@ def source_object_for_path(
     if scope["kind"] == "file":
         return scope["objectId"] if not suffix else None
     relative = PurePosixPath(*suffix).as_posix()
-    entry = exact_tree_path(repository, scope["objectId"], relative, require_unambiguous=True)
+    entry = exact_tree_path(repository, scope["objectId"], relative)
     if entry is None:
         selected = safe_source_path(target, scope["canonicalPath"])
         if selected is not None:
