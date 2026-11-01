@@ -6,8 +6,9 @@ repository package vulnerability CSV, including gzip-compressed files.
 
 ## Quick start
 
-For a package vulnerability export, select the repository in Wiz **Vulnerability
-Findings**, choose **Save as → Report**, then select **Repository Branch**,
+For package vulnerabilities, apply the requested repository, branch or build,
+and finding filters where available in Wiz **Vulnerability Findings**. Choose
+**Save as → Report**, then **Repository Branch**,
 **JSON** and **Detailed** columns. Download the completed report outside the
 checkout. From the destination checkout root, set the path and replace `TENANT_ID`
 with your stable Wiz tenant identifier.
@@ -22,12 +23,18 @@ codex-security publish findings "$report" \
 
 ## Import and verify
 
+For an explicit selection, proceed only if the JSON preview's `excluded` array
+is empty and `findings[].source_finding_id` lists each requested occurrence ID
+exactly once, with its family prefix where applicable, and no other IDs.
 Check that the preview covers the intended assets or builds and review excluded
 records. Reuse the source key for the same tenant and finding family across
 exports and project filters. [Save or publish and verify](README.md#save-or-publish-and-verify).
 
 ## Reference
 
+- **Connected Wiz account.** List findings for the repository and family, then
+  retrieve the selected records by Wiz finding ID. If a shared pull request scan
+  event cannot identify each occurrence, request a scoped native capture.
 - **Native JSON.** Package vulnerabilities accept individual records or
   `data.vulnerabilityFindings.nodes`. SAST, repository secrets and IaC require
   the named `data.sastFindings.nodes`, `data.secretInstances.nodes` or
