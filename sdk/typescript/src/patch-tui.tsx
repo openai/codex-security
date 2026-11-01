@@ -2,7 +2,7 @@ import { readFileSync, realpathSync } from "node:fs";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { Box, Text, render, useApp, useInput, useStdout } from "ink";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import type { Finding, FindingCodeEvidence } from "./models.js";
 import { SCAN_SEVERITIES } from "./scan-settings.js";
 
@@ -194,11 +194,7 @@ function matchesSeverity(finding: Finding, severity: PatchSeverity): boolean {
   );
 }
 
-function findingLines(
-  finding: Finding,
-  repository: string,
-  width: number,
-): string[] {
+function findingLines(finding: Finding, repository: string): string[] {
   const evidenceById = new Map(
     (finding.codeEvidence ?? []).map((item) => [item.id, item]),
   );
@@ -211,7 +207,7 @@ function findingLines(
     ),
   ];
 
-  const lines = [safeLine(finding.title), ""];
+  const parts: (string | string[])[] = [safeLine(finding.title), ""];
   for (const [key, value] of fields) {
     if (
       value === null ||
@@ -220,7 +216,7 @@ function findingLines(
     ) {
       continue;
     }
-    lines.push(fieldLabel(key).toUpperCase());
+    parts.push(fieldLabel(key).toUpperCase());
     if (key === "codeEvidence" && Array.isArray(value)) {
       for (const evidence of value as FindingCodeEvidence[]) {
         const { label, path, startLine, endLine, code, explanation, ...other } =
@@ -228,30 +224,33 @@ function findingLines(
         const location = `${safeLine(path)}:${startLine}${
           endLine === undefined ? "" : `–${endLine}`
         }`;
-        lines.push(
+        parts.push(
           label ? `${safeLine(label)} · ${location}` : location,
-          ...numberedCode(safeText(code).split("\n"), startLine),
-          ...safeText(explanation).split("\n"),
-          ...detailLines(other, "  ", evidenceById),
+          numberedCode(safeText(code).split("\n"), startLine),
+          safeText(explanation).split("\n"),
+          detailLines(other, "  ", evidenceById),
         );
       }
     } else if (key === "locations" && Array.isArray(value)) {
       for (const location of value as Finding["locations"]) {
         const { path, startLine, endLine, role, ...other } = location;
-        lines.push(
+        parts.push(
           `${safeLine(path)}:${startLine}${endLine === undefined ? "" : `–${endLine}`}${
             role === undefined ? "" : ` · ${safeLine(role)}`
           }`,
-          ...locationSource(repository, location),
-          ...detailLines(other, "  ", evidenceById),
+          locationSource(repository, location),
+          detailLines(other, "  ", evidenceById),
         );
       }
     } else {
-      lines.push(...detailLines(value, "", evidenceById));
+      parts.push(detailLines(value, "", evidenceById));
     }
-    lines.push("");
+    parts.push("");
   }
+  return parts.flat();
+}
 
+function wrapFindingLines(lines: readonly string[], width: number): string[] {
   return lines.flatMap((line) => {
     if (line.length === 0) return [""];
     const source = SOURCE_LINE.exec(line);
@@ -378,10 +377,18 @@ export function PatchTui({
       ),
     [inputFindings],
   );
-  const [pane, setPane] = useState<"findings" | "details">("findings");
-  const [focused, setFocused] = useState(0);
-  const focusedFinding = useRef(focused);
-  const [offset, setOffset] = useState(0);
+  const [navigation, setNavigation] = useState({
+    detailsActive: false,
+    focused: 0,
+    offset: 0,
+  });
+  // Ink can deliver several keys before React commits the next frame.
+  const cursor = useRef(navigation);
+  const navigate = (change: Partial<typeof navigation>) => {
+    cursor.current = { ...cursor.current, ...change };
+    setNavigation(cursor.current);
+  };
+  const { detailsActive, focused } = navigation;
   const [preset, setPreset] = useState<PatchSeverity>("low");
   const [instructions, setInstructions] = useState<Record<string, string>>({});
   const [createPullRequest, setCreatePullRequest] = useState(false);
@@ -394,33 +401,74 @@ export function PatchTui({
     rows?: number;
     columns?: number;
   };
-  const rows = terminal.rows ?? 28;
-  const columns = terminal.columns ?? 100;
-  const visibleRows = Math.max(4, rows - 15);
+  const viewportFor = useMemo(() => {
+    let cached:
+      | { finding: Finding; lines: string[]; width: number; details: string[] }
+      | undefined;
+    return (finding: Finding) => {
+      const rows = terminal.rows ?? 28;
+      const width = Math.max(
+        18,
+        Math.floor((terminal.columns ?? 100) * 0.58) - 7,
+      );
+      if (cached?.finding !== finding || cached.width !== width) {
+        const lines =
+          cached?.finding === finding
+            ? cached.lines
+            : findingLines(finding, repository);
+        cached = {
+          finding,
+          lines,
+          width,
+          details: wrapFindingLines(lines, width),
+        };
+      }
+      const visibleRows = Math.max(4, rows - 15);
+      return {
+        rows,
+        visibleRows,
+        details: cached.details,
+        maximumOffset: Math.max(0, cached.details.length - visibleRows),
+      };
+    };
+  }, [repository, terminal]);
+  const current = findings[focused]!;
+  const { rows, visibleRows, details, maximumOffset } = viewportFor(current);
+  const offset = Math.min(navigation.offset, maximumOffset);
   const listStart = Math.max(
     0,
     Math.min(focused - visibleRows + 1, findings.length - visibleRows),
   );
-  const current = findings[focused]!;
-  const details = useMemo(
-    () =>
-      findingLines(
-        current,
-        repository,
-        Math.max(18, Math.floor(columns * 0.58) - 7),
-      ),
-    [columns, current, repository],
-  );
-  const maximumOffset = Math.max(0, details.length - visibleRows);
+  const scroll = (direction: number, page = false) => {
+    try {
+      const { maximumOffset, visibleRows } = viewportFor(
+        findings[cursor.current.focused]!,
+      );
+      const previous = Math.min(cursor.current.offset, maximumOffset);
+      const next = previous + direction * (page ? visibleRows : 1);
+      const offset = Math.max(0, Math.min(maximumOffset, next));
+      // A resize must repaint even if the same row stays at the top.
+      if (direction === 0 || offset !== cursor.current.offset)
+        navigate({ offset });
+    } catch (error) {
+      exit(error instanceof Error ? error : new Error(String(error)));
+    }
+  };
+  const resize = useEffectEvent(() => scroll(0));
+  useEffect(() => {
+    terminal.on("resize", resize);
+    return () => {
+      terminal.off("resize", resize);
+    };
+  }, [terminal]);
   const accent = color ? "cyan" : undefined;
   const muted = color ? "gray" : undefined;
   const instructionColor = color ? "magentaBright" : undefined;
   const success = color ? "green" : undefined;
   const severityColor = (severity: PatchSeverity) =>
     color ? SEVERITY_COLORS[severity] : undefined;
-  const findingsColor =
-    pane === "findings" && editing === null ? accent : muted;
-  const detailsColor = pane === "details" && editing === null ? accent : muted;
+  const findingsColor = !detailsActive && editing === null ? accent : muted;
+  const detailsColor = detailsActive && editing === null ? accent : muted;
   const currentInstructions = instructions[current.occurrenceId];
   const selectedFindings = findings.filter(({ occurrenceId }) =>
     selected.has(occurrenceId),
@@ -489,36 +537,27 @@ export function PatchTui({
     } else if (input === "r") {
       setCreatePullRequest((previous) => !previous);
     } else if (input === "i") {
-      const occurrenceId = findings[focusedFinding.current]!.occurrenceId;
+      const occurrenceId = findings[cursor.current.focused]!.occurrenceId;
       setDraft(instructions[occurrenceId] ?? "");
       setEditing(occurrenceId);
     } else if (key.tab || key.leftArrow || key.rightArrow || input === "d") {
-      setPane(pane === "findings" ? "details" : "findings");
+      navigate({ detailsActive: !cursor.current.detailsActive });
     } else if (key.upArrow || key.downArrow || input === "j" || input === "k") {
       const direction = key.downArrow || input === "j" ? 1 : -1;
-      if (pane === "findings") {
-        focusedFinding.current = Math.max(
+      if (!cursor.current.detailsActive) {
+        const focused = Math.max(
           0,
-          Math.min(findings.length - 1, focusedFinding.current + direction),
+          Math.min(findings.length - 1, cursor.current.focused + direction),
         );
-        setFocused(focusedFinding.current);
-        setOffset(0);
-      } else {
-        setOffset(Math.max(0, Math.min(maximumOffset, offset + direction)));
-      }
+        if (focused !== cursor.current.focused || cursor.current.offset !== 0) {
+          navigate({ focused, offset: 0 });
+        }
+      } else scroll(direction);
     } else if (key.pageUp || key.pageDown) {
-      setOffset(
-        Math.max(
-          0,
-          Math.min(
-            maximumOffset,
-            offset + (key.pageDown ? 1 : -1) * visibleRows,
-          ),
-        ),
-      );
+      scroll(key.pageDown ? 1 : -1, true);
     } else if (input === " ") {
       const next = new Set(selected);
-      const occurrenceId = findings[focusedFinding.current]!.occurrenceId;
+      const occurrenceId = findings[cursor.current.focused]!.occurrenceId;
       if (next.has(occurrenceId)) next.delete(occurrenceId);
       else next.add(occurrenceId);
       setSelected(next);
