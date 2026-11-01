@@ -1,15 +1,17 @@
-<!-- release-version: 0.8.1 -->
+<!-- release-version: 0.8.2 -->
 
 <!-- release-section: highlights:start -->
 
 ## Highlights
 
-Codex Security 0.8.1 improves scan output reliability and adds two ways to move findings between tools.
+Codex Security 0.8.2 adds threat-model explorers and Amazon Inspector imports, and improves scan progress and finding review.
 
-- **Scan output.** Scan directories preserve trailing hyphens in repository names. Hosted Linux path scans keep temporary file lists out of captured output when private state storage is available. If a sealed file changes after validation, the hosted SDK returns a failed receipt with no artifacts.
-- **Dependabot imports.** With external imports enabled, import saved GitHub Dependabot alerts with `publish findings FILE --provider github`. Alerts keep their individual identities across imports, even when they share an advisory. See the [Dependabot import guide](https://github.com/openai/codex-security/blob/npm-v0.8.1/docs/scanner-imports/github-dependabot.md).
-- **ServiceNow exports.** Export saved findings as a CSV for Manual AVIT Ingestion using `--export-format servicenow-avit` and `--avit-template`. See the [application template](https://github.com/openai/codex-security/blob/npm-v0.8.1/examples/servicenow-avit-template.csv).
-- **Wolfi containers.** A manual release workflow can publish a versioned Linux amd64 scanner image with an SPDX software bill of materials. See the [Wolfi image guide](https://github.com/openai/codex-security/blob/npm-v0.8.1/docker/wolfi/README.md).
+- **Threat-model explorers.** Turn an existing threat model into a shareable HTML explorer with interactive architecture, scenarios, controls, and source evidence. Export HTML or SVG from the bundled skill.
+- **Amazon Inspector imports.** With external imports enabled, import a complete Inspector Code Security repository findings export while retaining each finding's identity across imports. See the [Inspector import guide](https://github.com/openai/codex-security/blob/npm-v0.8.2/docs/scanner-imports/inspector.md).
+- **Dedupe corrections.** Hosted reviewers can correct rejected decisions in the original open review when the host supports pending-call validation.
+- **Interactive scans.** Finding review shows critical findings first, followed by high, medium, and low severity. Component tables show saved review progress, and scan titles resolve relative directory names.
+- **Output directories.** Existing scan output directories keep their permissions across scans, saved-result reads, and resume. Newly created directories remain private by default.
+- **Container releases.** The release workflow builds Debian and Wolfi images from the same verified scanner package and frozen runtime dependency lock. See the [container guide](https://github.com/openai/codex-security/blob/npm-v0.8.2/docker/README.md).
 
 <!-- release-section: highlights:end -->
 
@@ -17,6 +19,8 @@ Codex Security 0.8.1 improves scan output reliability and adds two ways to move 
 
 ## Upgrade notes
 
-No additional migration steps are documented for this release.
+No migration is required for existing CLI workflows. Hosted integrations that opt into pending-call validation must keep the original review session open until they handle the CLI's feedback; existing hosts can continue returning final results.
+
+Inspector imports remain opt-in. Cloud publication requires a connected GitHub repository and a deployment that accepts the Inspector provider. The import guide describes repository matching and complete-export requirements.
 
 <!-- release-section: upgrades:end -->

@@ -5,6 +5,7 @@ on:
     inputs:
       release-version: {type: string, required: true}
       release-sha: {type: string}
+      recipe-sha: {type: string}
       release-integrity: {type: string}
       release-tarball-artifact: {type: string}
       runtime-lock-artifact: {type: string}
@@ -54,6 +55,7 @@ jobs:
       - &checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.recipe-sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - &setup-node

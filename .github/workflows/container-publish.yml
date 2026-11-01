@@ -9,6 +9,12 @@ on:
       release-version:
         required: true
         type: string
+      combined-approval:
+        required: true
+        type: boolean
+      refresh-wolfi-recipe:
+        type: boolean
+        default: false
       release-integrity:
         type: string
       release-tarball-artifact:
@@ -39,6 +45,7 @@ jobs:
       attestations: read
     outputs:
       sha: ${{ inputs.release-sha }}
+      recipe-sha: ${{ inputs.refresh-wolfi-recipe && github.sha || inputs.release-sha }}
       image: ${{ steps.release.outputs.image }}
       version: ${{ inputs.release-version }}
       wolfi: ${{ steps.release.outputs.wolfi }}
@@ -235,14 +242,15 @@ jobs:
       attestations: read
     uses: ./.github/workflows/wolfi-build.yml
     with:
+      recipe-sha: ${{ needs.source.outputs.recipe-sha }}
       release-sha: ${{ needs.source.outputs.sha }}
       release-version: ${{ needs.source.outputs.version }}
       release-integrity: ${{ inputs.release-integrity }}
       release-tarball-artifact: ${{ inputs.release-tarball-artifact }}
       runtime-lock-artifact: ${{ inputs.runtime-lock-artifact }}
 
-  authorize:
-    name: authorize-container-publication
+  preflight:
+    name: Verify container publication prerequisites
     needs: [source, debian, wolfi]
     if: >-
       !cancelled() && needs.source.result == 'success' &&
@@ -250,20 +258,52 @@ jobs:
       (needs.wolfi.result == 'success' || needs.source.outputs.wolfi != 'true') &&
       (needs.source.outputs.complete != 'true' || (needs.source.outputs.wolfi == 'true' && needs.wolfi.outputs.existing != 'true'))
     runs-on: ubuntu-24.04
-    environment: container
+    outputs:
+      npm-approved: ${{ steps.preflight.outputs.npm-approved }}
     permissions:
       contents: read
       packages: read
     steps:
-      - name: Require a public registry before uploading either image
+      - &require-public-registry
+        name: Require a public registry before uploading either image
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh api "orgs/${GITHUB_REPOSITORY_OWNER,,}/packages/container/codex-security" | jq -e '.visibility == "public"'
+      - name: Check whether npm approval covers the image inputs
+        id: preflight
+        shell: bash
+        env:
+          COMBINED_APPROVAL: ${{ inputs.combined-approval }}
+          PUBLISH_WOLFI: ${{ needs.source.outputs.wolfi == 'true' && needs.wolfi.outputs.existing != 'true' }}
+          RECIPE_SHA: ${{ needs.source.outputs.recipe-sha }}
+          RELEASE_SHA: ${{ needs.source.outputs.sha }}
+        run: |
+          if [[ $COMBINED_APPROVAL == true && ( $PUBLISH_WOLFI == false || $RECIPE_SHA == "$RELEASE_SHA" ) ]]; then
+            echo 'npm-approved=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  authorize:
+    name: authorize-container-publication
+    needs: preflight
+    if: >-
+      !cancelled() && needs.preflight.result == 'success' &&
+      needs.preflight.outputs.npm-approved != 'true'
+    runs-on: ubuntu-24.04
+    environment: container
+    permissions:
+      packages: read
+    steps:
+      # A backfill can wait for review after the initial registry check.
+      - *require-public-registry
 
   manifest:
     name: publish-and-verify-multiarchitecture-candidate
-    needs: [source, debian, authorize]
-    if: ${{ !cancelled() && needs.authorize.result == 'success' && needs.debian.result == 'success' }}
+    needs: [source, debian, preflight, authorize]
+    if: >-
+      !cancelled() && needs.preflight.result == 'success' &&
+      (needs.preflight.outputs.npm-approved == 'true' || needs.authorize.result == 'success') &&
+      needs.debian.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -281,7 +321,7 @@ jobs:
           path: ${{ runner.temp }}/debian
       - &login
         name: Sign in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -341,9 +381,11 @@ jobs:
             --source-ref refs/heads/main
 
   publish-wolfi:
-    needs: [source, authorize, attest, wolfi]
+    needs: [source, preflight, authorize, attest, wolfi]
     if: >-
-      !cancelled() && needs.authorize.result == 'success' && needs.wolfi.result == 'success' &&
+      !cancelled() && needs.preflight.result == 'success' &&
+      (needs.preflight.outputs.npm-approved == 'true' || needs.authorize.result == 'success') &&
+      needs.wolfi.result == 'success' &&
       needs.wolfi.outputs.existing != 'true' && (needs.attest.result == 'success' || needs.source.outputs.existing-digest != '')
     permissions:
       contents: read
@@ -360,9 +402,11 @@ jobs:
 
   promote:
     name: promote-verified-and-attested-release
-    needs: [source, authorize, debian, attest, wolfi, publish-wolfi]
+    needs: [source, preflight, authorize, debian, attest, wolfi, publish-wolfi]
     if: >-
-      !cancelled() && needs.authorize.result == 'success' && needs.source.outputs.complete != 'true' &&
+      !cancelled() && needs.preflight.result == 'success' &&
+      (needs.preflight.outputs.npm-approved == 'true' || needs.authorize.result == 'success') &&
+      needs.source.outputs.complete != 'true' &&
       (needs.attest.result == 'success' || needs.source.outputs.existing-digest != '') &&
       (needs.source.outputs.wolfi != 'true' || needs.wolfi.outputs.existing == 'true' || needs.publish-wolfi.result == 'success')
     runs-on: ubuntu-24.04

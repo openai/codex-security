@@ -684,10 +684,7 @@ export function normalizeInspectorFindings(
   checkReportScope(rows, target, projectMap);
   const result = normalizeRecords(
     rows,
-    ({ finding }, id) => ({
-      source_finding_id: id,
-      evidence: evidence(selectedFinding(finding), id, source, target),
-    }),
+    ({ finding }, id) => evidence(selectedFinding(finding), id, source, target),
     ({ finding }) => identity(record(finding, "Inspector finding")).arn,
     target,
   );

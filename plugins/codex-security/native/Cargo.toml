@@ -10,8 +10,8 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-napi = { version = "=3.14.2", default-features = false, features = ["napi8"] } # notices.mts supplies the license for this exact release.
-napi-derive = "=3.6.12" # notices.mts supplies the license for this exact release.
+napi = { version = "=3.15.0", default-features = false, features = ["napi8"] } # notices.mts supplies the license for this exact release.
+napi-derive = "=3.6.13" # notices.mts supplies the license for this exact release.
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.191" # Requalify the Unix account lookup on glibc, musl, and macOS when updating these bindings.

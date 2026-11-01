@@ -4,6 +4,7 @@ import { PassThrough } from "node:stream";
 import { pathToFileURL } from "node:url";
 import stripAnsi from "strip-ansi";
 import stringWidth from "string-width";
+import { fitCell, fitLine, graphemes } from "./terminal-columns.js";
 import { isRecord } from "./record.js";
 import type { ScanAuthMode, ScanBudget } from "./api.js";
 import type { ScanModelConfiguration } from "./config.js";
@@ -834,7 +835,7 @@ export class ScanDashboard {
       lines
         .map((line, index) => {
           const text = typeof line === "string" ? line : line.text;
-          const clean = fitLine(text, width);
+          const clean = fitLine(terminalText(text), width);
           const colored =
             this.#options.color === true
               ? styleLine(
@@ -961,10 +962,6 @@ export class ScanDashboard {
       Math.max("Status".length, 35 - progressWidth, nameAndStatusWidth - 10),
     );
     const nameWidth = Math.max(10, nameAndStatusWidth - statusWidth);
-    const cell = (value: string, width: number): string => {
-      const text = fitLine(value, width);
-      return text + " ".repeat(width - stringWidth(text));
-    };
     const row = (
       marker: string,
       name: string,
@@ -973,7 +970,7 @@ export class ScanDashboard {
       findings: string,
       cost: string,
     ): string =>
-      `  ${marker} ${cell(name, nameWidth)} ${cell(status, statusWidth)} ${progress.padStart(progressWidth)} ${findings.padStart(8)}${this.#showCost ? ` ${cost}` : ""}`;
+      `  ${marker} ${fitCell(terminalText(name), nameWidth)} ${fitCell(terminalText(status), statusWidth)} ${progress.padStart(progressWidth)} ${findings.padStart(8)}${this.#showCost ? ` ${cost}` : ""}`;
     const table = visible.map(
       ({ receipt, dashboard, status, progress }, index) =>
         row(
@@ -1496,7 +1493,7 @@ function formatLocalTime(timestamp: number): string {
 }
 
 function fitActivityPrefix(prefix: string, width: number): string {
-  return width <= 2 ? "" : fitLine(prefix, width - 2);
+  return width <= 2 ? "" : fitLine(terminalText(prefix), width - 2);
 }
 
 function wrapActivity(prefix: string, value: string, width: number): string[] {
@@ -1561,8 +1558,6 @@ function wrapActivity(prefix: string, value: string, width: number): string[] {
   if (current !== "") append(current);
   return lines;
 }
-
-const graphemes = new Intl.Segmenter();
 
 function columnChunks(
   value: string,
@@ -1697,17 +1692,4 @@ function budgetBar(cost: number, limit: number): string {
 
 function terminalText(value: string): string {
   return stripAnsi(value).replaceAll(/[\u0000-\u001F\u007F]/gu, " ");
-}
-
-function fitLine(value: string, width: number): string {
-  const clean = terminalText(value);
-  if (stringWidth(clean) <= width) return clean;
-  let clipped = "";
-  let columns = 0;
-  for (const { segment } of graphemes.segment(clean)) {
-    columns += stringWidth(segment);
-    if (columns > width - 1) break;
-    clipped += segment;
-  }
-  return `${clipped}…`;
 }

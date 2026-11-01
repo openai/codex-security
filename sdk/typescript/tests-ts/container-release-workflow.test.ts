@@ -18,6 +18,7 @@ type Job = {
   if?: string;
   environment?: string;
   permissions?: Record<string, string>;
+  outputs?: Record<string, string>;
   with?: Record<string, string>;
   steps?: Step[];
 };
@@ -187,12 +188,15 @@ test("requires both verified artifacts for a scanner release with the Wolfi buil
   }
 });
 
-test("approves both tested container candidates in one deployment", () => {
+test("publishes tested images after the combined npm approval or the backfill approval", () => {
   const container = parent.jobs["container"]!;
   expect(container.uses).toBe("./.github/workflows/container-publish.yml");
   expect(container.needs).toContain("action-verify");
   expect(container.needs).toContain("action");
   expect(container.with).toMatchObject({
+    "combined-approval":
+      "${{ needs.release.outputs.combined-approval == 'true' }}",
+    "refresh-wolfi-recipe": "${{ inputs.refresh-wolfi-recipe }}",
     "release-sha": "${{ needs.release.outputs.sha }}",
     "release-version": "${{ needs.release.outputs.version }}",
     "release-integrity": "${{ needs.release.outputs.integrity }}",
@@ -208,10 +212,29 @@ test("approves both tested container candidates in one deployment", () => {
       (key) => release.jobs[key]!.environment === "container",
     ),
   ).toEqual(["authorize"]);
+  const preflight = release.jobs["preflight"]!;
+  expect(preflight.outputs?.["npm-approved"]).toBe(
+    "${{ steps.preflight.outputs.npm-approved }}",
+  );
   for (const candidate of ["debian", "wolfi"]) {
-    expect(release.jobs["authorize"]?.needs).toContain(candidate);
+    expect(preflight.needs).toContain(candidate);
   }
-  expect(release.jobs["manifest"]?.needs).toContain("authorize");
+  expect(release.jobs["authorize"]).toMatchObject({
+    needs: "preflight",
+    steps: [preflight.steps![0]],
+    if: expect.stringContaining(
+      "needs.preflight.outputs.npm-approved != 'true'",
+    ),
+  });
+  for (const writer of ["manifest", "publish-wolfi", "promote"]) {
+    const job = release.jobs[writer]!;
+    expect(job.needs).toContain("preflight");
+    expect(job.needs).toContain("authorize");
+    expect(job.if).toContain("needs.preflight.result == 'success'");
+    expect(job.if).toContain(
+      "(needs.preflight.outputs.npm-approved == 'true' || needs.authorize.result == 'success')",
+    );
+  }
   const upload = release.jobs["manifest"]!.steps!.find(
     ({ name }) =>
       name === "Upload the approved index and verify its anonymous digest",
@@ -223,7 +246,6 @@ test("approves both tested container candidates in one deployment", () => {
     '"docker://$IMAGE@$DIGEST" "oci:$RUNNER_TEMP/public:scanner"',
   );
 
-  expect(release.jobs["publish-wolfi"]?.needs).toContain("authorize");
   expect(release.jobs["promote"]?.needs).toContain("attest");
   expect(release.jobs["promote"]?.needs).toContain("publish-wolfi");
   expect(release.concurrency).toEqual({
@@ -231,6 +253,35 @@ test("approves both tested container candidates in one deployment", () => {
     queue: "max",
   });
 });
+
+test.each([
+  ["routine release", true, true, "release", true],
+  ["npm-only historical release", false, true, "release", false],
+  ["new image from a refreshed recipe", true, true, "main", false],
+  ["reusing an existing Wolfi image", true, false, "main", true],
+] as const)(
+  "checks the approval scope for %s",
+  (_, combined, publishWolfi, recipe, approved) => {
+    const directory = directories.create("approval");
+    const output = join(directory, "output");
+    writeFileSync(output, "");
+    const preflight = release.jobs["preflight"]!.steps!.find(
+      (step) =>
+        step.name === "Check whether npm approval covers the image inputs",
+    )!;
+    const result = runWorkflowScript(directory, preflight.run, {
+      GITHUB_OUTPUT: output.replaceAll("\\", "/"),
+      COMBINED_APPROVAL: String(combined),
+      PUBLISH_WOLFI: String(publishWolfi),
+      RELEASE_SHA: "release",
+      RECIPE_SHA: recipe,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(readFileSync(output, "utf8")).toBe(
+      approved ? "npm-approved=true\n" : "",
+    );
+  },
+);
 
 test("routes a Wolfi-only OS update through its own approval", () => {
   const publisher = workflow("publish-wolfi");
@@ -266,6 +317,12 @@ test("passes the same verified npm tarball and runtime lock to both image builde
   }
   expect(debian.with?.["ref"]).toBe("${{ needs.source.outputs.sha }}");
   expect(wolfi.with?.["release-sha"]).toBe("${{ needs.source.outputs.sha }}");
+  expect(wolfi.with?.["recipe-sha"]).toBe(
+    "${{ needs.source.outputs.recipe-sha }}",
+  );
+  expect(release.jobs["source"]?.outputs?.["recipe-sha"]).toBe(
+    "${{ inputs.refresh-wolfi-recipe && github.sha || inputs.release-sha }}",
+  );
 });
 
 test("keeps historical native payloads tied to the release checkout", () => {
@@ -642,4 +699,17 @@ test("refuses to replace a source tag pointing at another index", () => {
   });
   expect(result.status).not.toBe(0);
   expect(result.output).not.toContain("digest=");
+});
+
+test("checks out the selected Wolfi recipe while verifying the coordinator as signer", () => {
+  const build = workflow("wolfi-build").jobs["build"]!;
+  expect(build.steps![0]?.with?.["ref"]).toBe(
+    "${{ inputs.recipe-sha || github.sha }}",
+  );
+  const publisher = workflow("publish-wolfi");
+  expect(publisher.jobs["os-update"]!.with).not.toHaveProperty("recipe-sha");
+  const promote = publisher.jobs["publish"]!.steps!.find(
+    ({ name }) => name === "Promote only the verified Wolfi tag",
+  );
+  expect(promote?.run).toContain('--source-digest "$GITHUB_SHA"');
 });

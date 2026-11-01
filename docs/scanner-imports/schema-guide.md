@@ -26,13 +26,18 @@ to investigate records together, not instructions to merge them.
 | [Amazon Inspector Code Security ListFindings JSON](inspector.md)                                                                                                                                    | Full Inspector finding ARN                                                                                                                              | AWS account, Region and repository project |
 | [Snyk Open Source CLI JSON, plugin v1 or SARIF](snyk.md)                                                                                                                                            | CLI: manager, manifest, advisory, package/version and dependency path; plugin: supplied composite; SARIF: advisory, manifest set and project when known | Repository, branch, scan target and format |
 | [Semgrep Code CLI/CI JSON or SARIF](semgrep.md)                                                                                                                                                     | Fingerprint; otherwise rule, literal path and start/end lines and columns                                                                               | Organization, project and branch           |
+| [SonarQube Cloud capture or native issue-search pages](sonar.md)                                                                                                                                    | Sonar issue key                                                                                                                                         | Cloud instance, org, project and ref       |
 | [GitHub Dependabot repository REST alerts](github-dependabot.md)                                                                                                                                    | Host, repository and alert number                                                                                                                       | Host, repository and Dependabot family     |
 | [GitHub saved `import github` output](../../sdk/typescript/docs/cli.md#import-github-findings-locally-or-to-cloud)                                                                                  | Host, repository, alert number and hash of selected ref                                                                                                 | Host, repository and code-scanning family  |
 | [GitHub saved `import github-advisories` output](../../sdk/typescript/docs/cli.md#import-ghsa-advisories-separately)                                                                                | Host, repository **or** global scope, and GHSA ID                                                                                                       | Separate advisory stream from alerts       |
+| [Black Duck BOM-6 collection or selected rows](blackduck.md)                                                                                                                                        | Project version, component version, origin, advisory source and advisory name                                                                           | Deployment, project and version            |
+| [Veracode Static Analysis Findings API pages](veracode.md)                                                                                                                                          | API origin, application and context, and native issue ID                                                                                                | Deployment, application and static policy  |
 
 Within **one input**, duplicate IDs are ambiguous, not corroboration. Wiz and
 GitHub reject a selection with duplicate accepted IDs. Endor, Snyk and Semgrep
-exclude every record with the colliding identity. Inspect the source and select
+exclude every record with the colliding identity. Black Duck rejects duplicate occurrences in a complete collection, and excludes all colliding rows in an explicit selection.
+Veracode rejects a capture that repeats an issue ID for the same scan type.
+Inspect the source and select
 the intended occurrence; don't rename records simply to make them import. Across
 **separate local imports**, changed evidence updates the same record; omission
 does not delete or resolve it. Cloud publication sends an expected version;
@@ -86,6 +91,11 @@ before preparing a fresh submission.
   envelopes and general Supply Chain/Secrets feeds are not Code CLI or SARIF exports.
 - **OpenGrep.** Use native JSON and supply `--source-repository-url`. The
   [OpenGrep guide](opengrep.md) covers export and occurrence identity.
+- **SonarQube Cloud.** Use [the Sonar import workflow](sonar.md) to capture
+  security issues for one project and branch or PR through the authenticated
+  Sonar CLI. Keep the capture to import and publish the same native evidence.
+  The issue key identifies the occurrence. The rule identifies the check that
+  raised it.
 - **GitHub:** For code scanning, the selected instance supplies path/range, ref
   and commit. The rule's `security_severity_level` supplies severity; diagnostic
   `error` alone means `unknown`. An alert-wide dismissal takes precedence over

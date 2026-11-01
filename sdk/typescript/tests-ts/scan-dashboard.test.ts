@@ -2773,6 +2773,7 @@ test.each([80, 160])(
           },
         });
       }
+      const max = index === 2 ? 1 : 12.34;
       dashboard.recordComponentEvent({
         componentId: receipt.id,
         type: "cost",
@@ -2783,7 +2784,7 @@ test.each([80, 160])(
           cacheWriteInputTokens: 0,
           outputTokens: 1,
           estimatedUsd: 1,
-          estimatedUsdRange: { min: 1, max: 12.34, context: "unknown" },
+          estimatedUsdRange: { min: 1, max, context: "unknown" },
         },
       });
     }
@@ -2800,12 +2801,12 @@ test.each([80, 160])(
     expect(rows).toHaveLength(receipts.length);
     expect(rows[0]).toContain("2/8 files");
     expect(rows[1]).toContain("1,234/12,345 reviews");
-    expect(rows[2]).toMatch(/Queued\s+—\s+—\s+\$1\.00/u);
+    expect(rows[2]).toMatch(/Queued\s+—\s+—\s+\$1\.00(?:\s|$)/u);
     const column = (line: string, value: string) =>
       stringWidth(line.slice(0, line.lastIndexOf(value)));
     const costColumn = column(lines[header]!, "Cost");
+    for (const row of rows.slice(0, 2)) expect(row).toContain("$1.00–$12.34");
     for (const row of rows.slice(0, -1)) {
-      expect(row).toContain("$1.00–$12.34");
       expect(column(row, "$1.00")).toBe(costColumn);
     }
     expect(column(rows.at(-1)!, "—")).toBe(costColumn);

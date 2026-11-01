@@ -1,5 +1,5 @@
 import { hash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, type FileHandle } from "node:fs/promises";
 import { promisify } from "node:util";
 import { gunzip } from "node:zlib";
 import { CodexSecurityError, errorMessage } from "./errors.js";
@@ -52,7 +52,7 @@ export function stableId(prefix: string, fields: unknown[]): string {
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
 const gunzipAsync = promisify(gunzip);
 
-async function readScannerBytes(path: string): Promise<Buffer> {
+async function readScannerBytes(path: string | FileHandle): Promise<Buffer> {
   const bytes = await readFile(path);
   return bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipAsync(bytes) : bytes;
 }
@@ -72,7 +72,9 @@ export function parseJsonOrJsonl(contents: string): unknown {
   }
 }
 
-export async function readScannerJson(path: string): Promise<unknown> {
+export async function readScannerJson(
+  path: string | FileHandle,
+): Promise<unknown> {
   const bytes = await readScannerBytes(path);
   let decoded: string;
   try {
@@ -173,10 +175,23 @@ export function sarifRunContextForResult(
   return context;
 }
 
+/** Duplicate IDs cannot identify a single rule in this run. */
+export function indexSarifRules(rules: Record<string, unknown>[]) {
+  const byId = new Map<
+    unknown,
+    { rule: Record<string, unknown>; index: number } | null
+  >();
+  for (const [index, rule] of rules.entries()) {
+    const id = rule["id"];
+    byId.set(id, byId.has(id) ? null : { rule, index });
+  }
+  return byId;
+}
+
 /** Exclude every colliding record: choosing the first could overwrite another occurrence. */
 export function normalizeRecords<T>(
   records: T[],
-  normalize: (record: T, id: string) => ExternalFinding,
+  projectEvidence: (record: T, id: string) => ExternalFinding["evidence"],
   identify: (record: T) => string,
   target: "local" | "cloud" = "cloud",
 ): ExternalFindings {
@@ -221,10 +236,10 @@ export function normalizeRecords<T>(
       continue;
     }
     try {
-      const finding = normalize(value, id);
-      if (finding.source_finding_id !== id)
-        throw new Error("Finding identity changed during normalization.");
-      result.findings.push(finding);
+      result.findings.push({
+        source_finding_id: id,
+        evidence: projectEvidence(value, id),
+      });
     } catch (error) {
       result.excluded.push({
         position,

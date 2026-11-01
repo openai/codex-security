@@ -331,6 +331,19 @@ export {
   readOpenGrepFindings,
   type OpenGrepImportOptions,
 } from "./opengrep-findings.js";
+export { readSonarFindings, type SonarCapture } from "./sonar-findings.js";
+export {
+  collectSonarIssues,
+  type SonarCollectionOptions,
+} from "./sonar-collector.js";
+export {
+  normalizeVeracodeFindings,
+  readVeracodeFindings,
+} from "./veracode-findings.js";
+export {
+  normalizeBlackDuckFindings,
+  readBlackDuckFindings,
+} from "./blackduck-findings.js";
 export {
   normalizeInspectorFindings,
   readInspectorFindings,

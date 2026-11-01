@@ -413,6 +413,7 @@ test("tracks protected container approval and failed reusable workflow jobs", as
   f.deployments.set(3, [{ environment: { name: "container" } }]);
   await f.update(3);
   assert.match(f.body(), /Container image \| Waiting for container approval/u);
+  assert.match(f.body(), /Approve the protected \*\*container\*\* deployment/u);
   await f.watch(3, async () => {
     f.deployments.set(3, []);
     Object.assign(f.runs.get(3), {
@@ -448,17 +449,46 @@ test("keeps one comment across CI, verification, and protected approval", async 
   assert.equal(f.comments.length, 1);
   assert.match(f.body(), /Post-merge CI \| Passed/u);
   assert.match(f.body(), /Release verification \| Passed/u);
+  assert.match(f.body(), /npm deployment \| Waiting for npm approval/u);
+  assert.match(f.body(), /see what the waiting job will do/u);
+  f.jobs.get(2).push(job("Publish npm and container images", null));
+  assert.equal((await f.update(2)).action, "updated");
   assert.match(
     f.body(),
-    /Protected npm publication \| Waiting for npm approval/u,
+    /Release approval and npm publication \| Waiting for npm approval/u,
+  );
+  assert.match(
+    f.body(),
+    /publish the npm package and its matching container images/u,
   );
   assert.match(f.body(), /runs\/2/u);
   assert.deepEqual(
     f.writes().map((request) => request.method),
-    ["POST", "PATCH"],
+    ["POST", "PATCH", "PATCH"],
   );
   assert.equal((await f.update(2)).action, "unchanged");
-  assert.equal(f.writes().length, 2);
+  assert.equal(f.writes().length, 3);
+});
+
+test("tracks approval and completion of existing npm release verification", async () => {
+  const f = fixture();
+  f.runs.set(2, run(2, "node-release", { status: "waiting" }));
+  f.jobs.set(2, [job("verify"), job("Verify existing npm release", null)]);
+  f.deployments.set(2, [{ environment: { name: "npm" } }]);
+  await f.update(2);
+  assert.match(
+    f.body(),
+    /Existing npm release verification \| Waiting for npm approval/u,
+  );
+  assert.match(
+    f.body(),
+    /verify the existing npm package and its signed provenance/u,
+  );
+  f.deployments.set(2, []);
+  f.jobs.set(2, [job("verify"), job("Verify existing npm release")]);
+  await f.update(2);
+  assert.match(f.body(), /Existing npm release verification \| Passed/u);
+  assert.match(f.body(), /Container image \| Not started/u);
 });
 
 test("follows a release tagged on a successful fix back to its version-bump PR", async (t) => {
@@ -499,7 +529,7 @@ test("follows a release tagged on a successful fix back to its version-bump PR",
   await f.update(1);
   assert.match(f.body(), /Post-merge CI \| Failed/u);
   f.runs.set(2, run(2, "node-release", { head_sha: fix, status: "waiting" }));
-  f.jobs.set(2, [job("verify")]);
+  f.jobs.set(2, [job("verify"), job("publish", null)]);
   f.deployments.set(2, [{ environment: { name: "npm" } }]);
   assert.equal((await f.update(2)).action, "updated");
   assert.equal(f.comments.length, 1);
@@ -508,6 +538,7 @@ test("follows a release tagged on a successful fix back to its version-bump PR",
     f.body(),
     /Protected npm publication \| Waiting for npm approval/u,
   );
+  assert.match(f.body(), /Approve the protected \*\*npm\*\* deployment/u);
   Object.assign(f.runs.get(2), { status: "completed", conclusion: "success" });
   f.runs.set(
     3,
@@ -564,7 +595,7 @@ test("continues a release backfill when saved workflow runs were deleted", async
       assert.match(f.body(), /Post-merge CI \| Not recorded/u);
     if (deleted.includes(2)) {
       assert.match(f.body(), /npm release status \| Not recorded/u);
-      assert.match(f.body(), /Protected npm publication \| Not recorded/u);
+      assert.match(f.body(), /npm deployment \| Not recorded/u);
     }
     f.requests.length = 0;
     assert.equal((await f.update(4)).action, "unchanged");
@@ -729,7 +760,7 @@ test("resolves GitHub publication to the release tag, including annotated tags",
     assert.match(f.body(), /## Automated release complete/u);
     assert.match(f.body(), /Post-merge CI \| Not recorded/u);
     assert.match(f.body(), /Release verification \| Not recorded/u);
-    assert.match(f.body(), /Protected npm publication \| Not recorded/u);
+    assert.match(f.body(), /npm deployment \| Not recorded/u);
     assert.match(f.body(), /GitHub Action \| Passed/u);
     assert.ok(
       f.requests.some(
