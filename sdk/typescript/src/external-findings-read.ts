@@ -11,6 +11,7 @@ import {
   isSemgrepSarifDriver,
   readSemgrepFindings,
 } from "./semgrep-findings.js";
+import { semgrepPlatformReportRepository } from "./semgrep-platform-findings.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
@@ -85,7 +86,7 @@ export function localFindingRepositories(
 /** Repository claims retained by the Semgrep SARIF reader. */
 export function semgrepSarifRepositories({
   evidence,
-}: ExternalFinding): ExternalSourceRepository[] {
+}: ExternalFinding): { url: string; branch?: string }[] {
   const data = evidence.source_data;
   const document = data?.["documentContext"];
   const driver = data?.["driverContext"];
@@ -107,7 +108,14 @@ export function semgrepSarifRepositories({
         isRecord(reference) &&
         typeof reference["repositoryUri"] === "string" &&
         reference["repositoryUri"].trim()
-          ? [{ url: reference["repositoryUri"] }]
+          ? [
+              {
+                url: reference["repositoryUri"],
+                ...(typeof reference["branch"] === "string" && {
+                  branch: reference["branch"],
+                }),
+              },
+            ]
           : [],
       )
     : [];
@@ -148,11 +156,12 @@ export async function readExternalFindings(
     const findings = await readSemgrepFindings(
       path,
       {
-        sourceRepositoryUrl: options.sourceRepositoryUrl ?? "",
+        sourceRepositoryUrl: options.sourceRepositoryUrl,
         sourceRepositories: references,
       },
       target,
     );
+    if (semgrepPlatformReportRepository(findings)) return { findings };
     const sourceRepositories = findings.findings.flatMap(
       semgrepSarifRepositories,
     );

@@ -18,7 +18,10 @@ import {
   cloudFindingsUrl,
   DEFAULT_CLOUD_BASE_URL,
 } from "./cloud-endpoint.js";
-import { isSemgrepSelectionEvidence } from "./semgrep-platform-findings.js";
+import {
+  isSemgrepPlatformEvidence,
+  semgrepPlatformReportRepository,
+} from "./semgrep-platform-findings.js";
 import { CodexSecurityError } from "./errors.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import {
@@ -355,10 +358,18 @@ async function withImportLock<T>(
   }
 }
 
-function rejectLocalSelections(input: ExternalFindings): void {
-  if (input.findings.some(isSemgrepSelectionEvidence))
+function rejectLocalSemgrepReports(
+  input: ExternalFindings,
+  provider: string,
+): void {
+  if (
+    semgrepPlatformReportRepository(input, provider) ||
+    input.findings.some((finding) =>
+      isSemgrepPlatformEvidence(finding, provider),
+    )
+  )
     throw new CodexSecurityError(
-      "Semgrep Platform selections require a local import.",
+      "Semgrep Platform findings require a local import.",
     );
 }
 
@@ -370,7 +381,7 @@ export async function prepareExternalPublication(
   requireExternalImports(dependencies.environment);
   const settings = snapshotImportOptions(options);
   const parsed = await readExternalFindings(path, settings);
-  rejectLocalSelections(parsed.findings);
+  rejectLocalSemgrepReports(parsed.findings, settings.provider);
   return preparePublicationInput(
     parsed.publication ?? normalizedPublicationInput(parsed.findings),
     { ...settings, provider: EXTERNAL_FINDINGS_PROVIDERS[settings.provider] },
@@ -385,8 +396,8 @@ export async function prepareNormalizedExternalPublication(
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
   requireExternalImports(dependencies.environment);
-  rejectLocalSelections(input);
   const settings = snapshotImportOptions(options);
+  rejectLocalSemgrepReports(input, settings.provider);
   return preparePublicationInput(
     normalizedPublicationInput(input),
     settings,

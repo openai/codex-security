@@ -1292,7 +1292,7 @@ export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
 
 In PowerShell, use `$env:CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS = '1'`.
 Only `1` enables the feature. Without it, `publish findings`, `findings imported`,
-and `import github-advisories` are absent from command help and schemas and cannot
+`import github-advisories` and `import semgrep` are absent from command help and schemas and cannot
 run. The SDK's external publication, local import/readback, and advisory
 acquisition APIs require the same flag in their effective environment. An explicit
 `dependencies.environment` is used instead of the process environment. Pure
@@ -1356,10 +1356,11 @@ Repeated imports update the same record by repository, provider, source key, and
 source finding ID. The result reports created, updated, and unchanged counts.
 Keep the source key stable across exports. Records omitted from a later selection
 remain stored; omission does not resolve or delete a finding. Excluded records
-are reported, and an import with exclusions exits with status 1. The local
-importer accepts selected Semgrep Platform findings. See the
-[Semgrep selection example](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#existing-platform-findings).
-Cloud's field, size and nesting limits apply to Cloud imports.
+are reported, and an import with exclusions exits with status 1. For existing
+Semgrep Platform findings, use the SDK to select individual Code findings or
+`import semgrep PROJECT --semgrep-deployment SLUG --semgrep-ref REF [--semgrep-product sast|sca|ai_sast]`
+to collect one project and branch. Both can be saved for local import. See the
+[Semgrep Platform workflows](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#existing-platform-findings).
 
 For OpenGrep, use `--provider opengrep` and supply `--source-repository-url`.
 The reader supports native JSON and gzip for both destinations. It uses the

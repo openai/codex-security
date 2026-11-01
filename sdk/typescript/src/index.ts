@@ -355,9 +355,16 @@ export {
   readSemgrepFindings,
   type SemgrepImportOptions,
 } from "./semgrep-findings.js";
+export { collectSemgrepPlatformFindings } from "./semgrep-platform-collector.js";
+export type {
+  SemgrepPlatformOptions,
+  SemgrepPlatformReport,
+} from "./semgrep-platform-collector.js";
+export type { HostedScannerHttpOptions } from "./hosted-scanner-http.js";
 export {
   normalizeSelectedSemgrepPlatformFindings,
   selectSemgrepPlatformFindings,
+  normalizeSemgrepPlatformFindings,
   type SemgrepPlatformSelection,
 } from "./semgrep-platform-findings.js";
 export {
