@@ -16,7 +16,6 @@ test.each([
   ["gpt-5.6-sol", [4, 0.4, 5, 20], [8, 0.8, 10, 30]],
   ["gpt-5.6-terra", [2, 0.2, 2.5, 12], [4, 0.4, 5, 18]],
   ["gpt-5.6-luna", [0.2, 0.02, 0.25, 1.2], [0.4, 0.04, 0.5, 1.8]],
-  ["gpt-daybreak-blue-latest", [4, 0.4, 5, 20], [8, 0.8, 10, 30]],
 ] as const)(
   "%s bounds each token category with verified rates",
   (model, short, long) => {
@@ -36,6 +35,16 @@ test.each([
         });
       }
     }
+  },
+);
+
+test.each(["blue", "red"])(
+  "leaves the Daybreak %s latest alias unpriced",
+  (program) => {
+    const alias = `gpt-daybreak-${program}-latest`;
+    const usage = { input_tokens: 1_000_000, output_tokens: 0 };
+    expect(estimateScanCost(alias, usage)).toBeNull();
+    expect(estimateScanCost(`openai.${alias}`, usage)).toBeNull();
   },
 );
 
@@ -185,7 +194,7 @@ test("widens the maximum for unreported cache writes without changing token coun
 });
 
 test("keeps unverified long-context prices unavailable", () => {
-  const cost = estimateScanCost("gpt-daybreak-red-latest", {
+  const cost = estimateScanCost("gpt-5.6-cyber", {
     input_tokens: 1_000_000,
     cache_write_input_tokens: 0,
     output_tokens: 0,
