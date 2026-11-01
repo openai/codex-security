@@ -6418,7 +6418,7 @@ export async function main(
                   verifiedPatchFiles(selected, patches),
                   errorOutput,
                   dependencies,
-                  patchRisk?.summary,
+                  patchRisk,
                 )
               : undefined;
             if (structuredOutput) {
@@ -6537,7 +6537,7 @@ export async function main(
               files,
               errorOutput,
               dependencies,
-              patchRisk?.summary,
+              patchRisk,
               identifier === undefined
                 ? "Applies a security fix generated from supplied issue data."
                 : `Applies a security fix generated for ${identifier}.`,
@@ -8030,20 +8030,6 @@ function patchPullRequestBodyKey(branch: string): string {
   return `branch.${branch}.codexSecurityPatchPullRequestBody`;
 }
 
-function patchPullRequestBody(
-  patchRiskSummary?: string,
-  introduction = PATCH_PR_BODY,
-): string {
-  if (patchRiskSummary === undefined) return introduction;
-  const summary = safePatchReport(patchRiskSummary);
-  if (!summary) {
-    throw new CodexSecurityError(
-      "Patch risk assessment returned an empty pull request summary.",
-    );
-  }
-  return `${introduction}\n\n## Patch risk assessment\n\n${summary}`;
-}
-
 function directPatchIdentifier(
   positionals: readonly string[],
   imports: readonly ImportedIssue[],
@@ -8166,7 +8152,7 @@ async function createPatchPullRequest(
   files: readonly string[],
   stderr: Writable,
   dependencies: CliDependencies,
-  patchRiskSummary?: string,
+  patchRisk?: PatchRiskAssessment,
   introduction = PATCH_PR_BODY,
 ): Promise<{ branch: string; url: string } | undefined> {
   if (files.length === 0) {
@@ -8175,7 +8161,10 @@ async function createPatchPullRequest(
   }
 
   const branch = `codex-security/patch-${patchId.replaceAll(/[^a-z\d._-]/giu, "-")}`;
-  const body = patchPullRequestBody(patchRiskSummary, introduction);
+  const body =
+    patchRisk === undefined
+      ? introduction
+      : `${introduction}\n\n## Patch risk assessment\n\n${patchRisk.summary}`;
   const run = (args: string[]) =>
     dependencies.runRepositoryCommand("git", args, repository);
   stderr.write(
