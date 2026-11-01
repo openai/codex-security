@@ -159,8 +159,14 @@ jobs:
         name: Install ripgrep
         run: .github/scripts/install-ripgrep.sh
 
-      - name: Audit production dependencies
-        run: sfw pnpm --dir sdk/typescript run audit:prod
+      - name: Audit SDK production dependencies
+        id: sdk-audit
+        working-directory: sdk/typescript
+        run: sfw pnpm run audit:prod --config.lockfile-dir=.
+      - name: Audit MCP production dependencies
+        if: ${{ !cancelled() && (steps.sdk-audit.outcome == 'success' || steps.sdk-audit.outcome == 'failure') }}
+        working-directory: plugins/codex-security/mcp-app
+        run: sfw pnpm audit --prod --audit-level high --config.lockfile-dir=.
 
       - name: Verify
         run: |
