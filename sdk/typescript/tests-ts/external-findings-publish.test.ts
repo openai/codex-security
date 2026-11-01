@@ -4442,14 +4442,14 @@ test.each(["released", "current"])(
       await expect(selected.publish()).rejects.toThrow("Slow down");
     }
 
-    f.state.throttle = false;
+    let unreadable = false;
     const statePaths = new Set([directory, await fs.realpath(directory)]);
     const listings = spyOn(fs, "readdir");
     const read = fs.readFile;
     const reads = spyOn(fs, "readFile").mockImplementation((async (
       ...args: Parameters<typeof read>
     ) => {
-      if (unrelated.has(String(args[0])))
+      if (unreadable && unrelated.has(String(args[0])))
         throw Object.assign(new Error("Unreadable unrelated approval"), {
           code: "EACCES",
         });
@@ -4464,16 +4464,38 @@ test.each(["released", "current"])(
       ),
     });
     try {
-      const retry = await prepare(2.5);
-      const atPrepare = operations();
+      if (released) {
+        const original = await prepare(2.5);
+        reads.mockClear();
+        listings.mockClear();
+        await expect(original.publish()).rejects.toThrow("Slow down");
+        expect(operations()).toEqual({ listed: true, readUnrelated: true });
+        expect(f.posts.at(-1)).toBe(JSON.stringify(request));
+      }
+      unreadable = true;
+      f.state.throttle = false;
       reads.mockClear();
       listings.mockClear();
+      const retry = await prepare(2.5);
       expect(retry.preview.resumed).toBe(true);
-      expect((await retry.publish()).receipts[0]!.id).toBe(requestId);
-      // An unmarked released approval may have a separately tagged peer.
-      const expected = { listed: released, readUnrelated: released };
-      expect(atPrepare).toEqual(expected);
-      expect(operations()).toEqual(expected);
+      expect(retry.preview.requests[0]!.request_id).toBe(requestId);
+      expect(operations()).toEqual({ listed: false, readUnrelated: false });
+      f.state.brokenReadback = true;
+      await expect(retry.publish()).rejects.toThrow("Readback unavailable");
+      const stored = JSON.parse(await readFile(path, "utf8"));
+      expect(stored.receipts[0].id).toBe(requestId);
+      if (released)
+        expect(f.posts.slice(-2)).toEqual([
+          JSON.stringify(request),
+          JSON.stringify(request),
+        ]);
+      const posted = [...f.posts];
+      f.state.brokenReadback = false;
+      expect((await (await prepare(2.5)).publish()).receipts).toEqual(
+        stored.receipts,
+      );
+      expect(f.posts).toEqual(posted);
+      expect(operations()).toEqual({ listed: false, readUnrelated: false });
       listings.mockClear();
       reads.mockClear();
       // A fresh selection must discover possible historical approvals.
@@ -4485,6 +4507,24 @@ test.each(["released", "current"])(
     }
   },
 );
+
+test("checking a released canonical approval preserves ambiguous boxed report metadata", async () => {
+  const { f, prepare } = await oldScoreApproval("report");
+  f.state.throttle = true;
+  const older = await prepare(2.5, { elapsed: {} });
+  expect(older.preview.resumed).toBe(true);
+  await expect(older.publish()).rejects.toThrow("Slow down");
+  const numeric = await prepare(2.5, { elapsed: 4.5 });
+  expect(numeric.preview.resumed).toBe(false);
+  await expect(numeric.publish()).rejects.toThrow("Slow down");
+  await expect(prepare(2.5, { elapsed: new Number(4.5) })).rejects.toThrow(
+    "older saved import cannot be matched",
+  );
+  expect(f.posts).toEqual([
+    JSON.stringify(older.preview.requests[0]),
+    JSON.stringify(numeric.preview.requests[0]),
+  ]);
+});
 
 test("matching released primitive and boxed approvals preserve both requests", async () => {
   const primitive = await oldScoreApproval("unreported");
@@ -4518,6 +4558,28 @@ test("matching released primitive and boxed approvals preserve both requests", a
     expect(await readFile(boxedPath, "utf8")).toBe(tagged);
     expect(primitive.f.posts).toEqual([]);
   }
+
+  // A partial check must see the second approval once it becomes readable.
+  const read = fs.readFile;
+  const unreadable = spyOn(fs, "readFile").mockImplementation((async (
+    ...args: Parameters<typeof read>
+  ) => {
+    if (String(args[0]) === boxedPath)
+      throw Object.assign(new Error("Unreadable approval"), { code: "EACCES" });
+    return read(...args);
+  }) as typeof read);
+  try {
+    primitive.f.state.throttle = true;
+    await expect(held.publish()).rejects.toThrow("Slow down");
+  } finally {
+    unreadable.mockRestore();
+  }
+  await expect(primitive.prepare(2.5)).rejects.toThrow(
+    "Two saved imports match",
+  );
+  expect(await readFile(primitive.path, "utf8")).toBe(primitive.saved);
+  expect(await readFile(boxedPath, "utf8")).toBe(tagged);
+  expect(primitive.f.posts).toEqual([JSON.stringify(primitive.request)]);
 });
 
 test.each(["report", "mixed", "aliased"])(
@@ -5728,8 +5790,15 @@ test(concurrentBoxedApproval, async () => {
   if (runTestInSubprocess(import.meta.filename, concurrentBoxedApproval))
     return;
 
-  for (const state of ["original result", "newer pending", "newer complete"]) {
-    const { f, prepare, directory, request } =
+  for (const state of [
+    "original result",
+    "newer pending",
+    "newer complete",
+    "released result",
+    "released different",
+    "released malformed",
+  ]) {
+    const { f, prepare, directory, path, request } =
       await oldScoreApproval("evidence");
     const atLock = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
@@ -5754,11 +5823,32 @@ test(concurrentBoxedApproval, async () => {
     const waiting = prepare(new Number(2.5));
     try {
       await Promise.race([atLock.promise, waiting]);
-      const completed = await (await prepare(new Number(2.5))).publish();
+      const leader = await prepare(new Number(2.5));
+      const { wireKey } = JSON.parse(await readFile(path, "utf8"));
+      const completed = await leader.publish();
       expect(completed.receipts[0]!.id).toBe(request.request_id);
       expect(f.posts).toEqual([JSON.stringify(request)]);
       let pending: { path: string; bytes: string } | undefined;
-      if (state !== "original result") {
+      if (state.startsWith("released")) {
+        // The released publisher stores this receipt under its original checkpoint filename.
+        const oldResult = path.replace(/\.pending\.json$/, ".result.json");
+        const currentName = `${wireKey}.result.json`;
+        const seed = (await readdir(directory)).find(
+          (name) => name.endsWith(".result.json") && name !== currentName,
+        )!;
+        const currentResult = join(directory, currentName);
+        await fs.rename(currentResult, oldResult);
+        if (state === "released malformed") {
+          const result = JSON.parse(await readFile(oldResult, "utf8"));
+          result.receipts[0].results = [];
+          await writeFile(oldResult, JSON.stringify(result));
+        } else if (state === "released different") {
+          await fs.copyFile(join(directory, seed), oldResult);
+        } else {
+          // A different completed request can still occupy the current result filename.
+          await fs.copyFile(join(directory, seed), currentResult);
+        }
+      } else if (state !== "original result") {
         const newer = await prepare(2.5);
         const newerId = newer.preview.requests[0]!.request_id;
         expect(newerId).not.toBe(request.request_id);
@@ -5780,7 +5870,9 @@ test(concurrentBoxedApproval, async () => {
       }
       const before = [...f.posts];
       release.resolve();
-      if (state === "newer complete") {
+      if (state === "released malformed") {
+        await expect(waiting).rejects.toThrow();
+      } else if (state === "newer complete" || state === "released different") {
         await expect(waiting).rejects.toThrow(/changed while preparing/);
       } else {
         const trailing = await waiting;
@@ -5973,4 +6065,60 @@ test("partially unboxing an approved input resumes its verified wire request", a
   );
   expect(f.posts).toEqual([body, body]);
   expect(await readFile(oldPath, "utf8")).toBe(saved);
+});
+
+test("preparing across a checkpoint handoff returns the observed approval", async () => {
+  const {
+    f,
+    prepare,
+    path: boxedPath,
+  } = await oldScoreApproval("evidence", false);
+  const first = await prepare(2.5);
+  f.state.loseResponse = true;
+  const interrupted = await first.publish().catch((error: unknown) => error);
+  if (!(interrupted instanceof ExternalPublicationError)) throw interrupted;
+  const canonicalPath = interrupted.result.savedSubmission!;
+  const leading = await prepare(2.5);
+
+  const captured = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let hold = true;
+  const read = fs.readFile;
+  const reads = spyOn(fs, "readFile").mockImplementation((async (
+    ...args: Parameters<typeof read>
+  ) => {
+    const bytes = await read(...args);
+    if (hold && String(args[0]) === canonicalPath) {
+      hold = false;
+      captured.resolve();
+      await release.promise;
+    }
+    return bytes;
+  }) as typeof read);
+  const waiting = prepare(2.5);
+  try {
+    await Promise.race([captured.promise, waiting]);
+    expect(hold).toBe(false);
+    const completed = await leading.publish();
+    expect(await Bun.file(canonicalPath).exists()).toBe(false);
+    const next = await prepare(new Number(2.5));
+    expect(next.preview.requests[0]!.request_id).not.toBe(
+      first.preview.requests[0]!.request_id,
+    );
+    f.state.throttle = true;
+    await expect(next.publish()).rejects.toThrow("Slow down");
+    const newer = await readFile(boxedPath, "utf8");
+    const before = [...f.posts];
+    release.resolve();
+    const trailing = await waiting;
+    expect(trailing.preview.resumed).toBe(true);
+    expect(trailing.preview.requests).toEqual(first.preview.requests);
+    expect(await trailing.publish()).toEqual(completed);
+    expect(await readFile(boxedPath, "utf8")).toBe(newer);
+    expect(f.posts).toEqual(before);
+  } finally {
+    release.resolve();
+    reads.mockRestore();
+    await Promise.allSettled([waiting]);
+  }
 });

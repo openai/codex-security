@@ -148,6 +148,8 @@ interface SavedSubmission {
   };
   // A verified older approval stays at its original deployment-bound filename.
   wireKey?: string;
+  // The older canonical file was checked under its lock for a second approval.
+  canonicalChecked?: true;
   inspectorProjectMapRequired?: true;
 }
 
@@ -879,8 +881,9 @@ async function preparePublicationInput(
     fileKey: string;
     content: SavedSubmission;
     historical: boolean;
+    checkedCanonical?: true;
   }
-  async function selectedCheckpoint(knownFileKey?: string) {
+  async function selectedCheckpoint(knownFileKey?: string, preparing = false) {
     const directory = await validatePreparedOutputDir(
       state,
       undefined,
@@ -894,6 +897,7 @@ async function preparePublicationInput(
       [key, previousKey, knownFileKey].filter((value) => value !== undefined),
     );
     let unidentified = false;
+    let incomplete = false;
     let differentOldWire = false;
     let stagingPathOccupied = false;
     async function readCandidate(
@@ -907,13 +911,17 @@ async function preparePublicationInput(
         (selected?.fileKey === key && !known.has(fileKey)
           ? await readOptionalRegularFile(path)
           : await readOptionalFile(path));
-      if (serialized === undefined) return selected;
+      if (serialized === undefined) {
+        if (!known.has(fileKey)) incomplete = true;
+        return selected;
+      }
       if (fileKey === (previousKey ?? key)) stagingPathOccupied = true;
       let record: SavedSubmission | null;
       try {
         record = JSON.parse(serialized) as SavedSubmission | null;
       } catch (error) {
         if (known.has(fileKey)) throw error;
+        incomplete = true;
         return selected;
       }
       if (record?.wireKey !== undefined && record.wireKey !== key)
@@ -943,10 +951,27 @@ async function preparePublicationInput(
         return selected;
       }
       if (!content) return selected;
-      if (selected)
-        throw new CodexSecurityError(
+      if (selected) {
+        const conflict = new CodexSecurityError(
           "Two saved imports match this input. Their original requests and receipts were preserved without uploading.",
         );
+        if (!preparing) throw conflict;
+        // The two unlocked reads may have straddled completion of the first request.
+        return await underLocks([key, selected.fileKey, fileKey], async () => {
+          const first = await readCandidate(selected.fileKey);
+          if (first && (await readCandidate(fileKey))) throw conflict;
+          if (first && sameSubmission(first.content, selected.content))
+            return first;
+          if (
+            await readCompletedPublication(
+              selected.content.requests,
+              selected.fileKey,
+            )
+          )
+            return selected;
+          throw changedWhilePreparing();
+        });
+      }
       return { fileKey, content, historical };
     }
     let selected: Checkpoint | undefined;
@@ -970,6 +995,7 @@ async function preparePublicationInput(
       selected &&
       !selected.historical &&
       (selected.fileKey !== key ||
+        selected.content.canonicalChecked ||
         selected.content.inputProjection?.identityFormat === 2)
     )
       return selected;
@@ -992,37 +1018,49 @@ async function preparePublicationInput(
       throw new CodexSecurityError(
         "An older pending import matches this input, but its checkpoint identity could not be established. Resume it using the original deployment and locale before publishing this selection. The saved request was preserved without uploading.",
       );
+    if (selected?.fileKey === key && !preparing && !incomplete)
+      selected.checkedCanonical = true;
     return selected;
   }
-  async function readCompletedPublication(requests: FindingImportRequest[]) {
-    const serialized = await readOptionalFile(
-      join(state, `${key}.result.json`),
-    );
-    if (serialized === undefined) return undefined;
-    const completed = JSON.parse(
-      serialized,
-    ) as ExternalPublicationResult | null;
-    if (
-      (completed?.status === "complete" || completed?.status === "partial") &&
-      Array.isArray(completed.receipts) &&
-      completed.receipts.length === requests.length &&
-      completed.receipts.every(
-        (receipt, i) => receipt?.id === requests[i]!.request_id,
+  async function readCompletedPublication(
+    requests: FindingImportRequest[],
+    observedKey: string,
+  ) {
+    for (const resultKey of new Set([key, observedKey])) {
+      const serialized = await readOptionalFile(
+        join(state, `${resultKey}.result.json`),
+      );
+      if (serialized === undefined) continue;
+      const completed = JSON.parse(
+        serialized,
+      ) as ExternalPublicationResult | null;
+      if (
+        (completed?.status === "complete" || completed?.status === "partial") &&
+        Array.isArray(completed.receipts) &&
+        completed.receipts.length === requests.length &&
+        completed.receipts.every(
+          (receipt, i) => receipt?.id === requests[i]!.request_id,
+        )
       )
-    )
-      return {
-        receipts: completed.receipts.map((receipt, i) =>
-          validatePublicationReceipt(receipt, requests[i]!),
-        ),
-        verified: completed.verified,
-      };
+        return {
+          receipts: completed.receipts.map((receipt, i) =>
+            validatePublicationReceipt(receipt, requests[i]!),
+          ),
+          verified: completed.verified,
+        };
+    }
+  }
+  function changedWhilePreparing() {
+    return new CodexSecurityError(
+      "The saved publication changed while preparing this input. Review it again.",
+    );
   }
   function occupiedCheckpoint() {
     return new CodexSecurityError(
       "Finish the other pending import at this checkpoint first, then review this input again.",
     );
   }
-  let selected = await selectedCheckpoint(recovered ? key : undefined);
+  let selected = await selectedCheckpoint(recovered ? key : undefined, true);
   const fileKey = selected?.fileKey ?? (recovered ? key : (previousKey ?? key));
   const pendingPath = join(state, `${fileKey}.pending.json`);
   async function rememberFile() {
@@ -1051,11 +1089,14 @@ async function preparePublicationInput(
         current.fileKey !== fileKey ||
         !sameSubmission(current.content, observed.content)
       ) {
-        if (await readCompletedPublication(observed.content.requests))
+        if (
+          await readCompletedPublication(
+            observed.content.requests,
+            observed.fileKey,
+          )
+        )
           return observed;
-        throw new CodexSecurityError(
-          "The saved publication changed while preparing this input. Review it again.",
-        );
+        throw changedWhilePreparing();
       }
       if (current.historical) {
         current.content.wireKey = key;
@@ -1287,7 +1328,7 @@ async function preparePublicationInput(
     receipts: saved?.receipts,
     wireKey: saved?.wireKey ?? (fileKey === key ? undefined : key),
     inputProjection: saved?.inputProjection ?? {
-      identityFormat: 2,
+      identityFormat: saved ? undefined : 2,
       inputDigest,
       savedEvidenceDigest: hash(
         "sha256",
@@ -1400,7 +1441,7 @@ async function preparePublicationInput(
             ? "Another publication prepared this input. Run the command again to review and resume that saved request."
             : "The saved publication changed after preview. Review its result before publishing again.";
           if (saved) {
-            const completed = await readCompletedPublication(requests);
+            const completed = await readCompletedPublication(requests, fileKey);
             if (completed)
               return result(completed.receipts, completed.verified);
             throw interruptedPreview(message);
@@ -1418,7 +1459,12 @@ async function preparePublicationInput(
         let verified = 0;
         let persisted = pending !== undefined;
         try {
-          if (pending === undefined || adoptProjectMap) {
+          if (selected?.checkedCanonical) current.canonicalChecked = true;
+          if (
+            pending === undefined ||
+            adoptProjectMap ||
+            selected?.checkedCanonical
+          ) {
             await writeAtomicJson(pendingPath, current);
             persisted = true;
           }
@@ -1446,7 +1492,11 @@ async function preparePublicationInput(
               receipts.push(receipt);
               // Acknowledged batches must not consume another POST quota on retry.
               // Readback can still resume after this checkpoint without replaying writes.
-              await writeAtomicJson(pendingPath, { ...submission, receipts });
+              await writeAtomicJson(pendingPath, {
+                ...submission,
+                canonicalChecked: current.canonicalChecked,
+                receipts,
+              });
             }
           }
           // Verify readable source records without mistaking a newer concurrent
