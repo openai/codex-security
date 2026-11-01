@@ -55,6 +55,16 @@ repository. Project names can match several integrations. With
 `inspector2:ListFindings` permission, replace the example Region, account ID, and
 repository resource ID in this export.
 
+For ARNs selected with the [AWS Codex plugin](https://github.com/aws/agent-toolkit-for-aws#codex),
+keep the Region, account, and repository filters below. Add a `findingArn` array
+with one `{"comparison":"EQUALS","value":"FINDING_ARN"}` per ARN, up to
+[10 per request](https://docs.aws.amazon.com/inspector/v2/APIReference/API_FilterCriteria.html#inspector2-Type-FilterCriteria-findingArn).
+Combine the native `findings` arrays from all fully paginated batches into one
+`{"findings":[...]}` report. From a saved scoped export, select those rows locally.
+If the selected rows cannot establish the repository together, request a native
+capture of those same ARNs with the missing evidence. Before import, verify the
+preview contains each requested ARN once, no other ARNs, and no exclusions.
+
 ```bash
 set -eu
 umask 077
