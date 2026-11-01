@@ -3,6 +3,8 @@
 Import a saved Semgrep Code CLI or CI report into the local workbench or Cloud.
 Native JSON preserves original severities and snippets when available. The reader
 also accepts self-contained Semgrep SARIF 2.1.0. Either format can be gzipped.
+To import selected existing findings from the Platform API, use the
+[SDK example](#import-selected-semgrep-platform-sast-findings-with-the-sdk).
 
 ## Quick start
 
@@ -100,10 +102,53 @@ directly, pass the original repository references in its third argument's
 `sourceRepositories`. Use `{ url, platform: "github" }` for a verified custom
 GitHub host.
 
-### Existing Platform findings
+### Import selected Semgrep Platform SAST findings with the SDK
 
-This file reader accepts scan reports. Semgrep Guardian, MCP and the Platform
-findings API return different records. For this workflow, use a Code scan
-artifact. [Guardian for Codex](https://docs.semgrep.dev/semgrep-guardian/ide-setup/codex),
-[Semgrep MCP implementation](https://github.com/semgrep/semgrep/blob/fe209763a4a2ccfcdf6434e6c332edc24a2f586e/cli/src/semgrep/mcp/server.py)
-and [Platform findings API](https://docs.semgrep.dev/semgrep-appsec-platform/semgrep-api)
+Request `issue_type=sast` and keep the project lookup and findings pages as original
+[Semgrep Web API](https://docs.semgrep.dev/semgrep-appsec-platform/semgrep-api) response text. Pass each page separately. When a page contributes a selected ID, the
+SDK checks its rows for conflicting product evidence. If a page contains only fields
+shared by several products, its product depends on the original request filter.
+[Guardian for Codex](https://docs.semgrep.dev/semgrep-guardian/ide-setup/codex) and
+[Semgrep MCP](https://github.com/semgrep/semgrep/blob/fe209763a4a2ccfcdf6434e6c332edc24a2f586e/cli/src/semgrep/mcp/server.py) return different records.
+Pass a fully qualified ref, such as `refs/heads/topic` or `refs/tags/topic`, exactly as it appears in the findings.
+Supply the HTTP(S) repository URL you independently associate with the target checkout.
+The native `project.url` and any selected `finding.repository.url` must match this spelling. Legacy findings can
+omit the project ID. An exact URL then identifies the repository even if the
+display name has changed. If multiple Semgrep projects share that URL, select
+the IDs from the intended project: the URL alone can also match a sibling project
+on the same ref. A conflicting project ID is always rejected. A finding without a
+URL must carry the matching project ID and a name equal to the namespace-qualified,
+decoded path in the operator-supplied URL.
+The local importer checks the checkout using its existing repository rules.
+
+```ts
+const selected = normalizeSelectedSemgrepPlatformFindings({
+  deployment,
+  ref,
+  sourceRepositoryUrl,
+  projectResponse,
+  findingsResponses,
+  findingIds,
+});
+const prepared = await prepareNormalizedLocalImport(
+  selected,
+  { provider: "semgrep", sourceKey, repository: checkout },
+  { sourceRepositories: [{ url: sourceRepositoryUrl }] },
+);
+if (prepared.preview.excluded.length) {
+  console.error(prepared.preview.excluded);
+} else {
+  await prepared.import();
+}
+```
+
+Keep the same source key on replay. Finding identity includes the deployment, project ID,
+SAST product, full ref, and native finding ID. Pass selected finding IDs as positive
+decimal strings without leading zeros. Semgrep emits 64-bit finding IDs. The adapter
+also accepts larger positive integer IDs in saved responses without rounding. The
+stored evidence includes the selected finding and the project's ID, name and URL.
+A record without a native rule name or message is excluded during preview.
+
+Changes to key order or equivalent numeric spellings such as `2` and `2.0` leave
+the stored record unchanged. Only repository-relative files become locations. Names
+with URI-like prefixes and directory-only paths remain in the native evidence.
