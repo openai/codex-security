@@ -4,9 +4,11 @@ import {
   captureCli,
   runCapturedCli,
 } from "./support/cli-run.js";
-import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
+import { sha256 } from "./support/finding-identity.js";
+import { writePublicationFindings } from "./support/sealed-scan.js";
 import { parseJsonLines, jsonLines } from "./support/json.js";
 import { nodeCommand } from "./support/shell.js";
+import { Database } from "bun:sqlite";
 import { execFileSync } from "node:child_process";
 import {
   appendFile,
@@ -21,12 +23,6 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { prepareScanPublication } from "../src/publication.js";
 import { recordPublishedIssues } from "../src/publication-store.js";
-import type {
-  CoverageDocument,
-  Finding,
-  FindingsDocument,
-  ScanManifest,
-} from "../src/models.js";
 import {
   checkScanPublicationInternal,
   forceTerminatePublicationProcesses,
@@ -56,13 +52,7 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "codex-security-publication-integration-",
 );
 
-interface PublicationFixture {
-  python: string;
-  scanDirectory: string;
-  stateDirectory: string;
-  environment: NodeJS.ProcessEnv;
-  findings: Finding[];
-}
+type PublicationFixture = Awaited<ReturnType<typeof fixture>>;
 
 interface PromptFinding {
   findingId: string;
@@ -91,7 +81,7 @@ interface StoredPublication {
 
 afterEach(cleanup);
 
-async function fixture(count: number): Promise<PublicationFixture> {
+async function fixture(count: number) {
   const root = await temporaryDirectory();
   const scanDirectory = join(root, "scan");
   const stateDirectory = join(root, "state");
@@ -101,37 +91,11 @@ async function fixture(count: number): Promise<PublicationFixture> {
   await mkdir(repository, { mode: 0o700 });
   if (process.platform !== "win32") await chmod(scanDirectory, 0o700);
 
-  const manifestPath = join(scanDirectory, "scan-manifest.json");
-  const findingsPath = join(scanDirectory, "findings.json");
-  const coveragePath = join(scanDirectory, "coverage.json");
-  const manifest = JSON.parse(
-    await readFile(manifestPath, "utf8"),
-  ) as ScanManifest;
-  const findings = JSON.parse(
-    await readFile(findingsPath, "utf8"),
-  ) as FindingsDocument;
-  const coverage = JSON.parse(
-    await readFile(coveragePath, "utf8"),
-  ) as CoverageDocument;
-  manifest.scan.id = SCAN_ID;
-  findings.scanId = SCAN_ID;
-  coverage.scanId = SCAN_ID;
-  const example = findings.findings[0]!;
-  findings.findings = Array.from({ length: count }, (_, index) => {
-    const finding = structuredClone(example);
-    finding.identity.anchor = `${example.identity.anchor}-${index + 1}`;
-    finding.title = `Synthetic finding ${index + 1}`;
-    setFindingIdentity(manifest.scan, finding);
-    return finding;
-  });
-  await writeFile(findingsPath, `${JSON.stringify(findings, null, 2)}\n`);
-  await writeFile(coveragePath, `${JSON.stringify(coverage, null, 2)}\n`);
-  for (const artifact of manifest.scan.artifacts) {
-    artifact.sha256 = sha256(
-      await readFile(join(scanDirectory, artifact.path)),
-    );
-  }
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  const findings = await writePublicationFindings(
+    scanDirectory,
+    SCAN_ID,
+    count,
+  );
 
   const python = (Bun.which("python3") ?? Bun.which("python"))!;
   expect(python).not.toBeNull();
@@ -155,7 +119,7 @@ async function fixture(count: number): Promise<PublicationFixture> {
       workspaceId: WORKSPACE_ID,
       scanDirectory,
       repository,
-      findings: findings.findings,
+      findings,
     }),
   );
   const seed = [
@@ -184,7 +148,7 @@ async function fixture(count: number): Promise<PublicationFixture> {
     scanDirectory,
     stateDirectory,
     environment,
-    findings: findings.findings,
+    findings,
   };
 }
 
@@ -272,20 +236,16 @@ function killTestProcess(pid: number): void {
 }
 
 function storedPublications(fixture: PublicationFixture): StoredPublication[] {
-  const script = [
-    "import json, sqlite3, sys",
-    "connection = sqlite3.connect(sys.argv[1])",
-    "connection.row_factory = sqlite3.Row",
-    "rows = connection.execute('SELECT scan_id, finding_id, occurrence_id, destination_type, team_id, project_id, external_id, external_url FROM finding_publications ORDER BY id').fetchall()",
-    "print(json.dumps([dict(row) for row in rows]))",
-  ].join("\n");
-  return JSON.parse(
-    execNodePython(
-      fixture.python,
-      ["-c", script, join(fixture.stateDirectory, "workbench.sqlite3")],
-      fixture.environment,
-    ),
-  ) as StoredPublication[];
+  using database = new Database(
+    join(fixture.stateDirectory, "workbench.sqlite3"),
+    { readwrite: true, create: false },
+  );
+  database.exec("PRAGMA query_only = ON");
+  return database
+    .query<StoredPublication, []>(
+      "SELECT scan_id, finding_id, occurrence_id, json_extract(destination_key, '$[0]') AS destination_type, json_extract(destination_key, '$[1]') AS team_id, json_extract(destination_key, '$[2]') AS project_id, external_id, external_url FROM finding_issue_receipts ORDER BY id",
+    )
+    .all();
 }
 
 function receiptPath(fixture: PublicationFixture): string {
@@ -298,6 +258,119 @@ function receiptPath(fixture: PublicationFixture): string {
 }
 
 describe("database-backed Linear publication integration", () => {
+  test("skips a Linear issue recorded through the shared tracking workbench", async () => {
+    const completed = await fixture(1);
+    const finding = completed.findings[0]!;
+    const sealed = await artifactDigests(completed.scanDirectory);
+    const issue = {
+      findingId: finding.findingId,
+      occurrenceId: finding.occurrenceId,
+      issueIdentifier: "EXAMPLE-711",
+      url: "https://linear.app/example/issue/EXAMPLE-711",
+    };
+    await runWorkbench(
+      {
+        python: completed.python,
+        pluginRoot: PLUGIN_ROOT,
+        environment: completed.environment,
+      },
+      ["finding-issues"],
+      JSON.stringify({
+        action: "record",
+        scanDirectory: completed.scanDirectory,
+        destination: {
+          type: "linear",
+          teamId: OPTIONS.teamId,
+          projectId: OPTIONS.projectId,
+        },
+        receipts: [
+          {
+            ...issue,
+            operation: "create",
+            readback: {
+              status: "failed",
+              error: "Synthetic readback unavailable",
+            },
+          },
+        ],
+      }),
+    );
+    const result = await publishScanInternal(
+      completed.scanDirectory,
+      {
+        ...OPTIONS,
+        skipExisting: true,
+      },
+      {
+        environment: completed.environment,
+        resolveCodex: throwing(
+          "A recorded tracker issue must not be created again.",
+        ),
+      },
+    );
+    expect(result.skipped).toEqual([issue]);
+    expect(result.created).toEqual([]);
+    expect(result.counts).toEqual({
+      findings: 1,
+      created: 0,
+      failed: 0,
+      skipped: 1,
+    });
+    expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);
+  });
+
+  test("exposes a CLI-created issue to the shared tracking workbench", async () => {
+    const completed = await fixture(1);
+    type LinearClient = ReturnType<
+      NonNullable<PublishScanDependencies["linearClient"]>
+    >;
+    const result = await publishScanInternal(
+      completed.scanDirectory,
+      {
+        ...OPTIONS,
+        linearApiKey: "lin_api_SYNTHETIC_INTEROPERABILITY",
+      },
+      {
+        environment: completed.environment,
+        linearClient: () =>
+          ({
+            createIssue: async () => ({
+              success: true,
+              issue: Promise.resolve({
+                identifier: "EXAMPLE-712",
+                url: "https://linear.app/example/issue/EXAMPLE-712",
+              }),
+            }),
+          }) as unknown as LinearClient,
+      },
+    );
+    expect(result.created).toHaveLength(1);
+    const inspected = await runWorkbench(
+      {
+        python: completed.python,
+        pluginRoot: PLUGIN_ROOT,
+        environment: completed.environment,
+      },
+      ["finding-issues"],
+      JSON.stringify({
+        action: "inspect",
+        scanDirectory: completed.scanDirectory,
+        destination: {
+          type: "linear",
+          teamId: OPTIONS.teamId,
+          projectId: OPTIONS.projectId,
+        },
+      }),
+    );
+    expect(inspected["receipts"]).toEqual([
+      expect.objectContaining({
+        ...result.created[0],
+        scanId: SCAN_ID,
+        operation: "create",
+      }),
+    ]);
+  });
+
   test("publishes classified selections while verifying the complete scan history and preserving earlier tickets", async () => {
     const { classifyScanDirectorySeverity } =
       await import("../src/classify-scan-severity.js");
@@ -999,7 +1072,7 @@ describe("database-backed Linear publication integration", () => {
       const publisherPidFile = join(root, "sdk-publication-child.pid");
       await writeFile(
         preload,
-        'const fs = require("node:fs");fs.readFileSync(0, "utf8");fs.writeFileSync(process.env.CODEX_PUBLICATION_PARENT_PID, String(process.pid));const waiter = new Int32Array(new SharedArrayBuffer(4));for (;;) Atomics.wait(waiter, 0, 0, 1000);',
+        'if (require("node:path").basename(process.argv[1] ?? "") !== "exec") return; const fs = require("node:fs");fs.readFileSync(0, "utf8");fs.writeFileSync(process.env.CODEX_PUBLICATION_PARENT_PID, String(process.pid));const waiter = new Int32Array(new SharedArrayBuffer(4));for (;;) Atomics.wait(waiter, 0, 0, 1000);',
         { mode: 0o600 },
       );
       const publishing = publishScanInternal(completed.scanDirectory, OPTIONS, {
@@ -1088,7 +1161,8 @@ describe("database-backed Linear publication integration", () => {
       'const fs = require("node:fs");process.on("SIGINT", () => {});process.on("SIGTERM", () => {});fs.writeFileSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID, String(process.pid));setInterval(() => {}, 1000);';
     await writeFile(
       preload,
-      `const fs = require("node:fs"); const { spawn } = require("node:child_process");
+      `if (require("node:path").basename(process.argv[1] ?? "") !== "exec") return;
+const fs = require("node:fs"); const { spawn } = require("node:child_process");
 const prompt = fs.readFileSync(0, "utf8"); const payload = JSON.parse(prompt.split("BEGIN UNTRUSTED PUBLICATION DATA\\n")[1].split("\\nEND UNTRUSTED PUBLICATION DATA")[0]); const finding = JSON.parse(fs.readFileSync(payload.publicationFile, "utf8")).batches[0][0];
 fs.appendFileSync(payload.handoffFile, JSON.stringify({ scanId: payload.scanId, findingId: finding.findingId, occurrenceId: finding.occurrenceId, error: "Synthetic connected publication may have completed.", possibleMutation: true, arguments: finding.arguments }) + "\\n"); fs.writeFileSync(process.env.CODEX_PUBLICATION_PARENT_PID, String(process.pid));
 spawn(process.execPath, ["-e", ${JSON.stringify(descendant)}], { env: { ...(process.platform === "win32" ? { SystemRoot: process.env.SystemRoot } : {}), CODEX_PUBLICATION_DESCENDANT_PID: process.env.CODEX_PUBLICATION_DESCENDANT_PID }, stdio: "ignore" });

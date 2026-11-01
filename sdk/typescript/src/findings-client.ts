@@ -30,8 +30,18 @@ class FindingsHttpError extends CodexSecurityError {
     message: string,
     signal?: AbortSignal,
   ): Promise<FindingsHttpError> {
-    // Gateways can return plain text or HTML instead of the service's JSON error.
-    const body: unknown = await response.json().catch(() => undefined);
+    // Service errors are JSON; other gateway bodies need not finish to report HTTP failure.
+    const mediaType = response.headers
+      .get("Content-Type")
+      ?.split(";", 1)[0]
+      ?.trim()
+      .toLowerCase();
+    let body: unknown;
+    if (mediaType === "application/json" || mediaType?.endsWith("+json")) {
+      body = await response.json().catch(() => undefined);
+    } else {
+      void response.body?.cancel().catch(() => undefined);
+    }
     signal?.throwIfAborted();
     const error = parseFindingsErrorResponse(body);
     return new FindingsHttpError(
@@ -50,16 +60,27 @@ function isRetryable(error: unknown): boolean {
   return error instanceof TypeError || error instanceof SyntaxError;
 }
 
+export function findingsBaseUrl(value: string): URL {
+  const url = new URL(value);
+  if (!url.pathname.endsWith("/")) url.pathname += "/";
+  url.search = "";
+  url.hash = "";
+  return url;
+}
+
 export class FindingsClient {
+  private readonly url: URL;
   constructor(
-    private readonly url: string,
+    url: string,
     private readonly signal?: AbortSignal,
     private readonly request: FindingsRequest = fetch,
     private readonly retries: {
       wait?: typeof waitForRetry;
       random?: () => number;
     } = {},
-  ) {}
+  ) {
+    this.url = findingsBaseUrl(url);
+  }
 
   async potentialDuplicates(
     findingId: string,
@@ -138,7 +159,7 @@ export class FindingsClient {
   }
 
   private endpoint(path: string): URL {
-    return new URL(path, this.url.endsWith("/") ? this.url : `${this.url}/`);
+    return new URL(path, this.url);
   }
 
   private async post(path: string, body: unknown): Promise<unknown> {

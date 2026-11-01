@@ -13,8 +13,12 @@ function endpointPattern(path: string, queryParts: string[] = []) {
     const repository = repositoryName(context.vars.target_repo as string);
     const paths = [path, path.replace("{owner}/{repo}", repository)];
     return (
-      paths.some((candidate) => escapedLiteralPattern(candidate).test(text)) &&
-      queryParts.every((part) => escapedLiteralPattern(part).test(text))
+      paths.some((candidate) =>
+        new RegExp(
+          escapedLiteralPattern(candidate).source + "\\b(?![/-]|\\.\\w)",
+          "i",
+        ).test(text),
+      ) && queryParts.every((part) => escapedLiteralPattern(part).test(text))
     );
   };
 }
@@ -217,6 +221,13 @@ const checks: Record<
         "must scope the REST fallback to the specified account and exact repository",
       );
     return failures;
+  },
+
+  default_rest: (text) => {
+    const decision = structuredAnswer(text);
+    return decision?.transport === "rest" && Object.keys(decision).length === 1
+      ? []
+      : ["must select REST when the user has not requested the Connector"];
   },
 
   explicit_issue: (text) => {

@@ -96,7 +96,7 @@ checksum = "9fb9654ba8355388abeb8dcb4fc62f511300867002afc858860463bdd9fe0c44"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.4",
+ "syn",
 ]
 
 [[package]]
@@ -130,9 +130,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.189"
+version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libloading"
@@ -152,9 +152,9 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "napi"
-version = "3.14.0"
+version = "3.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15301c22171e8397a7b17beb3c75bf486bf67ca3bdad8ea347835b770df61969"
+checksum = "6a746ad50efbfb632ade1de4025519a477decbbd798cea1a6ac41d7c44f80083"
 dependencies = [
  "bitflags",
  "ctor",
@@ -174,36 +174,36 @@ checksum = "b899b545d3aa6dca985939059f258c5488d34e4ecf39c274e20009748f4b846d"
 
 [[package]]
 name = "napi-derive"
-version = "3.6.10"
+version = "3.6.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d11174f7507d7f6cdd69874f541eff194e81c95652b775e69036bcf8d5b7a805"
+checksum = "3ff48271a0f61abb83f3e2d1989fa71169143db95f6f948c3a8903961f2855dc"
 dependencies = [
  "convert_case",
  "ctor",
  "napi-derive-backend",
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn",
 ]
 
 [[package]]
 name = "napi-derive-backend"
-version = "6.1.4"
+version = "6.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd6856fe1686867da90ed0dc292d7c0c87a695eb7c578b913360f33619ee01e3"
+checksum = "f2639052c5aff9956a21d7b6202fc61d5e89c5f19c72d289b7a0641ea94e8159"
 dependencies = [
  "convert_case",
  "proc-macro2",
  "quote",
  "semver",
- "syn 2.0.119",
+ "syn",
 ]
 
 [[package]]
 name = "napi-sys"
-version = "3.4.0"
+version = "3.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e22a4f25c16a5c5411d987cd6fbd48313522ae1789ade2d6dd3efdc6d40a0fc8"
+checksum = "d153beb7d5c973f4b9395be8a83054a28968b61188f1dd1a2cc2321af22daea2"
 dependencies = [
  "libloading",
 ]
@@ -255,17 +255,6 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
-
-[[package]]
-name = "syn"
-version = "2.0.119"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
-dependencies = [
- "proc-macro2",
- "quote",
- "unicode-ident",
-]
 
 [[package]]
 name = "syn"

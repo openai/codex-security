@@ -1,4 +1,5 @@
 import { delimiter, isAbsolute, resolve } from "node:path";
+import { isNumberObject } from "node:util/types";
 import {
   bundledPluginRoot,
   workbenchEnvironment,
@@ -6,7 +7,6 @@ import {
   type WorkbenchCommandOptions,
 } from "../runtime.js";
 import { FindingsError } from "./errors.js";
-import type { DashboardQuery, DashboardSnapshot } from "./dashboard-types.js";
 import type { FindingDedupeGroup } from "../finding-dedupe-groups.js";
 import type {
   FindingNeighborhood,
@@ -25,10 +25,6 @@ export class SqliteFindingsStore implements FindingsStore {
 
   async initialize(): Promise<void> {
     await this.run("database-info");
-  }
-
-  dashboard(query: DashboardQuery): Promise<DashboardSnapshot> {
-    return this.run("dashboard", query);
   }
 
   async insert(
@@ -72,8 +68,25 @@ export class SqliteFindingsStore implements FindingsStore {
   }
 
   private async run<T>(command: string, payload?: unknown): Promise<T> {
-    const input = JSON.stringify(payload);
-    const options = await (this.options ??= this.resolveOptions());
+    const input = JSON.stringify(
+      payload,
+      command === "store-findings"
+        ? (_key, value: unknown) => {
+            if (isNumberObject(value)) value = +value;
+            if (typeof value === "number" && !Number.isFinite(value))
+              throw new TypeError(
+                "Stored finding JSON cannot contain non-finite numbers.",
+              );
+            return value;
+          }
+        : undefined,
+    );
+    const options = await (this.options ??= this.resolveOptions().catch(
+      (error: unknown) => {
+        this.options = undefined;
+        throw error;
+      },
+    ));
     const result = await runWorkbench(options, [command], input);
     const messages = {
       finding_conflict:
@@ -81,7 +94,7 @@ export class SqliteFindingsStore implements FindingsStore {
           ? "A finding identity conflicts with stored data."
           : "Every dedupe group member must already exist in the findings database.",
       finding_not_indexed:
-        "The finding has no current embedding in the requested scope. Import it with the matching repositoryId through POST /v1/bulk/findings before requesting potential duplicates.",
+        "The finding has no current embedding in the requested scope. Prepare its local embeddings or insert it with the matching repositoryId before requesting potential duplicates.",
       embedding_failed:
         "A stored embedding cannot be compared. Reimport the finding.",
     };

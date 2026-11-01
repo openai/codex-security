@@ -1,7 +1,13 @@
 # Codex Security
 
-`@openai/codex-security` is a CLI and TypeScript SDK for finding, validating, and
-fixing security vulnerabilities in your code.
+Codex Security helps you find, investigate, and fix vulnerabilities in your code.
+Use its security workflows in Codex, or automate them with the
+`@openai/codex-security` CLI and TypeScript SDK.
+
+- **In Codex:** [choose a security workflow](docs/agent-workflows.md).
+- **In a terminal:** [install the CLI and scan your repository](#quick-start).
+- **In automation:** use the [TypeScript SDK](#typescript-sdk) or
+  [GitHub Action](#github-actions).
 
 ## Features
 
@@ -16,20 +22,59 @@ fixing security vulnerabilities in your code.
 - Automate scans across repositories or project components, including in CI and
   containers.
 
+## Use in Codex
+
+Open your repository in a Codex session with the Codex Security plugin enabled,
+then ask:
+
+> Run a Codex Security scan on this repository, focusing on authentication and
+> authorization. Return the saved report, source evidence, and coverage limits.
+
+A completed scan saves a report, findings, coverage, and a threat model when
+available. Use those results to investigate findings, request a patch, or verify
+an existing fix. See the [agent workflow guide](docs/agent-workflows.md) for plugin
+setup, task selection, and recovery when required tools are unavailable.
+
 ## Quick start
 
 Requires Node.js 22.13.0+ within 22.x, or Node.js 24.x or 26.x, and Python 3.10+.
 Python 3.10 also requires `tomli`.
 
-This example explicitly requests Daybreak Blue and requires the corresponding
-access. Without Daybreak access, omit `--cyber-access-program daybreak_blue`
-or use `--cyber-access-program standard`.
+Install the CLI globally and sign in:
 
 ```bash
-npm install @openai/codex-security
-npx @openai/codex-security login
-npx @openai/codex-security scan /path/to/repository \
-  --cyber-access-program daybreak_blue
+npm install --global @openai/codex-security
+cs login
+```
+
+`cs` is a short alias for `codex-security`; both commands run the same CLI.
+The installation creates both commands in npm's global executable directory,
+which must be on your `PATH`. If `cs` already resolves to another tool, use
+`codex-security` instead. If npm stops with an `EEXIST` error for `cs`, use
+`npx @openai/codex-security` without a global installation.
+
+Run your scan from the repository directory:
+
+```bash
+cs scan .
+```
+
+If you have Daybreak Blue access, add `--cyber-access-program daybreak_blue`
+to the scan command. Otherwise, omit the flag or use
+`--cyber-access-program standard`.
+
+To use Codex's Daybreak toggle, pass `--codex daybreak=true`. It defaults off
+and requires compatible access. See [Daybreak configuration](sdk/typescript/docs/cli.md#daybreak-opt-in)
+for SDK and plugin usage, including Deep Scan workers.
+
+Scans use your existing `SECURITY.md` guidance. You can optionally
+[draft or update a policy](#generate-securitymd) before scanning.
+
+To run without a global installation, replace `cs` in these examples with
+`npx @openai/codex-security`, for example:
+
+```bash
+npx @openai/codex-security scan .
 ```
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` in the scan process's environment.
@@ -45,19 +90,40 @@ Choose a scope and scan mode:
 
 ```bash
 # Scan selected paths.
-npx @openai/codex-security scan . --path src --path tests
+cs scan . --path src --path tests
 
 # Scan committed changes from a base revision to HEAD.
-npx @openai/codex-security scan . --diff origin/main
+cs scan . --diff origin/main
 
 # Run a deep scan of the repository.
-npx @openai/codex-security scan . --mode deep
+cs scan . --mode deep
 ```
 
-Use `npx @openai/codex-security --help` to browse commands, or `scan --help`
+Use `cs scan . --max-time 15` for an advisory 15-minute Standard investigation
+allowance. See [investigation time](sdk/typescript/docs/cli.md#set-investigation-time)
+for timing semantics and Deep Scan limits.
+
+Use `cs --help` to browse commands, or `cs scan --help`
 for scan options, cost limits, and patching after a scan.
 
+For an application spread across repositories, see
+[review one system across repositories](sdk/typescript/docs/cli.md#review-one-system-across-repositories).
+Use [bulk scans](sdk/typescript/docs/cli.md#bulk-scans) for independent repository
+reviews in one resumable campaign.
+
+After a scan, [inspect its scope and follow-up work](sdk/typescript/docs/cli.md#understand-scan-scope-and-follow-up-work)
+to understand recorded exclusions and decide whether to review the findings,
+run a focused scan, or recover an interrupted run.
+
 ## TypeScript SDK
+
+Install the package locally in your TypeScript project:
+
+```bash
+npm install @openai/codex-security
+```
+
+Then import it:
 
 ```ts
 import { CodexSecurity } from "@openai/codex-security";
@@ -75,18 +141,41 @@ try {
 The [SDK guide](sdk/typescript/README.md) includes deep-scan configuration,
 validation, severity classification, owner suggestions, and result handling.
 
+## Read existing Cloud findings
+
+When Codex Security Cloud is available to your account, the Security plugin's
+`$cloud-findings` skill can read findings, reports, recorded assignment and
+verification, and scan status in Codex desktop or the Codex CLI. Cloud is an
+optional connection; local scans work without it.
+
+See [Cloud connection setup and CLI reads](sdk/typescript/README.md#read-existing-cloud-findings)
+for authentication requirements and a read-only example.
+
 ## Generate SECURITY.md
 
-Draft security guidance for a repository or one of its components:
+Use `policy` to draft a new `SECURITY.md` or update an existing one. Use `--path`
+to select a component:
 
 ```bash
-npx @openai/codex-security policy .
-npx @openai/codex-security policy . --path services/api --knowledge-base architecture.md
+cs policy .
+cs policy . --path services/api --knowledge-base architecture.md
 ```
 
-The command saves a draft outside the checkout. Review it before installing it
-as guidance for future scans. See the [policy guide](sdk/typescript/docs/cli.md#generate-a-security-policy)
-for supporting documents and SDK usage.
+The command saves its draft outside the repository and leaves existing files
+unchanged. Review the diff and notes, edit the draft, then copy only `SECURITY.md`
+to the displayed **Policy target**. Keep the saved architecture and threat-model
+documents outside the repository.
+
+Scans already use root and component `SECURITY.md` files. Keep your current policy
+if it needs no changes. When updating it, preserve its vulnerability-reporting
+instructions. If the command says the policy is already up to date, no copy is
+needed.
+
+Files at `.github/SECURITY.md` or `docs/SECURITY.md` often contain reporting
+instructions. Preserve them when drafting a policy; those locations do not
+automatically provide repository-wide scan guidance. See the
+[policy guide](sdk/typescript/docs/cli.md#generate-a-security-policy) for policy
+locations, unanswered questions, saved artifacts, and SDK usage.
 
 ## Save and export threat models
 
@@ -94,12 +183,13 @@ Scans and policy generation save threat models with their results. Export a save
 model without starting another analysis:
 
 ```bash
-npx @openai/codex-security export --scan SCAN_ID --artifact threat-model --output threatmodel.md
+cs export --scan SCAN_ID --artifact threat-model --output threatmodel.md
 ```
 
 Omit `--scan` to use the current repository's latest completed scan. The
 [export guide](sdk/typescript/docs/cli.md#exports-and-ci) also covers findings,
-SARIF output for CI, and the offline TypeScript API.
+SARIF output for CI, and the offline TypeScript API. For ServiceNow Application
+Vulnerability Response, see [Export findings for ServiceNow](sdk/typescript/docs/cli.md#export-findings-for-servicenow).
 
 ## GitHub Actions
 
@@ -145,9 +235,9 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
 ```
 
-Findings are report-only by default. Partial scans with valid results produce a
-warning; scanner and required reporting errors fail the job. Severity thresholds
-apply to complete scans.
+Findings are report-only by default. Set a severity threshold to fail on reported
+findings at or above it. Scanner and required reporting errors fail the job;
+intentional file exclusions and investigation notes do not.
 See the [Action setup and input reference](github-action/README.md) for PR scans,
 severity thresholds, and report uploads.
 
@@ -159,38 +249,30 @@ which keeps results and authentication between runs. See the
 The [workflow runner](docker/README.md#workflow-runner) runs individual CLI stages
 in containers and can connect to a separately deployed findings service.
 
-## Findings service (preview)
+## Findings storage and deduplication
 
-Store findings, browse them in a dashboard, and review potential duplicates.
-Start the local service with:
-
-```bash
-npx @openai/codex-security serve
-```
-
-Publish a completed scan with `publish scan --to custom`, then use `dedupe` to
-review potential duplicates and save accepted groups. Point both commands at the
-service with `--findings-url`. The [service guide](sdk/typescript/docs/findings-service.md)
-covers setup, publishing, deduplication, and Docker deployment.
-
-The API has no built-in authentication. Imports send complete finding JSON to
-the configured embeddings endpoint and need an embedding API key, even after
-ChatGPT login.
+The [findings guide](sdk/typescript/docs/findings-service.md) covers local
+storage, deduplication, and compatibility with independently operated endpoints
+through `publish scan --to custom` and explicit `--findings-url`. The local
+`serve` command and browser dashboard have been removed; existing databases and
+scan artifacts remain available.
 
 ## Other providers
 
-Scans support OpenAI, Amazon Bedrock, OpenRouter, and Fireworks AI. Bedrock uses
+Scans support OpenAI, Amazon Bedrock, OpenRouter, Fireworks AI, and Cheaper Inference. Bedrock uses
 AWS credentials and does not require a separate OpenAI login. See
 [Bedrock setup](docs/bedrock.md) for AWS profiles, regions, and model access.
 
-For OpenRouter and Fireworks AI, set the provider's API key and choose a supported
+For OpenRouter, Fireworks AI, and Cheaper Inference, set the provider's API key and choose a supported
 model. See [provider configuration](sdk/typescript/docs/cli.md#native-command-authentication-and-other-providers)
 for examples.
 
 ## Documentation
 
 - [Online documentation](https://learn.chatgpt.com/docs/security/cli)
+- [Agent workflows and recovery](docs/agent-workflows.md)
 - [CLI reference](sdk/typescript/docs/cli.md)
+- [Scanner file import schema and capability guide](docs/scanner-imports/schema-guide.md)
 - [Project configuration](docs/project-configuration.md)
 - [Examples](examples/README.md)
 

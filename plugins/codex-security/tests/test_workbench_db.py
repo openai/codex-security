@@ -22,12 +22,15 @@ from workbench_test_support import (
     create_saved_git_workspace,
     create_saved_workspace,
     create_workspace,
+    empty_target_paths,
     empty_target_scan,
     fail_scan,
     get_scan,
     initialize_git_repository,
+    load_script,
     mark_handoff_delivered,
     mark_remediation_delivered,
+    read_review_state,
     request_remediation,
     request_remediation_action,
     resume_deep_scan,
@@ -60,10 +63,6 @@ DIRECTORY_CHANGED_WARNING = (
     "Directory contents changed while the scan was running; "
     "results were saved for the original snapshot."
 )
-TARGET_UNAVAILABLE_WARNING = (
-    "The scan target became unavailable while the scan was running; "
-    "results were saved for the original revision or snapshot."
-)
 GIT_UNAVAILABLE_WARNING = (
     "The scanned Git repository became unavailable while the scan was running; "
     "results were saved for the original revision."
@@ -73,7 +72,9 @@ BUDGET_WARNING = "Scan stopped: estimated cost $0.00625 exceeded the $0.005 cost
 EXPECTED_TABLES = {
     "deep_scan_dedup_inputs",
     "deep_scan_runs",
+    "deep_scan_worker_threads",
     "deep_scan_workers",
+    "external_source_reports",
     "finding_decisions",
     "finding_dedupe_group_members",
     "finding_dedupe_groups",
@@ -81,7 +82,7 @@ EXPECTED_TABLES = {
     "local_finding_embeddings",
     "finding_locations",
     "finding_occurrences",
-    "finding_publications",
+    "finding_issue_receipts",
     "finding_remediation_attempts",
     "finding_repositories",
     "finding_triage",
@@ -113,9 +114,7 @@ def budget_scan_fixture(
     terminal: bool = True,
     terminal_reason: str = "saturated",
 ) -> tuple[Path, Path, Path, str, Path]:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "app.py").write_text("value = request.args['value']\n")
     scan_dir = tmp_path / "scan"
     scan_dir.mkdir(mode=0o700)
@@ -185,7 +184,9 @@ def budget_scan_fixture(
     return state_dir, target, scan_dir, scan_id, ledger
 
 
-def complete_budget_scan(state_dir: Path, scan_id: str, *, check: bool = True) -> dict[str, object]:
+def complete_budget_scan(
+    state_dir: Path, scan_id: str, *, warning: str = BUDGET_WARNING, check: bool = True
+) -> dict[str, object]:
     return scan_command(
         state_dir,
         "complete-budget-exhausted-scan",
@@ -193,7 +194,7 @@ def complete_budget_scan(state_dir: Path, scan_id: str, *, check: bool = True) -
         "--cost-json",
         json.dumps(BUDGET_COST),
         "--message",
-        BUDGET_WARNING,
+        warning,
         check=check,
     )
 
@@ -224,34 +225,47 @@ def test_cost_limit_rejects_invalid_or_nonincreasing_totals(tmp_path: Path, limi
     assert scan_command(state_dir, "get-scan-recipe", scan_id)["recipe"]["maxCostUsd"] == 0.005
 
 
+@pytest.mark.parametrize(
+    "warning",
+    [
+        BUDGET_WARNING,
+        BUDGET_WARNING
+        + "\n"
+        + "Synthetic diagnostic detail.\n" * 100
+        + "Final cost-limit diagnostic.",
+    ],
+    ids=["short-diagnostic", "long-diagnostic"],
+)
 def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
     tmp_path: Path,
+    warning: str,
 ) -> None:
     state_dir, target, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
     original_ledger = ledger.read_bytes()
 
-    completed = complete_budget_scan(state_dir, scan_id)["scan"]
+    completed = complete_budget_scan(state_dir, scan_id, warning=warning)["scan"]
 
     assert completed["progress"]["status"] == "complete"
     assert completed["findings"] == []
     assert completed["cost"] == BUDGET_COST
-    assert completed["warnings"] == [BUDGET_WARNING]
+    assert completed["warnings"] == [warning]
+    assert get_scan(state_dir, scan_id)["scan"]["warnings"] == [warning]
     assert ledger.read_bytes() == original_ledger
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     assert manifest["scan"]["target"]["displayName"] == target.name
     assert manifest["scan"]["target"]["targetId"] == stable_target_id(target)
     assert manifest["scan"]["sealedAt"]
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    assert warning in manifest["scan"]["scope"]["limitations"]
+    coverage = read_review_state(state_dir, scan_dir)
     assert coverage["mode"] == "deep_repository"
-    assert coverage["completeness"] == "partial"
+
     assert coverage["deferred"][0]["id"] == "candidate-1"
     assert coverage["deferred"][0]["paths"] == ["app.py"]
     assert "cost limit" in coverage["deferred"][0]["reason"]
     assert "User input reaches a SQL statement" in coverage["deferred"][0]["reason"]
     assert coverage["surfaces"][0]["disposition"] == "needs_follow_up"
     report = (scan_dir / "report.md").read_text()
-    assert "No findings were validated before the scan reached its cost limit" in report
-    assert "User input reaches a SQL statement" in report
+    assert "No findings were reported." in report
 
 
 def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path) -> None:
@@ -269,8 +283,8 @@ def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path)
     assert completed["progress"]["status"] == "complete"
     assert completed["findingCount"] == 1
     assert "Unsafe archive extraction" in completed["findings"][0]["title"]
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+    coverage = read_review_state(state_dir, scan_dir)
+
     assert coverage["deferred"][0]["id"] == "candidate-1"
 
 
@@ -309,8 +323,8 @@ def test_budget_exhaustion_preserves_existing_candidate_decisions(
 
     assert completed["progress"]["status"] == "complete"
     assert completed["findings"] == []
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+    coverage = read_review_state(state_dir, scan_dir)
+
     assert coverage["surfaces"][0]["disposition"] == surface_disposition
     assert any(row["id"] == "candidate-1" for row in coverage["deferred"]) is deferred
     if not deferred:
@@ -330,7 +344,7 @@ def test_budget_exhaustion_preserves_existing_terminal_surface(tmp_path: Path) -
         coverage_mode="deep_repository",
     )
     coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage["surfaces"].append(
         {
             "id": "candidate-candidate-1",
@@ -344,7 +358,7 @@ def test_budget_exhaustion_preserves_existing_terminal_surface(tmp_path: Path) -
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["findingCount"] == 1
-    preserved = json.loads(coverage_path.read_text())
+    preserved = read_review_state(state_dir, scan_dir)
     assert sum(row["id"] == "candidate-candidate-1" for row in preserved["surfaces"]) == 1
     assert preserved["surfaces"][1]["disposition"] == "rejected"
     assert not any(row["id"] == "candidate-1" for row in preserved["deferred"])
@@ -374,7 +388,7 @@ def test_budget_exhaustion_preserves_existing_deferred_work_with_one_trusted_mar
     findings["findings"] = []
     findings_path.write_text(json.dumps(findings))
     coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     existing = {"id": "existing-proof-gap", "reason": reason, "paths": ["app.py"]}
     coverage["deferred"] = [existing]
     coverage_path.write_text(json.dumps(coverage))
@@ -382,7 +396,7 @@ def test_budget_exhaustion_preserves_existing_deferred_work_with_one_trusted_mar
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"
-    preserved = json.loads(coverage_path.read_text())
+    preserved = read_review_state(state_dir, scan_dir)
     assert preserved["deferred"][0] == existing
     assert len(preserved["deferred"]) == 1 + marker_added
     if marker_added:
@@ -390,10 +404,7 @@ def test_budget_exhaustion_preserves_existing_deferred_work_with_one_trusted_mar
             "id": "scan-cost-limit",
             "reason": "Validation was deferred because the scan reached its cost limit.",
         }
-    assert (
-        "No findings were validated before the scan reached its cost limit"
-        in (scan_dir / "report.md").read_text()
-    )
+    assert "No findings were reported." in (scan_dir / "report.md").read_text()
 
 
 def test_budget_exhaustion_preserves_capped_discovery(tmp_path: Path) -> None:
@@ -402,9 +413,7 @@ def test_budget_exhaustion_preserves_capped_discovery(tmp_path: Path) -> None:
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"
-    assert (
-        json.loads((scan_dir / "coverage.json").read_text())["deferred"][0]["id"] == "candidate-1"
-    )
+    assert read_review_state(state_dir, scan_dir)["deferred"][0]["id"] == "candidate-1"
 
 
 def test_budget_exhaustion_with_no_candidates_is_honestly_partial(tmp_path: Path) -> None:
@@ -414,8 +423,8 @@ def test_budget_exhaustion_with_no_candidates_is_honestly_partial(tmp_path: Path
 
     assert completed["progress"]["status"] == "complete"
     assert completed["findings"] == []
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+    coverage = read_review_state(state_dir, scan_dir)
+
     assert coverage["deferred"] == [
         {
             "id": "scan-cost-limit",
@@ -430,7 +439,7 @@ def test_budget_exhaustion_preserves_scoped_path_inventory(tmp_path: Path) -> No
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert coverage["mode"] == "scoped_path"
     assert coverage["inventoryStrategy"] == "scoped_path"
     assert coverage["includePaths"] == ["app.py"]
@@ -529,7 +538,7 @@ def test_budget_exhaustion_preserves_out_of_scope_supporting_evidence(tmp_path: 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert coverage["deferred"][0]["paths"] == ["app.py", "shared/control.py"]
 
 
@@ -550,7 +559,7 @@ def test_budget_exhaustion_preserves_unicode_line_separator_inventory(tmp_path: 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert coverage["deferred"][0]["paths"] == ["dir\u2028name.py"]
 
 
@@ -568,9 +577,7 @@ def test_budget_exhaustion_rejects_symlink_candidate_ledger(tmp_path: Path) -> N
 
 
 def test_workbench_reopens_workspace_only_from_owning_thread(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_saved_workspace(state_dir, target, thread_id="thread-a")
 
     reopened = workspace_command(
@@ -622,15 +629,13 @@ def test_completion_normalizes_unsealed_deep_inventory_strategy_alias(
     completed = scan_command(state_dir, "complete-scan", scan_id)
 
     assert completed["scan"]["progress"]["status"] == "complete"
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert coverage["mode"] == "deep_repository"
     assert coverage["inventoryStrategy"] == "repository"
 
 
 def test_completion_warns_after_plain_directory_changes(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     source = target / "app.py"
     source.write_text("version = 1\n")
     saved = create_saved_workspace(state_dir, target)
@@ -658,9 +663,7 @@ def test_completion_warns_after_plain_directory_changes(tmp_path: Path) -> None:
 
 
 def test_completion_warns_when_scanned_directory_becomes_unavailable(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "app.py").write_text("version = 1\n")
     scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target, relative_path="app.py")
@@ -669,17 +672,18 @@ def test_completion_warns_when_scanned_directory_becomes_unavailable(tmp_path: P
     completed = scan_command(state_dir, "complete-scan", scan_id)
 
     assert completed["scan"]["progress"]["status"] == "complete"
-    assert completed["scan"]["warnings"] == [TARGET_UNAVAILABLE_WARNING]
-    assert completed["targetWarnings"] == [TARGET_UNAVAILABLE_WARNING]
+    warnings = completed["scan"]["warnings"]
+    assert len(warnings) == 1
+    assert "selected checkout is no longer accessible" in warnings[0]
+    assert "results were saved" in warnings[0]
+    assert completed["targetWarnings"] == warnings
     assert completed["scan"]["findingCount"] == 1
     assert completed["scan"]["remediationAvailable"] is False
     assert (scan_dir / "report.md").is_file()
 
 
 def test_scan_start_rejects_artifact_root_inside_target(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
 
     failed = start_scan_command(
@@ -715,9 +719,7 @@ def test_workbench_serializes_concurrent_scan_completion(tmp_path: Path) -> None
 
 
 def test_workbench_persists_scan_model_and_updates_it_from_progress(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_delivered_scan(
         state_dir,
@@ -756,9 +758,7 @@ def test_workbench_persists_scan_model_and_updates_it_from_progress(tmp_path: Pa
 
 
 def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     workspace_id = str(saved["id"])
     assert saved["userContext"] == "Pay attention to uploaded archives."
@@ -839,7 +839,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
     assert finding["codeEvidence"][0]["code"] == "destination.write_bytes(entry.read())"
     assert finding["validation"]["evidenceRefs"] == ["archive-write"]
     assert finding["evidenceExcerpt"] == "destination.write_bytes(entry.read())"
-    assert finding["attackPath"]["dataFlow"] == (
+    assert finding["attackPath"]["dataflow"] == (
         "archive entry -> destination path -> filesystem write"
     )
     assert finding["attackPath"]["impact"]["level"] == "high"
@@ -914,7 +914,9 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
             )
         }
         assert tables == EXPECTED_TABLES
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (47,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (
+            len(load_script("workbench_schema").MIGRATIONS),
+        )
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_locations").fetchone() == (1,)
 
@@ -965,18 +967,54 @@ def test_completed_findings_are_summarized_and_sorted_by_severity(tmp_path: Path
     ]
 
 
-@pytest.mark.parametrize("line_ending", ["\n", "\r\n"], ids=["lf", "crlf"])
-def test_completed_finding_triage_and_remediation_persist(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, line_ending: str
-) -> None:
+@pytest.fixture
+def git_autocrlf(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.autocrlf")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", "true")
-    state_dir = tmp_path / "state"
+
+
+@pytest.mark.parametrize("line_ending", [b"\n", b"\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize(
+    "patch_name", ["remediation.patch", " remediation.patch"], ids=["plain", "leading-space"]
+)
+def test_reviewed_patch_matches_unversioned_checkout_bytes(
+    workbench_api, tmp_path: Path, git_autocrlf, line_ending: bytes, patch_name: str
+) -> None:
     target = tmp_path / "target"
     target.mkdir()
     source = target / "source.txt"
-    source.write_bytes(f"vulnerable{line_ending}".encode())
+    source.write_bytes(b"vulnerable" + line_ending)
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    revision, original, _device, inode = workbench_api["scan_target_identity"](target, None)
+    assert revision == "unversioned"
+    scan = {
+        "target_path": str(target),
+        "target_inode": inode,
+        "target_revision": revision,
+        "scan_dir": str(scan_dir),
+    }
+    patch = scan_dir / patch_name
+    write_remediation_patch(patch, newline="\n")
+    if patch_name.startswith(" "):
+        (scan_dir / patch_name.strip()).write_text("different patch contents\n")
+    remediation = {
+        "base_revision": revision,
+        "base_content_digest": original,
+        "patch_digest": f"sha256:{hashlib.sha256(patch.read_bytes()).hexdigest()}",
+    }
+    assert workbench_api["require_scan_relative_file"](scan, patch_name) == patch_name
+    subprocess.run(["git", "apply", "--no-index", str(patch)], cwd=target, check=True)
+    _, applied = workbench_api["remediation_checkout_snapshot"](scan)
+    assert applied != original
+    assert workbench_api["require_reviewed_patch_applied"](scan, remediation, patch_name) == applied
+
+
+def test_completed_finding_triage_and_remediation_persist(tmp_path: Path, git_autocrlf) -> None:
+    state_dir, target = empty_target_paths(tmp_path)
+    source = target / "source.txt"
+    source.write_bytes(b"vulnerable\r\n")
     scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target, relative_path=source.name)
     completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
@@ -1038,8 +1076,10 @@ def test_completed_finding_triage_and_remediation_persist(
         state_dir, occurrence_id, "closed", "--close-reason", "already_fixed", check=False
     )
     assert "pending remediation operation" in str(pending_close["stderr"])
-    patch_path = scan_dir / "remediation.patch"
+    patch_name = " remediation.patch"
+    patch_path = scan_dir / patch_name
     write_remediation_patch(patch_path, newline="\n")
+    (scan_dir / patch_name.strip()).write_text("different patch contents\n")
     generated = set_remediation(
         state_dir,
         occurrence_id,
@@ -1048,7 +1088,7 @@ def test_completed_finding_triage_and_remediation_persist(
         "1",
         "generated",
         "--patch-path",
-        patch_path.name,
+        patch_name,
         "--patch-digest",
         f"sha256:{hashlib.sha256(patch_path.read_bytes()).hexdigest()}",
         "--summary",
@@ -1056,7 +1096,7 @@ def test_completed_finding_triage_and_remediation_persist(
     )["scan"]
     assert generated["findings"][0]["remediationState"]["state"] == "generated"
     assert generated["findings"][0]["remediationState"]["pendingAction"] is None
-    assert generated["findings"][0]["remediationState"]["patchPath"] == patch_path.name
+    assert generated["findings"][0]["remediationState"]["patchPath"] == patch_name
     assert generated["findings"][0]["remediationState"]["patch"] == patch_path.read_bytes().decode()
     assert generated["findings"][0]["remediationState"]["patchStats"] == {
         "additions": 1,
@@ -1219,6 +1259,8 @@ def test_completed_finding_triage_and_remediation_persist(
         "applied",
         "--base-revision",
         "unversioned",
+        "--patch-path",
+        str(generated["findings"][0]["remediationState"]["patchPath"]),
     )["scan"]
     assert applied["findings"][0]["remediationState"]["state"] == "applied"
     verify_token = str(uuid.uuid4())
@@ -1356,9 +1398,7 @@ def test_completed_scan_disables_remediation_after_checkout_revision_changes(
 def assert_completed_scan_disables_remediation_after_checkout_path_is_replaced(
     tmp_path: Path, *, replacement_kind: str
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "source.txt").write_text("vulnerable\n")
     scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target, relative_path="source.txt")
@@ -1665,9 +1705,7 @@ def test_finding_remediation_rejects_delayed_update_after_superseding_patch(tmp_
 
 
 def test_finding_remediation_rejects_unversioned_directory_changes(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     source = target / "source.txt"
     source.write_text("original\n")
     scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
@@ -1716,9 +1754,7 @@ def test_finding_remediation_rejects_unversioned_directory_changes(tmp_path: Pat
 
 
 def test_workbench_defaults_scan_artifacts_to_persistent_state_dir(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_scan_command(state_dir, str(saved["id"]))
     scan_dir = Path(str(started["results"]["scanDir"]))
@@ -1726,9 +1762,7 @@ def test_workbench_defaults_scan_artifacts_to_persistent_state_dir(tmp_path: Pat
 
 
 def test_workbench_serializes_concurrent_scan_starts(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     workspace_id = str(saved["id"])
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -1748,9 +1782,7 @@ def test_workbench_serializes_concurrent_scan_starts(tmp_path: Path) -> None:
 
 
 def test_workbench_rejects_setup_changes_after_scan_starts(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     start_scan_command(state_dir, str(saved["id"]))
 
@@ -1761,9 +1793,7 @@ def test_workbench_rejects_setup_changes_after_scan_starts(tmp_path: Path) -> No
 
 
 def test_workbench_rejects_scoped_deep_scan(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace_id = str(uuid.uuid4())
     create_workspace(state_dir, workspace_id)
     failed = save_workspace(state_dir, workspace_id, str(target), "src", "deep", check=False)
@@ -1772,9 +1802,7 @@ def test_workbench_rejects_scoped_deep_scan(tmp_path: Path) -> None:
 
 
 def test_workbench_rejects_diff_scan_for_non_git_target(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace_id = str(uuid.uuid4())
     create_workspace(state_dir, workspace_id)
     failed = save_workspace(state_dir, workspace_id, str(target), ".", "diff", check=False)
@@ -1984,6 +2012,76 @@ def test_workbench_marks_nested_git_paths_as_review_changes_unsupported(tmp_path
     assert inspected["targetMetadata"]["reviewChangesSupported"] is False
 
 
+@pytest.mark.parametrize("scope", ["src", " component", "component ", "./ "])
+def test_workbench_roundtrips_literal_target_and_scope(tmp_path: Path, scope: str) -> None:
+    if os.name == "nt" and scope.endswith(" "):
+        pytest.skip("Windows removes trailing spaces from directory names.")
+    state_dir = tmp_path / "state"
+    target = tmp_path / ("target" if os.name == "nt" else "target ")
+    target.mkdir()
+    if target.name.endswith(" "):
+        (tmp_path / "target").mkdir()
+    (target / scope).mkdir()
+    if scope != scope.strip() and scope.strip() != "./":
+        (target / scope.strip()).mkdir()
+    inspected = run_workbench(state_dir, "inspect-target", "--target-path", str(target))
+    workspace_id = str(uuid.uuid4())
+    created = create_workspace(
+        state_dir, workspace_id, "--target-path", inspected["targetPath"], "--scope", scope
+    )
+    assert created["targetPath"] == str(target)
+    assert created["scope"] == scope
+    saved = save_workspace(
+        state_dir, workspace_id, created["targetPath"], created["scope"], "standard"
+    )
+    assert saved["targetPath"] == str(target)
+    assert saved["scope"] == scope
+    started = start_scan_command(state_dir, workspace_id, "--scan-root", str(tmp_path / "scans"))
+    scan = get_scan(state_dir, started["results"]["scanId"])["scan"]
+    assert scan["targetPath"] == str(target)
+    assert scan["scope"] == scope
+    assert scan["contract"]["scope"]["requiredIncludePaths"] == [scope]
+
+
+@pytest.mark.parametrize("blank", ["", " \t\n", " " * 5000], ids=["empty", "mixed", "long"])
+def test_workbench_keeps_blank_workspace_path_defaults(tmp_path: Path, blank: str) -> None:
+    state_dir = tmp_path / "state"
+    workspace_id = str(uuid.uuid4())
+    created = create_workspace(state_dir, workspace_id, "--target-path", blank, "--scope", blank)
+    assert created["targetPath"] is None
+    assert created["scope"] == "."
+    target = tmp_path / "target"
+    target.mkdir()
+    saved = save_workspace(state_dir, workspace_id, str(target), blank, "standard")
+    assert saved["targetPath"] == str(target)
+    assert saved["scope"] == "."
+
+
+@pytest.mark.parametrize("field", ["scope", "target-path"])
+@pytest.mark.parametrize("leading", [False, True])
+def test_workspace_checks_retained_literal_path_length(tmp_path: Path, field: str, leading: bool):
+    state_dir = tmp_path / "state"
+    value = " " * 5000 + "src" if leading else "src" + " " * 5000
+    result = run_workbench(
+        state_dir,
+        "create-workspace",
+        "--workspace-id",
+        str(uuid.uuid4()),
+        f"--{field}={value}",
+        check=False,
+    )
+    assert result["returncode"] != 0
+    assert result["stderr"] == "Text value must be no longer than 4096 characters.\n"
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM workspaces").fetchone()[0] == 0
+
+
+def test_workspace_keeps_literal_scope_at_length_boundary(tmp_path: Path):
+    scope = " " * 4093 + "src"
+    created = create_workspace(tmp_path / "state", str(uuid.uuid4()), "--scope", scope)
+    assert created["scope"] == scope
+
+
 def test_workbench_opens_invalid_target_for_correction(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     missing = tmp_path / "missing"
@@ -2021,9 +2119,7 @@ def test_workbench_preserves_long_user_context(tmp_path: Path) -> None:
 
 
 def test_workbench_preserves_url_user_context_on_workspace_creation(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     user_context = (
         "Repository: https://github.com/example/security-review\n"
         "OAuth callback: https://accounts.example.test/oauth/callback"
@@ -2039,9 +2135,7 @@ def test_workbench_preserves_url_user_context_on_workspace_creation(tmp_path: Pa
 
 
 def test_workbench_replaces_context_only_for_running_owned_scan(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_saved_workspace(state_dir, target)
     started = start_delivered_scan(state_dir, "--workspace-id", str(workspace["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -2100,9 +2194,7 @@ def test_workbench_replaces_context_only_for_running_owned_scan(tmp_path: Path) 
 
 
 def test_workbench_marks_invalid_initial_scope_for_correction(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_workspace(
         state_dir, str(uuid.uuid4()), "--target-path", str(target), "--scope", "missing"
     )
@@ -2282,7 +2374,6 @@ def test_workbench_warns_after_working_tree_changes(tmp_path: Path) -> None:
     assert "sourceExcerpt" not in finding
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     assert manifest["scan"]["target"]["snapshotDigest"] == snapshot_digest
-    assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == "complete"
 
 
 def test_workbench_warns_after_working_tree_head_changes(
@@ -2401,7 +2492,7 @@ def test_workbench_populates_manifest_with_working_tree_digest(tmp_path: Path) -
     completed = scan_command(state_dir, "complete-scan", scan_id)
     assert completed["scan"]["progress"]["status"] == "complete"
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert manifest["scan"]["target"]["snapshotDigest"] == diff_target["contentDigest"]
     assert manifest["scan"]["scope"] == {"includePaths": ["."], "excludePaths": []}
     assert coverage["mode"] == "working_tree"
@@ -2502,9 +2593,7 @@ def test_workbench_populates_completed_manifest_with_exact_diff_target(tmp_path:
 def test_workbench_preserves_invalid_requested_initial_deep_scope(
     tmp_path: Path,
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "src").mkdir()
     workspace = create_workspace(
         state_dir,
@@ -2529,9 +2618,7 @@ def test_workbench_preserves_invalid_requested_initial_deep_scope(
 
 
 def test_workbench_discards_diff_target_for_non_diff_mode(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_workspace(
         state_dir,
         str(uuid.uuid4()),
@@ -2560,9 +2647,7 @@ def test_workbench_discards_diff_target_for_non_diff_mode(tmp_path: Path) -> Non
 
 
 def test_workbench_rejects_diff_target_when_saving_non_diff_mode(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace_id = str(uuid.uuid4())
     create_workspace(state_dir, workspace_id)
 
@@ -2693,9 +2778,7 @@ def test_review_changes_rejects_unborn_and_bare_git_repositories(tmp_path: Path)
 
 
 def test_workbench_rejects_missing_or_file_scope(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "file.py").write_text("print('fixture')\n")
     workspace_id = str(uuid.uuid4())
     create_workspace(state_dir, workspace_id)
@@ -2724,9 +2807,7 @@ def test_workbench_normalizes_absolute_scope_inside_target(tmp_path: Path) -> No
 
 
 def test_workbench_rejects_scope_escape(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace_id = str(uuid.uuid4())
     create_workspace(state_dir, workspace_id)
     failed = save_workspace(
@@ -2751,9 +2832,7 @@ def test_workbench_rejects_symlinked_scope_escape(tmp_path: Path) -> None:
 
 
 def test_workbench_rejects_progress_completed_above_total(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     failed = update_progress(
@@ -2770,9 +2849,7 @@ def test_workbench_rejects_progress_completed_above_total(tmp_path: Path) -> Non
 
 
 def test_workbench_rejects_regressive_progress(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -2799,9 +2876,7 @@ def test_workbench_rejects_regressive_progress(tmp_path: Path) -> None:
 
 
 def test_workbench_tracks_review_pass_for_deep_scan_only(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace_id = str(uuid.uuid4())
     create_workspace(state_dir, workspace_id, "--target-path", str(target), "--mode", "deep")
     saved = save_workspace(state_dir, workspace_id, str(target), ".", "deep")
@@ -2845,9 +2920,7 @@ def test_workbench_tracks_review_pass_for_deep_scan_only(tmp_path: Path) -> None
 
 
 def test_workbench_updates_progress_timestamp_for_phase_and_failure(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -2862,9 +2935,7 @@ def test_workbench_updates_progress_timestamp_for_phase_and_failure(tmp_path: Pa
 
 
 def test_workbench_preserves_scan_when_git_revision_cannot_be_rechecked(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -2902,9 +2973,7 @@ def test_workbench_preserves_scan_when_git_revision_cannot_be_rechecked(tmp_path
 def test_completed_finding_projects_writeup_and_poc_artifact_paths(
     tmp_path: Path, non_utf8_artifact: bool
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -2943,8 +3012,23 @@ def test_completed_finding_projects_writeup_and_poc_artifact_paths(
 
 
 @pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize(
+    "long_path",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                sys.platform == "darwin",
+                reason="macOS cannot represent the real Git pathname beyond its 1024-byte path limit",
+            ),
+        ),
+    ],
+    ids=["short-control", "long-real-git-path"],
+)
 def test_workbench_populates_clean_git_scan_revision_with_large_source_excerpt(
     tmp_path: Path,
+    long_path: bool,
     nested: bool,
 ) -> None:
     state_dir = tmp_path / "state"
@@ -2955,12 +3039,17 @@ def test_workbench_populates_clean_git_scan_revision_with_large_source_excerpt(
         (repository / "README.md").write_text("different root source\n" * 50)
         target = repository / "nested"
         target.mkdir()
-    (target / "README.md").write_text(
+    relative_path = (
+        "/".join(["segment" + "a" * 178] * 12 + ["README.md"]) if long_path else "README.md"
+    )
+    source_path = target / relative_path
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text(
         "\n".join(f"source line {line_number}" for line_number in range(1, 51))
         + "\n"
         + "x" * (1024 * 1024)
     )
-    subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(["git", "-c", "core.longpaths=true", "add", "."], cwd=repository, check=True)
     subprocess.run(["git", "commit", "-qm", "Add source fixture"], cwd=repository, check=True)
     revision = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -2978,7 +3067,7 @@ def test_workbench_populates_clean_git_scan_revision_with_large_source_excerpt(
         Path(str(started["results"]["scanDir"])),
         scan_id,
         target,
-        relative_path="README.md",
+        relative_path=relative_path,
         target_kind="git_revision",
         target_revision="wrong-revision",
     )
@@ -2989,16 +3078,32 @@ def test_workbench_populates_clean_git_scan_revision_with_large_source_excerpt(
     )
     assert manifest["scan"]["target"]["revision"] == revision
     assert "snapshotDigest" not in manifest["scan"]["target"]
-    excerpt = completed["scan"]["findings"][0]["sourceExcerpt"]
-    assert excerpt.startswith("38  source line 38")
-    assert "41  source line 41" in excerpt
-    assert excerpt.endswith("47  source line 47")
+    finding = completed["scan"]["findings"][0]
+    saved_findings = json.loads(
+        (Path(str(started["results"]["scanDir"])) / "findings.json").read_text()
+    )
+    assert saved_findings["findings"][0]["locations"][0]["path"] == relative_path
+    if long_path:
+        assert len(relative_path.encode()) > 2048
+        assert finding["locations"][0]["path"] != relative_path
+        assert "sourceExcerpt" not in finding
+    else:
+        assert finding["locations"][0]["path"] == relative_path
+        excerpt = finding["sourceExcerpt"]
+        assert excerpt.startswith("38  source line 38")
+        assert "41  source line 41" in excerpt
+        assert excerpt.endswith("47  source line 47")
 
-    (target / "README.md").write_text("replacement source\n")
-    subprocess.run(["git", "add", "README.md"], cwd=target, check=True)
+    source_path.write_text("replacement source\n")
+    subprocess.run(
+        ["git", "-c", "core.longpaths=true", "add", "--", relative_path], cwd=target, check=True
+    )
     subprocess.run(["git", "commit", "-qm", "Replace source fixture"], cwd=target, check=True)
     refreshed = get_scan(state_dir, scan_id)
-    assert refreshed["scan"]["findings"][0]["sourceExcerpt"] == excerpt
+    if long_path:
+        assert "sourceExcerpt" not in refreshed["scan"]["findings"][0]
+    else:
+        assert refreshed["scan"]["findings"][0]["sourceExcerpt"] == excerpt
 
 
 def commit_source_fixture(target: Path, source: bytes) -> str:
@@ -3016,52 +3121,20 @@ def commit_source_fixture(target: Path, source: bytes) -> str:
     ).stdout.strip()
 
 
-@pytest.mark.parametrize(
-    "separator", ["\f", "\v", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
-)
-def test_source_excerpt_breaks_lines_only_at_newlines(tmp_path: Path, separator: str) -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    finding_source_excerpt = namespace["finding_source_excerpt"]
+def test_source_excerpt_breaks_lines_only_at_newlines(tmp_path: Path, workbench_api) -> None:
+    separators = "\f\v\x1c\x1d\x1e\x85\u2028\u2029"
+    source = f"one\r\ntwo{separators}\rthree\nfour\r\nfive\rsix\nseven\r\neight\rnine\n"
     target = tmp_path / "target"
-    revision = commit_source_fixture(
-        target,
-        "".join(
-            f"source line {line_number}{separator if line_number == 2 else ''}\n"
-            for line_number in range(1, 11)
-        ).encode(),
-    )
+    revision = commit_source_fixture(target, source.encode())
 
-    excerpt = finding_source_excerpt(
+    excerpt = workbench_api["finding_source_excerpt"](
         {"target_revision": revision, "target_snapshot_digest": None, "diff_target_kind": None},
         target,
         [{"path": "README.md", "startLine": 5, "endLine": 5}],
+        ["."],
     )
 
-    assert excerpt == "\n".join(
-        f"{line_number}  source line {line_number}{separator if line_number == 2 else ''}"
-        for line_number in range(2, 9)
-    )
-
-
-@pytest.mark.parametrize("line_ending", ["\n", "\r\n", "\r"])
-def test_source_excerpt_numbers_standard_line_endings(tmp_path: Path, line_ending: str) -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    finding_source_excerpt = namespace["finding_source_excerpt"]
-    target = tmp_path / "target"
-    revision = commit_source_fixture(
-        target,
-        "".join(f"source line {line_number}{line_ending}" for line_number in range(1, 11)).encode(),
-    )
-
-    excerpt = finding_source_excerpt(
-        {"target_revision": revision, "target_snapshot_digest": None, "diff_target_kind": None},
-        target,
-        [{"path": "README.md", "startLine": 5, "endLine": 5}],
-    )
-
-    assert excerpt == "\n".join(
-        f"{line_number}  source line {line_number}" for line_number in range(2, 9)
-    )
+    assert excerpt == f"2  two{separators}\n3  three\n4  four\n5  five\n6  six\n7  seven\n8  eight"
 
 
 @pytest.mark.parametrize(
@@ -3078,10 +3151,9 @@ def test_source_excerpt_numbers_standard_line_endings(tmp_path: Path, line_endin
     ],
 )
 def test_source_excerpt_preserves_final_lines(
-    tmp_path: Path, source: bytes, expected_lines: list[str]
+    tmp_path: Path, source: bytes, expected_lines: list[str], workbench_api
 ) -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    finding_source_excerpt = namespace["finding_source_excerpt"]
+    finding_source_excerpt = workbench_api["finding_source_excerpt"]
     target = tmp_path / "target"
     revision = commit_source_fixture(target, source)
     scan = {"target_revision": revision, "target_snapshot_digest": None, "diff_target_kind": None}
@@ -3090,6 +3162,7 @@ def test_source_excerpt_preserves_final_lines(
         scan,
         target,
         [{"path": "README.md", "startLine": len(expected_lines)}],
+        ["."],
     )
 
     assert excerpt == "\n".join(
@@ -3100,6 +3173,7 @@ def test_source_excerpt_preserves_final_lines(
             scan,
             target,
             [{"path": "README.md", "startLine": len(expected_lines) + 1}],
+            ["."],
         )
         is None
     )
@@ -3162,10 +3236,15 @@ def test_workbench_preserves_dirty_git_scan_after_worktree_changes(tmp_path: Pat
         target_kind="git_revision",
         target_revision=revision,
     )
-    failed = scan_command(state_dir, "complete-scan", scan_id, check=False)
-    assert failed["returncode"] != 0
-    assert "scan.target.kind" in str(failed["stderr"])
-    assert get_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "running"
+    # A draft that inferred git_revision from the checkout seals with the
+    # registered worktree kind and digest instead of discarding the scan.
+    completed = scan_command(state_dir, "complete-scan", scan_id)
+    assert completed["scan"]["progress"]["status"] == "complete"
+    manifest = json.loads(
+        (Path(str(started["results"]["scanDir"])) / "scan-manifest.json").read_text()
+    )
+    assert manifest["scan"]["target"]["kind"] == "git_worktree"
+    assert manifest["scan"]["target"]["snapshotDigest"] == contract["requiredSnapshotDigest"]
 
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -3191,9 +3270,7 @@ def test_workbench_preserves_dirty_git_scan_after_worktree_changes(tmp_path: Pat
 
 
 def test_workbench_generates_reports_during_completion(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -3227,9 +3304,7 @@ def test_workbench_omits_unsafe_symlink_source_path_without_hiding_finding(tmp_p
 
 
 def test_workbench_hides_missing_artifact_on_reopen(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])

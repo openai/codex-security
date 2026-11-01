@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, writeFile, readFile, realpath, symlink, rm, stat } from
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { captureRunnerPath, checkPython, cleanupRuntime, resolveTool, runtimeEnvironment, setupRuntime, writeRuntimeLauncher } from '../src/runtime.js';
+import { captureRunnerPath, checkPython, cleanupRuntime, resolveTool, runtimeEnvironment, scanCredentials, setupRuntime, writeRuntimeLauncher } from '../src/runtime.js';
 import { runProcess } from '../src/process.js';
 
 test('tool discovery preserves the selected PATH launcher spelling', async (t) => {
@@ -92,14 +92,15 @@ NODE
   assert.equal(invocation.env.LD_LIBRARY_PATH, libraryPath);
   assert.equal(invocation.env.OPENAI_API_KEY, undefined);
   assert.equal(invocation.env.ACTIONS_RUNTIME_TOKEN, undefined);
-  assert.equal(runtime.env('synthetic-scan-key').PYTHON, 'python3');
-  assert.equal(runtime.env('synthetic-scan-key').CODEX_MCP_NODE_PATH, join(runtime.root, 'bin', 'node'));
+  const credentials = scanCredentials('openai', {OPENAI_API_KEY:'synthetic-scan-key'});
+  assert.equal(runtime.env(credentials).PYTHON, 'python3');
+  assert.equal(runtime.env(credentials).CODEX_MCP_NODE_PATH, join(runtime.root, 'bin', 'node'));
   process.env.RUNNER_TRACKING_ID = 'synthetic-later-job';
   process.env.LD_LIBRARY_PATH = '/synthetic-later-library';
-  assert.equal(runtime.env('synthetic-scan-key').RUNNER_TRACKING_ID, 'synthetic-first-job');
-  assert.equal(runtime.env('synthetic-scan-key').LD_LIBRARY_PATH, libraryPath);
+  assert.equal(runtime.env(credentials).RUNNER_TRACKING_ID, 'synthetic-first-job');
+  assert.equal(runtime.env(credentials).LD_LIBRARY_PATH, libraryPath);
   const child = await runProcess(join(runtime.root, 'bin', 'node'), ['-e', 'console.log(process.env.RUNNER_TRACKING_ID)'],
-    {cwd:root, env:{...runtime.env('synthetic-scan-key'), RUNNER_TRACKING_ID:undefined}});
+    {cwd:root, env:{...runtime.env(credentials), RUNNER_TRACKING_ID:undefined}});
   assert.equal(child.exitCode, 0, child.stderr);
   assert.equal(child.stdout.trim(), 'synthetic-first-job');
   await cleanupRuntime(runtime.root, root);
@@ -208,7 +209,7 @@ test('scan environment excludes all inherited credential/config channels', () =>
   try {
     const paths = { root: '/tmp/owned', home: '/tmp/owned/home', codexHome: '/tmp/owned/codex', stateDirectory: '/tmp/owned/state' };
     const installer = runtimeEnvironment(paths);
-    const scanner = runtimeEnvironment(paths, 'scan-only-key');
+    const scanner = runtimeEnvironment(paths, scanCredentials('openai', {OPENAI_API_KEY:'scan-only-key'}));
     for (const key of Object.keys(poison)) { assert.equal(installer[key], undefined); assert.equal(scanner[key], undefined); }
     assert.equal(installer.OPENAI_API_KEY, undefined);
     assert.equal(scanner.OPENAI_API_KEY, 'scan-only-key');
@@ -225,8 +226,8 @@ test('each scan retains its runner tool path while keeping its environment isola
   const tool = join(tools, 'synthetic-tool');
   await writeFile(tool, '#!/bin/sh\nprintf selected-runner-tool\n', { mode: 0o755 });
   const paths = { root, home: root, codexHome: root, stateDirectory: root, runnerPath: tools, runnerTrackingId:'synthetic-first-job', runnerLibraryPath:'/synthetic-first-library' };
-  const first = runtimeEnvironment(paths, 'first-scan-key');
-  const second = runtimeEnvironment({...paths, runnerPath:'/other/tools', runnerTrackingId:'synthetic-second-job', runnerLibraryPath:'/synthetic-second-library'}, 'second-scan-key');
+  const first = runtimeEnvironment(paths, scanCredentials('openai', {OPENAI_API_KEY:'first-scan-key'}));
+  const second = runtimeEnvironment({...paths, runnerPath:'/other/tools', runnerTrackingId:'synthetic-second-job', runnerLibraryPath:'/synthetic-second-library'}, scanCredentials('openai', {OPENAI_API_KEY:'second-scan-key'}));
   const result = await runProcess('/bin/sh', ['-c', 'synthetic-tool'], {cwd:root, env:first});
   assert.equal(result.stdout, 'selected-runner-tool');
   assert.equal(first.PATH, `${join(root, 'bin')}:${tools}`);
@@ -242,6 +243,71 @@ test('each scan retains its runner tool path while keeping its environment isola
   assert.equal(runtimeEnvironment({...paths, runnerLibraryPath:''}).LD_LIBRARY_PATH, '');
   assert.equal(runtimeEnvironment({...paths, runnerTrackingId:undefined}).RUNNER_TRACKING_ID, undefined);
   assert.equal(runtimeEnvironment({...paths, runnerTrackingId:undefined}).CODEX_MCP_NODE_PATH, undefined);
+});
+
+test('Bedrock credentials reach child processes without unrelated runner credentials', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-bedrock-')));
+  t.after(() => rm(root, {recursive:true, force:true}));
+  const paths = {root, home:join(root, 'home'), codexHome:join(root, 'codex'), stateDirectory:join(root, 'state')};
+  const sources = [
+    {AWS_ACCESS_KEY_ID:'synthetic-access-key', AWS_SECRET_ACCESS_KEY:'synthetic-secret-key', AWS_SESSION_TOKEN:'synthetic-session-token', AWS_REGION:'us-east-2'},
+    {AWS_BEARER_TOKEN_BEDROCK:'synthetic-bearer-token', AWS_DEFAULT_REGION:'us-west-2'},
+    {AWS_PROFILE:'synthetic-profile', AWS_CONFIG_FILE:'/synthetic/config', AWS_SHARED_CREDENTIALS_FILE:'/synthetic/credentials'},
+    {AWS_ROLE_ARN:'arn:aws:iam::123456789012:role/synthetic-role', AWS_ROLE_SESSION_NAME:'synthetic-session', AWS_WEB_IDENTITY_TOKEN_FILE:'/synthetic/token'},
+    {AWS_CONTAINER_CREDENTIALS_FULL_URI:'http://127.0.0.1/synthetic', AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE:'/synthetic/token'},
+  ];
+  for (const aws of sources) {
+    const source = {...aws, OPENAI_API_KEY:'must-not-forward', CODEX_API_KEY:'must-not-forward',
+      GITHUB_TOKEN:'must-not-forward', ACTIONS_RUNTIME_TOKEN:'must-not-forward',
+      NODE_OPTIONS:'--require=unrelated', CODEX_CLI_PATH:'/unrelated/codex', AWS_UNRELATED_SECRET:'must-not-forward'};
+    const credentials = scanCredentials('amazon-bedrock', source);
+    const env = runtimeEnvironment(paths, credentials);
+    const child = await runProcess(process.execPath, ['-e', 'console.log(JSON.stringify(process.env))'], {cwd:root, env});
+    assert.equal(child.exitCode, 0, child.stderr);
+    const actual = JSON.parse(child.stdout);
+    assert.deepEqual(Object.fromEntries(Object.entries(actual).filter(([name]) => name.startsWith('AWS_'))), aws);
+    for (const name of ['OPENAI_API_KEY', 'CODEX_API_KEY', 'GITHUB_TOKEN', 'ACTIONS_RUNTIME_TOKEN', 'NODE_OPTIONS', 'CODEX_CLI_PATH'])
+      assert.equal(actual[name], undefined);
+    assert.equal(actual.HOME, paths.home); assert.equal(actual.CODEX_HOME, paths.codexHome);
+    const installer = runtimeEnvironment(paths);
+    for (const name of Object.keys(aws)) assert.equal(installer[name], undefined);
+  }
+});
+
+test('API providers forward only their own captured key to child processes', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-provider-')));
+  t.after(() => rm(root, {recursive:true, force:true}));
+  const paths = {root, home:root, codexHome:root, stateDirectory:root};
+  const source = {OPENAI_API_KEY:'synthetic-openai', CODEX_API_KEY:'synthetic-alias',
+    OPENROUTER_API_KEY:'synthetic-openrouter', FIREWORKS_API_KEY:'synthetic-fireworks',
+    AWS_SESSION_TOKEN:'unrelated-aws', GITHUB_TOKEN:'unrelated-github'};
+  const cases = [['openai', 'OPENAI_API_KEY'], ['openrouter', 'OPENROUTER_API_KEY'], ['fireworks', 'FIREWORKS_API_KEY']] as const;
+  const captured = cases.map(([provider, key]) => ({credentials:scanCredentials(provider, source), key, value:source[key]}));
+  source.OPENROUTER_API_KEY = source.FIREWORKS_API_KEY = 'changed-after-capture';
+  await Promise.all(captured.map(async ({credentials, key, value}) => {
+    const child = await runProcess(process.execPath, ['-e', 'console.log(JSON.stringify(process.env))'],
+      {cwd:root, env:runtimeEnvironment(paths, credentials)});
+    assert.equal(child.exitCode, 0, child.stderr);
+    const actual = JSON.parse(child.stdout);
+    for (const name of Object.keys(source)) assert.equal(actual[name], name === key ? value : undefined);
+    for (const name of Object.keys(source)) assert.equal(runtimeEnvironment(paths)[name], undefined);
+  }));
+});
+
+test('Bedrock credential snapshots stay isolated when the caller changes credentials', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-bedrock-snapshot-')));
+  t.after(() => rm(root, {recursive:true, force:true}));
+  const paths = {root, home:root, codexHome:root, stateDirectory:root};
+  const source = {AWS_BEARER_TOKEN_BEDROCK:'synthetic-first-token', AWS_REGION:'us-east-2'};
+  const first = scanCredentials('amazon-bedrock', source);
+  source.AWS_BEARER_TOKEN_BEDROCK = 'synthetic-second-token'; source.AWS_REGION = 'us-west-2';
+  const second = scanCredentials('amazon-bedrock', source);
+  const results = await Promise.all([first, second].map(credentials => runProcess(process.execPath,
+    ['-e', 'console.log(JSON.stringify([process.env.AWS_BEARER_TOKEN_BEDROCK,process.env.AWS_REGION]))'],
+    {cwd:root, env:runtimeEnvironment(paths, credentials)})));
+  assert.deepEqual(results.map(result => JSON.parse(result.stdout)), [
+    ['synthetic-first-token', 'us-east-2'], ['synthetic-second-token', 'us-west-2'],
+  ]);
 });
 
 test('shipped runtime lock matches the manifest and records dependency integrity', async () => {

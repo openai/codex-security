@@ -42,6 +42,7 @@ afterEach(cleanup);
 
 function createPolicyWorktree(repository: string, root: string, name: string) {
   policyGit(repository, "init", "--quiet");
+  policyGit(repository, "config", "--local", "core.autocrlf", "false");
   policyGit(repository, "commit", "--allow-empty", "--quiet", "-m", "initial");
   const linked = join(root, name);
   policyGit(
@@ -395,6 +396,44 @@ describe("security policy generation", () => {
     );
     expect(inventory.policyPaths).toEqual(["objects/SECURITY.md"]);
     expect(inventory.gitMetadataPaths).toEqual([]);
+  });
+
+  test("leaves Git-ignored dependencies out of the policy inventory", async () => {
+    const f = await fixture();
+    policyGit(f.repository, "init", "--quiet");
+    await writeFile(
+      join(f.repository, ".gitignore"),
+      "/SECURITY.md\nnode_modules/\n.venv/\n",
+    );
+    await writeFile(join(f.repository, "SECURITY.md"), POLICY);
+    for (const directory of [
+      "node_modules/dependency",
+      "node_modules/tracked",
+      ".venv/src/dependency",
+      "services/api",
+    ]) {
+      await mkdir(join(f.repository, directory), { recursive: true });
+      await writeFile(join(f.repository, directory, "SECURITY.md"), POLICY);
+    }
+    policyGit(join(f.repository, ".venv/src/dependency"), "init", "--quiet");
+    policyGit(f.repository, "add", "--force", "node_modules/tracked");
+    const inventory = await inspectSecurityPolicySources(
+      await resolveSecurityPolicyTarget(f.repository),
+    );
+    expect(inventory.policyPaths).toEqual([
+      "SECURITY.md",
+      "node_modules/tracked/SECURITY.md",
+      "services/api/SECURITY.md",
+    ]);
+    const selectedDependency = await inspectSecurityPolicySources(
+      await resolveSecurityPolicyTarget(
+        f.repository,
+        "node_modules/dependency",
+      ),
+    );
+    expect(selectedDependency.policyPaths).toEqual([
+      "node_modules/dependency/SECURITY.md",
+    ]);
   });
 
   test("recognizes shared Git storage without HEAD during policy discovery", async () => {
@@ -931,12 +970,7 @@ describe("security policy generation", () => {
   }
 
   test("retains completed evidence without saving invalid policy documents", async () => {
-    for (const markdown of [
-      "",
-      " \n\t",
-      "# Policy\n\ud800",
-      `# Policy\n${"x".repeat(1024 * 1024)}`,
-    ]) {
+    for (const markdown of ["", " \n\t", "# Policy\n\ud800"]) {
       const f = await fixture();
       await expect(
         f.generate({
@@ -953,18 +987,31 @@ describe("security policy generation", () => {
     }
   });
 
-  test("enforces the resolver byte limit on existing policies", async () => {
-    const header = "# Policy\n";
-    const maximum =
-      header + "x".repeat(1024 * 1024 - Buffer.byteLength(header));
-    const existing = await fixture();
-    const target = join(existing.repository, "SECURITY.md");
-    await writeFile(target, maximum);
-    expect(await readSecurityPolicy(target)).toBe(maximum);
-    await writeFile(target, `${maximum}x`);
-    await expect(existing.generate()).rejects.toThrow("1 MiB limit");
-    expect(await readdir(existing.outputDir)).toEqual([]);
-  });
+  test.each([".", "component"])(
+    "reads and generates policies larger than 1 MiB at %s",
+    async (scope) => {
+      const f = await fixture();
+      const directory = join(f.repository, scope);
+      await mkdir(directory, { recursive: true });
+      const target = join(directory, "SECURITY.md");
+      const previous = `# Existing policy\n${"é".repeat(1024 * 1024)}\n`;
+      const proposed = `# Proposed policy\n${"λ".repeat(1024 * 1024)}\n`;
+      await writeFile(target, previous);
+      expect(await readSecurityPolicy(target)).toBe(previous);
+
+      const draft = await f.generate({
+        path: scope,
+        run: async (stage) => stageResult(stage, proposed),
+      });
+      expect(draft.previousContent).toBe(previous);
+      expect(
+        await readFile(join(f.outputDir, "previous-SECURITY.md"), "utf8"),
+      ).toBe(previous);
+      expect(draft.content).toBe(proposed);
+      expect(await readFile(draft.draftPath, "utf8")).toBe(proposed);
+      expect(await readSecurityPolicy(target)).toBe(previous);
+    },
+  );
 
   test.each(["architecture", "threat_model"] as const)(
     "rejects malformed Unicode in %s evidence before saving it",
@@ -993,7 +1040,7 @@ describe("security policy generation", () => {
     },
   );
 
-  test("does not apply the policy byte limit to supporting evidence", async () => {
+  test("preserves supporting evidence larger than 1 MiB", async () => {
     const f = await fixture();
     const document = `# Evidence\n${"x".repeat(1024 * 1024)}`;
     const draft = await f.generate({
@@ -1042,6 +1089,28 @@ describe("security policy preview", () => {
     expect(await readdir(f.repository)).toEqual([]);
   });
 
+  test.each([null, "", "# Old policy\n"])(
+    "preserves missing and empty policy behavior (%j)",
+    async (before) => {
+      const f = await fixture();
+      if (before !== null)
+        await writeFile(join(f.repository, "SECURITY.md"), before);
+      const draft = await f.generate();
+      const diff = await securityPolicyDiff({ ...draft, content: "" });
+      expect(diff).toBe(
+        before
+          ? "--- a/SECURITY.md\n+++ b/SECURITY.md\n@@ -1 +0,0 @@\n-# Old policy\n"
+          : "",
+      );
+      if (before === "") {
+        expect(await securityPolicyDiff(draft)).toStartWith(
+          "--- a/SECURITY.md\n+++ b/SECURITY.md\n",
+        );
+      }
+      expect(await readSecurityPolicy(draft.targetPath)).toBe(before);
+    },
+  );
+
   test("rejects preview after a component changes Git roots", async () => {
     for (const change of ["add", "remove"] as const) {
       const f = await fixture();
@@ -1085,23 +1154,87 @@ describe("security policy preview", () => {
     expect(diff.match(/No newline at end of file/gu)).toHaveLength(2);
   });
 
-  test("reports an early diff subprocess exit without an unhandled stdin error", async () => {
-    const name =
-      "reports an early diff subprocess exit without an unhandled stdin error";
-    if (runTestInSubprocess(import.meta.path, name)) return;
+  test("previews with Python unavailable in a Node process", async () => {
     const f = await fixture();
     const draft = await f.generate();
-    const node = nodeCommand().command;
-    await expect(
-      securityPolicyDiff(
-        { ...draft, content: `# Policy\n${"x".repeat(900_000)}` },
-        node,
+    const source = new URL("../src/security-policy.ts", import.meta.url);
+    const built = await Bun.build({
+      entrypoints: [fileURLToPath(source)],
+      target: "node",
+      format: "esm",
+      define: { "import.meta.url": JSON.stringify(source.href) },
+    });
+    expect(built.success).toBe(true);
+    const module = join(f.root, "policy.mjs");
+    await writeFile(module, await built.outputs[0]!.text());
+    const missingPython = join(f.root, "missing-python");
+    const result = JSON.parse(
+      execFileSync(
+        nodeCommand().command,
+        [
+          "--input-type=module",
+          "--eval",
+          `
+import { readFileSync } from "node:fs";
+const { securityPolicyDiff } = await import(process.argv[1]);
+const draft = JSON.parse(readFileSync(0, "utf8"));
+const defaultDiff = await securityPolicyDiff(draft);
+const explicitDiff = await securityPolicyDiff(draft, process.env.PYTHON);
+console.log(JSON.stringify({ defaultDiff, explicitDiff }));`,
+          pathToFileURL(module).href,
+        ],
+        {
+          encoding: "utf8",
+          input: JSON.stringify(draft),
+          env: {
+            ...process.env,
+            PATH: "",
+            PYTHON: missingPython,
+            CODEX_SECURITY_PYTHON_COMMAND: missingPython,
+          },
+          timeout: 20_000,
+        },
       ),
-    ).rejects.toThrow();
+    );
+    expect(result.defaultDiff).toContain("--- /dev/null\n+++ b/SECURITY.md\n");
+    expect(result.explicitDiff).toBe(result.defaultDiff);
     expect(await readdir(f.repository)).toEqual([]);
   });
 
-  test("preserves UTF-8 text and CRLF content independently of Python's locale", async () => {
+  test("awaits explicit legacy resolvers and propagates their errors", async () => {
+    const f = await fixture();
+    const draft = await f.generate();
+    const resolver = mock(async () => join(f.root, "missing-python"));
+    expect(await securityPolicyDiff(draft, resolver)).toBe(
+      await securityPolicyDiff(draft),
+    );
+    expect(resolver).toHaveBeenCalledTimes(1);
+    const failure = new Error("Synthetic resolver failure");
+    await expect(
+      securityPolicyDiff(draft, async () => {
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
+  });
+
+  test("honors cancellation supplied through the public diff API", async () => {
+    const f = await fixture();
+    const draft = await f.generate();
+    const controller = new AbortController();
+    const reason = new Error("Preview cancelled");
+    await expect(
+      securityPolicyDiff(
+        draft,
+        async () => {
+          controller.abort(reason);
+          return "unused-python";
+        },
+        controller.signal,
+      ),
+    ).rejects.toBe(reason);
+  });
+
+  test("preserves UTF-8 text and CRLF content", async () => {
     const f = await fixture();
     await writeFile(
       join(f.repository, "SECURITY.md"),

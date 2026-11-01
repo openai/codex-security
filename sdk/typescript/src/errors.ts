@@ -73,7 +73,9 @@ export class OutputInsideProtectedRootError extends OutputDirectoryError {
     public readonly pathKind: ProtectedScanPathKind = "output",
   ) {
     super(
-      `Scan ${pathKind} directory must be outside the protected scan root: ${outputDirectory}`,
+      pathKind === "state"
+        ? `State directory ${outputDirectory} overlaps the protected root ${protectedRoot}. Choose a private, non-overlapping directory for CODEX_SECURITY_STATE_DIR (local scans) or stateDirectory (hosted scans).`
+        : `Scan ${pathKind} directory must be outside the protected scan root: ${outputDirectory}`,
     );
   }
 }
@@ -98,7 +100,7 @@ export class ScanCostLimitExceededError extends ScanInterruptedError {
     scanDir: string,
   ) {
     super(
-      `Scan stopped: short-context budget baseline ${formatUsd(cost.estimatedUsd)} exceeded the ${formatUsd(maxCostUsd)} limit; estimated cost ${formatScanCost(cost)}; partial output remains at ${scanDir}.`,
+      `Scan stopped: short-context budget baseline ${formatUsd(cost.estimatedUsd)} exceeded the ${formatUsd(maxCostUsd)} limit; estimated cost ${formatScanCost(cost)}; scan output directory: ${scanDir}.`,
       scanDir,
     );
     this.maxCostUsd = maxCostUsd;

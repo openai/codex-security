@@ -1,4 +1,6 @@
-import { findingEntry } from "./value.js";
+import { findingEntry, notify } from "./value.js";
+import type { CodexSecuritySurface } from "./api.js";
+import { codexSecurityRequestContext } from "./request-metadata.js";
 import {
   spawn,
   spawnSync,
@@ -11,6 +13,7 @@ import {
   mkdtemp,
   open,
   readFile,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -65,18 +68,17 @@ import {
   type CodexCommand,
 } from "./runtime.js";
 
-export interface PublishScanOptions {
+export interface PublishScanOptions extends Pick<
+  PrepareScanPublicationOptions,
+  "destination" | "teamId" | "projectId" | "signal"
+> {
   findingIds?: PrepareScanPublicationOptions["findingIds"];
   classification?: PrepareScanPublicationOptions["classification"];
   expectedScanId?: string;
-  destination: "linear";
-  teamId: string;
-  projectId?: string;
   linearApiKey?: string;
   assigneeId?: string;
   dryRun?: boolean;
   skipExisting?: boolean;
-  signal?: AbortSignal;
   onProgress?: (event: PublishScanProgress) => void;
 }
 
@@ -174,6 +176,7 @@ export interface PublicationCodexResult {
 }
 
 export interface PublishScanDependencies {
+  surface?: CodexSecuritySurface;
   environment?: NodeJS.ProcessEnv;
   linearClient?: LinearClientFactory<"users" | "createIssue">;
   prepare?: typeof prepareScanPublication;
@@ -204,6 +207,7 @@ type PublicationHandoffEvidence = {
   ownerFindingId?: string;
   resolution: ClaimResolution;
   possibleMutation?: boolean;
+  cause?: unknown;
 } & (
   | { status: "success" }
   | { status: "failure"; error: string }
@@ -216,12 +220,6 @@ type PublicationHandoffEvidence = {
 
 type PublicationEvidence =
   PublicationEventEvidence | PublicationHandoffEvidence;
-
-interface ReconciledPublication {
-  created: PublishedScanIssue[];
-  failed: FailedScanPublication[];
-  indeterminate?: boolean;
-}
 
 interface FindingReconciliation {
   issue: PreparedPublicationIssue;
@@ -337,6 +335,15 @@ export async function publishScanInternal(
       options.signal,
     );
   } else {
+    const requestContext = codexSecurityRequestContext(
+      {},
+      {
+        surface: dependencies.surface ?? "sdk",
+        command: "publish",
+        // Native Codex resolves provider and metadata from all its config layers.
+        providerResolved: false,
+      },
+    );
     invocation = await (dependencies.runCodex ?? runPublicationCodex)(
       command!,
       [
@@ -345,6 +352,8 @@ export async function publishScanInternal(
         "gpt-5.6-luna",
         "-c",
         'model_reasoning_effort="low"',
+        "-c",
+        requestContext.configOverride,
         "--ephemeral",
         "--json",
         "--sandbox",
@@ -371,7 +380,6 @@ export async function publishScanInternal(
       if (
         dependencies.runCodex === undefined &&
         error instanceof CodexSecurityError &&
-        error.message === "Could not start Codex for Linear publication." &&
         isRecord(cause) &&
         typeof cause["syscall"] === "string" &&
         cause["syscall"].startsWith("spawn ")
@@ -391,14 +399,30 @@ export async function publishScanInternal(
       : invocation!.exitCode === 0
         ? "Codex did not create a Linear issue for this finding."
         : codexFailureMessage(invocation!.stderr, invocation!.exitCode);
-  const evidence: PublicationEvidence[] = [
-    ...collectPublicationEvents(
-      invocation?.stdout ?? "",
-      prepared,
-      failureMessage,
-    ),
-    ...(await collectPublicationHandoffEvidence(handoff.file, prepared)),
-  ];
+  const events = collectPublicationEvents(
+    invocation?.stdout ?? "",
+    prepared,
+    failureMessage,
+  );
+  const connectorEvents = events.map((item) => item.rawLine);
+  let eventLogNotice: string | undefined;
+  const preserveConnectorEvents = async (): Promise<void> => {
+    if (eventLogNotice !== undefined || connectorEvents.length === 0) return;
+    try {
+      const file = await (dependencies.writeEvents ?? writePublicationEvents)(
+        handoff.directory,
+        connectorEvents,
+      );
+      eventLogNotice = `Linear connector-event evidence remains at ${file}.`;
+    } catch (error) {
+      eventLogNotice = `Could not preserve Linear connector-event evidence: ${errorMessage(error)}.`;
+    }
+  };
+  const handoffEvidence = await collectPublicationHandoffEvidence(
+    handoff.file,
+    prepared,
+  );
+  const evidence = [...events, ...handoffEvidence];
   const handoffResults = reconcilePublicationEvidence(
     prepared,
     evidence,
@@ -430,22 +454,6 @@ export async function publishScanInternal(
     }
   }
   const recoveryMessage = `The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`;
-  const connectorEvents = evidence.flatMap((item) =>
-    item.source === "event" ? [item.rawLine] : [],
-  );
-  let eventLogNotice: string | undefined;
-  const preserveConnectorEvents = async (): Promise<void> => {
-    if (eventLogNotice !== undefined || connectorEvents.length === 0) return;
-    try {
-      const file = await (dependencies.writeEvents ?? writePublicationEvents)(
-        handoff.directory,
-        connectorEvents,
-      );
-      eventLogNotice = `Linear connector-event evidence remains at ${file}.`;
-    } catch (error) {
-      eventLogNotice = `Could not preserve Linear connector-event evidence: ${errorMessage(error)}.`;
-    }
-  };
   if (handoffResults.indeterminate) {
     result.indeterminate = true;
     result.warnings = [
@@ -506,7 +514,9 @@ export async function publishScanInternal(
         : `Could not persist created Linear issues: ${persistenceFailure.detail}`;
     const cause =
       persistenceFailure === undefined
-        ? options.signal?.reason
+        ? options.signal?.aborted
+          ? options.signal.reason
+          : handoffEvidence.find((item) => item.cause !== undefined)?.cause
         : persistenceFailure.cause;
     if (persistenceFailure !== undefined && !result.indeterminate) {
       throw new CodexSecurityError(`${reason}. ${recoveryDetails}`, { cause });
@@ -528,7 +538,7 @@ export async function publishScanInternal(
   try {
     await saveReceipt(result, environment);
   } catch (error) {
-    if (result.created.length === 0 || options.signal?.aborted) throw error;
+    if (result.created.length === 0) throw error;
     result.warnings = [
       ...(result.warnings ?? []),
       `Could not save the publication receipt: ${errorMessage(error)}. Linear issues were already created; do not retry publication.`,
@@ -726,15 +736,22 @@ async function publishLinearApiIssues(
   observer: PublishScanOptions["onProgress"],
   signal?: AbortSignal,
 ): Promise<void> {
-  let handoffWrites = Promise.resolve();
+  let handoffWrites = Promise.resolve("");
   let recorded = 0;
   const appendHandoff = async (
     record: Record<string, unknown>,
   ): Promise<void> => {
-    const pending = handoffWrites.then(async () => {
-      await appendFile(handoffFile, `${JSON.stringify(record)}\n`, "utf8");
+    const pending = handoffWrites.then(async (prefix) => {
+      await appendFile(
+        handoffFile,
+        `${prefix}${JSON.stringify(record)}\n`,
+        "utf8",
+      );
     });
-    handoffWrites = pending.catch(() => undefined);
+    handoffWrites = pending.then(
+      () => "",
+      () => "\n",
+    );
     await pending;
   };
   for (let index = 0; index < publication.issues.length; index += 20) {
@@ -810,11 +827,7 @@ function reportPublicationProgress(
   event: PublishScanProgress,
 ): void {
   if (observer === undefined) return;
-  try {
-    observer(event);
-  } catch {
-    // Optional progress reporting must not stop issue publication.
-  }
+  notify(() => observer(event));
 }
 
 function publicationPrompt(
@@ -890,28 +903,47 @@ async function createPublicationHandoff(
   await mkdir(root, { recursive: true, mode: 0o700 });
   const digest = createHash("sha256").update(publication.scanId).digest("hex");
   const directory = await mkdtemp(join(root, `${digest}-`));
-  const file = join(directory, "issues.jsonl");
-  const publicationFile = join(directory, "publication.json");
-  const issues = publication.issues.map((issue) => ({
-    findingId: issue.findingId,
-    occurrenceId: issue.occurrenceId,
-    arguments: linearPublicationArguments(publication.destination, issue),
-  }));
-  const batches = Array.from(
-    { length: Math.ceil(issues.length / 20) },
-    (_, index) => issues.slice(index * 20, index * 20 + 20),
-  );
-  await writeFile(file, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
-  await writeFile(
-    publicationFile,
-    JSON.stringify({
-      scanId: publication.scanId,
-      destination: publication.destination,
-      batches,
-    }),
-    { encoding: "utf8", flag: "wx", mode: 0o600 },
-  );
-  return { directory, file, publicationFile };
+  try {
+    const file = join(directory, "issues.jsonl");
+    const publicationFile = join(directory, "publication.json");
+    const issues = publication.issues.map((issue) => ({
+      findingId: issue.findingId,
+      occurrenceId: issue.occurrenceId,
+      arguments: linearPublicationArguments(publication.destination, issue),
+    }));
+    const batches = Array.from(
+      { length: Math.ceil(issues.length / 20) },
+      (_, index) => issues.slice(index * 20, index * 20 + 20),
+    );
+    await writeFile(file, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
+    await writeFile(
+      publicationFile,
+      JSON.stringify({
+        scanId: publication.scanId,
+        destination: publication.destination,
+        batches,
+      }),
+      { encoding: "utf8", flag: "wx", mode: 0o600 },
+    );
+    return { directory, file, publicationFile };
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true }).catch(
+      () => undefined,
+    );
+    throw error;
+  }
+}
+
+async function readPublicationHandoff(file: string): Promise<string> {
+  try {
+    return await readFile(file, "utf8");
+  } catch (error) {
+    if (isRecord(error) && error["code"] === "ENOENT") return "";
+    throw new CodexSecurityError(
+      `Could not read the publication handoff: ${errorMessage(error)}. The publication handoff remains at ${file}; recover it before retrying to avoid creating duplicate issues.`,
+      { cause: error },
+    );
+  }
 }
 
 async function collectPublicationHandoffEvidence(
@@ -920,16 +952,16 @@ async function collectPublicationHandoffEvidence(
 ): Promise<PublicationHandoffEvidence[]> {
   let content: string;
   try {
-    content = await readFile(file, "utf8");
+    content = await readPublicationHandoff(file);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     return [
       {
         source: "handoff",
         status: "invalid",
         possibleMutation: true,
         resolution: resolveClaims([]),
-        error: `Could not read the Linear publication handoff: ${errorMessage(error)}`,
+        error: errorMessage(error),
+        cause: error,
       },
     ];
   }
@@ -1082,27 +1114,28 @@ function reconcilePublicationEvidence(
   publication: PreparedScanPublication,
   evidence: readonly PublicationEvidence[],
   failureMessage: string,
-): ReconciledPublication {
+) {
   const byOwner = Map.groupBy(evidence, (item) => item.ownerFindingId);
   const claimLedger = new Map<
     string,
-    {
-      kinds: Set<PublicationClaim["kind"]>;
-      owners: Set<string | undefined>;
-    }
+    { kind: PublicationClaim["kind"]; owner: string | undefined }
   >();
-
+  const collidingOwners = new Set<string>();
   for (const item of evidence) {
     for (const claim of item.resolution.claims) {
       for (const alias of publicationClaimAliases(claim)) {
-        const key = alias.value;
-        const reservation = claimLedger.get(key) ?? {
-          kinds: new Set<PublicationClaim["kind"]>(),
-          owners: new Set<string | undefined>(),
-        };
-        reservation.kinds.add(alias.kind);
-        reservation.owners.add(item.ownerFindingId);
-        claimLedger.set(key, reservation);
+        const reservation = claimLedger.get(alias.value);
+        const owner = item.ownerFindingId;
+        if (reservation === undefined) {
+          claimLedger.set(alias.value, { kind: alias.kind, owner });
+        } else if (
+          reservation.kind !== alias.kind ||
+          reservation.owner !== owner
+        ) {
+          if (reservation.owner !== undefined)
+            collidingOwners.add(reservation.owner);
+          if (owner !== undefined) collidingOwners.add(owner);
+        }
       }
     }
   }
@@ -1112,14 +1145,6 @@ function reconcilePublicationEvidence(
   );
   let indeterminate = outcomes.some((outcome) => outcome.indeterminate);
 
-  const collidingOwners = new Set<string>();
-  for (const reservation of claimLedger.values()) {
-    if (reservation.kinds.size > 1 || reservation.owners.size > 1) {
-      for (const owner of reservation.owners) {
-        if (owner !== undefined) collidingOwners.add(owner);
-      }
-    }
-  }
   for (const outcome of outcomes) {
     if (!collidingOwners.has(outcome.issue.findingId)) continue;
     outcome.created = undefined;
@@ -1358,13 +1383,7 @@ async function preserveVerifiedHandoff(
   publication: PreparedScanPublication,
   issues: readonly PublishedScanIssue[],
 ): Promise<void> {
-  let current: string;
-  try {
-    current = await readFile(file, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    current = "";
-  }
+  const current = await readPublicationHandoff(file);
   const planned = new Map(publication.issues.map(findingEntry));
   const verified = new Map(issues.map(findingEntry));
   const recorded = new Set<string>();
@@ -1511,7 +1530,7 @@ async function runPublicationCodex(
       cleanup();
       reject(
         new CodexSecurityError(
-          "Could not start Codex for Linear publication.",
+          `Could not start Codex for Linear publication: ${errorMessage(error)}`,
           {
             cause: error,
           },
@@ -1593,7 +1612,7 @@ function forceTerminatePublicationProcess(
   terminatePublicationProcessGroup(child, "SIGKILL");
 }
 
-function terminatePublicationProcessGroup(
+export function terminatePublicationProcessGroup(
   child: ChildProcessWithoutNullStreams,
   signal: NodeJS.Signals,
 ): void {
@@ -1660,8 +1679,15 @@ async function writePublicationReceipt(
     flag: "wx",
     mode: 0o600,
   });
-  await writeFile(join(directory, `${name}.json`), contents, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+  const temporary = join(directory, `.${name}-${randomUUID()}.json.tmp`);
+  const handle = await open(temporary, "wx", 0o600);
+  try {
+    await handle.writeFile(contents, "utf8");
+    await handle.close();
+    await rename(temporary, join(directory, `${name}.json`));
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    await rm(temporary, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
