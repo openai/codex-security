@@ -28,6 +28,23 @@ Codex plugin session.
 
 ## Choose a task
 
+To review a skill before giving it to a coding agent, ask
+[`$check-skills`](../plugins/codex-security/skills/check-skills/SKILL.md) directly:
+
+> Use $check-skills on ../downloaded-skills before I install them in Claude Code.
+
+Start the chat in a trusted workspace with the Codex Security checker enabled.
+Keep the downloaded checkout outside the host's skill discovery paths and pass
+its path to the checker. If you already opened the checkout as your workspace
+or enabled its skills, start a clean chat with the target outside discovery.
+The previous chat may have loaded its `AGENTS.md` or a replacement checker.
+
+Point it at a file, an extracted bundle, a checkout containing several skills,
+or paste the skill text. It returns a per-skill **PASS**, **REVIEW**, **BLOCK**,
+or **INCOMPLETE** with source evidence and coverage limits. A file review covers
+only that file. Supply the folder to include helpers and references. The review
+does not install the target or require the plugin MCP server.
+
 | Task                                                    | In Codex                                                                                                                                                                                 | From the terminal                                                                                                                                                                                             |
 | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Find vulnerabilities in a repository or selected paths  | [`$security-scan`](../plugins/codex-security/skills/security-scan/SKILL.md): one Standard audit.                                                                                         | `cs scan .`, optionally `--path src`.                                                                                                                                                                         |
