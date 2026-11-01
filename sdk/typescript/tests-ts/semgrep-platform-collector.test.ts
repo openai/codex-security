@@ -486,6 +486,92 @@ test("a normalized Platform report binds native rows even when both projects hav
   expect((await prepare(batch)).preview.findings).toHaveLength(2);
 });
 
+test("a marked Platform report requires scope for caller-managed partial v1 findings", async () => {
+  const native = {
+    id: 9,
+    rule_name: "example.rule",
+    repository: { url },
+    ref: options.ref,
+    product: "sast",
+  };
+  const report = normalizeSemgrepPlatformFindings({
+    ...options,
+    project,
+    product: "sast",
+    format: "semgrep-platform-findings/v1",
+    findingCount: 1,
+    findings: [native],
+  });
+  const partial = structuredClone(report.findings[0]!);
+  partial.source_finding_id = "caller-managed";
+  const source = { provider: "semgrep" as const, sourceKey: "example/topic" };
+  await using fixture = await localReportFixture("findings.json", source, {
+    remote: url,
+  });
+  const marked = (row: typeof partial) =>
+    fixture.prepareNormalized({
+      ...report,
+      read: 2,
+      findings: [...report.findings, row],
+    });
+  for (const finding of [
+    { id: native.id, repository: { url: "https://github.com/example/other" } },
+    { id: native.id, repository: native.repository },
+    { id: native.id, ref: native.ref },
+    { id: native.id, product: native.product },
+    { id: native.id, ref: "refs/heads/other" },
+    { id: native.id, ref: null },
+    { id: native.id, product: "sca" },
+    { id: native.id, issue_type: "Code" },
+    { id: native.id, found_dependency: { package: "example-package" } },
+    { id: native.id, vulnerability_identifier: "CVE-2099-0001" },
+    { id: native.id, ref: "HEAD" },
+    { repository: native.repository, ref: "HEAD" },
+  ]) {
+    partial.evidence.source_data = { finding };
+    await expect(marked(partial)).rejects.toThrow(/scope/i);
+  }
+  const format = "issue-tracker/v1";
+  partial.evidence.source_data = {
+    format,
+    finding: { id: native.id, ref: native.ref },
+  };
+  await expect(marked(partial)).rejects.toThrow(/scope/i);
+  const issue = { number: 9, remediationBranch: "refs/heads/topic" };
+  const fields = { id: issue.number, ref: issue.remediationBranch };
+  const ticket = {
+    source_finding_id: "caller-managed",
+    evidence: {
+      ...report.findings[0]!.evidence,
+      source_data: { format, finding: fields },
+    },
+  };
+  expect(JSON.stringify(ticket)).toBe(JSON.stringify(partial));
+  await expect(marked(ticket)).rejects.toThrow(/scope/i);
+  const ordinary = { read: 1, findings: [ticket], excluded: [] };
+  expect((await fixture.prepareNormalized(ordinary)).preview.findings).toEqual([
+    ticket,
+  ]);
+  for (const data of [
+    { format, ticket: fields },
+    { format, finding: { id: issue.number, ref: undefined } },
+    {
+      format,
+      finding: { found_dependency: null, vulnerability_identifier: null },
+    },
+    {
+      format,
+      finding: { id: issue.number, title: "Ticket", product: "widget" },
+    },
+  ]) {
+    const migrated = {
+      ...ticket,
+      evidence: { ...ticket.evidence, source_data: data },
+    };
+    expect((await marked(migrated)).preview.findings[1]).toEqual(migrated);
+  }
+});
+
 test("a v1 normalized report binds its object rows and empty results to the declared checkout", async () => {
   const source = { provider: "semgrep" as const, sourceKey: "example/topic" };
   await using fixture = await localReportFixture("v1.json", source, {

@@ -1264,6 +1264,261 @@ test("a normalized Semgrep report checks the provider before Cloud credentials",
   ).rejects.toThrow("requires the semgrep provider");
 });
 
+test.each(["ticket", "HEAD", "release"] as const)(
+  "Cloud replays a previously approved Semgrep request with its original scope checks (%s)",
+  async (kind) => {
+    const url = "https://github.com/example/project";
+    const other = "https://github.com/example/other";
+    const ref = kind === "ticket" ? "refs/heads/release" : kind;
+    const scope = {
+      deployment: "example",
+      projectId: "14",
+      ref,
+      product: "sast",
+    };
+    const capture = {
+      format: "semgrep-platform-findings/v1",
+      deployment: scope.deployment,
+      ref,
+      product: scope.product,
+      project: { id: 14, name: "example/project", url },
+      findingCount: 1,
+      findings: [{ id: 23, rule_name: "example.rule", ref }],
+    };
+    const f = await hostedFixture("semgrep", capture, url);
+    const report = normalizeSemgrepFindings(capture, {}, "cloud");
+    const row = report.findings[0]!;
+    const bare = {
+      read: 1,
+      excluded: [],
+      findings: [row],
+      sourceRepositoryUrl: url,
+    };
+    const marked = {
+      ...bare,
+      sourceFormat: "semgrep-platform-findings/v1" as const,
+      semgrepPlatformScope: scope,
+    };
+    if (kind === "ticket") {
+      row.source_finding_id = "operator-assigned";
+      row.evidence.source_data = {
+        format: "ticket/v1",
+        finding: { id: "TRACK-23", repository: { url: other } },
+      };
+      await expect(f.prepareNormalized(marked)).rejects.toThrow(
+        /original collection scope/iu,
+      );
+    }
+    const path = await f.loseResponse(
+      await f.prepareNormalized(kind === "ticket" ? bare : marked),
+    );
+    const saved = JSON.parse(await readFile(path, "utf8"));
+    // The released publisher stored whether a report was marked and the original evidence digests.
+    const { inputDigest, savedEvidenceDigest } = saved.inputProjection;
+    saved.inputProjection = {
+      retainedHostedSelection: true,
+      inputDigest,
+      savedEvidenceDigest,
+    };
+    const bytes = JSON.stringify(saved);
+    await writeFile(
+      path,
+      JSON.stringify({ ...saved, accountId: "other-account" }),
+    );
+    await expect(f.prepareNormalized(marked)).rejects.toThrow(/account/iu);
+    await writeFile(path, bytes);
+    await expect(
+      f.prepareNormalized({ ...marked, sourceRepositoryUrl: other }),
+    ).rejects.toThrow(/scope|repository/iu);
+    if (kind !== "ticket") {
+      await expect(
+        f.prepareNormalized({
+          ...marked,
+          semgrepPlatformScope: { ...scope, ref: "refs/heads/" + ref },
+        }),
+      ).rejects.toThrow(/scope|ref/iu);
+    }
+    expect(await readFile(path, "utf8")).toBe(bytes);
+    expect(f.posts).toHaveLength(1);
+    const retry = await f.prepareNormalized(marked);
+    expect(retry.preview.resumed).toBe(true);
+    await retry.publish();
+    expect(f.posts).toEqual([
+      JSON.stringify(saved.requests[0]),
+      JSON.stringify(saved.requests[0]),
+    ]);
+  },
+);
+
+test.each(["ticket metadata", "retained ref"] as const)(
+  "a mixed Semgrep request retries with an unmarked row containing %s",
+  async (kind) => {
+    const url = "https://github.com/example/project";
+    const capture = selectedSemgrepReport({ name: "example/project", url }, {});
+    const report = normalizeSemgrepFindings(capture, {}, "cloud");
+    const finding =
+      kind === "ticket metadata"
+        ? { id: "T-1", title: "Ticket" }
+        : { id: 23, ref: "refs/heads/other" };
+    const unmarked = {
+      read: 2,
+      excluded: [],
+      findings: [
+        ...report.findings,
+        {
+          source_finding_id: "ticket-1",
+          evidence: {
+            title: "Ticket",
+            severity: "low" as const,
+            source_data: { finding },
+          },
+        },
+      ],
+    };
+    const f = await hostedFixture("semgrep", capture, url);
+    const first = await f.prepareNormalized(unmarked);
+    const pending = await f.loseResponse(first);
+    const marked = { ...report, ...unmarked };
+    if (kind === "retained ref") {
+      const bytes = await readFile(pending);
+      await expect(f.prepareNormalized(marked)).rejects.toThrow(/scope/iu);
+      expect(await readFile(pending)).toEqual(bytes);
+      expect(f.posts).toHaveLength(1);
+    }
+    const retry = await f.prepareNormalized(
+      kind === "ticket metadata" ? marked : unmarked,
+    );
+    expect(retry.preview.resumed).toBe(true);
+    expect(retry.preview.requests).toEqual(first.preview.requests);
+    await retry.publish();
+    expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+  },
+);
+
+test("Cloud binds newly approved marked ticket context to its deployment", async () => {
+  const url = "https://github.com/example/project";
+  const f = await hostedFixture("semgrep", semgrepJson(), url);
+  const report = normalizeSemgrepFindings(
+    semgrepJson(),
+    { sourceRepositoryUrl: url },
+    "cloud",
+  );
+  report.findings[0]!.evidence.source_data = {
+    ticket: { id: "TRACK-23", ref: "HEAD" },
+  };
+  const scope = {
+    deployment: "example",
+    projectId: "14",
+    ref: "refs/heads/release",
+    product: "sast",
+  };
+  const input = {
+    ...report,
+    sourceRepositoryUrl: url,
+    sourceFormat: "semgrep-platform-findings/v1" as const,
+    semgrepPlatformScope: scope,
+  };
+  const path = await f.loseResponse(await f.prepareNormalized(input));
+  const bytes = await readFile(path, "utf8");
+  await expect(
+    f.prepareNormalized({
+      ...input,
+      semgrepPlatformScope: { ...scope, deployment: "another" },
+    }),
+  ).rejects.toThrow(/scope|deployment/iu);
+  expect(await readFile(path, "utf8")).toBe(bytes);
+  expect(f.posts).toHaveLength(1);
+  const retry = await f.prepareNormalized(input);
+  expect(retry.preview.resumed).toBe(true);
+  await retry.publish();
+  expect(f.posts[1]).toBe(f.posts[0]);
+});
+
+test.each(["marked", "unmarked"] as const)(
+  "Cloud preserves a Semgrep approval's scope when recovering the raw checkpoint key during %s retries",
+  async (retryKind) => {
+    const changedScope = retryKind === "marked";
+    const url = "https://scm.example.test/Org/Repo";
+    const capture = {
+      format: semgrepPlatformFormat,
+      repositoryAliases: ["org/repo"],
+      deployment: "example",
+      ref: "refs/heads/release",
+      product: "sast",
+      project: { id: "14", name: "Org/Repo", url },
+      findingCount: 1,
+      findings: [
+        JSON.stringify({
+          id: 23,
+          rule_name: "sample.rule",
+          repository: { id: 14, name: "org/repo" },
+          ref: "refs/heads/release",
+        }),
+      ],
+    };
+    const f = await hostedFixture("semgrep", capture, url);
+    const native = normalizeSemgrepPlatformFindings(capture);
+    const ticket = {
+      source_finding_id: "custom",
+      evidence: {
+        title: "Ticket",
+        severity: "high" as const,
+        source_data: { finding: { ref: "refs/heads/other" } },
+      },
+    };
+    const findings = [...native.findings, ticket];
+    const bare = {
+      read: 2,
+      excluded: [],
+      findings,
+      sourceRepositoryPlatform: "other" as const,
+      sourceRepositoryUrl: url,
+    };
+    const marked = { ...native, read: 2, findings };
+    const mapped = { ...bare, sourceRepositoryPlatform: "github" as const };
+    const path = await f.loseResponse(await f.prepareNormalized(bare));
+    const bytes = await readFile(path, "utf8");
+
+    // The raw publisher installs its checkpoint after the mapped reader misses the raw key.
+    const staged = path + ".staged";
+    await fs.rename(path, staged);
+    const originalRead = fs.readFile;
+    let installed = false;
+    const lookup = spyOn(fs, "readFile").mockImplementation(((
+      ...args: Parameters<typeof fs.readFile>
+    ) => {
+      const result = originalRead(...args);
+      if (args[0] !== path || installed) return result;
+      installed = true;
+      return result.finally(() => fs.rename(staged, path));
+    }) as typeof fs.readFile);
+    try {
+      if (changedScope)
+        await expect(f.prepareNormalized(marked)).rejects.toThrow(
+          /approved request/iu,
+        );
+      else
+        expect((await f.prepareNormalized(mapped)).preview.resumed).toBe(true);
+    } finally {
+      lookup.mockRestore();
+    }
+    expect(installed).toBe(true);
+    if (changedScope) expect(await readFile(path, "utf8")).toBe(bytes);
+    else {
+      await expect(fs.stat(path)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(f.prepareNormalized(marked)).rejects.toThrow(
+        /approved request/iu,
+      );
+    }
+    expect(f.posts).toHaveLength(1);
+    const resumed = await f.prepareNormalized(changedScope ? bare : mapped);
+    expect(resumed.preview.requests).toEqual(JSON.parse(bytes).requests);
+    expect(resumed.preview.resumed).toBe(true);
+    await resumed.publish();
+    expect(f.posts[1]).toBe(f.posts[0]);
+  },
+);
+
 test("Cloud checks both native Semgrep rows when a projection retains both formats", async () => {
   const url = "https://github.com/example/project";
   const f = await hostedFixture(

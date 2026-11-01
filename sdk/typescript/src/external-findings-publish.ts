@@ -53,6 +53,7 @@ import {
   snykRestRepositoryMatches,
 } from "./snyk-rest-findings.js";
 import {
+  hasRetainedSemgrepScope,
   isSemgrepPlatformEvidence,
   isSemgrepPlatformFormat,
   semgrepPlatformFormat,
@@ -68,7 +69,7 @@ import {
   hostedRepositoryUrlKey,
   normalizeHostedGitRepositoryUrl,
 } from "./hosted-git-repository.js";
-import { hostedRepositoryUrl } from "./hosted-scanner-http.js";
+import { canonicalNumber, hostedRepositoryUrl } from "./hosted-scanner-http.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
 import {
   blackDuckReportRepositories,
@@ -180,6 +181,7 @@ interface SavedSubmission {
     inputDigest: string;
     savedEvidenceDigest: string;
     retainedHostedSelection?: true;
+    semgrepPartialScopeDigest?: string;
   };
   inspectorProjectMapRequired?: true;
   /** Catalog URL when this source selection was approved, before any repository rename. */
@@ -688,6 +690,7 @@ function hostedRepositoryMatcher(
       reportScope,
       [{ url: projectedBlackDuckRepositoryUrl(finding, "cloud") }, ...sarif],
       "cloud",
+      allowOpaqueLegacyRows,
     )?.url;
     if (native) {
       original ??= native;
@@ -1324,6 +1327,22 @@ async function preparePublicationInput(
     });
     throw new CloudImportError(409, resetMessage);
   }
+  function suppliedSemgrepScopeDigest() {
+    const scope = semgrepPlatformReportScope(report, options.provider);
+    return hash(
+      "sha256",
+      canonicalJson(
+        scope?.format
+          ? [
+              scope.deployment,
+              canonicalNumber(scope.projectId),
+              scope.ref,
+              scope.product,
+            ]
+          : null,
+      ),
+    );
+  }
   function validateSaved(
     serialized: string,
     legacy = false,
@@ -1368,6 +1387,15 @@ async function preparePublicationInput(
       )
         throw new Error("Saved import destination does not match.");
     }
+    const approvedScope = content.inputProjection?.semgrepPartialScopeDigest;
+    if (
+      approvedScope !== undefined &&
+      !wasReset(content) &&
+      approvedScope !== suppliedSemgrepScopeDigest()
+    )
+      throw new CodexSecurityError(
+        "The supplied Semgrep report scope does not match the approved request.",
+      );
     return content;
   }
   const key = keyFor(currentIdentity);
@@ -1487,8 +1515,17 @@ async function preparePublicationInput(
           const rebindProjection =
             content.inputProjection !== undefined ||
             savedEvidenceDigest !== inputDigest;
-          if (rebindProjection)
-            content.inputProjection = { inputDigest, savedEvidenceDigest };
+          if (rebindProjection) {
+            const approvedScope =
+              content.inputProjection?.semgrepPartialScopeDigest;
+            content.inputProjection = {
+              inputDigest,
+              savedEvidenceDigest,
+              ...(approvedScope !== undefined && {
+                semgrepPartialScopeDigest: approvedScope,
+              }),
+            };
+          }
           recovered = content;
           if (serialized === undefined) return;
           await withSourceAdmission(async () => {
@@ -1857,12 +1894,24 @@ async function preparePublicationInput(
     }
     if (current) requests.push(validateImportRequest(current));
   }
+  const bindSemgrepScope =
+    !saved &&
+    options.provider === "semgrep" &&
+    report.findings.some(
+      (finding) =>
+        !isSemgrepPlatformEvidence(finding, "semgrep") &&
+        (scopedSemgrepReport ||
+          hasRetainedSemgrepScope(finding.evidence.source_data?.["finding"])),
+    );
   const submission: SavedSubmission = {
     accountId: credentials.account_id,
     requests,
     receipts: saved?.receipts,
     inputProjection: saved?.inputProjection ?? {
       ...(scopedSemgrepReport && { retainedHostedSelection: true }),
+      ...(bindSemgrepScope && {
+        semgrepPartialScopeDigest: suppliedSemgrepScopeDigest(),
+      }),
       inputDigest,
       savedEvidenceDigest: hash(
         "sha256",
