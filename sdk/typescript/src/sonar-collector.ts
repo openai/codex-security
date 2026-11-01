@@ -6,8 +6,8 @@ import {
   boundSonarWorktree,
   sonarRepositoryForRemote,
   sonarCheckoutMatchesSource,
-  localGitProtectionRoots,
 } from "./external-findings-local.js";
+import { localGitProtectionRoots } from "./local-git-metadata.js";
 import { repositoryUrlKey } from "./external-import-contract.js";
 import {
   forwardExternalImportSetting,
@@ -472,7 +472,7 @@ export async function collectSonarIssues(
     componentKeys: project,
     impactSoftwareQualities: "SECURITY",
     additionalFields: "rules",
-    ps: "100",
+    ps: "500",
   });
   if (branch !== undefined) query.set("branch", branch);
   if (pullRequest !== undefined) query.set("pullRequest", pullRequest);

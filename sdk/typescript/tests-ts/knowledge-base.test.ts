@@ -56,15 +56,22 @@ function pdf(text: string): Uint8Array {
   return pdfContent(`(${text.replace(/[\\()]/gu, "\\$&")}) Tj`);
 }
 
-function pdfContent(operators: string): Uint8Array {
+function pdfContent(operators: string, form?: string): Uint8Array {
   const stream = `BT /F1 12 Tf 72 720 Td ${operators} ET`;
+  const font = "/Font << /F1 4 0 R >>";
+  const forms = form ? " /XObject << /Word 6 0 R >>" : "";
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
     "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << ${font}${forms} >> /Contents 5 0 R >>`,
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
   ];
+  if (form) {
+    objects.push(
+      `<< /Type /XObject /Subtype /Form /BBox [0 0 300 100] /Resources << ${font} >> /Length ${Buffer.byteLength(form)} >>\nstream\n${form}\nendstream`,
+    );
+  }
   let output = "%PDF-1.4\n";
   const offsets = [0];
   for (const [index, object] of objects.entries()) {
@@ -477,12 +484,9 @@ describe("scan knowledge bases", () => {
     const root = await temporaryDirectory();
     await writeFile(
       join(root, "architecture.pdf"),
-      pdf("Payment service boundary"),
-    );
-    await writeFile(
-      join(root, "styled-runs.pdf"),
       pdfContent(
-        "(Rotate the admin) Tj /F1 18 Tf (_token) Tj /F1 12 Tf 0 -14 Td (every 90 days.) Tj",
+        "(Policy ) Tj /F1 14 Tf (guide) Tj /F1 12 Tf 0 -14 Td (Require) Tj ET q 1 0 0 1 117.348 706 cm /Word Do Q BT",
+        "BT /F1 12 Tf (authentication) Tj ET",
       ),
     );
     await writeFile(
@@ -526,8 +530,7 @@ describe("scan knowledge bases", () => {
     temporaryDirectories.track(knowledgeBase.path);
     const documents = await extractedDocuments(knowledgeBase.path);
 
-    expect(documents).toContain("Payment service boundary");
-    expect(documents).toContain("Rotate the admin_token\nevery 90 days.");
+    expect(documents).toContain("Policy guide\nRequire authentication");
     expect(documents).toContain("SSRF & IDOR\nReview authentication\n");
     expect(documents).toContain("Authorization\nReview permissions\n");
     expect(documents).toContain("Authentication\nReview sessions\n");

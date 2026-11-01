@@ -281,14 +281,17 @@ async function extractPdf(
         signal?.throwIfAborted();
         const content = await page.getTextContent();
         signal?.throwIfAborted();
-        pages.push(
-          content.items
-            // PDF.js emits its own spaces between words and marks line ends.
-            .map((item) =>
-              "str" in item ? item.str + (item.hasEOL ? "\n" : "") : "",
-            )
-            .join(""),
-        );
+        const parts: string[] = [];
+        for (const item of content.items) {
+          if (!("str" in item)) continue;
+          // Separate runs when the PDF supplies no whitespace, including across forms.
+          if (/^\S/u.test(item.str) && /\S$/u.test(parts.at(-1) ?? "")) {
+            parts.push(" ");
+          }
+          if (item.str) parts.push(item.str);
+          if (item.hasEOL) parts.push("\n");
+        }
+        pages.push(parts.join(""));
       }
       return pages.join("\n");
     } finally {
