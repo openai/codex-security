@@ -88,8 +88,8 @@ sets it up for the temporary home through its installed service or the standard
 Windows administrator approval prompt. Setup must succeed before shell commands
 run.
 
-The production prompt is staged unchanged, and its SHA-256 is recorded in the
-report. The eval uses zero subagents and a compact semantic-output schema to
+The report records the SHA-256 of the production core prompt and of each staged
+audit reference, including the baseline and validation instructions. The eval uses zero subagents and a compact semantic-output schema to
 exercise the core workflow's sequential fallback. It does not test SDK artifact
 publication or Deep Scan scheduling, inspect Git history, or check whether
 credentials work against a service.

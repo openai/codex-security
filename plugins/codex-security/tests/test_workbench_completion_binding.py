@@ -88,6 +88,46 @@ def register_cli_scan(
     )
 
 
+def test_cli_registration_requests_scoped_inventory_for_git(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    initialize_git_repository(repo)
+    src = repo / "src"
+    src.mkdir()
+    (repo / ".gitignore").write_text("*.ignored\n")
+    for name in ("entry.py", "direct.ignored", "skip.ignored"):
+        (src / name).touch()
+
+    registration = register_cli_scan(
+        tmp_path / "state",
+        repo,
+        tmp_path / "scan",
+        scan_target={"kind": "paths", "paths": ["src", "src/direct.ignored", "src/entry.py"]},
+    )
+    assert registration["prepareScopedInventory"]
+
+
+def test_cli_handoff_scopes_inherited_policy_to_requested_paths(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    initialize_git_repository(repo)
+    for directory in ("api", "api/nested", "client", "unrelated"):
+        (repo / directory).mkdir()
+        (repo / directory / "SECURITY.md").write_text(directory)
+    (repo / "SECURITY.md").write_text("Root policy")
+    (repo / "api/nested/code.py").touch()
+    paths = ["api/nested/code.py", "client"]
+    registration = register_cli_scan(
+        tmp_path / "state", repo, tmp_path / "scan", scan_target={"kind": "paths", "paths": paths}
+    )
+    assert registration["securityPolicyPaths"] == [
+        "SECURITY.md",
+        "api/SECURITY.md",
+        "api/nested/SECURITY.md",
+        "client/SECURITY.md",
+    ]
+    started = scan_command(tmp_path / "state", "get-scan", registration["scanId"])
+    assert started["scan"]["progress"]["phase"] == "threat_model"
+
+
 def _start_diff_scan_with_draft(tmp_path: Path, kind: str) -> tuple[Path, Path, dict[str, Any]]:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
@@ -363,6 +403,7 @@ def test_cli_scan_completes_when_draft_omits_registered_scope(
         scan_dir,
         scan_target={"kind": "paths", "paths": ["src", "tests"]},
     )
+    assert not registered["prepareScopedInventory"]  # Non-Git directories use the sandbox helper.
     scan_id = registered["scanId"]
     write_completed_contract(scan_dir, scan_id, repository)
     manifest_path = scan_dir / "scan-manifest.json"

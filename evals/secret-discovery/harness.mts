@@ -127,11 +127,18 @@ export async function prepareEval(
   await mkdir(join(runtime, "references"), { recursive: true });
   const core = await readFile(corePromptPath, "utf8");
   await writeFile(join(runtime, "references/core-scan.md"), core);
-  for (const name of ["threat-model.md", "finding-detail-fields.md"]) {
-    await cp(
-      join(pluginRoot, "references", name),
-      join(runtime, "references", name),
-    );
+  const referenceSha256: Record<string, string> = {};
+  for (const name of [
+    "baseline-auditor.md",
+    "focused-investigator.md",
+    "validate-scan-findings.md",
+    "threat-model.md",
+    "finding-detail-fields.md",
+    "final-report.md",
+  ]) {
+    const contents = await readFile(join(pluginRoot, "references", name));
+    await writeFile(join(runtime, "references", name), contents);
+    referenceSha256[name] = createHash("sha256").update(contents).digest("hex");
   }
   for (const name of ["schemas", "examples/completed-scan"]) {
     await cp(join(pluginRoot, name), join(runtime, name), { recursive: true });
@@ -153,6 +160,7 @@ export async function prepareEval(
     fixture,
     prompt,
     promptSha256: createHash("sha256").update(core).digest("hex"),
+    referenceSha256,
   };
 }
 
@@ -339,6 +347,7 @@ export async function runPreparedEval(
       ? "explicit"
       : "Codex default; SDK does not expose resolved model",
     promptSha256: prepared.promptSha256,
+    referenceSha256: prepared.referenceSha256,
     ...gradeResult(semanticResult, prepared.fixture),
     usage,
   };

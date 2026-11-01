@@ -21,6 +21,7 @@ from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import write_scan_local_bytes
 from workbench.storage import state_dir
 from workbench_feedback import get_scan_feedback
+from workbench_source_scopes import safe_source_path
 from workbench_target import (
     directory_content_digest,
     git_revision,
@@ -38,6 +39,27 @@ def safe_segment(value: str) -> str:
 
 def compact_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def starting_policy(mode: str, target: Path, scopes: list[str]) -> dict[str, list[str]]:
+    """Identify policy files for the starting scopes. The scanner reads them in its sandbox."""
+    if mode != "standard":
+        return {}
+    directories: set[Path] = set()
+    for scope in scopes:
+        path = safe_source_path(target, scope)
+        if path is None:
+            raise SystemExit(f"Scan scope must stay inside the scanned target: {scope}")
+        directory = (path if path.is_dir() else path.parent).relative_to(target)
+        directories.update((directory, *directory.parents))
+    policies = []
+    for directory in sorted(directories):
+        policy = directory / "SECURITY.md"
+        if (target / policy).is_file():
+            if safe_source_path(target, policy.as_posix()) is None:
+                raise SystemExit(f"SECURITY.md must stay inside the scanned target: {policy}")
+            policies.append(policy.as_posix())
+    return {"securityPolicyPaths": policies}
 
 
 def scan_target_identity(
@@ -259,7 +281,7 @@ def insert_running_scan(
             diff_head_revision, diff_content_digest, target_summary, scan_dir, model,
             reasoning_effort, status, phase, handoff_status, started_at, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            'running', 'preflight', ?, ?, ?, ?)
+            'running', ?, ?, ?, ?, ?)
         """,
         (
             scan_id,
@@ -277,6 +299,9 @@ def insert_running_scan(
             str(scan_dir),
             optional_text(model, maximum=200),
             optional_text(reasoning_effort, maximum=32),
+            "threat_model"
+            if workspace["default_mode"] == "standard" and handoff_status == "delivered"
+            else "preflight",
             handoff_status,
             timestamp,
             timestamp,

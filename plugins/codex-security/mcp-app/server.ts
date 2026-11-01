@@ -509,6 +509,10 @@ export function createCodexSecurityServer(): McpServer {
     deepScanCoordinators.shutdown("mcp_transport_closed");
   const appMeta = { ui: { visibility: ["app"] as const } };
   const modelActionMeta = { ui: { visibility: ["model"] as const } };
+  const accountMeta = {
+    ...modelActionMeta,
+    "openai/requestedEntitlements": ["cyber_trusted_access"],
+  };
   const destructiveAnnotations = {
     ...writingAnnotations,
     destructiveHint: true,
@@ -526,61 +530,17 @@ export function createCodexSecurityServer(): McpServer {
         "Check this ChatGPT account's Daybreak access and available Daybreak programs. This check is advisory and never authorizes or blocks a scan. Skip it for Amazon Bedrock scans: it does not check AWS model access or access to local CLI results.",
       inputSchema: z.strictObject({}),
       annotations: readingAnnotations,
-      _meta: {
-        ...modelActionMeta,
-        "openai/requestedEntitlements": ["cyber_trusted_access"],
-      },
+      _meta: accountMeta,
     },
     (_input, extra) => {
-      const metadata = requestMetadataFromExtra(extra);
-      const threadId =
-        typeof metadata?.threadId === "string" && metadata.threadId.trim()
-          ? metadata.threadId.trim()
-          : undefined;
-      const parsed = threadId
-        ? daybreakEntitlementContextSchema.safeParse(
-            metadata?.["openai/entitlementContext"],
-          )
-        : undefined;
-      const snapshot = parsed?.success
-        ? parsed.data.entitlements.cyber_trusted_access
-        : {
-            schemaVersion: 1 as const,
-            status: "unknown" as const,
-            grants: [],
-            checkedAt: new Date().toISOString(),
-            stale: false,
-          };
-      const status = snapshot.stale ? "unknown" : snapshot.status;
-      const programs =
-        status === "granted"
-          ? [
-              ...new Set(
-                snapshot.grants.map(({ level }) =>
-                  level === "tac3" || level === "government"
-                    ? "Daybreak Red"
-                    : "Daybreak Blue",
-                ),
-              ),
-            ]
-          : [];
-      const access = {
-        schemaVersion: snapshot.schemaVersion,
-        status,
-        programs,
-        checkedAt: snapshot.checkedAt,
-        stale: snapshot.stale,
-        ...(snapshot.enrollmentUrl
-          ? { enrollmentUrl: snapshot.enrollmentUrl }
-          : {}),
-      };
+      const access = daybreakAccess(extra);
       const warning =
         access.status === "not_granted"
           ? " This ChatGPT account check is advisory: a scan may run, but protected results associated with this account may not be displayable. It does not determine Amazon Bedrock model access or access to local CLI results."
           : "";
       return scanActionResult(
         access,
-        `Codex Security Daybreak access: status=${access.status}; programs=${programs.join(", ") || "none"}; checkedAt=${access.checkedAt}; stale=${access.stale}.${warning}`,
+        `Codex Security Daybreak access: status=${access.status}; programs=${access.programs.join(", ") || "none"}; checkedAt=${access.checkedAt}; stale=${access.stale}.${warning}`,
       );
     },
   );
@@ -590,10 +550,10 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Start or Join Codex Security Standard Scan",
       description:
-        "Headless and CLI only. Start or rejoin a Standard security scan. Do not use for desktop scans, Review changes, Deep Scan, or an existing SDK-owned scan. Use the returned authoritative scanId, scanDir, and handoffClaimToken throughout preflight, reporting, and completion.",
+        "Start or rejoin a Standard scan from its owning conversation. Returns the bound target, scope, starting policy paths, progress and handoff token.",
       inputSchema: startHeadlessStandardScanSchema,
       annotations: writingAnnotations,
-      _meta: modelActionMeta,
+      _meta: accountMeta,
     },
     async ({ targetPath, scope, targetSummary, userContext }, extra) => {
       const threadId = threadIdFromExtra(extra);
@@ -632,25 +592,36 @@ export function createCodexSecurityServer(): McpServer {
         scan.continuationThreadId !== threadId ||
         progress?.status !== "running" ||
         (started.startDisposition === "created" &&
-          progress.phase !== "preflight") ||
+          progress.phase !== "threat_model") ||
         workspaceResults?.scanId !== scanId
       ) {
         return toolErrorResult(
-          "Codex Security returned malformed Standard scan ownership; no headless scan can continue.",
+          "Codex Security returned malformed Standard scan ownership.",
         );
       }
       authenticatedArtifactClaims.set(scanId, {
         claimToken: handoffClaimToken,
         threadId,
       });
+      const advisory =
+        started.startDisposition === "created"
+          ? startAdvisory(extra)
+          : undefined;
       return scanActionResult(
         {
-          ...redactHandoffClaimToken(started),
+          startDisposition: started.startDisposition,
           scanId,
           scanDir,
           handoffClaimToken,
+          scan: redactHandoffClaimToken(started).scan,
+          securityPolicyPaths: started.securityPolicyPaths,
         },
-        `${started.startDisposition === "created" ? "Started" : "Rejoined"} Standard scan ${scanId}. When the scan is in preflight, follow references/scan-runtime.md, then advance to threat_model before reviewing the target. Use available workers or parent fallback. Preserve the returned handoffClaimToken for scan progress, the semantic draft, and completion.`,
+        [
+          advisory,
+          `${started.startDisposition === "created" ? "Started" : "Rejoined"} Standard scan ${scanId}. Use its target, scope and token for this review.`,
+        ]
+          .filter(Boolean)
+          .join("\n"),
       );
     },
   );
@@ -1359,28 +1330,34 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Get Codex Security Scan Context",
       description:
-        "Load the authoritative target, mode, optional user context, artifact directory, live progress, and optional selected finding for a launched scan. Validated legacy finding details may be migrated.",
+        "Load a launched scan or selected finding. A Standard launch token binds the review and returns its authorized target, starting policy paths, current context and progress.",
       inputSchema: scanContextSchema,
       annotations: writingAnnotations,
-      _meta: modelActionMeta,
+      _meta: accountMeta,
     },
     async ({ scanId, occurrenceId, handoffClaimToken }, extra) => {
       const threadId = threadIdFromExtra(extra);
+      let beganStandardReview = false;
       if (handoffClaimToken) {
-        await runWorkbench([
+        const delivery = await runWorkbench([
           "mark-handoff-delivered",
           "--scan-id",
           scanId,
           "--claim-token",
           handoffClaimToken,
           ...optionalArg("--thread-id", threadId),
+          ...(threadId && !occurrenceId ? ["--begin-standard-review"] : []),
         ]);
+        beganStandardReview = delivery.beganStandardReview === true;
       }
       const scanContext = await runWorkbench([
         "get-scan",
         "--scan-id",
         scanId,
         ...optionalArg("--occurrence-id", occurrenceId),
+        ...(handoffClaimToken && threadId && !occurrenceId
+          ? ["--include-policy-paths"]
+          : []),
       ]);
       const scan = isJsonObject(scanContext.scan)
         ? scanContext.scan
@@ -1409,7 +1386,8 @@ export function createCodexSecurityServer(): McpServer {
       }
       return scanActionResult(
         redactHandoffClaimToken(scanContext),
-        "Loaded Codex Security scan context.",
+        (beganStandardReview && startAdvisory(extra)) ||
+          "Loaded Codex Security scan context.",
       );
     },
   );
@@ -1555,12 +1533,12 @@ export function createCodexSecurityServer(): McpServer {
         progress?.phase === "preflight" &&
         progress.status === "running"
       ) {
-        return scanActionResult(
-          redactHandoffClaimToken(current),
+        return scanProgressResult(
+          current,
           "Deep Scan is still preparing. Discovery progress begins after its setup worker succeeds.",
         );
       }
-      return scanActionResult(
+      return scanProgressResult(
         await runWorkbench([
           "update-progress",
           "--scan-id",
@@ -2166,6 +2144,21 @@ function scanActionResult<T extends JsonObject>(result: T, summary: string) {
   };
 }
 
+function scanProgressResult(result: JsonObject, summary: string) {
+  const { scanId, progress, userContext, warnings } = result.scan as JsonObject;
+  return scanActionResult(
+    {
+      scan: {
+        scanId,
+        progress,
+        userContext,
+        ...(Array.isArray(warnings) && warnings.length ? { warnings } : {}),
+      },
+    },
+    summary,
+  );
+}
+
 function toolErrorResult(message: string) {
   return {
     content: [{ type: "text" as const, text: message }],
@@ -2352,6 +2345,62 @@ function diffTargetArgs(
       "contentDigest" in target ? target.contentDigest : undefined,
     ),
   ];
+}
+
+function daybreakAccess(extra: unknown) {
+  const metadata = requestMetadataFromExtra(extra);
+  const threadId =
+    typeof metadata?.threadId === "string" && metadata.threadId.trim()
+      ? metadata.threadId.trim()
+      : undefined;
+  const parsed = threadId
+    ? daybreakEntitlementContextSchema.safeParse(
+        metadata?.["openai/entitlementContext"],
+      )
+    : undefined;
+  const snapshot = parsed?.success
+    ? parsed.data.entitlements.cyber_trusted_access
+    : {
+        schemaVersion: 1 as const,
+        status: "unknown" as const,
+        grants: [],
+        checkedAt: new Date().toISOString(),
+        stale: false,
+      };
+  const status = snapshot.stale ? "unknown" : snapshot.status;
+  const programs =
+    status === "granted"
+      ? [
+          ...new Set(
+            snapshot.grants.map(({ level }) =>
+              level === "tac3" || level === "government"
+                ? "Daybreak Red"
+                : "Daybreak Blue",
+            ),
+          ),
+        ]
+      : [];
+  return {
+    schemaVersion: snapshot.schemaVersion,
+    status,
+    programs,
+    checkedAt: snapshot.checkedAt,
+    stale: snapshot.stale,
+    ...(snapshot.enrollmentUrl
+      ? { enrollmentUrl: snapshot.enrollmentUrl }
+      : {}),
+  };
+}
+
+function startAdvisory(extra: unknown) {
+  const access = daybreakAccess(extra);
+  if (access.status === "granted") {
+    return `Daybreak access granted: ${access.programs.join(", ")}.`;
+  }
+  if (access.status === "not_granted") {
+    return `This ChatGPT account lacks Daybreak access. Protected results may not be displayable. Apply at ${access.enrollmentUrl ?? "https://chatgpt.com/cyber"}.`;
+  }
+  return undefined;
 }
 
 function requestMetadataFromExtra(extra: unknown): JsonObject | undefined {

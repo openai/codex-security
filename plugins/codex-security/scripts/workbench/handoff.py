@@ -184,30 +184,50 @@ def mark_handoff_delivered(
                 raise SystemExit(
                     "Codex Security handoff delivery is owned by another continuation."
                 )
-            connection.commit()
-            return wb.workspace_state(connection, scan["workspace_id"])
-        updated = connection.execute(
-            """
-            UPDATE scans
-            SET handoff_status = 'delivered', handoff_claimed_at = NULL,
-                updated_at = ?
-            WHERE id = ? AND handoff_status = 'pending'
-                AND handoff_claim_token = ?
-            """,
-            (timestamp, scan["id"], claim_token),
-        )
-        if updated.rowcount != 1:
-            raise SystemExit("Codex Security handoff delivery could not be recorded.")
-        if scan["mode"] != "deep":
-            connection.execute(
+        else:
+            updated = connection.execute(
                 """
-                UPDATE scan_progress
-                SET phase_items_total = 0, phase_items_completed = 0,
-                    phase_progress_unit = 'checks',
-                    preflight_checks_total = 0, preflight_checks_completed = 0,
+                UPDATE scans
+                SET handoff_status = 'delivered', handoff_claimed_at = NULL,
                     updated_at = ?
-                WHERE scan_id = ?
+                WHERE id = ? AND handoff_status = 'pending'
+                    AND handoff_claim_token = ?
                 """,
-                (timestamp, scan["id"]),
+                (timestamp, scan["id"], claim_token),
             )
-    return wb.workspace_state(connection, scan["workspace_id"])
+            if updated.rowcount != 1:
+                raise SystemExit("Codex Security handoff delivery could not be recorded.")
+            if scan["mode"] != "deep":
+                connection.execute(
+                    """
+                    UPDATE scan_progress
+                    SET phase_items_total = 0, phase_items_completed = 0,
+                        phase_progress_unit = 'checks',
+                        preflight_checks_total = 0, preflight_checks_completed = 0,
+                        updated_at = ?
+                    WHERE scan_id = ?
+                    """,
+                    (timestamp, scan["id"]),
+                )
+        began_review = (
+            args.begin_standard_review
+            and thread_id is not None
+            and scan["mode"] == "standard"
+            and scan["status"] == "running"
+            and scan["canceled_at"] is None
+            and scan["phase"] == "preflight"
+        )
+        if began_review:
+            connection.execute(
+                "UPDATE scans SET phase = 'threat_model', updated_at = ? WHERE id = ?",
+                (timestamp, scan_id),
+            )
+            connection.execute(
+                """UPDATE scan_progress SET phase_items_total = 0, phase_items_completed = 0,
+                   phase_progress_unit = NULL, updated_at = ? WHERE scan_id = ?""",
+                (timestamp, scan_id),
+            )
+    workspace = wb.workspace_state(connection, scan["workspace_id"])
+    if began_review:
+        workspace["beganStandardReview"] = True
+    return workspace
