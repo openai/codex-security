@@ -371,11 +371,20 @@ export class DeepScanCoordinator {
         this.options.prepareReviewItems &&
         !hasAcceptedWorkerResults(this.state)
       ) {
-        const inventory = await this.options.prepareReviewItems(
-          this.discoveryAbortController.signal,
-        );
+        let inventory: { reviewItemsTotal: number } | undefined;
+        try {
+          inventory = await this.options.prepareReviewItems(
+            this.discoveryAbortController.signal,
+          );
+        } catch (error) {
+          if (
+            !this.discoveryDeadlineReached ||
+            this.abortController.signal.aborted
+          )
+            throw error;
+        }
         if (this.canceled || this.externallyFailed) return;
-        if (inventory.reviewItemsTotal === 0) {
+        if (inventory?.reviewItemsTotal === 0) {
           throw new Error(
             "Deep Scan target contains no reviewable source files; no security audit was performed.",
           );

@@ -5,6 +5,7 @@ import path from "node:path";
 import { after, test } from "node:test";
 import { promisify } from "node:util";
 import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
+import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import {
   DeepScanCoordinatorRegistry,
   FakeExecutor,
@@ -238,10 +239,11 @@ test("cancellation interrupts the pending preflight scan lookup", async () => {
   assert.deepEqual(store.failureMessages, []);
 });
 
-test("the discovery deadline reaches a pending inventory preflight", async () => {
+test("a discovery deadline during inventory preflight remains capped", async () => {
   const fixture = await fixtureRun();
   const store = new FakeStore(fixture.run);
   const executor = new FakeExecutor();
+  const completedDrafts: ScanDraftInput[] = [];
   let receivedSignal: AbortSignal | undefined;
 
   const terminal = await runCoordinator(fixture, store, executor, {
@@ -255,13 +257,22 @@ test("the discovery deadline reaches a pending inventory preflight", async () =>
       });
       throw new Error("inventory preflight reached its discovery deadline");
     },
+    onComplete: async (draft) =>
+      void completedDrafts.push(structuredClone(draft)),
   });
 
   assert.ok(receivedSignal?.aborted);
-  assert.equal(terminal?.status, "failed");
-  assert.match(terminal?.error ?? "", /discovery deadline/iu);
+  assert.equal(terminal?.status, "succeeded");
+  assert.equal(terminal?.terminalReason, "capped");
   assert.equal(executor.discoveryCalls, 0);
   assert.equal(executor.dedupCalls, 0);
+  assert.deepEqual(store.failureMessages, []);
+  assert.deepEqual(completedDrafts[0].reviewState.deferred, [
+    {
+      reason:
+        "The configured discovery time limit elapsed before any source review completed.",
+    },
+  ]);
 });
 
 test("cancellation before inventory preflight does not launch it", async () => {

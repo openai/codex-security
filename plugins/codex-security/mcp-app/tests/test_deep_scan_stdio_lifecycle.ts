@@ -85,6 +85,18 @@ async function testDeepScanStdioLifecycle() {
     fixtureRoot,
     "workbench-launches.jsonl",
   );
+  const blockedGetScanControlPath = path.join(
+    fixtureRoot,
+    "block-next-get-scan",
+  );
+  const blockedGetScanStartedPath = path.join(
+    fixtureRoot,
+    "blocked-get-scan-started.jsonl",
+  );
+  const blockedGetScanSignalPath = path.join(
+    fixtureRoot,
+    "blocked-get-scan-signals.jsonl",
+  );
   const serverBundlePath = path.join(
     installedPluginRoot,
     "mcp",
@@ -203,6 +215,9 @@ model_reasoning_summary = "none"
     FAKE_WORKBENCH_CANCEL_LOG: cancelLogPath,
     FAKE_WORKBENCH_COMPLETION_FAILURE_CONTROL: completionFailureControlPath,
     FAKE_WORKBENCH_LAUNCH_LOG: workbenchLaunchLogPath,
+    FAKE_WORKBENCH_BLOCK_GET_SCAN: blockedGetScanControlPath,
+    FAKE_WORKBENCH_BLOCK_GET_SCAN_STARTED: blockedGetScanStartedPath,
+    FAKE_WORKBENCH_BLOCK_GET_SCAN_SIGNAL: blockedGetScanSignalPath,
     FAKE_CODEX_EXIT_LOG: exitLogPath,
     FAKE_CODEX_RESTART_CONTROL: restartControlPath,
     FAKE_CODEX_SIGNAL_CHECKPOINT_CONTROL: signalCheckpointControlPath,
@@ -1376,6 +1391,51 @@ async function testCliDeepScanEngine({
     );
     return execution;
   };
+  const blocked = await register("cli-engine-blocked-get-scan");
+  await writeFile(
+    environment.FAKE_WORKBENCH_BLOCK_GET_SCAN!,
+    "block initial lookup\n",
+  );
+  const blockedExecution = launch(blocked.scanId);
+  const blockedOutcome = blockedExecution.then(
+    () => undefined,
+    (error) => error,
+  );
+  try {
+    await waitForJsonLines(
+      environment.FAKE_WORKBENCH_BLOCK_GET_SCAN_STARTED!,
+      1,
+    );
+    blockedExecution.child.kill("SIGTERM");
+    const error = await Promise.race([
+      blockedOutcome,
+      delay(5_000).then(() => {
+        throw new Error(
+          "packaged CLI did not interrupt the blocked initial get-scan lookup",
+        );
+      }),
+    ]);
+    assert.ok(error);
+    assert.deepEqual(
+      await readLogLines(environment.FAKE_WORKBENCH_BLOCK_GET_SCAN_SIGNAL!),
+      [{ signal: "SIGTERM" }],
+    );
+  } finally {
+    await rm(environment.FAKE_WORKBENCH_BLOCK_GET_SCAN!, { force: true });
+    if (
+      blockedExecution.child.exitCode === null &&
+      blockedExecution.child.signalCode === null
+    )
+      blockedExecution.child.kill("SIGKILL");
+    await blockedOutcome;
+    await runWorkbench(environment, [
+      "cancel-scan",
+      "--scan-id",
+      blocked.scanId,
+      "--thread-id",
+      threadId,
+    ]);
+  }
   const completed = await register("cli-engine-completed", true);
   const startIndex = (await readLogLines(environment.FAKE_CODEX_START_LOG!))
     .length;
@@ -1824,6 +1884,16 @@ const args = process.argv.slice(2);
 const input = Buffer.concat(await process.stdin.toArray());
 const workbenchArgs = JSON.parse(input.subarray(0, input.indexOf(10)).toString('utf8'));
 appendFileSync(process.env.FAKE_WORKBENCH_LAUNCH_LOG, JSON.stringify({ args, workbenchArgs, cwd: process.cwd() }) + '\\n');
+const blockedGetScan = process.env.FAKE_WORKBENCH_BLOCK_GET_SCAN;
+if (workbenchArgs[0] === 'get-scan' && blockedGetScan && existsSync(blockedGetScan)) {
+  process.once('SIGTERM', () => {
+    appendFileSync(process.env.FAKE_WORKBENCH_BLOCK_GET_SCAN_SIGNAL, JSON.stringify({ signal: 'SIGTERM' }) + '\\n');
+    process.exit(0);
+  });
+  appendFileSync(process.env.FAKE_WORKBENCH_BLOCK_GET_SCAN_STARTED, JSON.stringify({ pid: process.pid }) + '\\n');
+  setInterval(() => {}, 1_000);
+  await new Promise(() => {});
+}
 const control = process.env.FAKE_WORKBENCH_CANCEL_FAILURE_CONTROL;
 if (workbenchArgs[0] === 'cancel-scan') {
   appendFileSync(process.env.FAKE_WORKBENCH_CANCEL_LOG, JSON.stringify(workbenchArgs) + '\\n');

@@ -54,6 +54,7 @@ try {
   await testPreflightPreservesSavedPathKinds();
   await testFailedTrackedFileDiscoveryIsNotEmpty();
   await testPreflightCombinesGitAndRipgrepIgnoreRules();
+  await testPreflightMatchesCanonicalIgnoreSemantics();
   if (process.platform !== "win32")
     await testAuthoritativeScopesWithoutRipgrep();
   await testLargeAuthoritativeScopeTransport();
@@ -337,19 +338,134 @@ async function testPreflightCombinesGitAndRipgrepIgnoreRules() {
   );
   await fixture.writeRepositoryFile(".ignore", "selected/ignored.py\n");
 
-  assert.deepEqual(
-    await inventory.preflightCodexSecurityReviewItems({
-      ...fixture.scan,
-      targetContract: {
-        scope: {
-          requiredIncludePaths: ["selected"],
-          requiredExcludePaths: [],
-          filePaths: [],
-        },
-      },
-    }),
-    { reviewItemsTotal: 1 },
+  await assertPreflightMatchesCanonical(
+    fixture,
+    "selected",
+    true,
+    "selected/tracked.py",
   );
+}
+
+async function testPreflightMatchesCanonicalIgnoreSemantics() {
+  for (const ignoreName of [".ignore", ".rgignore"]) {
+    const fixture = await createFixture(`nested ${ignoreName} negation`);
+    await runGit(fixture.repoRoot, "init", "-q");
+    await fixture.writeRepositoryFile(
+      ".gitignore",
+      "selected/nested/source.py\n",
+    );
+    await fixture.writeRepositoryFile(
+      `selected/nested/${ignoreName}`,
+      "!source.py\n",
+    );
+    await fixture.writeRepositoryFile(
+      "selected/nested/source.py",
+      "# explicitly included\n",
+    );
+    await assertPreflightMatchesCanonical(
+      fixture,
+      "selected",
+      true,
+      "selected/nested/source.py",
+    );
+  }
+
+  if (process.platform !== "win32") {
+    for (const ignoreName of [".ignore", ".rgignore"]) {
+      const fixture = await createFixture(`symlinked ${ignoreName} rules`);
+      await runGit(fixture.repoRoot, "init", "-q");
+      const rules = path.join(
+        path.dirname(fixture.repoRoot),
+        `${ignoreName.slice(1)}-rules`,
+      );
+      await writeFile(rules, "selected/source.py\n");
+      await symlink(rules, path.join(fixture.repoRoot, ignoreName));
+      await fixture.writeRepositoryFile("selected/source.py", "# ignored\n");
+      await assertPreflightMatchesCanonical(fixture, "selected", false);
+    }
+  }
+
+  for (const ignoreName of [".ignore", ".rgignore"]) {
+    const fixture = await createFixture(`${ignoreName} above worktree`);
+    await runGit(fixture.repoRoot, "init", "-q");
+    await writeFile(
+      path.join(path.dirname(fixture.repoRoot), ignoreName),
+      "*.py\n",
+    );
+    await fixture.writeRepositoryFile("selected/source.py", "# ignored\n");
+    await assertPreflightMatchesCanonical(fixture, "selected", false);
+  }
+
+  {
+    const fixture = await createFixture("ripgrep configuration");
+    await runGit(fixture.repoRoot, "init", "-q");
+    await fixture.writeRepositoryFile("selected/source.py", "# ignored\n");
+    const config = path.join(fixture.root, "ripgrep-config");
+    await writeFile(config, "--glob\n!*.py\n");
+    const previous = process.env.RIPGREP_CONFIG_PATH;
+    process.env.RIPGREP_CONFIG_PATH = config;
+    try {
+      await assertPreflightMatchesCanonical(fixture, "selected", false);
+    } finally {
+      if (previous === undefined) delete process.env.RIPGREP_CONFIG_PATH;
+      else process.env.RIPGREP_CONFIG_PATH = previous;
+    }
+  }
+
+  if (process.platform !== "win32") {
+    const fixture = await createFixture("unrelated unreadable ignored child");
+    await runGit(fixture.repoRoot, "init", "-q");
+    await fixture.writeRepositoryFile(".gitignore", "selected/unreadable/\n");
+    await fixture.writeRepositoryFile("selected/source.py", "# included\n");
+    const unreadable = path.join(fixture.repoRoot, "selected", "unreadable");
+    await mkdir(unreadable, { recursive: true });
+    await chmod(unreadable, 0);
+    try {
+      await assertPreflightMatchesCanonical(
+        fixture,
+        "selected",
+        true,
+        "selected/source.py",
+      );
+    } finally {
+      await chmod(unreadable, 0o700);
+    }
+  }
+}
+
+async function assertPreflightMatchesCanonical(
+  fixture: Awaited<ReturnType<typeof createFixture>>,
+  scope: string,
+  expectedNonempty: boolean,
+  expectedPath?: string,
+) {
+  const preflight = await inventory.preflightCodexSecurityReviewItems({
+    ...fixture.scan,
+    targetContract: {
+      scope: {
+        requiredIncludePaths: [scope],
+        requiredExcludePaths: [],
+        filePaths: [],
+      },
+    },
+  });
+  const canonical = await inventory.prepareCodexSecurityReviewItems({
+    ...fixture.scan,
+    scope,
+  });
+  assert.equal(canonical.reviewItemsTotal > 0, expectedNonempty);
+  assert.deepEqual(preflight, {
+    reviewItemsTotal: canonical.reviewItemsTotal > 0 ? 1 : 0,
+  });
+  if (expectedPath) {
+    const listed = await inventory.listCodexSecurityReviewItems(fixture.scan, {
+      limit: 1_000,
+    });
+    assert.ok(
+      listed.items.some((item: { path: string }) => item.path === expectedPath),
+      `${expectedPath} must remain in the canonical inventory`,
+    );
+  }
 }
 
 async function testAuthoritativeScopesWithoutRipgrep() {

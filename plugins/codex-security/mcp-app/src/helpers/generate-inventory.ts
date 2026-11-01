@@ -118,68 +118,114 @@ function scopePath(
   return resolved;
 }
 
-function hasRipgrepIgnoreRules(
-  repo: string,
-  scope: string,
-  gitBacked: boolean,
-): boolean {
-  const names = new Set([".ignore", ".rgignore"]);
-  const boundary = gitBacked
-    ? ([...ancestors(scope)].find((path) => exists(append(path, ".git"))) ??
-      repo)
-    : repo;
-  for (const path of ancestors(scope)) {
-    try {
-      inside(boundary, path);
-    } catch {
-      continue;
-    }
-    if ([...names].some((name) => regular(append(path, name)))) return true;
-  }
-  for (const path of walk(scope, true, true)) {
-    if (names.has(path.slice(path.lastIndexOf(sep) + 1)) && regular(path))
-      return true;
-  }
-  return false;
-}
+class RipgrepUnavailableError extends Error {}
 
-async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
-  if (regular(scope)) return [scope];
-  const indexed = await directoryPaths(scope);
-  const usesRipgrepIgnoreRules = hasRipgrepIgnoreRules(
-    repo,
-    scope,
-    indexed !== undefined,
-  );
-  if (indexed !== undefined && !usesRipgrepIgnoreRules) return indexed;
+async function ripgrepScopeFiles(
+  repo: string,
+  requested: string,
+  requireTrackedSuccess: boolean,
+): Promise<string[]> {
   let result;
   try {
     result = await runRipgrep(
       [
         "--files",
-        "--hidden",
-        "--no-require-git",
-        ...(indexed === undefined ? [] : ["--no-ignore-vcs"]),
         "--null",
+        "--hidden",
+        "--path-separator",
+        "/",
         "--glob",
         "!**/{.git,.svn}",
         "--glob",
         "!**/{.git,.svn}/**",
         "--",
-        relative(repo, scope) || ".",
+        requested,
       ],
       repo,
     );
-  } catch {
+  } catch (error) {
+    throw new RipgrepUnavailableError(
+      `could not run ripgrep: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+  if (result.status !== 0 && result.status !== 1)
+    throw new Error(
+      `ripgrep ${result.signal ? `terminated by ${result.signal}` : `exited with status ${result.status}`}${result.stderr.trim() ? `: ${result.stderr.trim()}` : ""}`,
+    );
+  let bytes = result.stdout;
+  if ([...ancestors(repo)].some((path) => exists(append(path, ".git")))) {
+    const tracked = await git(repo, [
+      "ls-files",
+      "--cached",
+      "--ignored",
+      "--exclude-standard",
+      "-z",
+      "--",
+      requested,
+    ]);
+    if (tracked.status === 0) {
+      const prefix =
+        requested === "." || requested.startsWith("./") ? "./" : "";
+      const paths = decodeGitPath(tracked.stdout)
+        .split("\0")
+        .filter((path) => path && regular(append(repo, path)));
+      bytes = Buffer.concat([
+        bytes,
+        encodeGitPath(paths.map((path) => prefix + path + "\0").join("")),
+      ]);
+    } else if (requireTrackedSuccess && tracked.status !== 127) {
+      throw new Error(
+        tracked.stderr.trim() ||
+          (tracked.signal
+            ? `Git terminated by ${tracked.signal}`
+            : `Git exited with status ${tracked.status}`),
+      );
+    }
+  }
+  return decodePosixBytes(bytes).split("\0").filter(Boolean);
+}
+
+function hasRipgrepOnlyRules(scope: string): boolean {
+  if (environmentValue("RIPGREP_CONFIG_PATH")) return true;
+  const names = new Set([".ignore", ".rgignore"]);
+  for (const path of ancestors(scope)) {
+    if ([...names].some((name) => statFile(append(path, name)))) return true;
+  }
+  for (const path of walk(scope, true, true)) {
+    if (names.has(path.slice(path.lastIndexOf(sep) + 1)) && statFile(path))
+      return true;
+  }
+  return false;
+}
+
+function statFile(path: string): boolean {
+  try {
+    return stat(path).isFile();
+  } catch (error) {
+    if (isMissingPathError(error)) return false;
+    throw error;
+  }
+}
+
+async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
+  if (regular(scope)) return [scope];
+  try {
+    return (
+      await ripgrepScopeFiles(repo, relative(repo, scope) || ".", true)
+    ).map((path) => append(repo, path.startsWith("./") ? path.slice(2) : path));
+  } catch (error) {
+    if (!(error instanceof RipgrepUnavailableError)) throw error;
+    const indexed = await directoryPaths(scope);
+    if (indexed !== undefined) {
+      if (hasRipgrepOnlyRules(scope))
+        throw new Error(
+          "Could not safely enumerate ignored scoped files without Git or ripgrep.",
+          { cause: error },
+        );
+      return indexed;
+    }
     const ignoreNames = [".gitignore", ".ignore", ".rgignore"];
-    const isIgnoreFile = (path: string) => {
-      try {
-        return stat(path).isFile();
-      } catch (error) {
-        if (isMissingPathError(error)) return false;
-        throw error;
-      }
-    };
     let ignored =
       [...ancestors(repo)].some((path) => exists(append(path, ".git"))) ||
       [...ancestors(scope)].some((path) => {
@@ -188,14 +234,14 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
         } catch {
           return false;
         }
-        return ignoreNames.some((name) => isIgnoreFile(append(path, name)));
+        return ignoreNames.some((name) => statFile(append(path, name)));
       });
     const files: string[] = [];
     if (!ignored)
       for (const path of walk(scope, false, true)) {
         if (
           ignoreNames.some((name) => path.endsWith(sep + name)) &&
-          isIgnoreFile(path)
+          statFile(path)
         ) {
           ignored = true;
           break;
@@ -208,31 +254,6 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
       );
     return files;
   }
-  if (result.status !== 0 && result.status !== 1)
-    throw new Error(
-      `Could not enumerate scoped repository files${result.signal ? ` (${result.signal})` : ""}: ${result.stderr.trim()}`,
-    );
-  const visible = decodePosixBytes(result.stdout)
-    .split("\0")
-    .filter(Boolean)
-    .map((path) => append(repo, path));
-  if (indexed === undefined) return visible;
-  const allowed = new Set(
-    visible.flatMap((path) => {
-      try {
-        return [canonical(path)];
-      } catch {
-        return [];
-      }
-    }),
-  );
-  return indexed.filter((path) => {
-    try {
-      return allowed.has(canonical(path));
-    } catch {
-      return false;
-    }
-  });
 }
 
 interface RequestedScopes {
@@ -355,58 +376,7 @@ export async function generateInventory(
     const requested = isAbsolute(expandHome(scope, home))
       ? inside(repo, absolute)
       : scope;
-    const result = await runRipgrep(
-      [
-        "--files",
-        "--null",
-        "--hidden",
-        "--path-separator",
-        "/",
-        "--glob",
-        "!**/{.git,.svn}",
-        "--glob",
-        "!**/{.git,.svn}/**",
-        "--",
-        requested,
-      ],
-      repo,
-    ).catch((error: unknown) => {
-      throw new Error(
-        `could not run ripgrep: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    });
-    if (result.status !== 0 && result.status !== 1)
-      throw new Error(
-        `ripgrep ${result.signal ? `terminated by ${result.signal}` : `exited with status ${result.status}`}${result.stderr.trim() ? `: ${result.stderr.trim()}` : ""}`,
-      );
-    let bytes = result.stdout;
-    if ([...ancestors(repo)].some((path) => exists(append(path, ".git")))) {
-      const tracked = await git(repo, [
-        "ls-files",
-        "--cached",
-        "--ignored",
-        "--exclude-standard",
-        "-z",
-        "--",
-        requested,
-      ]).catch((error: unknown) => {
-        if (error instanceof Error && "code" in error)
-          return { status: 127, stdout: Buffer.alloc(0) };
-        throw error;
-      });
-      if (tracked.status === 0) {
-        const prefix =
-          requested === "." || requested.startsWith("./") ? "./" : "";
-        const paths = decodeGitPath(tracked.stdout)
-          .split("\0")
-          .filter((path) => path && regular(append(repo, path)));
-        bytes = Buffer.concat([
-          bytes,
-          encodeGitPath(paths.map((path) => prefix + path + "\0").join("")),
-        ]);
-      }
-    }
-    for (const path of decodePosixBytes(bytes).split("\0").filter(Boolean)) {
+    for (const path of await ripgrepScopeFiles(repo, requested, false)) {
       if (path.split("/").some((part) => sourceMetadata.has(part))) continue;
       if (/[\r\n]/u.test(path))
         throw new Error(

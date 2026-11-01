@@ -767,6 +767,7 @@ test("make-repo-scope-input retains explicit and ignored tracked files without w
   expect(paths("src/vendor", "src/logo.png")).toEqual([
     "src/logo.png",
     "src/vendor/tracked.py",
+    "src/vendor/untracked.py",
   ]);
 });
 
@@ -841,7 +842,7 @@ for (const ignoreName of [".ignore", ".rgignore"])
   });
 
 test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
-  "inherited ignore rules do not hide unreadable selected directories",
+  "inherited ignore rules avoid unreadable excluded directories",
   () => {
     const f = fixture();
     const selected = join(f.repo, "target");
@@ -856,9 +857,8 @@ test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
         selected,
         ...f.scopeArgs("."),
       ]);
-      expect(result.status).toBe(1);
-      expect(result.stderr).toMatch(/EACCES|permission denied/iu);
-      expect(readFileSync(f.out, "utf8")).toBe("previous\n");
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(f.out, "utf8")).toBe("");
     } finally {
       chmodSync(excluded, 0o700);
     }
@@ -1997,6 +1997,13 @@ for (const setting of [
           ? lines
           : lines.map((line) => JSON.parse(line).path),
       ).toEqual([
+        ...([
+          "GIT_CONFIG_PARAMETERS",
+          "GIT_CONFIG_KEY_0",
+          "GIT_CONFIG_VALUE_0",
+        ].includes(setting)
+          ? ["hidden.py"]
+          : []),
         setting === "RIPGREP_CONFIG_PATH" ? "./visible.py" : "visible.py",
       ]);
     },
