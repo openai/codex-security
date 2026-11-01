@@ -1,3 +1,5 @@
+import boxedNumberCheckpoints from "./fixtures/boxed-number-checkpoints.json" with { type: "json" };
+import boxedSonarCheckpoint from "./fixtures/boxed-sonar-checkpoint.json" with { type: "json" };
 import {
   snykJson,
   snykPluginExport,
@@ -840,6 +842,14 @@ test("normalized Sonar publication checks retained bindings on preview and retry
   const repository = f.state.repositoryUrl;
   const foreign = repository + "-other";
   const selected = { ...options, provider: "sonar" as const };
+  const deps = {
+    ...f.deps,
+    environment: {
+      ...f.environment,
+      CODEX_SECURITY_CLOUD_BASE_URL: undefined,
+      CODEX_SECURITY_CLOUD_WEB_URL: undefined,
+    },
+  };
   const context = { format: "sonar-issues/v1", repositoryUrl: repository };
   const finding = {
     source_finding_id: "issue-1",
@@ -859,14 +869,14 @@ test("normalized Sonar publication checks retained bindings on preview and retry
     },
   };
   const selection = { read: 2, findings: [finding, named], excluded: [] };
-  const prepare = () =>
+  const prepare = (findings = selection.findings) =>
     prepareNormalizedExternalPublication(
-      { ...selection, report: { ...context, branch: "main" } },
+      { ...selection, findings, report: { ...context, branch: "main" } },
       selected,
-      f.deps,
+      deps,
     );
   await expect(
-    prepareNormalizedExternalPublication(selection, selected, f.deps),
+    prepareNormalizedExternalPublication(selection, selected, deps),
   ).rejects.toThrow("without a ref");
   await expect(
     prepareNormalizedExternalPublication(
@@ -881,14 +891,14 @@ test("normalized Sonar publication checks retained bindings on preview and retry
         ],
       },
       selected,
-      f.deps,
+      deps,
     ),
   ).rejects.toThrow("retained Sonar branch");
   await expect(
     prepareNormalizedExternalPublication(
       { ...rows, report: { ...context, repositoryUrl: foreign } },
       selected,
-      f.deps,
+      deps,
     ),
   ).rejects.toThrow("does not match the selected Cloud repository");
   f.state.loseResponse = true;
@@ -899,7 +909,7 @@ test("normalized Sonar publication checks retained bindings on preview and retry
     prepareNormalizedExternalPublication(
       { ...selection, report: { ...context, branch: "other" } },
       selected,
-      f.deps,
+      deps,
     ),
   ).rejects.toThrow("conflicting branch");
   f.state.repositoryUrl = foreign;
@@ -913,6 +923,36 @@ test("normalized Sonar publication checks retained bindings on preview and retry
   await retry.publish();
   expect(f.posts).toHaveLength(2);
   expect(f.posts[1]).toBe(f.posts[0]);
+
+  // This old boxed update relies on the report for issue-1's branch on every retry.
+  const { filename, checkpoint } = boxedSonarCheckpoint;
+  const savedPath = join(
+    f.root,
+    "state",
+    "external-finding-publications",
+    filename,
+  );
+  await writeFile(savedPath, JSON.stringify(checkpoint), { mode: 0o600 });
+  const withEffort = (effort: unknown) => {
+    const updated = {
+      ...finding,
+      evidence: {
+        ...finding.evidence,
+        source_data: { ...finding.evidence.source_data, effort },
+      },
+    };
+    return prepare([updated, named]);
+  };
+  f.state.throttle = true;
+  const boxed = await withEffort(new Number(2.5));
+  expect(boxed.preview.resumed).toBe(true);
+  await expect(boxed.publish()).rejects.toThrow("Slow down");
+  f.state.throttle = false;
+  const primitive = await withEffort(2.5);
+  expect(primitive.preview.resumed).toBe(true);
+  expect((await primitive.publish()).verified).toBe(2);
+  const approved = JSON.stringify(checkpoint.requests[0]);
+  expect(f.posts.slice(2)).toEqual([approved, approved]);
 });
 
 test("Wiz occurrence mapping preserves original evidence without inventing repository provenance", async () => {
@@ -2716,6 +2756,41 @@ test.each(["request", "counts", "length", "schema"])(
   },
 );
 
+test("a held retry reports the acknowledged batch after another resumer retires the checkpoint", async () => {
+  const f = await fixture(
+    Array.from({ length: 101 }, (_, index) => normalized(`item-${index}`)),
+  );
+  const prepare = () => prepareExternalPublication(f.file, options, f.deps);
+  f.state.postBudget = 1;
+  const original = await prepare();
+  await expect(original.publish()).rejects.toThrow("Slow down");
+  const receipt = f.receipts.get(original.preview.requests[0]!.request_id)!;
+  expect(receipt.item_count).toBe(100);
+  const first = await prepare();
+  const held = await prepare();
+  f.state.postBudget = Infinity;
+  f.state.marker = "generation-2";
+  await expect(first.publish()).rejects.toThrow("HTTP 409");
+
+  const error = await held.publish().catch((error: unknown) => error);
+  if (!(error instanceof ExternalPublicationError)) throw error;
+  expect(error.result).toMatchObject({
+    status: "interrupted",
+    counts: { created: 100, updated: 0, unchanged: 0, error: 0 },
+    unacknowledged: 1,
+  });
+  expect(error.result.receipts).toEqual([receipt]);
+  expect(error.result).not.toHaveProperty("savedSubmission");
+  const bodies = original.preview.requests.map((request) =>
+    JSON.stringify(request),
+  );
+  expect(f.posts).toEqual([bodies[0]!, bodies[1]!, bodies[1]!]);
+  const directory = join(f.root, "state", "external-finding-publications");
+  expect(
+    (await readdir(directory)).filter((name) => name.endsWith(".pending.json")),
+  ).toEqual([]);
+});
+
 test.each([1, 101])(
   "a prepared retry keeps its receipts after another resumer completes (%i items)",
   async (count) => {
@@ -2731,13 +2806,12 @@ test.each([1, 101])(
     const first = await prepareExternalPublication(f.file, options, f.deps);
     const second = await prepareExternalPublication(f.file, options, f.deps);
     f.state.postBudget = Infinity;
-    expect((await first.publish()).counts.created).toBe(count);
+    const completed = await first.publish();
+    expect(completed.counts.created).toBe(count);
     const completedPosts = f.posts.length;
-    f.state.postBudget = count === 1 ? 0 : 1;
-    expect((await second.publish()).counts.created).toBe(count);
-    expect(f.posts.slice(completedPosts)).toEqual(
-      count === 1 ? [] : [JSON.stringify(second.preview.requests[1])],
-    );
+    f.state.postBudget = 0;
+    expect(await second.publish()).toEqual(completed);
+    expect(f.posts).toHaveLength(completedPosts);
     const fresh = await prepareExternalPublication(f.file, options, f.deps);
     expect(fresh.preview.resumed).toBe(false);
     expect(fresh.preview.requests[0]!.request_id).not.toBe(
@@ -4090,6 +4164,434 @@ test.each(["code-scanning", "advisory"])(
   },
 );
 
+function scoredFindings(
+  score: unknown,
+  report?: Record<string, unknown>,
+  aliasSelection = false,
+) {
+  const evidence = {
+    title: "Scanner score",
+    severity: "high" as const,
+    source_data: { score },
+  };
+  return {
+    read: 1,
+    excluded: [],
+    findings: [
+      {
+        source_finding_id: "boxed-score",
+        selection: aliasSelection ? evidence : "security", // Hashed by older publishers but absent from requests.
+        evidence,
+      },
+    ],
+    report,
+  };
+}
+
+// These filenames, request IDs and projections were recorded by the old SDK.
+async function oldScoreApproval(field: string, stageApproval = true) {
+  const f = await fixture();
+  const { filename, requestId, inputProjection } =
+    boxedNumberCheckpoints.cases.find((item) => item.field === field)!;
+  const prepare = (
+    score: unknown,
+    report?: Record<string, unknown>,
+    flag?: unknown,
+  ) => {
+    const input = scoredFindings(score, report, field === "aliased");
+    if (flag !== undefined)
+      Object.assign(input.findings[0]!.evidence.source_data, { flag });
+    return prepareNormalizedExternalPublication(input, options, {
+      ...f.deps,
+      environment: {
+        ...f.environment,
+        CODEX_SECURITY_CLOUD_BASE_URL: undefined,
+        CODEX_SECURITY_CLOUD_WEB_URL: undefined,
+      },
+    });
+  };
+  const request = {
+    request_id: requestId,
+    ...structuredClone(boxedNumberCheckpoints.request),
+  };
+  if (field === "flag") {
+    request.items[0]!.expected_version = 0;
+    Object.assign(request.items[0]!.evidence.source_data, {
+      score: 12,
+      flag: {},
+    });
+  } else {
+    if (field === "empty-report")
+      request.items[0]!.evidence.source_data.score = 12;
+    await (await prepare(0)).publish(); // The old checkpoint approved an update.
+    f.posts.length = 0;
+  }
+  const directory = join(f.root, "state", "external-finding-publications");
+  const path = join(directory, filename);
+  const saved = JSON.stringify({
+    accountId: boxedNumberCheckpoints.accountId,
+    requests: [request],
+    inputProjection,
+  });
+  if (stageApproval) {
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await writeFile(path, saved, { mode: 0o600 });
+  }
+  return { f, prepare, directory, path, filename, request, saved };
+}
+
+test.each(["released", "fresh"])(
+  "a primitive retry uses the lookup for a %s boxed approval without reading unrelated checkpoints",
+  async (kind) => {
+    const { f, prepare, directory, filename, path, request, saved } =
+      await oldScoreApproval("evidence", kind === "released");
+    const boxed = await prepare(new Number(2.5));
+    const approved = boxed.preview.requests[0]!;
+    if (kind === "released")
+      expect(approved.request_id).toBe(request.request_id);
+    f.state.brokenReadback = true;
+    await expect(boxed.publish()).rejects.toThrow("Readback unavailable");
+    const files = await readdir(directory);
+    expect(files.filter((file) => file.endsWith(".pending.json"))).toEqual([
+      filename,
+    ]);
+    const checkpoint = JSON.parse(await readFile(path, "utf8"));
+
+    const unrelated = join(
+      directory,
+      `${hash("sha256", "another-account")}.pending.json`,
+    );
+    await writeFile(
+      unrelated,
+      JSON.stringify({ ...JSON.parse(saved), accountId: "another-account" }),
+      { mode: 0o600 },
+    );
+    const read = fs.readFile;
+    const reads = spyOn(fs, "readFile").mockImplementation((async (
+      ...args: Parameters<typeof read>
+    ) => {
+      if (String(args[0]) === unrelated)
+        throw Object.assign(new Error("Unreadable unrelated approval"), {
+          code: "EACCES",
+        });
+      return read(...args);
+    }) as typeof read);
+    try {
+      f.state.brokenReadback = false;
+      const retry = await prepare(2.5);
+      expect(retry.preview.resumed).toBe(true);
+      expect(JSON.stringify(retry.preview.requests)).toBe(
+        JSON.stringify(boxed.preview.requests),
+      );
+      expect((await retry.publish()).receipts[0]!.id).toBe(approved.request_id);
+      expect(f.posts).toEqual([JSON.stringify(approved)]);
+      expect(files).toContain(`${checkpoint.wireKey}.lookup.json`);
+      expect(
+        reads.mock.calls.some(([file]) => String(file) === unrelated),
+      ).toBe(false);
+    } finally {
+      reads.mockRestore();
+    }
+  },
+);
+
+test("the original boxed approval keeps its filename, request and receipts on a primitive retry", async () => {
+  const { f, prepare, directory, path, filename, request, saved } =
+    await oldScoreApproval("evidence");
+  for (const score of [new Number(9.5), {}]) {
+    await expect(prepare(score)).rejects.toThrow();
+    expect(await readFile(path, "utf8")).toBe(saved);
+  }
+  expect(f.posts).toEqual([]);
+  const recovered = await prepare(new Number(2.5));
+  expect(recovered.preview.resumed).toBe(true);
+  expect(JSON.stringify(recovered.preview.requests)).toBe(
+    JSON.stringify([request]),
+  );
+  f.state.brokenReadback = true;
+  const interrupted = await recovered
+    .publish()
+    .catch((error: unknown) => error);
+  if (!(interrupted instanceof ExternalPublicationError)) throw interrupted;
+  expect(interrupted.result.savedSubmission).toBe(path);
+  const pending = (await readdir(directory)).filter((name) =>
+    name.endsWith(".pending.json"),
+  );
+  expect(pending).toEqual([filename]);
+  expect(JSON.parse(await readFile(path, "utf8")).receipts[0].id).toBe(
+    request.request_id,
+  );
+  f.state.brokenReadback = false;
+  const retry = await prepare(2.5);
+  const sibling = await prepare(2.5);
+  const stale = await prepare(2.5);
+  expect(retry.preview.resumed).toBe(true);
+  expect(JSON.stringify(retry.preview.requests)).toBe(
+    JSON.stringify([request]),
+  );
+  // An older checkpoint at an unknown filename can appear after both retries were prepared.
+  const unknown = join(
+    directory,
+    `${hash("sha256", "other-deployment")}.pending.json`,
+  );
+  const projectionless = JSON.stringify({
+    accountId: boxedNumberCheckpoints.accountId,
+    requests: [request],
+  });
+  await writeFile(unknown, projectionless, { mode: 0o600 });
+  const result = await retry.publish();
+  expect(result.verified).toBe(1);
+  expect(result.receipts.map(({ id }) => id)).toEqual([request.request_id]);
+  const reads = spyOn(fs, "readFile");
+  try {
+    expect(await sibling.publish()).toEqual(result);
+    expect(reads.mock.calls.map(([path]) => String(path))).not.toContain(
+      unknown,
+    );
+  } finally {
+    reads.mockRestore();
+  }
+  expect(f.posts).toEqual([JSON.stringify(request)]);
+  expect(await Bun.file(path).exists()).toBe(false);
+  expect(await readFile(unknown, "utf8")).toBe(projectionless);
+  await rm(unknown);
+
+  // A later approval of the same input replaced the completed result.
+  const fresh = await prepare(2.5);
+  const replacement = await fresh.publish();
+  expect(replacement.receipts[0]!.id).not.toBe(request.request_id);
+  await expect(stale.publish()).rejects.toThrow(/another publication|review/i);
+  expect(f.posts).toEqual([
+    JSON.stringify(request),
+    JSON.stringify(fresh.preview.requests[0]),
+  ]);
+  expect(await Bun.file(path).exists()).toBe(false);
+});
+
+test.each(["released", "current"])(
+  "a known %s pending retry does not read unrelated approvals",
+  async (format) => {
+    const released = format === "released";
+    const { f, prepare, directory, request, path, saved } =
+      await oldScoreApproval("unreported", released);
+    f.state.throttle = true;
+    for (const score of [1, 2, 3]) {
+      await expect((await prepare(score)).publish()).rejects.toThrow(
+        "Slow down",
+      );
+    }
+    const unrelated = new Set(
+      (await readdir(directory))
+        .filter((name) => name.endsWith(".pending.json"))
+        .map((name) => join(directory, name))
+        .filter((candidate) => candidate !== path),
+    );
+    expect(unrelated.size).toBe(3);
+    let requestId = request.request_id;
+    if (released) {
+      expect(await readFile(path, "utf8")).toBe(saved);
+    } else {
+      const selected = await prepare(2.5);
+      requestId = selected.preview.requests[0]!.request_id;
+      await expect(selected.publish()).rejects.toThrow("Slow down");
+    }
+
+    f.state.throttle = false;
+    const statePaths = new Set([directory, await fs.realpath(directory)]);
+    const listings = spyOn(fs, "readdir");
+    const read = fs.readFile;
+    const reads = spyOn(fs, "readFile").mockImplementation((async (
+      ...args: Parameters<typeof read>
+    ) => {
+      if (unrelated.has(String(args[0])))
+        throw Object.assign(new Error("Unreadable unrelated approval"), {
+          code: "EACCES",
+        });
+      return read(...args);
+    }) as typeof read);
+    const operations = () => ({
+      listings: listings.mock.calls.filter(([path]) =>
+        statePaths.has(String(path)),
+      ).length,
+      unrelatedReads: reads.mock.calls.filter(([path]) =>
+        unrelated.has(String(path)),
+      ).length,
+    });
+    try {
+      const retry = await prepare(2.5);
+      const atPrepare = operations();
+      reads.mockClear();
+      listings.mockClear();
+      expect(retry.preview.resumed).toBe(true);
+      expect((await retry.publish()).receipts[0]!.id).toBe(requestId);
+      expect(atPrepare).toEqual({ listings: 0, unrelatedReads: 0 });
+      expect(operations()).toEqual({ listings: 0, unrelatedReads: 0 });
+      // A fresh selection must discover possible historical approvals.
+      await expect(prepare(4)).rejects.toThrow("Unreadable unrelated approval");
+      expect(operations().listings).toBe(1);
+    } finally {
+      listings.mockRestore();
+      reads.mockRestore();
+    }
+  },
+);
+
+test("matching released primitive and boxed approvals preserve both requests", async () => {
+  const primitive = await oldScoreApproval("unreported");
+  const boxed = await oldScoreApproval("evidence", false);
+  const boxedPath = join(primitive.directory, boxed.filename);
+  await writeFile(boxedPath, boxed.saved, { mode: 0o600 });
+  await expect(primitive.prepare(new Number(2.5))).rejects.toThrow(
+    "Two saved imports match",
+  );
+  expect(primitive.f.posts).toEqual([]);
+  expect(await readFile(primitive.path, "utf8")).toBe(primitive.saved);
+  expect(await readFile(boxedPath, "utf8")).toBe(boxed.saved);
+
+  // A later independent canonical approval must still be checked alongside a valid lookup.
+  await rm(primitive.path);
+  await primitive.prepare(new Number(2.5));
+  const tagged = await readFile(boxedPath, "utf8");
+  const lookup = `${JSON.parse(tagged).wireKey}.lookup.json`;
+  expect(await readdir(primitive.directory)).toContain(lookup);
+  await writeFile(primitive.path, primitive.saved, { mode: 0o600 });
+  for (const score of [2.5, new Number(2.5)])
+    await expect(primitive.prepare(score)).rejects.toThrow(
+      "Two saved imports match",
+    );
+  expect(await readFile(primitive.path, "utf8")).toBe(primitive.saved);
+  expect(await readFile(boxedPath, "utf8")).toBe(tagged);
+  expect(primitive.f.posts).toEqual([]);
+});
+
+test.each(["report", "mixed", "aliased"])(
+  "ambiguous historical %s data preserves the pending approval",
+  async (field) => {
+    const { f, prepare, path, saved } = await oldScoreApproval(field);
+    const retry =
+      field === "mixed"
+        ? prepare(new Number(2.5), { elapsed: {} })
+        : prepare(2.5, { elapsed: new Number(4.5) });
+    await expect(retry).rejects.toThrow();
+    expect(await readFile(path, "utf8")).toBe(saved);
+    expect(f.posts).toEqual([]);
+  },
+);
+
+test("a new boxed report does not claim an unrelated older approval", async () => {
+  const { f, prepare, path, saved, request } =
+    await oldScoreApproval("unreported");
+  const fresh = await prepare(2.5, { elapsed: new Number(4.5) });
+  expect(fresh.preview.resumed).toBe(false);
+  expect(fresh.preview.requests[0]!.request_id).not.toBe(request.request_id);
+  expect(JSON.stringify((await prepare(2.5)).preview.requests)).toBe(
+    JSON.stringify([request]),
+  );
+  expect(await readFile(path, "utf8")).toBe(saved);
+  expect(f.posts).toEqual([]);
+});
+
+test("an older boxed score with an empty report resumes its original request", async () => {
+  const { f, prepare, request } = await oldScoreApproval("empty-report");
+  const boxed = await prepare(new Number(12), {});
+  expect(boxed.preview.resumed).toBe(true);
+  f.state.throttle = true;
+  await expect(boxed.publish()).rejects.toThrow("Slow down");
+  f.state.throttle = false;
+  const primitive = await prepare(12, {});
+  expect(primitive.preview.resumed).toBe(true);
+  expect((await primitive.publish()).verified).toBe(1);
+  const approved = JSON.stringify(request);
+  expect(f.posts).toEqual([approved, approved]);
+});
+
+test("a boxed false flag remains independent of an approved empty object", async () => {
+  const f = await fixture();
+  const prepare = (score: unknown, flag: unknown) => {
+    const input = scoredFindings(score);
+    Object.assign(input.findings[0]!.evidence.source_data, { flag });
+    return prepareNormalizedExternalPublication(input, options, f.deps);
+  };
+  f.state.throttle = true;
+  const original = await prepare(1, {});
+  await expect(original.publish()).rejects.toThrow("Slow down");
+  const boxed = await prepare(new Number(1), new Boolean(false));
+  expect(boxed.preview.resumed).toBe(false);
+  expect(boxed.preview.requests[0]!.request_id).not.toBe(
+    original.preview.requests[0]!.request_id,
+  );
+  await expect(boxed.publish()).rejects.toThrow("Slow down");
+  expect(JSON.parse(f.posts[1]!).items[0].evidence.source_data).toEqual({
+    score: 1,
+    flag: false,
+  });
+  const primitive = await prepare(1, false);
+  expect(primitive.preview.resumed).toBe(true);
+  f.state.throttle = false;
+  expect((await primitive.publish()).receipts[0]!.id).toBe(
+    boxed.preview.requests[0]!.request_id,
+  );
+  expect(f.posts[2]).toBe(f.posts[1]);
+  const empty = await prepare(1, {});
+  expect(empty.preview.resumed).toBe(true);
+  expect(JSON.stringify(empty.preview.requests[0])).toBe(f.posts[0]!);
+});
+
+test("an older empty flag cannot authorize a boxed Boolean", async () => {
+  const { f, prepare, path, saved, request } = await oldScoreApproval("flag");
+  await expect(
+    prepare(new Number(12), undefined, new Boolean(true)),
+  ).rejects.toThrow();
+  expect(await readFile(path, "utf8")).toBe(saved);
+  expect(f.posts).toEqual([]);
+  const original = await prepare(new Number(12), undefined, {});
+  expect(original.preview.resumed).toBe(true);
+  expect((await original.publish()).verified).toBe(1);
+  expect(f.posts).toEqual([JSON.stringify(request)]);
+});
+
+test.each(["evidence", "report"])(
+  "a fresh boxed %s reuses its historical filename until the numeric retry completes",
+  async (field) => {
+    const { f, prepare, path } = await oldScoreApproval(field, false);
+    const select = (value: unknown) =>
+      field === "report" ? prepare(2.5, { elapsed: value }) : prepare(value);
+    const value = field === "report" ? 4.5 : 2.5;
+    const ordinary = await select({});
+    const competing = await select(new Number(value + 1));
+    const boxed = await select(new Number(value));
+    f.state.throttle = true;
+    await expect(boxed.publish()).rejects.toThrow("Slow down");
+    const saved = await readFile(path, "utf8");
+    const body = f.posts[0]!;
+    expect(JSON.parse(saved).requests).toEqual([JSON.parse(body)]);
+    for (const stale of [ordinary, competing]) {
+      await expect(stale.publish()).rejects.toThrow(/pending|review/i);
+    }
+    await expect(select({})).rejects.toThrow(/finish the other pending/i);
+    expect(f.posts).toEqual([body]);
+    expect(await readFile(path, "utf8")).toBe(saved);
+
+    const numeric = await select(value);
+    expect(numeric.preview.resumed).toBe(true);
+    expect(numeric.preview.requests).toEqual([JSON.parse(body)]);
+    f.state.throttle = false;
+    expect((await numeric.publish()).verified).toBe(1);
+    expect(await Bun.file(path).exists()).toBe(false);
+    const fresh = await select({});
+    expect(fresh.preview.resumed).toBe(false);
+    expect(fresh.preview.requests[0]!.request_id).not.toBe(
+      numeric.preview.requests[0]!.request_id,
+    );
+    expect((await fresh.publish()).verified).toBe(1);
+    expect(f.posts).toEqual([
+      body,
+      body,
+      JSON.stringify(fresh.preview.requests[0]),
+    ]);
+  },
+);
+
 test("normalized SDK publication rejects nonfinite raw evidence without JSON coercion", async () => {
   const f = await fixture();
   const input = {
@@ -5120,4 +5622,230 @@ test("publication rejects malformed options without writing findings", async () 
   ).toBe(0);
   expect(JSON.parse(preview.stdout.text())).toMatchObject({ dryRun: true });
   expect(f.posts).toHaveLength(0);
+});
+
+test("a held primitive retry cannot republish after a newer boxed approval", async () => {
+  const f = await fixture();
+  const prepare = (elapsed: unknown) =>
+    prepareNormalizedExternalPublication(
+      scoredFindings(12, { elapsed }),
+      options,
+      f.deps,
+    );
+  const original = await prepare(2.5);
+  f.state.loseResponse = true;
+  await expect(original.publish()).rejects.toThrow(/resume the saved request/);
+  const held = await prepare(2.5);
+  expect(held.preview.resumed).toBe(true);
+  const completed = await (await prepare(2.5)).publish();
+
+  const newer = await prepare(new Number(2.5));
+  const newerId = newer.preview.requests[0]!.request_id;
+  expect(newerId).not.toBe(original.preview.requests[0]!.request_id);
+  f.state.loseResponse = true;
+  await expect(newer.publish()).rejects.toThrow(/resume the saved request/);
+  const before = [...f.posts];
+  expect(await held.publish()).toEqual(completed);
+  expect(f.posts).toEqual(before);
+
+  const remaining = await prepare(2.5);
+  expect(remaining.preview.requests).toEqual(newer.preview.requests);
+  expect((await remaining.publish()).receipts[0]!.id).toBe(newerId);
+  const directory = join(f.root, "state", "external-finding-publications");
+  const filename = (await readdir(directory)).find((name) =>
+    name.endsWith(".result.json"),
+  )!;
+  const resultPath = join(directory, filename);
+  const saved = await readFile(resultPath, "utf8");
+  await expect(held.publish()).rejects.toThrow(/changed after preview/);
+  expect(await readFile(resultPath, "utf8")).toBe(saved);
+  expect(f.posts).toEqual([
+    ...before,
+    JSON.stringify(newer.preview.requests[0]),
+  ]);
+});
+
+const concurrentBoxedApproval =
+  "concurrent prepares reuse only the matching completed boxed approval";
+test(concurrentBoxedApproval, async () => {
+  const { runTestInSubprocess } = await import("./support/test-subprocess.js");
+  if (runTestInSubprocess(import.meta.filename, concurrentBoxedApproval))
+    return;
+
+  for (const replace of [false, true]) {
+    const { f, prepare, directory, request } =
+      await oldScoreApproval("evidence");
+    const atLock = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const lstat = fs.lstat;
+    let holdFirst = true;
+    const metadata = spyOn(fs, "lstat").mockImplementation((async (
+      ...args: Parameters<typeof fs.lstat>
+    ) => {
+      const file = String(args[0]);
+      if (
+        holdFirst &&
+        file.startsWith(directory) &&
+        file.endsWith(".lock.sqlite")
+      ) {
+        holdFirst = false;
+        atLock.resolve();
+        await release.promise;
+      }
+      return lstat(...args);
+    }) as typeof fs.lstat);
+
+    const waiting = prepare(new Number(2.5));
+    try {
+      await Promise.race([atLock.promise, waiting]);
+      const completed = await (await prepare(new Number(2.5))).publish();
+      expect(completed.receipts[0]!.id).toBe(request.request_id);
+      expect(f.posts).toEqual([JSON.stringify(request)]);
+      if (replace) {
+        const newer = await (await prepare(2.5)).publish();
+        expect(newer.receipts[0]!.id).not.toBe(request.request_id);
+      }
+      const before = [...f.posts];
+      release.resolve();
+      if (replace) {
+        await expect(waiting).rejects.toThrow(/changed while preparing/);
+      } else {
+        const trailing = await waiting;
+        expect(trailing.preview.resumed).toBe(true);
+        expect(trailing.preview.requests[0]!.request_id).toBe(
+          request.request_id,
+        );
+        expect(await trailing.publish()).toEqual(completed);
+      }
+      expect(f.posts).toEqual(before);
+    } finally {
+      release.resolve();
+      metadata.mockRestore();
+      await Promise.allSettled([waiting]);
+    }
+  }
+});
+
+test("a lookup hint cannot substitute for the tagged approval", async () => {
+  const { f, prepare, directory, path, filename, request } =
+    await oldScoreApproval("evidence");
+  f.state.throttle = true;
+  await expect((await prepare(new Number(2.5))).publish()).rejects.toThrow(
+    "Slow down",
+  );
+  const tag = JSON.parse(await readFile(path, "utf8"));
+  const lookup = join(directory, `${tag.wireKey}.lookup.json`);
+  const suffix = ".pending.json";
+  expect(JSON.parse(await readFile(lookup, "utf8"))).toBe(
+    filename.slice(0, -suffix.length),
+  );
+
+  const otherReport = { units: "seconds" };
+  const other = await prepare(new Number(3.5), otherReport);
+  await expect(other.publish()).rejects.toThrow("Slow down");
+  const [otherName] = (await readdir(directory)).filter(
+    (name) => name.endsWith(suffix) && name !== filename,
+  );
+  const otherPath = join(directory, otherName!);
+  const otherSaved = await readFile(otherPath, "utf8");
+  const otherTag = JSON.parse(otherSaved);
+  expect(otherTag.wireKey).not.toBe(tag.wireKey);
+  const otherKey = otherName!.slice(0, -suffix.length);
+  expect(
+    JSON.parse(
+      await readFile(
+        join(directory, `${otherTag.wireKey}.lookup.json`),
+        "utf8",
+      ),
+    ),
+  ).toBe(otherKey);
+  f.posts.length = 0;
+  f.state.throttle = false;
+
+  const outside = join(directory, "..", "foreign.pending.json");
+  await writeFile(outside, otherSaved, { mode: 0o600 });
+  const reads = spyOn(fs, "readFile");
+  try {
+    for (const hint of [
+      undefined,
+      "{",
+      JSON.stringify("../foreign"),
+      JSON.stringify(otherKey),
+    ]) {
+      if (hint === undefined) await rm(lookup);
+      else await writeFile(lookup, hint);
+      const actual = await prepare(2.5);
+      expect(actual.preview.resumed).toBe(true);
+      expect(actual.preview.requests[0]!.request_id).toBe(request.request_id);
+    }
+    expect(reads.mock.calls.map(([path]) => String(path))).not.toContain(
+      outside,
+    );
+  } finally {
+    reads.mockRestore();
+  }
+  const completed = await (await prepare(2.5)).publish();
+  expect(completed.receipts[0]!.id).toBe(request.request_id);
+  expect(f.posts).toEqual([JSON.stringify(request)]);
+  expect(await readFile(otherPath, "utf8")).toBe(otherSaved);
+
+  const held = await prepare(3.5, otherReport);
+  expect(held.preview.requests[0]!.request_id).toBe(
+    other.preview.requests[0]!.request_id,
+  );
+  await rm(otherPath);
+  await expect(held.publish()).rejects.toThrow(/changed after preview/);
+  const fresh = await prepare(3.5, otherReport);
+  expect(fresh.preview.resumed).toBe(false);
+  expect(fresh.preview.requests[0]!.request_id).not.toBe(
+    other.preview.requests[0]!.request_id,
+  );
+  expect(f.posts).toEqual([JSON.stringify(request)]);
+});
+
+test("a lookup write or cleanup failure leaves the approved request usable", async () => {
+  const { f, prepare, path, directory, request } =
+    await oldScoreApproval("evidence");
+  const rename = fs.rename;
+  const write = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+    if (String(to).endsWith(".lookup.json"))
+      throw new Error("Lookup write failed");
+    return rename(from, to);
+  });
+  f.state.throttle = true;
+  try {
+    const boxed = await prepare(new Number(2.5));
+    await expect(boxed.publish()).rejects.toThrow("Slow down");
+    expect(
+      write.mock.calls.some(([, to]) => String(to).endsWith(".lookup.json")),
+    ).toBe(true);
+  } finally {
+    write.mockRestore();
+  }
+  const tag = JSON.parse(await readFile(path, "utf8"));
+  const lookup = join(directory, `${tag.wireKey}.lookup.json`);
+  expect(await Bun.file(lookup).exists()).toBe(false);
+  f.state.throttle = false;
+  const remove = fs.rm;
+  const cleanup = spyOn(fs, "rm").mockImplementation(async (file, options) => {
+    if (String(file) === lookup) throw new Error("Lookup cleanup failed");
+    return remove(file, options);
+  });
+  try {
+    const retry = await prepare(2.5);
+    expect(retry.preview.resumed).toBe(true);
+    const result = await retry.publish();
+    expect(result.status).toBe("complete");
+    expect(result.verified).toBe(1);
+    expect(result.receipts[0]!.id).toBe(request.request_id);
+    expect(cleanup.mock.calls.some(([file]) => String(file) === lookup)).toBe(
+      true,
+    );
+  } finally {
+    cleanup.mockRestore();
+  }
+  expect(await Bun.file(path).exists()).toBe(false);
+  expect(await Bun.file(lookup).exists()).toBe(true);
+  expect((await prepare(2.5)).preview.resumed).toBe(false);
+  expect(f.posts).toEqual([JSON.stringify(request), JSON.stringify(request)]);
 });

@@ -12,6 +12,7 @@ import {
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { isBoxedPrimitive } from "node:util/types";
 import { readCloudCredentials } from "./cloud-publish.js";
 import {
   cloudBaseUrl,
@@ -30,7 +31,7 @@ import {
   readExternalFindings,
   type ExternalFindingsReaderOptions,
 } from "./external-findings-read.js";
-import { canonicalJson } from "./record.js";
+import { canonicalJson, isRecord } from "./record.js";
 import { notify } from "./value.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { wizFindingRepository } from "./wiz-findings.js";
@@ -140,7 +141,13 @@ interface SavedSubmission {
   accountId: string;
   requests: FindingImportRequest[];
   receipts?: FindingImportReceipt[];
-  inputProjection?: { inputDigest: string; savedEvidenceDigest: string };
+  inputProjection?: {
+    identityFormat?: 2;
+    inputDigest: string;
+    savedEvidenceDigest: string;
+  };
+  // A verified older approval stays at its original deployment-bound filename.
+  wireKey?: string;
   inspectorProjectMapRequired?: true;
 }
 
@@ -178,6 +185,12 @@ async function readInBatches<T, U>(
   return output;
 }
 
+// JSON.stringify serializes boxed primitives after the replacer. Let it
+// produce their actual wire values, including false and strings.
+function wireJson(value: unknown): string {
+  return canonicalJson(value, undefined, isBoxedPrimitive);
+}
+
 function sameSubmission(
   left: SavedSubmission,
   right: SavedSubmission,
@@ -185,19 +198,21 @@ function sameSubmission(
   return (
     left.accountId === right.accountId &&
     left.inspectorProjectMapRequired === right.inspectorProjectMapRequired &&
-    canonicalJson(left.requests) === canonicalJson(right.requests)
+    wireJson(left.requests) === wireJson(right.requests)
   );
+}
+
+function wireFinding({
+  source_finding_id,
+  evidence,
+}: ExternalFindings["findings"][number]) {
+  return { source_finding_id, evidence };
 }
 
 function submissionFindings(
   requests: readonly FindingImportRequest[],
 ): ExternalFindings["findings"] {
-  return requests.flatMap((batch) =>
-    batch.items.map(({ source_finding_id, evidence }) => ({
-      source_finding_id,
-      evidence,
-    })),
-  );
+  return requests.flatMap((batch) => batch.items.map(wireFinding));
 }
 
 function sameFindingSelection(
@@ -278,8 +293,8 @@ function validatePublicationReceipt(
   const batchItems = new Map(batch.items.map((item) => [item.client_id, item]));
   if (
     receipt.id !== batch.request_id ||
-    canonicalJson(receipt.repository) !== canonicalJson(batch.repository) ||
-    canonicalJson(receipt.source) !== canonicalJson(batch.source) ||
+    wireJson(receipt.repository) !== wireJson(batch.repository) ||
+    wireJson(receipt.source) !== wireJson(batch.source) ||
     receipt.item_count !== batch.items.length ||
     receipt.results.length !== batch.items.length ||
     new Set(receipt.results.map((item) => item.client_id)).size !==
@@ -314,16 +329,16 @@ function validatePublicationReceipt(
         "Cloud returned an incomplete saved finding.",
       );
   }
-  if (canonicalJson(receipt.counts) !== canonicalJson(actual))
+  if (wireJson(receipt.counts) !== wireJson(actual))
     throw new CodexSecurityError(
       "Cloud returned inconsistent publication counts.",
     );
   return receipt;
 }
 
-async function withImportLock<T>(
+async function withImportLocks<T>(
   state: string,
-  key: string,
+  keys: string[],
   signal: AbortSignal | undefined,
   operation: () => Promise<T>,
 ): Promise<T> {
@@ -331,40 +346,53 @@ async function withImportLock<T>(
     await createWindowsOutputDirectory(state, true);
   else await mkdir(state, { recursive: true, mode: 0o700 });
   await validatePreparedOutputDir(state, undefined, true);
-  const path = join(state, `${key}.lock.sqlite`);
-  const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return undefined;
-    throw error;
-  });
-  if (metadata && !metadata.isFile())
-    throw new CodexSecurityError("The publication lock is not a regular file.");
   const require = createRequire(import.meta.url);
   const Database = (
     process.versions["bun"]
       ? require("bun:sqlite").Database
       : require("node:sqlite").DatabaseSync
   ) as new (path: string) => { exec(sql: string): void; close(): void };
-  const guard = new Database(path);
+  const guards: InstanceType<typeof Database>[] = [];
   try {
-    if (process.platform !== "win32") chmodSync(path, 0o600);
-    guard.exec("PRAGMA busy_timeout = 0");
+    for (const key of [...new Set(keys)].sort()) {
+      const path = join(state, `${key}.lock.sqlite`);
+      const metadata = await lstat(path).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return undefined;
+          throw error;
+        },
+      );
+      if (metadata && !metadata.isFile())
+        throw new CodexSecurityError(
+          "The publication lock is not a regular file.",
+        );
+      const guard = new Database(path);
+      guards.push(guard);
+      if (process.platform !== "win32") chmodSync(path, 0o600);
+      guard.exec("PRAGMA busy_timeout = 0");
+    }
     for (;;) {
       signal?.throwIfAborted();
+      let acquired = 0;
       try {
-        // Keep this inode across invocations. SQLite releases the transaction
-        // on process exit, so a paused publisher cannot lose its lock to a lease.
-        guard.exec("BEGIN EXCLUSIVE");
+        // SQLite releases these transactions on process exit.
+        for (const guard of guards) {
+          guard.exec("BEGIN EXCLUSIVE");
+          acquired++;
+        }
         break;
       } catch (error) {
         const sqliteError = error as { code?: string; errcode?: number };
         if (sqliteError.errcode !== 5 && sqliteError.code !== "SQLITE_BUSY")
           throw error;
+        // Older SDKs can acquire historical keys in a different order.
+        for (const guard of guards.slice(0, acquired)) guard.exec("ROLLBACK");
         await delay(50, undefined, { signal });
       }
     }
     return await operation();
   } finally {
-    guard.close();
+    for (const guard of guards) guard.close();
   }
 }
 
@@ -439,6 +467,46 @@ function normalizedPublicationInput(
     currentIdentity: identity,
     legacyIdentity: identity,
   };
+}
+
+// The old hash represented Number objects as {}. Unpublished row properties
+// and report metadata cannot be recovered from the immutable saved request.
+function verifiableLegacyMetadata(
+  { report, findings }: ExternalFindings,
+  wireIdentity: boolean,
+): boolean {
+  let verifiable = true;
+  // Only values in these records can be old scalar projections. Their record
+  // containers are required by the normalized selection, including an empty report.
+  const { errors, ...metadata } = report ?? {};
+  JSON.stringify(
+    [
+      Object.values(metadata),
+      // The original hash used the serialized form of report.errors arrays.
+      Array.isArray(errors) ? undefined : errors,
+      findings.map(({ evidence: _, ...fields }) => Object.values(fields)),
+    ],
+    (_key, value: unknown) => {
+      if (isRecord(value) && !(wireIdentity && isBoxedPrimitive(value))) {
+        // {} and string-index records can both be the old form of a scalar.
+        let index = 0;
+        if (
+          Object.keys(value).every((key) => {
+            const item = value[key];
+            return (
+              item === undefined ||
+              (key === String(index++) &&
+                typeof item === "string" &&
+                item.length === 1)
+            );
+          })
+        )
+          verifiable = false;
+      }
+      return value;
+    },
+  );
+  return verifiable;
 }
 
 async function preparePublicationInput(
@@ -564,48 +632,150 @@ async function preparePublicationInput(
     destination.repo_connector_id,
     source,
   ];
-  const inputDigest = hash("sha256", canonicalJson(currentIdentity));
-  const legacyInputDigest = hash("sha256", canonicalJson(legacyIdentity));
-  function validateSaved(serialized: string, legacy = false): SavedSubmission {
-    const content = JSON.parse(serialized) as SavedSubmission;
+  let hasBoxedScalars = false;
+  const inputDigest = hash(
+    "sha256",
+    canonicalJson(currentIdentity, undefined, (value) => {
+      if (!isBoxedPrimitive(value)) return false;
+      hasBoxedScalars = true;
+      return true;
+    }),
+  );
+  const legacyInputDigest =
+    currentIdentity === legacyIdentity
+      ? inputDigest
+      : hash("sha256", wireJson(legacyIdentity));
+  // The shipped SDK sorted a boxed primitive as an object. Only its exact
+  // deployment-bound key is a candidate for recovering an older approval.
+  const previousKey = hasBoxedScalars
+    ? hash("sha256", canonicalJson([...checkpointIdentity, currentIdentity]))
+    : undefined;
+  function readSaved(
+    content: SavedSubmission | null | undefined,
+  ): SavedSubmission {
     if (
+      !content ||
       content.accountId !== credentials.account_id ||
       !Array.isArray(content.requests) ||
       content.requests.length === 0
     )
       throw new Error("Saved import account or requests do not match.");
     content.requests = content.requests.map(validateImportRequest);
-    const savedFindings = submissionFindings(content.requests);
-    const savedEvidence = canonicalJson(savedFindings);
-    const expected = legacy ? legacyParsed.findings : parsed.findings;
-    const matches =
-      content.inputProjection !== undefined
-        ? sameFindingSelection(savedFindings, expected) &&
-          content.inputProjection?.inputDigest ===
-            (legacy ? legacyInputDigest : inputDigest) &&
-          content.inputProjection?.savedEvidenceDigest ===
-            hash("sha256", savedEvidence)
-        : savedEvidence === canonicalJson(expected);
-    if (!matches)
-      throw new Error(
-        "Saved import evidence does not match the selected input.",
-      );
     for (const submission of content.requests) {
       if (
         submission.repository.id !== destination.id ||
         submission.repository.repo_connector_id !==
           destination.repo_connector_id ||
-        canonicalJson(submission.source) !== canonicalJson(source)
+        wireJson(submission.source) !== wireJson(source)
       )
         throw new Error("Saved import destination does not match.");
     }
     return content;
   }
+
+  function validateSaved(
+    record: SavedSubmission | null | undefined,
+    legacy = false,
+  ): SavedSubmission {
+    const content = readSaved(record);
+    const saved = submissionFindings(content.requests);
+    const wire = wireJson(saved);
+    const expected = legacy ? legacyParsed.findings : parsed.findings;
+    const projection = content.inputProjection;
+    if (
+      projection &&
+      (!sameFindingSelection(saved, expected) ||
+        projection.inputDigest !== (legacy ? legacyInputDigest : inputDigest) ||
+        projection.savedEvidenceDigest !== hash("sha256", wire))
+    )
+      throw new Error(
+        "Saved import evidence does not match the selected input.",
+      );
+    // Older file readers can have a different, explicitly bound projection.
+    // A corrected numeric checkpoint must carry the selected evidence verbatim.
+    const exactWire = hasBoxedScalars || content.wireKey !== undefined;
+    if (
+      (!projection || exactWire) &&
+      wire !== wireJson(exactWire ? expected.map(wireFinding) : expected)
+    )
+      throw new Error(
+        "Saved import evidence does not match the selected input.",
+      );
+    if (
+      !legacy &&
+      hasBoxedScalars &&
+      projection?.identityFormat !== 2 &&
+      !verifiableLegacyMetadata(parsed, true)
+    )
+      throw unmatchedPreviousNumbers();
+    return content;
+  }
+
+  // The original filename and digests identify the previous selection, but
+  // contained {} for every boxed number. Only its actual saved request can
+  // prove which numbers were approved.
+  function readPreviousNumbers(
+    record: SavedSubmission | null,
+    canonicalExists = false,
+  ): SavedSubmission | undefined {
+    const content = readSaved(record);
+    const projection = content.inputProjection;
+    const savedWire = wireJson(submissionFindings(content.requests));
+    const wireDigest = hash("sha256", savedWire);
+    if (
+      projection?.inputDigest !== hash("sha256", canonicalJson(currentIdentity))
+    )
+      throw unmatchedPreviousNumbers();
+    if (projection.identityFormat === 2) {
+      // A current writer may own the old filename for an ordinary object.
+      if (projection.savedEvidenceDigest === wireDigest) return undefined;
+      throw unmatchedPreviousNumbers();
+    }
+    const selected = parsed.findings.map(wireFinding);
+    if (
+      projection.savedEvidenceDigest !== hash("sha256", canonicalJson(selected))
+    )
+      throw unmatchedPreviousNumbers();
+    if (savedWire !== wireJson(selected)) {
+      // A genuinely empty object at this key is a separate ordinary selection.
+      if (canonicalExists || wireDigest === projection.savedEvidenceDigest)
+        return undefined;
+      throw unmatchedPreviousNumbers();
+    }
+    if (!verifiableLegacyMetadata(parsed, false))
+      throw unmatchedPreviousNumbers();
+    content.inputProjection = {
+      identityFormat: 2,
+      inputDigest,
+      savedEvidenceDigest: wireDigest,
+    };
+    return content;
+  }
+  function unmatchedPreviousNumbers() {
+    return new CodexSecurityError(
+      "The older saved import cannot be matched to the selected input. Its checkpoint was preserved without uploading.",
+    );
+  }
   const key = hash(
     "sha256",
-    canonicalJson([...checkpointIdentity, currentIdentity]),
+    wireJson([...checkpointIdentity, currentIdentity]),
   );
-  const pendingPath = join(state, `${key}.pending.json`);
+  const canonicalPath = join(state, `${key}.pending.json`);
+  const lookupPath = join(state, `${key}.lookup.json`);
+  // A lookup only suggests a regular file to validate. A missing or stale hint
+  // leaves the same on-disk discovery available as before.
+  async function readLookupFile(path: string) {
+    try {
+      if ((await lstat(path)).isFile()) return await readFile(path, "utf8");
+    } catch {
+      // Optional lookup I/O must not prevent checking the actual checkpoints.
+    }
+  }
+  async function lookupFileKey() {
+    const serialized = await readLookupFile(lookupPath);
+    return serialized?.trim().match(/^"([a-f0-9]{64})"$/u)?.[1];
+  }
+
   const historicalKey = hash(
     "sha256",
     canonicalJson(
@@ -613,131 +783,289 @@ async function preparePublicationInput(
       (left, right) => left.localeCompare(right),
     ),
   );
-  const legacyKeys = new Set([
-    hash("sha256", canonicalJson([...checkpointIdentity, legacyIdentity])),
-    historicalKey,
-  ]);
-  async function rejectUnidentifiedLegacyCheckpoint(): Promise<void> {
+  const legacyIdentityKey = hash(
+    "sha256",
+    wireJson([...checkpointIdentity, legacyIdentity]),
+  );
+  const legacyKeys = new Set([legacyIdentityKey, historicalKey]);
+  function underLocks<T>(keys: string[], operation: () => Promise<T>) {
+    return withImportLocks(state, keys, dependencies.signal, operation);
+  }
+  let recovered: SavedSubmission | undefined;
+  for (const legacyKey of legacyKeys) {
+    if (legacyKey === key || legacyKey === previousKey) continue;
+    const legacyPath = join(state, `${legacyKey}.pending.json`);
+    const captured = await readOptionalFile(legacyPath);
+    if (captured !== undefined) {
+      // Preserve requests staged by the earlier locale-based filename format.
+      // Hold both publication locks while moving the original checkpoint.
+      await underLocks([key, legacyKey], async () => {
+        const current = await readOptionalFile(canonicalPath);
+        const serialized = await readOptionalFile(legacyPath);
+        let prior: SavedSubmission | undefined | null;
+        if (serialized !== undefined) {
+          try {
+            prior = JSON.parse(serialized) as SavedSubmission | null;
+          } catch (error) {
+            if (current === undefined || !(error instanceof SyntaxError))
+              throw error;
+          }
+        }
+        if (prior?.wireKey !== undefined) return;
+        if (current !== undefined) {
+          recovered = validateSaved(JSON.parse(current));
+          if (prior && sameSubmission(prior, recovered)) await rm(legacyPath);
+          return;
+        }
+        // A report-free approval at the locale-era filename can be a separate input.
+        if (
+          legacyKey === historicalKey &&
+          legacyKey !== legacyIdentityKey &&
+          prior?.inputProjection &&
+          prior.inputProjection.inputDigest !== legacyInputDigest &&
+          (prior.inputProjection.identityFormat === 2 ||
+            (prior.inputProjection.inputDigest ===
+              hash("sha256", wireJson(legacyParsed.findings)) &&
+              prior.inputProjection.savedEvidenceDigest ===
+                hash("sha256", wireJson(submissionFindings(prior.requests)))))
+        )
+          return;
+        const content = validateSaved(
+          serialized === undefined ? JSON.parse(captured) : prior,
+          true,
+        );
+        if (!sameFindingSelection(legacyParsed.findings, parsed.findings))
+          throw new CodexSecurityError(
+            "The saved import selects different findings from this input. Resume the original selection before publishing this selection.",
+          );
+        if (
+          content.requests.some(
+            (submission) =>
+              submission.repository.reset_marker !== destination.reset_marker,
+          )
+        ) {
+          if (serialized !== undefined) await rm(legacyPath);
+          throw new CloudImportError(
+            409,
+            "The repository was reset after this submission. The saved request was retired without uploading. Review the destination and run the command again to approve a fresh publication.",
+          );
+        }
+        const savedEvidenceDigest =
+          content.inputProjection?.savedEvidenceDigest ??
+          hash("sha256", wireJson(legacyParsed.findings));
+        const rebindProjection =
+          content.inputProjection !== undefined ||
+          savedEvidenceDigest !== inputDigest;
+        if (rebindProjection)
+          content.inputProjection = {
+            ...content.inputProjection,
+            identityFormat: 2,
+            inputDigest,
+            savedEvidenceDigest,
+          };
+        recovered = content;
+        if (serialized === undefined) return;
+        if (!rebindProjection) {
+          await rename(legacyPath, canonicalPath);
+        } else {
+          // Bind the new input projection to the original immutable evidence,
+          // so later inventory reordering still resumes these exact requests.
+          await writeAtomicJson(canonicalPath, content);
+          await rm(legacyPath);
+        }
+      });
+    }
+  }
+
+  interface Checkpoint {
+    fileKey: string;
+    content: SavedSubmission;
+    historical: boolean;
+  }
+  async function selectedCheckpoint(knownFileKey?: string) {
+    const directory = await validatePreparedOutputDir(
+      state,
+      undefined,
+      true,
+    ).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (!directory) return undefined;
+    const known = new Set(
+      [key, previousKey, knownFileKey].filter((value) => value !== undefined),
+    );
+    let unidentified = false;
+    let stagingPathOccupied = false;
+    async function readCandidate(
+      fileKey: string,
+      selected?: Checkpoint,
+      contents?: string,
+    ): Promise<Checkpoint | undefined> {
+      const serialized =
+        contents ??
+        (await readOptionalFile(join(state, `${fileKey}.pending.json`)));
+      if (serialized === undefined) return selected;
+      if (fileKey === (previousKey ?? key)) stagingPathOccupied = true;
+      let record: SavedSubmission | null;
+      try {
+        record = JSON.parse(serialized) as SavedSubmission | null;
+      } catch (error) {
+        if (known.has(fileKey)) throw error;
+        return selected;
+      }
+      if (record?.wireKey !== undefined && record.wireKey !== key)
+        return selected;
+      const historical =
+        fileKey !== key &&
+        record?.wireKey === undefined &&
+        fileKey === previousKey;
+      if (fileKey !== key && record?.wireKey !== key && !historical) {
+        // Some early locale filenames carry no deployment identity. Never guess their target.
+        if (record && !record.inputProjection && !legacyKeys.has(fileKey)) {
+          try {
+            validateSaved(record, true);
+            unidentified = true;
+          } catch {
+            /* Unrelated input. */
+          }
+        }
+        return selected;
+      }
+      const content = historical
+        ? readPreviousNumbers(record, selected?.fileKey === key)
+        : validateSaved(record);
+      if (!content) return selected;
+      if (selected)
+        throw new CodexSecurityError(
+          "Two saved imports match this input. Their original requests and receipts were preserved without uploading.",
+        );
+      return { fileKey, content, historical };
+    }
+    let selected: Checkpoint | undefined;
+    for (const fileKey of known)
+      selected = await readCandidate(fileKey, selected);
+    // A known file that disappeared can be checked against its completed receipt.
+    if (!selected && knownFileKey !== undefined) return undefined;
+    const hint = await lookupFileKey();
+    if (hint && !known.has(hint)) {
+      const contents = await readLookupFile(
+        join(state, `${hint}.pending.json`),
+      );
+      if (contents !== undefined) {
+        selected = await readCandidate(hint, selected, contents);
+        known.add(hint);
+      }
+    }
+    // Before claiming an unmarked historical file, still look for a second authority.
+    if (selected && !selected.historical) return selected;
     const entries = await readdir(state, { withFileTypes: true }).catch(
       (error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT") return [];
         throw error;
       },
     );
-    if (entries.length) await validatePreparedOutputDir(state, undefined, true);
     for (const entry of entries) {
       if (!entry.isFile() || !/^[a-f0-9]{64}\.pending\.json$/u.test(entry.name))
         continue;
-      const candidateKey = entry.name.slice(0, -".pending.json".length);
-      if (candidateKey === key || legacyKeys.has(candidateKey)) continue;
-      const serialized = await readOptionalFile(join(state, entry.name));
-      if (serialized === undefined) continue;
-      try {
-        // Locale-dependent filenames predate input projections. Later formats
-        // must remain isolated by their deployment-bound checkpoint keys.
-        const content = JSON.parse(serialized) as SavedSubmission | null;
-        if (!content || content.inputProjection !== undefined) continue;
-        validateSaved(serialized, true);
-      } catch {
-        continue;
-      }
-      // These older bodies contain no deployment identity. Do not guess a
-      // destination or replace their immutable request with a fresh publication.
+      const fileKey = entry.name.slice(0, -".pending.json".length);
+      if (!known.has(fileKey))
+        selected = await readCandidate(fileKey, selected);
+    }
+    if (!selected && stagingPathOccupied) throw occupiedCheckpoint();
+    if (!selected && unidentified)
       throw new CodexSecurityError(
         "An older pending import matches this input, but its checkpoint identity could not be established. Resume it using the original deployment and locale before publishing this selection. The saved request was preserved without uploading.",
       );
-    }
+    return selected;
   }
-  let recovered: SavedSubmission | undefined;
-  for (const legacyKey of legacyKeys) {
-    if (legacyKey === key) continue;
-    const legacyPath = join(state, `${legacyKey}.pending.json`);
-    const captured = await readOptionalFile(legacyPath);
-    if (captured !== undefined) {
-      // Preserve requests staged by the earlier locale-based filename format.
-      // Hold both publication locks while moving the original checkpoint.
-      await withImportLock(state, key, dependencies.signal, async () =>
-        withImportLock(state, legacyKey, dependencies.signal, async () => {
-          const current = await readOptionalFile(pendingPath);
-          const serialized = await readOptionalFile(legacyPath);
-          if (current !== undefined) {
-            recovered = validateSaved(current);
-            if (serialized !== undefined) {
-              // A crash may leave both copies after installing the canonical file.
-              // Retire only an identical immutable submission, never another request.
-              let duplicate: SavedSubmission | null = null;
-              try {
-                duplicate = JSON.parse(serialized) as SavedSubmission | null;
-              } catch (error) {
-                if (!(error instanceof SyntaxError)) throw error;
-              }
-              if (
-                duplicate !== null &&
-                typeof duplicate === "object" &&
-                sameSubmission(duplicate, recovered)
-              )
-                await rm(legacyPath);
-            }
-            return;
-          }
-          // A competing resumer may have completed and removed both paths while
-          // this caller waited. Retain its observed immutable request and receipts.
-          const content = validateSaved(serialized ?? captured, true);
-          if (!sameFindingSelection(legacyParsed.findings, parsed.findings))
-            throw new CodexSecurityError(
-              "The saved import selects different findings from this input. Resume the original selection before publishing this selection.",
-            );
-          if (
-            content.requests.some(
-              (submission) =>
-                submission.repository.reset_marker !== destination.reset_marker,
-            )
-          ) {
-            if (serialized !== undefined) await rm(legacyPath);
-            throw new CloudImportError(
-              409,
-              "The repository was reset after this submission. The saved request was retired without uploading. Review the destination and run the command again to approve a fresh publication.",
-            );
-          }
-          const savedEvidenceDigest =
-            content.inputProjection?.savedEvidenceDigest ??
-            hash("sha256", canonicalJson(legacyParsed.findings));
-          const rebindProjection =
-            content.inputProjection !== undefined ||
-            savedEvidenceDigest !== inputDigest;
-          if (rebindProjection)
-            content.inputProjection = { inputDigest, savedEvidenceDigest };
-          recovered = content;
-          if (serialized === undefined) return;
-          if (!rebindProjection) {
-            await rename(legacyPath, pendingPath);
-          } else {
-            // Bind the new input projection to the original immutable evidence,
-            // so later inventory reordering still resumes these exact requests.
-            await writeAtomicJson(pendingPath, content);
-            await rm(legacyPath);
-          }
-        }),
-      );
-    }
+  async function readCompletedPublication(requests: FindingImportRequest[]) {
+    const serialized = await readOptionalFile(
+      join(state, `${key}.result.json`),
+    );
+    if (serialized === undefined) return undefined;
+    const completed = JSON.parse(
+      serialized,
+    ) as ExternalPublicationResult | null;
+    if (
+      (completed?.status === "complete" || completed?.status === "partial") &&
+      Array.isArray(completed.receipts) &&
+      completed.receipts.length === requests.length &&
+      completed.receipts.every(
+        (receipt, i) => receipt?.id === requests[i]!.request_id,
+      )
+    )
+      return {
+        receipts: completed.receipts.map((receipt, i) =>
+          validatePublicationReceipt(receipt, requests[i]!),
+        ),
+        verified: completed.verified,
+      };
   }
-  const serialized = await readOptionalFile(pendingPath);
-  const saved =
-    serialized === undefined ? recovered : validateSaved(serialized);
-  if (!saved) await rejectUnidentifiedLegacyCheckpoint();
+  function occupiedCheckpoint() {
+    return new CodexSecurityError(
+      "Finish the other pending import at this checkpoint first, then review this input again.",
+    );
+  }
+  let selected = await selectedCheckpoint(recovered ? key : undefined);
+  const fileKey = selected?.fileKey ?? (recovered ? key : (previousKey ?? key));
+  const pendingPath = join(state, `${fileKey}.pending.json`);
+  async function rememberFile() {
+    if (fileKey !== key && (await lookupFileKey()) !== fileKey)
+      await writeAtomicJson(lookupPath, fileKey).catch(() => undefined);
+  }
+  async function removePending() {
+    await rm(pendingPath, { force: true });
+    if (fileKey !== key && (await lookupFileKey()) === fileKey)
+      await rm(lookupPath, { force: true }).catch(() => undefined);
+  }
+
+  const lockKeys = [
+    ...new Set([
+      key,
+      fileKey,
+      ...(previousKey === undefined ? [] : [previousKey]),
+    ]),
+  ];
+  if (selected?.historical) {
+    const observed = selected;
+    selected = await underLocks(lockKeys, async () => {
+      const current = await selectedCheckpoint(fileKey);
+      if (
+        !current &&
+        (await readCompletedPublication(observed.content.requests))
+      )
+        return observed;
+      if (
+        !current ||
+        current.fileKey !== fileKey ||
+        !sameSubmission(current.content, observed.content)
+      )
+        throw new CodexSecurityError(
+          "The saved publication changed while preparing this input. Review it again.",
+        );
+      if (current.historical) {
+        current.content.wireKey = key;
+        await writeAtomicJson(pendingPath, current.content);
+        await rememberFile();
+      }
+      return current;
+    });
+  }
+  const saved = selected?.content ?? recovered;
   if (saved) {
     const content = saved;
     for (const submission of content.requests) {
       if (submission.repository.reset_marker !== destination.reset_marker) {
         // The old request is never sent after reset. A subsequent explicit
         // invocation prepares a fresh submission and asks for approval again.
-        await withImportLock(state, key, dependencies.signal, async () => {
+        await underLocks(lockKeys, async () => {
           const current = await readOptionalFile(pendingPath);
           if (
             current !== undefined &&
             sameSubmission(JSON.parse(current) as SavedSubmission, content)
           )
-            await rm(pendingPath);
+            await removePending();
         });
         throw new CloudImportError(
           409,
@@ -944,11 +1272,13 @@ async function preparePublicationInput(
     accountId: credentials.account_id,
     requests,
     receipts: saved?.receipts,
+    wireKey: saved?.wireKey ?? (fileKey === key ? undefined : key),
     inputProjection: saved?.inputProjection ?? {
+      identityFormat: 2,
       inputDigest,
       savedEvidenceDigest: hash(
         "sha256",
-        canonicalJson(submissionFindings(requests)),
+        wireJson(submissionFindings(requests)),
       ),
     },
   };
@@ -1010,17 +1340,52 @@ async function preparePublicationInput(
           verified,
         };
       };
+      function interruptedPreview(
+        message: string,
+        cause?: unknown,
+        savedSubmission?: string,
+      ) {
+        // The expected file is gone or another publisher owns the lock. Use only
+        // the acknowledgements this caller saw when it prepared the request.
+        const known = submission.receipts ?? [];
+        if (known.length > submission.requests.length)
+          throw new CodexSecurityError(
+            "Saved publication has more receipts than requests.",
+          );
+        const acknowledged = known.map((receipt, index) =>
+          validatePublicationReceipt(receipt, submission.requests[index]!),
+        );
+        return new ExternalPublicationError(
+          message,
+          {
+            ...result(acknowledged, 0),
+            status: "interrupted",
+            error: message,
+            ...(savedSubmission === undefined ? {} : { savedSubmission }),
+          },
+          cause,
+        );
+      }
       let acquired = false;
-      return await withImportLock(state, key, dependencies.signal, async () => {
+      return await underLocks(lockKeys, async () => {
         acquired = true;
         // Re-read under the lock to keep checkpoints from another publisher.
-        const pending = await readOptionalFile(pendingPath);
-        if (pending === undefined && !saved)
-          await rejectUnidentifiedLegacyCheckpoint();
-        const current =
-          pending === undefined
-            ? submission
-            : (JSON.parse(pending) as SavedSubmission);
+        const selected = await selectedCheckpoint(saved ? fileKey : undefined);
+        if (!selected && saved) {
+          const completed = await readCompletedPublication(requests);
+          if (completed) return result(completed.receipts, completed.verified);
+          throw interruptedPreview(
+            "The saved publication changed after preview. Review its result before publishing again.",
+          );
+        }
+        if (selected && (selected.fileKey !== fileKey || selected.historical))
+          throw new CodexSecurityError(
+            "Another publication prepared this input. Run the command again to review and resume that saved request.",
+          );
+        if (!selected && (await readOptionalFile(pendingPath)) !== undefined)
+          throw occupiedCheckpoint();
+        const pending = selected?.content;
+        const current = pending ?? submission;
         const adoptProjectMap =
           submission.inspectorProjectMapRequired &&
           current.inspectorProjectMapRequired === undefined;
@@ -1042,6 +1407,7 @@ async function preparePublicationInput(
             await writeAtomicJson(pendingPath, current);
             persisted = true;
           }
+          await rememberFile();
           progress({
             phase: "uploading",
             completed: 0,
@@ -1065,10 +1431,7 @@ async function preparePublicationInput(
               receipts.push(receipt);
               // Acknowledged batches must not consume another POST quota on retry.
               // Readback can still resume after this checkpoint without replaying writes.
-              await writeAtomicJson(pendingPath, {
-                ...submission,
-                receipts,
-              });
+              await writeAtomicJson(pendingPath, { ...submission, receipts });
             }
           }
           // Verify readable source records without mistaking a newer concurrent
@@ -1103,13 +1466,12 @@ async function preparePublicationInput(
               report.version < item.version! ||
               (report.version === item.version &&
                 (report.observation_id !== item.observation_id ||
-                  canonicalJson(report.evidence) !==
-                    canonicalJson(expected.evidence))) ||
+                  wireJson(report.evidence) !== wireJson(expected.evidence))) ||
               report.source_finding_id !== expected.source_finding_id ||
               report.repo_id !== destination.id ||
               report.repo_connector_id !== destination.repo_connector_id ||
               report.environment_id !== batch.repository.environment_id ||
-              canonicalJson(report.source) !== canonicalJson(source)
+              wireJson(report.source) !== wireJson(source)
             )
               throw new CodexSecurityError(
                 "Cloud readback did not match the saved finding identity.",
@@ -1125,11 +1487,11 @@ async function preparePublicationInput(
             ...completed,
             report: reportForJson(completed.report),
           });
-          await rm(pendingPath, { force: true });
+          await removePending();
           return completed;
         } catch (error) {
           if (error instanceof CloudImportError && error.status === 409) {
-            await rm(pendingPath, { force: true });
+            await removePending();
             persisted = false;
           }
           const message = `${error instanceof Error ? error.message : String(error)} ${error instanceof CloudImportError && error.status === 409 ? "The old submission was retired. Rediscover and approve a fresh publication." : persisted ? `Repeat the same command to resume the saved request. Saved submission: ${pendingPath}` : "No resumable request was saved. Correct the error and review the input before retrying."}`;
@@ -1146,28 +1508,13 @@ async function preparePublicationInput(
         }
       }).catch((error: unknown) => {
         if (acquired || !dependencies.signal?.aborted) throw error;
-        // The active publisher owns the checkpoint. Report only acknowledgements
-        // already observed during preparation, without rewriting its files.
-        const known = submission.receipts ?? [];
-        if (known.length > requests.length)
-          throw new CodexSecurityError(
-            "Saved publication has more receipts than requests.",
-          );
-        const acknowledged = known.map((receipt, index) =>
-          validatePublicationReceipt(receipt, requests[index]!),
-        );
         const message = saved
           ? `Publication canceled while waiting. Repeat the same command to resume the saved request. Saved submission: ${pendingPath}`
           : "Publication canceled while waiting. No resumable request was saved by this invocation.";
-        throw new ExternalPublicationError(
+        throw interruptedPreview(
           message,
-          {
-            ...result(acknowledged, 0),
-            status: "interrupted",
-            error: message,
-            ...(saved ? { savedSubmission: pendingPath } : {}),
-          },
           error,
+          saved ? pendingPath : undefined,
         );
       });
     },

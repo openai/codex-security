@@ -875,6 +875,109 @@ describe("local normalized scanner findings", () => {
     expect(existsSync(stateDirectory)).toBe(false);
   });
 
+  test("local previews and storage capture the same numeric source data", async () => {
+    const { repository, environment } = await fixture();
+    const data = input();
+    let reads = 0;
+    const sourceData = {
+      scores: Object.assign([3], {
+        note: Object.assign(new Number(4), {
+          toJSON() {
+            throw new Error("JSON ignores named array properties");
+          },
+        }),
+      }),
+      get section() {
+        const n = ++reads;
+        return [new Number(n), new Number(n)];
+      },
+      value: Object.assign(new Number(9), {
+        toJSON: (key: string) => (key === "value" ? 0 : 9),
+      }),
+    };
+    data.findings[0]!.evidence.source_data = sourceData;
+    const prepared = await prepareNormalizedLocalImport(
+      data,
+      { repository, ...source },
+      { environment },
+    );
+    const expected = { scores: [3], section: [1, 1], value: 9 };
+    expect(reads).toBe(1);
+    const preview = prepared.preview.findings[0]!.evidence.source_data!;
+    expect(JSON.parse(JSON.stringify(preview))).toEqual(expected);
+    await prepared.import();
+    const rows = await listLocalExternalFindings(
+      { repository },
+      { environment },
+    );
+    expect(
+      rows.find((item) => item.sourceFindingId === "scanner-finding-1")
+        ?.evidence.source_data,
+    ).toEqual(expected);
+  });
+
+  test("captures numeric fields before later getters mutate the source", async () => {
+    const { repository, environment } = await fixture();
+    const data = input();
+    class Scores {
+      score = new Number(3);
+    }
+    const scores = new Scores();
+    let reads = 0;
+    Object.defineProperty(scores, "getterScore", {
+      enumerable: true,
+      get() {
+        reads++;
+        scores.score = new Number(7);
+        return Object.assign(new Number(1), { toJSON: () => 5 });
+      },
+    });
+    data.findings[0]!.evidence.source_data = { scores };
+    Object.assign(data.findings[0]!, {
+      vendorCursor: 2 ** 53,
+      previousCursor: new Number(2 ** 53),
+    });
+    const prepared = await prepareNormalizedLocalImport(
+      data,
+      { repository, ...source },
+      { environment },
+    );
+    expect(reads).toBe(1);
+    // Direct normalized imports snapshot caller data with structuredClone.
+    const expected = { scores: { score: 3, getterScore: 1 } };
+    expect(
+      JSON.parse(
+        JSON.stringify(prepared.preview.findings[0]!.evidence.source_data),
+      ),
+    ).toEqual(expected);
+    await prepared.import();
+    const rows = await listLocalExternalFindings(
+      { repository },
+      { environment },
+    );
+    expect(
+      rows.find((item) => item.sourceFindingId === "scanner-finding-1")
+        ?.evidence.source_data,
+    ).toEqual(expected);
+  });
+
+  test.each([2 ** 53, new Number(2 ** 53)])(
+    "rejects unsafe normalized evidence before writing any local state",
+    async (score) => {
+      const { repository, stateDirectory, environment } = await fixture();
+      const data = input();
+      data.findings[0]!.evidence.source_data = { score };
+      await expect(
+        prepareNormalizedLocalImport(
+          data,
+          { repository, ...source },
+          { environment },
+        ),
+      ).rejects.toThrow("safe integer");
+      expect(existsSync(stateDirectory)).toBe(false);
+    },
+  );
+
   test("uses the canonical selected checkout and rejects state inside it", async () => {
     const { root, repository, environment } = await fixture();
     const link = join(root, "repository-link");

@@ -5,7 +5,10 @@ import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import { listLocalExternalFindings } from "../src/external-findings-local.js";
 import { prepareNormalizedExternalPublication } from "../src/external-findings-publish.js";
 import { readExternalFindings } from "../src/external-findings-read.js";
-import { validateExternalEvidence } from "../src/external-import-contract.js";
+import {
+  validateExternalEvidence,
+  validateExternalEvidenceJson,
+} from "../src/external-import-contract.js";
 import type {
   ExternalFindingEvidence,
   Provider,
@@ -341,6 +344,50 @@ test.each(["wiz", "endor"] as const)(
     expect(credentials).not.toHaveBeenCalled();
   },
 );
+
+test.each([1e-7, 0.00001])(
+  "Cloud counts the serialized numeric value %s at the evidence byte limit",
+  (score) => {
+    const limit = 256 * 1024;
+    const padding =
+      limit - validateExternalEvidenceJson({ scores: [score] }, "cloud");
+    for (const value of [
+      new Number(score),
+      { hidden: 0.00001, toJSON: () => score },
+      { toJSON: () => Object.assign(new Number(1), { valueOf: () => score }) },
+    ]) {
+      expect(
+        validateExternalEvidenceJson({ scores: [value] }, "cloud", padding),
+      ).toBe(limit);
+      expect(() =>
+        validateExternalEvidenceJson({ scores: [value] }, "cloud", padding + 1),
+      ).toThrow("256 KiB");
+    }
+  },
+);
+
+test("Cloud measures caller fields at their retained numeric size", () => {
+  const limit = 256 * 1024;
+  const padding = limit - validateExternalEvidenceJson({ score: 1 }, "cloud");
+  const score = Object.assign(new Number(1), { toJSON: () => 1e-7 });
+  class Metrics {
+    score = score;
+  }
+  for (const input of [
+    { score },
+    new Metrics(),
+    {
+      get score() {
+        return score;
+      },
+    },
+  ]) {
+    expect(validateExternalEvidenceJson(input, "cloud", padding)).toBe(limit);
+    expect(() =>
+      validateExternalEvidenceJson(input, "cloud", padding + 1),
+    ).toThrow("256 KiB");
+  }
+});
 
 test("local evidence validation keeps structure, paths, links and numeric integrity", () => {
   const circular: Record<string, unknown> = {};

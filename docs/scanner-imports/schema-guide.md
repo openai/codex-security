@@ -47,6 +47,12 @@ defines the fields the reader can populate.
 | `details`                      | Optional context for `sast`, `secret`, `iac` or `advisory` findings. For GHSA, `details.advisory.source` distinguishes repository and global disclosures. |
 | `source_data`                  | The vendor fields retained for this record. Keep the original export when you need scan-wide diagnostics or inventory.                                    |
 
+Use finite JSON numbers in evidence and report metadata. Supply integers outside
+JavaScript’s safe range as strings to preserve their value. For consistent SDK
+imports and JSON exports, put primitive numbers in plain data properties.
+The SDK captures the value held by a `Number` object. A vendor class’s custom
+`toJSON()` can also expose fields outside that snapshot.
+
 ## Operate the two destinations
 
 **Local.** Run `codex-security findings imported PATH --format json` with the
@@ -92,7 +98,15 @@ With the SDK, repeat the preparation call that created the submission, using
 the same options. For `prepareExternalPublication()`, supply the original
 export file. For `prepareNormalizedExternalPublication()`, supply the original
 `ExternalFindings`. Check `preview.resumed` before calling `publish()`.
-Changing the findings prepares a new submission.
+Changing the findings prepares a new submission. Use the same SDK version for
+a submission and its retries.
+
+If an earlier SDK saved a normalized submission containing `Number` objects,
+retry with the original input. Once the SDK recognizes the saved request,
+later retries can use equivalent primitive numbers. Older checkpoints could
+record a boxed report value as `{}`. If the SDK cannot verify a boxed retry
+against that record, it preserves the checkpoint and stops before uploading.
+If another pending import already uses the same filename, finish that import first.
 
 See [results and exit codes](../../sdk/typescript/docs/cli.md#results-and-exit-codes)
 for cumulative counts and interrupted readback.

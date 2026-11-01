@@ -211,7 +211,9 @@ function validator<T>(
   };
 }
 
-const evidence = validator<ExternalFindingEvidence>("ImportedFindingEvidence");
+export const validateExternalEvidenceShape = validator<ExternalFindingEvidence>(
+  "ImportedFindingEvidence",
+);
 const localEvidence = validator<ExternalFindingEvidence>(
   "ImportedFindingEvidence",
   "local",
@@ -227,13 +229,17 @@ export const validateSourceReports =
   validator<SourceReportPage>("SourceReportPage");
 export const validateSourceReport = validator<SourceReport>("SourceReport");
 
-function requireJsonNumber(value: number, label: string): void {
-  if (!Number.isFinite(value))
-    throw new Error(`${label} must contain finite JSON numbers.`);
+export function requireSafeJsonInteger(value: number, label: string): void {
   if (Number.isInteger(value) && !Number.isSafeInteger(value))
     throw new Error(
       `${label} integers must be within JavaScript's safe integer range; export larger values as strings to preserve them exactly.`,
     );
+}
+
+function requireJsonNumber(value: number, label: string): void {
+  if (!Number.isFinite(value))
+    throw new Error(`${label} must contain finite JSON numbers.`);
+  requireSafeJsonInteger(value, label);
 }
 
 /** Report metadata is retained in previews and receipts without Cloud evidence size limits. */
@@ -252,7 +258,9 @@ export function validateExternalEvidence(
   input: unknown,
   target: ExternalImportTarget = "cloud",
 ): ExternalFindingEvidence {
-  const result = (target === "local" ? localEvidence : evidence)(input);
+  const result = (
+    target === "local" ? localEvidence : validateExternalEvidenceShape
+  )(input);
   for (const location of result.locations ?? []) {
     const path = location.path.replaceAll("\\", "/");
     if (
@@ -326,8 +334,7 @@ export function validateExternalEvidence(
         "Evidence URLs must be HTTP(S) links without credentials.",
       );
   }
-  validateExternalEvidenceJson(result, target);
-  return result;
+  return checkedEvidenceJson(result, target, 0).retained;
 }
 
 /** Return the validated Cloud wire size, or zero for local evidence. */
@@ -336,39 +343,156 @@ export function validateExternalEvidenceJson(
   target: ExternalImportTarget,
   additionalCloudBytes = 0,
 ): number {
-  // Local evidence still has to be serializable JSON, including acyclic source data.
-  if (target === "local") JSON.stringify(input);
-  let numericByteAdjustment = 0;
+  return checkedEvidenceJson(input, target, additionalCloudBytes).bytes;
+}
+
+function hasCustomNumberHooks(value: Number): boolean {
+  return (
+    Object.getPrototypeOf(value) !== Number.prototype ||
+    Object.hasOwn(value, "valueOf") ||
+    "toJSON" in value ||
+    Symbol.toPrimitive in value
+  );
+}
+
+/** Keep plain vendor fields and native SDK snapshots on the same numeric value. */
+function retainNumberValues<T>(input: T, parents: WeakSet<object>): T {
+  if (typeof input === "number") requireJsonNumber(input, "Evidence");
+  if (input === null || typeof input !== "object") return input;
+  if (isNumberObject(input)) {
+    requireJsonNumber(Number.prototype.valueOf.call(input), "Evidence");
+    if (!hasCustomNumberHooks(input)) return input;
+    const copy = structuredClone(input);
+    // Sibling getters can read vendor metadata attached to the number.
+    for (const key of Reflect.ownKeys(input)) {
+      if (
+        key !== "toJSON" &&
+        key !== "valueOf" &&
+        key !== "toString" &&
+        key !== Symbol.toPrimitive
+      )
+        Object.defineProperty(
+          copy,
+          key,
+          Object.getOwnPropertyDescriptor(input, key)!,
+        );
+    }
+    return copy;
+  }
+  const prototype: object | null = Object.getPrototypeOf(input);
+  const array = Array.isArray(input);
+  if (
+    !array &&
+    prototype &&
+    Object.getPrototypeOf(prototype) !== null &&
+    ("toJSON" in input ||
+      Symbol.toStringTag in input ||
+      Object.prototype.toString.call(input) !== "[object Object]")
+  )
+    return input;
+
+  let changes: Map<PropertyKey, unknown> | undefined;
+  const hasBoxedChild = parents.has(input);
+  let numberGetter = false;
+  function visit(key: string | number) {
+    const field = Object.getOwnPropertyDescriptor(input, key);
+    if (field?.get && hasBoxedChild) numberGetter = true;
+    if (!field || !("value" in field)) return;
+    const retained = retainNumberValues(field.value, parents);
+    if (retained !== field.value)
+      (changes ??= new Map()).set(String(key), retained);
+  }
+  if (array) {
+    for (let index = 0; index < input.length; index++) visit(index);
+  } else {
+    for (const key of Object.keys(input)) visit(key);
+  }
+  if (!changes && !numberGetter) return input;
+  const copy = array
+    ? Object.setPrototypeOf([], prototype)
+    : Object.create(prototype);
+  for (const key of Reflect.ownKeys(input)) {
+    const field = Object.getOwnPropertyDescriptor(input, key)!;
+    if (changes?.has(key)) field.value = changes.get(key);
+    if (field.get && numberGetter) {
+      const get = field.get;
+      field.get = function (this: unknown) {
+        return retainNumberValues(Reflect.apply(get, this, []), parents);
+      };
+    }
+    Object.defineProperty(copy, key, field);
+  }
+  return copy;
+}
+
+function checkedEvidenceJson<T>(
+  input: T,
+  target: ExternalImportTarget,
+  additionalCloudBytes: number,
+): { retained: T; bytes: number } {
+  // Preserve the native fast path and original circular-JSON diagnostics.
+  let failedPreflight: { reason: unknown } | undefined;
+  if (target === "local") {
+    try {
+      JSON.stringify(input);
+    } catch (reason) {
+      failedPreflight = { reason };
+    }
+  }
+  const ancestors: object[] = [];
+  let parents: WeakSet<object> | undefined;
   const pending: [unknown, number][] = [[input, 0]];
   while (pending.length > 0) {
     const [value, depth] = pending.pop()!;
     if (target === "cloud" && depth > 20)
       throw new Error("Evidence exceeds the Cloud JSON depth limit of 20.");
     if (value !== null && typeof value === "object") {
+      if (failedPreflight) {
+        ancestors.length = depth;
+        if (ancestors.includes(value)) throw failedPreflight.reason;
+      }
+      if (isNumberObject(value)) {
+        requireJsonNumber(Number.prototype.valueOf.call(value), "Evidence");
+        if (hasCustomNumberHooks(value)) {
+          parents ??= new WeakSet();
+          if (depth) parents.add(ancestors[depth - 1]!);
+        }
+      }
+      ancestors[depth] = value;
       for (const child of Object.values(value))
         pending.push([child, depth + 1]);
     } else if (typeof value === "number") {
       requireJsonNumber(value, "Evidence");
-      if (target === "local") continue;
-      const wire = JSON.stringify(value);
-      // Cloud pads short exponents and formats small fractions scientifically.
-      const cloud = (
-        wire.includes(".") && Math.abs(value) < 1e-4
-          ? value.toExponential()
-          : wire
-      ).replace(/e-(\d)$/u, "e-0$1");
-      numericByteAdjustment += cloud.length - wire.length;
     }
   }
+  const retained = parents ? retainNumberValues(input, parents) : input;
+  if (target === "local") {
+    if (failedPreflight) {
+      if (retained === input) throw failedPreflight.reason;
+      JSON.stringify(retained);
+    }
+    return { retained, bytes: 0 };
+  }
+  let numericByteAdjustment = 0;
+  const json = JSON.stringify(retained, (_key, value: unknown) => {
+    // JSON.stringify invokes toJSON before unboxing a Number with ToNumber.
+    if (isNumberObject(value)) value = +value;
+    if (typeof value !== "number") return value;
+    const wire = JSON.stringify(value);
+    // Cloud pads short exponents and formats small fractions scientifically.
+    const cloud = (
+      wire.includes(".") && Math.abs(value) < 1e-4
+        ? value.toExponential()
+        : wire
+    ).replace(/e-(\d)$/u, "e-0$1");
+    numericByteAdjustment += cloud.length - wire.length;
+    return value;
+  });
   const bytes =
-    target === "cloud"
-      ? Buffer.byteLength(JSON.stringify(input)) +
-        numericByteAdjustment +
-        additionalCloudBytes
-      : 0;
+    Buffer.byteLength(json) + numericByteAdjustment + additionalCloudBytes;
   if (bytes > 256 * 1024)
     throw new Error("Evidence exceeds the Cloud limit of 256 KiB.");
-  return bytes;
+  return { retained, bytes };
 }
 
 export function validateImportRequest(input: unknown): FindingImportRequest {

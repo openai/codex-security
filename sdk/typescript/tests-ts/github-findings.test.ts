@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { Octokit } from "@octokit/core";
+import { runInNewContext } from "node:vm";
 import { importGitHubCodeScanningAlerts } from "../src/github.js";
 import { importGitHubAdvisories } from "../src/github-advisories.js";
 import { validateExternalEvidence } from "../src/external-import-contract.js";
@@ -13,6 +14,115 @@ import {
   importedAlert,
   importedAdvisory,
 } from "./support/github-import-fixtures.js";
+
+test.each(["local", "cloud"] as const)(
+  "validates intrinsic numbers and retains vendor evidence on %s",
+  (target) => {
+    const normalize = (extension: unknown) => {
+      const selected = importedAlert();
+      Object.assign(selected.alert, { extension: [extension] });
+      return normalizeGitHubCodeScanningAlerts([selected], target);
+    };
+    // Cross-realm wrappers still serialize as numbers. Ordinary objects with
+    // user-defined coercion or a Number tag retain their normal JSON shape.
+    const unsafe = runInNewContext("new Number(2 ** 53)");
+    expect(normalize(2 ** 53).excluded[0]?.reason).toContain("safe integer");
+    const spoof = { [Symbol.toStringTag]: "Number", valueOf: () => NaN };
+    expect(normalize(unsafe).excluded[0]?.reason).toContain("safe integer");
+    expect(normalize(spoof).findings).toHaveLength(1);
+    expect(normalize(new Number(Infinity)).excluded[0]?.reason).toContain(
+      "finite JSON numbers",
+    );
+    const captured = (extension: unknown) => {
+      const data = normalize(extension).findings[0]!.evidence.source_data;
+      return (data?.["alert"] as { extension: unknown[] }).extension[0];
+    };
+    const plain = { score: new Number(7) };
+    expect(captured(plain)).toBe(plain);
+    const score = Object.assign(new Number(7), {
+      unit: "ms",
+      toJSON: () => 2 ** 53,
+    });
+    const sibling = {
+      score,
+      get unit() {
+        return this.score.unit;
+      },
+      suffix: "short",
+      get label() {
+        return this.suffix;
+      },
+      get metrics() {
+        return { score };
+      },
+      bytes: Buffer.from([1, 2]),
+      detail: { toJSON: () => "retained" },
+    };
+    const getter = captured({
+      get score() {
+        return score;
+      },
+    });
+    expect(JSON.stringify(getter)).toBe('{"score":7}');
+    const throwing = Object.assign(new Number(7), {
+      toJSON() {
+        throw new Error("vendor numeric hook");
+      },
+    });
+    expect(JSON.stringify(captured(throwing))).toBe("7");
+    const retained = captured(sibling) as typeof sibling;
+    retained.suffix = "long";
+    expect(sibling.suffix).toBe("short");
+    expect(retained.bytes).toBe(sibling.bytes);
+    expect(retained.detail).toBe(sibling.detail);
+    expect(JSON.stringify(sibling.score)).toBe(String(2 ** 53));
+    expect(JSON.parse(JSON.stringify(retained))).toEqual({
+      score: 7,
+      unit: "ms",
+      suffix: "long",
+      label: "long",
+      metrics: { score: 7 },
+      bytes: { type: "Buffer", data: [1, 2] },
+      detail: "retained",
+    });
+    class Metrics {
+      #unit = "ms";
+      score = runInNewContext("new Number(7)");
+      toJSON() {
+        return { score: this.score, unit: this.#unit };
+      }
+    }
+    const metrics = new Metrics();
+    expect(captured(metrics)).toBe(metrics);
+    expect(JSON.parse(JSON.stringify(metrics))).toEqual({
+      score: 7,
+      unit: "ms",
+    });
+    const changing = {
+      score,
+      get update() {
+        this.score = Object.assign(new Number(2 ** 53), {
+          unit: "ms",
+          toJSON: () => 7,
+        });
+        return true;
+      },
+    };
+    expect(normalize(changing).excluded[0]?.reason).toContain("safe integer");
+    expect(
+      normalize(Object.assign(new Number(2 ** 53), { toJSON: () => 12 }))
+        .excluded[0]?.reason,
+    ).toContain("safe integer");
+    expect(
+      normalize(Object.assign(new Number(Infinity), { valueOf: () => 12 }))
+        .excluded[0]?.reason,
+    ).toContain("finite JSON numbers");
+    expect(
+      normalize(Object.assign(new Number(7), { hidden: Infinity })).excluded[0]
+        ?.reason,
+    ).toContain("finite JSON numbers");
+  },
+);
 
 test("code-scanning mapping preserves full evidence and selected instance status without assessing it", () => {
   const imported = importedAlert("refs/heads/review");

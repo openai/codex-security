@@ -2191,8 +2191,7 @@ export async function validatePreparedOutputDir(
   const canonical = await realpath(path);
   requireModelSafeOutputDir(canonical);
   validateLocation?.(canonical);
-  const entries = await readdir(canonical);
-  if (!allowNonempty && entries.length !== 0) {
+  if (!allowNonempty && (await readdir(canonical)).length !== 0) {
     throw new OutputDirectoryError(
       `Scan output directory must be empty: ${path}`,
     );

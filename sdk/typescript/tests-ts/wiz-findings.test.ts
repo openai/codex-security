@@ -2719,6 +2719,15 @@ test("concurrent legacy inventory resumers retain the acknowledged request after
     newer.evidence.description =
       "Newer Cloud evidence after the first resumer completed";
     f.reports.set("sast:occurrence-1", newer);
+    const otherPath = join(
+      directory,
+      `${hash("sha256", "other-deployment")}.pending.json`,
+    );
+    const projectionless = JSON.stringify({
+      accountId: saved.accountId,
+      requests: saved.requests,
+    });
+    await writeFile(otherPath, projectionless, { mode: 0o600 });
     releaseSecond.resolve();
     const trailing = await second;
     const result = await trailing.publish();
@@ -2728,6 +2737,7 @@ test("concurrent legacy inventory resumers retain the acknowledged request after
     expect(result.receipts).toEqual(saved.receipts);
     expect(result.verified).toBe(1);
     expect(f.reports.get("sast:occurrence-1")).toEqual(newer);
+    expect(await readFile(otherPath, "utf8")).toBe(projectionless);
   } finally {
     secondAtLock.resolve();
     releaseSecond.resolve();

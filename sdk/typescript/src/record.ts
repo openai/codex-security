@@ -9,9 +9,10 @@ export function asRecord(value: unknown): Record<string, unknown> | undefined {
 export function canonicalJson(
   value: unknown,
   compareKeys?: (left: string, right: string) => number,
+  preserveScalar?: (value: object) => boolean,
 ): string {
   return JSON.stringify(value, (_key, child: unknown) => {
-    if (isRecord(child)) {
+    if (isRecord(child) && !preserveScalar?.(child)) {
       return Object.fromEntries(
         Object.keys(child)
           .sort(compareKeys)

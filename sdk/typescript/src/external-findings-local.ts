@@ -12,6 +12,7 @@ import {
 } from "./external-findings.js";
 import {
   cloudRepositoryUrlKey,
+  requireSafeJsonInteger,
   repositoryUrlKey,
   validateExternalReport,
 } from "./external-import-contract.js";
@@ -912,14 +913,20 @@ export async function prepareLocalImport(
       repository,
       provider: options.provider,
       sourceKey: options.sourceKey,
-      findings: current.findings,
+      findings: current.findings.map(({ source_finding_id, evidence }) => ({
+        source_finding_id,
+        evidence,
+      })),
     },
     (_key, value: unknown) => {
       if (isNumberObject(value)) value = +value;
-      if (typeof value === "number" && !Number.isFinite(value))
-        throw new TypeError(
-          "Stored finding JSON cannot contain non-finite numbers.",
-        );
+      if (typeof value === "number") {
+        if (!Number.isFinite(value))
+          throw new TypeError(
+            "Stored finding JSON cannot contain non-finite numbers.",
+          );
+        requireSafeJsonInteger(value, "Stored finding JSON");
+      }
       return value;
     },
   );
