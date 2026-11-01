@@ -405,7 +405,7 @@ function snapshotEvidence<T>(input: T): T {
   }
 }
 
-/** @internal Hold shared getter-backed numbers until every selected row has
+/** Hold shared getter-backed numbers until every selected row has
  * been read, then capture their graph once as the SDK does before publication. */
 export class EvidenceNumberBatch {
   readonly changed = new Set<object>();
