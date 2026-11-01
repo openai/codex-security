@@ -37,9 +37,10 @@ static analysis path, line, and module. The importer does not verify that the
 path exists in the checkout or infer a column or Git commit.
 
 Imported findings start unassessed. Replaying an upstream resolution does not
-verify a fix. Omitted findings remain stored. Pipeline Scan JSON, sandbox
-findings, SCA, DAST, policy pass/fail summaries, and the findings converter’s
-SARIF output use other formats.
+verify a fix. Omitted findings remain stored. `veracode static scan <package>`
+runs a new Pipeline Scan with different flaw IDs. Retrieve existing policy
+flaws with the Findings API export below. Sandbox, SCA, DAST, policy summaries,
+and converted SARIF also use other formats. [Veracode static scan](https://docs.veracode.com/r/veracode_static_scan)
 
 For SDK replay with the Veracode provider, keep each finding’s original
 `source_finding_id` and `evidence.source_data` so the SDK can verify its
