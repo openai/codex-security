@@ -165,10 +165,13 @@ test.each([7, 9])(
     let reads = 0;
     const shared = {
       score: Object.assign(new Number(7), { toJSON: () => wireScore }),
-      warning: Object.assign(new Error("scanner warning"), { code: "E_SCAN" }),
+      warning: Object.assign(new Error("scanner warning"), {
+        code: "E_SCAN",
+        context: { rule: "r1" },
+      }),
       bytes: Buffer.alloc(32 * 1024),
       get sample() {
-        return ++reads;
+        return { id: ++reads };
       },
     };
     const rows = ["refs/heads/main", "refs/heads/review"].map((ref) => {
@@ -185,15 +188,57 @@ test.each([7, 9])(
     );
     expect(retained[0]).toBe(retained[1]);
     const [first, second] = structuredClone(retained);
-    expect([first!.sample, second!.sample]).toEqual([5, 5]);
+    expect([first!.sample.id, second!.sample.id]).toEqual([5, 5]);
     expect(JSON.parse(JSON.stringify(retained[0]))).toMatchObject({
       score: 7,
-      warning: { code: "E_SCAN" },
+      warning: { code: "E_SCAN", context: { rule: "r1" } },
       bytes: { type: "Buffer" },
     });
     expect(JSON.stringify(shared.score)).toBe(String(wireScore));
   },
 );
+
+test("snapshots shared getter-backed numeric evidence once after reading all GitHub rows", () => {
+  let reads = 0;
+  class Metrics {
+    score = Object.assign(new Number(7), { toJSON: () => 9 });
+  }
+  const shared = {
+    metrics: new Metrics(),
+    get sample() {
+      return { id: ++reads };
+    },
+  };
+  const rows = ["refs/heads/main", "refs/heads/review"].map((ref) => {
+    const row = importedAlert(ref);
+    Object.assign(row.alert, { shared });
+    return row;
+  });
+  const result = normalizeGitHubCodeScanningAlerts(rows);
+  expect(result.excluded).toEqual([]);
+  const retained = result.findings.map(
+    ({ evidence }) =>
+      (evidence.source_data!["alert"] as { shared: typeof shared }).shared,
+  );
+  expect(retained[0]).toBe(retained[1]);
+  expect(retained.map((data) => data.sample.id)).toEqual([5, 5]);
+  expect(JSON.stringify(retained[0]!.metrics)).toBe('{"score":7}');
+});
+
+test("applies the Cloud byte limit to numbers returned by a vendor serializer", () => {
+  const row = importedAlert();
+  const score = Object.assign(new Number(1), { toJSON: () => 123456 });
+  const extension = { pad: "", formatted: { toJSON: () => ({ score }) } };
+  Object.assign(row.alert, { extension });
+  const read = () => normalizeGitHubCodeScanningAlerts([row]);
+  const evidence = read().findings[0]!.evidence;
+  extension.pad = "x".repeat(
+    256 * 1024 - Buffer.byteLength(JSON.stringify(evidence)),
+  );
+  expect(read().findings).toHaveLength(1);
+  extension.pad += "x";
+  expect(read().excluded[0]?.reason).toContain("256 KiB");
+});
 
 test("code-scanning mapping preserves full evidence and selected instance status without assessing it", () => {
   const imported = importedAlert("refs/heads/review");
@@ -249,8 +294,10 @@ test("SARIF levels do not fabricate security severity and malformed siblings rem
   delete noRating.alert.rule.security_severity_level;
   const badRepository = importedAlert("refs/heads/other");
   badRepository.repository = "example/wrong";
-  const result = normalizeGitHubCodeScanningAlerts([badRepository, noRating]);
-  expect(result.read).toBe(2);
+  const rows = [badRepository, noRating];
+  rows.length = 3;
+  const result = normalizeGitHubCodeScanningAlerts(rows);
+  expect(result.read).toBe(3);
   expect(result.findings).toHaveLength(1);
   expect(result.findings[0]!.evidence.severity).toBe("unknown");
   expect(result.excluded).toEqual([
@@ -259,6 +306,11 @@ test("SARIF levels do not fabricate security severity and malformed siblings rem
       source_finding_id: badRepository.url,
       reason:
         "GitHub alert URL does not match the selected repository and alert.",
+    },
+    {
+      position: 3,
+      source_finding_id: null,
+      reason: "GitHub finding must be an object.",
     },
   ]);
 });

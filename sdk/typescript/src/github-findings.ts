@@ -3,6 +3,7 @@ import { hash } from "node:crypto";
 import { GHSA_ID, githubRepositoryParts } from "./github-identifiers.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import {
+  EvidenceNumberBatch,
   retainNumberFields,
   validateExternalEvidence,
 } from "./external-import-contract.js";
@@ -54,7 +55,7 @@ function severity(value: unknown): string {
 function codeScanningFinding(
   record: Record<string, unknown>,
   target: ExternalImportTarget = "cloud",
-  captures?: Set<object>,
+  captures?: EvidenceNumberBatch,
 ): ExternalFinding {
   const repository = repositoryName(record["repository"]);
   const alert = asRecord(record["alert"]);
@@ -156,7 +157,7 @@ function codeScanningFinding(
 function advisoryFinding(
   record: Record<string, unknown>,
   target: ExternalImportTarget = "cloud",
-  captures?: Set<object>,
+  captures?: EvidenceNumberBatch,
 ): ExternalFinding {
   const repository = repositoryName(record["repository"]);
   const advisory = asRecord(record["advisory"]);
@@ -269,7 +270,7 @@ function advisoryFinding(
 function normalizeRecords(
   records: readonly unknown[],
   target: ExternalImportTarget = "cloud",
-  captures?: Set<object>,
+  captures?: EvidenceNumberBatch,
 ): ExternalFindings {
   const result: ExternalFindings = {
     read: records.length,
@@ -277,7 +278,7 @@ function normalizeRecords(
     excluded: [],
   };
   const identities = new Set<string>();
-  for (const [index, value] of records.entries()) {
+  const selected = Array.from(records, (value) => {
     const record = asRecord(value);
     try {
       if (!record) throw new Error("GitHub finding must be an object.");
@@ -290,23 +291,39 @@ function normalizeRecords(
         throw new Error(
           "Expected saved output from import github or import github-advisories; raw or incomplete API responses need an explicit mapping.",
         );
-      if (identities.has(finding.source_finding_id))
-        throw new CodexSecurityError(
-          `Duplicate source finding id ${JSON.stringify(finding.source_finding_id)}. Select each GitHub occurrence once.`,
-        );
-      identities.add(finding.source_finding_id);
-      result.findings.push(finding);
+      return finding;
     } catch (error) {
       if (error instanceof CodexSecurityError) throw error;
-      result.excluded.push({
-        position: index + 1,
-        source_finding_id: text(record?.["url"]),
-        reason: errorMessage(error),
-      });
+      return errorMessage(error);
     }
+  });
+  const completed = captures?.finish(target);
+  for (const [index, candidate] of selected.entries()) {
+    let reason: string;
+    if (typeof candidate === "string") reason = candidate;
+    else {
+      const captured = completed?.get(candidate.evidence);
+      if (typeof captured === "string") reason = captured;
+      else {
+        if (captured) candidate.evidence = captured;
+        const id = candidate.source_finding_id;
+        if (identities.has(id))
+          throw new CodexSecurityError(
+            `Duplicate source finding id ${JSON.stringify(id)}. Select each GitHub occurrence once.`,
+          );
+        identities.add(id);
+        result.findings.push(candidate);
+        continue;
+      }
+    }
+    result.excluded.push({
+      position: index + 1,
+      source_finding_id: text(asRecord(records[index])?.["url"]),
+      reason,
+    });
   }
-  if (captures?.size)
-    result.findings = retainNumberFields(result.findings, captures);
+  if (captures?.changed.size)
+    result.findings = retainNumberFields(result.findings, captures.changed);
   return result;
 }
 
@@ -315,7 +332,7 @@ export function normalizeGitHubCodeScanningAlerts(
   alerts: readonly ImportedGitHubCodeScanningAlert[],
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
-  return normalizeRecords(alerts, target, new Set());
+  return normalizeRecords(alerts, target, new EvidenceNumberBatch());
 }
 
 /** Map advisory disclosures without asserting an installed vulnerable dependency. */
@@ -323,7 +340,7 @@ export function normalizeGitHubAdvisories(
   advisories: readonly ImportedGitHubAdvisory[],
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
-  return normalizeRecords(advisories, target, new Set());
+  return normalizeRecords(advisories, target, new EvidenceNumberBatch());
 }
 
 /** Read unfiltered JSON/JSONL output saved by the read-only GitHub import commands. */

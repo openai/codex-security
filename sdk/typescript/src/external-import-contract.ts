@@ -1,4 +1,5 @@
 import { isIP } from "node:net";
+import { errorMessage } from "./errors.js";
 import { isBoxedPrimitive, isNumberObject } from "node:util/types";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import schema from "../schemas/external-findings.schema.json" with { type: "json" };
@@ -257,7 +258,7 @@ export function validateExternalReport(
 export function validateExternalEvidence(
   input: unknown,
   target: ExternalImportTarget = "cloud",
-  batch?: Set<object>,
+  batch?: EvidenceNumberBatch,
 ): ExternalFindingEvidence {
   const result = (
     target === "local" ? localEvidence : validateExternalEvidenceShape
@@ -394,6 +395,59 @@ function snapshotJsonEvidence<T>(input: T): T {
   ) as T;
 }
 
+function snapshotEvidence<T>(input: T): T {
+  try {
+    return structuredClone(input);
+  } catch (error) {
+    if (!(error instanceof DOMException) || error.name !== "DataCloneError")
+      throw error;
+    return snapshotJsonEvidence(input);
+  }
+}
+
+/** @internal Hold shared getter-backed numbers until every selected row has
+ * been read, then capture their graph once as the SDK does before publication. */
+export class EvidenceNumberBatch {
+  readonly changed = new Set<object>();
+  readonly deferred: ExternalFindingEvidence[] = [];
+
+  finish(
+    target: ExternalImportTarget,
+  ): Map<ExternalFindingEvidence, string | ExternalFindingEvidence> {
+    const captured = new Map<
+      ExternalFindingEvidence,
+      string | ExternalFindingEvidence
+    >();
+    const inputs = this.deferred;
+    if (!inputs.length) return captured;
+    let snapshots: ExternalFindingEvidence[] | undefined;
+    try {
+      snapshots = snapshotEvidence(inputs);
+    } catch {
+      // A row can fail JSON fallback. Still normalize the other selected rows.
+    }
+    for (const [index, input] of inputs.entries()) {
+      try {
+        const evidence = snapshots
+          ? snapshots[index]!
+          : snapshotEvidence(input);
+        checkedEvidenceJson(evidence, target, 0, false);
+        captured.set(input, evidence);
+      } catch (error) {
+        captured.set(input, errorMessage(error));
+      }
+    }
+    return captured;
+  }
+}
+
+function canCopyFields(value: object): boolean {
+  const prototype: unknown = Object.getPrototypeOf(value);
+  return (
+    Array.isArray(value) || prototype === null || prototype === Object.prototype
+  );
+}
+
 /** @internal Replace changed numeric fields together so common source objects and
  * their getters stay shared until the SDK snapshots the selected batch. */
 export function retainNumberFields<T>(input: T, changed: Set<object>): T {
@@ -407,13 +461,7 @@ export function retainNumberFields<T>(input: T, changed: Set<object>): T {
       captures.set(value, number);
       return number;
     }
-    const prototype: unknown = Object.getPrototypeOf(value);
-    if (
-      !Array.isArray(value) &&
-      prototype !== null &&
-      prototype !== Object.prototype
-    )
-      return value;
+    if (!canCopyFields(value)) return value;
     const properties = Object.getOwnPropertyDescriptors(value);
     let copy = false;
     for (const key of Object.keys(value)) {
@@ -430,7 +478,7 @@ export function retainNumberFields<T>(input: T, changed: Set<object>): T {
       if (descriptor.get) descriptor.get = descriptor.get.bind(value);
     const retained: object = Array.isArray(value)
       ? []
-      : Object.create(prototype as object | null);
+      : Object.create(Object.getPrototypeOf(value) as object | null);
     Object.defineProperties(retained, properties);
     captures.set(value, retained);
     return retained;
@@ -443,19 +491,28 @@ function checkedEvidenceJson<T>(
   target: ExternalImportTarget,
   additionalCloudBytes: number,
   captureNumbers = true,
-  batch?: Set<object>,
+  batch?: EvidenceNumberBatch,
 ): { retained: T; bytes: number } {
-  const changed = batch && new Set<object>();
-  let opaque = false;
+  // Only substitute fields the raw provider walk actually saw. A serializer
+  // can create a new object whose own numeric representation is the wire value.
+  const wireMatches = new Map<object, boolean>();
+  const numberOwners = new WeakSet<object>();
+  const indirectNumbers = new Set<object>();
+  let hasFunction = false;
   let numericByteAdjustment = 0;
   function wireValue(this: object, key: string, value: unknown) {
     const raw: unknown =
-      batch && Object.getOwnPropertyDescriptor(this, key)?.value;
+      batch &&
+      (target === "local" || numberOwners.has(this)) &&
+      Object.getOwnPropertyDescriptor(this, key)?.value;
     if (isNumberObject(value)) value = +value;
     if (isNumberObject(raw)) {
       const intrinsic = Number.prototype.valueOf.call(raw) as number;
-      requireJsonNumber(intrinsic, "Evidence");
-      if (value !== intrinsic) changed!.add(raw);
+      if (target === "cloud") requireJsonNumber(intrinsic, "Evidence");
+      wireMatches.set(
+        raw,
+        value === intrinsic && wireMatches.get(raw) !== false,
+      );
       value = intrinsic;
     }
     if (target === "cloud" && typeof value === "number") {
@@ -469,93 +526,87 @@ function checkedEvidenceJson<T>(
     }
     return value;
   }
-  function wireBytes(json: string): number {
-    if (target === "local") return 0;
-    const bytes =
-      Buffer.byteLength(json) + numericByteAdjustment + additionalCloudBytes;
-    if (bytes > 256 * 1024)
-      throw new Error("Evidence exceeds the Cloud limit of 256 KiB.");
-    return bytes;
-  }
-  // Preserve the native fast path and original circular-JSON diagnostics.
-  let failedPreflight: { reason: unknown } | undefined;
-  if (target === "local") {
+  let json: string | undefined;
+  let failed: { reason: unknown } | undefined;
+  function serialize() {
     try {
-      JSON.stringify(input, batch ? wireValue : undefined);
+      json = JSON.stringify(
+        input,
+        batch || target === "cloud" ? wireValue : undefined,
+      );
     } catch (reason) {
-      failedPreflight = { reason };
+      failed = { reason };
     }
   }
+  // Keep the provider's two reads in their original order. A saved SDK request
+  // can contain the value a shared getter returned immediately afterward.
+  if (target === "local") serialize();
   const ancestors: object[] = [];
   let customNumber = false;
-  const pending: [unknown, number][] = [[input, 0]];
+  const pending: [unknown, number, boolean][] = [[input, 0, false]];
   while (pending.length) {
-    const [value, depth] = pending.pop()!;
+    const [value, depth, indirect] = pending.pop()!;
     if (target === "cloud" && depth > 20)
       throw new Error("Evidence exceeds the Cloud JSON depth limit of 20.");
     if (value !== null && typeof value === "object") {
-      if (failedPreflight) {
+      if (failed) {
         ancestors.length = depth;
-        if (ancestors.includes(value)) throw failedPreflight.reason;
+        if (ancestors.includes(value)) throw failed.reason;
         ancestors[depth] = value;
       }
+
       if (isNumberObject(value)) {
         requireJsonNumber(Number.prototype.valueOf.call(value), "Evidence");
-        if (captureNumbers) customNumber ||= hasCustomNumberHooks(value);
+        if (captureNumbers && hasCustomNumberHooks(value)) {
+          customNumber = true;
+          if (batch && indirect) indirectNumbers.add(value);
+        }
       }
+      const ordinary = !batch || canCopyFields(value);
       for (const [key, child] of Object.entries(value)) {
+        if (batch && isNumberObject(child)) numberOwners.add(value);
         if (batch && typeof child === "function" && !isNumberObject(value))
-          opaque = true;
-        if (
+          hasFunction = true;
+        const getter =
           batch &&
-          child !== null &&
           typeof child === "object" &&
-          (Object.getOwnPropertyDescriptor(value, key)?.get ||
-            (!Array.isArray(value) &&
-              Object.getPrototypeOf(value) !== Object.prototype &&
-              Object.getPrototypeOf(value) !== null &&
-              !isNumberObject(value)))
-        )
-          opaque = true;
-        pending.push([child, depth + 1]);
+          child !== null &&
+          Object.getOwnPropertyDescriptor(value, key)?.get;
+        pending.push([child, depth + 1, indirect || !ordinary || !!getter]);
       }
     } else if (typeof value === "number") {
       requireJsonNumber(value, "Evidence");
     }
   }
+  if (target === "cloud") serialize();
   if (customNumber) {
-    let rawWire: string | undefined =
-      target === "local" && !failedPreflight ? "" : undefined;
-    if (target === "cloud") {
-      // Finish the provider read before capture, as a pending SDK request may
-      // already contain the next value returned by a vendor getter.
-      try {
-        rawWire = JSON.stringify(input, batch ? wireValue : undefined);
-      } catch {
-        /* the captured value is validated below */
-      }
+    if (!batch)
+      return checkedEvidenceJson(
+        snapshotEvidence(input),
+        target,
+        additionalCloudBytes,
+        false,
+      );
+    if (
+      failed ||
+      (hasFunction && [...wireMatches.values()].includes(false)) ||
+      [...indirectNumbers].some((number) => wireMatches.get(number) !== true)
+    ) {
+      batch.deferred.push(input as ExternalFindingEvidence);
+      return { retained: input, bytes: 0 };
     }
-    if (batch && !opaque && rawWire !== undefined) {
-      const bytes = wireBytes(rawWire);
-      for (const number of changed!) batch.add(number);
-      return { retained: input, bytes };
-    }
-    let snapshot: T;
-    try {
-      snapshot = structuredClone(input);
-    } catch (error) {
-      if (!(error instanceof DOMException) || error.name !== "DataCloneError")
-        throw error;
-      // An own function can supply JSON even when native SDK capture is unavailable.
-      snapshot = snapshotJsonEvidence(input);
-    }
-    return checkedEvidenceJson(snapshot, target, additionalCloudBytes, false);
   }
-  if (failedPreflight) throw failedPreflight.reason;
-  const retained = input;
-  if (target === "local") return { retained, bytes: 0 };
-  const bytes = wireBytes(JSON.stringify(retained, wireValue));
-  return { retained, bytes };
+  if (failed) throw failed.reason;
+  const bytes =
+    target === "cloud"
+      ? Buffer.byteLength(json!) + numericByteAdjustment + additionalCloudBytes
+      : 0;
+  if (bytes > 256 * 1024)
+    throw new Error("Evidence exceeds the Cloud limit of 256 KiB.");
+  if (batch && customNumber)
+    for (const [number, equal] of wireMatches)
+      if (!equal) batch.changed.add(number);
+  return { retained: input, bytes };
 }
 
 export function validateImportRequest(input: unknown): FindingImportRequest {
