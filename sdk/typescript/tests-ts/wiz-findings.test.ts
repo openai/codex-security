@@ -152,6 +152,40 @@ async function parse(payload: unknown) {
   return readVendorFindings(file);
 }
 
+test.each(["local", "cloud"] as const)(
+  "mixed Wiz reports preserve duplicate IDs found only in the historical projection (%s)",
+  async (target) => {
+    const row = { ...sast, repository: { id: repository.id } };
+    const { file } = await fixture({
+      data: {
+        vulnerabilityFindings: {
+          nodes: [
+            {
+              source_finding_id: "package",
+              evidence: { title: "Package", severity: "low" },
+            },
+          ],
+        },
+        sastFindings: { nodes: [row, row] },
+        versionControlResources: {
+          nodes: ["bad\0name", "good"].map((name) => ({
+            platform: "GITHUB",
+            repository: { ...repository, name, url: repositoryUrl },
+          })),
+        },
+      },
+    });
+    const current = await readVendorFindings(file, target);
+    expect(
+      current.findings.map((finding) => finding.source_finding_id),
+    ).toEqual(["package"]);
+    expect(current.excluded.map((finding) => finding.position)).toEqual([2, 3]);
+    await expect(
+      readVendorFindingsForPublication(file, target),
+    ).rejects.toThrow('Duplicate source finding id "sast:occurrence-1"');
+  },
+);
+
 test("SAST maps source range, CWE, scanner verdict, and repository inventory without changing raw evidence", async () => {
   const { file } = await fixture(envelope("sastFindings", [sast]), true);
   const parsed = await readVendorFindings(file);

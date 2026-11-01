@@ -510,12 +510,21 @@ export async function readVendorFindingsForPublication(
   const input = await readFindingInput(path);
   const normalized = new WeakSet<VendorFinding>();
   const current = normalizeFindings(input, target, normalized);
-  const legacy = normalizeFindings(
-    { ...input, repositories: input.legacyRepositories ?? input.repositories },
-    target,
-    normalized,
-    true,
+  // Only repository finding families use historical inventory and branch mapping.
+  const hasRepositoryFindings = input.records.some(
+    ({ kind }) => kind === "sast" || kind === "secret" || kind === "iac",
   );
+  const legacy = hasRepositoryFindings
+    ? normalizeFindings(
+        {
+          ...input,
+          repositories: input.legacyRepositories ?? input.repositories,
+        },
+        target,
+        normalized,
+        true,
+      )
+    : current;
   const identity = (parsed: VendorFindings) =>
     parsed.findings.map((finding) => {
       if (normalized.has(finding)) return finding;
@@ -537,11 +546,12 @@ export async function readVendorFindingsForPublication(
         },
       };
     });
+  const currentIdentity = identity(current);
   return {
     current,
     legacy,
-    currentIdentity: identity(current),
-    legacyIdentity: identity(legacy),
+    currentIdentity,
+    legacyIdentity: legacy === current ? currentIdentity : identity(legacy),
     sourceRepositories: current.findings.flatMap(({ evidence }) => {
       const repository = evidence.details?.repository;
       const inventory = input.repositories.get(repository?.id ?? "");
