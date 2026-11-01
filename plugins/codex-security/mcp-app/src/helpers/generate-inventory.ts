@@ -129,24 +129,22 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
   if (regular(scope)) return [scope];
   const indexed = await directoryPaths(scope);
   const ripgrepIgnoreNames = [".ignore", ".rgignore"];
-  const ignoreBoundary =
-    indexed === undefined
-      ? repo
-      : ([...ancestors(scope)].find((path) => exists(append(path, ".git"))) ??
-        repo);
-  let usesRipgrepIgnoreRules = [...ancestors(scope)].some((path) => {
+  const isIgnoreFile = (path: string) => {
     try {
-      inside(ignoreBoundary, path);
-    } catch {
-      return false;
+      return stat(path).isFile();
+    } catch (error) {
+      if (isMissingPathError(error)) return false;
+      throw error;
     }
-    return ripgrepIgnoreNames.some((name) => regular(append(path, name)));
-  });
+  };
+  let usesRipgrepIgnoreRules = [...ancestors(scope)].some((path) =>
+    ripgrepIgnoreNames.some((name) => isIgnoreFile(append(path, name))),
+  );
   if (!usesRipgrepIgnoreRules && indexed !== undefined)
     for (const path of walk(scope, true, true)) {
       if (
         ripgrepIgnoreNames.some(
-          (name) => path.endsWith(sep + name) && regular(path),
+          (name) => path.endsWith(sep + name) && isIgnoreFile(path),
         )
       ) {
         usesRipgrepIgnoreRules = true;
@@ -174,15 +172,8 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
     );
   } catch {
     const ignoreNames = [".gitignore", ".ignore", ".rgignore"];
-    const isIgnoreFile = (path: string) => {
-      try {
-        return stat(path).isFile();
-      } catch (error) {
-        if (isMissingPathError(error)) return false;
-        throw error;
-      }
-    };
     let ignored =
+      usesRipgrepIgnoreRules ||
       [...ancestors(repo)].some((path) => exists(append(path, ".git"))) ||
       [...ancestors(scope)].some((path) => {
         try {

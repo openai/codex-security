@@ -809,6 +809,44 @@ for (const ignoreName of [".ignore", ".rgignore"])
   });
 
 for (const ignoreName of [".ignore", ".rgignore"]) {
+  test(`scope input honors ${ignoreName} above the Git worktree`, () => {
+    const f = fixture();
+    writeFileSync(join(f.root, ignoreName), "excluded/\n");
+    f.write("selected/excluded/hidden.py");
+    expect(f.rows("make-repo-scope-input", f.scopeArgs("selected"))).toEqual(
+      [],
+    );
+    f.write("selected/visible.py");
+    expect(
+      f
+        .rows("make-repo-scope-input", f.scopeArgs("selected"))
+        .map((row) => row.path),
+    ).toEqual(["selected/visible.py"]);
+  });
+
+  for (const nested of [false, true])
+    test(`scope input honors symlinked ${ignoreName} rules with nested=${nested}`, () => {
+      const f = fixture();
+      const rules = join(f.root, "ignore-rules");
+      writeFileSync(rules, "excluded/\n");
+      f.write(".gitignore", "**/.ignore\n**/.rgignore\n");
+      f.write("selected/excluded/hidden.py");
+      symlinkSync(
+        rules,
+        join(f.repo, nested ? "selected" : ".", ignoreName),
+        "file",
+      );
+      expect(f.rows("make-repo-scope-input", f.scopeArgs("selected"))).toEqual(
+        [],
+      );
+      f.write("selected/visible.py");
+      expect(
+        f
+          .rows("make-repo-scope-input", f.scopeArgs("selected"))
+          .map((row) => row.path),
+      ).toEqual(["selected/visible.py"]);
+    });
+
   test(`scope input discovers Git-excluded nested ${ignoreName} rules`, () => {
     const f = fixture();
     f.write(".gitignore", "**/.ignore\n**/.rgignore\n");
