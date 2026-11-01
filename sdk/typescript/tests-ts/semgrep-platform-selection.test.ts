@@ -23,10 +23,7 @@ const page = (id: string, branch = ref, repo = url) =>
   `{"findings":[{"id":${id},"ref":"${branch}","repository":{"url":"${repo}"},"rule":{"name":"example.rule"},"severity":"medium","location":{"file_path":"src/app.ts","line":2},"score":1.00000000000000001,"units":9007199254740993,"magnitude":1e100000}]}`;
 
 test("reimporting two selected IDs from a non-default branch leaves both SQLite records unchanged", async () => {
-  await using fixture = await localFindingsFixture({
-    remote: url,
-    isolatedGit: true,
-  });
+  await using fixture = await localFindingsFixture({ remote: url });
   execFileSync(
     "git",
     ["-C", fixture.repository, "switch", "--quiet", "--orphan", "topic"],

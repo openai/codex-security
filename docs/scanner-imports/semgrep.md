@@ -1,128 +1,112 @@
 # Import Semgrep Code findings
 
-Vendor finding import and readback require `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`.
-See the [opt-in instructions](../../sdk/typescript/docs/cli.md#import-vendor-findings-locally)
-and [how saved scanner reports map to imported evidence](schema-guide.md).
+Import a saved Semgrep Code CLI or CI report into the local workbench or Cloud.
+Native JSON preserves original severities and snippets when available. The reader
+also accepts self-contained Semgrep SARIF 2.1.0. Either format can be gzipped.
+To import selected existing findings from the Platform API, use the
+[SDK example](#import-selected-semgrep-platform-sast-findings-with-the-sdk).
 
-Prefer native **Semgrep Code/SAST CLI or CI JSON** for this reader. It preserves
-the scanner's original severity and source evidence. Self-contained SARIF 2.1.0
-is a compatibility path. Both formats may be plain or gzip-compressed.
+## Quick start
 
-For existing Semgrep Platform SAST findings, the SDK can
-[import selected finding IDs](#import-selected-semgrep-platform-sast-findings-with-the-sdk)
-from Web API responses. The CLI file reader accepts the CLI/CI reports described below.
-
-To produce JSON locally, run the following from the source repository root with
-your selected SAST rules. This runs a new scan; it does not retrieve earlier
-findings from Semgrep AppSec Platform.
+From the scanned repository's root, set `report` to the saved report and
+`repo_url` to its credential-free HTTP(S) repository URL. Choose a stable source key for this
+organization, project and branch. Enable external imports for this shell.
 
 ```sh
-semgrep scan --config /path/to/sast-rules.yaml --json-output semgrep.json .
-codex-security publish findings semgrep.json --to local \
-  --provider semgrep --source-key ORGANIZATION/PROJECT/BRANCH \
-  --source-repository-url https://github.com/example/project \
-  --repository . --dry-run --format json
+export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
+report=../reports/semgrep.json
+repo_url=https://github.com/example/project
+source_key=example/project/main
 ```
 
-Existing CI jobs can add `--json-output semgrep.json` to their SAST scan and pass
-that artifact to the publisher. With authenticated `semgrep ci`, select `--code`;
-its output follows the job's policy and PR/baseline scope and may contain only new
-blocking findings. It is not a complete inventory of Platform findings.
-[CLI output and scope reference](https://docs.semgrep.dev/cli-reference).
-
-Review the findings, source repository and exclusions, then repeat the command
-without `--dry-run` and confirm the import, or add `--yes` after review. Local
-imports require no Cloud login and store unassessed evidence in the workbench
-SQLite database. Read it with `codex-security findings imported . --format json`.
-Repeated imports with the same source identity update the same records; omitted
-records remain stored. See the movement behavior under Evidence and identity.
-They do not create a completed scan or automatically assess or patch findings.
-
-For Cloud, use the same report and source selection with a Cloud destination:
+If you need a new report, run Semgrep in the repository root with your SAST
+rules. Use a private temporary directory outside the checkout for this run.
 
 ```sh
-codex-security publish findings semgrep.json --to cloud \
-  --provider semgrep --source-key ORGANIZATION/PROJECT/BRANCH \
-  --source-repository-url https://github.com/example/project \
-  --repository https://github.com/example/project --dry-run --format json
+report=
+report_dir=$(mktemp -d) &&
+  semgrep scan --config /path/to/sast-rules.yaml --json-output "$report_dir/semgrep.json" . &&
+  report="$report_dir/semgrep.json"
 ```
 
-Keep the same source key for one organization, project and branch across runs.
-`--source-repository-url` declares where the report came from; the importer checks
-it against configured local Git remotes or the Cloud destination. Cloud requires
-an authorized repository and support for the `semgrep` provider. Local SARIF
-imports also check every original `versionControlProvenance.repositoryUri` on
-accepted findings. Unknown Git hosts keep case-sensitive repository paths.
+After a successful scan, or with an existing report, preview the selected file locally.
 
-## Existing Platform findings
+```sh
+codex-security publish findings "$report" --to local --repository . \
+  --provider semgrep --source-repository-url "$repo_url" \
+  --source-key "$source_key" --dry-run --format json
+```
 
-Semgrep's official
-[Guardian Codex plugin](https://docs.semgrep.dev/semgrep-guardian/ide-setup/codex)
-can select and inspect existing findings. The separate local `semgrep mcp` server
-also exposes `semgrep_findings`. Its output lacks continuation metadata.
-[Official MCP implementation](https://github.com/semgrep/semgrep/blob/fe209763a4a2ccfcdf6434e6c332edc24a2f586e/cli/src/semgrep/mcp/server.py).
+## Import and verify
 
-The [Semgrep Web API](https://docs.semgrep.dev/semgrep-appsec-platform/semgrep-api)
-supports project lookups and paginated findings queries with a Web API token.
-Supply its original JSON responses to the
-[SDK selection adapter](#import-selected-semgrep-platform-sast-findings-with-the-sdk).
-The adapter requires native finding IDs and repository/ref evidence.
+Review the source and destination repositories, findings and exclusions. The
+declared source URL must match a comparable configured Git remote when one
+is available. Rerun the local preview command without `--dry-run`, confirm
+the import, then read back the unassessed records. Local import needs no Cloud account.
 
-## Evidence and identity
+```sh
+codex-security findings imported . --format json
+```
 
-JSON preserves original severity, rule, CWE IDs, source range, snippets when
-available and ignored state. SARIF retains its selected result and rule, including
-trace and fix evidence. Its Critical and High ratings both become diagnostic
-`error`, displayed here as High; prefer JSON when that distinction matters.
-Original evidence stays in `source_data`, and source state stays separate from a
-Codex assessment.
+To publish the same report, sign in to a Cloud account with access to the
+repository and a deployment that accepts the `semgrep` provider. Preview the
+destination, repeat without `--dry-run` and confirm. Check the result's
+`verified` count and any exclusions or failures.
+[Cloud publication](../../sdk/typescript/docs/cli.md#publish-findings-to-cloud)
 
-Cloud imports apply the service's evidence limits, including a maximum JSON
-depth of 20. A deeply nested taint trace can exceed that bound and be excluded
-with a reason in the Cloud preview. Local storage does not impose the Cloud
-size or depth limits. Neither path flattens or truncates accepted traces.
+```sh
+codex-security publish findings "$report" --to cloud --repository "$repo_url" \
+  --provider semgrep --source-repository-url "$repo_url" \
+  --source-key "$source_key" --dry-run --format json
+```
 
-Keep the supplied JSON `extra.fingerprint` or SARIF `matchBasedId/v1`
-fingerprint. If a later report supplies the same fingerprint after the code
-moves, importing it under the same repository and source key updates that record
-with the new range; the raw fingerprint stays in `source_data`.
+## Reference
 
-Community Edition may omit the fingerprint or emit `requires login`. The fallback
-identity uses the rule, literal path and range. Moving such a finding creates a
-second record, and the earlier record remains stored. The importer does not
-infer that they are the same finding, merge them or delete the earlier record.
-Read back both with `codex-security findings imported . --format json` before
-selecting evidence for assessment. A current checkout does not establish the
-report's revision or branch.
+### CI artifacts
 
-The adapter accepts SAST only. Select SAST rules or a Code-only CI scan, since
-SARIF may omit enough product metadata to distinguish Secrets. Identifiable
-Supply Chain and Secrets records are excluded. Reports with scan errors,
-unsuccessful SARIF invocations or scan-error notifications are rejected. The
-preview reports invalid findings and duplicate source identities before import.
+A saved native JSON report from a Code-only `semgrep ci` job is also accepted.
+The job's policy and baseline determine which matches the report contains.
+A job can exit 1 for blocking findings and still produce a valid report. Keep
+the CI job's product selection and exit status. From your workstation, set
+`report` to a private copy of the artifact and follow the local preview above.
+[Semgrep CLI reference](https://docs.semgrep.dev/cli-reference)
 
-SARIF supports direct artifact URIs and Semgrep's native `%SRCROOT%` marker without
-a base definition. Native paths retain literal percent characters; direct URIs
-are decoded once. Indexed artifacts and unresolved bases remain in original
-evidence without mapped repository locations. CE records with these references
-are excluded because they lack a usable identity. JSON scan-wide path inventories
-and timing tables are omitted from individual findings. SARIF artifact inventories
-are omitted when they are unrelated to the selected finding; required inventories
-retain their original entries and indexes. Empty external-property reference
-containers are accepted, while actual external file references are rejected.
+### Evidence and identity
 
-SDK callers pass `{ sourceRepositoryUrl }` to `normalizeSemgrepFindings`,
-`normalizeSemgrepSarif`, or `readSemgrepFindings`. When passing that normalized
-output directly to `prepareNormalizedLocalImport`, supply the original SARIF
-repository references in the third argument's `sourceRepositories`; the file
-importer forwards them automatically. For an independently known GitHub custom
-host, use `{ url, platform: "github" }` for its references. The Semgrep file reader
-accepts native reports, not normalized JSON/JSONL exports.
-See the [native output fields](https://docs.semgrep.dev/semgrep-appsec-platform/json-and-sarif).
+Semgrep JSON retains the result, rule, CWE IDs, source range, snippets and
+ignored state when supplied. SARIF retains the selected rule and result,
+including trace and fix evidence. Critical and High both map to SARIF `error`,
+which imports as High. Deeply nested traces can exceed Cloud limits and appear
+in `excluded`. Keep the original report for run-wide inventories and timing.
+[Semgrep output fields](https://docs.semgrep.dev/semgrep-appsec-platform/json-and-sarif)
+and [imported evidence](schema-guide.md)
+
+The reader identifies a match by JSON `extra.fingerprint` or SARIF
+`matchBasedId/v1` when supplied. Reimporting the same fingerprint under the
+same source key and repository updates its location. When Community Edition
+omits the fingerprint or returns `requires login`, the rule, literal path and
+range identify the match. Moving it creates another record. Omitted records
+remain stored.
+
+Use SAST-only rules. Identifiable Supply Chain and Secrets results are
+excluded, and SARIF may lack enough product metadata to identify all of them.
+Scan errors or unsuccessful SARIF invocations prevent import. SARIF supports
+direct artifact URIs and Semgrep's native `%SRCROOT%` paths. Indexed artifacts
+or unresolved bases stay in raw evidence and need a fingerprint for identity.
+External property files are unsupported.
+
+SDK callers pass `sourceRepositoryUrl` to `normalizeSemgrepFindings`,
+`normalizeSemgrepSarif` or `readSemgrepFindings`. The file import forwards
+SARIF repository provenance automatically. When calling `prepareNormalizedLocalImport`
+directly, pass the original repository references in its third argument's
+`sourceRepositories`. Use `{ url, platform: "github" }` for a verified custom
+GitHub host.
 
 ### Import selected Semgrep Platform SAST findings with the SDK
 
-Capture the project lookup and Findings API pages as original response text.
+Capture the project lookup and findings pages as original [Semgrep Web API](https://docs.semgrep.dev/semgrep-appsec-platform/semgrep-api) response text.
+[Guardian for Codex](https://docs.semgrep.dev/semgrep-guardian/ide-setup/codex) and
+[Semgrep MCP](https://github.com/semgrep/semgrep/blob/fe209763a4a2ccfcdf6434e6c332edc24a2f586e/cli/src/semgrep/mcp/server.py) return different records.
 Pass a fully qualified ref, such as `refs/heads/topic` or `refs/tags/topic`, exactly as it appears in the findings.
 Supply the HTTP(S) repository URL you independently associate with the target checkout.
 The project URL and any finding URL must match this spelling. An exact finding URL

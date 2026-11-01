@@ -1,5 +1,5 @@
 import { hash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, type FileHandle } from "node:fs/promises";
 import { posix } from "node:path";
 import { promisify } from "node:util";
 import { gunzip } from "node:zlib";
@@ -65,7 +65,7 @@ export function stableId(prefix: string, fields: unknown[]): string {
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
 const gunzipAsync = promisify(gunzip);
 
-async function readScannerBytes(path: string): Promise<Buffer> {
+async function readScannerBytes(path: string | FileHandle): Promise<Buffer> {
   const bytes = await readFile(path);
   return bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipAsync(bytes) : bytes;
 }
@@ -85,7 +85,9 @@ export function parseJsonOrJsonl(contents: string): unknown {
   }
 }
 
-export async function readScannerJson(path: string): Promise<unknown> {
+export async function readScannerJson(
+  path: string | FileHandle,
+): Promise<unknown> {
   const bytes = await readScannerBytes(path);
   let decoded: string;
   try {

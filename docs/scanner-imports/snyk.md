@@ -1,172 +1,126 @@
-# Snyk Open Source imports
+# Import Snyk Open Source findings
 
-Vendor finding import and readback require `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`.
-See the [opt-in instructions](../../sdk/typescript/docs/cli.md#import-vendor-findings-locally)
-and [how saved scanner reports map to imported evidence](schema-guide.md).
+Import Open Source dependency vulnerabilities from a saved `snyk test` JSON report,
+a `snyk-findings-export/v1` plugin bundle or self-contained Open Source SARIF.
+Native CLI JSON preserves individual dependency paths and remediation details.
 
-Use the [official Snyk Codex plugin](https://github.com/snyk/studio-recipes/tree/main/plugins/codex)
-to collect a fresh workspace scan. The existing
-[`publish findings` command](../../sdk/typescript/docs/cli.md#import-snyk-open-source-findings)
-accepts its `snyk-findings-export/v1` bundle with `--provider snyk` for local
-storage or Cloud publication. For CLI automation, prefer native JSON from
-`snyk test`; Open Source SARIF remains a compatibility input.
+## Quick start
 
-**Scope: Open Source SCA vulnerabilities only.** License findings, Snyk Code,
-Container, IaC, SBOM results and existing platform backlog ingestion are outside
-this adapter. License records in otherwise supported reports appear as explicit
-exclusions; they are not imported as vulnerabilities.
+From the repository root, set `report` to a saved native JSON report.
+Choose a stable source key for the repository, branch, scan target and format.
+For repeat imports, use the exact key from your previous run.
+Enable external imports and preview the local destination.
+
+```sh
+export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
+report=../reports/snyk-open-source.json
+source_key=github.com/example/project/main/root/native-sca
+```
+
+If you need a new report, use an authenticated Snyk CLI and the project's
+package tooling. For a project with `package.json`, run the following in the
+repository root. Use a private temporary directory outside the checkout for
+this run. Exit 1 means findings. Other nonzero exits stop acquisition.
+[Snyk CLI test](https://docs.snyk.io/developer-tools/snyk-cli/commands/test)
+
+```sh
+report_dir=$(mktemp -d) || exit "$?"
+report="$report_dir/snyk-open-source.json"
+snyk_status=0
+snyk test --file=package.json --json-file-output="$report" || snyk_status=$?
+if [ "$snyk_status" -gt 1 ]
+then
+  exit "$snyk_status"
+fi
+```
+
+Preview the selected report locally.
+
+```sh
+codex-security publish findings "$report" --to local --repository . \
+  --provider snyk --source-key "$source_key" --dry-run --format json
+```
+
+## Import and verify
+
+Review the scan coverage, destination, findings and exclusions. Confirm the
+checkout matches the scanned project, especially when the report has no Git URL.
+Repeat the local command without `--dry-run`, confirm, then read back the
+unassessed records. Local import needs no Cloud login.
+
+```sh
+codex-security findings imported . --format json
+```
+
+For Cloud, use a signed-in account with access to the connected repository.
+Preview the same file and source key, review the destination, then repeat
+without `--dry-run` and confirm. Check the result's `verified` count, failures
+and exclusions. [Cloud publication](../../sdk/typescript/docs/cli.md#publish-findings-to-cloud)
+
+```sh
+codex-security publish findings "$report" --to cloud \
+  --repository https://github.com/example/project --provider snyk \
+  --source-key "$source_key" --dry-run --format json
+```
+
+## Reference
+
+### Native CLI JSON
+
+Use ungrouped output. For several projects under one scan root, replace
+`--file=package.json` with `--all-projects --fail-fast` and handle exit codes
+as above. Without `--fail-fast`, Snyk can omit results for projects it could
+not scan. Project errors in the input stop the import. Keep independent scan
+roots in separate reports with separate keys. License records are excluded.
+[Snyk multi-project scan options](https://github.com/snyk/cli/blob/main/help/cli-commands/test.md#--fail-fast)
+
+A native occurrence is identified by package manager, manifest, advisory,
+package name and version, and dependency path. The reader retains the original
+vulnerability, project context and suggested fixes. Paths are target-relative.
+An exact Git revision or path from the repository root requires other evidence.
+[Native result fields](https://github.com/snyk/cli/blob/main/src/lib/snyk-test/legacy.ts)
+
+### Snyk plugin export
+
+Install the Snyk plugin in Codex and sign in to Snyk. From the repository's
+Git root, ask Codex to use `snyk-findings-export` to run an SCA-only scan and
+write its export to a file outside the checkout.
 
 ```sh
 codex plugin marketplace add snyk/studio-recipes
 codex plugin add snyk@snyk-studio-recipes
 ```
 
-Ask Codex: “Use snyk-findings-export to export SCA findings from this repository’s Git root to
-snyk-findings.json. Run SCA only.” The plugin uses the local Snyk MCP server and
-needs Snyk authentication and the package tooling required by the project. Check
-its scan coverage and limitations before importing. Preview local storage with a
-repository path; no Cloud login is required:
-
-```sh
-codex-security publish findings snyk-findings.json --to local \
-  --provider snyk --repository ./project \
-  --source-key github.com/example/project/main/root/plugin-sca --dry-run
-```
-
-Or preview publication to a connected Cloud repository:
-
-```sh
-codex-security publish findings snyk-findings.json --to cloud \
-  --provider snyk --repository https://github.com/example/project \
-  --source-key github.com/example/project/main/root/plugin-sca --dry-run
-```
-
-Remove `--dry-run` from the selected command to review and confirm the import.
-The existing `--yes` option allows an already approved, noninteractive import.
-Read local records with `codex-security findings imported ./project --format json`.
-See the common [local import flow](../../sdk/typescript/docs/cli.md#import-vendor-findings-locally)
-or [Cloud publication flow](../../sdk/typescript/docs/cli.md#import-wiz-findings)
-for destination requirements, confirmation and result handling. The publisher
-imports the saved evidence; it does not start another Snyk scan or assessment.
-
-This adapter imports Open Source SCA vulnerabilities. Other products, licenses
-and SBOM results in a mixed plugin bundle appear as exclusions. It preserves the
-complete selected finding, native MCP record, collection context, availability
-states and coverage limitations. Ignored status remains source evidence; it does
-not mark the finding fixed or assessed locally or in Cloud. A dirty workspace retains its
-revision in the original evidence without claiming it as the exact scanned commit.
-
-The MCP output is a projection: its SCA mapper shortens descriptions and can omit
-alternate dependency paths. The plugin cannot recover data its MCP server did
-not return. See the [official SCA mapper](https://github.com/snyk/studio-mcp/blob/main/internal/oss/map.go).
-The bundle's composite occurrence identity includes package version and dependency
-path. Keep the same source key for each repository, branch and scan target across
-exports. A change to the composite identity produces a new source ID; changing
-only the evidence preserves that ID. Plugin v1 paths are relative to the scan
-target and do not carry its Git-root offset. They remain in original evidence
-without being projected as repository locations or package manifest paths.
-
-### How to read import counts
-
-For the same repository and source key, `created` means a new source identity.
-For an existing identity, `updated` means the whole evidence snapshot changed;
-`unchanged` means it did not. These counts describe imported Snyk evidence, not
-new vulnerabilities, fixes, or Codex assessments.
-
-Each plugin finding retains its collection context. If a scan's `issueCount`
-falls from three to two, both remaining findings can get a new version even if
-neither occurrence changed. Their source IDs stay the same, and omitting the
-third finding does not close it. Native CLI JSON likewise retains the project's
-[`uniqueCount`](https://github.com/snyk/cli/blob/8b2d0a695c6b1b31f681e32039db958fba6f0c2f/src/lib/snyk-test/run-test.ts#L555)
-when supplied. It counts distinct vulnerabilities, not dependency-path
-occurrences: two paths to the same advisory contribute one to the count.
-Keep the original evidence; do not edit or strip scan metadata to suppress updates.
-
-### Native CLI JSON
-
-For automation, use the [Snyk CLI](https://docs.snyk.io/developer-tools/snyk-cli/commands/test)
-with `--json-file-output`. This preserves native descriptions, dependency paths,
-identifiers and remediation evidence before the MCP or SARIF projections. For
-example, run from the selected repository root:
-
-```sh
-snyk_status=0
-snyk test --file=package.json --json-file-output=snyk-open-source.json || snyk_status=$?
-if [ "$snyk_status" -gt 1 ]; then
-  exit "$snyk_status"
-fi
-codex-security publish findings snyk-open-source.json --to cloud \
-  --provider snyk --repository https://github.com/example/project \
-  --source-key github.com/example/project/main/root/native-sca --dry-run
-```
-
-Snyk exits 1 when it finds vulnerabilities. Other failures must stop acquisition;
-do not publish an older report after a failed scan. `snyk test --json` emits the
-same result to stdout. A single project object and the array produced by
-`--all-projects` under one scan root are supported. For multiple projects, replace
-`--file=package.json` with `--all-projects --fail-fast` and keep the exit-code
-handling above. Snyk's [`--fail-fast` option](https://github.com/snyk/cli/blob/main/help/cli-commands/test.md#--fail-fast)
-stops the scan when a project fails. Without it, Snyk continues and omits
-vulnerability results for projects it could not scan. Keep independent scan roots
-in separate reports and source keys; identical manifest and dependency paths from
-different roots otherwise have ambiguous identities. A project error in the
-supplied JSON stops the import, including an error mixed with successful results.
-A successful empty scan has zero findings; a license-only report instead lists
-its records as exclusions. Use the default ungrouped JSON output;
-`--group-issues` combines package and dependency-path fields and is not supported.
-
-The mapper follows the CLI's [native result types and dependency-path producer](https://github.com/snyk/cli/blob/main/src/lib/snyk-test/legacy.ts).
-It preserves the complete selected vulnerability and the surrounding project
-context. Identity uses the package manager, literal display manifest (falling back
-to the target file), advisory, package name/version and dependency path. Different
-occurrences remain separate. A duplicate identity is excluded rather than merged.
-Native JSON does not establish a Git-root offset, repository URL or exact scanned
-revision: paths and scan context stay in original evidence, without being claimed
-as repository locations or manifest paths. Suggested upgrades and fixed versions
-remain source advice, not verified patches.
-
-To store this JSON locally, use the same file, provider and source key with
-`--to local --repository .` from the repository root. No Cloud login is required.
+Use the saved bundle as `report` and a source key ending in `plugin-sca`.
+Check its coverage and limitations. The bundle retains collection context,
+ignored status and each selected MCP record. The MCP mapper can shorten
+descriptions and omit alternate dependency paths. Its paths are relative to
+the scan target. A dirty workspace does not establish an exact scanned commit.
+[Official Snyk plugin](https://github.com/snyk/studio-recipes/tree/main/plugins/codex)
+and [SCA mapper](https://github.com/snyk/studio-mcp/blob/main/internal/oss/map.go)
 
 ### SARIF compatibility
 
-Existing Open Source SARIF exports are still accepted. Generate one with
-`snyk test --file=package.json --sarif-file-output=snyk-open-source.sarif` and
-handle the exit code as above. For multiple projects, use `--all-projects --fail-fast`
-with the same exit-code handling. Import with `--provider snyk` and a stable source
-key ending in `sarif-sca`. The mapper follows the
-[Open Source SARIF formatter](https://github.com/snyk/cli/blob/main/src/lib/formatters/open-source-sarif-output.ts).
-It retains the selected rule, result and report context. Unrelated artifact
-inventories are omitted when direct manifest locations do not depend on them;
-indexed context and matching artifact metadata are retained. Empty
-external-reference containers are accepted; reports with actual external property
-references remain unsupported. SARIF groups an advisory's occurrences and exposes
-one package coordinate, so native JSON is preferable for preserving individual
-dependency paths and remediation fields. Manifest paths are literal target-relative
-paths, including percent characters, without a Git-root offset. They stay in
-original evidence with synthetic line numbers instead of being projected as
-repository locations or package manifest paths. Snyk
-Code, Container, IaC, external SARIF property files and indexed or base-relative
-manifest locations are unsupported.
+For Open Source SARIF, use `--sarif-file-output` instead of `--json-file-output`
+and handle exit codes as above. Use a source key ending in `sarif-sca`.
+SARIF groups an advisory's occurrences and exposes one package coordinate.
+The reader retains the rule, result and report context. It accepts direct
+manifest paths and self-contained reports. Indexed or base-relative manifest
+locations and external property files are unsupported.
+[Snyk Open Source SARIF formatter](https://github.com/snyk/cli/blob/main/src/lib/formatters/open-source-sarif-output.ts)
 
 ### Identities and provenance
 
-All three formats support either destination, but their source IDs differ. Use
-one acquisition format consistently for a repository, branch and scan target,
-with a stable source key. Use a separate key if switching formats; the importer
-does not guess equivalence between plugin occurrences, native JSON occurrences
-and SARIF advisory groups. Switching does not remove earlier imported records.
+Use a separate source key for each acquisition format because each produces
+different source IDs. For a given repository and source key, a new ID creates a
+record. A changed evidence snapshot updates its version. For example, changing
+a plugin scan's `issueCount` can update records whose underlying occurrence
+stayed the same. Identical evidence is counted as `unchanged`. Omitting a record
+from a later report leaves it stored. The native CLI's `uniqueCount` counts
+distinct vulnerabilities across dependency paths. [Imported evidence and identity](schema-guide.md)
+and [Snyk count definition](https://github.com/snyk/cli/blob/8b2d0a695c6b1b31f681e32039db958fba6f0c2f/src/lib/snyk-test/run-test.ts#L555)
 
-Unsafe or absolute paths remain in original evidence. Known source repository
-claims must match the selected Cloud repository or, for local imports when Git
-remotes are configured, one of those remotes. For Cloud publication, standard SSH
-remotes on the selected connected GitHub or GitHub Enterprise host match its HTTPS
-repository when using the default SSH port or port 22. The public
-`ssh://git@ssh.github.com:443/owner/repository.git` endpoint also matches
-`github.com`. Other hosts, nondefault SSH ports and explicit HTTPS ports remain
-distinct; the importer does not infer an Enterprise host from the artifact alone.
-Unknown repository context requires the user to select the correct destination.
-Gzip and UTF-8 BOM input are supported. Records exceeding the destination's
-field or total-size limits appear as exclusions in the preview, without
-truncation. Inspect preview exclusions before importing. Synthetic tests do
-not establish live tenant, plugin-runtime or deployed Cloud compatibility.
+Known source Git URLs must match a comparable configured Git remote when one
+is available locally, or the selected Cloud repository. Use the preview's exclusions to identify skipped
+records, including unsupported products and licenses. Snyk Code, Container,
+IaC, SBOM results and hosted backlog responses are outside this file import.

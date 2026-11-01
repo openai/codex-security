@@ -13,6 +13,7 @@ import sys
 import tempfile
 import uuid
 from contextlib import nullcontext
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -118,12 +119,27 @@ def source_plugin_version() -> str:
     return version
 
 
-def write_checkpoint(checkpoint_dir: Path, payload: Any) -> Path:
+def write_checkpoint(checkpoint_dir: Path, payload: Any, *, mtime_ns: int | None = None) -> Path:
     encoded = json.dumps(payload).encode()
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = checkpoint_dir / f"{hashlib.sha256(encoded).hexdigest()}.json"
     checkpoint_path.write_bytes(encoded)
+    if mtime_ns is not None:
+        os.utime(checkpoint_path, ns=(mtime_ns, mtime_ns))
     return checkpoint_path
+
+
+def select_checkpoint(output: Path, checkpoint: Path, *, mtime_ns: int | None = None) -> Path:
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    if mtime_ns is not None:
+        os.utime(head, ns=(mtime_ns, mtime_ns))
+    return head
+
+
+def write_result_draft(path: Path, draft: dict, *, mtime_ns: int) -> None:
+    path.write_text(json.dumps(draft))
+    os.utime(path, ns=(mtime_ns, mtime_ns))
 
 
 def sort_checkpoint_entries(monkeypatch, *, key=None, reverse=False):
@@ -500,80 +516,83 @@ def write_remediation_patch(patch_path: Path, **text_options: Any) -> None:
     )
 
 
-def request_remediation(
-    state_dir: Path,
-    occurrence_id: str,
-    request_id: str,
-    action_token: str,
-    *,
-    check: bool = True,
-) -> dict[str, object]:
-    return run_workbench(
-        state_dir,
-        "request-finding-remediation",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        action_token,
-        check=check,
-    )
+@dataclass(frozen=True)
+class RemediationRequest:
+    state_dir: Path
+    occurrence_id: str
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
+    def _run(self, command: str, *args: str, check: bool = True) -> dict[str, object]:
+        return run_workbench(
+            self.state_dir,
+            command,
+            "--occurrence-id",
+            self.occurrence_id,
+            "--request-id",
+            self.id,
+            *args,
+            check=check,
+        )
 
-def set_remediation(
-    state_dir: Path,
-    occurrence_id: str,
-    request_id: str,
-    action_token: str,
-    expected_version: str,
-    state: str,
-    *extra: str,
-    check: bool = True,
-) -> dict[str, object]:
-    return run_workbench(
-        state_dir,
-        "set-finding-remediation",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        action_token,
-        "--expected-version",
-        expected_version,
-        "--state",
-        state,
-        *extra,
-        check=check,
-    )
+    def start(self, token: str, *, check: bool = True) -> dict[str, object]:
+        return self._run("request-finding-remediation", "--action-token", token, check=check)
 
+    def update(
+        self, token: str, version: str, state: str, *args: str, check: bool = True
+    ) -> dict[str, object]:
+        return self._run(
+            "set-finding-remediation",
+            "--action-token",
+            token,
+            "--expected-version",
+            version,
+            "--state",
+            state,
+            *args,
+            check=check,
+        )
 
-def request_remediation_action(
-    state_dir: Path,
-    occurrence_id: str,
-    request_id: str,
-    expected_version: str,
-    action: str,
-    action_token: str,
-    *,
-    check: bool = True,
-) -> dict[str, object]:
-    return run_workbench(
-        state_dir,
-        "request-finding-remediation-action",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--expected-version",
-        expected_version,
-        "--action",
-        action,
-        "--action-token",
-        action_token,
-        check=check,
-    )
+    def generate(
+        self, token: str, patch: Path, *args: str, check: bool = True
+    ) -> dict[str, object]:
+        digest = hashlib.sha256(patch.read_bytes()).hexdigest()
+        return self.update(
+            token,
+            "1",
+            "generated",
+            "--patch-path",
+            patch.name,
+            "--patch-digest",
+            f"sha256:{digest}",
+            *args,
+            check=check,
+        )
+
+    def request_action(
+        self, version: str, action: str, token: str, *, check: bool = True
+    ) -> dict[str, object]:
+        return self._run(
+            "request-finding-remediation-action",
+            "--expected-version",
+            version,
+            "--action",
+            action,
+            "--action-token",
+            token,
+            check=check,
+        )
+
+    def claim_resend(self, token: str, *, check: bool = True) -> dict[str, object]:
+        return self._run("claim-finding-remediation-resend", "--action-token", token, check=check)
+
+    def cancel(self, token: str) -> dict[str, object]:
+        return self._run("cancel-finding-remediation-request", "--action-token", token)
+
+    def mark_delivered(self, token: str) -> dict[str, object]:
+        return self._run("mark-finding-remediation-delivered", "--action-token", token)
+
+    def release_claim(self, token: str) -> dict[str, object]:
+        return self._run("release-finding-remediation-claim", "--action-token", token)
 
 
 def save_workspace(
@@ -625,63 +644,6 @@ def update_progress(
     )
 
 
-def claim_remediation_resend(
-    state_dir: Path,
-    occurrence_id: str,
-    request_id: str,
-    action_token: str,
-    *,
-    check: bool = True,
-) -> dict[str, object]:
-    return run_workbench(
-        state_dir,
-        "claim-finding-remediation-resend",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        action_token,
-        check=check,
-    )
-
-
-def cancel_remediation_request(
-    state_dir: Path,
-    occurrence_id: str,
-    request_id: str,
-    action_token: str,
-) -> dict[str, object]:
-    return run_workbench(
-        state_dir,
-        "cancel-finding-remediation-request",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        action_token,
-    )
-
-
-def mark_remediation_delivered(
-    state_dir: Path,
-    occurrence_id: str,
-    request_id: str,
-    action_token: str,
-) -> dict[str, object]:
-    return run_workbench(
-        state_dir,
-        "mark-finding-remediation-delivered",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        action_token,
-    )
-
-
 def fail_deep_scan(state_dir, codex_home, scan_id, *, message="Worker stopped.", deep_status=None):
     return scan_command(
         state_dir,
@@ -696,28 +658,27 @@ def fail_deep_scan(state_dir, codex_home, scan_id, *, message="Worker stopped.",
 
 def start_delivered_scan(
     state_dir: Path,
+    workspace_id: str,
     *args: str,
     environment: dict[str, str] | None = None,
 ) -> dict[str, object]:
     """Prepare an unclaimed, delivered scan for tests outside handoff ownership."""
-    started = run_workbench(state_dir, "start-scan", *args, environment=environment)
-    scan = started["results"]
+    scan = start_scan_command(state_dir, workspace_id, *args, environment=environment)["results"]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute(
             "UPDATE scans SET handoff_status = 'delivered' WHERE id = ?", (scan["scanId"],)
         )
     scan["handoffStatus"] = "delivered"
-    return started
+    return scan
 
 
 def start_workspace_scan(state_dir: Path, workspace_id: str, scan_root: Path) -> tuple[str, Path]:
     started = start_delivered_scan(
         state_dir,
-        "--workspace-id",
         workspace_id,
         "--scan-root",
         str(scan_root),
-    )["results"]
+    )
     return str(started["scanId"]), Path(str(started["scanDir"]))
 
 
@@ -829,6 +790,14 @@ def mark_deep_coordinator_succeeded(state_dir: Path, scan_id: str, scan_dir: Pat
             (str(manifest), scan_id),
         )
     return manifest
+
+
+def read_draft_documents(scan_dir: Path) -> dict:
+    return {
+        "manifest": json.loads((scan_dir / "scan-manifest.json").read_text()),
+        "findings": json.loads((scan_dir / "findings.json").read_text()),
+        "coverage": json.loads((scan_dir / "coverage.json").read_text()),
+    }
 
 
 def write_completed_contract(

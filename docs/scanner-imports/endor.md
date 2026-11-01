@@ -1,85 +1,82 @@
 # Import Endor Labs findings
 
-Vendor finding import and readback require `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`.
-See the [opt-in instructions](../../sdk/typescript/docs/cli.md#import-vendor-findings-locally)
-and [how saved scanner reports map to imported evidence](schema-guide.md).
+Import findings from one Endor Labs project and scan context. Native Finding
+JSON preserves the scanned commit, severity, and dependency and location
+details reported by Endor.
 
-Use authenticated `endorctl` to export complete native Finding JSON through the
-[official CLI API](https://docs.endorlabs.com/developers-api/cli/commands/api).
-Scope the export to one project and context, omit `--field-mask`, and use
-`--list-all` to fetch every page. Replace the namespace and project UUID below
-to select the project's default-branch findings:
+## Quick start
 
-```sh
-endorctl api list --resource Finding --namespace "YOUR_NAMESPACE" \
-  --filter 'context.type==CONTEXT_TYPE_MAIN and spec.project_uuid=="PROJECT_UUID"' \
-  --list-all --output-type json > endor-findings.json
-
-codex-security publish findings endor-findings.json --to local \
-  --provider endor --repository ./project \
-  --source-key "YOUR_NAMESPACE/PROJECT_UUID/main" --dry-run
-```
-
-Use `--to local` with a local repository path to store unassessed source evidence
-without a Cloud login or model call. After reviewing the preview, remove
-`--dry-run` to confirm the import. Read the stored records with
-`codex-security findings imported ./project --format json`.
-
-To publish the same export to Cloud, select its connected repository instead:
+Authenticate `endorctl` for the namespace that owns the project. Confirm the
+project and context correspond to the checkout. The importer retains the
+project UUID but does not look up its repository. Run these commands from the
+checkout root, replacing `YOUR_NAMESPACE` and `PROJECT_UUID` in both commands.
 
 ```sh
-codex-security publish findings endor-findings.json --to cloud \
-  --provider endor --repository "CLOUD_REPOSITORY_ID" \
-  --source-key "YOUR_NAMESPACE/PROJECT_UUID/main" --dry-run
+out=$(mktemp -d) &&
+  endorctl api list --resource Finding --namespace "YOUR_NAMESPACE" \
+    --filter 'context.type==CONTEXT_TYPE_MAIN and spec.project_uuid=="PROJECT_UUID"' \
+    --list-all --output-type json > "$out/endor-findings.json"
 ```
 
-Confirm that the selected Endor project and context correspond to the destination
-repository. Native JSON retains the project UUID, but the importer does not look
-it up to verify that association. For another branch or scan context, change the
-Endor filter and use a distinct, stable source key. An unfinished paginated
-response is rejected by the importer. Remove `--dry-run` to review and confirm
-the upload.
+After the export succeeds, keep the file and preview it in the same shell.
 
-The official [Endor Labs Agent Kit for Codex](https://github.com/endorlabs/ai-plugins/tree/main/plugins/codex/endor-labs-agent-kit)
-can help with setup and interactive investigation. Its Findings Browser summaries,
-counts and field-masked results do not replace the complete Finding objects used
-here. `endorctl` reads the Endor API; the Codex Security importer reads the saved
-export. It does not establish a persistent API connection or write changes back
-to Endor.
+```sh
+export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
+codex-security publish findings "$out/endor-findings.json" \
+  --to local --repository . --provider endor \
+  --source-key "YOUR_NAMESPACE/PROJECT_UUID/main" --dry-run --format json
+```
 
-Native JSON is the preferred import format: it preserves Endor severity,
-dependency and advisory details, the scanned commit SHA, primary SAST/AI SAST
-locations, and the complete original Finding. The importer accepts a single
-Finding, an array, or a `ListFindingsResponse` containing `list.objects`. Mapping
-follows Endor's public [Finding model](https://github.com/endorlabs/endorlabs-sdk/blob/8a41756890c2dee3bb089fee881cae4f2adbde03/src/endorlabs/generated/models/finding_service.py).
+The filter selects default-branch findings. For another context, change both
+the filter and source key. Keep `--list-all` and omit `--field-mask` to export
+complete Finding objects.
 
-Existing self-contained `endorctl` SARIF 2.1.0 reports are accepted as a lossy
-compatibility format. The importer retains finding UUIDs and links but does not
-infer native Endor severity or scanned revisions from SARIF. Diagnostic levels
-and CVSS stay in the original evidence;
-displayed severity remains unknown. Direct repository paths and reported SAST or
-Secrets lines are mapped. Indexed or base-relative artifact references remain in
-the original evidence. Run artifact inventories that are unrelated to the selected
-finding are omitted from its evidence. Declared SARIF repository URLs must
-match the selected Cloud repository for a new upload. For local imports, those
-URLs must match a configured Git remote when the checkout has remotes.
+## Import and verify
 
-Both formats use the native finding UUID as identity within the selected
-repository and source key. Keep the source key stable across repeated imports.
-Importing the same UUID from SARIF after native JSON updates the same source
-record: it replaces the evidence snapshot rather than merging it. Severity can
-become unknown, and commit, package, advisory and other native detail absent from
-SARIF is no longer present in that snapshot. Importing native JSON again replaces
-it with the richer native evidence. Use native JSON consistently for ongoing
-imports.
+Check the destination, ready records, and exclusions. Rerun only the
+`publish findings` command without `--dry-run` to import that saved file.
+Local import needs no Cloud login or model call. Read back the stored evidence.
 
-Recommended upgrades, reachability, dismissals and other Endor assessments remain
-source claims. Local records remain unassessed and separate from completed scans;
-imports do not automatically investigate or patch them. Records omitted from a
-later local import remain stored. Saved Cloud requests retain their destination
-repository ID when resumed.
+```sh
+codex-security findings imported . --format json
+```
 
-The adapter can be tested with synthetic records and the public SARIF sample.
-Verifying acquisition requires an authenticated Endor namespace with findings.
-Verifying Cloud publication also requires a Cloud environment that supports
-finding imports.
+For Cloud, replace `--to local --repository .` with
+`--to cloud --repository CLOUD_REPOSITORY_ID` for the connected repository.
+Review the Cloud preview before confirming. If the repository is renamed, a
+saved submission can resume against the same Cloud repository ID.
+
+## Reference
+
+### Native Finding JSON
+
+The importer accepts a single Finding, an array, or a `ListFindingsResponse`
+containing `list.objects`. An unfinished paginated response is rejected. Native
+JSON retains the complete Finding and maps severity, dependency and advisory
+details, scanned commit SHA, and primary SAST or AI SAST locations when
+available. See the [Endor CLI API](https://docs.endorlabs.com/developers-api/cli/commands/api)
+and [Finding model](https://github.com/endorlabs/endorlabs-sdk/blob/8a41756890c2dee3bb089fee881cae4f2adbde03/src/endorlabs/generated/models/finding_service.py).
+
+The [Endor Labs Agent Kit for Codex](https://github.com/endorlabs/ai-plugins/tree/main/plugins/codex/endor-labs-agent-kit)
+can help with setup or investigation. Findings Browser summaries, counts, and
+field-masked results omit fields needed for import. Codex Security reads the
+saved export offline. It does not change findings in Endor.
+
+### SARIF and repeat imports
+
+Self-contained `endorctl` SARIF 2.1.0 reports preserve finding UUIDs, links,
+direct repository paths, and reported SAST or Secrets lines. Native severity
+and scanned revision are unavailable. Diagnostic levels, CVSS, and indexed or
+base-relative artifact references stay in the original evidence. Unrelated run
+artifact inventories are omitted. For a new Cloud submission, declared
+repository URLs must match the selected repository. For local imports, they must match a comparable
+configured Git remote when one is available.
+
+Both formats identify a record by finding UUID within the repository and source
+key. Reimporting replaces its evidence snapshot. Importing SARIF after native
+JSON can clear commit, package, and advisory details and make severity unknown.
+For ongoing imports use native JSON and the same source key. Local records
+omitted from later imports remain stored.
+
+Upgrades, reachability, and dismissals remain Endor’s claims. Imported findings
+start unassessed and are separate from completed scans.

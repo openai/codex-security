@@ -9,40 +9,22 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { sonarGitTestEnvironment } from "./support/sonar-import-fixtures.js";
 
 /** Real Git checkout and separate state, shared by normalized and vendor import tests. */
-type Checkout = {
-  remote?: string;
-  environment?: NodeJS.ProcessEnv;
-  isolatedGit?: boolean;
-};
-
-export async function localFindingsFixture(options: Checkout = {}) {
+export async function localFindingsFixture(options: { remote?: string } = {}) {
   const root = await mkdtemp(
     join(await realpath(tmpdir()), "codex-security-external-local-"),
   );
-  let environment = options.environment ?? process.env;
-  if (options.isolatedGit) {
-    const config = join(root, "global.gitconfig");
-    await writeFile(config, "");
-    environment = {
-      ...Object.fromEntries(
-        Object.entries(environment).filter(
-          ([name]) => !name.toUpperCase().startsWith("GIT_"),
-        ),
-      ),
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_CONFIG_GLOBAL: config,
-    };
-  }
   const repository = join(root, "repository");
+  const env = sonarGitTestEnvironment();
   await mkdir(repository);
-  execFileSync("git", ["init", "--quiet", repository], { env: environment });
+  execFileSync("git", ["init", "--quiet", repository], { env });
   if (options.remote !== undefined)
     execFileSync(
       "git",
       ["-C", repository, "remote", "add", "origin", options.remote],
-      { env: environment },
+      { env },
     );
   const stateDirectory = join(root, "state");
   const dispose = () => rm(root, { recursive: true, force: true });
@@ -52,7 +34,7 @@ export async function localFindingsFixture(options: Checkout = {}) {
     stateDirectory,
     environment: {
       ...Object.fromEntries(
-        Object.entries(environment).filter(
+        Object.entries(env).filter(
           ([name]) =>
             name.toUpperCase() !== "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
         ),
@@ -68,7 +50,7 @@ export async function localFindingsFixture(options: Checkout = {}) {
 export async function localReportFixture(
   filename: string,
   source: Omit<ExternalPublicationOptions, "repository">,
-  checkout: Checkout = {},
+  checkout: { remote?: string } = {},
 ) {
   const fixture = await localFindingsFixture(checkout);
   const file = join(fixture.root, filename);
