@@ -102,10 +102,11 @@ for the checkout. The native `project.url` and any selected
   equal to the decoded, namespace-qualified path in the supplied URL, such as
   `example/project`.
 
-[Enable external imports](README.md#preview-a-report) and run the SDK from
-the matching checkout. Replace the example values and file paths with your
-selection. Pass the finding IDs as positive decimal strings without leading
-zeros to preserve 64-bit IDs.
+[Enable external imports](README.md#preview-a-report). In a Node.js project
+you control outside the scanned checkout, install `@openai/codex-security`
+and save this script as `preview-semgrep.mjs`. Set the deployment, ref,
+repository URL, source key and finding IDs for your selection. Pass the IDs as
+positive decimal strings without leading zeros to preserve 64-bit IDs.
 
 ```js
 import { readFile } from "node:fs/promises";
@@ -114,15 +115,16 @@ import {
   prepareNormalizedLocalImport,
 } from "@openai/codex-security";
 
+const [checkout, projectFile, ...findingsFiles] = process.argv.slice(2);
 const sourceRepositoryUrl = "https://github.com/example/project";
 const selected = normalizeSelectedSemgrepPlatformFindings({
   deployment: "example",
   ref: "refs/heads/main",
   sourceRepositoryUrl,
-  projectResponse: await readFile("../reports/semgrep-project.json", "utf8"),
-  findingsResponses: [
-    await readFile("../reports/semgrep-findings-1.json", "utf8"),
-  ],
+  projectResponse: await readFile(projectFile, "utf8"),
+  findingsResponses: await Promise.all(
+    findingsFiles.map((file) => readFile(file, "utf8")),
+  ),
   findingIds: ["123"],
 });
 const prepared = await prepareNormalizedLocalImport(
@@ -130,16 +132,26 @@ const prepared = await prepareNormalizedLocalImport(
   {
     provider: "semgrep",
     sourceKey: "example/project/platform/main",
-    repository: ".",
+    repository: checkout,
   },
   { sourceRepositories: [{ url: sourceRepositoryUrl }] },
 );
-console.log(prepared.preview);
+console.log(JSON.stringify(prepared.preview, null, 2));
 ```
 
-Review the repository, findings and exclusions in the preview. To save the
-selection, call `await prepared.import()` and
-[read back the local records](README.md#save-or-publish-and-verify).
+Run the script from your SDK project. Pass the checkout, project response and
+each saved findings page as absolute paths.
+
+```sh
+node preview-semgrep.mjs /path/to/checkout /path/to/reports/semgrep-project.json \
+  /path/to/reports/semgrep-findings-1.json
+```
+
+Review the repository, findings and exclusions. To save the selection, append
+`await prepared.import()` to a copy of the script in your SDK project and run
+that copy with the same inputs.
+[Read back the local records](README.md#save-or-publish-and-verify) using the
+checkout path from the preview.
 Keep the same source key on replay. Each occurrence is identified by deployment,
 project ID, SAST product, full ref and native finding ID.
 

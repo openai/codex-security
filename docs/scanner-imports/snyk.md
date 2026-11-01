@@ -6,25 +6,34 @@ Native CLI JSON preserves individual dependency paths and remediation details.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report). From the scanned
-checkout root, preview a saved, ungrouped Open Source JSON report. Use a stable key
-for the repository, branch, scan target and format. If you need a report,
-[run the Snyk CLI](#native-cli-json).
-
-For an existing report, set its path in the same shell.
+[Enable external imports](README.md#preview-a-report). For a first local import,
+set the destination from the checkout root. Choose a key for the repository,
+branch, original scan target and format. If you ran Snyk in `services/api`,
+replace `root` in the example key with `services/api`.
 
 ```sh
-snyk_report=../reports/snyk-open-source.json
+snyk_repository=$(pwd -P)
+snyk_source_key=github.com/example/project/main/root/native-sca
 ```
 
-If you collected the report from a package subdirectory, return to the checkout
-root before previewing it with `--repository .`. Replace `root` in the source
-key below with the original scan target, such as `services/api`, so reports
-from different package directories keep separate records.
+For a repeat import, set `snyk_repository` and `snyk_source_key` to the
+previous local preview's exact `repository` and `source.source_key`. Keep the
+original destination even if it was a package subdirectory. Changing either
+value creates a separate set of records.
+
+Set `snyk_report` to the absolute path of your saved, ungrouped Open Source
+JSON report so it still resolves if you change directories.
 
 ```sh
-codex-security publish findings "$snyk_report" --to local --repository . \
-  --provider snyk --source-key github.com/example/project/main/root/native-sca \
+snyk_report=/path/to/reports/snyk-open-source.json
+```
+
+If you need a new report, [run the Snyk CLI](#native-cli-json) and keep the
+`snyk_report` it sets. Preview the selected report.
+
+```sh
+codex-security publish findings "$snyk_report" --to local --repository "$snyk_repository" \
+  --provider snyk --source-key "$snyk_source_key" \
   --dry-run --format json
 ```
 
