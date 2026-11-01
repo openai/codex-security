@@ -16,21 +16,9 @@ PHASE_PROGRESS_UNITS = (
 FINDING_SEVERITIES = ("critical", "high", "medium", "low", "informational")
 FINDING_STATUSES = ("open", "closed")
 FINDING_CLOSE_REASONS = ("already_fixed", "wont_fix", "false_positive")
-REMEDIATION_STATES = (
-    "idle",
-    "requested",
-    "generated",
-    "applied",
-    "verifying",
-    "verified",
-    "failed",
-    "superseded",
-)
 REMEDIATION_UPDATE_STATES = ("generated", "applied", "verifying", "verified", "failed")
-REMEDIATION_PENDING_ACTIONS = ("generate", "apply", "verify")
 EXPORT_FORMATS = ("csv", "json", "sarif")
 ARTIFACTS = {
-    "coverage": "coverage.json",
     "findings": "findings.json",
     "manifest": "scan-manifest.json",
     "markdownReport": "report.md",
@@ -68,11 +56,27 @@ GIT_REPOSITORY_ENVIRONMENT = (
     "GIT_WORK_TREE",
 )
 EMPTY_GIT_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+EMPTY_GIT_TREES = {
+    "sha1": EMPTY_GIT_TREE,
+    "sha256": "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321",
+}
 
 
-def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
+def optional_text(value: str | None, *, maximum: int | None = None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if maximum is not None and len(normalized) > maximum:
+        raise SystemExit(f"Text value must be no longer than {maximum} characters.")
+    return normalized or None
+
+
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("expected a positive integer")
+    return parsed
 
 
 if __name__ == "__main__":
-    main()
+    argparse.ArgumentParser(description=__doc__).parse_args()

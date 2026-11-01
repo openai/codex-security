@@ -1,10 +1,37 @@
 import {
   CodexSecurity,
+  importGitHubCodeScanningAlerts,
+  importGitHubAdvisories,
+  normalizeGitHubAdvisories,
+  normalizeGitHubCodeScanningAlerts,
+  prepareExternalPublication,
+  prepareLocalExternalImport,
+  prepareNormalizedLocalImport,
+  listLocalExternalFindings,
+  type NormalizedLocalImportOptions,
+  type StoredExternalFinding,
+  normalizeSnykFindingsExport,
+  prepareNormalizedExternalPublication,
+  type ExternalFindings,
+  type FindingImportRequest,
+  type ExternalPublicationOptions,
+  type NormalizedExternalPublicationOptions,
+  type ExternalPublicationResult,
   DiffTarget,
   classifySeverity,
   classifyScanSeverity,
   classifyScanDirectorySeverity,
   deduplicateScan,
+  deduplicateRecords,
+  runHostedScan,
+  type HostedScanInput,
+  type HostedScanOptions,
+  type HostedScanResult,
+  type ScanExecutor,
+  type DeduplicateRecordsInput,
+  type DeduplicateRecordsResult,
+  type DeduplicationReviewRequest,
+  type DeduplicationReviewRunner,
   estimateScanCost,
   loadProjectConfig,
   matchScanFindings,
@@ -13,6 +40,9 @@ import {
   publishScan,
   runComponentScans,
   resolveProjectConfig,
+  suggestOwners,
+  type OwnerFinding,
+  type OwnerSuggestion,
   type ComponentScanOptions,
   type DeduplicateScanResult,
   type CustomPublicationResult,
@@ -28,6 +58,7 @@ import {
   type ScanComparisonResult,
   type ScanOptions,
   type ScanProgress,
+  type ScanWorkerEvent,
   type ScanResult,
   type ScanSettings,
   type ValidationOptions,
@@ -36,7 +67,6 @@ import {
 import {
   OpenAiFindingEmbedder,
   SqliteFindingsStore,
-  startFindingsServer,
 } from "@openai/codex-security/server";
 
 export async function classify(
@@ -71,17 +101,15 @@ export async function classify(
   return classification;
 }
 
-export async function findingsServer(getApiKey: () => Promise<string>) {
-  return await startFindingsServer({
+export function findingsStorage(getApiKey: () => Promise<string>) {
+  return {
     store: new SqliteFindingsStore(),
     embeddings: new OpenAiFindingEmbedder(
       getApiKey,
       fetch,
       process.env["CODEX_SECURITY_EMBEDDINGS_URL"] || undefined,
     ),
-    host: "127.0.0.1",
-    port: 0,
-  });
+  };
 }
 
 export async function publishCustom(
@@ -112,6 +140,10 @@ const options: ScanOptions = {
   target: DiffTarget.refs({ base: "HEAD~1" }),
   onProgress(progress: ScanProgress) {
     progress.filesCompleted satisfies number;
+  },
+  onWorkerEvent(event: ScanWorkerEvent) {
+    event.kind satisfies "observed";
+    event.worker satisfies number;
   },
 };
 
@@ -206,14 +238,6 @@ export async function patch(
   return result;
 }
 
-const invalidPatchOptions: PatchOptions = {
-  repositoryPath: "/synthetic/repository",
-  finding: "Synthetic finding",
-  // @ts-expect-error Patch reasoning effort is restricted to Codex SDK values.
-  reasoningEffort: "extreme",
-};
-void invalidPatchOptions;
-
 // @ts-expect-error The dependency-injection constructor is internal.
 new CodexSecurity({}, undefined as never, undefined as never);
 
@@ -258,3 +282,158 @@ export async function scanComponents(repository: string, outputDir: string) {
 
 // @ts-expect-error The model client is an internal test dependency.
 planComponents("synthetic-repository", { codex: {} });
+
+export async function dedupeRecords(
+  input: DeduplicateRecordsInput,
+  execute: (
+    request: DeduplicationReviewRequest,
+    signal?: AbortSignal,
+  ) => Promise<unknown>,
+  signal: AbortSignal,
+): Promise<DeduplicateRecordsResult> {
+  const reviewRunner: DeduplicationReviewRunner = {
+    run(request, options) {
+      return execute(request, options?.signal);
+    },
+  };
+  return await deduplicateRecords(input, { reviewRunner, signal });
+}
+
+export async function externalPublication(
+  file: string,
+  input: ExternalFindings,
+  options: ExternalPublicationOptions,
+): Promise<ExternalPublicationResult> {
+  const fromFile = await prepareExternalPublication(file, options);
+  fromFile.preview.requests[0]?.source.provider satisfies
+    FindingImportRequest["source"]["provider"] | undefined;
+  const prepared = await prepareNormalizedExternalPublication(input, {
+    ...options,
+    provider: fromFile.preview.source.provider,
+  });
+  return prepared.publish();
+}
+
+export async function publishGitHubAlerts(): Promise<ExternalPublicationResult> {
+  const imported = await importGitHubCodeScanningAlerts({
+    repository: "example/project",
+  });
+  const prepared = await prepareNormalizedExternalPublication(
+    normalizeGitHubCodeScanningAlerts(imported),
+    {
+      provider: "github",
+      sourceKey: "github.com/example/project/code-scanning",
+      repository: "https://github.com/example/project",
+    },
+  );
+  return prepared.publish();
+}
+
+export async function publishGitHubAdvisories(): Promise<ExternalPublicationResult> {
+  const imported = await importGitHubAdvisories({
+    repository: "example/project",
+    source: "global",
+    advisoryIds: ["GHSA-2345-6789-cfgh"],
+  });
+  const prepared = await prepareNormalizedExternalPublication(
+    normalizeGitHubAdvisories(imported),
+    {
+      provider: "github",
+      sourceKey: "github.com/example/project/security-advisories",
+      repository: "https://github.com/example/project",
+    },
+  );
+  return prepared.publish();
+}
+
+export async function publishNormalizedVendorEvidence(
+  input: ExternalFindings,
+): Promise<ExternalPublicationResult> {
+  const options: NormalizedExternalPublicationOptions = {
+    provider: "endor",
+    sourceKey: "example-namespace/example-project/main",
+    repository: "https://github.com/example/project",
+  };
+  const prepared = await prepareNormalizedExternalPublication(input, options);
+  return prepared.publish();
+}
+
+export const ownerVariants: OwnerSuggestion["owner"][] = [
+  { name: "Alex Example", email: "alex@example.test" },
+  { kind: "person", provider: "github", handle: "example-user" },
+  { kind: "group", provider: "github", handle: "example/maintainers" },
+  { kind: "person", email: "alex@example.test" },
+  null,
+];
+
+export function ownerIdentifier(owner: OwnerSuggestion["owner"]) {
+  if (owner === null) return null;
+  return "handle" in owner ? owner.handle : owner.email;
+}
+
+export async function suggestFindingOwners(
+  repository: string,
+  findings: OwnerFinding[],
+) {
+  const report = await suggestOwners(repository, findings);
+  const schemaVersion: 2 = report.schemaVersion;
+  return {
+    schemaVersion,
+    identifiers: report.results.map(({ owner }) => ownerIdentifier(owner)),
+  };
+}
+
+export async function hostedScan(
+  input: HostedScanInput,
+  executor: ScanExecutor,
+  signal: AbortSignal,
+): Promise<HostedScanResult> {
+  const options: HostedScanOptions = {
+    executor,
+    ownerCodex: {
+      startThread(options) {
+        options.model satisfies string | undefined;
+        options.modelReasoningEffort satisfies string | undefined;
+        return {
+          async run(input, options) {
+            input satisfies string;
+            options.signal satisfies AbortSignal | undefined;
+            return { finalResponse: "{}" };
+          },
+        };
+      },
+    },
+    signal,
+    onEvent(event) {
+      event.type satisfies "progress" | "activity";
+    },
+  };
+  return await runHostedScan({ ...input, ownerSuggestions: true }, options);
+}
+
+const localOptions: ScanOptions = {
+  // @ts-expect-error Hosted execution uses the standalone runHostedScan API.
+  hosted: {},
+};
+void localOptions;
+
+export async function importLocalEvidence(
+  input: ExternalFindings,
+  options: NormalizedLocalImportOptions,
+): Promise<StoredExternalFinding[]> {
+  const prepared = await prepareNormalizedLocalImport(input, options);
+  await prepared.import();
+  return listLocalExternalFindings({ repository: options.repository });
+}
+
+export async function importLocalFile(
+  file: string,
+  options: ExternalPublicationOptions,
+): Promise<StoredExternalFinding[]> {
+  const prepared = await prepareLocalExternalImport(file, options);
+  return (await prepared.import()).findings;
+}
+
+export function snykPluginFindings(bundle: unknown): ExternalFindings {
+  return normalizeSnykFindingsExport(bundle);
+}

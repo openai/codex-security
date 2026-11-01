@@ -8,13 +8,17 @@ import { PLUGIN_NAME } from "./runtime.js";
 // Review this adapter when the bundled workflows change. Never silently run
 // the ordinary validation sequence with a custom-validation request.
 const SOURCES = {
-  "references/core-scan.md":
-    "77b082eb8613cf93427ff730e4ae5d85b0a0dca37c02a8af1ea69f679ac3d1d9",
-  "skills/security-scan/SKILL.md":
-    "5b8f5d7debeca14c6b37e8e7ba737671362b8eb4b7f49e693c99c6bd04bc8fa0",
-  "skills/security-diff-scan/SKILL.md":
-    "0a4c519ad713585876ea7eb0a8af4b59892c86746f4c69851db9ab347b7fad2f",
-} as const;
+  "references/core-scan.md": [
+    "7690b6c854de07ff15984f6d2c25ddfa1f6ae65f65876cadf2f904054b4f0679",
+  ],
+  "skills/security-scan/SKILL.md": [
+    "b6a69658d48fff6979d6690e95d2096da236bb7e51b96ebb4f92102a9863d66c",
+    "99cfcbbaa9d5b0450881ec752a116888b05b7fe21ea7af28fd22d088882dcd46",
+  ],
+  "skills/security-diff-scan/SKILL.md": [
+    "09232fd5d96cfed2a5bdccd176c09b7e9ca53ebd7ac136d283bec884fde94b0d",
+  ],
+};
 
 const DISABLED_TOOLS = [
   "start_codex_security_standard_scan",
@@ -26,14 +30,15 @@ const DISABLED_TOOLS = [
 ];
 
 const HANDOFF =
-  "Preserve every surviving source-backed candidate as a provisional finding, including its identity, source locations, evidence, counterevidence, and preliminary assessments. Assemble unsealed scan-manifest.json, findings.json, and coverage.json using <plugin_dir>/examples/completed-scan/ and <plugin_dir>/schemas/ as shape references. Set scan.scope.validationMode to custom_pending and put each finding's matching coverage surface IDs in extensions.customValidationSurfaceIds. Every reported coverage surface must have a candidate. Do not claim that custom validation has occurred. Verify the three files exist, then return control to the SDK without invoking validation or attack-path skills, running application code, sealing files, generating a report, or calling a scan completion tool or helper.";
+  "Preserve every surviving source-backed candidate as a provisional finding, including its identity, source locations, evidence, counterevidence, and preliminary assessments. Assemble unsealed scan-manifest.json and findings.json using <plugin_dir>/examples/completed-scan/ and <plugin_dir>/schemas/ as shape references. Put candidate dispositions and pending work in scan.reviewState. Set scan.scope.validationMode to custom_pending and put each finding's matching review-state surface IDs in extensions.customValidationSurfaceIds. Every reported review-state surface must have a candidate. When source discovery finishes and a bound semantic draft tool is available, submit an accepted final source-discovery draft with complete: true, preserving the provisional findings, reviewState, threat model, and custom_pending validation mode. This marks source discovery finished; it does not claim custom validation has occurred or seal the scan. Keep complete: false when requested source review remains unfinished. Verify both files exist, then return control to the SDK without invoking validation or attack-path skills, running application code, sealing files, generating a report, or calling a scan completion tool or helper.";
 
 async function source(pluginRoot: string, name: keyof typeof SOURCES) {
   const text = (await readFile(join(pluginRoot, name), "utf8")).replaceAll(
     "\r\n",
     "\n",
   );
-  if (createHash("sha256").update(text).digest("hex") !== SOURCES[name]) {
+  const digest = createHash("sha256").update(text).digest("hex");
+  if (!SOURCES[name].includes(digest)) {
     throw new IncompleteScanError(
       `Custom validation is incompatible with the installed plugin workflow (${name}). Update the SDK and plugin together. Default validation was not started.`,
     );
@@ -63,6 +68,10 @@ export async function customDiscoveryPrompt(
       .replace(
         /^Keep discovery, validation, and attack-path reasoning.+$/m,
         "Keep source-evidence and counterevidence checks within discovery. Do not run an independent final validation pass or invoke separate phase skills.",
+      )
+      .replace(
+        "reconcile their evidence and submit the result;",
+        "reconcile their evidence and preserve provisional candidates through the SDK-owned discovery handoff;",
       );
     workflow = [
       skill.slice(
@@ -72,7 +81,7 @@ export async function customDiscoveryPrompt(
       "## Discovery workflow",
       `1. ${step(skill, 1)}`,
       "2. Perform the embedded core discovery workflow below. Do not reload the ordinary core-scan.md or top-level security-scan skill.",
-      `3. ${step(skill, 3).split("For an SDK-owned or prompt-only headless scan, ")[1]}`,
+      `3. ${step(skill, 3).slice(step(skill, 3).indexOf("For an SDK-owned scan with a bound semantic draft tool,"))}`,
       `4. ${HANDOFF}`,
       "## Embedded core discovery workflow",
       discovery,
@@ -84,7 +93,7 @@ export async function customDiscoveryPrompt(
     );
     workflow = [
       skill.slice(skill.indexOf("## Setup"), skill.indexOf("\n4. ")),
-      `4. ${HANDOFF} Use diff for coverage.mode and coverage.inventoryStrategy.`,
+      `4. ${HANDOFF} Use diff for scan.mode.`,
     ].join("\n\n");
   } else {
     throw new IncompleteScanError(

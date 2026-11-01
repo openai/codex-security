@@ -1,3 +1,4 @@
+import type { inspectPublicationStore } from "../../src/publication-store.js";
 import { expect } from "bun:test";
 import type { JsonObject } from "../../src/config.js";
 import type { runWorkbench } from "../../src/runtime.js";
@@ -51,43 +52,47 @@ export function scriptedWorkbench(
 export function checkpointWorkbench(workflowId: string, source: JsonObject) {
   const reviews = new Map<string, unknown>();
   const saved: JsonObject[] = [];
-  const fixture: {
-    source: JsonObject;
-    saved: JsonObject[];
-    run: typeof runWorkbench;
-  } = {
-    source,
-    saved,
-    run: (async (_options, args, input) => {
-      const payload = request(args, input);
-      expect(payload["id"]).toBe(workflowId);
-      switch (payload["action"]) {
-        case "source":
-          expect(payload["repository"]).toBe(fixture.source["repository"]);
-          return { source: structuredClone(fixture.source) };
-        case "get-review":
-          expect(typeof payload["key"]).toBe("string");
-          return {
-            review: structuredClone(
-              reviews.get(payload["key"] as string) ?? null,
-            ),
-          } as JsonObject;
-        case "save-review":
-          expect(typeof payload["key"]).toBe("string");
-          expect(payload["binding"]).toBeObject();
-          expect(payload).toHaveProperty("result");
-          saved.push(structuredClone(payload));
-          reviews.set(
-            payload["key"] as string,
-            structuredClone(payload["result"]),
-          );
-          return {};
-        default:
-          throw new Error(
-            `Unexpected checkpoint request: ${JSON.stringify(payload)}`,
-          );
-      }
-    }) satisfies typeof runWorkbench,
+  const run: typeof runWorkbench = async (_options, args, input) => {
+    const payload = request(args, input);
+    expect(payload["id"]).toBe(workflowId);
+    switch (payload["action"]) {
+      case "source":
+        expect(payload["repository"]).toBe(fixture.source["repository"]);
+        return { source: structuredClone(fixture.source) };
+      case "get-review":
+        expect(typeof payload["key"]).toBe("string");
+        return {
+          review: structuredClone(
+            reviews.get(payload["key"] as string) ?? null,
+          ),
+        } as JsonObject;
+      case "save-review":
+        expect(typeof payload["key"]).toBe("string");
+        expect(payload["binding"]).toBeObject();
+        expect(payload).toHaveProperty("result");
+        saved.push(structuredClone(payload));
+        reviews.set(
+          payload["key"] as string,
+          structuredClone(payload["result"]),
+        );
+        return {};
+      default:
+        throw new Error(
+          `Unexpected checkpoint request: ${JSON.stringify(payload)}`,
+        );
+    }
   };
+  const fixture = { source, saved, run };
   return fixture;
+}
+
+export function cancelInspection(
+  controller: AbortController,
+  reason: Error,
+): typeof inspectPublicationStore {
+  return async (_publication, _environment, signal) => {
+    expect(signal).toBe(controller.signal);
+    controller.abort(reason);
+    throw signal!.reason;
+  };
 }

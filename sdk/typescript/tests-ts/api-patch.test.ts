@@ -1,4 +1,5 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { requestMetadata } from "./support/request-metadata.js";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   CodexOptions,
@@ -18,12 +19,10 @@ import {
 } from "../src/index.js";
 import { estimateScanCost } from "../src/cost.js";
 import type { JsonObject } from "../src/config.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
-import {
-  createApiTestFixtures,
-  preparedRuntime,
-} from "./support/api-events.js";
+import { preparedRuntime } from "./support/api-events.js";
 
 describe("CodexSecurity headless patching", () => {
   const { cleanup, temporaryDirectory } = createApiTestFixtures();
@@ -93,7 +92,7 @@ describe("CodexSecurity headless patching", () => {
     ]);
     await writeFile(join(markerRoot, "package.json"), "{}\n");
     const captured: {
-      codex?: CodexOptions;
+      codex?: CodexOptions & { nativeProfile?: string };
       thread?: ThreadOptions;
       turn?: TurnOptions;
       prompt?: string;
@@ -144,12 +143,17 @@ describe("CodexSecurity headless patching", () => {
       repositoryPath: repository,
       finding: "Candidate finding",
     };
+    const projectTrustKey =
+      process.platform === "win32"
+        ? repository.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
+        : repository;
     return {
       client,
       options,
       captured,
       workbench,
       codexHome,
+      projectTrustKey,
     };
   }
 
@@ -291,8 +295,6 @@ describe("CodexSecurity headless patching", () => {
         workingDirectory: options.repositoryPath,
         skipGitRepoCheck: true,
         approvalPolicy: "never",
-        sandboxMode: "workspace-write",
-        networkAccessEnabled: false,
         webSearchMode: "disabled",
         model: "gpt-5.6-sol",
         modelReasoningEffort: "high",
@@ -303,9 +305,14 @@ describe("CodexSecurity headless patching", () => {
           model: "gpt-5.6-terra",
           model_reasoning_effort: "medium",
           features: { plugins: false },
-          responses_api_metadata: { codex_security_surface: "sdk" },
+          default_permissions: "codex_security_scan",
         },
       });
+      expect(requestMetadata(captured.codex?.configOverrides)).toMatchObject({
+        codex_security_surface: "sdk",
+      });
+      expect(captured.thread).not.toHaveProperty("sandboxMode");
+      expect(captured.thread).not.toHaveProperty("networkAccessEnabled");
       expect(captured.codex?.env?.["OPENAI_API_KEY"]).toBeUndefined();
       expect(captured.codex?.env?.["CODEX_API_KEY"]).toBeUndefined();
       expect(captured.codex?.env?.["CODEX_SECURITY_REPOSITORY"]).toBe(
@@ -314,14 +321,99 @@ describe("CodexSecurity headless patching", () => {
     },
   );
 
-  test("keeps the patch workspace untrusted across native config layers", async () => {
-    const { client, options, captured } = await patchClient();
+  test("static verification scopes the patch assessment while preserving standard defaults and permissions", async () => {
+    const verificationReport =
+      "Source review shows bound query parameters preserve legitimate queries. Runtime checks were not performed.";
+    const { client, options, captured } = await patchClient(() =>
+      patchEvents({ ...verifiedResponse, verificationReport }),
+    );
     await using security = client;
     await security.patch(options);
-    expect(captured.codex?.configOverrides).toEqual([
-      "project_root_markers=[]",
-      `projects.${JSON.stringify(options.repositoryPath)}.trust_level="untrusted"`,
-    ]);
+    const defaultPrompt = captured.prompt;
+    const defaultThread = captured.thread;
+    await security.patch({ ...options, verificationMode: "standard" });
+    expect(captured.prompt).toBe(defaultPrompt);
+    const result = await security.patch({
+      ...options,
+      verificationMode: "static",
+    });
+    expect(captured.prompt).toContain("Verification mode: static");
+    expect(captured.prompt).toContain("Do not install dependencies");
+    expect(captured.prompt).not.toContain(
+      "without running the relevant checks",
+    );
+    expect(captured.prompt).not.toContain(
+      "only when the original issue no longer reproduces",
+    );
+    expect(captured.thread).toEqual(defaultThread);
+    expect(result).toMatchObject({ status: "verified", verificationReport });
+  });
+
+  test("inherits constructor settings after a per-call override and ignores observer failures", async () => {
+    const { client, options, captured } = await patchClient();
+    await using security = client;
+    const observerErrors: string[] = [];
+    const result = await security.patch({
+      ...options,
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high",
+      onActivity: () => {
+        throw new Error("synthetic observer failure");
+      },
+      onObserverError: (name) => {
+        observerErrors.push(name);
+      },
+    });
+    expect(result.status).toBe("verified");
+    expect(observerErrors).toContain("onActivity");
+    await security.patch(options);
+    expect(captured.thread).toMatchObject({
+      model: "gpt-5.6-terra",
+      modelReasoningEffort: "medium",
+    });
+  });
+
+  test("preserves changed-file names and transport diagnostics", async () => {
+    const changedFiles = ["src/query with spaces.ts "];
+    const { client, options } = await patchClient(() =>
+      patchEvents({ ...verifiedResponse, changedFiles }),
+    );
+    await using security = client;
+    expect((await security.patch(options)).changedFiles).toEqual(changedFiles);
+    const failure = await patchClient(async function* () {
+      yield {
+        type: "turn.failed",
+        error: { message: "Synthetic provider failure" },
+      };
+    });
+    await using failingClient = failure.client;
+    await expect(failingClient.patch(failure.options)).rejects.toThrow(
+      "Synthetic provider failure",
+    );
+  });
+
+  test("keeps the patch workspace untrusted across native config layers", async () => {
+    const { client, options, captured, codexHome, projectTrustKey } =
+      await patchClient();
+    await using security = client;
+    await security.patch(options);
+    expect(
+      parseToml(captured.codex!.configOverrides!.join("\n")),
+    ).toMatchObject({
+      permissions: {
+        codex_security_scan: {
+          filesystem: {
+            ":root": "read",
+            ":workspace_roots": "write",
+            [await realpath(codexHome)]: { ".": "deny" },
+            [preparedRuntime(codexHome).deepScanConfigPath!]: { ".": "deny" },
+          },
+          network: { enabled: false },
+        },
+      },
+      project_root_markers: [],
+      projects: { [projectTrustKey]: { trust_level: "untrusted" } },
+    });
     expect(captured.thread?.workingDirectory).toBe(options.repositoryPath);
   });
 
@@ -339,25 +431,46 @@ describe("CodexSecurity headless patching", () => {
           refresh_interval_ms: 1000,
         },
       };
-      const { client, options, captured } = await patchClient(undefined, {
-        ...(selection === "profile"
-          ? {
-              profile: "review",
-              profiles: { review: { model_provider: "synthetic.provider" } },
-            }
-          : { model_provider: "synthetic.provider" }),
-        model_providers: { "synthetic.provider": provider },
-      });
+      const { client, options, captured, codexHome, projectTrustKey } =
+        await patchClient(undefined, {
+          ...(selection === "profile"
+            ? {
+                profile: "review",
+                profiles: { review: { model_provider: "synthetic.provider" } },
+              }
+            : { model_provider: "synthetic.provider" }),
+          model_providers: { "synthetic.provider": provider },
+        });
       await using security = client;
       expect(await security.patch(options)).toMatchObject(verified);
-      expect(captured.codex?.configOverrides).toHaveLength(3);
-      expect(parseToml(captured.codex!.configOverrides![0]!)).toEqual({
+      expect(captured.codex?.nativeProfile).toBeDefined();
+      expect(
+        parseToml(
+          await readFile(
+            join(codexHome, `${captured.codex!.nativeProfile}.config.toml`),
+            "utf8",
+          ),
+        ),
+      ).toEqual({
         model_providers: { "synthetic.provider": provider },
       });
-      expect(captured.codex?.configOverrides?.slice(1)).toEqual([
-        "project_root_markers=[]",
-        `projects.${JSON.stringify(options.repositoryPath)}.trust_level="untrusted"`,
-      ]);
+      expect(
+        parseToml(captured.codex!.configOverrides!.join("\n")),
+      ).toMatchObject({
+        permissions: {
+          codex_security_scan: {
+            filesystem: {
+              ":root": "read",
+              ":workspace_roots": "write",
+              [await realpath(codexHome)]: { ".": "deny" },
+              [preparedRuntime(codexHome).deepScanConfigPath!]: { ".": "deny" },
+            },
+            network: { enabled: false },
+          },
+        },
+        project_root_markers: [],
+        projects: { [projectTrustKey]: { trust_level: "untrusted" } },
+      });
       expect(captured.codex?.config).not.toHaveProperty("model_providers");
       expect(captured.codex?.apiKey).toBeUndefined();
       expect(captured.codex?.env).not.toHaveProperty("OPENAI_API_KEY");
@@ -447,6 +560,13 @@ describe("CodexSecurity headless patching", () => {
         model: " ",
       }),
     ).rejects.toThrow("model must be a nonempty string");
+    await expect(
+      localClient.patch({
+        repositoryPath,
+        finding: "Candidate",
+        verificationMode: "unsupported" as PatchOptions["verificationMode"],
+      }),
+    ).rejects.toThrow();
     expect(prepareRuntime).not.toHaveBeenCalled();
 
     for (const [response, complete, message] of [
@@ -493,6 +613,10 @@ describe("CodexSecurity headless patching", () => {
       const controller = new AbortController();
       const { client, options } = await patchClient(async function* (signal) {
         yield { type: "thread.started", thread_id: "patch-thread" };
+        await writeFile(
+          join(options.repositoryPath, "partial.txt"),
+          "partial patch",
+        );
         started.resolve();
         await new Promise<void>((resolve) => {
           if (signal.aborted) resolve();
@@ -512,6 +636,9 @@ describe("CodexSecurity headless patching", () => {
       if (cancel === "signal") controller.abort("synthetic cancellation");
       else await security.close();
       const error = await pending;
+      expect(
+        await readFile(join(options.repositoryPath, "partial.txt"), "utf8"),
+      ).toBe("partial patch");
       if (cancel === "signal") {
         expect(error).toMatchObject({
           name: ScanInterruptedError.name,

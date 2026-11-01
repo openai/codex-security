@@ -25,17 +25,17 @@ Read [references/risk-rubric.md](references/risk-rubric.md) before assigning rat
 4. **Describe the semantic change.** Separate production, test, generated, configuration, dependency, migration, documentation, and build changes. Identify changed behavior, defaults, errors, side effects, state, and contracts.
 5. **Map program impact from source.** Trace changed symbols through direct callers and affected callees to production entrypoints, jobs, routes, registries, package exports, deployment paths, or supported external consumers. Check dynamic dispatch and configuration-selected paths. Do not call code dead from text search alone.
 6. **Inspect material boundaries.** Check authentication and authorization, tenant isolation, parsing, filesystem and network access, sandboxing, public APIs, serialized data, configuration defaults, migrations, persistence, concurrency, retries, performance, and rollout behavior when affected.
-7. **Try to falsify safety.** For each material changed boundary, state one concrete counterexample and one legitimate control grounded in base source, callers, or an authoritative contract. Trace both through the patched source. Reclassify redirects, callbacks, embedded URLs, cached authority, and other derived trust decisions at the point of use instead of inheriting trust from their origin. When policy aggregates multiple subjects, bind each decision to the same identity, route, resource, or record rather than transferring one subject's properties to the set. Trace validated values, authority, and state through later mutation or re-resolution to the first sensitive sink. Treat UI, discovery, prompt, instruction, and visibility controls as exposure controls unless they remove the underlying capability or an independent downstream control enforces the same boundary. A changed test or implementation list cannot by itself define the supported contract.
+7. **Try to falsify safety.** For each material changed boundary, trace a concrete counterexample and a legitimate control grounded in base source, callers, or an authoritative contract. Use the boundary challenges in `references/risk-rubric.md`, including identity binding, derived trust, and changes between validation and use. A changed test or implementation list cannot by itself define the supported contract.
 8. **Evaluate regression protection.** Distinguish changed-path, caller, integration, and rollout coverage. Inspect what assertions actually observe, whether the relevant check ran at the exact head, and whether platform or deployment-specific validation is missing. Tests lower likelihood or raise confidence; they never lower the impact if failure occurs.
 9. **Assess applicability and recovery.** Establish that the patch affects an owned runtime or supported consumer. Use `no_op` when evidence proves no live effect, wrong ownership, duplication, or supersession. Describe rollback, persistent-state effects, migrations, and operational recovery. Report the risk of not merging separately; use `unknown` when motivating context is unavailable.
-10. **Resolve available unknowns now.** Inspect accessible source, exact-head checks, and focused deterministic local tests when safe. If a decision-critical unknown remains, return `hold_for_evidence` with at most three concrete actions, the evidence each action seeks, and how each possible result changes the recommendation. Do not wait or poll indefinitely.
+10. **Resolve available unknowns now.** Inspect accessible source, exact-head checks, and focused deterministic local tests when safe. If a decision-critical unknown remains, return `hold_for_evidence` with at most three next actions as required by the schema, the evidence each seeks, and how the possible results change the recommendation. Do not wait or poll indefinitely.
 
 ## Recommendation
 
 Return exactly one recommendation:
 
 - `merge`: source evidence supports the patch and no decision-critical defect or unknown remains;
-- `revise`: the patch, its tests, or a material documentation contract must change;
+- `revise`: the patch, its tests, or a material documentation contract must change because of an established defect; record it as a contradicted `materialBoundaries` result or a failed `validation` entry. Source inspection can establish a documentation-contract failure; a runtime test failure is not required;
 - `no_op`: evidence shows the patch has no required live effect or belongs elsewhere;
 - `block`: affirmative evidence establishes a material safety failure; or
 - `hold_for_evidence`: unavailable evidence can still change the decision.
@@ -62,15 +62,15 @@ Return both a concise Markdown report and a JSON object conforming to [`../../sc
 7. top risk drivers, protective factors, and status-quo risk; and
 8. unknowns plus the bounded evidence plan when held.
 
-This skill lives at `<plugin-root>/skills/assess-patch-risk/SKILL.md`, so `<plugin-root>` is two directories up. Resolve `<python_command>` to the configured Python interpreter (`"$PYTHON"` in POSIX shells or `& "$env:PYTHON"` in PowerShell), otherwise use `python` on Windows and `python3` on Unix-like hosts.
+This skill lives at `<plugin-root>/skills/assess-patch-risk/SKILL.md`, so `<plugin-root>` is two directories up.
 
 Before returning the result, validate the JSON from any working directory with:
 
 ```text
-<python_command> <plugin-root>/skills/assess-patch-risk/scripts/validate_patch_risk_assessment.py <assessment.json>
+<plugin-root>/scripts/launch_codex_security_mcp --helper validate-patch-risk-assessment <assessment.json>
 ```
 
-Pass `-` as `<assessment.json>` to read the assessment from standard input without creating a file.
+On Windows, use the literal-path PowerShell invocation in [references/windows-validation.md](references/windows-validation.md). The validator also accepts `-` for standard input and uses the bundled Node helper without requiring Python.
 
 Correct structural or invariant errors by revisiting the evidence; never change a recommendation merely to make validation pass. Return the validated JSON in the response. Write it to disk only when the caller requests an artifact, and keep every assessment-created file outside the subject checkout and its Git directories.
 

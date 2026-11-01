@@ -8,21 +8,27 @@ import copy
 import csv
 import errno
 import hashlib
-import importlib.util
 import io
+import ipaddress
 import json
 import math
 import os
 import re
 import secrets
 import stat
+import struct
 import sys
-import time
-from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, TextIO
+from typing import Any, NamedTuple, TextIO
 from urllib.parse import quote, urlsplit
+
+# Keep sibling helpers importable when Python starts in isolated mode.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import report_projection
+import servicenow_avit
+import threat_model_projection
+from review_state import checkpoint_review_state, review_state, review_summary
 
 SCHEMA_VERSION = "1.0"
 PRODUCER_NAME = "codex-security-plugin"
@@ -60,8 +66,11 @@ SARIF_SECURITY_SCORES = {
 }
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*$")
 RFC3339_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$"
+    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.(?P<fraction>\d+))?(?:[Zz]|[+-]\d{2}:\d{2})$",
+    re.ASCII,
 )
+REMOTE_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+REMOTE_UNSAFE_HOST_RE = re.compile(r"[\s<>^|]")
 GITHUB_HASH_BLOCK_SIZE = 100
 GITHUB_HASH_MOD = 37
 GITHUB_HASH_MASK = (1 << 64) - 1
@@ -70,9 +79,17 @@ SOURCE_READ_CHUNK_SIZE = 64 * 1024
 MAX_JSON_INTEGER = (1 << 53) - 1
 EXPORT_PATHS = {
     "csv": "exports/findings.csv",
+    "servicenow-avit": "exports/servicenow-avit.csv",
     "json": "exports/findings.json",
     "sarif": "exports/results.sarif",
 }
+THREAT_MODEL_EXPORT_PATH = "exports/threatmodel.md"
+_LEGACY_THREAT_MODEL_PATHS = (
+    "threatmodel.md",
+    "THREAT_MODEL.md",
+    "artifacts/01_context/threat_model.md",
+    "threat_model.md",
+)
 WINDOWS_UNSAFE_PATH_COMPONENT_RE = re.compile(
     r'[<>:"|?*\x00-\x1f]|[ .]$|^(?:con|prn|aux|nul|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\..*)?$',
     re.IGNORECASE,
@@ -83,8 +100,20 @@ class ContractError(ValueError):
     """Raised when a completed scan does not satisfy the additive contract."""
 
 
+class ScanLocalIOError(ContractError):
+    """Raised when scan-local storage I/O fails, distinct from path validation."""
+
+
+class MissingScanLocalFileError(ContractError):
+    """Raised when a scan-local file or its containing directory is absent."""
+
+
 class RecoverableContractError(ContractError):
-    """Raised when report projection can safely be retried before publication."""
+    """Raised when scan completion can safely be retried before publication."""
+
+
+class SealedArtifactError(ContractError):
+    """Raised when an export would overwrite a sealed scan artifact."""
 
 
 def _reject_non_finite_json(value: str) -> None:
@@ -115,31 +144,209 @@ def _generate_report_projection(
     findings: dict[str, Any],
     coverage: dict[str, Any],
 ) -> bytes:
-    script = Path(__file__).resolve().parent / "report_projection.py"
-    spec = importlib.util.spec_from_file_location("codex_security_report_projection", script)
-    if spec is None or spec.loader is None:
-        raise ContractError(f"could not load report projection helper: {script}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    attempts = (
-        getattr(sys.modules.get("workbench_constants"), "SQLITE_RETRY_ATTEMPTS", 1)
-        if coverage.get("mode") == "deep_repository"
-        else 1
+    try:
+        return report_projection.generate_report_markdown(manifest, findings, coverage)
+    except ValueError as exc:
+        raise ContractError(f"report projection failed: {exc}") from exc
+
+
+def threat_model_provenance(manifest: dict[str, Any]) -> dict[str, Any]:
+    if manifest.get("documentType") == "codex-security.policy-draft":
+        scope = manifest.get("scope")
+        return {
+            "source": "policy",
+            "target": manifest.get("repository"),
+            "revision": manifest.get("revision"),
+            "scanScope": {"includePaths": [scope], "excludePaths": []} if scope else None,
+            "status": manifest.get("status", "completed"),
+            "provisional": manifest.get("status", "completed") != "completed",
+        }
+    scan = _require_dict(manifest, "scan", "manifest")
+    target = _require_dict(scan, "target", "manifest.scan") if "target" in scan else {}
+    status = scan.get("status")
+    if status == "completed" and not scan.get("sealedAt"):
+        status = "draft"
+    return {
+        "source": "scan",
+        "scanId": scan.get("id"),
+        "target": target.get("displayName"),
+        "revision": target.get("revision") or target.get("headRevision"),
+        "snapshotDigest": target.get("snapshotDigest"),
+        "scanScope": scan.get("scope"),
+        "status": status,
+        "provisional": scan.get("status") != "completed" or not scan.get("sealedAt"),
+    }
+
+
+def _render_threat_model(model: dict[str, Any], provenance: dict[str, Any]) -> bytes:
+    try:
+        return threat_model_projection.render_threat_model(model, provenance)
+    except (TypeError, ValueError) as exc:
+        raise ContractError(f"threat model projection failed: {exc}") from exc
+
+
+def _read_saved_threat_model(
+    scan_dir: Path, *, validate_seal: bool = True, schema_dir: Path | None = None
+) -> tuple[dict[str, Any], bytes] | None:
+    """Read canonical content first; old documents are a read-only compatibility path."""
+    scan_dir = _require_scan_directory(scan_dir)
+    saved_provenance: dict[str, Any] | None = None
+    sealed_artifact_paths: set[str] | None = None
+    scan_manifest_path = scan_dir / "scan-manifest.json"
+    filename = (
+        "scan-manifest.json"
+        if scan_manifest_path.exists() or scan_manifest_path.is_symlink()
+        else "policy-draft.json"
     )
-    for attempt in range(attempts):
+    manifest_path = scan_dir / filename
+    if manifest_path.exists() or manifest_path.is_symlink():
+        manifest = _read_scan_local_json(scan_dir, filename, filename)
+        scan = (
+            _require_dict(manifest, "scan", "manifest")
+            if filename == "scan-manifest.json"
+            else manifest
+        )
+        if validate_seal and filename == "scan-manifest.json" and manifest_is_sealed(scan):
+            if "threatModel" not in scan:
+                _validate_manifest(manifest)
+                recorded_paths = {
+                    _require_portable_relative_path(artifact["path"], "sealed artifact path")
+                    for artifact in scan["artifacts"]
+                }
+                if recorded_paths.isdisjoint(_LEGACY_THREAT_MODEL_PATHS):
+                    validate_against_schema(
+                        manifest,
+                        (schema_dir or Path(__file__).resolve().parent.parent / "schemas")
+                        / "scan-manifest.schema.json",
+                    )
+                    return None
+            manifest, _, _, _ = _read_sealed_scan(scan_dir, schema_dir, "threat model export")
+            scan = manifest["scan"]
+            sealed_artifact_paths = {
+                _require_portable_relative_path(artifact["path"], "sealed artifact path")
+                for artifact in scan["artifacts"]
+            }
+        provenance = threat_model_provenance(manifest)
+        saved_provenance = provenance
+        if "threatModel" in scan:
+            model = _require_dict(
+                scan,
+                "threatModel",
+                "manifest.scan" if filename == "scan-manifest.json" else "policy draft",
+            )
+            contents = _render_threat_model(model, provenance)
+            path = scan_dir / "threatmodel.md"
+            current_path = None
+            try:
+                descriptor = open_scan_local_file_descriptor(
+                    scan_dir, "threatmodel.md", "Saved threat model"
+                )
+                with os.fdopen(descriptor, "rb") as handle:
+                    if handle.read() == contents:
+                        current_path = str(path)
+            except (ContractError, OSError):
+                # An unavailable projection does not invalidate the canonical model.
+                pass
+            return {
+                "threatModel": model,
+                "provenance": provenance,
+                "path": current_path,
+            }, contents
+    for filename in _LEGACY_THREAT_MODEL_PATHS:
+        if sealed_artifact_paths is not None and filename not in sealed_artifact_paths:
+            continue
+        path = scan_dir / filename
+        if not path.exists() and not path.is_symlink():
+            continue
+        descriptor, filename = _open_scan_local_file_with_path(
+            scan_dir,
+            filename,
+            "Saved threat model",
+            resolve_spelling=sealed_artifact_paths is None,
+        )
+        path = scan_dir / filename
+        with os.fdopen(descriptor, "rb") as handle:
+            contents = handle.read()
         try:
-            return module.generate_report_markdown(manifest, findings, coverage)
-        except OSError as exc:
-            if attempt == attempts - 1:
-                raise RecoverableContractError(f"report projection failed: {exc}") from exc
-            time.sleep(0.05 * (2**attempt))
-        except ValueError as exc:
-            raise ContractError(f"report projection failed: {exc}") from exc
-    raise AssertionError("Report projection retry loop exhausted unexpectedly.")
+            body = contents.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ContractError(f"{filename}: expected UTF-8 Markdown") from exc
+        if body.strip():
+            return {
+                "threatModel": {"format": "markdown", "content": body},
+                "provenance": saved_provenance
+                or {"source": filename, "status": "unknown", "provisional": True},
+                "path": str(path),
+            }, contents
+    return None
 
 
-def _validate_report_output_paths(scan_dir: Path) -> None:
-    _validate_scan_local_output_path(scan_dir, scan_dir / "report.md", "report.md")
+def describe_threat_model(scan_dir: Path, schema_dir: Path | None = None) -> dict[str, Any]:
+    saved = _read_saved_threat_model(scan_dir, schema_dir=schema_dir)
+    if saved is None:
+        raise ContractError("No saved threat model is available for this result.")
+    return saved[0]
+
+
+def build_threat_model_export(scan_dir: Path, schema_dir: Path | None = None) -> bytes:
+    saved = _read_saved_threat_model(scan_dir, schema_dir=schema_dir)
+    if saved is None:
+        raise ContractError("No saved threat model is available for this result.")
+    return saved[1]
+
+
+def write_threat_model_projection_if_possible(
+    scan_dir: Path, manifest: dict[str, Any] | None = None
+) -> str | None:
+    """A convenience document failure must not discard saved canonical content."""
+    try:
+        saved_manifest = manifest
+        if saved_manifest is None and (scan_dir / "scan-manifest.json").exists():
+            saved_manifest = _read_scan_local_json(
+                scan_dir, "scan-manifest.json", "scan-manifest.json"
+            )
+        if (
+            saved_manifest is not None
+            and saved_manifest.get("documentType") != "codex-security.policy-draft"
+        ):
+            scan = _require_dict(saved_manifest, "scan", "manifest")
+            artifacts = (
+                _require_list(scan, "artifacts", "manifest.scan") if "artifacts" in scan else []
+            )
+            for index, artifact in enumerate(artifacts):
+                if not isinstance(artifact, dict):
+                    continue
+                context = f"manifest.scan.artifacts[{index}]"
+                path = _require_portable_relative_path(
+                    _require_str(artifact, "path", context), f"{context}.path"
+                )
+                if path.lower() == "threatmodel.md":
+                    return None
+        if manifest is None:
+            saved = _read_saved_threat_model(scan_dir, validate_seal=False)
+            if saved is None:
+                return None
+            contents = saved[1]
+        else:
+            scan = (
+                manifest
+                if manifest.get("documentType") == "codex-security.policy-draft"
+                else _require_dict(manifest, "scan", "manifest")
+            )
+            model = scan.get("threatModel")
+            if not isinstance(model, dict):
+                return None
+            contents = _render_threat_model(model, threat_model_provenance(manifest))
+        write_scan_local_bytes(scan_dir, "threatmodel.md", contents, owner_read_write=True)
+        return None
+    except (ContractError, OSError) as exc:
+        warning = (
+            f"Automatic threat model save failed: {exc}. "
+            "Saved canonical content can be exported with `codex-security export "
+            "<result-dir> --artifact threat-model`."
+        )
+        print(f"codex-security: warning: {warning}", file=sys.stderr)
+        return warning
 
 
 def _json_bytes(payload: Any) -> bytes:
@@ -192,22 +399,6 @@ def _require_safe_json_string(value: str, context: str) -> None:
         raise ContractError(f"{context}: expected well-formed Unicode JSON strings") from exc
 
 
-def _sha256_text(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-def _sha256_bytes(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _require_dict(payload: dict[str, Any], key: str, context: str) -> dict[str, Any]:
     value = payload.get(key)
     if not isinstance(value, dict):
@@ -229,7 +420,9 @@ def _require_str(payload: dict[str, Any], key: str, context: str) -> str:
     return value
 
 
-def _require_safe_relative_path(value: str, context: str, *, allow_dot: bool = False) -> str:
+def _require_safe_relative_path(value: object, context: str, *, allow_dot: bool = False) -> str:
+    if not isinstance(value, str) or not value:
+        raise ContractError(f"{context}: expected a safe repository-relative POSIX path")
     try:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:
@@ -237,9 +430,8 @@ def _require_safe_relative_path(value: str, context: str, *, allow_dot: bool = F
     path = PurePosixPath(value)
     normalized = path.as_posix()
     if (
-        not value.strip()
-        or (normalized == "." and not allow_dot)
-        or (len(value) >= 2 and value[0].isalpha() and value[1] == ":")
+        (normalized == "." and not allow_dot)
+        or re.match(r"^[A-Za-z]:", value)
         or "\\" in value
         or "\0" in value
         or any(ord(character) < 32 for character in value)
@@ -252,7 +444,7 @@ def _require_safe_relative_path(value: str, context: str, *, allow_dot: bool = F
 
 def _require_portable_relative_path(value: str, context: str, *, allow_dot: bool = False) -> str:
     normalized = _require_safe_relative_path(value, context, allow_dot=allow_dot)
-    if any(_windows_unsafe_path_component(part) for part in value.split("/")):
+    if not value.strip() or any(_windows_unsafe_path_component(part) for part in value.split("/")):
         raise ContractError(f"{context}: expected a safe scan-relative POSIX path")
     return normalized
 
@@ -263,18 +455,28 @@ def _windows_unsafe_path_component(value: str) -> bool:
     return WINDOWS_UNSAFE_PATH_COMPONENT_RE.search(value) is not None
 
 
+def _scan_local_directory_error(message: str, error: OSError) -> ContractError:
+    if error.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+        return ContractError(message)
+    return ScanLocalIOError(message)
+
+
 def _require_scan_directory(scan_dir: Path) -> Path:
     scan_dir = scan_dir.absolute()
     try:
         metadata = scan_dir.lstat()
     except OSError as exc:
-        raise ContractError("scan directory: expected an existing non-symlink directory") from exc
+        raise _scan_local_directory_error(
+            "scan directory: expected an existing non-symlink directory", exc
+        ) from exc
     if not stat.S_ISDIR(metadata.st_mode):
         raise ContractError("scan directory: expected an existing non-symlink directory")
     try:
         resolved = scan_dir.resolve(strict=True)
     except OSError as exc:
-        raise ContractError("scan directory: expected an existing non-symlink directory") from exc
+        raise _scan_local_directory_error(
+            "scan directory: expected an existing non-symlink directory", exc
+        ) from exc
     if os.path.normcase(resolved) != os.path.normcase(scan_dir):
         raise ContractError("scan directory: expected a canonical non-symlink directory")
     return resolved
@@ -294,10 +496,6 @@ def _validate_scan_local_output_path(scan_dir: Path, path: Path, relative_path: 
         raise ContractError(f"{relative_path}: expected a regular file")
 
 
-def _descriptor_relative_reads_available() -> bool:
-    return os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW")
-
-
 def _is_windows() -> bool:
     return os.name == "nt"
 
@@ -311,22 +509,11 @@ def _descriptor_relative_writes_available() -> bool:
     )
 
 
-_WINDOWS_SCAN_LOCAL_FILES: Any | None = None
-
-
 def _windows_scan_local_files() -> Any:
     """Load the Win32 backend and shared stream comparison lazily."""
+    import windows_scan_local_files
 
-    global _WINDOWS_SCAN_LOCAL_FILES
-    if _WINDOWS_SCAN_LOCAL_FILES is None:
-        script = Path(__file__).resolve().with_name("windows_scan_local_files.py")
-        spec = importlib.util.spec_from_file_location("codex_security_windows_scan_files", script)
-        if spec is None or spec.loader is None:
-            raise ContractError(f"could not load Windows scan-local file helper: {script}")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        _WINDOWS_SCAN_LOCAL_FILES = module
-    return _WINDOWS_SCAN_LOCAL_FILES
+    return windows_scan_local_files
 
 
 def _open_verified_scan_directory(
@@ -344,7 +531,9 @@ def _open_verified_scan_directory(
             os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
         )
     except OSError as exc:
-        raise ContractError("scan directory: expected an existing non-symlink directory") from exc
+        raise _scan_local_directory_error(
+            "scan directory: expected an existing non-symlink directory", exc
+        ) from exc
     opened = os.fstat(descriptor)
     opened_identity = (opened.st_dev, opened.st_ino)
     if opened_identity != observed_identity or (
@@ -379,6 +568,7 @@ def _open_scan_local_directory(root_fd: int, parts: tuple[str, ...], *, create: 
                 try:
                     os.mkdir(part, mode=0o700, dir_fd=descriptor)
                 except FileExistsError:
+                    # The open below verifies that an existing entry is a real directory.
                     pass
             next_descriptor = os.open(
                 part,
@@ -393,15 +583,35 @@ def _open_scan_local_directory(root_fd: int, parts: tuple[str, ...], *, create: 
         raise
 
 
-def open_scan_local_file_descriptor(scan_dir: Path, relative_path: str, context: str) -> int:
+def open_scan_local_file_descriptor(
+    scan_dir: Path, relative_path: str, context: str, *, portable: bool = True
+) -> int:
+    return _open_scan_local_file_with_path(scan_dir, relative_path, context, portable=portable)[0]
+
+
+def _open_scan_local_file_with_path(
+    scan_dir: Path,
+    relative_path: str,
+    context: str,
+    *,
+    resolve_spelling: bool = False,
+    portable: bool = True,
+) -> tuple[int, str]:
     scan_dir = _require_scan_directory(scan_dir)
-    relative_path = _require_portable_relative_path(relative_path, context)
-    if not _descriptor_relative_reads_available():
+    validate_path = _require_portable_relative_path if portable else _require_safe_relative_path
+    relative_path = validate_path(relative_path, context)
+    if not (os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW")):
         if not _is_windows():
             raise ContractError("scan-local input requires descriptor-relative file operations")
         try:
-            return _windows_scan_local_files().open_read_fd(scan_dir, relative_path, context)
+            backend = _windows_scan_local_files()
+            if resolve_spelling:
+                return backend.open_read_fd_with_path(scan_dir, relative_path, context)
+            return backend.open_read_fd(scan_dir, relative_path, context), relative_path
         except OSError as exc:
+            # The Windows backend retains native ERROR_FILE/PATH_NOT_FOUND codes.
+            if exc.errno in {2, 3}:
+                raise MissingScanLocalFileError(str(exc)) from exc
             raise ContractError(str(exc)) from exc
     root_fd: int | None = None
     parent_fd: int | None = None
@@ -417,6 +627,10 @@ def open_scan_local_file_descriptor(scan_dir: Path, relative_path: str, context:
                 dir_fd=parent_fd,
             )
         except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                raise MissingScanLocalFileError(
+                    f"{context}: expected a file inside the scan directory"
+                ) from exc
             if exc.errno == errno.ELOOP:
                 try:
                     link_target = Path(os.readlink(parts[-1], dir_fd=parent_fd))
@@ -432,9 +646,22 @@ def open_scan_local_file_descriptor(scan_dir: Path, relative_path: str, context:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
             raise ContractError(f"{context}: expected a regular non-symlink file")
+        if resolve_spelling:
+            names = os.listdir(parent_fd)
+            if parts[-1] not in names:
+                for name in names:
+                    if name.casefold() != parts[-1].casefold():
+                        continue
+                    try:
+                        entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    if os.path.samestat(metadata, entry):
+                        relative_path = PurePosixPath(relative_path).with_name(name).as_posix()
+                        break
         result = descriptor
         descriptor = None
-        return result
+        return result, relative_path
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -449,7 +676,13 @@ def _require_scan_local_file(scan_dir: Path, relative_path: str, context: str) -
     os.close(descriptor)
 
 
-def _require_derived_writeup_files(scan_dir: Path, findings: dict[str, Any]) -> None:
+def _prepare_derived_writeups(
+    scan_dir: Path,
+    findings: dict[str, Any],
+    *,
+    allow_missing: bool = False,
+) -> list[str]:
+    warnings: list[str] = []
     for index, finding in enumerate(findings.get("findings", [])):
         if not isinstance(finding, dict):
             continue
@@ -458,11 +691,18 @@ def _require_derived_writeup_files(scan_dir: Path, findings: dict[str, Any]) -> 
             continue
         report_path = writeup.get("reportPath")
         if isinstance(report_path, str):
-            _require_scan_local_file(
-                scan_dir,
-                report_path,
-                f"findings[{index}].writeup.reportPath",
-            )
+            try:
+                _require_scan_local_file(
+                    scan_dir,
+                    report_path,
+                    f"findings[{index}].writeup.reportPath",
+                )
+            except MissingScanLocalFileError as exc:
+                if not allow_missing:
+                    raise
+                finding.pop("writeup")
+                warnings.append(f"Skipped missing writeup for finding {index + 1}: {exc}.")
+    return warnings
 
 
 def _require_hardening_portfolio_file(scan_dir: Path, scan: dict[str, Any]) -> None:
@@ -478,16 +718,17 @@ def _require_hardening_portfolio_file(scan_dir: Path, scan: dict[str, Any]) -> N
         )
 
 
-def _read_scan_local_json_bytes(
+def _read_scan_local_json_with_metadata(
     scan_dir: Path, relative_path: str, context: str
-) -> tuple[dict[str, Any], bytes]:
+) -> tuple[dict[str, Any], bytes, os.stat_result]:
     descriptor = open_scan_local_file_descriptor(scan_dir, relative_path, context)
     try:
         with os.fdopen(descriptor, "rb") as handle:
             descriptor = -1
             raw = handle.read()
+            metadata = os.fstat(handle.fileno())
         try:
-            payload = _loads_json(raw.decode("utf-8"))
+            payload = _loads_json(raw.decode("utf-8-sig"))
         except (UnicodeDecodeError, ValueError) as exc:
             raise ContractError(f"{context}: invalid JSON: {exc}") from exc
         if not isinstance(payload, dict):
@@ -496,6 +737,13 @@ def _read_scan_local_json_bytes(
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+    return payload, raw, metadata
+
+
+def _read_scan_local_json_bytes(
+    scan_dir: Path, relative_path: str, context: str
+) -> tuple[dict[str, Any], bytes]:
+    payload, raw, _ = _read_scan_local_json_with_metadata(scan_dir, relative_path, context)
     return payload, raw
 
 
@@ -525,6 +773,7 @@ def write_scan_local_bytes(
     *,
     external_name: bool = False,
     expected_root_identity: tuple[int, int] | None = None,
+    owner_read_write: bool = False,
 ) -> None:
     scan_dir = _require_scan_directory(scan_dir)
     if external_name:
@@ -536,15 +785,18 @@ def write_scan_local_bytes(
     if not _descriptor_relative_writes_available():
         if not _is_windows():
             raise ContractError("scan-local output requires descriptor-relative file operations")
+        backend = _windows_scan_local_files()
         try:
-            _windows_scan_local_files().atomic_write(
+            backend.atomic_write(
                 scan_dir,
                 relative_path,
                 payload,
                 expected_root_identity=expected_root_identity,
             )
-        except OSError as exc:
+        except backend.WindowsScanLocalPathError as exc:
             raise ContractError(f"{relative_path}: {exc}") from exc
+        except OSError as exc:
+            raise ScanLocalIOError(f"{relative_path}: {exc}") from exc
         return
     root_fd: int | None = None
     parent_fd: int | None = None
@@ -555,8 +807,8 @@ def write_scan_local_bytes(
         try:
             parent_fd = _open_scan_local_directory(root_fd, parts[:-1], create=True)
         except OSError as exc:
-            raise ContractError(
-                f"{relative_path}: expected a path inside the scan directory"
+            raise _scan_local_directory_error(
+                f"{relative_path}: expected a path inside the scan directory", exc
             ) from exc
         # The held descriptor is the authority for the validated parent. A
         # concurrent rename cannot redirect later operations through a
@@ -596,6 +848,7 @@ def write_scan_local_bytes(
                                 ):
                                     return
                         except OSError:
+                            # A failed content comparison still allows an atomic replacement.
                             pass
                 finally:
                     if existing_fd >= 0:
@@ -603,21 +856,29 @@ def write_scan_local_bytes(
         temp_name = f".{path.name}.{secrets.token_hex(8)}.tmp"
         temp_fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent_fd)
         with os.fdopen(temp_fd, "wb") as handle:
+            if owner_read_write:
+                # Generated Markdown must remain editable under a restrictive umask.
+                os.fchmod(handle.fileno(), 0o600)
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_name, parts[-1], src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         temp_name = None
     finally:
-        if temp_name is not None and parent_fd is not None:
+        try:
+            if temp_name is not None and parent_fd is not None:
+                try:
+                    os.unlink(temp_name, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    # The temporary file is already gone, so cleanup is complete.
+                    pass
+        finally:
             try:
-                os.unlink(temp_name, dir_fd=parent_fd)
-            except FileNotFoundError:
-                pass
-        if parent_fd is not None:
-            os.close(parent_fd)
-        if root_fd is not None:
-            os.close(root_fd)
+                if parent_fd is not None:
+                    os.close(parent_fd)
+            finally:
+                if root_fd is not None:
+                    os.close(root_fd)
 
 
 def _remove_scan_local_file_if_exists(scan_dir: Path, relative_path: str) -> None:
@@ -656,20 +917,52 @@ def _write_scan_local_json(scan_dir: Path, relative_path: str, payload: Any) -> 
 
 
 def _validate_remote(remote: str, context: str) -> None:
-    parsed = urlsplit(remote)
-    if not parsed.scheme or not parsed.netloc:
+    if REMOTE_CONTROL_RE.search(remote):
         raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
-    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+    try:
+        parsed = urlsplit(remote)
+    except ValueError as exc:
+        # urlsplit rejects authorities with unbalanced brackets.
+        raise ContractError(f"{context}: expected a sanitized canonical absolute URL") from exc
+    if "\\" in remote or not parsed.scheme or not parsed.netloc:
+        raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
+    if "@" in parsed.netloc or parsed.query or parsed.fragment:
         raise ContractError(
             f"{context}: remote URL must not contain credentials, query, or fragment"
         )
+    # Mirrors the authority rules of the WHATWG URL parser the SDK reader applies.
+    authority = parsed.netloc
+    if authority.startswith("["):
+        try:
+            ipaddress.IPv6Address(authority.partition("]")[0][1:])
+        except ValueError as exc:
+            raise ContractError(f"{context}: expected a sanitized canonical absolute URL") from exc
+        authority = authority.partition("]")[2]
+        if authority and not authority.startswith(":"):
+            raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
+    port = authority.partition(":")[2]
+    hostname = parsed.hostname
+    if (
+        not hostname
+        or REMOTE_UNSAFE_HOST_RE.search(hostname)
+        or (port and (not port.isascii() or not port.isdigit() or int(port) > 65535))
+    ):
+        raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
+
+
+def parse_timestamp(value: str) -> datetime:
+    match = RFC3339_RE.fullmatch(value)
+    if match and (fraction := match.group("fraction")):
+        start, end = match.span("fraction")
+        value = value[:start] + fraction[:6].ljust(6, "0") + value[end:]
+    return datetime.fromisoformat(value.upper().replace("Z", "+00:00"))
 
 
 def _validate_date_time(value: str, context: str) -> None:
     if not RFC3339_RE.fullmatch(value):
         raise ContractError(f"{context}: expected an RFC 3339 timestamp")
     try:
-        parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value[-1] in "Zz" else value)
+        parsed = parse_timestamp(value)
     except ValueError as exc:
         raise ContractError(f"{context}: expected an RFC 3339 timestamp") from exc
     if parsed.tzinfo is None:
@@ -689,11 +982,7 @@ def _validate_target(target: dict[str, Any]) -> None:
         _validate_remote(remote, "scan.target.remote")
     if kind == "git_revision":
         _require_str(target, "revision", "scan.target")
-    elif kind == "git_worktree":
-        _require_str(target, "snapshotDigest", "scan.target")
-    elif kind == "git_diff":
-        _require_str(target, "snapshotDigest", "scan.target")
-    elif kind == "directory_snapshot":
+    elif kind in ("git_worktree", "git_diff", "directory_snapshot"):
         _require_str(target, "snapshotDigest", "scan.target")
 
 
@@ -711,15 +1000,15 @@ def _fingerprint(target_id: str, finding: dict[str, Any]) -> str:
     if not SLUG_RE.fullmatch(rule_id):
         raise ContractError("finding.ruleId: expected a stable lowercase rule slug")
     material = "\0".join((FINGERPRINT_ALGORITHM, target_id, rule_id, anchor, instance))
-    return f"{FINGERPRINT_ALGORITHM}:sha256:{_sha256_text(material)}"
+    return f"{FINGERPRINT_ALGORITHM}:sha256:{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
 
 
 def _stable_id(prefix: str, *parts: str) -> str:
-    return f"{prefix}_{_sha256_text(chr(0).join(parts))[:24]}"
+    return f"{prefix}_{hashlib.sha256(chr(0).join(parts).encode('utf-8')).hexdigest()[:24]}"
 
 
 def _validate_location(location: dict[str, Any], context: str) -> None:
-    _require_safe_relative_path(_require_str(location, "path", context), f"{context}.path")
+    _require_safe_relative_path(location.get("path"), f"{context}.path")
     start = location.get("startLine")
     end = location.get("endLine", start)
     if not isinstance(start, int) or start < 1:
@@ -804,6 +1093,8 @@ def _recover_unsealed_findings(
     schema_dir: Path,
     scan_dir: Path,
     warnings: list[str],
+    *,
+    current_contract: bool = False,
 ) -> list[str]:
     schema = _read_json(schema_dir / "findings.schema.json")
     properties = _require_dict(schema, "properties", "findings.schema")
@@ -911,14 +1202,17 @@ def _recover_unsealed_findings(
                     continue
                 try:
                     _validate_schema_node(
-                        finding[auxiliary], auxiliary_schema, f"{context}.{auxiliary}"
+                        finding[auxiliary], auxiliary_schema, f"{context}.{auxiliary}", schema
                     )
                 except ContractError as exc:
                     finding.pop(auxiliary)
                     warnings.append(
                         f"Skipped malformed {auxiliary} for finding {index + 1}: {exc}."
                     )
-            _validate_schema_node(finding, finding_schema, context)
+            _validate_schema_node(finding, finding_schema, context, schema)
+            _require_safe_json_value(finding, context)
+            if current_contract:
+                _validate_current_findings({"findings": [finding]}, schema_dir)
         except ContractError as exc:
             warning = f"Skipped malformed finding {index + 1}: {exc}."
             warnings.append(warning)
@@ -974,36 +1268,40 @@ def _recover_unsealed_coverage(
     scan_dir: Path,
     warnings: list[str],
     discarded_findings: list[str],
-) -> None:
+    *,
+    worker_draft: bool = False,
+) -> set[str]:
     schema = _read_json(schema_dir / "coverage.schema.json")
     properties = _require_dict(schema, "properties", "coverage.schema")
-    completeness = coverage.get("completeness")
-    partial = completeness not in ("complete", "partial", "unknown")
-    if partial:
-        warnings.append("Recovered malformed coverage completeness; marked coverage as partial.")
+    discarded_fields: set[str] = set()
     if (
         coverage.get("mode") == "deep_repository"
         and coverage.get("inventoryStrategy") != "repository"
     ):
         coverage["inventoryStrategy"] = "repository"
-        warnings.append(
-            "Recovered malformed Deep Scan inventory strategy; marked coverage as partial."
-        )
-        partial = True
+        warnings.append("Recovered malformed Deep Scan inventory strategy.")
 
     surface_ids: set[str] = set()
-    for field, label in (
+    receipt_paths: dict[str, str] = {}
+    fields = [
         ("surfaces", "coverage surface"),
         ("explicitExclusions", "coverage exclusion"),
         ("deferred", "deferred coverage item"),
-    ):
+    ]
+    if worker_draft:
+        if "openQuestions" in coverage:
+            _normalize_unsealed_open_questions(coverage)
+            fields.append(("openQuestions", "coverage open question"))
+        if "resolvedDeferred" in coverage:
+            fields.append(("resolvedDeferred", "resolved deferred item"))
+    for field, label in fields:
         array_schema = _require_dict(properties, field, "coverage.schema.properties")
         item_schema = _require_dict(array_schema, "items", f"coverage.schema.properties.{field}")
         items = coverage.get(field)
         if not isinstance(items, list):
             warnings.append(f"Skipped malformed {label} records: expected an array.")
+            discarded_fields.add(field)
             coverage[field] = []
-            partial = True
             continue
 
         recovered: list[dict[str, Any]] = []
@@ -1013,8 +1311,11 @@ def _recover_unsealed_coverage(
                 if not isinstance(item, dict):
                     raise ContractError(f"{context}: expected an object")
                 if field == "surfaces":
+                    surface_receipt_paths = dict(receipt_paths)
                     surface_id = _require_str(item, "id", context)
-                    if surface_id in surface_ids:
+                    if worker_draft:
+                        _require_str(item, "label", context)
+                    if surface_id in surface_ids and not worker_draft:
                         raise ContractError(f"{context}.id: duplicate surface id")
                     disposition = item.get("disposition")
                     surface_recovered = False
@@ -1047,6 +1348,11 @@ def _recover_unsealed_coverage(
                                     f"{ref_context}: expected a file under artifacts/"
                                 )
                             _require_scan_local_file(scan_dir, normalized_ref, ref_context)
+                            key = normalized_ref.lower()
+                            previous = surface_receipt_paths.get(key)
+                            if previous is not None and previous != normalized_ref:
+                                raise ContractError(f"{ref_context}: duplicate artifact path")
+                            surface_receipt_paths[key] = normalized_ref
                         except ContractError as exc:
                             warnings.append(
                                 f"Skipped malformed coverage receipt "
@@ -1057,42 +1363,59 @@ def _recover_unsealed_coverage(
                         recovered_receipts.append(normalized_ref)
 
                     item["receiptRefs"] = recovered_receipts
-                    if surface_recovered or item["disposition"] == "needs_follow_up":
-                        if not surface_recovered and completeness != "partial":
-                            warnings.append(
-                                f"Coverage surface {index + 1} requires follow-up; "
-                                "marked coverage as partial."
-                            )
+                    if surface_recovered:
                         item["disposition"] = "needs_follow_up"
-                        partial = True
+                        discarded_fields.add(field)
 
+                if field == "deferred":
+                    _validate_deferred_paths(item, context)
                 _validate_schema_node(item, item_schema, context)
+                if field == "resolvedDeferred":
+                    _validate_resolved_deferred({"resolvedDeferred": [item]})
+                if worker_draft:
+                    _require_safe_json_value(item, context)
             except ContractError as exc:
                 warnings.append(f"Skipped malformed {label} {index + 1}: {exc}.")
-                partial = True
+                discarded_fields.add(field)
                 continue
 
             if field == "surfaces":
                 surface_ids.add(surface_id)
+                receipt_paths = surface_receipt_paths
             recovered.append(item)
 
         coverage[field] = recovered
 
     if discarded_findings:
         for surface in coverage["surfaces"]:
+            if (
+                worker_draft
+                and surface.get("candidateId")
+                and surface["disposition"] in {"rejected", "not_applicable"}
+            ):
+                # A valid explicit outcome can still resolve that worker's history.
+                continue
             surface["disposition"] = "needs_follow_up"
         coverage["deferred"].extend(
             {"id": f"discarded-finding-{index}", "reason": warning}
             for index, warning in enumerate(discarded_findings, 1)
         )
-        partial = True
 
-    if coverage["deferred"] and completeness != "partial":
-        if not discarded_findings:
-            warnings.append("Coverage has deferred review work; marked coverage as partial.")
-        partial = True
-    if partial:
-        coverage["completeness"] = "partial"
+    if "resolvedDeferred" in coverage:
+        try:
+            _validate_schema_node(
+                coverage["resolvedDeferred"],
+                properties["resolvedDeferred"],
+                "coverage.resolvedDeferred",
+            )
+            _validate_resolved_deferred(coverage)
+            if worker_draft:
+                _require_safe_json_value(coverage["resolvedDeferred"], "coverage.resolvedDeferred")
+        except ContractError as exc:
+            coverage.pop("resolvedDeferred")
+            warnings.append(f"Skipped malformed resolved deferred work: {exc}.")
+            discarded_fields.add("resolvedDeferred")
+    return discarded_fields
 
 
 def _recover_unsealed_hardening(
@@ -1147,8 +1470,9 @@ def _populate_unsealed_manifest_envelope(
     scan["status"] = (
         completion_binding.get("status", "completed") if completion_binding else "completed"
     )
-    scan["coverageRef"] = "coverage.json"
     scan["findingsRef"] = "findings.json"
+    if "coverageRef" in scan:
+        scan["coverageRef"] = "coverage.json"
     if completion_binding is None:
         started_at = os.environ.get("CODEX_SECURITY_STARTED_AT")
         if started_at is not None:
@@ -1162,21 +1486,58 @@ def _populate_unsealed_manifest_envelope(
     scan["completedAt"] = completion_binding["completedAt"]
     scan["producer"] = copy.deepcopy(completion_binding["producer"])
 
-    target = scan.get("target")
+    target = scan.setdefault("target", {})
     if isinstance(target, dict):
-        _populate_unsealed_target_binding(target, completion_binding["target"])
+        allowed_kinds = completion_binding["allowedTargetKinds"]
+        if len(allowed_kinds) == 1:
+            target.setdefault("kind", allowed_kinds[0])
+        _populate_unsealed_target_binding(target, completion_binding["target"], allowed_kinds)
 
-    scope = scan.get("scope")
+    scope = scan.setdefault("scope", {})
     if isinstance(scope, dict):
         scope.update(copy.deepcopy(completion_binding["scope"]))
+
+
+def _populate_unsealed_target_kind(
+    target: dict[str, Any],
+    target_binding: dict[str, Any],
+    allowed_kinds: Any,
+) -> None:
+    """Adopt the registered target kind when the binding owns every coordinate it needs.
+
+    The workbench, not the draft, knows how the target was registered: a scan agent
+    that infers the kind from the checkout (a clean worktree registered as
+    git_revision is the common case) used to discard the whole completed scan at the
+    seal step. The kind carries no draft-owned information when the registration
+    allows a single value, so take that value instead of failing.
+
+    Rewriting the kind also reinterprets the coordinates that kind requires, and a
+    coordinate the binding does not own survives the replacement below with whatever
+    the draft computed under its own reading of the target. Adopting git_diff without
+    a bound snapshotDigest, for example, would seal a whole-worktree digest as the
+    diff digest. Leave the kind alone whenever the binding cannot restate every
+    coordinate the registered kind requires, and let the binding check reject the
+    draft instead.
+    """
+
+    if not isinstance(allowed_kinds, list) or len(allowed_kinds) != 1:
+        return
+    registered_kind = allowed_kinds[0]
+    if not isinstance(registered_kind, str) or target.get("kind") == registered_kind:
+        return
+    if not TARGET_REQUIRED_COORDINATE_FIELDS.get(registered_kind, set()) <= target_binding.keys():
+        return
+    target["kind"] = registered_kind
 
 
 def _populate_unsealed_target_binding(
     target: dict[str, Any],
     target_binding: dict[str, Any],
+    allowed_kinds: Any = None,
 ) -> None:
     """Replace workbench-owned target coordinates without retaining incompatible drafts."""
 
+    _populate_unsealed_target_kind(target, target_binding, allowed_kinds)
     target_kind = target.get("kind")
     required_coordinates = (
         TARGET_REQUIRED_COORDINATE_FIELDS.get(target_kind, set())
@@ -1247,17 +1608,6 @@ def _normalize_unsealed_open_questions(coverage: dict[str, Any]) -> None:
     coverage["openQuestions"] = normalized
 
 
-def _normalize_unsealed_deep_repository_inventory_strategy(
-    coverage: dict[str, Any],
-    *,
-    expected_coverage_mode: str | None,
-) -> None:
-    """Label whole-repository Deep scans as using the repository inventory."""
-
-    if expected_coverage_mode == "deep_repository":
-        coverage["inventoryStrategy"] = "repository"
-
-
 def _validate_completion_binding(
     manifest: dict[str, Any],
     findings: dict[str, Any],
@@ -1299,6 +1649,14 @@ def _validate_completion_binding(
     for key, expected in completion_binding["scope"].items():
         if coverage.get(key) != expected:
             raise ContractError(f"coverage.{key}: must match the workbench scan")
+
+
+def path_within_scope(path: str, scope: str) -> bool:
+    candidate = PurePosixPath(path)
+    requested = PurePosixPath(scope)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        return False
+    return candidate.is_relative_to(requested)
 
 
 def _validate_finding(finding: dict[str, Any], context: str) -> None:
@@ -1358,6 +1716,11 @@ def _validate_finding(finding: dict[str, Any], context: str) -> None:
                 raise ContractError(f"{evidence_context}.id: duplicate code-evidence id")
             evidence_ids.add(evidence_id)
             _require_str(evidence, "code", evidence_context)
+            if evidence_key == "codeEvidence":
+                _require_safe_relative_path(
+                    evidence.get("path"),
+                    f"{evidence_context}.path",
+                )
 
     referenced_sections = [
         (section_name, finding.get(section_name))
@@ -1394,13 +1757,45 @@ def _validate_finding(finding: dict[str, Any], context: str) -> None:
         raise ContractError(f"{context}.extensions: expected an object")
 
 
+def _validate_resolved_deferred(coverage: dict[str, Any]) -> None:
+    if "resolvedDeferred" not in coverage:
+        return
+    active = {
+        identity
+        for row in coverage.get("deferred", [])
+        if isinstance(row, dict)
+        for identity in (row.get("id"), row.get("candidateId"))
+        if isinstance(identity, str)
+    }
+    resolved: set[str] = set()
+    for index, closure in enumerate(_require_list(coverage, "resolvedDeferred", "coverage")):
+        context = f"coverage.resolvedDeferred[{index}]"
+        if not isinstance(closure, dict):
+            raise ContractError(f"{context}: expected an object")
+        closure_id = _require_str(closure, "id", context)
+        _require_str(closure, "reason", context)
+        if closure_id in resolved:
+            raise ContractError(f"{context}.id: duplicate resolved deferred id")
+        if closure_id in active:
+            raise ContractError(f"{context}.id: deferred work is still active")
+        resolved.add(closure_id)
+
+
+def _validate_deferred_paths(deferred: dict[str, Any], context: str) -> None:
+    if "paths" not in deferred:
+        return
+    for index, path in enumerate(_require_list(deferred, "paths", context)):
+        if not isinstance(path, str):
+            raise ContractError(f"{context}.paths[{index}]: expected a string")
+        _require_safe_relative_path(path, f"{context}.paths[{index}]", allow_dot=True)
+
+
 def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_dir: Path) -> None:
     scan = _require_dict(manifest, "scan", "manifest")
     scan_id = _require_str(scan, "id", "manifest.scan")
     if coverage.get("scanId") != scan_id:
         raise ContractError("coverage.scanId: must match manifest scan id")
     _require_str(coverage, "mode", "coverage")
-    completeness = _require_str(coverage, "completeness", "coverage")
     _require_str(coverage, "inventoryStrategy", "coverage")
     scope = _require_dict(scan, "scope", "manifest.scan")
     if coverage.get("includePaths") != scope.get("includePaths"):
@@ -1408,7 +1803,6 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
     if coverage.get("excludePaths") != scope.get("excludePaths"):
         raise ContractError("coverage.excludePaths: must match manifest scope")
     surface_ids: set[str] = set()
-    has_needs_follow_up = False
     for index, surface in enumerate(_require_list(coverage, "surfaces", "coverage")):
         context = f"coverage.surfaces[{index}]"
         if not isinstance(surface, dict):
@@ -1421,7 +1815,6 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
         disposition = _require_str(surface, "disposition", context)
         if disposition not in DISPOSITIONS:
             raise ContractError(f"{context}.disposition: unsupported disposition: {disposition}")
-        has_needs_follow_up = has_needs_follow_up or disposition == "needs_follow_up"
         receipt_refs = surface.get("receiptRefs", [])
         if not isinstance(receipt_refs, list):
             raise ContractError(f"{context}.receiptRefs: expected an array")
@@ -1442,8 +1835,10 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
     for field in ("explicitExclusions", "deferred"):
         if not isinstance(coverage.get(field, []), list):
             raise ContractError(f"coverage.{field}: expected an array")
-    if completeness == "complete" and (has_needs_follow_up or coverage.get("deferred")):
-        raise ContractError("coverage.completeness: complete coverage cannot have deferred work")
+    for index, deferred in enumerate(coverage.get("deferred", [])):
+        if isinstance(deferred, dict):
+            _validate_deferred_paths(deferred, f"coverage.deferred[{index}]")
+    _validate_resolved_deferred(coverage)
     _require_safe_json_value(coverage, "coverage.json")
 
 
@@ -1490,7 +1885,7 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
         artifact_collision_keys.add(collision_key)
         _require_str(artifact, "sha256", context)
         _require_str(artifact, "mediaType", context)
-    for required_path in ("findings.json", "coverage.json"):
+    for required_path in ("findings.json", *(["coverage.json"] if "coverageRef" in scan else [])):
         if required_path not in artifact_paths:
             raise ContractError(
                 f"manifest.scan.artifacts: missing required artifact: {required_path}"
@@ -1522,16 +1917,22 @@ def _validate_findings(manifest: dict[str, Any], findings: dict[str, Any]) -> No
     _require_safe_json_value(findings, "findings.json")
 
 
+_SCHEMA_TYPES = {
+    "array": list,
+    "boolean": bool,
+    "integer": int,
+    "number": (int, float),
+    "object": dict,
+    "string": str,
+}
+
+
 def _schema_type_matches(value: Any, expected: str) -> bool:
-    return {
-        "array": isinstance(value, list),
-        "boolean": isinstance(value, bool),
-        "integer": isinstance(value, int) and not isinstance(value, bool),
-        "number": isinstance(value, (int, float)) and not isinstance(value, bool),
-        "object": isinstance(value, dict),
-        "string": isinstance(value, str),
-        "null": value is None,
-    }[expected]
+    if expected == "null":
+        return value is None
+    return isinstance(value, _SCHEMA_TYPES[expected]) and (
+        expected not in ("integer", "number") or not isinstance(value, bool)
+    )
 
 
 def _schema_values_equal(left: Any, right: Any) -> bool:
@@ -1574,6 +1975,21 @@ def _resolve_schema_reference(
     return target
 
 
+def _matches_sealed_path_exclusion(value: str, one_of: Any) -> bool:
+    # The empty alternative always matches, so a path must not match the second one.
+    if not isinstance(one_of, list) or len(one_of) != 2 or one_of[0] != {}:
+        return False
+    excluded = one_of[1]
+    return (
+        isinstance(excluded, dict)
+        and excluded.keys() == {"$comment", "type", "pattern"}
+        and excluded["$comment"] == "invalidSealedDeferredPath"
+        and excluded["type"] == "string"
+        and isinstance(excluded["pattern"], str)
+        and re.search(excluded["pattern"], value) is not None
+    )
+
+
 def _validate_schema_node(
     value: Any,
     schema: dict[str, Any],
@@ -1581,6 +1997,17 @@ def _validate_schema_node(
     root_schema: dict[str, Any] | None = None,
 ) -> None:
     root_schema = schema if root_schema is None else root_schema
+    alternatives = schema.get("anyOf")
+    if isinstance(alternatives, list):
+        errors = []
+        for alternative in alternatives:
+            try:
+                _validate_schema_node(value, alternative, context, root_schema)
+                break
+            except ContractError as exc:
+                errors.append(str(exc))
+        else:
+            raise ContractError(f"{context}: no schema alternative matched: {'; '.join(errors)}")
     reference = schema.get("$ref")
     if reference is not None:
         if not isinstance(reference, str):
@@ -1591,6 +2018,8 @@ def _validate_schema_node(
             context,
             root_schema,
         )
+        if len(schema) == 1:
+            return
     expected = schema.get("type")
     if isinstance(expected, list):
         if not any(_schema_type_matches(value, item) for item in expected):
@@ -1606,8 +2035,12 @@ def _validate_schema_node(
     if isinstance(value, str):
         if schema.get("minLength", 0) and len(value) < schema["minLength"]:
             raise ContractError(f"{context}: string is too short")
-        if "pattern" in schema and not re.fullmatch(schema["pattern"], value):
+        if "maxLength" in schema and len(value) > schema["maxLength"]:
+            raise ContractError(f"{context}: string is too long")
+        if "pattern" in schema and not re.search(schema["pattern"], value):
             raise ContractError(f"{context}: string does not match schema pattern")
+        if _matches_sealed_path_exclusion(value, schema.get("oneOf")):
+            raise ContractError(f"{context}: string matches excluded schema pattern")
         if schema.get("format") == "date-time":
             _validate_date_time(value, context)
     if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -1664,6 +2097,8 @@ def _validate_schema_node(
         additional_properties = schema.get("additionalProperties", True)
         for key, item in value.items():
             item_schema = properties.get(key)
+            if item_schema is False:
+                raise ContractError(f"{context}.{key}: unexpected schema property")
             if isinstance(item_schema, dict):
                 _validate_schema_node(item, item_schema, f"{context}.{key}", root_schema)
             elif additional_properties is False:
@@ -1680,6 +2115,38 @@ def _validate_schema_node(
 def validate_against_schema(payload: dict[str, Any], schema_path: Path) -> None:
     schema = _read_json(schema_path)
     _validate_schema_node(payload, schema, schema_path.stem, schema)
+
+
+def _validate_current_findings(findings: dict[str, Any], schema_dir: Path) -> None:
+    """Use the model's current finding contract for new completed results."""
+
+    draft = _read_json(schema_dir / "tools" / "scan-draft.schema.json")
+    common = _read_json(schema_dir / "definitions" / "artifact-common.schema.json")
+    documents = {document["$id"]: document for document in (draft, common)}
+
+    def resolve(node: Any) -> Any:
+        if isinstance(node, list):
+            return [resolve(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+        resolved = {key: resolve(value) for key, value in node.items() if key != "$ref"}
+        if "$ref" in node:
+            document_id, fragment = node["$ref"].split("#", 1)
+            referenced = _resolve_schema_reference(
+                documents[document_id], f"#{fragment}", "finding schema"
+            )
+            resolved = {**resolve(referenced), **resolved}
+        return resolved
+
+    finding_schema = resolve(draft["$defs"]["finding"])
+    for index, finding in enumerate(findings["findings"]):
+        # These fields belong to the host, not the authored finding contract.
+        authored = {
+            key: value
+            for key, value in finding.items()
+            if key not in {"findingId", "occurrenceId", "fingerprints"}
+        }
+        _validate_schema_node(authored, finding_schema, f"findings.findings[{index}]")
 
 
 def _filter_unknown_legacy_evidence_refs(section: dict[str, Any], evidence_ids: set[str]) -> None:
@@ -1726,7 +2193,7 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
             continue
         canonical_evidence = finding.get("codeEvidence")
         canonical_evidence = canonical_evidence if isinstance(canonical_evidence, list) else []
-        canonical_evidence_ids = {
+        evidence_ids = {
             evidence["id"]
             for evidence in canonical_evidence
             if isinstance(evidence, dict) and isinstance(evidence.get("id"), str) and evidence["id"]
@@ -1734,7 +2201,6 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
         legacy_evidence = finding.get("code_evidence")
         if isinstance(legacy_evidence, list):
             compatible_legacy_evidence = []
-            seen_evidence_ids = set(canonical_evidence_ids)
             for evidence in legacy_evidence:
                 if not isinstance(evidence, dict):
                     continue
@@ -1747,22 +2213,13 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
                     or not evidence_code.strip()
                 ):
                     continue
-                if evidence_id in seen_evidence_ids:
+                if evidence_id in evidence_ids:
                     continue
-                seen_evidence_ids.add(evidence_id)
+                evidence_ids.add(evidence_id)
                 compatible_legacy_evidence.append(evidence)
             finding["code_evidence"] = compatible_legacy_evidence
         elif "code_evidence" in finding:
             finding.pop("code_evidence")
-        compatible_legacy_evidence = finding.get("code_evidence")
-        compatible_legacy_evidence = (
-            compatible_legacy_evidence if isinstance(compatible_legacy_evidence, list) else []
-        )
-        evidence_ids = canonical_evidence_ids | {
-            evidence["id"]
-            for evidence in compatible_legacy_evidence
-            if isinstance(evidence, dict) and isinstance(evidence.get("id"), str) and evidence["id"]
-        }
         for section_name, list_fields in (
             ("rootCause", ("evidenceRefs", "evidence_refs")),
             ("root_cause", ("evidenceRefs", "evidence_refs")),
@@ -1817,29 +2274,20 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
             continue
         _remove_unsupported_legacy_scalar_fields(attack_path, ("summary",))
         for field in ("dataFlow", "data_flow", "dataflow", "reachability"):
-            if field not in attack_path:
-                continue
             detail = attack_path.get(field)
-            if detail is None:
-                attack_path.pop(field)
-                continue
-            if not isinstance(detail, (str, dict)):
-                attack_path.pop(field)
-                continue
-            if isinstance(detail, str):
-                if detail == "":
-                    attack_path.pop(field)
-                continue
-            detail_scalar_fields = ("summary", "source", "sink", "outcome")
-            if field == "reachability":
-                detail_scalar_fields += ("attacker", "entrypoint")
-            _remove_unsupported_legacy_scalar_fields(detail, detail_scalar_fields)
-            _normalize_legacy_string_list_fields(
-                detail, ("evidenceRefs", "evidence_refs", "transformations")
-            )
-            _filter_unknown_legacy_evidence_refs(detail, evidence_ids)
-            if field == "reachability":
-                _normalize_legacy_string_list_fields(detail, ("preconditions",))
+            if isinstance(detail, dict):
+                detail_scalar_fields = ("summary", "source", "sink", "outcome")
+                if field == "reachability":
+                    detail_scalar_fields += ("attacker", "entrypoint")
+                _remove_unsupported_legacy_scalar_fields(detail, detail_scalar_fields)
+                _normalize_legacy_string_list_fields(
+                    detail, ("evidenceRefs", "evidence_refs", "transformations")
+                )
+                _filter_unknown_legacy_evidence_refs(detail, evidence_ids)
+                if field == "reachability":
+                    _normalize_legacy_string_list_fields(detail, ("preconditions",))
+            elif not isinstance(detail, str) or detail == "":
+                attack_path.pop(field, None)
         for field in ("impact", "likelihood"):
             detail = attack_path.get(field)
             if isinstance(detail, dict):
@@ -1861,6 +2309,9 @@ def _validate_canonical_schemas_before_projection(
         {"path": "findings.json", "sha256": "0" * 64, "mediaType": "application/json"},
         {"path": "coverage.json", "sha256": "0" * 64, "mediaType": "application/json"},
     ]
+    if "coverageRef" not in provisional_scan:
+        provisional_scan["mode"] = coverage["mode"]
+        provisional_scan["review"] = review_summary(coverage)
     validate_against_schema(provisional_manifest, schema_dir / "scan-manifest.schema.json")
     validate_against_schema(findings, schema_dir / "findings.schema.json")
     validate_against_schema(coverage, schema_dir / "coverage.schema.json")
@@ -1871,6 +2322,8 @@ def _validate_contract_refs(scan: dict[str, Any]) -> None:
         ("coverageRef", "coverage.json"),
         ("findingsRef", "findings.json"),
     ):
+        if field == "coverageRef" and field not in scan:
+            continue
         actual = _require_str(scan, field, "manifest.scan")
         if actual != expected:
             raise ContractError(f"manifest.scan.{field}: expected {expected!r}")
@@ -1890,8 +2343,8 @@ def _sarif_rule(rule_id: str, findings: list[dict[str, Any]]) -> dict[str, Any]:
     tags = {"security", *categories}
     for cwe in cwes:
         match = re.fullmatch(r"CWE-([0-9]+)", cwe, re.IGNORECASE)
-        if match and int(match[1]) > 0:
-            tags.add(f"external/cwe/cwe-{int(match[1]):03d}")
+        if match and (digits := match[1].lstrip("0")):
+            tags.add(f"external/cwe/cwe-{digits.zfill(3)}")
     description = f"{name}. Categories: {', '.join(map(_sarif_label, categories))}."
     if cwes:
         description += f" Weaknesses: {', '.join(cwes)}."
@@ -1935,12 +2388,6 @@ def _sarif_finding_message(finding: dict[str, Any]) -> str:
         if finding.get(key):
             details.append(f"{label}:\n" + "\n".join(f"- {item}" for item in finding[key]))
     return "\n\n".join(details)
-
-
-def _utf16_code_units(value: str) -> Iterator[int]:
-    encoded = value.encode("utf-16-le")
-    for index in range(0, len(encoded), 2):
-        yield int.from_bytes(encoded[index : index + 2], "little")
 
 
 def _github_line_hashes(
@@ -1995,7 +2442,7 @@ def _github_line_hashes(
         update_hash(current)
 
     while chunk := handle.read(SOURCE_READ_CHUNK_SIZE):
-        for code_unit in _utf16_code_units(chunk):
+        for (code_unit,) in struct.iter_unpack("<H", chunk.encode("utf-16-le")):
             process_character(code_unit)
     process_character(GITHUB_HASH_EOF)
     for _ in range(GITHUB_HASH_BLOCK_SIZE):
@@ -2009,7 +2456,7 @@ def _open_source_file(source_root: Path, relative_path: str) -> TextIO | None:
     file_fd: int | None = None
     try:
         file_fd = open_scan_local_file_descriptor(
-            source_root, relative_path, f"source file {relative_path}"
+            source_root, relative_path, f"source file {relative_path}", portable=False
         )
         handle = os.fdopen(file_fd, "r", encoding="utf-8", errors="replace")
         file_fd = None
@@ -2134,37 +2581,12 @@ def _sarif_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
     unique: dict[tuple[str, int, int], dict[str, Any]] = {}
     for location in locations:
         key = (
-            location["path"],
+            PurePosixPath(location["path"]).as_posix(),
             location["startLine"],
             location.get("endLine", location["startLine"]),
         )
         unique.setdefault(key, location)
     return list(unique.values())
-
-
-def _github_primary_location_line_hash(
-    finding: dict[str, Any],
-    source_root: Path | None,
-    line_hash_cache: dict[tuple[Path, int], str | None] | None = None,
-) -> str | None:
-    if source_root is None:
-        return None
-    primary_location = _sarif_primary_location(finding)
-    try:
-        source_root = source_root.resolve(strict=True)
-    except (OSError, RuntimeError):
-        return None
-    relative_path = _require_safe_relative_path(primary_location["path"], "SARIF source location")
-    source_path = source_root / relative_path
-    start_line = primary_location["startLine"]
-    cache_key = (source_path, start_line)
-    if line_hash_cache is not None and cache_key in line_hash_cache:
-        return line_hash_cache[cache_key]
-    line_hashes = _github_line_hashes_for_source(source_root, relative_path, {start_line})
-    line_hash = None if line_hashes is None else line_hashes.get(start_line)
-    if line_hash_cache is not None:
-        line_hash_cache[cache_key] = line_hash
-    return line_hash
 
 
 def _github_line_hash_cache(
@@ -2186,7 +2608,7 @@ def _github_line_hash_cache(
     line_hash_cache: dict[tuple[Path, int], str | None] = {}
     for relative_path, requested_lines in requested_lines_by_path.items():
         line_hashes = _github_line_hashes_for_source(source_root, relative_path, requested_lines)
-        source_path = source_root / relative_path
+        source_path = Path(relative_path)
         for line_number in requested_lines:
             line_hash_cache[(source_path, line_number)] = (
                 None if line_hashes is None else line_hashes.get(line_number)
@@ -2194,7 +2616,7 @@ def _github_line_hash_cache(
     return line_hash_cache
 
 
-def _sarif_location(location: dict[str, Any], location_id: int | None = None) -> dict[str, Any]:
+def _sarif_location(location: dict[str, Any]) -> dict[str, Any]:
     sarif_location: dict[str, Any] = {
         "physicalLocation": {
             "artifactLocation": {
@@ -2206,8 +2628,6 @@ def _sarif_location(location: dict[str, Any], location_id: int | None = None) ->
             },
         }
     }
-    if location_id is not None:
-        sarif_location["id"] = location_id
     if location.get("role"):
         sarif_location["message"] = {"text": location["role"]}
     return sarif_location
@@ -2216,7 +2636,6 @@ def _sarif_location(location: dict[str, Any], location_id: int | None = None) ->
 def _sarif_result(
     finding: dict[str, Any],
     rule_index: int,
-    source_root: Path | None = None,
     line_hash_cache: dict[tuple[Path, int], str | None] | None = None,
 ) -> dict[str, Any]:
     properties = {
@@ -2233,10 +2652,11 @@ def _sarif_result(
     partial_fingerprints = {
         "codexSecurity/v1": finding["fingerprints"]["primary"],
     }
-    line_hash = _github_primary_location_line_hash(finding, source_root, line_hash_cache)
+    primary = _sarif_primary_location(finding)
+    line_hash = (line_hash_cache or {}).get((Path(primary["path"]), primary["startLine"]))
     if line_hash is not None:
         partial_fingerprints["primaryLocationLineHash"] = line_hash
-    result = {
+    return {
         "ruleId": finding["ruleId"],
         "ruleIndex": rule_index,
         "level": SARIF_LEVELS[finding["severity"]["level"]],
@@ -2245,7 +2665,6 @@ def _sarif_result(
         "partialFingerprints": partial_fingerprints,
         "properties": properties,
     }
-    return result
 
 
 def build_sarif(
@@ -2272,7 +2691,7 @@ def build_sarif(
         },
         "automationDetails": {"id": scan["id"]},
         "results": [
-            _sarif_result(finding, rule_index[finding["ruleId"]], source_root, line_hash_cache)
+            _sarif_result(finding, rule_index[finding["ruleId"]], line_hash_cache)
             for finding in ordered_findings
         ],
         "properties": {
@@ -2294,23 +2713,6 @@ def build_sarif(
     }
 
 
-def _validate_sarif(sarif: dict[str, Any]) -> None:
-    if sarif.get("version") != "2.1.0":
-        raise ContractError("SARIF: expected version 2.1.0")
-    runs = sarif.get("runs")
-    if not isinstance(runs, list) or len(runs) != 1:
-        raise ContractError("SARIF: expected exactly one run")
-    run = runs[0]
-    if not isinstance(run, dict):
-        raise ContractError("SARIF: expected a run object")
-    rule_ids = [rule["id"] for rule in run["tool"]["driver"]["rules"]]
-    for result in run["results"]:
-        if result["ruleId"] not in rule_ids:
-            raise ContractError("SARIF: result references an unknown rule")
-        if not result.get("partialFingerprints"):
-            raise ContractError("SARIF: result is missing partialFingerprints")
-
-
 def _artifact_record(
     scan_dir: Path, relative_path: str, media_type: str, contents: bytes | None = None
 ) -> dict[str, str]:
@@ -2321,16 +2723,30 @@ def _artifact_record(
         "mediaType": media_type,
         "path": relative_path,
         "sha256": (
-            _sha256_bytes(contents)
+            hashlib.sha256(contents).hexdigest()
             if contents is not None
             else _sha256_scan_local_file(scan_dir, relative_path, relative_path)
         ),
     }
 
 
-def _coverage_receipt_refs(coverage: dict[str, Any]) -> list[str]:
-    refs = {ref for surface in coverage["surfaces"] for ref in surface.get("receiptRefs", [])}
-    return sorted(refs)
+def _supplementary_artifact_refs(scan: dict[str, Any], coverage: dict[str, Any]) -> dict[str, str]:
+    refs = {
+        ref: "coverage receipt"
+        for surface in coverage["surfaces"]
+        for ref in surface.get("receiptRefs", [])
+    }
+    extensions = scan.get("extensions")
+    imported = extensions.get("import") if isinstance(extensions, dict) else None
+    if isinstance(imported, dict) and "sourceRef" in imported:
+        context = "manifest.scan.extensions.import"
+        ref = _require_portable_relative_path(
+            _require_str(imported, "sourceRef", context), f"{context}.sourceRef"
+        )
+        if not ref.startswith("artifacts/"):
+            raise ContractError(f"{context}.sourceRef: expected a file under artifacts/")
+        refs.setdefault(ref, "import source")
+    return {ref: refs[ref] for ref in sorted(refs)}
 
 
 def _validate_sealed_coverage_receipts(scan: dict[str, Any], coverage: dict[str, Any]) -> None:
@@ -2338,9 +2754,9 @@ def _validate_sealed_coverage_receipts(scan: dict[str, Any], coverage: dict[str,
         _require_portable_relative_path(artifact["path"], "sealed artifact path")
         for artifact in scan["artifacts"]
     }
-    for ref in _coverage_receipt_refs(coverage):
+    for ref, context in _supplementary_artifact_refs(scan, coverage).items():
         if ref not in artifact_paths:
-            raise ContractError(f"coverage receipt is missing from sealed artifacts: {ref}")
+            raise ContractError(f"{context} is missing from sealed artifacts: {ref}")
 
 
 def _validate_existing_seal(
@@ -2357,7 +2773,6 @@ def _validate_existing_seal(
         raise ContractError("manifest.scan.sealedAt: must match completedAt")
     if not isinstance(artifacts, list) or not artifacts:
         raise ContractError("manifest.scan.artifacts: sealed manifest requires artifact records")
-    artifact_paths: set[str] = set()
     artifact_collision_keys: set[str] = set()
     for index, artifact in enumerate(artifacts):
         context = f"manifest.scan.artifacts[{index}]"
@@ -2369,17 +2784,34 @@ def _validate_existing_seal(
         collision_key = path.lower()
         if collision_key in artifact_collision_keys:
             raise ContractError(f"{context}.path: duplicate artifact path")
-        artifact_paths.add(path)
         artifact_collision_keys.add(collision_key)
         expected_sha256 = _require_str(artifact, "sha256", context)
         contents = (artifact_contents or {}).get(path)
         actual_sha256 = (
-            _sha256_bytes(contents)
+            hashlib.sha256(contents).hexdigest()
             if contents is not None
             else _sha256_scan_local_file(scan_dir, path, context)
         )
         if actual_sha256 != expected_sha256:
             raise ContractError(f"{context}: sealed artifact changed or is missing")
+
+
+def _read_sealed_artifacts(
+    scan_dir: Path, scan: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any], bytes]:
+    findings, findings_bytes = _read_scan_local_json_bytes(
+        scan_dir, scan["findingsRef"], scan["findingsRef"]
+    )
+    contents = {scan["findingsRef"]: findings_bytes}
+    if "coverageRef" in scan:
+        coverage, coverage_bytes = _read_scan_local_json_bytes(
+            scan_dir, scan["coverageRef"], scan["coverageRef"]
+        )
+        contents[scan["coverageRef"]] = coverage_bytes
+    else:
+        coverage = review_state(scan)
+    _validate_existing_seal(scan_dir, scan, artifact_contents=contents)
+    return findings, coverage, findings_bytes
 
 
 def _read_sealed_scan(
@@ -2392,20 +2824,7 @@ def _read_sealed_scan(
     _validate_contract_refs(scan)
     if scan.get("sealedAt") is None or scan.get("artifacts") is None:
         raise ContractError(f"manifest.scan: {required_for} requires a sealed scan")
-    findings, findings_bytes = _read_scan_local_json_bytes(
-        scan_dir, scan["findingsRef"], scan["findingsRef"]
-    )
-    coverage, coverage_bytes = _read_scan_local_json_bytes(
-        scan_dir, scan["coverageRef"], scan["coverageRef"]
-    )
-    _validate_existing_seal(
-        scan_dir,
-        scan,
-        artifact_contents={
-            scan["findingsRef"]: findings_bytes,
-            scan["coverageRef"]: coverage_bytes,
-        },
-    )
+    findings, coverage, findings_bytes = _read_sealed_artifacts(scan_dir, scan)
     _validate_manifest(manifest)
     findings_for_validation = _legacy_sealed_findings_for_validation(findings)
     _validate_findings(manifest, findings_for_validation)
@@ -2432,19 +2851,20 @@ def build_sarif_projection(
     manifest, findings, coverage, _ = _read_sealed_scan(scan_dir, schema_dir, "SARIF projection")
     sarif = build_sarif(manifest, findings, source_root)
     execution_successful = manifest["scan"]["status"] == "completed"
-    if not execution_successful or coverage["completeness"] != "complete":
+    messages = [item["reason"] for item in coverage["deferred"]]
+    for warning in manifest["scan"].get("warnings", []):
+        if warning not in messages:
+            messages.append(warning)
+    if not execution_successful or messages:
         run = sarif["runs"][0]
-        run["properties"]["codexSecurityCoverageCompleteness"] = coverage["completeness"]
         run["invocations"] = [
             {
                 "executionSuccessful": execution_successful,
                 "toolExecutionNotifications": [
-                    {"level": "warning", "message": {"text": item["reason"]}}
-                    for item in coverage["deferred"]
+                    {"level": "warning", "message": {"text": message}} for message in messages
                 ],
             }
         ]
-    _validate_sarif(sarif)
     return sarif
 
 
@@ -2452,29 +2872,35 @@ def write_sarif_projection(
     scan_dir: Path, source_root: Path | None = None, schema_dir: Path | None = None
 ) -> None:
     sarif = build_sarif_projection(scan_dir, source_root, schema_dir)
-    _write_scan_local_json(scan_dir, "exports/results.sarif", sarif)
-
-
-def write_sarif_output(scan_dir: Path, output: Path, sarif: dict[str, Any]) -> None:
-    write_export_output(scan_dir, output, "sarif", _json_bytes(sarif))
+    relative_path = EXPORT_PATHS["sarif"]
+    write_export_output(
+        scan_dir, scan_dir / relative_path, "sarif", _contract_json_bytes(relative_path, sarif)
+    )
 
 
 def csv_cell(value: Any) -> Any:
     if isinstance(value, str) and (
-        value.startswith(("\t", "\r", "\n"))
+        value.startswith(("'", "\t", "\r", "\n"))
         or value.lstrip().startswith(("=", "+", "-", "@", "＝", "＋", "－", "＠"))
     ):
         return f"'{value}"
     return value
 
 
+def _has_identity_text(value: Any) -> bool:
+    # Match JavaScript String.trim when selecting optional identity metadata.
+    return isinstance(value, str) and bool(
+        value.strip(
+            "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680"
+            "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+            "\u2028\u2029\u202f\u205f\u3000\ufeff"
+        )
+    )
+
+
 def finding_candidate_id(finding: dict[str, Any]) -> str | None:
     provenance = finding.get("provenance")
-    if (
-        isinstance(provenance, dict)
-        and isinstance(value := provenance.get("candidateId"), str)
-        and value.strip()
-    ):
+    if isinstance(provenance, dict) and _has_identity_text(value := provenance.get("candidateId")):
         return value
     extensions = finding.get("extensions")
     if not isinstance(extensions, dict):
@@ -2483,56 +2909,60 @@ def finding_candidate_id(finding: dict[str, Any]) -> str | None:
         (
             value
             for field in ("candidateId", "reportId", "ledgerRowId")
-            if isinstance(value := extensions.get(field), str) and value.strip()
+            if _has_identity_text(value := extensions.get(field))
         ),
         None,
+    )
+
+
+def _csv_candidate_id(finding: dict[str, Any]) -> str | None:
+    candidate_id = finding_candidate_id(finding)
+    if candidate_id is not None:
+        return candidate_id
+    # Preserve literal CSV metadata, such as FEFF, that is not a canonical identity.
+    for metadata, fields in (
+        (finding.get("provenance"), ("candidateId",)),
+        (finding.get("extensions"), ("candidateId", "reportId", "ledgerRowId")),
+    ):
+        if isinstance(metadata, dict):
+            for field in fields:
+                value = metadata.get(field)
+                if isinstance(value, str) and value.strip():
+                    return value
+    return None
+
+
+def finding_csv_columns(deep_scan: bool) -> tuple[str, ...]:
+    return (
+        "occurrence_id",
+        "finding_id",
+        *(("candidate_id",) if deep_scan else ()),
+        "title",
+        "summary",
+        "severity",
+        "confidence",
+        "status",
+        "close_reason",
+        "note",
+        "remediation",
+        "path",
+        "start_line",
+        "end_line",
     )
 
 
 def build_csv_projection(findings: dict[str, Any], coverage: dict[str, Any]) -> bytes:
     output = io.StringIO(newline="")
     writer = csv.writer(output)
-    deep_scan = coverage.get("mode") == "deep_repository" or (
-        coverage.get("mode") == "scoped_path"
-        and any(
-            isinstance(finding.get("extensions"), dict)
-            and any(
-                isinstance(finding["extensions"].get(field), str)
-                and finding["extensions"][field].strip()
-                for field in ("candidateId", "reportId")
-            )
-            for finding in findings["findings"]
-        )
-    )
-    writer.writerow(
-        (
-            "occurrence_id",
-            "finding_id",
-            *(("candidate_id",) if deep_scan else ()),
-            "title",
-            "summary",
-            "severity",
-            "confidence",
-            "status",
-            "close_reason",
-            "note",
-            "remediation",
-            "path",
-            "start_line",
-            "end_line",
-        )
-    )
+    deep_scan = report_projection.uses_deep_presentation(coverage, findings["findings"])
+    writer.writerow(finding_csv_columns(deep_scan))
     for finding in findings["findings"]:
-        locations = finding["locations"]
-        location = next(
-            (candidate for candidate in locations if candidate.get("role") == "root_control"),
-            locations[0],
-        )
+        location = _sarif_primary_location(finding)
         writer.writerow(
             (
                 csv_cell(finding["occurrenceId"]),
                 csv_cell(finding["findingId"]),
-                *((csv_cell(finding_candidate_id(finding)),) if deep_scan else ()),
+                *((csv_cell(_csv_candidate_id(finding)),) if deep_scan else ()),
                 csv_cell(finding["title"]),
                 csv_cell(finding["summary"]),
                 csv_cell(finding["severity"]["level"]),
@@ -2549,11 +2979,21 @@ def build_csv_projection(findings: dict[str, Any], coverage: dict[str, Any]) -> 
     return output.getvalue().encode("utf-8")
 
 
+def _avit_fields(finding: dict[str, Any]) -> dict[str, str]:
+    attack_path = dict(finding.get("attackPath") or {})
+    _normalize_legacy_string_list_fields(attack_path, ("steps",))
+    steps = "\n".join(attack_path.get("steps", []))
+    return servicenow_avit.finding_fields(
+        finding, _sarif_primary_location(finding), csv_cell(steps)
+    )
+
+
 def build_findings_export(
     scan_dir: Path,
     export_format: str,
     source_root: Path | None = None,
     schema_dir: Path | None = None,
+    avit_template: Path | None = None,
 ) -> bytes:
     if export_format not in EXPORT_PATHS:
         raise ContractError(f"unsupported export format: {export_format}")
@@ -2566,11 +3006,43 @@ def build_findings_export(
     )
     if export_format == "json":
         return findings_bytes
+    if export_format == "servicenow-avit":
+        if avit_template is None:
+            raise ContractError("--export-format servicenow-avit requires --avit-template")
+        try:
+            return servicenow_avit.render(avit_template, map(_avit_fields, findings["findings"]))
+        except ValueError as exc:
+            raise ContractError(str(exc)) from exc
     return build_csv_projection(findings, coverage)
 
 
+def _is_sealed_artifact(scan_dir: Path, relative_output: str, artifact_paths: list[str]) -> bool:
+    try:
+        output_metadata = (scan_dir / relative_output).stat(follow_symlinks=False)
+    except FileNotFoundError:
+        output_metadata = None
+    except OSError as exc:
+        raise ContractError(f"{relative_output}: unable to inspect export output") from exc
+    for artifact_path in artifact_paths:
+        if artifact_path == relative_output:
+            return True
+        if output_metadata is None:
+            continue
+        descriptor = open_scan_local_file_descriptor(
+            scan_dir, artifact_path, f"sealed artifact {artifact_path}"
+        )
+        try:
+            artifact_metadata = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        if os.path.samestat(output_metadata, artifact_metadata):
+            return True
+    return False
+
+
 def write_export_output(scan_dir: Path, output: Path, export_format: str, contents: bytes) -> None:
-    if export_format not in EXPORT_PATHS:
+    output_paths = {**EXPORT_PATHS, "md": THREAT_MODEL_EXPORT_PATH}
+    if export_format not in output_paths:
         raise ContractError(f"unsupported export format: {export_format}")
     scan_dir = _require_scan_directory(scan_dir)
     output = Path(os.path.abspath(output))
@@ -2594,13 +3066,22 @@ def write_export_output(scan_dir: Path, output: Path, export_format: str, conten
                 relative_output = output.relative_to(ancestor).as_posix()
                 break
         else:
-            write_scan_local_bytes(output.parent, output.name, contents, external_name=True)
+            write_scan_local_bytes(
+                output.parent,
+                output.name,
+                contents,
+                external_name=True,
+                owner_read_write=export_format == "md",
+            )
             return
-    if relative_output != EXPORT_PATHS[export_format]:
+    if relative_output != output_paths[export_format]:
         raise ContractError(f"{export_format.upper()} output path cannot overwrite a scan artifact")
-    manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "scan-manifest.json")
-    scan = _require_dict(manifest, "scan", "manifest")
-    artifacts = _require_list(scan, "artifacts", "manifest.scan")
+    if (scan_dir / "scan-manifest.json").exists():
+        manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "scan-manifest.json")
+        scan = _require_dict(manifest, "scan", "manifest")
+        artifacts = scan.get("artifacts", [])
+    else:
+        artifacts = []
     artifact_paths = [
         _require_portable_relative_path(
             _require_str(artifact, "path", f"manifest.scan.artifacts[{index}]"),
@@ -2609,38 +3090,25 @@ def write_export_output(scan_dir: Path, output: Path, export_format: str, conten
         for index, artifact in enumerate(artifacts)
         if isinstance(artifact, dict)
     ]
-    try:
-        output_metadata = output.stat(follow_symlinks=False)
-    except FileNotFoundError:
-        output_metadata = None
-    except OSError as exc:
-        raise ContractError(f"{relative_output}: unable to inspect export output") from exc
-    for artifact_path in artifact_paths:
-        if artifact_path == relative_output:
-            raise ContractError(
-                f"{export_format.upper()} output path cannot overwrite a sealed scan artifact"
-            )
-        if output_metadata is None:
-            continue
-        descriptor = open_scan_local_file_descriptor(
-            scan_dir, artifact_path, f"sealed artifact {artifact_path}"
+    if _is_sealed_artifact(scan_dir, relative_output, artifact_paths):
+        raise SealedArtifactError(
+            f"{export_format.upper()} output path cannot overwrite a sealed scan artifact"
         )
-        try:
-            artifact_metadata = os.fstat(descriptor)
-        finally:
-            os.close(descriptor)
-        if os.path.samestat(output_metadata, artifact_metadata):
-            raise ContractError(
-                f"{export_format.upper()} output path cannot overwrite a sealed scan artifact"
-            )
-    write_scan_local_bytes(scan_dir, relative_output, contents)
+    write_scan_local_bytes(
+        scan_dir, relative_output, contents, owner_read_write=export_format == "md"
+    )
 
 
 def _write_sarif_projection_if_possible(
-    scan_dir: Path, source_root: Path | None = None, schema_dir: Path | None = None
+    scan_dir: Path,
+    source_root: Path | None = None,
+    schema_dir: Path | None = None,
+    *,
+    sealed_paths: list[str],
 ) -> None:
     try:
-        write_sarif_projection(scan_dir, source_root, schema_dir)
+        if not _is_sealed_artifact(scan_dir, "exports/results.sarif", sealed_paths):
+            write_sarif_projection(scan_dir, source_root, schema_dir)
     except (ContractError, OSError) as error:
         print(
             f"codex-security: warning: automatic SARIF export failed: {error}. "
@@ -2649,15 +3117,19 @@ def _write_sarif_projection_if_possible(
         )
 
 
-PreparedScanFinalization = tuple[
-    Path,
-    Path,
-    dict[str, Any],
-    dict[str, Any],
-    dict[str, Any],
-    bool,
-    bytes,
-]
+class PreparedScanFinalization(NamedTuple):
+    scan_dir: Path
+    schema_dir: Path
+    manifest: dict[str, Any]
+    findings: dict[str, Any]
+    coverage: dict[str, Any]
+    was_sealed: bool
+    report_markdown_bytes: bytes
+    warnings: list[str]
+
+
+def manifest_is_sealed(scan: dict[str, Any]) -> bool:
+    return scan.get("sealedAt") is not None or scan.get("artifacts") not in (None, [])
 
 
 def _prepare_scan_finalization(
@@ -2666,11 +3138,14 @@ def _prepare_scan_finalization(
     *,
     expected_coverage_mode: str | None = None,
     completion_binding: dict[str, Any] | None = None,
-    completion_warnings: list[str] | None = None,
+    recover_unsealed: bool = False,
+    allow_missing_writeups: bool = False,
     draft_documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
+    finding_scope: list[tuple[str, bool]] | None = None,
 ) -> PreparedScanFinalization:
-    """Read, populate, and validate a scan without writing any output files."""
+    """Prepare validated documents and warnings without writing any output files."""
 
+    warnings: list[str] = []
     scan_dir = _require_scan_directory(scan_dir)
     schema_dir = schema_dir or Path(__file__).resolve().parent.parent / "schemas"
     manifest = (
@@ -2681,7 +3156,15 @@ def _prepare_scan_finalization(
     scan = _require_dict(manifest, "scan", "manifest")
     if scan.get("sealedAt") is None and scan.get("artifacts") == []:
         del scan["artifacts"]
-    was_sealed = scan.get("sealedAt") is not None or scan.get("artifacts") is not None
+    was_sealed = manifest_is_sealed(scan)
+    if (
+        not was_sealed
+        and "review" not in scan
+        and "reviewState" not in scan
+        and draft_documents is None
+        and (scan_dir / "coverage.json").exists()
+    ):
+        scan["coverageRef"] = "coverage.json"
     if not was_sealed:
         _populate_unsealed_manifest_envelope(manifest, scan, completion_binding)
     _validate_contract_refs(scan)
@@ -2689,18 +3172,23 @@ def _prepare_scan_finalization(
         findings, findings_input_bytes = _read_scan_local_json_bytes(
             scan_dir, scan["findingsRef"], scan["findingsRef"]
         )
-        coverage, coverage_input_bytes = _read_scan_local_json_bytes(
-            scan_dir, scan["coverageRef"], scan["coverageRef"]
-        )
+        if "coverageRef" in scan:
+            coverage, coverage_input_bytes = _read_scan_local_json_bytes(
+                scan_dir, scan["coverageRef"], scan["coverageRef"]
+            )
+        else:
+            coverage = review_state(scan)
+            coverage_input_bytes = _json_bytes(coverage)
     else:
         findings, coverage = copy.deepcopy(draft_documents[1:])
         findings_input_bytes, coverage_input_bytes = _json_bytes(findings), _json_bytes(coverage)
     if not was_sealed:
+        # Preserve legacy sealed bundles, but do not publish a completeness claim.
+        coverage.pop("completeness", None)
         _populate_unsealed_artifact_envelope(manifest, findings, coverage, completion_binding)
-        _normalize_unsealed_deep_repository_inventory_strategy(
-            coverage,
-            expected_coverage_mode=expected_coverage_mode,
-        )
+        # Label whole-repository Deep scans as using the repository inventory.
+        if expected_coverage_mode == "deep_repository":
+            coverage["inventoryStrategy"] = "repository"
         _normalize_unsealed_open_questions(coverage)
 
     if manifest.get("schemaVersion") != SCHEMA_VERSION:
@@ -2722,7 +3210,7 @@ def _prepare_scan_finalization(
         scan,
         artifact_contents={
             scan["findingsRef"]: findings_input_bytes,
-            scan["coverageRef"]: coverage_input_bytes,
+            **({scan["coverageRef"]: coverage_input_bytes} if "coverageRef" in scan else {}),
         },
     )
     scan["sealedAt"] = _require_str(scan, "completedAt", "manifest.scan")
@@ -2731,103 +3219,180 @@ def _prepare_scan_finalization(
     findings_for_validation = (
         _legacy_sealed_findings_for_validation(findings) if was_sealed else findings
     )
-    if was_sealed:
-        _validate_findings(manifest, findings_for_validation)
-        _validate_derived_finding_identities(manifest, findings)
-    elif completion_warnings is not None:
+    discarded_findings: list[str] = []
+    if not was_sealed and scan["status"] == "completed":
+        try:
+            _populate_unsealed_finding_identities(manifest, findings)
+            _validate_findings(manifest, findings)
+            _validate_current_findings(findings, schema_dir)
+        except ContractError as exc:
+            raise RecoverableContractError(
+                "Scan result contains invalid findings; repair the finding records "
+                f"before completion. {exc}"
+            ) from exc
+    elif not was_sealed and recover_unsealed:
         discarded_findings = _recover_unsealed_findings(
-            manifest, findings, schema_dir, scan_dir, completion_warnings
+            manifest, findings, schema_dir, scan_dir, warnings
         )
-        _recover_unsealed_coverage(
-            coverage, schema_dir, scan_dir, completion_warnings, discarded_findings
-        )
-        _recover_unsealed_hardening(manifest, scan_dir, completion_warnings)
-    else:
+    elif not was_sealed:
         _populate_unsealed_finding_identities(manifest, findings)
-    _validate_findings(manifest, findings_for_validation)
+    if not was_sealed and recover_unsealed:
+        _recover_unsealed_coverage(coverage, schema_dir, scan_dir, warnings, discarded_findings)
+        _recover_unsealed_hardening(manifest, scan_dir, warnings)
+    if was_sealed or scan["status"] != "completed":
+        _validate_findings(manifest, findings_for_validation)
+    if was_sealed:
+        _validate_derived_finding_identities(manifest, findings)
     _validate_coverage(manifest, coverage, scan_dir)
     _validate_canonical_schemas_before_projection(
         manifest, findings_for_validation, coverage, schema_dir
     )
-    _require_derived_writeup_files(scan_dir, findings)
     _require_hardening_portfolio_file(scan_dir, scan)
+    if finding_scope is not None:
+        # Accepted worker/reducer files remain immutable; only the new parent
+        # projection is scoped, after the existing validation of every finding.
+        scoped_findings = []
+        excluded_findings = []
+        for finding in findings["findings"]:
+            in_scope = any(
+                PurePosixPath(location["path"]) == PurePosixPath(path)
+                if is_file
+                else path_within_scope(location["path"], path)
+                for location in finding["locations"]
+                for path, is_file in finding_scope
+            )
+            (scoped_findings if in_scope else excluded_findings).append(finding)
+        if was_sealed and len(scoped_findings) != len(findings["findings"]):
+            raise ContractError(
+                "The sealed Deep scan contains findings outside its requested paths; "
+                "start a new scan to produce scoped results."
+            )
+        if not was_sealed:
+            # Excluded findings still require safe writeups, but missing optional
+            # links should only produce warnings for findings in the final report.
+            _prepare_derived_writeups(
+                scan_dir,
+                {"findings": excluded_findings},
+                allow_missing=allow_missing_writeups,
+            )
+            findings["findings"] = scoped_findings
+    warnings.extend(
+        _prepare_derived_writeups(
+            scan_dir,
+            findings,
+            allow_missing=allow_missing_writeups and not was_sealed,
+        )
+    )
     if was_sealed:
         _validate_sealed_coverage_receipts(scan, coverage)
         _validate_manifest(manifest)
         validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
-        validate_against_schema(findings_for_validation, schema_dir / "findings.schema.json")
-        validate_against_schema(coverage, schema_dir / "coverage.schema.json")
         report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
-        _validate_report_output_paths(scan_dir)
-        return (
-            scan_dir,
-            schema_dir,
-            manifest,
-            findings,
-            coverage,
-            was_sealed,
-            report_markdown_bytes,
-        )
-
-    findings_bytes = _contract_json_bytes("findings.json", findings)
-    coverage_bytes = _contract_json_bytes("coverage.json", coverage)
-    report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
-    _validate_report_output_paths(scan_dir)
-    scan["artifacts"] = [
-        _artifact_record(scan_dir, "findings.json", "application/json", findings_bytes),
-        _artifact_record(scan_dir, "coverage.json", "application/json", coverage_bytes),
-        *[
-            _artifact_record(scan_dir, ref, "application/octet-stream")
-            for ref in _coverage_receipt_refs(coverage)
-        ],
-    ]
-    _validate_sealed_coverage_receipts(scan, coverage)
-    _validate_manifest(manifest)
-    validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
-    validate_against_schema(findings_for_validation, schema_dir / "findings.schema.json")
-    validate_against_schema(coverage, schema_dir / "coverage.schema.json")
-    _contract_json_bytes("scan-manifest.json", manifest)
-    return (
-        scan_dir,
-        schema_dir,
-        manifest,
-        findings,
-        coverage,
-        was_sealed,
-        report_markdown_bytes,
+        _validate_scan_local_output_path(scan_dir, scan_dir / "report.md", "report.md")
+    else:
+        findings_bytes = _contract_json_bytes("findings.json", findings)
+        coverage_bytes = _contract_json_bytes("coverage.json", coverage)
+        if "coverageRef" not in scan:
+            scan["mode"] = coverage["mode"]
+            scan["review"] = review_summary(coverage)
+            scan.pop("reviewState", None)
+        report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
+        _validate_scan_local_output_path(scan_dir, scan_dir / "report.md", "report.md")
+        scan["artifacts"] = [
+            _artifact_record(scan_dir, "findings.json", "application/json", findings_bytes),
+            *(
+                [_artifact_record(scan_dir, "coverage.json", "application/json", coverage_bytes)]
+                if "coverageRef" in scan
+                else []
+            ),
+            *[
+                _artifact_record(scan_dir, ref, "application/octet-stream")
+                for ref in _supplementary_artifact_refs(scan, coverage)
+            ],
+        ]
+        _validate_manifest(manifest)
+        validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
+        _contract_json_bytes("scan-manifest.json", manifest)
+    return PreparedScanFinalization(
+        scan_dir=scan_dir,
+        schema_dir=schema_dir,
+        manifest=manifest,
+        findings=findings,
+        coverage=coverage,
+        was_sealed=was_sealed,
+        report_markdown_bytes=report_markdown_bytes,
+        warnings=warnings,
     )
 
 
 def _write_prepared_scan_finalization(
     prepared: PreparedScanFinalization,
     source_root: Path | None = None,
+    *,
+    projection_warnings: list[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Write a previously validated scan finalization result."""
 
-    (
-        scan_dir,
-        schema_dir,
-        manifest,
-        findings,
-        coverage,
-        was_sealed,
-        report_markdown_bytes,
-    ) = prepared
-    scan = _require_dict(manifest, "scan", "manifest")
-    if was_sealed:
-        write_scan_local_bytes(scan_dir, "report.md", report_markdown_bytes)
+    scan_dir = prepared.scan_dir
+    scan = _require_dict(prepared.manifest, "scan", "manifest")
+    if not prepared.was_sealed:
+        # Capture warnings before the first seal; later operation diagnostics must
+        # not change an existing scan's portable results.
+        # Escape surrogate-escaped filesystem bytes for the Unicode JSON contract.
+        warnings = list(
+            dict.fromkeys(
+                warning.encode("utf-8", errors="backslashreplace").decode("utf-8")
+                for warning in [
+                    *scan.get("warnings", []),
+                    *(projection_warnings or []),
+                    *prepared.warnings,
+                ]
+            )
+        )
+        if warnings:
+            scan["warnings"] = warnings
+            validate_against_schema(
+                prepared.manifest, prepared.schema_dir / "scan-manifest.schema.json"
+            )
+        _write_scan_local_json(scan_dir, "findings.json", prepared.findings)
+        if "coverageRef" in scan:
+            _write_scan_local_json(scan_dir, "coverage.json", prepared.coverage)
+        elif "preservedSources" not in scan and not (scan_dir / "checkpoint-head.json").exists():
+            checkpoint = {
+                "scanId": scan["id"],
+                "complete": scan["status"] == "completed",
+                "scope": scan["scope"],
+                "findings": prepared.findings["findings"],
+                "reviewState": checkpoint_review_state(prepared.coverage),
+                **({"threatModel": scan["threatModel"]} if "threatModel" in scan else {}),
+            }
+            contents = _json_bytes(checkpoint)
+            name = hashlib.sha256(contents).hexdigest() + ".json"
+            write_scan_local_bytes(scan_dir, "checkpoints/" + name, contents)
+            _write_scan_local_json(scan_dir, "checkpoint-head.json", {"checkpoint": name})
+    if not prepared.was_sealed and "coverageRef" not in scan:
+        _remove_scan_local_file_if_exists(scan_dir, "coverage.json")
+    sealed_paths = (
+        [artifact["path"] for artifact in scan["artifacts"]] if prepared.was_sealed else []
+    )
+    if not _is_sealed_artifact(scan_dir, "report.md", sealed_paths):
+        write_scan_local_bytes(scan_dir, "report.md", prepared.report_markdown_bytes)
+    if not _is_sealed_artifact(scan_dir, "report.html", sealed_paths):
         _remove_scan_local_file_if_exists(scan_dir, "report.html")
-        _write_sarif_projection_if_possible(scan_dir, source_root, schema_dir)
-        return manifest, findings, coverage
-
-    _write_scan_local_json(scan_dir, "findings.json", findings)
-    _write_scan_local_json(scan_dir, "coverage.json", coverage)
-    write_scan_local_bytes(scan_dir, "report.md", report_markdown_bytes)
-    _remove_scan_local_file_if_exists(scan_dir, "report.html")
-    _write_scan_local_json(scan_dir, "scan-manifest.json", manifest)
-    _validate_existing_seal(scan_dir, scan)
-    _write_sarif_projection_if_possible(scan_dir, source_root, schema_dir)
-    return manifest, findings, coverage
+    if not prepared.was_sealed:
+        _write_scan_local_json(scan_dir, "scan-manifest.json", prepared.manifest)
+        _validate_existing_seal(scan_dir, scan)
+    _write_sarif_projection_if_possible(
+        scan_dir, source_root, prepared.schema_dir, sealed_paths=sealed_paths
+    )
+    warning = write_threat_model_projection_if_possible(scan_dir, prepared.manifest)
+    if (
+        warning is not None
+        and projection_warnings is not None
+        and warning not in projection_warnings
+    ):
+        projection_warnings.append(warning)
+    return prepared.manifest, prepared.findings, prepared.coverage
 
 
 def finalize_scan(
@@ -2837,6 +3402,7 @@ def finalize_scan(
     *,
     expected_coverage_mode: str | None = None,
     completion_binding: dict[str, Any] | None = None,
+    projection_warnings: list[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     prepared = _prepare_scan_finalization(
         scan_dir,
@@ -2844,7 +3410,9 @@ def finalize_scan(
         expected_coverage_mode=expected_coverage_mode,
         completion_binding=completion_binding,
     )
-    return _write_prepared_scan_finalization(prepared, source_root)
+    return _write_prepared_scan_finalization(
+        prepared, source_root, projection_warnings=projection_warnings
+    )
 
 
 def main() -> int:
@@ -2854,30 +3422,78 @@ def main() -> int:
     parser.add_argument("--source-root", type=Path)
     parser.add_argument("--sarif-only", action="store_true")
     parser.add_argument("--sarif-output", type=Path)
-    parser.add_argument("--export-format", choices=sorted(EXPORT_PATHS))
+    parser.add_argument(
+        "--export-artifact", choices=("findings", "threat-model"), default="findings"
+    )
+    parser.add_argument("--export-format", choices=[*sorted(EXPORT_PATHS), "md"])
+    parser.add_argument("--avit-template", type=Path)
     parser.add_argument("--export-output", type=Path)
+    parser.add_argument("--export-metadata", action="store_true")
+    parser.add_argument("--describe-threat-model", action="store_true")
+    parser.add_argument("--write-threat-model", action="store_true")
     args = parser.parse_args()
     try:
+        args.scan_dir = args.scan_dir.resolve()
+        if args.avit_template is not None:
+            if args.export_format != "servicenow-avit":
+                parser.error(
+                    "--avit-template is only supported with --export-format servicenow-avit"
+                )
+            if (
+                args.export_output
+                and args.export_output.exists()
+                and args.avit_template.exists()
+                and args.export_output.samefile(args.avit_template)
+            ):
+                parser.error("AVIT export output cannot overwrite the reusable template")
+        if args.describe_threat_model:
+            sys.stdout.buffer.write(
+                _json_bytes(describe_threat_model(args.scan_dir, args.schema_dir))
+            )
+            return 0
+        if args.write_threat_model:
+            write_threat_model_projection_if_possible(args.scan_dir)
+            return 0
+        if args.export_artifact == "threat-model" and args.export_format is None:
+            args.export_format = "md"
+        if args.export_metadata and (
+            args.export_artifact != "threat-model" or args.export_output is None
+        ):
+            parser.error("--export-metadata requires a threat-model export with --export-output")
         if args.sarif_only and args.export_format is not None:
             parser.error("--sarif-only cannot be combined with --export-format")
         if args.export_output is not None and args.export_format is None:
             parser.error("--export-output requires --export-format")
         if args.sarif_output is not None and not args.sarif_only:
             parser.error("--sarif-output requires --sarif-only")
+        if args.sarif_only:
+            args.export_format, args.export_output = "sarif", args.sarif_output
         if args.export_format is not None:
-            contents = build_findings_export(
-                args.scan_dir, args.export_format, args.source_root, args.schema_dir
-            )
+            if args.export_artifact == "threat-model":
+                if args.export_format != "md":
+                    parser.error("threat-model exports require --export-format md")
+                if args.source_root is not None:
+                    parser.error("source-root is only supported for SARIF exports")
+                saved = _read_saved_threat_model(args.scan_dir, schema_dir=args.schema_dir)
+                if saved is None:
+                    raise ContractError("No saved threat model is available for this result.")
+                description, contents = saved
+            else:
+                contents = build_findings_export(
+                    args.scan_dir,
+                    args.export_format,
+                    args.source_root,
+                    args.schema_dir,
+                    avit_template=args.avit_template,
+                )
             if args.export_output is None:
                 sys.stdout.buffer.write(contents)
             else:
                 write_export_output(args.scan_dir, args.export_output, args.export_format, contents)
-        elif args.sarif_only:
-            sarif = build_sarif_projection(args.scan_dir, args.source_root, args.schema_dir)
-            if args.sarif_output is None:
-                sys.stdout.buffer.write(_json_bytes(sarif))
-            else:
-                write_sarif_output(args.scan_dir, args.sarif_output, sarif)
+                if args.export_metadata:
+                    sys.stdout.buffer.write(
+                        _json_bytes({**description, "path": str(args.export_output.absolute())})
+                    )
         else:
             finalize_scan(args.scan_dir, args.schema_dir, args.source_root)
     except ContractError as exc:

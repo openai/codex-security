@@ -1,28 +1,16 @@
-import {
-  chmod,
-  cp,
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { FindingsDocument } from "../../src/models.js";
-import { PLUGIN_ROOT } from "../plugin-root.js";
+import { copyCompletedScanFixture } from "../plugin-root.js";
+import { temporaryDirectory } from "./temporary-directories.js";
 
 export async function workflowFixture() {
-  const root = await realpath(
-    await mkdtemp(join(tmpdir(), "findings-workflow-")),
-  );
+  const root = await temporaryDirectory("findings-workflow-", true);
   const scanDir = join(root, "scan");
   const repository = join(root, "repository");
   try {
     await mkdir(repository);
-    await cp(join(PLUGIN_ROOT, "examples/completed-scan"), scanDir, {
-      recursive: true,
-    });
+    await copyCompletedScanFixture(scanDir);
     if (process.platform !== "win32") await chmod(scanDir, 0o700);
     const environment = {
       PATH: process.env["PATH"],
