@@ -12,6 +12,25 @@ Model how the authorized software is used and which boundaries protect its asset
 
 Cite inspected repository-relative paths and lines for code-established facts. Inspect generated or bundled implementation as data when it owns the control; use stable symbols when source lines are unavailable. Distinguish code evidence, provided deployment facts, assumptions, and unknowns. Verify cited paths/lines before returning, and stop expanding once the important boundaries and supporting evidence are clear. Represent secret-bearing configuration by its key/reference, location, recipients, and control, never by copying credential values or private context documents.
 
+## Locate Entry Points
+
+During architecture mapping or finding discovery, look for registrations that connect outside input to application code. Select relevant files from the authorized scope and use the supplied inventory when available. For a diff or a pinned revision, search the source supplied for that revision, including the baseline for deleted code.
+
+For current-checkout files, native ripgrep can locate HTTP routes, GraphQL definitions, serverless handlers, message consumers, server bindings and workflow triggers. Invoke the caller's verified native ripgrep executable by its absolute path with `--no-config -nH --no-heading --only-matching` and one `-e` argument per relevant expression below. After `--`, pass one or more in-scope regular files as separate literal path arguments. Use absolute paths or paths prefixed with `./`, retaining spaces and shell metacharacters. Check the resolved locations against the authorized scope and skip links. If a verified ripgrep executable is unavailable, use a trusted host source reader or another verified local search tool on those files.
+
+```text
+\b(app|router)\.(route|get|post|put|patch|delete|all|use)\s*\(\s*["'`]/|\b(HandleFunc|MapGet|MapPost)\s*\(|@(Get|Post|Request)Mapping\b
+\b(ApolloServer|GraphQLSchema|graphqlHTTP)\b|\btype\s+(Query|Mutation|Subscription)\b
+\bexports\.handler\s*=|\bexport\s+(const\s+handler\b|(async\s+)?function\s+handler\b)|\b(AWS::Lambda::Function|aws_lambda_function(_url)?)\b
+@(KafkaListener|RabbitListener|SqsListener)\b|\b(basic_consume|KafkaConsumer|consumer\.subscribe|channel\.consume)\s*\(
+\b(ListenAndServe(TLS)?|createServer|TcpListener::bind|net\.Listen|uvicorn\.run)\s*\(
+^\s*["']?on["']?\s*:
+```
+
+Inspect the surrounding source. Resolve imports, follow the registered handler, and check configuration to see who can reach it. In a workflow, read the actual event block and trace event-controlled values into commands or privileged steps. At a mutation, verify which caller can change which object's fields and whether the authorization check holds when the write occurs. For a queue or function handler, check who can publish an event and which authority the consumer uses.
+
+Text matches can occur in comments, example code or unrelated APIs. Follow multiline and computed registrations through callers even when the search returns no matches.
+
 ## Independent Review
 
 Use an independent architecture reviewer when a complex or uncertain boundary would benefit from one and the caller's allowance permits it. Work within the existing scan; do not create another worker pool. Give a fresh-context reviewer the authorized source/scope, exact user context, supplied model and policy, optional knowledge base, and this guide, without generated hypotheses or findings. A useful assignment is:

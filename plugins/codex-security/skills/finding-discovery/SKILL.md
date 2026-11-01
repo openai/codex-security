@@ -21,6 +21,8 @@ For a diff, inspect the actual changed behavior, including deleted files at the 
 
 ## Evidence Criteria
 
+Use the “Locate Entry Points” section of `../../references/threat-model.md` when tracing registrations for a changed handler or mapping inputs into the authorized scope.
+
 - Trace attacker-controlled input or a privileged operation through the closest relevant control to the sink and security impact. Explain why the control is absent, bypassable, or applied to the wrong value or boundary.
 - Check runtime reachability and deployment assumptions. Record effective guards and containment as counterevidence; a safe sibling implementation does not establish that the candidate path is safe.
 - Preserve the root-control location as well as entrypoints, wrappers, concrete implementations, and sinks needed to understand the claim. When the claim covers several implementations, inspect those implementations rather than asserting that all are affected.
