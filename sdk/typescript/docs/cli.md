@@ -2460,7 +2460,7 @@ const alerts = await importGitHubCodeScanningAlerts({
   repository: "example/project",
 });
 const prepared = await prepareNormalizedExternalPublication(
-  normalizeGitHubCodeScanningAlerts(alerts),
+  normalizeGitHubCodeScanningAlerts(alerts, "cloud"),
   {
     provider: "github",
     repository: "https://github.com/example/project",
@@ -2472,10 +2472,11 @@ console.log(prepared.preview);
 const receipt = await prepared.publish();
 ```
 
-For local storage, pass the same normalized evidence to
-`prepareNormalizedLocalImport()` with `repository: "/path/to/project"`, inspect
-its preview, and call `import()`. `prepareLocalExternalImport()` accepts the saved
-import file directly. Read records with `listLocalExternalFindings({ repository })`.
+For local storage, call `normalizeGitHubCodeScanningAlerts(alerts, "local")` on
+the original alerts to retain evidence that exceeds Cloud limits. Pass the result
+to `prepareNormalizedLocalImport()` with `repository: "/path/to/project"`, inspect
+its preview, and call `import()`. Alternatively, pass the saved alert file directly
+to `prepareLocalExternalImport()`. Read records with `listLocalExternalFindings({ repository })`.
 
 ### Import GHSA advisories separately
 
@@ -2543,9 +2544,10 @@ state, and all imported evidence remains not assessed by Codex. Use a separate
 source key from code-scanning alerts; shared advisory IDs do not combine source
 records from different providers.
 
-In the SDK, call `importGitHubAdvisories()` and `normalizeGitHubAdvisories()`
-with `prepareNormalizedExternalPublication()` for Cloud or
-`prepareNormalizedLocalImport()` for local storage as described above.
+In the SDK, collect the advisories with `importGitHubAdvisories()`. For Cloud,
+pass `normalizeGitHubAdvisories(advisories, "cloud")` to
+`prepareNormalizedExternalPublication()`. For local storage, pass
+`normalizeGitHubAdvisories(advisories, "local")` to `prepareNormalizedLocalImport()`.
 `importGitHubAdvisories()` defaults to `{ source: "repository", state: "published" }`; use
 `{ source: "global", advisoryIds: ["GHSA-2345-6789-cfgh"] }` for selected database
 records. Both forms require `repository: "OWNER/REPO"` as source or target context.
