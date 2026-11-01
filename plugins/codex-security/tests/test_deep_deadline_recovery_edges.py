@@ -21,6 +21,7 @@ from workbench_test_support import (
     read_review_state,
     run_workbench,
     saved_draft,
+    select_checkpoint,
     worker_paths,
     write_checkpoint,
 )
@@ -71,7 +72,7 @@ def deadline_fixture(
         )
         draft["threatModel"] = {"summary": "Synthetic worker model."}
         checkpoint = write_checkpoint(output / "checkpoints", draft)
-        (output / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
+        select_checkpoint(output, checkpoint)
         run_workbench(state, *args, "--status", "canceled", environment=environment)
     artifacts = directory / "artifacts/02_discovery"
     artifacts.mkdir(parents=True, exist_ok=True)
