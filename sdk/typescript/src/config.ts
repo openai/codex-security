@@ -178,6 +178,8 @@ export function inlineToml(value: JsonValue): string {
     throw new ConfigurationError(
       "Codex TOML overrides cannot contain null values.",
     );
+  // Match the Codex SDK's numeric spelling, including integers above 2**53 - 1.
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
   if (Array.isArray(value)) return `[${value.map(inlineToml).join(",")}]`;
   if (isObject(value)) {
     return `{${Object.entries(value)

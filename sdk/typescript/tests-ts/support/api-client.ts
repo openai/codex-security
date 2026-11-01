@@ -54,6 +54,9 @@ export function withSyntheticScanEvents<T extends Partial<Dependencies>>(
       };
     },
     runDeepScan: dependencies.runDeepScan ?? runDeepScan,
+    readDeepScanParentConfig:
+      dependencies.readDeepScanParentConfig ??
+      (async ({ codexOptions }) => codexOptions.config ?? {}),
   };
 }
 

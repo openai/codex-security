@@ -34,6 +34,7 @@ import {
   type ComponentScanEvent,
   type ComponentScanOptions,
 } from "../src/component-scan.js";
+import * as deepScan from "../src/deep-scan.js";
 import type { Finding, SeverityLevel } from "../src/models.js";
 import { ScanResult } from "../src/result.js";
 import * as runtime from "../src/runtime.js";
@@ -1852,6 +1853,10 @@ test.each([
         return preparedRuntime("unused").plugin;
       }),
       spyOn(runtime, "probeCodexSandbox").mockImplementation(async () => {}),
+      // The Node child below implements only `codex exec`.
+      spyOn(deepScan, "readDeepScanParentConfig").mockImplementation(
+        async ({ codexOptions }) => codexOptions.config ?? {},
+      ),
       spyOn(runtime, "resolvePluginPython").mockResolvedValue(
         "/managed/python",
       ),
