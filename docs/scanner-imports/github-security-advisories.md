@@ -7,7 +7,10 @@ a dependency in your checkout is affected.
 ## Quick start
 
 Sign in with `gh auth login`. For GitHub Enterprise, set `GH_HOST` to the host
-you signed in to. From the destination checkout root, set `repo` to its GitHub
+you signed in to. If `gh` is unavailable, the SDK accepts `githubHost` and a
+`githubToken` for that host.
+
+From the destination checkout root, set `repo` to its GitHub
 repository and `source_key` to your existing advisories key exactly, including
 case. For a first import, choose a key for the host, repository and finding
 family. Replace `/path/to/private/reports` with an existing private directory
