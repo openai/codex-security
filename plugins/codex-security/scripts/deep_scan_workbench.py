@@ -11,7 +11,7 @@ import sys
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_saved_results as saved_results
@@ -22,116 +22,9 @@ from workbench_source_scopes import capture_source_scopes
 from workbench_target import directory_snapshot_regular_file_count
 from workbench_validation import optional_text, require_uuid, user_context_argument
 
-DEEP_SCAN_WORKER_KINDS = ("setup", "discovery", "dedup")
-DEEP_SCAN_WORKER_STATUSES = ("queued", "running", "succeeded", "failed", "canceled")
-DEEP_SCAN_REPLACEABLE_FAILURE_KINDS = (
-    "policy_refusal",
-    "transient_error",
-    "invalid_discovery_artifacts",
-)
-DEEP_SCAN_TERMINAL_REASONS = ("saturated", "capped")
-DEEP_SCAN_WORKFLOW_VERSION = "deep-security-scan/v1"
 DEEP_SCAN_COORDINATOR_LEASE_SECONDS = 30
 DEEP_SCAN_LEGACY_COORDINATOR_GRACE_SECONDS = 120
 DEEP_SCAN_PUBLICATION_ERROR_SEPARATOR = "\nOriginal Deep Scan failure:\n"
-
-
-def register_subcommands(subparsers: Any, positive_int: Callable[[str], int]) -> None:
-    begin_deep_scan = subparsers.add_parser("begin-deep-scan")
-    begin_deep_scan.add_argument("--thread-id", required=True)
-    begin_target = begin_deep_scan.add_mutually_exclusive_group(required=True)
-    begin_target.add_argument("--scan-id")
-    begin_target.add_argument("--target-path")
-    begin_deep_scan.add_argument("--scope", default=".")
-    begin_user_context = begin_deep_scan.add_mutually_exclusive_group()
-    begin_user_context.add_argument("--user-context")
-    begin_user_context.add_argument("--user-context-stdin", action="store_true")
-    begin_deep_scan.add_argument("--scan-root")
-    begin_deep_scan.add_argument("--claim-token")
-    begin_deep_scan.add_argument("--model")
-    begin_deep_scan.add_argument("--reasoning-effort")
-    begin_deep_scan.add_argument("--available-parallelism", type=positive_int)
-    begin_deep_scan.add_argument("--deep-scan-project-json")
-    begin_deep_scan.add_argument("--project-config-path")
-    begin_deep_scan.add_argument("--join-only", action="store_true")
-    begin_deep_scan.add_argument("--workflow-version", default=DEEP_SCAN_WORKFLOW_VERSION)
-
-    get_deep_scan = subparsers.add_parser("get-deep-scan")
-    get_deep_scan.add_argument("--scan-id", required=True)
-    get_deep_scan.add_argument("--thread-id", required=True)
-
-    acknowledge_result = subparsers.add_parser("acknowledge-deep-scan-result")
-    acknowledge_result.add_argument("--scan-id", required=True)
-
-    claim_coordinator = subparsers.add_parser("claim-deep-scan-coordinator")
-    claim_coordinator.add_argument("--scan-id", required=True)
-    claim_coordinator.add_argument("--thread-id", required=True)
-    claim_coordinator.add_argument("--claim-token")
-    claim_coordinator.add_argument("--coordinator-generation", type=positive_int)
-
-    upsert_deep_worker = subparsers.add_parser("upsert-deep-scan-worker")
-    upsert_deep_worker.add_argument("--scan-id", required=True)
-    upsert_deep_worker.add_argument("--worker-id", required=True)
-    upsert_deep_worker.add_argument("--kind", choices=DEEP_SCAN_WORKER_KINDS, required=True)
-    upsert_deep_worker.add_argument("--status", choices=DEEP_SCAN_WORKER_STATUSES, required=True)
-    upsert_deep_worker.add_argument("--prompt-path", required=True)
-    upsert_deep_worker.add_argument("--artifact-dir", required=True)
-    upsert_deep_worker.add_argument("--result-manifest-path")
-    upsert_deep_worker.add_argument("--attempt", type=non_negative_int)
-    upsert_deep_worker.add_argument("--sdk-thread-id")
-    upsert_deep_worker.add_argument("--error-message")
-    upsert_deep_worker.add_argument(
-        "--replaceable-failure-kind", choices=DEEP_SCAN_REPLACEABLE_FAILURE_KINDS
-    )
-    upsert_deep_worker.add_argument("--coordinator-generation", type=positive_int)
-
-    claim_deep_dedup = subparsers.add_parser("claim-deep-scan-dedup")
-    claim_deep_dedup.add_argument("--scan-id", required=True)
-    claim_deep_dedup.add_argument("--worker-id", required=True)
-    claim_deep_dedup.add_argument("--prompt-path", required=True)
-    claim_deep_dedup.add_argument("--artifact-dir", required=True)
-    claim_deep_dedup.add_argument("--input-worker-id", action="append", required=True)
-    claim_deep_dedup.add_argument("--coordinator-generation", type=positive_int)
-
-    commit_deep_dedup = subparsers.add_parser("commit-deep-scan-dedup")
-    commit_deep_dedup.add_argument("--scan-id", required=True)
-    commit_deep_dedup.add_argument("--worker-id", required=True)
-    commit_deep_dedup.add_argument("--result-manifest-path", required=True)
-    commit_deep_dedup.add_argument("--candidate-ledger-path")
-    commit_deep_dedup.add_argument("--new-findings-count", type=non_negative_int, required=True)
-    commit_deep_dedup.add_argument("--coordinator-generation", type=positive_int)
-
-    finish_deep_scan = subparsers.add_parser("finish-deep-scan")
-    finish_deep_scan.add_argument("--scan-id", required=True)
-    finish_deep_scan.add_argument(
-        "--terminal-reason", choices=DEEP_SCAN_TERMINAL_REASONS, required=True
-    )
-    finish_deep_scan.add_argument("--manifest-path", required=True)
-    finish_deep_scan.add_argument("--staged-manifest-path")
-    finish_deep_scan.add_argument("--omitted-worker-id", action="append", default=[])
-    finish_deep_scan.add_argument("--coordinator-generation", type=positive_int)
-
-    fail_deep_scan = subparsers.add_parser("fail-deep-scan")
-    fail_deep_scan.add_argument("--scan-id", required=True)
-    fail_deep_scan.add_argument("--message", required=True)
-    fail_deep_scan.add_argument("--manifest-path")
-    fail_deep_scan.add_argument("--staged-manifest-path")
-    fail_deep_scan.add_argument(
-        "--deep-status", choices=("failed", "interrupted"), default="failed"
-    )
-    fail_deep_scan.add_argument("--coordinator-generation", type=positive_int)
-
-    publication_failure = subparsers.add_parser("record-deep-scan-publication-failure")
-    publication_failure.add_argument("--scan-id", required=True)
-    publication_failure.add_argument("--message", required=True)
-    publication_failure.add_argument("--coordinator-generation", type=positive_int)
-
-
-def non_negative_int(value: str) -> int:
-    parsed = int(value)
-    if parsed < 0:
-        raise argparse.ArgumentTypeError("expected a non-negative integer")
-    return parsed
 
 
 _dependencies: Any = None
