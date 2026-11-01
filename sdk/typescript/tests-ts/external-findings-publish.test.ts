@@ -3735,13 +3735,25 @@ test("read lookups and verification run concurrently with bounded requests and o
 
 test("progress is optional and stderr progress never corrupts JSON results", async () => {
   const f = await fixture();
+  const phases = new Set<ExternalPublicationProgress["phase"]>();
   const prepared = await prepareExternalPublication(f.file, options, {
     ...f.deps,
-    onProgress: () => {
+    onProgress: ({ phase }) => {
+      phases.add(phase);
+      if (phase === "reading")
+        return Promise.reject(new Error("Optional async observer failed"));
       throw new Error("Optional observer failed");
     },
   });
   expect((await prepared.publish()).status).toBe("complete");
+  expect([...phases]).toEqual([
+    "reading",
+    "discovering",
+    "preparing",
+    "waiting",
+    "uploading",
+    "verifying",
+  ]);
   const cli = createCliTest(main, { stderr: true });
   expect(await cli.runCli([...f.command, "--yes"], f.cliDeps)).toBe(0);
   expect(JSON.parse(cli.stdout.text())).toMatchObject({
@@ -5142,6 +5154,15 @@ test.each([
     f.state.environmentId = null;
     const settings = { ...options, provider };
     let contextVersion = "generation-a";
+    let formats = [
+      "security.findings.v1",
+      "endor.findings_json.v1",
+      "wiz.vulnerability_json.v1",
+    ];
+    let expectedFormat: typeof format = format;
+    let loseResponses = true;
+    let unavailable = false;
+    let terminal: "completed" | "failed" | "cancelled" = "completed";
     let advertised = true;
     let canCreate = true;
     let fileRequest: string | undefined;
@@ -5149,7 +5170,7 @@ test.each([
     let fileBytes = 0;
     let jobRequest: string | undefined;
     const fileId = "aifile_" + "a".repeat(32);
-    const jobId = "import_" + "b".repeat(32);
+    let jobId = "import_" + "b".repeat(32);
     const calls: string[] = [];
     const fileMetadata = () => ({
       object: "security.finding_import_file",
@@ -5163,7 +5184,7 @@ test.each([
       id: jobId,
       request_id: jobRequest,
       source: { provider, source_key: settings.sourceKey },
-      input: { type: "file", file_id: fileId, format },
+      input: { type: "file", file_id: fileId, format: expectedFormat },
       default_targets: [
         {
           type: "repository",
@@ -5175,11 +5196,11 @@ test.each([
       counts: {
         total: 1,
         discovered: 1,
-        created: 1,
+        created: status === "completed" ? 1 : 0,
         updated: 0,
         unchanged: 0,
         error: 0,
-        unprocessed: 0,
+        unprocessed: status === "completed" ? 0 : 1,
       },
       poll_after_seconds: null,
       error: null,
@@ -5214,11 +5235,7 @@ test.each([
             can_upload: canCreate,
             can_create_import_jobs: canCreate,
             can_read: true,
-            formats: [
-              "security.findings.v1",
-              "endor.findings_json.v1",
-              "wiz.vulnerability_json.v1",
-            ],
+            formats,
             limits: {
               max_direct_file_bytes: 32 * 1024 * 1024,
               max_record_bytes: 1024 * 1024,
@@ -5230,9 +5247,9 @@ test.each([
           expect(form.get("purpose")).toBe("report");
           fileRequest = String(form.get("request_id"));
           const bytes = await (form.get("file") as Blob).text();
-          if (format === "security.findings.v1") {
+          if (expectedFormat === "security.findings.v1") {
             const doc = JSON.parse(bytes);
-            expect(doc.format).toBe(format);
+            expect(doc.format).toBe(expectedFormat);
             expect(doc.findings[0].source_finding_id).toBeTruthy();
             expect(doc.findings[0].evidence.source_data).toBeTruthy();
           } else {
@@ -5240,14 +5257,19 @@ test.each([
           }
           fileHash = hash("sha256", bytes);
           fileBytes = Buffer.byteLength(bytes);
-          throw new Error("lost upload response");
+          if (loseResponses) throw new Error("lost upload response");
+          return Response.json(fileMetadata());
         }
         if (path === `/finding-imports/file-requests/${fileRequest}`)
           return Response.json(fileMetadata());
         if (path === "/finding-imports/jobs") {
           const body = JSON.parse(String(init.body));
           expect(body.request_id).not.toBe(fileRequest);
-          expect(body.input).toEqual({ type: "file", file_id: fileId, format });
+          expect(body.input).toEqual({
+            type: "file",
+            file_id: fileId,
+            format: expectedFormat,
+          });
           expect(body.default_targets).toEqual([
             {
               type: "repository",
@@ -5255,6 +5277,15 @@ test.each([
               repo_connector_id: "github",
             },
           ]);
+          if (!loseResponses) {
+            expect(body.request_id).not.toBe(jobRequest);
+            jobRequest = body.request_id;
+            jobId =
+              terminal === "completed"
+                ? "import_" + "d".repeat(32)
+                : "import_" + "c".repeat(32);
+            return Response.json(job(terminal));
+          }
           if (!jobRequest) {
             jobRequest = body.request_id;
             throw new Error("lost job response");
@@ -5265,7 +5296,9 @@ test.each([
           });
         }
         if (path === `/finding-imports/jobs/${jobId}`)
-          return Response.json(job("completed"));
+          return unavailable
+            ? new Response(null, { status: 503 })
+            : Response.json(job(terminal));
         throw new Error("Unexpected route: " + path);
       },
     };
@@ -5273,6 +5306,16 @@ test.each([
     const original = await prepare();
     expect(original.preview.privateImport?.sha256).toBeTruthy();
     expect(original.preview.privateImport?.format).toBe(format);
+    const cli = createCliTest(main);
+    const dryRun = [...f.command, "--dry-run"];
+    dryRun[dryRun.indexOf("--provider") + 1] = provider;
+    dryRun[dryRun.indexOf("--format") + 1] = "toon";
+    expect(
+      await cli.runCli(dryRun, { ...f.cliDeps, cloudFetch: deps.fetch }),
+    ).toBe(0);
+    expect(cli.stderr.text()).toContain(
+      `Report: ${format} (${original.preview.privateImport?.bytes} bytes)`,
+    );
     expect(calls.filter((call) => call.startsWith("POST"))).toEqual([]);
     contextVersion = "generation-b";
     await expect(original.publish()).rejects.toThrow("private inbox changed");
@@ -5296,6 +5339,70 @@ test.each([
     canCreate = false;
     expect((await (await prepare()).publish()).privateJob?.id).toBe(jobId);
     expect(calls.at(-1)).toBe(`GET /finding-imports/jobs/${jobId}`);
+    unavailable = true;
+    const acknowledged = {
+      result: {
+        status: "interrupted",
+        counts: { created: 1 },
+        unacknowledged: 0,
+        privateJob: { id: jobId },
+      },
+    };
+    await expect((await prepare()).publish()).rejects.toMatchObject(
+      acknowledged,
+    );
+    unavailable = false;
+
+    // The same context retains its native wire representation even if discovery changes.
+    formats = ["security.findings.v1"];
+    expect((await prepare()).preview.privateImport?.format).toBe(format);
+    contextVersion = "generation-c";
+    canCreate = true;
+    loseResponses = false;
+    expectedFormat = "security.findings.v1";
+    terminal = provider === "wiz" ? "cancelled" : "failed";
+    const fresh = await prepare();
+    expect(fresh.preview.resumed).toBe(false);
+    expect(fresh.preview.privateImport?.format).toBe(expectedFormat);
+    expect((await fresh.publish()).privateJob?.status).toBe(terminal);
+    const failedJob = jobId;
+    const retry = await prepare();
+    const secondPreview = await prepare();
+    expect(retry.preview.resumed).toBe(false);
+    expect(retry.preview.privateImport?.retryOfJobId).toBe(failedJob);
+
+    // A terminal response still acknowledges the report if saving its receipt fails.
+    terminal = "completed";
+    const rename = fs.rename;
+    const fault = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+      if (
+        String(to).endsWith(".private-import.json") &&
+        JSON.parse(await readFile(from, "utf8")).receipt?.status === "completed"
+      )
+        throw new Error("Checkpoint interrupted");
+      return rename(from, to);
+    });
+    try {
+      await expect(retry.publish()).rejects.toMatchObject({
+        result: {
+          status: "interrupted",
+          counts: { created: 1 },
+          unacknowledged: 0,
+          privateJob: { status: "completed" },
+        },
+      });
+    } finally {
+      fault.mockRestore();
+    }
+    // A second preview of the failed job replays the already-started replacement.
+    loseResponses = true;
+    const uploads = calls.filter(
+      (call) => call === "POST /finding-imports/files",
+    ).length;
+    expect((await secondPreview.publish()).privateJob?.id).not.toBe(failedJob);
+    expect(
+      calls.filter((call) => call === "POST /finding-imports/files"),
+    ).toHaveLength(uploads);
   },
 );
 

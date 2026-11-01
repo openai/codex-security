@@ -174,10 +174,12 @@ export async function selectPrivateReport(
   context: PrivateImportContext,
   saved: string | undefined,
 ): Promise<ReturnType<typeof privateReport>> {
+  const checkpoint =
+    saved === undefined ? undefined : checkpointSchema.parse(JSON.parse(saved));
   const originalFormat =
-    saved === undefined
-      ? undefined
-      : checkpointSchema.parse(JSON.parse(saved)).format;
+    checkpoint?.contextVersion === context.context_version
+      ? checkpoint.format
+      : undefined;
   const format =
     provider === "endor"
       ? "endor.findings_json.v1"
@@ -278,8 +280,15 @@ const checkpointSchema = z.object({
   jobRequestId: z.uuid(),
   fileId: fileId.optional(),
   jobId: jobSchema.shape.id.optional(),
-  receipt: jobSchema.optional(),
+  receipt: jobSchema
+    .refine((job) => job.status === "completed" || unsuccessfulJob(job))
+    .optional(),
+  previousReceipt: jobSchema.refine(unsuccessfulJob).optional(),
 });
+
+export function unsuccessfulJob(job: PrivateImportJob | undefined) {
+  return job?.status === "failed" || job?.status === "cancelled";
+}
 
 export function readPrivateCheckpoint(
   serialized: string,
@@ -294,23 +303,49 @@ export function readPrivateCheckpoint(
   },
 ) {
   const checkpoint = checkpointSchema.parse(JSON.parse(serialized));
-  const { uploadRequestId, jobRequestId, fileId, jobId, receipt, ...binding } =
-    checkpoint;
+  const {
+    uploadRequestId,
+    jobRequestId,
+    fileId,
+    jobId,
+    receipt,
+    previousReceipt,
+    contextVersion,
+    format,
+    sha256,
+    ...scope
+  } = checkpoint;
+  const {
+    contextVersion: currentContext,
+    format: selectedFormat,
+    sha256: selectedDigest,
+    ...selectedScope
+  } = expected;
+  const sameContext = contextVersion === currentContext;
   if (
-    canonicalJson({ ...binding, contextVersion: expected.contextVersion }) !==
-      canonicalJson(expected) ||
+    canonicalJson(scope) !== canonicalJson(selectedScope) ||
+    (sameContext && (format !== selectedFormat || sha256 !== selectedDigest)) ||
     (jobId && !fileId) ||
+    [receipt, previousReceipt].some(
+      (job) =>
+        job &&
+        (job.input.format !== format ||
+          canonicalJson(job.source) !== canonicalJson(scope.source) ||
+          job.default_targets.length !== 1 ||
+          job.default_targets[0]?.repo_id !== scope.repository.id ||
+          job.default_targets[0]?.repo_connector_id !==
+            scope.repository.repo_connector_id),
+    ) ||
     (receipt &&
       (receipt.id !== jobId ||
         receipt.request_id !== jobRequestId ||
-        receipt.input.format !== checkpoint.format ||
         receipt.input.file_id !== fileId)) ||
     uploadRequestId === jobRequestId
   )
     throw new CodexSecurityError(
       "Saved private import does not match this account, repository or report.",
     );
-  return checkpoint;
+  return sameContext ? checkpoint : undefined;
 }
 
 export class PrivateImportRequestError extends CodexSecurityError {
@@ -459,16 +494,16 @@ export function privateImportClient(
           throw new CodexSecurityError(
             "Cloud returned a job for a different private import.",
           );
-        if (!id) {
-          id = job.id;
-          await accepted(id);
-        }
         if (
           job.status === "completed" ||
           job.status === "failed" ||
           job.status === "cancelled"
         )
           return job;
+        if (!id) {
+          id = job.id;
+          await accepted(id);
+        }
         const retry = response.headers.get("Retry-After");
         const seconds = retry === null ? 0 : Number(retry);
         await delay(

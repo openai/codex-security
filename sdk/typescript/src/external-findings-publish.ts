@@ -17,6 +17,7 @@ import {
   selectPrivateReport,
   type PrivateImportFormat,
   readPrivateCheckpoint,
+  unsuccessfulJob,
   type PrivateImportJob,
 } from "./private-finding-import.js";
 import { readCloudCredentials } from "./cloud-publish.js";
@@ -38,6 +39,7 @@ import {
   type ExternalFindingsReaderOptions,
 } from "./external-findings-read.js";
 import { canonicalJson } from "./record.js";
+import { notify } from "./value.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { wizFindingRepository } from "./wiz-findings.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
@@ -165,6 +167,7 @@ export interface ExternalPublicationPreview extends ExternalFindings {
     contextVersion: string;
     sha256: string;
     bytes: number;
+    retryOfJobId?: string;
   };
 }
 
@@ -463,13 +466,8 @@ async function preparePublicationInput(
   nativePath?: string,
 ): Promise<PreparedExternalPublication> {
   const { inspectorProjectMap } = options;
-  const progress = (event: ExternalPublicationProgress): void => {
-    try {
-      dependencies.onProgress?.(event);
-    } catch {
-      // Optional progress must not interrupt preparation or publication.
-    }
-  };
+  const progress = (event: ExternalPublicationProgress): void =>
+    notify(() => dependencies.onProgress?.(event));
   if (
     !options.sourceKey.trim() ||
     options.sourceKey.includes("\0") ||
@@ -917,12 +915,9 @@ async function preparePublicationInput(
       contextVersion: context.context_version,
     };
     function checkpointForContext(data: string | undefined) {
-      if (data === undefined) return undefined;
-      const checkpoint = readPrivateCheckpoint(data, binding);
-      // A reset requires another preview and fresh upload and job request IDs.
-      return checkpoint.contextVersion === binding.contextVersion
-        ? checkpoint
-        : undefined;
+      return data === undefined
+        ? undefined
+        : readPrivateCheckpoint(data, binding);
     }
     const previous = checkpointForContext(privateSaved);
     function requireAccess(
@@ -942,11 +937,19 @@ async function preparePublicationInput(
         );
     }
     requireAccess(context, !!previous?.fileId, !!previous?.jobId);
+    const retryOfJobId =
+      unsuccessfulJob(previous?.receipt) &&
+      context.can_upload &&
+      context.can_create_import_jobs &&
+      context.formats.includes(report.format)
+        ? previous?.jobId
+        : undefined;
     const privateImport = {
       format: report.format,
       contextVersion: binding.contextVersion,
       sha256: report.digest,
       bytes: Buffer.byteLength(report.bytes),
+      ...(retryOfJobId ? { retryOfJobId } : {}),
     };
     const preview: ExternalPublicationPreview = {
       ...parsed,
@@ -954,7 +957,7 @@ async function preparePublicationInput(
       accountId: credentials.account_id,
       destination,
       source,
-      resumed: previous !== undefined,
+      resumed: previous !== undefined && !retryOfJobId,
       requests: [],
       privateImport,
     };
@@ -970,18 +973,23 @@ async function preparePublicationInput(
           const stored = checkpointForContext(
             await readOptionalFile(privatePath),
           );
-          requireAccess(current, !!stored?.fileId, !!stored?.jobId);
+          // Only a preview of this terminal job can start a new attempt.
+          const retrying =
+            retryOfJobId !== undefined && stored?.receipt?.id === retryOfJobId;
+          const active = retrying ? undefined : stored;
+          requireAccess(current, !!active?.fileId, !!active?.jobId);
           if ((await readOptionalFile(pendingPath)) !== undefined)
             throw new CodexSecurityError(
               "A repository submission is pending. Review its saved request before continuing.",
             );
-          const checkpoint = stored ?? {
+          const checkpoint = active ?? {
             ...binding,
             uploadRequestId: randomUUID(),
             jobRequestId: randomUUID(),
             fileId: undefined,
             jobId: undefined,
             receipt: undefined,
+            previousReceipt: retrying ? stored?.receipt : undefined,
           };
           const result: ExternalPublicationResult = {
             cloudApiUrl: preview.cloudApiUrl,
@@ -996,15 +1004,41 @@ async function preparePublicationInput(
             unacknowledged: parsed.findings.length,
             verified: 0,
           };
-          if (!stored) await writeAtomicJson(privatePath, checkpoint);
+          function acknowledge(job: PrivateImportJob) {
+            const { created, updated, unchanged, error } = job.counts;
+            const processed = created + updated + unchanged + error;
+            if (
+              job.counts.discovered !== processed + job.counts.unprocessed ||
+              job.counts.discovered > result.ready ||
+              (job.status === "completed" &&
+                (processed !== result.ready ||
+                  job.counts.total !== result.ready))
+            )
+              throw new CodexSecurityError(
+                "Cloud returned counts that do not match the selected report.",
+              );
+            result.privateJob = job;
+            result.counts = { created, updated, unchanged, error };
+            result.unacknowledged = result.ready - processed;
+            result.status =
+              job.status === "completed" && !error && !parsed.excluded.length
+                ? "complete"
+                : "partial";
+            if (job.error) result.error = job.error.message;
+            else delete result.error;
+          }
           try {
+            const savedReceipt =
+              checkpoint.receipt ?? checkpoint.previousReceipt;
+            if (savedReceipt) acknowledge(savedReceipt);
+            if (!active) await writeAtomicJson(privatePath, checkpoint);
             if (!checkpoint.fileId) {
               progress({ phase: "uploading", completed: 0 });
               checkpoint.fileId = await client.upload({
                 requestId: checkpoint.uploadRequestId,
                 contextVersion: binding.contextVersion,
                 ...report,
-                recovering: stored !== undefined,
+                recovering: active !== undefined,
               });
               await writeAtomicJson(privatePath, checkpoint);
             }
@@ -1024,32 +1058,13 @@ async function preparePublicationInput(
                 await writeAtomicJson(privatePath, checkpoint);
               },
             );
-            const { created, updated, unchanged, error } = job.counts;
-            const processed = created + updated + unchanged + error;
-            if (
-              job.counts.discovered !== processed + job.counts.unprocessed ||
-              job.counts.discovered > result.ready ||
-              (job.status === "completed" &&
-                (processed !== result.ready ||
-                  job.counts.total !== result.ready))
-            )
-              throw new CodexSecurityError(
-                "Cloud returned counts that do not match the selected report.",
-              );
+            acknowledge(job);
+            checkpoint.jobId = job.id;
             checkpoint.receipt = job;
             await writeAtomicJson(privatePath, checkpoint);
-            Object.assign(result, {
-              privateJob: job,
-              counts: { created, updated, unchanged, error },
-              unacknowledged: result.ready - processed,
-              status:
-                job.status === "completed" && !error && !parsed.excluded.length
-                  ? "complete"
-                  : "partial",
-              ...(job.error ? { error: job.error.message } : {}),
-            });
             return result;
           } catch (error) {
+            result.status = "interrupted";
             result.error =
               error instanceof Error ? error.message : String(error);
             result.savedSubmission = privatePath;

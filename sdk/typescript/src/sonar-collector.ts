@@ -6,8 +6,8 @@ import {
   boundSonarWorktree,
   sonarRepositoryForRemote,
   sonarCheckoutMatchesSource,
-  localGitProtectionRoots,
 } from "./external-findings-local.js";
+import { localGitProtectionRoots } from "./local-git-metadata.js";
 import { repositoryUrlKey } from "./external-import-contract.js";
 import {
   forwardExternalImportSetting,

@@ -8,9 +8,9 @@ import { requireExternalImports } from "./external-imports-feature.js";
 import {
   configuredFetchRemotes,
   type ConfiguredFetchRemote,
-  localGitProtectionRoots,
   prepareLocalImport,
 } from "./external-findings-local.js";
+import { importGitProtectionRoots } from "./local-git-metadata.js";
 import {
   ExternalPublicationError,
   externalPublicationStateDirectory,
@@ -177,8 +177,7 @@ export async function prepareSonarImport(
   const configuredState = codexSecurityStateDirectory(environment);
   const protectedRoots = [
     repository,
-    ...(await localGitProtectionRoots(options.cwd, environment, signal)),
-    ...(await localGitProtectionRoots(process.cwd(), environment, signal)),
+    ...(await importGitProtectionRoots(options.cwd, environment, signal)),
   ];
   requireOutputOutsideRepositories(protectedRoots, configuredState, "runtime");
   const state = await canonicalConfigPath(configuredState);
