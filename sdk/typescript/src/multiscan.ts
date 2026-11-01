@@ -281,14 +281,27 @@ async function runCampaign(
     options,
     knowledgeByMode,
   );
+  const repairedCompletions = new Set<string>();
   const receipts = await readReceipts(
     ledger,
     tasks,
     options.recoverScan !== undefined,
     options.signal,
+    repairedCompletions,
   );
   const pending: MultiscanTask[] = [];
   const rejectedCompleted = new Set<string>();
+  for (const path of repairedCompletions) {
+    if (
+      !(await hasCompletedContract(
+        path,
+        await resumePluginRoot(),
+        options.signal,
+      )) ||
+      !(await hasArtifacts(path))
+    )
+      rejectedCompleted.add(path);
+  }
   let completed = 0;
   let policyFailed = false;
   const warnings: NonNullable<MultiscanResult["warnings"]> = [];
@@ -1056,6 +1069,7 @@ async function readReceipts(
   tasks: readonly MultiscanTask[],
   recover = false,
   signal?: AbortSignal,
+  repairedCompletions = new Set<string>(),
 ): Promise<Map<string, MultiscanHistory>> {
   let contents: Buffer;
   try {
@@ -1111,10 +1125,26 @@ async function readReceipts(
             ? rejectedKnowledgeAttempts
             : rejectedAttempts;
         const previous = rejected.get(id);
+        if (attempt === undefined) unidentifiedReceipt = true;
         rejected.set(
           id,
           attempt === undefined ? previous : Math.max(previous ?? 0, attempt),
         );
+        if (
+          attempt !== undefined &&
+          isRecord(value) &&
+          (value["status"] === "completed" ||
+            value["status"] === "completed_with_incomplete_coverage" ||
+            value["error"] === "Multiscan repository coverage is incomplete.")
+        )
+          repairedCompletions.add(
+            join(
+              dirname(path),
+              "artifacts",
+              tasksById.get(id)!.id,
+              `attempt-${attempt}`,
+            ),
+          );
       } else {
         unidentifiedReceipt = true;
       }
@@ -1138,6 +1168,11 @@ async function readReceipts(
       `.results.repair-${randomUUID()}.jsonl`,
     );
     await writeReceiptRepair(backup, contents);
+    signal?.throwIfAborted();
+    if (unidentifiedReceipt)
+      throw new Error(
+        `Cannot repair ${path}: unresolved attempted history because a damaged receipt does not identify its task and attempt. The active ledger is unchanged. Repair the ledger manually using the original bytes in ${backup} before retrying recovery.`,
+      );
     for (const [id, task] of tasksById) {
       const requiredAttempt = rejectedAttempts.get(id);
       const requiredKnowledgeAttempt = rejectedKnowledgeAttempts.get(id);
@@ -1149,9 +1184,7 @@ async function readReceipts(
       const retainedKnowledge =
         !rejectedKnowledgeAttempts.has(id) ||
         includesAttempt(history?.maxAttempt, requiredKnowledgeAttempt);
-      const retainedUnidentified =
-        !unidentifiedReceipt || history !== undefined;
-      if (retainedScan && retainedKnowledge && retainedUnidentified) continue;
+      if (retainedScan && retainedKnowledge) continue;
       const artifactRoot = join(dirname(path), "artifacts", task.id);
       const existing = await lstat(artifactRoot).catch(undefinedIfMissingFile);
       const savedAttempt =
@@ -1165,8 +1198,7 @@ async function readReceipts(
       const missingKnowledge =
         !retainedKnowledge &&
         !includesAttempt(savedAttempt, requiredKnowledgeAttempt);
-      const missingUnidentified = !retainedUnidentified && savedAttempt === 0;
-      if (!missingScan && !missingKnowledge && !missingUnidentified) continue;
+      if (!missingScan && !missingKnowledge) continue;
       const required = missingScan
         ? requiredAttempt
         : missingKnowledge
