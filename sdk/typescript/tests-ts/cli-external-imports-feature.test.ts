@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { expect, mock, test } from "bun:test";
 import { main } from "../src/cli.js";
@@ -7,7 +8,7 @@ import {
   removeTemporaryDirectory,
   temporaryDirectory,
 } from "./support/temporary-directories.js";
-import { dependencies } from "./cli-fixtures.js";
+import { capture, dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 import { importedAlert } from "./support/github-import-fixtures.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
@@ -16,6 +17,7 @@ const commands = [
   ["publish", "findings"],
   ["findings", "imported"],
   ["import", "github-advisories"],
+  ["import", "sonar"],
 ];
 
 const publishLocal = [
@@ -32,36 +34,6 @@ const publishLocal = [
   "synthetic/findings",
   "--yes",
 ];
-
-for (const value of [undefined, "", "0", "true"]) {
-  test(`external commands are absent from discovery without opt-in (${String(value)})`, async () => {
-    const environment = { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: value };
-    for (const [group, command] of commands) {
-      const cli = createCliTest(main);
-      expect(
-        await cli.runCli([group!, "--help"], dependencies({ environment })),
-      ).toBe(0);
-      expect(cli.stdout.text()).not.toMatch(
-        new RegExp(`^\\s+${command}\\s`, "m"),
-      );
-      const schema = createCliTest(main);
-      expect(
-        await schema.runCli(
-          [group!, command!, "--schema"],
-          dependencies({ environment }),
-        ),
-      ).not.toBe(0);
-    }
-    const github = createCliTest(main);
-    expect(
-      await github.runCli(
-        ["import", "github", "--help"],
-        dependencies({ environment }),
-      ),
-    ).toBe(0);
-    expect(github.stdout.text()).not.toContain("publish findings");
-  });
-}
 
 test("disabled commands distinguish discovery requests from filter values", async () => {
   const deps = dependencies({ environment: {} });
@@ -131,6 +103,7 @@ test("disabled commands cannot invoke import, storage, or publication handlers",
     ],
     ["findings", "imported", "."],
     ["import", "github-advisories", "example/project"],
+    ["import", "sonar"],
   ]) {
     const cli = createCliTest(main);
     expect(await cli.runCli(command, deps)).not.toBe(0);
@@ -191,7 +164,9 @@ test("disabled commands cannot invoke import, storage, or publication handlers",
         ),
       ).toBe(2);
       expect(unsupported.stdout.text()).toContain("INVALID_ARGUMENTS");
-    } else if (command[1] === "github-advisories") {
+    } else if (command[0] === "import") {
+      const errorCode =
+        command[1] === "sonar" ? "SONAR_IMPORT_FAILED" : "GITHUB_IMPORT_FAILED";
       for (const format of [undefined, "json", "jsonl", "yaml", "md", "toon"]) {
         const formatted = createCliTest(main);
         expect(
@@ -207,10 +182,10 @@ test("disabled commands cannot invoke import, storage, or publication handlers",
         if (format === "json" || format === "jsonl") {
           expect(JSON.parse(formatted.stdout.text())).toMatchObject({
             ok: false,
-            error: { code: "GITHUB_IMPORT_FAILED" },
+            error: { code: errorCode },
           });
         } else {
-          expect(formatted.stdout.text()).toContain("GITHUB_IMPORT_FAILED");
+          expect(formatted.stdout.text()).toContain(errorCode);
         }
         expect(formatted.stdout.text()).toContain(
           "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1",
@@ -219,6 +194,48 @@ test("disabled commands cannot invoke import, storage, or publication handlers",
     }
   }
   expect(unexpected).not.toHaveBeenCalled();
+});
+
+test("a closed diagnostic pipe preserves the Sonar error envelope", async () => {
+  const stdout = capture();
+  const stderr = new Writable({
+    write(_chunk, _encoding, done) {
+      setImmediate(() =>
+        done(Object.assign(new Error("closed"), { code: "EPIPE" })),
+      );
+    },
+  });
+  const closed = new Promise<void>((resolve) => stderr.once("close", resolve));
+  const code = await main(
+    ["import", "sonar", "--full-output", "--format=json"],
+    stdout.stream,
+    stderr,
+    dependencies({ environment: {} }),
+  );
+  await closed;
+  expect(code).toBe(2);
+  expect(JSON.parse(stdout.text()).error.code).toBe("SONAR_IMPORT_FAILED");
+});
+
+test("rejects unsupported Sonar full-output formats before collecting findings", async () => {
+  const collectSonarIssues = mock(async (): Promise<never> => {
+    throw new Error("Unexpected collection");
+  });
+  const cli = createCliTest(main);
+  const deps = {
+    ...dependencies({
+      environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+    }),
+    collectSonarIssues,
+  };
+  expect(
+    await cli.runCli(
+      ["import", "sonar", "--yes", "--full-output", "--format", "yaml"],
+      deps,
+    ),
+  ).toBe(2);
+  expect(cli.stdout.text()).toContain("INVALID_ARGUMENTS");
+  expect(collectSonarIssues).not.toHaveBeenCalled();
 });
 
 const installedSkills =
@@ -309,15 +326,13 @@ test("opt-in exposes the commands per invocation without affecting concurrent di
         expect(
           new RegExp(`^\\s+${command}\\s`, "m").test(cli.stdout.text()),
         ).toBe(enabled);
-        if (enabled) {
-          const help = createCliTest(main);
-          expect(
-            await help.runCli(
-              [group!, command!, "--schema"],
-              dependencies({ environment }),
-            ),
-          ).toBe(0);
-        }
+        const schema = createCliTest(main);
+        const status = await schema.runCli(
+          [group!, command!, "--schema"],
+          dependencies({ environment }),
+        );
+        if (enabled) expect(status).toBe(0);
+        else expect(status).not.toBe(0);
       }
     }),
   );
@@ -340,5 +355,7 @@ test("established scan publishing, status, scan import, and GitHub collection st
     expect(cli.stdout.text()).toContain(
       `Usage: codex-security ${command.join(" ")} `,
     );
+    if (command[0] === "import" && command[1] === "github")
+      expect(cli.stdout.text()).not.toContain("publish findings");
   }
 });

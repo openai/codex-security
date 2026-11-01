@@ -19,6 +19,7 @@ from workbench_test_support import (
     create_saved_git_workspace,
     create_saved_workspace,
     create_workspace,
+    empty_target_paths,
     empty_target_scan,
     fail_scan,
     get_scan,
@@ -137,9 +138,7 @@ def test_late_parent_draft_is_retained_without_mutating_frozen_stopped_seal(
 def test_canceled_scan_does_not_accept_checkpoints_written_after_cancellation(
     tmp_path: Path,
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_scan_command(
         state_dir, str(saved["id"]), "--scan-root", str(tmp_path / "scans")
@@ -441,9 +440,7 @@ def test_incomplete_parent_checkpoint_cannot_complete_scan(tmp_path: Path) -> No
 def test_model_only_draft_is_available_before_findings_and_survives_stop(
     tmp_path: Path, termination: str, projection_failure_at: str
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     scan_id, scan_dir = start_workspace_scan(state_dir, str(saved["id"]), tmp_path / "scans")
     update_progress(state_dir, scan_id, "--phase", "threat_model")
@@ -553,9 +550,7 @@ def test_history_does_not_expose_a_model_from_changed_sealed_artifacts(
 def test_invalid_model_or_binding_keeps_history_available_for_semantic_repair(
     tmp_path: Path, malformation: str
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     scan_id, scan_dir = start_workspace_scan(state_dir, str(saved["id"]), tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target)
@@ -664,9 +659,7 @@ def test_export_validation_checks_binding_without_writing_or_pinning_legacy_arti
 
 
 def test_completed_findings_export_inside_scan_directory(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     source = target / "src/extract.py"
     source.parent.mkdir()
     source.write_text("".join(f"line {line}\n" for line in range(1, 46)))
@@ -740,10 +733,8 @@ def test_deep_csv_export_adds_only_candidate_id_column(
     monkeypatch: pytest.MonkeyPatch,
     workbench_api,
 ) -> None:
-    state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace_id = str(uuid.uuid4())
     create_workspace(
         state_dir, workspace_id, "--thread-id", "thread-deep-export", "--target-path", str(target)
@@ -1064,9 +1055,7 @@ def test_embedded_and_paged_findings_normalize_scalar_attack_path_assessments(
 def test_primary_location_prefers_root_control_in_bounded_and_csv_results(
     tmp_path: Path,
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     for index in range(9):
         (target / f"support-{index}.py").write_text("support\n")
     (target / "root.py").write_text("vulnerable\n")

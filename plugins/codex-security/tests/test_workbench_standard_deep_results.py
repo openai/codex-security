@@ -17,6 +17,7 @@ from workbench_test_support import (
     cancel_scan,
     claim_deep_scan_dedup,
     commit_deep_dedup,
+    empty_target_paths,
     empty_target_scan,
     fail_deep_scan,
     fail_scan,
@@ -1108,10 +1109,8 @@ def deep_scan_fixture(
     include_paths: list[str] | None = None,
     run=run_workbench,
 ) -> tuple[Path, Path, Path, Path, str]:
-    state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "app.py").write_text("value = request.args['value']\n")
     for relative in include_paths or []:
         included = target / relative
