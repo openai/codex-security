@@ -1,15 +1,24 @@
 import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
-import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, expect, test, mock } from "bun:test";
 import { ScanCostTracker } from "../src/cost.js";
 import type { ScanTokenUsage } from "../src/index.js";
-import { CodexSecurity, type ScanOptions } from "../src/api.js";
+import {
+  CodexSecurity,
+  type ScanOptions,
+  type ValidationOptions,
+} from "../src/api.js";
+import { ScanResult } from "../src/result.js";
 import { main } from "../src/cli.js";
-import type { CodexSecurityConfig, JsonObject } from "../src/config.js";
+import {
+  mergedCodexConfig,
+  type CodexSecurityConfig,
+  type JsonObject,
+} from "../src/config.js";
 import type { ProjectConfigInput } from "../src/project-config-schema.js";
 import { readProjectConfig } from "../src/project-config.js";
+import { git } from "./git-fixture.js";
 import { dependencies, fakeResult, fakeSecurity } from "./cli-fixtures.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { copyCompletedScanFixture } from "./plugin-root.js";
@@ -53,26 +62,16 @@ async function bulkInventory(
   input: Awaited<ReturnType<typeof fixture>>,
   rowModes: readonly string[],
 ) {
-  execFileSync("git", ["init", "-q", input.repository]);
-  execFileSync("git", [
-    "-C",
+  git(input.repository, "init", "-q");
+  git(
     input.repository,
-    "-c",
-    "user.name=Test",
-    "-c",
-    "user.email=test@example.test",
-    "-c",
-    "commit.gpgsign=false",
     "commit",
+    "--no-gpg-sign",
     "--allow-empty",
     "-qm",
     "fixture",
-  ]);
-  const revision = execFileSync(
-    "git",
-    ["-C", input.repository, "rev-parse", "HEAD"],
-    { encoding: "utf8" },
-  ).trim();
+  );
+  const revision = git(input.repository, "rev-parse", "HEAD");
   const csv = join(input.root, "repositories.csv");
   await writeFile(
     csv,
@@ -261,12 +260,22 @@ test("an explicit config flag overrides the operator-selected environment file",
 });
 
 test.each([undefined, "standard", "daybreak_red"] as const)(
-  "scan resolves Cyber selection from project or CLI override: %s",
+  "scan and follow-up validation use Cyber selection from project or CLI override: %s",
   async (override) => {
     const input = await fixture({
       scan: { cyber_access_program: "daybreak_blue" },
     });
     const onTurn = mock<(_target: string, options: ScanOptions) => void>();
+    const onValidate = mock(async (_options: ValidationOptions) => ({
+      disposition: "deferred" as const,
+      report: "Additional evidence is needed.",
+      outputDir: join(input.root, "evidence"),
+      threadId: "validation-thread",
+    }));
+    const result = new ScanResult({
+      ...fakeResult(["high"]),
+      scanDir: await temporaryDirectory(),
+    });
     expect(
       await runCapturedCli(
         main,
@@ -275,6 +284,7 @@ test.each([undefined, "standard", "daybreak_red"] as const)(
           input.repository,
           "-c",
           input.config,
+          "--validate",
           "--json",
           ...(override === undefined
             ? []
@@ -283,11 +293,17 @@ test.each([undefined, "standard", "daybreak_red"] as const)(
         dependencies({
           currentDirectory: input.repository,
           onTurn,
+          onValidate,
+          result,
         }),
       ),
     ).toBe(0);
     const selected = onTurn.mock.lastCall?.[1];
     expect(selected?.cyberAccessProgram).toBe(override ?? "daybreak_blue");
+    expect(onValidate).toHaveBeenCalledTimes(1);
+    expect(onValidate.mock.lastCall?.[0].cyberAccessProgram).toBe(
+      override ?? "daybreak_blue",
+    );
   },
 );
 
@@ -479,29 +495,11 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
     join(input.repository, "lib", "index.ts"),
     "export const value = 2;\n",
   );
-  for (const args of [
-    ["init", "-q", input.repository],
-    ["-C", input.repository, "add", "."],
-    [
-      "-C",
-      input.repository,
-      "-c",
-      "user.name=Test",
-      "-c",
-      "user.email=test@example.test",
-      "-c",
-      "commit.gpgsign=false",
-      "commit",
-      "-qm",
-      "fixture",
-    ],
-  ])
-    execFileSync("git", args);
-  const revision = execFileSync(
-    "git",
-    ["-C", input.repository, "rev-parse", "HEAD"],
-    { encoding: "utf8" },
-  ).trim();
+  git(input.repository, "init", "-q");
+  git(input.repository, "config", "--local", "core.autocrlf", "false");
+  git(input.repository, "add", ".");
+  git(input.repository, "commit", "--no-gpg-sign", "-qm", "fixture");
+  const revision = git(input.repository, "rev-parse", "HEAD");
   const csv = join(input.root, "repositories.csv");
   await writeFile(
     csv,
@@ -541,7 +539,9 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
   });
   expect(selected.find((options) => options.mode === "standard")).toMatchObject(
     {
-      target: ["lib"],
+      target: [
+        join(input.root, "batch-results", "checkouts", "standard", "lib"),
+      ],
       auth: "api-key",
       maxCostUsd: 3,
       failureSeverity: "high",
@@ -633,7 +633,7 @@ test.each(["standard", "deep"] as const)(
     const selected = onTurn.mock.lastCall?.[1];
     expect(selected).toMatchObject({
       mode,
-      target: ["lib"],
+      target: [join(input.repository, "lib")],
       scanPrompt: "Review synthetic boundaries.",
       failureSeverity: "high",
       maxCostUsd: 7,
@@ -1115,6 +1115,48 @@ test("a malformed selected file fails before constructing a client", async () =>
   });
 });
 
+test("dry-run reports native defaults restored by a CLI table", async () => {
+  const input = await fixture({
+    codex: { features: { multi_agent_v2: null } },
+  });
+  const onConfig = mock<(config: CodexSecurityConfig) => void>();
+  const { stdout, runCli } = createCliTest(main);
+  expect(
+    await runCli(
+      [
+        "scan",
+        input.repository,
+        "-c",
+        input.config,
+        "--codex",
+        "features.multi_agent_v2.max_concurrent_threads_per_session=2",
+        "--dry-run",
+        "--json",
+      ],
+      dependencies({
+        currentDirectory: input.repository,
+        onConfig,
+        onRun: throwing("Dry-run must not start a scan"),
+      }),
+    ),
+  ).toBe(0);
+  expect(JSON.parse(stdout.text())).toMatchObject({
+    dryRun: true,
+    projectConfig: {
+      sources: {
+        "codex.features.multi_agent_v2.enabled": "default",
+        "codex.features.multi_agent_v2.max_concurrent_threads_per_session":
+          "cli",
+      },
+    },
+  });
+  expect(
+    (await mergedCodexConfig(onConfig.mock.lastCall![0]))["features"],
+  ).toMatchObject({
+    multi_agent_v2: { enabled: true, max_concurrent_threads_per_session: 2 },
+  });
+});
+
 test("dry-run uses the real SDK without initializing its runtime and reports provenance", async () => {
   const input = await fixture({
     scan: {
@@ -1355,7 +1397,9 @@ test.each([
           codexHome: input.root,
           model,
           onUsage: options?.onUsage,
-          onCost: options?.onCost,
+          onCost: (cost, complete) => {
+            if (complete) options?.onCost?.(cost);
+          },
         });
         tracker.start("synthetic-scan-thread");
         await tracker.stop(usage);

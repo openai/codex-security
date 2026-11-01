@@ -84,7 +84,11 @@ if (role === "holder") {
   for await (const line of createInterface({ input: process.stdin })) {
     if (mode === "active") continue;
     const message = JSON.parse(line);
-    if (["initialize", "account/login/start"].includes(message.method)) {
+    if (
+      ["initialize", "account/login/start", "config/read"].includes(
+        message.method,
+      )
+    ) {
       send({ id: message.id, result: {} });
     } else if (message.method === "feedback/upload") {
       send(

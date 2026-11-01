@@ -1,7 +1,8 @@
-import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { expect, test } from "bun:test";
 
 const ci = Bun.YAML.parse(
@@ -10,14 +11,127 @@ const ci = Bun.YAML.parse(
     "utf8",
   ),
 ) as {
+  on: { pull_request: { types: string[] } };
+  concurrency: { group: string; "cancel-in-progress": string };
   jobs: Record<
     string,
     {
+      name: string;
+      needs?: string | string[];
       if?: string;
       steps: { name: string; if?: string; run: string }[];
     }
   >;
 };
+
+// These workflow expressions use boolean/string operators shared with JavaScript.
+// Evaluate the YAML itself so routing and check-name regressions are exercised.
+function expression(source: string, context: Record<string, unknown>): unknown {
+  return new Function(...Object.keys(context), `return (${source});`)(
+    ...Object.values(context),
+  );
+}
+
+function interpolate(source: string, context: Record<string, unknown>): string {
+  return source.replace(/\$\{\{(.*?)\}\}/g, (_, value: string) =>
+    String(expression(value, context)),
+  );
+}
+
+function eventContext(
+  action: string,
+  changes: Record<string, unknown> = {},
+  title = "test(ci): update checks",
+) {
+  return {
+    github: {
+      workflow: "node-ci",
+      event_name: action === "push" ? "push" : "pull_request",
+      event: {
+        action,
+        changes,
+        pull_request: action === "push" ? {} : { number: 1, title },
+      },
+      run_id: 123,
+    },
+    always: () => true,
+  };
+}
+
+test.each([
+  ["push", {}, true],
+  ["opened", {}, true],
+  ["synchronize", {}, true],
+  ["reopened", {}, true],
+  ["edited", { base: { ref: { from: "main" } } }, true],
+  ["edited", { title: { from: "Previous title" } }, false],
+  ["edited", { body: { from: "Previous body" } }, false],
+  ["edited", {}, false],
+] as const)(
+  "routes %s / %p without replacing required source checks",
+  (action, changes, sourceEvent) => {
+    const context = eventContext(action, changes);
+    const classifier = ci.jobs["classify-changes"]!;
+    expect(classifier.if).toBeUndefined();
+    const proof = classifier.steps.find(
+      ({ name }) => name === "Verify pull request source",
+    )!;
+    expect(expression(proof.if!, context)).toBe(!sourceEvent);
+    const gate = ci.jobs["ci"]!;
+    expect(gate.name).toBe("ci");
+    expect(expression(gate.if!, context)).toBe(true);
+    const confirmation = gate.steps.at(-1)!;
+    expect(confirmation.run).toBe(
+      "node .github/scripts/verify-pr-source.mjs confirm-target",
+    );
+    expect(expression(confirmation.if!, context)).toBe(!sourceEvent);
+    const sourceGroup = interpolate(
+      ci.concurrency.group,
+      eventContext("synchronize"),
+    );
+    const group = interpolate(ci.concurrency.group, context);
+    expect(group === sourceGroup).toBe(sourceEvent && action !== "push");
+    expect(interpolate(ci.concurrency["cancel-in-progress"], context)).toBe(
+      action === "push" ? "false" : "true",
+    );
+    const sdkGate = ci.jobs["test"]!.if!;
+    expect(ci.jobs["windows-test"]!.if).toBe(sdkGate);
+    const needs = {
+      "classify-changes": { outputs: { "source-required": "true" } },
+      package: { result: "success" },
+      "static-checks": { result: "failure" },
+    };
+    const run = (cancelled = false) =>
+      interpolate(sdkGate, { ...context, needs, cancelled: () => cancelled });
+    expect(run()).toBe(String(action === "push" || action === "edited"));
+    needs["static-checks"].result = "success";
+    expect(run()).toBe("true");
+    expect(run(true)).toBe("false");
+    needs.package.result = "failure";
+    expect(run()).toBe("false");
+    needs.package.result = "success";
+    needs["classify-changes"].outputs["source-required"] = "false";
+    expect(run()).toBe("false");
+  },
+);
+
+test("all source jobs depend on classification and titles cannot block source checks", () => {
+  expect(ci.on.pull_request.types).toEqual([
+    "opened",
+    "edited",
+    "reopened",
+    "synchronize",
+  ]);
+  for (const [id, job] of Object.entries(ci.jobs)) {
+    if (id !== "classify-changes") {
+      const dependencies = Array.isArray(job.needs) ? job.needs : [job.needs];
+      expect(dependencies, id).toContain("classify-changes");
+    }
+  }
+  const classifier = ci.jobs["classify-changes"]!;
+  expect(JSON.stringify(classifier)).not.toContain("PR_TITLE");
+  expect(classifier.if).toBeUndefined();
+});
 
 const musl = Bun.YAML.parse(
   await readFile(
@@ -46,64 +160,147 @@ const musl = Bun.YAML.parse(
 const bashTest = test.skipIf(process.platform === "win32");
 
 bashTest(
-  "selects workflow checks for workflow changes and main pushes",
+  "title corrections validate independently on every target branch",
   async () => {
-    const scope = ci.jobs["validate-title"]!.steps.find(
-      (step) => step.name === "Select additional checks",
+    const titleWorkflow = Bun.YAML.parse(
+      await readFile(
+        new URL(
+          "../../../.github/workflows/validate-pr-title.yml",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ) as typeof ci;
+    expect(titleWorkflow.on.pull_request).not.toHaveProperty("branches");
+    expect(titleWorkflow.on.pull_request.types).toEqual(
+      ci.on.pull_request.types,
+    );
+    const step = titleWorkflow.jobs["validate-pr-title"]!.steps.find(
+      (candidate) => candidate.name === "Check conventional title",
     )!;
-    const directory = await mkdtemp(join(tmpdir(), "workflow-quality-"));
-    try {
-      for (const [event, baseChanged, paths, expected] of [
-        ["push", false, [], "true"],
-        ["pull_request", true, [], "true"],
-        ["pull_request", false, [".github/workflows/node-release.yml"], "true"],
-        [
-          "pull_request",
-          false,
-          [".github/actions/download-native/action.yml"],
-          "true",
-        ],
-        ["pull_request", false, [".github/actionlint.yaml"], "true"],
-        ["pull_request", false, [".github/zizmor.yml"], "true"],
-        ["pull_request", false, ["docker/verify-container-compose.sh"], "true"],
-        ["pull_request", false, ["sdk/typescript/src/index.ts"], "false"],
-        ["pull_request", false, ["README.md"], "false"],
-      ] as const) {
-        const output = join(directory, "output");
-        await rm(output, { force: true });
-        const result = spawnSync(
-          "bash",
-          [
-            "-c",
-            'changed_paths=("$@"); git() { if ((${#changed_paths[@]})); then printf "%s\\0" "${changed_paths[@]}"; fi; }\n' +
-              scope.run,
-            "scope",
-            ...paths,
-          ],
-          {
-            encoding: "utf8",
-            env: {
-              ...process.env,
-              EVENT_NAME: event,
-              BASE_CHANGED: String(baseChanged),
-              GITHUB_OUTPUT: output,
-            },
-          },
-        );
-        expect(result.status, result.stderr).toBe(0);
-        const outputs = Object.fromEntries(
-          (await readFile(output, "utf8"))
-            .trim()
-            .split("\n")
-            .map((line) => line.split("=")),
-        );
-        expect(outputs["workflow-quality"], paths.join(",")).toBe(expected);
-      }
-    } finally {
-      await rm(directory, { recursive: true, force: true });
+    for (const [title, expected] of [
+      ["Invalid title", 1],
+      ["test(ci): valid title", 0],
+      ["test(ci): valid title\nInvalid continuation", 1],
+      ["test(ci): corrected title", 0],
+    ] as const) {
+      const result = spawnSync("bash", ["-c", step.run], {
+        encoding: "utf8",
+        env: { ...process.env, PR_TITLE: title },
+      });
+      expect(result.status, result.stderr).toBe(expected);
     }
   },
 );
+
+test("classification uses the PR merge diff and validates retargeted merge parents", async () => {
+  const scope = ci.jobs["classify-changes"]!.steps.find(
+    (step) => step.name === "Select required checks",
+  )!;
+  const [command, script] = scope.run.split(" ");
+  expect(command).toBe("node");
+  const directory = await mkdtemp(join(tmpdir(), "ci-merge-diff-"));
+  const repository = join(directory, "repository");
+  const output = join(directory, "outputs");
+  await mkdir(repository);
+  const git = (...args: string[]) =>
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=CI Test",
+        "-c",
+        "user.email=ci@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        ...args,
+      ],
+      { cwd: repository, encoding: "utf8", stdio: "pipe" },
+    );
+  try {
+    git("init", "-b", "main");
+    await writeFile(join(repository, "README.md"), "Original documentation\n");
+    git("add", ".");
+    git("commit", "-m", "Initial fixture");
+    git("checkout", "-b", "docs");
+    await writeFile(join(repository, "README.md"), "Updated documentation\n");
+    git("commit", "-am", "Update documentation");
+    git("checkout", "main");
+    await writeFile(
+      join(repository, "runtime.ts"),
+      "export const value = 1;\n",
+    );
+    git("add", ".");
+    git("commit", "-m", "Independent base change");
+    git("merge", "--no-ff", "docs", "-m", "Merge fixture");
+    const classify = (env: Record<string, string> = {}) =>
+      spawnSync(
+        command!,
+        [fileURLToPath(new URL(`../../../${script}`, import.meta.url))],
+        {
+          cwd: repository,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            EVENT_NAME: "pull_request",
+            GITHUB_SHA: git("rev-parse", "HEAD").trim(),
+            BASE_CHANGED: "false",
+            GITHUB_OUTPUT: output,
+            ...env,
+          },
+        },
+      );
+    const result = classify();
+    expect(result.status, result.stderr).toBe(0);
+    const outputs = Object.fromEntries(
+      (await readFile(output, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => line.split("=")),
+    );
+    expect(outputs["source-required"]).toBe("false");
+    expect(outputs["workflow-quality"]).toBe("false");
+
+    const base = git("rev-parse", "HEAD^1").trim();
+    const head = git("rev-parse", "docs").trim();
+    const old = git("rev-parse", "HEAD^1^1").trim();
+    const eventPath = join(directory, "event.json");
+    const baseEdit = { base: { ref: { from: "previous" } } };
+    for (const [changes, expectedBase, expectedHead, valid] of [
+      [baseEdit, base, head, true],
+      [baseEdit, old, head, false],
+      [baseEdit, base, old, false],
+      [{ title: { from: "Previous title" } }, old, head, true],
+    ] as const) {
+      await writeFile(
+        eventPath,
+        JSON.stringify({
+          changes,
+          pull_request: {
+            base: { ref: "main", sha: expectedBase },
+            head: { sha: expectedHead },
+          },
+        }),
+      );
+      await writeFile(output, "");
+      const retarget = classify({
+        BASE_CHANGED: "true",
+        GITHUB_EVENT_PATH: eventPath,
+      });
+      expect(retarget.status, retarget.stderr).toBe(valid ? 0 : 1);
+      const selection = await readFile(output, "utf8");
+      if (valid) expect(selection).toContain("workflow-quality=true");
+      else {
+        expect(retarget.stderr).toContain(base);
+        expect(retarget.stderr).toContain(head);
+        expect(retarget.stderr).toContain("Stale test merge");
+        expect(selection).toBe("");
+      }
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 for (const target of musl.jobs.primitives.strategy.matrix.include) {
   for (const scenario of ["ecr-success", "ecr-failure", "both-fail"] as const) {
@@ -202,37 +399,3 @@ for (const target of musl.jobs.primitives.strategy.matrix.include) {
     });
   }
 }
-
-bashTest(
-  "required Unix checks fail when selected workflow checks do not pass",
-  () => {
-    const aggregate = ci.jobs["required-test"]!;
-    expect(aggregate.if).toStartWith("always() && (");
-    const gate = aggregate.steps.find(
-      (step) => step.name === "Require selected workflow checks",
-    )!;
-    const condition = gate
-      .if!.replaceAll(
-        "needs.validate-title.outputs.workflow-quality",
-        '"$SELECTED"',
-      )
-      .replaceAll("needs.workflow-quality.result", '"$RESULT"');
-    for (const [selected, result, expected] of [
-      ["true", "success", 0],
-      ["true", "failure", 1],
-      ["true", "cancelled", 1],
-      ["true", "skipped", 1],
-      ["false", "skipped", 0],
-    ] as const) {
-      const execution = spawnSync(
-        "bash",
-        ["-c", `if [[ ${condition} ]]; then\n${gate.run}\nfi`],
-        {
-          encoding: "utf8",
-          env: { ...process.env, SELECTED: selected, RESULT: result },
-        },
-      );
-      expect(execution.status, execution.stderr).toBe(expected);
-    }
-  },
-);

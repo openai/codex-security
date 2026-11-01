@@ -1,4 +1,6 @@
 import { findingEntry, notify } from "./value.js";
+import type { CodexSecuritySurface } from "./api.js";
+import { codexSecurityRequestContext } from "./request-metadata.js";
 import {
   spawn,
   spawnSync,
@@ -174,6 +176,7 @@ export interface PublicationCodexResult {
 }
 
 export interface PublishScanDependencies {
+  surface?: CodexSecuritySurface;
   environment?: NodeJS.ProcessEnv;
   linearClient?: LinearClientFactory<"users" | "createIssue">;
   prepare?: typeof prepareScanPublication;
@@ -332,6 +335,15 @@ export async function publishScanInternal(
       options.signal,
     );
   } else {
+    const requestContext = codexSecurityRequestContext(
+      {},
+      {
+        surface: dependencies.surface ?? "sdk",
+        command: "publish",
+        // Native Codex resolves provider and metadata from all its config layers.
+        providerResolved: false,
+      },
+    );
     invocation = await (dependencies.runCodex ?? runPublicationCodex)(
       command!,
       [
@@ -340,6 +352,8 @@ export async function publishScanInternal(
         "gpt-5.6-luna",
         "-c",
         'model_reasoning_effort="low"',
+        "-c",
+        requestContext.configOverride,
         "--ephemeral",
         "--json",
         "--sandbox",
@@ -1598,7 +1612,7 @@ function forceTerminatePublicationProcess(
   terminatePublicationProcessGroup(child, "SIGKILL");
 }
 
-function terminatePublicationProcessGroup(
+export function terminatePublicationProcessGroup(
   child: ChildProcessWithoutNullStreams,
   signal: NodeJS.Signals,
 ): void {

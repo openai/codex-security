@@ -125,6 +125,12 @@ export const ScanSettingsSchema = DeepScanSettingsSchema.extend({
   outputDir: inputPath.optional(),
   failureSeverity: z.enum(SCAN_SEVERITIES).optional(),
   maxCostUsd: z.number().positive().optional(),
+  ownerSuggestions: z
+    .boolean()
+    .optional()
+    .describe(
+      "Generate optional owner-suggestions.json after a committed scan (default: false).",
+    ),
 });
 
 /** Scan settings shared by SDK calls, CLI flags, and project files. */

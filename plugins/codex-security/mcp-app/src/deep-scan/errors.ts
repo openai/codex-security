@@ -1,7 +1,4 @@
-import { createHash } from "node:crypto";
 import type { DeepScanRunState } from "./types.js";
-
-const MAX_PERSISTED_ERROR_LENGTH = 2_400;
 
 const STALE_COORDINATOR_GENERATION_MESSAGE =
   "Deep Scan coordinator lease belongs to a newer generation.";
@@ -69,49 +66,11 @@ export function confirmedOwnershipChange(
   }
 }
 
-/** Keep SQLite's bounded diagnostic useful while the manifest retains the full error. */
-export function boundedDeepScanErrorMessage(error: unknown): string {
-  return boundedDeepScanErrorText(
-    deepScanErrorMessage(error),
-    MAX_PERSISTED_ERROR_LENGTH,
-  );
-}
-
-export function boundedDeepScanErrorPair(
-  primary: unknown,
-  separator: string,
-  secondary: unknown,
-): string {
-  const primaryMessage = deepScanErrorMessage(primary);
-  const secondaryMessage = deepScanErrorMessage(secondary);
-  const available = MAX_PERSISTED_ERROR_LENGTH - separator.length;
-  const balancedBudget = Math.floor(available / 2);
-  let primaryBudget = Math.min(primaryMessage.length, balancedBudget);
-  const secondaryBudget = Math.min(
-    secondaryMessage.length,
-    available - primaryBudget,
-  );
-  primaryBudget = Math.min(primaryMessage.length, available - secondaryBudget);
-  return [
-    boundedDeepScanErrorText(primaryMessage, primaryBudget),
-    separator,
-    boundedDeepScanErrorText(secondaryMessage, secondaryBudget),
-  ].join("");
-}
-
-function deepScanErrorMessage(error: unknown): string {
+export function deepScanErrorMessage(error: unknown): string {
   return (
     (error instanceof Error ? error.message : String(error)).trim() ||
     "Codex Security Deep Scan failed."
   );
-}
-
-function boundedDeepScanErrorText(message: string, maxLength: number): string {
-  if (message.length <= maxLength) return message;
-  const digest = createHash("sha256").update(message).digest("hex");
-  const suffix = `\n...[truncated; sha256:${digest}]`;
-  if (suffix.length >= maxLength) return message.slice(0, maxLength);
-  return `${message.slice(0, maxLength - suffix.length)}${suffix}`;
 }
 
 export function isStaleCoordinatorGenerationError(error: unknown): boolean {

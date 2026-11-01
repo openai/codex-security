@@ -3,14 +3,13 @@ import { execFileSync } from "node:child_process";
 import {
   copyFileSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { runWorkflowScript } from "./support/workflow-script.js";
 
 type Step = {
@@ -24,6 +23,7 @@ type Step = {
 };
 type Job = {
   steps: Step[];
+  env?: Record<string, string>;
   permissions?: Record<string, string>;
   needs?: string[];
   outputs?: Record<string, string>;
@@ -55,22 +55,19 @@ const reuse = script(
   "Reuse an existing immutable Action distribution",
 );
 const detect = script("release", "Detect Action release source");
+const detectContainer = script("release", "Detect container release source");
 const complete = script("complete", "Require completed release channels");
+const summarize = script("complete", "Summarize release channels");
 const publish = script("action", "Publish immutable Action tag and metadata");
-const directories: string[] = [];
+const directories = createTemporaryDirectoriesSync();
 const version = "99.1.2";
 const packageName = "@openai/codex-security";
 const integrity = "sha512-synthetic-verified-integrity";
 
-afterEach(() => {
-  for (const directory of directories.splice(0)) {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
+afterEach(directories.cleanup);
 
 function fixture(includeAction = true) {
-  const directory = mkdtempSync(join(tmpdir(), "action release workflow "));
-  directories.push(directory);
+  const directory = directories.create("action release workflow ");
   const repository = join(directory, "release-source");
   const output = join(directory, "outputs");
   const npmMarker = join(directory, "npm-ran");
@@ -396,8 +393,7 @@ test.each([0, 42])(
     expect(validate.if).toBeUndefined();
     expect(upload.if).toBeUndefined();
 
-    const directory = mkdtempSync(join(tmpdir(), "action runtime firewall "));
-    directories.push(directory);
+    const directory = directories.create("action runtime firewall ");
     const runner = join(directory, "runner");
     const existingCache = join(runner, "existing-cache");
     mkdirSync(existingCache, { recursive: true });
@@ -545,8 +541,11 @@ const changedDistributions: Array<{
   },
 ];
 
-for (const job of ["action-verify", "action"]) {
-  test(`${job} reuses the exact CLI release before installing dependencies`, () => {
+const releaseJobs = ["action-verify", "action"];
+
+test.each(releaseJobs)(
+  "%s reuses the exact CLI release before installing dependencies",
+  (job) => {
     const release = fixture();
     const distribution = release.distribution();
     const result = release.run(reuseAndInstall(job));
@@ -554,23 +553,26 @@ for (const job of ["action-verify", "action"]) {
     expect(result.output).toBe("existing=true\n");
     expect(readFileSync(release.npmMarker, "utf8")).toContain("npm\n");
     expect(release.git("rev-parse", "HEAD")).toBe(distribution);
-  });
+  },
+);
 
-  test.each(changedDistributions)(
-    `${job} rejects changed $name before installing dependencies`,
-    ({ path, update, error }) => {
-      const release = fixture();
-      release.distribution(() =>
-        release.updateJson(`github-action/${path}`, update),
-      );
+test.each(changedDistributions)(
+  "both jobs reject changed $name before installing dependencies",
+  ({ path, update, error }) => {
+    const release = fixture();
+    release.distribution(() =>
+      release.updateJson(`github-action/${path}`, update),
+    );
+    for (const job of releaseJobs) {
+      release.git("checkout", "--detach", release.source);
       const result = release.run(reuseAndInstall(job));
-      expect(result.status).not.toBe(0);
-      expect(result.stderr).toContain(error);
-      expect(result.output).toBe("");
-      expect(readFileSync(release.npmMarker, "utf8")).toBe("");
-    },
-  );
-}
+      expect(result.status, job).not.toBe(0);
+      expect(result.stderr, job).toContain(error);
+      expect(result.output, job).toBe("");
+      expect(readFileSync(release.npmMarker, "utf8"), job).toBe("");
+    }
+  },
+);
 
 test("leaves the CLI source ready for first Action publication", () => {
   const release = fixture();
@@ -758,19 +760,21 @@ test("recovers an existing Action tag by creating its companion release with bot
   const result = publication.run();
   expect(result.status, result.stderr).toBe(0);
   expect(publication.commands()).toEqual(["view", "create"]);
-  expect(publication.state()).toMatchObject({
+  const published = publication.state();
+  expect(published).toMatchObject({
     isDraft: false,
     assets: actionAssets,
   });
-  expect(publication.state().notes).toContain(
+  expect(published.notes).toContain(
     "https://github.com/example/security-tool/releases/tag/npm-v99.1.2",
   );
-  expect(publication.state().notes).toContain(
+  expect(published.notes).toContain(
     `uses: example/security-tool@${publication.distribution}`,
   );
 
   const retry = publication.run();
   expect(retry.status, retry.stderr).toBe(0);
+  expect(publication.state()).toEqual(published);
   expect(publication.commands()).toEqual([
     "view",
     "create",
@@ -809,17 +813,6 @@ test.each(draftAssetSets)(
     ]);
   },
 );
-
-test("reuses identical published Action metadata without changing the immutable release", () => {
-  const publication = publicationFixture({
-    isDraft: false,
-    assets: actionAssets,
-  });
-  const result = publication.run();
-  expect(result.status, result.stderr).toBe(0);
-  expect(publication.commands()).toEqual(["view", "download", "download"]);
-  expect(publication.state()).toEqual({ isDraft: false, assets: actionAssets });
-});
 
 test.each(
   [false, true].flatMap((isDraft) =>
@@ -866,24 +859,152 @@ test.each(Object.keys(actionAssets))(
   },
 );
 
-test.each([
-  ["success", "success", "success", "true", true],
-  ["success", "success", "skipped", "", true],
-  ["failure", "skipped", "skipped", "", false],
-  ["success", "failure", "skipped", "true", false],
-  ["success", "success", "failure", "true", false],
-  ["success", "success", "skipped", "true", false],
-  ["success", "cancelled", "skipped", "", false],
-] as const)(
-  "requires completed release channels: release=%s install=%s action=%s present=%s",
-  (releaseResult, installResult, actionResult, hasAction, succeeds) => {
-    const release = fixture();
-    const result = release.run(complete, {
-      RELEASE_RESULT: releaseResult,
-      INSTALL_RESULT: installResult,
-      ACTION_RESULT: actionResult,
-      HAS_ACTION: hasAction,
-    });
+const successfulChannels = {
+  RELEASE_RESULT: "success",
+  INSTALL_RESULT: "success",
+  ACTION_RESULT: "success",
+  HAS_ACTION: "true",
+  CONTAINER_RESULT: "success",
+  HAS_CONTAINER: "true",
+};
+
+const failedRelease = {
+  RELEASE_RESULT: "failure",
+  INSTALL_RESULT: "skipped",
+  ACTION_RESULT: "skipped",
+  HAS_ACTION: "",
+};
+
+const channelCases: Array<[Record<string, string>, boolean]> = [
+  [{}, true],
+  [{ RELEASE_RESULT: "failure" }, false],
+  [failedRelease, false],
+  [{ ...failedRelease, CONTAINER_RESULT: "skipped", HAS_CONTAINER: "" }, false],
+  [{ INSTALL_RESULT: "failure" }, false],
+  [{ INSTALL_RESULT: "failure", ACTION_RESULT: "skipped" }, false],
+  [{ INSTALL_RESULT: "cancelled" }, false],
+  [
+    { INSTALL_RESULT: "cancelled", ACTION_RESULT: "skipped", HAS_ACTION: "" },
+    false,
+  ],
+  [{ ACTION_RESULT: "failure" }, false],
+  [{ ACTION_RESULT: "skipped" }, false],
+  [{ ACTION_RESULT: "skipped", HAS_ACTION: "" }, true],
+  [{ CONTAINER_RESULT: "failure" }, false],
+  [{ CONTAINER_RESULT: "cancelled" }, false],
+  [{ CONTAINER_RESULT: "skipped" }, false],
+  [{ HAS_WOLFI: "true", DEBIAN_DIGEST: "debian-digest" }, false],
+  [{ HAS_WOLFI: "true", WOLFI_DIGEST: "wolfi-digest" }, false],
+  [
+    {
+      HAS_WOLFI: "true",
+      DEBIAN_DIGEST: "debian-digest",
+      WOLFI_DIGEST: "wolfi-digest",
+    },
+    true,
+  ],
+  [{ CONTAINER_RESULT: "skipped", HAS_CONTAINER: "" }, true],
+];
+
+test.each(channelCases)(
+  "checks release channel requirements with %j",
+  (overrides, succeeds) => {
+    const result = runWorkflowScript(
+      tmpdir(),
+      complete,
+      { ...successfulChannels, ...overrides },
+      ["-e", "-o", "pipefail"],
+    );
     expect(result.status === 0).toBe(succeeds);
+  },
+);
+
+test("detects container support from the release commit, not the automation checkout", () => {
+  const release = fixture();
+  release.write(".github/workflows/wolfi-build.yml", "name: Wolfi\n");
+  const withoutContainer = release.commit("Add Wolfi workflow");
+  expect(
+    release.run(detectContainer, { RELEASE_SHA: withoutContainer }).output,
+  ).toBe("");
+  release.write("Dockerfile", "FROM scratch\n");
+  const containerSource = release.commit("Add container");
+  expect(release.run(detectContainer).output).toBe("");
+  expect(
+    release.run(detectContainer, { RELEASE_SHA: containerSource }).output,
+  ).toBe("present=true\nwolfi=true\n");
+});
+
+test.each([
+  ["0.1.26", false],
+  ["0.4.0", false],
+  ["0.5.0", true],
+  ["0.10.0", true],
+  ["1.0.0", true],
+] as const)(
+  "preserves historical recovery before coordinated containers: %s",
+  (version, included) => {
+    const release = fixture();
+    release.write("Dockerfile", "FROM scratch\n");
+    release.updateJson("sdk/typescript/package.json", (value) => ({
+      ...value,
+      version,
+    }));
+    const source = release.commit("Add container source");
+    expect(
+      release.run(detectContainer, {
+        RELEASE_SHA: source,
+        RELEASE_VERSION: version,
+      }).output,
+    ).toBe(included ? "present=true\n" : "");
+  },
+);
+
+test.each(["success", "failure", "cancelled", "skipped"])(
+  "reports the coordinated container result: %s",
+  (containerResult) => {
+    const directory = directories.create("release summary ");
+    const summary = join(directory, "summary.md");
+    const result = runWorkflowScript(
+      directory,
+      summarize,
+      {
+        ...successfulChannels,
+        RELEASE_VERSION: version,
+        GITHUB_STEP_SUMMARY: summary.replaceAll("\\", "/"),
+        GITHUB_SERVER_URL: "https://github.com",
+        GITHUB_REPOSITORY: "example/project",
+        CONTAINER_RESULT: containerResult,
+        RELEASE_SHA: "a".repeat(40),
+        DEBIAN_DIGEST:
+          containerResult === "success" ? `sha256:${"a".repeat(64)}` : "",
+        WOLFI_DIGEST:
+          containerResult === "success" ? `sha256:${"b".repeat(64)}` : "",
+      },
+      ["-e", "-o", "pipefail"],
+    );
+    expect(result.status, result.stderr).toBe(0);
+    const text = readFileSync(summary, "utf8");
+    if (containerResult === "success") {
+      for (const digit of ["a", "b"]) {
+        const ref = `ghcr.io/example/project@sha256:${digit.repeat(64)}`;
+        expect(text).toContain(`docker pull ${ref}`);
+        expect(text).toContain(
+          `gh attestation verify oci://${ref} --repo example/project`,
+        );
+      }
+    }
+    const rows = text
+      .split("\n")
+      .filter((line) => line.startsWith("|"))
+      .map((line) => line.split("|").map((cell) => cell.trim()));
+    expect(rows.find((row) => row[1] === "Container image")?.[2]).toBe(
+      containerResult,
+    );
+    expect(
+      step("complete", "Summarize release channels")["continue-on-error"],
+    ).toBe(true);
+    expect(workflow.jobs["complete"]?.env?.["CONTAINER_RESULT"]).toBe(
+      "${{ needs.container.result }}",
+    );
   },
 );

@@ -34,6 +34,17 @@ if (process.env.SYNTHETIC_SKILL_COMMAND === "validate") {
       send({ id: request.id, result: { type: "apiKey" } });
     } else if (request.method === "config/read") {
       send({ id: request.id, result: { layers: [] } });
+    } else if (request.method === "experimentalFeature/list") {
+      send({
+        id: request.id,
+        result: {
+          data: [
+            { name: "cli_daybreak", enabled: true },
+            { name: "api_key_cyber_access_programs", enabled: true },
+          ],
+          nextCursor: null,
+        },
+      });
     } else if (request.method === "thread/start") {
       send({
         id: request.id,

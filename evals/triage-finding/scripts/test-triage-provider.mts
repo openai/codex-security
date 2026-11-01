@@ -1,16 +1,119 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import { createServer } from "node:net";
 import path from "node:path";
-import test from "node:test";
+import test, { after, type TestContext } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { parse } from "yaml";
 import { beforeAll } from "./triage-provider.mts";
 
 const evalRoot = path.resolve(import.meta.dirname, "..");
 const runner = path.join(import.meta.dirname, "run-promptfoo.mts");
+const fixtureRunner = path.join(
+  import.meta.dirname,
+  "run-provider-fixture.mts",
+);
+const fixtureRoot = fs.realpathSync(
+  fs.mkdtempSync(path.join(os.tmpdir(), "triage-provider-bundle-")),
+);
+after(() => fs.rmSync(fixtureRoot, { recursive: true, force: true }));
+let builtMcp: string | undefined;
+
+function replayRunnerArgs() {
+  if (!builtMcp) {
+    const output = path.join(fixtureRoot, "mcp");
+    const mcpApp = path.join(evalRoot, "../../plugins/codex-security/mcp-app");
+    execFileSync(
+      process.execPath,
+      [
+        path.join(mcpApp, "scripts/build_mcp_app.mjs"),
+        "--output",
+        output,
+        "--native",
+        "host",
+      ],
+      { cwd: mcpApp },
+    );
+    builtMcp = output;
+  }
+  // Every child copies the same build into its own throwaway skill runtime.
+  return ["--experimental-strip-types", fixtureRunner, builtMcp];
+}
+
+const probeFixturePolicy = `
+const launcher = path.join(cwd, 'plugins/codex-security/scripts/launch_codex_security_mcp');
+const fixture = path.join(cwd, 'evals/triage-finding/fixtures/repo');
+fs.writeFileSync(path.join(fixture, 'SECURITY.md'), '# Synthetic policy\\n');
+const policy = require('node:child_process').execFileSync(launcher, ['--helper', 'resolve-security-md', '--repo', fixture, '--scope', 'src/server.js', '--out', '-'], {encoding:'utf8'});
+`;
+
+async function replayInViewer(
+  t: TestContext,
+  environment: NodeJS.ProcessEnv,
+  request: {
+    evaluationId: unknown;
+    prompt: string;
+    variables: Record<string, unknown>;
+  },
+) {
+  const listener = createServer();
+  await new Promise<void>((resolve) =>
+    listener.listen(0, "127.0.0.1", resolve),
+  );
+  const address = listener.address();
+  assert.ok(address && typeof address !== "string");
+  const port = address.port;
+  await new Promise<void>((resolve, reject) =>
+    listener.close((error) => (error ? reject(error) : resolve())),
+  );
+  const viewer = spawn(
+    process.execPath,
+    [...replayRunnerArgs(), "view", "--port", String(port), "--no"],
+    {
+      cwd: evalRoot,
+      env: { ...process.env, ...environment, NODE_USE_ENV_PROXY: "" },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let viewerOutput = "";
+  for (const stream of [viewer.stdout, viewer.stderr])
+    stream.on("data", (chunk) => {
+      viewerOutput += chunk;
+    });
+  const closed = new Promise<number | null>((resolve, reject) => {
+    viewer.once("error", reject);
+    viewer.once("close", resolve);
+  });
+  t.after(async () => {
+    if (viewer.exitCode === null) viewer.kill("SIGTERM");
+    await closed;
+  });
+  const url = `http://127.0.0.1:${port}`;
+  while (true) {
+    try {
+      const response = await fetch(`${url}/api/eval`);
+      if (response.ok) break;
+    } catch {
+      /* The actual viewer is still building its staged runtime. */
+    }
+    assert.equal(viewer.exitCode, null, viewerOutput);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  const replay = await fetch(`${url}/api/eval/replay`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ testIndex: 0, ...request }),
+  });
+  assert.equal(replay.status, 200, viewerOutput);
+  const replayResult = (await replay.json()) as { output: unknown };
+  assert.equal(replayResult.output, "ok", JSON.stringify(replayResult));
+  viewer.kill("SIGTERM");
+  await closed;
+  return viewerOutput;
+}
+
 function providerConfig(name: string) {
   return parse(
     fs.readFileSync(path.join(evalRoot, "providers", `${name}.yaml`), "utf8"),
@@ -36,18 +139,18 @@ const proxies = {
   NO_PROXY: "localhost,.example.test",
 };
 
-function invoke(args: string[], environment: NodeJS.ProcessEnv) {
+function invoke(
+  args: string[],
+  environment: NodeJS.ProcessEnv,
+  runnerArgs = replayRunnerArgs(),
+) {
   return new Promise<{ code: number | null; output: string }>(
     (resolve, reject) => {
-      const child = spawn(
-        process.execPath,
-        ["--experimental-strip-types", runner, ...args],
-        {
-          cwd: evalRoot,
-          env: { ...process.env, ...environment, NODE_USE_ENV_PROXY: "" },
-          stdio: ["ignore", "pipe", "pipe"],
-        },
-      );
+      const child = spawn(process.execPath, [...runnerArgs, ...args], {
+        cwd: evalRoot,
+        env: { ...process.env, ...environment, NODE_USE_ENV_PROXY: "" },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
       let output = "";
       child.stdout.on("data", (chunk) => {
         output += chunk;
@@ -191,7 +294,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const cwd = process.argv[process.argv.indexOf('--cd') + 1];
 fs.readFileSync(path.join(cwd, 'plugins/codex-security/skills/triage-finding/SKILL.md'));
-fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({cwd,node:process.env.CODEX_MCP_NODE_PATH,directories:process.argv.flatMap((arg,index)=>arg==='--add-dir'?[process.argv[index+1]]:[])}));
+${probeFixturePolicy}
+fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({cwd,policy,node:process.env.CODEX_MCP_NODE_PATH,directories:process.argv.flatMap((arg,index)=>arg==='--add-dir'?[process.argv[index+1]]:[])}));
 console.log(JSON.stringify({type:'thread.started',thread_id:'synthetic-cli-provider'}));
 console.log(JSON.stringify({type:'item.completed',item:{id:'message',type:'agent_message',text:'ok'}}));
 console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_tokens:1}}));
@@ -234,10 +338,12 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
         PROMPTFOO_DISABLE_TELEMETRY: "1",
         PROMPTFOO_DISABLE_UPDATE: "1",
       },
+      ["--experimental-strip-types", runner],
     );
     assert.equal(result.code, 0, result.output);
     const row = JSON.parse(fs.readFileSync(capture, "utf8"));
     assert.notEqual(row.cwd, evalRoot);
+    assert.match(row.policy, /Synthetic policy/);
     assert.equal(fs.existsSync(row.cwd), false);
     assert.equal(row.node, process.execPath);
     assert.deepEqual(row.directories, [
@@ -248,33 +354,44 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
   },
 );
 
-// Exercise the pinned provider and Codex SDK subprocess without a model request.
-// The normal setup command supplies the host helper build used by the runner.
-test(
-  "provider preserves proxies and rebinds saved evaluations to fresh runtimes",
-  { skip: process.platform === "win32", timeout: 120000 },
-  async (t) => {
-    const root = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), "triage-provider-")),
+// Reuse the immutable Node binaries; captures and Promptfoo databases belong to each test.
+function providerNode(...parts: string[]) {
+  const executable = path.join(fixtureRoot, ...parts);
+  if (!fs.existsSync(executable)) {
+    fs.mkdirSync(path.dirname(executable), { recursive: true });
+    fs.copyFileSync(
+      process.execPath,
+      executable,
+      fs.constants.COPYFILE_FICLONE,
     );
-    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-    const capture = path.join(root, "captures.jsonl");
-    const fakeCodex = path.join(root, "codex");
-    const fail = path.join(root, "fail");
-    fs.writeFileSync(
-      fakeCodex,
-      `#!${process.execPath}
+  }
+  return executable;
+}
+
+function captureProvider(t: TestContext, mode: "launcher" | "replay") {
+  const root = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), "triage-provider-")),
+  );
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const capture = path.join(root, "captures.jsonl");
+  const fakeCodex = path.join(root, "codex");
+  const fail = path.join(root, "fail");
+  fs.writeFileSync(
+    fakeCodex,
+    `#!${process.execPath}
 const fs = require('node:fs');
 const path = require('node:path');
-const cp = require('node:child_process');
 const cwd = process.argv[process.argv.indexOf('--cd') + 1];
-const launcher = path.join(cwd, 'plugins/codex-security/scripts/launch_codex_security_mcp');
-const fixture = path.join(cwd, 'evals/triage-finding/fixtures/repo');
-fs.writeFileSync(path.join(fixture, 'SECURITY.md'), '# Synthetic policy\\n');
-const policy = cp.execFileSync(launcher, ['--helper', 'resolve-security-md', '--repo', fixture, '--scope', 'src/server.js', '--out', '-'], {encoding:'utf8'});
+fs.readFileSync(path.join(cwd, 'plugins/codex-security/skills/triage-finding/SKILL.md'));
+// Each replay has a fresh cwd. One concurrent caller claims its helper probe.
+let capturedPolicy = '';
+if (${mode === "launcher"} || (!fs.existsSync(${JSON.stringify(fail)}) && fs.mkdirSync(path.join(cwd, '.policy-probe'), {recursive: true}))) {
+  ${probeFixturePolicy}
+  capturedPolicy = policy;
+}
 const directories = process.argv.flatMap((arg, index) => arg === '--add-dir' ? [process.argv[index + 1]] : []);
 const overrides = process.argv.flatMap((arg, index) => arg === '--config' ? [process.argv[index + 1]] : []);
-fs.appendFileSync(${JSON.stringify(capture)}, JSON.stringify({cwd,policy,directories,overrides,nodePath:process.env.CODEX_MCP_NODE_PATH,nodeTarget:fs.realpathSync.native(process.env.CODEX_MCP_NODE_PATH), proxies: Object.fromEntries(${JSON.stringify(Object.keys(proxies))}.map(key => [key,process.env[key]]))}) + '\\n');
+fs.appendFileSync(${JSON.stringify(capture)}, JSON.stringify({cwd,policy:capturedPolicy,directories,overrides,nodePath:process.env.CODEX_MCP_NODE_PATH,nodeTarget:fs.realpathSync.native(process.env.CODEX_MCP_NODE_PATH), proxies: Object.fromEntries(${JSON.stringify(Object.keys(proxies))}.map(key => [key,process.env[key]]))}) + '\\n');
 console.log(JSON.stringify({type:'thread.started', thread_id:'synthetic-thread'}));
 if (fs.existsSync(${JSON.stringify(fail)})) {
  console.log(JSON.stringify({type:'turn.failed',error:{message:'synthetic retryable failure'}}));
@@ -283,24 +400,52 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
  console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_input_tokens:0,output_tokens:1}}));
 }
 `,
-      { mode: 0o755 },
-    );
-    const ambientNode = path.join(root, "ambient-node", "bin", "node");
-    fs.mkdirSync(path.dirname(ambientNode), { recursive: true });
-    fs.copyFileSync(
-      process.execPath,
+    { mode: 0o755 },
+  );
+  const ambientNode = providerNode("ambient-node", "bin", "node");
+  const customNode = providerNode("custom-node", "bin", "node");
+  const selectedNode = providerNode("selected-node", "bin", "synthetic-node");
+  const environment = {
+    ...proxies,
+    CODEX_MCP_NODE_PATH: ambientNode,
+    OPENAI_API_KEY: "synthetic-test-key",
+    PROMPTFOO_CONFIG_DIR: path.join(root, "state"),
+    PROMPTFOO_DISABLE_WAL_MODE: "true",
+    PROMPTFOO_DISABLE_TELEMETRY: "1",
+    PROMPTFOO_DISABLE_UPDATE: "1",
+  };
+  const readRows = (): Capture[] =>
+    fs
+      .readFileSync(capture, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Capture);
+  return {
+    root,
+    fakeCodex,
+    fail,
+    ambientNode,
+    customNode,
+    selectedNode,
+    environment,
+    readRows,
+  };
+}
+
+// Exercise the pinned provider and Codex SDK subprocess without a model request.
+test(
+  "provider preserves proxies and selects each Node launcher",
+  { skip: process.platform === "win32", timeout: 120000 },
+  async (t) => {
+    const {
+      root,
+      fakeCodex,
       ambientNode,
-      fs.constants.COPYFILE_FICLONE,
-    );
-    const environment = {
-      ...proxies,
-      CODEX_MCP_NODE_PATH: ambientNode,
-      OPENAI_API_KEY: "synthetic-test-key",
-      PROMPTFOO_CONFIG_DIR: path.join(root, "state"),
-      PROMPTFOO_DISABLE_WAL_MODE: "true",
-      PROMPTFOO_DISABLE_TELEMETRY: "1",
-      PROMPTFOO_DISABLE_UPDATE: "1",
-    };
+      customNode,
+      selectedNode,
+      environment,
+      readRows,
+    } = captureProvider(t, "launcher");
     const configPath = path.join(root, "config.json");
     const provider = providerConfig("triage");
     provider.config.codex_path_override = fakeCodex;
@@ -315,26 +460,7 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
     const calibration = providerConfig("calibration");
     calibration.id = provider.id;
     calibration.config.codex_path_override = fakeCodex;
-    const customNode = path.join(root, "custom-node", "bin", "node");
-    fs.mkdirSync(path.dirname(customNode), { recursive: true });
-    fs.copyFileSync(
-      process.execPath,
-      customNode,
-      fs.constants.COPYFILE_FICLONE,
-    );
     calibration.config.cli_env.CODEX_MCP_NODE_PATH = customNode;
-    const selectedNode = path.join(
-      root,
-      "selected-node",
-      "bin",
-      "synthetic-node",
-    );
-    fs.mkdirSync(path.dirname(selectedNode), { recursive: true });
-    fs.copyFileSync(
-      process.execPath,
-      selectedNode,
-      fs.constants.COPYFILE_FICLONE,
-    );
     const nodeAlias = path.join(root, "node-alias");
     const nodeDispatcher = path.join(root, "node-runtime", "dispatcher");
     fs.mkdirSync(path.dirname(nodeDispatcher));
@@ -406,11 +532,7 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
     );
     for (const result of simultaneous)
       assert.equal(result.code, 0, result.output);
-    const rows = fs
-      .readFileSync(capture, "utf8")
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as Capture);
+    const rows = readRows();
     assert.equal(rows.length, 8);
     assert.equal(new Set(rows.map((row) => row.cwd)).size, 3);
     for (const row of rows) {
@@ -439,9 +561,23 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
         .length,
       1,
     );
+  },
+);
 
-    // Prompt-specific settings merge and render separately for each concurrent
-    // case, including the original configuration saved for retry and resume.
+test(
+  "provider rebinds saved templated settings for retry and resume",
+  { skip: process.platform === "win32", timeout: 120000 },
+  async (t) => {
+    const {
+      root,
+      fakeCodex,
+      fail,
+      customNode,
+      selectedNode,
+      environment,
+      readRows,
+    } = captureProvider(t, "replay");
+    const provider = providerConfig("triage");
     const templatedConfig = path.join(root, "templated.json");
     fs.writeFileSync(
       templatedConfig,
@@ -451,6 +587,7 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
             ...provider,
             config: {
               ...provider.config,
+              codex_path_override: fakeCodex,
               cli_env: {
                 ...provider.config.cli_env,
                 CODEX_MCP_NODE_PATH: "{{node_path}}",
@@ -487,11 +624,6 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
         })),
       }),
     );
-    const templatedEnvironment = {
-      ...environment,
-      PROMPTFOO_CONFIG_DIR: path.join(root, "templated-state"),
-    };
-    const startingRows = rows.length;
     fs.writeFileSync(fail, "");
     const templatedInitial = await invoke(
       [
@@ -504,7 +636,7 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
         "--no-share",
         "--no-progress-bar",
       ],
-      templatedEnvironment,
+      environment,
     );
     assert.notEqual(templatedInitial.code, 0, templatedInitial.output);
     assert.match(templatedInitial.output, /synthetic retryable failure/);
@@ -517,28 +649,28 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
         "--no-share",
         "--no-progress-bar",
       ],
-      templatedEnvironment,
+      environment,
     );
     assert.equal(templatedRetry.code, 0, templatedRetry.output);
     const templatedDatabase = new DatabaseSync(
-      path.join(templatedEnvironment.PROMPTFOO_CONFIG_DIR, "promptfoo.db"),
+      path.join(environment.PROMPTFOO_CONFIG_DIR, "promptfoo.db"),
       { enableForeignKeyConstraints: false },
     );
     templatedDatabase.prepare("DELETE FROM eval_results").run();
     templatedDatabase.close();
     const templatedResume = await invoke(
       ["eval", "--resume", "--no-cache", "--no-share", "--no-progress-bar"],
-      templatedEnvironment,
+      environment,
     );
     assert.equal(templatedResume.code, 0, templatedResume.output);
-    const templatedRows = fs
-      .readFileSync(capture, "utf8")
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as Capture)
-      .slice(startingRows);
+    const templatedRows = readRows();
     assert.equal(templatedRows.length, 12);
     assert.equal(new Set(templatedRows.map((row) => row.cwd)).size, 3);
+    const replayProbes = templatedRows.filter((row) => row.policy);
+    assert.equal(replayProbes.length, 2);
+    assert.equal(new Set(replayProbes.map((row) => row.cwd)).size, 2);
+    for (const row of replayProbes)
+      assert.match(row.policy, /Synthetic policy/);
     assert.equal(
       templatedRows.filter((row) => row.nodePath === customNode).length,
       6,
@@ -1124,70 +1256,13 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
     const replayVariables =
       JSON.parse((resumedResult.metadata as string) || "{}").inputVars ||
       JSON.parse(resumedResult.test_case).vars;
-    const listener = createServer();
-    await new Promise<void>((resolve) =>
-      listener.listen(0, "127.0.0.1", resolve),
-    );
-    const address = listener.address();
-    assert.ok(address && typeof address !== "string");
-    const port = address.port;
-    await new Promise<void>((resolve, reject) =>
-      listener.close((error) => (error ? reject(error) : resolve())),
-    );
-    const viewer = spawn(
-      process.execPath,
-      [
-        "--experimental-strip-types",
-        runner,
-        "view",
-        "--port",
-        String(port),
-        "--no",
-      ],
-      {
-        cwd: evalRoot,
-        env: { ...process.env, ...environment, NODE_USE_ENV_PROXY: "" },
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-    let viewerOutput = "";
-    for (const stream of [viewer.stdout, viewer.stderr])
-      stream.on("data", (chunk) => {
-        viewerOutput += chunk;
-      });
-    const closed = new Promise<number | null>((resolve, reject) => {
-      viewer.once("error", reject);
-      viewer.once("close", resolve);
+    await replayInViewer(t, environment, {
+      evaluationId: stored.id,
+      prompt:
+        "Read and follow skills/triage-finding/SKILL.md.\nTARGET=" +
+        replayVariables.target_repo,
+      variables: replayVariables,
     });
-    t.after(async () => {
-      if (viewer.exitCode === null) viewer.kill("SIGTERM");
-      await closed;
-    });
-    const url = `http://127.0.0.1:${port}`;
-    while (true) {
-      try {
-        if ((await fetch(`${url}/api/eval`)).ok) break;
-      } catch {}
-      assert.equal(viewer.exitCode, null, viewerOutput);
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    const replay = await fetch(`${url}/api/eval/replay`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        evaluationId: stored.id,
-        testIndex: 0,
-        prompt:
-          "Read and follow skills/triage-finding/SKILL.md.\nTARGET=" +
-          replayVariables.target_repo,
-        variables: replayVariables,
-      }),
-    });
-    assert.equal(replay.status, 200, viewerOutput);
-    const replayResult = (await replay.json()) as { output: unknown };
-    assert.equal(replayResult.output, "ok", JSON.stringify(replayResult));
-    viewer.kill("SIGTERM");
-    await closed;
     const rows = fs
       .readFileSync(capture, "utf8")
       .trim()
@@ -1452,71 +1527,11 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
           .inputVars || JSON.parse(resumedResult.test_case).vars;
       assert.equal(typeof replayVariables.target_repo, "string");
 
-      const listener = createServer();
-      await new Promise<void>((resolve) =>
-        listener.listen(0, "127.0.0.1", resolve),
-      );
-      const address = listener.address();
-      assert.ok(address && typeof address !== "string");
-      const port = address.port;
-      await new Promise<void>((resolve, reject) =>
-        listener.close((error) => (error ? reject(error) : resolve())),
-      );
-      const viewer = spawn(
-        process.execPath,
-        [
-          "--experimental-strip-types",
-          runner,
-          "view",
-          "--port",
-          String(port),
-          "--no",
-        ],
-        {
-          cwd: evalRoot,
-          env: { ...process.env, ...environment, NODE_USE_ENV_PROXY: "" },
-          stdio: ["ignore", "pipe", "pipe"],
-        },
-      );
-      let viewerOutput = "";
-      for (const stream of [viewer.stdout, viewer.stderr])
-        stream.on("data", (chunk) => {
-          viewerOutput += chunk;
-        });
-      const closed = new Promise<number | null>((resolve, reject) => {
-        viewer.once("error", reject);
-        viewer.once("close", resolve);
+      const viewerOutput = await replayInViewer(t, environment, {
+        evaluationId: stored.id,
+        prompt: "hello",
+        variables: replayVariables,
       });
-      t.after(async () => {
-        if (viewer.exitCode === null) viewer.kill("SIGTERM");
-        await closed;
-      });
-      const url = `http://127.0.0.1:${port}`;
-      while (true) {
-        try {
-          const response = await fetch(`${url}/api/eval`);
-          if (response.ok) break;
-        } catch {
-          /* The actual viewer is still building its staged runtime. */
-        }
-        assert.equal(viewer.exitCode, null, viewerOutput);
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-      const replay = await fetch(`${url}/api/eval/replay`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          evaluationId: stored.id,
-          testIndex: 0,
-          prompt: "hello",
-          variables: replayVariables,
-        }),
-      });
-      assert.equal(replay.status, 200, viewerOutput);
-      const replayResult = (await replay.json()) as { output: unknown };
-      assert.equal(replayResult.output, "ok", JSON.stringify(replayResult));
-      viewer.kill("SIGTERM");
-      await closed;
       assert.doesNotMatch(viewerOutput, /afterEach extension hook failed/);
       const rows = fs
         .readFileSync(capture, "utf8")

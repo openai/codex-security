@@ -1,6 +1,10 @@
-import { createHash } from "node:crypto";
+import { hash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { readScanFile, safeScopePath } from "./contract.js";
+import {
+  readScanFile,
+  safeScopePath,
+  validatedFileDigests,
+} from "./contract.js";
 import { isRecord } from "./record.js";
 import { VERSION } from "./version.js";
 import {
@@ -31,6 +35,7 @@ export const HostedScanInputSchema = z.strictObject({
   stateDirectory: z.string().min(1),
   model: z.string().min(1),
   reasoningEffort: z.string(),
+  ownerSuggestions: z.boolean().optional(),
   identity: z.strictObject({
     runId: z.string().min(1),
     attemptId: z.string().min(1),
@@ -171,6 +176,15 @@ function hostedScanEnvironment(stateDirectory: string): Record<string, string> {
 
 export interface HostedScanOptions {
   executor: ScanExecutor;
+  /** @deprecated Automatic owner reports validate scan hints without additional inference. */
+  ownerCodex?: {
+    startThread(options: { model?: string; modelReasoningEffort?: string }): {
+      run(
+        input: string,
+        options: { outputSchema?: unknown; signal?: AbortSignal },
+      ): Promise<{ finalResponse: string }>;
+    };
+  };
   signal?: AbortSignal;
   onEvent?: (event: ScanExecutionEvent) => void;
 }
@@ -245,6 +259,7 @@ export async function runHostedScan(
       mode: "standard",
       outputDir: outputDirectory,
       signal: options.signal,
+      ownerSuggestions: input.ownerSuggestions,
       onOutputDirReady(path) {
         outputDirectory = path;
       },
@@ -261,8 +276,8 @@ export async function runHostedScan(
     });
     if (
       result.manifest.scan.target.revision !== context.revision ||
-      (await repositoryRevision(context.repository, options.signal)) !==
-        context.revision
+      // Owner cancellation cannot invalidate an already sealed base scan.
+      (await repositoryRevision(context.repository)) !== context.revision
     )
       throw new Error(
         "Checkout changed from the frozen revision during execution.",
@@ -276,27 +291,41 @@ export async function runHostedScan(
     )
       throw new Error("Completed artifacts do not match the requested scope.");
     const sources = result.manifest.scan["preservedSources"];
+    const sealedDigests = validatedFileDigests.get(result.manifest)!;
     const names = new Set([
       "scan-manifest.json",
       "findings.json",
-      "coverage.json",
       "report.md",
-      ...result.manifest.scan.artifacts.map((artifact) => artifact.path),
+      ...result.manifest.scan.artifacts.map(({ path }) => path),
       ...(isRecord(sources) ? Object.keys(sources) : []),
     ]);
+    if (result.ownerSuggestionsPath !== undefined)
+      names.add("owner-suggestions.json");
     const artifacts = await Promise.all(
       [...names].sort().map(async (path) => {
         const contents = await readScanFile(outputDirectory, path, path);
         return {
           path,
-          sha256: createHash("sha256").update(contents).digest("hex"),
-          bytes: Buffer.byteLength(contents),
+          sha256: hash("sha256", contents),
+          bytes: contents.byteLength,
         };
       }),
     );
+    // Report a seal mismatch after the concurrent reads have closed their files.
+    for (const { path, sha256 } of artifacts) {
+      const expected = sealedDigests.get(path);
+      if (expected !== undefined && expected !== sha256) {
+        throw new Error(
+          `The sealed file ${path} changed before the hosted receipt was created.`,
+        );
+      }
+    }
     return {
       ...base(),
       status: "completed" as const,
+      ...(result.ownerSuggestionsError === undefined
+        ? {}
+        : { ownerSuggestionsError: result.ownerSuggestionsError }),
       artifacts,
     };
   } catch (error) {

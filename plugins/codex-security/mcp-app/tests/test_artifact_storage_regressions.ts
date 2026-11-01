@@ -162,6 +162,40 @@ try {
     await assert.rejects(fs.stat(scanRoot), { code: "ENOENT" });
   });
 
+  await test("option-shaped temporary artifact names survive save, read and import", async () => {
+    const context = await standaloneArtifactContext(
+      repository,
+      workbench,
+      true,
+      path.join(fixture, "literal-name-scans"),
+      "persistent",
+    );
+    for (const name of ["--help", "-evidence=λ.txt"]) {
+      const saved = await saveCodexSecurityArtifact(
+        context,
+        { storage: "temporary", path: name, content: "literal evidence\n" },
+        workbench,
+      );
+      temporaryDirectories.push(saved.directory);
+      const read = await readCodexSecurityArtifact(
+        context,
+        { storage: "temporary", path: name, encoding: "utf8" },
+        workbench,
+      );
+      assert.equal(read.content, "literal evidence\n");
+      const retained = await saveCodexSecurityArtifact(
+        context,
+        {
+          storage: "persistent",
+          path: `artifacts/${name}`,
+          sourcePath: saved.path,
+        },
+        workbench,
+      );
+      assert.equal(await fs.readFile(retained.path, "utf8"), read.content);
+    }
+  });
+
   await test("standalone persistent storage allows sibling-prefix directories", async () => {
     const scanRoot = repository + "-scans";
     const context = await standaloneArtifactContext(
@@ -756,7 +790,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       ...identity,
       findings: [],
       threatModel: { summary: "Synthetic test target" },
-      coverage: {
+      reviewState: {
         surfaces: [
           {
             id: "source",

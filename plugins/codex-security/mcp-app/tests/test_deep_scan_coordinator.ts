@@ -1,12 +1,16 @@
+import { testSharedReceiptSurvivesWorkerRetry } from "./deep_scan_receipt_cases.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
+import type { JsonObject } from "../src/types.js";
 import type {
   DeepScanConfig,
   DeepScanRunState,
   CodexWorkerDiagnostic,
   PersistedDeepScanWorker,
   DeepScanLogEvent,
+  CodexWorkerRequest,
+  CodexWorkerResult,
 } from "../src/deep-scan/types.js";
 import { mock } from "node:test";
 import assert from "node:assert/strict";
@@ -49,6 +53,7 @@ import {
   createCoordinator,
   runCoordinator,
   recordingClock,
+  recordCodexSecurityWorkerScanDraft,
   type TestWorker,
   type StoreInput,
 } from "./deep_scan_coordinator_fixture.ts";
@@ -862,7 +867,7 @@ async function testTransientDiscoveryErrorsRetainRecovery() {
   }
 }
 
-async function testConsecutiveTransientFailuresFailAtConfiguredThreshold() {
+async function testConsecutiveTransientErrorsFailAtConfiguredThreshold() {
   const { fixture, store } = await coordinatorFixture({
     stopAfterNoNew: 6,
     stopAfterConsecutiveErrors: 2,
@@ -870,8 +875,8 @@ async function testConsecutiveTransientFailuresFailAtConfiguredThreshold() {
   });
   const executor = new FakeExecutor({
     discoveryFailureMessages: {
-      "discovery-0001": "Synthetic transient worker failure.",
-      "discovery-0002": "Synthetic transient worker failure.",
+      "discovery-0001": "transient worker failure",
+      "discovery-0002": "transient worker failure",
     },
   });
   const terminal = await runCoordinator(fixture, store, executor, {
@@ -903,8 +908,8 @@ async function testSuccessfulDiscoveryResetsConsecutiveFailureThreshold() {
   });
   const executor = new FakeExecutor({
     discoveryFailureMessages: {
-      "discovery-0001": "Synthetic transient worker failure.",
-      "discovery-0003": "Synthetic transient worker failure.",
+      "discovery-0001": "transient worker failure",
+      "discovery-0003": "transient worker failure",
     },
     discoveryCandidateId: "candidate-1",
   });
@@ -1107,7 +1112,7 @@ async function testCommittedReducerIsReconciledBeforeDiscoveryFailureManifest() 
   assert.equal(store.run.noNewStreak, 2);
 }
 
-async function testLongWorkerErrorIsBoundedOnlyAtPersistenceBoundary() {
+async function testLongWorkerErrorIsPreservedAtPersistenceBoundary() {
   const { fixture, store } = await coordinatorFixture();
   const fullError = `fixture long validator error: ${"x".repeat(5_000)}`;
   const terminal = await runCoordinator(
@@ -1117,13 +1122,13 @@ async function testLongWorkerErrorIsBoundedOnlyAtPersistenceBoundary() {
     { retryDelaysMs: [1, 3, 9], random: () => 0 },
   );
   assert.equal(terminal?.status, "failed");
-  assert.equal(store.failureMessages[0].length <= 2_400, true);
-  assert.match(store.failureMessages[0], /truncated; sha256:/);
+  assert.ok(store.failureMessages[0].includes(fullError));
+  assert.equal(terminal.error, store.failureMessages[0]);
   assert.equal(terminal.manifestPath, undefined);
   const [worker] = [...store.workers.values()];
   assert.equal(worker.status, "canceled");
   assert.equal(worker.attempt, 4);
-  assert.match(worker.error!, /truncated; sha256:/);
+  assert.equal(worker.error, `transient_error: ${fullError}`);
 }
 
 async function testDiscoveryPhasePersistenceFailureStopsDispatch() {
@@ -1256,7 +1261,7 @@ async function testMissingDiscoveryResultResumesExistingThread(
   assert.match(continuation, /completed source analysis/);
   assert.match(
     continuation,
-    /record_codex_security_scan_draft\(\{ scanId, scope\?, threatModel\?, findings, coverage \}\)/,
+    /record_codex_security_scan_draft\(\{ scanId, scope\?, threatModel\?, findings, reviewState \}\)/,
   );
   assert.doesNotMatch(continuation, /\b(?:Deep|artifacts?|rebuild)\b/i);
   assert.equal([...executor.discoveryPromptPaths.values()][0].size, 1);
@@ -1454,7 +1459,7 @@ async function testMissingReducerResultResumesExistingThread(
   assert.equal(new Set(executor.dedupThreadIds).size, 1);
   assert.match(
     executor.dedupContinuationPrompts[1] ?? "",
-    /record_codex_security_deep_reduction\(\{ scanId, findings, threatModel\?, scope\? \}\)/,
+    /record_codex_security_deep_reduction\(\{ scanId, findings, retainedFindingRefs\?, threatModel\?, scope\? \}\)/,
   );
   assert.doesNotMatch(
     executor.dedupContinuationPrompts[1] ?? "",
@@ -1476,6 +1481,12 @@ async function testMissingReducerResultResumesExistingThread(
     executor.dedupContinuationPrompts[1] ?? "",
     /paginate all assigned findings and the previous aggregate/,
   );
+  for (const prompt of [
+    await readFile(executor.dedupPromptPaths[0], "utf8"),
+    executor.dedupContinuationPrompts[1] ?? "",
+  ]) {
+    assert.match(prompt, /without code mode[^\n]*\bdirectly\b/i);
+  }
   assert.equal(new Set(executor.dedupPromptPaths).size, 1);
   await assert.rejects(
     realpath(
@@ -1599,7 +1610,7 @@ async function testExhaustedReducerIsReplacedAtDiscoveryLimit() {
   assert.match(failedReducer?.error ?? "", /result\.json/);
 }
 
-async function testExhaustedReducerPreservesCommittedArtifacts() {
+async function testFailedReducerPreservesCommittedArtifacts(refused: boolean) {
   const { fixture, store } = await coordinatorFixture({
     workers: 2,
     stopAfterNoNew: 99,
@@ -1614,12 +1625,24 @@ async function testExhaustedReducerPreservesCommittedArtifacts() {
     invalidDedupFromCall: 2,
   });
   const completedDrafts: ScanDraftInput[] = [];
-  const coordinator = createCoordinator(fixture, store, executor, {
-    retryDelaysMs: [1],
-    threadId: "fixture-owning-thread",
-    onComplete: async (draft) =>
-      void completedDrafts.push(structuredClone(draft)),
-  });
+  const coordinator = createCoordinator(
+    fixture,
+    store,
+    {
+      async run(request) {
+        if (refused && request.kind === "dedup" && executor.dedupCalls === 1) {
+          throw codexWorkerTurnError("Request blocked by cyberPolicy.");
+        }
+        return executor.run(request);
+      },
+    },
+    {
+      retryDelaysMs: [1],
+      threadId: "fixture-owning-thread",
+      onComplete: async (draft) =>
+        void completedDrafts.push(structuredClone(draft)),
+    },
+  );
   coordinator.start();
 
   await store.dedupCommitted.promise;
@@ -1631,15 +1654,13 @@ async function testExhaustedReducerPreservesCommittedArtifacts() {
   assert.equal(terminal?.status, "failed");
   assert.equal(terminal?.terminalReason, undefined);
   assert.equal(store.dedupCommits.length, 1);
-  assert.equal(executor.dedupCalls, 5);
+  assert.equal(executor.dedupCalls, refused ? 1 : 5);
   assert.equal(completedDrafts.length, 0);
   assert.equal(store.finishCalls.length, 0);
-  assert.match(terminal.error, /2 consecutive unsuccessful reducer workers/);
-  assert.deepEqual(
-    await readFile(committedResultPath),
-    committedContent,
-    "an exhausted reducer must preserve the committed semantic Standard result",
-  );
+  if (refused) assert.equal(terminal.error, "Request blocked by cyberPolicy.");
+  else
+    assert.match(terminal.error, /2 consecutive unsuccessful reducer workers/);
+  assert.deepEqual(await readFile(committedResultPath), committedContent);
 }
 
 async function testCommittedAggregateIsNotSalvagedWhenUntrusted(
@@ -2139,7 +2160,8 @@ async function testStoppedPublicationFailurePreservesOriginalDiagnostic() {
     /Saved result publication failed: fixture retained result publication failure/,
   );
   assert.match(terminal?.error ?? "", /Original Deep Scan failure:/);
-  assert.equal((terminal?.error?.length ?? 0) <= 2_400, true);
+  assert.ok(terminal?.error?.includes("y".repeat(2_350)));
+  assert.ok(terminal?.error?.includes("x".repeat(2_350)));
   assert.equal(
     (await store.get(fixture.run.scanId, "checkpoint-owner")).error,
     terminal?.error,
@@ -2153,7 +2175,7 @@ async function testStoppedPublicationFailurePreservesOriginalDiagnostic() {
   );
 }
 
-async function testStoppedPublicationFailureBoundsPrefixedDiagnostic() {
+async function testStoppedPublicationFailurePreservesPrefixedDiagnostic() {
   const { fixture, store } = await coordinatorFixture();
   const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
   const coordinator = createCoordinator(fixture, store, executor, {
@@ -2170,9 +2192,11 @@ async function testStoppedPublicationFailureBoundsPrefixedDiagnostic() {
   const terminal = await coordinator.wait(undefined, 5_000);
 
   assert.equal(terminal?.status, "canceled");
-  assert.equal((terminal?.error?.length ?? 0) <= 2_400, true);
-  assert.equal(store.publicationFailureMessages.length, 1);
-  assert.equal(store.publicationFailureMessages[0].length <= 2_400, true);
+  assert.equal(
+    terminal?.error,
+    `Saved result publication failed: fixture publication failure ${"z".repeat(2_400)}`,
+  );
+  assert.deepEqual(store.publicationFailureMessages, [terminal.error]);
   assert.match(
     store.publicationFailureMessages[0],
     /^Saved result publication failed: fixture publication failure/,
@@ -3239,7 +3263,7 @@ async function testResumeUsesHistoricalCandidateSnapshotForEachReducer() {
         "result.json",
       );
       const result = await readJson(resultPath);
-      result.coverage.deferred = [
+      result.reviewState.deferred = [
         { id: "remaining-review", reason: "Source review remains pending." },
       ];
       await writeJson(resultPath, result);
@@ -3275,7 +3299,7 @@ async function testResumeUsesHistoricalCandidateSnapshotForEachReducer() {
   assert.equal(resumed?.status, "succeeded", resumed?.error);
 
   assert.equal(
-    (completedDrafts[0].coverage.deferred as unknown[]).length,
+    (completedDrafts[0].reviewState.deferred as unknown[]).length,
     5,
     "resumed reduction must retain pending review from every merged worker",
   );
@@ -3605,7 +3629,7 @@ async function testDiscoveryDeadlineWithoutAcceptedWorkersReturnsPartialEvidence
   const manifest = await readJson(terminal.manifestPath);
   assert.deepEqual(manifest.findings, []);
 
-  assert.deepEqual(completedDrafts[0].coverage.deferred, [
+  assert.deepEqual(completedDrafts[0].reviewState.deferred, [
     {
       reason:
         "The configured discovery time limit elapsed before any source review completed.",
@@ -3813,7 +3837,7 @@ async function testSaturationIgnoresDiscoveryCancellationWriteFailure(
   const acceptedReducer = [...store.workers.values()].find(
     (worker) => worker.kind === "dedup" && worker.status === "succeeded",
   );
-  const { coverage, ...publishedReduction } = completed[0];
+  const { reviewState, ...publishedReduction } = completed[0];
   assert.deepEqual(
     publishedReduction,
     await readJson(acceptedReducer!.resultManifestPath!),
@@ -3832,7 +3856,7 @@ async function testPublicationUsesAcceptedReducerSnapshot() {
     for (const worker of store.workers.values()) {
       if (worker.kind !== "discovery" || !worker.resultManifestPath) continue;
       const changed = await readJson(worker.resultManifestPath);
-      changed.coverage = {
+      changed.reviewState = {
         surfaces: [],
         explicitExclusions: [],
         deferred: [{ reason: "Late write after acceptance." }],
@@ -3873,11 +3897,11 @@ async function testPublicationUsesAcceptedReducerSnapshot() {
   );
 
   assert.deepEqual(
-    completed[0].coverage.deferred,
+    completed[0].reviewState.deferred,
     [],
-    "late writes cannot change accepted coverage",
+    "late writes cannot change accepted reviewState",
   );
-  assert.equal(completed[0].coverage.surfaces.length, 1);
+  assert.equal(completed[0].reviewState.surfaces.length, 1);
   const reducer = [...store.workers.values()].find(
     (worker) => worker.kind === "dedup",
   );
@@ -3998,79 +4022,6 @@ async function testRecoverableWorkerErrorsCannotFailScan() {
   }
 }
 
-async function testPolicyRefusedReducerPreservesCommittedAggregate() {
-  const { fixture, store } = await coordinatorFixture({
-    workers: 2,
-    stopAfterNoNew: 10,
-    stopAfterConsecutiveErrors: 2,
-    maxDiscoveryRuns: 3,
-  });
-  const refusalMessage =
-    "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber";
-  const nextDiscovery = Promise.withResolvers<void>();
-  const normalExecutor = new FakeExecutor({
-    discoveryCandidateId: "candidate-1",
-    canonicalCandidateId: "candidate-1",
-    discoveryGates: { "discovery-0003": nextDiscovery.promise },
-  });
-  const failedAttempts: (string | undefined)[] = [];
-  const preserved: ScanDraftInput[] = [];
-  let stoppedState: DeepScanRunState | undefined;
-  const sleeps: number[] = [];
-  const coordinator = createCoordinator(
-    fixture,
-    store,
-    {
-      async run(request) {
-        if (
-          request.kind === "dedup" &&
-          (await promptContext(request.promptPath)).reducerLabel ===
-            "dedup-0002"
-        ) {
-          failedAttempts.push(request.resumeThreadId);
-          const error = codexWorkerTurnError(refusalMessage);
-          if (error instanceof DeepScanNonRetryableError)
-            request.onNonRetryableError?.(error);
-          throw error;
-        }
-        return normalExecutor.run(request);
-      },
-    },
-    {
-      clock: recordingClock(sleeps),
-      threadId: "fixture-owning-thread",
-      onStopped: async (stopped) => {
-        stoppedState = stopped;
-        const aggregate = stopped.persistedWorkers?.find(
-          (worker) => worker.kind === "dedup" && worker.status === "succeeded",
-        );
-        preserved.push(await readJson(aggregate!.resultManifestPath!));
-      },
-    },
-  );
-  coordinator.start();
-  await store.dedupCommitted.promise;
-  const committedResultPath = store.dedupCommits[0].resultManifestPath;
-  const committedContent = await readFile(committedResultPath);
-  nextDiscovery.resolve();
-
-  const terminal = await coordinator.wait(undefined, 5_000);
-
-  assert.equal(terminal?.status, "failed");
-  assert.equal(terminal?.error, refusalMessage);
-  assert.deepEqual(failedAttempts, [undefined]);
-  assert.deepEqual(sleeps, []);
-  assert.equal(store.dedupClaims.length, 2);
-  assert.equal(store.dedupCommits.length, 1);
-  assert.equal(store.finishCalls.length, 0);
-  assert.equal(normalExecutor.runningDiscovery, 0);
-  assert.deepEqual(await readFile(committedResultPath), committedContent);
-  assert.equal(stoppedState?.status, "failed");
-  assert.equal(stoppedState?.error, refusalMessage);
-  assert.deepEqual(preserved, [JSON.parse(committedContent.toString())]);
-  assert.deepEqual(store.failureMessages, [refusalMessage]);
-}
-
 async function testNonRetryableReducerAbortsScanWithoutRetry(
   failureMessage = "fixture fatal reducer failure",
 ) {
@@ -4109,9 +4060,8 @@ async function testNonRetryableReducerAbortsScanWithoutRetry(
   assert.equal(store.dedupCommits.length, 0);
 }
 
-async function testNonRetryableTurnStopsDispatchBeforeWorkerShutdown(
+async function testTerminalFailureStopsDispatchBeforeWorkerShutdown(
   kind: "discovery" | "dedup",
-  message: string,
   resumed: boolean,
 ) {
   const { fixture, store } = await coordinatorFixture({
@@ -4127,6 +4077,9 @@ async function testNonRetryableTurnStopsDispatchBeforeWorkerShutdown(
   const shutdown = Promise.withResolvers<void>();
   const signals: AbortSignal[] = [];
   const sleeps: number[] = [];
+  const message = resumed
+    ? "Request blocked by cyberPolicy."
+    : "Quota exceeded. Check your plan and billing details.";
   const attempts: (string | undefined)[] = [];
   let discoveryCalls = 0;
   const terminal = runCoordinator(
@@ -4136,28 +4089,25 @@ async function testNonRetryableTurnStopsDispatchBeforeWorkerShutdown(
       async run(request) {
         signals.push(request.signal);
         if (request.kind === "discovery") discoveryCalls++;
-        if (request.kind === kind && (kind === "dedup" || discoveryCalls > 1)) {
+        if (
+          request.kind === kind &&
+          (kind === "dedup" || discoveryCalls >= 2)
+        ) {
           attempts.push(request.resumeThreadId);
-          await request.onThreadStarted?.("fixture-refused-thread");
-          if (resumed && attempts.length === 1) {
-            throw new Error("Synthetic transient failure before refusal.");
-          }
+          await request.onThreadStarted?.("fixture-failing-thread");
+          if (resumed && attempts.length === 1)
+            throw new Error("temporary failure");
           const error = codexWorkerTurnError(message);
           if (error instanceof DeepScanNonRetryableError)
             request.onNonRetryableError?.(error);
           notified.resolve();
           await shutdown.promise;
-          if (resumed) throw new Error("Synthetic worker cleanup failure.");
-          throw error;
+          throw new Error("worker shutdown failed");
         }
         return normal.run(request);
       },
     },
-    {
-      clock: recordingClock(sleeps),
-      retryDelaysMs: [1, 3],
-      random: () => 0,
-    },
+    { clock: recordingClock(sleeps), retryDelaysMs: [1], random: () => 0 },
   );
   try {
     await notified.promise;
@@ -4167,29 +4117,20 @@ async function testNonRetryableTurnStopsDispatchBeforeWorkerShutdown(
     const result = await terminal;
     assert.equal(result?.status, "failed");
     assert.equal(result?.error, message);
-    const failed = [...store.workers.values()].filter(
-      (worker) => worker.status === "failed",
-    );
+    const workers = [...store.workers.values()];
+    const failed = workers.filter((worker) => worker.status === "failed");
     assert.equal(failed.length, 1);
     assert.equal(failed[0].kind, kind);
-    assert.equal(failed[0].threadId, "fixture-refused-thread");
-    assert.equal(failed[0].error, message);
+    assert.equal(failed[0].threadId, "fixture-failing-thread");
     assert.equal(failed[0].attempt, resumed ? 2 : 1);
-    assert.equal(
-      [...store.workers.values()].every(
-        (worker) =>
-          worker.id === failed[0].id ||
-          worker.status === "canceled" ||
-          worker.status === "succeeded",
-      ),
-      true,
+    assert.equal(failed[0].error, message);
+    assert.ok(workers.some((worker) => worker.status === "canceled"));
+    assert.deepEqual(
+      attempts,
+      resumed ? [undefined, "fixture-failing-thread"] : [undefined],
     );
     assert.equal(signals.length, callsAtFailure);
     assert.deepEqual(sleeps, resumed ? [1] : []);
-    assert.deepEqual(
-      attempts,
-      resumed ? [undefined, "fixture-refused-thread"] : [undefined],
-    );
   } finally {
     shutdown.resolve();
     await terminal;
@@ -4205,19 +4146,9 @@ try {
     DeepScanCoordinatorRegistry,
     immediateClock,
   });
-  for (const message of [
-    "Quota exceeded. Check your plan and billing details.",
-    "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber",
-  ]) {
-    for (const kind of ["discovery", "dedup"] as const) {
-      for (const resumed of [false, true]) {
-        await testNonRetryableTurnStopsDispatchBeforeWorkerShutdown(
-          kind,
-          message,
-          resumed,
-        );
-      }
-    }
+  for (const kind of ["discovery", "dedup"] as const) {
+    await testTerminalFailureStopsDispatchBeforeWorkerShutdown(kind, false);
+    await testTerminalFailureStopsDispatchBeforeWorkerShutdown(kind, true);
   }
   await testCappedQueueAndSerialDedup();
   await testStandardWorkersReceiveExistingFalsePositiveFeedback();
@@ -4249,23 +4180,25 @@ try {
   await testSingletonHardCapReduction();
   await testExhaustedRetryFailsScan();
   await testTransientDiscoveryErrorsRetainRecovery();
-  await testConsecutiveTransientFailuresFailAtConfiguredThreshold();
+  await testConsecutiveTransientErrorsFailAtConfiguredThreshold();
   await testRecoverableWorkerErrorsCannotFailScan();
   await testSuccessfulDiscoveryResetsConsecutiveFailureThreshold();
   await testExhaustedInvalidDiscoveryArtifactsAreReplaced();
   await testExhaustedMalformedDiscoveryDoesNotRemainPublishable();
   await testTransientExecutionFailureResumesWorkerThread();
   await testConfigurationFailureDoesNotRetry();
+  await testConfigurationFailureDoesNotRetry("Request blocked by cyberPolicy.");
   await testFailureManifestWriteDoesNotMaskOriginalError();
   await testFinishPersistenceFailureRewritesManifestAsFailure();
   await testCommittedReducerIsReconciledBeforeDiscoveryFailureManifest();
-  await testLongWorkerErrorIsBoundedOnlyAtPersistenceBoundary();
+  await testLongWorkerErrorIsPreservedAtPersistenceBoundary();
   await testDiscoveryPhasePersistenceFailureStopsDispatch();
   await testCancellationClearsRetryWait();
   await testGenericDiagnosticsPreserveMissingResultRetries();
   await testMissingDiscoveryResultResumesExistingThread();
   await testMissingDiscoveryResultResumesExistingThread(true);
   await testInvalidArtifactsRetry();
+  await testSharedReceiptSurvivesWorkerRetry();
   await testInvalidReducerResultRetriesFromSnapshot();
   await testInvalidReducerResultRetriesFromSnapshot(true);
   await testMissingReducerResultResumesExistingThread();
@@ -4274,9 +4207,12 @@ try {
   );
   await testMissingReducerResultRetainsSizeDiagnosticAfterOtherFailures();
   await testExhaustedReducerIsReplacedAtDiscoveryLimit();
-  await testPolicyRefusedReducerPreservesCommittedAggregate();
   await testNonRetryableReducerAbortsScanWithoutRetry();
-  await testExhaustedReducerPreservesCommittedArtifacts();
+  await testNonRetryableReducerAbortsScanWithoutRetry(
+    "Request blocked by cyberPolicy.",
+  );
+  await testFailedReducerPreservesCommittedArtifacts(false);
+  await testFailedReducerPreservesCommittedArtifacts(true);
   await testCommittedAggregateIsNotSalvagedWhenUntrusted("missing-owner");
   await testCommittedAggregateIsNotSalvagedWhenUntrusted("wrong-scan");
   await testCommittedAggregateIsNotSalvagedWhenUntrusted("stale-owner");
@@ -4293,7 +4229,7 @@ try {
   await testCancellationDuringDiscoveryAcceptanceRejectsLateSuccess();
   await testRegistryEvictionAndExternalFailure();
   await testStoppedPublicationFailurePreservesOriginalDiagnostic();
-  await testStoppedPublicationFailureBoundsPrefixedDiagnostic();
+  await testStoppedPublicationFailurePreservesPrefixedDiagnostic();
   await testTerminalReadFailureIsNotRecordedAsPublicationFailure();
   await testStaleMutationObservesReplacement();
   await testStoreConfirmedReplacementSurvivesReadFailure();

@@ -127,6 +127,7 @@ def collect_scan_usage(
     rate_limits: dict[str, dict[str, Any]] = {}
     tokens_updated_at = None
     accepted_thread_ids: set[str] = set()
+    measured_thread_ids: set[str] = set()
     excluded_thread_ids: set[str] = set()
     for session in sessions:
         if session.parent_thread_id in excluded_thread_ids:
@@ -145,6 +146,10 @@ def collect_scan_usage(
                 started_at=started_at,
                 completed_at=stopped_at,
                 completed_turn_id=completed_turn_id if session.thread_id == thread_id else None,
+                is_scan_owner=(
+                    scan["mode"] == "deep"
+                    and session.thread_id == scan["deep_scan_owner_thread_id"]
+                ),
             )
         except (OSError, UnicodeError, ValueError):
             missing_thread_ids.add(session.thread_id)
@@ -160,6 +165,13 @@ def collect_scan_usage(
             missing_thread_ids.add(session.thread_id)
             continue
         accepted_thread_ids.add(session.thread_id)
+        for key, snapshot in usage.rate_limits.items():
+            if key not in rate_limits or snapshot["observedAt"] > rate_limits[key]["observedAt"]:
+                rate_limits[key] = snapshot
+        if "token_usage_unavailable" in usage.warnings:
+            missing_thread_ids.add(session.thread_id)
+            continue
+        measured_thread_ids.add(session.thread_id)
         role = by_role["parent" if session.thread_id in parent_ids else "workers"]
         _add_token_usage(role, usage.tokens)
         role["threadCount"] += 1
@@ -167,19 +179,22 @@ def collect_scan_usage(
             tokens_updated_at = max(
                 tokens_updated_at or usage.tokens_updated_at, usage.tokens_updated_at
             )
-        for key, snapshot in usage.rate_limits.items():
-            if key not in rate_limits or snapshot["observedAt"] > rate_limits[key]["observedAt"]:
-                rate_limits[key] = snapshot
 
     if not accepted_thread_ids:
         return _unavailable_usage("scan_thread_unavailable", warnings=warnings)
+    if not measured_thread_ids:
+        return _unavailable_usage(
+            "token_usage_unavailable", warnings=warnings, rate_limits=rate_limits
+        )
 
     if any(
         usage["cachedInputTokens"] + usage["cacheWriteInputTokens"] > usage["inputTokens"]
         or usage["totalTokens"] != usage["inputTokens"] + usage["outputTokens"]
         for usage in by_role.values()
     ):
-        return _unavailable_usage("token_breakdown_unavailable", warnings=warnings)
+        return _unavailable_usage(
+            "token_breakdown_unavailable", warnings=warnings, rate_limits=rate_limits
+        )
 
     if completed_turn_id is not None and tokens_updated_at is not None:
         stopped_at = max(stopped_at, tokens_updated_at)
@@ -187,7 +202,7 @@ def collect_scan_usage(
         "coverage": "partial" if missing_thread_ids or warnings else "complete",
         "source": "codex_rollout",
         **{key: sum(role[key] for role in by_role.values()) for key in TOKEN_FIELDS.values()},
-        "threadCount": len(accepted_thread_ids),
+        "threadCount": len(measured_thread_ids),
         "byRole": by_role,
         "window": {"startedAt": started_at.isoformat(), "endedAt": stopped_at.isoformat()},
         "observedAt": observed_at.isoformat(),
@@ -228,8 +243,8 @@ def _scan_root_thread_ids(
             for row in connection.execute(
                 """
                 SELECT DISTINCT sdk_thread_id
-                FROM deep_scan_workers
-                WHERE scan_id = ? AND sdk_thread_id IS NOT NULL
+                FROM deep_scan_worker_threads
+                WHERE scan_id = ?
                 ORDER BY sdk_thread_id
                 """,
                 (scan["id"],),
@@ -472,6 +487,7 @@ def _read_rollout_usage(
     started_at: datetime,
     completed_at: datetime | None,
     completed_turn_id: str | None = None,
+    is_scan_owner: bool = False,
 ) -> RolloutUsage:
     result = RolloutUsage(_empty_token_usage(), set(), None, {})
     total = result.tokens
@@ -484,6 +500,7 @@ def _read_rollout_usage(
     response_ids: set[str] = set()
     current_turn_id: str | None = None
     completed_turn_measured = False
+    direct_control_session = False
     started_turns: set[str] = set()
     open_turns: set[str] = set()
     closed_turns: set[str] = set()
@@ -525,6 +542,13 @@ def _read_rollout_usage(
                     and not recorded_parent
                     and not payload.get("forked_from_id")
                 )
+                # prepareCliDeepScanSession creates this owner through app-server
+                # without a model turn, so its initial token usage is known zero.
+                direct_control_session = (
+                    boundary_reached
+                    and is_scan_owner
+                    and payload.get("originator") == "codex_security_deep_scan"
+                )
                 continue
 
             if not isinstance(payload, dict):
@@ -550,6 +574,19 @@ def _read_rollout_usage(
                 if not boundary_reached:
                     continue
             if event.get("type") == "event_msg" and payload.get("type") == "task_started":
+                # The same owner can resume as a model-backed coordinator. Only
+                # a provably post-scan turn leaves the original control zero intact.
+                task_started_at = _timestamp(event.get("timestamp"))
+                if (
+                    completed_at is None
+                    or task_started_at is None
+                    or task_started_at <= completed_at
+                    or (
+                        completed_turn_id is not None
+                        and payload.get("turn_id") == completed_turn_id
+                    )
+                ):
+                    direct_control_session = False
                 if (
                     completed_turn_id is not None
                     and current_turn_id == completed_turn_id
@@ -722,11 +759,13 @@ def _read_rollout_usage(
     _add_token_usage(total, response_usage if response_usage is not None else legacy_usage)
     if not boundary_reached:
         warnings.add("thread_ownership_unavailable")
+    elif result.tokens_updated_at is None and not direct_control_session:
+        warnings.add("token_usage_unavailable")
     if completed_turn_id is not None:
         open_turns.discard(completed_turn_id)
     if open_turns:
         warnings.add("turn_in_progress")
-    if boundary_reached and result.tokens_updated_at is None:
+    if boundary_reached and result.tokens_updated_at is None and not direct_control_session:
         warnings.add("token_record_missing")
     if closed_turns - measured_turns:
         warnings.add("token_record_missing")
@@ -846,7 +885,8 @@ def _usage_counts(usage: object) -> dict[str, int] | None:
     input_tokens = usage.get("input_tokens")
     cached_input_tokens = usage.get("cached_input_tokens", 0)
     if (
-        cache_write == 0
+        type(cache_write) is int
+        and cache_write == 0
         and type(legacy_cache_write) is int
         and legacy_cache_write > 0
         and type(input_tokens) is int
@@ -890,18 +930,26 @@ def _timestamp(value: object) -> datetime | None:
             if value.endswith("Z")
             else datetime.fromisoformat(value)
         )
-    except ValueError:
+        return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None
+    except (ValueError, OverflowError):
         return None
-    return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None
 
 
-def _unavailable_usage(reason: str, *, warnings: set[str] | None = None) -> dict[str, Any]:
-    return {
+def _unavailable_usage(
+    reason: str,
+    *,
+    warnings: set[str] | None = None,
+    rate_limits: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
         "coverage": "unavailable",
         "source": "codex_rollout",
         "threadCount": 0,
         "warnings": sorted({reason, *(warnings or set())}),
     }
+    if rate_limits:
+        result["accountRateLimits"] = [rate_limits[key] for key in sorted(rate_limits)]
+    return result
 
 
 def _reject_nonstandard_json_number(value: str) -> None:

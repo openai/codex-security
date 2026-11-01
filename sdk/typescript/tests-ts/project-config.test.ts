@@ -13,6 +13,7 @@ import {
   type ProjectConfigInput,
 } from "../src/project-config-schema.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
+import { mergedCodexConfig, type JsonValue } from "../src/config.js";
 import { ConfigurationError } from "../src/errors.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
@@ -22,6 +23,13 @@ afterEach(cleanup);
 
 const cases: [string, unknown, boolean][] = [
   ["minimal file", {}, true],
+  ["owner artifact enabled", { scan: { owner_suggestions: true } }, true],
+  ["owner artifact disabled", { scan: { owner_suggestions: false } }, true],
+  [
+    "owner artifact requires a boolean",
+    { scan: { owner_suggestions: "true" } },
+    false,
+  ],
   [
     "fractional investigation minutes",
     { scan: { max_time_minutes: 0.5 } },
@@ -241,7 +249,7 @@ describe("project configuration input contract", () => {
     ).toEqual(DEFAULT_DEEP_SCAN_SETTINGS);
   });
 
-  test("YAML and JSON load the same literal data without adding defaults", async () => {
+  test("YAML, JSON, and BOM-prefixed JSON load literal data without adding defaults", async () => {
     const root = await temporaryDirectory();
     const yaml = join(root, "scan.yaml");
     const json = join(root, "scan.json");
@@ -256,6 +264,10 @@ describe("project configuration input contract", () => {
     await writeFile(json, JSON.stringify(input));
     expect((await readProjectConfig(yaml)).input).toEqual(input);
     expect((await readProjectConfig(json)).input).toEqual(input);
+
+    const marked = { codex: { synthetic_setting: "preserve\uFEFFthis" } };
+    await writeFile(json, `\uFEFF${JSON.stringify(marked)}`);
+    expect((await readProjectConfig(json)).input).toEqual(marked);
   });
 
   test.each([
@@ -458,6 +470,98 @@ describe("project configuration resolution", () => {
       "codex.profiles.reviewCase.model": "project",
       "codex.synthetic_setting.itemCount": "cli",
     });
+  });
+
+  test.each<{ value: JsonValue; source: "default" | "project" }>([
+    { value: null, source: "default" },
+    { value: false, source: "default" },
+    { value: [], source: "default" },
+    { value: {}, source: "default" },
+    { value: { enabled: true }, source: "project" },
+  ])(
+    "tracks restored native defaults after replacing $value with a CLI table",
+    async ({ value, source }) => {
+      const root = await temporaryDirectory();
+      const input = { codex: { features: { multi_agent_v2: value } } };
+      const original = structuredClone(input);
+      const resolved = resolveScanSettings(
+        { input, directory: root },
+        {
+          codexOverrides: {
+            features: {
+              multi_agent_v2: { max_concurrent_threads_per_session: 2 },
+            },
+          },
+        },
+        root,
+      );
+      expect(
+        (await mergedCodexConfig(resolved.config))["features"],
+      ).toMatchObject({
+        multi_agent_v2: {
+          enabled: true,
+          max_concurrent_threads_per_session: 2,
+        },
+      });
+      expect(resolved.sources).toMatchObject({
+        "codex.features.multi_agent_v2.enabled": source,
+        "codex.features.multi_agent_v2.max_concurrent_threads_per_session":
+          "cli",
+      });
+      expect(
+        Object.hasOwn(resolved.sources, "codex.features.multi_agent_v2"),
+      ).toBe(false);
+      expect(Object.isFrozen(resolved.sources)).toBe(true);
+      expect(input).toEqual(original);
+    },
+  );
+
+  test("preserves literal native keys and profile sources across empty-table and list replacements", async () => {
+    const root = await temporaryDirectory();
+    const { config, sources } = resolveScanSettings(
+      {
+        directory: root,
+        input: {
+          codex: {
+            "setting.with.dot": { keep: true, retained: null, replace: [] },
+            setting: { with: { dot: { keep: true } } },
+            "literal.branch": { leaf: true },
+            synthetic: { old: true },
+            profile: "review",
+            profiles: { review: { model: "gpt-5.6-terra" } },
+          },
+        },
+      },
+      {
+        codexOverrides: {
+          "setting.with.dot": { keep: false, replace: {} },
+          literal: { branch: false },
+          synthetic: [],
+        },
+      },
+      root,
+    );
+    expect(config.codexOverrides["setting.with.dot"]).toEqual({
+      keep: false,
+      retained: null,
+      replace: {},
+    });
+    expect(config.codexOverrides["synthetic"]).toEqual([]);
+    expect(config.codexOverrides["literal.branch"]).toEqual({ leaf: true });
+    expect(config.codexOverrides["literal"]).toEqual({ branch: false });
+    expect(sources).toMatchObject({
+      "codex.setting.with.dot.keep": "cli",
+      "codex.setting.with.dot.retained": "project",
+      "codex.literal.branch.leaf": "project",
+      "codex.literal.branch": "cli",
+      "codex.synthetic": "cli",
+      "codex.profile": "project",
+      "codex.profiles.review.model": "project",
+    });
+    expect(Object.hasOwn(sources, "codex.setting.with.dot.replace")).toBe(
+      false,
+    );
+    expect(Object.hasOwn(sources, "codex.synthetic.old")).toBe(false);
   });
 
   test("ignores valid inactive deep defaults but rejects explicit deep CLI options in standard mode", async () => {

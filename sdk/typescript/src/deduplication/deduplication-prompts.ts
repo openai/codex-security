@@ -79,3 +79,7 @@ export function savedSourceContext(
     })),
   })}\nThe approved checkout can establish current source only for findings associated with approvedRepositoryId. A sourceSnapshot identifies the saved occurrence's repository, recorded revision, and working-tree snapshot digest; a revision can be a baseline for uncommitted changes, so preserve the supplied snapshot evidence. Missing sourceSnapshot means its saved source could not be established, not that the current checkout is its source. Current files do not establish another repository's or an earlier revision's code. Treat disjoint repository associations as separate source contexts: similar names, paths, or snippets do not prove a shared maintained control. Establish any common originating control from supplied source provenance before deciding SAME across those contexts; missing provenance is not evidence that they are the same repository. These associations do not authorize reading another checkout. Use supplied evidence and available revisions in approved checkouts, and report a required source-access blocker when it prevents a decision.\n\n`;
 }
+
+export function missingSubmissionPrompt(validationFailure?: string): string {
+  return `Continue the original assigned review in this conversation. No submission was accepted.${validationFailure ? ` The last submission was rejected: ${validationFailure}` : ""} ${reviewSubmissionInstructions}`;
+}

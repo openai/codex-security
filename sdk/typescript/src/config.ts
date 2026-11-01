@@ -167,6 +167,11 @@ export function structuredCodexConfig(config: JsonObject = {}): JsonObject {
   return structured;
 }
 
+/** @internal Quote a TOML string without changing its contents. */
+export function quoteTomlString(value: string): string {
+  return JSON.stringify(value).replaceAll("\u007f", "\\u007f");
+}
+
 /** @internal Serialize one Codex CLI override value without flattening its keys. */
 export function inlineToml(value: JsonValue): string {
   if (value === null)
@@ -177,7 +182,7 @@ export function inlineToml(value: JsonValue): string {
   if (isObject(value)) {
     return `{${Object.entries(value)
       .filter(([, item]) => item !== null)
-      .map(([key, item]) => `${JSON.stringify(key)}=${inlineToml(item)}`)
+      .map(([key, item]) => `${quoteTomlString(key)}=${inlineToml(item)}`)
       .join(",")}}`;
   }
   return stringify({ value }).slice("value = ".length).trim();

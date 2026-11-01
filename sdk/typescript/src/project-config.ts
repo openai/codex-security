@@ -9,7 +9,6 @@ import {
 } from "node:path";
 import { pathToFileURL } from "node:url";
 import Ajv from "ajv";
-import { parseDocument } from "yaml";
 import {
   DEFAULT_CODEX_CONFIG,
   mergeCodexOverrides,
@@ -59,6 +58,7 @@ const PROJECT_SETTING_KEYS = {
   mode: "scan.mode",
   maxTimeMinutes: "scan.max_time_minutes",
   cyberAccessProgram: "scan.cyber_access_program",
+  ownerSuggestions: "scan.owner_suggestions",
   target: "scan.scope",
   knowledgeBasePaths: "scan.knowledge_base",
   scanPromptFile: "scan.instructions_file",
@@ -146,8 +146,9 @@ export async function readProjectConfig(
   let value: unknown;
   try {
     if (extension === ".json") {
-      value = JSON.parse(text);
+      value = JSON.parse(text.replace(/^\uFEFF/u, ""));
     } else {
+      const { parseDocument } = await import("yaml");
       const document = parseDocument(text, { prettyErrors: false });
       if (document.errors.length > 0) throw document.errors[0];
       // Keep YAML's expansion guard while allowing repeated native profiles.
@@ -314,6 +315,18 @@ export function resolveScanSettings(
     file?.codex ?? {},
     overrides.codexOverrides ?? {},
   );
+  const nativeSourceTree = (
+    value: JsonObject,
+    source: ConfigurationSource,
+  ): JsonObject =>
+    Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        item !== null && typeof item === "object" && !Array.isArray(item)
+          ? nativeSourceTree(item, source)
+          : source,
+      ]),
+    );
   const recordNativeSources = (
     value: JsonObject,
     source: ConfigurationSource,
@@ -322,19 +335,24 @@ export function resolveScanSettings(
     for (const [key, item] of Object.entries(value)) {
       const path: `codex.${string}` = `${prefix}.${key}`;
       if (item !== null && typeof item === "object" && !Array.isArray(item)) {
-        delete sources[path];
         recordNativeSources(item, source, path);
-      } else {
-        for (const existing of Object.keys(sources) as ProvenanceKey[]) {
-          if (existing.startsWith(`${path}.`)) delete sources[existing];
-        }
+      } else if (item === source) {
         sources[path] = source;
       }
     }
   };
-  recordNativeSources(DEFAULT_CODEX_CONFIG, "default");
-  recordNativeSources(file?.codex ?? {}, "project");
-  recordNativeSources(overrides.codexOverrides ?? {}, "cli");
+  // Match the value merge: defaults beneath the combined project/CLI overrides.
+  const nativeSources = mergeCodexOverrides(
+    nativeSourceTree(DEFAULT_CODEX_CONFIG, "default"),
+    mergeCodexOverrides(
+      nativeSourceTree(file?.codex ?? {}, "project"),
+      nativeSourceTree(overrides.codexOverrides ?? {}, "cli"),
+    ),
+  );
+  // Literal dotted keys can share a flattened name; retain layer precedence.
+  for (const source of ["default", "project", "cli"] as const) {
+    recordNativeSources(nativeSources, source);
+  }
   const knowledgeBasePaths =
     choose(
       "scan.knowledge_base",
@@ -356,6 +374,11 @@ export function resolveScanSettings(
     mode,
     maxTimeMinutes,
     target,
+    ownerSuggestions: choose(
+      "scan.owner_suggestions",
+      file?.scan?.owner_suggestions,
+      overrides.ownerSuggestions,
+    ),
     knowledgeBasePaths,
     scanPromptFile: choose(
       "scan.instructions_file",

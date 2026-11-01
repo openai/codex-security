@@ -10,6 +10,7 @@ from typing import Any
 from workbench_test_support import (
     cancel_remediation_request,
     claim_remediation_resend,
+    empty_target_paths,
     mark_remediation_delivered,
     request_remediation,
     request_remediation_action,
@@ -38,9 +39,7 @@ def update_remediation(
 
 
 def test_failed_remediation_steps_can_retry_or_regenerate(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     source = target / "source.txt"
     source.write_text("vulnerable\n")
     scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
@@ -189,12 +188,28 @@ def test_failed_remediation_steps_can_retry_or_regenerate(tmp_path: Path) -> Non
     assert failed["pendingAction"] == "verify"
     assert failed["actionClaimToken"] is None
     assert failed["actionDeliveredAt"] is None
+    canceled = cancel_remediation_request(state_dir, occurrence_id, request_id, verify_token)[
+        "scan"
+    ]["findings"][0]["remediationState"]
+    assert canceled == failed
     verify_retry_token = str(uuid.uuid4())
     claim_remediation_resend(state_dir, occurrence_id, request_id, verify_retry_token)
     delivered = mark_remediation_delivered(
         state_dir, occurrence_id, request_id, verify_retry_token
     )["scan"]["findings"][0]["remediationState"]
     assert delivered["actionDeliveredAt"]
+    canceled = cancel_remediation_request(state_dir, occurrence_id, request_id, verify_retry_token)[
+        "scan"
+    ]["findings"][0]["remediationState"]
+    assert canceled["state"] == "failed"
+    assert canceled["pendingAction"] == "verify"
+    assert canceled["summary"] == failed["summary"]
+    assert canceled["version"] == failed["version"]
+    assert canceled["actionClaimToken"] is None
+    assert canceled["actionClaimedAt"] is None
+    assert canceled["actionDeliveredAt"] is None
+    verify_retry_token = str(uuid.uuid4())
+    claim_remediation_resend(state_dir, occurrence_id, request_id, verify_retry_token)
     verified = update_remediation(
         state_dir,
         occurrence_id,

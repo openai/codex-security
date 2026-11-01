@@ -10,6 +10,7 @@ import {
   estimateScanCost,
   ScanCostTracker,
   type ScanSessionEvent,
+  type ScanUsageObservation,
   type ScanWorkerEvent,
 } from "../src/cost.js";
 import type { ScanActivity } from "../src/scan-activity.js";
@@ -185,10 +186,20 @@ describe("scan cost", () => {
       {},
       { parent: scanThreadId },
     );
+    const rollout = ownershipRollout([]);
+    rollout.splice(2, 0, {
+      type: "event_msg",
+      timestamp: "2026-07-26T12:04:00Z",
+      payload: {
+        type: "token_count",
+        info: null,
+        rate_limits: { limit_id: "replayed" },
+      },
+    });
     await writeFile(
       path,
       jsonLines([
-        ...ownershipRollout([]),
+        ...rollout,
         {
           type: "event_msg",
           timestamp: "2026-07-26T12:03:00Z",
@@ -200,12 +211,27 @@ describe("scan cost", () => {
         },
       ]) + "\n",
     );
+    const observations: ScanUsageObservation[] = [];
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-6-astra",
+      onUsageObservation: (observation) => observations.push(observation),
     });
     tracker.start(scanThreadId);
     expect((await tracker.stop()).usage).toEqual(ownedSdkUsage);
+    expect(observations).toEqual([
+      {
+        tokensUpdatedAt: "2026-07-26T12:02:00.250Z",
+        accountRateLimits: [
+          {
+            limitId: "codex",
+            observedAt: "2026-07-26T12:03:00.000Z",
+            primary: { usedPercent: 5, windowMinutes: null, resetsAt: null },
+            secondary: null,
+          },
+        ],
+      },
+    ]);
     expect(readPythonRolloutUsage(BUNDLED_PLUGIN_ROOT, path)).toEqual({
       usage: ownedPythonUsage,
       warnings: [],
@@ -525,6 +551,69 @@ describe("scan cost", () => {
 });
 
 describe("live scan cost tracking", () => {
+  test("observes account limits and actual token measurement times from this scan", async () => {
+    const home = await codexHome();
+    const path = await writeSession(home, scanThreadId, {});
+    const unrelated = await writeSession(home, "unrelated", {});
+    const older = "2026-07-26T12:00:00.000Z";
+    const limitAt = "2026-07-26T12:01:00.000Z";
+    const tokensAt = "2026-07-26T12:02:00.000Z";
+    const later = "2026-07-26T12:03:00.000Z";
+    const limit = (timestamp: string, usedPercent: number) => ({
+      type: "event_msg",
+      timestamp,
+      payload: {
+        type: "token_count",
+        info: null,
+        rate_limits: {
+          limit_id: "codex",
+          secondary: { used_percent: usedPercent, window_minutes: 10_080 },
+        },
+      },
+    });
+    await appendFile(path, jsonLines([limit(limitAt, 12)]) + "\n");
+    await appendFile(unrelated, jsonLines([limit(later, 99)]) + "\n");
+    const observations: ScanUsageObservation[] = [];
+    const tracker = costTracker(home, {
+      onUsageObservation: (observation) => observations.push(observation),
+    });
+    tracker.start(scanThreadId);
+    const accountRateLimits = [
+      {
+        limitId: "codex",
+        observedAt: limitAt,
+        primary: null,
+        secondary: { usedPercent: 12, windowMinutes: 10_080, resetsAt: null },
+      },
+    ];
+    try {
+      expect((await tracker.refresh()).usage).toBeNull();
+      expect(observations).toEqual([
+        { tokensUpdatedAt: null, accountRateLimits },
+      ]);
+      const receipt = nativeUsageRecord(
+        scanThreadId,
+        "response",
+        ownedSdkUsage,
+      );
+      await appendFile(
+        path,
+        jsonLines([
+          { ...receipt, timestamp: tokensAt },
+          { ...receipt, timestamp: later },
+          limit(older, 3),
+        ]) + "\n",
+      );
+      expect((await tracker.refresh()).usage).toEqual(ownedSdkUsage);
+      await tracker.refresh();
+      expect(observations.slice(1)).toEqual([
+        { tokensUpdatedAt: tokensAt, accountRateLimits },
+      ]);
+    } finally {
+      await tracker.stop();
+    }
+  });
+
   test("keeps receipt cache-write detail when an equal legacy counter omits it", async () => {
     const home = await codexHome();
     const usage = {
@@ -548,6 +637,71 @@ describe("live scan cost tracking", () => {
       cacheWriteInputTokens: 12,
       outputTokens: 10,
     });
+  });
+
+  test("keeps freshness with the last reportable token total", async () => {
+    const home = await codexHome();
+    const parent = await writeSession(home, scanThreadId, {});
+    const first = "2026-07-26T10:01:00.000Z";
+    const second = "2026-07-26T10:02:00.000Z";
+    const third = "2026-07-26T10:03:00.000Z";
+    const measure = (
+      path: string,
+      timestamp: string | undefined,
+      input: number,
+    ) =>
+      appendFile(
+        path,
+        jsonLines([
+          {
+            ...legacyUsageRecord({ input_tokens: input, output_tokens: 0 }),
+            timestamp,
+          },
+        ]) + "\n",
+      );
+    await measure(parent, first, 10);
+    const times: Array<string | null> = [];
+    const tracker = costTracker(home, {
+      onUsageObservation: ({ tokensUpdatedAt }) => times.push(tokensUpdatedAt),
+    });
+    tracker.start(scanThreadId);
+    try {
+      expect((await tracker.refresh()).usage).toMatchObject({
+        total_tokens: 10,
+      });
+      const worker = await writeSession(
+        home,
+        "worker",
+        {},
+        { parent: scanThreadId },
+      );
+      await measure(parent, second, 20);
+      expect((await tracker.refresh()).usage).toBeNull();
+      expect(times).toEqual([first]);
+      await measure(worker, third, 7);
+      expect((await tracker.refresh()).usage).toMatchObject({
+        total_tokens: 27,
+      });
+      expect(times).toEqual([first, third]);
+      tracker.recordUsage({ input_tokens: 30, output_tokens: 0 });
+      expect((await tracker.refresh()).usage).toMatchObject({
+        total_tokens: 37,
+      });
+      expect(times).toEqual([first, third, null]);
+      await measure(parent, third, 30);
+      await tracker.refresh();
+      expect(times.at(-1)).toBe(third);
+      await measure(parent, undefined, 30);
+      await tracker.refresh();
+      expect(times.at(-1)).toBe(third);
+      await measure(parent, undefined, 31);
+      expect((await tracker.refresh()).usage).toMatchObject({
+        total_tokens: 38,
+      });
+      expect(times.at(-1)).toBeNull();
+    } finally {
+      await tracker.stop();
+    }
   });
 
   test("counts compaction receipts before stale counters and deduplicates responses", async () => {
@@ -2614,6 +2768,99 @@ describe("live scan cost tracking", () => {
         outputTokens: 20,
         estimatedUsd: 0.000224,
       },
+    });
+  });
+
+  test("reports budget subtotals until missing worker usage becomes measured", async () => {
+    const home = await codexHome();
+    const parentUsage = { input_tokens: 1_000_000, output_tokens: 100_000 };
+    await writeSession(home, "scan-thread", parentUsage);
+    const costs: Array<[number, boolean]> = [];
+    const usages: unknown[] = [];
+    const tracker = costTracker(home, {
+      onCost: (cost, complete) => costs.push([cost.estimatedUsd, complete]),
+      onUsage: (usage) => usages.push(usage),
+    });
+    tracker.start("scan-thread");
+    expect((await tracker.refresh()).cost?.estimatedUsd).toBe(6);
+
+    const worker = await writeSession(
+      home,
+      "worker-thread",
+      {},
+      {
+        parent: "scan-thread",
+      },
+    );
+    expect(await tracker.refresh()).toEqual({ usage: null, cost: null });
+    expect(costs.at(-1)).toEqual([6, false]);
+    expect(usages).toHaveLength(1);
+
+    await appendFile(
+      worker,
+      jsonLines([legacyUsageRecord({ input_tokens: 0, output_tokens: 0 })]) +
+        "\n",
+    );
+    expect((await tracker.refresh()).usage).toMatchObject({
+      ...parentUsage,
+      total_tokens: 1_100_000,
+    });
+    expect(costs.at(-1)).toEqual([6, true]);
+    expect(usages).toHaveLength(1);
+
+    await appendFile(
+      worker,
+      jsonLines([
+        legacyUsageRecord({ input_tokens: 500_000, output_tokens: 50_000 }),
+      ]) + "\n",
+    );
+    expect((await tracker.stop(parentUsage)).usage).toMatchObject({
+      input_tokens: 1_500_000,
+      output_tokens: 150_000,
+      total_tokens: 1_650_000,
+    });
+    expect(costs).toEqual([
+      [6, true],
+      [6, false],
+      [6, true],
+      [9, true],
+    ]);
+    expect(usages).toHaveLength(2);
+  });
+
+  test("keeps independent Deep worker usage unknown until a receipt supplies it", async () => {
+    const home = await codexHome();
+    const scanDirectory = join(home, "scans", "current");
+    const parentUsage = { input_tokens: 100, output_tokens: 10 };
+    await writeSession(home, "scan-thread", parentUsage, {
+      cwd: scanDirectory,
+      timestamp: "2026-07-26T12:00:00Z",
+    });
+    await writeSession(
+      home,
+      "deep-worker",
+      {},
+      {
+        cwd: join(
+          scanDirectory,
+          "artifacts",
+          "deep_discovery",
+          "workers",
+          "one",
+          "output",
+        ),
+        timestamp: "2026-07-26T12:01:00Z",
+      },
+    );
+    const tracker = costTracker(home, { scanDirectory });
+    tracker.start("scan-thread");
+    expect(await tracker.refresh()).toEqual({ usage: null, cost: null });
+
+    tracker.recordUsage({ input_tokens: 50, output_tokens: 5 }, "deep-worker");
+    expect((await tracker.stop(parentUsage)).usage).toMatchObject({
+      input_tokens: 150,
+      output_tokens: 15,
+      total_tokens: 165,
     });
   });
 

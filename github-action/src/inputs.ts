@@ -71,7 +71,9 @@ export function scanArguments(inputs: Inputs, target: {repository: string; diffB
     '--output-dir', resultsDirectory, '--format', 'json'];
   // Preserve the pinned CLI's sandbox and automatic approval-review defaults.
   // Forcing approval_policy="never" prevents recovery from hosted Linux sandbox errors.
-  args.push('--codex', 'analytics.enabled=false');
+  args.push('--codex', 'analytics.enabled=false',
+    '--codex', 'responses_api_metadata.codex_security_integration="github_action"',
+    '--codex', `responses_api_metadata.codex_security_provider=${JSON.stringify(inputs.provider)}`);
   // Bind the option value and keep it explicitly relative so the CLI treats
   // leading '-' and '~' as literal repository filenames.
   for (const path of inputs.paths) args.push(`--path=./${path}`);

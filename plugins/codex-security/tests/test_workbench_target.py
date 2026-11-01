@@ -24,6 +24,7 @@ worktree_content_digest = cast(Callable[[Path], str], WORKBENCH_TARGET["worktree
 update_digest_field = cast(
     Callable[[Any, bytes, bytes], None], WORKBENCH_TARGET["update_digest_field"]
 )
+CASE_ALIAS = pytest.param("case", marks=pytest.mark.native_macos)
 
 
 @pytest.fixture(
@@ -670,6 +671,82 @@ def initialize_unborn_git_repository(target: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=target, check=True)
 
 
+@pytest.mark.parametrize("git", [False, True])
+def test_directory_snapshots_exclude_svn_metadata(tmp_path: Path, git: bool) -> None:
+    target = tmp_path / "target"
+    if git:
+        initialize_unborn_git_repository(target)
+    else:
+        target.mkdir()
+    source = target / "app.py"
+    source.write_text("source\n")
+    metadata = [target / ".svn" / "wc.db", target / "nested" / ".svn" / "pristine" / "base"]
+    for path in metadata:
+        path.parent.mkdir(parents=True)
+        path.write_text("metadata\n")
+    if git:
+        subprocess.run(["git", "add", "--force", "."], cwd=target, check=True)
+
+    original = directory_content_digest(target)
+    count_files = WORKBENCH_TARGET["directory_snapshot_regular_file_count"]
+    assert count_files(target) == 1
+    for path in metadata:
+        path.write_text("metadata changed\n")
+    assert directory_content_digest(target) == original
+    assert count_files(target) == 1
+    source.write_text("source changed\n")
+    assert directory_content_digest(target) != original
+
+
+@pytest.mark.parametrize("tracked", [False, True])
+@pytest.mark.parametrize("scope", [".", "nested[scope]"])
+def test_worktree_snapshots_exclude_svn_metadata(tmp_path: Path, tracked: bool, scope: str) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_repository(repository)
+    target = repository / scope
+    target.mkdir(exist_ok=True)
+    source = target / ".svn-backup" / "app.py"
+    source.parent.mkdir()
+    source.write_text("source\n")
+    metadata = [target / ".svn" / "wc.db", target / "nested" / ".svn" / "entries"]
+    for path in metadata:
+        path.parent.mkdir(parents=True)
+        path.write_text("metadata\n")
+    subprocess.run(["git", "add", str(source)], cwd=repository, check=True)
+    if tracked:
+        subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "Synthetic source and metadata"], cwd=repository, check=True
+    )
+
+    original = worktree_content_digest(target)
+    for path in metadata:
+        path.write_text("updated metadata\n")
+    assert worktree_content_digest(target) == original
+    source.write_text("updated source\n")
+    assert worktree_content_digest(target) != original
+
+
+@pytest.mark.parametrize("scope", [".svn", "nested/.svn"])
+def test_git_directory_snapshots_exclude_svn_junctions(
+    tmp_path: Path, junction_factory: Callable[[Path, Path], None], scope: str
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "target"
+    initialize_unborn_git_repository(target)
+    source = target / "app.py"
+    source.write_text("source\n")
+    metadata = target / scope
+    metadata.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "state").write_text("metadata\n")
+    junction_factory(metadata / "linked", outside)
+
+    assert workbench_target.git_directory_snapshot_paths(target) == [source]
+
+
 def test_windows_inventory_batches_wide_untracked_trees(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -788,135 +865,6 @@ def test_stale_git_binding_does_not_spawn(tmp_path: Path, monkeypatch: pytest.Mo
 
 
 @pytest.mark.parametrize(
-    ("encoding", "bom"),
-    [("utf-8", b""), ("utf-16-le", b"\xff\xfe"), ("utf-16-be", b"\xfe\xff")],
-)
-def test_git_blob_samples_match_full_file_classification_with_bounded_reads(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, encoding: str, bom: bytes
-) -> None:
-    target = tmp_path / "target"
-    initialize_git_repository(target)
-    # The UTF-16 surrogate pair crosses the first 64 KiB sample boundary.
-    text = bom + ("a" * 32766 + "😀" + "b" * 32768).encode(encoding)
-    contents = {
-        "text.bin": text + (b"\0" if bom else b""),
-        "binary-tail.bin": text + "\0".encode(encoding),
-        "binary-head.bin": b"\0" + text * 32,
-        "empty.bin": b"",
-        "after.txt": b"after\n",
-    }
-    for name, content in contents.items():
-        (target / name).write_bytes(content)
-    subprocess.run(["git", "add", "."], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "source samples"], cwd=target, check=True)
-
-    git_blob_samples = WORKBENCH_TARGET["git_blob_samples"]
-    function_globals = git_blob_samples.__globals__
-    read_batch_samples = function_globals["_read_git_batch_samples"]
-    reads: list[int] = []
-
-    def require_bounded_output(output: Any, names: list[str]):
-        assert not output.seekable()
-        read = output.read
-
-        def bounded_read(size: int = -1) -> bytes:
-            assert 0 <= size <= 64 * 1024
-            reads.append(size)
-            return read(size)
-
-        output.read = bounded_read
-        return read_batch_samples(output, names)
-
-    monkeypatch.setitem(function_globals, "_read_git_batch_samples", require_bounded_output)
-    # Both request and response exceed pipe buffers, before the multi-megabyte binary.
-    missing = ["HEAD:missing"] * 10_000
-    samples = git_blob_samples(target, [*missing, *(f"HEAD:{name}" for name in contents)])
-
-    assert samples == [
-        *([None] * len(missing)),
-        (text[: 64 * 1024], False),
-        (b"", True),
-        (b"", True),
-        (b"", False),
-        (b"after\n", False),
-    ]
-    assert max(reads) == 64 * 1024
-
-    from rank_preview import is_binary_file
-
-    assert [is_binary_file(target / name) for name in contents] == [False, True, True, False, False]
-
-
-@pytest.mark.parametrize(
-    "output",
-    [
-        b"missing terminator",
-        b"object blob invalid\n",
-        b"object blob -1\n",
-        b"object blob 4\nabc",
-        b"object blob 4\nabcd!",
-        b"object blob invalid\n" + b"x" * (4 * 1024 * 1024),
-        b"object blob 131072\n" + b"x" * (64 * 1024 + 1),
-    ],
-)
-def test_git_blob_samples_reject_incomplete_framing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output: bytes
-) -> None:
-    git_blob_samples = WORKBENCH_TARGET["git_blob_samples"]
-
-    def git_command(*args: Any, **kwargs: Any):
-        remaining = memoryview(output)
-        try:
-            while remaining:
-                written = os.write(kwargs["stdout_file"].fileno(), remaining)
-                remaining = remaining[written:]
-        except BrokenPipeError:
-            return subprocess.CompletedProcess(args, 1)
-        return subprocess.CompletedProcess(args, 0)
-
-    monkeypatch.setitem(git_blob_samples.__globals__, "git_command", git_command)
-
-    assert git_blob_samples(tmp_path, ["HEAD:source"]) == [None]
-
-
-@pytest.mark.parametrize("output", [b"", b"object blob 4\ntext\n"])
-def test_git_blob_samples_reject_git_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output: bytes
-) -> None:
-    git_blob_samples = WORKBENCH_TARGET["git_blob_samples"]
-
-    def git_command(*args: Any, **kwargs: Any):
-        kwargs["stdout_file"].write(output)
-        return subprocess.CompletedProcess(args, 1)
-
-    monkeypatch.setitem(git_blob_samples.__globals__, "git_command", git_command)
-
-    assert git_blob_samples(tmp_path, ["HEAD:source"]) == [None]
-
-
-def test_git_blob_samples_work_with_git_before_2_38(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    target = tmp_path / "target"
-    initialize_git_repository(target)
-    git_blob_samples = WORKBENCH_TARGET["git_blob_samples"]
-    git_command = git_blob_samples.__globals__["git_command"]
-
-    def git_before_2_38(*args: Any, **kwargs: Any):
-        # Git before 2.38 rejects cat-file -z with a usage error.
-        if "-z" in args:
-            return subprocess.CompletedProcess(args, 129)
-        return git_command(*args, **kwargs)
-
-    monkeypatch.setitem(git_blob_samples.__globals__, "git_command", git_before_2_38)
-
-    assert git_blob_samples(target, ["HEAD:README.md", "HEAD:missing"]) == [
-        (b"fixture\n", False),
-        None,
-    ]
-
-
-@pytest.mark.parametrize(
     ("log_encoding", "subject"),
     [
         ("UTF-8", "docs: \u65e5\u672c\u8a9e \ud55c\uad6d\uc5b4 \U0001f527"),
@@ -943,6 +891,31 @@ def test_git_metadata_preserves_unicode_commit_subject(
     assert WORKBENCH_TARGET["git_bytes"](
         target, "show", "-s", "--format=%s", "HEAD"
     ) == f"{subject}\n".encode("utf-8")
+
+
+@pytest.mark.cross_platform
+def test_git_metadata_ignores_signature_output_in_commit_subject(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    headers = subprocess.check_output(["git", "cat-file", "commit", "HEAD"], cwd=target).split(
+        b"\n\n", 1
+    )[0]
+    # A synthetic signature reproduces Git's extra output without a signing tool.
+    commit = headers + (
+        b"\ngpgsig -----BEGIN SSH SIGNATURE-----\n synthetic\n -----END SSH SIGNATURE-----"
+        b"\n\nSigned subject\n"
+    )
+    revision = (
+        subprocess.check_output(
+            ["git", "hash-object", "-t", "commit", "-w", "--stdin"], cwd=target, input=commit
+        )
+        .decode()
+        .strip()
+    )
+    subprocess.run(["git", "update-ref", "HEAD", revision], cwd=target, check=True)
+    subprocess.run(["git", "config", "log.showSignature", "true"], cwd=target, check=True)
+
+    assert WORKBENCH_TARGET["git_target_metadata"](target)["commitSubject"] == "Signed subject"
 
 
 @pytest.mark.parametrize("encoding", ["cp932", "cp949"])
@@ -1085,7 +1058,7 @@ def test_directory_snapshot_preserves_target_alias_spelling(tmp_path: Path, scop
 
 
 @pytest.mark.parametrize("scope", [".", "component"])
-@pytest.mark.parametrize("alias_kind", ["symlink", "case"])
+@pytest.mark.parametrize("alias_kind", ["symlink", CASE_ALIAS])
 def test_submodule_checks_preserve_target_alias_spelling(
     tmp_path: Path, scope: str, alias_kind: str
 ) -> None:
@@ -1111,7 +1084,7 @@ def test_submodule_checks_preserve_target_alias_spelling(
 
 
 @pytest.mark.parametrize("content_digest", [directory_content_digest, worktree_content_digest])
-@pytest.mark.parametrize("alias_kind", ["original", "symlink", "case"])
+@pytest.mark.parametrize("alias_kind", ["original", "symlink", CASE_ALIAS])
 def test_content_digest_expands_nested_git_repositories(
     tmp_path: Path, content_digest: Callable[[Path], str], alias_kind: str
 ) -> None:
@@ -1233,7 +1206,7 @@ def test_worktree_content_digest_streams_tracked_binary_patch(
     def require_streamed_diff(
         repository: Path, *args: str, **kwargs: object
     ) -> subprocess.CompletedProcess[Any]:
-        if args and args[0] == "diff":
+        if "diff" in args:
             assert kwargs.get("stdout_file") is not None
         return git_command(repository, *args, **kwargs)
 
@@ -1385,6 +1358,7 @@ def test_git_context_retains_scoped_directory_spelling(tmp_path: Path, name: str
     assert pathspec == scoped.name
 
 
+@pytest.mark.native_macos
 def test_git_target_accepts_filesystem_case_aliases(tmp_path: Path) -> None:
     target = tmp_path / "target"
     initialize_git_repository(target)
@@ -1440,7 +1414,7 @@ def test_git_context_rejects_an_unrelated_configured_worktree(tmp_path: Path) ->
 
 
 @pytest.mark.parametrize("scope", [".", "component"])
-@pytest.mark.parametrize("alias_kind", ["original", "symlink", "case"])
+@pytest.mark.parametrize("alias_kind", ["original", "symlink", CASE_ALIAS])
 def test_copy_retains_alias_rooted_gitlink_exclusions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str, alias_kind: str
 ) -> None:
@@ -1483,6 +1457,23 @@ def test_copy_retains_alias_rooted_gitlink_exclusions(
         assert not (copied / "submodule").exists()
 
 
+@pytest.mark.cross_platform
+def test_candidate_sources_disambiguate_revision_from_worktree_filename(tmp_path: Path) -> None:
+    target = tmp_path / "repository"
+    revision = initialize_git_repository(target)
+    (target / revision).write_text("synthetic revision-named file\n")
+    subprocess.run(["git", "rm", "-q", "README.md"], cwd=target, check=True)
+
+    sources = WORKBENCH_TARGET["candidate_source_lines"](
+        target,
+        {"kind": "working_tree", "baseRevision": revision, "headRevision": revision},
+        ["README.md"],
+        ["README.md"],
+    )
+
+    assert sources == {"README.md": {"path": "README.md", "lineCount": 1}}
+
+
 @pytest.mark.parametrize("replacement", ["directory", "ignored_file", "link"])
 @pytest.mark.parametrize("case_insensitive", [False, True])
 def test_deleted_candidate_sources_keep_base_blob_when_path_is_recreated(
@@ -1513,9 +1504,12 @@ def test_deleted_candidate_sources_keep_base_blob_when_path_is_recreated(
             )
         else:
             source.symlink_to(outside, target_is_directory=True)
-    from generate_rank_input import git_changed_paths
-
-    assert dict(git_changed_paths(target, revision, revision, "local-patch"))[source] == "D"
+    assert (
+        dict(WORKBENCH_TARGET["git_changed_paths"](target, revision, revision, "local-patch"))[
+            source
+        ]
+        == "D"
+    )
     sources = WORKBENCH_TARGET["candidate_source_lines"](
         target,
         {"kind": "working_tree", "baseRevision": revision, "headRevision": revision},

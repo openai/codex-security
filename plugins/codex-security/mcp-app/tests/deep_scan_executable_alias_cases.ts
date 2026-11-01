@@ -4,13 +4,13 @@ import path from "node:path";
 import type { DeepWorkerParentSandbox } from "../src/deep-scan/parent-sandbox.js";
 import type { CodexSdkWorkerExecutor as WorkerExecutor } from "../src/deep-scan/executor.js";
 import { readJson } from "./support/json.ts";
+import { assertConfigOverrides } from "./assertions.ts";
 
 export async function testConcurrentWorkerExecutableAliases({
   CodexSdkWorkerExecutor,
   fakeCodexFixture,
   parentSandbox,
   bundledCodexSdkEnvironment,
-  assertConfigOverrides,
   assertReadOnlyWorkerPolicy,
 }: {
   CodexSdkWorkerExecutor: typeof WorkerExecutor;
@@ -25,10 +25,6 @@ export async function testConcurrentWorkerExecutableAliases({
     command: string,
     environment: Record<string, string>,
   ) => Record<string, string>;
-  assertConfigOverrides: (
-    args: readonly string[],
-    values: Record<string, string>,
-  ) => void;
   assertReadOnlyWorkerPolicy: (args: readonly string[]) => void;
 }) {
   const saved = [

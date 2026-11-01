@@ -63,16 +63,12 @@ If you have Daybreak Blue access, add `--cyber-access-program daybreak_blue`
 to the scan command. Otherwise, omit the flag or use
 `--cyber-access-program standard`.
 
-Scans use your existing `SECURITY.md` guidance. To define or update it,
-optionally [draft a policy](#generate-securitymd):
+To use Codex's Daybreak toggle, pass `--codex daybreak=true`. It defaults off
+and requires compatible access. See [Daybreak configuration](sdk/typescript/docs/cli.md#daybreak-opt-in)
+for SDK and plugin usage, including Deep Scan workers.
 
-```bash
-cs policy .
-```
-
-The draft is saved outside your repository. Review the diff and notes, edit the
-draft, then copy only `SECURITY.md` to the **Policy target** shown. You can scan
-without generating a policy.
+Scans use your existing `SECURITY.md` guidance. You can optionally
+[draft or update a policy](#generate-securitymd) before scanning.
 
 To run without a global installation, replace `cs` in these examples with
 `npx @openai/codex-security`, for example:
@@ -192,7 +188,8 @@ cs export --scan SCAN_ID --artifact threat-model --output threatmodel.md
 
 Omit `--scan` to use the current repository's latest completed scan. The
 [export guide](sdk/typescript/docs/cli.md#exports-and-ci) also covers findings,
-SARIF output for CI, and the offline TypeScript API.
+SARIF output for CI, and the offline TypeScript API. For ServiceNow Application
+Vulnerability Response, see [Export findings for ServiceNow](sdk/typescript/docs/cli.md#export-findings-for-servicenow).
 
 ## GitHub Actions
 
@@ -275,6 +272,7 @@ for examples.
 - [Online documentation](https://learn.chatgpt.com/docs/security/cli)
 - [Agent workflows and recovery](docs/agent-workflows.md)
 - [CLI reference](sdk/typescript/docs/cli.md)
+- [Scanner file import schema and capability guide](docs/scanner-imports/schema-guide.md)
 - [Project configuration](docs/project-configuration.md)
 - [Examples](examples/README.md)
 

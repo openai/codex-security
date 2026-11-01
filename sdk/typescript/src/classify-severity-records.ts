@@ -1,9 +1,12 @@
 import { SCAN_SEVERITIES } from "./scan-settings.js";
+import { defaultSeverityRubric } from "./default-severity-rubric.js";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { abortable } from "./targets.js";
 import {
   parseSeverityDecision,
+  reviewSeverity,
+  classificationRunsSchema,
   severityDecisionSchema,
   severityReviewInstructions,
   type SeverityDecision,
@@ -41,7 +44,8 @@ export const classifySeverityRecordsInputSchema = z
         markdown: text,
         sha256: digest,
       })
-      .strict(),
+      .strict()
+      .optional(),
     model: text,
     effort: z.enum([
       "minimal",
@@ -80,6 +84,8 @@ export interface SeverityClassificationReviewRequest {
 }
 
 export interface ClassifySeverityRecordsOptions {
+  /** Independent reviews per record: integer 1–10, default 3. */
+  classificationRuns?: number;
   reviewRunner: {
     run(
       request: SeverityClassificationReviewRequest,
@@ -99,6 +105,7 @@ export type CanonicalSeverityAssessment = Omit<
 };
 
 interface RecordsResultBinding {
+  classificationRuns: number;
   version: 1;
   rubric: { revision: number; sha256: string };
 }
@@ -130,8 +137,16 @@ export async function classifySeverityRecords(
   options: ClassifySeverityRecordsOptions,
 ): Promise<ClassifySeverityRecordsResult> {
   options.signal?.throwIfAborted();
+  const classificationRuns = classificationRunsSchema
+    .default(3)
+    .parse(options.classificationRuns);
   const data = classifySeverityRecordsInputSchema.parse(structuredClone(input));
-  if (sha256(data.rubric.markdown) !== data.rubric.sha256)
+  const rubric = data.rubric ?? {
+    revision: 1,
+    markdown: defaultSeverityRubric,
+    sha256: sha256(defaultSeverityRubric),
+  };
+  if (sha256(rubric.markdown) !== rubric.sha256)
     throw new Error("Rubric SHA-256 does not match its exact UTF-8 Markdown.");
   const ids = new Set<string>();
   for (const record of data.records) {
@@ -147,29 +162,46 @@ export async function classifySeverityRecords(
       );
   }
   const binding: RecordsResultBinding = {
+    classificationRuns,
     version: 1,
-    rubric: { revision: data.rubric.revision, sha256: data.rubric.sha256 },
+    rubric: { revision: rubric.revision, sha256: rubric.sha256 },
   };
   const assessments: CanonicalSeverityAssessment[] = [];
   for (const record of data.records) {
     options.signal?.throwIfAborted();
-    let response: unknown;
+    let code: "review_failed" | "invalid_assessment" = "review_failed";
     try {
-      response = await abortable(() => {
-        options.signal?.throwIfAborted();
-        return options.reviewRunner.run(
-          {
-            requestId: randomUUID(),
-            stage: "severity-classification",
-            model: data.model,
-            effort: data.effort,
-            trustedInstructions: severityReviewInstructions,
-            prompt: `{"rubric":${JSON.stringify([data.rubric.markdown])},"knowledgeBase":null,"finding":${record.findingJson}}`,
-            schema: z.toJSONSchema(severityDecisionSchema),
-          },
-          { signal: options.signal },
-        );
-      }, options.signal);
+      const { findingId: _findingId, ...decision } = await reviewSeverity(
+        async () => {
+          code = "review_failed";
+          const response = await abortable(() => {
+            options.signal?.throwIfAborted();
+            return options.reviewRunner.run(
+              {
+                requestId: randomUUID(),
+                stage: "severity-classification",
+                model: data.model,
+                effort: data.effort,
+                trustedInstructions: severityReviewInstructions,
+                prompt: `{"rubric":${JSON.stringify([rubric.markdown])},"knowledgeBase":null,"finding":${record.findingJson}}`,
+                schema: z.toJSONSchema(severityDecisionSchema),
+              },
+              { signal: options.signal },
+            );
+          }, options.signal);
+          options.signal?.throwIfAborted();
+          code = "invalid_assessment";
+          return parseSeverityDecision(response, record.id);
+        },
+        classificationRuns,
+      );
+      options.signal?.throwIfAborted();
+      assessments.push({
+        ...decision,
+        id: record.id,
+        revision: record.revision,
+        inputSha256: record.inputSha256,
+      });
     } catch (error) {
       options.signal?.throwIfAborted();
       return {
@@ -178,34 +210,13 @@ export async function classifySeverityRecords(
         assessments: [],
         error: {
           recordId: record.id,
-          code: "review_failed",
+          code,
           message:
-            error instanceof Error ? error.message : "Host review failed.",
-        },
-      };
-    }
-    options.signal?.throwIfAborted();
-    try {
-      const { findingId: _findingId, ...decision } = parseSeverityDecision(
-        response,
-        record.id,
-      );
-      assessments.push({
-        ...decision,
-        id: record.id,
-        revision: record.revision,
-        inputSha256: record.inputSha256,
-      });
-    } catch (error) {
-      return {
-        ...binding,
-        status: "unresolved",
-        assessments: [],
-        error: {
-          recordId: record.id,
-          code: "invalid_assessment",
-          message:
-            error instanceof Error ? error.message : "Invalid assessment.",
+            error instanceof Error
+              ? error.message
+              : code === "review_failed"
+                ? "Host review failed."
+                : "Invalid assessment.",
         },
       };
     }

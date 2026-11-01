@@ -30,7 +30,10 @@ const csvFindingRowSchema = z
       .string()
       .optional()
       .transform((value) =>
-        value === undefined || value.trim() === "" ? undefined : value,
+        value === undefined ||
+        (value.trim() === "" && !value.includes("\uFEFF"))
+          ? undefined
+          : value,
       ),
     title: requiredCsvText("title"),
     summary: requiredCsvText("summary"),
@@ -54,7 +57,9 @@ const csvFindingRowSchema = z
       .transform((value) => (value === "" ? undefined : value)),
     note: z
       .string()
-      .transform((value) => (value.trim() === "" ? undefined : value)),
+      .transform((value) =>
+        value.trim() === "" && !value.includes("\uFEFF") ? undefined : value,
+      ),
     remediation: requiredCsvText("remediation"),
     path: z.string().refine(safeFindingPath, {
       error: "has an invalid path",
@@ -204,6 +209,21 @@ export function bindImportedFindings(
   });
 }
 
+function exportedCsvNewline(source: string): "\r\n" | "\r" | "\n" | undefined {
+  const start = source.startsWith("\uFEFF") ? 1 : 0;
+  for (const columns of [CSV_COLUMNS, REQUIRED_CSV_COLUMNS]) {
+    const header = columns.join(",");
+    if (!source.startsWith(header, start)) continue;
+    const end = start + header.length;
+    for (const newline of ["\r\n", "\r", "\n"] as const) {
+      // Require the exporter's first cell: skipped empty records can make
+      // other mixed-ending CSV valid under Papa's existing auto-detection.
+      if (source.startsWith(`${newline}occ_`, end)) return newline;
+    }
+  }
+  return undefined;
+}
+
 export function parseFindingsCsv(source: string): CsvFindingRow[] {
   const {
     data: rows,
@@ -212,6 +232,7 @@ export function parseFindingsCsv(source: string): CsvFindingRow[] {
   } = Papa.parse<Record<string, string>>(source, {
     header: true,
     delimiter: ",",
+    newline: exportedCsvNewline(source),
     skipEmptyLines: "greedy",
     transform: decodeExportedCsvCell,
   });
@@ -325,7 +346,7 @@ function validCsvLine(value: string): boolean {
 
 function safeFindingPath(value: string): boolean {
   if (
-    value.trim().length === 0 ||
+    value.length === 0 ||
     value === "." ||
     isAbsolute(value) ||
     /^[A-Za-z]:/u.test(value) ||

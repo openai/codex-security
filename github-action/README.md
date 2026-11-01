@@ -1,8 +1,7 @@
 # Codex Security GitHub Action
 
 Run Codex Security scans in GitHub Actions. Scan a repository or pull request,
-check findings against a severity threshold, and export JSON, coverage, and
-SARIF reports.
+check findings against a severity threshold, and export JSON and SARIF reports.
 
 ## Quick start
 
@@ -120,12 +119,12 @@ sandbox requirements apply on both supported GitHub Cloud hosts.
 The CLI configures the provider and validates its model requirements. The Action
 uses the same provider names and forwards only the selected provider's credentials:
 
-| `provider` | Step environment |
-| --- | --- |
-| `openai` (default) | `OPENAI_API_KEY`, or `CODEX_API_KEY` as a fallback |
-| `amazon-bedrock` | AWS credentials and region; see the OIDC example below |
-| `openrouter` | `OPENROUTER_API_KEY` |
-| `fireworks` | `FIREWORKS_API_KEY` |
+| `provider`         | Step environment                                       |
+| ------------------ | ------------------------------------------------------ |
+| `openai` (default) | `OPENAI_API_KEY`, or `CODEX_API_KEY` as a fallback     |
+| `amazon-bedrock`   | AWS credentials and region; see the OIDC example below |
+| `openrouter`       | `OPENROUTER_API_KEY`                                   |
+| `fireworks`        | `FIREWORKS_API_KEY`                                    |
 
 OpenAI retains the `gpt-5.6-sol` default. Other providers require an explicit
 model ID your credentials can access. For example, replace the scan step in the
@@ -344,9 +343,15 @@ room for finalization within your job timeout.
 
 ## Reports
 
-The Action writes a job summary and source annotations. Set
+The Action lists the highest-severity findings first in the job summary and
+source annotations, preserving scan order within each severity level. Set
 `upload-artifacts: 'true'` for downloadable reports, retained for seven days by
 default. Reports can contain source code and vulnerability details.
+
+The job summary includes the configured provider, reported input/cached/output
+token usage, and estimated USD cost, including a range when supplied by the CLI.
+Missing measurements or pricing appear as `unavailable`; measured zeros remain
+zero. Cost estimates are not billing totals.
 
 The Action uses the normal Actions job check. Its summary and final log message
 distinguish findings above the failure threshold from a scan that could not
@@ -355,16 +360,16 @@ are report-only; scanner and required reporting failures still fail the job.
 
 A completed scan means the configured analysis produced a valid result. Scope
 exclusions, deferred investigations, and other coverage notes remain in the
-coverage report; they do not create a separate scan outcome or bypass the
+review notes, they do not create a separate scan outcome or bypass the
 findings policy. Completion does not certify that every vulnerability was found.
 
 The Action follows the CLI outcome consistently:
 
-| CLI exit | Action result |
-| --- | --- |
-| `0` | `scan-status: completed`, `policy-status: passed`; the step succeeds. |
-| `1` | `scan-status: completed`, `policy-status: failed`; the step fails on findings. |
-| `2` or an interrupted process | `scan-status: failed`, `policy-status: not-evaluated`; the step fails. |
+| CLI exit                      | Action result                                                                  |
+| ----------------------------- | ------------------------------------------------------------------------------ |
+| `0`                           | `scan-status: completed`, `policy-status: passed`; the step succeeds.          |
+| `1`                           | `scan-status: completed`, `policy-status: failed`; the step fails on findings. |
+| `2` or an interrupted process | `scan-status: failed`, `policy-status: not-evaluated`; the step fails.         |
 
 Usable reports retained after an execution failure remain available, but are not
 eligible for SARIF upload. Invalid or missing required reports, a changed
@@ -424,6 +429,21 @@ The Action uses the CLI’s validated JSON result for findings and scan status.
 If the CLI exits without a usable result, the Action reports failure and leaves
 report paths empty; it does not recover unvalidated files from disk.
 
+### Request attribution
+
+The Action adds `codex_security_integration=github_action` and
+`codex_security_provider` (the configured provider family) through the CLI's existing
+`responses_api_metadata` setting. These accompany the CLI's request attribution
+on model requests supported by the provider. This attribution contains no
+repository, workflow, run, actor, credential, or finding data.
+Native managed configuration may override the provider selection before inference.
+
+The Action continues to set `analytics.enabled=false`. Request metadata is
+separate from native analytics and does not create an additional telemetry
+request or publish scan results to Codex Security Cloud. Requests sent to other
+providers do not establish OpenAI-side usage reporting. Summaries, annotations,
+and artifact uploads retain their existing controls.
+
 ## Troubleshooting
 
 - **Checkout or history errors:** use the triggering revision, `fetch-depth: 0`
@@ -439,7 +459,7 @@ report paths empty; it does not recover unvalidated files from disk.
 - **Missing SARIF uploads:** inspect `scan-status`, `report-status`, and
   `sarif-upload-ready`.
 - **Failed scans:** inspect the CLI diagnostics for execution errors. Scope
-  exclusions and deferred investigations in the coverage report do not cause
+  exclusions and deferred investigations in the review notes do not cause
   execution failures or bypass the severity policy.
 
 CLI diagnostics stream by default. Set `verbose: 'false'` for lifecycle and
@@ -447,53 +467,47 @@ elapsed-time messages only.
 
 ## Development
 
-From the repository root:
+From the repository root, use Node.js 24 to check the committed files and audit
+both dependency locks.
 
 ```bash
 npm --prefix github-action ci --ignore-scripts --no-audit --no-fund
-npm --prefix github-action run docs
-npm --prefix github-action run build
 npm --prefix github-action run validate
-# Test the published CLI with synthetic scans; no model calls:
+npm --prefix github-action audit --audit-level=high
+npm --prefix github-action/runtime audit --omit=dev --audit-level=high
+```
+
+After changing Action inputs or outputs, run `npm --prefix github-action run docs`
+to regenerate the README reference. After changing bundled source or the runtime
+lock, run `npm --prefix github-action run build`. Review the generated README and
+`dist/*.cjs` changes, rerun validation, and commit them with their source changes.
+
+On Linux x64 with a working sandbox, run the published CLI integration and
+packaged smoke tests.
+
+```bash
 npm --prefix github-action/runtime ci --ignore-scripts --no-audit --no-fund
 npm --prefix github-action run test:cli
-# Linux x64 with Node 24; no model calls:
 node github-action/scripts/linux-smoke.mjs
 ```
 
-Commit source changes and the generated `dist/*.cjs` bundles together.
 Validation checks types, tests, Action metadata, documentation, and bundle
 reproducibility. CI also tests the result adapter against the pinned CLI and its
-SARIF exporter using synthetic scans, runs the packaged Linux smoke test, and
-audits the Action and CLI dependency locks. The `@openai/codex-security` dependency in
+SARIF exporter using synthetic scans. A local inference fixture checks request
+attribution and the analytics opt-out with synthetic credentials. These tests run
+without external model calls. The `@openai/codex-security` dependency in
 `runtime/package.json` is the installed CLI version source. Main keeps an already
 published CLI baseline so its checks remain runnable while a release PR prepares
 the next product version. This development pin does not necessarily track the
 latest CLI release. To upgrade it, update it and regenerate
 `runtime/package-lock.json`, rebuild the bundles, and run validation.
 
-Releases use the product version from `sdk/typescript/package.json`. Before npm
-publication, the release workflow exercises the Action's compatibility suite
-against the packed CLI candidate. After publication and provenance verification,
-the Action release workflow starts from that exact CLI source commit, updates
-the runtime pin and integrity lock, and fetches the locked runtime through
-Socket Firewall with an empty cache before running the CLI. The lock keeps
-public npm URLs for Action consumers. The workflow rebuilds the bundles and
-runs the Action checks in a job with read-only repository permissions.
-A fresh publisher takes only the tested runtime lock, rebuilds
-from the same source, and verifies the bundle hashes without executing the CLI.
-It creates a distribution commit and an immutable `action-vX.Y.Z` tag with the
-same version as `npm-vX.Y.Z`. The companion Action release includes the manifest
-and SBOM before publication, lists the full distribution commit SHA, and links
-to the npm release's canonical changelog. It is never marked Latest.
-
-The Action distribution commit differs from the CLI source commit because the
-registry integrity lock is finalized after publication. Release metadata records
-both commits, both tags, and the verified CLI integrity. A failed Action stage
-can be rerun without republishing npm or changing its immutable release assets.
-Recovery verifies existing Action assets and can finish a partial draft release.
-Existing version tags are never moved.
-See [the release process](../RELEASING.md) for the orchestration and recovery flow.
+The `action-vX.Y.Z` release uses the same version as the corresponding
+`npm-vX.Y.Z` CLI release. Its distribution commit includes the built bundles and
+final runtime lock and differs from the CLI source commit. Pin the full Action
+distribution SHA listed in the Action release, which also includes its manifest,
+SBOM, and a link to the product changelog. See [the release process](../RELEASING.md)
+for publication, verification, and recovery instructions.
 
 <!-- prettier-ignore-start -->
 
@@ -533,7 +547,8 @@ All outputs are strings. An empty cost or count means unavailable, not zero.
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | `sarif-path`          | Absolute validated SARIF file path, or empty when unavailable or withheld.                                                             |
 | `json-path`           | Absolute canonical findings JSON path, or empty when unavailable or withheld.                                                          |
-| `coverage-path`       | Absolute coverage JSON path, or empty when unavailable or withheld.                                                                    |
+| `manifest-path`       | Absolute scan manifest path, including scan status and scope, or empty when unavailable or withheld.                                   |
+| `coverage-path`       | Legacy coverage JSON path. Empty for current CLI results.                                                                              |
 | `results-directory`   | Runner-local reports directory; do not upload it recursively.                                                                          |
 | `scan-status`         | completed, failed, or skipped. Completed means analysis produced a valid result. Skipped is reserved for empty diffs or dry-run.       |
 | `skip-reason`         | empty-diff or dry-run when no scan ran; otherwise empty.                                                                               |

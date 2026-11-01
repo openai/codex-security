@@ -54,7 +54,7 @@ raise AssertionError("publication never reached the requested crash boundary")
 
 @pytest.mark.parametrize(
     "boundary",
-    ["findings.json", "coverage.json", "scan-manifest.json", "sqlite-before", "sqlite-after"],
+    ["findings.json", "scan-manifest.json", "sqlite-before", "sqlite-after"],
 )
 def test_publication_crash_replays_selected_input_without_stale_overwrite(
     workbench_api, workbench_db, publication_scan, tmp_path, boundary
@@ -133,7 +133,10 @@ def test_publication_crash_replays_selected_input_without_stale_overwrite(
         )["scan"]
         assert completed["progress"]["status"] == "complete"
         assert completed["findingCount"] == 1
-        assert dict(connection.execute("SELECT * FROM deep_scan_runs").fetchone()) == run_before
+        assert dict(connection.execute("SELECT * FROM deep_scan_runs").fetchone()) == {
+            **run_before,
+            "terminal_reviewed_surface_count": 0,
+        }
         assert [
             dict(row) for row in connection.execute("SELECT * FROM deep_scan_workers")
         ] == workers_before

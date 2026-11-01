@@ -1,4 +1,5 @@
 name: node-github-release
+run-name: Publish ${{ inputs.tag }}
 
 on:
   workflow_dispatch:
@@ -11,6 +12,10 @@ on:
         description: Successful node-release run to use for backfill
         required: false
         type: string
+      refresh-wolfi-recipe:
+        description: Use the current main Wolfi recipe when building a missing image.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -33,7 +38,11 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       sha: ${{ steps.release.outputs.sha }}
       integrity: ${{ steps.artifact.outputs.integrity }}
+      combined-approval: ${{ steps.artifact.outputs.combined-approval }}
       has-action: ${{ steps.action.outputs.present }}
+      has-container: ${{ steps.container.outputs.present }}
+      has-wolfi: ${{ steps.container.outputs.wolfi }}
+      release-tarball-artifact: ${{ steps.container-tarball.outputs.artifact-id }}
 
     steps:
       - name: Checkout release automation
@@ -41,7 +50,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: refs/heads/main
+          ref: ${{ github.sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -54,29 +63,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          npm_tools="$RUNNER_TEMP/codex-security-provenance-npm"
-          npm install \
-            --prefix "$npm_tools" \
-            --ignore-scripts \
-            --no-audit \
-            --no-fund \
-            --registry=https://openai.firewall.socket.dev/npm/ \
-            npm@11.12.1
+          source .github/scripts/release-npm.sh
+          install_release_npm
+          printf '%s\n' "$release_npm_bin" >> "$GITHUB_PATH"
 
-          if [[ "$("$npm_tools/node_modules/.bin/npm" --version)" != "11.12.1" ]]; then
-            echo "npm 11.12.1 is required to verify Sigstore attestations." >&2
-            exit 1
-          fi
-          printf '%s\n' "$npm_tools/node_modules/.bin" >> "$GITHUB_PATH"
-
-      - name: Verify bundled provenance-capable npm
+      - name: Verify npm on PATH
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$(npm --version)" != "11.12.1" ]]; then
-            echo "npm 11.12.1 is required to verify Sigstore attestations." >&2
-            exit 1
-          fi
+          source .github/scripts/release-npm.sh
+          verify_release_npm "$(command -v npm)"
 
       - name: Resolve the successful protected release
         id: release
@@ -156,11 +152,12 @@ jobs:
           for ((attempt = 1; attempt <= 30; attempt++)); do
             run_fields="$(
               gh api "repos/$GITHUB_REPOSITORY/actions/runs/$release_run" \
-                --jq '[.name, .status, (.conclusion // "pending"), .head_sha, .head_branch] | @tsv'
+                --jq '[.path, .event, .status, (.conclusion // "pending"), .head_sha, .head_branch] | @tsv'
             )"
-            IFS=$'\t' read -r run_name run_status run_conclusion run_sha run_tag <<< "$run_fields"
+            IFS=$'\t' read -r run_path run_event run_status run_conclusion run_sha run_tag <<< "$run_fields"
 
-            if [[ "$run_name" != "node-release" ||
+            if [[ "${run_path%%@*}" != ".github/workflows/node-release.yml" ||
+                  ( "$run_event" != push && "$run_event" != workflow_dispatch ) ||
                   "$run_sha" != "$release_sha" ||
                   "$run_tag" != "$release_tag" ]]; then
               echo "The release run must successfully publish the exact tagged commit." >&2
@@ -301,12 +298,11 @@ jobs:
             echo "Verified npm provenance for the resolved release run."
           else
             recovery_conclusion="$(
-              gh api \
-                "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_RUN_ID/jobs?per_page=100" \
-                --paginate \
-                --jq '.jobs[] | select(.name == "publish") | .steps[] | select(.name == "Verify recovered npm release provenance") | .conclusion'
+              gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_RUN_ID/jobs?per_page=100" --paginate \
+                --jq '.jobs[] | select(.conclusion == "success" and (.name == "publish" or .name == "Verify existing npm release"))
+                  | .steps[] | select(.name == "Verify recovered npm release provenance") | .conclusion'
             )"
-            if [[ "$recovery_conclusion" != "success" ]]; then
+            if [[ "$recovery_conclusion" != success ]]; then
               echo "Signed npm provenance must identify the resolved successful release run." >&2
               exit 1
             fi
@@ -334,10 +330,10 @@ jobs:
             original_run_fields="$(
               gh api \
                 "repos/$GITHUB_REPOSITORY/actions/runs/$original_run_id" \
-                --jq '[.name, .status, .head_sha, .head_branch] | @tsv'
+                --jq '[.path, .status, .head_sha, .head_branch] | @tsv'
             )"
-            IFS=$'\t' read -r original_name original_status original_sha original_tag <<< "$original_run_fields"
-            if [[ "$original_name" != "node-release" ||
+            IFS=$'\t' read -r original_path original_status original_sha original_tag <<< "$original_run_fields"
+            if [[ "${original_path%%@*}" != ".github/workflows/node-release.yml" ||
                   "$original_status" != "completed" ||
                   "$original_sha" != "$RELEASE_SHA" ||
                   "$original_tag" != "$RELEASE_TAG" ]]; then
@@ -362,6 +358,15 @@ jobs:
 
           printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
           printf 'integrity=%s\n' "$(jq -r '."dist.integrity" // .dist.integrity' <<< "$metadata")" >> "$GITHUB_OUTPUT"
+          # Only the attempt identified by signed npm provenance can authorize
+          # images. If its job record is unavailable, request container review.
+          signing_attempt=$(jq -er '.runAttempt' <<< "$verified_provenance")
+          if combined_publisher="$(
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$verified_run_id/attempts/$signing_attempt/jobs?per_page=100" --paginate \
+              --jq '.jobs[] | select(.name == "Publish npm and container images") | .conclusion'
+          )" && [[ "$combined_publisher" == success ]]; then
+            echo 'combined-approval=true' >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Detect Action release source
         id: action
@@ -371,6 +376,34 @@ jobs:
           if git cat-file -e "$RELEASE_SHA:action.yml" 2>/dev/null; then
             echo 'present=true' >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Detect container release source
+        id: container
+        env:
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          # Coordinated container publication starts at 0.5.0. Earlier releases
+          # use older container/native build contracts and retain npm/Action recovery.
+          if [[ "$RELEASE_VERSION" =~ ^0\.[0-4]\. ]]; then
+            exit 0
+          fi
+          git cat-file -e "$RELEASE_SHA:Dockerfile" 2>/dev/null || exit 0
+          echo 'present=true' >> "$GITHUB_OUTPUT"
+          if git cat-file -e "$RELEASE_SHA:.github/workflows/wolfi-build.yml" 2>/dev/null; then
+            echo 'wolfi=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save the verified scanner archive for both container builds
+        id: container-tarball
+        if: steps.container.outputs.wolfi == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: container-scanner-tarball-${{ github.run_attempt }}
+          path: ${{ steps.artifact.outputs.archive }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
 
       - name: Resolve published release history
         id: history
@@ -512,13 +545,10 @@ jobs:
         uses: SocketDev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
         with:
           mode: firewall-free
-          firewall-version: "1.15.0"
+          firewall-version: "1.15.4"
 
       - name: Set up the Ubuntu sandbox
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap apparmor-profiles
-          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+        run: bash automation/github-action/scripts/setup-ubuntu-sandbox.sh
 
       - &action-reuse-distribution
         name: Reuse an existing immutable Action distribution
@@ -712,21 +742,99 @@ jobs:
             printf 'Action: `uses: %s@%s` (`action-v%s`)\n' "$GITHUB_REPOSITORY" "$(git rev-parse HEAD)" "$RELEASE_VERSION"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  container:
+    name: publish matching container
+    needs: [release, installed, action-verify, action]
+    if: >-
+      !cancelled() && needs.release.result == 'success' && needs.installed.result == 'success' &&
+      needs.release.outputs.has-container == 'true' &&
+      (needs.release.outputs.has-wolfi != 'true' || needs.action.result == 'success')
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      artifact-metadata: write
+      id-token: write
+    uses: ./.github/workflows/container-publish.yml
+    with:
+      combined-approval: ${{ needs.release.outputs.combined-approval == 'true' }}
+      refresh-wolfi-recipe: ${{ inputs.refresh-wolfi-recipe }}
+      release-sha: ${{ needs.release.outputs.sha }}
+      release-version: ${{ needs.release.outputs.version }}
+      release-integrity: ${{ needs.release.outputs.integrity }}
+      release-tarball-artifact: ${{ needs.release.outputs.release-tarball-artifact }}
+      runtime-lock-artifact: ${{ needs.action-verify.outputs.runtime-lock-artifact }}
+
   complete:
     name: release status
     if: always()
-    needs: [release, installed, action]
+    needs: [release, installed, action, container]
     runs-on: ubuntu-latest
+    env:
+      RELEASE_RESULT: ${{ needs.release.result }}
+      INSTALL_RESULT: ${{ needs.installed.result }}
+      ACTION_RESULT: ${{ needs.action.result }}
+      HAS_ACTION: ${{ needs.release.outputs.has-action }}
+      CONTAINER_RESULT: ${{ needs.container.result }}
+      HAS_CONTAINER: ${{ needs.release.outputs.has-container }}
+      HAS_WOLFI: ${{ needs.release.outputs.has-wolfi }}
+      DEBIAN_DIGEST: ${{ needs.container.outputs.debian-digest }}
+      WOLFI_DIGEST: ${{ needs.container.outputs.wolfi-digest }}
     steps:
-      - name: Require completed release channels
+      - name: Summarize release channels
+        continue-on-error: true
         env:
-          RELEASE_RESULT: ${{ needs.release.result }}
-          INSTALL_RESULT: ${{ needs.installed.result }}
-          ACTION_RESULT: ${{ needs.action.result }}
-          HAS_ACTION: ${{ needs.release.outputs.has-action }}
+          RELEASE_VERSION: ${{ needs.release.outputs.version }}
+          RELEASE_SHA: ${{ needs.release.outputs.sha }}
+        run: |
+          {
+            printf '## Release publication status\n\n'
+            printf '| Channel | Result |\n| --- | --- |\n'
+            printf '| npm package and CLI GitHub release | %s |\n' "$RELEASE_RESULT"
+            printf '| Published package installation checks | %s |\n' "$INSTALL_RESULT"
+            printf '| GitHub Action release | %s |\n' "$ACTION_RESULT"
+            printf '| GitHub Marketplace | Not checked; publish and verify separately |\n'
+            printf '| Container image | %s |\n' "$CONTAINER_RESULT"
+            if [[ -n "$DEBIAN_DIGEST" ]]; then printf '| Debian `%s` | `%s` |\n' "$RELEASE_VERSION" "$DEBIAN_DIGEST"; fi
+            if [[ -n "$WOLFI_DIGEST" ]]; then printf '| Wolfi `%s-wolfi-amd64` | `%s` |\n' "$RELEASE_VERSION" "$WOLFI_DIGEST"; fi
+            echo
+            if [[ -n "$DEBIAN_DIGEST" ]]; then
+              repo="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+              printf '[Release source](%s/tree/%s) | [Container guide](%s/blob/%s/docker/README.md)\n\n' "$repo" "$RELEASE_SHA" "$repo" "$RELEASE_SHA"
+              printf '```bash\n'
+              for digest in "$DEBIAN_DIGEST" "$WOLFI_DIGEST"; do
+                if [[ -n "$digest" ]]; then
+                  ref="ghcr.io/$GITHUB_REPOSITORY@$digest"
+                  printf 'docker pull %s\ngh attestation verify oci://%s --repo %s' "$ref" "$ref" "$GITHUB_REPOSITORY"
+                  if [[ -n "$WOLFI_DIGEST" ]]; then
+                    signer=container-publish
+                    if [[ $digest == "$WOLFI_DIGEST" ]]; then signer=publish-wolfi; fi
+                    printf ' --cert-identity %s/.github/workflows/%s.yml@refs/heads/main --source-ref refs/heads/main' "$repo" "$signer"
+                  fi
+                  printf '\n'
+                fi
+              done
+              printf '```\n\n'
+            fi
+            if [[ "$HAS_ACTION" == true && "$ACTION_RESULT" == success ]]; then
+              printf 'Marketplace: [edit the Action release](%s/%s/releases/edit/action-v%s) to publish or verify its listing.\n\n' \
+                "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$RELEASE_VERSION"
+            fi
+            printf 'See the [release process](%s/%s/blob/main/RELEASING.md#publish-to-github-marketplace) for Marketplace publication.\n' \
+              "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Require completed release channels
         run: |
           test "$RELEASE_RESULT" = success
           test "$INSTALL_RESULT" = success
           if [[ "$HAS_ACTION" == true ]]; then
             test "$ACTION_RESULT" = success
+          fi
+          if [[ "$HAS_CONTAINER" == true ]]; then
+            test "$CONTAINER_RESULT" = success
+          fi
+          if [[ "$HAS_WOLFI" == true ]]; then
+            test -n "$DEBIAN_DIGEST"
+            test -n "$WOLFI_DIGEST"
           fi
