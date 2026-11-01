@@ -1,0 +1,967 @@
+{
+  "schema_version": "codex-security.sca-smoke-corpus/v0",
+  "kind": "synthetic_smoke",
+  "human_adjudicated_cases": 0,
+  "cases": [
+    {
+      "case_id": "sca-001",
+      "advisory_family": "depth-parser",
+      "split": "synthetic_smoke",
+      "gold_label": "affected",
+      "label_provenance": "Synthetic specification, not independently human adjudicated",
+      "rationale": "Literal options satisfy the fictional advisory precondition.",
+      "input": {
+        "input_id": "sca-001-match",
+        "source_type": "advisory",
+        "component": {
+          "source": "package-lock.json",
+          "ecosystem": "npm",
+          "name": "@sca-fixtures/depth-parser",
+          "version": "1.4.0"
+        },
+        "advisory_ids": [
+          "SCA-FIXTURE-001",
+          "SCA-ALIAS-001"
+        ],
+        "advisories": [
+          {
+            "id": "SCA-FIXTURE-001",
+            "aliases": [
+              "SCA-ALIAS-001"
+            ],
+            "modified": "2026-01-01T00:00:00Z",
+            "published": "2026-01-01T00:00:00Z",
+            "summary": "Fictional depth-parser advisory",
+            "details": "A null maxDepth leaves nesting unbounded in decode. A positive maxDepth bounds nesting and is the documented application workaround. Resource exhaustion is possible when arbitrary request bodies reach decode with no bound.",
+            "affected": [
+              {
+                "package": {
+                  "ecosystem": "npm",
+                  "name": "@sca-fixtures/depth-parser"
+                },
+                "ranges": [
+                  {
+                    "type": "SEMVER",
+                    "events": [
+                      {
+                        "introduced": "0"
+                      },
+                      {
+                        "fixed": "1.4.1"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "references": [
+              {
+                "type": "ADVISORY",
+                "url": "https://example.invalid/advisories/SCA-FIXTURE-001"
+              }
+            ]
+          }
+        ],
+        "preconditions": [
+          "maxDepth is null"
+        ],
+        "scanner_evidence": "osv.json"
+      },
+      "required_evidence": [
+        {
+          "path": "src/application.mjs",
+          "line": 4,
+          "fragment": "maxDepth: null"
+        }
+      ],
+      "sha256": {
+        "APPLICATION.md": "2298bdef70ae5556278cc40108bd1642972236b915e1d1db8d49758938c540c9",
+        "input.json": "6fd72a109815414b127975a3e25f959f34303f27d7671bc53ea0636f8170810d",
+        "osv.json": "37947b0cc955b73d73a4dde3f802404923fd65af35b276dc178788e4d49064e4",
+        "package-lock.json": "906cbcf1711b7c23e4ce0da932f19f0dcf9edd9c327784724144eb7dfc26ad0f",
+        "package.json": "cefbad6b6618cef1d9192b3f3214f2bcc698de5527711b60dc37b244ead998f6",
+        "src/application.mjs": "1db6ee0de088cee182be0fd8ec0254dfd9a8d5b0cf94b4294be8001bc4436bed"
+      }
+    },
+    {
+      "case_id": "sca-002",
+      "advisory_family": "depth-parser",
+      "split": "synthetic_smoke",
+      "gold_label": "not_affected",
+      "label_provenance": "Synthetic specification, not independently human adjudicated",
+      "rationale": "Literal options select the fictional advisory's documented complete workaround.",
+      "input": {
+        "input_id": "sca-002-match",
+        "source_type": "advisory",
+        "component": {
+          "source": "package-lock.json",
+          "ecosystem": "npm",
+          "name": "@sca-fixtures/depth-parser",
+          "version": "1.4.0"
+        },
+        "advisory_ids": [
+          "SCA-FIXTURE-001",
+          "SCA-ALIAS-001"
+        ],
+        "advisories": [
+          {
+            "id": "SCA-FIXTURE-001",
+            "aliases": [
+              "SCA-ALIAS-001"
+            ],
+            "modified": "2026-01-01T00:00:00Z",
+            "published": "2026-01-01T00:00:00Z",
+            "summary": "Fictional depth-parser advisory",
+            "details": "A null maxDepth leaves nesting unbounded in decode. A positive maxDepth bounds nesting and is the documented application workaround. Resource exhaustion is possible when arbitrary request bodies reach decode with no bound.",
+            "affected": [
+              {
+                "package": {
+                  "ecosystem": "npm",
+                  "name": "@sca-fixtures/depth-parser"
+                },
+                "ranges": [
+                  {
+                    "type": "SEMVER",
+                    "events": [
+                      {
+                        "introduced": "0"
+                      },
+                      {
+                        "fixed": "1.4.1"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "references": [
+              {
+                "type": "ADVISORY",
+                "url": "https://example.invalid/advisories/SCA-FIXTURE-001"
+              }
+            ]
+          }
+        ],
+        "preconditions": [
+          "maxDepth is null"
+        ],
+        "scanner_evidence": "osv.json"
+      },
+      "required_evidence": [
+        {
+          "path": "src/application.mjs",
+          "line": 4,
+          "fragment": "maxDepth: 32"
+        }
+      ],
+      "sha256": {
+        "APPLICATION.md": "2298bdef70ae5556278cc40108bd1642972236b915e1d1db8d49758938c540c9",
+        "input.json": "2a82f144c312d9ada51c023f60a6567d1ddc1bf7f2d2369003621c92a126221d",
+        "osv.json": "37947b0cc955b73d73a4dde3f802404923fd65af35b276dc178788e4d49064e4",
+        "package-lock.json": "13723d91430df548eae32b082fb30d60ebf961eaebf8885cbd6fbf03f1ff9d16",
+        "package.json": "4cb8ec82bccd4805a9911a439e1de69705a9afb51a48ee640c75654d23f43f35",
+        "src/application.mjs": "2a594335856b6aa34244d33b31422b55acf650deb5a4afdebd9a10215b8af1f1"
+      }
+    },
+    {
+      "case_id": "sca-003",
+      "advisory_family": "depth-parser",
+      "split": "synthetic_smoke",
+      "gold_label": "unresolved",
+      "label_provenance": "Synthetic specification, not independently human adjudicated",
+      "rationale": "Required deployment setting is missing; both applicable and inapplicable configurations remain possible.",
+      "input": {
+        "input_id": "sca-003-match",
+        "source_type": "advisory",
+        "component": {
+          "source": "package-lock.json",
+          "ecosystem": "npm",
+          "name": "@sca-fixtures/depth-parser",
+          "version": "1.4.0"
+        },
+        "advisory_ids": [
+          "SCA-FIXTURE-001",
+          "SCA-ALIAS-001"
+        ],
+        "advisories": [
+          {
+            "id": "SCA-FIXTURE-001",
+            "aliases": [
+              "SCA-ALIAS-001"
+            ],
+            "modified": "2026-01-01T00:00:00Z",
+            "published": "2026-01-01T00:00:00Z",
+            "summary": "Fictional depth-parser advisory",
+            "details": "A null maxDepth leaves nesting unbounded in decode. A positive maxDepth bounds nesting and is the documented application workaround. Resource exhaustion is possible when arbitrary request bodies reach decode with no bound.",
+            "affected": [
+              {
+                "package": {
+                  "ecosystem": "npm",
+                  "name": "@sca-fixtures/depth-parser"
+                },
+                "ranges": [
+                  {
+                    "type": "SEMVER",
+                    "events": [
+                      {
+                        "introduced": "0"
+                      },
+                      {
+                        "fixed": "1.4.1"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "references": [
+              {
+                "type": "ADVISORY",
+                "url": "https://example.invalid/advisories/SCA-FIXTURE-001"
+              }
+            ]
+          }
+        ],
+        "preconditions": [
+          "maxDepth is null"
+        ],
+        "scanner_evidence": "osv.json"
+      },
+      "required_evidence": [
+        {
+          "path": "src/application.mjs",
+          "line": 4,
+          "fragment": "maxDepth: deployment.maxDepth"
+        }
+      ],
+      "sha256": {
+        "APPLICATION.md": "7168d9cb2965292003b3dfbb00757229faf144a7335f9e7c27a201ead9d6b69b",
+        "input.json": "20e0cc37b37495f0dcb228991ad546c41cfef844e6f0e7b84e64ea07b9134d33",
+        "osv.json": "37947b0cc955b73d73a4dde3f802404923fd65af35b276dc178788e4d49064e4",
+        "package-lock.json": "f5d1e2800fe4701622d63fdd13ab69c56298183602ac736dd1effbf7ddac709d",
+        "package.json": "eefdfd32f633582f52c98f85183cdd78db4b6842a680a4a6a1c8fcbee641e06a",
+        "src/application.mjs": "687905d466700797755d66d06a3acb39b4443b7dda8cc8e7e084424ba222b840"
+      }
+    },
+    {
+      "case_id": "sca-004",
+      "advisory_family": "template-view",
+      "split": "synthetic_smoke",
+      "gold_label": "affected",
+      "label_provenance": "Synthetic specification, not independently human adjudicated",
+      "rationale": "Literal options satisfy the fictional advisory precondition.",
+      "input": {
+        "input_id": "sca-004-match",
+        "source_type": "advisory",
+        "component": {
+          "source": "package-lock.json",
+          "ecosystem": "npm",
+          "name": "@sca-fixtures/template-view",
+          "version": "1.4.0"
+        },
+        "advisory_ids": [
+          "SCA-FIXTURE-002",
+          "SCA-ALIAS-002"
+        ],
+        "advisories": [
+          {
+            "id": "SCA-FIXTURE-002",
+            "aliases": [
+              "SCA-ALIAS-002"
+            ],
+            "modified": "2026-01-01T00:00:00Z",
+            "published": "2026-01-01T00:00:00Z",
+            "summary": "Fictional template-view advisory",
+            "details": "render inserts values without HTML encoding when escapeValues is false. With escapeValues true it encodes every substituted value and the advisory does not apply. This fixture has no alternative template or rendering entrypoint.",
+            "affected": [
+              {
+                "package": {
+                  "ecosystem": "npm",
+                  "name": "@sca-fixtures/template-view"
+                },
+                "ranges": [
+                  {
+                    "type": "SEMVER",
+                    "events": [
+                      {
+                        "introduced": "0"
+                      },
+                      {
+                        "fixed": "1.4.1"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "references": [
+              {
+                "type": "ADVISORY",
+                "url": "https://example.invalid/advisories/SCA-FIXTURE-002"
+              }
+            ]
+          }
+        ],
+        "preconditions": [
+          "escapeValues is false"
+        ],
+        "scanner_evidence": "osv.json"
+      },
+      "required_evidence": [
+        {
+          "path": "src/application.mjs",
+          "line": 4,
+          "fragment": "escapeValues: false"
+        }
+      ],
+      "sha256": {
+        "APPLICATION.md": "2298bdef70ae5556278cc40108bd1642972236b915e1d1db8d49758938c540c9",
+        "input.json": "58a701ac13ef99cbccad5da338582e7610dd969a7b9f6c7feb9f70e5fb490db6",
+        "osv.json": "4f1a8a112c310ab9005e0cd8cdb8b0d8261c95ddc5a7906ed7a1215488c389a1",
+        "package-lock.json": "519b8a49b5a978ad51f92a0f6058b1c95fff70c56ca4a37d40df91c6feaaf7a3",
+        "package.json": "b3b3ff548f1bd673eb087b1b37f21ff557911c5b8f2f6fae1448d8da8b015f57",
+        "src/application.mjs": "3803b7e64ce9f0940fafe9028e06306594be097e6fe69dc4f76c14878d997eda"
+      }
+    },
+    {
+      "case_id": "sca-005",
+      "advisory_family": "template-view",
+      "split": "synthetic_smoke",
+      "gold_label": "not_affected",
+      "label_provenance": "Synthetic specification, not independently human adjudicated",
+      "rationale": "Literal options select the fictional advisory's documented complete workaround.",
+      "input": {
+        "input_id": "sca-005-match",
+        "source_type": "advisory",
+        "component": {
+          "source": "package-lock.json",
+          "ecosystem": "npm",
+          "name": "@sca-fixtures/template-view",
+          "version": "1.4.0"
+        },
+        "advisory_ids": [
+          "SCA-FIXTURE-002",
+          "SCA-ALIAS-002"
+        ],
+        "advisories": [
+          {
+            "id": "SCA-FIXTURE-002",
+            "aliases": [
+              "SCA-ALIAS-002"
+            ],
+            "modified": "2026-01-01T00:00:00Z",
+            "published": "2026-01-01T00:00:00Z",
+            "summary": "Fictional template-view advisory",
+            "details": "render inserts values without HTML encoding when escapeValues is false. With escapeValues true it encodes every substituted value and the advisory does not apply. This fixture has no alternative template or rendering entrypoint.",
+            "affected": [
+              {
+                "package": {
+                  "ecosystem": "npm",
+                  "name": "@sca-fixtures/template-view"
+                },
+                "ranges": [
+                  {
+                    "type": "SEMVER",
+                    "events": [
+                      {
+                        "introduced": "0"
+                      },
+                      {
+                        "fixed": "1.4.1"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "references": [
+              {
+                "type": "ADVISORY",
+                "url": "https://example.invalid/advisories/SCA-FIXTURE-002"
+              }
+            ]
+          }
+        ],
+        "preconditions": [
+          "escapeValues is false"
+        ],
+        "scanner_evidence": "osv.json"
+      },
+      "required_evidence": [
+        {
+          "path": "src/application.mjs",
+          "line": 4,
+          "fragment": "escapeValues: true"
+        }
+      ],
+      "sha256": {
+        "APPLICATION.md": "2298bdef70ae5556278cc40108bd1642972236b915e1d1db8d49758938c540c9",
+        "input.json": "5d0b46b6dbbd8a6946d44862df0248b504aa7babd1da6e6bde2ea751cd995656",
+        "osv.json": "4f1a8a112c310ab9005e0cd8cdb8b0d8261c95ddc5a7906ed7a1215488c389a1",
+        "package-lock.json": "0086fa1367072058b24f971541980fd48ed7503a44c42992d4ae8fabde8bd3b6",
+        "package.json": "7350e5404b98995175d68cfd0b2f0d9b0b879e263846b076f537bfe71cbfa31a",
+        "src/application.mjs": "32ac6d9fd9d019db10436a7abb010f8cfedce176bbed35a33b7d0ae47959a03d"
+      }
+    },
+    {
+      "case_id": "sca-006",
+      "advisory_family": "template-view",
+      "split": "synthetic_smoke",
+      "gold_label": "unresolved",
+      "label_provenance": "Synthetic specification, not independently human adjudicated",
+      "rationale": "Required deployment setting is missing; both applicable and inapplicable configurations remain possible.",
+      "input": {
+        "input_id": "sca-006-match",
+        "source_type": "advisory",
+        "component": {
+          "source": "package-lock.json",
+          "ecosystem": "npm",
+          "name": "@sca-fixtures/template-view",
+          "version": "1.4.0"
+        },
+        "advisory_ids": [
+          "SCA-FIXTURE-002",
+          "SCA-ALIAS-002"
+        ],
+        "advisories": [
+          {
+            "id": "SCA-FIXTURE-002",
+            "aliases": [
+              "SCA-ALIAS-002"
+            ],
+            "modified": "2026-01-01T00:00:00Z",
+            "published": "2026-01-01T00:00:00Z",
+            "summary": "Fictional template-view advisory",
+            "details": "render inserts values without HTML encoding when escapeValues is false. With escapeValues true it encodes every substituted value and the advisory does not apply. This fixture has no alternative template or rendering entrypoint.",
+            "affected": [
+              {
+                "package": {
+                  "ecosystem": "npm",
+                  "name": "@sca-fixtures/template-view"
+                },
+                "ranges": [
+                  {
+                    "type": "SEMVER",
+                    "events": [
+                      {
+                        "introduced": "0"
+                      },
+                      {
+                        "fixed": "1.4.1"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "references": [
+              {
+                "type": "ADVISORY",
+                "url": "https://example.invalid/advisories/SCA-FIXTURE-002"
+              }
+            ]
+          }
+        ],
+        "preconditions": [
+          "escapeValues is false"
+        ],
+        "scanner_evidence": "osv.json"
+      },
+      "required_evidence": [
+        {
+          "path": "src/application.mjs",
+          "line": 4,
+          "fragment": "escapeValues: deployment.escapeValues"
+        }
+      ],
+      "sha256": {
+        "APPLICATION.md": "0262df72c83a4ada393caebb9883555ef547ee58c492526d426a0fd462c980c1",
+        "input.json": "54d46c791b61722c037270ba59e82a0ddca60ac1e8fe7328ca7c3fefb61bba1f",
+        "osv.json": "4f1a8a112c310ab9005e0cd8cdb8b0d8261c95ddc5a7906ed7a1215488c389a1",
+        "package-lock.json": "e4c867f82f269b18da0cfd38b10d24164746d2b37dbff4f73d2732bad10df816",
+        "package.json": "6e5239ecd47d17230eadf16e76d66379aebbfab1a5bcb9f2ec4784ea54b50bf9",
+        "src/application.mjs": "ec40d936c1ef82a8904ee6eb6d6f266fd1d92e5d1c272f17ef71b03d1f8db3f3"
+      }
+    },
+    {
+      "case_id": "sca-007",
+      "advisory_family": "shared-cache",
+      "split": "synthetic_smoke",
+      "gold_label": "affected",
+      "label_provenance": "Synthetic specification, not independently human adjudicated",
+      "rationale": "Literal options satisfy the fictional advisory precondition.",
+      "input": {
+        "input_id": "sca-007-match",
+        "source_type": "advisory",
+        "component": {
+          "source": "package-lock.json",
+          "ecosystem": "npm",
+          "name": "@sca-fixtures/shared-cache",
+          "version": "1.4.0"
+        },
+        "advisory_ids": [
+          "SCA-FIXTURE-003",
+          "SCA-ALIAS-003"
+        ],
+        "advisories": [
+          {
+            "id": "SCA-FIXTURE-003",
+            "aliases": [
+              "SCA-ALIAS-003"
+            ],
+            "modified": "2026-01-01T00:00:00Z",
+            "published": "2026-01-01T00:00:00Z",
+            "summary": "Fictional shared-cache advisory",
+            "details": "lookup uses shared keys when isolateTenants is false, so a multi-tenant caller can receive another tenant's cached value. With isolateTenants true the implementation includes the authenticated tenant in every lookup key.",
+            "affected": [
+              {
+                "package": {
+                  "ecosystem": "npm",
+                  "name": "@sca-fixtures/shared-cache"
+                },
+                "ranges": [
+                  {
+                    "type": "SEMVER",
+                    "events": [
+                      {
+                        "introduced": "0"
+                      },
+                      {
+                        "fixed": "1.4.1"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "references": [
+              {
+                "type": "ADVISORY",
+                "url": "https://example.invalid/advisories/SCA-FIXTURE-003"
+              }
+            ]
+          }
+        ],
+        "preconditions": [
+          "isolateTenants is false"
+        ],
+        "scanner_evidence": "osv.json"
+      },
+      "required_evidence": [
+        {
+          "path": "src/application.mjs",
+          "line": 4,
+          "fragment": "isolateTenants: false"
+        }
+      ],
+      "sha256": {
+        "APPLICATION.md": "2298bdef70ae5556278cc40108bd1642972236b915e1d1db8d49758938c540c9",
+        "input.json": "3f94f3b8b686a998001273fba103f1f7fca54dde6bde5e8926fb1ecf3dd8f8cd",
+        "osv.json": "b56bec31e009e6eac9875d3983de2708497bec4ae2d78a96c6951e3c56c09722",
+        "package-lock.json": "dc1de170270ff04805b6c641ed2d16e613ce7d4e7f3c50298bb9483e0f0b3c81",
+        "package.json": "7693098901680aa2b44d973f1b8dc9420b73f5d5aaccbbb1c78c14c05b3d18fe",
+        "src/application.mjs": "2816199729b8eabe42c3c4ee4c88c616a28c95416f05f8522aa1d270b3f45fb1"
+      }
+    },
+    {
+      "case_id": "sca-008",
+      "advisory_family": "shared-cache",
+      "split": "synthetic_smoke",
+      "gold_label": "not_affected",
+      "label_provenance": "Synthetic specification, not independently human adjudicated",
+      "rationale": "Literal options select the fictional advisory's documented complete workaround.",
+      "input": {
+        "input_id": "sca-008-match",
+        "source_type": "advisory",
+        "component": {
+          "source": "package-lock.json",
+          "ecosystem": "npm",
+          "name": "@sca-fixtures/shared-cache",
+          "version": "1.4.0"
+        },
+        "advisory_ids": [
+          "SCA-FIXTURE-003",
+          "SCA-ALIAS-003"
+        ],
+        "advisories": [
+          {
+            "id": "SCA-FIXTURE-003",
+            "aliases": [
+              "SCA-ALIAS-003"
+            ],
+            "modified": "2026-01-01T00:00:00Z",
+            "published": "2026-01-01T00:00:00Z",
+            "summary": "Fictional shared-cache advisory",
+            "details": "lookup uses shared keys when isolateTenants is false, so a multi-tenant caller can receive another tenant's cached value. With isolateTenants true the implementation includes the authenticated tenant in every lookup key.",
+            "affected": [
+              {
+                "package": {
+                  "ecosystem": "npm",
+                  "name": "@sca-fixtures/shared-cache"
+                },
+                "ranges": [
+                  {
+                    "type": "SEMVER",
+                    "events": [
+                      {
+                        "introduced": "0"
+                      },
+                      {
+                        "fixed": "1.4.1"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "references": [
+              {
+                "type": "ADVISORY",
+                "url": "https://example.invalid/advisories/SCA-FIXTURE-003"
+              }
+            ]
+          }
+        ],
+        "preconditions": [
+          "isolateTenants is false"
+        ],
+        "scanner_evidence": "osv.json"
+      },
+      "required_evidence": [
+        {
+          "path": "src/application.mjs",
+          "line": 4,
+          "fragment": "isolateTenants: true"
+        }
+      ],
+      "sha256": {
+        "APPLICATION.md": "2298bdef70ae5556278cc40108bd1642972236b915e1d1db8d49758938c540c9",
+        "input.json": "994ab8e89e742fa2c7c87e45ceefe0b2ddf965e1c5684507799e76d7c9442d3e",
+        "osv.json": "b56bec31e009e6eac9875d3983de2708497bec4ae2d78a96c6951e3c56c09722",
+        "package-lock.json": "6202d9c15597bc6d063a27bba2c40646533d20261ef91e54d41cee674fddece0",
+        "package.json": "07d0d4d0948644283e495bee260bf773c034ca5cf633d23efa7ad49587cbd38a",
+        "src/application.mjs": "d8973cb32761cc4e0d774547f9ad6c139b8227f55f40d86c59d1901ff527b3b6"
+      }
+    },
+    {
+      "case_id": "sca-009",
+      "advisory_family": "shared-cache",
+      "split": "synthetic_smoke",
+      "gold_label": "unresolved",
+      "label_provenance": "Synthetic specification, not independently human adjudicated",
+      "rationale": "Required deployment setting is missing; both applicable and inapplicable configurations remain possible.",
+      "input": {
+        "input_id": "sca-009-match",
+        "source_type": "advisory",
+        "component": {
+          "source": "package-lock.json",
+          "ecosystem": "npm",
+          "name": "@sca-fixtures/shared-cache",
+          "version": "1.4.0"
+        },
+        "advisory_ids": [
+          "SCA-FIXTURE-003",
+          "SCA-ALIAS-003"
+        ],
+        "advisories": [
+          {
+            "id": "SCA-FIXTURE-003",
+            "aliases": [
+              "SCA-ALIAS-003"
+            ],
+            "modified": "2026-01-01T00:00:00Z",
+            "published": "2026-01-01T00:00:00Z",
+            "summary": "Fictional shared-cache advisory",
+            "details": "lookup uses shared keys when isolateTenants is false, so a multi-tenant caller can receive another tenant's cached value. With isolateTenants true the implementation includes the authenticated tenant in every lookup key.",
+            "affected": [
+              {
+                "package": {
+                  "ecosystem": "npm",
+                  "name": "@sca-fixtures/shared-cache"
+                },
+                "ranges": [
+                  {
+                    "type": "SEMVER",
+                    "events": [
+                      {
+                        "introduced": "0"
+                      },
+                      {
+                        "fixed": "1.4.1"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "references": [
+              {
+                "type": "ADVISORY",
+                "url": "https://example.invalid/advisories/SCA-FIXTURE-003"
+              }
+            ]
+          }
+        ],
+        "preconditions": [
+          "isolateTenants is false"
+        ],
+        "scanner_evidence": "osv.json"
+      },
+      "required_evidence": [
+        {
+          "path": "src/application.mjs",
+          "line": 4,
+          "fragment": "isolateTenants: deployment.isolateTenants"
+        }
+      ],
+      "sha256": {
+        "APPLICATION.md": "bdbed9add83f2b3514cd61a9c4e5f003b21f53490f0d9dbe7cc3e879d4eebc31",
+        "input.json": "1c341f4dead09121984d6fd2cde9b9c614e64f3f02f88fc65c86299de0acd0c7",
+        "osv.json": "b56bec31e009e6eac9875d3983de2708497bec4ae2d78a96c6951e3c56c09722",
+        "package-lock.json": "3c359190fc0ce9a6a70140f07369c60cf02c17e6d8af34edf504967228931075",
+        "package.json": "618e015ac2e5f9c481b6e022c2d14cf12796a350f34d6b63f05817f71bf7d1b8",
+        "src/application.mjs": "feab309a963e4d64f39b4ba7e652933df8089fb75e42d09c9a52447208a8ff54"
+      }
+    },
+    {
+      "case_id": "sca-010",
+      "advisory_family": "pattern-filter",
+      "split": "synthetic_smoke",
+      "gold_label": "affected",
+      "label_provenance": "Synthetic specification, not independently human adjudicated",
+      "rationale": "Literal options satisfy the fictional advisory precondition.",
+      "input": {
+        "input_id": "sca-010-match",
+        "source_type": "advisory",
+        "component": {
+          "source": "package-lock.json",
+          "ecosystem": "npm",
+          "name": "@sca-fixtures/pattern-filter",
+          "version": "1.4.0"
+        },
+        "advisory_ids": [
+          "SCA-FIXTURE-004",
+          "SCA-ALIAS-004"
+        ],
+        "advisories": [
+          {
+            "id": "SCA-FIXTURE-004",
+            "aliases": [
+              "SCA-ALIAS-004"
+            ],
+            "modified": "2026-01-01T00:00:00Z",
+            "published": "2026-01-01T00:00:00Z",
+            "summary": "Fictional pattern-filter advisory",
+            "details": "filter can consume unbounded work for user-supplied patterns when bounded is false. bounded true selects the documented bounded-work implementation. This dependency is used by a build-preview service even though it is declared in devDependencies.",
+            "affected": [
+              {
+                "package": {
+                  "ecosystem": "npm",
+                  "name": "@sca-fixtures/pattern-filter"
+                },
+                "ranges": [
+                  {
+                    "type": "SEMVER",
+                    "events": [
+                      {
+                        "introduced": "0"
+                      },
+                      {
+                        "fixed": "1.4.1"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "references": [
+              {
+                "type": "ADVISORY",
+                "url": "https://example.invalid/advisories/SCA-FIXTURE-004"
+              }
+            ]
+          }
+        ],
+        "preconditions": [
+          "bounded is false"
+        ],
+        "scanner_evidence": "osv.json"
+      },
+      "required_evidence": [
+        {
+          "path": "src/application.mjs",
+          "line": 4,
+          "fragment": "bounded: false"
+        }
+      ],
+      "sha256": {
+        "APPLICATION.md": "60bdc3e9bdaa3f290de9ca9767c6d8a3a3a3f40531d965d30fe4ee0138c8c94b",
+        "input.json": "777858ab23c28a7a74dec7f68cff9e8cedfc61a90472f6afbdf0318aeb4033d6",
+        "osv.json": "e43f854dc8c95bc7b0a3bbbf6ba06b3fd3facc37e8ff1762db7deb40f49d13ff",
+        "package-lock.json": "afb3d974bcbff0c1341eebd8be4c4553f41d1015cb3931192de95175c84306e3",
+        "package.json": "34c0e7af54690ebd6b2eed6440547ce0a13a9e82ee6a2520905567ed2a659ca0",
+        "src/application.mjs": "c68fbb61f40f438e0b9effa4bd306fc4a640030ee8df7799fd6c197e50a4448b"
+      }
+    },
+    {
+      "case_id": "sca-011",
+      "advisory_family": "pattern-filter",
+      "split": "synthetic_smoke",
+      "gold_label": "not_affected",
+      "label_provenance": "Synthetic specification, not independently human adjudicated",
+      "rationale": "Literal options select the fictional advisory's documented complete workaround.",
+      "input": {
+        "input_id": "sca-011-match",
+        "source_type": "advisory",
+        "component": {
+          "source": "package-lock.json",
+          "ecosystem": "npm",
+          "name": "@sca-fixtures/pattern-filter",
+          "version": "1.4.0"
+        },
+        "advisory_ids": [
+          "SCA-FIXTURE-004",
+          "SCA-ALIAS-004"
+        ],
+        "advisories": [
+          {
+            "id": "SCA-FIXTURE-004",
+            "aliases": [
+              "SCA-ALIAS-004"
+            ],
+            "modified": "2026-01-01T00:00:00Z",
+            "published": "2026-01-01T00:00:00Z",
+            "summary": "Fictional pattern-filter advisory",
+            "details": "filter can consume unbounded work for user-supplied patterns when bounded is false. bounded true selects the documented bounded-work implementation. This dependency is used by a build-preview service even though it is declared in devDependencies.",
+            "affected": [
+              {
+                "package": {
+                  "ecosystem": "npm",
+                  "name": "@sca-fixtures/pattern-filter"
+                },
+                "ranges": [
+                  {
+                    "type": "SEMVER",
+                    "events": [
+                      {
+                        "introduced": "0"
+                      },
+                      {
+                        "fixed": "1.4.1"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "references": [
+              {
+                "type": "ADVISORY",
+                "url": "https://example.invalid/advisories/SCA-FIXTURE-004"
+              }
+            ]
+          }
+        ],
+        "preconditions": [
+          "bounded is false"
+        ],
+        "scanner_evidence": "osv.json"
+      },
+      "required_evidence": [
+        {
+          "path": "src/application.mjs",
+          "line": 4,
+          "fragment": "bounded: true"
+        }
+      ],
+      "sha256": {
+        "APPLICATION.md": "60bdc3e9bdaa3f290de9ca9767c6d8a3a3a3f40531d965d30fe4ee0138c8c94b",
+        "input.json": "df109a03967329978bcc33f9fe61b0f24b251893b3595c9f899331c63585ef40",
+        "osv.json": "e43f854dc8c95bc7b0a3bbbf6ba06b3fd3facc37e8ff1762db7deb40f49d13ff",
+        "package-lock.json": "b5fb8eb76f8a5b2dfba4e9ca783818b78a891b58d6a4f13f9079eb5d9baf0481",
+        "package.json": "134639955076194c56d90dc8023267e988813a764359ac3d22041efb0247fe86",
+        "src/application.mjs": "816da0bb79a641d7bf2f85c49fd4b8afd3bf9842b60e746fc7c1fb8455bd5721"
+      }
+    },
+    {
+      "case_id": "sca-012",
+      "advisory_family": "pattern-filter",
+      "split": "synthetic_smoke",
+      "gold_label": "unresolved",
+      "label_provenance": "Synthetic specification, not independently human adjudicated",
+      "rationale": "Required deployment setting is missing; both applicable and inapplicable configurations remain possible.",
+      "input": {
+        "input_id": "sca-012-match",
+        "source_type": "advisory",
+        "component": {
+          "source": "package-lock.json",
+          "ecosystem": "npm",
+          "name": "@sca-fixtures/pattern-filter",
+          "version": "1.4.0"
+        },
+        "advisory_ids": [
+          "SCA-FIXTURE-004",
+          "SCA-ALIAS-004"
+        ],
+        "advisories": [
+          {
+            "id": "SCA-FIXTURE-004",
+            "aliases": [
+              "SCA-ALIAS-004"
+            ],
+            "modified": "2026-01-01T00:00:00Z",
+            "published": "2026-01-01T00:00:00Z",
+            "summary": "Fictional pattern-filter advisory",
+            "details": "filter can consume unbounded work for user-supplied patterns when bounded is false. bounded true selects the documented bounded-work implementation. This dependency is used by a build-preview service even though it is declared in devDependencies.",
+            "affected": [
+              {
+                "package": {
+                  "ecosystem": "npm",
+                  "name": "@sca-fixtures/pattern-filter"
+                },
+                "ranges": [
+                  {
+                    "type": "SEMVER",
+                    "events": [
+                      {
+                        "introduced": "0"
+                      },
+                      {
+                        "fixed": "1.4.1"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "references": [
+              {
+                "type": "ADVISORY",
+                "url": "https://example.invalid/advisories/SCA-FIXTURE-004"
+              }
+            ]
+          }
+        ],
+        "preconditions": [
+          "bounded is false"
+        ],
+        "scanner_evidence": "osv.json"
+      },
+      "required_evidence": [
+        {
+          "path": "src/application.mjs",
+          "line": 4,
+          "fragment": "bounded: deployment.bounded"
+        }
+      ],
+      "sha256": {
+        "APPLICATION.md": "56eab8f6469a0a01215968948948960ab22d35b739094e47d6d1ab6f0e4ed541",
+        "input.json": "5807fe1ec18d63a733a2b83da8222de8c536a6d6134ab2be0516421d66a50298",
+        "osv.json": "e43f854dc8c95bc7b0a3bbbf6ba06b3fd3facc37e8ff1762db7deb40f49d13ff",
+        "package-lock.json": "9e354ccab1746ea507c2a2424243912481f85087d90239c214e36b0376328f9e",
+        "package.json": "fa8f92bdeb7f46efd6223fc22d5d7654dfa4e1be478a99a8748c9da2baea8b2b",
+        "src/application.mjs": "aaec8acdbf1ca133cb69cd6a542f330dabc3c1fe2aa52a64eca8269eae28e144"
+      }
+    }
+  ]
+}

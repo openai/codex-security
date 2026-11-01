@@ -585,6 +585,22 @@ try {
     capture: true,
   });
   assert.match(policyHelp, /SECURITY\.md/u);
+  const dependencyHelp = run(
+    process.execPath,
+    [launcher, "scan", "dependencies", "--help"],
+    { cwd: consumer, capture: true, env: launchEnvironment },
+  );
+  assert.match(dependencyHelp, /scan dependencies/u);
+  assert.match(dependencyHelp, /--max-cost/u);
+  const dependencySchema = JSON.parse(
+    run(
+      process.execPath,
+      [launcher, "scan", "dependencies", "--schema", "--format", "json"],
+      { cwd: consumer, capture: true, env: launchEnvironment },
+    ),
+  );
+  assert.equal(dependencySchema.options.properties.model.type, "string");
+  assert.equal(dependencySchema.options.properties.path, undefined);
   const policyTarget = join(consumer, "policy-target");
   await mkdir(policyTarget);
   const policyPreflight = JSON.parse(

@@ -967,6 +967,73 @@ test("empty credential paths use default directories without denying cwd", async
   }
 });
 
+test("relative private stores are denied from the review working directory", async () => {
+  if (
+    runTestInSubprocess(
+      import.meta.path,
+      "relative private stores are denied from the review working directory",
+    )
+  )
+    return;
+  const comparison = { ...(await import("../src/scan-comparison.js")) };
+  const root = await mkdtemp(join(tmpdir(), "codex-review-relative-paths-"));
+  const checkout = join(root, "review checkout");
+  await mkdir(checkout);
+  mock.module("../src/scan-comparison.js", () => ({
+    ...comparison,
+    disabledMcpServers: async () => ({}),
+  }));
+  try {
+    for (const [name, suffix] of [
+      ["HOME", ".ssh"],
+      ["USERPROFILE", ".ssh"],
+      ["XDG_CONFIG_HOME", "gh"],
+      ["GH_CONFIG_DIR", ""],
+    ] as const) {
+      const configured = join("relative private stores", name);
+      let args: readonly string[] = [];
+      const runner = new CodexReviewRunner(
+        {
+          CODEX_CLI_PATH: process.execPath,
+          CODEX_HOME: join(root, "native-home"),
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          OPENAI_API_KEY: "synthetic-review-key",
+          [name]: configured,
+        },
+        (_command, commandArgs) => {
+          args = commandArgs;
+          throw new Error("Synthetic stop after permission configuration");
+        },
+        undefined,
+        checkout,
+      );
+      await expect(
+        runner.run({
+          stage: "pair-review",
+          model: "synthetic-review-model",
+          effort: "high",
+          prompt: "Review the supplied synthetic reports.",
+          schema: {},
+          validate: (value) => value,
+        }),
+      ).rejects.toThrow(
+        "Codex did not complete a validated deduplication review",
+      );
+      const permissions = args.find((argument) =>
+        argument.startsWith("permissions.codex_security_review="),
+      );
+      for (const base of [process.cwd(), checkout]) {
+        expect(permissions).toContain(
+          `${JSON.stringify(resolve(base, configured, suffix))}="deny"`,
+        );
+      }
+    }
+  } finally {
+    mock.module("../src/scan-comparison.js", () => comparison);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("environment lookups preserve platform case rules and exact-key precedence", () => {
   const aliases = { codex_home: "synthetic-alias" };
   expect(environmentEntry(aliases, "CODEX_HOME")).toBe(

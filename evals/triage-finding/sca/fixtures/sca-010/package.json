@@ -1,0 +1,9 @@
+{
+  "name": "sca-synthetic-sca-010",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@sca-fixtures/pattern-filter": "1.4.0"
+  }
+}

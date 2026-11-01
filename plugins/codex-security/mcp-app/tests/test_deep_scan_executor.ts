@@ -1355,7 +1355,7 @@ async function testUnsupportedProviderSnapshotFailsBeforeLaunch() {
 }
 
 async function testWorkerRuntimeSettings() {
-  const cases: [string, string | undefined][] = [
+  const cases: [string, string | undefined, boolean?][] = [
     ["", undefined],
     ['model_reasoning_summary = "none"\n', "none"],
     ['model_reasoning_summary = "auto"\n', "auto"],
@@ -1368,6 +1368,8 @@ async function testWorkerRuntimeSettings() {
       "none",
     ],
   ];
+  if (process.platform !== "win32")
+    cases.push(['model_reasoning_summary = "auto"\n', "auto", true]);
   const saved = [
     "PYTHON",
     "CODEX_SECURITY_PYTHON_COMMAND",
@@ -1380,6 +1382,8 @@ async function testWorkerRuntimeSettings() {
     "CODEX_SECURITY_GIT",
     "GIT_SSH_COMMAND",
     "GIT_CONFIG_GLOBAL",
+    "GH_CONFIG_DIR",
+    "XDG_CONFIG_HOME",
     "CODEX_CLI_PATH",
     "CODEX_MCP_NODE_PATH",
     "CODEX_HOME",
@@ -1409,7 +1413,7 @@ async function testWorkerRuntimeSettings() {
     delete process.env.SYNTHETIC_GATEWAY_KEY;
     delete process.env.SYNTHETIC_HEADER_VALUE;
     delete process.env.CODEX_SQLITE_HOME;
-    for (const [configuration, expected] of cases) {
+    for (const [configuration, expected, scriptLauncher = false] of cases) {
       for (const [name, value] of saved) {
         if (name === "TEMP" || name === "TMP") restoreEnv(name, value);
       }
@@ -1826,7 +1830,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         ),
       );
       await writeFile(promptPath, "synthetic worker configuration fixture");
-      process.env.CODEX_CLI_PATH = process.execPath;
+      const selectedExecutable = scriptLauncher
+        ? fixture.executablePath
+        : process.execPath;
+      process.env.CODEX_CLI_PATH = selectedExecutable;
       process.env.CODEX_HOME = codexHome;
       process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
       process.env.CODEX_SECURITY_PLUGIN_ROOT = path.join(
@@ -1859,6 +1866,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           ),
         };
         launches.push({ command, args, environment, markerPath });
+        if (scriptLauncher && command === selectedExecutable)
+          return originalSpawn(
+            process.execPath,
+            [fixture.executablePath, ...args],
+            { ...options, env: environment },
+          );
         return originalSpawn(
           command,
           command === process.execPath ||
@@ -1983,11 +1996,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerLaunch.command,
               process.platform === "win32"
                 ? path.toNamespacedPath(process.execPath)
-                : process.execPath,
+                : selectedExecutable,
             );
             assert.equal(
               workerLaunch.environment!.CODEX_CLI_PATH,
-              process.execPath,
+              selectedExecutable,
             );
             assert.equal(
               workerLaunch.environment!.CODEX_HOME,
@@ -2372,9 +2385,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             args.includes("app-server"),
           )) {
             const preflight = await readJson(launch.markerPath);
-            const selectedProvider = workerConfigurations.find(
+            const index = workerConfigurations.findIndex(
               (entry) => preflight.configPath === entry.path,
             );
+            const selectedProvider = workerConfigurations[index];
             assert.ok(
               selectedProvider,
               "worker preflight must use the same scan environment",
@@ -2383,11 +2397,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               preflight.gitEnvironment,
               expectedGitEnvironment(
                 gitEnvironment,
-                nodePaths[workerConfigurations.indexOf(selectedProvider)],
+                nodePaths[index],
                 selectedProvider.environment,
               ),
             );
-            const index = workerConfigurations.indexOf(selectedProvider);
             assert.equal(preflight.codexHome, await realpath(codexHome));
             assert.equal(
               preflight.stateDirectory,
@@ -2401,10 +2414,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             });
             assert.equal(
               launch.environment!.CODEX_SECURITY_STATE_DIR,
-              path.join(
-                fixture.root,
-                `state-${workerConfigurations.indexOf(selectedProvider)}`,
-              ),
+              path.join(fixture.root, `state-${index}`),
             );
             assert.equal(
               preflight.providerKey,
@@ -2427,10 +2437,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             });
             assert.equal(
               preflight.cacheDirectory,
-              path.join(
-                fixture.root,
-                `cache-${workerConfigurations.indexOf(selectedProvider)} `,
-              ),
+              path.join(fixture.root, `cache-${index} `),
             );
             assert.deepEqual(
               preflight.argv.filter((arg: string) =>

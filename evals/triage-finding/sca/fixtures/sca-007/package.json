@@ -1,0 +1,9 @@
+{
+  "name": "sca-synthetic-sca-007",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@sca-fixtures/shared-cache": "1.4.0"
+  }
+}
