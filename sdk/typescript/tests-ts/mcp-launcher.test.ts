@@ -115,6 +115,118 @@ test.skipIf(process.platform !== "win32")(
   },
 );
 
+test.skipIf(process.platform !== "win32")(
+  "explicit Windows Node selection precedes every relocated runtime cache",
+  async () => {
+    const node = Bun.which("node");
+    if (node === null)
+      throw new Error("Node is required for the launcher test.");
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-runtime-precedence-")),
+    );
+    try {
+      const scripts = join(root, "plugin", "scripts");
+      const mcp = join(root, "plugin", "mcp");
+      const explicit = join(root, "explicit %RUNTIME% !RUNTIME!", "node.exe");
+      await Promise.all(
+        [scripts, mcp, dirname(explicit)].map((directory) =>
+          mkdir(directory, { recursive: true }),
+        ),
+      );
+      const launcher = join(scripts, "launch_codex_security_mcp.cmd");
+      await copyFile(
+        join(PLUGIN_ROOT, "scripts", "launch_codex_security_mcp.cmd"),
+        launcher,
+      );
+      await copyFile(node, explicit);
+      for (const script of ["server.mjs", "helpers.mjs"])
+        await writeFile(
+          join(mcp, script),
+          `import { readFileSync } from "node:fs";\nconsole.log(JSON.stringify({ executable: process.execPath, cwd: process.cwd(), args: process.argv.slice(2), input: readFileSync(0, "utf8") }));\nprocess.exitCode = 23;\n`,
+        );
+      const caches = {
+        LOCALAPPDATA: join(
+          root,
+          "OpenAI",
+          "Codex",
+          "runtimes",
+          "cua_node",
+          "fixture",
+          "bin",
+          "node.exe",
+        ),
+        XDG_CACHE_HOME: join(
+          root,
+          "codex-runtimes",
+          "codex-primary-runtime",
+          "dependencies",
+          "node",
+          "bin",
+          "node.exe",
+        ),
+        USERPROFILE: join(
+          root,
+          ".cache",
+          "codex-runtimes",
+          "codex-primary-runtime",
+          "dependencies",
+          "node",
+          "bin",
+          "node.exe",
+        ),
+      };
+      const argument = "argument with spaces %RUNTIME% !RUNTIME!";
+      for (const [name, cached] of Object.entries(caches)) {
+        await mkdir(dirname(cached), { recursive: true });
+        await copyFile(node, cached);
+        for (const helper of [false, true]) {
+          const args = helper ? ["--helper", "fixture-helper"] : ["--stdio"];
+          for (const override of [undefined, explicit]) {
+            const result = spawnSync(
+              join(process.env["SystemRoot"]!, "System32", "cmd.exe"),
+              [
+                "/d",
+                "/s",
+                "/c",
+                `""${launcher}" ${args.join(" ")} "%LAUNCH_ARGUMENT%""`,
+              ],
+              {
+                cwd: root,
+                env: {
+                  SystemRoot: process.env["SystemRoot"],
+                  PATH: "",
+                  [name]: root,
+                  LAUNCH_ARGUMENT: argument,
+                  RUNTIME: "expanded-runtime",
+                  ...(override === undefined
+                    ? {}
+                    : { CODEX_MCP_NODE_PATH: override }),
+                },
+                encoding: "utf8",
+                windowsHide: true,
+                windowsVerbatimArguments: true,
+                input: "launcher input\n",
+              },
+            );
+            expect(
+              result.status,
+              `${name}, helper=${helper}, override=${override !== undefined}: ${result.stderr || result.error?.message || ""}`,
+            ).toBe(23);
+            expect(JSON.parse(result.stdout)).toEqual({
+              executable: override ?? cached,
+              cwd: helper ? root : parse(launcher).root,
+              args: [...args, argument],
+              input: "launcher input\n",
+            });
+          }
+        }
+      }
+    } finally {
+      await removeTemporaryDirectory(root);
+    }
+  },
+);
+
 test.skipIf(process.platform === "win32")(
   "preserves helper argument bytes, stdin, and exit status",
   async () => {

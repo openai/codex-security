@@ -11,15 +11,21 @@ Codex Security is a thin wrapper around Codex and its security plugin.
 - Keep credential access, storage, and configuration protections, unsafe-path
   checks, and settings the user explicitly requests.
 - Prefer straightforward code and tests for real behavior.
-- Accept reasoning-effort values as strings and pass them through unchanged.
-  Do not add wrapper-owned enums or allowlists; let the selected model/provider
-  determine which values it supports.
+- Pass Codex-owned settings through existing SDK configuration interfaces.
+  Accept reasoning-effort values as strings and pass them through unchanged.
+  Do not maintain wrapper-owned model or reasoning-effort enums or allowlists;
+  let Codex and the selected model/provider validate supplied values. Use
+  upstream capability discovery for suggested choices. Preserve credential
+  protections, worker permissions, and per-scan configuration isolation.
 - Mention another `openai/` repository in comments or pull request descriptions
   only after checking that it is public. If you cannot confirm its visibility,
   leave it out.
 
 When changing `plugins/codex-security`, run its portable source checks before
 submitting the change:
+
+Run the commands in order from the repository root. `build:ci` compiles the tracked
+`.mts` source checks into the generated `.mjs` entrypoints used below.
 
 ```bash
 python -m ruff check --config plugins/codex-security/pyproject.toml plugins/codex-security
@@ -80,6 +86,12 @@ variables, and defaults as public API.
   choices are unclear.
 - Update relevant help, schemas, documentation, and tests in the same change.
   Describe the public CLI change in the pull request.
+
+## Published documentation
+
+For changes to how developers use the CLI, SDK, or plugin, update the affected
+docs and examples in this repository. Maintainers update the [published docs](https://learn.chatgpt.com/docs/security).
+To suggest a website edit, name the page or workflow and describe the change in your PR.
 
 ## Pull request labels
 

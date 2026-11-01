@@ -300,7 +300,7 @@ def test_default_open_finding_overrides_an_older_false_positive(tmp_path: Path) 
     assert _feedback(state_dir, str(current["scanId"]))["falsePositives"] == []
 
 
-def test_feedback_returns_only_the_50_latest_decisions(tmp_path: Path) -> None:
+def test_scan_materializes_all_false_positive_decisions(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "repository"
     workspace_id = _create_workspace(state_dir, target)
@@ -340,10 +340,14 @@ def test_feedback_returns_only_the_50_latest_decisions(tmp_path: Path) -> None:
     current = _start_scan(state_dir, workspace_id, tmp_path / "scans")
     feedback = _feedback(state_dir, str(current["scanId"]))
 
-    assert len(feedback["falsePositives"]) == 50
+    assert len(feedback["falsePositives"]) == 55
     assert [finding["identity"]["anchor"] for finding in feedback["falsePositives"]] == [
-        f"false-positive-{index:03d}" for index in range(54, 4, -1)
+        f"false-positive-{index:03d}" for index in range(54, -1, -1)
     ]
+    feedback_path = (
+        Path(str(current["scanDir"])) / "artifacts" / "01_context" / "false_positive_feedback.json"
+    )
+    assert json.loads(feedback_path.read_text()) == feedback["falsePositives"]
 
 
 def test_later_offset_completion_supersedes_false_positive_feedback(tmp_path: Path) -> None:

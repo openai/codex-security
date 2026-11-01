@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -14,7 +14,7 @@ if (role === "holder") {
   const interval = setInterval(() => {
     if (!existsSync(release)) return;
     clearInterval(interval);
-    if (mode !== "late") finish();
+    if (!["late", "command-late", "archive-committed"].includes(mode)) finish();
     const diagnostic = Buffer.from("late café 日本語 😀\n");
     process.stderr.write(diagnostic.subarray(0, 9), () => {
       setImmediate(() => {
@@ -34,6 +34,33 @@ if (role === "holder") {
     },
   );
   await new Promise((resolve) => holder.once("message", resolve));
+  if (mode.startsWith("command-") || mode.startsWith("archive-")) {
+    writeFileSync(
+      `${release}.ready.tmp`,
+      JSON.stringify({ parentPid: process.pid, holderPid: holder.pid }),
+    );
+    renameSync(`${release}.ready.tmp`, `${release}.ready`);
+    if (mode === "command-active" || mode === "archive-pending") {
+      setInterval(() => {}, 1000);
+      await new Promise(() => {});
+    }
+    if (mode === "archive-committed") {
+      const lines = createInterface({ input: process.stdin });
+      let receivedInput = false;
+      for await (const _line of lines) {
+        if (receivedInput) break;
+        receivedInput = true;
+        process.stdout.write("codex-security-archive-ready\n");
+      }
+      await new Promise((resolve) =>
+        process.stdout.write("committed\n", resolve),
+      );
+    }
+    await new Promise((resolve) =>
+      process.stderr.write("initial diagnostic\n", resolve),
+    );
+    process.exit(mode === "command-failure" ? 7 : 0);
+  }
   process.on("SIGTERM", () => {
     if (mode === "active") process.send("ignored-term");
     else process.exit(0);
@@ -57,7 +84,11 @@ if (role === "holder") {
   for await (const line of createInterface({ input: process.stdin })) {
     if (mode === "active") continue;
     const message = JSON.parse(line);
-    if (["initialize", "account/login/start"].includes(message.method)) {
+    if (
+      ["initialize", "account/login/start", "config/read"].includes(
+        message.method,
+      )
+    ) {
       send({ id: message.id, result: {} });
     } else if (message.method === "feedback/upload") {
       send(

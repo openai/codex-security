@@ -185,3 +185,37 @@ test("alternate records flag syntax cannot start local validation", async () => 
   expect(stderr.text()).toContain("Use validate --records alone");
   expect(deps.runCodex).not.toHaveBeenCalled();
 });
+
+test.each([
+  ["const", "drop"],
+  ["const", "keep"],
+  ["enum", "drop"],
+  ["enum", "keep"],
+] as const)(
+  "keeps the admitted %s schema when a host mutates it and returns %s",
+  async (keyword, verdict) => {
+    const admitted = { verdict: { value: "keep" } };
+    const outputSchema = {
+      [keyword]: keyword === "const" ? admitted : [admitted],
+    };
+    const original = structuredClone(outputSchema);
+    const run = mock(async (request: ValidationReviewRequest) => {
+      const value = request.schema[keyword];
+      const constraint = (Array.isArray(value) ? value[0] : value) as {
+        verdict: { value: string };
+      };
+      expect(constraint.verdict.value).toBe("keep");
+      constraint.verdict.value = "drop";
+      return { verdict: { value: verdict } };
+    });
+    const pending = validateRecords(
+      { ...input, outputSchema },
+      { reviewRunner: { run } },
+    );
+    if (verdict === "drop")
+      await expect(pending).rejects.toThrow("does not match");
+    else await expect(pending).resolves.toEqual(admitted);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(outputSchema).toEqual(original);
+  },
+);

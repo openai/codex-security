@@ -1,20 +1,20 @@
 # Codex Security GitHub Action
 
 Run Codex Security scans in GitHub Actions. Scan a repository or pull request,
-check findings against a severity threshold, and export JSON, coverage, and
-SARIF reports.
+check findings against a severity threshold, and export JSON and SARIF reports.
 
 ## Quick start
 
-Use a GitHub-hosted Ubuntu 24.04 x64 runner on GitHub.com and an OpenAI API key
+Use a GitHub-hosted Ubuntu 24.04 x64 runner on GitHub.com or GitHub Enterprise
+Cloud on `*.ghe.com`, and an OpenAI API key
 with access to the selected model. OpenAI is the default provider. See
 [Inference providers](#inference-providers) for Bedrock, OpenRouter, and Fireworks.
 
 Add your API key as a repository secret named `CODEX_SECURITY_API_KEY`, then
 save this workflow in `.github/workflows/codex-security.yml`.
 Replace `REPLACE_WITH_REVIEWED_COMMIT` with the full SHA of an Action commit.
-The matching `action-vX.Y.Z` tag and distribution commit are listed in each
-product release after the CLI and Action have both passed release checks.
+The matching `action-vX.Y.Z` release lists the full distribution commit SHA
+and links to the product changelog after the Action has passed release checks.
 When using a fork, replace `openai` with the fork owner.
 
 This example requests Daybreak Blue. Use an API key from a project with Blue
@@ -77,18 +77,54 @@ This setup is specific to the Linux runner. Local macOS scans use the built-in
 Seatbelt sandbox and do not need Bubblewrap. See the
 [sandbox documentation](https://learn.chatgpt.com/docs/sandboxing) for details.
 
+## Supported GitHub hosts and checkout URLs
+
+The Action supports GitHub.com and GitHub Enterprise Cloud on `*.ghe.com`.
+Checkout origins can use HTTPS, SCP-style SSH (`USER@HOST:OWNER/REPO.git`),
+or an `ssh://` URL, including an explicit port 22. Repository names and hostnames
+are compared without regard to case; a `.git` suffix and trailing slash are optional.
+
+On GitHub.com, `ssh://git@ssh.github.com:443/OWNER/REPO.git` is also supported.
+GitHub does not offer this SSH-over-443 endpoint for enterprises on `ghe.com`;
+see [GitHub's SSH-over-HTTPS guidance](https://docs.github.com/en/authentication/troubleshooting-ssh/using-ssh-over-the-https-port).
+
+### GitHub Enterprise Cloud
+
+The workflows in this guide also support GitHub Enterprise Cloud with data
+residency at `https://SUBDOMAIN.ghe.com`. The Action reads `GITHUB_SERVER_URL`
+from the runner and requires the checkout origin to match that host and
+`GITHUB_REPOSITORY`. No additional Action input or GitHub token is needed.
+Use a reviewed Action commit containing this support.
+
+Keep `persist-credentials: false` and use the triggering repository and revision.
+HTTPS origins work with the checkout step above. For SSH origins, GitHub uses
+the enterprise subdomain as the username, such as
+`example-enterprise@example-enterprise.ghe.com:example/repo.git`.
+See [GitHub's SSH guidance](https://docs.github.com/en/enterprise-cloud@latest/admin/data-residency/network-details-for-ghecom#using-ssh-with-ghecom).
+
+Report artifacts use the runner's Actions artifact service. The separate
+`github/codeql-action/upload-sarif` step uses the enterprise's code scanning
+service and requires the permissions and availability described below.
+Enterprise policies must permit the referenced actions. For Bedrock OIDC,
+configure AWS trust for the enterprise issuer at
+`https://token.actions.SUBDOMAIN.ghe.com`; see
+[GitHub's feature differences](https://docs.github.com/en/enterprise-cloud@latest/admin/data-residency/feature-overview-for-github-enterprise-cloud-with-data-residency).
+
+GitHub Enterprise Server remains unsupported. The Linux x64 runtime and
+sandbox requirements apply on both supported GitHub Cloud hosts.
+
 ## Inference providers
 
 `provider` and `model` map to `codex-security scan --provider` and `--model`.
 The CLI configures the provider and validates its model requirements. The Action
 uses the same provider names and forwards only the selected provider's credentials:
 
-| `provider` | Step environment |
-| --- | --- |
-| `openai` (default) | `OPENAI_API_KEY`, or `CODEX_API_KEY` as a fallback |
-| `amazon-bedrock` | AWS credentials and region; see the OIDC example below |
-| `openrouter` | `OPENROUTER_API_KEY` |
-| `fireworks` | `FIREWORKS_API_KEY` |
+| `provider`         | Step environment                                       |
+| ------------------ | ------------------------------------------------------ |
+| `openai` (default) | `OPENAI_API_KEY`, or `CODEX_API_KEY` as a fallback     |
+| `amazon-bedrock`   | AWS credentials and region; see the OIDC example below |
+| `openrouter`       | `OPENROUTER_API_KEY`                                   |
+| `fireworks`        | `FIREWORKS_API_KEY`                                    |
 
 OpenAI retains the `gpt-5.6-sol` default. Other providers require an explicit
 model ID your credentials can access. For example, replace the scan step in the
@@ -307,9 +343,15 @@ room for finalization within your job timeout.
 
 ## Reports
 
-The Action writes a job summary and source annotations. Set
+The Action lists the highest-severity findings first in the job summary and
+source annotations, preserving scan order within each severity level. Set
 `upload-artifacts: 'true'` for downloadable reports, retained for seven days by
 default. Reports can contain source code and vulnerability details.
+
+The job summary includes the configured provider, reported input/cached/output
+token usage, and estimated USD cost, including a range when supplied by the CLI.
+Missing measurements or pricing appear as `unavailable`; measured zeros remain
+zero. Cost estimates are not billing totals.
 
 The Action uses the normal Actions job check. Its summary and final log message
 distinguish findings above the failure threshold from a scan that could not
@@ -318,16 +360,16 @@ are report-only; scanner and required reporting failures still fail the job.
 
 A completed scan means the configured analysis produced a valid result. Scope
 exclusions, deferred investigations, and other coverage notes remain in the
-coverage report; they do not create a separate scan outcome or bypass the
+review notes, they do not create a separate scan outcome or bypass the
 findings policy. Completion does not certify that every vulnerability was found.
 
 The Action follows the CLI outcome consistently:
 
-| CLI exit | Action result |
-| --- | --- |
-| `0` | `scan-status: completed`, `policy-status: passed`; the step succeeds. |
-| `1` | `scan-status: completed`, `policy-status: failed`; the step fails on findings. |
-| `2` or an interrupted process | `scan-status: failed`, `policy-status: not-evaluated`; the step fails. |
+| CLI exit                      | Action result                                                                  |
+| ----------------------------- | ------------------------------------------------------------------------------ |
+| `0`                           | `scan-status: completed`, `policy-status: passed`; the step succeeds.          |
+| `1`                           | `scan-status: completed`, `policy-status: failed`; the step fails on findings. |
+| `2` or an interrupted process | `scan-status: failed`, `policy-status: not-evaluated`; the step fails.         |
 
 Usable reports retained after an execution failure remain available, but are not
 eligible for SARIF upload. Invalid or missing required reports, a changed
@@ -387,6 +429,21 @@ The Action uses the CLI’s validated JSON result for findings and scan status.
 If the CLI exits without a usable result, the Action reports failure and leaves
 report paths empty; it does not recover unvalidated files from disk.
 
+### Request attribution
+
+The Action adds `codex_security_integration=github_action` and
+`codex_security_provider` (the configured provider family) through the CLI's existing
+`responses_api_metadata` setting. These accompany the CLI's request attribution
+on model requests supported by the provider. This attribution contains no
+repository, workflow, run, actor, credential, or finding data.
+Native managed configuration may override the provider selection before inference.
+
+The Action continues to set `analytics.enabled=false`. Request metadata is
+separate from native analytics and does not create an additional telemetry
+request or publish scan results to Codex Security Cloud. Requests sent to other
+providers do not establish OpenAI-side usage reporting. Summaries, annotations,
+and artifact uploads retain their existing controls.
+
 ## Troubleshooting
 
 - **Checkout or history errors:** use the triggering revision, `fetch-depth: 0`
@@ -402,7 +459,7 @@ report paths empty; it does not recover unvalidated files from disk.
 - **Missing SARIF uploads:** inspect `scan-status`, `report-status`, and
   `sarif-upload-ready`.
 - **Failed scans:** inspect the CLI diagnostics for execution errors. Scope
-  exclusions and deferred investigations in the coverage report do not cause
+  exclusions and deferred investigations in the review notes do not cause
   execution failures or bypass the severity policy.
 
 CLI diagnostics stream by default. Set `verbose: 'false'` for lifecycle and
@@ -410,48 +467,47 @@ elapsed-time messages only.
 
 ## Development
 
-From the repository root:
+From the repository root, use Node.js 24 to check the committed files and audit
+both dependency locks.
 
 ```bash
 npm --prefix github-action ci --ignore-scripts --no-audit --no-fund
-npm --prefix github-action run docs
-npm --prefix github-action run build
 npm --prefix github-action run validate
-# Test the published CLI with synthetic scans; no model calls:
+npm --prefix github-action audit --audit-level=high
+npm --prefix github-action/runtime audit --omit=dev --audit-level=high
+```
+
+After changing Action inputs or outputs, run `npm --prefix github-action run docs`
+to regenerate the README reference. After changing bundled source or the runtime
+lock, run `npm --prefix github-action run build`. Review the generated README and
+`dist/*.cjs` changes, rerun validation, and commit them with their source changes.
+
+On Linux x64 with a working sandbox, run the published CLI integration and
+packaged smoke tests.
+
+```bash
 npm --prefix github-action/runtime ci --ignore-scripts --no-audit --no-fund
 npm --prefix github-action run test:cli
-# Linux x64 with Node 24; no model calls:
 node github-action/scripts/linux-smoke.mjs
 ```
 
-Commit source changes and the generated `dist/*.cjs` bundles together.
 Validation checks types, tests, Action metadata, documentation, and bundle
 reproducibility. CI also tests the result adapter against the pinned CLI and its
-SARIF exporter using synthetic scans, runs the packaged Linux smoke test, and
-audits the Action and CLI dependency locks. The `@openai/codex-security` dependency in
-`runtime/package.json` is the installed CLI version source. Main keeps the last
-published CLI pin so its checks remain runnable while a release PR prepares the
-next product version. To upgrade that development pin, update it and regenerate
+SARIF exporter using synthetic scans. A local inference fixture checks request
+attribution and the analytics opt-out with synthetic credentials. These tests run
+without external model calls. The `@openai/codex-security` dependency in
+`runtime/package.json` is the installed CLI version source. Main keeps an already
+published CLI baseline so its checks remain runnable while a release PR prepares
+the next product version. This development pin does not necessarily track the
+latest CLI release. To upgrade it, update it and regenerate
 `runtime/package-lock.json`, rebuild the bundles, and run validation.
 
-Releases use the product version from `sdk/typescript/package.json`. Before npm
-publication, the release workflow exercises the Action's compatibility suite
-against the packed CLI candidate. After publication and provenance verification,
-the Action release workflow starts from that exact CLI source commit, updates
-the runtime pin and integrity lock, and fetches the locked runtime through
-Socket Firewall with an empty cache before running the CLI. The lock keeps
-public npm URLs for Action consumers. The workflow rebuilds the bundles and
-runs the Action checks in a job with read-only repository permissions.
-A fresh publisher takes only the tested runtime lock, rebuilds
-from the same source, and verifies the bundle hashes without executing the CLI.
-It creates a distribution commit and an immutable `action-vX.Y.Z` tag with the
-same version as `npm-vX.Y.Z`.
-
-The Action distribution commit differs from the CLI source commit because the
-registry integrity lock is finalized after publication. Release metadata records
-both commits, both tags, and the verified CLI integrity. A failed Action stage
-can be rerun without republishing npm. Existing version tags are never moved.
-See [the release process](../RELEASING.md) for the orchestration and recovery flow.
+The `action-vX.Y.Z` release uses the same version as the corresponding
+`npm-vX.Y.Z` CLI release. Its distribution commit includes the built bundles and
+final runtime lock and differs from the CLI source commit. Pin the full Action
+distribution SHA listed in the Action release, which also includes its manifest,
+SBOM, and a link to the product changelog. See [the release process](../RELEASING.md)
+for publication, verification, and recovery instructions.
 
 <!-- prettier-ignore-start -->
 
@@ -471,7 +527,7 @@ Inputs are strings. Quote booleans and use newline-separated literal paths for l
 | `provider`             | `openai`                  | Inference provider, matching scan --provider: openai, openrouter, fireworks, or amazon-bedrock. Supply the selected provider's credentials to the step.                                                                      |
 | `model`                | Unset                     | Model to scan with, passed to scan --model. Defaults to gpt-5.6-sol for OpenAI; other providers require an explicit model ID. Cost limits require CLI pricing support for the model.                                         |
 | `cyber-access-program` | Unset                     | Optional Cyber access program: standard, daybreak_blue, or daybreak_red. Unset preserves CLI defaults. Daybreak selections require approved organization and enabled API project access; model access is checked separately. |
-| `effort`               | `xhigh`                   | Reasoning effort: minimal, low, medium, high, xhigh, or max (subject to model support).                                                                                                                                      |
+| `effort`               | `xhigh`                   | Reasoning effort passed to Codex; supported values depend on the model and provider.                                                                                                                                         |
 | `max-cost`             | Unset                     | Positive estimated USD stop threshold per invocation. In-flight requests can exceed it; unset means no cost limit.                                                                                                           |
 | `max-time-hours`       | Unset                     | Positive Deep discovery duration in hours, up to 96. Unset uses the CLI default. Finalization and job timeout are separate.                                                                                                  |
 | `fail-on-severity`     | `none`                    | none, low, medium, high, or critical. Fails on reported findings at or above the selected severity. Scanner and required reporting errors also fail.                                                                         |
@@ -491,7 +547,8 @@ All outputs are strings. An empty cost or count means unavailable, not zero.
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | `sarif-path`          | Absolute validated SARIF file path, or empty when unavailable or withheld.                                                             |
 | `json-path`           | Absolute canonical findings JSON path, or empty when unavailable or withheld.                                                          |
-| `coverage-path`       | Absolute coverage JSON path, or empty when unavailable or withheld.                                                                    |
+| `manifest-path`       | Absolute scan manifest path, including scan status and scope, or empty when unavailable or withheld.                                   |
+| `coverage-path`       | Legacy coverage JSON path. Empty for current CLI results.                                                                              |
 | `results-directory`   | Runner-local reports directory; do not upload it recursively.                                                                          |
 | `scan-status`         | completed, failed, or skipped. Completed means analysis produced a valid result. Skipped is reserved for empty diffs or dry-run.       |
 | `skip-reason`         | empty-diff or dry-run when no scan ran; otherwise empty.                                                                               |

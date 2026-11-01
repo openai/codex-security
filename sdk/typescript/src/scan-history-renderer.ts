@@ -1,6 +1,11 @@
 import { basename, relative } from "node:path";
 import stringWidth from "string-width";
+import { fitCell, graphemes } from "./terminal-columns.js";
 import type { JsonObject } from "./config.js";
+import {
+  formatCoverageScopeParts,
+  type CoverageSummary,
+} from "./coverage-presentation.js";
 
 export type HistoryCommand =
   "list" | "show" | "findings" | "compare" | "match-all";
@@ -14,9 +19,6 @@ type RendererOptions = {
 };
 
 const STALE_SCAN_MILLISECONDS = 24 * 60 * 60 * 1_000;
-const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, {
-  granularity: "grapheme",
-});
 
 const STATUS_STYLES: Record<string, { color: number; icon: string }> = {
   resolved: { color: 32, icon: "✓" },
@@ -81,11 +83,17 @@ export function renderScanHistory(
     `  ${accent("━".repeat(width - 4))}`,
   ];
 
-  const wrap = (value: string, indent: number, prefix?: string): void => {
+  const wrap = (
+    value: string | readonly string[],
+    indent: number,
+    prefix?: string,
+  ): void => {
     const available = width - indent - 2;
     let line = "";
     let lineWidth = 0;
-    for (const word of clean(value).split(/\s+/)) {
+    const words =
+      typeof value === "string" ? clean(value).split(/\s+/) : value.map(clean);
+    for (const word of words) {
       if (line.length > 0 && lineWidth + stringWidth(word) + 1 > available) {
         lines.push(`${prefix || " ".repeat(indent)}${line}`);
         prefix = undefined;
@@ -96,7 +104,7 @@ export function renderScanHistory(
         line += " ";
         lineWidth += 1;
       }
-      for (const { segment } of GRAPHEME_SEGMENTER.segment(word)) {
+      for (const { segment } of graphemes.segment(word)) {
         const segmentWidth = stringWidth(segment);
         if (lineWidth + segmentWidth > available) {
           lines.push(`${prefix || " ".repeat(indent)}${line}`);
@@ -209,7 +217,7 @@ export function renderScanHistory(
     const multipleRepositories =
       options.repository === undefined &&
       new Set(scans.map((scan) => scan["targetPath"])).size > 1;
-    const wide = width >= (multipleRepositories ? 96 : 80);
+    const wide = width >= (multipleRepositories ? 97 : 80);
     lines.push(
       `  ${strong(clean(repository))}  ${accent("·")}  ${scans.length} ${scans.length === 1 ? "scan" : "scans"}${latest === undefined ? "" : `  ${accent("·")}  latest: ${clean(latest)} findings`}`,
       "",
@@ -232,13 +240,22 @@ export function renderScanHistory(
       const scanRepository = basename(clean(scan["targetPath"]));
       if (wide) {
         lines.push(
-          `  ${clean(scan["scanId"]).padEnd(36)} ${started.padEnd(10)} ${clean(scan["mode"]).padEnd(8)}${multipleRepositories ? ` ${scanRepository.slice(0, 18).padEnd(18)}` : ""} ${findings.padEnd(8)} ${statusLabel}`,
+          `  ${clean(scan["scanId"]).padEnd(36)} ${started.padEnd(10)} ${clean(scan["mode"]).padEnd(8)}${multipleRepositories ? ` ${fitCell(scanRepository, 18, "")}` : ""} ${findings.padEnd(8)} ${statusLabel}`,
         );
       } else {
-        lines.push(
-          `  ${clean(scan["scanId"])}`,
-          `    ${started}${multipleRepositories ? `  ${accent("·")}  ${clean(scanRepository)}` : ""}  ${accent("·")}  ${findings} findings  ${accent("·")}  ${statusLabel}`,
-        );
+        lines.push(`  ${clean(scan["scanId"])}`);
+        const separator = `  ${accent("·")}  `;
+        const summary = `${findings} findings${separator}${statusLabel}`;
+        const location = multipleRepositories
+          ? `${scanRepository}${separator}`
+          : "";
+        const line = `    ${started}${separator}${location}${summary}`;
+        if (multipleRepositories && stringWidth(line) > width) {
+          lines.push(`    ${started}${separator}${summary}`);
+          wrap([scanRepository], 4);
+        } else {
+          lines.push(line);
+        }
       }
     }
   } else if (command === "findings") {
@@ -265,6 +282,14 @@ export function renderScanHistory(
       lines.push(`  ${strong("STARTED")}  ${clean(result["startedAt"])}`);
     } else if (typeof result["updatedAt"] === "string") {
       lines.push(`  ${strong("UPDATED")}  ${clean(result["updatedAt"])}`);
+    }
+    const canonicalCoverage = result["coverage"] as CoverageSummary | undefined;
+    if (canonicalCoverage) {
+      wrap(
+        formatCoverageScopeParts(canonicalCoverage),
+        11,
+        `  ${strong("SCOPE")}  `,
+      );
     }
     if (result["failureMessage"]) {
       wrap(String(result["failureMessage"]), 11, `  ${paint("ERROR", 31)}  `);
@@ -305,7 +330,9 @@ export function renderScanHistory(
     const recipe = result["recipe"] as JsonObject | undefined;
     const target = recipe?.["target"] as JsonObject | undefined;
     if (target) {
-      lines.push(`  ${strong("SCOPE")}  ${clean(JSON.stringify(target))}`);
+      lines.push(
+        `  ${strong("SAVED SCOPE")}  ${clean(JSON.stringify(target))}`,
+      );
     }
     const deepScan = recipe?.["deepScan"] as JsonObject | undefined;
     if (deepScan) {
@@ -338,7 +365,7 @@ export function renderScanHistory(
       ];
       if (parts.length > 0) {
         lines.push(
-          `  ${strong("COVERAGE")}  ${parts.join(`  ${accent("·")}  `)}`,
+          `  ${strong("REVIEW")}  ${parts.join(`  ${accent("·")}  `)}`,
         );
       }
     }

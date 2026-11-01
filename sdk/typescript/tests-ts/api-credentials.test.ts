@@ -1,4 +1,5 @@
-import { nodeCommand } from "./support/shell.js";
+import { requestMetadata } from "./support/request-metadata.js";
+import { nodeCommand, runCommand } from "./support/shell.js";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
@@ -9,7 +10,11 @@ import { parse as parseToml } from "smol-toml";
 import { initialCredentialsAvailable } from "../src/api.js";
 import { AuthenticationRequiredError } from "../src/errors.js";
 import { setCodexSecurityCredentialLogout } from "../src/runtime.js";
-import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
+import {
+  copyCompletedScan,
+  copyCredentialTestPlugin,
+  PLUGIN_ROOT,
+} from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
 import {
   codexFactory,
@@ -112,7 +117,12 @@ describe("CodexSecurity orchestration", () => {
       const originalOverrides = structuredClone(overrides);
       let captured: (CodexOptions & { nativeProfile?: string }) | undefined;
       const client = new TestClient(
-        { pluginPath: PLUGIN_ROOT, codexOverrides: overrides },
+        {
+          pluginPath: profile
+            ? PLUGIN_ROOT
+            : await copyCredentialTestPlugin(root),
+          codexOverrides: overrides,
+        },
         {
           environment: {
             CODEX_HOME: relative(process.cwd(), home),
@@ -342,10 +352,10 @@ describe("CodexSecurity orchestration", () => {
               shell_environment_policy: {
                 set: { PRIVATE_TOKEN: "RUNTIME_SHELL_SECRET" },
               },
-              responses_api_metadata: {
-                request_trace: "preserve-configured-metadata",
-                codex_security_surface: "sdk",
-              },
+            });
+            expect(requestMetadata(options.configOverrides)).toMatchObject({
+              request_trace: "preserve-configured-metadata",
+              codex_security_surface: "sdk",
             });
             if (process.platform !== "win32") {
               expect((await stat(configPath!)).mode & 0o777).toBe(0o600);
@@ -450,11 +460,28 @@ describe("CodexSecurity orchestration", () => {
     let scansStarted = 0;
     const deepScanConfigPaths = new Set<string>();
     const concurrentScans = Promise.withResolvers<void>();
+    const inheritedOptIn = Object.defineProperty(
+      {},
+      "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
+      { value: "1", enumerable: false, writable: true },
+    );
 
     const clients = await Promise.all(
-      [0, 1].map(async (index) => {
+      [
+        {},
+        {
+          CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS:
+            process.platform === "win32" ? undefined : "0",
+          Codex_Security_Enable_External_Imports: "1",
+        },
+      ].map(async (overrides, index) => {
         const scanDir = join(root, `parallel-scan-${index}`);
         await mkdir(scanDir, { mode: 0o700 });
+        const environment: NodeJS.ProcessEnv = Object.assign(
+          Object.create(inheritedOptIn),
+          { CODEX_HOME: ambientHome, CODEX_SECURITY_STATE_DIR: stateDirectory },
+          overrides,
+        );
         return new TestClient(
           {
             pluginPath: PLUGIN_ROOT,
@@ -463,10 +490,7 @@ describe("CodexSecurity orchestration", () => {
             },
           },
           {
-            environment: {
-              CODEX_HOME: ambientHome,
-              CODEX_SECURITY_STATE_DIR: stateDirectory,
-            },
+            environment,
             resolvePluginPython: async () => "/managed/python",
             prepareOutputDir: async () => scanDir,
             repositoryRevision: async () => "deadbeef",
@@ -499,6 +523,15 @@ describe("CodexSecurity orchestration", () => {
                   workers: index + 2,
                 });
                 await concurrentScans.promise;
+                const child = await runCommand(
+                  nodeCommand().command,
+                  ["-p", "process.env.CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS"],
+                  { env: options.env },
+                );
+                expect(child.status, child.stderr).toBe(0);
+                expect(child.stdout.trim()).toBe(
+                  String(environment["CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS"]),
+                );
                 const after = parseToml(
                   await readFile(deepScanConfigPath!, "utf8"),
                 );
@@ -517,7 +550,11 @@ describe("CodexSecurity orchestration", () => {
       const results = await Promise.allSettled(
         clients.map((client, index) =>
           client
-            .run(repository, { mode: "deep", workers: index + 2 })
+            .run(repository, {
+              mode: "deep",
+              workers: index + 2,
+              auth: index === 0 ? "chatgpt" : "auto",
+            })
             .finally(concurrentScans.resolve),
         ),
       );
@@ -561,7 +598,7 @@ describe("CodexSecurity orchestration", () => {
     const runs: Array<{ home: string; apiKey?: string }> = [];
     const client = new TestClient(
       {
-        pluginPath: PLUGIN_ROOT,
+        pluginPath: await copyCredentialTestPlugin(root),
         codexOverrides: {
           model_provider: "synthetic.account",
           model_providers: {

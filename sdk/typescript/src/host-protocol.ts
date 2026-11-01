@@ -17,8 +17,13 @@ const progress = envelope.extend({
   method: z.literal("execution.progress"),
   params: z.strictObject({ requestId: z.string(), event: z.unknown() }),
 });
+const success = envelope.extend({ id: rpcId, result: z.unknown() });
+const acceptsPendingReview = z.object({
+  supportsSubmissionValidation: z.literal(true),
+});
 const response = z.union([
-  envelope.extend({ id: rpcId, result: z.unknown() }),
+  success,
+  success.extend({ reviewPending: z.literal(true) }),
   envelope.extend({
     id: rpcId,
     error: z.strictObject({
@@ -28,6 +33,10 @@ const response = z.union([
     }),
   }),
 ]);
+/** Only the host can mark the RPC envelope. Model-controlled results remain plain JSON. */
+export class PendingReviewSubmission {
+  constructor(readonly submission: unknown) {}
+}
 type Output = Pick<NodeJS.WriteStream, "write"> & {
   on?(event: "error", listener: (error: Error) => void): unknown;
   off?(event: "error", listener: (error: Error) => void): unknown;
@@ -36,6 +45,7 @@ type Execute = (
   id: string,
   request: unknown,
   onProgress?: (event: unknown) => void,
+  method?: string,
 ) => Promise<unknown>;
 
 /** One bidirectional run, shared with dedupe. This transport never replays. */
@@ -45,6 +55,7 @@ export async function runHostProtocol(
   operation: {
     label: string;
     requestMethod: string;
+    progressMethod?: string;
     /** Scan cancellation must retain the host's eventual receipt and usage. */
     awaitCancellationReceipt?: boolean;
     errorData?: (error: unknown) => object | undefined;
@@ -64,6 +75,7 @@ export async function runHostProtocol(
   let pending:
     | {
         id: string;
+        acceptsPendingReview: boolean;
         resolve(value: unknown): void;
         reject(error: Error): void;
         onProgress?: (event: unknown) => void;
@@ -215,17 +227,25 @@ export async function runHostProtocol(
       void operation
         .run(
           run.data.params,
-          (id, params, onProgress) => {
+          (id, params, onProgress, method = operation.requestMethod) => {
             if (terminalCode !== undefined || controller.signal.aborted)
               return Promise.reject(controller.signal.reason);
             if (pending)
               return Promise.reject(new Error("Execution is already pending."));
             return new Promise((resolve, reject) => {
-              pending = { id, resolve, reject, onProgress };
+              pending = {
+                id,
+                resolve,
+                reject,
+                onProgress,
+                acceptsPendingReview:
+                  method === "review.run" &&
+                  acceptsPendingReview.safeParse(params).success,
+              };
               void send({
                 jsonrpc: "2.0",
                 id,
-                method: operation.requestMethod,
+                method,
                 params,
               }).catch(outputError);
             });
@@ -235,7 +255,7 @@ export async function runHostProtocol(
             if (terminalCode === undefined)
               void send({
                 jsonrpc: "2.0",
-                method: "scan.progress",
+                method: operation.progressMethod ?? "scan.progress",
                 params: { id: runId, event },
               }).catch(outputError);
           },
@@ -280,7 +300,12 @@ export async function runHostProtocol(
       return;
     }
     const reply = response.safeParse(message);
-    if (!reply.success || !pending || reply.data.id !== pending.id) {
+    if (
+      !reply.success ||
+      !pending ||
+      reply.data.id !== pending.id ||
+      ("reviewPending" in reply.data && !pending.acceptsPendingReview)
+    ) {
       fail(
         -32600,
         `Malformed, unexpected, or mismatched ${operation.requestMethod === "review.run" ? "review" : "execution"} response.`,
@@ -291,6 +316,8 @@ export async function runHostProtocol(
     pending = undefined;
     if ("error" in reply.data)
       execution.reject(new Error(reply.data.error.message));
+    else if ("reviewPending" in reply.data)
+      execution.resolve(new PendingReviewSubmission(reply.data.result));
     else execution.resolve(reply.data.result);
   });
   if (signal?.aborted) interrupted();
