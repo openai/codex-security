@@ -31,6 +31,7 @@ export const {
   DeepScanRemoteCoordinator,
   AsyncLock,
   classifyCodexWorkerError,
+  codexWorkerTurnError,
   startOrJoinDeepScanCoordinator,
   recordCodexSecurityWorkerScanDraft,
 } = await importModule({
@@ -38,7 +39,7 @@ export const {
     contents: `
       export * from "./registry.ts";
       export { WorkbenchDeepScanStore } from "./store.ts";
-      export { classifyCodexWorkerError } from "./errors.ts";
+      export { classifyCodexWorkerError, codexWorkerTurnError } from "./errors.ts";
       export { recordCodexSecurityWorkerScanDraft } from "../artifact-scan-draft.ts";
     `,
     resolveDir: path.join(import.meta.dirname, "../src/deep-scan/"),

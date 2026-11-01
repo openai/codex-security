@@ -44,6 +44,7 @@ After an ended turn or host timeout, rejoin with the same scan ID and token. If 
 - **Plugin-launched scan.** The coordinator also returns `completion`. Use the returned scan ID, sealed artifacts, and generated `report.md` in the authoritative directory.
 - **Cancelled:** stop without completion. Report retained findings and pending work without claiming a successful scan or generating a replacement report.
 - **Terminal failure:** surface the exact stable MCP error and read the existing scan context to report preserved results and remaining work. Do not continue analysis, complete or cancel an already terminal scan, or claim a no-findings result.
+  For a policy refusal, use the saved worker error to identify the source when available. Capability and access checks are advisory.
 - **Missing or malformed canonical artifacts:** surface the blocker and preserve the existing scan. Do not fabricate a report.
 
 ## Report the Completed Parent Scan

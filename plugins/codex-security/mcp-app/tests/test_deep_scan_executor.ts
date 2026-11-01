@@ -81,7 +81,6 @@ const {
   resolveCodexPath,
   snapshotWorkerEnvironment,
   appendItemDiagnostic,
-  isCodexCybersecurityPolicyRefusal,
   parseDeepScan,
 } = await importModule({
   define: {
@@ -91,7 +90,6 @@ const {
     // Expose the environment snapshot only for tests.
     contents: `${await readFile(executorSource, "utf8")}
 export { snapshotWorkerEnvironment, appendItemDiagnostic };
-export { isCodexCybersecurityPolicyRefusal } from "./errors.js";
 export { parseDeepScan } from "./response.js";`,
     loader: "ts",
     resolveDir: path.dirname(fileURLToPath(executorSource)),
@@ -233,9 +231,7 @@ try {
       );
       await check(t, testCodeModeFrameDiagnosticSurvivesSuccessfulTurn);
       await check(t, testSetupExitDiagnosticsRemainRetryable);
-      await check(t, testPolicyFailuresRemainWorkerErrors);
       await check(t, testMalformedCommandEventsRemainRetryable);
-      await check(t, testRateLimitPolicyFailureRemainsRetryable);
       await check(t, testArtifactStartupTimeoutRemainsRetryable);
     }
   });
@@ -3659,8 +3655,7 @@ async function testArtifactStartupTimeoutRemainsRetryable() {
     runFixtureWorker("ARTIFACT_MCP_STARTUP_TIMEOUT"),
     (error: Error) =>
       error.name === "Error" &&
-      error.message.includes("cs_artifacts: request timed out") &&
-      !isCodexCybersecurityPolicyRefusal(error),
+      error.message.includes("cs_artifacts: request timed out"),
   );
 }
 
@@ -3677,32 +3672,6 @@ async function testSetupExitDiagnosticsRemainRetryable() {
       prompt,
     );
   }
-}
-
-async function testPolicyFailuresRemainWorkerErrors() {
-  for (const prompt of [
-    "CYBER_POLICY_ERROR",
-    "SAFETY_POLICY_ERROR",
-    "CYBERSECURITY_RISK_ERROR",
-    "HIGH_RISK_CYBER_ACTIVITY_ERROR",
-    "UPSTREAM_CYBERSECURITY_RISK_ERROR",
-    "UPSTREAM_HIGH_RISK_CYBER_ACTIVITY_ERROR",
-  ]) {
-    await assert.rejects(
-      runFixtureWorker(prompt),
-      (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-        error?.name === "Error" && isCodexCybersecurityPolicyRefusal(error),
-    );
-  }
-}
-
-async function testRateLimitPolicyFailureRemainsRetryable() {
-  await assert.rejects(
-    runFixtureWorker("RATE_LIMIT_CYBER_POLICY_ERROR"),
-    (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-      error?.name === "Error" &&
-      /429 Too Many Requests/.test(error?.message ?? ""),
-  );
 }
 
 async function testMalformedCommandEventsRemainRetryable() {
@@ -4085,11 +4054,29 @@ async function testWorkerTerminalEvents() {
   try {
     const promptPath = path.join(fixture.root, "prompt.md");
     const quotaMessage = "Quota exceeded. Check your plan and billing details.";
+    const policyMessage =
+      "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber";
     for (const event of [
       undefined,
       { type: "turn.failed", error: { message: quotaMessage } },
+      { type: "turn.failed", error: { message: policyMessage } },
+      {
+        type: "turn.failed",
+        error: {
+          message: "429 Too Many Requests: Request blocked by cyberPolicy.",
+        },
+      },
       { type: "turn.failed", error: { message: "429 Too Many Requests" } },
       { type: "error", message: quotaMessage },
+      { type: "error", message: policyMessage },
+      {
+        type: "item.completed",
+        item: {
+          id: "refusal-text",
+          type: "agent_message",
+          text: policyMessage,
+        },
+      },
       {
         type: "item.completed",
         item: { id: "quota-text", type: "agent_message", text: quotaMessage },
@@ -4116,16 +4103,18 @@ async function testWorkerTerminalEvents() {
             onNonRetryableError,
           });
           if (event?.type === "turn.failed") {
-            const isQuota = event.error.message === quotaMessage;
+            const permanent =
+              event.error.message === quotaMessage ||
+              event.error.message === policyMessage;
             await assert.rejects(execution, {
-              name: isQuota ? "DeepScanNonRetryableError" : "Error",
+              name: permanent ? "DeepScanNonRetryableError" : "Error",
               message: event.error.message,
             });
             assert.deepEqual(
               onNonRetryableError.mock.calls.map(
                 ({ arguments: [error] }) => error.message,
               ),
-              isQuota ? [quotaMessage] : [],
+              permanent ? [event.error.message] : [],
             );
             continue;
           }

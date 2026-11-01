@@ -839,6 +839,40 @@ def test_expired_generation_refunds_shutdown_canceled_discovery(
     )
 
 
+@pytest.mark.parametrize("terminal", [False, True], ids=["ordinary", "terminal"])
+def test_worker_failure_diagnostic_survives_coordinator_adoption(
+    tmp_path: Path, terminal: bool
+) -> None:
+    state_dir, codex_home, scan_id, scan_dir = start_empty_target_scan(tmp_path)
+    environment = deep_environment(codex_home)
+    claimed = claim_deep_scan_coordinator(state_dir, codex_home, scan_id)["deepScan"]
+    generation = claimed["coordinatorGeneration"]
+    worker = (state_dir, scan_id, str(uuid.uuid4()), "discovery")
+    prompt, artifacts, _ = worker_paths(scan_dir, "discovery-1")
+    paths = (str(prompt), str(artifacts), "--coordinator-generation", str(generation))
+    upsert_deep_worker(*worker, "running", *paths, environment=environment)
+    message = "Worker stopped by policy."
+    failure = (*worker, "failed", *paths, "--error-message", message)
+    if terminal:
+        failure += ("--terminal-failure",)
+    failed = upsert_deep_worker(*failure, environment=environment)["deepScan"]
+    expected = message if terminal else None
+    assert (failed["status"], failed["error"]) == ("running", expected)
+    persisted = failed["workers"][0]
+    assert (persisted["status"], persisted["error"]) == ("failed", message)
+
+    expire_deep_scan_coordinator(state_dir, scan_id)
+    claim = claim_deep_scan_coordinator(state_dir, codex_home, scan_id)
+    assert claim["coordinatorDisposition"] == "adopted"
+    assert claim["deepScan"]["error"] == expected
+    cancel_scan(state_dir, scan_id, "thread-deep-scan", environment=environment)
+    stopped = get_deep_scan(state_dir, scan_id, "thread-deep-scan", environment=environment)[
+        "deepScan"
+    ]
+    assert (stopped["status"], stopped["error"]) == ("canceled", None)
+    assert stopped["workers"][0]["error"] == message
+
+
 @pytest.mark.cross_platform
 def test_expired_generation_cannot_mutate_recovered_scan(tmp_path: Path) -> None:
     state_dir, codex_home, scan_id, scan_dir = start_empty_target_scan(tmp_path)

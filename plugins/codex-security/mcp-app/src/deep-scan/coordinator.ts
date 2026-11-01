@@ -720,6 +720,8 @@ export class DeepScanCoordinator {
    * finish during reduction wait for the next one.
    */
   private async runScheduler(): Promise<SchedulerResult> {
+    // A previous coordinator may have recorded a terminal worker failure before stopping.
+    if (this.state.error) throw new Error(this.state.error);
     const config = this.state.config;
     const active = new Map<string, Promise<DiscoveryOutcome>>();
     const recovered = await this.recoverAcceptedDiscoveries();
@@ -895,11 +897,9 @@ export class DeepScanCoordinator {
 
     while (!stopReason) {
       if (this.abortController.signal.aborted) {
-        await Promise.allSettled([
-          ...active.values(),
-          ...(reducer ? [reducer] : []),
-        ]);
-        throw abortError(this.abortController.signal.reason);
+        return await settleFailure(
+          abortError(this.abortController.signal.reason),
+        );
       }
       if (settlements.length === 0) {
         while (
@@ -1040,6 +1040,7 @@ export class DeepScanCoordinator {
       previousReducerResultPath = outcome.resultPath;
       latestResult = outcome.result;
       if (
+        !this.abortController.signal.aborted &&
         !this.discoveryDeadlineReached &&
         outcome.run.noNewStreak >= config.stopAfterNoNew &&
         buffer.length === 0

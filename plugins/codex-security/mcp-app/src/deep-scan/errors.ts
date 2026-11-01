@@ -4,26 +4,16 @@ const STALE_COORDINATOR_GENERATION_MESSAGE =
   "Deep Scan coordinator lease belongs to a newer generation.";
 
 // The SDK currently exposes only the message for turn errors. Match known
-// refusal messages exactly so repository output embedded in another error
-// cannot be mistaken for a refusal.
-const CYBERSECURITY_POLICY_REFUSAL_MESSAGES = new Set([
+// terminal messages exactly so repository output embedded in another error
+// cannot be mistaken for a permanent failure.
+const NON_RETRYABLE_TURN_MESSAGES = new Set([
   "Request blocked by cyberPolicy.",
   "Request blocked by a safety policy violation.",
   "This content was flagged for possible cybersecurity risk.",
+  "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber",
   "This content was flagged for potentially high-risk cyber activity.",
   "This request has been flagged for possible cybersecurity risk.",
   "This request has been flagged for potentially high-risk cyber activity.",
-]);
-
-/** Explicitly opt a confirmed scan-wide prerequisite failure out of retries. */
-export class DeepScanNonRetryableError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options);
-    this.name = "DeepScanNonRetryableError";
-  }
-}
-
-const USAGE_LIMIT_MESSAGES = new Set([
   "Quota exceeded. Check your plan and billing details.",
   "Your workspace is out of credits. Add credits to continue.",
   "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
@@ -31,10 +21,18 @@ const USAGE_LIMIT_MESSAGES = new Set([
   "You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.",
 ]);
 
-// Codex exec exposes only text for failed turns. Match its native quota messages here.
+/** A confirmed terminal worker failure that stops the scan without retries. */
+export class DeepScanNonRetryableError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "DeepScanNonRetryableError";
+  }
+}
+
+// Classify only terminal turn failures; diagnostics can contain arbitrary output.
 export function codexWorkerTurnError(message: string): Error {
   if (
-    USAGE_LIMIT_MESSAGES.has(message) ||
+    NON_RETRYABLE_TURN_MESSAGES.has(message) ||
     message.startsWith("You’ve hit your usage limit.") ||
     message.startsWith("You’ve hit your usage limit for ")
   ) {
@@ -83,16 +81,10 @@ export function isStaleCoordinatorGenerationError(error: unknown): boolean {
   return false;
 }
 
-/** A safety refusal retires the refused thread; it is not a broken scan. */
-export function isCodexCybersecurityPolicyRefusal(error: unknown): boolean {
-  return CYBERSECURITY_POLICY_REFUSAL_MESSAGES.has(errorMessage(error));
-}
-
 export function classifyCodexWorkerError(error: unknown): Error {
   // OS error codes alone do not establish a permanent failure, and SDK errors
   // can contain arbitrary command output. Leave both on the normal retry path
-  // unless a producer explicitly identifies the failure as nonretryable. The
-  // worker runner handles exact policy refusals without failing the scan.
+  // unless a producer explicitly identifies the failure as nonretryable.
   return error instanceof Error ? error : new Error(String(error));
 }
 
