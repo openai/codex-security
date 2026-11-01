@@ -6,7 +6,14 @@ import {
 } from "./helper-files";
 import { randomBytes } from "node:crypto";
 import { renameSync, unlinkSync } from "node:fs";
-import { dirname, isAbsolute, parse, relative, sep } from "node:path";
+import {
+  dirname,
+  isAbsolute,
+  normalize,
+  parse,
+  relative,
+  sep,
+} from "node:path";
 import { parseArgs } from "node:util";
 import { mkdir, readFile, writeFile } from "./helper-files";
 import { expandHome, windowsFiles, windowsJoin } from "./resolve-security-md";
@@ -127,21 +134,25 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
       ? repo
       : ([...ancestors(scope)].find((path) => exists(append(path, ".git"))) ??
         repo);
-  const usesRipgrepIgnoreRules =
-    [...ancestors(scope)].some((path) => {
-      try {
-        inside(ignoreBoundary, path);
-      } catch {
-        return false;
+  let usesRipgrepIgnoreRules = [...ancestors(scope)].some((path) => {
+    try {
+      inside(ignoreBoundary, path);
+    } catch {
+      return false;
+    }
+    return ripgrepIgnoreNames.some((name) => regular(append(path, name)));
+  });
+  if (!usesRipgrepIgnoreRules && indexed !== undefined)
+    for (const path of walk(scope, true, true)) {
+      if (
+        ripgrepIgnoreNames.some(
+          (name) => path.endsWith(sep + name) && regular(path),
+        )
+      ) {
+        usesRipgrepIgnoreRules = true;
+        break;
       }
-      return ripgrepIgnoreNames.some((name) => regular(append(path, name)));
-    }) ||
-    (indexed?.some((path) =>
-      ripgrepIgnoreNames.some(
-        (name) => path.endsWith(sep + name) && regular(path),
-      ),
-    ) ??
-      false);
+    }
   if (indexed !== undefined && !usesRipgrepIgnoreRules) return indexed;
   let result;
   try {
@@ -150,6 +161,7 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
         "--files",
         "--hidden",
         "--no-require-git",
+        ...(indexed === undefined ? [] : ["--no-ignore-vcs"]),
         "--null",
         "--glob",
         "!**/{.git,.svn}",
@@ -202,10 +214,13 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
     throw new Error(
       `Could not enumerate scoped repository files${result.signal ? ` (${result.signal})` : ""}: ${result.stderr.trim()}`,
     );
-  return decodePosixBytes(result.stdout)
+  const candidates = decodePosixBytes(result.stdout)
     .split("\0")
     .filter(Boolean)
     .map((path) => append(repo, path));
+  if (indexed === undefined) return candidates;
+  const included = new Set(indexed.map((path) => normalize(path)));
+  return candidates.filter((path) => included.has(normalize(path)));
 }
 
 function loadScopes(path: string): string[] {

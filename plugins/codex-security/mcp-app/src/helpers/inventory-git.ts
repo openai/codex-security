@@ -585,9 +585,6 @@ export async function directoryPaths(
     depth && !unicodeCase ? `:(icase,literal)${prefix}` : ".",
   ]);
   const listing = paths(requireSuccess(listingResult));
-  // Empty output with a warning does not establish that the scope has no files.
-  if (!listing.length && listingResult.stderr.trim())
-    throw new Error(listingResult.stderr.trim());
   const found = new Set<string>(),
     matching = new Map<string, boolean>();
   for (const name of listing) {
@@ -623,6 +620,9 @@ export async function directoryPaths(
       for (const child of nested ?? walk(path, true, true)) found.add(child);
     }
   }
+  // Stale index entries, metadata and links do not make a warned listing usable.
+  if (listingResult.stderr.trim() && ![...found].some(regular))
+    throw new Error(listingResult.stderr.trim());
   return [...found];
 }
 

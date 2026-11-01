@@ -808,6 +808,70 @@ for (const ignoreName of [".ignore", ".rgignore"])
     expect(paths()).toEqual(["included.py"]);
   });
 
+for (const ignoreName of [".ignore", ".rgignore"]) {
+  test(`scope input discovers Git-excluded nested ${ignoreName} rules`, () => {
+    const f = fixture();
+    f.write(".gitignore", "**/.ignore\n**/.rgignore\n");
+    f.write(`selected/nested/${ignoreName}`, "hidden.py\n");
+    f.write("selected/nested/hidden.py");
+    expect(f.rows("make-repo-scope-input", f.scopeArgs("selected"))).toEqual(
+      [],
+    );
+  });
+
+  test(`scope input retains Git-ignored tracked source with inherited ${ignoreName}`, () => {
+    const f = fixture();
+    f.write(".gitignore", "*.py\n");
+    f.write(ignoreName, "unrelated/\n");
+    f.write("selected/tracked.py");
+    f.write("selected/untracked.py");
+    git(f.repo, "add", "--force", "selected/tracked.py");
+    expect(
+      f
+        .rows("make-repo-scope-input", f.scopeArgs("selected"))
+        .map((row) => row.path),
+    ).toEqual(["selected/tracked.py"]);
+    f.write(ignoreName, "tracked.py\n");
+    expect(f.rows("make-repo-scope-input", f.scopeArgs("selected"))).toEqual(
+      [],
+    );
+  });
+}
+
+for (const readable of [false, true])
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    `Git permission warnings survive stale-entry filtering with readable source=${readable}`,
+    () => {
+      const f = fixture();
+      const stale = f.write("selected/deleted.py");
+      git(f.repo, "add", "selected/deleted.py");
+      rmSync(stale);
+      f.write("selected/private/only.py");
+      if (readable) f.write("selected/visible.py");
+      const blocked = join(f.repo, "selected", "private");
+      writeFileSync(f.out, "previous\n");
+      chmodSync(blocked, 0);
+      try {
+        const result = f.run("make-repo-scope-input", f.scopeArgs("selected"));
+        if (readable) {
+          expect(result.status, result.stderr).toBe(0);
+          expect(
+            readFileSync(f.out, "utf8")
+              .trim()
+              .split(/\r?\n/u)
+              .map((line) => JSON.parse(line).path),
+          ).toEqual(["selected/visible.py"]);
+        } else {
+          expect(result.status).toBe(1);
+          expect(result.stderr).toMatch(/EACCES|permission denied/iu);
+          expect(readFileSync(f.out, "utf8")).toBe("previous\n");
+        }
+      } finally {
+        chmodSync(blocked, 0o700);
+      }
+    },
+  );
+
 test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
   "inherited ignore rules do not hide unreadable selected directories",
   () => {
