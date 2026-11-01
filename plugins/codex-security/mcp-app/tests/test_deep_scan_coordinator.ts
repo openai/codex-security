@@ -3460,12 +3460,13 @@ async function testDiscoveryDeadlineDrainsActiveReducerAndPreservesFindings() {
   });
   executor.dedupGate = Promise.withResolvers<void>();
   const blockedDiscovery = Promise.withResolvers<CodexWorkerRequest>();
+  let admitted = 0;
   const coordinator = createCoordinator(
     fixture,
     store,
     {
       run(request) {
-        if (request.kind === "discovery" && executor.discoveryCalls >= 2)
+        if (request.kind === "discovery" && ++admitted === 3)
           blockedDiscovery.resolve(request);
         return executor.run(request);
       },
@@ -3485,9 +3486,7 @@ async function testDiscoveryDeadlineDrainsActiveReducerAndPreservesFindings() {
   } finally {
     mock.timers.reset();
   }
-  await eventually(() => executor.runningDiscovery === 0);
-
-  const discoveryCallsAtDeadline = executor.discoveryCalls;
+  const dispatchedAtDeadline = store.run.dispatchedCount;
   assert.equal(
     executor.runningDedup,
     1,
@@ -3501,7 +3500,7 @@ async function testDiscoveryDeadlineDrainsActiveReducerAndPreservesFindings() {
   assert.equal(terminal?.status, "succeeded");
   assert.equal(terminal?.terminalReason, "capped");
   assert.equal(store.failureMessages.length, 0);
-  assert.equal(executor.discoveryCalls, discoveryCallsAtDeadline);
+  assert.equal(terminal.dispatchedCount, dispatchedAtDeadline);
   assert.equal(
     terminal.dispatchedCount < fixture.run.config.maxDiscoveryRuns,
     true,
@@ -4130,6 +4129,19 @@ async function testTerminalFailureStopsDispatchBeforeWorkerShutdown(
   const notified = Promise.withResolvers<void>();
   const shutdown = Promise.withResolvers<void>();
   const signals: AbortSignal[] = [];
+  const updateWorker = store.updateWorker.bind(store);
+  store.updateWorker = async (update) => {
+    if (update.terminalFailure)
+      assert.ok(signals.every((signal) => !signal.aborted));
+    const worker = await updateWorker(update);
+    if (resumed && update.terminalFailure) {
+      await notified.promise;
+      throw new Error("fixture lost the terminal worker update response");
+    }
+    return worker;
+  };
+  const terminalUpdates = () =>
+    store.workerUpdates.filter((update) => update.terminalFailure);
   const sleeps: number[] = [];
   const message = resumed
     ? "Request blocked by cyberPolicy."
@@ -4167,6 +4179,11 @@ async function testTerminalFailureStopsDispatchBeforeWorkerShutdown(
     await notified.promise;
     assert.ok(signals.every((signal) => signal.aborted));
     const callsAtFailure = signals.length;
+    const [source] = terminalUpdates();
+    assert.equal(source?.status, "failed");
+    assert.equal(source.error, message);
+    // An async write rejection must be handled even while executor cleanup is pending.
+    await new Promise((resolve) => setImmediate(resolve));
     shutdown.resolve();
     const result = await terminal;
     assert.equal(result?.status, "failed");
@@ -4174,16 +4191,12 @@ async function testTerminalFailureStopsDispatchBeforeWorkerShutdown(
     const workers = [...store.workers.values()];
     const failed = workers.filter((worker) => worker.status === "failed");
     assert.equal(failed.length, 1);
+    assert.equal(failed[0].id, source.id);
     assert.equal(failed[0].kind, kind);
     assert.equal(failed[0].threadId, "fixture-failing-thread");
     assert.equal(failed[0].attempt, resumed ? 2 : 1);
     assert.equal(failed[0].error, message);
-    assert.deepEqual(
-      store.workerUpdates
-        .filter((update) => update.terminalFailure)
-        .map((update) => update.id),
-      [failed[0].id],
-    );
+    assert.deepEqual(terminalUpdates(), [source]);
     assert.ok(workers.some((worker) => worker.status === "canceled"));
     assert.deepEqual(
       attempts,

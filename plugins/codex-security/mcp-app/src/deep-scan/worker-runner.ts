@@ -379,7 +379,7 @@ export class DeepScanWorkerRunner {
       let validationStarted = false;
       let validationCompleted = false;
       let activeThreadId = resumableThreadId;
-      let nonRetryableError: Error | undefined;
+      let terminalFailure: Promise<WorkerAttemptOutcome> | undefined;
       const baseMutation: DeepScanWorkerMutation = {
         id: input.workerId,
         scanId: run.scanId,
@@ -411,8 +411,18 @@ export class DeepScanWorkerRunner {
           subagents: input.subagents,
           signal,
           onNonRetryableError: (error) => {
-            if (signal.aborted) return;
-            nonRetryableError = error;
+            if (signal.aborted || terminalFailure) return;
+            terminalFailure = this.options.store
+              .updateWorker({
+                ...baseMutation,
+                threadId: activeThreadId,
+                status: "failed",
+                error: deepScanErrorMessage(error),
+                terminalFailure: true,
+              })
+              .then(() => ({ status: "failed", error }));
+            // Await this write after executor cleanup, even if it rejects first.
+            void terminalFailure.catch(() => {});
             this.options.onNonRetryableError?.(error);
           },
           resumeThreadId: resumableThreadId,
@@ -438,6 +448,7 @@ export class DeepScanWorkerRunner {
             });
           },
         });
+        if (terminalFailure) return terminalFailure;
         if (signal.aborted) {
           return await this.cancelAttempt(input, attempt, activeThreadId);
         }
@@ -465,10 +476,11 @@ export class DeepScanWorkerRunner {
         };
       } catch (error) {
         if (confirmedOwnershipChange(error, run.scanId)) throw error;
-        if (signal.aborted && !nonRetryableError) {
+        if (terminalFailure) return terminalFailure;
+        if (signal.aborted) {
           return await this.cancelAttempt(input, attempt, activeThreadId);
         }
-        const normalized = nonRetryableError ?? asError(error);
+        const normalized = asError(error);
         const retryable = !(normalized instanceof DeepScanNonRetryableError);
         if (!retryable || attempt === maximumAttempts) {
           const replaceableFailureKind =
@@ -487,7 +499,6 @@ export class DeepScanWorkerRunner {
                 : normalized,
             ),
             ...(replaceableFailureKind ? { replaceableFailureKind } : {}),
-            terminalFailure: nonRetryableError !== undefined,
           });
           return {
             status: "failed",
