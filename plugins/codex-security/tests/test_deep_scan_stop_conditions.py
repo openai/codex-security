@@ -734,3 +734,51 @@ def test_zero_accepted_deadline_preserves_worker_checkpoint_links_and_receipts(
         assert task["id"] == f"{worker_id}/review"
         assert task["surfaceIds"] == [surface["id"]]
     assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
+@pytest.mark.parametrize("scope", ["subdir/extract.py", "./subdir/extract.py", "subdir"])
+def test_deadline_scope_filters_replays_before_identity_reconciliation(
+    workbench_api, workbench_db, publication_scan, scope
+):
+    scan = publication_scan(paths=[scope])
+    result_path = add_worker(workbench_db, scan, status="canceled")
+    accepted = copy.deepcopy(scan.findings[0])
+    for key in ("findingId", "occurrenceId", "fingerprints"):
+        accepted.pop(key, None)
+    accepted.update(
+        identity={"anchor": "accepted-exact-file"},
+        summary="Accepted exact-file observation",
+        provenance={"source": "local_plugin", "workerId": result_path.parent.name},
+    )
+    accepted["severity"]["level"] = "low"
+    stronger = copy.deepcopy(accepted)
+    stronger.update(
+        summary="Stronger descendant observation",
+        locations=[{"path": "subdir/extract.py/generated", "startLine": 1}],
+    )
+    stronger["severity"]["level"] = "critical"
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": [accepted]}))
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        os.utime(scan.scan_dir / name, ns=(1_000_000_000, 1_000_000_000))
+    result_path.write_text(json.dumps(saved_draft(scan.scan_id, findings=[stronger])))
+    os.utime(result_path, ns=(2_000_000_000, 2_000_000_000))
+    worker_bytes = result_path.read_bytes()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = 'running', phase = 'discovery', "
+            "created_at = '2000-01-01T00:00:00+00:00', manifest_path = NULL, "
+            "terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    assert (
+        finish(workbench_api, workbench_db, scan, terminal_reason="capped")["status"] == "succeeded"
+    )
+    assert complete(workbench_api, workbench_db, scan)["findingCount"] == 1
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    assert len(findings) == 1
+    assert findings[0]["summary"] == accepted["summary"]
+    assert findings[0]["locations"] == accepted["locations"]
+    assert findings[0]["identity"] == accepted["identity"]
+    history = findings[0]["provenance"].get("previousFindings", [])
+    assert any(row["summary"] == stronger["summary"] for row in history) == (scope == "subdir")
+    assert result_path.read_bytes() == worker_bytes

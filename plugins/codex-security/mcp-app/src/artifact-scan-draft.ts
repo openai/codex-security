@@ -39,6 +39,7 @@ const fileScanDraftInputSchema = scanDraftInputSchema.extend({
 export const completedScanInputSchema = draftDefinitions.completedScanInput;
 export type ScanDraftInput = z.infer<typeof scanDraftInputSchema>;
 type DraftCoverage = ScanDraftInput["reviewState"];
+type DraftFinding = ScanDraftInput["findings"][number];
 export type CompletedScanInput = z.infer<typeof completedScanInputSchema>;
 
 function canonicalFieldSchema(schema: object): z.ZodType {
@@ -151,6 +152,8 @@ interface SavedScanDraft {
   modifiedMs: number;
   head?: boolean;
   attempt?: string;
+  name?: string;
+  previousCheckpoint?: string;
 }
 
 const pendingWorkerDrafts = new Map<string, Promise<void>>();
@@ -784,7 +787,21 @@ async function preserveScanDraft(
       ),
     ),
   );
-  const savedSources = [...current, ...archived];
+  const history = [...current, ...archived];
+  const retainedFinal =
+    input.complete === false
+      ? history.find((source) => source.input.complete !== false)
+      : undefined;
+  const retainedIndex = retainedFinal ? history.indexOf(retainedFinal) : -1;
+  const savedSources =
+    retainedFinal && context.layout === "scan" && context.mode === "deep"
+      ? history.filter(
+          (source, index) =>
+            index <= retainedIndex ||
+            (retainedFinal.name !== undefined &&
+              source.previousCheckpoint === retainedFinal.name),
+        )
+      : history;
   const sources = savedSources.map(({ input }) => input);
   const ambiguousSurfaceIds = new Set<string>();
   for (const draft of [result, ...sources]) {
@@ -886,27 +903,43 @@ async function preserveScanDraft(
   const ambiguousDeferredIds = ambiguousGenericDeferredIds(sources);
   const keepsGenericWork = (row: JsonObject) =>
     ambiguousGenericEntry(row, ambiguousDeferredIds);
-  const retainedFinal =
-    input.complete === false
-      ? savedSources.find(({ input }) => input.complete !== false)
-      : undefined;
   if (retainedFinal) result = structuredClone(retainedFinal.input);
-  const retainedScope = sources.find(
-    (source) => source.scope !== undefined,
-  )?.scope;
+  const retainedScope = history.find(
+    (source) => source.input.scope !== undefined,
+  )?.input.scope;
   if (result.scope === undefined && retainedScope !== undefined) {
     result.scope = retainedScope;
   }
-  const retainedThreatModel = sources.find(
-    (source) => source.threatModel !== undefined,
-  )?.threatModel;
+  const retainedThreatModel = history.find(
+    (source) => source.input.threatModel !== undefined,
+  )?.input.threatModel;
   if (result.threatModel === undefined && retainedThreatModel !== undefined) {
     result.threatModel = structuredClone(retainedThreatModel);
   }
 
   const reopenedSurfaces = new Set<JsonObject>();
+  // A raw terminal checkpoint can share the last published progress timestamp.
+  const tiedProgress =
+    retainedFinal &&
+    context.layout === "worker" &&
+    !coverageHasOutstandingWork(retainedFinal.input.reviewState)
+      ? savedSources.find(
+          (source) =>
+            source.input.complete === false &&
+            (source.head || source.input === previous) &&
+            source.attempt === retainedFinal.attempt &&
+            source.modifiedMs === retainedFinal.modifiedMs,
+        )
+      : undefined;
+  const tiedFindingIds =
+    tiedProgress?.input.findings
+      .map(findingCandidateId)
+      .filter((id): id is string => id !== undefined) ?? [];
   if (retainedFinal) {
-    const terminalOutcomeIds = completedCandidateIds(retainedFinal.input);
+    const terminalOutcomeIds = new Set([
+      ...completedCandidateIds(retainedFinal.input),
+      ...tiedFindingIds,
+    ]);
     for (const surface of result.reviewState.surfaces) {
       if (
         terminalOutcomeIds.has((surface.candidateId ?? surface.id) as string) &&
@@ -917,7 +950,6 @@ async function preserveScanDraft(
     const closedIds = new Set(
       resolvedDeferred(result.reviewState).map((row) => row.id as string),
     );
-    const retainedIndex = savedSources.indexOf(retainedFinal);
     const progressSources = savedSources
       .filter(
         (source, index) =>
@@ -1006,20 +1038,23 @@ async function preserveScanDraft(
         {
           ...result.reviewState,
           deferred,
-          surfaces: progress.reviewState.surfaces.filter(
-            (surface) =>
-              (keepsGenericWork(surface) ||
-                (!terminalOutcomeIds.has(surface.id as string) &&
-                  !terminalOutcomeIds.has(surface.candidateId as string))) &&
-              (retainedHasOutstandingWork ||
-                surface.disposition !== "needs_follow_up" ||
-                !terminalSurfaceIds.has(
-                  (surface.candidateId ?? surface.id) as string,
-                ) ||
-                reopenedIds.has(
-                  (surface.candidateId ?? surface.id) as string,
-                ) ||
-                deferred.some((row) => linked(row, surface))),
+          surfaces: normalizeSurfaces(
+            progress.reviewState.surfaces.filter(
+              (surface) =>
+                (keepsGenericWork(surface) ||
+                  (!terminalOutcomeIds.has(surface.id as string) &&
+                    !terminalOutcomeIds.has(surface.candidateId as string))) &&
+                (retainedHasOutstandingWork ||
+                  surface.disposition !== "needs_follow_up" ||
+                  !terminalSurfaceIds.has(
+                    (surface.candidateId ?? surface.id) as string,
+                  ) ||
+                  reopenedIds.has(
+                    (surface.candidateId ?? surface.id) as string,
+                  ) ||
+                  deferred.some((row) => linked(row, surface))),
+            ),
+            result.reviewState.surfaces,
           ),
         },
         result.reviewState,
@@ -1087,6 +1122,19 @@ async function preserveScanDraft(
     preserveFindingDetails(current, previous);
     if (reservedIdentity) delete current.identity;
   };
+  // Reconcile the observations each batch would publish. Keep untouched rows
+  // raw so reconciliation can restore their previously published identities.
+  if (context.layout === "scan" && context.mode !== "deep") {
+    for (const draft of [result, ...sources]) {
+      const raw = draft.findings;
+      if (raw.length > 1 && raw.some((row) => row.identity === undefined))
+        draft.findings = coalesceCandidateObservations(
+          raw,
+          assignFindingIdentities(raw, context.mode),
+          raw,
+        );
+    }
+  }
 
   for (const source of sources) {
     for (const previous of source.reviewState.surfaces as JsonObject[]) {
@@ -1184,9 +1232,38 @@ async function preserveScanDraft(
         disposition.finding ??= structuredClone(finding);
         continue;
       }
+      if (candidateId && finding.identity === undefined) {
+        const represented = result.findings.filter((current) => {
+          if (
+            current.identity === undefined ||
+            findingCandidateId(current) !== candidateId
+          )
+            return false;
+          const history = (current.provenance as JsonObject).previousFindings;
+          return (
+            Array.isArray(history) &&
+            history.some(
+              (prior) =>
+                isObject(prior) && containsSavedFinding(prior, finding),
+            )
+          );
+        });
+        if (new Set(represented.map(scanFindingIdentity)).size === 1) {
+          for (const current of represented)
+            preserveFindingDetails(current, finding);
+          continue;
+        }
+      }
       const available = result.findings.filter(
         (current) =>
           !assignedFindings.has(current) ||
+          (finding.identity === undefined &&
+            !candidateId &&
+            findingIdentityCandidate(current) !== undefined &&
+            isObject(current.identity) &&
+            current.identity.instance ===
+              semanticIdentifier(finding.title as string, "finding") &&
+            containsSavedFinding(current, finding)) ||
           (current.identity !== undefined &&
             finding.identity !== undefined &&
             sameSavedFinding(current, finding)),
@@ -1266,6 +1343,7 @@ async function preserveScanDraft(
     const resolvedIds = new Set(
       [
         ...result.findings.map(findingCandidateId),
+        ...tiedFindingIds,
         ...dispositions
           .filter((item) => !keepsGenericWork(item))
           .map((item) => item.candidateId ?? item.id),
@@ -1872,7 +1950,8 @@ function reconcileDeferredSurfaces(
     )
       continue;
     if (inheritedSource) {
-      const latest = matches.find(({ surfaces }) => surfaces.length > 0)!;
+      const latest = matches.find(({ surfaces }) => surfaces.length > 0);
+      if (!latest) continue;
       const latestObservation = observations.get(latest.source);
       const pendingAtSameTime =
         latestObservation &&
@@ -2040,6 +2119,10 @@ async function readSavedCheckpoints(
     checkpoints.push({
       input,
       snapshot: draft,
+      ...(isObject(draft.publication) &&
+      typeof draft.publication.previousCheckpoint === "string"
+        ? { previousCheckpoint: draft.publication.previousCheckpoint }
+        : {}),
       modifiedMs:
         entry.name === checkpointHead
           ? head!.modifiedMs
@@ -2535,7 +2618,11 @@ function containsSavedFinding(
     ?.workerId;
   if (!isDeepStrictEqual(currentOwner, previousOwner)) return false;
   const original = withoutPreviousFindings(previous);
-  if (current.identity === undefined) delete original.identity;
+  if (
+    current.identity === undefined &&
+    findingIdentitySchema.safeParse(previous.identity).success
+  )
+    delete original.identity;
   return containsSavedValue(current, original);
 }
 
@@ -3127,7 +3214,256 @@ function buildScope(
   };
 }
 
-function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
+function findingLocationKeys(
+  finding: JsonObject,
+  includeRole = false,
+): string[] {
+  return (finding.locations as JsonObject[])
+    .map((location) =>
+      JSON.stringify([
+        location.path,
+        location.startLine,
+        location.endLine ?? location.startLine,
+        ...(includeRole ? [location.role] : []),
+      ]),
+    )
+    .sort();
+}
+
+function compareFindingStrength(
+  current: JsonObject,
+  previous: JsonObject,
+): number {
+  const levelDifference = (field: string, levels: string[]) =>
+    levels.indexOf((current[field] as JsonObject).level as string) -
+    levels.indexOf((previous[field] as JsonObject).level as string);
+  // Match the finalizer's severity, confidence, and evidence-strength ordering.
+  return (
+    levelDifference("severity", [
+      "informational",
+      "low",
+      "medium",
+      "high",
+      "critical",
+    ]) ||
+    levelDifference("confidence", ["low", "medium", "high"]) ||
+    findingEvidenceStrength(current) - findingEvidenceStrength(previous)
+  );
+}
+
+function findingEvidenceStrength(finding: JsonObject): number {
+  const catalog = new Map<string, JsonObject>();
+  for (const field of ["codeEvidence", "code_evidence"]) {
+    const evidence = finding[field];
+    if (!Array.isArray(evidence)) continue;
+    for (const item of evidence)
+      if (
+        isObject(item) &&
+        typeof item.id === "string" &&
+        item.id &&
+        !catalog.has(item.id)
+      )
+        catalog.set(item.id, item);
+  }
+  const evidence = [...catalog.values()];
+  const seenIds = new Set(
+    evidence.map((item) => item.id as string).filter((id) => id.trim()),
+  );
+  const seenCodes = new Set(
+    evidence.flatMap((item) =>
+      typeof item.code === "string" && item.code.trim() ? [item.code] : [],
+    ),
+  );
+  let strength = evidence.length;
+  for (const field of ["rootCause", "root_cause"]) {
+    const section = finding[field];
+    if (!isObject(section)) continue;
+    for (const field of ["codeEvidence", "code_evidence"]) {
+      const embedded = section[field];
+      if (!Array.isArray(embedded)) continue;
+      for (const item of embedded) {
+        if (
+          !isObject(item) ||
+          typeof item.code !== "string" ||
+          !item.code.trim() ||
+          seenCodes.has(item.code)
+        )
+          continue;
+        if (typeof item.id === "string" && item.id.trim()) {
+          if (seenIds.has(item.id)) continue;
+          seenIds.add(item.id);
+        }
+        seenCodes.add(item.code);
+        strength++;
+      }
+    }
+    if (
+      typeof section.code === "string" &&
+      section.code.trim() &&
+      !seenCodes.has(section.code)
+    ) {
+      seenCodes.add(section.code);
+      strength++;
+    }
+  }
+  return strength;
+}
+
+function observationContent(finding: JsonObject): JsonObject {
+  const { identity, severity, confidence, provenance, ...content } = finding;
+  const title = semanticIdentifier(finding.title as string, "finding");
+  const authored = isObject(identity) ? identity : {};
+  return {
+    ...content,
+    locations: findingLocationKeys(finding, true),
+    identity: [
+      authored.anchor === title ? undefined : authored.anchor,
+      authored.instance === title ? undefined : authored.instance,
+    ],
+  };
+}
+
+function coalesceCandidateObservations(
+  raw: DraftFinding[],
+  identified: DraftFinding[],
+  unchanged = identified,
+): DraftFinding[] {
+  type Observation = { owner?: string; candidate?: string; indexes: number[] };
+  const scopes = new Map<string, Observation[]>();
+  for (const [index, finding] of raw.entries()) {
+    const extensions = finding.extensions as JsonObject | undefined;
+    const qualified = ["candidateId", "reportId", "ledgerRowId"].some(
+      (key) =>
+        typeof extensions?.[key] === "string" &&
+        Boolean(extensions[key].trim()),
+    );
+    const provenance = finding.provenance as JsonObject;
+    const candidate = findingCandidateId(finding);
+    const owner =
+      typeof provenance.workerId === "string" && provenance.workerId
+        ? provenance.workerId
+        : undefined;
+    const scope = JSON.stringify([
+      finding.ruleId,
+      finding.title,
+      findingLocationKeys(finding),
+    ]);
+    const observations = scopes.get(scope) ?? [];
+    let observation = observations.find(
+      (item) => item.owner === owner && item.candidate === candidate,
+    );
+    if (!observation) {
+      observation = { owner, candidate, indexes: [] };
+      observations.push(observation);
+      scopes.set(scope, observations);
+    }
+    if (!qualified) observation.indexes.push(index);
+  }
+  const result: (DraftFinding | undefined)[] = [...unchanged];
+  for (const observations of scopes.values()) {
+    for (const item of observations) {
+      if (!item.indexes.length || (item.candidate && item.owner)) continue;
+      const matches = observations.filter(
+        (other) =>
+          other !== item &&
+          other.candidate &&
+          (!item.candidate || item.candidate === other.candidate) &&
+          (!item.owner || item.owner === other.owner),
+      );
+      if (matches.length !== 1) continue;
+      const other = matches[0]!;
+      if (!other.indexes.length) continue;
+      const first = raw[item.indexes[0]!]!;
+      if (
+        !item.candidate &&
+        !other.indexes.some((index) =>
+          item.indexes.every((unknown) =>
+            isDeepStrictEqual(
+              observationContent(raw[unknown]!),
+              observationContent(raw[index]!),
+            ),
+          ),
+        )
+      )
+        continue;
+      const strengthChanged = [...item.indexes, ...other.indexes].some(
+        (index) => compareFindingStrength(raw[index]!, first) !== 0,
+      );
+      if (
+        strengthChanged ||
+        (!item.candidate && item.indexes.some((index) => raw[index]!.identity))
+      )
+        other.indexes.push(...item.indexes.splice(0));
+    }
+    for (const { candidate, indexes } of observations) {
+      if (indexes.length < 2) continue;
+      indexes.sort((a, b) => a - b);
+      let selected = indexes;
+      let explicit = indexes.filter(
+        (index) => raw[index]!.identity !== undefined,
+      );
+      const anonymous = indexes.filter(
+        (index) => raw[index]!.identity === undefined,
+      );
+      if (explicit.length > 1) {
+        if (!candidate || anonymous.length < 2) continue;
+        selected = anonymous;
+        explicit = [];
+      }
+      const first = selected[0]!;
+      if (
+        (!candidate || selected !== indexes) &&
+        selected.some(
+          (index) =>
+            !isDeepStrictEqual(
+              observationContent(raw[first]!),
+              observationContent(raw[index]!),
+            ),
+        )
+      )
+        continue;
+      if (explicit.length) {
+        const authored = raw[explicit[0]!]!;
+        const anchor = (authored.identity as JsonObject).anchor;
+        if (
+          anchor !== semanticIdentifier(authored.title as string, "finding") &&
+          anchor !== semanticIdentifier(candidate ?? "", "finding") &&
+          anonymous.some(
+            (index) => !containsSavedFinding(raw[index]!, authored),
+          )
+        )
+          continue;
+      }
+      const strongest = selected.reduce((best, index) =>
+        compareFindingStrength(raw[index]!, raw[best]!) > 0 ? index : best,
+      );
+      const finding = structuredClone(identified[strongest]!);
+      finding.identity = structuredClone(
+        identified[
+          explicit[0] ??
+            selected.find(
+              (index) => findingIdentityCandidate(raw[index]!) === candidate,
+            ) ??
+            first
+        ]!.identity,
+      );
+      const provenance = finding.provenance;
+      if (candidate && !findingIdentityCandidate(finding))
+        provenance.candidateId = candidate;
+      for (const index of selected) {
+        if (index !== strongest) preserveFindingDetails(finding, raw[index]!);
+        if (index !== first) result[index] = undefined;
+      }
+      result[first] = finding;
+    }
+  }
+  return result.filter((finding) => finding !== undefined);
+}
+
+function assignFindingIdentities(
+  findings: DraftFinding[],
+  mode?: string,
+): DraftFinding[] {
   const anchorCounts = new Map<string, number>();
   const anchors = findings.map((finding, index) => {
     const identitySource =
@@ -3144,9 +3480,11 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
     return anchor;
   });
 
-  const identified: JsonObject[] = findings.map((finding, index) => {
+  const identified: DraftFinding[] = findings.map((finding, index) => {
     if (finding.identity !== undefined) return { ...finding };
-    const identity: JsonObject = { anchor: anchors[index] };
+    const identity: NonNullable<DraftFinding["identity"]> = {
+      anchor: anchors[index]!,
+    };
     const extensions = finding.extensions as JsonObject | undefined;
     const siblingSource = [extensions?.reportId, extensions?.ledgerRowId].find(
       (value): value is string =>
@@ -3186,10 +3524,10 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
       used.add(key);
       return finding;
     }
-    const identity = finding.identity as JsonObject;
+    const identity = finding.identity!;
     const baseInstance = identity.instance ?? "saved";
     let suffix = 2;
-    const distinct: JsonObject & { identity: JsonObject } = {
+    const distinct = {
       ...finding,
       identity: { ...identity },
     };
@@ -3201,7 +3539,7 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
       used.has(scanFindingIdentity(distinct))
     );
     if (explicit) {
-      const provenance = finding.provenance as JsonObject;
+      const provenance = finding.provenance;
       distinct.provenance = {
         ...provenance,
         preservedIdentity:
@@ -3211,6 +3549,16 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
     used.add(scanFindingIdentity(distinct));
     return distinct;
   });
+}
+
+function buildFindings(
+  findings: DraftFinding[],
+  mode?: string,
+): DraftFinding[] {
+  const projected = assignFindingIdentities(findings, mode);
+  return mode === "deep"
+    ? projected
+    : coalesceCandidateObservations(findings, projected);
 }
 
 function buildCoverage(
@@ -3243,6 +3591,7 @@ function buildCoverage(
 
 function normalizeSurfaces(
   surfaces: DraftCoverage["surfaces"],
+  previous: DraftCoverage["surfaces"] = [],
 ): DraftCoverage["surfaces"] {
   const reservedSurfaceIds = new Set(
     surfaces.flatMap((surface) =>
@@ -3251,6 +3600,12 @@ function normalizeSurfaces(
       ),
     ),
   );
+  const previousConflict = (id: string, surface: JsonObject) =>
+    previous.some(
+      (row) =>
+        (row.id === id || row.candidateId === id) &&
+        !sameAuthoredSurface(row, { ...surface, id }),
+    );
   const surfaceIds = new Set<string>();
   return surfaces.map((surface) => {
     const explicitId = typeof surface.id === "string";
@@ -3261,12 +3616,20 @@ function normalizeSurfaces(
           .digest("hex")
           .slice(0, 16)}`;
     let id = baseId;
-    if (surfaceIds.has(id) || (!explicitId && reservedSurfaceIds.has(id))) {
+    if (
+      surfaceIds.has(id) ||
+      (!explicitId &&
+        (reservedSurfaceIds.has(id) || previousConflict(id, surface)))
+    ) {
       let suffix = 2;
       do {
         id = `${baseId}-${suffix}`;
         suffix += 1;
-      } while (surfaceIds.has(id) || reservedSurfaceIds.has(id));
+      } while (
+        surfaceIds.has(id) ||
+        reservedSurfaceIds.has(id) ||
+        previousConflict(id, surface)
+      );
     }
     surfaceIds.add(id);
     return { ...surface, id, receiptRefs: surface.receiptRefs ?? [] };
