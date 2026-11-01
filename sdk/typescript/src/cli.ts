@@ -11145,6 +11145,16 @@ function componentScanEventLine(
 function protectedRootErrorMessage(
   error: OutputInsideProtectedRootError,
 ): string {
+  const paths = [
+    `  Resolved path:  ${error.outputDirectory}`,
+    `  Protected root: ${error.protectedRoot}`,
+  ];
+  if (error.pathKind === "state")
+    return [
+      "Codex Security state directory must not overlap a protected root.",
+      ...paths,
+      "Set CODEX_SECURITY_STATE_DIR to a private directory that does not overlap the protected root.",
+    ].join("\n");
   const description =
     error.pathKind === "output"
       ? "Scan output directory"
@@ -11158,8 +11168,7 @@ function protectedRootErrorMessage(
   const suggestion = suggestedOutputDirectory(error.protectedRoot);
   return [
     `${description} must be outside the scanned directory and any enclosing Git worktree.`,
-    `  Resolved path:  ${error.outputDirectory}`,
-    `  Protected root: ${error.protectedRoot}`,
+    ...paths,
     `  Reason:         ${reason}`,
     error.pathKind === "output"
       ? suggestion === undefined

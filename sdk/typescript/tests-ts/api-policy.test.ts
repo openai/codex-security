@@ -717,9 +717,9 @@ describe("CodexSecurity policy API", () => {
         environment: { CODEX_SECURITY_STATE_DIR: join(f.repository, "state") },
       },
     );
-    await expect(stateInside.preflightPolicy(nested)).rejects.toThrow(
-      "outside the protected scan root",
-    );
+    await expect(stateInside.preflightPolicy(nested)).rejects.toMatchObject({
+      pathKind: "state",
+    });
     await stateInside.close();
     expect(onPrepare).not.toHaveBeenCalled();
     expect(f.threads).toHaveLength(0);
@@ -784,13 +784,13 @@ describe("CodexSecurity policy API", () => {
           {},
           { environment: { CODEX_SECURITY_STATE_DIR: outputDir } },
         );
-        await expect(state.preflightPolicy(repository)).rejects.toThrow(
-          "outside the protected scan root",
-        );
+        await expect(state.preflightPolicy(repository)).rejects.toMatchObject({
+          pathKind: "state",
+        });
         if (kind === "linked" && metadata === gitDirectory) {
-          await expect(state.generatePolicy(repository)).rejects.toThrow(
-            "outside the protected scan root",
-          );
+          await expect(state.generatePolicy(repository)).rejects.toMatchObject({
+            pathKind: "state",
+          });
         }
         await state.close();
         await expect(readdir(outputDir)).rejects.toMatchObject({

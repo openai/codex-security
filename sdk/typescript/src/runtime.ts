@@ -1598,7 +1598,8 @@ export function requireOutputOutsideRepository(
 ): void {
   if (
     isWithin(repository, outputDirectory) ||
-    (pathKind === "output" && isWithin(outputDirectory, repository))
+    ((pathKind === "output" || pathKind === "state") &&
+      isWithin(outputDirectory, repository))
   ) {
     throw new OutputInsideProtectedRootError(
       outputDirectory,
