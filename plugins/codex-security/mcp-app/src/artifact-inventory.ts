@@ -101,16 +101,12 @@ export async function preflightCodexSecurityReviewItems(
   const scopesFile = `${destination}.${suffix}.scopes.json`;
   const output = `${destination}.${suffix}.tmp`;
   try {
-    await writeFile(
-      scopesFile,
-      JSON.stringify(authoritativeIncludePaths(context)),
-      {
-        encoding: "utf8",
-        mode: 0o600,
-        flag: "wx",
-        signal,
-      },
-    );
+    await writeFile(scopesFile, JSON.stringify(authoritativeScope(context)), {
+      encoding: "utf8",
+      mode: 0o600,
+      flag: "wx",
+      signal,
+    });
     await runInventoryHelper(
       context,
       [
@@ -192,14 +188,18 @@ async function runInventoryHelper(
   }
 }
 
-function authoritativeIncludePaths(context: ArtifactContext): string[] {
+function authoritativeScope(context: ArtifactContext): {
+  paths: string[];
+  filePaths?: string[];
+} {
   const scope = context.targetContract?.scope;
-  if (scope === undefined) return [context.scope ?? "."];
+  if (scope === undefined) return { paths: [context.scope ?? "."] };
   if (!scope || typeof scope !== "object" || Array.isArray(scope)) {
     throw new Error(`${label}: the authoritative scope is invalid.`);
   }
-  const includePaths = (scope as Record<string, unknown>).requiredIncludePaths;
-  if (includePaths === undefined) return [context.scope ?? "."];
+  const saved = scope as Record<string, unknown>;
+  const includePaths = saved.requiredIncludePaths;
+  if (includePaths === undefined) return { paths: [context.scope ?? "."] };
   if (
     !Array.isArray(includePaths) ||
     includePaths.length === 0 ||
@@ -209,7 +209,18 @@ function authoritativeIncludePaths(context: ArtifactContext): string[] {
       `${label}: the authoritative included scope must contain a nonempty array of paths.`,
     );
   }
-  return [...new Set(includePaths)];
+  const paths = [...new Set(includePaths)];
+  const filePaths = saved.filePaths;
+  if (filePaths === undefined) return { paths };
+  if (
+    !Array.isArray(filePaths) ||
+    filePaths.some(
+      (entry) => typeof entry !== "string" || !entry || !paths.includes(entry),
+    )
+  ) {
+    throw new Error(`${label}: the authoritative file scope is invalid.`);
+  }
+  return { paths, filePaths: [...new Set(filePaths)] };
 }
 
 /** Return bounded source paths from the fixed scan or worker inventory. */

@@ -188,6 +188,82 @@ test("cancellation reaches a pending inventory preflight", async () => {
   assert.deepEqual(store.failureMessages, []);
 });
 
+test("cancellation interrupts the pending preflight scan lookup", async () => {
+  const fixture = await fixtureRun();
+  const store = new FakeStore(fixture.run);
+  const executor = new FakeExecutor();
+  const registry = new DeepScanCoordinatorRegistry();
+  const start = registry.start.bind(registry);
+  registry.start = (options: CoordinatorOptions) =>
+    start({ ...options, executor });
+  const lookupStarted = Promise.withResolvers<void>();
+  const pluginRoot = path.resolve(
+    import.meta.dirname,
+    "../../../../sdk/typescript/_bundled_plugin",
+  );
+  const { coordinator } = await startDeepScanEngine({
+    run: store.run,
+    store,
+    registry,
+    runWorkbench: async (
+      args: string[],
+      _input?: string | Buffer,
+      options?: { signal?: AbortSignal },
+    ) => {
+      if (args[0] === "preserve-scan-results") return {};
+      assert.equal(args[0], "get-scan");
+      const signal = options?.signal;
+      assert.ok(signal instanceof AbortSignal);
+      lookupStarted.resolve();
+      await new Promise<void>((_resolve, reject) => {
+        const abort = () => reject(new Error(String(signal.reason)));
+        if (signal.aborted) abort();
+        else signal.addEventListener("abort", abort, { once: true });
+      });
+      throw new Error("unreachable scan lookup");
+    },
+    pluginRoot,
+    pythonCommand: "fixture-python",
+    parentSandbox: { filesystemDenies: [] },
+    threadId: "fixture-owner",
+  });
+
+  await lookupStarted.promise;
+  coordinator.cancel("cancel pending get-scan");
+  const terminal = await coordinator.wait(undefined, 5_000);
+
+  assert.equal(terminal?.status, "canceled");
+  assert.equal(executor.discoveryCalls, 0);
+  assert.equal(executor.dedupCalls, 0);
+  assert.deepEqual(store.failureMessages, []);
+});
+
+test("the discovery deadline reaches a pending inventory preflight", async () => {
+  const fixture = await fixtureRun();
+  const store = new FakeStore(fixture.run);
+  const executor = new FakeExecutor();
+  let receivedSignal: AbortSignal | undefined;
+
+  const terminal = await runCoordinator(fixture, store, executor, {
+    discoveryTimeoutMs: 1,
+    prepareReviewItems: async (signal: AbortSignal) => {
+      receivedSignal = signal;
+      await new Promise<void>((resolve) => {
+        const abort = () => resolve();
+        if (signal.aborted) abort();
+        else signal.addEventListener("abort", abort, { once: true });
+      });
+      throw new Error("inventory preflight reached its discovery deadline");
+    },
+  });
+
+  assert.ok(receivedSignal?.aborted);
+  assert.equal(terminal?.status, "failed");
+  assert.match(terminal?.error ?? "", /discovery deadline/iu);
+  assert.equal(executor.discoveryCalls, 0);
+  assert.equal(executor.dedupCalls, 0);
+});
+
 test("cancellation before inventory preflight does not launch it", async () => {
   const fixture = await fixtureRun();
   const store = new FakeStore(fixture.run);
@@ -353,6 +429,49 @@ for (const included of [false, true])
       assert.deepEqual(store.finishCalls, []);
     }
   });
+
+test("a saved file scope replaced by a directory stays empty", async () => {
+  const fixture = await fixtureRun();
+  await mkdir(path.join(fixture.run.targetPath, "selected"), {
+    recursive: true,
+  });
+  await writeFile(
+    path.join(fixture.run.targetPath, "selected", "descendant.py"),
+    "# not part of the saved file scope\n",
+  );
+  const store = new FakeStore(fixture.run);
+  const executor = new FakeExecutor();
+  const pluginRoot = path.resolve(
+    import.meta.dirname,
+    "../../../../sdk/typescript/_bundled_plugin",
+  );
+
+  const terminal = await runCoordinator(fixture, store, executor, {
+    prepareReviewItems: (signal) =>
+      artifactInventory.preflightCodexSecurityReviewItems(
+        {
+          root: fixture.run.scanDir,
+          repoRoot: fixture.run.targetPath,
+          layout: "scan",
+          scope: "selected",
+          pluginRoot,
+          targetContract: {
+            scope: {
+              requiredIncludePaths: ["selected"],
+              requiredExcludePaths: [],
+              filePaths: ["selected"],
+            },
+          },
+        },
+        signal,
+      ),
+  });
+
+  assert.equal(terminal?.status, "failed");
+  assert.match(terminal?.error ?? "", /no security audit was performed/iu);
+  assert.equal(executor.discoveryCalls, 0);
+  assert.equal(executor.dedupCalls, 0);
+});
 
 test("empty requested paths do not widen to the repository root", async () => {
   const fixture = await fixtureRun();

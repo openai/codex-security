@@ -372,7 +372,7 @@ export class DeepScanCoordinator {
         !hasAcceptedWorkerResults(this.state)
       ) {
         const inventory = await this.options.prepareReviewItems(
-          this.abortController.signal,
+          this.discoveryAbortController.signal,
         );
         if (this.canceled || this.externallyFailed) return;
         if (inventory.reviewItemsTotal === 0) {

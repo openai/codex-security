@@ -787,6 +787,38 @@ test("scope input honors ripgrep-only ignore rules in Git repositories", () => {
   ).toEqual(["selected/hidden.py"]);
 });
 
+test("scope input retains tracked files while applying ripgrep-only rules", () => {
+  const f = fixture();
+  f.write("selected/tracked.py");
+  f.write("selected/ignored.py");
+  git(f.repo, "add", "--force", "selected/tracked.py");
+  writeFileSync(
+    join(f.repo, ".git", "info", "exclude"),
+    "/selected/tracked.py\n",
+  );
+  f.write(".ignore", "selected/ignored.py\n");
+
+  expect(
+    f
+      .rows("make-repo-scope-input", f.scopeArgs("selected"))
+      .map((row) => row.path),
+  ).toEqual(["selected/tracked.py"]);
+});
+
+for (const ignoreName of [".ignore", ".rgignore"])
+  test(`scope input notices Git-ignored nested ${ignoreName} rules`, () => {
+    const f = fixture();
+    f.write(".gitignore", `**/${ignoreName}\n`);
+    f.write(`selected/nested/${ignoreName}`, "*.py\n");
+    f.write("selected/nested/source.py");
+
+    expect(
+      f
+        .rows("make-repo-scope-input", f.scopeArgs("selected"))
+        .map((row) => row.path),
+    ).toEqual([]);
+  });
+
 for (const ignoreName of [".ignore", ".rgignore"])
   test(`scope input honors inherited ${ignoreName} rules for a selected child`, () => {
     const f = fixture();

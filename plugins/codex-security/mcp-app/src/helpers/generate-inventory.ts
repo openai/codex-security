@@ -118,31 +118,39 @@ function scopePath(
   return resolved;
 }
 
+function hasRipgrepIgnoreRules(
+  repo: string,
+  scope: string,
+  gitBacked: boolean,
+): boolean {
+  const names = new Set([".ignore", ".rgignore"]);
+  const boundary = gitBacked
+    ? ([...ancestors(scope)].find((path) => exists(append(path, ".git"))) ??
+      repo)
+    : repo;
+  for (const path of ancestors(scope)) {
+    try {
+      inside(boundary, path);
+    } catch {
+      continue;
+    }
+    if ([...names].some((name) => regular(append(path, name)))) return true;
+  }
+  for (const path of walk(scope, true, true)) {
+    if (names.has(path.slice(path.lastIndexOf(sep) + 1)) && regular(path))
+      return true;
+  }
+  return false;
+}
+
 async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
   if (regular(scope)) return [scope];
   const indexed = await directoryPaths(scope);
-  const ripgrepIgnoreNames = [".ignore", ".rgignore"];
-  const ignoreBoundary =
-    indexed === undefined
-      ? repo
-      : ([...ancestors(scope)].find((path) =>
-          exists(append(path, ".git")),
-        ) ?? repo);
-  const usesRipgrepIgnoreRules =
-    [...ancestors(scope)].some((path) => {
-      try {
-        inside(ignoreBoundary, path);
-      } catch {
-        return false;
-      }
-      return ripgrepIgnoreNames.some((name) => regular(append(path, name)));
-    }) ||
-    (indexed?.some((path) =>
-      ripgrepIgnoreNames.some(
-        (name) => path.endsWith(sep + name) && regular(path),
-      ),
-    ) ??
-      false);
+  const usesRipgrepIgnoreRules = hasRipgrepIgnoreRules(
+    repo,
+    scope,
+    indexed !== undefined,
+  );
   if (indexed !== undefined && !usesRipgrepIgnoreRules) return indexed;
   let result;
   try {
@@ -151,6 +159,7 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
         "--files",
         "--hidden",
         "--no-require-git",
+        ...(indexed === undefined ? [] : ["--no-ignore-vcs"]),
         "--null",
         "--glob",
         "!**/{.git,.svn}",
@@ -203,28 +212,76 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
     throw new Error(
       `Could not enumerate scoped repository files${result.signal ? ` (${result.signal})` : ""}: ${result.stderr.trim()}`,
     );
-  return decodePosixBytes(result.stdout)
+  const visible = decodePosixBytes(result.stdout)
     .split("\0")
     .filter(Boolean)
     .map((path) => append(repo, path));
+  if (indexed === undefined) return visible;
+  const allowed = new Set(
+    visible.flatMap((path) => {
+      try {
+        return [canonical(path)];
+      } catch {
+        return [];
+      }
+    }),
+  );
+  return indexed.filter((path) => {
+    try {
+      return allowed.has(canonical(path));
+    } catch {
+      return false;
+    }
+  });
 }
 
-function loadScopes(path: string): string[] {
+interface RequestedScopes {
+  paths: string[];
+  filePaths: Set<string>;
+  firstMatchOnly: boolean;
+  preserveKinds: boolean;
+}
+
+function loadScopes(path: string): RequestedScopes {
   let scopes: unknown;
   try {
     scopes = JSON.parse(decodeUtf8(readFile(path)));
   } catch {
     throw new Error(`Unable to read scopes file: ${path}`);
   }
+  const paths = Array.isArray(scopes)
+    ? scopes
+    : scopes && typeof scopes === "object"
+      ? (scopes as Record<string, unknown>).paths
+      : undefined;
+  const preserveKinds = Boolean(
+    scopes &&
+    !Array.isArray(scopes) &&
+    typeof scopes === "object" &&
+    Object.hasOwn(scopes, "filePaths"),
+  );
+  const filePaths = preserveKinds
+    ? (scopes as Record<string, unknown>).filePaths
+    : [];
   if (
-    !Array.isArray(scopes) ||
-    !scopes.length ||
-    scopes.some((scope: unknown) => typeof scope !== "string" || !scope)
+    !Array.isArray(paths) ||
+    !paths.length ||
+    paths.some((scope: unknown) => typeof scope !== "string" || !scope) ||
+    !Array.isArray(filePaths) ||
+    filePaths.some(
+      (scope: unknown) =>
+        typeof scope !== "string" || !scope || !paths.includes(scope),
+    )
   )
     throw new Error(
       `Scopes file must contain a non-empty JSON string array: ${path}`,
     );
-  return scopes as string[];
+  return {
+    paths: paths as string[],
+    filePaths: new Set(filePaths as string[]),
+    firstMatchOnly: !Array.isArray(scopes),
+    preserveKinds,
+  };
 }
 
 function inventoryOutput(value: string): string {
@@ -427,22 +484,35 @@ export async function generateInventory(
     }
   } else {
     const scopes = loadScopes(expandHome(options.scopesFile!, home));
-    const resolved = scopes.map((value) =>
-      scopePath(repo, value, home, true, true),
-    );
-    for (const selected of resolved) {
-      for (const path of await scopeCandidates(repo, selected)) {
-        let name: string;
-        try {
-          if (!regular(path)) continue;
-          name = inside(repo, canonical(path));
-        } catch {
+    let listingFailure: unknown;
+    selectedScopes: for (const value of scopes.paths) {
+      try {
+        const selected = scopePath(repo, value, home, true, true);
+        if (
+          scopes.firstMatchOnly &&
+          scopes.preserveKinds &&
+          scopes.filePaths.has(value) !== regular(selected)
+        )
           continue;
+        for (const path of await scopeCandidates(repo, selected)) {
+          let name: string;
+          try {
+            if (!regular(path)) continue;
+            name = inside(repo, canonical(path));
+          } catch {
+            continue;
+          }
+          if (name.split("/").some((part) => sourceMetadata.has(part)))
+            continue;
+          rankRows.set(name, { path: name });
+          if (scopes.firstMatchOnly) break selectedScopes;
         }
-        if (name.split("/").some((part) => sourceMetadata.has(part))) continue;
-        rankRows.set(name, { path: name });
+      } catch (error) {
+        if (!scopes.firstMatchOnly) throw error;
+        listingFailure ??= error;
       }
     }
+    if (rankRows.size === 0 && listingFailure) throw listingFailure;
   }
   if (inventory) {
     const unique = [

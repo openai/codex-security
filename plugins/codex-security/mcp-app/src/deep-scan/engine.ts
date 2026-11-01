@@ -13,12 +13,18 @@ import type { WorkbenchDeepScanStore } from "./store.js";
 import type { DeepScanLogger, DeepScanRunState } from "./types.js";
 import type { CoordinatorOptions } from "./coordinator.js";
 
+type AbortableWorkbench = (
+  arguments_: string[],
+  input?: string | Buffer,
+  options?: { signal?: AbortSignal },
+) => Promise<Record<string, unknown>>;
+
 /** Shared execution behind the SDK engine and the plugin's MCP adapter. */
 export function startDeepScanEngine(options: {
   run: DeepScanRunState;
   store: WorkbenchDeepScanStore;
   registry: DeepScanCoordinatorRegistry;
-  runWorkbench: Parameters<typeof createScanArtifactContext>[1];
+  runWorkbench: AbortableWorkbench;
   pluginRoot: string;
   pythonCommand: string;
   parentSandbox: DeepWorkerParentSandbox;
@@ -61,7 +67,7 @@ export function startDeepScanEngine(options: {
       prepareReviewItems: async (signal) => {
         const context = await createScanArtifactContext(
           run.scanId,
-          runWorkbench,
+          (arguments_, input) => runWorkbench(arguments_, input, { signal }),
           {
             requireRunning: true,
             requireClaim: true,

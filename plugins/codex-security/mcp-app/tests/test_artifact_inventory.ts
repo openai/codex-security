@@ -8,6 +8,7 @@ import {
   readFile,
   readdir,
   rename,
+  rm,
   symlink,
   unlink,
   writeFile,
@@ -50,8 +51,11 @@ try {
   await testSchemasAreBoundAndExact();
   await testPrepareUsesTheExistingStandardGenerator();
   await testPreflightUsesAuthoritativeRequestedPaths();
+  await testPreflightPreservesSavedPathKinds();
   await testFailedTrackedFileDiscoveryIsNotEmpty();
-  await testAuthoritativeScopesWithoutRipgrep();
+  await testPreflightCombinesGitAndRipgrepIgnoreRules();
+  if (process.platform !== "win32")
+    await testAuthoritativeScopesWithoutRipgrep();
   await testLargeAuthoritativeScopeTransport();
   await testAuthoritativeLiteralTildePath();
   if (process.platform !== "win32")
@@ -213,14 +217,20 @@ async function testPreflightUsesAuthoritativeRequestedPaths() {
   await runGit(fixture.repoRoot, "init", "-q");
   await runGit(fixture.repoRoot, "add", "outside-selection.py");
   await runGit(fixture.repoRoot, "commit", "-qm", "root source");
-  const context = (requiredIncludePaths: string[]) => ({
+  const context = (
+    requiredIncludePaths: string[],
+    filePaths: string[] = [],
+  ) => ({
     ...fixture.scan,
     targetContract: {
-      scope: { requiredIncludePaths, requiredExcludePaths: [] },
+      scope: { requiredIncludePaths, requiredExcludePaths: [], filePaths },
     },
   });
-  const prepare = async (requiredIncludePaths: string[]) => {
-    const selected = context(requiredIncludePaths);
+  const prepare = async (
+    requiredIncludePaths: string[],
+    filePaths: string[] = [],
+  ) => {
+    const selected = context(requiredIncludePaths, filePaths);
     return inventory.preflightCodexSecurityReviewItems(selected);
   };
 
@@ -234,16 +244,18 @@ async function testPreflightUsesAuthoritativeRequestedPaths() {
   assert.deepEqual(await prepare(["left", "right"]), { reviewItemsTotal: 1 });
 
   await fixture.writeRepositoryFile("left/left.py", "# left\n");
-  assert.deepEqual(await prepare(["left", "right"]), { reviewItemsTotal: 2 });
+  assert.deepEqual(await prepare(["left", "right"]), { reviewItemsTotal: 1 });
 
   await fixture.writeRepositoryFile("left/nested/source.py", "# nested\n");
   assert.deepEqual(await prepare(["left", "left/nested"]), {
-    reviewItemsTotal: 2,
+    reviewItemsTotal: 1,
   });
-  assert.deepEqual(await prepare(["left/left.py"]), { reviewItemsTotal: 1 });
+  assert.deepEqual(await prepare(["left/left.py"], ["left/left.py"]), {
+    reviewItemsTotal: 1,
+  });
 
   assert.deepEqual(await prepare([".", "left"]), {
-    reviewItemsTotal: 4,
+    reviewItemsTotal: 1,
   });
 
   await writeInventory(fixture.scanInventory, "previous.py\n");
@@ -263,6 +275,7 @@ async function testAuthoritativeLiteralTildePath() {
       scope: {
         requiredIncludePaths: ["~/selected.py"],
         requiredExcludePaths: [],
+        filePaths: ["~/selected.py"],
       },
     },
   };
@@ -270,6 +283,73 @@ async function testAuthoritativeLiteralTildePath() {
   assert.deepEqual(await inventory.preflightCodexSecurityReviewItems(context), {
     reviewItemsTotal: 1,
   });
+}
+
+async function testPreflightPreservesSavedPathKinds() {
+  const fixture = await createFixture("saved path kinds");
+  const selected = path.join(fixture.repoRoot, "selected");
+  const context = (filePaths: string[]) => ({
+    ...fixture.scan,
+    targetContract: {
+      scope: {
+        requiredIncludePaths: ["selected"],
+        requiredExcludePaths: [],
+        filePaths,
+      },
+    },
+  });
+
+  await fixture.writeRepositoryFile("selected", "# selected file\n");
+  assert.deepEqual(
+    await inventory.preflightCodexSecurityReviewItems(context(["selected"])),
+    { reviewItemsTotal: 1 },
+  );
+
+  await unlink(selected);
+  await fixture.writeRepositoryFile("selected/descendant.py", "# child\n");
+  assert.deepEqual(
+    await inventory.preflightCodexSecurityReviewItems(context(["selected"])),
+    { reviewItemsTotal: 0 },
+  );
+  assert.deepEqual(
+    await inventory.preflightCodexSecurityReviewItems(context([])),
+    { reviewItemsTotal: 1 },
+  );
+
+  await rm(selected, { recursive: true });
+  await fixture.writeRepositoryFile("selected", "# replacement file\n");
+  assert.deepEqual(
+    await inventory.preflightCodexSecurityReviewItems(context([])),
+    { reviewItemsTotal: 0 },
+  );
+}
+
+async function testPreflightCombinesGitAndRipgrepIgnoreRules() {
+  const fixture = await createFixture("combined ignore rules");
+  await runGit(fixture.repoRoot, "init", "-q");
+  await fixture.writeRepositoryFile("selected/tracked.py", "# tracked\n");
+  await fixture.writeRepositoryFile("selected/ignored.py", "# ignored\n");
+  await runGit(fixture.repoRoot, "add", "--force", "selected/tracked.py");
+  await runGit(fixture.repoRoot, "commit", "-qm", "tracked source");
+  await writeFile(
+    path.join(fixture.repoRoot, ".git", "info", "exclude"),
+    "/selected/tracked.py\n",
+  );
+  await fixture.writeRepositoryFile(".ignore", "selected/ignored.py\n");
+
+  assert.deepEqual(
+    await inventory.preflightCodexSecurityReviewItems({
+      ...fixture.scan,
+      targetContract: {
+        scope: {
+          requiredIncludePaths: ["selected"],
+          requiredExcludePaths: [],
+          filePaths: [],
+        },
+      },
+    }),
+    { reviewItemsTotal: 1 },
+  );
 }
 
 async function testAuthoritativeScopesWithoutRipgrep() {
@@ -329,10 +409,11 @@ async function testLargeAuthoritativeScopeTransport() {
         scope: {
           requiredIncludePaths: requested,
           requiredExcludePaths: [],
+          filePaths: requested,
         },
       },
     }),
-    { reviewItemsTotal: requested.length },
+    { reviewItemsTotal: 1 },
   );
 }
 
