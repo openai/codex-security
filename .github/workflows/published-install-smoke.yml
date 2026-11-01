@@ -11,7 +11,7 @@ on:
   schedule:
     - cron: "43 9 * * *"
   workflow_dispatch:
-    inputs:
+    inputs: &smoke-inputs
       version:
         description: Published npm version to verify, or latest
         type: string
@@ -21,15 +21,7 @@ on:
         type: string
         required: false
   workflow_call:
-    inputs:
-      version:
-        description: Published npm version to verify, or latest
-        type: string
-        default: latest
-      ref:
-        description: Source commit or tag containing the smoke checks
-        type: string
-        required: false
+    inputs: *smoke-inputs
 
 permissions:
   contents: read
