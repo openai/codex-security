@@ -498,6 +498,35 @@ function optionValue(flag: string) {
   return z.string().min(1, `${flag} must not be empty.`);
 }
 
+function remediationInputOptions(verb: "Patch" | "Verify") {
+  return z.object({
+    scan: optionValue("--scan")
+      .optional()
+      .describe(
+        `${verb} open findings from a saved scan ID or the latest completed scan.`,
+      ),
+    severity: z
+      .enum(REPORTABLE_SEVERITIES)
+      .optional()
+      .describe(`${verb} saved findings at or above LEVEL.`),
+    linearIssue: z
+      .array(optionValue("--linear-issue"))
+      .default([])
+      .describe("Linear issue identifier or URL; repeat for more issues."),
+    linearProject: optionValue("--linear-project")
+      .optional()
+      .describe(
+        verb === "Patch"
+          ? "Patch every open issue in this Linear project."
+          : "Verify issues in this Linear project.",
+      ),
+    linearFilter: optionValue("--linear-filter")
+      .optional()
+      .describe("JSON Linear issue filter for --linear-project."),
+    linearApiKey: linearApiKeyOption(),
+  });
+}
+
 function linearApiKeyOption() {
   return z
     .string()
@@ -6052,26 +6081,7 @@ export async function main(
         verificationMode: VERIFICATION_MODE_OPTION,
         auth: SKILL_AUTH_OPTION,
         ...MODEL_OPTIONS.shape,
-        scan: optionValue("--scan")
-          .optional()
-          .describe(
-            "Verify open findings from a saved scan ID or the latest completed scan.",
-          ),
-        severity: z
-          .enum(REPORTABLE_SEVERITIES)
-          .optional()
-          .describe("Verify saved findings at or above LEVEL."),
-        linearIssue: z
-          .array(optionValue("--linear-issue"))
-          .default([])
-          .describe("Linear issue identifier or URL; repeat for more issues."),
-        linearProject: optionValue("--linear-project")
-          .optional()
-          .describe("Verify issues in this Linear project."),
-        linearFilter: optionValue("--linear-filter")
-          .optional()
-          .describe("JSON Linear issue filter for --linear-project."),
-        linearApiKey: linearApiKeyOption(),
+        ...remediationInputOptions("Verify").shape,
         codex: SKILL_CONFIG_OPTIONS.shape.codex,
       }),
       examples: [
@@ -6091,31 +6101,10 @@ export async function main(
         try {
           if (options.host)
             throw new CodexSecurityError("Use verify-fix --host alone.");
-          const linear =
-            options.linearIssue.length > 0 || !!options.linearProject;
-          if (options.linearIssue.length > 0 && options.linearProject) {
-            throw new CodexSecurityError(
-              "Use either --linear-issue or --linear-project, not both.",
-            );
-          }
-          if (options.linearFilter && !options.linearProject) {
-            throw new CodexSecurityError(
-              "--linear-filter requires --linear-project.",
-            );
-          }
-          if (options.linearApiKey !== undefined && !linear) {
-            throw new CodexSecurityError(
-              "--linear-api-key requires --linear-issue or --linear-project.",
-            );
-          }
-          const savedFindings =
-            options.scan !== undefined ||
-            (positionals.length > 0 && positionals.every(isFindingIdentifier));
-          if (savedFindings && linear) {
-            throw new CodexSecurityError(
-              "Saved findings cannot be combined with Linear issues or projects.",
-            );
-          }
+          const { savedFindings, linear } = resolveRemediationInputs(
+            options,
+            positionals,
+          );
           if (options.severity !== undefined && !savedFindings) {
             throw new CodexSecurityError(
               "--severity requires a saved finding identifier or --scan.",
@@ -6137,10 +6126,7 @@ export async function main(
             : undefined;
           const imports = linear
             ? await importLinearIssues({
-                issues: options.linearIssue,
-                project: options.linearProject,
-                filter: options.linearFilter,
-                apiKey: options.linearApiKey,
+                ...linear,
                 environment: dependencies.environment,
                 linearClient: dependencies.linearClient,
               })
@@ -6284,26 +6270,7 @@ export async function main(
           .describe(
             "Use the container's isolation instead of the Codex sandbox (default: false).",
           ),
-        scan: optionValue("--scan")
-          .optional()
-          .describe(
-            "Patch open findings from a saved scan ID or the latest completed scan.",
-          ),
-        severity: z
-          .enum(REPORTABLE_SEVERITIES)
-          .optional()
-          .describe("Patch saved findings at or above LEVEL."),
-        linearIssue: z
-          .array(optionValue("--linear-issue"))
-          .default([])
-          .describe("Linear issue identifier or URL; repeat for more issues."),
-        linearProject: optionValue("--linear-project")
-          .optional()
-          .describe("Patch every open issue in this Linear project."),
-        linearFilter: optionValue("--linear-filter")
-          .optional()
-          .describe("JSON Linear issue filter for --linear-project."),
-        linearApiKey: linearApiKeyOption(),
+        ...remediationInputOptions("Patch").shape,
         createPr: CREATE_PR_OPTION,
         assessPatchRisk: ASSESS_PATCH_RISK_OPTION,
         validationPromptFile: optionValue("--validation-prompt-file")
@@ -6342,8 +6309,6 @@ export async function main(
         try {
           if (options.host)
             throw new CodexSecurityError("Use patch --host alone.");
-          const linear =
-            options.linearIssue.length > 0 || !!options.linearProject;
           if (options.resumePr !== undefined) {
             if (
               positionals.length > 0 ||
@@ -6354,7 +6319,8 @@ export async function main(
               options.validationPromptFile !== undefined ||
               options.externalSandbox ||
               options.verificationMode !== undefined ||
-              linear ||
+              options.linearIssue.length > 0 ||
+              options.linearProject ||
               options.linearFilter !== undefined ||
               options.linearApiKey !== undefined ||
               options.model !== undefined ||
@@ -6377,29 +6343,10 @@ export async function main(
             }
             return;
           }
-          if (options.linearIssue.length > 0 && options.linearProject) {
-            throw new CodexSecurityError(
-              "Use either --linear-issue or --linear-project, not both.",
-            );
-          }
-          if (options.linearFilter && !options.linearProject) {
-            throw new CodexSecurityError(
-              "--linear-filter requires --linear-project.",
-            );
-          }
-          if (options.linearApiKey !== undefined && !linear) {
-            throw new CodexSecurityError(
-              "--linear-api-key requires --linear-issue or --linear-project.",
-            );
-          }
-          const savedFindings =
-            options.scan !== undefined ||
-            (positionals.length > 0 && positionals.every(isFindingIdentifier));
-          if (savedFindings && linear) {
-            throw new CodexSecurityError(
-              "Saved findings cannot be combined with Linear issues or projects.",
-            );
-          }
+          const { savedFindings, linear } = resolveRemediationInputs(
+            options,
+            positionals,
+          );
           if (options.externalSandbox) {
             errorOutput.write(
               "WARNING: --external-sandbox disables Codex sandbox enforcement for patching. The container must provide isolation.\n",
@@ -6514,10 +6461,7 @@ export async function main(
           );
           const imports = linear
             ? await importLinearIssues({
-                issues: options.linearIssue,
-                project: options.linearProject,
-                filter: options.linearFilter,
-                apiKey: options.linearApiKey,
+                ...linear,
                 environment: dependencies.environment,
                 linearClient: dependencies.linearClient,
               })
@@ -7848,6 +7792,44 @@ function staysWithinWindowsDeviceRoot(input: string, root: string): boolean {
 
 function isFindingIdentifier(value: string): boolean {
   return /^(?:occ|csf)_[A-Za-z0-9_-]+$/u.test(value);
+}
+
+function resolveRemediationInputs(
+  {
+    scan,
+    linearIssue: issues,
+    linearProject: project,
+    linearFilter: filter,
+    linearApiKey: apiKey,
+  }: z.infer<ReturnType<typeof remediationInputOptions>>,
+  positionals: readonly string[],
+) {
+  if (issues.length > 0 && project) {
+    throw new CodexSecurityError(
+      "Use either --linear-issue or --linear-project, not both.",
+    );
+  }
+  if (filter && !project) {
+    throw new CodexSecurityError("--linear-filter requires --linear-project.");
+  }
+  const linear =
+    issues.length > 0 || project
+      ? { issues, project, filter, apiKey }
+      : undefined;
+  if (apiKey !== undefined && !linear) {
+    throw new CodexSecurityError(
+      "--linear-api-key requires --linear-issue or --linear-project.",
+    );
+  }
+  const savedFindings =
+    scan !== undefined ||
+    (positionals.length > 0 && positionals.every(isFindingIdentifier));
+  if (savedFindings && linear) {
+    throw new CodexSecurityError(
+      "Saved findings cannot be combined with Linear issues or projects.",
+    );
+  }
+  return { savedFindings, linear };
 }
 
 async function* workbenchFindings(
