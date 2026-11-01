@@ -168,7 +168,6 @@ any scope retained by the original native records. A caller-managed row can
 lack the original collection scope. Changing supplemental display metadata on
 a retry cannot change the approved request bytes, account or destination.
 
-
 ## Collect a Platform project and branch
 
 With a Web API token in `SEMGREP_APP_TOKEN`, collect all findings returned for a
