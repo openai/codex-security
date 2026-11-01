@@ -27,6 +27,18 @@ const nonSastFields = [
   "vulnerability_identifier",
 ];
 
+function identifiesNonSastProduct(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    nonSastFields.some((field) => value[field] != null) ||
+    [value["issue_type"], value["product"]].some(
+      (product) =>
+        typeof product === "string" &&
+        /^(?:sca|ai_sast|secrets)$/iu.test(product),
+    )
+  );
+}
+
 // Node 22 supports JSON source text and raw values. The SDK targets the ES2022 type library.
 const wireJson = JSON as JSON & {
   rawJSON(source: string): { rawJSON: string };
@@ -173,10 +185,12 @@ export function normalizeSelectedSemgrepPlatformFindings(options: {
     new URL(scope.project.url).pathname,
   ).replace(/^\/|\/$/gu, "");
   for (const response of pages) {
-    for (const finding of array(
+    const findings = array(
       parseSemgrepResponse(response)["findings"],
       "Semgrep findings",
-    )) {
+    );
+    const previousCount = selected.size;
+    for (const finding of findings) {
       if (!isRecord(finding)) continue;
       const id = platformId(finding["id"]);
       if (!id || !wanted.has(id)) continue;
@@ -208,12 +222,17 @@ export function normalizeSelectedSemgrepPlatformFindings(options: {
             product != null &&
             (typeof product !== "string" ||
               !["sast", "code"].includes(product.toLowerCase())),
-        ) ||
-        nonSastFields.some((field) => finding[field] != null)
+        )
       )
         throw new Error("Select Semgrep Code (SAST) findings.");
       selected.set(id, finding);
     }
+    // The v1 findings endpoint returns a single product per response page.
+    if (
+      selected.size !== previousCount &&
+      findings.some(identifiesNonSastProduct)
+    )
+      throw new Error("Select Semgrep Code (SAST) findings.");
   }
   const rows = Array.from(wanted, (id) => {
     const found = selected.get(id);

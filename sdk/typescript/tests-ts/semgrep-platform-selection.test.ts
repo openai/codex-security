@@ -134,6 +134,29 @@ test("each selected finding must match the independently named project, ref, and
     });
   const unrelated = '{"findings":[{"rule_name":"no-id"},{"id":2.5}]}';
   expect(select([first, unrelated, second]).findings).toHaveLength(2);
+  const findingsPage = (rows: unknown[]) => JSON.stringify({ findings: rows });
+  const selectedRow = {
+    id: ids[1],
+    ref,
+    repository: { url },
+    rule_name: "example.rule",
+  };
+  for (const other of [
+    { ai_impact: "Synthetic impact" },
+    { is_malicious: false },
+    { issue_type: "ai_sast" },
+  ]) {
+    const sibling = { ...selectedRow, id: "99", ...other };
+    expect(() => select([first, findingsPage([selectedRow, sibling])])).toThrow(
+      "SAST",
+    );
+    expect(() => select([first, findingsPage([sibling, selectedRow])])).toThrow(
+      "SAST",
+    );
+    expect(
+      select([first, findingsPage([sibling]), second]).findings,
+    ).toHaveLength(2);
+  }
   const unknown = select([
     first,
     second.replace('"severity":"medium"', '"severity":"WARNING"'),
@@ -161,13 +184,7 @@ test("each selected finding must match the independently named project, ref, and
     { usage: { location: { file_path: "src/app.ts" } } },
     { vulnerability_identifier: "CVE-2099-0001" },
   ]) {
-    const finding = {
-      id: ids[1],
-      ref,
-      repository: { url },
-      rule_name: "example.rule",
-      ...fields,
-    };
+    const finding = { ...selectedRow, ...fields };
     expect(() =>
       select([first, JSON.stringify({ findings: [finding] })]),
     ).toThrow("SAST");

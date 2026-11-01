@@ -105,12 +105,14 @@ GitHub host.
 ### Import selected Semgrep Platform SAST findings with the SDK
 
 Request `issue_type=sast` and keep the project lookup and findings pages as original
-[Semgrep Web API](https://docs.semgrep.dev/semgrep-appsec-platform/semgrep-api) response text.
+[Semgrep Web API](https://docs.semgrep.dev/semgrep-appsec-platform/semgrep-api) response text. Pass each page separately. When a page contributes a selected ID, the
+SDK checks its rows for conflicting product evidence. If a page contains only fields
+shared by several products, its product depends on the original request filter.
 [Guardian for Codex](https://docs.semgrep.dev/semgrep-guardian/ide-setup/codex) and
 [Semgrep MCP](https://github.com/semgrep/semgrep/blob/fe209763a4a2ccfcdf6434e6c332edc24a2f586e/cli/src/semgrep/mcp/server.py) return different records.
 Pass a fully qualified ref, such as `refs/heads/topic` or `refs/tags/topic`, exactly as it appears in the findings.
 Supply the HTTP(S) repository URL you independently associate with the target checkout.
-The project URL and any finding URL must match this spelling. Legacy findings can
+The native `project.url` and any selected `finding.repository.url` must match this spelling. Legacy findings can
 omit the project ID. An exact URL then identifies the repository even if the
 display name has changed. If multiple Semgrep projects share that URL, select
 the IDs from the intended project: the URL alone can also match a sibling project
