@@ -373,31 +373,45 @@ function sessionCallArguments(
   return isRecord(parsed) ? parsed : {};
 }
 
-function relativeRepositoryPath(
-  value: string,
-  repository: string,
-): string | null {
-  const normalized = repository.replaceAll("\\", "/");
-  const prefix = `${normalized.replace(/\/$/u, "")}/`;
-  if (value.startsWith(prefix)) return value.slice(prefix.length);
+// An explicit WebDAV host is followed by a URL path, including its first directory.
+const WEBDAV_HOST = /^\/\/(?:[?.]\/UNC\/)?[^/@]+@(?:SSL(?:@\d+)?|\d+)\//i;
 
-  // A saved Windows path may be displayed on another host. Only the volume
-  // can ignore case: differently cased directories can be distinct checkouts.
-  if (!win32.isAbsolute(normalized)) return null;
-  const volume = windowsVolumeRoot(prefix);
-  const valueVolume = windowsVolumeRoot(value);
-  if (
-    volume.length <= 1 ||
-    valueVolume.length !== volume.length ||
-    valueVolume.toLowerCase() !== volume.toLowerCase() ||
-    !value.startsWith(prefix.slice(volume.length), volume.length)
-  )
+function foldAsciiCase(text: string): string {
+  return text.replace(/[A-Z]/gu, (letter) => letter.toLowerCase());
+}
+
+function repositoryPathMatcher(
+  repository: string,
+): (value: string) => string | null {
+  const prefix = `${repository.replaceAll("\\", "/").replace(/\/$/u, "")}/`;
+  const volume = win32.isAbsolute(repository)
+    ? (WEBDAV_HOST.exec(prefix)?.[0] ?? windowsVolumeRoot(prefix))
+    : "";
+  const foldedVolume = foldAsciiCase(volume);
+  const directory = prefix.slice(volume.length);
+
+  // Saved events carry no filesystem identity. Preserve non-ASCII spelling and
+  // directory case so distinct shares or checkouts keep their own activity.
+  return (value) => {
+    if (
+      value.startsWith(prefix) ||
+      (volume.length > 1 &&
+        value.startsWith(directory, volume.length) &&
+        foldAsciiCase(value.slice(0, volume.length)) === foldedVolume)
+    ) {
+      return value.slice(prefix.length);
+    }
     return null;
-  return value.slice(prefix.length);
+  };
 }
 
 function commandRepositoryPaths(command: string, repository: string): string[] {
   const paths = new Set<string>();
+  const roots = [
+    "$CODEX_SECURITY_REPOSITORY",
+    "${CODEX_SECURITY_REPOSITORY}",
+    repository,
+  ].map(repositoryPathMatcher);
   for (const token of command.match(SHELL_TOKEN) ?? []) {
     let value = token;
     const singleQuoted = value.startsWith("'") && value.endsWith("'");
@@ -411,12 +425,8 @@ function commandRepositoryPaths(command: string, repository: string): string[] {
         "$CODEX_SECURITY_REPOSITORY/",
       );
     }
-    for (const root of [
-      "$CODEX_SECURITY_REPOSITORY",
-      "${CODEX_SECURITY_REPOSITORY}",
-      repository,
-    ]) {
-      const relative = relativeRepositoryPath(value, root);
+    for (const relativeTo of roots) {
+      const relative = relativeTo(value);
       if (relative === null) continue;
       const path = relative
         .replace(/["'\r\n].*$/u, "")
@@ -440,12 +450,10 @@ function argumentRepositoryPaths(value: unknown, repository: string): string[] {
   if (!isRecord(value)) return [];
   const candidates = [value["path"], value["file_path"], value["paths"]].flat();
   const paths = new Set<string>();
+  const relativeTo = repositoryPathMatcher(repository);
   for (const candidate of candidates) {
     if (typeof candidate !== "string") continue;
-    const path = relativeRepositoryPath(
-      candidate.replaceAll("\\", "/"),
-      repository,
-    );
+    const path = relativeTo(candidate.replaceAll("\\", "/"));
     if (path !== null && !path.split("/").includes("..")) paths.add(path);
     if (paths.size >= MAX_ACTIVITY_PATHS) break;
   }

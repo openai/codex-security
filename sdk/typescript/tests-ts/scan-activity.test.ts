@@ -369,12 +369,6 @@ describe("scan activity", () => {
       { paths: [] },
     ],
     [
-      "keeps POSIX environment names case-sensitive",
-      'cat "$codex_security_repository/src/app.ts" "${Codex_Security_Repository}/src/app.ts"',
-      "/code/project",
-      { paths: [] },
-    ],
-    [
       "keeps POSIX environment names case-sensitive for Windows repositories",
       'cat "$CODEX_SECURITY_REPOSITORY/Src/App.ts" "${CODEX_SECURITY_REPOSITORY}/Src/Other.ts" "$codex_security_repository/src/app.ts" "${Codex_Security_Repository}/src/app.ts"',
       "C:\\code\\project",
@@ -407,12 +401,18 @@ describe("scan activity", () => {
     ["//Server/Share/Repo", "//server/SHARE/repo/Src/A.ts", false],
     ["//?/UNC/Srv/Share/Repo", "//?/UNC/srv/share/repo/Src/A.ts", false],
     ["//Server/Share", "//server/share-other/Src/A.ts", false],
+    ["//host/K/Repo", "//host/K/Repo/Src/A.ts", false],
+    ["//HOST/K/Repo", "//host/K/Repo/Src/A.ts", true],
+    ["//Host@SSL/Docs", "//HOST@ssl/Docs/Src/A.ts", true],
+    ["//Host@SSL/Docs", "//host@SSL/docs/Src/A.ts", false],
+    ["//Host@8080/Docs", "//host@8080/docs/Src/A.ts", false],
+    ["//?/UNC/Host@SSL@443/Docs", "//?/UNC/host@SSL@443/docs/Src/A.ts", false],
     ["C:/Work/Repo", "c:/Work/Repo-other/Src/A.ts", false],
     ["C:/", "D:/Src/A.ts", false],
     ["C:Repo", "c:Repo/Src/A.ts", false],
     ["/work/Repo", "/work/repo/Src/A.ts", false],
     ["/work/Repo", "/work/Repo/../Src/A.ts", false],
-    ["C:/Work/Repo", "c:/Work/Repo/../Src/A.ts", false],
+    ["C:/Work/Repo", "c:\\Work\\Repo\\..\\Src\\A.ts", false],
   ] as const)(
     "%s extracts live and saved activity paths from %s",
     (repository, path, inside) => {
