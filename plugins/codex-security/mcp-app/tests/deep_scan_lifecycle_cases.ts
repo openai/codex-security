@@ -1,8 +1,15 @@
+import type { TestContext } from "node:test";
 import { readJson, writeJson } from "./support/json.ts";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import {
   coordinatorFixture,
+  startCoordinator,
+  DeepScanCoordinatorRegistry,
   FakeExecutor,
+  FakeStore,
+  pausePoint,
+  fixtureRun,
+  immediateClock,
   runCoordinator,
 } from "./deep_scan_coordinator_fixture.ts";
 import assert from "node:assert/strict";
@@ -10,36 +17,17 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { importModule } from "./import-module.ts";
+import { importCoordinatorServer } from "./import-module.ts";
 import type { DeepScanRunState } from "../src/deep-scan/types.js";
 
-type LifecycleFixtures = Pick<
-  typeof import("./deep_scan_coordinator_fixture.ts"),
-  | "fixtureRun"
-  | "FakeStore"
-  | "FakeExecutor"
-  | "createCoordinator"
-  | "DeepScanCoordinatorRegistry"
-  | "immediateClock"
->;
-
-export async function testDeepScanLifecycle({
-  fixtureRun,
-  FakeStore,
-  FakeExecutor,
-  createCoordinator,
-  DeepScanCoordinatorRegistry,
-  immediateClock,
-}: LifecycleFixtures) {
+export async function testDeepScanLifecycle(context: TestContext) {
   const config = {
     workers: 1,
     subagents: 0,
     stopAfterNoNew: 1,
     maxDiscoveryRuns: 1,
   };
-  const errors = [];
-  for (const test of [
+  for (const check of [
     lateCancellationWaitsForPersistence,
     failedParentCancellationStopsActiveWorker,
     canceledPublicationWaitsForHeartbeat,
@@ -54,14 +42,8 @@ export async function testDeepScanLifecycle({
     orphanWorkerDirectoriesAreNotReused,
     ancestorNamesDoNotChooseWorkerSequence,
   ]) {
-    try {
-      await test();
-    } catch (error) {
-      errors.push(new Error(test.name, { cause: error }));
-    }
+    await context.test(check.name, check);
   }
-  if (errors.length)
-    throw new AggregateError(errors, "Deep Scan lifecycle regressions");
 
   async function failedParentCancellationStopsActiveWorker() {
     for (const terminalReadFails of [false, true]) {
@@ -127,7 +109,7 @@ export async function testDeepScanLifecycle({
     }
   }
 
-  async function lateCancellationWaitsForPersistence() {
+  async function lateCancellationWaitsForPersistence(context: TestContext) {
     const completedParentStatus: string = JSON.parse(
       execFileSync(
         process.env.PYTHON || "python3",
@@ -146,21 +128,15 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
     saved = run_workbench(state, "get-scan", "--scan-id", scan_id)
     print(json.dumps(saved["workspace"]["results"]["progress"]["status"]))
 `,
-          fileURLToPath(new URL("../../tests/", import.meta.url)),
+          path.join(import.meta.dirname, "../../tests"),
         ],
         { encoding: "utf8" },
       ),
     );
-    const applicationRoot = fileURLToPath(new URL("../", import.meta.url));
-    const source = await readFile(
-      new URL("../server.ts", import.meta.url),
-      "utf8",
-    );
     let current: {
-      registry: InstanceType<LifecycleFixtures["DeepScanCoordinatorRegistry"]>;
-      store: InstanceType<LifecycleFixtures["FakeStore"]>;
-      persistEntered: PromiseWithResolvers<void>;
-      persistRelease: PromiseWithResolvers<void>;
+      registry: InstanceType<typeof DeepScanCoordinatorRegistry>;
+      store: FakeStore;
+      persistence: ReturnType<typeof pausePoint>;
       rejectPersistence: boolean;
       calls: string[];
       readParent?: () => Promise<{ workspace: typeof current.workspace }>;
@@ -200,8 +176,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
               .length > 1
           )
             throw new Error("synthetic duplicate cancellation persistence");
-          current.persistEntered.resolve();
-          await current.persistRelease.promise;
+          await current.persistence.pause();
           if (current.rejectPersistence)
             throw new Error("synthetic cancellation persistence failure");
           current.store.run.status = "canceled";
@@ -210,33 +185,20 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
         },
       },
     });
-    const { createCodexSecurityServer } = await importModule({
-      stdin: {
-        contents: source
-          .replace(
-            "const deepScanCoordinators = new DeepScanCoordinatorRegistry();",
-            "const deepScanCoordinators = globalThis.deepScanCancellationFixture.registry;",
-          )
-          .replace(
-            'import { PLUGIN_ROOT, runWorkbench, scanRoot } from "./src/workbench-client.js";',
-            'import { PLUGIN_ROOT, scanRoot } from "./src/workbench-client.js";\nconst runWorkbench = (...args) => globalThis.deepScanCancellationFixture.workbench(...args);',
-          ),
-        loader: "ts",
-        resolveDir: applicationRoot,
-      },
-      define: {
-        __dirname: JSON.stringify(applicationRoot),
-        "import.meta.url": JSON.stringify(
-          new URL("../server.ts", import.meta.url).href,
-        ),
-      },
-      loader: { ".md": "text" },
-    });
+    const { createCodexSecurityServer } = await importCoordinatorServer(
+      "deepScanCancellationFixture",
+    );
     const server = createCodexSecurityServer();
-    const cancel =
-      server._registeredTools.cancel_codex_security_scan_from_app.handler;
-    const fail = server._registeredTools.fail_codex_security_scan.handler;
-    const failures = [];
+    const tools = server._registeredTools;
+    const cancel = (scanId: string) =>
+      tools.cancel_codex_security_scan_from_app.handler({ scanId });
+    const failExternally = (scanId: string) =>
+      tools.fail_codex_security_scan.handler(
+        { scanId, message: "synthetic external failure" },
+        {},
+      );
+    const parentStatus = (result: Awaited<ReturnType<typeof cancel>>) =>
+      result.structuredContent.workspace.results.progress.status;
     try {
       for (const stage of [
         "final read",
@@ -260,534 +222,458 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
         "onComplete external failure during cleanup",
       ]) {
         for (const rejectPersistence of [false, true]) {
-          const fixture = await fixtureRun(config);
-          fixture.run.coordinatorGeneration = 1;
-          const store = new FakeStore(fixture.run);
-          const registry = new DeepScanCoordinatorRegistry();
-          const entered = Promise.withResolvers<void>();
-          const release = Promise.withResolvers<void>();
-          const persistEntered = Promise.withResolvers<void>();
-          const persistRelease = Promise.withResolvers<void>();
-          const failureEntered = Promise.withResolvers<void>();
-          const failureRelease = Promise.withResolvers<void>();
-          const failureSaved = Promise.withResolvers<void>();
-          const admissionEntered = Promise.withResolvers<void>();
-          const admissionRelease = Promise.withResolvers<void>();
-          const heartbeatRead = Promise.withResolvers<void>();
-          const heartbeatRelease = Promise.withResolvers<void>();
-          let publications = 0;
-          let cancellation: ReturnType<typeof cancel> | undefined;
-          let repeatedCancellation: ReturnType<typeof cancel> | undefined;
-          let coordinator:
-            | ReturnType<
-                InstanceType<
-                  LifecycleFixtures["DeepScanCoordinatorRegistry"]
-                >["start"]
-              >
-            | undefined;
-          let gateHeartbeat = false;
-          const concurrentFailure = stage.endsWith("external failure");
-          const failureDuringCleanup =
-            stage === "onComplete external failure during cleanup";
-          const completedParent = stage.includes("completed parent");
-          const completesDuringAdmission = stage.includes(
-            "completes during admission",
+          await context.test(
+            `${stage}; persistence rejects=${rejectPersistence}`,
+            () => runStage(stage, rejectPersistence),
           );
-          const pendingFailureRead = stage.includes("pending-read");
-          const unavailableRead = stage.startsWith("unavailable");
-          const lostResponse =
-            stage.startsWith("lost-response") || unavailableRead;
-          const interrupted = stage === "observed interrupted";
-          const stoppedStatus = interrupted ? "interrupted" : "failed";
-          const observeFailure = stage === "observed failure" || interrupted;
-          const publicationGate =
-            stage === "lost-response failure" ||
-            stage === "stale heartbeat failure";
-          const durableFailure =
-            stage === "persisted failure" ||
-            observeFailure ||
-            publicationGate ||
-            lostResponse ||
-            unavailableRead ||
-            concurrentFailure ||
-            failureDuringCleanup;
-          current = {
-            store,
-            registry,
-            persistEntered,
-            persistRelease,
-            rejectPersistence,
-            calls: [],
-            workspace: {
-              setup: { submitted: true },
-              results: {
-                progress: {
-                  status: completedParent ? completedParentStatus : "running",
-                },
-              },
-            },
-          };
-          let admissionPaused = false;
-          current.readParent = async () => {
-            const workspace = structuredClone(current.workspace);
-            if (workspace.results.progress.status === "failed")
-              workspace.results.failureMessage = current.store.run.error;
-            if (pendingFailureRead && !admissionPaused) {
-              admissionPaused = true;
-              admissionEntered.resolve();
-              await admissionRelease.promise;
-              if (unavailableRead)
-                throw new Error("synthetic terminal state unavailable");
-            }
-            if (completesDuringAdmission)
-              queueMicrotask(() => {
-                current.workspace.results.progress.status =
-                  completedParentStatus;
-              });
-            return { workspace };
-          };
-          if (
-            stage.startsWith("final read") ||
-            observeFailure ||
-            publicationGate ||
-            pendingFailureRead
-          ) {
-            const get = store.get.bind(store);
-            let paused = false;
-            store.get = async () => {
-              const snapshot = await get();
-              if (concurrentFailure && paused && !admissionPaused) {
-                admissionPaused = true;
-                admissionEntered.resolve();
-                await admissionRelease.promise;
-              }
-              if (gateHeartbeat) {
-                gateHeartbeat = false;
-                heartbeatRead.resolve();
-                await heartbeatRelease.promise;
-              }
-              if (
-                !paused &&
-                (observeFailure || pendingFailureRead
-                  ? coordinator?.snapshot().status === stoppedStatus
-                  : snapshot.status === "succeeded")
-              ) {
-                paused = true;
-                entered.resolve();
-                await release.promise;
-              }
-              return snapshot;
-            };
-          }
-          if (stage.startsWith("unpersisted"))
-            store.fail = async () => {
-              throw new Error("synthetic failure persistence unavailable");
-            };
-          if (publicationGate || lostResponse) {
-            const fail = store.fail.bind(store);
-            store.fail = async (...args) => {
-              if (stage === "stale heartbeat failure") {
-                failureEntered.resolve();
-                await failureRelease.promise;
-              }
-              const result = await fail(...args);
-              current.workspace.results.progress.status = "failed";
-              if (lostResponse)
-                throw new Error("synthetic committed failure response lost");
-              return result;
-            };
-          }
-          const executor = new FakeExecutor(
-            observeFailure
-              ? { blockDiscoveryAfterCalls: 0 }
-              : stage.endsWith("failure")
-                ? {
-                    nonRetryableDiscoveryMessage: "synthetic worker failure",
-                  }
-                : {},
-          );
-          coordinator = registry.start({
-            run: fixture.run,
-            store,
-            executor,
-            pluginRoot: fixture.pluginRoot,
-            clock: immediateClock,
-            threadId:
-              stage === "unpersisted unowned failure"
-                ? undefined
-                : "fixture-owner",
-            heartbeatIntervalMs: 60_000,
-            onComplete: async () => {
-              if (stage.startsWith("onComplete")) {
-                entered.resolve();
-                await release.promise;
-              }
-            },
-            onStopped: async () => {
-              publications++;
-              if (publicationGate) {
-                entered.resolve();
-                await release.promise;
-              }
-            },
-            log: (event: { event: string }) => {
-              if (
-                failureDuringCleanup &&
-                event.event === "coordinator_cancel_requested"
-              )
-                void fail(
-                  {
-                    scanId: fixture.run.scanId,
-                    message: "synthetic external failure",
-                  },
-                  {},
-                ).then(() => failureSaved.resolve());
-              if (
-                stage.endsWith("microtask") &&
-                event.event === "coordinator_cleanup_settled"
-              )
-                queueMicrotask(() => {
-                  cancellation = cancel({ scanId: fixture.run.scanId });
-                  void cancellation.catch(() => {});
-                });
-              if (
-                !stage.endsWith("failure") ||
-                event.event !== "coordinator_failed"
-              )
-                return;
-              if (publicationGate || pendingFailureRead) {
-                failureSaved.resolve();
-                return;
-              }
-              if (stage === "persisted failure")
-                current.workspace.results.progress.status = "failed";
-              entered.resolve();
-              cancellation = cancel({ scanId: fixture.run.scanId });
-              void cancellation.catch(() => {});
-            },
-          });
-          const terminal = coordinator.settled();
-          void terminal.catch(() => {});
-          try {
-            if (stage === "stale heartbeat failure") {
-              await failureEntered.promise;
-              gateHeartbeat = true;
-              const heartbeat = coordinator.renewHeartbeat();
-              await heartbeatRead.promise;
-              failureRelease.resolve();
-              await failureSaved.promise;
-              heartbeatRelease.resolve();
-              await heartbeat;
-            }
-            if (observeFailure) {
-              await executor.discoveryStarted.promise;
-              store.run.status = stoppedStatus;
-              current.workspace.results.progress.status = "failed";
-              await coordinator.renewHeartbeat();
-            }
-            await entered.promise;
-            if (stage.startsWith("final read heartbeat"))
-              await coordinator.renewHeartbeat();
-            if (!stage.endsWith("microtask")) {
-              cancellation ??= cancel({ scanId: fixture.run.scanId });
-              void cancellation.catch(() => {});
-            }
-            if (stage === "final read repeated cancellation") {
-              await coordinator.renewHeartbeat();
-              repeatedCancellation = cancel({ scanId: fixture.run.scanId });
-              void repeatedCancellation.catch(() => {});
-            }
-            if (pendingFailureRead) {
-              const admitted = await Promise.race([
-                admissionEntered.promise.then(() => true),
-                persistEntered.promise.then(() => false),
-                cancellation.then(
-                  () => false,
-                  () => false,
-                ),
-                coordinator.wait(undefined, 25).then(() => false),
-              ]);
-              if (admitted) {
-                if (concurrentFailure)
-                  await fail(
-                    {
-                      scanId: fixture.run.scanId,
-                      message: "synthetic external failure",
-                    },
-                    {},
-                  );
-                repeatedCancellation = cancel({ scanId: fixture.run.scanId });
-                void repeatedCancellation.catch(() => {});
-                assert.equal(await coordinator.wait(undefined, 25), undefined);
-                admissionRelease.resolve();
-              }
-            }
-            if (failureDuringCleanup) await failureSaved.promise;
-            release.resolve();
-            if (completedParent || completesDuringAdmission) {
-              persistRelease.resolve();
-              assert.equal((await terminal).status, "succeeded");
-              if (completesDuringAdmission)
-                await assert.rejects(
-                  cancellation,
-                  /Only a running scan can be canceled/,
-                );
-              else
-                assert.equal(
-                  (await cancellation).structuredContent.workspace.results
-                    .progress.status,
-                  completedParentStatus,
-                );
-              assert.equal(store.run.status, "succeeded");
-              assert.equal(
-                current.workspace.results.progress.status,
-                completedParentStatus,
-              );
-              assert.equal(
-                current.calls.filter((command) => command === "cancel-scan")
-                  .length,
-                completesDuringAdmission ? 1 : 0,
-              );
-              continue;
-            }
-            if (durableFailure) {
-              assert.equal((await terminal).status, stoppedStatus);
-              if (unavailableRead)
-                await assert.rejects(
-                  cancellation,
-                  /synthetic terminal state unavailable/,
-                );
-              else
-                assert.equal(
-                  (await cancellation).structuredContent.workspace.results
-                    .progress.status,
-                  "failed",
-                );
-              assert.equal(current.calls.includes("cancel-scan"), false);
-              if (concurrentFailure || failureDuringCleanup)
-                assert.match(
-                  (await terminal).error,
-                  /synthetic external failure/,
-                );
-              assert.equal(publications, interrupted ? 0 : 1);
-              if (unavailableRead)
-                assert.match(
-                  (await terminal).error,
-                  /synthetic worker failure/,
-                );
-              if (repeatedCancellation) {
-                if (unavailableRead)
-                  await assert.rejects(
-                    repeatedCancellation,
-                    /synthetic terminal state unavailable/,
-                  );
-                else
-                  assert.equal(
-                    (await repeatedCancellation).structuredContent.workspace
-                      .results.progress.status,
-                    "failed",
-                  );
-              }
-              continue;
-            }
-            await persistEntered.promise;
-            const waiting = await coordinator.wait(undefined, 25);
-            persistRelease.resolve();
-            if (stage.endsWith("microtask")) {
-              assert.equal(
-                waiting?.status,
-                "succeeded",
-                "settlement must finish before admitting another cancellation",
-              );
-              if (rejectPersistence)
-                await assert.rejects(
-                  cancellation,
-                  /synthetic cancellation persistence failure/,
-                );
-              else
-                assert.equal(
-                  (await cancellation).structuredContent.workspace.results
-                    .progress.status,
-                  "canceled",
-                );
-              assert.equal((await terminal).status, "succeeded");
-              assert.equal(publications, 0);
-              assert.deepEqual(current.calls, ["get-scan", "cancel-scan"]);
-              continue;
-            }
-            assert.equal(
-              waiting,
-              undefined,
-              "start waiter must await durable cancellation",
-            );
-            if (rejectPersistence) {
-              await assert.rejects(
-                cancellation,
-                /synthetic cancellation persistence failure/,
-              );
-              await assert.rejects(
-                terminal,
-                /synthetic cancellation persistence failure/,
-              );
-              if (repeatedCancellation)
-                await assert.rejects(
-                  repeatedCancellation,
-                  /synthetic cancellation persistence failure/,
-                );
-              assert.equal(publications, 0);
-            } else {
-              assert.equal(
-                (await cancellation).structuredContent.workspace.results
-                  .progress.status,
-                "canceled",
-              );
-              assert.equal((await terminal).status, "canceled");
-              assert.equal(store.run.status, "canceled");
-              assert.equal(
-                publications,
-                stage === "unpersisted unowned failure" ? 0 : 1,
-              );
-              if (repeatedCancellation)
-                assert.equal(
-                  (await repeatedCancellation).structuredContent.workspace
-                    .results.progress.status,
-                  "canceled",
-                );
-            }
-            assert.equal(current.calls[0], "get-scan");
-            assert.equal(
-              current.calls.filter((command) => command === "cancel-scan")
-                .length,
-              1,
-            );
-          } catch (error) {
-            failures.push(
-              new Error(
-                `${stage}; persistence rejects=${rejectPersistence}: ${error instanceof Error ? error.message : String(error)}`,
-                { cause: error },
-              ),
-            );
-          } finally {
-            release.resolve();
-            persistRelease.resolve();
-            failureRelease.resolve();
-            heartbeatRelease.resolve();
-            admissionRelease.resolve();
-            registry.shutdown("fixture cleanup");
-            await Promise.allSettled([
-              terminal,
-              cancellation,
-              repeatedCancellation,
-            ]);
-          }
         }
       }
       for (const joined of [false, true]) {
-        const fixture = await fixtureRun(config);
-        const store = new FakeStore(fixture.run);
-        const registry = new DeepScanCoordinatorRegistry();
-        const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
-        const readEntered = Promise.withResolvers<void>();
-        const readRelease = Promise.withResolvers<void>();
-        const persistEntered = Promise.withResolvers<void>();
-        const persistRelease = Promise.withResolvers<void>();
-        let reads = 0;
-        current = {
-          store,
-          registry,
-          persistEntered,
-          persistRelease,
-          rejectPersistence: false,
-          calls: [],
-          workspace: {
-            setup: { submitted: true },
-            results: { progress: { status: "running" } },
-          },
-          readParent: async () => {
-            if (reads++ === 0) {
-              readEntered.resolve();
-              await readRelease.promise;
-              throw new Error("synthetic temporary parent read failure");
-            }
-            return { workspace: structuredClone(current.workspace) };
-          },
-        };
-        const coordinator = registry.start({
-          run: fixture.run,
-          store,
-          executor,
-          pluginRoot: fixture.pluginRoot,
-          clock: immediateClock,
-          threadId: "fixture-owner",
-          heartbeatIntervalMs: 60_000,
-        });
-        const outcome = (operation: ReturnType<typeof cancel>) =>
-          operation.then(
-            () => undefined,
-            (error: Error) => error,
-          );
-        let first: Promise<Error | undefined> | undefined;
-        let second: Promise<Error | undefined> | undefined;
-        let retry: ReturnType<typeof cancel> | undefined;
-        try {
-          await executor.discoveryStarted.promise;
-          first = outcome(cancel({ scanId: fixture.run.scanId }));
-          await readEntered.promise;
-          if (joined) second = outcome(cancel({ scanId: fixture.run.scanId }));
-          readRelease.resolve();
-          assert.match(
-            (await first)?.message ?? "",
-            /temporary parent read failure/,
-          );
-          if (second) {
-            const result = await Promise.race([
-              second,
-              coordinator.wait(undefined, 25).then(() => undefined),
-            ]);
-            assert.match(
-              result?.message ?? "",
-              /temporary parent read failure/,
-            );
-          }
-          assert.equal(coordinator.snapshot().status, "running");
-          assert.equal(await coordinator.wait(undefined, 25), undefined);
-          retry = cancel({ scanId: fixture.run.scanId });
-          void retry.catch(() => {});
-          await persistEntered.promise;
-          assert.equal(await coordinator.wait(undefined, 25), undefined);
-          persistRelease.resolve();
-          assert.equal(
-            (await retry).structuredContent.workspace.results.progress.status,
-            "canceled",
-          );
-          assert.equal((await coordinator.settled()).status, "canceled");
-          assert.equal(
-            current.calls.filter((command) => command === "cancel-scan").length,
-            1,
-          );
-        } catch (error) {
-          failures.push(
-            new Error(`Admission read failure; joined=${joined}`, {
-              cause: error,
-            }),
-          );
-        } finally {
-          readRelease.resolve();
-          persistRelease.resolve();
-          registry.shutdown("fixture cleanup");
-          await Promise.allSettled([
-            first,
-            second,
-            retry,
-            coordinator.settled(),
-          ]);
-        }
+        await context.test(`Admission read failure; joined=${joined}`, () =>
+          runAdmissionFailure(joined),
+        );
       }
-      if (failures.length)
-        throw new AggregateError(failures, "Late cancellation responses");
     } finally {
       await server.close();
       Reflect.deleteProperty(globalThis, "deepScanCancellationFixture");
+    }
+
+    async function runStage(stage: string, rejectPersistence: boolean) {
+      const fixture = await fixtureRun(config);
+      fixture.run.coordinatorGeneration = 1;
+      const store = new FakeStore(fixture.run);
+      const registry = new DeepScanCoordinatorRegistry();
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const persistence = pausePoint();
+      const failureWrite = pausePoint();
+      const failureSaved = Promise.withResolvers<void>();
+      const admission = pausePoint();
+      const heartbeatOwnershipRead = pausePoint();
+      let publications = 0;
+      let cancellation: ReturnType<typeof cancel> | undefined;
+      let repeatedCancellation: ReturnType<typeof cancel> | undefined;
+      let coordinator:
+        | ReturnType<InstanceType<typeof DeepScanCoordinatorRegistry>["start"]>
+        | undefined;
+      let gateHeartbeat = false;
+      const concurrentFailure = stage.endsWith("external failure");
+      const failureDuringCleanup =
+        stage === "onComplete external failure during cleanup";
+      const completedParent = stage.includes("completed parent");
+      const completesDuringAdmission = stage.includes(
+        "completes during admission",
+      );
+      const pendingFailureRead = stage.includes("pending-read");
+      const unavailableRead = stage.startsWith("unavailable");
+      const lostResponse = stage.startsWith("lost-response") || unavailableRead;
+      const interrupted = stage === "observed interrupted";
+      const stoppedStatus = interrupted ? "interrupted" : "failed";
+      const observeFailure = stage === "observed failure" || interrupted;
+      const publicationGate =
+        stage === "lost-response failure" ||
+        stage === "stale heartbeat failure";
+      const durableFailure =
+        stage === "persisted failure" ||
+        observeFailure ||
+        publicationGate ||
+        lostResponse ||
+        unavailableRead ||
+        concurrentFailure ||
+        failureDuringCleanup;
+      current = {
+        store,
+        registry,
+        persistence,
+        rejectPersistence,
+        calls: [],
+        workspace: {
+          setup: { submitted: true },
+          results: {
+            progress: {
+              status: completedParent ? completedParentStatus : "running",
+            },
+          },
+        },
+      };
+      let admissionPaused = false;
+      current.readParent = async () => {
+        const workspace = structuredClone(current.workspace);
+        if (workspace.results.progress.status === "failed")
+          workspace.results.failureMessage = current.store.run.error;
+        if (pendingFailureRead && !admissionPaused) {
+          admissionPaused = true;
+          await admission.pause();
+          if (unavailableRead)
+            throw new Error("synthetic terminal state unavailable");
+        }
+        if (completesDuringAdmission)
+          queueMicrotask(() => {
+            current.workspace.results.progress.status = completedParentStatus;
+          });
+        return { workspace };
+      };
+      if (
+        stage.startsWith("final read") ||
+        observeFailure ||
+        publicationGate ||
+        pendingFailureRead
+      ) {
+        const get = store.get.bind(store);
+        let paused = false;
+        store.get = async () => {
+          const snapshot = await get();
+          if (concurrentFailure && paused && !admissionPaused) {
+            admissionPaused = true;
+            await admission.pause();
+          }
+          if (gateHeartbeat) {
+            gateHeartbeat = false;
+            await heartbeatOwnershipRead.pause();
+          }
+          if (
+            !paused &&
+            (observeFailure || pendingFailureRead
+              ? coordinator?.snapshot().status === stoppedStatus
+              : snapshot.status === "succeeded")
+          ) {
+            paused = true;
+            entered.resolve();
+            await release.promise;
+          }
+          return snapshot;
+        };
+      }
+      if (stage.startsWith("unpersisted"))
+        store.fail = async () => {
+          throw new Error("synthetic failure persistence unavailable");
+        };
+      if (publicationGate || lostResponse) {
+        const fail = store.fail.bind(store);
+        store.fail = async (...args) => {
+          if (stage === "stale heartbeat failure") {
+            await failureWrite.pause();
+          }
+          const result = await fail(...args);
+          current.workspace.results.progress.status = "failed";
+          if (lostResponse)
+            throw new Error("synthetic committed failure response lost");
+          return result;
+        };
+      }
+      const executor = new FakeExecutor(
+        observeFailure
+          ? { blockDiscoveryAfterCalls: 0 }
+          : stage.endsWith("failure")
+            ? {
+                nonRetryableDiscoveryMessage: "synthetic worker failure",
+              }
+            : {},
+      );
+      coordinator = registry.start({
+        run: fixture.run,
+        store,
+        executor,
+        pluginRoot: fixture.pluginRoot,
+        clock: immediateClock,
+        threadId:
+          stage === "unpersisted unowned failure" ? undefined : "fixture-owner",
+        heartbeatIntervalMs: 60_000,
+        onComplete: async () => {
+          if (stage.startsWith("onComplete")) {
+            entered.resolve();
+            await release.promise;
+          }
+        },
+        onStopped: async () => {
+          publications++;
+          if (publicationGate) {
+            entered.resolve();
+            await release.promise;
+          }
+        },
+        log: (event: { event: string }) => {
+          if (
+            failureDuringCleanup &&
+            event.event === "coordinator_cancel_requested"
+          )
+            void failExternally(fixture.run.scanId).then(() =>
+              failureSaved.resolve(),
+            );
+          if (
+            stage.endsWith("microtask") &&
+            event.event === "coordinator_cleanup_settled"
+          )
+            queueMicrotask(() => {
+              cancellation = cancel(fixture.run.scanId);
+              void cancellation.catch(() => {});
+            });
+          if (
+            !stage.endsWith("failure") ||
+            event.event !== "coordinator_failed"
+          )
+            return;
+          if (publicationGate || pendingFailureRead) {
+            failureSaved.resolve();
+            return;
+          }
+          if (stage === "persisted failure")
+            current.workspace.results.progress.status = "failed";
+          entered.resolve();
+          cancellation = cancel(fixture.run.scanId);
+          void cancellation.catch(() => {});
+        },
+      });
+      const terminal = coordinator.settled();
+      void terminal.catch(() => {});
+      try {
+        if (stage === "stale heartbeat failure") {
+          await failureWrite.entered;
+          gateHeartbeat = true;
+          const heartbeat = coordinator.renewHeartbeat();
+          await heartbeatOwnershipRead.entered;
+          failureWrite.release();
+          await failureSaved.promise;
+          heartbeatOwnershipRead.release();
+          await heartbeat;
+        }
+        if (observeFailure) {
+          await executor.discoveryStarted.promise;
+          store.run.status = stoppedStatus;
+          current.workspace.results.progress.status = "failed";
+          await coordinator.renewHeartbeat();
+        }
+        await entered.promise;
+        if (stage.startsWith("final read heartbeat"))
+          await coordinator.renewHeartbeat();
+        if (!stage.endsWith("microtask")) {
+          cancellation ??= cancel(fixture.run.scanId);
+          void cancellation.catch(() => {});
+        }
+        if (stage === "final read repeated cancellation") {
+          await coordinator.renewHeartbeat();
+          repeatedCancellation = cancel(fixture.run.scanId);
+          void repeatedCancellation.catch(() => {});
+        }
+        if (pendingFailureRead) {
+          const admitted = await Promise.race([
+            admission.entered.then(() => true),
+            persistence.entered.then(() => false),
+            cancellation.then(
+              () => false,
+              () => false,
+            ),
+            coordinator.wait(undefined, 25).then(() => false),
+          ]);
+          if (admitted) {
+            if (concurrentFailure) await failExternally(fixture.run.scanId);
+            repeatedCancellation = cancel(fixture.run.scanId);
+            void repeatedCancellation.catch(() => {});
+            assert.equal(await coordinator.wait(undefined, 25), undefined);
+            admission.release();
+          }
+        }
+        if (failureDuringCleanup) await failureSaved.promise;
+        release.resolve();
+        if (completedParent || completesDuringAdmission) {
+          persistence.release();
+          assert.equal((await terminal).status, "succeeded");
+          if (completesDuringAdmission)
+            await assert.rejects(
+              cancellation,
+              /Only a running scan can be canceled/,
+            );
+          else
+            assert.equal(
+              parentStatus(await cancellation),
+              completedParentStatus,
+            );
+          assert.equal(store.run.status, "succeeded");
+          assert.equal(
+            current.workspace.results.progress.status,
+            completedParentStatus,
+          );
+          assert.equal(
+            current.calls.filter((command) => command === "cancel-scan").length,
+            completesDuringAdmission ? 1 : 0,
+          );
+          return;
+        }
+        if (durableFailure) {
+          assert.equal((await terminal).status, stoppedStatus);
+          if (unavailableRead)
+            await assert.rejects(
+              cancellation,
+              /synthetic terminal state unavailable/,
+            );
+          else assert.equal(parentStatus(await cancellation), "failed");
+          assert.equal(current.calls.includes("cancel-scan"), false);
+          if (concurrentFailure || failureDuringCleanup)
+            assert.match((await terminal).error, /synthetic external failure/);
+          assert.equal(publications, interrupted ? 0 : 1);
+          if (unavailableRead)
+            assert.match((await terminal).error, /synthetic worker failure/);
+          if (repeatedCancellation) {
+            if (unavailableRead)
+              await assert.rejects(
+                repeatedCancellation,
+                /synthetic terminal state unavailable/,
+              );
+            else
+              assert.equal(parentStatus(await repeatedCancellation), "failed");
+          }
+          return;
+        }
+        await persistence.entered;
+        const waiting = await coordinator.wait(undefined, 25);
+        persistence.release();
+        if (stage.endsWith("microtask")) {
+          assert.equal(
+            waiting?.status,
+            "succeeded",
+            "settlement must finish before admitting another cancellation",
+          );
+          if (rejectPersistence)
+            await assert.rejects(
+              cancellation,
+              /synthetic cancellation persistence failure/,
+            );
+          else assert.equal(parentStatus(await cancellation), "canceled");
+          assert.equal((await terminal).status, "succeeded");
+          assert.equal(publications, 0);
+          assert.deepEqual(current.calls, ["get-scan", "cancel-scan"]);
+          return;
+        }
+        assert.equal(
+          waiting,
+          undefined,
+          "start waiter must await durable cancellation",
+        );
+        if (rejectPersistence) {
+          await assert.rejects(
+            cancellation,
+            /synthetic cancellation persistence failure/,
+          );
+          await assert.rejects(
+            terminal,
+            /synthetic cancellation persistence failure/,
+          );
+          if (repeatedCancellation)
+            await assert.rejects(
+              repeatedCancellation,
+              /synthetic cancellation persistence failure/,
+            );
+          assert.equal(publications, 0);
+        } else {
+          assert.equal(parentStatus(await cancellation), "canceled");
+          assert.equal((await terminal).status, "canceled");
+          assert.equal(store.run.status, "canceled");
+          assert.equal(
+            publications,
+            stage === "unpersisted unowned failure" ? 0 : 1,
+          );
+          if (repeatedCancellation)
+            assert.equal(parentStatus(await repeatedCancellation), "canceled");
+        }
+        assert.equal(current.calls[0], "get-scan");
+        assert.equal(
+          current.calls.filter((command) => command === "cancel-scan").length,
+          1,
+        );
+      } finally {
+        release.resolve();
+        persistence.release();
+        failureWrite.release();
+        heartbeatOwnershipRead.release();
+        admission.release();
+        registry.shutdown("fixture cleanup");
+        await Promise.allSettled([
+          terminal,
+          cancellation,
+          repeatedCancellation,
+        ]);
+      }
+    }
+
+    async function runAdmissionFailure(joined: boolean) {
+      const fixture = await fixtureRun(config);
+      const store = new FakeStore(fixture.run);
+      const registry = new DeepScanCoordinatorRegistry();
+      const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
+      const admissionRead = pausePoint();
+      const persistence = pausePoint();
+      let reads = 0;
+      current = {
+        store,
+        registry,
+        persistence,
+        rejectPersistence: false,
+        calls: [],
+        workspace: {
+          setup: { submitted: true },
+          results: { progress: { status: "running" } },
+        },
+        readParent: async () => {
+          if (reads++ === 0) {
+            await admissionRead.pause();
+            throw new Error("synthetic temporary parent read failure");
+          }
+          return { workspace: structuredClone(current.workspace) };
+        },
+      };
+      const coordinator = registry.start({
+        run: fixture.run,
+        store,
+        executor,
+        pluginRoot: fixture.pluginRoot,
+        clock: immediateClock,
+        threadId: "fixture-owner",
+        heartbeatIntervalMs: 60_000,
+      });
+      const outcome = (operation: ReturnType<typeof cancel>) =>
+        operation.then(
+          () => undefined,
+          (error: Error) => error,
+        );
+      let first: Promise<Error | undefined> | undefined;
+      let second: Promise<Error | undefined> | undefined;
+      let retry: ReturnType<typeof cancel> | undefined;
+      try {
+        await executor.discoveryStarted.promise;
+        first = outcome(cancel(fixture.run.scanId));
+        await admissionRead.entered;
+        if (joined) second = outcome(cancel(fixture.run.scanId));
+        admissionRead.release();
+        assert.match(
+          (await first)?.message ?? "",
+          /temporary parent read failure/,
+        );
+        if (second) {
+          const result = await Promise.race([
+            second,
+            coordinator.wait(undefined, 25).then(() => undefined),
+          ]);
+          assert.match(result?.message ?? "", /temporary parent read failure/);
+        }
+        assert.equal(coordinator.snapshot().status, "running");
+        assert.equal(await coordinator.wait(undefined, 25), undefined);
+        retry = cancel(fixture.run.scanId);
+        void retry.catch(() => {});
+        await persistence.entered;
+        assert.equal(await coordinator.wait(undefined, 25), undefined);
+        persistence.release();
+        assert.equal(parentStatus(await retry), "canceled");
+        assert.equal((await coordinator.settled()).status, "canceled");
+        assert.equal(
+          current.calls.filter((command) => command === "cancel-scan").length,
+          1,
+        );
+      } finally {
+        admissionRead.release();
+        persistence.release();
+        registry.shutdown("fixture cleanup");
+        await Promise.allSettled([first, second, retry, coordinator.settled()]);
+      }
     }
   }
 
@@ -796,21 +682,16 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
     fixture.run.coordinatorGeneration = 1;
     const store = new FakeStore(fixture.run);
     const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
-    const publishing = Promise.withResolvers<void>();
-    const release = Promise.withResolvers<void>();
-    const coordinator = createCoordinator(fixture, store, executor, {
+    const publication = pausePoint();
+    const coordinator = startCoordinator(fixture, store, executor, {
       threadId: "fixture-owner",
       heartbeatIntervalMs: 60_000,
-      onStopped: async () => {
-        publishing.resolve();
-        await release.promise;
-      },
+      onStopped: async () => await publication.pause(),
     });
-    coordinator.start();
     await executor.discoveryStarted.promise;
     store.run.status = "canceled";
     coordinator.cancel("fixture cancellation");
-    await publishing.promise;
+    await publication.entered;
     try {
       await coordinator.renewHeartbeat();
       assert.equal(
@@ -819,7 +700,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
         "heartbeat must not release waiters while saved results are being published",
       );
     } finally {
-      release.resolve();
+      publication.release();
       await coordinator.settled();
     }
   }
@@ -829,29 +710,21 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
       const fixture = await fixtureRun(config);
       fixture.run.coordinatorGeneration = 1;
       const store = new FakeStore(fixture.run);
-      const committed = Promise.withResolvers<void>();
-      const release = Promise.withResolvers<void>();
+      const commitResponse = pausePoint();
       const commit = store.commitDedup.bind(store);
       store.commitDedup = async (input) => {
         const response = await commit(input);
-        committed.resolve();
-        await release.promise;
+        await commitResponse.pause();
         return response;
       };
-      const coordinator = createCoordinator(
-        fixture,
-        store,
-        new FakeExecutor(),
-        {
-          threadId: "fixture-owner",
-          heartbeatIntervalMs: 60_000,
-        },
-      );
-      coordinator.start();
-      await committed.promise;
+      const coordinator = startCoordinator(fixture, store, new FakeExecutor(), {
+        threadId: "fixture-owner",
+        heartbeatIntervalMs: 60_000,
+      });
+      await commitResponse.entered;
       store.run.status = status;
       await coordinator.renewHeartbeat();
-      release.resolve();
+      commitResponse.release();
       assert.equal((await coordinator.settled()).status, status);
     }
   }
@@ -863,7 +736,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
     const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
     const observing = Promise.withResolvers<void>();
     const replacement = Promise.withResolvers<DeepScanRunState>();
-    const coordinator = createCoordinator(fixture, store, executor, {
+    const coordinator = startCoordinator(fixture, store, executor, {
       threadId: "fixture-owner",
       heartbeatIntervalMs: 60_000,
       observeReplacement: async () => {
@@ -871,7 +744,6 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
         return await replacement.promise;
       },
     });
-    coordinator.start();
     await executor.discoveryStarted.promise;
     store.run.coordinatorGeneration = 2;
     const heartbeat = coordinator.renewHeartbeat();
@@ -902,8 +774,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
       const fixture = await fixtureRun(config);
       fixture.run.coordinatorGeneration = 2;
       const store = new FakeStore(fixture.run);
-      const preparing = Promise.withResolvers<void>();
-      const failProgress = Promise.withResolvers<void>();
+      const progressWrite = pausePoint();
       const heartbeatReadStarted = Promise.withResolvers<void>();
       const failureReadStarted = Promise.withResolvers<void>();
       const heartbeatRead = Promise.withResolvers<DeepScanRunState>();
@@ -915,8 +786,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
       let failureCalls = 0;
       let observations = 0;
       store.updateProgress = async () => {
-        preparing.resolve();
-        await failProgress.promise;
+        await progressWrite.pause();
         throw new Error(
           leaseLossConfirmed
             ? "Deep Scan coordinator lease belongs to a newer generation."
@@ -939,25 +809,19 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
           "Deep Scan coordinator lease belongs to a newer generation.",
         );
       };
-      const coordinator = createCoordinator(
-        fixture,
-        store,
-        new FakeExecutor(),
-        {
-          threadId: "fixture-owner",
-          heartbeatIntervalMs: 60_000,
-          observeReplacement: async () => {
-            observations += 1;
-            observing.resolve();
-            return await replacement.promise;
-          },
+      const coordinator = startCoordinator(fixture, store, new FakeExecutor(), {
+        threadId: "fixture-owner",
+        heartbeatIntervalMs: 60_000,
+        observeReplacement: async () => {
+          observations += 1;
+          observing.resolve();
+          return await replacement.promise;
         },
-      );
-      coordinator.start();
-      await preparing.promise;
+      });
+      await progressWrite.entered;
       const heartbeat = coordinator.renewHeartbeat();
       await heartbeatReadStarted.promise;
-      failProgress.resolve();
+      progressWrite.release();
       await failureReadStarted.promise;
       const newer = { ...store.run, coordinatorGeneration: 3 };
       store.run = newer;
@@ -992,20 +856,18 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
         fixture.run.coordinatorGeneration = 2;
         const store = new FakeStore(fixture.run);
         store.failProgressAt = 1;
-        const failing = Promise.withResolvers<void>();
-        const release = Promise.withResolvers<void>();
+        const failureWrite = pausePoint();
         store.fail = async (_scanId, message) => {
           const stale = {
             ...store.run,
             status: "failed" as const,
             error: message,
           };
-          failing.resolve();
-          await release.promise;
+          await failureWrite.pause();
           if (rejectFailure) throw new Error("fixture stale failure rejected");
           return stale;
         };
-        const coordinator = createCoordinator(
+        const coordinator = startCoordinator(
           fixture,
           store,
           new FakeExecutor(),
@@ -1019,8 +881,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
             }),
           },
         );
-        coordinator.start();
-        await failing.promise;
+        await failureWrite.entered;
         try {
           if (status === "succeeded") {
             store.run.coordinatorGeneration = 3;
@@ -1033,7 +894,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
             coordinator.failExternallyPersisted("fixture external failure");
           }
         } finally {
-          release.resolve();
+          failureWrite.release();
         }
         const terminal = await coordinator.settled();
         assert.equal(terminal.status, status);
@@ -1081,19 +942,16 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
     const fixture = await fixtureRun(config);
     const store = new FakeStore(fixture.run);
     const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
-    const publishing = Promise.withResolvers<void>();
-    const release = Promise.withResolvers<void>();
+    const publication = pausePoint();
     let publications = 0;
     let cancellationSettled = false;
-    const coordinator = createCoordinator(fixture, store, executor, {
+    const coordinator = startCoordinator(fixture, store, executor, {
       threadId: "fixture-owner",
       onStopped: async () => {
-        publishing.resolve();
-        await release.promise;
+        await publication.pause();
         publications += 1;
       },
     });
-    coordinator.start();
     const terminal = coordinator.settled().catch((error: Error) => error);
     await executor.discoveryStarted.promise;
     const cancellation = coordinator
@@ -1109,7 +967,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
         cancellationSettled = true;
         return error;
       });
-    await publishing.promise;
+    await publication.entered;
     await new Promise<void>((resolve) => setImmediate(resolve));
     try {
       assert.equal(
@@ -1118,7 +976,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
         "lost response must wait for saved result publication",
       );
     } finally {
-      release.resolve();
+      publication.release();
       await terminal;
     }
     assert.match((await cancellation).message, /response lost/);
@@ -1135,21 +993,16 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
     const fixture = await fixtureRun(config);
     const store = new FakeStore(fixture.run);
     const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
-    const publishing = Promise.withResolvers<void>();
-    const release = Promise.withResolvers<void>();
+    const publication = pausePoint();
     let cancellations = 0;
-    const coordinator = createCoordinator(fixture, store, executor, {
+    const coordinator = startCoordinator(fixture, store, executor, {
       threadId: "fixture-owner",
-      onStopped: async () => {
-        publishing.resolve();
-        await release.promise;
-      },
+      onStopped: async () => await publication.pause(),
     });
-    coordinator.start();
     await executor.discoveryStarted.promise;
     store.run.status = "failed";
     coordinator.failExternallyPersisted("fixture worker failure");
-    await publishing.promise;
+    await publication.entered;
     const cancellation = coordinator.cancelAfterPersistence(
       "late cancellation",
       async () => {
@@ -1157,7 +1010,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
       },
       async () => ({ status: "running" }),
     );
-    release.resolve();
+    publication.release();
     const result = await cancellation;
     assert.equal(
       cancellations,
@@ -1173,14 +1026,12 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
       const store = new FakeStore(fixture.run);
       store.failFinish = status === "failed";
       store.rejectFailurePersistence = status === "failed";
-      let coordinator: ReturnType<typeof createCoordinator>;
-      const finalRead = Promise.withResolvers<void>();
-      const release = Promise.withResolvers<void>();
+      let coordinator: ReturnType<typeof startCoordinator>;
+      const finalRead = pausePoint();
       const originalGet = store.get.bind(store);
       store.get = async (...args) => {
         if (coordinator?.snapshot().status === status) {
-          finalRead.resolve();
-          await release.promise;
+          await finalRead.pause();
         }
         return await originalGet(...args);
       };
@@ -1194,7 +1045,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
         threadId: "fixture-owner",
         onStopped: async () => {},
       });
-      await finalRead.promise;
+      await finalRead.entered;
       let persisted = false;
       let resolved = false;
       const cancellation = registry
@@ -1217,7 +1068,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
         false,
         "wait for all coordinator cleanup before durable parent cancellation",
       );
-      release.resolve();
+      finalRead.release();
       assert.equal(
         await cancellation,
         true,
@@ -1254,8 +1105,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
       }
       const store = new FakeStore(fixture.run);
       const executor = new FakeExecutor();
-      const coordinator = createCoordinator(fixture, store, executor);
-      coordinator.start();
+      const coordinator = startCoordinator(fixture, store, executor);
       const terminal = await coordinator.wait(undefined, 5_000);
       assert.equal(terminal?.status, "succeeded", terminal?.error);
       const next = String(BigInt(suffix) + 1n).padStart(4, "0");
@@ -1306,8 +1156,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
       },
     ];
     const store = new FakeStore(fixture.run);
-    const coordinator = createCoordinator(fixture, store, new FakeExecutor());
-    coordinator.start();
+    const coordinator = startCoordinator(fixture, store, new FakeExecutor());
     const terminal = await coordinator.wait(undefined, 5_000);
     assert.equal(terminal?.status, "succeeded", terminal?.error);
     assert.ok(

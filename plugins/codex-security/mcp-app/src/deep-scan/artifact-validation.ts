@@ -32,6 +32,8 @@ export type DeepReductionInput = Omit<ScanDraftInput, "reviewState"> & {
   /** Host-owned accepted coverage, omitted from the legacy persisted reducer format. */
   sourceCoverage?: ScanDraftInput["reviewState"];
 };
+type ReductionFinding = DeepReductionInput["findings"][number];
+
 export const deepReductionInputSchema = projectArtifactToolSchema(
   artifactSchemaDocuments["tools/deep-reducer"].$defs.reductionInput,
 );
@@ -227,8 +229,8 @@ export function reconcileDeepReduction(
         `Deep reduction retained finding ${ref} is not assigned to this reducer.`,
       );
     const retained = structuredClone(finding);
-    (retained.provenance as Record<string, unknown>).sourceFindingIds =
-      retainedFindingSources(finding, index).map((source) => source.id);
+    const sources = retainedFindingSources(finding, index);
+    retained.provenance.sourceFindingIds = sources.map((source) => source.id);
     result.findings.push(retained);
   }
   for (const source of [
@@ -257,8 +259,7 @@ export function reconcileDeepReduction(
       validateRetainedFindingContent(retained, finding, sourceIds);
       preserveFindingDetails(retained, finding);
     }
-    (retained.provenance as Record<string, unknown>).sourceFindingIds =
-      sourceIds;
+    retained.provenance.sourceFindingIds = sourceIds;
   }
   retainSourceFindings(result, { discoveries, previous });
   for (const [field, label] of [
@@ -426,21 +427,17 @@ export function projectDiscoveryCoverage(
   };
 }
 
-function findingSourceIds(finding: Record<string, unknown>): string[] {
-  const { sourceFindingIds, sourceFindings } = finding.provenance as {
-    sourceFindingIds?: string[];
-    sourceFindings?: { id: string }[];
-  };
+function findingSourceIds(finding: ReductionFinding): string[] {
+  const { sourceFindingIds, sourceFindings } = finding.provenance;
   return sourceFindingIds ?? sourceFindings?.map((source) => source.id) ?? [];
 }
 
-function retainedFindingSources(
-  finding: Record<string, unknown>,
+// Old aggregates without retained originals contribute one source named previous:<index>.
+export function retainedFindingSources(
+  finding: ReductionFinding,
   index: number,
 ) {
-  const originals = (finding.provenance as Record<string, unknown>)
-    .sourceFindings as
-    Array<{ id: string; finding: Record<string, unknown> }> | undefined;
+  const originals = finding.provenance.sourceFindings;
   return originals?.length ? originals : [{ id: `previous:${index}`, finding }];
 }
 
@@ -448,12 +445,11 @@ function retainSourceFindings(
   result: DeepReductionInput,
   inputs: DeepReductionSources,
 ): void {
-  type Finding = Record<string, unknown>;
-  const sources = new Map<string, Finding>();
+  const sources = new Map<string, JsonObject>();
   for (const discovery of inputs.discoveries) {
     for (const [index, finding] of discovery.result.findings.entries()) {
       const original = structuredClone(finding);
-      delete (original.provenance as Finding).sourceFindingIds;
+      delete original.provenance.sourceFindingIds;
       sources.set(`${discovery.workerId}:${index}`, original);
     }
   }
@@ -463,8 +459,8 @@ function retainSourceFindings(
     sources.set(original.id, original.finding);
   const claimed = new Set<string>();
   for (const finding of result.findings) {
-    const provenance = finding.provenance as Finding;
-    let refs = provenance.sourceFindingIds as string[] | undefined;
+    const provenance = finding.provenance;
+    let refs = provenance.sourceFindingIds;
     if (refs === undefined) {
       const matches = [...sources].filter(
         ([, source]) =>
@@ -562,18 +558,13 @@ function validateReductionHasFindings(
 function previousFindingAssignments(
   result: DeepReductionInput,
   previous?: DeepReductionInput | null,
-): Map<DeepReductionInput["findings"][number], DeepReductionInput["findings"]> {
-  const assignments = new Map<
-    DeepReductionInput["findings"][number],
-    DeepReductionInput["findings"]
-  >();
+) {
+  const assignments = new Map<ReductionFinding, ReductionFinding[]>();
   for (const [index, finding] of (previous?.findings ?? []).entries()) {
     const previousRefs = retainedFindingSources(finding, index).map(
       (source) => source.id,
     );
-    const originals = (finding.provenance as { sourceFindings?: unknown[] })
-      .sourceFindings;
-    const legacy = !originals?.length;
+    const legacy = !finding.provenance.sourceFindings?.length;
     let matches = result.findings.filter((current) => {
       const refs = new Set(findingSourceIds(current));
       return previousRefs.every((ref) => refs.has(ref));

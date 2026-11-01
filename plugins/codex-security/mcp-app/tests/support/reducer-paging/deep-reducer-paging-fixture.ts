@@ -1,4 +1,5 @@
-import { workerDraft } from "../../scan-draft-fixture.ts";
+import { reducerAssignment } from "../reducer-assignment.ts";
+import { scanId, workerDraft } from "../../scan-draft-fixture.ts";
 import { readJson, writeJson } from "../json.ts";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -9,7 +10,6 @@ import { sourceReferences } from "../source-references.ts";
 // These are the real ceilings reported by the respective transports.
 const IPC_FRAME_LIMIT_BYTES = 64 * 1024 * 1024;
 const STDIO_LINE_LIMIT_BYTES = 16 * 1024 * 1024;
-const SCAN_ID = "7fc17317-9594-49e0-b06a-d72fd7e14bba";
 
 /** Generate one reducer assignment; no repository scan or external service runs. */
 export async function createReducerPagingFixture(
@@ -22,11 +22,10 @@ export async function createReducerPagingFixture(
   const fixtureLimitBytes =
     mode === "model" ? IPC_FRAME_LIMIT_BYTES : responseLimitBytes;
   const fixtureRoot = await realpath(root);
-  const scanRoot = path.join(fixtureRoot, "scan");
-  const deepRoot = path.join(scanRoot, "artifacts", "deep_discovery");
-  const workerRoot = path.join(deepRoot, "workers", "discovery-0001", "output");
-  const previousRoot = path.join(deepRoot, "dedup", "dedup-0001", "output");
-  const outputRoot = path.join(deepRoot, "dedup", "dedup-0002", "output");
+  const assignment = reducerAssignment(fixtureRoot);
+  const workerRoot = assignment.workerOutput("discovery-0001");
+  const previousRoot = assignment.reducerOutput("dedup-0001");
+  const outputRoot = assignment.reducerOutput("dedup-0002");
   await Promise.all(
     [workerRoot, previousRoot, outputRoot].map((directory) =>
       mkdir(directory, { recursive: true }),
@@ -82,14 +81,14 @@ export async function createReducerPagingFixture(
     [...expectedSources].map(([id, value]) => [id, canonicalSha256(value)]),
   );
   const result = {
-    scanId: SCAN_ID,
+    scanId,
     findings: currentFindings,
     scope: {
       summary: "Three independent synthetic request-processing issues.",
     },
   };
   const previous = {
-    scanId: SCAN_ID,
+    scanId,
     findings: [previousCanonical],
     threatModel: {
       summary:
@@ -129,17 +128,11 @@ export async function createReducerPagingFixture(
   const legacyResponseBytes = envelopeBytes + bytes * 2 + stringEscapes;
   assert.ok(legacyResponseBytes > fixtureLimitBytes);
   return {
-    context: {
-      root: outputRoot,
-      repoRoot: fixtureRoot,
-      scanId: SCAN_ID,
-      layout: "reducer" as const,
-      deepReducer: {
-        scanRoot,
-        claimedWorkers: [{ id: workerId, resultPath: workerPath }],
-        previousReducerResultPath: previousPath,
-      },
-    },
+    context: assignment.context(
+      outputRoot,
+      [{ id: workerId, resultPath: workerPath }],
+      previousPath,
+    ),
     resultPath: path.join(outputRoot, "result.json"),
     expected: {
       sourceSha256ById,

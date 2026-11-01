@@ -218,9 +218,3 @@ export function restoreEnv(name: string, value: string | undefined) {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;
 }
-
-export function nativeConfigOverrides(args: readonly string[]) {
-  return args.flatMap((arg, index) =>
-    arg === "--config" || arg === "-c" ? [args[index + 1]] : [],
-  );
-}

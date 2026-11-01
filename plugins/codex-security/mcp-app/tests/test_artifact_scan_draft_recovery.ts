@@ -48,6 +48,36 @@ const findingFor = (candidateId: string): FixtureFinding => ({
   provenance: { source: "local_plugin", candidateId },
 });
 
+async function finalizeParentFindings({
+  root,
+  context,
+}: Awaited<ReturnType<typeof fixture>>) {
+  const manifestPath = path.join(root, "scan-manifest.json");
+  const manifest = await readJson(manifestPath);
+  Object.assign(manifest.scan, {
+    id: context.scanId,
+    producer: { name: "codex-security-plugin", version: "0.1.0" },
+    status: "completed",
+    startedAt: "2026-05-31T18:00:00Z",
+    completedAt: "2026-05-31T18:09:00Z",
+  });
+  await writeJson(manifestPath, manifest);
+  for (const file of ["findings.json", "coverage.json"]) {
+    const filePath = path.join(root, file);
+    const document = await readJson(filePath);
+    document.scanId = context.scanId;
+    await writeJson(filePath, document);
+  }
+  await execFileAsync(process.env.PYTHON?.trim() || "python3", [
+    fileURLToPath(
+      new URL("../../scripts/finalize_scan_contract.py", import.meta.url),
+    ),
+    "--scan-dir",
+    root,
+  ]);
+  return (await readJson(root, "findings.json")).findings;
+}
+
 // Finding reconciliation is shared by failed and canceled scans. Exercise both
 // terminal bindings without repeating every identity case for each status.
 for (const [layout, status] of [
@@ -215,10 +245,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       await f.write(submitted);
       await f.write(submitted);
       await f.writeReviewState({}, true);
-      const saved = await readJson(
-        f.root,
-        layout === "worker" ? "result.json" : "findings.json",
-      );
+      const saved = await readJson(f.findingsPath);
       assert.equal(saved.findings.length, 1);
     });
   }
@@ -227,41 +254,14 @@ for (const layout of ["standard", "diff", "worker"] as const) {
     for (const candidate of ["first", "second", "third"])
       await f.writeFindings([findingFor(candidate)]);
     await f.writeReviewState({}, true);
-    const saved = await readJson(
-      f.root,
-      layout === "worker" ? "result.json" : "findings.json",
-    );
+    const saved = await readJson(f.findingsPath);
     assert.equal(saved.findings.length, 3);
     if (layout !== "worker") {
       assert.equal(
         new Set(saved.findings.map(draftApi.scanFindingIdentity)).size,
         3,
       );
-      const manifestPath = path.join(f.root, "scan-manifest.json");
-      const manifest = await readJson(manifestPath);
-      Object.assign(manifest.scan, {
-        id: f.context.scanId!,
-        producer: { name: "codex-security-plugin", version: "0.1.0" },
-        status: "completed",
-        startedAt: "2026-05-31T18:00:00Z",
-        completedAt: "2026-05-31T18:09:00Z",
-      });
-      await writeFile(manifestPath, JSON.stringify(manifest));
-      for (const file of ["findings.json", "coverage.json"]) {
-        const filePath = path.join(f.root, file);
-        const document = await readJson(filePath);
-        document.scanId = f.context.scanId;
-        await writeFile(filePath, JSON.stringify(document));
-      }
-      await execFileAsync(process.env.PYTHON?.trim() || "python3", [
-        fileURLToPath(
-          new URL("../../scripts/finalize_scan_contract.py", import.meta.url),
-        ),
-        "--scan-dir",
-        f.root,
-      ]);
-      const completed = await readJson(f.root, "findings.json");
-      assert.equal(completed.findings.length, 3);
+      assert.equal((await finalizeParentFindings(f)).length, 3);
     }
     assert.deepEqual(
       new Set(
@@ -1647,13 +1647,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       });
       const original = structuredClone(input);
       if (interrupted) {
-        await interruptDraftWrite(
-          path.join(
-            f.root,
-            layout === "worker" ? "result.json" : "findings.json",
-          ),
-          () => f.write(input),
-        );
+        await interruptDraftWrite(f.findingsPath, () => f.write(input));
       }
       const initial = await f.write(input);
       const [surface] = initial.reviewState.surfaces;
@@ -1962,14 +1956,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         await f.writeReviewState({ resolvedDeferred: [close(task.id)] }, true);
       for (const input of [f.draft({ deferred: [task] }), f.draft()]) {
         await f.write(input);
-        const published = await readJson(
-          f.root,
-          layout === "worker" ? "result.json" : "scan-manifest.json",
-        );
-        assert.equal(
-          layout === "worker" ? published.complete : published.scan.complete,
-          false,
-        );
+        assert.equal(await f.readComplete(), false);
         if (layout === "worker") {
           const head = await readJson(f.root, "checkpoint-head.json");
           const checkpoint = await readJson(
@@ -1982,14 +1969,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         }
       }
       await f.writeReviewState({ resolvedDeferred: [close(task.id)] }, true);
-      const finished = await readJson(
-        f.root,
-        layout === "worker" ? "result.json" : "scan-manifest.json",
-      );
-      assert.notEqual(
-        layout === "worker" ? finished.complete : finished.scan.complete,
-        false,
-      );
+      assert.notEqual(await f.readComplete(), false);
     });
   }
 
@@ -2086,12 +2066,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
             ),
             pendingBefore ? followUp : reviewed,
           );
-          const published = await readJson(
-            f.root,
-            layout === "worker" ? "result.json" : "scan-manifest.json",
-          );
-          const complete =
-            layout === "worker" ? published.complete : published.scan.complete;
+          const complete = await f.readComplete();
           if (pendingBefore || pendingAfter) assert.equal(complete, false);
           else assert.notEqual(complete, false);
         }
@@ -2108,14 +2083,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         const finished = await f.read();
         assert.deepEqual(finished.deferred, []);
         assert.equal(finished.surfaces[0].disposition, "no_issue_found");
-        const published = await readJson(
-          f.root,
-          layout === "worker" ? "result.json" : "scan-manifest.json",
-        );
-        assert.notEqual(
-          layout === "worker" ? published.complete : published.scan.complete,
-          false,
-        );
+        assert.notEqual(await f.readComplete(), false);
       });
     }
   }
@@ -2124,14 +2092,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
     const f = await fixture(t, layout);
     await f.writeReviewState({}, true);
     await f.writeReviewState({ deferred: [{ id: "late", ...generic }] });
-    const published = await readJson(
-      f.root,
-      layout === "worker" ? "result.json" : "scan-manifest.json",
-    );
-    assert.equal(
-      layout === "worker" ? published.complete : published.scan.complete,
-      false,
-    );
+    assert.equal(await f.readComplete(), false);
     const pending = (await f.read()).deferred;
     assert.deepEqual(pending, [{ id: "late", ...generic }]);
     await f.writeReviewState({}, true);
@@ -2315,14 +2276,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
             otherPending,
           );
           assert.equal(result.reviewState.completeness, undefined);
-          const document = await readJson(
-            f.root,
-            layout === "worker" ? "result.json" : "scan-manifest.json",
-          );
-          assert.equal(
-            layout === "worker" ? document.complete : document.scan.complete,
-            false,
-          );
+          assert.equal(await f.readComplete(), false);
         }
       });
     }
@@ -2364,10 +2318,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       const input = f.findingsDraft([reported], { complete: true });
       await f.write(input);
       await f.write(input);
-      const saved = await readJson(
-        f.root,
-        layout === "worker" ? "result.json" : "findings.json",
-      );
+      const saved = await readJson(f.findingsPath);
       assert.equal(saved.findings.length, 1);
       const provenance = saved.findings[0].provenance;
       for (const field of ["sourceFindingIds", "sourceFindings"] as const) {
@@ -2387,32 +2338,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       const parent = layout === "worker" ? await fixture(t, "deep") : f;
       if (layout === "worker")
         await parent.writeFindings(saved.findings, { complete: true });
-      const manifestPath = path.join(parent.root, "scan-manifest.json");
-      const manifest = await readJson(manifestPath);
-      Object.assign(manifest.scan, {
-        id: parent.context.scanId,
-        producer: { name: "codex-security-plugin", version: "0.1.0" },
-        status: "completed",
-        startedAt: "2026-05-31T18:00:00Z",
-        completedAt: "2026-05-31T18:09:00Z",
-      });
-      await writeFile(manifestPath, JSON.stringify(manifest));
-      for (const file of ["findings.json", "coverage.json"]) {
-        const document = await readJson(parent.root, file);
-        document.scanId = parent.context.scanId;
-        await writeFile(path.join(parent.root, file), JSON.stringify(document));
-      }
-      await execFileAsync(process.env.PYTHON?.trim() || "python3", [
-        fileURLToPath(
-          new URL("../../scripts/finalize_scan_contract.py", import.meta.url),
-        ),
-        "--scan-dir",
-        parent.root,
-      ]);
-      assert.equal(
-        (await readJson(parent.root, "findings.json")).findings.length,
-        1,
-      );
+      assert.equal((await finalizeParentFindings(parent)).length, 1);
     });
   }
 }

@@ -4,9 +4,10 @@ import {
   deepReducerInputsInputSchema,
   getCodexSecurityDeepReducerInputs,
 } from "./artifact-deep-reducer.js";
-import type {
-  DeepReductionInput,
-  DeepReductionSources,
+import {
+  retainedFindingSources,
+  type DeepReductionInput,
+  type DeepReductionSources,
 } from "./deep-scan/artifact-validation.js";
 
 export type DeepReducerPageInput = z.infer<typeof deepReducerInputsInputSchema>;
@@ -63,7 +64,7 @@ export async function getCodexSecurityDeepReducerInputsPage(
 }
 
 function createDocuments(sources: DeepReductionSources) {
-  const findings = new Map<string, Finding | string>();
+  const findings = new Map<string, Record<string, unknown> | string>();
   const discoveries = sources.discoveries.map((discovery) => ({
     workerId: discovery.workerId,
     result: {
@@ -79,19 +80,10 @@ function createDocuments(sources: DeepReductionSources) {
         ...sources.previous,
         findings: sources.previous.findings.map((finding, index) => {
           findings.set(`previous:${index}`, finding);
-          const originals = (finding.provenance as Record<string, unknown>)
-            .sourceFindings as
-            Array<{ id: string; finding: Finding }> | undefined;
-          // Match retainSourceFindings: old aggregates without retained
-          // originals contribute one source named previous:<index>.
-          const refs = originals?.length
-            ? originals.map((original) => {
-                findings.set(`source:${original.id}`, original.finding);
-                return original.id;
-              })
-            : [`previous:${index}`];
-          if (!originals?.length)
-            findings.set(`source:previous:${index}`, finding);
+          const refs = retainedFindingSources(finding, index).map((source) => {
+            findings.set(`source:${source.id}`, source.finding);
+            return source.id;
+          });
           return projectFinding(finding, refs);
         }),
       }

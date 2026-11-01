@@ -1,3 +1,4 @@
+import { after, before, test } from "node:test";
 import * as z from "zod/v4";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { readJson } from "./support/json.ts";
@@ -56,22 +57,13 @@ const context = {
 };
 const components = ["artifacts", "02_discovery", "candidate_ledger.jsonl"];
 
-try {
-  await testSchemaSourceOfTruth();
-  await testScanContext();
-  await testWorkerStandardLayout();
-  await testSafeJsonAndJsonl();
-  await testAtomicReplacementAfterInterruptedWriter();
-  await testAtomicReplacement();
-  await testBoundedPagination();
-  await testUnsafeArtifacts();
-} finally {
-  await rm(fixture, { force: true, recursive: true });
-}
+after(() => rm(fixture, { force: true, recursive: true }));
+before(async () => {
+  await mkdir(context.root, { recursive: true });
+  await mkdir(context.repoRoot, { recursive: true });
+});
 
-console.log("Codex Security compact artifact foundation tests passed");
-
-async function testSchemaSourceOfTruth() {
+test(async function testSchemaSourceOfTruth() {
   const common =
     schemas.artifactSchemaDocuments["definitions/artifact-common"].$defs;
   const validator = z.strictObject({
@@ -146,13 +138,11 @@ async function testSchemaSourceOfTruth() {
       candidateId,
     );
   }
-}
+});
 
-async function testScanContext() {
+test(async function testScanContext() {
   const root = path.join(fixture, "scan");
   const repoRoot = path.join(fixture, "repository");
-  await mkdir(root, { recursive: true });
-  await mkdir(repoRoot, { recursive: true });
   const scanId = "61a20957-1be8-4ccf-8de8-eab4061e8cc3";
   const contract = {
     target: {
@@ -231,9 +221,9 @@ async function testScanContext() {
     })),
     /requested scan identity/,
   );
-}
+});
 
-async function testWorkerStandardLayout() {
+test(async function testWorkerStandardLayout() {
   const root = path.join(fixture, "worker", "output");
   const repoRoot = path.join(fixture, "repository");
   await mkdir(root, { recursive: true });
@@ -299,32 +289,9 @@ async function testWorkerStandardLayout() {
     });
   assert.equal(reducer.layout, "reducer");
   assert.equal(reducer.deepReducer.claimedWorkers[0].id, "worker-1");
-}
+});
 
-async function testAtomicReplacementAfterInterruptedWriter() {
-  const destination = await io.artifactDestination(
-    context,
-    ["interrupted.json"],
-    "interrupted artifact",
-  );
-  const child = spawn(process.execPath, [
-    "-e",
-    'require("node:fs").openSync(process.argv[1], "wx", 0o600); process.stdout.write("locked"); setInterval(() => {}, 1000);',
-    destination + ".lock",
-  ]);
-  await once(child.stdout, "data");
-  child.kill("SIGKILL");
-  await once(child, "close");
-  await io.replaceArtifactText(destination, "recovered\n");
-  assert.equal(await readFile(destination, "utf8"), "recovered\n");
-  const values = ["a", "b", "c"].map((value) => value.repeat(32_000));
-  await Promise.all(
-    values.map((value) => io.replaceArtifactText(destination, value)),
-  );
-  assert.ok(values.includes(await readFile(destination, "utf8")));
-}
-
-async function testSafeJsonAndJsonl() {
+test(async function testSafeJsonAndJsonl() {
   const destination = await io.artifactDestination(
     context,
     components,
@@ -418,9 +385,32 @@ async function testSafeJsonAndJsonl() {
       await chmod(destination, 0o600);
     }
   }
-}
+});
 
-async function testAtomicReplacement() {
+test(async function testAtomicReplacementAfterInterruptedWriter() {
+  const destination = await io.artifactDestination(
+    context,
+    ["interrupted.json"],
+    "interrupted artifact",
+  );
+  const child = spawn(process.execPath, [
+    "-e",
+    'require("node:fs").openSync(process.argv[1], "wx", 0o600); process.stdout.write("locked"); setInterval(() => {}, 1000);',
+    destination + ".lock",
+  ]);
+  await once(child.stdout, "data");
+  child.kill("SIGKILL");
+  await once(child, "close");
+  await io.replaceArtifactText(destination, "recovered\n");
+  assert.equal(await readFile(destination, "utf8"), "recovered\n");
+  const values = ["a", "b", "c"].map((value) => value.repeat(32_000));
+  await Promise.all(
+    values.map((value) => io.replaceArtifactText(destination, value)),
+  );
+  assert.ok(values.includes(await readFile(destination, "utf8")));
+});
+
+test(async function testAtomicReplacement() {
   const destination = await io.artifactDestination(
     context,
     components,
@@ -443,9 +433,9 @@ async function testAtomicReplacement() {
   assert.deepEqual(await readdir(path.dirname(destination)), [
     "candidate_ledger.jsonl",
   ]);
-}
+});
 
-async function testBoundedPagination() {
+test(async function testBoundedPagination() {
   const rows = [
     { path: "./src/first.ts" },
     { path: "scope with spaces/café.ts" },
@@ -466,9 +456,9 @@ async function testBoundedPagination() {
     () => io.paginateArtifactRows(rows, { cursor: "4" }, "review_items"),
     /outside the available rows/,
   );
-}
+});
 
-async function testUnsafeArtifacts() {
+test(async function testUnsafeArtifacts() {
   for (const components of [
     [],
     ["..", "outside.json"],
@@ -523,4 +513,4 @@ async function testUnsafeArtifacts() {
     ),
     /safe regular directory|escaped|context/i,
   );
-}
+});

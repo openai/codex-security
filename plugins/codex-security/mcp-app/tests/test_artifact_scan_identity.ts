@@ -33,6 +33,29 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+async function createWorker(parent: DraftFixture, id = "reviewer") {
+  const root = path.join(parent.root, id);
+  await mkdir(root);
+  return draftFixture(root, "worker");
+}
+
+async function recoveryWriters(
+  t: Parameters<typeof fixture>[0],
+  layout: Parameters<typeof fixture>[1],
+) {
+  const { normal, recovered, recover } = await recoveryPair(
+    t,
+    layout === "worker" ? "deep" : layout,
+  );
+  const normalWriter =
+    layout === "worker" ? await createWorker(normal) : normal;
+  const recoveredWriter =
+    layout === "worker" ? await createWorker(recovered) : recovered;
+  const workers =
+    layout === "worker" ? [savedWorker(recoveredWriter.root)] : [];
+  return { normal, normalWriter, recoveredWriter, workers, recover };
+}
+
 function withWorkerId(rows: FixtureFinding[], workerId: string) {
   return rows.map((row) => ({
     ...row,
@@ -103,11 +126,10 @@ for (const variant of [
   for (const reversed of [false, true]) {
     test(`worker ${variant} identity survives recovery (reversed=${reversed})`, async (t) => {
       const { normal, recovered, recover } = await recoveryPair(t, "deep");
-      const workerRoot = path.join(normal.root, "worker");
-      const interruptedRoot = path.join(recovered.root, "worker");
-      await Promise.all([mkdir(workerRoot), mkdir(interruptedRoot)]);
-      const worker = draftFixture(workerRoot, "worker");
-      const interrupted = draftFixture(interruptedRoot, "worker");
+      const [worker, interrupted] = await Promise.all([
+        createWorker(normal, "worker"),
+        createWorker(recovered, "worker"),
+      ]);
       const locations = [
         { path: "src/first.py", startLine: 1 },
         { path: "src/second.py", startLine: 2 },
@@ -135,10 +157,10 @@ for (const variant of [
       }
       await worker.writeFindings([rows[1]]);
       await interrupted.checkpoint(interrupted.findingsDraft([rows[1]]));
-      const saved = await readJson(workerRoot, "result.json");
+      const saved = await readJson(worker.root, "result.json");
       await normal.writeFindings(withWorkerId(saved.findings, "worker"));
       const result = await recover({
-        workers: [savedWorker(interruptedRoot, "worker", "succeeded")],
+        workers: [savedWorker(interrupted.root, "worker", "succeeded")],
         details: true,
         replay: true,
         provenanceDetails: true,
@@ -216,11 +238,10 @@ for (const observations of [
 ]) {
   test(`worker checkpoints preserve reordered JSON identities ${observations.join("/")}`, async (t) => {
     const { normal, recovered, recover } = await recoveryPair(t, "deep");
-    const workerRoot = path.join(normal.root, "worker");
-    const interruptedRoot = path.join(recovered.root, "worker");
-    await Promise.all([mkdir(workerRoot), mkdir(interruptedRoot)]);
-    const worker = draftFixture(workerRoot, "worker");
-    const interrupted = draftFixture(interruptedRoot, "worker");
+    const [worker, interrupted] = await Promise.all([
+      createWorker(normal, "worker"),
+      createWorker(recovered, "worker"),
+    ]);
     const findings = observations.map((value) =>
       finding("Synthetic review", {
         extensions: { observations: [{ value }] },
@@ -241,21 +262,21 @@ for (const observations of [
         const name =
           createHash("sha256").update(contents).digest("hex") + ".json";
         await writeFile(
-          path.join(interruptedRoot, "checkpoints", name),
+          path.join(interrupted.root, "checkpoints", name),
           contents,
         );
       } else {
         await interrupted.checkpoint(snapshot);
       }
       if (index === 0) {
-        await dateDraftFiles(workerRoot, 100);
-        await dateDraftFiles(interruptedRoot, 100);
+        await dateDraftFiles(worker.root, 100);
+        await dateDraftFiles(interrupted.root, 100);
       }
     }
-    const saved = await readJson(workerRoot, "result.json");
+    const saved = await readJson(worker.root, "result.json");
     await normal.writeFindings(withWorkerId(saved.findings, "worker"));
     const result = await recover({
-      workers: [savedWorker(interruptedRoot, "worker")],
+      workers: [savedWorker(interrupted.root, "worker")],
       details: true,
       replay: true,
     });
@@ -454,11 +475,10 @@ const terminalDraftCases: Array<{
 for (const { variant, expectedCount, observation } of terminalDraftCases) {
   test(`worker: a newer terminal draft reconciles ${variant} observations`, async (t) => {
     const { normal, recovered, recover } = await recoveryPair(t, "deep");
-    const workerRoot = path.join(normal.root, "worker");
-    const interruptedRoot = path.join(recovered.root, "worker");
-    await Promise.all([mkdir(workerRoot), mkdir(interruptedRoot)]);
-    const worker = draftFixture(workerRoot, "worker");
-    const interrupted = draftFixture(interruptedRoot, "worker");
+    const [worker, interrupted] = await Promise.all([
+      createWorker(normal, "worker"),
+      createWorker(recovered, "worker"),
+    ]);
     const plain = finding(
       "Synthetic review",
       observation
@@ -557,10 +577,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         provenance: { source: "local_plugin", candidateId: "candidate-1" },
       },
     ]);
-    const saved = await readJson(
-      f.root,
-      layout === "worker" ? "result.json" : "findings.json",
-    );
+    const saved = await readJson(f.findingsPath);
     assert.equal(saved.findings.length, 1);
     assert.equal(saved.findings[0].provenance.candidateId, "candidate-1");
   });
@@ -644,9 +661,7 @@ for (const variant of [
     const workers = [];
     const findings = [];
     for (const [index, id] of ["reviewer-a", "reviewer-b"].entries()) {
-      const root = path.join(recovered.root, id);
-      await mkdir(root);
-      const worker = draftFixture(root, "worker");
+      const worker = await createWorker(recovered, id);
       const value = finding(
         variant === "same title" || index === 0
           ? "First review"
@@ -666,7 +681,7 @@ for (const variant of [
       if (variant === "authored anchor" && index === 0)
         value.identity = { anchor: "established-review" };
       await worker.writeFindings([value]);
-      const result = await readJson(root, "result.json");
+      const result = await readJson(worker.root, "result.json");
       if (variant === "rejected sibling" && index === 1) {
         await worker.writeReviewState(
           {
@@ -684,7 +699,7 @@ for (const variant of [
       } else {
         findings.push(...withWorkerId(result.findings, id));
       }
-      workers.push(savedWorker(root, id));
+      workers.push(savedWorker(worker.root, id));
     }
     await normal.writeFindings(findings);
     const result = await recover({ workers });
@@ -708,12 +723,8 @@ for (const [kind, metadata, identifier] of [
 ]) {
   test(`deep: ${kind} via ${metadata}/${identifier ?? "plain"} matches published worker identities`, async (t) => {
     const { normal, recovered, recover } = await recoveryPair(t, "deep");
-    const normalRoot = path.join(normal.root, "reviewer");
-    const recoveryRoot = path.join(recovered.root, "reviewer");
-    await mkdir(normalRoot);
-    await mkdir(recoveryRoot);
-    const publishedWorker = draftFixture(normalRoot, "worker");
-    const interruptedWorker = draftFixture(recoveryRoot, "worker");
+    const publishedWorker = await createWorker(normal);
+    const interruptedWorker = await createWorker(recovered);
     const first = finding("First review", {
       ...(kind === "candidate enrichment"
         ? {}
@@ -746,9 +757,11 @@ for (const [kind, metadata, identifier] of [
     await interruptedWorker.checkpoint(
       interruptedWorker.findingsDraft([second]),
     );
-    const result = await readJson(normalRoot, "result.json");
+    const result = await readJson(publishedWorker.root, "result.json");
     await normal.writeFindings(withWorkerId(result.findings, "reviewer"));
-    const comparison = await recover({ workers: [savedWorker(recoveryRoot)] });
+    const comparison = await recover({
+      workers: [savedWorker(interruptedWorker.root)],
+    });
     assert.equal(
       comparison.normal.length,
       kind === "candidate aliases" ? 2 : 1,
@@ -794,12 +807,8 @@ for (const variant of [
   for (const reversed of [false, true]) {
     test(`deep: explicit worker identity survives ${variant} revision (reverse=${reversed})`, async (t) => {
       const { normal, recovered, recover } = await recoveryPair(t, "deep");
-      const nwroot = path.join(normal.root, "reviewer"),
-        rwroot = path.join(recovered.root, "reviewer");
-      await mkdir(nwroot);
-      await mkdir(rwroot);
-      const nw = draftFixture(nwroot, "worker"),
-        rw = draftFixture(rwroot, "worker");
+      const nw = await createWorker(normal);
+      const rw = await createWorker(recovered);
       const first = finding("First review", {
         identity: { anchor: "authored-review" },
       });
@@ -828,9 +837,9 @@ for (const variant of [
       await rw.writeFindings(ordered(first));
       await nw.writeFindings(ordered(second));
       await rw.checkpoint(rw.findingsDraft(ordered(second)));
-      const result = await readJson(nwroot, "result.json");
+      const result = await readJson(nw.root, "result.json");
       await normal.writeFindings(withWorkerId(result.findings, "reviewer"));
-      const comparison = await recover({ workers: [savedWorker(rwroot)] });
+      const comparison = await recover({ workers: [savedWorker(rw.root)] });
       assert.equal(comparison.normal.length, withSibling ? 2 : 1);
       assert.deepEqual(comparison.recovered, comparison.normal);
       assert.deepEqual(comparison.warnings, []);
@@ -868,26 +877,8 @@ for (const layout of ["standard", "diff", "worker"] as const) {
     "retained sibling",
   ]) {
     test(`${layout}: checkpoint reconciliation preserves ${variant}`, async (t) => {
-      const { normal, recovered, recover } = await recoveryPair(
-        t,
-        layout === "worker" ? "deep" : layout,
-      );
-      let normalSource = normal,
-        recoveredSource = recovered;
-      const workers = [];
-      if (layout === "worker") {
-        for (const f of [normal, recovered])
-          await mkdir(path.join(f.root, "reviewer"));
-        normalSource = draftFixture(
-          path.join(normal.root, "reviewer"),
-          "worker",
-        );
-        recoveredSource = draftFixture(
-          path.join(recovered.root, "reviewer"),
-          "worker",
-        );
-        workers.push(savedWorker(recoveredSource.root));
-      }
+      const { normal, normalWriter, recoveredWriter, workers, recover } =
+        await recoveryWriters(t, layout);
       const first = finding("First review", {
         provenance: { source: "local_plugin", candidateId: "candidate-1" },
       });
@@ -906,14 +897,14 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       if (variant === "retained sibling") second.title = "Second review";
       const initial =
         variant === "retained sibling" ? [first, second] : [first];
-      for (const f of [normalSource, recoveredSource])
+      for (const f of [normalWriter, recoveredWriter])
         await f.writeFindings(initial);
-      await normalSource.writeFindings([second], { complete: true });
-      await recoveredSource.checkpoint(
-        recoveredSource.findingsDraft([second], { complete: true }),
+      await normalWriter.writeFindings([second], { complete: true });
+      await recoveredWriter.checkpoint(
+        recoveredWriter.findingsDraft([second], { complete: true }),
       );
       if (layout === "worker") {
-        const saved = await readJson(normalSource.root, "result.json");
+        const saved = await readJson(normalWriter.root, "result.json");
         await normal.writeFindings(withWorkerId(saved.findings, "reviewer"));
       }
       const result = await recover({
@@ -1045,12 +1036,8 @@ for (const layout of ["standard", "diff", "deep"] as const) {
 for (const field of ["reportId", "ledgerRowId"]) {
   test(`deep: worker blank ${field} enrichment retains publication identity`, async (t) => {
     const { normal, recovered, recover } = await recoveryPair(t, "deep");
-    const normalRoot = path.join(normal.root, "reviewer");
-    const recoveredRoot = path.join(recovered.root, "reviewer");
-    await mkdir(normalRoot);
-    await mkdir(recoveredRoot);
-    const normalWorker = draftFixture(normalRoot, "worker");
-    const recoveredWorker = draftFixture(recoveredRoot, "worker");
+    const normalWorker = await createWorker(normal);
+    const recoveredWorker = await createWorker(recovered);
     const first = finding("Synthetic worker review", {
       provenance: { source: "local_plugin", candidateId: "candidate-1" },
       extensions: { [field]: " \t " },
@@ -1060,9 +1047,11 @@ for (const field of ["reportId", "ledgerRowId"]) {
       await normalWorker.writeFindings([value]);
       await recoveredWorker.checkpoint(recoveredWorker.findingsDraft([value]));
     }
-    const saved = await readJson(normalRoot, "result.json");
+    const saved = await readJson(normalWorker.root, "result.json");
     await normal.writeFindings(withWorkerId(saved.findings, "reviewer"));
-    const result = await recover({ workers: [savedWorker(recoveredRoot)] });
+    const result = await recover({
+      workers: [savedWorker(recoveredWorker.root)],
+    });
     assert.equal(result.normal.length, 1);
     assert.equal(result.recovered.length, 1);
     assert.deepEqual(result.warnings, []);
@@ -1149,12 +1138,8 @@ for (const layout of ["standard", "diff", "deep"] as const) {
 
 test("deep: refined candidate retains independent cross-location report", async (t) => {
   const { normal, recovered, recover } = await recoveryPair(t, "deep");
-  const normalRoot = path.join(normal.root, "reviewer");
-  const recoveredRoot = path.join(recovered.root, "reviewer");
-  await mkdir(normalRoot);
-  await mkdir(recoveredRoot);
-  const normalWorker = draftFixture(normalRoot, "worker");
-  const recoveredWorker = draftFixture(recoveredRoot, "worker");
+  const normalWorker = await createWorker(normal);
+  const recoveredWorker = await createWorker(recovered);
   const first = finding("First review", {
     severity: { level: "high" },
     provenance: { source: "local_plugin", candidateId: "candidate-1" },
@@ -1173,10 +1158,10 @@ test("deep: refined candidate retains independent cross-location report", async 
     await normalWorker.writeFindings(findings);
     await recoveredWorker.checkpoint(recoveredWorker.findingsDraft(findings));
   }
-  const saved = await readJson(normalRoot, "result.json");
+  const saved = await readJson(normalWorker.root, "result.json");
   await normal.writeFindings(withWorkerId(saved.findings, "reviewer"));
   const result = await recover({
-    workers: [savedWorker(recoveredRoot)],
+    workers: [savedWorker(recoveredWorker.root)],
     details: true,
   });
 
@@ -1300,9 +1285,7 @@ for (const authored of [false, true]) {
     const workers = [],
       findings = [];
     for (const id of ["worker-a", "worker-b"]) {
-      const workerRoot = path.join(recovered.root, id);
-      await mkdir(workerRoot);
-      const worker = draftFixture(workerRoot, "worker");
+      const worker = await createWorker(recovered, id);
       const value = finding("Synthetic bound owner review", {
         provenance: { source: "local_plugin", candidateId: "candidate-1" },
         ...(authored ? { identity: { anchor: "authored-review" } } : {}),
@@ -1317,7 +1300,7 @@ for (const authored of [false, true]) {
         ...value,
         provenance: { ...value.provenance, workerId: id },
       });
-      workers.push(savedWorker(workerRoot, id));
+      workers.push(savedWorker(worker.root, id));
     }
     await normal.writeFindings(findings);
     const result = await recover({ workers });
@@ -1332,11 +1315,8 @@ for (const order of ["earlier-first", "later-first"]) {
     for (const initialLevel of ["low", "high"]) {
       test(`worker revised raw checkpoint retains ${metadata} enrichment (${order}, ${initialLevel} to low)`, async (t) => {
         const { normal, recovered, recover } = await recoveryPair(t, "deep");
-        const normalRoot = path.join(normal.root, "reviewer"),
-          recoveredRoot = path.join(recovered.root, "reviewer");
-        for (const root of [normalRoot, recoveredRoot]) await mkdir(root);
-        const worker = draftFixture(normalRoot, "worker"),
-          recoveryWorker = draftFixture(recoveredRoot, "worker");
+        const worker = await createWorker(normal);
+        const recoveryWorker = await createWorker(recovered);
         const initial = {
           ...finding("Synthetic review"),
           summary: "Initial assessment.",
@@ -1365,14 +1345,14 @@ for (const order of ["earlier-first", "later-first"]) {
           await worker.write(draft);
           await saveCheckpointAt(recoveryWorker, draft, 100 + index * 100);
         }
-        const saved = await readJson(normalRoot, "result.json");
+        const saved = await readJson(worker.root, "result.json");
         assert.equal(saved.findings.length, 1);
         assert.equal(saved.findings[0].summary, revised.summary);
         assert.equal(saved.findings[0].severity.level, "low");
         assert.equal(saved.findings[0][metadata].candidateId, "candidate-1");
         await normal.writeFindings(withWorkerId(saved.findings, "reviewer"));
         const result = await recover({
-          workers: [savedWorker(recoveredRoot)],
+          workers: [savedWorker(recoveryWorker.root)],
           details: true,
         });
         assert.deepEqual(result.warnings, []);
@@ -1444,9 +1424,7 @@ for (const sameTitle of [false, true]) {
     const workers = [],
       findings = [];
     for (const [index, id] of ["worker-a", "worker-b"].entries()) {
-      const workerRoot = path.join(recovered.root, id);
-      await mkdir(workerRoot);
-      const worker = draftFixture(workerRoot, "worker");
+      const worker = await createWorker(recovered, id);
       const value = finding(
         sameTitle
           ? "Synthetic shared review"
@@ -1460,9 +1438,9 @@ for (const sameTitle of [false, true]) {
         },
       );
       await worker.writeFindings([value]);
-      const saved = await readJson(workerRoot, "result.json");
+      const saved = await readJson(worker.root, "result.json");
       findings.push(...saved.findings);
-      workers.push(savedWorker(workerRoot, id));
+      workers.push(savedWorker(worker.root, id));
     }
     await normal.writeFindings(findings);
     const result = await recover({ workers });
@@ -1474,12 +1452,8 @@ for (const sameTitle of [false, true]) {
 for (const authored of [false, true]) {
   test(`bound owner keeps same worker metadata revision authored=${authored}`, async (t) => {
     const { normal, recovered, recover } = await recoveryPair(t, "deep");
-    const workerRoot = path.join(recovered.root, "worker-a"),
-      normalWorkerRoot = path.join(normal.root, "worker-a");
-    await mkdir(workerRoot);
-    await mkdir(normalWorkerRoot);
-    const worker = draftFixture(workerRoot, "worker"),
-      normalWorker = draftFixture(normalWorkerRoot, "worker");
+    const worker = await createWorker(recovered, "worker-a");
+    const normalWorker = await createWorker(normal, "worker-a");
     for (const alias of ["discovery", "refined"]) {
       const value = finding("Synthetic shared review", {
         provenance: {
@@ -1492,10 +1466,10 @@ for (const authored of [false, true]) {
       await normalWorker.writeFindings([value]);
       await worker.checkpoint(worker.findingsDraft([value]));
     }
-    const saved = await readJson(normalWorkerRoot, "result.json");
+    const saved = await readJson(normalWorker.root, "result.json");
     await normal.writeFindings(saved.findings);
     const result = await recover({
-      workers: [savedWorker(workerRoot, "worker-a")],
+      workers: [savedWorker(worker.root, "worker-a")],
     });
     assert.equal(result.normal.length, 1);
     assert.deepEqual(result.recovered, result.normal);
@@ -1507,11 +1481,8 @@ for (const metadata of ["provenance", "extensions"] as const) {
   for (const shape of ["shared siblings", "reportId", "ledgerRowId"]) {
     test(`raw group authority preserves ${shape} with ${metadata} candidates`, async (t) => {
       const { normal, recovered, recover } = await recoveryPair(t, "deep");
-      const normalRoot = path.join(normal.root, "reviewer"),
-        recoveredRoot = path.join(recovered.root, "reviewer");
-      for (const root of [normalRoot, recoveredRoot]) await mkdir(root);
-      const writer = draftFixture(normalRoot, "worker"),
-        interrupted = draftFixture(recoveredRoot, "worker");
+      const writer = await createWorker(normal);
+      const interrupted = await createWorker(recovered);
       const first = finding("First review");
       first[metadata] = { ...first[metadata], candidateId: "candidate-1" };
       if (shape === "shared siblings")
@@ -1531,20 +1502,20 @@ for (const metadata of ["provenance", "extensions"] as const) {
       };
       for (const worker of [writer, interrupted])
         await worker.writeFindings(initial);
-      await dateDraftFiles(recoveredRoot, 100);
+      await dateDraftFiles(interrupted.root, 100);
       const update = writer.findingsDraft([revised]);
       await writer.write(update);
       await interrupted.checkpoint(update);
       await utimes(
-        path.join(recoveredRoot, "checkpoints", checkpointName(update)),
+        path.join(interrupted.root, "checkpoints", checkpointName(update)),
         200,
         200,
       );
-      const saved = await readJson(normalRoot, "result.json");
+      const saved = await readJson(writer.root, "result.json");
       assert.equal(saved.findings.length, initial.length);
       await normal.writeFindings(withWorkerId(saved.findings, "reviewer"));
       const result = await recover({
-        workers: [savedWorker(recoveredRoot)],
+        workers: [savedWorker(interrupted.root)],
         details: true,
         replay: true,
       });
@@ -1630,9 +1601,7 @@ const revisionFinding = (level: string, summary: string) =>
 for (const source of ["selected checkpoint", "published result"]) {
   test(`finding precedence retains ${source} at tied timestamps`, async (t) => {
     const { normal, recovered, recover } = await recoveryPair(t, "deep");
-    const output = path.join(recovered.root, "reviewer");
-    await mkdir(output);
-    const worker = draftFixture(output, "worker");
+    const worker = await createWorker(recovered);
     const initial = worker.findingsDraft(
       [revisionFinding("low", "Initial evidence.")],
       { complete: true },
@@ -1643,24 +1612,24 @@ for (const source of ["selected checkpoint", "published result"]) {
     );
     await worker.write(initial);
     await worker.write(latest);
-    const saved = await readJson(output, "result.json");
+    const saved = await readJson(worker.root, "result.json");
     await normal.writeFindings(saved.findings, { complete: true });
     // Valid JSON whitespace controls filename order without changing the evidence.
-    const names = await readdir(path.join(output, "checkpoints"));
+    const names = await readdir(path.join(worker.root, "checkpoints"));
     let contents = JSON.stringify(initial),
       name = "";
     do {
       contents += "\n";
       name = createHash("sha256").update(contents).digest("hex") + ".json";
     } while (names.some((existing) => existing > name));
-    await writeFile(path.join(output, "checkpoints", name), contents);
+    await writeFile(path.join(worker.root, "checkpoints", name), contents);
     if (source === "published result") {
       const { rm } = await import("node:fs/promises");
-      await rm(path.join(output, "checkpoint-head.json"));
+      await rm(path.join(worker.root, "checkpoint-head.json"));
     }
-    await dateDraftFiles(output, 100);
+    await dateDraftFiles(worker.root, 100);
     const result = await recover({
-      workers: [savedWorker(output)],
+      workers: [savedWorker(worker.root)],
       details: true,
       replay: true,
     });
@@ -1714,9 +1683,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
 }
 test("finding precedence compares parent and worker observation times", async (t) => {
   const { normal, recovered, recover } = await recoveryPair(t, "deep");
-  const workerRoot = path.join(recovered.root, "reviewer");
-  await mkdir(workerRoot);
-  const worker = draftFixture(workerRoot, "worker");
+  const worker = await createWorker(recovered);
   await worker.writeFindings(
     [revisionFinding("low", "Earlier worker evidence.")],
     { complete: true },
@@ -1727,9 +1694,9 @@ test("finding precedence compares parent and worker observation times", async (t
   );
   for (const f of [normal, recovered]) await f.write(latest);
   await dateDraftFiles(recovered.root, 200);
-  await dateDraftFiles(workerRoot, 100);
+  await dateDraftFiles(worker.root, 100);
   const result = await recover({
-    workers: [savedWorker(workerRoot)],
+    workers: [savedWorker(worker.root)],
     details: true,
     replay: true,
   });
@@ -1750,9 +1717,7 @@ for (const revised of [false, true]) {
         },
       }),
     );
-    const workerRoot = path.join(recovered.root, "reviewer");
-    await mkdir(workerRoot);
-    const worker = draftFixture(workerRoot, "worker");
+    const worker = await createWorker(recovered);
     await worker.writeFindings(findings, { complete: true });
     for (const f of [normal, recovered])
       await f.writeFindings(findings, { complete: true });
@@ -1768,7 +1733,7 @@ for (const revised of [false, true]) {
     });
     if (revised) await normal.writeFindings(latest, { complete: true });
     const result = await recover({
-      workers: [savedWorker(workerRoot)],
+      workers: [savedWorker(worker.root)],
       details: true,
       replay: true,
     });
@@ -1971,9 +1936,7 @@ for (const [field, value] of Object.entries({
         findings = [];
       for (const index of reservedFirst ? [2, 0, 1] : [0, 1, 2]) {
         const id = `worker-${index}`;
-        const workerRoot = path.join(recovered.root, id);
-        await mkdir(workerRoot);
-        const worker = draftFixture(workerRoot, "worker");
+        const worker = await createWorker(recovered, id);
         const row = finding(`Review ${index}`, {
           identity: {
             anchor: "shared",
@@ -1988,7 +1951,7 @@ for (const [field, value] of Object.entries({
         });
         await worker.writeFindings([row]);
         findings.push(row);
-        workers.push(savedWorker(workerRoot, id));
+        workers.push(savedWorker(worker.root, id));
       }
       await normal.writeFindings(findings);
       const result = await recover({ workers, details: true, replay: true });
@@ -2098,9 +2061,7 @@ for (const field of ["description", "source", "version"]) {
   for (const candidate of [false, true]) {
     test(`worker identity ${field} annotation revision keeps one report (candidate=${candidate})`, async (t) => {
       const { normal, recovered, recover } = await recoveryPair(t, "deep");
-      const workerRoot = path.join(recovered.root, "reviewer");
-      await mkdir(workerRoot);
-      const worker = draftFixture(workerRoot, "worker");
+      const worker = await createWorker(recovered);
       const first = finding("Synthetic review", {
         identity: {
           anchor: "authored",
@@ -2114,15 +2075,15 @@ for (const field of ["description", "source", "version"]) {
         },
       });
       await worker.writeFindings([first]);
-      await dateDraftFiles(workerRoot, 100);
+      await dateDraftFiles(worker.root, 100);
       const revised = {
         ...first,
         identity: { ...first.identity, [field]: "revised" },
       };
       await worker.writeFindings([revised]);
-      const saved = await readJson(workerRoot, "result.json");
+      const saved = await readJson(worker.root, "result.json");
       await normal.writeFindings(saved.findings);
-      const workers = [savedWorker(workerRoot)];
+      const workers = [savedWorker(worker.root)];
       const result = await recover({ workers, details: true, replay: true });
       assert.equal(result.normal.length, 1);
       assert.equal(result.recovered.length, 1);
@@ -2136,25 +2097,23 @@ for (const metadata of ["extensions", "provenance"] as const) {
   for (const malformedFirst of [false, true]) {
     test(`discarded ${metadata} sibling cannot change a valid identity (malformed first=${malformedFirst})`, async (t) => {
       const { normal, recovered, recover } = await recoveryPair(t, "deep");
-      const workerRoot = path.join(recovered.root, "reviewer");
-      await mkdir(workerRoot);
-      const worker = draftFixture(workerRoot, "worker");
+      const worker = await createWorker(recovered);
       const row = finding("Synthetic review");
       row[metadata] = { ...row[metadata], candidateId: "candidate-1" };
       row.provenance = { ...row.provenance, workerId: "reviewer" };
       await worker.writeFindings([row]);
-      await dateDraftFiles(workerRoot, 100);
+      await dateDraftFiles(worker.root, 100);
       await normal.writeFindings([row]);
       const { summary: _summary, ...malformed } = {
         ...structuredClone(row),
         locations: [{ path: "src/example.py", startLine: 2 }],
       };
-      const resultFile = path.join(workerRoot, "result.json");
+      const resultFile = path.join(worker.root, "result.json");
       const saved = await readJson(resultFile);
       saved.findings = malformedFirst ? [malformed, row] : [row, malformed];
       await writeFile(resultFile, JSON.stringify(saved));
       await utimes(resultFile, 200, 200);
-      const workers = [savedWorker(workerRoot)];
+      const workers = [savedWorker(worker.root)];
       const result = await recover({ workers, details: true, replay: true });
       assert.equal(result.normal.length, 1);
       assert.equal(result.recovered.length, 1);
@@ -2169,11 +2128,8 @@ for (const field of ["description", "source", "version"]) {
     for (const order of ["earlier-first", "later-first"]) {
       test(`worker identity ${field} annotation revision survives checkpoint order (${order}, candidate=${candidate})`, async (t) => {
         const { normal, recovered, recover } = await recoveryPair(t, "deep");
-        const normalRoot = path.join(normal.root, "reviewer"),
-          recoveredRoot = path.join(recovered.root, "reviewer");
-        for (const root of [normalRoot, recoveredRoot]) await mkdir(root);
-        const worker = draftFixture(normalRoot, "worker"),
-          recoveryWorker = draftFixture(recoveredRoot, "worker");
+        const worker = await createWorker(normal);
+        const recoveryWorker = await createWorker(recovered);
         const first = finding("Synthetic review", {
           identity: {
             anchor: "authored",
@@ -2209,11 +2165,11 @@ for (const field of ["description", "source", "version"]) {
           await worker.write(draft);
           await saveCheckpointAt(recoveryWorker, draft, 100 + index * 100);
         }
-        const saved = await readJson(normalRoot, "result.json");
+        const saved = await readJson(worker.root, "result.json");
         assert.equal(saved.findings.length, 1);
         assert.equal(saved.findings[0].identity[field], "revised");
         await normal.writeFindings(saved.findings);
-        const workers = [savedWorker(recoveredRoot)];
+        const workers = [savedWorker(recoveryWorker.root)];
         const result = await recover({ workers, details: true, replay: true });
         assert.equal(result.normal.length, 1);
         assert.equal(result.recovered.length, 1);
@@ -2255,9 +2211,7 @@ for (const sameLocation of [false, true]) {
   for (const level of ["low", "high"]) {
     test(`absorbed worker report keeps independent candidate sibling (same location=${sameLocation}, ${level})`, async (t) => {
       const { normal, recovered, recover } = await recoveryPair(t, "deep");
-      const workerRoot = path.join(recovered.root, "reviewer");
-      await mkdir(workerRoot);
-      const worker = draftFixture(workerRoot, "worker");
+      const worker = await createWorker(recovered);
       const first = finding("First review", {
         summary: "Original first assessment.",
         severity: { level: "medium" },
@@ -2287,16 +2241,16 @@ for (const sameLocation of [false, true]) {
         },
       };
       await worker.writeFindings([first], { complete: true });
-      await dateDraftFiles(workerRoot, 100);
+      await dateDraftFiles(worker.root, 100);
       for (const f of [normal, recovered])
         await f.writeFindings([parent], { complete: true });
       await dateDraftFiles(recovered.root, 200);
-      await dateDraftFiles(workerRoot, 100);
+      await dateDraftFiles(worker.root, 100);
       const checkpoint = worker.findingsDraft([first, second]);
       await saveCheckpointAt(worker, checkpoint, 300);
       await normal.writeFindings([parent, second], { complete: true });
       const result = await recover({
-        workers: [savedWorker(workerRoot)],
+        workers: [savedWorker(worker.root)],
         details: true,
         replay: true,
       });
@@ -2309,21 +2263,8 @@ for (const sameLocation of [false, true]) {
 for (const layout of ["standard", "diff", "deep", "worker"] as const) {
   for (const update of ["omitted", "partial"] as const) {
     test(`${layout}: accepted provenance arrays survive ${update} checkpoint details`, async (t) => {
-      const { normal, recovered, recover } = await recoveryPair(
-        t,
-        layout === "worker" ? "deep" : layout,
-      );
-      let normalWriter = normal,
-        recoveredWriter = recovered;
-      const workers: Record<string, unknown>[] = [];
-      if (layout === "worker") {
-        const normalRoot = path.join(normal.root, "reviewer"),
-          recoveredRoot = path.join(recovered.root, "reviewer");
-        for (const root of [normalRoot, recoveredRoot]) await mkdir(root);
-        normalWriter = draftFixture(normalRoot, "worker");
-        recoveredWriter = draftFixture(recoveredRoot, "worker");
-        workers.push(savedWorker(recoveredRoot));
-      }
+      const { normal, normalWriter, recoveredWriter, workers, recover } =
+        await recoveryWriters(t, layout);
       const raw = finding("Synthetic finding", {
         identity: { anchor: "stable" },
         provenance: {
@@ -2402,21 +2343,8 @@ for (const layout of ["standard", "diff", "deep", "worker"] as const) {
 for (const layout of ["standard", "diff", "deep", "worker"] as const) {
   for (const field of ["reportId", "ledgerRowId"] as const) {
     test(`${layout}: revised sibling keeps identity through ${field} enrichment`, async (t) => {
-      const { normal, recovered, recover } = await recoveryPair(
-        t,
-        layout === "worker" ? "deep" : layout,
-      );
-      let normalWriter = normal,
-        recoveredWriter = recovered;
-      const workers: Record<string, unknown>[] = [];
-      if (layout === "worker") {
-        const normalRoot = path.join(normal.root, "reviewer"),
-          recoveredRoot = path.join(recovered.root, "reviewer");
-        for (const root of [normalRoot, recoveredRoot]) await mkdir(root);
-        normalWriter = draftFixture(normalRoot, "worker");
-        recoveredWriter = draftFixture(recoveredRoot, "worker");
-        workers.push(savedWorker(recoveredRoot));
-      }
+      const { normal, normalWriter, recoveredWriter, workers, recover } =
+        await recoveryWriters(t, layout);
       const first = finding(
         "First review",
         layout === "worker"
@@ -2518,10 +2446,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       let saved: { findings: FixtureFinding[] };
       for (let replay = 0; replay < 2; replay++) {
         await f.writeFindings([revised]);
-        saved = await readJson(
-          f.root,
-          layout === "worker" ? "result.json" : "findings.json",
-        );
+        saved = await readJson(f.findingsPath);
         assert.ok(
           containsAncestor(saved.findings),
           "Saved ancestry must survive the published revision and replay.",
@@ -2671,21 +2596,8 @@ for (const layout of ["standard", "diff", "deep"] as const) {
 for (const layout of ["standard", "diff", "deep", "worker"] as const) {
   for (const candidate of [false, true]) {
     test(`${layout}: live revisions inherit the published identity from retained history (candidate=${candidate})`, async (t) => {
-      const { normal, recovered, recover } = await recoveryPair(
-        t,
-        layout === "worker" ? "deep" : layout,
-      );
-      let normalWriter = normal,
-        recoveredWriter = recovered;
-      const workers: Record<string, unknown>[] = [];
-      if (layout === "worker") {
-        const normalRoot = path.join(normal.root, "reviewer"),
-          recoveredRoot = path.join(recovered.root, "reviewer");
-        for (const root of [normalRoot, recoveredRoot]) await mkdir(root);
-        normalWriter = draftFixture(normalRoot, "worker");
-        recoveredWriter = draftFixture(recoveredRoot, "worker");
-        workers.push(savedWorker(recoveredRoot));
-      }
+      const { normal, normalWriter, recoveredWriter, workers, recover } =
+        await recoveryWriters(t, layout);
       const original = finding("Synthetic historical revision", {
         identity: { anchor: "stable-report" },
         summary: "Original evidence.",
@@ -2702,12 +2614,8 @@ for (const layout of ["standard", "diff", "deep", "worker"] as const) {
         await writer.writeFindings([original]);
       for (let replay = 0; replay < 2; replay++) {
         await normalWriter.writeFindings([revised]);
-        await interruptDraftWrite(
-          path.join(
-            recoveredWriter.root,
-            layout === "worker" ? "result.json" : "findings.json",
-          ),
-          () => recoveredWriter.writeFindings([revised]),
+        await interruptDraftWrite(recoveredWriter.findingsPath, () =>
+          recoveredWriter.writeFindings([revised]),
         );
         if (layout === "worker") {
           const saved = await readJson(normalWriter.root, "result.json");
@@ -2758,10 +2666,7 @@ for (const layout of ["standard", "diff", "deep", "worker"] as const) {
         let previous: unknown;
         for (let replay = 0; replay < 2; replay++) {
           await f.writeFindings([revised]);
-          const saved = await readJson(
-            f.root,
-            layout === "worker" ? "result.json" : "findings.json",
-          );
+          const saved = await readJson(f.findingsPath);
           assert.equal(
             saved.findings.length,
             2,
@@ -2786,9 +2691,7 @@ for (const evidence of ["identical", "distinct", "reordered"] as const) {
   for (const includeResult of [false, true]) {
     test(`unchanged worker batch retains ${evidence} provenance (result=${includeResult})`, async (t) => {
       const { normal, recovered, recover } = await recoveryPair(t, "deep");
-      const workerRoot = path.join(recovered.root, "reviewer");
-      await mkdir(workerRoot);
-      const worker = draftFixture(workerRoot, "worker");
+      const worker = await createWorker(recovered);
       const findings = ["first", "second"].map((id) =>
         finding("Synthetic saved review", {
           provenance: {
@@ -2803,14 +2706,14 @@ for (const evidence of ["identical", "distinct", "reordered"] as const) {
       await worker.writeFindings(findings, { complete: true });
       if (evidence === "reordered")
         await worker.writeFindings([...findings].reverse(), { complete: true });
-      const saved = await readJson(workerRoot, "result.json");
+      const saved = await readJson(worker.root, "result.json");
       assert.equal(saved.findings.length, 2);
       await normal.writeFindings(withWorkerId(saved.findings, "reviewer"), {
         complete: true,
       });
-      if (!includeResult) await rm(path.join(workerRoot, "result.json"));
+      if (!includeResult) await rm(path.join(worker.root, "result.json"));
       const result = await recover({
-        workers: [savedWorker(workerRoot)],
+        workers: [savedWorker(worker.root)],
         details: true,
         replay: true,
         provenanceDetails: true,
@@ -2836,21 +2739,8 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       },
     })) {
       test(`${layout}: preserved identity metadata ${metadata} survives ${cut} interruption`, async (t) => {
-        const { normal, recovered, recover } = await recoveryPair(
-          t,
-          layout === "worker" ? "deep" : layout,
-        );
-        let writer: DraftFixture = normal,
-          recoveryWriter: DraftFixture = recovered;
-        if (layout === "worker") {
-          for (const f of [normal, recovered])
-            await mkdir(path.join(f.root, "reviewer"));
-          writer = draftFixture(path.join(normal.root, "reviewer"), "worker");
-          recoveryWriter = draftFixture(
-            path.join(recovered.root, "reviewer"),
-            "worker",
-          );
-        }
+        const { normal, normalWriter, recoveredWriter, workers, recover } =
+          await recoveryWriters(t, layout);
         const initial = finding("Synthetic preserved identity review", {
           identity:
             metadata === "valid" ? preservedIdentity : { anchor: "authored" },
@@ -2861,27 +2751,25 @@ for (const layout of ["standard", "diff", "worker"] as const) {
             ...(layout === "worker" ? { workerId: "reviewer" } : {}),
           },
         });
-        for (const f of [writer, recoveryWriter])
+        for (const f of [normalWriter, recoveredWriter])
           await f.writeFindings([initial]);
-        await dateDraftFiles(recoveryWriter.root, 100);
+        await dateDraftFiles(recoveredWriter.root, 100);
         const revised = {
           ...initial,
           summary: "Revised synthetic assessment.",
           severity: { level: "high" },
         };
         delete revised.identity;
-        await writer.writeFindings([revised]);
-        const filename = layout === "worker" ? "result.json" : "findings.json";
+        await normalWriter.writeFindings([revised]);
         if (cut === "raw")
-          await recoveryWriter.checkpoint(
-            recoveryWriter.findingsDraft([revised]),
+          await recoveredWriter.checkpoint(
+            recoveredWriter.findingsDraft([revised]),
           );
         else
-          await interruptDraftWrite(
-            path.join(recoveryWriter.root, filename),
-            () => recoveryWriter.writeFindings([revised]),
+          await interruptDraftWrite(recoveredWriter.findingsPath, () =>
+            recoveredWriter.writeFindings([revised]),
           );
-        const saved = await readJson(writer.root, filename);
+        const saved = await readJson(normalWriter.findingsPath);
         assert.equal(saved.findings.length, 1);
         assert.equal(saved.findings[0].severity.level, "high");
         assert.deepEqual(
@@ -2890,8 +2778,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         );
         if (layout === "worker") await normal.writeFindings(saved.findings);
         const result = await recover({
-          workers:
-            layout === "worker" ? [savedWorker(recoveryWriter.root)] : [],
+          workers,
           details: true,
           replay: true,
         });
@@ -3101,16 +2988,14 @@ for (const missing of [false, true]) {
       delete saved.findings[0].identity;
       await writeFile(file, JSON.stringify(saved));
     }
-    const workerRoot = path.join(recovered.root, "reviewer");
-    await mkdir(workerRoot);
-    const worker = draftFixture(workerRoot, "worker");
+    const worker = await createWorker(recovered);
     await worker.writeFindings([source], { complete: true });
     for (const name of ["scan-manifest.json", "findings.json", "coverage.json"])
       await utimes(path.join(recovered.root, name), 2, 2);
     for (const name of await readdir(path.join(recovered.root, "checkpoints")))
       await utimes(path.join(recovered.root, "checkpoints", name), 1.5, 1.5);
-    await utimes(path.join(workerRoot, "result.json"), 1, 1);
-    const result = await recover({ workers: [savedWorker(workerRoot)] });
+    await utimes(path.join(worker.root, "result.json"), 1, 1);
+    const result = await recover({ workers: [savedWorker(worker.root)] });
     assert.equal(result.normal.length, 1);
     assert.deepEqual(result.recovered, result.normal);
     assert.deepEqual(result.warnings, []);
@@ -3161,10 +3046,7 @@ for (const reversed of [false, true]) {
             ? { ...raw, extensions: { reportId: "report-1" } }
             : raw;
           await f.writeFindings([update], { complete: true });
-          const saved = await readJson(
-            f.root,
-            layout === "worker" ? "result.json" : "findings.json",
-          );
+          const saved = await readJson(f.findingsPath);
           assert.equal(saved.findings.length, 2);
           assert.deepEqual(
             saved.findings

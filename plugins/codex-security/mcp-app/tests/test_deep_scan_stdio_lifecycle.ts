@@ -187,12 +187,7 @@ model_reasoning_summary = "none"
   const server = startServer(serverBundlePath, environment);
 
   try {
-    const initialized = await server.request(1, "initialize", {
-      protocolVersion: "2025-11-25",
-      capabilities: {},
-      clientInfo: { name: "deep-scan-stdio-lifecycle", version: "0.1.0" },
-    });
-    assertNoError(initialized);
+    const initialized = await server.initialize("deep-scan-stdio-lifecycle");
     assert.deepEqual(
       initialized.result.capabilities.experimental["codex/sandbox-state-meta"],
       {},
@@ -203,59 +198,43 @@ model_reasoning_summary = "none"
     );
     assert.deepEqual(initialized.result.capabilities.logging, {});
 
-    const missingParentSandbox = await server.request(
-      2,
-      "tools/call",
-      toolCall(
-        "start_codex_security_deep_scan",
-        {
-          targetPath,
-          scope: ".",
-          userContext: "missing parent sandbox fixture",
-        },
-        threadId,
-        undefined,
-        null,
-      ),
-    );
-    assert.equal(missingParentSandbox.result?.isError, true);
-    assert.match(
-      missingParentSandbox.result.content
-        .map((item: { text: string }) => item.text)
-        .join(" "),
-      /parent.*sandbox|sandbox.*metadata|permission/i,
-    );
-
-    const unsupportedParentSandbox = await server.request(
-      3,
-      "tools/call",
-      toolCall(
-        "start_codex_security_deep_scan",
-        {
-          targetPath,
-          scope: ".",
-          userContext: "unsupported parent sandbox fixture",
-        },
-        threadId,
-        undefined,
+    for (const [id, reason, sandboxState] of [
+      [2, "missing", null],
+      [
+        3,
+        "unsupported",
         {
           permissionProfile: { type: "disabled" },
           sandboxCwd: pathToFileURL(pluginRoot).href,
         },
-      ),
-    );
-    assert.equal(unsupportedParentSandbox.result?.isError, true);
-    assert.match(
-      unsupportedParentSandbox.result.content
-        .map((item: { text: string }) => item.text)
-        .join(" "),
-      /parent.*sandbox|sandbox.*metadata|permission/i,
-    );
+      ],
+    ] as const) {
+      const response = await server.callTool(
+        id,
+        toolCall(
+          "start_codex_security_deep_scan",
+          {
+            targetPath,
+            scope: ".",
+            userContext: `${reason} parent sandbox fixture`,
+          },
+          threadId,
+          undefined,
+          sandboxState,
+        ),
+      );
+      assert.equal(response.result?.isError, true);
+      assert.match(
+        response.result.content
+          .map((item: { text: string }) => item.text)
+          .join(" "),
+        /parent.*sandbox|sandbox.*metadata|permission/i,
+      );
+    }
     assert.deepEqual(await readLogLines(startLogPath), []);
 
-    const missingConfig = await server.request(
+    const missingConfig = await server.callTool(
       4,
-      "tools/call",
       toolCall(
         "start_codex_security_deep_scan",
         {
@@ -272,25 +251,21 @@ model_reasoning_summary = "none"
       [],
     );
 
+    const targetRequest = {
+      targetPath,
+      scope: ".",
+      userContext: "stdio lifecycle fixture",
+      projectConfigPath,
+    };
     server.sendRequest(
       10,
       "tools/call",
-      toolCall(
-        "start_codex_security_deep_scan",
-        {
-          targetPath,
-          scope: ".",
-          userContext: "stdio lifecycle fixture",
-          projectConfigPath,
-        },
-        threadId,
-        {
-          model: "gpt-5.5",
-          reasoning_effort: "xhigh",
-          thread_id: threadId,
-          turn_id: "active-parent-turn",
-        },
-      ),
+      toolCall("start_codex_security_deep_scan", targetRequest, threadId, {
+        model: "gpt-5.5",
+        reasoning_effort: "xhigh",
+        thread_id: threadId,
+        turn_id: "active-parent-turn",
+      }),
     );
 
     const scanId = await waitForScanId({ server });
@@ -306,6 +281,7 @@ model_reasoning_summary = "none"
       (worker: PersistedDeepScanWorker) => worker.kind === "discovery",
     )?.artifactDir;
     assert.equal(typeof startedArtifactRoot, "string");
+    // Another client can replace this shared install while the scan is active.
     await writeFile(
       path.join(installedPluginRoot, "scripts", "workbench_db.py"),
       'raise RuntimeError("Installed plugin helpers replaced during another scan")\n',
@@ -355,20 +331,14 @@ model_reasoning_summary = "none"
       pythonWrapperPath,
     );
 
-    // Another client can replace this shared install while the scan is active.
-    await writeFile(
-      path.join(installedPluginRoot, "scripts", "workbench_db.py"),
-      "raise RuntimeError('synthetic replacement plugin helper')\n",
-    );
     await rm(path.join(installedPluginRoot, "references"), {
       recursive: true,
     });
     await rm(path.join(installedPluginRoot, "schemas"), { recursive: true });
 
     // Discovery progress is admitted once the first complete Standard worker is active.
-    const discoveryProgress = await server.request(
+    await server.callSuccessfulTool(
       15,
-      "tools/call",
       toolCall(
         "update_codex_security_scan_progress",
         {
@@ -380,14 +350,9 @@ model_reasoning_summary = "none"
         threadId,
       ),
     );
-    assertNoError(discoveryProgress);
-    const discoveryScan = await runWorkbench(environment, [
-      "get-scan",
-      "--scan-id",
-      scanId,
-    ]);
-    assert.equal(discoveryScan.scan.progress.phase, "discovery");
-    assert.equal(discoveryScan.scan.progress.coverage.worklistRows, 6);
+    const discoveryScan = await getScan(environment, scanId);
+    assert.equal(discoveryScan.progress.phase, "discovery");
+    assert.equal(discoveryScan.progress.coverage.worklistRows, 6);
 
     // Stopping the original model response detaches only that long-poll waiter.
     server.notify("notifications/cancelled", {
@@ -399,12 +364,6 @@ model_reasoning_summary = "none"
     const stillRunning = await getDeepScan({ environment, scanId, threadId });
     assert.equal(stillRunning.status, "running");
     assert.equal(stillRunning.cancelRequested, false);
-    assert.equal(
-      stillRunning.workers.some(
-        (worker: PersistedDeepScanWorker) => worker.kind === "setup",
-      ),
-      false,
-    );
     assert.equal(stillRunning.workers.length, 1);
     assert.equal(stillRunning.workers[0].kind, "discovery");
     assert.equal(stillRunning.workers[0].status, "running");
@@ -415,16 +374,7 @@ model_reasoning_summary = "none"
     server.sendRequest(
       11,
       "tools/call",
-      toolCall(
-        "start_codex_security_deep_scan",
-        {
-          targetPath,
-          scope: ".",
-          userContext: "stdio lifecycle fixture",
-          projectConfigPath,
-        },
-        threadId,
-      ),
+      toolCall("start_codex_security_deep_scan", targetRequest, threadId),
     );
     server.sendRequest(
       12,
@@ -443,9 +393,8 @@ model_reasoning_summary = "none"
     );
     assert.equal((await readLogLines(startLogPath)).length, 1);
 
-    const rejectedWrongThreadCancel = await server.request(
+    const rejectedWrongThreadCancel = await server.callTool(
       1312,
-      "tools/call",
       toolCall("cancel_codex_security_scan", { scanId }, "another-thread"),
     );
     assert.equal(rejectedWrongThreadCancel.result?.isError, true);
@@ -459,9 +408,8 @@ model_reasoning_summary = "none"
 
     await writeFile(signalCheckpointControlPath, "write-on-signal\n");
     await writeFile(cancelFailureControlPath, "fail\n");
-    const failedCancel = await server.request(
+    const failedCancel = await server.callTool(
       1313,
-      "tools/call",
       toolCall("cancel_codex_security_scan", { scanId }, threadId),
     );
     assert.equal(failedCancel.result?.isError, true);
@@ -485,23 +433,17 @@ model_reasoning_summary = "none"
       assert.equal(failedJoin.result?.structuredContent, undefined);
       assert.match(failureText, /injected cancel-scan failure/);
     }
-    const stillDurablyRunning = await runWorkbench(environment, [
-      "get-scan",
-      "--scan-id",
-      scanId,
-    ]);
-    assert.equal(stillDurablyRunning.scan.progress.status, "running");
+    const stillDurablyRunning = await getScan(environment, scanId);
+    assert.equal(stillDurablyRunning.progress.status, "running");
     assert.equal(
       (await getDeepScan({ environment, scanId, threadId })).cancelRequested,
       false,
     );
 
-    const cancelResponse = await server.request(
+    await server.callSuccessfulTool(
       1314,
-      "tools/call",
       toolCall("cancel_codex_security_scan", { scanId }, threadId),
     );
-    assertNoError(cancelResponse);
     assert.equal(
       (await readLogLines(cancelLogPath)).length,
       2,
@@ -553,9 +495,8 @@ model_reasoning_summary = "none"
       true,
     );
 
-    const lateJoin = await server.request(
+    const lateJoin = await server.callTool(
       14,
-      "tools/call",
       toolCall("start_codex_security_deep_scan", { scanId }, threadId),
     );
     assertCanceled(lateJoin, scanId, startedState.scanDir);
@@ -623,28 +564,20 @@ model_reasoning_summary = "none"
       true,
     );
     assertReadOnlyWorkerInvocation(failedWorker.argv, codexHome);
-    assert.equal(
-      activeFailureState.workers.some(
-        (worker: PersistedDeepScanWorker) => worker.kind === "setup",
-      ),
-      false,
-    );
     assert.equal(activeFailureState.workers.length, 1);
     assert.equal(activeFailureState.workers[0].kind, "discovery");
     assert.equal(activeFailureState.workers[0].status, "running");
     assertProcessAlive(failedWorker.pid);
 
     const failureMessage = "fixture unrecoverable failure\0source";
-    const failureResponse = await server.request(
+    await server.callSuccessfulTool(
       21,
-      "tools/call",
       toolCall(
         "fail_codex_security_scan",
         { scanId: failedScanId, message: failureMessage },
         failureThreadId,
       ),
     );
-    assertNoError(failureResponse);
 
     const failedWaiter = await server.waitForResponse(20);
     const failureText =
@@ -655,18 +588,16 @@ model_reasoning_summary = "none"
     assert.equal(failedWaiter.result?.structuredContent, undefined);
     assert.match(failureText, /fixture unrecoverable failure/);
     assert.match(failureText, /no successful discovery manifest was returned/);
-    const failedContext = await server.request(
+    const failedContext = await server.callSuccessfulTool(
       211,
-      "tools/call",
       toolCall(
         "get_codex_security_scan_context",
         { scanId: failedScanId },
         failureThreadId,
       ),
     );
-    assertNoError(failedContext);
     assert.equal(
-      failedContext.result.structuredContent.scan.progress.status,
+      failedContext.structuredContent.scan.progress.status,
       "failed",
     );
     const exitedWorkers = await waitForJsonLines(exitLogPath, 2);
@@ -705,9 +636,8 @@ model_reasoning_summary = "none"
       true,
     );
 
-    const failedLateJoin = await server.request(
+    const failedLateJoin = await server.callTool(
       22,
-      "tools/call",
       toolCall(
         "start_codex_security_deep_scan",
         { scanId: failedScanId },
@@ -738,35 +668,28 @@ model_reasoning_summary = "none"
     );
 
     const resumedThreadId = "deep-scan-stdio-resumed-thread";
-    const opened = await server.request(
+    const opened = await server.callSuccessfulTool(
       24,
-      "tools/call",
       toolCall(
         "open_codex_security_workspace",
         { targetPath, scope: ".", mode: "deep" },
         resumedThreadId,
       ),
     );
-    assertNoError(opened);
-    const sessionId = opened.result.structuredContent.workspace.id;
-    assertNoError(
-      await server.request(
-        25,
-        "tools/call",
-        toolCall(
-          "submit_codex_security_setup",
-          { sessionId, targetPath, scope: ".", mode: "deep" },
-          resumedThreadId,
-        ),
+    const sessionId = opened.structuredContent.workspace.id;
+    await server.callSuccessfulTool(
+      25,
+      toolCall(
+        "submit_codex_security_setup",
+        { sessionId, targetPath, scope: ".", mode: "deep" },
+        resumedThreadId,
       ),
     );
-    const started = await server.request(
+    const started = await server.callSuccessfulTool(
       26,
-      "tools/call",
       toolCall("start_codex_security_scan", { sessionId }, resumedThreadId),
     );
-    assertNoError(started);
-    const resumedScan = started.result.structuredContent.workspace.results;
+    const resumedScan = started.structuredContent.workspace.results;
     const resumedScanId = resumedScan.scanId;
     await chmod(resumedScan.scanDir, 0o755);
     const handoffClaimToken = randomUUID();
@@ -789,12 +712,9 @@ model_reasoning_summary = "none"
         },
       ],
     ] as const) {
-      assertNoError(
-        await server.request(
-          id,
-          "tools/call",
-          toolCall(name, arguments_, resumedThreadId),
-        ),
+      await server.callSuccessfulTool(
+        id,
+        toolCall(name, arguments_, resumedThreadId),
       );
     }
 
@@ -847,27 +767,19 @@ model_reasoning_summary = "none"
       () => process.kill(server.pid!, 0),
       "the original MCP server must have exited",
     );
-    const paused = await runWorkbench(environment, [
-      "get-scan",
-      "--scan-id",
-      resumedScanId,
-    ]);
+    const paused = await getScan(environment, resumedScanId);
     assert.deepEqual(
-      [paused.scan.progress.status, paused.scan.progress.phase],
+      [paused.progress.status, paused.progress.phase],
       ["running", "discovery"],
     );
-    assert.deepEqual(paused.scan.progress.independentReviews, {
+    assert.deepEqual(paused.progress.independentReviews, {
       completed: 1,
       active: 0,
       maximum: 2,
       consolidating: false,
     });
     assert.deepEqual(
-      [
-        paused.scan.reportAvailable,
-        paused.scan.findingCount,
-        paused.scan.artifacts,
-      ],
+      [paused.reportAvailable, paused.findingCount, paused.artifacts],
       [false, 0, {}],
     );
     const manifestPath = path.join(resumedScan.scanDir, "scan-manifest.json");
@@ -892,16 +804,7 @@ model_reasoning_summary = "none"
     const resumedStartIndex = (await readJsonLines(startLogPath)).length;
     const restartedServer = startServer(serverBundlePath, environment);
     try {
-      assertNoError(
-        await restartedServer.request(1, "initialize", {
-          protocolVersion: "2025-11-25",
-          capabilities: {},
-          clientInfo: {
-            name: "deep-scan-restarted-artifacts",
-            version: "0.1.0",
-          },
-        }),
-      );
+      await restartedServer.initialize("deep-scan-restarted-artifacts");
       restartedServer.sendRequest(
         2,
         "tools/call",
@@ -937,21 +840,16 @@ model_reasoning_summary = "none"
         return run.status === "succeeded";
       }, "the detached coordinator to persist its successful aggregate");
       await waitFor(async () => {
-        const scan = await runWorkbench(environment, [
-          "get-scan",
-          "--scan-id",
-          resumedScanId,
-        ]);
-        return scan.scan.progress.status === "complete";
+        const scan = await getScan(environment, resumedScanId);
+        return scan.progress.status === "complete";
       }, "the detached coordinator to finalize without another tool call");
       const sealedBeforeRejoin = await readFile(manifestPath, "utf8");
       const reportBeforeRejoin = await readFile(
         path.join(resumedScan.scanDir, "report.md"),
         "utf8",
       );
-      const resumed = await restartedServer.request(
+      const resumed = await restartedServer.callSuccessfulTool(
         3,
-        "tools/call",
         toolCall(
           "start_codex_security_deep_scan",
           { scanId: resumedScanId, handoffClaimToken },
@@ -959,7 +857,6 @@ model_reasoning_summary = "none"
           { model: "gpt-6.1-sol", reasoning_effort: "max" },
         ),
       );
-      assertNoError(resumed);
       const modelRows = await execFileAsync(
         process.env.PYTHON?.trim() || "python3",
         [
@@ -970,26 +867,24 @@ model_reasoning_summary = "none"
         ],
       );
       assert.deepEqual(JSON.parse(modelRows.stdout), ["gpt-6.1-sol", "max"]);
-      const instructions = resumed.result.structuredContent.instructions;
+      const instructions = resumed.structuredContent.instructions;
       assert.match(
         instructions,
         /Do not call complete_codex_security_scan again/,
       );
-      const completion = resumed.result.structuredContent.completion;
+      const completion = resumed.structuredContent.completion;
       assert.equal(completion.scan.progress.status, "complete");
       assert.equal(completion.scan.reportAvailable, true);
-      assert.deepEqual(resumed.result.structuredContent, {
+      assert.deepEqual(resumed.structuredContent, {
         scanId: resumedScanId,
         scanDir: resumedScan.scanDir,
         manifestPath,
         instructions,
         completion,
       });
-      assert.deepEqual(resumed.result.content, [
-        { type: "text", text: instructions },
-      ]);
+      assert.deepEqual(resumed.content, [{ type: "text", text: instructions }]);
       assert.equal(
-        resumed.result.content.some((item: { text: string }) =>
+        resumed.content.some((item: { text: string }) =>
           item.text.includes(resumedScanId),
         ),
         true,
@@ -1035,7 +930,7 @@ model_reasoning_summary = "none"
         (await readJson(resumedScan.scanDir, "findings.json")).findings,
         [],
       );
-      const completedScan = resumed.result.structuredContent;
+      const completedScan = resumed.structuredContent;
       const sealedManifest = await readJson(completedScan.manifestPath);
       assert.equal(sealedManifest.scan.status, "completed");
       assert.ok(sealedManifest.scan.sealedAt);
@@ -1107,9 +1002,8 @@ model_reasoning_summary = "none"
         "# Synthetic completion retry\n",
       );
       await writeFile(completionFailureControlPath, "fail\n");
-      const completionFailed = await restartedServer.request(
+      const completionFailed = await restartedServer.callTool(
         4,
-        "tools/call",
         toolCall(
           "start_codex_security_deep_scan",
           { targetPath: retryTarget },
@@ -1133,35 +1027,29 @@ model_reasoning_summary = "none"
         threadId: resumedThreadId,
       });
       assert.equal(retryRun.status, "succeeded");
-      const pending = await runWorkbench(environment, [
-        "get-scan",
-        "--scan-id",
-        retryScanId,
-      ]);
-      assert.equal(pending.scan.progress.status, "running");
-      assert.equal(pending.scan.reportAvailable, false);
+      const pending = await getScan(environment, retryScanId);
+      assert.equal(pending.progress.status, "running");
+      assert.equal(pending.reportAvailable, false);
       const workerCountBeforeRetry = (await readLogLines(startLogPath)).length;
       await writeFile(
         path.join(retryTarget, "source.py"),
         "# Target changed after the failed completion\n",
       );
-      const retry = await restartedServer.request(
+      const retry = await restartedServer.callSuccessfulTool(
         5,
-        "tools/call",
         toolCall(
           "start_codex_security_deep_scan",
           { scanId: retryScanId },
           resumedThreadId,
         ),
       );
-      assertNoError(retry);
-      assert.equal(retry.result.structuredContent.scanId, retryScanId);
+      assert.equal(retry.structuredContent.scanId, retryScanId);
       assert.equal(
-        retry.result.structuredContent.completion.scan.progress.status,
+        retry.structuredContent.completion.scan.progress.status,
         "complete",
       );
       assert.equal(
-        retry.result.structuredContent.completion.scan.reportAvailable,
+        retry.structuredContent.completion.scan.reportAvailable,
         true,
       );
       assert.equal(
@@ -1207,17 +1095,13 @@ async function testDetachedTargetReplay(
   );
   let server = startServer(serverBundlePath, environment);
   try {
-    assertNoError(await server.initialize("detached-target"));
+    await server.initialize("detached-target");
     server.sendRequest(2, "tools/call", request);
     const scanId = await waitForScanId({ server, requestId: 2 });
     server.notify("notifications/cancelled", { requestId: 2 });
     await waitFor(async () => {
-      const state = await runWorkbench(environment, [
-        "get-scan",
-        "--scan-id",
-        scanId,
-      ]);
-      return state.scan.progress.status === "complete";
+      const state = await getScan(environment, scanId);
+      return state.progress.status === "complete";
     }, "the detached target request to finalize");
     assert.equal(server.response(2)?.result?.structuredContent, undefined);
     const { scanDir } = await getDeepScan({ environment, scanId, threadId });
@@ -1226,10 +1110,9 @@ async function testDetachedTargetReplay(
     await server.stop();
 
     server = startServer(serverBundlePath, environment);
-    assertNoError(await server.initialize("detached-target-retry"));
-    const replay = await server.callTool(2, request);
-    assertNoError(replay);
-    const completed = replay.result.structuredContent;
+    await server.initialize("detached-target-retry");
+    const replay = await server.callSuccessfulTool(2, request);
+    const completed = replay.structuredContent;
     assert.equal(completed.scanId, scanId);
     assert.equal(completed.scanDir, scanDir);
     assert.equal(completed.completion.scan.reportAvailable, true);
@@ -1412,8 +1295,8 @@ async function testCliDeepScanEngine({
   // A resumed SDK scan rejoins through the parent MCP turn after discovery.
   const parent = startServer(serverBundlePath, environment);
   try {
-    assertNoError(await parent.initialize("sdk-parent"));
-    const joined = await parent.callTool(
+    await parent.initialize("sdk-parent");
+    const joined = await parent.callSuccessfulTool(
       2,
       toolCall(
         "start_codex_security_deep_scan",
@@ -1421,10 +1304,9 @@ async function testCliDeepScanEngine({
         threadId,
       ),
     );
-    assertNoError(joined);
-    assert.equal(joined.result.structuredContent.scanId, completed.scanId);
-    assert.equal(joined.result.structuredContent.completion, undefined);
-    assert.match(joined.result.structuredContent.instructions, /SDK/);
+    assert.equal(joined.structuredContent.scanId, completed.scanId);
+    assert.equal(joined.structuredContent.completion, undefined);
+    assert.match(joined.structuredContent.instructions, /SDK/);
   } finally {
     await parent.stop();
   }
@@ -1649,6 +1531,15 @@ async function waitForScanId({
     return typeof scanId === "string";
   }, "target-based Deep Scan bootstrap");
   return scanId;
+}
+
+async function getScan(environment: NodeJS.ProcessEnv, scanId: string) {
+  const result = await runWorkbench(environment, [
+    "get-scan",
+    "--scan-id",
+    scanId,
+  ]);
+  return result.scan;
 }
 
 async function getDeepScan({
