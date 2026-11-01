@@ -17,6 +17,7 @@ import {
   array,
   hasSarifExternalPropertyReferences,
   indexSarifRules,
+  matchesSarifRuleReference,
   normalizeRecords,
   readScannerJson,
   record,
@@ -230,7 +231,7 @@ export function normalizeSemgrepSarif(
     const rules = array(driver["rules"] ?? [], "Semgrep rules").map((r) =>
       record(r, "Semgrep rule"),
     );
-    const rulesById = indexSarifRules(rules);
+    const rulesById = indexSarifRules(rules.entries());
     const { runs: _runs, ...documentContext } = document;
     const { results: _results, tool: _tool, ...runContext } = run;
     const { rules: _rules, ...driverContext } = driver;
@@ -277,12 +278,7 @@ export function normalizeSemgrepSarif(
         throw new Error("Semgrep ruleIndex and ruleId disagree.");
       if (result["rule"] !== undefined) {
         const ref = record(result["rule"], "Semgrep rule reference");
-        if (
-          ref["toolComponent"] !== undefined ||
-          (ref["id"] !== undefined && ref["id"] !== ruleId) ||
-          (ref["index"] !== undefined && ref["index"] !== ruleIndex) ||
-          (ref["guid"] !== undefined && ref["guid"] !== rule?.["guid"])
-        )
+        if (!matchesSarifRuleReference(ref, ruleId, selectedRule))
           throw new Error("Inconsistent or external Semgrep rule reference.");
       }
       const locations = array(result["locations"] ?? [], "Semgrep locations");
