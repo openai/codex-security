@@ -1353,6 +1353,20 @@ def test_git_context_preserves_trailing_root_whitespace(
     assert (destination / "synthetic.txt").read_text() == "selected target content\n"
 
 
+def test_copy_skips_index_paths_under_a_directory_replaced_by_a_file(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    (target / "config").mkdir()
+    (target / "config" / "settings.py").write_text("tracked = True\n")
+    subprocess.run(["git", "add", "config"], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "Add config"], cwd=target, check=True)
+    shutil.rmtree(target / "config")
+    (target / "config").write_text("replacement file\n")
+    destination = tmp_path / "copied"
+    WORKBENCH_TARGET["copy_git_worktree_files"](target, destination, ())
+    assert (destination / "config").read_text() == "replacement file\n"
+
+
 def test_git_context_rejects_an_unrelated_configured_worktree(tmp_path: Path) -> None:
     target = tmp_path / "target"
     unrelated = tmp_path / "unrelated"
