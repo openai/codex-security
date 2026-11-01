@@ -575,41 +575,32 @@ export async function normalizeTarget(
     const candidate = isAbsolute(expandHome(value))
       ? resolve(expandHome(value))
       : resolve(root, expandHome(value));
-    let metadata: Stats;
     let canonical: string;
-    let metadata;
     try {
-      metadata = await abortable(() => stat(candidate), signal);
-      canonical = await abortable(() => realpath(candidate), signal);
-      metadata = await abortable(() => stat(canonical), signal);
+      canonical = await abortable(() => realpath(candidate), signal).catch(
+        async (error: NodeJS.ErrnoException) => {
+          // Bun on macOS cannot realpath Unix sockets. Only use the original
+          // path to identify a special file, never as the accepted target.
+          if (error?.code === "EOPNOTSUPP" || error?.code === "ENOTSUP") {
+            const metadata = await abortable(
+              () => stat(candidate),
+              signal,
+            ).catch(() => undefined);
+            if (metadata) requireScanPathType(value, metadata, error);
+          }
+          throw error;
+        },
+      );
+      requireScanPathType(
+        value,
+        await abortable(() => stat(canonical), signal),
+      );
     } catch (error) {
       throwIfAborted(signal);
-      // Bun on macOS cannot realpath an existing Unix socket (EOPNOTSUPP).
-      // Stat the original path, following symlinks, solely to classify the
-      // rejected special target; never use this fallback to accept a path.
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "EOPNOTSUPP" || code === "ENOTSUP") {
-        const special = await abortable(async () => {
-          const info = await stat(candidate);
-          return !info.isFile() && !info.isDirectory();
-        }, signal).catch(() => false);
-        throwIfAborted(signal);
-        if (special) {
-          throw new InvalidTargetError(
-            `Path target must be a regular file or directory: ${value}`,
-            { cause: error },
-          );
-        }
-      }
+      if (error instanceof InvalidTargetError) throw error;
       throw new InvalidTargetError(`Path target does not exist: ${value}`, {
         cause: error,
       });
-    }
-    // Match the bundled scan scope resolver's supported filesystem types.
-    if (!metadata.isFile() && !metadata.isDirectory()) {
-      throw new InvalidTargetError(
-        `Path target is not a regular file or directory: ${value}`,
-      );
     }
     const relativePath = relative(root, canonical);
     if (relativePathIsOutside(relativePath)) {
@@ -625,15 +616,23 @@ export async function normalizeTarget(
         `Path target contains an unsupported colon component: ${value}`,
       );
     }
-    if (!metadata.isFile() && !metadata.isDirectory()) {
-      throw new InvalidTargetError(
-        `Path target must be a regular file or directory: ${value}`,
-      );
-    }
     const normalized = relativePath.split(sep).join("/") || ".";
     paths.add(normalized);
   }
   return { kind: "paths", paths: [...paths] };
+}
+
+function requireScanPathType(
+  value: string,
+  metadata: Stats,
+  cause?: unknown,
+): void {
+  if (!metadata.isFile() && !metadata.isDirectory()) {
+    throw new InvalidTargetError(
+      `Path target is not a regular file or directory: ${value}`,
+      { cause },
+    );
+  }
 }
 
 export async function validateCommittedDiffCheckout(
