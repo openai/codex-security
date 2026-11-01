@@ -177,6 +177,10 @@ overlapping page. Offset pagination does not provide a point-in-time snapshot.
 For a multi-page result the collector also checks whether the first page's
 membership has changed. Retry the collection if it reports a change.
 
+On HTTP 429, the collector retries the same GET once if `Retry-After` specifies
+a wait of 10 seconds or less, in whole seconds or as an HTTP date. Zero or a
+past date triggers an immediate retry. Cancellation stops the wait.
+
 A finding that identifies its repository only by name can use the project name,
 the Git URL path, or the final path component of either. For any other name,
 at least one finding in the collection must pair that name with the project's

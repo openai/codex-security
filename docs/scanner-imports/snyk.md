@@ -43,6 +43,10 @@ coordinates, and projects monitored through the CLI or API, read the original
 location from `evidence.source_data.issue` in v1 or from the JSON text in
 `evidence.source_data.issueJson` in v2.
 
+On HTTP 429, the collector retries the same GET once if `Retry-After` specifies
+a wait of 10 seconds or less, in whole seconds or as an HTTP date. Zero or a
+past date triggers an immediate retry. Cancellation stops the wait.
+
 Use the same source key on later imports. The issue key within the API
 origin, organization, project and product identifies the finding. Replaying the
 same evidence leaves the version unchanged. Whitespace, object key order and

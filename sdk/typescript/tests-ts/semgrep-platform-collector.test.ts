@@ -708,7 +708,7 @@ test("file and normalized Platform reports keep their Git binding with no accept
   }
 });
 
-test("walks the selected project and ref, then rechecks page zero for offset drift", async () => {
+test("retries the throttled page in scope, then rechecks page zero for offset drift", async () => {
   const pages: string[] = [];
   const report = await collectSemgrepPlatformFindings(options, {
     environment,
@@ -733,13 +733,19 @@ test("walks the selected project and ref, then rechecks page zero for offset dri
         repository_ids: "77",
         dedup: "false",
       });
+      expect(init.method).toBe("GET");
       pages.push(page);
+      if (pages.length === 2)
+        return new Response("try again", {
+          status: 429,
+          headers: { "Retry-After": "0" },
+        });
       return Response.json({
         findings: page === "1" ? [{ id: 3001 }] : fullPage,
       });
     },
   });
-  expect(pages).toEqual(["0", "1", "0"]);
+  expect(pages).toEqual(["0", "1", "1", "0"]);
   expect(report.findingCount).toBe(3001);
   expect(JSON.parse(report.findings[3000]!)).toEqual({ id: 3001 });
 
@@ -809,6 +815,14 @@ test("rejects failed, overlapping or wrong-scope pages without returning a parti
       ),
     ).rejects.toThrow(error);
   }
+  const limited = () =>
+    new Response("try later", { status: 429, headers: { "Retry-After": "0" } });
+  await expect(
+    collectSemgrepPlatformFindings(
+      options,
+      responses(Response.json({ findings: fullPage }), limited(), limited()),
+    ),
+  ).rejects.toThrow("Retry-After: 0: try later");
 });
 
 test.each([null, "git@github.com:example/service.git"])(
