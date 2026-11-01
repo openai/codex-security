@@ -350,6 +350,15 @@ export {
   readSnykFindings,
 } from "./snyk-findings.js";
 export {
+  collectSnykIssues,
+  normalizeSnykIssues,
+  SNYK_REST_ISSUES_FORMAT,
+  type CollectSnykIssuesOptions,
+  type SnykIssuesExport,
+  type SnykIssuesFindings,
+  type SnykIssuesProduct,
+} from "./snyk-rest-findings.js";
+export {
   normalizeSemgrepFindings,
   normalizeSemgrepSarif,
   readSemgrepFindings,

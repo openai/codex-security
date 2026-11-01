@@ -1,6 +1,16 @@
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { validateExternalEvidence } from "./external-import-contract.js";
-import type { ExternalFindings } from "./external-findings.js";
+import type {
+  ExternalFindings,
+  ExternalSourceRepository,
+} from "./external-findings.js";
+import {
+  encodeSnykV1File,
+  isSnykRestFormat,
+  parseSnykReport,
+  SNYK_REST_ISSUES_V1,
+} from "./snyk-rest-v1.js";
+import type { SnykIssuesFindings } from "./snyk-rest-findings.js";
 import { isRecord } from "./record.js";
 import {
   array,
@@ -516,10 +526,23 @@ export function normalizeSnykJson(
 export async function readSnykFindings(
   path: string,
   target: ExternalImportTarget = "cloud",
-): Promise<ExternalFindings> {
-  const input = await readScannerJson(path);
+  references: readonly ExternalSourceRepository[] = [],
+): Promise<ExternalFindings & Partial<SnykIssuesFindings>> {
+  const input = await readScannerJson(path, parseSnykReport);
   if (Array.isArray(input)) return normalizeSnykJson(input, target);
   const document = record(input, "Snyk findings");
+  if (isSnykRestFormat(document["format"])) {
+    if (target !== "local")
+      throw new Error("Snyk REST issues currently support local import only.");
+    const { normalizeSnykIssues } = await import("./snyk-rest-findings.js");
+    return normalizeSnykIssues(
+      document["format"] === SNYK_REST_ISSUES_V1
+        ? encodeSnykV1File(document)
+        : document,
+      target,
+      references,
+    );
+  }
   if (document["format"] === "snyk-findings-export/v1")
     return normalizeSnykFindingsExport(document, target);
   if (document["version"] === "2.1.0")
