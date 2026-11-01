@@ -1,4 +1,4 @@
-import { notify } from "./value.js";
+import { notify, parseJson } from "./value.js";
 import { execFile as execFileCallback } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
@@ -281,27 +281,14 @@ async function runCampaign(
     options,
     knowledgeByMode,
   );
-  const repairedCompletions = new Set<string>();
   const receipts = await readReceipts(
     ledger,
     tasks,
     options.recoverScan !== undefined,
     options.signal,
-    repairedCompletions,
   );
   const pending: MultiscanTask[] = [];
   const rejectedCompleted = new Set<string>();
-  for (const path of repairedCompletions) {
-    if (
-      !(await hasCompletedContract(
-        path,
-        await resumePluginRoot(),
-        options.signal,
-      )) ||
-      !(await hasArtifacts(path))
-    )
-      rejectedCompleted.add(path);
-  }
   let completed = 0;
   let policyFailed = false;
   const warnings: NonNullable<MultiscanResult["warnings"]> = [];
@@ -448,6 +435,24 @@ async function runCampaign(
         const latest = await latestArtifactAttempt(artifactRoot);
         maxAttempt = Math.max(maxAttempt, latest);
         recoveryAttempt = Math.max(recoveryAttempt, latest);
+        if (recoveryAttempt > 0) {
+          const candidate = join(artifactRoot, `attempt-${recoveryAttempt}`);
+          const existing = await lstat(candidate).catch(undefinedIfMissingFile);
+          if (existing !== undefined && !rejectedCompleted.has(candidate)) {
+            await ensureOutputDirectory(candidate);
+            if (await hasCompletedManifest(candidate, options.signal)) {
+              if (
+                !(await hasCompletedContract(
+                  candidate,
+                  await resumePluginRoot(),
+                  options.signal,
+                )) ||
+                !(await hasArtifacts(candidate))
+              )
+                rejectedCompleted.add(candidate);
+            }
+          }
+        }
       }
       for (let retry = 0; retry < options.maxAttempts; retry += 1) {
         options.signal?.throwIfAborted();
@@ -1069,7 +1074,6 @@ async function readReceipts(
   tasks: readonly MultiscanTask[],
   recover = false,
   signal?: AbortSignal,
-  repairedCompletions = new Set<string>(),
 ): Promise<Map<string, MultiscanHistory>> {
   let contents: Buffer;
   try {
@@ -1110,7 +1114,10 @@ async function readReceipts(
           { cause: error },
         );
       const knowledge = repairKnowledgeReceipt(value);
-      if (knowledge !== undefined) {
+      if (
+        knowledge !== undefined &&
+        tasksById.has(knowledge.id.toLowerCase())
+      ) {
         // Extraction failures have no scan directory; retain their attempt watermark.
         const id = knowledge.id.toLowerCase();
         const previous = receipts.get(id);
@@ -1143,21 +1150,6 @@ async function readReceipts(
           id,
           attempt === undefined ? previous : Math.max(previous ?? 0, attempt),
         );
-        if (
-          attempt !== undefined &&
-          isRecord(value) &&
-          (value["status"] === "completed" ||
-            value["status"] === "completed_with_incomplete_coverage" ||
-            value["error"] === "Multiscan repository coverage is incomplete.")
-        )
-          repairedCompletions.add(
-            join(
-              dirname(path),
-              "artifacts",
-              tasksById.get(id)!.id,
-              `attempt-${attempt}`,
-            ),
-          );
       } else {
         unidentifiedReceipt = true;
       }
@@ -1333,6 +1325,23 @@ async function hasArtifacts(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function hasCompletedManifest(
+  path: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const contents = await readFile(join(path, "scan-manifest.json"), {
+    encoding: "utf8",
+    signal,
+  }).catch(undefinedIfMissingFile);
+  if (contents === undefined) return false;
+  const manifest = parseJson(() => contents);
+  return (
+    isRecord(manifest) &&
+    isRecord(manifest["scan"]) &&
+    manifest["scan"]["status"] === "completed"
+  );
 }
 
 async function hasCompletedContract(

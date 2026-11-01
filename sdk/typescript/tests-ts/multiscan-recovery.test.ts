@@ -2412,6 +2412,103 @@ describe("multiscan", () => {
     expect(await readFile(join(paths.output, backups[0]!))).toEqual(damaged);
   });
 
+  test("receipt repair leaves unknown knowledge-failure task IDs unresolved", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "unknown-knowledge-id");
+    const knowledge = join(paths.root, "missing-knowledge.md");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nknown,${source.path},${source.revision}\n`,
+    );
+    const run = mock(completeRun);
+    const configured = options(paths, client(run), {
+      maxAttempts: 1,
+      knowledgeBasePaths: [knowledge],
+    });
+    const initial = await runMultiscan(configured);
+    expect(initial.failed).toBe(1);
+    const [receipt] = await results(initial.resultsPath);
+    expect(receipt).toMatchObject({ knowledgeBaseFailure: true, attempt: 1 });
+    const damaged = Buffer.from(
+      `${JSON.stringify({ ...receipt, id: "unknown", warnings: {} })}\n`,
+    );
+    await writeFile(initial.resultsPath, damaged);
+    const recoverScan = mock(async () => undefined);
+    await expect(runMultiscan({ ...configured, recoverScan })).rejects.toThrow(
+      "Repair the ledger manually",
+    );
+    expect(await readFile(initial.resultsPath)).toEqual(damaged);
+    expect(run).not.toHaveBeenCalled();
+    expect(recoverScan).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    "missing status",
+    "invalid status",
+    "interrupted repair",
+    "orphaned attempt",
+  ] as const)("revalidates completed artifacts after %s", async (scenario) => {
+    const { paths } = await repositoryFixture("persistent-completion");
+    const run = mock(completeRun);
+    const configured = options(paths, client(run));
+    const initial = await runMultiscan(configured);
+    const [receipt] = await results(initial.resultsPath);
+    const scanDir = receipt!["outputDir"] as string;
+    await appendFile(join(scanDir, "findings.json"), "\n");
+    const evidence = await readFile(join(scanDir, "findings.json"));
+    const damaged: Record<string, unknown> = { ...receipt, warnings: {} };
+    if (scenario === "missing status") delete damaged["status"];
+    if (scenario === "invalid status") damaged["status"] = "unknown";
+    await writeFile(
+      initial.resultsPath,
+      scenario === "orphaned attempt" ? "" : `${JSON.stringify(damaged)}\n`,
+    );
+    const recoverScan = mock(async () => {
+      throw new Error("Invalid completed artifacts cannot be resumed");
+    });
+    if (scenario === "interrupted repair") {
+      const controller = new AbortController();
+      const failure = new Error("Synthetic interrupted ledger replacement");
+      const renamed = filesystem.rename;
+      const renaming = spyOn(filesystem, "rename").mockImplementation(
+        async (...args: Parameters<typeof filesystem.rename>) => {
+          await renamed(...args);
+          if (String(args[0]).includes(".results.repair-"))
+            controller.abort(failure);
+        },
+      );
+      try {
+        await expect(
+          runMultiscan({
+            ...configured,
+            recoverScan,
+            signal: controller.signal,
+          }),
+        ).rejects.toBe(failure);
+        expect(await readFile(initial.resultsPath, "utf8")).toBe("");
+      } finally {
+        renaming.mockRestore();
+      }
+    }
+    expect(await runMultiscan({ ...configured, recoverScan })).toMatchObject({
+      completed: 1,
+      failed: 0,
+      skipped: 0,
+    });
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(recoverScan).not.toHaveBeenCalled();
+    expect((await results(initial.resultsPath)).at(-1)).toMatchObject({
+      attempt: 2,
+      status: "completed",
+    });
+    expect(await readFile(join(scanDir, "findings.json"))).toEqual(evidence);
+    expect(await runMultiscan({ ...configured, recoverScan })).toMatchObject({
+      completed: 1,
+      failed: 0,
+      skipped: 1,
+    });
+  });
+
   test("receipt repair preserves the watermark of a malformed knowledge-only failure without scan artifacts", async () => {
     const { paths } = await repositoryFixture("knowledge-watermark");
     const run = mock(completeRun);
