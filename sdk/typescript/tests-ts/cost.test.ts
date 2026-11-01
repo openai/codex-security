@@ -1385,7 +1385,7 @@ describe("live scan cost tracking", () => {
         onCost: (cost) => reported.push(cost.inputTokens),
         onProgress: (update) => progress.push(update.filesCompleted),
         onSessionEvent: ({ threadId, event }) => {
-          if (event.type === "session_meta") observed.push(threadId);
+          if (event["type"] === "session_meta") observed.push(threadId);
         },
       });
       tracker.start("scan-thread");

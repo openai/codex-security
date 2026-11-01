@@ -266,6 +266,7 @@ export class ScanCostTracker {
       try {
         await readSessionUsage(path, session, repository);
       } catch (error) {
+        if (session.threadId === null && !isAccessDenied(error)) throw error;
         unreadable.set(session, error);
       }
     }
@@ -955,6 +956,12 @@ function subtractTokenUsage(
     reasoning_output_tokens:
       usage.reasoning_output_tokens - inherited.reasoning_output_tokens,
   });
+}
+
+function isAccessDenied(error: unknown): boolean {
+  return (
+    isRecord(error) && (error["code"] === "EACCES" || error["code"] === "EPERM")
+  );
 }
 
 function isMissingFile(error: unknown): boolean {
