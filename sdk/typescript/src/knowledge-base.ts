@@ -283,8 +283,11 @@ async function extractPdf(
         signal?.throwIfAborted();
         pages.push(
           content.items
-            .map((item) => ("str" in item ? item.str : ""))
-            .join(" "),
+            // PDF.js emits its own spaces between words and marks line ends.
+            .map((item) =>
+              "str" in item ? item.str + (item.hasEOL ? "\n" : "") : "",
+            )
+            .join(""),
         );
       }
       return pages.join("\n");

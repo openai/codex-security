@@ -53,8 +53,11 @@ function docxBody(body: string): Uint8Array {
 }
 
 function pdf(text: string): Uint8Array {
-  const escaped = text.replace(/[\\()]/gu, "\\$&");
-  const stream = `BT /F1 12 Tf 72 720 Td (${escaped}) Tj ET`;
+  return pdfContent(`(${text.replace(/[\\()]/gu, "\\$&")}) Tj`);
+}
+
+function pdfContent(operators: string): Uint8Array {
+  const stream = `BT /F1 12 Tf 72 720 Td ${operators} ET`;
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
     "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
@@ -477,6 +480,12 @@ describe("scan knowledge bases", () => {
       pdf("Payment service boundary"),
     );
     await writeFile(
+      join(root, "styled-runs.pdf"),
+      pdfContent(
+        "(Rotate the admin) Tj /F1 18 Tf (_token) Tj /F1 12 Tf 0 -14 Td (every 90 days.) Tj",
+      ),
+    );
+    await writeFile(
       join(root, "threat-model.docx"),
       docx("SSRF &amp; IDOR", "Review authentication"),
     );
@@ -518,6 +527,7 @@ describe("scan knowledge bases", () => {
     const documents = await extractedDocuments(knowledgeBase.path);
 
     expect(documents).toContain("Payment service boundary");
+    expect(documents).toContain("Rotate the admin_token\nevery 90 days.");
     expect(documents).toContain("SSRF & IDOR\nReview authentication\n");
     expect(documents).toContain("Authorization\nReview permissions\n");
     expect(documents).toContain("Authentication\nReview sessions\n");
