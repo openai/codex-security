@@ -198,31 +198,43 @@ test.each([7, 9])(
   },
 );
 
-test("snapshots shared getter-backed numeric evidence once after reading all GitHub rows", () => {
+test("snapshots shared evidence even when only one GitHub row needs numeric capture", () => {
   let reads = 0;
-  class Metrics {
-    score = Object.assign(new Number(7), { toJSON: () => 9 });
-  }
   const shared = {
-    metrics: new Metrics(),
     get sample() {
       return { id: ++reads };
     },
   };
-  const rows = ["refs/heads/main", "refs/heads/review"].map((ref) => {
-    const row = importedAlert(ref);
-    Object.assign(row.alert, { shared });
-    return row;
+  const first = importedAlert();
+  const second = importedAlert("refs/heads/review");
+  class Metrics {
+    score = Object.assign(new Number(7), { toJSON: () => 9 });
+  }
+  Object.assign(first.alert, { extra: new Metrics(), shared });
+  Object.assign(second.alert, { shared });
+  const separate = importedAlert("refs/heads/separate");
+  Object.assign(separate.alert, {
+    rule: first.alert["rule"],
+    warning: Object.assign(new Error("warning"), { context: { rule: "r1" } }),
+    bytes: Buffer.from([1, 2]),
   });
-  const result = normalizeGitHubCodeScanningAlerts(rows);
+  const result = normalizeGitHubCodeScanningAlerts([first, second, separate]);
   expect(result.excluded).toEqual([]);
-  const retained = result.findings.map(
-    ({ evidence }) =>
-      (evidence.source_data!["alert"] as { shared: typeof shared }).shared,
-  );
+  const retained = result.findings
+    .slice(0, 2)
+    .map(
+      ({ evidence }) =>
+        (evidence.source_data!["alert"] as { shared: typeof shared }).shared,
+    );
   expect(retained[0]).toBe(retained[1]);
-  expect(retained.map((data) => data.sample.id)).toEqual([5, 5]);
-  expect(JSON.stringify(retained[0]!.metrics)).toBe('{"score":7}');
+  expect(retained.map((value) => value.sample.id)).toEqual([5, 5]);
+  expect(Object.is(result.findings[2]!.evidence.source_data, separate)).toBe(
+    true,
+  );
+  expect(JSON.parse(JSON.stringify(separate.alert))).toMatchObject({
+    warning: { context: { rule: "r1" } },
+    bytes: { type: "Buffer", data: [1, 2] },
+  });
 });
 
 test("applies the Cloud byte limit to numbers returned by a vendor serializer", () => {

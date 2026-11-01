@@ -54,7 +54,9 @@ primitive numbers in plain data fields for predictable JSON exports.
 The SDK uses the underlying numeric value of a JavaScript `Number` object in
 evidence. If a record also uses getters or custom serialization, the reader
 may capture their values during normalization. Readers that clone raw records
-require cloneable input and can copy a `Buffer` as a `Uint8Array`.
+require cloneable input and can copy a `Buffer` as a `Uint8Array`. Values created by a
+serializer use their emitted JSON for the Cloud byte limit. Use stable getters
+and serializers when you need to reproduce a saved request.
 
 ## Operate the two destinations
 

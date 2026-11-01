@@ -409,7 +409,29 @@ function snapshotEvidence<T>(input: T): T {
  * been read, then capture their graph once as the SDK does before publication. */
 export class EvidenceNumberBatch {
   readonly changed = new Set<object>();
-  readonly deferred: ExternalFindingEvidence[] = [];
+  readonly #deferred: ExternalFindingEvidence[] = [];
+  readonly #owners = new WeakMap<object, ExternalFindingEvidence>();
+  readonly #linked = new Map<
+    ExternalFindingEvidence,
+    Set<ExternalFindingEvidence>
+  >();
+
+  record(
+    input: ExternalFindingEvidence,
+    getters: Set<object> | undefined,
+    snapshot: boolean,
+  ): void {
+    if (snapshot) this.#deferred.push(input);
+    const links = new Set<ExternalFindingEvidence>();
+    this.#linked.set(input, links);
+    for (const object of getters ?? []) {
+      const owner = this.#owners.get(object);
+      if (owner) {
+        links.add(owner);
+        this.#linked.get(owner)!.add(input);
+      } else this.#owners.set(object, input);
+    }
+  }
 
   finish(
     target: ExternalImportTarget,
@@ -418,8 +440,14 @@ export class EvidenceNumberBatch {
       ExternalFindingEvidence,
       string | ExternalFindingEvidence
     >();
-    const inputs = this.deferred;
-    if (!inputs.length) return captured;
+    if (!this.#deferred.length) return captured;
+    // A shared getter must run once across the affected rows, in selection order.
+    const needed = new Set(this.#deferred);
+    for (const input of needed)
+      for (const other of this.#linked.get(input)!) needed.add(other);
+    const inputs = [...this.#linked.keys()].filter((input) =>
+      needed.has(input),
+    );
     let snapshots: ExternalFindingEvidence[] | undefined;
     try {
       snapshots = snapshotEvidence(inputs);
@@ -495,6 +523,12 @@ function checkedEvidenceJson<T>(
 ): { retained: T; bytes: number } {
   // Only substitute fields the raw provider walk actually saw. A serializer
   // can create a new object whose own numeric representation is the wire value.
+  let getters: Set<object> | undefined;
+  function retained(bytes: number, snapshot = false) {
+    if (batch && (snapshot || getters))
+      batch.record(input as ExternalFindingEvidence, getters, snapshot);
+    return { retained: input, bytes };
+  }
   const wireMatches = new Map<object, boolean>();
   const numberOwners = new WeakSet<object>();
   const indirectNumbers = new Set<object>();
@@ -568,10 +602,8 @@ function checkedEvidenceJson<T>(
         if (batch && typeof child === "function" && !isNumberObject(value))
           hasFunction = true;
         const getter =
-          batch &&
-          typeof child === "object" &&
-          child !== null &&
-          Object.getOwnPropertyDescriptor(value, key)?.get;
+          batch && Object.getOwnPropertyDescriptor(value, key)?.get;
+        if (getter) (getters ??= new Set()).add(value);
         pending.push([child, depth + 1, indirect || !ordinary || !!getter]);
       }
     } else if (typeof value === "number") {
@@ -592,8 +624,7 @@ function checkedEvidenceJson<T>(
       (hasFunction && [...wireMatches.values()].includes(false)) ||
       [...indirectNumbers].some((number) => wireMatches.get(number) !== true)
     ) {
-      batch.deferred.push(input as ExternalFindingEvidence);
-      return { retained: input, bytes: 0 };
+      return retained(0, true);
     }
   }
   if (failed) throw failed.reason;
@@ -606,7 +637,7 @@ function checkedEvidenceJson<T>(
   if (batch && customNumber)
     for (const [number, equal] of wireMatches)
       if (!equal) batch.changed.add(number);
-  return { retained: input, bytes };
+  return retained(bytes);
 }
 
 export function validateImportRequest(input: unknown): FindingImportRequest {
