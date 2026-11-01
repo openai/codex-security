@@ -5,6 +5,15 @@ const MAX_ACTIVITY_PATHS = 8;
 const MAX_PROSE_CHARACTERS = 1_000;
 const SHELL_TOKEN = /"(?:\\.|[^"\\])*"|'[^']*'|[^\s|;&<>]+/gu;
 
+interface ActivityCommand {
+  text: string;
+  posix: boolean;
+  powershell: boolean;
+  script?: string;
+  argv?: readonly string[];
+  argvExpansion?: readonly boolean[];
+}
+
 export type ScanActivityStatus = "running" | "completed" | "failed";
 
 export interface ScanActivity {
@@ -74,12 +83,15 @@ export function scanActivityFromEvent(
     item["type"] === "command_execution" &&
     typeof item["command"] === "string"
   ) {
-    const command = unwrapCommand(item["command"]);
+    const command = unwrapCommand(
+      item["command"],
+      item["shell"] ?? event["shell"],
+    );
     return {
       id: item["id"],
       kind: "command",
       status,
-      description: command.replaceAll(/\s+/gu, " "),
+      description: command.text,
       paths: commandRepositoryPaths(command, repository),
     };
   }
@@ -87,14 +99,17 @@ export function scanActivityFromEvent(
   if (item["type"] === "mcp_tool_call" && typeof item["tool"] === "string") {
     const arguments_ = isRecord(item["arguments"]) ? item["arguments"] : {};
     const value = arguments_["cmd"] ?? arguments_["command"];
-    const command = typeof value === "string" ? unwrapCommand(value) : null;
+    const command =
+      typeof value === "string"
+        ? unwrapCommand(value, arguments_["shell"])
+        : null;
     return {
       id: item["id"],
       kind: "tool",
       status,
       description:
         item["tool"] === "exec" && command !== null
-          ? command.replaceAll(/\s+/gu, " ")
+          ? command.text
           : toolDescription(item["tool"], arguments_, item["arguments"]),
       paths:
         item["tool"] === "exec" && command !== null
@@ -118,30 +133,299 @@ export function scanActivityFromEvent(
   return null;
 }
 
-function unwrapCommand(command: string): string {
-  const normalized = command.trim();
-  const powershell =
-    process.platform === "win32"
-      ? /^(?:"([^"]+)"|([^\s"'|;&<>]+))\s+(?:-NoProfile\s+)?-Command\s+(['"])(.*)\3$/isu.exec(
-          normalized,
-        )
-      : null;
-  if (
-    powershell !== null &&
-    /(?:^|[\\/])(?:powershell|pwsh)(?:\.exe)?$/iu.test(
-      powershell[1] ?? powershell[2]!,
-    )
+type ShellKind = "posix" | "powershell" | "unknown";
+
+function shellKind(shell: unknown): ShellKind {
+  if (typeof shell !== "string") return "unknown";
+  if (/(?:^|[\\/])(?:powershell|pwsh)(?:\.exe)?$/iu.test(shell))
+    return "powershell";
+  return /(?:^|\/)(?:sh|bash|zsh)$/u.test(shell) ? "posix" : "unknown";
+}
+
+interface CommandToken {
+  value: string;
+  resolved: boolean;
+  quoted: boolean;
+  expand: boolean;
+}
+
+// Find a substitution's closing delimiter without interpreting its contents.
+// Unsupported shell grammar stays unresolved through the end of the command.
+function substitutionEnd(text: string, start: number): number | undefined {
+  const stack: { end: ")" | "`"; quote: "'" | '"' | null; depth: number }[] = [
+    { end: text[start] === "`" ? "`" : ")", quote: null, depth: 0 },
+  ];
+  for (
+    let index = start + (text[start] === "`" ? 1 : 2);
+    index < text.length;
+    index++
   ) {
-    return powershell[4]!;
+    const frame = stack[stack.length - 1]!;
+    const char = text[index]!;
+    if (char === "\\" && frame.quote !== "'") {
+      // Escaped backticks can encode another legacy substitution layer.
+      if (frame.end === "`" && text[index + 1] === "`") return undefined;
+      index++;
+      continue;
+    }
+    if (char === frame.quote) {
+      frame.quote = null;
+      continue;
+    }
+    if (frame.quote === "'") continue;
+    // Parameter expansion has its own delimiters and quoting grammar.
+    if (text.startsWith("${", index)) return undefined;
+    if (frame.quote === null && (char === "'" || char === '"')) {
+      frame.quote = char;
+      continue;
+    }
+    if (frame.quote === null) {
+      // ANSI-C quoting has additional escape rules; do not guess its boundary.
+      if (text.startsWith("$'", index)) return undefined;
+      if (
+        text.startsWith("<<", index) ||
+        (/^case(?:\s|$)/u.test(text.slice(index)) &&
+          (index === 0 || /[\s;|(]/u.test(text[index - 1]!)))
+      )
+        return undefined;
+      if (char === "#" && /[\s;|(]/u.test(text[index - 1] ?? " ")) {
+        const newline = text.indexOf("\n", index);
+        if (newline === -1) return undefined;
+        index = newline;
+        continue;
+      }
+      if (char === frame.end && frame.depth === 0) {
+        stack.pop();
+        if (stack.length === 0) return index;
+        continue;
+      }
+      if (frame.end === ")" && char === "(") {
+        frame.depth++;
+        continue;
+      }
+      if (frame.end === ")" && char === ")") {
+        frame.depth--;
+        continue;
+      }
+    }
+    if (char === "`" || text.startsWith("$(", index)) {
+      stack.push({ end: char === "`" ? "`" : ")", quote: null, depth: 0 });
+      if (char !== "`") index++;
+    }
   }
-  const match =
-    /^(?:\/(?:usr\/)?bin\/)?(?:zsh|bash|sh)\s+-[a-z]*c[a-z]*\s+(['"])(.*)$/su.exec(
+  return undefined;
+}
+
+// Read whole shell words, including adjacent quoted pieces. Expansions whose
+// values are not recorded remain unresolved; this is not a shell evaluator.
+function posixTokens(text: string): CommandToken[] {
+  const tokens: CommandToken[] = [];
+  let value = "";
+  let active = false;
+  let resolved = true;
+  let quoted = false;
+  let expand = false;
+  let quote: "'" | '"' | null = null;
+  const finish = () => {
+    if (active)
+      tokens.push({
+        value,
+        resolved: resolved && quote === null,
+        quoted,
+        expand,
+      });
+    value = "";
+    active = false;
+    resolved = true;
+    expand = false;
+  };
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index]!;
+    if (quote === null && /[\s|;&<>]/u.test(char)) {
+      finish();
+      continue;
+    }
+    if (!active && quote === null && char === "#") {
+      const newline = text.indexOf("\n", index);
+      index = newline === -1 ? text.length : newline;
+      continue;
+    }
+    if (!active) {
+      active = true;
+      quoted = char === "'" || char === '"';
+    }
+    if (char === quote) {
+      quote = null;
+      continue;
+    }
+    if (quote === null && (char === "'" || char === '"')) {
+      quote = char;
+      continue;
+    }
+    if (char === "\\" && quote !== "'") {
+      const next = text[index + 1];
+      if (next === undefined) {
+        resolved = false;
+        continue;
+      }
+      if (quote === '"' && !/[\n$`"\\]/u.test(next)) {
+        value += char;
+      } else {
+        if (next !== "\n") value += next;
+        if (next === "$" && value === "$") resolved = false;
+        index++;
+      }
+      continue;
+    }
+    if (quote !== "'" && (char === "`" || text.startsWith("$(", index))) {
+      resolved = false;
+      const end = substitutionEnd(text, index);
+      if (end === undefined) return tokens;
+      value += text.slice(index, end + 1);
+      index = end;
+      continue;
+    }
+    if (char === "$" && value === "" && quote !== "'") {
+      const reference =
+        /^\$(?:CODEX_SECURITY_REPOSITORY|\{CODEX_SECURITY_REPOSITORY\})(?=\/|$)/u.exec(
+          text.slice(index),
+        );
+      if (reference) {
+        value += reference[0];
+        expand = true;
+        index += reference[0].length - 1;
+        continue;
+      }
+    }
+    if (char === "$" && quote !== "'") resolved = false;
+    if (quote === null && /[*?\[\]{}]/u.test(char)) resolved = false;
+    value += char;
+  }
+  finish();
+  return tokens;
+}
+
+function scriptIndex(
+  argv: readonly string[],
+  kind: ShellKind,
+): number | undefined {
+  let commandOption = false;
+  for (let index = 1; index < argv.length; index++) {
+    const option = argv[index]!;
+    if (kind === "powershell") {
+      if (/^-Command$/iu.test(option)) return index + 1;
+      if (/^-(?:NoProfile|NoLogo|NonInteractive)$/iu.test(option)) continue;
+      return undefined;
+    }
+    if (kind !== "posix") return undefined;
+    if (option === "--") return commandOption ? index + 1 : undefined;
+    if (/^--(?:noprofile|norc|posix|login|restricted)$/u.test(option)) continue;
+    if (/^--(?:rcfile|init-file)$/u.test(option)) {
+      index++;
+      continue;
+    }
+    if (!/^[-+][a-zA-Z]+$/u.test(option))
+      return commandOption ? index : undefined;
+    if (option.startsWith("-") && option.includes("c")) commandOption = true;
+    // -o/+o and Bash -O/+O consume an option name, also in combined flags.
+    index += option.match(/[oO]/gu)?.length ?? 0;
+  }
+  return undefined;
+}
+
+function unwrapCommand(
+  command: string | readonly string[],
+  shell?: unknown,
+): ActivityCommand {
+  const kind =
+    shell === undefined
+      ? process.platform === "win32"
+        ? "powershell"
+        : "posix"
+      : shellKind(shell);
+  if (typeof command !== "string") {
+    const launcher = shellKind(command[0]);
+    const index = scriptIndex(command, launcher);
+    const script = index === undefined ? undefined : command[index];
+    return {
+      text: command
+        .map((part) =>
+          /^[\w./:-]+$/u.test(part) ? part : JSON.stringify(part),
+        )
+        .join(" "),
+      posix:
+        launcher === "posix" ||
+        (launcher === "unknown" && shellKind(shell) === "posix"),
+      powershell: launcher === "powershell",
+      script:
+        script === undefined
+          ? undefined
+          : launcher === "powershell"
+            ? command.slice(index).join(" ")
+            : script,
+      argv:
+        index === undefined
+          ? command
+          : command.filter((_, position) =>
+              launcher === "powershell" ? position < index : position !== index,
+            ),
+    };
+  }
+  const normalized = command.trimStart();
+  // A PowerShell wrapper is identifiable independently of the replay host.
+  const powershell =
+    /^(?:"([^"]+)"|([^\s"'|;&<>]+))\s+(?:-(?:NoProfile|NoLogo|NonInteractive)\s+)*-Command\s+([\s\S]*)$/iu.exec(
       normalized,
     );
-  if (match === null) return normalized;
-  const quote = match[1]!;
-  const script = match[2]!;
-  return script.endsWith(quote) ? script.slice(0, -1) : script;
+  if (
+    powershell &&
+    shellKind(powershell[1] ?? powershell[2]) === "powershell"
+  ) {
+    let script = powershell[3]!;
+    const wrapper = /^(['"])([\s\S]*)\1\s*$/u.exec(script);
+    if (wrapper) script = wrapper[2]!;
+    return { text: script, posix: false, powershell: true };
+  }
+  if (/^(?:\/(?:usr\/)?bin\/)?(?:sh|bash|zsh)\s/u.test(normalized)) {
+    const tokens = posixTokens(normalized);
+    const index = scriptIndex(
+      tokens.map((token) => token.value),
+      "posix",
+    );
+    const script = index === undefined ? undefined : tokens[index];
+    if (script?.resolved) {
+      const operands = tokens
+        .slice(index! + 1)
+        .filter((token) => token.resolved);
+      return {
+        text:
+          operands.length === 0 && script.quoted ? script.value : normalized,
+        script: script.value,
+        posix: true,
+        powershell: false,
+        argv: operands.map((token) => token.value),
+        argvExpansion: operands.map((token) => token.expand),
+      };
+    }
+    return {
+      text: normalized,
+      posix: true,
+      powershell: false,
+      argv:
+        index === undefined
+          ? tokens.filter((token) => token.resolved).map((token) => token.value)
+          : [],
+      argvExpansion:
+        index === undefined
+          ? tokens.filter((token) => token.resolved).map((token) => token.expand)
+          : [],
+    };
+  }
+  return {
+    text: normalized,
+    posix: kind === "posix",
+    powershell: kind === "powershell",
+  };
 }
 
 export function scanActivityFromSessionEvent(
@@ -211,21 +495,27 @@ export function scanActivityFromSessionEvent(
     customShellCommand(name, payload["input"]);
   const command =
     typeof value === "string"
-      ? value
+      ? unwrapCommand(
+          value,
+          arguments_["shell"] ?? payload["shell"] ?? event["shell"],
+        )
       : Array.isArray(value) && value.every((part) => typeof part === "string")
-        ? value.join(" ")
+        ? unwrapCommand(
+            value,
+            arguments_["shell"] ?? payload["shell"] ?? event["shell"],
+          )
         : null;
   if (
     command !== null &&
     /^(?:exec|exec_command|shell_command|shell)$/u.test(name)
   ) {
-    return scanActivityFromEvent(
-      {
-        type: "item.started",
-        item: { id, type: "command_execution", command },
-      },
-      repository,
-    );
+    return {
+      id,
+      kind: "command",
+      status: "running",
+      description: command.text,
+      paths: commandRepositoryPaths(command, repository),
+    };
   }
 
   return {
@@ -371,41 +661,64 @@ function sessionCallArguments(
   return isRecord(parsed) ? parsed : {};
 }
 
-function commandRepositoryPaths(command: string, repository: string): string[] {
+function commandRepositoryPaths(
+  command: ActivityCommand,
+  repository: string,
+): string[] {
   const paths = new Set<string>();
-  const repositoryPrefix = repository.replaceAll("\\", "/").replace(/\/$/u, "");
-  for (const token of command.match(SHELL_TOKEN) ?? []) {
-    let value = token;
-    const singleQuoted = value.startsWith("'") && value.endsWith("'");
-    if ((value.startsWith('"') && value.endsWith('"')) || singleQuoted) {
-      value = value.slice(1, -1);
-    }
-    value = value.replaceAll('\\"', '"').replaceAll("\\", "/");
-    if (process.platform === "win32" && !singleQuoted) {
-      value = value.replace(
-        /^\$(?:env:CODEX_SECURITY_REPOSITORY|\{env:CODEX_SECURITY_REPOSITORY\})\//iu,
-        "$CODEX_SECURITY_REPOSITORY/",
-      );
-    }
-    for (const prefix of [
-      "$CODEX_SECURITY_REPOSITORY/",
-      "${CODEX_SECURITY_REPOSITORY}/",
-      `${repositoryPrefix}/`,
-    ]) {
-      if (!value.startsWith(prefix)) continue;
-      const path = value
-        .slice(prefix.length)
-        .replace(/["'\r\n].*$/u, "")
-        .trim()
-        .replace(/\/+$/u, "")
-        .replace(/:\d+(?::\d+)?$/u, "");
-      if (
-        path !== "" &&
-        !path.startsWith("../") &&
-        !path.split("/").includes("..")
-      ) {
-        paths.add(path);
+  const windows =
+    command.powershell || /^(?:[a-z]:[\\/]|\\\\)/iu.test(repository);
+  const normalize = (value: string) =>
+    windows ? value.replaceAll("\\", "/") : value;
+  const repositoryPrefix = normalize(repository).replace(/\/$/u, "");
+  const script =
+    command.script ?? (command.argv === undefined ? command.text : undefined);
+  const candidates: { value: string; expand: boolean; posix?: boolean }[] = [];
+  if (script !== undefined) {
+    if (command.posix) {
+      for (const token of posixTokens(script)) {
+        if (token.resolved)
+          candidates.push({ value: token.value, expand: true, posix: true });
       }
+    } else if (command.powershell) {
+      for (const token of script.match(SHELL_TOKEN) ?? []) {
+        const singleQuoted = token.startsWith("'") && token.endsWith("'");
+        const quoted =
+          singleQuoted || (token.startsWith('"') && token.endsWith('"'));
+        let value = quoted ? token.slice(1, -1) : token;
+        value = normalize(value.replaceAll('\\"', '"'));
+        if (value.includes('"')) continue;
+        if (command.powershell && !singleQuoted) {
+          value = value.replace(
+            /^\$(?:env:CODEX_SECURITY_REPOSITORY|\{env:CODEX_SECURITY_REPOSITORY\})\//iu,
+            "$CODEX_SECURITY_REPOSITORY/",
+          );
+        }
+        candidates.push({ value, expand: !singleQuoted });
+      }
+    }
+  }
+  // Recorded arguments are literal values, never input to the shell lexer.
+  for (const [index, value] of (command.argv ?? []).entries())
+    candidates.push({
+      value,
+      expand: command.argvExpansion?.[index] ?? false,
+      posix: command.posix,
+    });
+  for (const candidate of candidates) {
+    const value = candidate.posix
+      ? candidate.value
+      : normalize(candidate.value);
+    const prefixes = [`${repositoryPrefix}/`];
+    if (candidate.expand)
+      prefixes.push(
+        "$CODEX_SECURITY_REPOSITORY/",
+        "${CODEX_SECURITY_REPOSITORY}/",
+      );
+    for (const prefix of prefixes) {
+      if (!value.startsWith(prefix)) continue;
+      const path = value.slice(prefix.length).replace(/\/+$/u, "");
+      if (path !== "" && !path.split("/").includes("..")) paths.add(path);
     }
     if (paths.size >= MAX_ACTIVITY_PATHS) break;
   }
