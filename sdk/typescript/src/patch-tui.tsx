@@ -4,6 +4,7 @@ import { stripVTControlCharacters } from "node:util";
 import { Box, Text, render, useApp, useInput, useStdout } from "ink";
 import { useMemo, useRef, useState } from "react";
 import type { Finding, FindingCodeEvidence } from "./models.js";
+import { SCAN_SEVERITIES } from "./scan-settings.js";
 
 const SEVERITY_COLORS = {
   critical: "redBright",
@@ -174,6 +175,7 @@ function locationSource(
     }
 
     const source = readFileSync(path, "utf8").split(/\r?\n/u);
+    if (source.at(-1) === "") source.pop();
     const first = Math.max(0, location.startLine - 4);
     const last = Math.min(
       source.length,
@@ -361,12 +363,21 @@ function FindingDetailLine({
 
 export function PatchTui({
   repository,
-  findings,
+  findings: inputFindings,
   onComplete,
   color = process.env["NO_COLOR"] === undefined,
 }: PatchTuiProps): React.JSX.Element {
   const { exit } = useApp();
   const { stdout } = useStdout();
+  const findings = useMemo(
+    () =>
+      [...inputFindings].sort(
+        (left, right) =>
+          SCAN_SEVERITIES.indexOf(left.severity.level) -
+          SCAN_SEVERITIES.indexOf(right.severity.level),
+      ),
+    [inputFindings],
+  );
   const [pane, setPane] = useState<"findings" | "details">("findings");
   const [focused, setFocused] = useState(0);
   const focusedFinding = useRef(focused);

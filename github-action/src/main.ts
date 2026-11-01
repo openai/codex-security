@@ -4,12 +4,14 @@ import { parseInputs, scanArguments, type Inputs } from './inputs.js';
 import { resolveTarget, type EventContext, type Target } from './targets.js';
 import { SUPPORTED_CLI_VERSION, setupRuntime, cleanupRuntime, runtimeEnvironment, scanCredentials, API_KEY_ENVIRONMENT_VARIABLES, type Runtime } from './runtime.js';
 import { runProcess, safeLogLines } from './process.js';
-import { analyzeResults, type ScanResults } from './results.js';
+import { analyzeResults, type ScanResults, type Severity } from './results.js';
 import { collectReports, uploadReports } from './artifacts.js';
 import { resultSummary, emitAnnotations, plain, resultTitle } from './reporting.js';
 
+const SEVERITY_RANK: Record<Severity, number> = { critical: 0, high: 1, medium: 2, low: 3, informational: 4 };
+
 export const OUTPUT_NAMES = [
-  'sarif-path', 'json-path', 'coverage-path', 'results-directory', 'scan-status', 'skip-reason',
+  'sarif-path', 'json-path', 'manifest-path', 'coverage-path', 'results-directory', 'scan-status', 'skip-reason',
   'policy-status', 'report-status', 'exit-code', 'scanned-sha', 'analysis-ref', 'sarif-upload-ready',
   'critical-count', 'high-count', 'medium-count', 'low-count', 'informational-count', 'estimated-cost',
 ] as const;
@@ -30,7 +32,7 @@ async function context(): Promise<EventContext> {
 }
 function outputs(result: ScanResults, target: Target, exitCode: number): void {
   const values: Record<string, string | number | boolean> = {
-    'sarif-path': result.paths.sarifPath, 'json-path': result.paths.jsonPath, 'coverage-path': result.paths.coveragePath,
+    'sarif-path': result.paths.sarifPath, 'json-path': result.paths.jsonPath, 'coverage-path': result.paths.coveragePath, 'manifest-path': result.paths.manifestPath,
     'results-directory': result.paths.resultsDirectory, 'scan-status': result.scanStatus, 'policy-status': result.policyStatus,
     'report-status': result.reportStatus, 'exit-code': exitCode, 'scanned-sha': target.scannedSha,
     'analysis-ref': target.analysisRef, 'sarif-upload-ready': result.sarifUploadReady,
@@ -84,8 +86,8 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
           ? 'Set CODEX_SECURITY_API_KEY in Actions secrets (or Dependabot secrets for Dependabot runs) and pass it as OPENAI_API_KEY to this step. No scan was started.'
           : `Pass ${API_KEY_ENVIRONMENT_VARIABLES[credentials.provider]} from Actions secrets to this step. No scan was started.`);
       }
-      tempRoot = await realpath(process.env.RUNNER_TEMP ?? '');
       if (!process.env.RUNNER_TEMP) throw new Error('RUNNER_TEMP is required.');
+      tempRoot = await realpath(process.env.RUNNER_TEMP);
       core.info(`Preparing Codex Security ${SUPPORTED_CLI_VERSION}. Scope: ${inputs.scope}; mode: ${inputs.mode}; effort: ${inputs.effort}.`);
       const preparationStarted = performance.now();
       let timer = heartbeat('CLI preparation', preparationStarted);
@@ -160,8 +162,12 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
         core.info(`Findings: ${result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(', ') : 'unavailable'}.`);
         core.info(`Estimated cost: ${result.estimatedCost === undefined ? 'unavailable' : `$${result.estimatedCost.toFixed(4)}`}.`);
         for (const error of result.errors) log(`Report diagnostic: ${error}`);
-        finalSummary = resultSummary(result, inputs, target);
-        if (inputs.annotations) emitAnnotations(result);
+        const displayResult = {
+          ...result,
+          findings: [...result.findings].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity]),
+        };
+        finalSummary = resultSummary(displayResult, inputs, target);
+        if (inputs.annotations) emitAnnotations(displayResult);
         success = result.reportStatus !== 'failed' && result.scanStatus === 'completed' && result.policyStatus === 'passed';
         finalTitle = resultTitle(result, inputs);
       }

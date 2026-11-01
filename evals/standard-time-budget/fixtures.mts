@@ -31,6 +31,11 @@ server files, including configuration, must remain private.
 Preview endpoints render user-provided titles in HTML for the signed-in browser.
 The deployment does not add an HTML sanitizer or Content-Security-Policy header.
 The database and export files are deployment resources, not checked-in fixtures.
+
+Partner status checks use Requests to report an HTTP status to the signed-in
+user. Only the catalog and shipping status URLs are approved. Both are managed
+by the operator. The portal can also reach internal services that tenants cannot
+contact directly.
 `,
     "src/app.py": `import os
 import sqlite3
@@ -39,6 +44,7 @@ from flask import Flask, abort, g, session
 
 from .downloads import downloads
 from .invoices import invoices
+from .partners import partners
 from .preview import preview
 from .search import search
 
@@ -69,6 +75,7 @@ app.register_blueprint(invoices)
 app.register_blueprint(search)
 app.register_blueprint(downloads)
 app.register_blueprint(preview)
+app.register_blueprint(partners)
 `,
     "src/__init__.py": "",
     "src/invoices.py": `from flask import Blueprint, abort, g, jsonify
@@ -160,6 +167,30 @@ def billing_preview():
     title = escape(request.args.get("title", ""))
     return Response(f"<h1>{title}</h1>", content_type="text/html")
 `,
+    "src/partners.py": `import requests
+from flask import Blueprint, abort, request
+
+partners = Blueprint("partners", __name__)
+PARTNER_STATUS_URLS = {
+    "https://catalog.example.test/status",
+    "https://shipping.example.test/status",
+}
+
+
+@partners.get("/account/partner-status")
+def account_partner_status():
+    response = requests.head(request.args["url"], timeout=3, allow_redirects=False)
+    return {"status": response.status_code}
+
+
+@partners.get("/billing/partner-status")
+def billing_partner_status():
+    url = request.args["url"]
+    if url not in PARTNER_STATUS_URLS:
+        abort(400)
+    response = requests.head(url, timeout=3, allow_redirects=False)
+    return {"status": response.status_code}
+`,
     "schema.sql": `CREATE TABLE invoices (
     id INTEGER PRIMARY KEY,
     tenant_id INTEGER NOT NULL,
@@ -212,6 +243,12 @@ CREATE TABLE catalog (
         "return Response",
         ["CWE-79"],
       ),
+      sourceCase(
+        "partner-status-ssrf",
+        "src/partners.py",
+        'requests.head(request.args["url"]',
+        ["CWE-918"],
+      ),
     ],
     controls: [
       sourceCase(
@@ -235,6 +272,12 @@ CREATE TABLE catalog (
         "return Response",
         ["CWE-79"],
         1,
+      ),
+      sourceCase(
+        "partner-status-allowlist",
+        "src/partners.py",
+        "requests.head(url,",
+        ["CWE-918"],
       ),
     ],
   };

@@ -19,26 +19,41 @@ import {
   DEFAULT_CLOUD_BASE_URL,
 } from "./cloud-endpoint.js";
 import { CodexSecurityError } from "./errors.js";
+import { requireExternalImports } from "./external-imports-feature.js";
 import {
   codexSecurityStateDirectory,
   createWindowsOutputDirectory,
   validatePreparedOutputDir,
 } from "./runtime.js";
 import {
+  EXTERNAL_FINDINGS_PROVIDERS,
   readExternalFindings,
   type ExternalFindingsReaderOptions,
 } from "./external-findings-read.js";
+import { canonicalJson } from "./record.js";
+import { notify } from "./value.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
+import { wizFindingRepository } from "./wiz-findings.js";
+import { dependabotRepository } from "./github-dependabot-findings.js";
 import { snykRepositoryUrls } from "./snyk-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
-import type {
-  ExternalFindings,
-  ExternalPublicationInput,
+import {
+  blackDuckReportRepositories,
+  projectedBlackDuckRepositoryUrl,
+} from "./blackduck-findings.js";
+import { veracodeReportRepositories } from "./veracode-findings.js";
+import { inspectorReportRepository } from "./inspector-findings.js";
+import { sonarRepositoryUrls } from "./sonar-findings.js";
+import {
+  snapshotImportOptions,
+  type ExternalFindings,
+  type ExternalPublicationInput,
 } from "./external-findings.js";
 import {
   cloudRepositoryUrlKey,
   validateImportRequest,
   validateExternalEvidence,
+  validateExternalReport,
   validateImportReceipt,
   validateRepositories,
   validateSourceReports,
@@ -58,10 +73,15 @@ export interface NormalizedExternalPublicationOptions {
   repository: string;
   provider: FindingImportRequest["source"]["provider"];
   sourceKey: string;
+  /** Full Inspector project ARNs mapped to independently verified repository URLs. */
+  inspectorProjectMap?: ReadonlyMap<string, string>;
 }
 
 /** File readers accept the vendor formats installed in this SDK. */
-export interface ExternalPublicationOptions extends NormalizedExternalPublicationOptions {
+export interface ExternalPublicationOptions extends Omit<
+  NormalizedExternalPublicationOptions,
+  "provider"
+> {
   provider: ExternalFindingsReaderOptions["provider"];
   sourceRepositoryUrl?: string;
 }
@@ -93,6 +113,7 @@ export interface ExternalPublicationResult {
   cloudUrl?: string;
   status: "complete" | "partial" | "interrupted";
   read: number;
+  report?: ExternalFindings["report"];
   ready: number;
   excluded: ExternalFindings["excluded"];
   receipts: FindingImportReceipt[];
@@ -120,6 +141,7 @@ interface SavedSubmission {
   requests: FindingImportRequest[];
   receipts?: FindingImportReceipt[];
   inputProjection?: { inputDigest: string; savedEvidenceDigest: string };
+  inspectorProjectMapRequired?: true;
 }
 
 export interface ExternalPublicationPreview extends ExternalFindings {
@@ -156,29 +178,13 @@ async function readInBatches<T, U>(
   return output;
 }
 
-function canonicalJson(
-  value: unknown,
-  compareKeys?: (left: string, right: string) => number,
-): string {
-  return JSON.stringify(value, (_key, child: unknown) => {
-    if (child !== null && typeof child === "object" && !Array.isArray(child)) {
-      const record = child as Record<string, unknown>;
-      return Object.fromEntries(
-        Object.keys(record)
-          .sort(compareKeys)
-          .map((key) => [key, record[key]]),
-      );
-    }
-    return child;
-  });
-}
-
 function sameSubmission(
   left: SavedSubmission,
   right: SavedSubmission,
 ): boolean {
   return (
     left.accountId === right.accountId &&
+    left.inspectorProjectMapRequired === right.inspectorProjectMapRequired &&
     canonicalJson(left.requests) === canonicalJson(right.requests)
   );
 }
@@ -214,7 +220,28 @@ async function readOptionalFile(path: string): Promise<string | undefined> {
   });
 }
 
-async function writeAtomicJson(path: string, value: unknown): Promise<void> {
+function reportForJson(report: ExternalFindings["report"]) {
+  const errors = report?.["errors"];
+  if (!Array.isArray(errors)) return report;
+  const json = JSON.stringify(errors, (_key, entry: unknown) =>
+    entry instanceof Error ? { message: entry.message } : entry,
+  );
+  return { ...report, errors: JSON.parse(json) as unknown[] };
+}
+
+export function externalPublicationStateDirectory(
+  environment: NodeJS.ProcessEnv,
+): string {
+  return join(
+    codexSecurityStateDirectory(environment),
+    "external-finding-publications",
+  );
+}
+
+export async function writeAtomicJson(
+  path: string,
+  value: unknown,
+): Promise<void> {
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
     const file = await open(temporary, "wx", 0o600);
@@ -346,14 +373,14 @@ export async function prepareExternalPublication(
   options: ExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
-  const parsed = await readExternalFindings(path, options);
-  return parsed.publication
-    ? preparePublicationInput(parsed.publication, options, dependencies)
-    : prepareNormalizedExternalPublication(
-        parsed.findings,
-        options,
-        dependencies,
-      );
+  requireExternalImports(dependencies.environment);
+  const settings = snapshotImportOptions(options);
+  const parsed = await readExternalFindings(path, settings);
+  return preparePublicationInput(
+    parsed.publication ?? normalizedPublicationInput(parsed.findings),
+    { ...settings, provider: EXTERNAL_FINDINGS_PROVIDERS[settings.provider] },
+    dependencies,
+  );
 }
 
 /** Prepare normalized provider evidence without reading a vendor export. */
@@ -362,8 +389,25 @@ export async function prepareNormalizedExternalPublication(
   options: NormalizedExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
+  requireExternalImports(dependencies.environment);
+  const settings = snapshotImportOptions(options);
+  return preparePublicationInput(
+    normalizedPublicationInput(input),
+    settings,
+    dependencies,
+  );
+}
+
+function normalizedPublicationInput(
+  input: ExternalFindings,
+): ExternalPublicationInput {
   // Validation adds Cloud defaults; leave the caller's objects unchanged.
-  const current = structuredClone(input);
+  const { report, ...parsed } = input;
+  const current: ExternalFindings = structuredClone(parsed);
+  if (report !== undefined) {
+    current.report = structuredClone(report);
+    validateExternalReport(current.report);
+  }
   // structuredClone preserves aliases. Detach every raw record before adding
   // typed defaults, including aliases shared with another finding's evidence.
   for (const finding of current.findings)
@@ -385,16 +429,16 @@ export async function prepareNormalizedExternalPublication(
     identities.add(id);
     finding.evidence = validateExternalEvidence(finding.evidence);
   }
-  return preparePublicationInput(
-    {
-      current,
-      legacy: current,
-      currentIdentity: current.findings,
-      legacyIdentity: current.findings,
-    },
-    options,
-    dependencies,
-  );
+  const identity =
+    current.report === undefined
+      ? current.findings
+      : { findings: current.findings, report: reportForJson(current.report) };
+  return {
+    current,
+    legacy: current,
+    currentIdentity: identity,
+    legacyIdentity: identity,
+  };
 }
 
 async function preparePublicationInput(
@@ -402,13 +446,9 @@ async function preparePublicationInput(
   options: NormalizedExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies,
 ): Promise<PreparedExternalPublication> {
-  const progress = (event: ExternalPublicationProgress): void => {
-    try {
-      dependencies.onProgress?.(event);
-    } catch {
-      // Optional progress must not interrupt preparation or publication.
-    }
-  };
+  const { inspectorProjectMap } = options;
+  const progress = (event: ExternalPublicationProgress): void =>
+    notify(() => dependencies.onProgress?.(event));
   if (
     !options.sourceKey.trim() ||
     options.sourceKey.includes("\0") ||
@@ -426,12 +466,14 @@ async function preparePublicationInput(
     legacyIdentity,
   } = input;
   if (parsed.findings.length === 0) {
+    const diagnostics = reportForJson(parsed.report)?.["errors"];
     throw new CodexSecurityError(
-      `No supported findings are ready to publish. ${parsed.excluded.map((item) => `Item ${item.position}: ${item.reason}`).join(" ")}`,
+      `No supported findings are ready to publish. ${parsed.excluded.map((item) => `Item ${item.position}: ${item.reason}`).join(" ")}${Array.isArray(diagnostics) && diagnostics.length ? ` Scanner diagnostics: ${JSON.stringify(diagnostics)}` : ""}`,
     );
   }
   progress({ phase: "discovering", completed: 0 });
   const environment = dependencies.environment ?? process.env;
+  requireExternalImports(environment);
   const apiBaseUrl = cloudBaseUrl(environment);
   const cloudApiUrl = `${apiBaseUrl}/external`;
   // Validate the configured return destination before authentication or uploads.
@@ -510,10 +552,9 @@ async function preparePublicationInput(
     );
   const destination = destinations[0]!;
   const source = { provider: options.provider, source_key: options.sourceKey };
-  const state = join(
-    codexSecurityStateDirectory(environment),
-    "external-finding-publications",
-  );
+  const importPrefix = source.provider === "sonar" ? "/v2" : "";
+  const sourceReportsPath = importPrefix + sourcePath(destination);
+  const state = externalPublicationStateDirectory(environment);
   const checkpointIdentity = [
     // Keep existing production checkpoints readable; other deployments must
     // never share a saved request or receipt with the production default.
@@ -705,33 +746,110 @@ async function preparePublicationInput(
       }
     }
   }
-  let requests = saved?.requests;
-  if (!requests) {
-    for (const finding of parsed.findings) {
-      const sourceRepositories = [
-        finding.evidence.details?.repository?.url,
-        ...(options.provider === "wiz"
-          ? [wizCsvRepositoryUrl(finding.evidence)]
-          : []),
+  if (saved?.inspectorProjectMapRequired && !inspectorProjectMap)
+    throw new CodexSecurityError(
+      "Supply the verified Inspector project binding again to resume.",
+    );
+
+  function checkRepositories(
+    findings: ExternalFindings["findings"],
+    report?: ExternalFindings["report"],
+  ) {
+    function requireDestination(id: string, url: string | null | undefined) {
+      if (
+        url &&
+        cloudRepositoryUrlKey(url) !== cloudRepositoryUrlKey(destination.url)
+      )
+        throw new CodexSecurityError(
+          `Finding ${JSON.stringify(id)} belongs to ${JSON.stringify(url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
+        );
+    }
+    // Historical checkpoints already fixed the provider and request bytes.
+    // Recheck any projected source against the destination discovered for this retry.
+    const replay = saved && options.provider !== "blackduck";
+    if (!saved || options.provider === "sonar") {
+      for (const url of sonarRepositoryUrls(
+        options.provider,
+        findings,
+        report,
+        "cloud",
+      ))
+        requireDestination("Sonar source", url);
+    }
+    const repositories = replay
+      ? undefined
+      : blackDuckReportRepositories(options.provider, findings, "cloud");
+    if (!saved || options.provider === "veracode") {
+      for (const [id, source] of veracodeReportRepositories(
+        options.provider,
+        findings,
+        "cloud",
+      ))
+        requireDestination(id, source.url);
+    }
+    if (
+      !replay ||
+      options.provider === "inspector" ||
+      options.provider === "veracode"
+    ) {
+      const binding = inspectorReportRepository(
+        options.provider,
+        findings,
+        "cloud",
+        inspectorProjectMap,
+      );
+      if (binding) requireDestination(binding.findingId, binding.url);
+    }
+    for (const finding of findings) {
+      const { source_finding_id: id, evidence } = finding;
+      const projected = repositories
+        ? repositories.get(id)?.url
+        : projectedBlackDuckRepositoryUrl(finding, "cloud");
+      if (
+        replay &&
+        !projected &&
+        options.provider !== "inspector" &&
+        options.provider !== "veracode" &&
+        options.provider !== "sonar"
+      )
+        continue;
+      const urls = [
+        projected,
+        evidence.details?.repository?.url,
+        options.provider === "wiz"
+          ? projected
+            ? wizFindingRepository(evidence, "cloud")?.url
+            : wizCsvRepositoryUrl(evidence)
+          : undefined,
         ...(options.provider === "snyk"
-          ? snykRepositoryUrls(finding.evidence.source_data, {
+          ? snykRepositoryUrls(evidence.source_data, {
               cloudRepositoryUrl: destination.url,
             })
           : []),
         ...(options.provider === "endor"
-          ? endorRepositoryUrls(finding.evidence.source_data)
+          ? endorRepositoryUrls(evidence.source_data)
           : []),
+        options.provider === "github"
+          ? dependabotRepository(finding)
+          : undefined,
       ];
-      for (const sourceRepository of sourceRepositories)
-        if (
-          sourceRepository &&
-          cloudRepositoryUrlKey(sourceRepository) !==
-            cloudRepositoryUrlKey(destination.url)
-        )
-          throw new CodexSecurityError(
-            `Finding ${JSON.stringify(finding.source_finding_id)} belongs to ${JSON.stringify(sourceRepository)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
-          );
+      for (const url of urls) requireDestination(id, url);
     }
+  }
+  checkRepositories(parsed.findings, parsed.report);
+  // A retry sends its saved projection, which may differ from today's reader.
+  if (saved) {
+    // A common Sonar ref can supply missing row refs. Only use the report
+    // associated with the input digest in the saved checkpoint.
+    const report =
+      saved.inputProjection?.inputDigest === inputDigest
+        ? parsed.report
+        : undefined;
+    checkRepositories(submissionFindings(saved.requests), report);
+  }
+
+  let requests = saved?.requests;
+  if (!requests) {
     let preparedCount = 0;
     progress({
       phase: "preparing",
@@ -748,7 +866,7 @@ async function preparePublicationInput(
           limit: "2",
         });
         const summaries = validateSourceReports(
-          await request(`${sourcePath(destination)}?${query}`),
+          await request(`${sourceReportsPath}?${query}`),
         );
         if (summaries.has_more || summaries.data.length > 1)
           throw new CodexSecurityError(
@@ -776,6 +894,7 @@ async function preparePublicationInput(
     );
     requests = [];
     let current: FindingImportRequest | undefined;
+    let currentBytes = 0;
     for (const [index, finding] of parsed.findings.entries()) {
       const previous = previousReports[index];
       const environmentId =
@@ -784,31 +903,40 @@ async function preparePublicationInput(
         throw new CodexSecurityError(
           "Configure an authorized Cloud environment for this repository before importing findings.",
         );
-      const repository = {
-        id: destination.id,
-        repo_connector_id: destination.repo_connector_id,
-        environment_id: environmentId,
-        reset_marker: destination.reset_marker,
-      };
       const item = {
         client_id: `item-${index + 1}`,
         source_finding_id: finding.source_finding_id,
         expected_version: previous?.version ?? 0,
         evidence: finding.evidence,
       };
+      const itemBytes = Buffer.byteLength(JSON.stringify(item));
       if (
         current &&
         (current.repository.environment_id !== environmentId ||
           current.items.length === 100 ||
-          Buffer.byteLength(
-            JSON.stringify({ ...current, items: [...current.items, item] }),
-          ) > MAX_REQUEST_BYTES)
+          currentBytes + 1 + itemBytes > MAX_REQUEST_BYTES)
       ) {
         requests.push(validateImportRequest(current));
         current = undefined;
       }
-      current ??= { request_id: randomUUID(), repository, source, items: [] };
+      if (!current) {
+        current = {
+          request_id: randomUUID(),
+          repository: {
+            id: destination.id,
+            repo_connector_id: destination.repo_connector_id,
+            environment_id: environmentId,
+            reset_marker: destination.reset_marker,
+          },
+          source,
+          items: [],
+        };
+        currentBytes = Buffer.byteLength(JSON.stringify(current));
+      } else {
+        currentBytes++;
+      }
       current.items.push(item);
+      currentBytes += itemBytes;
     }
     if (current) requests.push(validateImportRequest(current));
   }
@@ -824,6 +952,7 @@ async function preparePublicationInput(
       ),
     },
   };
+  if (inspectorProjectMap) submission.inspectorProjectMapRequired = true;
   const preview: ExternalPublicationPreview = {
     ...parsed,
     findings: submissionFindings(requests),
@@ -836,7 +965,7 @@ async function preparePublicationInput(
     requests,
   };
   return {
-    preview,
+    preview: structuredClone(preview),
     async publish() {
       progress({ phase: "waiting", completed: 0 });
       const result = (
@@ -867,6 +996,9 @@ async function preparePublicationInput(
           status:
             parsed.excluded.length || counts.error ? "partial" : "complete",
           read: parsed.read,
+          ...(parsed.report === undefined
+            ? {}
+            : { report: structuredClone(parsed.report) }),
           ready: parsed.findings.length,
           excluded: parsed.excluded,
           receipts: acknowledged,
@@ -889,6 +1021,10 @@ async function preparePublicationInput(
           pending === undefined
             ? submission
             : (JSON.parse(pending) as SavedSubmission);
+        const adoptProjectMap =
+          submission.inspectorProjectMapRequired &&
+          current.inspectorProjectMapRequired === undefined;
+        if (adoptProjectMap) current.inspectorProjectMapRequired = true;
         if (!sameSubmission(current, submission))
           throw new CodexSecurityError(
             "Another publication prepared this input. Run the command again to review and resume that saved request.",
@@ -902,8 +1038,8 @@ async function preparePublicationInput(
         let verified = 0;
         let persisted = pending !== undefined;
         try {
-          if (pending === undefined) {
-            await writeAtomicJson(pendingPath, submission);
+          if (pending === undefined || adoptProjectMap) {
+            await writeAtomicJson(pendingPath, current);
             persisted = true;
           }
           progress({
@@ -915,7 +1051,7 @@ async function preparePublicationInput(
           for (const [batchIndex, batch] of requests.entries()) {
             const receipt = validatePublicationReceipt(
               receipts[batchIndex] ??
-                (await request("/finding_imports", batch)),
+                (await request(`${importPrefix}/finding_imports`, batch)),
               batch,
             );
             acknowledged.push(receipt);
@@ -958,7 +1094,7 @@ async function preparePublicationInput(
           await readInBatches(readbacks, async ({ item, expected, batch }) => {
             const report = validateSourceReport(
               await request(
-                `${sourcePath(destination)}/${encodeURIComponent(item.source_report_id!)}`,
+                `${sourceReportsPath}/${encodeURIComponent(item.source_report_id!)}`,
               ),
             );
             if (
@@ -985,7 +1121,10 @@ async function preparePublicationInput(
             });
           });
           const completed = result(acknowledged, verified);
-          await writeAtomicJson(join(state, `${key}.result.json`), completed);
+          await writeAtomicJson(join(state, `${key}.result.json`), {
+            ...completed,
+            report: reportForJson(completed.report),
+          });
           await rm(pendingPath, { force: true });
           return completed;
         } catch (error) {

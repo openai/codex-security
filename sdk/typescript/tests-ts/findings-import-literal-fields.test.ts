@@ -31,6 +31,18 @@ function csvSource(fields: Record<string, string> = {}): string {
   );
 }
 
+test.each(
+  (["title", "summary", "remediation"] as const).flatMap((field) =>
+    [" \t\r\n", "\u0085", "\u001c\u001d\u001e\u001f"].map(
+      (value) => [field, value] as const,
+    ),
+  ),
+)("rejects canonical whitespace in CSV %s %j", async (field, value) => {
+  await expect(
+    parseImportedFindings(csvSource({ [field]: value }), "csv", PLUGIN_ROOT),
+  ).rejects.toThrow(`requires ${field}`);
+});
+
 test.each([" ", "  ", "\u00A0", "\u2003", "\u2028", "\u2029", "\uFEFF"])(
   "preserves the literal CSV path %j",
   async (path) => {

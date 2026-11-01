@@ -1,3 +1,4 @@
+import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import { readJson, writeJson } from "./support/json.ts";
 import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
 import type {
@@ -31,12 +32,14 @@ export const {
   AsyncLock,
   classifyCodexWorkerError,
   startOrJoinDeepScanCoordinator,
+  recordCodexSecurityWorkerScanDraft,
 } = await importModule({
   stdin: {
     contents: `
       export * from "./registry.ts";
       export { WorkbenchDeepScanStore } from "./store.ts";
       export { classifyCodexWorkerError } from "./errors.ts";
+      export { recordCodexSecurityWorkerScanDraft } from "../artifact-scan-draft.ts";
     `,
     resolveDir: path.join(import.meta.dirname, "../src/deep-scan/"),
   },
@@ -300,7 +303,7 @@ export class FakeStore {
       : {
           scanId: this.run.scanId,
           findings: [],
-          coverage: {
+          reviewState: {
             surfaces: [],
             explicitExclusions: [],
             deferred: [],
@@ -313,7 +316,7 @@ export class FakeStore {
         ...(draft.threatModel ? { threatModel: draft.threatModel } : {}),
       },
       findings: draft.findings,
-      coverage: draft.coverage,
+      reviewState: draft.reviewState,
     });
     this.run.status = "succeeded";
     this.run.terminalReason = input.reason;
@@ -646,7 +649,7 @@ async function writeDedupArtifacts(
   if (options.canonicalCandidateId && draft.findings.length > 0) {
     draft.findings[0].provenance.candidateId = options.canonicalCandidateId;
   }
-  delete (draft as { coverage?: unknown }).coverage;
+  delete (draft as { reviewState?: unknown }).reviewState;
   if (invalidResult) (draft as { findings: unknown }).findings = "invalid";
   if (options.dropLastFinding) draft.findings.pop();
   const resultPath = path.join(artifactContext.root, "result.json");
@@ -661,7 +664,7 @@ export function standardScanDraft(
   scanId: string,
   candidateId: string | undefined,
   workerLabel: string,
-) {
+): ScanDraftInput {
   return {
     scanId,
     threatModel: { summary: `Independent threat model for ${workerLabel}.` },
@@ -688,7 +691,7 @@ export function standardScanDraft(
           },
         ]
       : [],
-    coverage: {
+    reviewState: {
       surfaces: [
         {
           label: "Fixture query",

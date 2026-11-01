@@ -1858,10 +1858,66 @@ var require_request = __commonJS({
           return false;
         }
       }
-      onUpgrade(statusCode, headers, socket) {
+      /**
+       * @param {number|null} statusCode
+       * @param {Buffer[]|null} headers
+       * @param {import('node:stream').Duplex} socket
+       * @param {string} [statusText]
+       */
+      onUpgrade(statusCode, headers, socket, statusText = "") {
+        this.onFinally();
         assert(!this.aborted);
         assert(!this.completed);
-        return this[kHandler].onUpgrade(statusCode, headers, socket);
+        if (statusCode !== null) {
+          this.#publishUpgradeHeaders(statusCode, headers, statusText);
+        }
+        const result = this[kHandler].onUpgrade(statusCode, headers, socket);
+        if (!this.aborted) {
+          this.completed = true;
+          if (statusCode !== null) {
+            this.#publishUpgradeTrailers();
+          }
+        }
+        return result;
+      }
+      /**
+       * @param {number} statusCode
+       * @param {import('node:http2').IncomingHttpHeaders} headers
+       * @param {(headers: import('node:http2').IncomingHttpHeaders) => Buffer[]} parseHeaders
+       * @param {string} [statusText]
+       */
+      onUpgradeResponse(statusCode, headers, parseHeaders, statusText = "") {
+        assert(!this.aborted);
+        assert(this.completed);
+        if (channels.headers.hasSubscribers) {
+          this.#publishUpgradeHeaders(statusCode, parseHeaders(headers), statusText);
+        }
+        this.#publishUpgradeTrailers();
+      }
+      /**
+       * @param {Error} error
+       */
+      onUpgradeError(error2) {
+        assert(!this.aborted);
+        assert(this.completed);
+        if (channels.error.hasSubscribers) {
+          channels.error.publish({ request: this, error: error2 });
+        }
+      }
+      /**
+       * @param {number} statusCode
+       * @param {Buffer[]} headers
+       * @param {string} statusText
+       */
+      #publishUpgradeHeaders(statusCode, headers, statusText) {
+        if (channels.headers.hasSubscribers) {
+          channels.headers.publish({ request: this, response: { statusCode, headers, statusText } });
+        }
+      }
+      #publishUpgradeTrailers() {
+        if (channels.trailers.hasSubscribers) {
+          channels.trailers.publish({ request: this, trailers: [] });
+        }
       }
       onComplete(trailers) {
         this.onFinally();
@@ -2046,6 +2102,7 @@ var require_dispatcher = __commonJS({
 var require_dispatcher_base = __commonJS({
   "node_modules/undici/lib/dispatcher/dispatcher-base.js"(exports2, module2) {
     "use strict";
+    var buffer2 = require("node:buffer");
     var Dispatcher = require_dispatcher();
     var {
       ClientDestroyedError,
@@ -2057,6 +2114,7 @@ var require_dispatcher_base = __commonJS({
     var kOnClosed = /* @__PURE__ */ Symbol("onClosed");
     var kInterceptedDispatch = /* @__PURE__ */ Symbol("Intercepted Dispatch");
     var kWebSocketOptions = /* @__PURE__ */ Symbol("webSocketOptions");
+    var kEventSourceOptions = /* @__PURE__ */ Symbol("eventSourceOptions");
     var DispatcherBase = class extends Dispatcher {
       constructor(opts) {
         super();
@@ -2065,11 +2123,17 @@ var require_dispatcher_base = __commonJS({
         this[kClosed] = false;
         this[kOnClosed] = [];
         this[kWebSocketOptions] = opts?.webSocket ?? {};
+        this[kEventSourceOptions] = opts?.eventSource ?? {};
       }
       get webSocketOptions() {
         return {
           maxFragments: this[kWebSocketOptions].maxFragments ?? 131072,
           maxPayloadSize: this[kWebSocketOptions].maxPayloadSize ?? 128 * 1024 * 1024
+        };
+      }
+      get eventSourceOptions() {
+        return {
+          maxEventSize: this[kEventSourceOptions].maxEventSize ?? buffer2.kStringMaxLength
         };
       }
       get destroyed() {
@@ -6004,7 +6068,7 @@ var require_client_h1 = __commonJS({
         }
       }
       onUpgrade(head) {
-        const { upgrade, client: client2, socket, headers, statusCode } = this;
+        const { upgrade, client: client2, socket, headers, statusCode, statusText } = this;
         assert(upgrade);
         assert(client2[kSocket] === socket);
         assert(!socket.destroyed);
@@ -6029,9 +6093,10 @@ var require_client_h1 = __commonJS({
         client2[kQueue][client2[kRunningIdx]++] = null;
         client2.emit("disconnect", client2[kUrl], [client2], new InformationalError("upgrade"));
         try {
-          request2.onUpgrade(statusCode, headers, socket);
-        } catch (err) {
-          util3.destroy(socket, err);
+          request2.onUpgrade(statusCode, headers, socket, statusText);
+        } catch (error2) {
+          util3.errorRequest(client2, request2, error2);
+          util3.destroy(socket, error2);
         }
         client2[kResume]();
       }
@@ -6218,7 +6283,6 @@ var require_client_h1 = __commonJS({
       socket[kSocketUsed] = false;
       socket[kParser] = new Parser(client2, socket, llhttpInstance);
       addListener(socket, "error", function(err) {
-        assert(err.code !== "ERR_TLS_CERT_ALTNAME_INVALID");
         const parser = this[kParser];
         if (err.code === "ECONNRESET" && parser.statusCode && !parser.shouldKeepAlive) {
           const parserErr = parser.finish();
@@ -6434,11 +6498,17 @@ var require_client_h1 = __commonJS({
       }
       const socket = client2[kSocket];
       clearIdleSocketValidation(socket);
-      const abort = (err) => {
-        if (request2.aborted || request2.completed) {
+      const abort = (error2) => {
+        if (request2.aborted) {
           return;
         }
-        util3.errorRequest(client2, request2, err || new RequestAbortedError());
+        if (request2.completed) {
+          if (request2.upgrade || request2.method === "CONNECT") {
+            util3.destroy(socket, new InformationalError("aborted"));
+          }
+          return;
+        }
+        util3.errorRequest(client2, request2, error2 || new RequestAbortedError());
         util3.destroy(body2);
         util3.destroy(socket, new InformationalError("aborted"));
       };
@@ -6794,6 +6864,7 @@ var require_client_h2 = __commonJS({
   "node_modules/undici/lib/dispatcher/client-h2.js"(exports2, module2) {
     "use strict";
     var assert = require("node:assert");
+    var { errorMonitor } = require("node:events");
     var { pipeline: pipeline3 } = require("node:stream");
     var util3 = require_util();
     var {
@@ -6854,6 +6925,10 @@ var require_client_h2 = __commonJS({
       }
       return result;
     }
+    function parseH2ResponseHeaders(headers) {
+      const { [HTTP2_HEADER_STATUS]: _statusCode, ...realHeaders } = headers;
+      return parseH2Headers(realHeaders);
+    }
     async function connectH2(client2, socket) {
       client2[kSocket] = socket;
       if (!h2ExperimentalWarned) {
@@ -6891,7 +6966,6 @@ var require_client_h2 = __commonJS({
       client2[kHTTP2Session] = session;
       socket[kHTTP2Session] = session;
       util3.addListener(socket, "error", function(err) {
-        assert(err.code !== "ERR_TLS_CERT_ALTNAME_INVALID");
         this[kError] = err;
         this[kClient][kOnError](err);
       });
@@ -6950,7 +7024,6 @@ var require_client_h2 = __commonJS({
       }
     }
     function onHttp2SessionError(err) {
-      assert(err.code !== "ERR_TLS_CERT_ALTNAME_INVALID");
       this[kSocket][kError] = err;
       this[kClient][kOnError](err);
     }
@@ -7017,16 +7090,22 @@ var require_client_h2 = __commonJS({
       const { hostname, port } = client2[kUrl];
       headers[HTTP2_HEADER_AUTHORITY] = host || `${hostname}${port ? `:${port}` : ""}`;
       headers[HTTP2_HEADER_METHOD] = method;
-      const abort = (err) => {
-        if (request2.aborted || request2.completed) {
+      const abort = (error2) => {
+        if (request2.aborted) {
           return;
         }
-        err = err || new RequestAbortedError();
-        util3.errorRequest(client2, request2, err);
-        if (stream4 != null) {
-          util3.destroy(stream4, err);
+        if (request2.completed) {
+          if (method === "CONNECT" && stream4 != null) {
+            util3.destroy(stream4, error2 || new RequestAbortedError());
+          }
+          return;
         }
-        util3.destroy(body2, err);
+        error2 = error2 || new RequestAbortedError();
+        util3.errorRequest(client2, request2, error2);
+        if (stream4 != null) {
+          util3.destroy(stream4, error2);
+        }
+        util3.destroy(body2, error2);
         client2[kQueue][client2[kRunningIdx]++] = null;
         client2[kResume]();
       };
@@ -7041,18 +7120,42 @@ var require_client_h2 = __commonJS({
       if (method === "CONNECT") {
         session.ref();
         stream4 = session.request(headers, { endStream: false, signal });
-        if (stream4.id && !stream4.pending) {
-          request2.onUpgrade(null, null, stream4);
-          ++session[kOpenStreams];
-          client2[kQueue][client2[kRunningIdx]++] = null;
-        } else {
-          stream4.once("ready", () => {
+        let upgradeResponseFinished = false;
+        const onResponse = (headers2) => {
+          upgradeResponseFinished = true;
+          stream4.off(errorMonitor, onUpgradeError);
+          request2.onUpgradeResponse(Number(headers2[HTTP2_HEADER_STATUS]), headers2, parseH2ResponseHeaders);
+        };
+        const onUpgradeError = (error2) => {
+          upgradeResponseFinished = true;
+          stream4.off("response", onResponse);
+          request2.onUpgradeError(error2);
+        };
+        const onReady = () => {
+          try {
             request2.onUpgrade(null, null, stream4);
-            ++session[kOpenStreams];
-            client2[kQueue][client2[kRunningIdx]++] = null;
-          });
-        }
+          } catch (error2) {
+            stream4.off("response", onResponse);
+            abort(error2);
+            return;
+          }
+          if (request2.aborted) {
+            return;
+          }
+          stream4.off("error", abort);
+          stream4.once(errorMonitor, onUpgradeError);
+          client2[kQueue][client2[kRunningIdx]++] = null;
+        };
+        stream4.once("response", onResponse);
+        stream4.once("error", abort);
+        ++session[kOpenStreams];
+        onReady();
         stream4.once("close", () => {
+          if (!upgradeResponseFinished && request2.completed) {
+            stream4.off("response", onResponse);
+            stream4.off(errorMonitor, onUpgradeError);
+            request2.onUpgradeError(new InformationalError(`HTTP/2: "stream error" received - code ${stream4.rstCode}`));
+          }
           session[kOpenStreams] -= 1;
           if (session[kOpenStreams] === 0) session.unref();
         });
@@ -7614,9 +7717,10 @@ var require_client = __commonJS({
         // h2
         maxConcurrentStreams,
         allowH2,
-        webSocket
+        webSocket,
+        eventSource
       } = {}) {
-        super({ webSocket });
+        super({ webSocket, eventSource });
         if (keepAlive !== void 0) {
           throw new InvalidArgumentError("unsupported keepAlive, use pipelining=0 instead");
         }
@@ -8513,7 +8617,7 @@ var require_agent = __commonJS({
       return opts && opts.connections === 1 ? new Client(origin, opts) : new Pool(origin, opts);
     }
     var Agent3 = class extends DispatcherBase {
-      constructor({ factory = defaultFactory, maxRedirections = 0, connect, ...options } = {}) {
+      constructor({ factory = defaultFactory, maxRedirections = 0, connect, tls, ...options } = {}) {
         if (typeof factory !== "function") {
           throw new InvalidArgumentError("factory must be a function.");
         }
@@ -8527,8 +8631,11 @@ var require_agent = __commonJS({
         if (connect && typeof connect !== "function") {
           connect = { ...connect };
         }
+        if (tls && typeof tls !== "function") {
+          tls = { ...tls };
+        }
         this[kInterceptors] = options.interceptors?.Agent && Array.isArray(options.interceptors.Agent) ? options.interceptors.Agent : [createRedirectInterceptor({ maxRedirections })];
-        this[kOptions] = { ...util3.deepClone(options), connect };
+        this[kOptions] = { ...util3.deepClone(options), connect, tls };
         this[kOptions].interceptors = options.interceptors ? { ...options.interceptors } : void 0;
         this[kMaxRedirections] = maxRedirections;
         this[kFactory] = factory;
@@ -9117,7 +9224,7 @@ var require_retry_handler = __commonJS({
         const headers = parseHeaders(rawHeaders);
         this.retryCount += 1;
         if (statusCode >= 300) {
-          if (this.retryOpts.statusCodes.includes(statusCode) === false) {
+          if (!this.headersSent && this.retryOpts.statusCodes.includes(statusCode) === false) {
             this.headersSent = true;
             this.checkpointResponseEnd(headers, resume);
             return this.handler.onHeaders(
@@ -14256,8 +14363,9 @@ var require_fetch = __commonJS({
         }
       );
       response.body = { stream: stream4, source: null, length: null };
-      fetchParams.controller.onAborted = onAborted;
-      fetchParams.controller.on("terminated", onAborted);
+      if (!fetchParams.controller.resume) {
+        fetchParams.controller.on("terminated", onAborted);
+      }
       fetchParams.controller.resume = async () => {
         while (true) {
           let bytes;
@@ -14357,7 +14465,6 @@ var require_fetch = __commonJS({
                 headersList.append(bufferToLowerCasedHeaderName(rawHeaders[i]), rawHeaders[i + 1].toString("latin1"), true);
               }
               location = headersList.get("location", true);
-              this.body = new Readable7({ read: resume });
               const decoders = [];
               const willFollow = location && request2.redirect === "follow" && redirectStatusSet.has(status);
               if (request2.method !== "HEAD" && request2.method !== "CONNECT" && !nullBodyStatus.includes(status) && !willFollow) {
@@ -14365,7 +14472,7 @@ var require_fetch = __commonJS({
                 const codings = contentEncoding ? contentEncoding.toLowerCase().split(",") : [];
                 const maxContentEncodings = 5;
                 if (codings.length > maxContentEncodings) {
-                  reject(new Error(`too many content-encodings in response: ${codings.length}, maximum allowed is ${maxContentEncodings}`));
+                  this.abort(new Error(`too many content-encodings in response: ${codings.length}, maximum allowed is ${maxContentEncodings}`));
                   return true;
                 }
                 for (let i = codings.length - 1; i >= 0; --i) {
@@ -14395,6 +14502,7 @@ var require_fetch = __commonJS({
                   }
                 }
               }
+              this.body = new Readable7({ read: resume });
               const onError = this.onError.bind(this);
               resolve7({
                 status,
@@ -14419,9 +14527,6 @@ var require_fetch = __commonJS({
             onComplete() {
               if (this.abort) {
                 fetchParams.controller.off("terminated", this.abort);
-              }
-              if (fetchParams.controller.onAborted) {
-                fetchParams.controller.off("terminated", fetchParams.controller.onAborted);
               }
               fetchParams.controller.ended = true;
               this.body.push(null);
@@ -17496,6 +17601,16 @@ var require_receiver = __commonJS({
             if (isControlFrame(this.#info.opcode)) {
               this.#loop = this.parseControlFrame(body2);
               this.#state = parserStates.INFO;
+              const socket = this.ws[kResponse].socket;
+              if (this.#loop && socket.writableNeedDrain) {
+                this.#loop = false;
+                socket.once("drain", () => {
+                  if (this.destroyed) return;
+                  this.#loop = true;
+                  this.run(callback);
+                });
+                return;
+              }
             } else {
               if (!this.#info.compressed) {
                 if (!this.writeFragments(body2)) {
@@ -18189,6 +18304,7 @@ var require_util8 = __commonJS({
 var require_eventsource_stream = __commonJS({
   "node_modules/undici/lib/web/eventsource/eventsource-stream.js"(exports2, module2) {
     "use strict";
+    var buffer2 = require("node:buffer");
     var { Transform: Transform4 } = require("node:stream");
     var { isASCIINumber, isValidLastEventId } = require_util8();
     var BOM = [239, 187, 191];
@@ -18196,24 +18312,28 @@ var require_eventsource_stream = __commonJS({
     var CR = 13;
     var COLON = 58;
     var SPACE = 32;
+    var defaultMaxEventSize = buffer2.kStringMaxLength;
     var DATA = Buffer.from("data");
     var EVENT = Buffer.from("event");
     var ID = Buffer.from("id");
     var RETRY = Buffer.from("retry");
-    function isASCIINumberBytes(buffer2, start) {
-      if (start >= buffer2.length) {
+    var minParserItems = 1024;
+    var maxParserItems = 131072;
+    var bytesPerParserItem = 128;
+    function isASCIINumberBytes(buffer3, start) {
+      if (start >= buffer3.length) {
         return false;
       }
-      for (let i = start; i < buffer2.length; i++) {
-        if (buffer2[i] < 48 || buffer2[i] > 57) {
+      for (let i = start; i < buffer3.length; i++) {
+        if (buffer3[i] < 48 || buffer3[i] > 57) {
           return false;
         }
       }
       return true;
     }
-    function isValidLastEventIdBytes(buffer2, start) {
-      for (let i = start; i < buffer2.length; i++) {
-        if (buffer2[i] === 0) {
+    function isValidLastEventIdBytes(buffer3, start) {
+      for (let i = start; i < buffer3.length; i++) {
+        if (buffer3[i] === 0) {
           return false;
         }
       }
@@ -18229,6 +18349,11 @@ var require_eventsource_stream = __commonJS({
         }
       }
       return true;
+    }
+    function createMaxEventSizeExceededError() {
+      const error2 = new Error("EventSource message size exceeded");
+      error2.aborted = false;
+      return error2;
     }
     var EventSourceStream = class extends Transform4 {
       /**
@@ -18256,6 +18381,13 @@ var require_eventsource_stream = __commonJS({
       pos = 0;
       lineChunkIndex = 0;
       linePos = 0;
+      lineLength = 0;
+      eventSize = 0;
+      eventFieldSizes = { data: 0, event: 0, id: 0, retry: 0 };
+      dataLineCount = 0;
+      maxEventSize;
+      maxDataLines;
+      maxBufferedChunks;
       event = {
         data: void 0,
         event: void 0,
@@ -18264,6 +18396,7 @@ var require_eventsource_stream = __commonJS({
       };
       /**
        * @param {object} options
+       * @param {number} [options.maxEventSize]
        * @param {eventSourceSettings} options.eventSourceSettings
        * @param {Function} [options.push]
        */
@@ -18271,6 +18404,10 @@ var require_eventsource_stream = __commonJS({
         options.readableObjectMode = true;
         super(options);
         this.state = options.eventSourceSettings || {};
+        this.maxEventSize = options.maxEventSize ?? defaultMaxEventSize;
+        const parserItemLimit = this.maxEventSize > 0 ? Math.min(maxParserItems, Math.max(minParserItems, Math.floor(this.maxEventSize / bytesPerParserItem))) : 0;
+        this.maxDataLines = parserItemLimit;
+        this.maxBufferedChunks = parserItemLimit;
         if (options.push) {
           this.push = options.push;
         }
@@ -18284,6 +18421,10 @@ var require_eventsource_stream = __commonJS({
       _transform(chunk, _encoding, callback) {
         if (chunk.length === 0) {
           callback();
+          return;
+        }
+        if (this.maxEventSize > 0 && this.chunks.length >= this.maxBufferedChunks && chunk[0] !== LF && chunk[0] !== CR) {
+          callback(createMaxEventSizeExceededError());
           return;
         }
         this.chunks.push(chunk);
@@ -18322,18 +18463,32 @@ var require_eventsource_stream = __commonJS({
             if (byte === CR) {
               this.crlfCheck = true;
             }
-            this.parseLine(this.readLine(), this.event);
+            try {
+              this.parseLine(this.readLine(), this.event);
+            } catch (error2) {
+              callback(error2);
+              return;
+            }
             this.consumeCurrentByte();
             this.eventEndCheck = true;
             continue;
+          }
+          if (this.maxEventSize > 0 && ++this.lineLength > this.maxEventSize + 7) {
+            callback(createMaxEventSizeExceededError());
+            return;
           }
           this.advanceCursor();
         }
         callback();
       }
+      _destroy(error2, callback) {
+        this.chunks.length = 0;
+        this.clearEvent();
+        super._destroy(error2, callback);
+      }
       /**
        * @param {Buffer} line
-       * @param {EventStreamEvent} event
+       * @param {EventSourceStreamEvent} event
        */
       parseLine(line, event) {
         if (line.length === 0) {
@@ -18353,6 +18508,12 @@ var require_eventsource_stream = __commonJS({
           }
         }
         if (isFieldName(line, fieldLength, DATA)) {
+          if (this.maxEventSize > 0 && this.dataLineCount >= this.maxDataLines) {
+            throw createMaxEventSizeExceededError();
+          }
+          const valueBytes = line.length - valueStart;
+          const dataSize = this.eventFieldSizes.data + (event.data === void 0 ? 0 : 1) + valueBytes;
+          this.setEventFieldSize("data", dataSize);
           const value = line.toString("utf8", valueStart);
           if (event.data === void 0) {
             event.data = value;
@@ -18360,26 +18521,37 @@ var require_eventsource_stream = __commonJS({
             event.data += `
 ${value}`;
           }
+          this.dataLineCount++;
           return;
         }
         if (isFieldName(line, fieldLength, RETRY)) {
           if (isASCIINumberBytes(line, valueStart)) {
+            this.setEventFieldSize("retry", line.length - valueStart);
             event.retry = line.toString("utf8", valueStart);
           }
           return;
         }
         if (isFieldName(line, fieldLength, ID)) {
           if (isValidLastEventIdBytes(line, valueStart)) {
+            this.setEventFieldSize("id", line.length - valueStart);
             event.id = line.toString("utf8", valueStart);
           }
           return;
         }
         if (isFieldName(line, fieldLength, EVENT)) {
-          const value = line.toString("utf8", valueStart);
-          if (value.length > 0) {
-            event.event = value;
+          if (valueStart < line.length) {
+            this.setEventFieldSize("event", line.length - valueStart);
+            event.event = line.toString("utf8", valueStart);
           }
         }
+      }
+      setEventFieldSize(field, size) {
+        const eventSize = this.eventSize - this.eventFieldSizes[field] + size;
+        if (this.maxEventSize > 0 && eventSize > this.maxEventSize) {
+          throw createMaxEventSizeExceededError();
+        }
+        this.eventSize = eventSize;
+        this.eventFieldSizes[field] = size;
       }
       /**
        * @param {EventSourceStreamEvent} event
@@ -18407,6 +18579,12 @@ ${value}`;
         this.event.event = void 0;
         this.event.id = void 0;
         this.event.retry = void 0;
+        this.eventSize = 0;
+        this.dataLineCount = 0;
+        this.eventFieldSizes.data = 0;
+        this.eventFieldSizes.event = 0;
+        this.eventFieldSizes.id = 0;
+        this.eventFieldSizes.retry = 0;
       }
       hasPendingEvent() {
         return this.event.data !== void 0 || this.event.event !== void 0 || this.event.id !== void 0 || this.event.retry !== void 0;
@@ -18431,13 +18609,15 @@ ${value}`;
       syncLineStartToCursor() {
         this.lineChunkIndex = this.chunkIndex;
         this.linePos = this.pos;
+        this.lineLength = 0;
         this.dropConsumedChunks();
       }
       dropConsumedChunks() {
-        while (this.lineChunkIndex > 0) {
-          this.chunks.shift();
-          this.lineChunkIndex--;
-          this.chunkIndex--;
+        if (this.lineChunkIndex > 0) {
+          const consumed = this.lineChunkIndex;
+          this.chunks.splice(0, consumed);
+          this.lineChunkIndex = 0;
+          this.chunkIndex -= consumed;
         }
         if (this.chunkIndex === this.chunks.length) {
           this.chunks.length = 0;
@@ -18540,6 +18720,7 @@ var require_eventsource = __commonJS({
     var { delay: delay4 } = require_util8();
     var { kEnumerableProperty } = require_util();
     var { environmentSettingsObject } = require_util2();
+    var { getGlobalDispatcher } = require_global2();
     var experimentalWarned = false;
     var defaultReconnectionTime = 3e3;
     var CONNECTING = 0;
@@ -18680,6 +18861,7 @@ var require_eventsource = __commonJS({
           this.#state.origin = response.urlList[response.urlList.length - 1].origin;
           const eventSourceStream = new EventSourceStream({
             eventSourceSettings: this.#state,
+            maxEventSize: this.#dispatcher.eventSourceOptions?.maxEventSize,
             push: (event) => {
               this.dispatchEvent(createFastMessageEvent(
                 event.type,
@@ -18812,7 +18994,8 @@ var require_eventsource = __commonJS({
       {
         key: "dispatcher",
         // undici only
-        converter: webidl.converters.any
+        converter: webidl.converters.any,
+        defaultValue: () => getGlobalDispatcher()
       }
     ]);
     module2.exports = {
@@ -55924,7 +56107,7 @@ var package_default = {
   name: "codex-security-action-runtime",
   private: true,
   dependencies: {
-    "@openai/codex-security": "0.2.0"
+    "@openai/codex-security": "0.6.0"
   }
 };
 
@@ -56196,7 +56379,7 @@ async function analyzeResults(options) {
       result.errors.push(value.message);
       return result;
     }
-    if (!value?.manifest?.scan?.target || !Array.isArray(value?.findings?.findings) || !value?.coverage)
+    if (!value?.manifest?.scan?.target || !Array.isArray(value?.findings?.findings) || !(value?.review ?? value?.coverage))
       throw new Error();
   } catch {
     result.errors.push("CLI did not return a usable JSON scan result. See the CLI diagnostics.");
@@ -56240,7 +56423,7 @@ async function analyzeResults(options) {
     resultsDirectory: options.resultsDirectory,
     manifestPath: (0, import_node_path5.join)(options.resultsDirectory, "scan-manifest.json"),
     jsonPath: (0, import_node_path5.join)(options.resultsDirectory, "findings.json"),
-    coveragePath: (0, import_node_path5.join)(options.resultsDirectory, "coverage.json"),
+    coveragePath: value.coverage ? (0, import_node_path5.join)(options.resultsDirectory, "coverage.json") : "",
     sarifPath: ""
   };
   const warnings = value.warnings ?? [];
@@ -99216,7 +99399,9 @@ async function uploadReports(reports, inputs, tempRoot) {
 // src/reporting.ts
 function plain(value, limit) {
   const text = value.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, "");
-  return text.slice(0, limit);
+  const prefix2 = text.slice(0, limit);
+  const codePoint = text.codePointAt(prefix2.length - 1);
+  return codePoint !== void 0 && codePoint > 65535 ? prefix2.slice(0, -1) : prefix2;
 }
 function html(value) {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/@/g, "&#64;").replace(/\r/g, "&#13;").replace(/\n/g, "&#10;").replace(/[\\`*_\[\]~]/g, (character) => `&#${character.charCodeAt(0)};`);
@@ -99257,7 +99442,7 @@ function resultSummary(result, inputs, target) {
 <pre>${esc(finding.summary, 1200)}</pre>`);
   }
   if (result.findings.length > 30) parts.push(`${result.findings.length - 30} additional findings are available in the JSON/SARIF reports.`);
-  parts.push("Use the action outputs for full JSON, coverage, and SARIF. Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.");
+  parts.push("Use the action outputs for full JSON and SARIF. Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.");
   return Buffer.from(parts.join("\n\n")).subarray(0, 58e3).toString("utf8").replace(/\uFFFD$/, "");
 }
 function emitAnnotations(result) {
@@ -99275,9 +99460,11 @@ function emitAnnotations(result) {
 }
 
 // src/main.ts
+var SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3, informational: 4 };
 var OUTPUT_NAMES = [
   "sarif-path",
   "json-path",
+  "manifest-path",
   "coverage-path",
   "results-directory",
   "scan-status",
@@ -99314,6 +99501,7 @@ function outputs(result, target, exitCode) {
     "sarif-path": result.paths.sarifPath,
     "json-path": result.paths.jsonPath,
     "coverage-path": result.paths.coveragePath,
+    "manifest-path": result.paths.manifestPath,
     "results-directory": result.paths.resultsDirectory,
     "scan-status": result.scanStatus,
     "policy-status": result.policyStatus,
@@ -99369,8 +99557,8 @@ async function runAction(actionRoot, overrides = {}) {
       if (!inputs.dryRun && credentials.provider !== "amazon-bedrock" && (!credentials.apiKey || /[\r\n\u0000]/.test(credentials.apiKey))) {
         throw new Error(credentials.provider === "openai" ? "Set CODEX_SECURITY_API_KEY in Actions secrets (or Dependabot secrets for Dependabot runs) and pass it as OPENAI_API_KEY to this step. No scan was started." : `Pass ${API_KEY_ENVIRONMENT_VARIABLES[credentials.provider]} from Actions secrets to this step. No scan was started.`);
       }
-      tempRoot = await (0, import_promises10.realpath)(process.env.RUNNER_TEMP ?? "");
       if (!process.env.RUNNER_TEMP) throw new Error("RUNNER_TEMP is required.");
+      tempRoot = await (0, import_promises10.realpath)(process.env.RUNNER_TEMP);
       info(`Preparing Codex Security ${SUPPORTED_CLI_VERSION}. Scope: ${inputs.scope}; mode: ${inputs.mode}; effort: ${inputs.effort}.`);
       const preparationStarted = performance.now();
       let timer = heartbeat("CLI preparation", preparationStarted);
@@ -99458,8 +99646,12 @@ async function runAction(actionRoot, overrides = {}) {
         info(`Findings: ${result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(", ") : "unavailable"}.`);
         info(`Estimated cost: ${result.estimatedCost === void 0 ? "unavailable" : `$${result.estimatedCost.toFixed(4)}`}.`);
         for (const error2 of result.errors) log2(`Report diagnostic: ${error2}`);
-        finalSummary = resultSummary(result, inputs, target);
-        if (inputs.annotations) emitAnnotations(result);
+        const displayResult = {
+          ...result,
+          findings: [...result.findings].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity])
+        };
+        finalSummary = resultSummary(displayResult, inputs, target);
+        if (inputs.annotations) emitAnnotations(displayResult);
         success = result.reportStatus !== "failed" && result.scanStatus === "completed" && result.policyStatus === "passed";
         finalTitle = resultTitle(result, inputs);
       }

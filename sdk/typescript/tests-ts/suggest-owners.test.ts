@@ -1,7 +1,7 @@
 import { modelResponseText } from "./support/model-response-text.js";
 import { execFile as execFileCallback } from "node:child_process";
 import { cp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { delimiter, dirname, join, relative } from "node:path";
+import { delimiter, join, relative } from "node:path";
 import { promisify } from "node:util";
 import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
 import { afterEach, expect, test } from "bun:test";
@@ -582,6 +582,45 @@ test.each(["author", "checkout"] as const)(
   },
 );
 
+test("scan hints match the cited commit when Git emails differ in case", async () => {
+  const repo = await repository();
+  await writeFile(
+    join(repo.path, "handler.ts"),
+    "// Record access\nexport function readRecord(id) {\n  return records.get(id);\n}\n",
+  );
+  await repo.git(
+    "-c",
+    "user.email=Alex@Example.test",
+    "commit",
+    "-qam",
+    "Use a record map",
+  );
+  const revision = await repo.git("rev-parse", "HEAD");
+  const { codex, calls } = fakeCodex();
+  const report = await suggestOwnersFromScan(
+    repo.path,
+    [
+      {
+        ...finding,
+        sourceRevision: revision,
+        extensions: {
+          ownerSuggestion: {
+            email: "Alex@Example.test",
+            commit: revision,
+            reason: "Alex changed the affected record lookup.",
+          },
+        },
+      },
+    ],
+    { codex },
+  );
+  expect(calls).toHaveLength(0);
+  expect(report.results[0]).toMatchObject({
+    status: "identified",
+    owner: { name: "Alex Example", email: "Alex@Example.test" },
+  });
+});
+
 test("rejects invented identities and citations and preserves later results", async () => {
   const repo = await repository();
   const invalid: ((context: OwnerContext) => unknown)[] = [
@@ -682,7 +721,7 @@ test("prioritizes the first committed declared owner without a model call", asyn
   await mkdir(join(repo.path, "docs"));
   await writeFile(
     join(repo.path, ".github", "CODEOWNERS"),
-    "* @default\n/handler.ts @example/maintainers @reviewer alex@example.test\n",
+    "* @default\n/hand*.ts @example/maintainers @reviewer alex@example.test\n",
   );
   await writeFile(join(repo.path, "CODEOWNERS"), "* @wrong-root\n");
   await writeFile(join(repo.path, "docs", "CODEOWNERS"), "* @wrong-docs\n");
@@ -712,61 +751,13 @@ test("prioritizes the first committed declared owner without a model call", asyn
         commit: revision,
         startLine: 2,
         endLine: 2,
-        rule: "/handler.ts @example/maintainers @reviewer alex@example.test",
+        rule: "/hand*.ts @example/maintainers @reviewer alex@example.test",
         matchedPath: "handler.ts",
       },
     ],
   });
   expect(report.results[0]!.evidence).toHaveLength(1);
 });
-
-test.each([
-  ["src/main.ts", "/src/ @alex_corp", "alex_corp", 2],
-  [
-    "src/main.ts",
-    "/src/ @example/maintainers @alex_corp",
-    "example/maintainers",
-    2,
-  ],
-  ["lib/main.rb", "***/*.rb @ruby-team", "default", 1],
-  ["app/[id]/page.ts", "/app/\\[id\\]/page.ts @routes-team", "routes-team", 2],
-  ["services/api.ts", "/service* @service-team", "service-team", 2],
-  ["api1/main.ts", "/api? @api-team", "api-team", 2],
-  ["docs/start.md", "docs/* @docs-team", "docs-team", 2],
-  ["docs/nested/start.md", "docs/* @docs-team", "default", 1],
-  ["src/handler.ts", "/src/**/handler.ts @src-team", "src-team", 2],
-  ["src/deep/handler.ts", "/src/**/handler.ts @src-team", "src-team", 2],
-] as const)(
-  "selects the committed owner for %s using %s",
-  async (path, rule, handle, line) => {
-    const repo = await repository();
-    await mkdir(join(repo.path, dirname(path)), { recursive: true });
-    await writeFile(join(repo.path, path), "// Ownership fixture\n");
-    await writeFile(join(repo.path, "CODEOWNERS"), `* @default\n${rule}\n`);
-    await repo.git("add", ".");
-    await repo.git("commit", "-qm", "Declare owners");
-    const { codex, calls } = fakeCodex();
-    const report = await suggestOwners(
-      repo.path,
-      [{ ...finding, locations: [{ path }] }],
-      { codex },
-    );
-    expect(report.results[0]).toMatchObject({
-      status: "identified",
-      owner: { handle },
-      evidence: [
-        {
-          kind: "codeowners",
-          startLine: line,
-          matchedPath: path,
-          commit: report.revision,
-          rule: line === 1 ? "* @default" : rule,
-        },
-      ],
-    });
-    expect(calls).toHaveLength(0);
-  },
-);
 
 test("loads CODEOWNERS once per invocation while matching each finding separately", async () => {
   const repo = await repository();

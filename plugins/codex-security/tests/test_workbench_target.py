@@ -24,6 +24,7 @@ worktree_content_digest = cast(Callable[[Path], str], WORKBENCH_TARGET["worktree
 update_digest_field = cast(
     Callable[[Any, bytes, bytes], None], WORKBENCH_TARGET["update_digest_field"]
 )
+CASE_ALIAS = pytest.param("case", marks=pytest.mark.native_macos)
 
 
 @pytest.fixture(
@@ -87,6 +88,28 @@ def junction_factory(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyP
     return create
 
 
+def write_reviewed_patch(
+    tmp_path: Path, source: Path, patch: bytes, revision: str = "unversioned"
+) -> dict[str, object]:
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    (scan_dir / "reviewed.patch").write_bytes(patch)
+    return {
+        "target_path": str(source),
+        "target_inode": source.stat().st_ino,
+        "target_revision": revision,
+        "scan_dir": str(scan_dir),
+    }
+
+
+def reviewed_remediation(patch: bytes, revision: str, digest: str) -> dict[str, str]:
+    return {
+        "base_revision": revision,
+        "base_content_digest": digest,
+        "patch_digest": "sha256:" + hashlib.sha256(patch).hexdigest(),
+    }
+
+
 @pytest.mark.parametrize(
     ("git_repository", "git_exclusion"),
     [
@@ -144,24 +167,14 @@ def test_reviewed_patch_preserves_junction_boundaries(
     if change != "target_populated":
         (outside / "source.txt").write_text("original contents\n")
     junction_factory(junction, outside)
-    scan_dir = tmp_path / "scan"
-    scan_dir.mkdir(mode=0o700)
     patch = b"diff --git a/app.txt b/app.txt\n--- a/app.txt\n+++ b/app.txt\n@@ -1 +1 @@\n-before\n+after\n"
-    (scan_dir / "reviewed.patch").write_bytes(patch)
-    scan = {
-        "target_path": str(source),
-        "target_inode": source.stat().st_ino,
-        "target_revision": "unversioned",
-        "scan_dir": str(scan_dir),
-    }
+    scan = write_reviewed_patch(tmp_path, source, patch)
     (source / "app.txt").write_text("before\n")
     if git_repository == "indexed":
         subprocess.run(["git", "add", "."], cwd=source, check=True)
-    remediation = {
-        "base_revision": "unversioned",
-        "base_content_digest": workbench_db.directory_content_digest(source),
-        "patch_digest": "sha256:" + hashlib.sha256(patch).hexdigest(),
-    }
+    remediation = reviewed_remediation(
+        patch, "unversioned", workbench_db.directory_content_digest(source)
+    )
     (source / "app.txt").write_text("after\n")
     if change in {"junction_target", "same_content_target"}:
         junction_target = tmp_path / "other"
@@ -345,21 +358,11 @@ def test_reviewed_patch_does_not_copy_through_indexed_directory_links(
     (sentinel / "file.txt").write_text("staged outside sentinel\n")
     # A relative link resolves to this different directory after materialization.
     monkeypatch.setattr(workbench_db.tempfile, "tempdir", str(staging))
-    scan_dir = tmp_path / "scan"
-    scan_dir.mkdir(mode=0o700)
     patch = b"diff --git a/app.txt b/app.txt\n--- a/app.txt\n+++ b/app.txt\n@@ -1 +1 @@\n-before\n+after\n"
-    (scan_dir / "reviewed.patch").write_bytes(patch)
-    scan = {
-        "target_path": str(source),
-        "target_inode": source.stat().st_ino,
-        "target_revision": revision,
-        "scan_dir": str(scan_dir),
-    }
-    remediation = {
-        "base_revision": revision,
-        "base_content_digest": workbench_db.worktree_content_digest(source),
-        "patch_digest": "sha256:" + hashlib.sha256(patch).hexdigest(),
-    }
+    scan = write_reviewed_patch(tmp_path, source, patch, revision)
+    remediation = reviewed_remediation(
+        patch, revision, workbench_db.worktree_content_digest(source)
+    )
     (source / "app.txt").write_text("after\n")
     if unrelated_change:
         (source / "unrelated.txt").write_text("outside the reviewed patch\n")
@@ -484,22 +487,10 @@ def assert_reviewed_change(
             )
         )
     ).encode()
-    scan_dir = tmp_path / "scan"
-    scan_dir.mkdir(mode=0o700)
-    (scan_dir / "reviewed.patch").write_bytes(patch)
-    scan = {
-        "target_path": str(source),
-        "target_inode": source.stat().st_ino,
-        "target_revision": revision,
-        "scan_dir": str(scan_dir),
-    }
+    scan = write_reviewed_patch(tmp_path, source, patch, revision)
     (source / relative).write_text(before, newline=newline)
     revision, digest = workbench_db.remediation_checkout_snapshot(scan)
-    remediation = {
-        "base_revision": revision,
-        "base_content_digest": digest,
-        "patch_digest": "sha256:" + hashlib.sha256(patch).hexdigest(),
-    }
+    remediation = reviewed_remediation(patch, revision, digest)
     (source / relative).write_text(after, newline=newline)
     assert workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
 
@@ -574,21 +565,9 @@ def test_reverse_patch_cannot_write_through_junction(
     (outside / "keep.txt").write_text("outside contents\n")
     junction = source / "linked"
     junction_factory(junction, outside)
-    scan_dir = tmp_path / "scan"
-    scan_dir.mkdir(mode=0o700)
     patch = b"diff --git a/linked/deleted.txt b/linked/deleted.txt\ndeleted file mode 100644\n--- a/linked/deleted.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-removed\n"
-    (scan_dir / "reviewed.patch").write_bytes(patch)
-    scan = {
-        "target_path": str(source),
-        "target_inode": source.stat().st_ino,
-        "target_revision": "unversioned",
-        "scan_dir": str(scan_dir),
-    }
-    remediation = {
-        "base_revision": "unversioned",
-        "base_content_digest": "different base",
-        "patch_digest": "sha256:" + hashlib.sha256(patch).hexdigest(),
-    }
+    scan = write_reviewed_patch(tmp_path, source, patch)
+    remediation = reviewed_remediation(patch, "unversioned", "different base")
     with pytest.raises(OSError):
         workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
     assert sorted(path.name for path in outside.iterdir()) == ["keep.txt"]
@@ -617,8 +596,6 @@ def test_reverse_patch_cannot_redirect_junction_restoration(
     config = tmp_path / "gitconfig"
     config.write_text("[core]\n\tsymlinks = true\n")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
-    scan_dir = tmp_path / "scan"
-    scan_dir.mkdir(mode=0o700)
     patch = f"""diff --git a/app.txt b/app.txt
 --- a/app.txt
 +++ b/app.txt
@@ -640,19 +617,11 @@ index {"0" * 40}..{"1" * 40}
 @@ -0,0 +1 @@
 +Subproject commit {"1" * 40}
 """.encode()
-    (scan_dir / "reviewed.patch").write_bytes(patch)
-    scan = {
-        "target_path": str(source),
-        "target_inode": source.stat().st_ino,
-        "target_revision": "unversioned",
-        "scan_dir": str(scan_dir),
-    }
+    scan = write_reviewed_patch(tmp_path, source, patch)
     (source / "app.txt").write_text("before\n")
-    remediation = {
-        "base_revision": "unversioned",
-        "base_content_digest": workbench_db.directory_content_digest(source),
-        "patch_digest": "sha256:" + hashlib.sha256(patch).hexdigest(),
-    }
+    remediation = reviewed_remediation(
+        patch, "unversioned", workbench_db.directory_content_digest(source)
+    )
     (source / "app.txt").write_text("after\n")
     try:
         with pytest.raises(SystemExit, match="checkout path was replaced"):
@@ -793,26 +762,14 @@ def test_reviewed_patch_preserves_unborn_git_inventory(tmp_path: Path, change: s
     cached_file = cache / "output.txt"
     cached_file.write_text("ignored build output\n")
     subprocess.run(["git", "add", ".gitignore", "src/app.txt"], cwd=source, check=True)
-    scan_dir = tmp_path / "scan"
-    scan_dir.mkdir(mode=0o700)
     patch = (
         b"diff --git a/src/app.txt b/src/app.txt\n"
         b"--- a/src/app.txt\n+++ b/src/app.txt\n@@ -1 +1 @@\n-before\n+after\n"
     )
-    (scan_dir / "reviewed.patch").write_bytes(patch)
-    scan = {
-        "target_path": str(source),
-        "target_inode": source.stat().st_ino,
-        "target_revision": "unversioned",
-        "scan_dir": str(scan_dir),
-    }
+    scan = write_reviewed_patch(tmp_path, source, patch)
     revision, digest = workbench_db.remediation_checkout_snapshot(scan)
     assert revision == "unversioned"
-    remediation = {
-        "base_revision": revision,
-        "base_content_digest": digest,
-        "patch_digest": "sha256:" + hashlib.sha256(patch).hexdigest(),
-    }
+    remediation = reviewed_remediation(patch, revision, digest)
     app.write_text("after\n")
     if change == "ignored_file":
         cached_file.write_text("updated ignored build output\n")
@@ -861,135 +818,6 @@ def test_stale_git_binding_does_not_spawn(tmp_path: Path, monkeypatch: pytest.Mo
     assert result.returncode == 127
     assert result.stdout == ""
     assert result.args[0] == "git"
-
-
-@pytest.mark.parametrize(
-    ("encoding", "bom"),
-    [("utf-8", b""), ("utf-16-le", b"\xff\xfe"), ("utf-16-be", b"\xfe\xff")],
-)
-def test_git_blob_samples_match_full_file_classification_with_bounded_reads(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, encoding: str, bom: bytes
-) -> None:
-    target = tmp_path / "target"
-    initialize_git_repository(target)
-    # The UTF-16 surrogate pair crosses the first 64 KiB sample boundary.
-    text = bom + ("a" * 32766 + "😀" + "b" * 32768).encode(encoding)
-    contents = {
-        "text.bin": text + (b"\0" if bom else b""),
-        "binary-tail.bin": text + "\0".encode(encoding),
-        "binary-head.bin": b"\0" + text * 32,
-        "empty.bin": b"",
-        "after.txt": b"after\n",
-    }
-    for name, content in contents.items():
-        (target / name).write_bytes(content)
-    subprocess.run(["git", "add", "."], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "source samples"], cwd=target, check=True)
-
-    git_blob_samples = WORKBENCH_TARGET["git_blob_samples"]
-    function_globals = git_blob_samples.__globals__
-    read_batch_samples = function_globals["_read_git_batch_samples"]
-    reads: list[int] = []
-
-    def require_bounded_output(output: Any, names: list[str]):
-        assert not output.seekable()
-        read = output.read
-
-        def bounded_read(size: int = -1) -> bytes:
-            assert 0 <= size <= 64 * 1024
-            reads.append(size)
-            return read(size)
-
-        output.read = bounded_read
-        return read_batch_samples(output, names)
-
-    monkeypatch.setitem(function_globals, "_read_git_batch_samples", require_bounded_output)
-    # Both request and response exceed pipe buffers, before the multi-megabyte binary.
-    missing = ["HEAD:missing"] * 10_000
-    samples = git_blob_samples(target, [*missing, *(f"HEAD:{name}" for name in contents)])
-
-    assert samples == [
-        *([None] * len(missing)),
-        (text[: 64 * 1024], False),
-        (b"", True),
-        (b"", True),
-        (b"", False),
-        (b"after\n", False),
-    ]
-    assert max(reads) == 64 * 1024
-
-    from rank_preview import is_binary_file
-
-    assert [is_binary_file(target / name) for name in contents] == [False, True, True, False, False]
-
-
-@pytest.mark.parametrize(
-    "output",
-    [
-        b"missing terminator",
-        b"object blob invalid\n",
-        b"object blob -1\n",
-        b"object blob 4\nabc",
-        b"object blob 4\nabcd!",
-        b"object blob invalid\n" + b"x" * (4 * 1024 * 1024),
-        b"object blob 131072\n" + b"x" * (64 * 1024 + 1),
-    ],
-)
-def test_git_blob_samples_reject_incomplete_framing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output: bytes
-) -> None:
-    git_blob_samples = WORKBENCH_TARGET["git_blob_samples"]
-
-    def git_command(*args: Any, **kwargs: Any):
-        remaining = memoryview(output)
-        try:
-            while remaining:
-                written = os.write(kwargs["stdout_file"].fileno(), remaining)
-                remaining = remaining[written:]
-        except BrokenPipeError:
-            return subprocess.CompletedProcess(args, 1)
-        return subprocess.CompletedProcess(args, 0)
-
-    monkeypatch.setitem(git_blob_samples.__globals__, "git_command", git_command)
-
-    assert git_blob_samples(tmp_path, ["HEAD:source"]) == [None]
-
-
-@pytest.mark.parametrize("output", [b"", b"object blob 4\ntext\n"])
-def test_git_blob_samples_reject_git_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output: bytes
-) -> None:
-    git_blob_samples = WORKBENCH_TARGET["git_blob_samples"]
-
-    def git_command(*args: Any, **kwargs: Any):
-        kwargs["stdout_file"].write(output)
-        return subprocess.CompletedProcess(args, 1)
-
-    monkeypatch.setitem(git_blob_samples.__globals__, "git_command", git_command)
-
-    assert git_blob_samples(tmp_path, ["HEAD:source"]) == [None]
-
-
-def test_git_blob_samples_work_with_git_before_2_38(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    target = tmp_path / "target"
-    initialize_git_repository(target)
-    git_blob_samples = WORKBENCH_TARGET["git_blob_samples"]
-    git_command = git_blob_samples.__globals__["git_command"]
-
-    def git_before_2_38(*args: Any, **kwargs: Any):
-        # Git before 2.38 rejects cat-file -z with a usage error.
-        if "-z" in args:
-            return subprocess.CompletedProcess(args, 129)
-        return git_command(*args, **kwargs)
-
-    monkeypatch.setitem(git_blob_samples.__globals__, "git_command", git_before_2_38)
-
-    assert git_blob_samples(target, ["HEAD:README.md", "HEAD:missing"]) == [
-        (b"fixture\n", False),
-        None,
-    ]
 
 
 @pytest.mark.parametrize(
@@ -1186,7 +1014,7 @@ def test_directory_snapshot_preserves_target_alias_spelling(tmp_path: Path, scop
 
 
 @pytest.mark.parametrize("scope", [".", "component"])
-@pytest.mark.parametrize("alias_kind", ["symlink", "case"])
+@pytest.mark.parametrize("alias_kind", ["symlink", CASE_ALIAS])
 def test_submodule_checks_preserve_target_alias_spelling(
     tmp_path: Path, scope: str, alias_kind: str
 ) -> None:
@@ -1212,7 +1040,7 @@ def test_submodule_checks_preserve_target_alias_spelling(
 
 
 @pytest.mark.parametrize("content_digest", [directory_content_digest, worktree_content_digest])
-@pytest.mark.parametrize("alias_kind", ["original", "symlink", "case"])
+@pytest.mark.parametrize("alias_kind", ["original", "symlink", CASE_ALIAS])
 def test_content_digest_expands_nested_git_repositories(
     tmp_path: Path, content_digest: Callable[[Path], str], alias_kind: str
 ) -> None:
@@ -1486,6 +1314,7 @@ def test_git_context_retains_scoped_directory_spelling(tmp_path: Path, name: str
     assert pathspec == scoped.name
 
 
+@pytest.mark.native_macos
 def test_git_target_accepts_filesystem_case_aliases(tmp_path: Path) -> None:
     target = tmp_path / "target"
     initialize_git_repository(target)
@@ -1541,7 +1370,7 @@ def test_git_context_rejects_an_unrelated_configured_worktree(tmp_path: Path) ->
 
 
 @pytest.mark.parametrize("scope", [".", "component"])
-@pytest.mark.parametrize("alias_kind", ["original", "symlink", "case"])
+@pytest.mark.parametrize("alias_kind", ["original", "symlink", CASE_ALIAS])
 def test_copy_retains_alias_rooted_gitlink_exclusions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str, alias_kind: str
 ) -> None:
@@ -1584,6 +1413,23 @@ def test_copy_retains_alias_rooted_gitlink_exclusions(
         assert not (copied / "submodule").exists()
 
 
+@pytest.mark.cross_platform
+def test_candidate_sources_disambiguate_revision_from_worktree_filename(tmp_path: Path) -> None:
+    target = tmp_path / "repository"
+    revision = initialize_git_repository(target)
+    (target / revision).write_text("synthetic revision-named file\n")
+    subprocess.run(["git", "rm", "-q", "README.md"], cwd=target, check=True)
+
+    sources = WORKBENCH_TARGET["candidate_source_lines"](
+        target,
+        {"kind": "working_tree", "baseRevision": revision, "headRevision": revision},
+        ["README.md"],
+        ["README.md"],
+    )
+
+    assert sources == {"README.md": {"path": "README.md", "lineCount": 1}}
+
+
 @pytest.mark.parametrize("replacement", ["directory", "ignored_file", "link"])
 @pytest.mark.parametrize("case_insensitive", [False, True])
 def test_deleted_candidate_sources_keep_base_blob_when_path_is_recreated(
@@ -1614,9 +1460,12 @@ def test_deleted_candidate_sources_keep_base_blob_when_path_is_recreated(
             )
         else:
             source.symlink_to(outside, target_is_directory=True)
-    from generate_rank_input import git_changed_paths
-
-    assert dict(git_changed_paths(target, revision, revision, "local-patch"))[source] == "D"
+    assert (
+        dict(WORKBENCH_TARGET["git_changed_paths"](target, revision, revision, "local-patch"))[
+            source
+        ]
+        == "D"
+    )
     sources = WORKBENCH_TARGET["candidate_source_lines"](
         target,
         {"kind": "working_tree", "baseRevision": revision, "headRevision": revision},

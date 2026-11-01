@@ -1,3 +1,4 @@
+import { nodeCommand } from "./support/shell.js";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -656,9 +657,6 @@ describe("Codex configuration", () => {
       await mkdir(repository);
       await writeFile(join(repository, "fixture.txt"), "synthetic source\n");
       const inventory = join(workspace, "in-scope-files.txt");
-      const python =
-        Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-      expect(python).not.toBeNull();
       const helper = runPinnedCodex(
         codexHome,
         [
@@ -669,8 +667,9 @@ describe("Codex configuration", () => {
           "codex_security_scan",
           "--cd",
           workspace,
-          python!,
-          join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+          nodeCommand().command,
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "generate-in-scope-files",
           "--repo",
           repository,
           "--scope",
@@ -700,6 +699,33 @@ describe("Codex configuration", () => {
     async () => {
       const { root, codexHome, workspace, stateDirectory, environment } =
         await scanSandboxFixture();
+      if (process.platform === "win32") {
+        // Native read ACLs are applied in the background. Initialize with the
+        // scan profile, whose workspace grants are synchronous, then wait
+        // before checking the read-only profile in this private fixture.
+        const setup = runPinnedCodex(
+          codexHome,
+          [
+            "sandbox",
+            "--permission-profile",
+            "codex_security_scan",
+            "--cd",
+            workspace,
+            join(
+              process.env["SystemRoot"] ?? "C:\\Windows",
+              "System32",
+              "cmd.exe",
+            ),
+            "/d",
+            "/c",
+            "exit",
+            "0",
+          ],
+          environment,
+        );
+        expect(setup.exitCode, new TextDecoder().decode(setup.stderr)).toBe(0);
+        await waitForWindowsSandboxSetup();
+      }
       const source = join(root, "repository", "component");
       await mkdir(source, { recursive: true });
       const sourceFile = join(source, "fixture.txt");

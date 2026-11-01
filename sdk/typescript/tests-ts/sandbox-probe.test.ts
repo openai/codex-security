@@ -7,7 +7,9 @@ import { TestClient } from "./support/api-client.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const SANDBOX_DENIAL =
-  "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted";
+  process.platform === "darwin"
+    ? "sandbox-exec: sandbox_apply: Operation not permitted"
+    : "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "codex-security-sandbox-",
@@ -57,6 +59,15 @@ describe("Codex sandbox probe", () => {
       expect(failure?.message).toContain(SANDBOX_DENIAL);
       expect(failure?.message).toContain(
         `${command} sandbox -- ${command} --version`,
+      );
+      expect(failure?.message.indexOf(SANDBOX_DENIAL)).toBeLessThan(
+        failure?.message.indexOf("reproduce") ?? -1,
+      );
+      expect(failure?.message.includes("AppArmor")).toBe(
+        process.platform === "linux",
+      );
+      expect(failure?.message.includes("user namespaces")).toBe(
+        process.platform === "linux",
       );
     },
   );

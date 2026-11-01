@@ -11,9 +11,8 @@ security plugin, and TypeScript declarations. It uses ES modules.
 - Review saved findings, identify duplicates, classify severity, and suggest owners.
 - Import GitHub code scanning alerts, export SARIF, JSON, or CSV, and publish
   findings to Linear or a findings service.
-- Import [Snyk Open Source findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md) from
-  official plugin JSON or native CLI JSON locally or into Cloud; Open Source
-  SARIF is also supported. License findings and other Snyk products are excluded.
+- Import saved scanner reports locally or publish them to Codex Security Cloud.
+  See the [scanner import guides](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md) for supported vendors and formats.
 - Automate scans across repositories and project components.
 
 See the [CLI reference](docs/cli.md),
@@ -61,6 +60,24 @@ Install the package locally in your TypeScript project:
 ```bash
 npm install @openai/codex-security
 ```
+
+### Package and plugin versions
+
+For bug reports, run `npx @openai/codex-security info --json` in the project
+where the SDK is installed, or `codex-security info --json` for a global install.
+Include the npm version (`cliVersion` and `sdkVersion`), bundled plugin manifest
+version (`bundledPluginVersion`), and Codex runtime and SDK pins (`codexVersion`
+and `codexSdkVersion`). If you used a marketplace plugin, a plugin supplied by
+path, or a custom Codex executable, include its version separately.
+
+For example, `npm view @openai/codex-security@0.1.5 gitHead dist.integrity`
+shows the registry's source commit and tarball digest. Compare `gitHead` with
+the commit for tag `npm-v0.1.5`. `npm pack @openai/codex-security@0.1.5` downloads
+the archive, including `package/_bundled_plugin/.codex-plugin/plugin.json`.
+
+The [release workflow](https://github.com/openai/codex-security/blob/main/.github/workflows/node-github-release.yml)
+verifies the signed attestation that binds the tarball to the tagged commit.
+For `0.1.0` and `0.1.1`, npm omits `gitHead`. Use the commit from the verified attestation.
 
 ## Authentication
 
@@ -174,8 +191,8 @@ try {
 
 Omitting `outputDir` saves results in the private Codex Security state directory.
 To choose another location, use a new or empty directory outside the scanned
-repository and its enclosing Git worktree. On macOS and Linux, an existing output
-directory must be private to you (`chmod 700`).
+repository and its enclosing Git worktree. Existing output directories keep their
+permissions; newly created directories are private to you by default.
 
 ### Read results
 
@@ -183,17 +200,17 @@ directory must be private to you (`chmod 700`).
 | --------------------------------- | ---------------------------------------------------------------- |
 | `findings.findings`               | Findings from this scan.                                         |
 | `reportPath`                      | Path to the Markdown report.                                     |
-| `coverage`                        | What the scan assessed and any coverage gaps.                    |
+| `review`                          | Additional excluded paths. This is not file coverage.            |
 | `repositoryFindings`              | This scan's findings plus earlier open findings, when available. |
 | `sarifPath`                       | SARIF export path, or `null`.                                    |
 | `threatModel` / `threatModelPath` | Saved threat model and document path; either can be `null`.      |
 | `cost`                            | Estimated model usage cost, or `null` when unavailable.          |
 
 Review the requested paths and exclusions alongside the execution outcome.
-`coverage.deferred` records unfinished requested work, while
-`coverage.openQuestions` records optional follow-up separately.
+`reviewState.deferred` records unfinished requested work, while
+`reviewState.openQuestions` records optional follow-up separately.
 
-Review coverage alongside findings. A report with no findings does not establish
+Review the scan status and scope alongside findings. A report with no findings does not establish
 that the repository is secure. Reports and logs can contain source code,
 vulnerability details, and credentials; review them before sharing.
 
@@ -385,6 +402,10 @@ Deep discovery retains its enforced deadline, with a default and maximum of
 ### Progress and cost
 
 Use `onProgress` for scan progress and `onCost` for cost updates.
+Use `onUsageObservation` for the last reported token measurement time
+(`tokensUpdatedAt`) and account-wide allowance readings (`accountRateLimits`).
+Each reading includes its own `observedAt` timestamp and the percentage used in
+each reported window. A limit-only update can arrive before any token measurement.
 
 Follow scans with `onWorkerEvent` and `onReconnect`. `onWorkerEvent` reports
 persisted worker sessions discovered by the SDK's existing session tracker,
@@ -636,9 +657,26 @@ contributors. Suggestions do not assign tickets. See
 
 `publish scan --to cloud` uploads selected findings to Codex Security Cloud.
 It requires ChatGPT credentials; inference API keys and AWS credentials do not
-grant Cloud access. See [Cloud publication](docs/cli.md#publish-findings-to-cloud)
+grant Cloud access. See [Cloud publication](docs/cli.md#publish-completed-scans)
 for setup and review steps, or [Linear publication](docs/cli.md#publish-completed-scans-to-linear)
 for issue creation.
+
+### Import external findings
+
+External vendor imports are opt-in. Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`
+to enable `publish findings`, `findings imported`, `import sonar`, `import github-advisories`, and
+the SDK's external publication, local import/readback, Sonar issue collection, and advisory acquisition
+APIs. They are disabled otherwise; CLI commands are hidden from help and schemas.
+SDK callers can supply the flag through the existing per-call
+`dependencies.environment`, or in `options.environment` for `collectSonarIssues(options)`.
+For an SDK import of selected Sonar issues, pass their keys in `options.issueKeys`.
+Omit `issueKeys` to collect the project's open security issues. An empty list is rejected.
+If you know the source repository, pass its Git URL in `options.sourceRepositoryUrl`
+to check the Sonar binding before fetching issues.
+Pure normalizers and file readers remain available.
+Use `normalizeSelectedSemgrepPlatformFindings` for selected SAST findings from saved
+Semgrep Web API responses. See the [Semgrep SDK example](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#import-selected-semgrep-platform-sast-findings-with-the-sdk).
+This does not affect scan publishing or the existing GitHub alert collector.
 
 The SDK also exposes `prepareExternalPublication(file, options)` for supported
 vendor exports and `prepareNormalizedExternalPublication(findings, options)` for
@@ -649,43 +687,8 @@ use `ExternalPublicationOptions` for their supported formats. Both resolve the C
 calling `publish()`. Imported evidence remains not assessed by Codex, and saved
 requests and receipts support retries after interruption.
 
-Prefer each provider's supported native JSON for local and Cloud imports. Keep
-the same acquisition format for repeat imports: SARIF and CSV are compatibility
-options where supported, and changing formats can change record identities or
-replace richer evidence with less detail. See the
-[import guide](docs/cli.md#import-vendor-findings-locally) for format selection.
-
-For Wiz, prefer supported native JSON acquired through an authorized MCP or API
-connection. The [CSV compatibility reader](docs/cli.md#import-wiz-findings) covers
-repository package vulnerabilities (SCA) only; it does not add SAST, CSPM or
-complete code-to-cloud coverage. Both formats support gzip. The acquisition path
-still needs validation with an authorized Wiz tenant.
-
-For GitHub, save complete JSON from `import github` or `import github-advisories`;
-the configured GitHub plugin can help select alerts before collection. The
-[separate readers and mappings](docs/cli.md#import-github-findings-locally-or-to-cloud)
-retain code-scanning evidence or GHSA disclosures. **GHSA import does not
-establish an installed dependency or applicability to the repository.** This
-integration does not import Dependabot or secret-scanning alerts or write back
-to GitHub.
-
-Use `publish findings FILE --to local --repository PATH --provider wiz
---source-key KEY` to store the same vendor evidence in the local workbench SQLite
-database. Preview with `--dry-run --format json`, then confirm interactively or
-use `--yes`. Read it with `findings imported [REPOSITORY] --format json`; the
-repository defaults to the current directory. No Cloud login or model call is
-needed. Use `--provider snyk` for native CLI JSON, a Snyk plugin SCA bundle or
-Open Source SARIF. Prefer JSON, and keep one format and stable source key per scan
-target; switching formats creates separate source identities. See
-[local imports](docs/cli.md#import-vendor-findings-locally).
-
-Use `--provider endor` with native Endor Finding JSON; existing endorctl SARIF is
-accepted as a lossy compatibility format. See
-[Endor imports](docs/cli.md#import-endor-labs-findings).
-
-For saved GitHub code-scanning alerts or GHSA advisories, use
-`--provider github` with a separate stable source key for each finding family.
-See [local imports](docs/cli.md#import-vendor-findings-locally).
+For CLI examples and supported input formats, see the
+[scanner import guides](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md).
 
 The SDK's `prepareLocalExternalImport(file, options)` returns a `preview` and a
 separate `import()` operation. `prepareNormalizedLocalImport(findings,
@@ -695,17 +698,15 @@ remain unassessed source evidence, separate from native scan findings. Repeated
 imports update the same repository/provider/source-key/source-ID record; omitted
 records remain stored, and unknown evidence fields are not inferred.
 
-File imports forward repository references from the reader automatically. Direct
-normalized callers should provide additional known references in the third
-argument's `sourceRepositories` when they are absent from
+File imports forward repository references from the reader automatically. With
+`prepareNormalizedLocalImport()`, supply additional known references in the
+third argument's `sourceRepositories` when they are absent from
 `evidence.details.repository.url`. For a known GitHub custom host, include
 `platform: "github"`, for example `{ sourceRepositories: [{ url:
 "https://git.example.test/example/project", platform: "github" }] }`. Named Wiz
 reports carry this platform in their repository inventory. If you export only the
 normalized finding rows to JSONL, supply that metadata separately; the original
 finding evidence does not include the surrounding inventory.
-
-See [Semgrep Code imports](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md) for native CLI/CI JSON, SARIF compatibility, and local or Cloud imports. Platform API and Guardian/MCP responses need a separate mapping.
 
 ## Findings storage and deduplication
 

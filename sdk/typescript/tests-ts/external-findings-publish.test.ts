@@ -1,3 +1,24 @@
+import {
+  snykJson,
+  snykPluginExport,
+  snykSarif,
+} from "./support/snyk-import-fixtures.js";
+import {
+  opengrepJson,
+  opengrepTraceJson,
+} from "./support/opengrep-import-fixtures.js";
+import {
+  normalizeSnykFindingsExport,
+  normalizeSnykSarif,
+  snykRepositoryUrls,
+} from "../src/snyk-findings.js";
+import {
+  semgrepJson,
+  semgrepSarif,
+} from "./support/semgrep-import-fixtures.js";
+import { endorFinding, endorSarif } from "./support/endor-import-fixtures.js";
+import { sonarGitTestEnvironment } from "./support/sonar-import-fixtures.js";
+import { normalizeEndorFindings } from "../src/endor-findings.js";
 import { createServer, type ServerResponse } from "node:http";
 import { execFile } from "node:child_process";
 import { hash } from "node:crypto";
@@ -21,11 +42,14 @@ import {
   ExternalPublicationError,
   prepareExternalPublication,
   prepareNormalizedExternalPublication,
+  type ExternalPublicationOptions,
   type ExternalPublicationProgress,
+  type PreparedExternalPublication,
 } from "../src/external-findings-publish.js";
 import { readGitHubFindings } from "../src/github-findings.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
 import {
+  cloudRepositoryUrlKey,
   validateExternalEvidence,
   validateImportRequest,
   validateRepositories,
@@ -37,11 +61,26 @@ import type {
 } from "../src/external-import-models.js";
 import { main } from "../src/cli.js";
 import { dependencies } from "./cli-fixtures.js";
+import { githubDependabotAlert } from "./support/github-dependabot-fixtures.js";
 import {
   importedAlert,
   importedAdvisory,
 } from "./support/github-import-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
+import {
+  inspectorPackageFinding,
+  inspectorRepositoryUrl,
+} from "./support/inspector-import-fixtures.js";
+import { normalizeBlackDuckFindings } from "../src/blackduck-findings.js";
+import { normalizeVeracodeFindings } from "../src/veracode-findings.js";
+import {
+  veracodePolicyPage,
+  veracodePolicyRow,
+} from "./support/veracode-import-fixtures.js";
+import {
+  blackDuckBomReport,
+  blackDuckBomRow,
+} from "./support/blackduck-import-fixtures.js";
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -61,9 +100,126 @@ const normalized = (id = "vendor-1", severity = "high") => ({
   },
 });
 
+test("external publication requires opt-in before reading input or accessing Cloud", async () => {
+  const root = await mkdtemp(join(tmpdir(), "external-import-disabled-"));
+  cleanups.push(() => rm(root, { recursive: true, force: true }));
+  const state = join(root, "state");
+  let sideEffects = 0;
+  const disabled = {
+    environment: {
+      CODEX_SECURITY_STATE_DIR: state,
+    },
+    credentials: async () => {
+      sideEffects++;
+      throw new Error("Unexpected credential read");
+    },
+    fetch: async () => {
+      sideEffects++;
+      throw new Error("Unexpected Cloud request");
+    },
+  };
+  // The missing path would fail differently if the file reader ran first.
+  await expect(
+    prepareExternalPublication(join(root, "missing.json"), options, disabled),
+  ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
+  await expect(
+    prepareNormalizedExternalPublication(
+      { read: 0, findings: [], excluded: [] },
+      options,
+      disabled,
+    ),
+  ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
+  expect(sideEffects).toBe(0);
+  await expect(readdir(state)).rejects.toThrow("ENOENT");
+});
+
+test("concurrent external publications enforce opt-in and provider options before Cloud access", async () => {
+  const f = await fixture();
+  const parsed = await readVendorFindings(f.file);
+  let disabledSideEffects = 0;
+  const disabled = {
+    ...f.deps,
+    environment: {
+      ...f.environment,
+      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "0",
+    },
+    credentials: async () => {
+      disabledSideEffects++;
+      throw new Error("Unexpected credential read");
+    },
+    fetch: async () => {
+      disabledSideEffects++;
+      throw new Error("Unexpected Cloud request");
+    },
+  };
+  const results = await Promise.allSettled([
+    prepareExternalPublication(f.file, options, f.deps),
+    prepareExternalPublication(f.file, options, disabled),
+    prepareNormalizedExternalPublication(parsed, options, f.deps),
+    prepareNormalizedExternalPublication(parsed, options, disabled),
+  ]);
+  expect(results.map((result) => result.status)).toEqual([
+    "fulfilled",
+    "rejected",
+    "fulfilled",
+    "rejected",
+  ]);
+  for (const result of results) {
+    if (result.status === "fulfilled") {
+      expect(result.value.preview.findings).toHaveLength(1);
+    } else {
+      expect(String(result.reason)).toContain(
+        "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1",
+      );
+    }
+  }
+  const incompatible = { ...options, inspectorProjectMap: new Map() };
+  const enabled = { ...disabled, environment: f.environment };
+  const message = "map requires the inspector provider";
+  await expect(
+    prepareNormalizedExternalPublication(parsed, incompatible, enabled),
+  ).rejects.toThrow(message);
+  await expect(
+    prepareExternalPublication(
+      join(f.root, "missing.json"),
+      incompatible,
+      enabled,
+    ),
+  ).rejects.toThrow(message);
+  expect(disabledSideEffects).toBe(0);
+  expect(f.posts).toHaveLength(0);
+});
+
+for (const provider of ["wiz", "snyk"] as const) {
+  test(`${provider} publication rechecks the selected Cloud opt-in after reading`, async () => {
+    const f =
+      provider === "snyk" ? await fixture(snykSarif()) : await fixture();
+    let credentialReads = 0;
+    const dependencies = {
+      ...f.deps,
+      environment: { ...f.environment },
+      credentials: async () => {
+        credentialReads++;
+        throw new Error("Unexpected credential read");
+      },
+    };
+    const pending = prepareExternalPublication(
+      f.file,
+      { ...options, provider },
+      dependencies,
+    );
+    dependencies.environment.CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS = "0";
+    await expect(pending).rejects.toThrow(
+      "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1",
+    );
+    expect(credentialReads).toBe(0);
+  });
+}
+
 test("Wiz's gzip JSON report retains finding identity, evidence and repository locations", async () => {
   const report = {
     id: "vendor-report-1",
+    row: veracodePolicyRow(),
     name: "CVE-2026-0001",
     detailedName: "example-package",
     version: "1.2.3",
@@ -85,7 +241,7 @@ test("Wiz's gzip JSON report retains finding identity, evidence and repository l
   await writeFile(
     f.file,
     gzipSync(
-      [report, { ...report, id: "vendor-report-2" }]
+      [report, { ...report, id: `veracode-static-policy:${"a".repeat(64)}` }]
         .map((record) => JSON.stringify(record))
         .join("\n"),
     ),
@@ -148,6 +304,103 @@ test("a Wiz Raw Event export explains the finding-report path before contacting 
   expect(contactedCloud).toBe(false);
 });
 
+test("Dependabot publishes on the existing GitHub provider and rejects foreign repositories before POST", async () => {
+  const input = { ...githubDependabotAlert(), source: "extra" };
+  const correct = await fixture([input]);
+  const selection = {
+    ...options,
+    provider: "github" as const,
+    sourceKey: "github.com/example/project/dependabot",
+  };
+  const first = await prepareExternalPublication(
+    correct.file,
+    selection,
+    correct.deps,
+  );
+  expect(first.preview.requests[0]!.source.provider).toBe("github");
+  expect(correct.posts).toHaveLength(0);
+  first.preview.requests[0]!.items[0]!.evidence.url =
+    "https://github.com/example/other/security/dependabot/1";
+  correct.state.loseResponse = true;
+  await expect(first.publish()).rejects.toThrow();
+  expect(JSON.parse(correct.posts[0]!).items[0].evidence.url).toBe(
+    input.html_url,
+  );
+  const retry = await prepareExternalPublication(
+    correct.file,
+    selection,
+    correct.deps,
+  );
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).counts.created).toBe(1);
+  expect(correct.posts[1]).toBe(correct.posts[0]);
+  const replay = await prepareExternalPublication(
+    correct.file,
+    selection,
+    correct.deps,
+  );
+  expect((await replay.publish()).counts.unchanged).toBe(1);
+  const foreign = await fixture([input], "https://github.com/example/other");
+  await expect(
+    prepareExternalPublication(foreign.file, selection, foreign.deps),
+  ).rejects.toThrow(/does not match/i);
+  const native = await readGitHubFindings(correct.file);
+  await expect(
+    prepareNormalizedExternalPublication(native, selection, foreign.deps),
+  ).rejects.toThrow(/does not match/i);
+  const projected = structuredClone(native);
+  delete projected.findings[0]!.evidence.source_data;
+  await expect(
+    prepareNormalizedExternalPublication(projected, selection, foreign.deps),
+  ).rejects.toThrow(/does not match/i);
+  expect(
+    (
+      await prepareNormalizedExternalPublication(
+        projected,
+        selection,
+        correct.deps,
+      )
+    ).preview.requests,
+  ).toHaveLength(1);
+  projected.findings[0]!.evidence.url = input.url;
+  projected.findings[0]!.evidence.source_data = {
+    security_vulnerability: input.security_vulnerability,
+  };
+  projected.findings[0]!.source_finding_id = "alert-1";
+  const compatible = await prepareNormalizedExternalPublication(
+    projected,
+    selection,
+    correct.deps,
+  );
+  expect((await compatible.publish()).counts.created).toBe(1);
+  expect(
+    (
+      await (
+        await prepareNormalizedExternalPublication(
+          projected,
+          selection,
+          correct.deps,
+        )
+      ).publish()
+    ).counts.unchanged,
+  ).toBe(1);
+  await expect(
+    prepareNormalizedExternalPublication(projected, selection, foreign.deps),
+  ).rejects.toThrow(/does not match/i);
+  const conflicting = structuredClone(native);
+  conflicting.findings[0]!.evidence.url = githubDependabotAlert(2).html_url;
+  await expect(
+    prepareNormalizedExternalPublication(conflicting, selection, correct.deps),
+  ).rejects.toThrow(/alert URL/i);
+  const relabeled = structuredClone(native);
+  relabeled.findings[0]!.source_finding_id =
+    "github.com/example/other/dependabot/2";
+  await expect(
+    prepareNormalizedExternalPublication(relabeled, selection, foreign.deps),
+  ).rejects.toThrow(/source finding ID/i);
+  expect(foreign.posts).toHaveLength(0);
+});
+
 async function fixture(
   records: unknown = [normalized()],
   repositoryUrl = "https://github.com/example/project",
@@ -159,6 +412,7 @@ async function fixture(
   await writeFile(file, JSON.stringify(records));
   const environment = {
     ...process.env,
+    CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
     CODEX_HOME: join(root, "credentials"),
     CODEX_SECURITY_STATE_DIR: join(root, "state"),
   };
@@ -180,6 +434,7 @@ async function fixture(
   const receipts = new Map<string, FindingImportReceipt>();
   const posts: string[] = [];
   const state = {
+    repositoryUrl,
     marker: "generation-1",
     environmentId: "environment-example" as string | null,
     materializeDefaults: false,
@@ -194,7 +449,7 @@ async function fixture(
     id: options.repository,
     object: "security.repository",
     repo_connector_id: repoConnectorId,
-    url: repositoryUrl,
+    url: state.repositoryUrl,
     default_branch: "main",
     reset_marker: state.marker,
     import_environment_id: state.environmentId,
@@ -418,6 +673,247 @@ async function fixture(
     command,
   };
 }
+
+test("Sonar replays the selected evidence locally and to Cloud without signing in to Sonar again", async () => {
+  const repo = "https://github.com/example/project";
+  const source = {
+    format: "sonar-issues/v1" as const,
+    server: "https://sonarcloud.io",
+    organization: "example",
+    project: "example_project",
+    branch: "main",
+    projectBase: "",
+    repositoryUrl: repo,
+    pages: [
+      {
+        paging: { pageIndex: 1, pageSize: 100, total: 1 },
+        issues: [
+          {
+            key: "issue-1",
+            project: "example_project",
+            component: "file",
+            rule: "example:R1",
+            message: "Review input handling",
+            type: "VULNERABILITY",
+            severity: "CRITICAL",
+            flows: [
+              {
+                locations: [
+                  {
+                    component: "file",
+                    textRange: { startLine: 2, endLine: 3 },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        components: [{ key: "file", path: "src/example.ts" }],
+      },
+    ],
+  };
+  const f = await fixture(source, repo);
+  const checkout = join(f.root, "checkout");
+  const git = promisify(execFile);
+  const environment = sonarGitTestEnvironment({
+    ...f.cliDeps.environment,
+    CODEX_SECURITY_CLOUD_BASE_URL: "https://cloud.example.test",
+  });
+  await git("git", ["init", "--quiet", checkout], { env: environment });
+  await git("git", ["-C", checkout, "remote", "add", "origin", repo], {
+    env: environment,
+  });
+  const paths = new Set<string>();
+  const deps = {
+    ...f.cliDeps,
+    environment,
+    currentDirectory: () => checkout,
+    cloudFetch: (url: string, init: RequestInit) => {
+      paths.add(new URL(url).pathname);
+      return f.cliDeps.cloudFetch(url, init);
+    },
+  };
+  const first = createCliTest(main);
+  const previewExit = await first.runCli(
+    [
+      "import",
+      "sonar",
+      "--sonar-project",
+      source.project,
+      "--sonar-branch",
+      source.branch,
+      "--sonar-issue",
+      "issue-1",
+      "--dry-run",
+      "--format",
+      "json",
+    ],
+    {
+      ...deps,
+      collectSonarIssues: async (selection) => {
+        expect(selection.issueKeys).toEqual(["issue-1"]);
+        return source;
+      },
+    },
+  );
+  expect(previewExit, first.stderr.text()).toBe(0);
+  expect(f.posts).toHaveLength(0);
+  const capture: string = JSON.parse(first.stdout.text()).capture;
+  expect(JSON.parse(await readFile(capture, "utf8"))).toEqual(source);
+  const previewArgs = [
+    "import",
+    "sonar",
+    capture,
+    "--to",
+    "cloud",
+    "--format",
+    "json",
+  ];
+
+  const outside = join(f.root, "without-remotes");
+  await mkdir(outside);
+  const noRemotes = createCliTest(main);
+  expect(
+    await noRemotes.runCli([...previewArgs, "--dry-run"], {
+      ...deps,
+      currentDirectory: () => outside,
+    }),
+  ).toBe(2);
+  expect(noRemotes.stderr.text()).toContain("--source-repository-url");
+  expect(f.posts).toHaveLength(0);
+
+  const cloudPreview = createCliTest(main);
+  expect(await cloudPreview.runCli([...previewArgs, "--dry-run"], deps)).toBe(
+    0,
+  );
+  const reviewed = JSON.parse(cloudPreview.stdout.text());
+  expect(reviewed.cloud.destination.url).toBe(repo);
+  expect(reviewed.capture).not.toBe(capture);
+  expect(f.posts).toHaveLength(0);
+  const args = [
+    "import",
+    "sonar",
+    reviewed.capture,
+    "--to",
+    "cloud",
+    "--format",
+    "json",
+  ];
+
+  const unavailable = createCliTest(main);
+  expect(
+    await unavailable.runCli([...args, "--yes"], {
+      ...deps,
+      cloudFetch: async () => new Response("Unknown account", { status: 403 }),
+    }),
+  ).toBe(2);
+  expect(JSON.parse(unavailable.stdout.text()).local.counts.created).toBe(1);
+
+  const replay = createCliTest(main);
+  expect(await replay.runCli([...args, "--yes"], deps)).toBe(0);
+  const result = JSON.parse(replay.stdout.text());
+  expect(result.local.counts.unchanged).toBe(1);
+  expect(result.cloud.verified).toBe(1);
+  const posted = JSON.parse(f.posts[0]!);
+  expect(posted.source).toEqual({
+    provider: "sonar",
+    source_key: result.sourceKey,
+  });
+  expect(posted.items[0].source_finding_id).toBe("issue-1");
+  const repository = f.destination();
+  const reportsPath = `/external/v2/repository_connectors/${repository.repo_connector_id}/repositories/${repository.id}/source_reports`;
+  expect(paths).toEqual(
+    new Set([
+      "/external/repositories",
+      reportsPath,
+      "/external/v2/finding_imports",
+      `${reportsPath}/${f.reports.get("issue-1")!.id}`,
+    ]),
+  );
+  expect(posted.items[0].evidence.source_data.issue.flows).toEqual(
+    source.pages[0]!.issues[0]!.flows,
+  );
+});
+
+test("normalized Sonar publication checks retained bindings on preview and retry", async () => {
+  const f = await fixture();
+  const repository = f.state.repositoryUrl;
+  const foreign = repository + "-other";
+  const selected = { ...options, provider: "sonar" as const };
+  const context = { format: "sonar-issues/v1", repositoryUrl: repository };
+  const finding = {
+    source_finding_id: "issue-1",
+    evidence: {
+      title: "Review input handling",
+      severity: "high" as const,
+      source_data: { ...context, issue: { key: "issue-1" } },
+    },
+  };
+  const rows = { read: 1, findings: [finding], excluded: [] };
+  const named = {
+    source_finding_id: "issue-2",
+    evidence: {
+      ...finding.evidence,
+      branch: "main",
+      source_data: { ...context, branch: "main", issue: { key: "issue-2" } },
+    },
+  };
+  const selection = { read: 2, findings: [finding, named], excluded: [] };
+  const prepare = () =>
+    prepareNormalizedExternalPublication(
+      { ...selection, report: { ...context, branch: "main" } },
+      selected,
+      f.deps,
+    );
+  await expect(
+    prepareNormalizedExternalPublication(selection, selected, f.deps),
+  ).rejects.toThrow("without a ref");
+  await expect(
+    prepareNormalizedExternalPublication(
+      {
+        ...rows,
+        report: { ...context, branch: "main" },
+        findings: [
+          {
+            ...finding,
+            evidence: { ...finding.evidence, branch: "unrelated" },
+          },
+        ],
+      },
+      selected,
+      f.deps,
+    ),
+  ).rejects.toThrow("retained Sonar branch");
+  await expect(
+    prepareNormalizedExternalPublication(
+      { ...rows, report: { ...context, repositoryUrl: foreign } },
+      selected,
+      f.deps,
+    ),
+  ).rejects.toThrow("does not match the selected Cloud repository");
+  f.state.loseResponse = true;
+  await expect((await prepare()).publish()).rejects.toThrow(
+    "resume the saved request",
+  );
+  await expect(
+    prepareNormalizedExternalPublication(
+      { ...selection, report: { ...context, branch: "other" } },
+      selected,
+      f.deps,
+    ),
+  ).rejects.toThrow("conflicting branch");
+  f.state.repositoryUrl = foreign;
+  await expect(prepare()).rejects.toThrow(
+    "does not match the selected Cloud repository",
+  );
+  expect(f.posts).toHaveLength(1);
+  f.state.repositoryUrl = repository;
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  await retry.publish();
+  expect(f.posts).toHaveLength(2);
+  expect(f.posts[1]).toBe(f.posts[0]);
+});
 
 test("Wiz occurrence mapping preserves original evidence without inventing repository provenance", async () => {
   const record = {
@@ -760,6 +1256,601 @@ test("request and pagination metadata retain Cloud byte limits and distinct iden
   expect(() =>
     validateRepositories({ ...page, next: `${page.next}é` }),
   ).toThrow("4096 UTF-8");
+});
+
+const inspectorOptions = {
+  ...options,
+  provider: "inspector" as const,
+  sourceRepositoryUrl: inspectorRepositoryUrl,
+};
+
+async function inspectorPublicationFixture(name = inspectorRepositoryUrl) {
+  const input = inspectorPackageFinding();
+  const project = input.resources[0]!;
+  project.details.codeRepository.projectName = name;
+  const f = await fixture({ findings: [input] });
+  const map = new Map([[project.id, inspectorRepositoryUrl]]);
+  const prepare = (settings: ExternalPublicationOptions = inspectorOptions) =>
+    prepareExternalPublication(f.file, settings, f.deps);
+  async function loseResponse(prepared: PreparedExternalPublication) {
+    f.state.loseResponse = true;
+    await expect(prepared.publish()).rejects.toThrow(
+      "resume the saved request",
+    );
+    return f.posts.at(-1)!;
+  }
+  return { f, input, project, map, prepare, loseResponse };
+}
+
+test("Inspector publication checks its source and reuses the finding ARN", async () => {
+  const { f, input, prepare } = await inspectorPublicationFixture();
+  const prepared = await prepare();
+  expect(prepared.preview.source.provider).toBe("inspector");
+  expect((await prepared.publish()).counts.created).toBe(1);
+  expect((await (await prepare()).publish()).counts.unchanged).toBe(1);
+  expect(f.reports.has(input.findingArn)).toBe(true);
+
+  const row = prepared.preview.findings[0]!;
+  const opaque = structuredClone(row);
+  opaque.source_finding_id = "typed-only";
+  delete opaque.evidence.source_data;
+  const other = "https://github.com/example/other";
+  opaque.evidence.details = { kind: "sast", repository: { url: other } };
+  await expect(
+    prepareNormalizedExternalPublication(
+      { ...prepared.preview, findings: [row, opaque] },
+      inspectorOptions,
+      f.deps,
+    ),
+  ).rejects.toThrow(/typed-only.*does not match/i);
+
+  f.state.repositoryUrl = other;
+  await expect(prepare()).rejects.toThrow(/does not match/i);
+  for (const source_data of [row.evidence.source_data, { finding: input }]) {
+    row.evidence.source_data = source_data;
+    await expect(
+      prepareNormalizedExternalPublication(prepared.preview, options, f.deps),
+    ).rejects.toThrow("requires the inspector provider");
+  }
+  expect(f.posts).toHaveLength(2);
+});
+
+test("Wiz can import, resume and update its own occurrence with upstream Inspector evidence", async () => {
+  const record = {
+    id: "wiz-vulnerability-1",
+    name: "CVE-2099-1234",
+    detailedName: "example-package",
+    vendorSeverity: "HIGH",
+    vulnerableAsset: { id: "example-asset" },
+    finding: inspectorPackageFinding(),
+  };
+  const f = await fixture([record]);
+  const prepare = () => prepareExternalPublication(f.file, options, f.deps);
+  const first = await prepare();
+  f.state.loseResponse = true;
+  const error = await first.publish().catch((error: unknown) => error);
+  if (!(error instanceof ExternalPublicationError)) throw error;
+  expect(f.reports.get(record.id)?.evidence.source_data).toEqual(record);
+
+  // A pre-Inspector checkpoint can contain the original requests without their input projection.
+  const path = error.result.savedSubmission!;
+  const saved = JSON.parse(await readFile(path, "utf8"));
+  delete saved.inputProjection;
+  await writeFile(path, JSON.stringify(saved));
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).verified).toBe(1);
+  expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+
+  record.vendorSeverity = "MEDIUM";
+  await writeFile(f.file, JSON.stringify([record]));
+  const updated = await prepareNormalizedExternalPublication(
+    await readVendorFindings(f.file),
+    options,
+    f.deps,
+  );
+  expect((await updated.publish()).counts.updated).toBe(1);
+  expect(f.reports.get(record.id)?.evidence.source_data).toEqual(record);
+});
+
+test.each(["example/project", inspectorRepositoryUrl])(
+  "pending Inspector requests for %s recheck their project mapping and destination host",
+  async (name) => {
+    const { f, project, map, prepare, loseResponse } =
+      await inspectorPublicationFixture(name);
+    const otherUrl = "https://git.example.test/example/project";
+    const supplied = new Map(map);
+    const settings: ExternalPublicationOptions = {
+      ...inspectorOptions,
+      inspectorProjectMap: supplied,
+    };
+    const preparing = prepare(settings);
+    if (name === inspectorRepositoryUrl) delete settings.inspectorProjectMap;
+    else supplied.clear();
+    const prepared = await preparing;
+    const firstBody = await loseResponse(prepared);
+    const resume = (inspectorProjectMap?: ReadonlyMap<string, string>) =>
+      prepareNormalizedExternalPublication(
+        prepared.preview,
+        { ...inspectorOptions, inspectorProjectMap },
+        f.deps,
+      );
+
+    await expect(resume()).rejects.toThrow(/project|repository/i);
+    await expect(resume(new Map([[project.id, otherUrl]]))).rejects.toThrow(
+      /project|repository/i,
+    );
+    // Connector and repository IDs stay stable while the host changes.
+    f.state.repositoryUrl = otherUrl;
+    await expect(resume(map)).rejects.toThrow(/repository/i);
+    expect(f.posts).toHaveLength(1);
+
+    f.state.repositoryUrl = inspectorRepositoryUrl;
+    const retry = await resume(map);
+    expect(retry.preview.resumed).toBe(true);
+    retry.preview.requests[0]!.items[0]!.evidence.source_data![
+      "sourceRepositoryUrl"
+    ] = otherUrl;
+    expect((await retry.publish()).verified).toBe(1);
+    expect(f.posts).toEqual([firstBody, firstBody]);
+  },
+);
+
+test("a repository reset retires an Inspector request even when the destination URL changed", async () => {
+  const { f, map, prepare, loseResponse } = await inspectorPublicationFixture();
+  const first = await prepare({
+    ...inspectorOptions,
+    inspectorProjectMap: map,
+  });
+  await loseResponse(first);
+  f.state.marker = "generation-2";
+  f.state.repositoryUrl = "https://github.com/example/new-destination";
+  await expect(prepare()).rejects.toThrow("retired without uploading");
+  await expect(prepare()).rejects.toThrow("does not match");
+  expect(f.posts).toHaveLength(1);
+
+  f.state.repositoryUrl = inspectorRepositoryUrl;
+  const fresh = await prepare();
+  expect(fresh.preview.resumed).toBe(false);
+  const request = fresh.preview.requests[0]!;
+  expect(request.repository.reset_marker).toBe("generation-2");
+  expect(request.request_id).not.toBe(first.preview.requests[0]!.request_id);
+});
+
+test("publishing an Inspector retry adopts its project map without changing the pending request", async () => {
+  const { f, map, prepare, loseResponse } = await inspectorPublicationFixture();
+  const mappedOptions = { ...inspectorOptions, inspectorProjectMap: map };
+  const body = await loseResponse(await prepare());
+  const mapped = await prepare(mappedOptions);
+  const withoutMap = await prepare(); // Previewing the map does not change the checkpoint.
+  await loseResponse(mapped);
+  await expect(prepare()).rejects.toThrow(
+    "Supply the verified Inspector project binding",
+  );
+  await expect(withoutMap.publish()).rejects.toThrow(
+    "Another publication prepared this input",
+  );
+  expect((await (await prepare(mappedOptions)).publish()).verified).toBe(1);
+  expect(f.posts).toEqual([body, body, body]);
+});
+
+test.each(["inspector", "sonar"] as const)(
+  "a normalized %s retry checks its typed repository without native evidence",
+  async (provider) => {
+    const f = await fixture();
+    const finding = {
+      source_finding_id: "vendor-1",
+      evidence: {
+        title: "Synthetic code finding",
+        severity: "high" as const,
+        details: {
+          kind: "sast" as const,
+          repository: { url: inspectorRepositoryUrl },
+        },
+      },
+    };
+    const prepare = () =>
+      prepareNormalizedExternalPublication(
+        { read: 1, findings: [finding], excluded: [] },
+        { ...options, provider },
+        f.deps,
+      );
+    f.state.loseResponse = true;
+    await expect((await prepare()).publish()).rejects.toThrow(
+      "resume the saved request",
+    );
+    f.state.repositoryUrl = "https://github.com/different/project";
+    await expect(prepare()).rejects.toThrow(
+      "does not match the selected Cloud repository",
+    );
+    expect(f.posts).toHaveLength(1);
+  },
+);
+
+const savedBlackDuckEvidence = {
+  data: { format: "blackduck-bom-6" },
+  requiredProvider: "blackduck",
+  digest: "d3001de83673b0f42b1d1d42cb19ea546869d41ed99504ca213b303267bb1346",
+};
+
+const savedDependabotData = {
+  ...githubDependabotAlert(),
+  sourceRepositoryUrl: "https://github.com/example/different",
+};
+
+test.each([
+  {
+    ...savedBlackDuckEvidence,
+    selected: options,
+    filename:
+      "2dfdb44c2c7494f4eed20e59244df967598fc3a284589ec2f6c3a24bfff7b2d0.pending.json",
+  },
+  {
+    ...savedBlackDuckEvidence,
+    selected: { ...options, provider: "inspector" as const },
+    filename:
+      "d0ba21fbe6c5927206db937694c98f69ad59e33fc390cae6eb6bd01249b5ca10.pending.json",
+  },
+  {
+    selected: { ...options, provider: "github" as const },
+    data: savedDependabotData,
+    requiredProvider: "blackduck",
+    filename:
+      "2dc327e13b7b9548e828b0fe3193988a26c53c9c956b364c69990abdb418c298.pending.json",
+    digest: "abe417c10599f27dc9adc599465af29f693069deaca7942f79c952871216070e",
+  },
+  {
+    selected: { ...options, provider: "inspector" as const },
+    data: {
+      sourceRepositoryUrl: inspectorRepositoryUrl,
+      applicationUrl: veracodePolicyPage()._links.application.href,
+      row: veracodePolicyRow(),
+    },
+    requiredProvider: "veracode",
+    filename:
+      "7d21ed6ce9acbc4bf00c5c7d7ed02b8e7937e92efa796e6218d57273eb9ce2f4.pending.json",
+    digest: "13b472f7b050ef94705eed1fb4487b206386130f988d3ee6f87824f02f4d79f0",
+  },
+])(
+  "checks a saved $selected.provider request from before $requiredProvider checks",
+  async ({ selected, data, requiredProvider, filename, digest }) => {
+    const f = await fixture();
+    const environment: NodeJS.ProcessEnv = { ...f.environment };
+    // These persisted keys came from the default deployment.
+    delete environment["CODEX_SECURITY_CLOUD_BASE_URL"];
+    delete environment["CODEX_SECURITY_CLOUD_WEB_URL"];
+    const alert =
+      selected.provider === "github" ? savedDependabotData : undefined;
+    const row = normalized();
+    const finding = {
+      source_finding_id: alert
+        ? "blackduck-bom:" + "a".repeat(64)
+        : row.source_finding_id,
+      evidence: validateExternalEvidence(
+        alert
+          ? {
+              title: "Dependabot alert",
+              severity: "high",
+              url: alert.html_url,
+              source_data: data,
+            }
+          : { ...row.evidence, source_data: data },
+      ),
+    };
+    const input = { read: 1, excluded: [], findings: [finding] };
+    const prepare = () =>
+      prepareNormalizedExternalPublication(input, selected, {
+        ...f.deps,
+        environment,
+      });
+
+    // The previous publisher accepted this opaque evidence. Keep its checkpoint
+    // filename and digests so this exercises recovery across the provider change.
+    const directory = join(
+      f.environment.CODEX_SECURITY_STATE_DIR,
+      "external-finding-publications",
+    );
+    const request = {
+      request_id: "efbc3c2e-0462-4411-89aa-9ced1d34223c",
+      repository: {
+        id: selected.repository,
+        repo_connector_id: "github",
+        environment_id: f.state.environmentId,
+        reset_marker: f.state.marker,
+      },
+      source: { provider: selected.provider, source_key: selected.sourceKey },
+      items: [{ client_id: "item-1", ...finding, expected_version: 0 }],
+    };
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await writeFile(
+      join(directory, filename),
+      JSON.stringify({
+        accountId: "synthetic-account",
+        requests: [request],
+        inputProjection: { inputDigest: digest, savedEvidenceDigest: digest },
+      }),
+      { mode: 0o600 },
+    );
+
+    if (alert) {
+      // The original publisher selected the alert's repository. Changing the
+      // catalog to match the projection must not permit replay to another repo.
+      const originalRepository = f.state.repositoryUrl;
+      f.state.repositoryUrl = alert.sourceRepositoryUrl;
+      await expect(prepare()).rejects.toThrow(
+        `belongs to "${originalRepository}"`,
+      );
+      expect(f.posts).toHaveLength(0);
+      return;
+    }
+    const retry = await prepare();
+    expect(retry.preview.resumed).toBe(true);
+    expect((await retry.publish()).counts.created).toBe(1);
+    expect(f.posts.map((body) => JSON.parse(body))).toEqual([request]);
+    await expect(prepare()).rejects.toThrow(
+      `requires the ${requiredProvider} provider`,
+    );
+  },
+);
+
+test.each(["wiz", "inspector"] as const)(
+  "rechecks a projected Black Duck repository on a saved %s publication",
+  async (provider) => {
+    const f = await fixture();
+    const source = f.state.repositoryUrl;
+    const input = normalizeBlackDuckFindings([blackDuckBomRow()], source);
+    input.findings[0]!.evidence.source_data = { sourceRepositoryUrl: source };
+    const prepare = () =>
+      prepareNormalizedExternalPublication(
+        input,
+        { ...options, provider },
+        f.deps,
+      );
+
+    f.state.loseResponse = true;
+    await expect((await prepare()).publish()).rejects.toThrow(
+      "resume the saved request",
+    );
+    f.state.repositoryUrl = "https://github.com/example/different";
+    await expect(prepare()).rejects.toThrow(
+      "does not match the selected Cloud repository",
+    );
+    expect(f.posts).toHaveLength(1);
+    f.state.repositoryUrl = source;
+    const retry = await prepare();
+    expect(retry.preview.resumed).toBe(true);
+    await retry.publish();
+    expect(f.posts).toHaveLength(2);
+    expect(f.posts[1]).toBe(f.posts[0]);
+  },
+);
+
+test("Black Duck Cloud replay preserves package occurrence and rejects a different destination", async () => {
+  const row = {
+    ...blackDuckBomRow(),
+    packageUrl: "pkg:composer/example/library@2.0",
+  };
+  const report = blackDuckBomReport([row]);
+  const correct = await fixture(report);
+  const selected = {
+    ...options,
+    provider: "blackduck" as const,
+    sourceKey: "scanner/project-a/release-a",
+    sourceRepositoryUrl: "https://github.com/example/project",
+  };
+  const prepare = () =>
+    prepareExternalPublication(correct.file, selected, correct.deps);
+  const first = await prepare();
+  expect(correct.posts).toHaveLength(0);
+  expect(first.preview.requests[0]!.source.provider).toBe("blackduck");
+  first.preview.requests[0]!.items[0]!.evidence.source_data![
+    "sourceRepositoryUrl"
+  ] = "https://git.example.test/example/project";
+  correct.state.loseResponse = true;
+  await expect(first.publish()).rejects.toThrow("resume the saved request");
+  expect([...correct.reports.values()][0]!.evidence.source_data).toMatchObject({
+    sourceRepositoryUrl: selected.sourceRepositoryUrl,
+  });
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).counts.created).toBe(1);
+  expect(correct.posts).toHaveLength(2);
+  expect(correct.posts[1]).toBe(correct.posts[0]);
+  expect([...correct.reports.values()][0]!.evidence.packages).toMatchObject([
+    {
+      name: "example/library",
+      ecosystem: "composer",
+      installed_version: "2.0",
+    },
+  ]);
+  expect((await (await prepare()).publish()).counts.unchanged).toBe(1);
+  const foreign = await fixture(report, "https://github.com/example/other");
+  await expect(
+    prepareExternalPublication(foreign.file, selected, foreign.deps),
+  ).rejects.toThrow(/does not match/i);
+  expect(foreign.posts).toHaveLength(0);
+  const native = normalizeBlackDuckFindings(
+    report,
+    selected.sourceRepositoryUrl,
+  );
+  const mixed = structuredClone(native);
+  mixed.findings.push(
+    ...normalizeBlackDuckFindings(
+      [blackDuckBomRow(undefined, "release-b")],
+      selected.sourceRepositoryUrl,
+    ).findings,
+  );
+  mixed.read = mixed.findings.length;
+  await expect(
+    prepareNormalizedExternalPublication(mixed, selected, correct.deps),
+  ).rejects.toThrow(/same project version/);
+  await expect(
+    prepareNormalizedExternalPublication(
+      native,
+      { ...selected, provider: "wiz" },
+      foreign.deps,
+    ),
+  ).rejects.toThrow(/requires the blackduck provider/);
+  const stripped = structuredClone(native);
+  const data = stripped.findings[0]!.evidence.source_data!;
+  delete data["row"];
+  delete data["format"];
+  const wiz = { ...selected, provider: "wiz" as const };
+  const matching = await fixture();
+  for (const sourceData of [
+    data,
+    { sourceRepositoryUrl: selected.sourceRepositoryUrl },
+  ]) {
+    stripped.findings[0]!.evidence.source_data = sourceData;
+    await expect(
+      prepareNormalizedExternalPublication(stripped, wiz, foreign.deps),
+    ).rejects.toThrow(/does not match the selected Cloud repository/);
+    await prepareNormalizedExternalPublication(stripped, wiz, matching.deps);
+  }
+  for (const url of [
+    "ssh://git@git.example.test/team/project.git",
+    ` ${selected.sourceRepositoryUrl}`,
+  ]) {
+    stripped.findings[0]!.evidence.source_data = { sourceRepositoryUrl: url };
+    await expect(
+      prepareNormalizedExternalPublication(stripped, wiz, foreign.deps),
+    ).rejects.toThrow();
+  }
+  expect(foreign.posts).toHaveLength(0);
+  stripped.findings[0]!.evidence.source_data = { upstream: data };
+  await prepareNormalizedExternalPublication(stripped, wiz, foreign.deps);
+  delete stripped.findings[0]!.evidence.source_data;
+  await expect(
+    prepareNormalizedExternalPublication(stripped, selected, foreign.deps),
+  ).rejects.toThrow(/retained Black Duck/);
+  const normalized = structuredClone(native);
+  normalized.findings[0]!.source_finding_id = "sdk-id";
+  normalized.findings[0]!.evidence.source_data = {
+    sourceRepositoryUrl: selected.sourceRepositoryUrl,
+    projectVersionUrl: "https://scanner.example.test/dashboard/version",
+  };
+  await prepareNormalizedExternalPublication(
+    normalized,
+    selected,
+    correct.deps,
+  );
+
+  const summary = normalized.findings[0]!;
+  delete summary.evidence.source_data;
+  summary.evidence.details = {
+    kind: "sast",
+    repository: { url: selected.sourceRepositoryUrl },
+  };
+  const prepareSummary = () =>
+    prepareNormalizedExternalPublication(normalized, selected, correct.deps);
+  const prepared = await prepareSummary();
+  const expected = JSON.stringify(prepared.preview.requests[0]);
+  correct.state.loseResponse = true;
+  await expect(prepared.publish()).rejects.toThrow("resume the saved request");
+  const posted = correct.posts.length;
+  correct.state.repositoryUrl = foreign.state.repositoryUrl;
+  await expect(prepareSummary()).rejects.toThrow(/does not match/);
+  expect(correct.posts).toHaveLength(posted);
+  correct.state.repositoryUrl = selected.sourceRepositoryUrl;
+  const resumed = await prepareSummary();
+  expect(resumed.preview.resumed).toBe(true);
+  await resumed.publish();
+  expect(correct.posts.slice(-2)).toEqual([expected, expected]);
+});
+
+test("Veracode Cloud replays an application policy issue and rejects a foreign destination before POST", async () => {
+  const page = veracodePolicyPage([veracodePolicyRow(1)]);
+  const correct = await fixture([page]);
+  const selected = {
+    ...options,
+    provider: "veracode" as const,
+    sourceRepositoryUrl: "https://github.com/example/project",
+    sourceKey: "veracode/example/static",
+  };
+  const prepare = () =>
+    prepareExternalPublication(correct.file, selected, correct.deps);
+  const first = await prepare();
+  expect(first.preview.requests[0]!.source.provider).toBe("veracode");
+  await expect(
+    prepareNormalizedExternalPublication(
+      normalizeVeracodeFindings(page, selected.sourceRepositoryUrl),
+      { ...selected, provider: "wiz" },
+      correct.deps,
+    ),
+  ).rejects.toThrow(/requires the veracode provider/i);
+  for (const row of [
+    { ...veracodePolicyRow(), context_type: "SANDBOX" },
+    { ...veracodePolicyRow(), scan_type: "DYNAMIC" },
+  ]) {
+    const input = normalizeVeracodeFindings(page, selected.sourceRepositoryUrl);
+    input.findings[0]!.source_finding_id = "sdk-id";
+    input.findings[0]!.evidence.source_data!["row"] = row;
+    await expect(
+      prepareNormalizedExternalPublication(input, selected, correct.deps),
+    ).rejects.toThrow(/context|STATIC/);
+  }
+  const partial = normalizeVeracodeFindings(page, selected.sourceRepositoryUrl);
+  const finding = partial.findings[0]!;
+  delete finding.evidence.source_data!["applicationUrl"];
+  const foreignUrl = "https://github.com/example/other";
+  const foreign = await fixture(undefined, foreignUrl);
+  finding.evidence.details!.repository!.url = foreignUrl;
+  for (const id of [finding.source_finding_id, "sdk-id"]) {
+    finding.source_finding_id = id;
+    await expect(
+      prepareNormalizedExternalPublication(
+        partial,
+        { ...selected, provider: "wiz" },
+        foreign.deps,
+      ),
+    ).rejects.toThrow(/requires the veracode provider/i);
+  }
+  finding.evidence.details!.repository!.url = selected.sourceRepositoryUrl;
+  await expect(
+    prepareNormalizedExternalPublication(partial, selected, correct.deps),
+  ).rejects.toThrow(/retained application/i);
+  finding.evidence.source_data = {
+    sourceRepositoryUrl: selected.sourceRepositoryUrl,
+    applicationUrl:
+      "https://scanner.example.test/appsec/v1/applications/dashboard",
+    row: { status: "ready" },
+  };
+  expect(
+    (
+      await prepareNormalizedExternalPublication(
+        partial,
+        { ...selected, provider: "wiz" },
+        correct.deps,
+      )
+    ).preview.findings,
+  ).toHaveLength(1);
+  const mixed = normalizeVeracodeFindings(page, selected.sourceRepositoryUrl);
+  const sdkFinding = structuredClone(mixed.findings[0]!);
+  sdkFinding.source_finding_id = "sdk-id";
+  delete sdkFinding.evidence.source_data;
+  sdkFinding.evidence.details!.repository!.url =
+    "https://github.com/example/other";
+  mixed.findings.push(sdkFinding);
+  mixed.read++;
+  await expect(
+    prepareNormalizedExternalPublication(mixed, selected, correct.deps),
+  ).rejects.toThrow(/does not match/);
+  expect(correct.posts).toHaveLength(0);
+  first.preview.requests[0]!.items[0]!.evidence.source_data![
+    "sourceRepositoryUrl"
+  ] = "https://github.com/example/other";
+  correct.state.loseResponse = true;
+  await expect(first.publish()).rejects.toThrow("resume the saved request");
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).counts.created).toBe(1);
+  expect(correct.posts[1]).toBe(correct.posts[0]);
+  expect((await (await prepare()).publish()).counts.unchanged).toBe(1);
+  const other = await fixture([page], "https://github.com/example/other");
+  await expect(
+    prepareExternalPublication(other.file, selected, other.deps),
+  ).rejects.toThrow(/does not match/i);
+  expect(other.posts).toHaveLength(0);
 });
 
 test("CLI preview and rejected confirmation never POST or persist an upload", async () => {
@@ -1354,15 +2445,95 @@ test.each(["environment-example", "replacement-environment", null])(
   },
 );
 
-test("batching preserves item order and keeps final item errors visible", async () => {
-  const f = await fixture(
-    Array.from({ length: 101 }, (_, index) => normalized(`vendor-${index}`)),
-  );
-  const prepared = await prepareExternalPublication(f.file, options, f.deps);
-  expect(
-    prepared.preview.requests.map((request) => request.items.length),
-  ).toEqual([100, 1]);
-  expect((await prepared.publish()).counts.created).toBe(101);
+test("empty or oversized normalized input stops before Cloud discovery", async () => {
+  const oversized = {
+    source_finding_id: "oversized",
+    evidence: {
+      title: "Oversized evidence",
+      severity: "high" as const,
+      source_data: { raw: "x".repeat(5 * 1024 * 1024) },
+    },
+  };
+  const prepare = (findings: (typeof oversized)[]) =>
+    prepareNormalizedExternalPublication(
+      { read: findings.length, findings, excluded: [] },
+      options,
+      {
+        environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+        credentials: async () => {
+          throw new Error("Unexpected authentication");
+        },
+      },
+    );
+  await expect(prepare([])).rejects.toThrow("No supported findings");
+  await expect(prepare([oversized])).rejects.toThrow("256 KiB");
+});
+
+test.each([0, 1])(
+  "batching accounts for exactly 5 MiB plus %i UTF-8 bytes",
+  async (extraByte) => {
+    const f = await fixture();
+    const findings = Array.from({ length: 21 }, (_, index) => ({
+      source_finding_id: `vendor-${index}`,
+      evidence: {
+        title: 'Quoted "雪"\\\n🌱',
+        severity: "high" as const,
+        source_data: { padding: "" },
+      },
+    }));
+    const prepare = () =>
+      prepareNormalizedExternalPublication(
+        { read: findings.length, findings, excluded: [] },
+        { ...options, sourceKey: 'tenant/"境界"' },
+        f.deps,
+      );
+    const template = (await prepare()).preview.requests[0]!;
+    const targetBytes = 5 * 1024 * 1024 + extraByte;
+    const padding = targetBytes - Buffer.byteLength(JSON.stringify(template));
+    for (const [index, finding] of findings.entries())
+      finding.evidence.source_data.padding = "x".repeat(
+        Math.floor(padding / findings.length) +
+          Number(index < padding % findings.length),
+      );
+    findings.push({ ...findings[0]!, source_finding_id: "trailing" });
+    const { requests } = (await prepare()).preview;
+    expect(requests.map((request) => request.items.length)).toEqual(
+      extraByte === 0 ? [21, 1] : [20, 2],
+    );
+    const items = requests.flatMap((request) => request.items).slice(0, -1);
+    expect(Buffer.byteLength(JSON.stringify({ ...requests[0], items }))).toBe(
+      targetBytes,
+    );
+  },
+);
+
+test.each([100, 101])(
+  "batching preserves order for %i items",
+  async (count) => {
+    const records = Array.from({ length: count }, (_, index) =>
+      normalized(`vendor-${index}`),
+    );
+    const f = await fixture(records);
+    const prepared = await prepareExternalPublication(f.file, options, f.deps);
+    const { requests } = prepared.preview;
+    expect(requests.map((request) => request.items.length)).toEqual(
+      count === 100 ? [100] : [100, 1],
+    );
+    expect(
+      requests.flatMap((request) =>
+        request.items.map((item) => [item.client_id, item.source_finding_id]),
+      ),
+    ).toEqual(
+      records.map((record, index) => [
+        `item-${index + 1}`,
+        record.source_finding_id,
+      ]),
+    );
+    expect((await prepared.publish()).counts.created).toBe(count);
+  },
+);
+
+test("publication keeps final item errors visible", async () => {
   const errorFixture = await fixture();
   errorFixture.state.finalError = true;
   const cli = createCliTest(main);
@@ -2256,22 +3427,43 @@ test("interrupted CLI output preserves acknowledged batches and resumes only unf
   expect(f.posts[2]).toBe(f.posts[1]);
 });
 
-test("readback interruption distinguishes acknowledged findings from verified findings", async () => {
-  const f = await fixture();
+test("readback retry preserves acknowledged findings and scanner diagnostics", async () => {
+  const input = opengrepJson();
+  const f = await fixture(input);
   f.state.brokenReadback = true;
-  const prepared = await prepareExternalPublication(f.file, options, f.deps);
+  const settings = {
+    ...options,
+    provider: "opengrep" as const,
+    sourceRepositoryUrl: f.destination().url,
+  };
+  const prepared = await prepareExternalPublication(f.file, settings, f.deps);
   try {
     await prepared.publish();
     throw new Error("Expected readback interruption");
   } catch (error) {
-    expect(error).toBeInstanceOf(ExternalPublicationError);
-    expect((error as ExternalPublicationError).result).toMatchObject({
+    if (!(error instanceof ExternalPublicationError)) throw error;
+    expect(error.result).toMatchObject({
       status: "interrupted",
       counts: { created: 1 },
       unacknowledged: 0,
       verified: 0,
     });
+    (error.result.report!["errors"] as unknown[]).pop();
   }
+  const changed = structuredClone(input);
+  changed.errors[0]!.message = "A different scanner diagnostic";
+  await writeFile(f.file, JSON.stringify(changed));
+  const different = await prepareExternalPublication(f.file, settings, f.deps);
+  expect(different.preview.resumed).toBe(false);
+  expect(different.preview.report?.["errors"]).toEqual(changed.errors);
+  await writeFile(f.file, JSON.stringify(input));
+  const original = await prepareExternalPublication(f.file, settings, f.deps);
+  expect(original.preview.resumed).toBe(true);
+  f.state.brokenReadback = false;
+  const retried = await original.publish();
+  expect(retried.report?.["errors"]).toEqual(input.errors);
+  expect(retried.verified).toBe(1);
+  expect(f.posts).toHaveLength(1);
 });
 
 test("repository selection is sent on every discovery page", async () => {
@@ -2368,6 +3560,7 @@ test("Cloud deployment routing covers every request and isolates saved retries",
   expect(requested.some((url) => url.includes("/source_reports?"))).toBe(true);
   expect(requested.some((url) => url.endsWith("/finding_imports"))).toBe(true);
   expect(requested.some((url) => url.includes("/source_reports/"))).toBe(true);
+  expect(requested.some((url) => url.includes("/external/v2/"))).toBe(false);
 });
 
 test.each(["localhost", "127.0.0.1", "127.0.0.2", "[::1]"])(
@@ -2538,13 +3731,25 @@ test("read lookups and verification run concurrently with bounded requests and o
 
 test("progress is optional and stderr progress never corrupts JSON results", async () => {
   const f = await fixture();
+  const phases = new Set<ExternalPublicationProgress["phase"]>();
   const prepared = await prepareExternalPublication(f.file, options, {
     ...f.deps,
-    onProgress: () => {
+    onProgress: ({ phase }) => {
+      phases.add(phase);
+      if (phase === "reading")
+        return Promise.reject(new Error("Optional async observer failed"));
       throw new Error("Optional observer failed");
     },
   });
   expect((await prepared.publish()).status).toBe("complete");
+  expect([...phases]).toEqual([
+    "reading",
+    "discovering",
+    "preparing",
+    "waiting",
+    "uploading",
+    "verifying",
+  ]);
   const cli = createCliTest(main, { stderr: true });
   expect(await cli.runCli([...f.command, "--yes"], f.cliDeps)).toBe(0);
   expect(JSON.parse(cli.stdout.text())).toMatchObject({
@@ -2596,7 +3801,7 @@ test("normalized SDK publication preserves caller evidence and exclusion account
   const original = structuredClone(input);
   const prepared = await prepareNormalizedExternalPublication(
     input as Parameters<typeof prepareNormalizedExternalPublication>[0],
-    options,
+    Object.create(options) as typeof options,
     f.deps,
   );
   expect(input).toEqual(original);
@@ -2806,6 +4011,7 @@ test("normalized SDK publication detaches raw evidence aliases before validating
   const sharedPackage = { name: "example-package" };
   const input = {
     read: 2,
+    report: { package: sharedPackage },
     findings: [
       {
         source_finding_id: "shared-first",
@@ -2834,6 +4040,9 @@ test("normalized SDK publication detaches raw evidence aliases before validating
     f.deps,
   );
   expect(JSON.stringify(input)).toBe(original);
+  expect(prepared.preview.report).toEqual({
+    package: { name: "example-package" },
+  });
   expect(prepared.preview.findings[0]!.evidence.source_data).toEqual({
     package: { name: "example-package" },
   });
@@ -2902,6 +4111,93 @@ test("normalized SDK publication rejects nonfinite raw evidence without JSON coe
   ).rejects.toThrow("finite JSON numbers");
   expect(input.findings[0]!.evidence.source_data.score).toBe(Infinity);
   expect(f.posts).toHaveLength(0);
+});
+
+test("normalized SDK publication rejects unserializable report metadata before upload", async () => {
+  const f = await fixture();
+  const input = {
+    read: 1,
+    report: { elapsedNs: 1n },
+    findings: [
+      {
+        source_finding_id: "synthetic-report",
+        evidence: { title: "Example", severity: "unknown" as const },
+      },
+    ],
+    excluded: [],
+  };
+  await expect(
+    prepareNormalizedExternalPublication(input, options, f.deps),
+  ).rejects.toThrow(/bigint/i);
+  await expect(
+    prepareNormalizedExternalPublication(
+      { ...input, report: { elapsed: new Number(Infinity) } },
+      options,
+      f.deps,
+    ),
+  ).rejects.toThrow("finite JSON numbers");
+  expect(f.posts).toHaveLength(0);
+});
+
+test("publication JSON retains native Error messages and scanner diagnostics", async () => {
+  const scannerErrors = opengrepJson().errors;
+  const error = new Error("Scanner rule timed out.");
+  const nested = {
+    path: "src/example.ts",
+    cause: new Error("Parser stopped."),
+  };
+  const report = { errors: [error, nested, ...scannerErrors] };
+  const jsonErrors = [
+    { message: error.message },
+    { path: nested.path, cause: { message: nested.cause.message } },
+    ...scannerErrors,
+  ];
+  const f = await fixture();
+  await expect(
+    prepareNormalizedExternalPublication(
+      { read: 0, findings: [], excluded: [], report },
+      options,
+      f.deps,
+    ),
+  ).rejects.toThrow(`Scanner diagnostics: ${JSON.stringify(jsonErrors)}`);
+  expect(f.posts).toHaveLength(0);
+
+  const prepared = await prepareNormalizedExternalPublication(
+    {
+      read: 1,
+      findings: [
+        {
+          source_finding_id: "synthetic-report",
+          evidence: { title: "Example finding", severity: "high" },
+        },
+      ],
+      excluded: [],
+      report,
+    },
+    options,
+    f.deps,
+  );
+  const original = structuredClone(report);
+  nested.cause.message = "Caller changed the diagnostic.";
+  const completed = await prepared.publish();
+  expect(completed.verified).toBe(1);
+  for (const value of [prepared.preview.report, completed.report]) {
+    expect(value).toEqual(original);
+    expect(value?.["errors"]).toEqual([
+      expect.any(Error),
+      { path: nested.path, cause: expect.any(Error) },
+      ...scannerErrors,
+    ]);
+  }
+  const dir = join(f.root, "state", "external-finding-publications");
+  const receipt = (await readdir(dir)).find((name) =>
+    name.endsWith(".result.json"),
+  )!;
+  expect(JSON.parse(await readFile(join(dir, receipt), "utf8")).report).toEqual(
+    {
+      errors: jsonErrors,
+    },
+  );
 });
 
 test("invalid source namespaces fail before authentication or Cloud requests", async () => {
@@ -2977,7 +4273,6 @@ test.each([
 );
 
 test("Snyk SARIF publish, replay and changed evidence preserve Cloud identity", async () => {
-  const { snykSarif } = await import("./support/snyk-import-fixtures.js");
   const input = snykSarif();
   const f = await fixture(input);
   const settings = {
@@ -3007,53 +4302,70 @@ test("Snyk SARIF publish, replay and changed evidence preserve Cloud identity", 
   expect(updated.version).toBe(2);
 });
 
-test("Snyk CLI dry run selects its adapter without writing an import", async () => {
-  const { snykSarif } = await import("./support/snyk-import-fixtures.js");
-  const f = await fixture(snykSarif());
-  const command = [...f.command, "--dry-run"];
-  command[command.indexOf("--provider") + 1] = "snyk";
-  const cli = createCliTest(main);
-  expect(await cli.runCli(command, f.cliDeps)).toBe(0);
-  expect(f.posts).toHaveLength(0);
-});
-
-test.each([
-  { uris: ["https://github.com/other/project"] },
-  {
-    uris: [
-      "https://github.com/example/project",
-      "https://github.com/other/project",
-    ],
-  },
-  { uris: ["https://github.com:443/example/project"] },
-])(
-  "Snyk source repository provenance binds both publication entrypoints: %p",
-  async ({ uris }) => {
-    const { snykSarif } = await import("./support/snyk-import-fixtures.js");
-    const { normalizeSnykSarif } = await import("../src/snyk-findings.js");
-    const input: any = snykSarif();
-    input.runs[0].versionControlProvenance = uris.map((repositoryUri) => ({
-      repositoryUri,
-    }));
-    const f = await fixture(input);
-    const selected = { ...options, provider: "snyk" as const };
-    await expect(
-      prepareExternalPublication(f.file, selected, f.deps),
-    ).rejects.toThrow("does not match the selected Cloud repository");
-    await expect(
-      prepareNormalizedExternalPublication(
-        normalizeSnykSarif(input),
-        selected,
-        f.deps,
-      ),
-    ).rejects.toThrow("does not match the selected Cloud repository");
+for (const [provider, report, normalize, dryRunTitle] of [
+  [
+    "snyk",
+    snykSarif,
+    normalizeSnykSarif,
+    "Snyk CLI dry run selects its adapter without writing an import",
+  ],
+  [
+    "endor",
+    endorSarif,
+    normalizeEndorFindings,
+    "Endor CLI dry-run recognizes SARIF without writing imports",
+  ],
+] as const) {
+  test(dryRunTitle, async () => {
+    const f = await fixture(report());
+    const command = [...f.command, "--dry-run"];
+    command[command.indexOf("--provider") + 1] = provider;
+    const cli = createCliTest(main);
+    expect(await cli.runCli(command, f.cliDeps)).toBe(0);
     expect(f.posts).toHaveLength(0);
-    expect(f.reports.size).toBe(0);
-  },
-);
+  });
+
+  test.each([
+    { uris: ["https://github.com/other/project"] },
+    {
+      uris: [
+        "https://github.com/example/project",
+        "https://github.com/other/project",
+      ],
+    },
+    { uris: ["https://github.com:443/example/project"] },
+  ])(
+    `${provider === "snyk" ? "Snyk" : "Endor"} source repository provenance binds both publication entrypoints: %p`,
+    async ({ uris }) => {
+      const original = report();
+      const input = {
+        ...original,
+        runs: original.runs.map((run) => ({
+          ...run,
+          versionControlProvenance: uris.map((repositoryUri) => ({
+            repositoryUri,
+          })),
+        })),
+      };
+      const f = await fixture(input);
+      const selected = { ...options, provider };
+      await expect(
+        prepareExternalPublication(f.file, selected, f.deps),
+      ).rejects.toThrow("does not match the selected Cloud repository");
+      await expect(
+        prepareNormalizedExternalPublication(
+          normalize(input),
+          selected,
+          f.deps,
+        ),
+      ).rejects.toThrow("does not match the selected Cloud repository");
+      expect(f.posts).toHaveLength(0);
+      expect(f.reports.size).toBe(0);
+    },
+  );
+}
 
 test("Snyk source repository binding is rechecked for a fresh import after completion", async () => {
-  const { snykSarif } = await import("./support/snyk-import-fixtures.js");
   const input: any = snykSarif();
   input.runs[0].versionControlProvenance = [
     {
@@ -3097,10 +4409,6 @@ async function snykRepositoryEvidence(
   format: "plugin" | "SARIF",
   repository: string,
 ) {
-  const { snykPluginExport, snykSarif } =
-    await import("./support/snyk-import-fixtures.js");
-  const { normalizeSnykFindingsExport, normalizeSnykSarif } =
-    await import("../src/snyk-findings.js");
   if (format === "plugin") {
     const input = snykPluginExport();
     input.collection.target.repository = repository;
@@ -3126,78 +4434,42 @@ async function snykRepositoryEvidence(
   };
 }
 
+const gitHubProject = "https://github.com/example/project";
+const connectedProject = "https://git.example.test/example/project";
+const tenantProject = "https://tenant.ghe.com/example/project";
+
 const snykRepositoryAliases: [string, string][] = [
-  [
-    "https://github.com/example/project.git",
-    "https://github.com/example/project",
-  ],
-  ["git@github.com:example/project.git", "https://github.com/example/project"],
-  [
-    "ssh://git@github.com/example/project.git",
-    "https://github.com/example/project",
-  ],
-  [
-    "ssh://git@github.com:22/example/project.git",
-    "https://github.com/example/project",
-  ],
-  [
-    "ssh://git@ssh.github.com:443/example/project.git",
-    "https://github.com/example/project",
-  ],
-  [
-    "git@git.example.test:example/project.git",
-    "https://git.example.test/example/project",
-  ],
-  [
-    "ssh://git@git.example.test/example/project.git",
-    "https://git.example.test/example/project",
-  ],
-  [
-    "ssh://git@git.example.test:22/example/project.git",
-    "https://git.example.test/example/project",
-  ],
-  [
-    "tenant@tenant.ghe.com:example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://tenant@tenant.ghe.com/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://tenant@tenant.ghe.com:22/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
+  ["https://github.com/example/project.git", gitHubProject],
+  ["git@github.com:example/project.git", gitHubProject],
+  ["ssh://git@github.com/example/project.git", gitHubProject],
+  ["ssh://git@github.com:22/example/project.git", gitHubProject],
+  ["ssh://git@ssh.github.com:443/example/project.git", gitHubProject],
+  ["git@git.example.test:example/project.git", connectedProject],
+  ["ssh://git@git.example.test/example/project.git", connectedProject],
+  ["ssh://git@git.example.test:22/example/project.git", connectedProject],
+  ["tenant@tenant.ghe.com:example/project.git", tenantProject],
+  ["ssh://tenant@tenant.ghe.com/example/project.git", tenantProject],
+  ["ssh://tenant@tenant.ghe.com:22/example/project.git", tenantProject],
   // Preserve the existing generic git-user aliases for connected catalog hosts.
-  [
-    "git@tenant.ghe.com:example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://git@tenant.ghe.com/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://git@tenant.ghe.com:22/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "git@GIT.EXAMPLE.TEST:example/project.git",
-    "https://git.example.test/example/project",
-  ],
-  [
-    "https://git.example.test/example/project.git",
-    "https://git.example.test/example/project",
-  ],
+  ["git@tenant.ghe.com:example/project.git", tenantProject],
+  ["ssh://git@tenant.ghe.com/example/project.git", tenantProject],
+  ["ssh://git@tenant.ghe.com:22/example/project.git", tenantProject],
+  ["git@GIT.EXAMPLE.TEST:example/project.git", connectedProject],
+  ["https://git.example.test/example/project.git", connectedProject],
 ];
 
 test.each([
-  ...snykRepositoryAliases.flatMap(([repository, destination]) =>
-    (["plugin", "SARIF"] as const).map(
-      (format) => [format, repository, destination] as const,
-    ),
-  ),
-  ["plugin", "unknown", "https://github.com/example/project"] as const,
+  [
+    "plugin",
+    "ssh://tenant@tenant.ghe.com:22/example/project.git",
+    tenantProject,
+  ] as const,
+  [
+    "SARIF",
+    "ssh://git@ssh.github.com:443/example/project.git",
+    gitHubProject,
+  ] as const,
+  ["plugin", "unknown", gitHubProject] as const,
 ])(
   "Snyk %s export imports and replays with repository remote %s",
   async (format, repository, destination) => {
@@ -3231,95 +4503,50 @@ test.each([
 
 const snykRepositoryMismatches: [string, string][] = [
   ...["\t", "\r", "\n"].flatMap((control): [string, string][] => [
-    [
-      `ssh://git@github.${control}com/example/project.git`,
-      "https://github.com/example/project",
-    ],
-    [
-      `ssh://git@github.com/example/pro${control}ject.git`,
-      "https://github.com/example/project",
-    ],
+    [`ssh://git@github.${control}com/example/project.git`, gitHubProject],
+    [`ssh://git@github.com/example/pro${control}ject.git`, gitHubProject],
     [
       `ssh://tenant@tenant.${control}ghe.com/example/project.git`,
-      "https://tenant.ghe.com/example/project",
+      tenantProject,
     ],
     [
       `ssh://tenant@tenant.ghe.com/example/pro${control}ject.git`,
-      "https://tenant.ghe.com/example/project",
+      tenantProject,
     ],
     [
       `ssh://git@ssh.github.${control}com:443/example/project.git`,
-      "https://github.com/example/project",
+      gitHubProject,
     ],
     [
       `ssh://git@ssh.github.com:443/example/pro${control}ject.git`,
-      "https://github.com/example/project",
+      gitHubProject,
     ],
   ]),
   [
     "ssh://tenant@other:synthetic@tenant.ghe.com/example/project.git",
-    "https://tenant.ghe.com/example/project",
+    tenantProject,
   ],
-  [
-    "ssh://tenant@other:@tenant.ghe.com/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://git@other:synthetic@github.com/example/project.git",
-    "https://github.com/example/project",
-  ],
-  [
-    "ssh://git@other:@github.com/example/project.git",
-    "https://github.com/example/project",
-  ],
-  [
-    "ssh://te\nnant@tenant.ghe.com/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://te\tnant@tenant.ghe.com/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://te\rnant@tenant.ghe.com/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://gi\nt@github.com/example/project.git",
-    "https://github.com/example/project",
-  ],
-  [
-    "ssh://tenant@other@tenant.ghe.com/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "other@tenant.ghe.com:example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://other@tenant.ghe.com:22/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
+  ["ssh://tenant@other:@tenant.ghe.com/example/project.git", tenantProject],
+  ["ssh://git@other:synthetic@github.com/example/project.git", gitHubProject],
+  ["ssh://git@other:@github.com/example/project.git", gitHubProject],
+  ["ssh://te\nnant@tenant.ghe.com/example/project.git", tenantProject],
+  ["ssh://te\tnant@tenant.ghe.com/example/project.git", tenantProject],
+  ["ssh://te\rnant@tenant.ghe.com/example/project.git", tenantProject],
+  ["ssh://gi\nt@github.com/example/project.git", gitHubProject],
+  ["ssh://tenant@other@tenant.ghe.com/example/project.git", tenantProject],
+  ["other@tenant.ghe.com:example/project.git", tenantProject],
+  ["ssh://other@tenant.ghe.com:22/example/project.git", tenantProject],
   [
     "tenant@tenant.ghe.com:example/project.git",
     "https://other.ghe.com/example/project",
   ],
-  [
-    "ssh://tenant@git.example.test/example/project.git",
-    "https://git.example.test/example/project",
-  ],
+  ["ssh://tenant@git.example.test/example/project.git", connectedProject],
   [
     "ssh://tenant@api.tenant.ghe.com/example/project.git",
     "https://api.tenant.ghe.com/example/project",
   ],
-  [
-    "ssh://tenant:synthetic@tenant.ghe.com/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://tenant:@tenant.ghe.com/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
+  ["ssh://tenant:synthetic@tenant.ghe.com/example/project.git", tenantProject],
+  ["ssh://tenant:@tenant.ghe.com/example/project.git", tenantProject],
   [
     "ssh://tenant@tenant.ghe.com:443/example/project.git",
     "https://tenant.ghe.com:443/example/project",
@@ -3328,31 +4555,16 @@ const snykRepositoryMismatches: [string, string][] = [
     "ssh://tenant@tenant.ghe.com:22/example/project.git",
     "https://tenant.ghe.com:443/example/project",
   ],
-  [
-    "tenant@tenant.ghe.com:other/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://tenant@ssh.github.com:443/example/project.git",
-    "https://github.com/example/project",
-  ],
+  ["tenant@tenant.ghe.com:other/project.git", tenantProject],
+  ["ssh://tenant@ssh.github.com:443/example/project.git", gitHubProject],
   [
     "tenant@tenant.ghe.com:example/project.git",
     "http://tenant.ghe.com/example/project",
   ],
-  ["git@github.com:other/project.git", "https://github.com/example/project"],
-  [
-    "ssh://git@github.com:2222/example/project.git",
-    "https://github.com/example/project",
-  ],
-  [
-    "ssh://git@ssh.github.com:2222/example/project.git",
-    "https://github.com/example/project",
-  ],
-  [
-    "ssh://git@git.example.test:443/example/project.git",
-    "https://github.com/example/project",
-  ],
+  ["git@github.com:other/project.git", gitHubProject],
+  ["ssh://git@github.com:2222/example/project.git", gitHubProject],
+  ["ssh://git@ssh.github.com:2222/example/project.git", gitHubProject],
+  ["ssh://git@git.example.test:443/example/project.git", gitHubProject],
   [
     "ssh://git@git.example.test:2222/example/project.git",
     "https://git.example.test:2222/example/project",
@@ -3377,14 +4589,8 @@ const snykRepositoryMismatches: [string, string][] = [
     "ssh://git@ssh.github.com:2222/example/project.git",
     "https://ssh.github.com:2222/example/project",
   ],
-  [
-    "git@other.example.test:example/project.git",
-    "https://git.example.test/example/project",
-  ],
-  [
-    "git@git.example.test:other/project.git",
-    "https://git.example.test/example/project",
-  ],
+  ["git@other.example.test:example/project.git", connectedProject],
+  ["git@git.example.test:other/project.git", connectedProject],
   [
     "git@git.example.test:example/project.git",
     "https://git.example.test:443/example/project",
@@ -3399,13 +4605,47 @@ const snykRepositoryMismatches: [string, string][] = [
   ],
 ];
 
+// Check the URL matrix before involving the filesystem, catalog, or publication state.
+for (const [cases, matches] of [
+  [snykRepositoryAliases, true],
+  [snykRepositoryMismatches, false],
+] as const) {
+  test.each(cases)(
+    `Snyk repository %j against %j (matches=${matches})`,
+    async (repository, destination) => {
+      for (const format of ["plugin", "SARIF"] as const) {
+        const { normalized, original } = await snykRepositoryEvidence(
+          format,
+          repository,
+        );
+        const source = normalized.findings[0]!.evidence.source_data;
+        const urls = snykRepositoryUrls(source, {
+          cloudRepositoryUrl: destination,
+        });
+        expect(urls, format).toHaveLength(1);
+        expect(
+          cloudRepositoryUrlKey(urls[0]!) ===
+            cloudRepositoryUrlKey(destination),
+          format,
+        ).toBe(matches);
+        expect(source, format).toMatchObject(original);
+      }
+    },
+  );
+}
+
 test.each([
-  ...snykRepositoryMismatches.flatMap(([repository, destination]) =>
-    (["plugin", "SARIF"] as const).map(
-      (format) => [format, repository, destination] as const,
-    ),
-  ),
-  ["SARIF", "unknown", "https://github.com/example/project"] as const,
+  [
+    "plugin",
+    "ssh://git@github.\tcom/example/project.git",
+    gitHubProject,
+  ] as const,
+  [
+    "SARIF",
+    "ssh://git@github.com:2222/example/project.git",
+    gitHubProject,
+  ] as const,
+  ["SARIF", "unknown", gitHubProject] as const,
 ])(
   "Snyk %s repository claim %s cannot target %s",
   async (format, repository, destination) => {
@@ -3429,7 +4669,6 @@ test.each([
 );
 
 test("native Snyk JSON publishes selected dependency occurrences and replays their evidence", async () => {
-  const { snykJson } = await import("./support/snyk-import-fixtures.js");
   const input = snykJson();
   const f = await fixture(input);
   const selected = {
@@ -3454,8 +4693,6 @@ test("native Snyk JSON publishes selected dependency occurrences and replays the
 });
 
 test("Semgrep publication preserves identity across JSON and SARIF with explicit repository provenance", async () => {
-  const { semgrepJson, semgrepSarif } =
-    await import("./support/semgrep-import-fixtures.js");
   const f = await fixture(semgrepJson());
   const settings = {
     ...options,
@@ -3463,9 +4700,12 @@ test("Semgrep publication preserves identity across JSON and SARIF with explicit
     sourceKey: "organization/project/main",
     sourceRepositoryUrl: "https://github.com/example/project",
   };
-  const first = await (
-    await prepareExternalPublication(f.file, settings, f.deps)
-  ).publish();
+  const prepared = await prepareExternalPublication(f.file, settings, f.deps);
+  expect(prepared.preview.source).toEqual({
+    provider: "semgrep",
+    source_key: settings.sourceKey,
+  });
+  const first = await prepared.publish();
   expect(first.counts.created).toBe(1);
   expect(first.verified).toBe(1);
   const original = structuredClone([...f.reports.values()][0]!);
@@ -3491,9 +4731,127 @@ test("Semgrep publication preserves identity across JSON and SARIF with explicit
   });
 });
 
+test("OpenGrep publication retains grouped evidence through Cloud readback and replay", async () => {
+  const input = opengrepTraceJson();
+  const { results, ...report } = input;
+  const f = await fixture(input);
+  const settings = {
+    ...options,
+    provider: "opengrep" as const,
+    sourceKey: "organization/project/main/opengrep",
+    sourceRepositoryUrl: "https://github.com/example/project",
+  };
+  const prepared = await prepareExternalPublication(f.file, settings, f.deps);
+  expect(prepared.preview.source).toEqual({
+    provider: "semgrep",
+    source_key: settings.sourceKey,
+  });
+  expect(prepared.preview.report).toEqual(report);
+  expect(prepared.preview.findings).toHaveLength(1);
+  expect(prepared.preview.excluded).toEqual([]);
+  prepared.preview.report!["errors"] = [];
+  const first = await prepared.publish();
+  expect(first.counts.created).toBe(1);
+  expect(first.verified).toBe(1);
+  expect(first.report).toEqual(report);
+  const original = structuredClone([...f.reports.values()][0]!);
+  expect(original).toMatchObject({
+    origin: "imported",
+    source: { provider: "semgrep" },
+    assessment: { state: "not_assessed" },
+    evidence: {
+      details: { kind: "sast", scanner_origin: "OpenGrep" },
+      source_data: { scan_error_count: input.errors.length },
+    },
+  });
+  expect(original.evidence.source_data!["results"]).toHaveLength(2);
+  expect(original.evidence.source_data!["results"]).toEqual(
+    expect.arrayContaining(results),
+  );
+  expect(original.evidence).not.toHaveProperty("confidence");
+  expect(JSON.parse(f.posts[0]!).source.provider).toBe("semgrep");
+  const repeated = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(repeated.counts.unchanged).toBe(1);
+  expect(repeated.report).toEqual(report);
+
+  input.results[0]!.extra.message = "Updated OpenGrep evidence";
+  input.results[0]!.extra.fingerprint = "new-scanner-fingerprint_9";
+  await writeFile(f.file, JSON.stringify(input));
+  const changed = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(changed.counts.updated).toBe(1);
+  expect(changed.verified).toBe(1);
+  expect(changed.report).toEqual(report);
+  expect([...f.reports.values()]).toHaveLength(1);
+  const updated = [...f.reports.values()][0]!;
+  expect(updated).toMatchObject({
+    id: original.id,
+    canonical_finding_id: original.canonical_finding_id,
+    source_finding_id: original.source_finding_id,
+    version: 2,
+    origin: "imported",
+    assessment: { state: "not_assessed" },
+  });
+  expect(updated.evidence.source_data!["results"]).toHaveLength(2);
+  expect(updated.evidence.source_data!["results"]).toEqual(
+    expect.arrayContaining(input.results),
+  );
+});
+
+test("empty OpenGrep Cloud imports retain scanner diagnostics without uploading", async () => {
+  const input = opengrepJson();
+  input.results = [];
+  const f = await fixture(input);
+  await expect(
+    prepareExternalPublication(
+      f.file,
+      {
+        ...options,
+        provider: "opengrep",
+        sourceRepositoryUrl: "https://github.com/example/project",
+      },
+      f.deps,
+    ),
+  ).rejects.toThrow(input.errors[0]!.message);
+  expect(f.posts).toHaveLength(0);
+});
+
+test("OpenGrep CLI Cloud preview forwards source provenance without uploading", async () => {
+  const input = opengrepJson();
+  const f = await fixture(input);
+  const command = [
+    ...f.command,
+    "--dry-run",
+    "--source-repository-url",
+    "https://github.com/example/project",
+  ];
+  command[command.indexOf("--provider") + 1] = "opengrep";
+  const cli = createCliTest(main);
+  expect(await cli.runCli(command, f.cliDeps)).toBe(0);
+  expect(JSON.parse(cli.stdout.text())).toMatchObject({
+    source: { provider: "semgrep", source_key: options.sourceKey },
+    report: { errors: input.errors },
+    findings: [
+      {
+        evidence: {
+          details: { scanner_origin: "OpenGrep" },
+          source_data: { results: input.results },
+        },
+      },
+    ],
+  });
+  const humanCommand = [...command];
+  humanCommand.splice(humanCommand.indexOf("--format"), 2);
+  const human = createCliTest(main);
+  expect(await human.runCli(humanCommand, f.cliDeps)).toBe(0);
+  expect(human.stderr.text()).toContain(input.errors[0]!.message);
+  expect(f.posts).toHaveLength(0);
+});
+
 test("Semgrep native percent paths retain CE records through JSON-to-SARIF publication", async () => {
-  const { semgrepJson, semgrepSarif } =
-    await import("./support/semgrep-import-fixtures.js");
   const paths = [
     "src/my file.ts",
     "src/my%20file.ts",
@@ -3553,7 +4911,6 @@ test("Semgrep native percent paths retain CE records through JSON-to-SARIF publi
 });
 
 test("Semgrep publication retains unsupported SARIF bases without repository locations", async () => {
-  const { semgrepSarif } = await import("./support/semgrep-import-fixtures.js");
   const input: any = semgrepSarif();
   const run = input.runs[0];
   run.results[0].locations[0].physicalLocation.artifactLocation.uriBaseId =
@@ -3602,7 +4959,6 @@ test("Semgrep publication retains unsupported SARIF bases without repository loc
 });
 
 test("Semgrep refuses missing source identity and a conflicting Cloud destination without uploads", async () => {
-  const { semgrepJson } = await import("./support/semgrep-import-fixtures.js");
   const f = await fixture(semgrepJson());
   await expect(
     prepareExternalPublication(
@@ -3626,7 +4982,6 @@ test("Semgrep refuses missing source identity and a conflicting Cloud destinatio
 });
 
 test("Semgrep CLI dry-run preserves explicit source repository and does not upload", async () => {
-  const { semgrepJson } = await import("./support/semgrep-import-fixtures.js");
   const f = await fixture(semgrepJson());
   const command = [
     ...f.command,
@@ -3641,8 +4996,6 @@ test("Semgrep CLI dry-run preserves explicit source repository and does not uplo
 });
 
 test("Endor JSON and SARIF reuse UUID identity through Cloud publication", async () => {
-  const { endorFinding, endorSarif } =
-    await import("./support/endor-import-fixtures.js");
   const input = endorFinding();
   const f = await fixture(input);
   const settings = {
@@ -3676,53 +5029,7 @@ test("Endor JSON and SARIF reuse UUID identity through Cloud publication", async
     result: sarif.runs[0]!.results[0],
   });
 });
-test("Endor CLI dry-run recognizes SARIF without writing imports", async () => {
-  const { endorSarif } = await import("./support/endor-import-fixtures.js");
-  const f = await fixture(endorSarif());
-  const command = [...f.command, "--dry-run"];
-  command[command.indexOf("--provider") + 1] = "endor";
-  const cli = createCliTest(main);
-  expect(await cli.runCli(command, f.cliDeps)).toBe(0);
-  expect(f.posts).toHaveLength(0);
-});
-
-test.each([
-  { uris: ["https://github.com/other/project"] },
-  {
-    uris: [
-      "https://github.com/example/project",
-      "https://github.com/other/project",
-    ],
-  },
-  { uris: ["https://github.com:443/example/project"] },
-])(
-  "Endor source repository provenance binds both publication entrypoints: %p",
-  async ({ uris }) => {
-    const { endorSarif } = await import("./support/endor-import-fixtures.js");
-    const { normalizeEndorFindings } = await import("../src/endor-findings.js");
-    const input: any = endorSarif();
-    input.runs[0].versionControlProvenance = uris.map((repositoryUri) => ({
-      repositoryUri,
-    }));
-    const f = await fixture(input);
-    const selected = { ...options, provider: "endor" as const };
-    await expect(
-      prepareExternalPublication(f.file, selected, f.deps),
-    ).rejects.toThrow("does not match the selected Cloud repository");
-    await expect(
-      prepareNormalizedExternalPublication(
-        normalizeEndorFindings(input),
-        selected,
-        f.deps,
-      ),
-    ).rejects.toThrow("does not match the selected Cloud repository");
-    expect(f.posts).toHaveLength(0);
-    expect(f.reports.size).toBe(0);
-  },
-);
-
 test("Endor source repository binding preserves immutable requests across a repository rename", async () => {
-  const { endorSarif } = await import("./support/endor-import-fixtures.js");
   const input: any = endorSarif();
   input.runs[0].versionControlProvenance = [
     {
@@ -3767,4 +5074,50 @@ test("Endor source repository binding preserves immutable requests across a repo
   ).rejects.toThrow("does not match the selected Cloud repository");
   expect(f.posts).toHaveLength(posted);
   expect(input).toEqual(original);
+});
+
+test("publication rejects malformed options without writing findings", async () => {
+  const f = await fixture();
+  const missingSourceKey = [
+    ...f.command.slice(1, f.command.indexOf("--source-key") + 1),
+    "--dry-run",
+    "--yes",
+  ];
+  for (const flags of [
+    ["--json"],
+    ["--json", "--filter-output", "--token-limit"],
+    ["--filter-output", "--to"],
+  ]) {
+    const cli = createCliTest(main);
+    expect(
+      await cli.runCli(["publish", ...flags, ...missingSourceKey], f.cliDeps),
+    ).toBe(2);
+    expect(cli.stderr.text()).toContain("Missing value for flag");
+  }
+  const extraArguments = createCliTest(main);
+  expect(
+    await extraArguments.runCli(
+      [
+        "--filter-output",
+        "--token-limit",
+        ...f.command,
+        "--yes",
+        "extra-1",
+        "extra-2",
+      ],
+      f.cliDeps,
+    ),
+  ).toBe(2);
+  expect(extraArguments.stderr.text()).toContain(
+    "Unexpected positional argument",
+  );
+  const preview = createCliTest(main);
+  expect(
+    await preview.runCli(
+      ["--json", ...f.command, "--dry-run", "--yes"],
+      f.cliDeps,
+    ),
+  ).toBe(0);
+  expect(JSON.parse(preview.stdout.text())).toMatchObject({ dryRun: true });
+  expect(f.posts).toHaveLength(0);
 });

@@ -147,7 +147,7 @@ jobs:
           targetType: inline
           script: |
             set -euo pipefail
-            for report in report.md coverage.json findings.json; do
+            for report in report.md scan-manifest.json findings.json; do
               if [[ -f "$SCAN_DIRECTORY/$report" ]]; then
                 cp "$SCAN_DIRECTORY/$report" "$REPORT_DIRECTORY/$report"
               fi

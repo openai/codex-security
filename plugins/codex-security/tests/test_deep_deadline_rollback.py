@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from test_deep_coverage_recovery import worker
 from test_workbench_standard_deep_results import write_saved_parent
-from workbench_test_support import saved_binding, saved_draft, write_checkpoint
+from workbench_test_support import saved_binding, saved_draft, select_checkpoint, write_checkpoint
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import finalize_scan_contract as finalizer
@@ -40,6 +40,36 @@ def publication_context(tmp_path, scan_id):
     return binding, db, scan
 
 
+def test_deadline_rollback_removes_new_parent_observation_without_a_selected_head(tmp_path):
+    scan_id = "00000000-0000-4000-8000-000000000001"
+    parent = saved_draft(
+        scan_id, deferred=[{"id": "review", "reason": "Review remains."}], complete=True
+    )
+    write_saved_parent(tmp_path, parent, 100)
+    _, db, scan = publication_context(tmp_path, scan_id)
+    original = {
+        path.relative_to(tmp_path): (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+    class Connection:
+        def execute(self, sql, _args):
+            if sql.startswith("UPDATE"):
+                raise RuntimeError("Synthetic publication failure")
+            return SimpleNamespace(fetchall=list)
+
+    with pytest.raises(RuntimeError, match="Synthetic publication failure"):
+        saved.preserve_deep_deadline_draft(db, Connection(), scan)
+
+    restored = {
+        path.relative_to(tmp_path): (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    assert restored == original
+
+
 @pytest.mark.parametrize("local_failure", [False, True], ids=["caller-rollback", "local-failure"])
 def test_deadline_rollback_does_not_reintroduce_a_later_rejected_worker_finding(
     tmp_path, local_failure
@@ -64,8 +94,7 @@ def test_deadline_rollback_does_not_reintroduce_a_later_rejected_worker_finding(
     worker_bytes = worker_checkpoint.read_bytes()
     previous = write_checkpoint(tmp_path / "checkpoints", saved_draft(scan_id))
     previous_bytes = previous.read_bytes()
-    head = tmp_path / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": previous.name}))
+    head = select_checkpoint(tmp_path, previous)
     original_head = head.read_bytes()
     binding, db, scan = publication_context(tmp_path, scan_id)
 
@@ -131,11 +160,8 @@ def test_deadline_rollback_preserves_parent_observation_order(
     older, newer = (pending, closed) if newer_source == "canonical" else (closed, pending)
     older["threatModel"] = {"summary": "The earlier model."}
     newer["threatModel"] = {"summary": "The current model."}
-    selected = write_checkpoint(tmp_path / "checkpoints", older)
-    os.utime(selected, ns=(100, 100))
-    head = tmp_path / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": selected.name}))
-    os.utime(head, ns=(100, 100))
+    selected = write_checkpoint(tmp_path / "checkpoints", older, mtime_ns=100)
+    head = select_checkpoint(tmp_path, selected, mtime_ns=100)
     canonical = newer if newer_source == "canonical" else older
     modified = 200 if newer_source == "canonical" else 100
     write_saved_parent(tmp_path, canonical, modified)
@@ -146,8 +172,7 @@ def test_deadline_rollback_preserves_parent_observation_order(
     for name in ("scan-manifest.json", "findings.json", "coverage.json"):
         os.utime(tmp_path / name, ns=(modified, modified))
     if newer_source == "unselected-checkpoint":
-        unselected = write_checkpoint(tmp_path / "checkpoints", newer)
-        os.utime(unselected, ns=(200, 200))
+        write_checkpoint(tmp_path / "checkpoints", newer, mtime_ns=200)
     binding, db, scan = publication_context(tmp_path, scan_id)
 
     class Connection:

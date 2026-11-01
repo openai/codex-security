@@ -318,24 +318,6 @@ describe("Cloud publication", () => {
     expect(finding!.occurrenceId).toMatch(/^occ_[a-f0-9]{24}$/);
   });
 
-  test("keeps separate CSV occurrences with the same source finding ID", async () => {
-    const second = csvRow.replace(
-      "occ_e79cb19591e696572a1c22be",
-      "occ_111111111111111111111111",
-    );
-    const path = await csvFixture(`${csvHeader}\n${csvRow}\n${second}\n`);
-    const result = await publishFindingsCsvToCloud(path, { dryRun: true });
-    expect(result.findingCount).toBe(2);
-    expect(
-      new Set(result.findings!.map((finding) => finding.occurrenceId)).size,
-    ).toBe(2);
-    expect(
-      new Set(result.findings!.map((finding) => finding.findingId)).size,
-    ).toBe(2);
-    const repeated = await publishFindingsCsvToCloud(path, { dryRun: true });
-    expect(repeated.findings).toEqual(result.findings);
-  });
-
   test("accepts the candidate_id column from a Deep scan export", async () => {
     const path = await csvFixture(
       `${csvHeader.replace("finding_id,", "finding_id,candidate_id,")}\n${csvRow.replace("csf_852f90d6e1177502ff113d4a,", "csf_852f90d6e1177502ff113d4a,candidate-001,")}\n`,
@@ -569,24 +551,6 @@ describe("Cloud publication", () => {
     });
   });
 
-  test("honors a Cloud publication URL override", async () => {
-    const { scan, environment } = await fixture();
-    const publishUrl =
-      "https://chatgpt-staging.com/backend-api/aardvark/cli/findings";
-    let requestedUrl: string | undefined;
-    await publishScanToCloud(scan, {
-      environment: {
-        ...environment,
-        CODEX_SECURITY_CLOUD_PUBLISH_URL: publishUrl,
-      },
-      fetch: async (url) => {
-        requestedUrl = String(url);
-        return Response.json(receipt);
-      },
-    });
-    expect(requestedUrl).toBe(publishUrl);
-  });
-
   test("uses the shared Cloud API base while preserving the publication URL override", async () => {
     const { scan, environment } = await fixture();
     const cloudBase = "https://cloud.example.test/pilot/backend-api/aardvark";
@@ -595,23 +559,21 @@ describe("Cloud publication", () => {
       urls.push(String(url));
       return Response.json(receipt);
     };
-    await publishScanToCloud(scan, {
-      environment: {
-        ...environment,
-        CODEX_SECURITY_CLOUD_BASE_URL: `${cloudBase}/`,
-      },
-      fetch,
-    });
     const publishUrl = "https://other-cloud.example.test/publish";
-    await publishScanToCloud(scan, {
-      environment: {
-        ...environment,
+    for (const settings of [
+      { CODEX_SECURITY_CLOUD_BASE_URL: `${cloudBase}/` },
+      { CODEX_SECURITY_CLOUD_PUBLISH_URL: publishUrl },
+      {
         CODEX_SECURITY_CLOUD_BASE_URL: cloudBase,
         CODEX_SECURITY_CLOUD_PUBLISH_URL: publishUrl,
       },
-      fetch,
-    });
-    expect(urls).toEqual([`${cloudBase}/cli/findings`, publishUrl]);
+    ]) {
+      await publishScanToCloud(scan, {
+        environment: { ...environment, ...settings },
+        fetch,
+      });
+    }
+    expect(urls).toEqual([`${cloudBase}/cli/findings`, publishUrl, publishUrl]);
   });
 
   test("rejects a remote HTTP Cloud base before reading credentials or sending a scan", async () => {

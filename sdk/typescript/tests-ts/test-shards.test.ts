@@ -9,12 +9,17 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { expect, test } from "bun:test";
+import { bunTestTimeout } from "../scripts/bun-test-timeout.mts";
 import { partitionTests, type TestTimings } from "../scripts/test-shards.mts";
 import { readSubprocess } from "./support/shell.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 
 async function copyRunner(root: string, timings: TestTimings = {}) {
-  for (const name of ["run-ci-tests.mts", "test-shards.mts"]) {
+  for (const name of [
+    "run-ci-tests.mts",
+    "test-shards.mts",
+    "bun-test-timeout.mts",
+  ]) {
     await copyFile(
       new URL(`../scripts/${name}`, import.meta.url),
       join(root, "scripts", name),
@@ -65,99 +70,63 @@ test("uses each platform's history and includes new files without selecting dele
   expect(partitionTests(files, 2, {}, "darwin").flat().sort()).toEqual(files);
 });
 
-test.each([3, 7])(
-  "runs each eligible file once across %i native shards, including new files",
-  async (count) => {
-    const node = Bun.which("node");
-    expect(node).not.toBeNull();
-    const root = await temporaryDirectory("codex-security-native-shards-");
-    try {
-      await mkdir(join(root, "scripts"));
-      await mkdir(join(root, "tests-ts"));
-      await copyRunner(root, {
-        "probe-0.test.ts": { linux: 100, darwin: 100, win32: 100 },
-        "probe-1.test.ts": { linux: 80, darwin: 80, win32: 80 },
-        "deleted.test.ts": { linux: 1_000, darwin: 1_000, win32: 1_000 },
-      });
-      const files = [
-        ...Array.from({ length: 20 }, (_, index) => `probe-${index}.test.ts`),
-        "newly-added.test.ts",
-      ];
-      const executionLog = join(root, "executed.txt");
-      for (const file of files) {
-        await writeFile(
-          join(root, "tests-ts", file),
-          `import { appendFileSync } from "node:fs";
+test.each([3, 6, 7, 14])(
+  "assigns each discovered file once across %i shards",
+  (count) => {
+    const files = Array.from(
+      { length: 20 },
+      (_, index) => `probe-${index}.test.ts`,
+    );
+    const shards = partitionTests(
+      files,
+      count,
+      { "deleted.test.ts": { linux: 100 } },
+      "linux",
+    );
+    expect(shards).toHaveLength(count);
+    expect(shards.every((shard) => shard.length > 0)).toBe(true);
+    expect(shards.flat().sort()).toEqual(files.sort());
+  },
+);
+
+test("runs every discovered file once across two real shards, excluding machine policy", async () => {
+  const count = 2;
+  const node = Bun.which("node");
+  expect(node).not.toBeNull();
+  const root = await temporaryDirectory("codex-security-native-shards-");
+  try {
+    await mkdir(join(root, "scripts"));
+    await mkdir(join(root, "tests-ts"));
+    await copyRunner(root, {
+      "probe-0.test.ts": { linux: 100, darwin: 100, win32: 100 },
+      "probe-1.test.ts": { linux: 80, darwin: 80, win32: 80 },
+      "deleted.test.ts": { linux: 1_000, darwin: 1_000, win32: 1_000 },
+    });
+    const files = ["probe-0.test.ts", "probe-1.test.ts", "newly-added.test.ts"];
+    const executionLog = join(root, "executed.txt");
+    for (const file of files) {
+      await writeFile(
+        join(root, "tests-ts", file),
+        `import { appendFileSync } from "node:fs";
 import { test } from "bun:test";
 test(${JSON.stringify(file)}, () => {
   appendFileSync(${JSON.stringify(executionLog)}, ${JSON.stringify(`${file}\n`)});
 });\n`,
-        );
-      }
-      await writeFile(
-        join(root, "tests-ts", "windows-machine-policy.test.ts"),
-        'throw new Error("Machine policy test must run separately");\n',
       );
-      const executed: string[] = [];
-      for (let shard = 1; shard <= count; shard++) {
-        await writeFile(executionLog, "");
-        const child = Bun.spawn({
-          cmd: [
-            node!,
-            "--experimental-strip-types",
-            join(root, "scripts", "run-ci-tests.mts"),
-            `${shard}/${count}`,
-          ],
-          env: {
-            ...process.env,
-            PATH: `${dirname(process.execPath)}${delimiter}${process.env["PATH"] ?? ""}`,
-          },
-          stdin: "ignore",
-          stdout: "pipe",
-          stderr: "pipe",
-          timeout: 30_000,
-          windowsHide: true,
-        });
-        const { status, stdout, stderr } = await readSubprocess(child);
-        expect(status, stderr).toBe(0);
-        const shardFiles = (await readFile(executionLog, "utf8"))
-          .trim()
-          .split("\n");
-        expect(stdout).toContain(
-          `Test shard ${shard}/${count}: ${shardFiles.sort().join(" ")}`,
-        );
-        executed.push(...shardFiles);
-      }
-      expect(executed.sort()).toEqual(files.sort());
-    } finally {
-      await rm(root, { recursive: true, force: true });
     }
-  },
-);
-
-test("rejects an empty shard while allowing a nonempty shard with the same count", async () => {
-  const node = Bun.which("node");
-  expect(node).not.toBeNull();
-  const root = await temporaryDirectory("codex-security-empty-shard-");
-  try {
-    await mkdir(join(root, "scripts"));
-    await mkdir(join(root, "tests-ts"));
-    await copyRunner(root);
-    await writeFile(
-      join(root, "tests-ts", "probe.test.ts"),
-      'import { test } from "bun:test"; test("synthetic shard probe", () => {});\n',
-    );
     await writeFile(
       join(root, "tests-ts", "windows-machine-policy.test.ts"),
       'throw new Error("Machine policy test must run separately");\n',
     );
-    for (const shard of [1, 2]) {
+    const executed: string[] = [];
+    for (let shard = 1; shard <= count; shard++) {
+      await writeFile(executionLog, "");
       const child = Bun.spawn({
         cmd: [
           node!,
           "--experimental-strip-types",
           join(root, "scripts", "run-ci-tests.mts"),
-          `${shard}/2`,
+          `${shard}/${count}`,
         ],
         env: {
           ...process.env,
@@ -170,14 +139,136 @@ test("rejects an empty shard while allowing a nonempty shard with the same count
         windowsHide: true,
       });
       const { status, stdout, stderr } = await readSubprocess(child);
+      expect(status, stderr).toBe(0);
+      const shardFiles = (await readFile(executionLog, "utf8"))
+        .trim()
+        .split("\n");
+      expect(stdout).toContain(
+        `Test shard ${shard}/${count}: ${shardFiles.sort().join(" ")}`,
+      );
+      executed.push(...shardFiles);
+    }
+    expect(executed.sort()).toEqual(files.sort());
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects an empty shard while allowing a nonempty shard with the same count", async () => {
+  const node = Bun.which("node");
+  expect(node).not.toBeNull();
+  const fixture = await temporaryDirectory("codex-security-empty-shard-");
+  const root = join(fixture, "sdk", "typescript");
+  try {
+    await mkdir(join(root, "scripts"), { recursive: true });
+    await mkdir(join(root, "tests-ts"));
+    await copyRunner(root);
+    const worker = "deep-scan-worker-shutdown.test.ts";
+    await copyFile(
+      new URL(worker, import.meta.url),
+      join(root, "tests-ts", worker),
+    );
+    const mcpApp = join(fixture, "plugins", "codex-security", "mcp-app");
+    const executor = join(mcpApp, "tests", "test_deep_scan_executor.ts");
+    const executed = join(root, "worker-ran");
+    await mkdir(dirname(executor), { recursive: true });
+    await writeFile(join(mcpApp, "package.json"), '{"type":"module"}\n');
+    await writeFile(
+      executor,
+      `import { writeFileSync } from "node:fs";
+import { test } from "node:test";
+test("Deep worker lifecycle", () => writeFileSync(${JSON.stringify(executed)}, "ran"));\n`,
+    );
+    await writeFile(
+      join(root, "tests-ts", "windows-machine-policy.test.ts"),
+      'throw new Error("Machine policy test must run separately");\n',
+    );
+    for (const [shard, separateMcp, runsWorker] of [
+      [1, false, true],
+      [2, false, false],
+      [1, true, process.platform !== "linux"],
+    ] as const) {
+      await rm(executed, { force: true });
+      const child = Bun.spawn({
+        cmd: [
+          node!,
+          "--experimental-strip-types",
+          join(root, "scripts", "run-ci-tests.mts"),
+          `${shard}/2`,
+          "-t",
+          "Deep worker lifecycle",
+        ],
+        env: {
+          ...process.env,
+          CODEX_SECURITY_TEST_MCP_WORKERS_SEPARATE: String(separateMcp),
+          PATH: `${dirname(process.execPath)}${delimiter}${process.env["PATH"] ?? ""}`,
+        },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 30_000,
+        windowsHide: true,
+      });
+      const { status, stdout, stderr } = await readSubprocess(child);
       expect(status, stderr).toBe(shard === 1 ? 0 : 1);
+      expect(await Bun.file(executed).exists()).toBe(runsWorker);
       if (shard === 1) {
-        expect(stdout).toContain("Test shard 1/2: probe.test.ts");
-        expect(stderr).toContain("synthetic shard probe");
+        expect(stdout).toContain(`Test shard 1/2: ${worker}`);
       } else {
-        expect(stderr).toContain("Test shard 2/2 is empty.");
+        expect(stderr).toContain(`Test shard ${shard}/2 is empty.`);
       }
     }
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("propagates a subprocess exit after successful test assertions", async () => {
+  const node = Bun.which("node");
+  expect(node).not.toBeNull();
+  const root = await temporaryDirectory("codex-security-shard-exit-");
+  const completed = join(root, "assertion-completed");
+  try {
+    await mkdir(join(root, "scripts"));
+    await mkdir(join(root, "tests-ts"));
+    await copyRunner(root);
+    // Exercise the two-digit selector used by Windows CI without extra processes.
+    await Promise.all(
+      Array.from({ length: 13 }, (_, index) =>
+        writeFile(join(root, "tests-ts", `earlier-${index}.test.ts`), ""),
+      ),
+    );
+    await writeFile(
+      join(root, "tests-ts", "probe.test.ts"),
+      `import { writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+test("completed shard assertion", () => {
+  expect(1).toBe(1);
+  writeFileSync(${JSON.stringify(completed)}, "completed");
+});
+afterAll(() => { process.exit(7); });
+`,
+    );
+    const child = Bun.spawn({
+      cmd: [
+        node!,
+        "--experimental-strip-types",
+        join(root, "scripts", "run-ci-tests.mts"),
+        "14/14",
+      ],
+      env: {
+        ...process.env,
+        PATH: `${dirname(process.execPath)}${delimiter}${process.env["PATH"] ?? ""}`,
+      },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 30_000,
+      windowsHide: true,
+    });
+    const { status, stderr } = await readSubprocess(child);
+    expect(await readFile(completed, "utf8")).toBe("completed");
+    expect(status, stderr).toBe(7);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -186,29 +277,38 @@ test("rejects an empty shard while allowing a nonempty shard with the same count
 const defaultTimeoutMs = process.platform === "win32" ? "120000" : "30000";
 
 test.each([
-  [defaultTimeoutMs, [], "available", false],
-  [defaultTimeoutMs, [], "available", true],
-  [defaultTimeoutMs, [], "blocked directory", false],
-  [defaultTimeoutMs, [], "blocked directory", true],
-  ["5000", ["--timeout", "5000"], "available", false],
-  ["5000", ["--timeout=5000"], "available", false],
-  ["5000", ["--timeout", "9000", "--timeout=5000"], "available", false],
-  ["5000", ["--timeout=9000", "--timeout", "5000"], "available", false],
-  [defaultTimeoutMs, ["--", "--timeout", "5000"], "available", false],
-  [defaultTimeoutMs, ["-t", "--timeout=5000"], "available", false],
-  [defaultTimeoutMs, ["--grep", "--timeout=5000"], "available", false],
-  [
-    defaultTimeoutMs,
-    ["--test-name-pattern", "--timeout=5000"],
-    "available",
-    false,
-  ],
-  ["7000", ["--timeout", "7000", "-t", "--timeout=5000"], "available", false],
-  [defaultTimeoutMs, ["--coverage-dir", "--timeout=5000"], "available", false],
-  [defaultTimeoutMs, ["--title", "--timeout=5000"], "available", false],
+  [defaultTimeoutMs, []],
+  ["5000", ["--timeout", "5000"]],
+  ["5000", ["--timeout=5000"]],
+  ["5000", ["--timeout", "9000", "--timeout=5000"]],
+  ["5000", ["--timeout=9000", "--timeout", "5000"]],
+  [defaultTimeoutMs, ["--", "--timeout", "5000"]],
+  [defaultTimeoutMs, ["-t", "--timeout=5000"]],
+  [defaultTimeoutMs, ["--grep", "--timeout=5000"]],
+  [defaultTimeoutMs, ["--test-name-pattern", "--timeout=5000"]],
+  ["7000", ["--timeout", "7000", "-t", "--timeout=5000"]],
+  [defaultTimeoutMs, ["--coverage-dir", "--timeout=5000"]],
+  [defaultTimeoutMs, ["--title", "--timeout=5000"]],
+  ["7000", ["--config", "--timeout=7000"]],
+  ["7000", ["-c", "--timeout=7000"]],
+  ["7000", ["--bail", "--timeout=7000"]],
+] as const)("uses timeout %s when Bun receives %p", (expected, options) => {
+  expect(
+    bunTestTimeout([
+      "test",
+      "--timeout",
+      defaultTimeoutMs,
+      ...options,
+      "./tests-ts/probe.test.ts",
+    ]),
+  ).toBe(expected);
+});
+
+test.each([
   ["7000", ["--config", "--timeout=7000"], "available", false],
-  ["7000", ["-c", "--timeout=7000"], "available", false],
-  ["7000", ["--bail", "--timeout=7000"], "available", false],
+  [defaultTimeoutMs, [], "available", true],
+  [defaultTimeoutMs, ["-t", "--timeout=5000"], "blocked directory", false],
+  [defaultTimeoutMs, [], "blocked directory", true],
 ] as const)(
   "uses timeout %s with %p, %s reports and failure=%p",
   async (timeout, options, report, fail) => {
@@ -303,3 +403,99 @@ test("isolated timeout", async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+function runMcpShard(root: string, shard: number, count: number) {
+  return readSubprocess(
+    Bun.spawn({
+      cmd: [
+        Bun.which("node")!,
+        "--experimental-strip-types",
+        join(import.meta.dir, "../scripts/run-mcp-test-shard.mts"),
+        String(shard),
+        String(count),
+      ],
+      cwd: root,
+      stdout: "pipe",
+      stderr: "pipe",
+    }),
+  );
+}
+
+test("MCP shards run each literal test filename once and propagate failures", async () => {
+  const root = await temporaryDirectory("mcp-shard-");
+  const tests = join(root, "tests");
+  await mkdir(tests);
+  const files = ["test_route_[ab].ts", "test_route_a.ts", "test_route_b.ts"];
+  try {
+    for (const file of files) {
+      await writeFile(
+        join(tests, file),
+        [
+          'import { appendFileSync } from "node:fs";',
+          'import { test } from "node:test";',
+          `test(${JSON.stringify(file)}, () => {`,
+          `  appendFileSync("executed.txt", ${JSON.stringify(file + "\n")});`,
+          file === files[0]
+            ? '  throw new Error("intentional test failure");'
+            : "",
+          "});",
+        ].join("\n"),
+      );
+    }
+    const statuses = [];
+    for (const shard of [1, 2]) {
+      const { status } = await runMcpShard(root, shard, 2);
+      statuses.push(status);
+    }
+    expect(statuses.sort()).toEqual([0, 1]);
+    expect(
+      (await readFile(join(root, "executed.txt"), "utf8"))
+        .trim()
+        .split("\n")
+        .sort(),
+    ).toEqual(files.sort());
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test.skipIf(process.platform !== "linux")(
+  "terminating an MCP shard stops its active file worker",
+  async () => {
+    const root = await temporaryDirectory("mcp-shard-cancel-");
+    const pid = Bun.file(join(root, "worker.pid"));
+    const stopped = Bun.file(join(root, "stopped"));
+    try {
+      await mkdir(join(root, "tests"));
+      await writeFile(
+        join(root, "tests/test_cancel.ts"),
+        `
+        import { writeFileSync } from "node:fs";
+        import { test } from "node:test";
+        import { setTimeout } from "node:timers/promises";
+        test("cancel the runner once this worker is ready", async () => {
+          process.once("SIGTERM", () => {
+            writeFileSync("stopped", "SIGTERM");
+            process.exit(0);
+          });
+          writeFileSync("worker.pid", String(process.pid));
+          process.kill(process.ppid, "SIGTERM");
+          await setTimeout(20_000);
+        });
+      `,
+      );
+      const { status } = await runMcpShard(root, 1, 1);
+      expect(await stopped.text()).toBe("SIGTERM");
+      expect(status).not.toBe(0);
+    } finally {
+      if (!(await stopped.exists()) && (await pid.exists())) {
+        try {
+          process.kill(Number(await pid.text()), "SIGKILL");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);

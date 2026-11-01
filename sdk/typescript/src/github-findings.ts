@@ -1,24 +1,23 @@
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { hash } from "node:crypto";
+import { GHSA_ID, githubRepositoryParts } from "./github-identifiers.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import { validateExternalEvidence } from "./external-import-contract.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
 import type { ImportedGitHubCodeScanningAlert } from "./github.js";
 import type { ImportedGitHubAdvisory } from "./github-advisories.js";
+import {
+  isGitHubDependabotAlert,
+  normalizeGitHubDependabotAlerts,
+} from "./github-dependabot-findings.js";
+import { asRecord } from "./record.js";
 import { parseJsonOrJsonl, readScannerText, text } from "./scanner-import.js";
-
-function object(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
 
 function repositoryName(value: unknown): string {
   const repository = text(value);
-  const parts = /^([a-z0-9_.-]+)\/([a-z0-9_.-]+)$/iu.exec(repository ?? "");
-  if (!parts || parts.slice(1).some((part) => /^\.{1,2}$/u.test(part)))
+  if (!repository || !githubRepositoryParts(repository))
     throw new Error("GitHub repository must be OWNER/REPO.");
-  return repository!;
+  return repository;
 }
 
 function sourceUrl(value: string): {
@@ -54,7 +53,7 @@ function codeScanningFinding(
   target: ExternalImportTarget = "cloud",
 ): ExternalFinding {
   const repository = repositoryName(record["repository"]);
-  const alert = object(record["alert"]);
+  const alert = asRecord(record["alert"]);
   const number = record["number"];
   if (
     !alert ||
@@ -80,16 +79,16 @@ function codeScanningFinding(
     throw new Error(
       "GitHub alert URL does not match the selected repository and alert.",
     );
-  const rule = object(alert["rule"]);
-  const instance = object(alert["most_recent_instance"]);
+  const rule = asRecord(alert["rule"]);
+  const instance = asRecord(alert["most_recent_instance"]);
   const ref = text(instance?.["ref"]);
   if (!ref)
     throw new Error(
       "GitHub code-scanning evidence requires the selected instance ref.",
     );
-  const location = object(instance?.["location"]);
-  const tool = object(alert["tool"]);
-  const message = text(object(instance?.["message"])?.["text"]);
+  const location = asRecord(instance?.["location"]);
+  const tool = asRecord(alert["tool"]);
+  const message = text(asRecord(instance?.["message"])?.["text"]);
   const description =
     text(rule?.["full_description"]) ?? text(rule?.["description"]);
   const tags = Array.isArray(rule?.["tags"]) ? rule["tags"] : [];
@@ -154,13 +153,13 @@ function advisoryFinding(
   target: ExternalImportTarget = "cloud",
 ): ExternalFinding {
   const repository = repositoryName(record["repository"]);
-  const advisory = object(record["advisory"]);
+  const advisory = asRecord(record["advisory"]);
   const id = text(record["ghsaId"]);
   const selection = record["selection"];
   if (
     !advisory ||
     !id ||
-    !/^GHSA-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/iu.test(id) ||
+    !GHSA_ID.test(id) ||
     text(advisory["ghsa_id"])?.toUpperCase() !== id.toUpperCase()
   )
     throw new Error(
@@ -198,11 +197,11 @@ function advisoryFinding(
   const advisoryIds = [
     id,
     text(advisory["cve_id"]),
-    ...identifiers.map((identifier) => text(object(identifier)?.["value"])),
+    ...identifiers.map((identifier) => text(asRecord(identifier)?.["value"])),
   ].filter((value): value is string => value !== null);
   const packages = vulnerabilities.flatMap((value) => {
-    const vulnerability = object(value);
-    const pkg = object(vulnerability?.["package"]);
+    const vulnerability = asRecord(value);
+    const pkg = asRecord(vulnerability?.["package"]);
     const name = text(pkg?.["name"]);
     // GitHub permits incomplete package metadata in advisory disclosures.
     // Preserve it in source_data without inventing a typed package identity.
@@ -251,7 +250,7 @@ function advisoryFinding(
               (selection === "global" ? "published" : null)),
           scanner_origin: "GitHub Security Advisories",
           weakness_ids: cwes
-            .map((value) => text(object(value)?.["cwe_id"]))
+            .map((value) => text(asRecord(value)?.["cwe_id"]))
             .filter((value): value is string => value !== null),
         },
       },
@@ -271,7 +270,7 @@ function normalizeRecords(
   };
   const identities = new Set<string>();
   for (const [index, value] of records.entries()) {
-    const record = object(value);
+    const record = asRecord(value);
     try {
       if (!record) throw new Error("GitHub finding must be an object.");
       let finding: ExternalFinding;
@@ -324,10 +323,17 @@ export async function readGitHubFindings(
 ): Promise<ExternalFindings> {
   try {
     const payload = parseJsonOrJsonl(await readScannerText(path));
-    return normalizeRecords(
-      Array.isArray(payload) ? payload : [payload],
-      target,
-    );
+    const rows = Array.isArray(payload) ? payload : [payload];
+    if (
+      (rows.length > 0 && rows.every(Array.isArray)) ||
+      rows.some((row) =>
+        Array.isArray(row)
+          ? row.some(isGitHubDependabotAlert)
+          : isGitHubDependabotAlert(row),
+      )
+    )
+      return normalizeGitHubDependabotAlerts(payload, target);
+    return normalizeRecords(rows, target);
   } catch (cause) {
     throw new CodexSecurityError(
       `Could not read GitHub findings as UTF-8 JSON or JSONL: ${errorMessage(cause)}`,

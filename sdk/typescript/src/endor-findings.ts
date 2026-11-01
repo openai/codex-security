@@ -5,12 +5,14 @@ import { isRecord } from "./record.js";
 import {
   array,
   hasSarifExternalPropertyReferences,
+  indexSarifRules,
+  matchesSarifRuleReference,
   normalizeRecords,
   readScannerJson,
   record,
   relativePath,
   requiredText,
-  sarifRunContextForResult,
+  sarifRunContextSelector,
   strings,
   text,
 } from "./scanner-import.js";
@@ -60,7 +62,7 @@ export function normalizeEndorFindings(
       : [input];
   return normalizeRecords(
     values,
-    (value, id) => {
+    (value) => {
       const finding = record(value, "Endor finding");
       const meta = record(finding["meta"], "Endor meta");
       const spec = record(finding["spec"], "Endor spec");
@@ -138,42 +140,37 @@ export function normalizeEndorFindings(
         : [];
       const context = record(finding["context"] ?? {}, "Endor context");
       const updated = text(meta["update_time"]);
-      return {
-        source_finding_id: id,
-        evidence: validateExternalEvidence(
-          {
-            title: requiredText(meta["name"], "Endor finding title"),
-            description:
-              [
-                text(spec["summary"]),
-                text(spec["explanation"]),
-                text(spec["remediation"]),
-              ]
-                .filter(Boolean)
-                .join("\n\n") || text(meta["description"]),
-            severity,
-            branch:
-              context["type"] === "CONTEXT_TYPE_REF"
-                ? text(context["id"])
-                : null,
-            code_revision: text(
-              record(
-                spec["source_code_version"] ?? {},
-                "Endor source code version",
-              )["sha"],
-            ),
-            source_updated_at:
-              updated === null ? null : Math.floor(Date.parse(updated) / 1000),
-            advisory_ids: [
-              ...new Set([...(advisory ? [advisory] : []), ...aliases]),
-            ],
-            packages,
-            locations,
-            source_data: structuredClone(finding),
-          },
-          target,
-        ),
-      };
+      return validateExternalEvidence(
+        {
+          title: requiredText(meta["name"], "Endor finding title"),
+          description:
+            [
+              text(spec["summary"]),
+              text(spec["explanation"]),
+              text(spec["remediation"]),
+            ]
+              .filter(Boolean)
+              .join("\n\n") || text(meta["description"]),
+          severity,
+          branch:
+            context["type"] === "CONTEXT_TYPE_REF" ? text(context["id"]) : null,
+          code_revision: text(
+            record(
+              spec["source_code_version"] ?? {},
+              "Endor source code version",
+            )["sha"],
+          ),
+          source_updated_at:
+            updated === null ? null : Math.floor(Date.parse(updated) / 1000),
+          advisory_ids: [
+            ...new Set([...(advisory ? [advisory] : []), ...aliases]),
+          ],
+          packages,
+          locations,
+          source_data: structuredClone(finding),
+        },
+        target,
+      );
     },
     (value) =>
       requiredText(
@@ -205,21 +202,16 @@ export function normalizeEndorSarif(
     const rules = array(driver["rules"] ?? [], "Endor rules").map((r) =>
       record(r, "Endor rule"),
     );
-    const rulesById = new Map<
-      unknown,
-      { rule: Record<string, unknown>; index: number } | null
-    >();
-    for (const [index, rule] of rules.entries()) {
-      const id = rule["id"];
-      rulesById.set(id, rulesById.has(id) ? null : { rule, index });
-    }
+    const rulesById = indexSarifRules(rules.entries());
     const { runs: _runs, ...documentContext } = document;
     const { results: _results, tool: _tool, ...runContext } = run;
     const { rules: _rules, ...driverContext } = driver;
     const { driver: _driver, ...toolContext } = tool;
+    const selectRunContext = sarifRunContextSelector(runContext);
     return array(run["results"] ?? [], "Endor results").map((result) => ({
       result,
       rulesById,
+      selectRunContext,
       documentContext,
       runContext,
       driverContext,
@@ -228,7 +220,7 @@ export function normalizeEndorSarif(
   });
   return normalizeRecords(
     entries,
-    ({ result: value, rulesById, ...context }, id) => {
+    ({ result: value, rulesById, selectRunContext, ...context }) => {
       const result = record(value, "Endor result");
       const properties = record(
         result["properties"],
@@ -249,14 +241,7 @@ export function normalizeEndorSarif(
         throw new Error("Endor ruleIndex and ruleId disagree.");
       if (result["rule"] !== undefined) {
         const reference = record(result["rule"], "Endor rule reference");
-        if (
-          reference["toolComponent"] !== undefined ||
-          (reference["id"] !== undefined && reference["id"] !== ruleId) ||
-          (reference["index"] !== undefined &&
-            reference["index"] !== ruleIndex) ||
-          (reference["guid"] !== undefined &&
-            reference["guid"] !== rule["guid"])
-        )
+        if (!matchesSarifRuleReference(reference, ruleId, selectedRule))
           throw new Error("Inconsistent or external Endor rule reference.");
       }
       const message = record(result["message"], "Endor message");
@@ -311,46 +296,39 @@ export function normalizeEndorSarif(
           },
         ];
       });
-      return {
-        source_finding_id: id,
-        evidence: validateExternalEvidence(
-          {
-            title: text(short["text"]) ?? text(rule["name"]) ?? ruleId,
-            url: text(properties["finding-url"]),
-            description: [
-              text(message["markdown"]) ?? text(message["text"]),
-              text(full["text"]),
-              text(help["markdown"]) ?? text(help["text"]),
-            ]
-              .filter(Boolean)
-              .join("\n\n"),
-            // Diagnostic level and CVSS are not Endor's finding severity. Keep both as source evidence.
-            severity: "unknown",
-            locations: [
-              ...new Map(
-                locations.map((location) => [
-                  JSON.stringify(location),
-                  location,
-                ]),
-              ).values(),
-            ],
-            source_data: structuredClone({
-              ...context,
-              runContext: sarifRunContextForResult(
-                context.runContext,
-                result,
-                rule,
-                context.documentContext,
-                context.driverContext,
-                context.toolContext,
-              ),
-              rule,
+      return validateExternalEvidence(
+        {
+          title: text(short["text"]) ?? text(rule["name"]) ?? ruleId,
+          url: text(properties["finding-url"]),
+          description: [
+            text(message["markdown"]) ?? text(message["text"]),
+            text(full["text"]),
+            text(help["markdown"]) ?? text(help["text"]),
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
+          // Diagnostic level and CVSS are not Endor's finding severity. Keep both as source evidence.
+          severity: "unknown",
+          locations: [
+            ...new Map(
+              locations.map((location) => [JSON.stringify(location), location]),
+            ).values(),
+          ],
+          source_data: structuredClone({
+            ...context,
+            runContext: selectRunContext(
               result,
-            }),
-          },
-          target,
-        ),
-      };
+              rule,
+              context.documentContext,
+              context.driverContext,
+              context.toolContext,
+            ),
+            rule,
+            result,
+          }),
+        },
+        target,
+      );
     },
     ({ result }) =>
       requiredText(

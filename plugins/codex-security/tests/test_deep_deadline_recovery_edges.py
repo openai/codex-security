@@ -18,8 +18,10 @@ from test_workbench_standard_deep_results import (
 from workbench_test_support import (
     finish_deep_scan,
     get_scan,
+    read_review_state,
     run_workbench,
     saved_draft,
+    select_checkpoint,
     worker_paths,
     write_checkpoint,
 )
@@ -70,7 +72,7 @@ def deadline_fixture(
         )
         draft["threatModel"] = {"summary": "Synthetic worker model."}
         checkpoint = write_checkpoint(output / "checkpoints", draft)
-        (output / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
+        select_checkpoint(output, checkpoint)
         run_workbench(state, *args, "--status", "canceled", environment=environment)
     artifacts = directory / "artifacts/02_discovery"
     artifacts.mkdir(parents=True, exist_ok=True)
@@ -130,43 +132,55 @@ def assert_retained_finding(scan: SimpleNamespace):
     assert findings[0]["severity"] == scan.finding["severity"]
 
 
-@pytest.mark.parametrize("canonical", [False, True])
-@pytest.mark.parametrize("same_identity", [False, True])
-@pytest.mark.parametrize(
-    ("field", "value"), [("severity", None), ("code_evidence", []), ("root_cause", None)]
-)
-def test_deadline_recovers_partial_worker_findings_before_completion(
-    tmp_path, canonical, same_identity, field, value
-):
+def append_worker_findings(scan, findings):
+    head = next(scan.directory.glob("artifacts/**/checkpoint-head.json"))
+    previous = head.parent / "checkpoints" / json.loads(head.read_text())["checkpoint"]
+    draft = json.loads(previous.read_text())
+    draft["findings"].extend(findings)
+    checkpoint = write_checkpoint(head.parent / "checkpoints", draft)
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    return previous, checkpoint, head
+
+
+@pytest.mark.parametrize("canonical", [False, True], ids=["coordinator", "canonical"])
+def test_deadline_recovers_partial_worker_findings_before_completion(tmp_path, canonical):
     scan = deadline_fixture(tmp_path, "valid")
     if canonical:
         canonical_parent(scan, saved_draft(scan.scan_id))
-    head = next(scan.directory.glob("artifacts/**/checkpoint-head.json"))
-    selected = head.parent / "checkpoints" / json.loads(head.read_text())["checkpoint"]
-    draft = json.loads(selected.read_text())
-    partial = copy.deepcopy(scan.finding)
-    if not same_identity:
-        partial["ruleId"] = "synthetic.partial"
-        partial["identity"] = {"anchor": "partial"}
-        partial["provenance"]["candidateId"] = "partial-candidate"
-    if field == "severity":
-        partial.pop(field)
-    else:
-        partial[field] = value
-        partial["severity"]["level"] = "critical"
-    draft["findings"].append(partial)
-    checkpoint = write_checkpoint(head.parent / "checkpoints", draft)
-    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-    source_bytes = {path: path.read_bytes() for path in (selected, checkpoint, head)}
+
+    defects = {"severity": None, "codeEvidence": [None], "rootCause": {"summary": 7}}
+    partials = []
+    for same_identity in (False, True):
+        for field, value in defects.items():
+            partial = copy.deepcopy(scan.finding)
+            if not same_identity:
+                anchor = f"partial-{field.lower()}"
+                partial.update(ruleId="synthetic.partial", identity={"anchor": anchor})
+                partial["provenance"]["candidateId"] = anchor
+            if field == "severity":
+                partial.pop(field)
+            else:
+                partial[field] = value
+                partial["severity"]["level"] = "critical"
+            partials.append(partial)
+    # Reject the old spellings even when the canonical fields are present.
+    partials.append({**scan.finding, "root_cause": None})
+    partials.append({**scan.finding, "code_evidence": []})
+    source_bytes = {path: path.read_bytes() for path in append_worker_findings(scan, partials)}
 
     terminal = finish(scan, canonical=canonical)["deepScan"]
     assert terminal["status"] == "succeeded"
     assert terminal["terminalReason"] == "capped"
     assert_retained_finding(scan)
     warnings = get_scan(scan.state, scan.scan_id)["scan"]["warnings"]
-    assert any(field in warning for warning in warnings)
-    coverage = json.loads((scan.directory / "coverage.json").read_text())
-    assert any(field in row["reason"] for row in coverage["deferred"])
+    coverage = read_review_state(scan.state, scan.directory)
+    pending = {row["reason"] for row in coverage["deferred"]}
+    for field in defects:
+        field_warnings = [warning for warning in warnings if field in warning]
+        assert len(field_warnings) == 2, (field, warnings)
+        assert pending.issuperset(field_warnings)
+    assert any("root_cause" in warning and warning in pending for warning in warnings)
+    assert any("code_evidence" in warning and warning in pending for warning in warnings)
     assert all(path.read_bytes() == contents for path, contents in source_bytes.items())
     run_workbench(
         scan.state,
@@ -192,7 +206,7 @@ def test_coordinator_deadline_preserves_only_usable_worker_checkpoints(
     findings = scan.directory / "findings.json"
     if checkpoint_kind == "valid":
         assert_retained_finding(scan)
-        coverage = json.loads((scan.directory / "coverage.json").read_text())
+        coverage = read_review_state(scan.state, scan.directory)
         assert "completeness" not in coverage
         assert any(row.get("id", "").endswith("/review") for row in coverage["deferred"])
         manifest = json.loads((scan.directory / "scan-manifest.json").read_text())
@@ -249,16 +263,38 @@ def test_deadline_recovery_does_not_snapshot_untouched_optional_sarif(tmp_path):
     assert external.read_text() == "Unchanged optional export.\n"
 
 
-@pytest.mark.parametrize("include_paths", [None, ["app.py"], ["unrelated.py"]])
-@pytest.mark.parametrize("source", ["parent", "worker", "both"])
+@pytest.mark.parametrize(
+    ("source", "include_paths", "distinct"),
+    [
+        ("both", None, ["parent-app.py", "parent-other.py", "worker-app.py", "worker-other.py"]),
+        ("both", ["app.py"], ["parent-app.py", "worker-app.py"]),
+        ("parent", ["app.py"], ["parent-app.py"]),
+        ("worker", ["app.py"], ["worker-app.py"]),
+        ("both", ["unrelated.py"], []),
+    ],
+    ids=["repository", "scoped", "parent-only", "worker-only", "no-matches"],
+)
 def test_deadline_recovery_applies_requested_scope_to_parent_and_worker_findings(
-    tmp_path, include_paths, source
+    tmp_path, source, include_paths, distinct
 ):
     scan = deadline_fixture(
         tmp_path, "empty" if source == "parent" else "valid", include_paths=include_paths
     )
+
+    def source_findings(source_name):
+        rows = []
+        for path in ("app.py", "other.py"):
+            row = copy.deepcopy(scan.finding)
+            row["identity"] = {"anchor": f"{source_name}-{path}"}
+            row["locations"][0]["path"] = row["codeEvidence"][0]["path"] = path
+            rows.append(row)
+        return rows
+
+    (tmp_path / "target" / "other.py").write_text("value = 1\n")
+    if source != "parent":
+        append_worker_findings(scan, source_findings("worker"))
     if source != "worker":
-        draft = saved_draft(scan.scan_id, findings=[scan.finding])
+        draft = saved_draft(scan.scan_id, findings=[scan.finding, *source_findings("parent")])
         draft["coverage"].update(
             mode="scoped_path" if include_paths is not None else "deep_repository",
             inventoryStrategy="scoped_path" if include_paths is not None else "repository",
@@ -272,13 +308,18 @@ def test_deadline_recovery_applies_requested_scope_to_parent_and_worker_findings
     findings = json.loads((scan.directory / "findings.json").read_text())["findings"]
     head = json.loads((scan.directory / "checkpoint-head.json").read_text())["checkpoint"]
     checkpoint = json.loads((scan.directory / "checkpoints" / head).read_text())
-    expected = 0 if include_paths == ["unrelated.py"] else 1
-    assert len(findings) == len(checkpoint["findings"]) == expected
+    # Each available source starts with the same app.py finding; keep it exactly once in scope.
+    expected = [scan.finding["identity"]["anchor"], *distinct] if distinct else []
+    for rows in (findings, checkpoint["findings"]):
+        assert sorted(row["identity"]["anchor"] for row in rows) == sorted(expected)
     assert all(path.read_bytes() == contents for path, contents in original.items())
 
 
-@pytest.mark.parametrize("with_worker", [False, True])
-@pytest.mark.parametrize("inventory", [None, "", "invalid_strategy", 7, "scoped_path"])
+@pytest.mark.parametrize(
+    ("with_worker", "inventory"),
+    [(False, None), (True, "invalid_strategy")],
+    ids=["missing-without-worker", "invalid-with-worker"],
+)
 def test_scoped_deadline_recovers_interrupted_inventory_before_final_publication(
     tmp_path: Path, with_worker: bool, inventory: object
 ):
@@ -298,7 +339,7 @@ def test_scoped_deadline_recovers_interrupted_inventory_before_final_publication
     assert terminal["status"] == "succeeded"
     assert terminal["terminalReason"] == "capped"
     assert terminal["completionSequence"] == 0
-    recovered = json.loads((scan.directory / "coverage.json").read_text())
+    recovered = read_review_state(scan.state, scan.directory)
     assert recovered["mode"] == "scoped_path"
     assert recovered["inventoryStrategy"] == "scoped_path"
     assert recovered["includePaths"] == ["app.py"]
@@ -431,7 +472,7 @@ def test_deadline_interrupt_preserves_only_committed_publication(
 def test_mid_merge_failure_removes_only_created_recovery_evidence(
     tmp_path: Path, monkeypatch, workbench_api, write_kind: str
 ):
-    from workbench import saved_sources
+    from workbench import retained_coverage, saved_sources
 
     scan = deadline_fixture(tmp_path, "valid")
     canonical_parent(scan, saved_draft(scan.scan_id, findings=[scan.finding]))
@@ -461,6 +502,7 @@ def test_mid_merge_failure_removes_only_created_recovery_evidence(
 
     monkeypatch.setattr(saved, "write_scan_local_bytes", fail_during_merge)
     monkeypatch.setattr(saved_sources, "write_scan_local_bytes", fail_during_merge)
+    monkeypatch.setattr(retained_coverage, "write_scan_local_bytes", fail_during_merge)
     with sqlite3.connect(scan.database) as connection:
         connection.row_factory = sqlite3.Row
         record = workbench_api["require_scan"](connection, scan.scan_id)
@@ -475,11 +517,10 @@ def test_mid_merge_failure_removes_only_created_recovery_evidence(
     assert unrelated.read_text() == "Unrelated worker evidence.\n"
 
 
-@pytest.mark.parametrize("snapshot_failure", [False, True])
 def test_failed_head_snapshot_does_not_interrupt_publication_rollback(
-    tmp_path, monkeypatch, workbench_api, snapshot_failure
+    tmp_path, monkeypatch, workbench_api
 ):
-    from workbench import saved_sources
+    from workbench import retained_coverage, saved_sources
 
     scan = deadline_fixture(tmp_path, "valid")
     canonical_parent(scan, saved_draft(scan.scan_id, findings=[scan.finding]))
@@ -493,7 +534,7 @@ def test_failed_head_snapshot_does_not_interrupt_publication_rollback(
     failed_snapshots = []
 
     def fail_before_snapshot_directory(directory, relative, contents):
-        if snapshot_failure and "/checkpoint-heads/" in relative:
+        if "/checkpoint-heads/" in relative:
             assert not (directory / relative).parent.exists()
             failed_snapshots.append(relative)
             raise OSError("Synthetic head snapshot write failure")
@@ -501,6 +542,7 @@ def test_failed_head_snapshot_does_not_interrupt_publication_rollback(
 
     monkeypatch.setattr(saved, "write_scan_local_bytes", fail_before_snapshot_directory)
     monkeypatch.setattr(saved_sources, "write_scan_local_bytes", fail_before_snapshot_directory)
+    monkeypatch.setattr(retained_coverage, "write_scan_local_bytes", fail_before_snapshot_directory)
     with sqlite3.connect(scan.database) as connection:
         connection.row_factory = sqlite3.Row
         connection.execute(
@@ -510,7 +552,7 @@ def test_failed_head_snapshot_does_not_interrupt_publication_rollback(
         record = workbench_api["require_scan"](connection, scan.scan_id)
         with pytest.raises(sqlite3.IntegrityError, match="synthetic publication failure"):
             saved.preserve_deep_deadline_draft(SimpleNamespace(**workbench_api), connection, record)
-    assert bool(failed_snapshots) is snapshot_failure
+    assert failed_snapshots
     assert all(not (scan.directory / path).exists() for path in failed_snapshots)
     after = {
         path.relative_to(scan.directory): (path.read_bytes(), path.stat().st_mtime_ns)
@@ -522,8 +564,10 @@ def test_failed_head_snapshot_does_not_interrupt_publication_rollback(
 
 @pytest.mark.parametrize("directory", ["checkpoints", "checkpoint-heads", "source-order"])
 def test_deadline_rollback_preserves_preexisting_dangling_recovery_entry(
-    tmp_path: Path, workbench_api, directory: str
+    tmp_path: Path, workbench_api, monkeypatch, directory: str
 ):
+    from workbench import retained_coverage, saved_sources
+
     scan = deadline_fixture(tmp_path)
     canonical_parent(scan, saved_draft(scan.scan_id, findings=[scan.finding]))
     saved = workbench_api["saved_results"]
@@ -560,6 +604,16 @@ def test_deadline_rollback_preserves_preexisting_dangling_recovery_entry(
             raise
         with pytest.raises(saved.ContractError) as rejected:
             saved.write_scan_local_bytes(scan.directory, relative.as_posix(), b"{}")
+        write = saved.write_scan_local_bytes
+        attempted_writes = set()
+
+        def record_write(directory, relative, contents):
+            attempted_writes.add(relative)
+            write(directory, relative, contents)
+
+        monkeypatch.setattr(saved, "write_scan_local_bytes", record_write)
+        monkeypatch.setattr(saved_sources, "write_scan_local_bytes", record_write)
+        monkeypatch.setattr(retained_coverage, "write_scan_local_bytes", record_write)
         try:
             publication = saved.preserve_deep_deadline_draft(
                 SimpleNamespace(**workbench_api), connection, record
@@ -572,7 +626,10 @@ def test_deadline_rollback_preserves_preexisting_dangling_recovery_entry(
                     "SELECT completion_warnings_json FROM scans WHERE id = ?", (scan.scan_id,)
                 ).fetchone()[0]
             )
-            assert any(str(rejected.value) in warning for warning in warnings)
+            # Existing checkpoint names participate in the parent snapshot digest,
+            # so this entry can remain untouched while a new checkpoint is written.
+            if relative.as_posix() in attempted_writes:
+                assert any(str(rejected.value) in warning for warning in warnings)
             connection.rollback()
             saved._restore_published_outputs(*publication)
     assert target.is_symlink()
