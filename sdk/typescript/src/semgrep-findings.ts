@@ -17,12 +17,13 @@ import {
   array,
   hasSarifExternalPropertyReferences,
   indexSarifRules,
+  matchesSarifRuleReference,
   normalizeRecords,
   readScannerJson,
   record,
   relativePath,
   requiredText,
-  sarifRunContextForResult,
+  sarifRunContextSelector,
   stableId,
   text,
 } from "./scanner-import.js";
@@ -230,14 +231,16 @@ export function normalizeSemgrepSarif(
     const rules = array(driver["rules"] ?? [], "Semgrep rules").map((r) =>
       record(r, "Semgrep rule"),
     );
-    const rulesById = indexSarifRules(rules);
+    const rulesById = indexSarifRules(rules.entries());
     const { runs: _runs, ...documentContext } = document;
     const { results: _results, tool: _tool, ...runContext } = run;
     const { rules: _rules, ...driverContext } = driver;
     const { driver: _driver, ...toolContext } = tool;
+    const selectRunContext = sarifRunContextSelector(runContext);
     return array(run["results"] ?? [], "Semgrep results").map((result) => ({
       result,
       rulesById,
+      selectRunContext,
       hasRules: rules.length > 0,
       documentContext,
       runContext,
@@ -247,7 +250,7 @@ export function normalizeSemgrepSarif(
   });
   return normalizeRecords(
     entries,
-    ({ result: value, rulesById, hasRules, ...context }) => {
+    ({ result: value, rulesById, selectRunContext, hasRules, ...context }) => {
       const result = record(value, "Semgrep result");
       const properties = record(
         result["properties"] ?? {},
@@ -275,12 +278,7 @@ export function normalizeSemgrepSarif(
         throw new Error("Semgrep ruleIndex and ruleId disagree.");
       if (result["rule"] !== undefined) {
         const ref = record(result["rule"], "Semgrep rule reference");
-        if (
-          ref["toolComponent"] !== undefined ||
-          (ref["id"] !== undefined && ref["id"] !== ruleId) ||
-          (ref["index"] !== undefined && ref["index"] !== ruleIndex) ||
-          (ref["guid"] !== undefined && ref["guid"] !== rule?.["guid"])
-        )
+        if (!matchesSarifRuleReference(ref, ruleId, selectedRule))
           throw new Error("Inconsistent or external Semgrep rule reference.");
       }
       const locations = array(result["locations"] ?? [], "Semgrep locations");
@@ -357,8 +355,7 @@ export function normalizeSemgrepSarif(
           },
           source_data: structuredClone({
             ...context,
-            runContext: sarifRunContextForResult(
-              context.runContext,
+            runContext: selectRunContext(
               result,
               rule,
               context.driverContext,
