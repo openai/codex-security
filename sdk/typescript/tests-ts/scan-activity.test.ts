@@ -1018,20 +1018,38 @@ describe("concrete repository path prefixes", () => {
     [
       "UNC casing",
       "\\\\Server\\Share\\project",
-      "\\\\server\\SHARE\\project\\Src\\Login.ts",
+      "\\\\server\\Share\\project\\Src\\Login.ts",
       ["Src/Login.ts"],
     ],
     [
       "UNC share root",
       "\\\\Server\\Share\\",
-      "\\\\server\\SHARE\\Src\\Login.ts",
+      "\\\\server\\Share\\Src\\Login.ts",
       ["Src/Login.ts"],
     ],
     [
       "UNC forward slashes",
       "//Server/Share/project",
-      "//server/share/project/Src/Login.ts",
+      "//server/Share/project/Src/Login.ts",
       ["Src/Login.ts"],
+    ],
+    [
+      "UNC share root without separator",
+      "//Server/Share",
+      "//server/Share/Src/Login.ts",
+      ["Src/Login.ts"],
+    ],
+    [
+      "case-sensitive UNC collection",
+      "//Server/Docs/Repo",
+      "//server/docs/Repo/Src/Login.ts",
+      [],
+    ],
+    [
+      "case-sensitive WebDAV collection",
+      "//Server/DavWWWRoot/Docs/Repo",
+      "//server/DavWWWRoot/docs/Repo/Src/Login.ts",
+      [],
     ],
     [
       "case-sensitive Windows checkout sibling",

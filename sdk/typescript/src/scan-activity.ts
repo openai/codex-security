@@ -1,4 +1,3 @@
-import { win32 } from "node:path";
 import { isRecord } from "./record.js";
 import { parseJson } from "./value.js";
 
@@ -380,17 +379,14 @@ function relativeRepositoryPath(
   const prefix = `${normalized.replace(/\/$/u, "")}/`;
   if (value.startsWith(prefix)) return value.slice(prefix.length);
 
-  // A Windows drive or UNC volume can differ in case. Its descendant
-  // directories may be case-sensitive, even on Windows, so folding the whole
-  // repository prefix could attribute a different checkout's files to this one.
+  // Windows drive letters and UNC host names can differ in case. Shares and
+  // descendant directories may be case-sensitive (including WebDAV collections).
   // Saved sessions can be read on other hosts and cannot prove file identity.
-  const root = win32.parse(normalized).root;
-  const valueRoot = win32.parse(value).root;
+  const root =
+    /^[a-z]:\//iu.exec(prefix)?.[0] ?? /^\/\/[^/]+\//u.exec(prefix)?.[0];
   if (
-    win32.isAbsolute(normalized) &&
-    root.length > 1 &&
-    root.length === valueRoot.length &&
-    root.toLowerCase() === valueRoot.toLowerCase() &&
+    root !== undefined &&
+    value.slice(0, root.length).toLowerCase() === root.toLowerCase() &&
     value.slice(root.length, prefix.length) === prefix.slice(root.length)
   ) {
     return value.slice(prefix.length);
