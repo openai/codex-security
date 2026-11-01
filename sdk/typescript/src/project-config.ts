@@ -19,6 +19,7 @@ import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
 import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
 import { deepScanOptions, type DeepScanSources } from "./deep-config.js";
 import {
+  DEFAULT_DECISIONS_CUTOFF,
   projectConfigJsonSchema,
   type ProjectConfigInput,
   type ProjectScope,
@@ -48,8 +49,18 @@ export interface ProjectConfigSource {
 export interface ResolvedProjectConfig {
   config: { codexOverrides: JsonObject };
   options: ResolvedScanSettings;
+  reviewEvents?: ReturnType<typeof projectReviewEventSettings>;
   sources: ConfigurationSources;
   projectConfig?: ProjectConfigProvenance;
+}
+
+export function projectReviewEventSettings(
+  settings: NonNullable<ProjectConfigInput["review_events"]>,
+) {
+  return {
+    screenWithDecisions: settings.screen_with_decisions,
+    decisionsCutoff: settings.decisions_cutoff,
+  };
 }
 
 export type ConfigurationSource = "default" | "legacy" | "project" | "cli";
@@ -216,6 +227,9 @@ export function projectConfigStarter(
     `#   model_reasoning_effort: ${DEFAULT_CODEX_CONFIG["model_reasoning_effort"]}`,
     "# limits:",
     "#   max_cost_usd_per_scan: 10 # Optional limit per scan attempt.",
+    "# review_events:",
+    "#   screen_with_decisions: false",
+    `#   decisions_cutoff: ${DEFAULT_DECISIONS_CUTOFF}`,
     "# policy:",
     "#   fail_on_severity: high # Omitted by default (report only).",
     "# output:",
@@ -412,6 +426,9 @@ export function resolveScanSettings(
   return {
     config: { codexOverrides },
     options: settings,
+    ...(file?.review_events === undefined
+      ? {}
+      : { reviewEvents: projectReviewEventSettings(file.review_events) }),
     sources: resolvedSources,
     ...(project?.path === undefined
       ? {}

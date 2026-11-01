@@ -632,6 +632,13 @@ Separate examples cover
 [GitHub Actions with Bedrock](https://github.com/openai/codex-security/blob/main/examples/github-actions/README.md)
 and [Azure Pipelines](https://github.com/openai/codex-security/blob/main/examples/azure-pipelines/README.md).
 
+### Review audit events
+
+Use `review-events` or `reviewSecurityEvents()` to assess native CEF audit records,
+with optional grouping and historical context. Add `--screen-with-decisions` to screen the evidence with the OpenAI
+Decisions API before spending a Codex review on a group. See the
+[batch format and SDK example](docs/cli.md#review-audit-events).
+
 ### Classify finding severity
 
 Use `classify-severity` to assess saved findings with the built-in severity rubric

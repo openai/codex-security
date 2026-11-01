@@ -9,7 +9,7 @@ codex-security scan . -c codex-security.json --model gpt-5.6-terra
 ```
 
 The supported extensions are `.yaml`, `.yml`, and `.json`. `scan`, `bulk-scan`,
-`scan-components`, and `info` accept `-c` / `--config`. An operator can set
+`scan-components`, `review-events`, and `info` accept `-c` / `--config`. An operator can set
 `CODEX_SECURITY_PROJECT_CONFIG` instead; an explicit `-c` takes precedence. With
 neither, no file is loaded, even if `codex-security.yaml` exists. SDK `run()` calls
 and saved reruns do not read this environment variable or discover project files.
@@ -139,6 +139,13 @@ limits, and aggregation and reporting can continue afterward.
 
 See [owner suggestions](../sdk/typescript/README.md#scan-options-and-output) for
 supported scan types, cost-limit behavior, and the saved report.
+
+`review-events` reads the `review_events` section of the selected file.
+`screen_with_decisions` enables the optional first pass and defaults to `false`.
+`decisions_cutoff` accepts a confidence from 0 to 1 and defaults to 0.95.
+The corresponding CLI flags are `--screen-with-decisions` and `--decisions-cutoff`.
+`loadProjectConfig()` exposes both values as `reviewEvents.screenWithDecisions` and
+`reviewEvents.decisionsCutoff` when the section is present.
 
 Patching, PR creation, publication, post-scan prompt files, and machine-specific
 plugin or Python selection remain explicit CLI/SDK inputs.
