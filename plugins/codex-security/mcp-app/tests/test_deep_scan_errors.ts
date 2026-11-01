@@ -107,6 +107,7 @@ function testWorkerErrorClassificationPreservesExplicitFailures() {
 function testUsageLimitClassification() {
   for (const message of [
     "Quota exceeded. Check your plan and billing details.",
+    "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus.",
     "Your workspace is out of credits. Add credits to continue.",
     "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
     "You hit your spend cap set in your workspace. Increase your spend cap to continue.",
