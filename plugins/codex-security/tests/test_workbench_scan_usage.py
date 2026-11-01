@@ -42,6 +42,23 @@ class ScanFixture:
     mode: str = "standard"
     diff_target: dict[str, Any] | None = None
 
+    def write_parent_rollout(
+        self, events: list[dict[str, Any]], *, originator: str | None = None
+    ) -> Path:
+        rollout = _rollout(self.target.parent, "scan-parent", events, originator=originator)
+        _state_graph(self.environment, {"scan-parent": rollout}, [])
+        return rollout
+
+    def command(self, name: str, *arguments: str, check: bool = True) -> dict[str, Any]:
+        return scan_command(
+            self.state_dir,
+            name,
+            self.scan_id,
+            *arguments,
+            check=check,
+            environment=self.environment,
+        )
+
 
 def _start_scan(tmp_path: Path, *, mode: str = "standard") -> ScanFixture:
     state_dir = tmp_path / "workbench-state"
@@ -92,12 +109,11 @@ def _start_scan(tmp_path: Path, *, mode: str = "standard") -> ScanFixture:
 
     started = start_delivered_scan(
         state_dir,
-        "--workspace-id",
         workspace_id,
         "--scan-root",
         str(tmp_path / "scans"),
         environment=environment,
-    )["results"]
+    )
     if mode == "deep":
         begin_deep_scan(
             state_dir,
@@ -219,6 +235,24 @@ def _rollout(
     return rollout.resolve()
 
 
+def _measure_rollout(
+    scan_usage,
+    path: Path,
+    started_at: datetime,
+    completed_at: datetime,
+    *,
+    thread_id: str = "scan-parent",
+    parent_id: str | None = None,
+    **options: str | None,
+):
+    return scan_usage._read_rollout_usage(
+        scan_usage.RolloutSession(thread_id, parent_id, path),
+        started_at=started_at,
+        completed_at=completed_at,
+        **options,
+    )
+
+
 def _allowance_event(timestamp: datetime, percent: int, limit: str = "codex") -> dict[str, Any]:
     return _event(
         timestamp,
@@ -336,13 +370,7 @@ def _complete_scan(fixture: ScanFixture, *arguments: str) -> dict[str, Any]:
         fixture.target,
         **options,
     )
-    return scan_command(
-        fixture.state_dir,
-        "complete-scan",
-        fixture.scan_id,
-        *arguments,
-        environment=fixture.environment,
-    )
+    return fixture.command("complete-scan", *arguments)
 
 
 @pytest.mark.parametrize(
@@ -361,8 +389,7 @@ def test_completion_preserves_usage_record_warnings(
         event["payload"]["info"] = None
     elif info == "invalid":
         event["payload"]["info"] = {}
-    parent = _rollout(tmp_path, "scan-parent", [event, _token_event(counted, 20, 10)])
-    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    fixture.write_parent_rollout([event, _token_event(counted, 20, 10)])
 
     usage = _complete_scan(fixture)["scan"]["usage"]
 
@@ -377,9 +404,7 @@ def test_completion_counts_native_responses_and_compaction_without_legacy_duplic
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
     compaction = _response_event(counted, "scan-parent", "compaction", 40, 3, turn_usage=(60, 5))
-    parent = _rollout(
-        tmp_path,
-        "scan-parent",
+    fixture.write_parent_rollout(
         [
             _token_event(fixture.started_at - timedelta(seconds=1), 100, 10),
             _token_event(counted, 150, 15),
@@ -400,9 +425,8 @@ def test_completion_counts_native_responses_and_compaction_without_legacy_duplic
             compaction,
             _response_event(counted, "scan-parent", "last", 30, 4, turn_usage=(90, 9)),
             _event(counted, "event_msg", {"type": "task_complete"}),
-        ],
+        ]
     )
-    _state_graph(fixture.environment, {"scan-parent": parent}, [])
 
     assert (
         _complete_scan(fixture)["scan"]["usage"].items()
@@ -452,17 +476,16 @@ def test_legacy_compaction_usage_is_unverifiable_only_inside_scan_window(
     events.append(_event(completed, "event_msg", {"type": "task_complete"}))
     parent = _rollout(tmp_path, "scan-parent", events)
 
-    measurement = scan_usage._read_rollout_usage(
-        scan_usage.RolloutSession("scan-parent", None, parent),
-        started_at=started,
-        completed_at=completed,
+    usage = _measure_rollout(
+        scan_usage,
+        parent,
+        started,
+        completed,
         completed_turn_id="turn-scan-parent" if scope == "completion_turn" else None,
     )
-    usage = measurement.tokens
-    warnings = measurement.warnings
 
-    assert usage == _counts(10, 0, 1)
-    assert warnings == ({"compaction_usage_unavailable"} if expected_warning else set())
+    assert usage.tokens == _counts(10, 0, 1)
+    assert usage.warnings == ({"compaction_usage_unavailable"} if expected_warning else set())
 
 
 def test_legacy_compaction_warning_survives_a_later_native_turn(scan_usage, tmp_path: Path) -> None:
@@ -479,16 +502,10 @@ def test_legacy_compaction_warning_survives_a_later_native_turn(scan_usage, tmp_
         ],
     )
 
-    measurement = scan_usage._read_rollout_usage(
-        scan_usage.RolloutSession("scan-parent", None, parent),
-        started_at=started,
-        completed_at=started,
-    )
-    usage = measurement.tokens
-    warnings = measurement.warnings
+    usage = _measure_rollout(scan_usage, parent, started, started)
 
-    assert usage == _counts(30, 0, 3)
-    assert warnings == {"compaction_usage_unavailable"}
+    assert usage.tokens == _counts(30, 0, 3)
+    assert usage.warnings == {"compaction_usage_unavailable"}
 
 
 def test_native_usage_respects_scan_window_and_preserves_cache_details(
@@ -524,16 +541,10 @@ def test_native_usage_respects_scan_window_and_preserves_cache_details(
         ],
     )
 
-    measurement = scan_usage._read_rollout_usage(
-        scan_usage.RolloutSession("scan-parent", None, parent),
-        started_at=started,
-        completed_at=completed,
-    )
-    usage = measurement.tokens
-    warnings = measurement.warnings
+    usage = _measure_rollout(scan_usage, parent, started, completed)
 
-    assert usage == _counts(20, 3, 2, cache_write_input_tokens=4)
-    assert warnings == set()
+    assert usage.tokens == _counts(20, 3, 2, cache_write_input_tokens=4)
+    assert usage.warnings == set()
 
 
 def test_native_worker_usage_excludes_inherited_totals_and_survives_resume(
@@ -566,16 +577,12 @@ def test_native_worker_usage_excludes_inherited_totals_and_survives_resume(
         copied_events=[inherited, _token_event(started, 1_000, 100)],
     )
 
-    measurement = scan_usage._read_rollout_usage(
-        scan_usage.RolloutSession("scan-worker", "scan-parent", worker),
-        started_at=started,
-        completed_at=started,
+    usage = _measure_rollout(
+        scan_usage, worker, started, started, thread_id="scan-worker", parent_id="scan-parent"
     )
-    usage = measurement.tokens
-    warnings = measurement.warnings
 
-    assert usage == _counts(60, 0, 6)
-    assert warnings == set()
+    assert usage.tokens == _counts(60, 0, 6)
+    assert usage.warnings == set()
 
 
 @pytest.mark.parametrize("gap", ["before", "after", "inside"])
@@ -611,16 +618,10 @@ def test_native_usage_only_marks_receipt_gaps_inside_scan_window(
         ],
     )
 
-    measurement = scan_usage._read_rollout_usage(
-        scan_usage.RolloutSession("scan-parent", None, parent),
-        started_at=started,
-        completed_at=started,
-    )
-    usage = measurement.tokens
-    warnings = measurement.warnings
+    usage = _measure_rollout(scan_usage, parent, started, started)
 
-    assert usage == _counts(30, 0, 0)
-    assert warnings == ({"token_record_incomplete"} if gap == "inside" else set())
+    assert usage.tokens == _counts(30, 0, 0)
+    assert usage.warnings == ({"token_record_incomplete"} if gap == "inside" else set())
 
 
 def test_native_usage_continues_cumulative_baseline_when_recovering_same_turn(
@@ -645,16 +646,10 @@ def test_native_usage_continues_cumulative_baseline_when_recovering_same_turn(
         ],
     )
 
-    measurement = scan_usage._read_rollout_usage(
-        scan_usage.RolloutSession("scan-parent", None, parent),
-        started_at=started,
-        completed_at=started,
-    )
-    usage = measurement.tokens
-    warnings = measurement.warnings
+    usage = _measure_rollout(scan_usage, parent, started, started)
 
-    assert usage == _counts(30, 0, 3)
-    assert warnings == set()
+    assert usage.tokens == _counts(30, 0, 3)
+    assert usage.warnings == set()
 
 
 @pytest.mark.parametrize(
@@ -694,16 +689,12 @@ def test_native_usage_preserves_partial_measurement_warnings(
     if failure == "truncated":
         parent.write_bytes(parent.read_bytes().removesuffix(b"\n"))
 
-    measurement = scan_usage._read_rollout_usage(
-        scan_usage.RolloutSession("scan-parent", None, parent),
-        started_at=started,
-        completed_at=started,
-    )
-    usage = measurement.tokens
-    warnings = measurement.warnings
+    usage = _measure_rollout(scan_usage, parent, started, started)
 
-    assert usage == (_counts(20, 0, 2) if failure == "missing_receipt" else _counts(10, 0, 1))
-    assert warnings == {
+    assert usage.tokens == (
+        _counts(20, 0, 2) if failure == "missing_receipt" else _counts(10, 0, 1)
+    )
+    assert usage.warnings == {
         "token_record_incomplete"
         if failure == "missing_receipt"
         else "rollout_record_incomplete"
@@ -912,8 +903,7 @@ def test_completion_includes_cached_and_cache_write_tokens(
     reported = event["payload"]["info"]["total_token_usage"]
     reported.pop("cache_write_input_tokens")
     reported[cache_write_field] = 12
-    parent = _rollout(tmp_path, "scan-parent", [event])
-    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    fixture.write_parent_rollout([event])
 
     usage = _complete_scan(fixture)["scan"]["usage"]
 
@@ -1112,11 +1102,7 @@ def test_completion_distinguishes_missing_usage_from_observed_zero(
             _response_event(counted, "scan-parent", "zero-response", 0, 0),
             _event(counted, "event_msg", {"type": "task_complete", "turn_id": "turn-scan-parent"}),
         ]
-    _state_graph(
-        fixture.environment,
-        {"scan-parent": _rollout(tmp_path, "scan-parent", events)},
-        [],
-    )
+    fixture.write_parent_rollout(events)
 
     usage = _complete_scan(fixture)["scan"]["usage"]
 
@@ -1330,22 +1316,12 @@ def test_completion_preserves_explicit_legacy_cost(
 ) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
-    _state_graph(
-        fixture.environment,
-        {
-            "scan-parent": _rollout(
-                tmp_path,
-                "scan-parent",
-                [
-                    _token_event(fixture.started_at - timedelta(seconds=1), 100, 0),
-                    _token_event(
-                        counted, 115, 6, cached_input_tokens=100 if delayed_cache_counts else 0
-                    ),
-                    _allowance_event(counted, 6),
-                ],
-            )
-        },
-        [],
+    fixture.write_parent_rollout(
+        [
+            _token_event(fixture.started_at - timedelta(seconds=1), 100, 0),
+            _token_event(counted, 115, 6, cached_input_tokens=100 if delayed_cache_counts else 0),
+            _allowance_event(counted, 6),
+        ]
     )
     cost = {
         "model": "gpt-5.6-sol",
@@ -1358,14 +1334,7 @@ def test_completion_preserves_explicit_legacy_cost(
     write_completed_contract(
         fixture.scan_dir, fixture.scan_id, fixture.target, relative_path="app.py"
     )
-    completed = scan_command(
-        fixture.state_dir,
-        "complete-scan",
-        fixture.scan_id,
-        "--cost-json",
-        json.dumps(cost),
-        environment=fixture.environment,
-    )["scan"]
+    completed = fixture.command("complete-scan", "--cost-json", json.dumps(cost))["scan"]
     assert completed["cost"] == cost
     assert completed["usage"]["accountRateLimits"][0]["primary"]["usedPercent"] == 6
     if delayed_cache_counts:
@@ -1444,9 +1413,7 @@ def test_completion_persists_direct_control_zero_without_hiding_missing_workers(
         "threadCount": 1 if measured_worker else 0,
     }
     assert "cost" not in completed
-    repeated = scan_command(
-        fixture.state_dir, "complete-scan", fixture.scan_id, environment=fixture.environment
-    )["scan"]
+    repeated = fixture.command("complete-scan")["scan"]
     assert repeated["usage"] == usage
     assert "cost" not in repeated
     with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
@@ -1516,11 +1483,7 @@ def test_metadata_only_deep_owner_requires_direct_control_originator(
     tmp_path: Path, originator: str | None
 ) -> None:
     fixture = _start_scan(tmp_path, mode="deep")
-    _state_graph(
-        fixture.environment,
-        {"scan-parent": _rollout(tmp_path, "scan-parent", [], originator=originator)},
-        [],
-    )
+    fixture.write_parent_rollout([], originator=originator)
 
     assert _complete_scan(fixture)["scan"]["usage"] == {
         "coverage": "unavailable",
@@ -1599,32 +1562,18 @@ def test_host_finalizes_exact_completion_turn_without_changing_artifacts(
     )
     with parent.open("a", encoding="utf-8") as output:
         output.writelines(f"{json.dumps(event)}\n" for event in final_events)
-    mismatched = scan_command(
-        fixture.state_dir,
+    mismatched = fixture.command(
         "finalize-scan-usage",
-        fixture.scan_id,
         "--thread-id",
         "scan-parent",
         "--turn-id",
         "another-turn",
-        environment=fixture.environment,
         check=False,
     )
     assert mismatched["returncode"] != 0
-    assert (
-        scan_command(
-            fixture.state_dir, "get-scan", fixture.scan_id, environment=fixture.environment
-        )["scan"]["usage"]
-        == initial["usage"]
-    )
+    assert fixture.command("get-scan")["scan"]["usage"] == initial["usage"]
     arguments = ("--thread-id", "scan-parent", "--turn-id", turn_id)
-    finalized = scan_command(
-        fixture.state_dir,
-        "finalize-scan-usage",
-        fixture.scan_id,
-        *arguments,
-        environment=fixture.environment,
-    )["scan"]
+    finalized = fixture.command("finalize-scan-usage", *arguments)["scan"]
     assert (
         finalized["usage"].items()
         >= {
@@ -1646,26 +1595,16 @@ def test_host_finalizes_exact_completion_turn_without_changing_artifacts(
     ]
     with parent.open("a", encoding="utf-8") as output:
         output.writelines(f"{json.dumps(event)}\n" for event in later_events)
-    measurement = scan_usage._read_rollout_usage(
-        scan_usage.RolloutSession("scan-parent", None, parent),
-        started_at=fixture.started_at,
-        completed_at=datetime.fromisoformat(stopped_at.replace("Z", "+00:00")),
+    usage = _measure_rollout(
+        scan_usage,
+        parent,
+        fixture.started_at,
+        datetime.fromisoformat(stopped_at.replace("Z", "+00:00")),
         completed_turn_id=turn_id,
     )
-    measured = measurement.tokens
-    warnings = measurement.warnings
-    assert measured == _counts(90, 0, 11)
-    assert warnings == set()
-    assert (
-        scan_command(
-            fixture.state_dir,
-            "finalize-scan-usage",
-            fixture.scan_id,
-            *arguments,
-            environment=fixture.environment,
-        )["scan"]["usage"]
-        == finalized["usage"]
-    )
+    assert usage.tokens == _counts(90, 0, 11)
+    assert usage.warnings == set()
+    assert fixture.command("finalize-scan-usage", *arguments)["scan"]["usage"] == finalized["usage"]
     assert {name: (fixture.scan_dir / name).read_bytes() for name in sealed_files} == sealed_files
 
 
@@ -1689,17 +1628,14 @@ def test_host_final_usage_preserves_missing_worker_warning(
         [("scan-parent", "scan-worker")],
     )
     _complete_scan(fixture, "--thread-id", "scan-parent", "--turn-id", turn_id)
-    usage = scan_command(
-        fixture.state_dir,
+    usage = fixture.command(
         "finalize-scan-usage",
-        fixture.scan_id,
         "--thread-id",
         "scan-parent",
         "--turn-id",
         turn_id,
         "--turn-status",
         turn_status,
-        environment=fixture.environment,
     )["scan"]["usage"]
     assert (
         usage.items()
@@ -1722,12 +1658,7 @@ def test_host_final_usage_retries_a_locked_native_database_without_losing_counts
 ) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
-    parent = _rollout(
-        tmp_path,
-        "scan-parent",
-        [_response_event(counted, "scan-parent", "first", 10, 2)],
-    )
-    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    parent = fixture.write_parent_rollout([_response_event(counted, "scan-parent", "first", 10, 2)])
     arguments = ("--thread-id", "scan-parent", "--turn-id", "turn-scan-parent")
     initial = _complete_scan(fixture, *arguments)["scan"]["usage"]
     with parent.open("a", encoding="utf-8") as output:
@@ -1737,24 +1668,12 @@ def test_host_final_usage_retries_a_locked_native_database_without_losing_counts
         Path(fixture.environment["CODEX_SQLITE_HOME"]) / "state_5.sqlite"
     ) as native_database:
         native_database.execute("BEGIN EXCLUSIVE")
-        pending = scan_command(
-            fixture.state_dir,
-            "finalize-scan-usage",
-            fixture.scan_id,
-            *arguments,
-            environment=fixture.environment,
-        )["scan"]["usage"]
+        pending = fixture.command("finalize-scan-usage", *arguments)["scan"]["usage"]
         assert pending == initial
         assert pending["totalTokens"] == 12
         assert pending["completion"]["finalized"] is False
 
-    finalized = scan_command(
-        fixture.state_dir,
-        "finalize-scan-usage",
-        fixture.scan_id,
-        *arguments,
-        environment=fixture.environment,
-    )["scan"]["usage"]
+    finalized = fixture.command("finalize-scan-usage", *arguments)["scan"]["usage"]
     assert (
         finalized.items()
         >= {
@@ -1773,34 +1692,11 @@ def test_host_final_usage_recovers_initially_unavailable_records(tmp_path: Path)
     initial = _complete_scan(fixture, *arguments)["scan"]["usage"]
     assert initial["coverage"] == "unavailable"
     assert initial["completion"]["finalized"] is False
-    assert (
-        scan_command(
-            fixture.state_dir,
-            "finalize-scan-usage",
-            fixture.scan_id,
-            *arguments,
-            environment=fixture.environment,
-        )["scan"]["usage"]
-        == initial
+    assert fixture.command("finalize-scan-usage", *arguments)["scan"]["usage"] == initial
+    fixture.write_parent_rollout(
+        [_response_event(fixture.started_at, "scan-parent", "final-response", 10, 2)]
     )
-    _state_graph(
-        fixture.environment,
-        {
-            "scan-parent": _rollout(
-                tmp_path,
-                "scan-parent",
-                [_response_event(fixture.started_at, "scan-parent", "final-response", 10, 2)],
-            )
-        },
-        [],
-    )
-    finalized = scan_command(
-        fixture.state_dir,
-        "finalize-scan-usage",
-        fixture.scan_id,
-        *arguments,
-        environment=fixture.environment,
-    )["scan"]["usage"]
+    finalized = fixture.command("finalize-scan-usage", *arguments)["scan"]["usage"]
     assert finalized["coverage"] == "complete"
     assert finalized["totalTokens"] == 12
     assert finalized["completion"]["finalized"] is True
@@ -1809,28 +1705,14 @@ def test_host_final_usage_recovers_initially_unavailable_records(tmp_path: Path)
 def test_host_final_usage_does_not_invent_an_unrecorded_completion_turn(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path)
     arguments = ("--thread-id", "scan-parent", "--turn-id", "unrecorded-turn")
-    _state_graph(
-        fixture.environment,
-        {
-            "scan-parent": _rollout(
-                tmp_path,
-                "scan-parent",
-                [
-                    _response_event(fixture.started_at, "scan-parent", "earlier-response", 10, 2),
-                    _event(fixture.started_at, "event_msg", {"type": "task_complete"}),
-                ],
-            )
-        },
-        [],
+    fixture.write_parent_rollout(
+        [
+            _response_event(fixture.started_at, "scan-parent", "earlier-response", 10, 2),
+            _event(fixture.started_at, "event_msg", {"type": "task_complete"}),
+        ]
     )
     _complete_scan(fixture, *arguments)
-    finalized = scan_command(
-        fixture.state_dir,
-        "finalize-scan-usage",
-        fixture.scan_id,
-        *arguments,
-        environment=fixture.environment,
-    )["scan"]["usage"]
+    finalized = fixture.command("finalize-scan-usage", *arguments)["scan"]["usage"]
     assert finalized["coverage"] == "partial"
     assert finalized["totalTokens"] == 12
     assert finalized["warnings"] == ["completion_turn_unavailable"]
@@ -1840,11 +1722,7 @@ def test_host_final_usage_does_not_invent_an_unrecorded_completion_turn(tmp_path
 def test_failed_scan_preserves_legacy_failure_behavior(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
-    _state_graph(
-        fixture.environment,
-        {"scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 21, 8)])},
-        [],
-    )
+    fixture.write_parent_rollout([_token_event(counted, 21, 8)])
     failed = fail_scan(
         fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
     )["scan"]
@@ -2115,12 +1993,7 @@ def test_completion_uses_latest_account_snapshot_across_owned_sessions(
         "secondary": None,
     }
     assert limits["another-limit"]["primary"]["usedPercent"] == 2
-    assert (
-        scan_command(
-            fixture.state_dir, "get-scan", fixture.scan_id, environment=fixture.environment
-        )["scan"]["usage"]
-        == usage
-    )
+    assert fixture.command("get-scan")["scan"]["usage"] == usage
 
 
 @pytest.mark.parametrize("terminal_status", ["complete", "failed"])
@@ -2160,9 +2033,7 @@ def test_large_usage_persists_with_terminal_scan_state(
 
     assert terminal["progress"]["status"] == terminal_status
     assert terminal["usage"] == usage
-    stored = scan_command(
-        fixture.state_dir, "get-scan", fixture.scan_id, environment=fixture.environment
-    )["scan"]
+    stored = fixture.command("get-scan")["scan"]
     assert stored["progress"]["status"] == terminal_status
     assert stored["usage"] == usage
 
@@ -2171,15 +2042,12 @@ def test_completion_collects_large_usage_from_owned_rollouts(tmp_path: Path) -> 
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
     limit_ids = {f"fixture-limit-{index}" for index in range(60)}
-    parent = _rollout(
-        tmp_path,
-        "scan-parent",
+    fixture.write_parent_rollout(
         [
             _token_event(counted, 120, 15, cached_input_tokens=30),
             *[_allowance_event(counted, 6, limit_id) for limit_id in sorted(limit_ids)],
-        ],
+        ]
     )
-    _state_graph(fixture.environment, {"scan-parent": parent}, [])
 
     completed = _complete_scan(fixture)["scan"]
 
@@ -2190,53 +2058,26 @@ def test_completion_collects_large_usage_from_owned_rollouts(tmp_path: Path) -> 
     assert usage["threadCount"] == 1
     assert usage.items() >= _counts(120, 30, 15).items()
     assert {limit["limitId"] for limit in usage["accountRateLimits"]} == limit_ids
-    assert (
-        scan_command(
-            fixture.state_dir, "get-scan", fixture.scan_id, environment=fixture.environment
-        )["scan"]["usage"]
-        == usage
-    )
+    assert fixture.command("get-scan")["scan"]["usage"] == usage
 
 
 def test_host_final_usage_saves_allowances_before_token_receipts(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path)
     arguments = ("--thread-id", "scan-parent", "--turn-id", "turn-scan-parent")
     initial = _complete_scan(fixture, *arguments)["scan"]["usage"]
-    parent = _rollout(
-        tmp_path,
-        "scan-parent",
-        [_allowance_event(fixture.started_at, 6)],
-    )
-    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    parent = fixture.write_parent_rollout([_allowance_event(fixture.started_at, 6)])
 
-    pending = scan_command(
-        fixture.state_dir,
-        "finalize-scan-usage",
-        fixture.scan_id,
-        *arguments,
-        environment=fixture.environment,
-    )["scan"]["usage"]
+    pending = fixture.command("finalize-scan-usage", *arguments)["scan"]["usage"]
     assert pending["coverage"] == "unavailable"
     assert pending["completion"] == initial["completion"]
     assert not set(_counts(0, 0, 0)).intersection(pending)
     assert pending["accountRateLimits"][0]["primary"]["usedPercent"] == 6
-    assert (
-        scan_command(
-            fixture.state_dir, "get-scan", fixture.scan_id, environment=fixture.environment
-        )["scan"]["usage"]
-        == pending
-    )
+    assert fixture.command("get-scan")["scan"]["usage"] == pending
 
     with parent.open("a", encoding="utf-8") as output:
         receipt = _response_event(fixture.started_at, "scan-parent", "final-response", 10, 2)
         output.write(f"{json.dumps(receipt)}\n")
-    finalized = scan_command(
-        fixture.state_dir,
-        "finalize-scan-usage",
-        fixture.scan_id,
-        *arguments,
-        environment=fixture.environment,
-    )["scan"]["usage"]
+    finalized = fixture.command("finalize-scan-usage", *arguments)["scan"]["usage"]
     assert finalized["totalTokens"] == 12
     assert finalized["completion"]["finalized"] is True
     assert finalized["accountRateLimits"] == pending["accountRateLimits"]
@@ -2253,14 +2094,8 @@ def test_completion_validates_account_snapshots_without_token_usage(
         "threadCount": 0,
         "accountRateLimits": limits,
     }
-    rejected = scan_command(
-        fixture.state_dir,
-        "complete-scan",
-        fixture.scan_id,
-        "--cost-json",
-        json.dumps({"usage": usage}),
-        environment=fixture.environment,
-        check=False,
+    rejected = fixture.command(
+        "complete-scan", "--cost-json", json.dumps({"usage": usage}), check=False
     )
     assert rejected["returncode"] != 0
     assert "invalid measured token usage" in rejected["stderr"]
@@ -2305,16 +2140,13 @@ def test_completion_marks_in_flight_usage_partial_even_with_earlier_receipts(
 ) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
-    parent = _rollout(
-        tmp_path,
-        "scan-parent",
+    fixture.write_parent_rollout(
         [
             _event(counted, "event_msg", {"type": "task_started", "turn_id": "scan-turn"}),
             _token_event(counted, 12, 3),
             _event(counted + timedelta(days=1), "event_msg", {"type": "task_complete"}),
-        ],
+        ]
     )
-    _state_graph(fixture.environment, {"scan-parent": parent}, [])
     usage = _complete_scan(fixture)["scan"]["usage"]
     assert usage["coverage"] == "partial"
     assert usage["totalTokens"] == 15
@@ -2395,14 +2227,13 @@ def test_closed_turn_coverage_survives_later_success(
     rollout = _rollout(
         tmp_path, thread_id, events, parent_thread_id=parent_id, include_task_start=False
     )
-    measurement = scan_usage._read_rollout_usage(
-        scan_usage.RolloutSession(thread_id, parent_id, rollout),
-        started_at=started,
-        completed_at=started,
+    usage = _measure_rollout(
+        scan_usage, rollout, started, started, thread_id=thread_id, parent_id=parent_id
     )
-    usage, warnings = measurement.tokens, measurement.warnings
-    assert usage == (_counts(30, 0, 5) if receipt in {"native", "legacy"} else _counts(10, 0, 2))
-    assert warnings == ({"token_record_missing"} if receipt == "none" else set()) | (
+    assert usage.tokens == (
+        _counts(30, 0, 5) if receipt in {"native", "legacy"} else _counts(10, 0, 2)
+    )
+    assert usage.warnings == ({"token_record_missing"} if receipt == "none" else set()) | (
         {"turn_interrupted"} if terminal == "turn_aborted" else set()
     )
 
@@ -2429,14 +2260,9 @@ def test_closed_turn_coverage_retains_before_window_receipt_evidence(
         ]
     )
     rollout = _rollout(tmp_path, "scan-parent", events)
-    measurement = scan_usage._read_rollout_usage(
-        scan_usage.RolloutSession("scan-parent", None, rollout),
-        started_at=started,
-        completed_at=started,
-    )
-    usage, warnings = measurement.tokens, measurement.warnings
-    assert usage == _counts(10, 0, 2)
-    assert warnings == (set() if receipt else {"token_record_missing"})
+    usage = _measure_rollout(scan_usage, rollout, started, started)
+    assert usage.tokens == _counts(10, 0, 2)
+    assert usage.warnings == (set() if receipt else {"token_record_missing"})
 
 
 def test_closed_turn_coverage_accepts_delayed_receipt_for_same_turn(
@@ -2452,14 +2278,9 @@ def test_closed_turn_coverage_accepts_delayed_receipt_for_same_turn(
             _response_event(started, "scan-parent", "late", 10, 2, turn_id="first"),
         ],
     )
-    measurement = scan_usage._read_rollout_usage(
-        scan_usage.RolloutSession("scan-parent", None, rollout),
-        started_at=started,
-        completed_at=started,
-    )
-    usage, warnings = measurement.tokens, measurement.warnings
-    assert usage == _counts(10, 0, 2)
-    assert warnings == set()
+    usage = _measure_rollout(scan_usage, rollout, started, started)
+    assert usage.tokens == _counts(10, 0, 2)
+    assert usage.warnings == set()
 
 
 def test_closed_turn_coverage_preserves_interruption_after_same_turn_resumes(
@@ -2478,14 +2299,9 @@ def test_closed_turn_coverage_preserves_interruption_after_same_turn_resumes(
             _event(started, "event_msg", {"type": "task_complete", "turn_id": "same-turn"}),
         ],
     )
-    measurement = scan_usage._read_rollout_usage(
-        scan_usage.RolloutSession("scan-parent", None, rollout),
-        started_at=started,
-        completed_at=started,
-    )
-    usage, warnings = measurement.tokens, measurement.warnings
-    assert usage == _counts(10, 0, 2)
-    assert warnings == {"turn_interrupted"}
+    usage = _measure_rollout(scan_usage, rollout, started, started)
+    assert usage.tokens == _counts(10, 0, 2)
+    assert usage.warnings == {"turn_interrupted"}
 
 
 def test_closed_turn_coverage_ignores_inherited_and_outside_window_interruptions(
@@ -2509,31 +2325,25 @@ def test_closed_turn_coverage_ignores_inherited_and_outside_window_interruptions
             _event(before, "event_msg", {"type": "turn_aborted", "turn_id": "inherited"}),
         ],
     )
-    measurement = scan_usage._read_rollout_usage(
-        scan_usage.RolloutSession("worker", "scan-parent", rollout),
-        started_at=started,
-        completed_at=started,
+    usage = _measure_rollout(
+        scan_usage, rollout, started, started, thread_id="worker", parent_id="scan-parent"
     )
-    usage, warnings = measurement.tokens, measurement.warnings
-    assert usage == _counts(10, 0, 2)
-    assert warnings == set()
+    assert usage.tokens == _counts(10, 0, 2)
+    assert usage.warnings == set()
 
 
 def test_completion_marks_closed_turn_without_receipt_partial(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
-    parent = _rollout(
-        tmp_path,
-        "scan-parent",
+    fixture.write_parent_rollout(
         [
             _event(counted, "event_msg", {"type": "task_started", "turn_id": "empty"}),
             _event(counted, "event_msg", {"type": "task_complete", "turn_id": "empty"}),
             _event(counted, "event_msg", {"type": "task_started", "turn_id": "measured"}),
             _response_event(counted, "scan-parent", "response", 10, 2, turn_id="measured"),
             _event(counted, "event_msg", {"type": "task_complete", "turn_id": "measured"}),
-        ],
+        ]
     )
-    _state_graph(fixture.environment, {"scan-parent": parent}, [])
     assert (
         _complete_scan(fixture)["scan"]["usage"].items()
         >= {

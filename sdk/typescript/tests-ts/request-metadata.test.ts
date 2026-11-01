@@ -1,5 +1,5 @@
 import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import { parse } from "smol-toml";
@@ -114,7 +114,8 @@ test("native table overrides preserve inherited literal metadata and opt-outs", 
   );
   const config = await readDeepScanRuntimeConfig({
     codexPath: resolveCodexCommand({}).command,
-    cwd: home,
+    // Native descendants can hold their working directory open on Windows.
+    cwd: dirname(home),
     configOverrides: [context.configOverride],
     env: {
       PATH: process.env["PATH"],

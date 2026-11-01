@@ -47,6 +47,24 @@ test.each(["repository", "global"] as const)(
   },
 );
 
+test.each([
+  [403, "GitHub denied security advisory access"],
+  [404, "GitHub repository or security advisory was not found"],
+] as const)(
+  "reports advisory-specific guidance for HTTP %i",
+  async (status, guidance) => {
+    await expect(
+      importGitHubAdvisories(
+        { repository: "example/project" },
+        {
+          environment: enabledEnvironment,
+          createGitHub: async () => client(() => Response.json({}, { status })),
+        },
+      ),
+    ).rejects.toThrow(guidance);
+  },
+);
+
 test("concurrent advisory imports keep opt-in scoped to each call", async () => {
   const advisory = importedAdvisory();
   const createGitHub = mock(async () =>

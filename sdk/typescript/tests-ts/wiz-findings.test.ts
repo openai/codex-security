@@ -152,6 +152,40 @@ async function parse(payload: unknown) {
   return readVendorFindings(file);
 }
 
+test.each(["local", "cloud"] as const)(
+  "mixed Wiz reports preserve duplicate IDs found only in the historical projection (%s)",
+  async (target) => {
+    const row = { ...sast, repository: { id: repository.id } };
+    const { file } = await fixture({
+      data: {
+        vulnerabilityFindings: {
+          nodes: [
+            {
+              source_finding_id: "package",
+              evidence: { title: "Package", severity: "low" },
+            },
+          ],
+        },
+        sastFindings: { nodes: [row, row] },
+        versionControlResources: {
+          nodes: ["bad\0name", "good"].map((name) => ({
+            platform: "GITHUB",
+            repository: { ...repository, name, url: repositoryUrl },
+          })),
+        },
+      },
+    });
+    const current = await readVendorFindings(file, target);
+    expect(
+      current.findings.map((finding) => finding.source_finding_id),
+    ).toEqual(["package"]);
+    expect(current.excluded.map((finding) => finding.position)).toEqual([2, 3]);
+    await expect(
+      readVendorFindingsForPublication(file, target),
+    ).rejects.toThrow('Duplicate source finding id "sast:occurrence-1"');
+  },
+);
+
 test("SAST maps source range, CWE, scanner verdict, and repository inventory without changing raw evidence", async () => {
   const { file } = await fixture(envelope("sastFindings", [sast]), true);
   const parsed = await readVendorFindings(file);
@@ -2308,6 +2342,43 @@ test.each(["raw", "normalized"])(
   },
 );
 
+async function prepareLegacyInventoryPublication(
+  sastNodes: unknown[],
+  lastInventoryNode: unknown,
+) {
+  // The earlier mapper used the last inventory row and stripped branch prefixes.
+  const f = await cloudFixture({
+    data: {
+      sastFindings: { nodes: sastNodes },
+      versionControlResources: { nodes: [lastInventoryNode] },
+    },
+  });
+  const deps = {
+    ...f.deps,
+    environment: {
+      ...f.environment,
+      CODEX_SECURITY_CLOUD_BASE_URL: DEFAULT_CLOUD_BASE_URL,
+    },
+  };
+  const historical = await readVendorFindingsForPublication(f.file);
+  await writeFile(f.file, JSON.stringify(historical.legacy.findings));
+  const original = await prepareExternalPublication(f.file, f.options, deps);
+  f.state.failReadback = true;
+  return { f, deps, historical, original };
+}
+
+async function savedPathAfterReadbackFailure(
+  publication: Awaited<ReturnType<typeof prepareExternalPublication>>,
+) {
+  try {
+    await publication.publish();
+  } catch (error) {
+    expect(error).toBeInstanceOf(ExternalPublicationError);
+    return (error as ExternalPublicationError).result.savedSubmission!;
+  }
+  throw new Error("Expected publication readback to fail");
+}
+
 test.each([
   "resume",
   "reset",
@@ -2380,34 +2451,12 @@ test.each([
         versionControlResources: { nodes },
       },
     };
-    // The earlier mapper used the last inventory row. This single-row export
-    // stages exactly that historical evidence with real publication receipts.
-    const f = await cloudFixture({
-      data: { ...payload.data, versionControlResources: { nodes: [nodes[1]] } },
-    });
-    const deps = {
-      ...f.deps,
-      environment: {
-        ...f.environment,
-        CODEX_SECURITY_CLOUD_BASE_URL: DEFAULT_CLOUD_BASE_URL,
-      },
-    };
-    // Stage the old branch projection explicitly; new imports retain names.
-    const historical = (await readVendorFindingsForPublication(f.file)).legacy;
-    expect(historical.findings[0]!.evidence.branch).toBe(
+    const { f, deps, historical, original } =
+      await prepareLegacyInventoryPublication(selected, nodes[1]);
+    expect(historical.legacy.findings[0]!.evidence.branch).toBe(
       scenario === "qualifier" ? "component/Feature" : "feature/parser",
     );
-    await writeFile(f.file, JSON.stringify(historical.findings));
-    const original = await prepareExternalPublication(f.file, f.options, deps);
-    f.state.failReadback = true;
-    let originalPath = "";
-    try {
-      await original.publish();
-    } catch (error) {
-      expect(error).toBeInstanceOf(ExternalPublicationError);
-      originalPath = (error as ExternalPublicationError).result
-        .savedSubmission!;
-    }
+    const originalPath = await savedPathAfterReadbackFailure(original);
     const saved = JSON.parse(await readFile(originalPath, "utf8"));
     delete saved.inputProjection;
     await writeFile(originalPath, JSON.stringify(saved));
@@ -2451,14 +2500,7 @@ test.each([
     expect(upgraded.preview.resumed).toBe(true);
     expect(upgraded.preview.requests).toEqual(original.preview.requests);
     expect(upgraded.preview.findings).toEqual(original.preview.findings);
-    let migratedPath = "";
-    try {
-      await upgraded.publish();
-    } catch (error) {
-      expect(error).toBeInstanceOf(ExternalPublicationError);
-      migratedPath = (error as ExternalPublicationError).result
-        .savedSubmission!;
-    }
+    const migratedPath = await savedPathAfterReadbackFailure(upgraded);
     const migrated = await readFile(migratedPath, "utf8");
     const migratedData = JSON.parse(migrated);
     expect(migratedData.requests).toEqual(saved.requests);
@@ -2592,27 +2634,9 @@ test("concurrent legacy inventory resumers retain the acknowledged request after
       versionControlResources: { nodes },
     },
   };
-  const f = await cloudFixture({
-    data: { ...payload.data, versionControlResources: { nodes: [nodes[1]] } },
-  });
-  const deps = {
-    ...f.deps,
-    environment: {
-      ...f.environment,
-      CODEX_SECURITY_CLOUD_BASE_URL: DEFAULT_CLOUD_BASE_URL,
-    },
-  };
-  const historical = await readVendorFindingsForPublication(f.file);
-  await writeFile(f.file, JSON.stringify(historical.legacy.findings));
-  const original = await prepareExternalPublication(f.file, f.options, deps);
-  f.state.failReadback = true;
-  let originalPath = "";
-  try {
-    await original.publish();
-  } catch (error) {
-    expect(error).toBeInstanceOf(ExternalPublicationError);
-    originalPath = (error as ExternalPublicationError).result.savedSubmission!;
-  }
+  const { f, deps, historical, original } =
+    await prepareLegacyInventoryPublication([record], nodes[1]);
+  const originalPath = await savedPathAfterReadbackFailure(original);
   const saved = JSON.parse(await readFile(originalPath, "utf8"));
   expect(saved.receipts).toHaveLength(1);
   const identity = [
