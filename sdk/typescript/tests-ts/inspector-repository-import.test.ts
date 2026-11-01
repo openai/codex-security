@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -20,9 +19,8 @@ async function checkout(
   remote = inspectorRepositoryUrl,
   source = inspectorRepositoryUrl,
 ) {
-  const { root, repository, environment, dispose } = await localFindingsFixture(
-    { remote },
-  );
+  const { root, repository, environment, git, dispose } =
+    await localFindingsFixture({ remote });
   return {
     path: join(root, "inspector.json.gz"),
     options: {
@@ -32,6 +30,7 @@ async function checkout(
       sourceRepositoryUrl: source,
     },
     deps: { environment },
+    git,
     [Symbol.asyncDispose]: dispose,
   };
 }
@@ -301,14 +300,7 @@ test("normalized imports bind mixed projects, native evidence and maps to their 
   ).rejects.toThrow("more than one repository project");
 
   const forkUrl = project.details.codeRepository.projectName;
-  execFileSync("git", [
-    "-C",
-    f.options.repository,
-    "remote",
-    "add",
-    "fork",
-    forkUrl,
-  ]);
+  f.git("remote", "add", "fork", forkUrl);
   const plain = await mkdtemp(join(dirname(f.path), "plain-"));
   for (const repository of [plain, f.options.repository]) {
     await expect(

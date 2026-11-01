@@ -18,20 +18,24 @@ export async function localFindingsFixture(options: { remote?: string } = {}) {
   );
   const repository = join(root, "repository");
   const env = sonarGitTestEnvironment();
-  await mkdir(repository);
-  execFileSync("git", ["init", "--quiet", repository], { env });
-  if (options.remote !== undefined)
-    execFileSync(
-      "git",
-      ["-C", repository, "remote", "add", "origin", options.remote],
-      { env },
-    );
-  const stateDirectory = join(root, "state");
   const dispose = () => rm(root, { recursive: true, force: true });
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-C", repository, ...args], { env, encoding: "utf8" });
+  try {
+    await mkdir(repository);
+    git("init", "--quiet");
+    if (options.remote !== undefined)
+      git("remote", "add", "origin", options.remote);
+  } catch (error) {
+    await dispose();
+    throw error;
+  }
+  const stateDirectory = join(root, "state");
   return {
     root,
     repository,
     stateDirectory,
+    git,
     environment: {
       ...Object.fromEntries(
         Object.entries(env).filter(

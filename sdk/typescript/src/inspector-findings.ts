@@ -20,7 +20,7 @@ import {
   normalizeRecords,
   readScannerJson,
   record,
-  relativePath,
+  repositoryFilePath,
   requiredText,
   text,
 } from "./scanner-import.js";
@@ -444,17 +444,6 @@ export function inspectorReportRepository(
   };
 }
 
-function repoFile(value: unknown): string | null {
-  const relative = relativePath(value);
-  if (!relative) return null;
-  const path = posix.normalize(relative);
-  return path === "." ||
-    path.endsWith("/") ||
-    /^(?:[a-z][a-z\d+.-]*:|~[^/]*(?:\/|$)|[^/]+@[^/]+:)/iu.test(path)
-    ? null
-    : path;
-}
-
 function timestamp(value: unknown): number {
   const seconds =
     typeof value === "number"
@@ -587,7 +576,7 @@ function evidence(
   const level = requiredText(severity, "Inspector severity").toLowerCase();
   const paths = new Set<string>();
   const packages = (pkg?.vulnerablePackages ?? []).map((item) => {
-    const path = repoFile(item.filePath);
+    const path = repositoryFilePath(item.filePath);
     if (path) paths.add(path);
     const ecosystem = ecosystems.get(text(item.packageManager) ?? "") ?? null;
     const version = (value: unknown) =>
@@ -609,7 +598,7 @@ function evidence(
   );
   if (code) {
     const { fileName, filePath, startLine } = code.filePath;
-    const path = repoFile(filePath);
+    const path = repositoryFilePath(filePath);
     if (path && posix.basename(path) === fileName)
       locations.push({
         path,
