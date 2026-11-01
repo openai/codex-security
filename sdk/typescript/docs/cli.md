@@ -2267,7 +2267,8 @@ and preview findings. All three use `--provider github`. Keep a separate source
 key for each family. Saving locally or publishing to Cloud requires the
 [external-import opt-in](#import-vendor-findings-locally).
 
-The code-scanning collector uses the GitHub CLI login and `GH_HOST`. A GitHub
+The code-scanning and advisory CLI collectors use `gh` to authenticate for
+`GH_HOST` (default `github.com`). A GitHub
 plugin connection can select alerts but does not sign the CLI in.
 Collection retains the selected ref's instance. Branches keep separate
 evidence. An alert-wide dismissal takes precedence over the selected instance's
@@ -2360,6 +2361,7 @@ import {
 const findings = await importGitHubCodeScanningAlerts({
   repository: "example/repository",
   alertNumbers: [12, 18], // Omit for all open alerts on the default branch.
+  githubHost: "github.com",
   githubToken: process.env["GH_TOKEN"],
 });
 
@@ -2378,8 +2380,9 @@ try {
 ```
 
 SDK options include `state` (default `"open"`), `ref`, and `signal`.
-Supply `githubToken` or use `gh auth token` credentials, including GitHub CLI
-token environment variables. `githubHost` defaults to `GH_HOST` or `github.com`.
+Without `gh`, pass a `githubToken` issued for the selected `githubHost`.
+If you omit the token, the SDK asks the GitHub CLI for credentials, including
+its supported token environment variables. `githubHost` defaults to `GH_HOST` or `github.com`.
 The token needs code-scanning read access; access failures reject the import.
 
 ## Validate and patch findings
