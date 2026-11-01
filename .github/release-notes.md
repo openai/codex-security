@@ -47,6 +47,7 @@
 - share connection and error handling for finding imports ([#2204](https://github.com/openai/codex-security/pull/2204))
 - avoid duplicate Git metadata discovery ([#2205](https://github.com/openai/codex-security/pull/2205))
 - skip Cloud number formatting for local evidence ([#2202](https://github.com/openai/codex-security/pull/2202))
+- give each scanner import a focused guide ([#2201](https://github.com/openai/codex-security/pull/2201))
 
 <!-- release-section: highlights:end -->
 

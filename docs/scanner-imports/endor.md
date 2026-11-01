@@ -6,49 +6,42 @@ details reported by Endor.
 
 ## Quick start
 
-Authenticate `endorctl` for the namespace that owns the project. Confirm the
-project and context correspond to the checkout. The importer retains the
-project UUID but does not look up its repository. Run these commands from the
-checkout root, replacing `YOUR_NAMESPACE` and `PROJECT_UUID` in both commands.
+[Enable external imports](README.md#preview-a-report) and
+[export the native findings](#native-finding-json) from the intended project
+and context. From the matching checkout root, preview the saved file. Replace
+the file path, namespace, and project UUID.
+
+```sh
+codex-security publish findings /private/path/endor-findings.json \
+  --to local --repository . --provider endor \
+  --source-key "YOUR_NAMESPACE/PROJECT_UUID/main" --dry-run --format json
+```
+
+## Import and verify
+
+Confirm the project and context belong to this repository. The importer retains
+the project UUID but does not look up its Git repository.
+[Save or publish and verify](README.md#save-or-publish-and-verify) using the same
+source key for later exports from this context.
+
+## Reference
+
+### Native Finding JSON
+
+Authenticate `endorctl` for the namespace that owns the project. Replace
+`YOUR_NAMESPACE` and `PROJECT_UUID`, then export the findings.
 
 ```sh
 out=$(mktemp -d) &&
   endorctl api list --resource Finding --namespace "YOUR_NAMESPACE" \
     --filter 'context.type==CONTEXT_TYPE_MAIN and spec.project_uuid=="PROJECT_UUID"' \
-    --list-all --output-type json > "$out/endor-findings.json"
-```
-
-After the export succeeds, keep the file and preview it in the same shell.
-
-```sh
-export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
-codex-security publish findings "$out/endor-findings.json" \
-  --to local --repository . --provider endor \
-  --source-key "YOUR_NAMESPACE/PROJECT_UUID/main" --dry-run --format json
+    --list-all --output-type json > "$out/endor-findings.tmp" &&
+  mv "$out/endor-findings.tmp" "$out/endor-findings.json"
 ```
 
 The filter selects default-branch findings. For another context, change both
 the filter and source key. Keep `--list-all` and omit `--field-mask` to export
-complete Finding objects.
-
-## Import and verify
-
-Check the destination, ready records, and exclusions. Rerun only the
-`publish findings` command without `--dry-run` to import that saved file.
-Local import needs no Cloud login or model call. Read back the stored evidence.
-
-```sh
-codex-security findings imported . --format json
-```
-
-For Cloud, replace `--to local --repository .` with
-`--to cloud --repository CLOUD_REPOSITORY_ID` for the connected repository.
-Review the Cloud preview before confirming. If the repository is renamed, a
-saved submission can resume against the same Cloud repository ID.
-
-## Reference
-
-### Native Finding JSON
+complete Finding objects. The saved file is `$out/endor-findings.json`.
 
 The importer accepts a single Finding, an array, or a `ListFindingsResponse`
 containing `list.objects`. An unfinished paginated response is rejected. Native
@@ -69,8 +62,8 @@ direct repository paths, and reported SAST or Secrets lines. Native severity
 and scanned revision are unavailable. Diagnostic levels, CVSS, and indexed or
 base-relative artifact references stay in the original evidence. Unrelated run
 artifact inventories are omitted. For a new Cloud submission, declared
-repository URLs must match the selected repository. For local imports, they must match a comparable
-configured Git remote when one is available.
+repository URLs must match the selected repository. For local imports, they
+must match a comparable configured Git remote when one is available.
 
 Both formats identify a record by finding UUID within the repository and source
 key. Reimporting replaces its evidence snapshot. Importing SARIF after native
