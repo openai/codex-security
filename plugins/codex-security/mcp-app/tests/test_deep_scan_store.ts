@@ -38,12 +38,16 @@ async function testBeginProtocolAndParsing() {
   const calls: { args: string[]; input?: string }[] = [];
   const runner = async (args: string[], input?: string) => {
     calls.push({ args, input });
-    return stateResult(scanId, { startDisposition: "created" });
+    return stateResult(scanId, {
+      startDisposition: "created",
+      deepScan: { serviceTier: "default" },
+    });
   };
   const store = new WorkbenchDeepScanStore(runner);
   const result = await store.begin({
     model: "gpt-5.6-sol",
     reasoningEffort: "high",
+    serviceTier: "default",
     targetPath: "/fixture/repository",
     scope: ".",
     userContext: "focus on archive parsing",
@@ -51,6 +55,7 @@ async function testBeginProtocolAndParsing() {
     scanRoot: "/fixture/scans",
   });
   assert.equal(result.scanId, scanId);
+  assert.equal(result.serviceTier, "default");
   assert.deepEqual(result.config, {
     workers: 6,
     subagents: 3,
@@ -69,6 +74,7 @@ async function testBeginProtocolAndParsing() {
   );
   assert.equal(flagValue(calls[0].args, "--model"), "gpt-5.6-sol");
   assert.equal(flagValue(calls[0].args, "--reasoning-effort"), "high");
+  assert.equal(flagValue(calls[0].args, "--service-tier"), "default");
   assert.equal(flagValue(calls[0].args, "--scope"), ".");
   assert.equal(calls[0].args.includes("--user-context-stdin"), true);
   assert.equal(calls[0].input, "focus on archive parsing");

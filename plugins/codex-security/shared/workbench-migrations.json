@@ -476,5 +476,10 @@
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN terminal_reviewed_surface_count INTEGER CHECK (terminal_reviewed_surface_count >= 0);"
     ]
+  },
+  {
+    "version": 59,
+    "name": "retain the launching Deep Scan service tier",
+    "statements": ["ALTER TABLE deep_scan_runs ADD COLUMN service_tier TEXT;"]
   }
 ]

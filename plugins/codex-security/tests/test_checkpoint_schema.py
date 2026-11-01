@@ -11,7 +11,7 @@ import pytest
     "omitted_versions, legacy_checkpoint, main_reader",
     [
         ((), False, False),
-        ((57, 58), False, False),
+        ((57, 58, 59), False, False),
         ((), 47, False),
         ((), 47, True),
         ((), 48, False),
