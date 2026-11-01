@@ -51,11 +51,10 @@ Use finite JSON numbers in evidence and report metadata. Supply integers outside
 JavaScript’s safe range as strings to preserve their value. In SDK inputs, use
 primitive numbers in plain data fields for predictable JSON exports.
 
-When a vendor record contains a `Number` object with custom numeric or JSON
-conversion, the SDK captures the record before import. The native snapshot
-preserves the underlying number, evaluates getters, and copies a `Buffer` as a
-`Uint8Array`. If the record cannot be cloned, the SDK uses a JSON copy when one
-is available.
+The SDK uses the underlying numeric value of a JavaScript `Number` object in
+evidence. If a record also uses getters or custom serialization, the reader
+may capture their values during normalization. Readers that clone raw records
+require cloneable input and can copy a `Buffer` as a `Uint8Array`.
 
 ## Operate the two destinations
 

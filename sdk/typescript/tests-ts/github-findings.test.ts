@@ -96,6 +96,24 @@ test.each(["local", "cloud"] as const)(
       bytes: { type: "Buffer", data: [1, 2] },
       detail: "retained",
     });
+    let reads = 0;
+    const fallback = captured({
+      first: {
+        get ordinal() {
+          return ++reads;
+        },
+      },
+      get score() {
+        reads++;
+        return Object.assign(new Number(reads), { toJSON: () => 9 });
+      },
+      detail: { toJSON: () => "retained" },
+    });
+    expect(fallback).toEqual({
+      first: { ordinal: reads - 1 },
+      score: reads,
+      detail: "retained",
+    });
     const throwing = Object.assign(new Number(7), {
       toJSON() {
         throw new Error("vendor numeric hook");
@@ -138,6 +156,42 @@ test.each(["local", "cloud"] as const)(
       normalize(Object.assign(new Number(7), { hidden: Infinity })).excluded[0]
         ?.reason,
     ).toContain("finite JSON numbers");
+  },
+);
+
+test.each([7, 9])(
+  "preserves shared GitHub source evidence when a boxed seven serializes as %i",
+  (wireScore) => {
+    let reads = 0;
+    const shared = {
+      score: Object.assign(new Number(7), { toJSON: () => wireScore }),
+      warning: Object.assign(new Error("scanner warning"), { code: "E_SCAN" }),
+      bytes: Buffer.alloc(32 * 1024),
+      get sample() {
+        return ++reads;
+      },
+    };
+    const rows = ["refs/heads/main", "refs/heads/review"].map((ref) => {
+      const row = importedAlert(ref);
+      Object.assign(row.alert, { shared });
+      return row;
+    });
+    const result = normalizeGitHubCodeScanningAlerts(rows);
+    expect(result.excluded).toEqual([]);
+    expect(reads).toBe(4);
+    const retained = result.findings.map(
+      ({ evidence }) =>
+        (evidence.source_data!["alert"] as { shared: typeof shared }).shared,
+    );
+    expect(retained[0]).toBe(retained[1]);
+    const [first, second] = structuredClone(retained);
+    expect([first!.sample, second!.sample]).toEqual([5, 5]);
+    expect(JSON.parse(JSON.stringify(retained[0]))).toMatchObject({
+      score: 7,
+      warning: { code: "E_SCAN" },
+      bytes: { type: "Buffer" },
+    });
+    expect(JSON.stringify(shared.score)).toBe(String(wireScore));
   },
 );
 

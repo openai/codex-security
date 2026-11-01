@@ -1,5 +1,5 @@
 import { isIP } from "node:net";
-import { isNumberObject } from "node:util/types";
+import { isBoxedPrimitive, isNumberObject } from "node:util/types";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import schema from "../schemas/external-findings.schema.json" with { type: "json" };
 import type {
@@ -257,6 +257,7 @@ export function validateExternalReport(
 export function validateExternalEvidence(
   input: unknown,
   target: ExternalImportTarget = "cloud",
+  batch?: Set<object>,
 ): ExternalFindingEvidence {
   const result = (
     target === "local" ? localEvidence : validateExternalEvidenceShape
@@ -334,7 +335,7 @@ export function validateExternalEvidence(
         "Evidence URLs must be HTTP(S) links without credentials.",
       );
   }
-  return checkedEvidenceJson(result, target, 0).retained;
+  return checkedEvidenceJson(result, target, 0, true, batch).retained;
 }
 
 /** Return the validated Cloud wire size, or zero for local evidence. */
@@ -354,17 +355,133 @@ function hasCustomNumberHooks(value: Number): boolean {
   return owner === value || !isNumberObject(owner);
 }
 
+function snapshotJsonEvidence<T>(input: T): T {
+  const views = new WeakMap<object, object>();
+  const json = JSON as JSON & { isRawJSON?(value: unknown): boolean };
+  return json.parse(
+    json.stringify(input, (_key, value: unknown) => {
+      if (
+        value === null ||
+        typeof value !== "object" ||
+        isBoxedPrimitive(value) ||
+        json.isRawJSON?.(value)
+      )
+        return value;
+      const cached = views.get(value);
+      if (cached) return cached;
+      const handler: ProxyHandler<object> = {
+        get(_target, key) {
+          const field: unknown = Reflect.get(value, key);
+          const result = isNumberObject(field)
+            ? Number.prototype.valueOf.call(field)
+            : field;
+          if (typeof result === "number") requireJsonNumber(result, "Evidence");
+          return result;
+        },
+      };
+      const array = Array.isArray(value);
+      if (!array) {
+        handler.ownKeys = () => Object.keys(value);
+        handler.getOwnPropertyDescriptor = () => ({
+          enumerable: true,
+          configurable: true,
+        });
+      }
+      const view = new Proxy(array ? [] : {}, handler);
+      views.set(value, view);
+      return view;
+    }),
+  ) as T;
+}
+
+/** @internal Replace changed numeric fields together so common source objects and
+ * their getters stay shared until the SDK snapshots the selected batch. */
+export function retainNumberFields<T>(input: T, changed: Set<object>): T {
+  const captures = new WeakMap<object, object>();
+  function retain(value: unknown): unknown {
+    if (!value || typeof value !== "object") return value;
+    const found = captures.get(value);
+    if (found) return found;
+    if (changed.has(value)) {
+      const number = new Number(Number.prototype.valueOf.call(value));
+      captures.set(value, number);
+      return number;
+    }
+    const prototype: unknown = Object.getPrototypeOf(value);
+    if (
+      !Array.isArray(value) &&
+      prototype !== null &&
+      prototype !== Object.prototype
+    )
+      return value;
+    const properties = Object.getOwnPropertyDescriptors(value);
+    let copy = false;
+    for (const key of Object.keys(value)) {
+      const property = properties[key]!;
+      if (!Object.hasOwn(property, "value")) continue;
+      const next = retain(property.value);
+      if (next !== property.value) {
+        property.value = next;
+        copy = true;
+      }
+    }
+    if (!copy) return value;
+    for (const descriptor of Object.values(properties))
+      if (descriptor.get) descriptor.get = descriptor.get.bind(value);
+    const retained: object = Array.isArray(value)
+      ? []
+      : Object.create(prototype as object | null);
+    Object.defineProperties(retained, properties);
+    captures.set(value, retained);
+    return retained;
+  }
+  return retain(input) as T;
+}
+
 function checkedEvidenceJson<T>(
   input: T,
   target: ExternalImportTarget,
   additionalCloudBytes: number,
   captureNumbers = true,
+  batch?: Set<object>,
 ): { retained: T; bytes: number } {
+  const changed = batch && new Set<object>();
+  let opaque = false;
+  let numericByteAdjustment = 0;
+  function wireValue(this: object, key: string, value: unknown) {
+    const raw: unknown =
+      batch && Object.getOwnPropertyDescriptor(this, key)?.value;
+    if (isNumberObject(value)) value = +value;
+    if (isNumberObject(raw)) {
+      const intrinsic = Number.prototype.valueOf.call(raw) as number;
+      requireJsonNumber(intrinsic, "Evidence");
+      if (value !== intrinsic) changed!.add(raw);
+      value = intrinsic;
+    }
+    if (target === "cloud" && typeof value === "number") {
+      const wire = JSON.stringify(value);
+      const cloud = (
+        wire.includes(".") && Math.abs(value) < 1e-4
+          ? value.toExponential()
+          : wire
+      ).replace(/e-(\d)$/u, "e-0$1");
+      numericByteAdjustment += cloud.length - wire.length;
+    }
+    return value;
+  }
+  function wireBytes(json: string): number {
+    if (target === "local") return 0;
+    const bytes =
+      Buffer.byteLength(json) + numericByteAdjustment + additionalCloudBytes;
+    if (bytes > 256 * 1024)
+      throw new Error("Evidence exceeds the Cloud limit of 256 KiB.");
+    return bytes;
+  }
   // Preserve the native fast path and original circular-JSON diagnostics.
   let failedPreflight: { reason: unknown } | undefined;
   if (target === "local") {
     try {
-      JSON.stringify(input);
+      JSON.stringify(input, batch ? wireValue : undefined);
     } catch (reason) {
       failedPreflight = { reason };
     }
@@ -386,21 +503,42 @@ function checkedEvidenceJson<T>(
         requireJsonNumber(Number.prototype.valueOf.call(value), "Evidence");
         if (captureNumbers) customNumber ||= hasCustomNumberHooks(value);
       }
-      for (const child of Object.values(value))
+      for (const [key, child] of Object.entries(value)) {
+        if (batch && typeof child === "function" && !isNumberObject(value))
+          opaque = true;
+        if (
+          batch &&
+          child !== null &&
+          typeof child === "object" &&
+          (Object.getOwnPropertyDescriptor(value, key)?.get ||
+            (!Array.isArray(value) &&
+              Object.getPrototypeOf(value) !== Object.prototype &&
+              Object.getPrototypeOf(value) !== null &&
+              !isNumberObject(value)))
+        )
+          opaque = true;
         pending.push([child, depth + 1]);
+      }
     } else if (typeof value === "number") {
       requireJsonNumber(value, "Evidence");
     }
   }
   if (customNumber) {
+    let rawWire: string | undefined =
+      target === "local" && !failedPreflight ? "" : undefined;
     if (target === "cloud") {
       // Finish the provider read before capture, as a pending SDK request may
       // already contain the next value returned by a vendor getter.
       try {
-        JSON.stringify(input);
+        rawWire = JSON.stringify(input, batch ? wireValue : undefined);
       } catch {
         /* the captured value is validated below */
       }
+    }
+    if (batch && !opaque && rawWire !== undefined) {
+      const bytes = wireBytes(rawWire);
+      for (const number of changed!) batch.add(number);
+      return { retained: input, bytes };
     }
     let snapshot: T;
     try {
@@ -409,42 +547,14 @@ function checkedEvidenceJson<T>(
       if (!(error instanceof DOMException) || error.name !== "DataCloneError")
         throw error;
       // An own function can supply JSON even when native SDK capture is unavailable.
-      snapshot = JSON.parse(
-        JSON.stringify(input, function (key, value: unknown) {
-          const raw: unknown = Object.getOwnPropertyDescriptor(
-            this,
-            key,
-          )?.value;
-          return isNumberObject(raw)
-            ? Number.prototype.valueOf.call(raw)
-            : value;
-        }),
-      ) as T;
+      snapshot = snapshotJsonEvidence(input);
     }
     return checkedEvidenceJson(snapshot, target, additionalCloudBytes, false);
   }
   if (failedPreflight) throw failedPreflight.reason;
   const retained = input;
   if (target === "local") return { retained, bytes: 0 };
-  let numericByteAdjustment = 0;
-  const json = JSON.stringify(retained, (_key, value: unknown) => {
-    // JSON.stringify invokes toJSON before unboxing a Number with ToNumber.
-    if (isNumberObject(value)) value = +value;
-    if (typeof value !== "number") return value;
-    const wire = JSON.stringify(value);
-    // Cloud pads short exponents and formats small fractions scientifically.
-    const cloud = (
-      wire.includes(".") && Math.abs(value) < 1e-4
-        ? value.toExponential()
-        : wire
-    ).replace(/e-(\d)$/u, "e-0$1");
-    numericByteAdjustment += cloud.length - wire.length;
-    return value;
-  });
-  const bytes =
-    Buffer.byteLength(json) + numericByteAdjustment + additionalCloudBytes;
-  if (bytes > 256 * 1024)
-    throw new Error("Evidence exceeds the Cloud limit of 256 KiB.");
+  const bytes = wireBytes(JSON.stringify(retained, wireValue));
   return { retained, bytes };
 }
 

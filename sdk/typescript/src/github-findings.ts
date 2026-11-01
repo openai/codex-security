@@ -2,7 +2,10 @@ import type { ExternalImportTarget } from "./external-import-contract.js";
 import { hash } from "node:crypto";
 import { GHSA_ID, githubRepositoryParts } from "./github-identifiers.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
-import { validateExternalEvidence } from "./external-import-contract.js";
+import {
+  retainNumberFields,
+  validateExternalEvidence,
+} from "./external-import-contract.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
 import type { ImportedGitHubCodeScanningAlert } from "./github.js";
 import type { ImportedGitHubAdvisory } from "./github-advisories.js";
@@ -51,6 +54,7 @@ function severity(value: unknown): string {
 function codeScanningFinding(
   record: Record<string, unknown>,
   target: ExternalImportTarget = "cloud",
+  captures?: Set<object>,
 ): ExternalFinding {
   const repository = repositoryName(record["repository"]);
   const alert = asRecord(record["alert"]);
@@ -144,6 +148,7 @@ function codeScanningFinding(
         },
       },
       target,
+      captures,
     ),
   };
 }
@@ -151,6 +156,7 @@ function codeScanningFinding(
 function advisoryFinding(
   record: Record<string, unknown>,
   target: ExternalImportTarget = "cloud",
+  captures?: Set<object>,
 ): ExternalFinding {
   const repository = repositoryName(record["repository"]);
   const advisory = asRecord(record["advisory"]);
@@ -255,6 +261,7 @@ function advisoryFinding(
         },
       },
       target,
+      captures,
     ),
   };
 }
@@ -262,6 +269,7 @@ function advisoryFinding(
 function normalizeRecords(
   records: readonly unknown[],
   target: ExternalImportTarget = "cloud",
+  captures?: Set<object>,
 ): ExternalFindings {
   const result: ExternalFindings = {
     read: records.length,
@@ -275,9 +283,9 @@ function normalizeRecords(
       if (!record) throw new Error("GitHub finding must be an object.");
       let finding: ExternalFinding;
       if (record["source"] === "github-code-scanning")
-        finding = codeScanningFinding(record, target);
+        finding = codeScanningFinding(record, target, captures);
       else if (record["source"] === "github-security-advisory")
-        finding = advisoryFinding(record, target);
+        finding = advisoryFinding(record, target, captures);
       else
         throw new Error(
           "Expected saved output from import github or import github-advisories; raw or incomplete API responses need an explicit mapping.",
@@ -297,6 +305,8 @@ function normalizeRecords(
       });
     }
   }
+  if (captures?.size)
+    result.findings = retainNumberFields(result.findings, captures);
   return result;
 }
 
@@ -305,7 +315,7 @@ export function normalizeGitHubCodeScanningAlerts(
   alerts: readonly ImportedGitHubCodeScanningAlert[],
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
-  return normalizeRecords(alerts, target);
+  return normalizeRecords(alerts, target, new Set());
 }
 
 /** Map advisory disclosures without asserting an installed vulnerable dependency. */
@@ -313,7 +323,7 @@ export function normalizeGitHubAdvisories(
   advisories: readonly ImportedGitHubAdvisory[],
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
-  return normalizeRecords(advisories, target);
+  return normalizeRecords(advisories, target, new Set());
 }
 
 /** Read unfiltered JSON/JSONL output saved by the read-only GitHub import commands. */
