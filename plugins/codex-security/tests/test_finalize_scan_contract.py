@@ -172,6 +172,56 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         contents = FINALIZER.build_csv_projection({"findings": [finding]}, self.coverage)
         return csv.DictReader(io.StringIO(contents.decode("utf-8"), newline=""))
 
+    def test_avit_reuses_template_columns_and_maps_findings_individually(self) -> None:
+        template = self.scan_dir.parent / "app.csv"
+        headers = [
+            *FINALIZER.servicenow_avit.AVIT_APP_FIELDS,
+            *(name.upper() for name in FINALIZER.servicenow_avit.AVIT_FINDING_FIELDS),
+            "Release",
+        ]
+        defaults = dict.fromkeys(FINALIZER.servicenow_avit.AVIT_APP_FIELDS, "Example")
+        defaults.update({"Release": "v1, beta", "Application": "Billing", "CWE CATEGORY": "stale"})
+        with template.open("w", encoding="utf-8-sig", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=headers)
+            writer.writeheader()
+            writer.writerow(defaults)
+        first = self.findings["findings"][0]
+        first["taxonomy"]["cwe"] = ["=bad", "CWE-" + "9" * 252, "cwe-22"]
+        self.findings["findings"].append(
+            {
+                **first,
+                "identity": {**first["identity"], "instance": "second"},
+                "taxonomy": {**first["taxonomy"], "cwe": []},
+                "severity": {**first["severity"], "level": "informational"},
+                "summary": "x" * 1200,
+                "attackPath": {"steps": ["=Read the cell", "Inspect the result."]},
+            }
+        )
+        _, findings, _ = self.write_sealed_scan()
+        contents = FINALIZER.build_findings_export(
+            self.scan_dir, "servicenow-avit", avit_template=template
+        )
+        reader = csv.DictReader(io.StringIO(contents.decode(), newline=""))
+        self.assertEqual(reader.fieldnames, headers)
+        a, b = reader
+        self.assertEqual(a["STEPS TO REPRODUCE"], "")
+        self.assertEqual((a["CWE CATEGORY"], a["VULNERABILITY ID"]), ("CWE-22", ""))
+        self.assertEqual(
+            (b["CWE CATEGORY"], b["VULNERABILITY ID"]), ("", findings["findings"][1]["findingId"])
+        )
+        self.assertEqual(b["RISK RATING"], "None")
+        self.assertEqual(b["STEPS TO REPRODUCE"], "'=Read the cell\nInspect the result.")
+        self.assertEqual(len(b["TECHNICAL DETAILS"]), 1000)
+        for row in (a, b):
+            self.assertEqual((row["Application"], row["Release"]), ("Billing", "v1, beta"))
+
+        with template.open("a", encoding="utf-8", newline="") as file:
+            csv.writer(file).writerow(["unexpected second row"])
+        with self.assertRaisesRegex(FINALIZER.ContractError, "one application row"):
+            FINALIZER.build_findings_export(
+                self.scan_dir, "servicenow-avit", avit_template=template
+            )
+
     def write_sealed_receipt_scan(self, receipt_ref: str) -> Path:
         self.coverage["surfaces"][0]["receiptRefs"] = [receipt_ref]
         self.write_scan()

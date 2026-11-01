@@ -699,6 +699,33 @@ describe("Codex configuration", () => {
     async () => {
       const { root, codexHome, workspace, stateDirectory, environment } =
         await scanSandboxFixture();
+      if (process.platform === "win32") {
+        // Native read ACLs are applied in the background. Initialize with the
+        // scan profile, whose workspace grants are synchronous, then wait
+        // before checking the read-only profile in this private fixture.
+        const setup = runPinnedCodex(
+          codexHome,
+          [
+            "sandbox",
+            "--permission-profile",
+            "codex_security_scan",
+            "--cd",
+            workspace,
+            join(
+              process.env["SystemRoot"] ?? "C:\\Windows",
+              "System32",
+              "cmd.exe",
+            ),
+            "/d",
+            "/c",
+            "exit",
+            "0",
+          ],
+          environment,
+        );
+        expect(setup.exitCode, new TextDecoder().decode(setup.stderr)).toBe(0);
+        await waitForWindowsSandboxSetup();
+      }
       const source = join(root, "repository", "component");
       await mkdir(source, { recursive: true });
       const sourceFile = join(source, "fixture.txt");

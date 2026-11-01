@@ -1,9 +1,8 @@
 import { createHash } from "node:crypto";
-import { dirname, posix, relative, sep } from "node:path";
+import { dirname, posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { JsonObject } from "../types.js";
 import { asRecord } from "../record.js";
-import type { AcceptedDiscovery } from "./worker-runner.js";
 import { artifactSourcePath, type ArtifactContext } from "../artifact-io.js";
 import {
   coverageReceiptComponents,
@@ -64,72 +63,6 @@ export function deepReductionForPersistence(
 ): Omit<ScanDraftInput, "reviewState"> {
   const { sourceCoverage: _coverage, ...persisted } = result;
   return persisted;
-}
-
-/** Reduction combines findings; it does not complete the source workers' review. */
-export function aggregateDiscoveryCoverage(
-  artifacts: DeepScanArtifacts,
-  discoveries: Pick<AcceptedDiscovery, "id" | "resultPath" | "result">[],
-): ScanDraftInput["reviewState"] {
-  const coverage: ScanDraftInput["reviewState"] = {
-    surfaces: [],
-    explicitExclusions: [],
-    deferred: [],
-  };
-  for (const worker of discoveries) {
-    const source = structuredClone(worker.result.reviewState);
-    const prefix = relative(artifacts.scanDir, dirname(worker.resultPath))
-      .split(sep)
-      .join("/");
-    const scopedId = (id: string) => `${worker.id}/${id}`;
-    for (const field of [
-      "surfaces",
-      "explicitExclusions",
-      "deferred",
-    ] as const) {
-      const rows = source[field] as JsonObject[];
-      const usedIds = new Set(
-        rows.flatMap((row) => (typeof row.id === "string" ? [row.id] : [])),
-      );
-      const emittedIds = new Set<string>();
-      for (const [index, row] of rows.entries()) {
-        const retained: JsonObject = { ...row, workerId: worker.id };
-        // Independent reviews reuse local IDs. Preserve their links without
-        // allowing one worker's disposition to stand in for another's work.
-        const baseId = typeof row.id === "string" ? row.id : String(index);
-        let id = baseId;
-        if (typeof row.id !== "string" || emittedIds.has(id)) {
-          for (let suffix = 2; usedIds.has(id); suffix++) {
-            id = `${baseId}-${suffix}`;
-          }
-        }
-        usedIds.add(id);
-        emittedIds.add(id);
-        retained.id = scopedId(id);
-        if (field === "deferred" && Array.isArray(row.surfaceIds)) {
-          retained.surfaceIds = (row.surfaceIds as string[]).map(scopedId);
-        }
-        if (field === "surfaces" && Array.isArray(row.receiptRefs)) {
-          retained.receiptRefs = (row.receiptRefs as string[]).map(
-            (ref) => `${prefix}/${coverageReceiptComponents(ref).join("/")}`,
-          );
-        }
-        (coverage[field] as JsonObject[]).push(retained);
-      }
-    }
-    if (Array.isArray(source.openQuestions)) {
-      const questions = (coverage.openQuestions ??= []) as JsonObject[];
-      for (const question of source.openQuestions) {
-        questions.push({
-          ...(typeof question === "string"
-            ? { question }
-            : (question as JsonObject)),
-          workerId: worker.id,
-        });
-      }
-    }
-  }
-  return coverage;
 }
 
 export function parseDeepReduction(input: unknown): DeepReductionInput {

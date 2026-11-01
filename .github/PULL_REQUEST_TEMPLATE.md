@@ -6,7 +6,8 @@
 
 ## Changes
 
-<!-- Summarize the specific changes that reviewers should understand. -->
+<!-- Summarize the changes reviewers should understand. If maintainers need to update
+https://learn.chatgpt.com/docs/security, you can name the affected page or workflow and suggest an edit. -->
 
 ## Testing
 

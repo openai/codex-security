@@ -4,6 +4,7 @@ import { PassThrough } from "node:stream";
 import { pathToFileURL } from "node:url";
 import stripAnsi from "strip-ansi";
 import stringWidth from "string-width";
+import { fitCell, fitLine, graphemes } from "./terminal-columns.js";
 import { isRecord } from "./record.js";
 import type { ScanAuthMode, ScanBudget } from "./api.js";
 import type { ScanModelConfiguration } from "./config.js";
@@ -834,7 +835,7 @@ export class ScanDashboard {
       lines
         .map((line, index) => {
           const text = typeof line === "string" ? line : line.text;
-          const clean = fitLine(text, width);
+          const clean = fitLine(terminalText(text), width);
           const colored =
             this.#options.color === true
               ? styleLine(
@@ -922,48 +923,67 @@ export class ScanDashboard {
         this.#components.length - rows,
       ),
     );
+    const visible = this.#components
+      .slice(first, first + rows)
+      .map(({ receipt, dashboard }) => {
+        const count =
+          dashboard.#files === null
+            ? null
+            : scanProgressCount(dashboard.#files);
+        const progress =
+          count === null
+            ? "—"
+            : `${formatCount(count.completed)}/${formatCount(count.total)} ${count.label}`;
+        const status =
+          receipt.status === "started"
+            ? dashboard.#stage
+            : componentStatus(receipt);
+        return { receipt, dashboard, status, progress };
+      });
+    const progressWidth = Math.max(
+      "Progress".length,
+      ...visible.map(({ progress }) => progress.length),
+    );
     const costWidth = Math.max(
       8,
       ...this.#components.map(({ dashboard }) =>
         dashboard.#cost === null ? 1 : formatScanCost(dashboard.#cost).length,
       ),
     );
-    const nameWidth = Math.max(
-      10,
-      width - 52 - (this.#showCost ? costWidth + 1 : 0),
+    const nameAndStatusWidth =
+      width - 17 - progressWidth - (this.#showCost ? costWidth + 1 : 0);
+    // When space is tight, share the original 35 status and progress columns
+    // so adding the unit doesn't push the cost amount offscreen.
+    const statusWidth = Math.min(
+      Math.max(
+        "Status".length,
+        ...visible.map(({ status }) => stringWidth(status)),
+      ),
+      Math.max("Status".length, 35 - progressWidth, nameAndStatusWidth - 10),
     );
-    const cell = (value: string, width: number): string => {
-      const text = fitLine(value, width);
-      return text + " ".repeat(width - stringWidth(text));
-    };
+    const nameWidth = Math.max(10, nameAndStatusWidth - statusWidth);
     const row = (
       marker: string,
       name: string,
       status: string,
-      files: string,
+      progress: string,
       findings: string,
       cost: string,
     ): string =>
-      `  ${marker} ${cell(name, nameWidth)} ${cell(status, 24)} ${files.padStart(11)} ${findings.padStart(8)}${this.#showCost ? ` ${cost.padStart(8)}` : ""}`;
-    const table = this.#components
-      .slice(first, first + rows)
-      .map(({ receipt, dashboard }, index) => {
-        const files = dashboard.#files;
-        return row(
+      `  ${marker} ${fitCell(terminalText(name), nameWidth)} ${fitCell(terminalText(status), statusWidth)} ${progress.padStart(progressWidth)} ${findings.padStart(8)}${this.#showCost ? ` ${cost.padStart(8)}` : ""}`;
+    const table = visible.map(
+      ({ receipt, dashboard, status, progress }, index) =>
+        row(
           first + index === this.#selectedComponent ? "›" : " ",
           receipt.name,
-          receipt.status === "started"
-            ? dashboard.#stage
-            : componentStatus(receipt),
-          files === null
-            ? "—"
-            : `${formatCount(files.filesCompleted)}/${formatCount(files.filesTotal)}`,
+          status,
+          progress,
           receipt.findingCount === undefined
             ? "—"
             : formatCount(receipt.findingCount),
           dashboard.#cost === null ? "—" : formatScanCost(dashboard.#cost),
-        );
-      });
+        ),
+    );
     if (table.length === 0) table.push(`  ${this.#stage}…`);
     while (table.length < rows) table.push("");
     const count = (status: ComponentReceipt["status"]) =>
@@ -984,7 +1004,7 @@ export class ScanDashboard {
       divider,
       `  ${count("completed")} complete · ${count("started")} running · ${count("pending")} queued · ${count("failed")} failed`,
       "",
-      row(" ", "Component", "Status", "Files", "Findings", "Cost"),
+      row(" ", "Component", "Status", "Progress", "Findings", "Cost"),
       ...table,
       divider,
       `  SCOPE    ${selected?.paths.join(", ") ?? "waiting for component plan"}`,
@@ -1473,7 +1493,7 @@ function formatLocalTime(timestamp: number): string {
 }
 
 function fitActivityPrefix(prefix: string, width: number): string {
-  return width <= 2 ? "" : fitLine(prefix, width - 2);
+  return width <= 2 ? "" : fitLine(terminalText(prefix), width - 2);
 }
 
 function wrapActivity(prefix: string, value: string, width: number): string[] {
@@ -1538,8 +1558,6 @@ function wrapActivity(prefix: string, value: string, width: number): string[] {
   if (current !== "") append(current);
   return lines;
 }
-
-const graphemes = new Intl.Segmenter();
 
 function columnChunks(
   value: string,
@@ -1674,17 +1692,4 @@ function budgetBar(cost: number, limit: number): string {
 
 function terminalText(value: string): string {
   return stripAnsi(value).replaceAll(/[\u0000-\u001F\u007F]/gu, " ");
-}
-
-function fitLine(value: string, width: number): string {
-  const clean = terminalText(value);
-  if (stringWidth(clean) <= width) return clean;
-  let clipped = "";
-  let columns = 0;
-  for (const { segment } of graphemes.segment(clean)) {
-    columns += stringWidth(segment);
-    if (columns > width - 1) break;
-    clipped += segment;
-  }
-  return `${clipped}…`;
 }
