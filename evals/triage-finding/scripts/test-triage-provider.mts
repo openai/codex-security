@@ -21,6 +21,48 @@ const fixtureRoot = fs.realpathSync(
 after(() => fs.rmSync(fixtureRoot, { recursive: true, force: true }));
 let builtMcp: string | undefined;
 
+function promptfooEnvironment(root: string) {
+  return {
+    OPENAI_API_KEY: "synthetic-test-key",
+    PROMPTFOO_CONFIG_DIR: path.join(root, "state"),
+    PROMPTFOO_DISABLE_WAL_MODE: "true",
+    PROMPTFOO_DISABLE_TELEMETRY: "1",
+    PROMPTFOO_DISABLE_UPDATE: "1",
+  };
+}
+
+function temporaryRoot(t: TestContext, prefix: string) {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  return root;
+}
+
+function evalArgs(...args: string[]) {
+  return ["eval", ...args, "--no-cache", "--no-share", "--no-progress-bar"];
+}
+
+function openDatabase(environment: { PROMPTFOO_CONFIG_DIR: string }) {
+  return new DatabaseSync(
+    path.join(environment.PROMPTFOO_CONFIG_DIR, "promptfoo.db"),
+    { enableForeignKeyConstraints: false },
+  );
+}
+
+function storedReplayResult(
+  environment: { PROMPTFOO_CONFIG_DIR: string },
+  id: unknown,
+) {
+  const database = openDatabase(environment);
+  const result = database
+    .prepare(
+      "SELECT metadata, test_case FROM eval_results WHERE eval_id = ? LIMIT 1",
+    )
+    .get(String(id));
+  database.close();
+  assert.ok(result && typeof result.test_case === "string");
+  return { metadata: result.metadata, testCase: result.test_case };
+}
+
 function replayRunnerArgs() {
   if (!builtMcp) {
     const output = path.join(fixtureRoot, "mcp");
@@ -168,10 +210,7 @@ test(
   "preloaded runtime preserves native credentials and legacy hooks wrap once",
   { skip: process.platform === "win32" },
   async (t) => {
-    const root = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), "triage-auth-")),
-    );
-    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const root = temporaryRoot(t, "triage-auth-");
     const priorRuntime = process.env.TRIAGE_RUNTIME_ROOT;
     process.env.TRIAGE_RUNTIME_ROOT = root;
     t.after(() => {
@@ -281,10 +320,7 @@ test(
   "native CLI provider overrides without a working directory use the staged runtime",
   { skip: process.platform === "win32", timeout: 120000 },
   async (t) => {
-    const root = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), "triage-cli-provider-")),
-    );
-    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const root = temporaryRoot(t, "triage-cli-provider-");
     const capture = path.join(root, "capture.json");
     const fakeCodex = path.join(root, "custom-codex");
     fs.writeFileSync(
@@ -321,23 +357,8 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
       }),
     );
     const result = await invoke(
-      [
-        "eval",
-        "-c",
-        configPath,
-        "--providers",
-        provider.id,
-        "--no-cache",
-        "--no-share",
-        "--no-progress-bar",
-      ],
-      {
-        OPENAI_API_KEY: "synthetic-test-key",
-        PROMPTFOO_CONFIG_DIR: path.join(root, "state"),
-        PROMPTFOO_DISABLE_WAL_MODE: "true",
-        PROMPTFOO_DISABLE_TELEMETRY: "1",
-        PROMPTFOO_DISABLE_UPDATE: "1",
-      },
+      evalArgs("-c", configPath, "--providers", provider.id),
+      promptfooEnvironment(root),
       ["--experimental-strip-types", runner],
     );
     assert.equal(result.code, 0, result.output);
@@ -369,10 +390,7 @@ function providerNode(...parts: string[]) {
 }
 
 function captureProvider(t: TestContext, mode: "launcher" | "replay") {
-  const root = fs.realpathSync(
-    fs.mkdtempSync(path.join(os.tmpdir(), "triage-provider-")),
-  );
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const root = temporaryRoot(t, "triage-provider-");
   const capture = path.join(root, "captures.jsonl");
   const fakeCodex = path.join(root, "codex");
   const fail = path.join(root, "fail");
@@ -406,13 +424,9 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
   const customNode = providerNode("custom-node", "bin", "node");
   const selectedNode = providerNode("selected-node", "bin", "synthetic-node");
   const environment = {
+    ...promptfooEnvironment(root),
     ...proxies,
     CODEX_MCP_NODE_PATH: ambientNode,
-    OPENAI_API_KEY: "synthetic-test-key",
-    PROMPTFOO_CONFIG_DIR: path.join(root, "state"),
-    PROMPTFOO_DISABLE_WAL_MODE: "true",
-    PROMPTFOO_DISABLE_TELEMETRY: "1",
-    PROMPTFOO_DISABLE_UPDATE: "1",
   };
   const readRows = (): Capture[] =>
     fs
@@ -513,21 +527,11 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
     );
     const simultaneous = await Promise.all(
       [configPath, calibrationConfig, configPath].map((config, index) =>
-        invoke(
-          [
-            "eval",
-            "-c",
-            config,
-            "--no-cache",
-            "--no-share",
-            "--no-progress-bar",
-          ],
-          {
-            ...environment,
-            CODEX_MCP_NODE_PATH: index === 0 ? undefined : ambientNode,
-            PROMPTFOO_CONFIG_DIR: path.join(root, `concurrent-${index}`),
-          },
-        ),
+        invoke(evalArgs("-c", config), {
+          ...environment,
+          CODEX_MCP_NODE_PATH: index === 0 ? undefined : ambientNode,
+          PROMPTFOO_CONFIG_DIR: path.join(root, `concurrent-${index}`),
+        }),
       ),
     );
     for (const result of simultaneous)
@@ -626,42 +630,21 @@ test(
     );
     fs.writeFileSync(fail, "");
     const templatedInitial = await invoke(
-      [
-        "eval",
-        "-c",
-        templatedConfig,
-        "--max-concurrency",
-        "2",
-        "--no-cache",
-        "--no-share",
-        "--no-progress-bar",
-      ],
+      evalArgs("-c", templatedConfig, "--max-concurrency", "2"),
       environment,
     );
     assert.notEqual(templatedInitial.code, 0, templatedInitial.output);
     assert.match(templatedInitial.output, /synthetic retryable failure/);
     fs.rmSync(fail);
     const templatedRetry = await invoke(
-      [
-        "eval",
-        "--retry-errors",
-        "--no-cache",
-        "--no-share",
-        "--no-progress-bar",
-      ],
+      evalArgs("--retry-errors"),
       environment,
     );
     assert.equal(templatedRetry.code, 0, templatedRetry.output);
-    const templatedDatabase = new DatabaseSync(
-      path.join(environment.PROMPTFOO_CONFIG_DIR, "promptfoo.db"),
-      { enableForeignKeyConstraints: false },
-    );
+    const templatedDatabase = openDatabase(environment);
     templatedDatabase.prepare("DELETE FROM eval_results").run();
     templatedDatabase.close();
-    const templatedResume = await invoke(
-      ["eval", "--resume", "--no-cache", "--no-share", "--no-progress-bar"],
-      environment,
-    );
+    const templatedResume = await invoke(evalArgs("--resume"), environment);
     assert.equal(templatedResume.code, 0, templatedResume.output);
     const templatedRows = readRows();
     assert.equal(templatedRows.length, 12);
@@ -696,10 +679,7 @@ test(
   "provider resolves each call's Node template without leaking sibling configuration",
   { skip: process.platform === "win32", timeout: 120000 },
   async (t) => {
-    const root = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), "triage-provider-vars-")),
-    );
-    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const root = temporaryRoot(t, "triage-provider-vars-");
     const nodes = [
       "first & node/node",
       "second/node",
@@ -723,15 +703,11 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
       { mode: 0o755 },
     );
     const environment = {
+      ...promptfooEnvironment(root),
       TRIAGE_RUNTIME_ROOT: root,
-      PROMPTFOO_CONFIG_DIR: path.join(root, "state"),
-      PROMPTFOO_DISABLE_TELEMETRY: "1",
-      PROMPTFOO_DISABLE_UPDATE: "1",
-      PROMPTFOO_DISABLE_WAL_MODE: "true",
       PROMPTFOO_DISABLE_TEMPLATING: "",
       NODE_BASENAME: "node",
       CODEX_MCP_NODE_PATH: "",
-      OPENAI_API_KEY: "synthetic-test-key",
     };
     const original = new Map(
       Object.keys(environment).map((key) => [key, process.env[key]]),
@@ -1086,10 +1062,7 @@ test(
   "saved native-provider configs retain legacy paths through retry, resume, and viewer replay",
   { skip: process.platform === "win32", timeout: 120000 },
   async (t) => {
-    const root = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), "legacy-provider-")),
-    );
-    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const root = temporaryRoot(t, "legacy-provider-");
     // Keep the saved source layout independent of the checkout and its path.
     const legacySourceRoot = path.join(root, "source.checkout");
     const legacyEvalRoot = path.join(
@@ -1187,43 +1160,15 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
         ],
       }),
     );
-    const environment = {
-      OPENAI_API_KEY: "synthetic-test-key",
-      PROMPTFOO_CONFIG_DIR: path.join(root, "state"),
-      PROMPTFOO_DISABLE_WAL_MODE: "true",
-      PROMPTFOO_DISABLE_TELEMETRY: "1",
-      PROMPTFOO_DISABLE_UPDATE: "1",
-    };
+    const environment = promptfooEnvironment(root);
     fs.writeFileSync(failure, "");
-    const initial = await invoke(
-      [
-        "eval",
-        "-c",
-        configPath,
-        "--no-cache",
-        "--no-share",
-        "--no-progress-bar",
-      ],
-      environment,
-    );
+    const initial = await invoke(evalArgs("-c", configPath), environment);
     assert.notEqual(initial.code, 0, initial.output);
     assert.match(initial.output, /synthetic legacy retryable failure/);
     fs.rmSync(failure);
-    const retry = await invoke(
-      [
-        "eval",
-        "--retry-errors",
-        "--no-cache",
-        "--no-share",
-        "--no-progress-bar",
-      ],
-      environment,
-    );
+    const retry = await invoke(evalArgs("--retry-errors"), environment);
     assert.equal(retry.code, 0, retry.output);
-    const database = new DatabaseSync(
-      path.join(environment.PROMPTFOO_CONFIG_DIR, "promptfoo.db"),
-      { enableForeignKeyConstraints: false },
-    );
+    const database = openDatabase(environment);
     const stored = database
       .prepare("SELECT id, config FROM evals ORDER BY created_at DESC LIMIT 1")
       .get();
@@ -1237,25 +1182,12 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
     assert.equal(saved.extensions?.length || 0, 0);
     database.exec("DELETE FROM eval_results");
     database.close();
-    const resumed = await invoke(
-      ["eval", "--resume", "--no-cache", "--no-share", "--no-progress-bar"],
-      environment,
-    );
+    const resumed = await invoke(evalArgs("--resume"), environment);
     assert.equal(resumed.code, 0, resumed.output);
-    const resumedDatabase = new DatabaseSync(
-      path.join(environment.PROMPTFOO_CONFIG_DIR, "promptfoo.db"),
-      { enableForeignKeyConstraints: false },
-    );
-    const resumedResult = resumedDatabase
-      .prepare(
-        "SELECT metadata, test_case FROM eval_results WHERE eval_id = ? LIMIT 1",
-      )
-      .get(String(stored.id));
-    resumedDatabase.close();
-    assert.ok(resumedResult && typeof resumedResult.test_case === "string");
+    const resumedResult = storedReplayResult(environment, stored.id);
     const replayVariables =
       JSON.parse((resumedResult.metadata as string) || "{}").inputVars ||
-      JSON.parse(resumedResult.test_case).vars;
+      JSON.parse(resumedResult.testCase).vars;
     await replayInViewer(t, environment, {
       evaluationId: stored.id,
       prompt:
@@ -1301,14 +1233,8 @@ for (const [suite, legacy] of [
     `${suite}${legacy ? " legacy hook" : ""} provider survives persisted retry, resume, and viewer replay`,
     { skip: process.platform === "win32", timeout: 120000 },
     async (t) => {
-      const root = fs.realpathSync(
-        fs.mkdtempSync(path.join(os.tmpdir(), "sast-provider-replay-")),
-      );
-      t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-      const targetRoot = fs.realpathSync(
-        fs.mkdtempSync(path.join(os.tmpdir(), "sast-custom-target-")),
-      );
-      t.after(() => fs.rmSync(targetRoot, { recursive: true, force: true }));
+      const root = temporaryRoot(t, "sast-provider-replay-");
+      const targetRoot = temporaryRoot(t, "sast-custom-target-");
       const targetRepository = path.join(targetRoot, "selected-case");
       const siblingRepository = path.join(targetRoot, "other-case");
       fs.mkdirSync(targetRepository);
@@ -1336,12 +1262,8 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
         { mode: 0o755 },
       );
       const environment = {
-        OPENAI_API_KEY: "synthetic-test-key",
+        ...promptfooEnvironment(root),
         CODEX_MCP_NODE_PATH: process.execPath,
-        PROMPTFOO_CONFIG_DIR: path.join(root, "state"),
-        PROMPTFOO_DISABLE_WAL_MODE: "true",
-        PROMPTFOO_DISABLE_TELEMETRY: "1",
-        PROMPTFOO_DISABLE_UPDATE: "1",
       };
       const template = parse(
         fs.readFileSync(
@@ -1408,23 +1330,10 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
         }),
       );
       fs.writeFileSync(failure, "");
-      const initial = await invoke(
-        [
-          "eval",
-          "-c",
-          configPath,
-          "--no-cache",
-          "--no-share",
-          "--no-progress-bar",
-        ],
-        environment,
-      );
+      const initial = await invoke(evalArgs("-c", configPath), environment);
       assert.notEqual(initial.code, 0, initial.output);
       assert.match(initial.output, /synthetic retryable failure/);
-      const initialDatabase = new DatabaseSync(
-        path.join(environment.PROMPTFOO_CONFIG_DIR, "promptfoo.db"),
-        { enableForeignKeyConstraints: false },
-      );
+      const initialDatabase = openDatabase(environment);
       const initialEvaluation = initialDatabase
         .prepare("SELECT config FROM evals ORDER BY created_at DESC LIMIT 1")
         .get();
@@ -1468,21 +1377,9 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
         );
       }
       fs.rmSync(failure);
-      const retry = await invoke(
-        [
-          "eval",
-          "--retry-errors",
-          "--no-cache",
-          "--no-share",
-          "--no-progress-bar",
-        ],
-        environment,
-      );
+      const retry = await invoke(evalArgs("--retry-errors"), environment);
       assert.equal(retry.code, 0, retry.output);
-      const database = new DatabaseSync(
-        path.join(environment.PROMPTFOO_CONFIG_DIR, "promptfoo.db"),
-        { enableForeignKeyConstraints: false },
-      );
+      const database = openDatabase(environment);
       const stored = database
         .prepare(
           "SELECT id, config FROM evals ORDER BY created_at DESC LIMIT 1",
@@ -1504,27 +1401,14 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
       );
       database.prepare("DELETE FROM eval_results").run();
       database.close();
-      const resumed = await invoke(
-        ["eval", "--resume", "--no-cache", "--no-share", "--no-progress-bar"],
-        environment,
-      );
+      const resumed = await invoke(evalArgs("--resume"), environment);
       assert.equal(resumed.code, 0, resumed.output);
 
-      const resumedDatabase = new DatabaseSync(
-        path.join(environment.PROMPTFOO_CONFIG_DIR, "promptfoo.db"),
-        { enableForeignKeyConstraints: false },
-      );
-      const resumedResult = resumedDatabase
-        .prepare(
-          "SELECT metadata, test_case FROM eval_results WHERE eval_id = ? LIMIT 1",
-        )
-        .get(String(stored.id));
-      resumedDatabase.close();
-      assert.ok(resumedResult && typeof resumedResult.test_case === "string");
+      const resumedResult = storedReplayResult(environment, stored.id);
       // Match the viewer: prefer saved inputVars, then the resolved test-case vars.
       const replayVariables =
         JSON.parse((resumedResult.metadata as string | null) ?? "{}")
-          .inputVars || JSON.parse(resumedResult.test_case).vars;
+          .inputVars || JSON.parse(resumedResult.testCase).vars;
       assert.equal(typeof replayVariables.target_repo, "string");
 
       const viewerOutput = await replayInViewer(t, environment, {
