@@ -109,10 +109,13 @@ Capture the project lookup and findings pages as original [Semgrep Web API](http
 [Semgrep MCP](https://github.com/semgrep/semgrep/blob/fe209763a4a2ccfcdf6434e6c332edc24a2f586e/cli/src/semgrep/mcp/server.py) return different records.
 Pass a fully qualified ref, such as `refs/heads/topic` or `refs/tags/topic`, exactly as it appears in the findings.
 Supply the HTTP(S) repository URL you independently associate with the target checkout.
-The project URL and any finding URL must match this spelling. An exact finding URL
-identifies the repository even if its display label has changed. A finding without a URL
-must carry the project ID and a repository name that equals the namespace-qualified,
-decoded path in the operator-supplied URL. A conflicting project ID is always rejected.
+The project URL and any finding URL must match this spelling. Legacy findings can
+omit the project ID. An exact URL then identifies the repository even if the
+display name has changed. If multiple Semgrep projects share that URL, select
+the IDs from the intended project: the URL alone can also match a sibling project
+on the same ref. A conflicting project ID is always rejected. A finding without a
+URL must carry the matching project ID and a name equal to the namespace-qualified,
+decoded path in the operator-supplied URL.
 The local importer checks the checkout using its existing repository rules.
 
 ```ts

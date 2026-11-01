@@ -293,12 +293,12 @@ test("a URL-less row needs the matching project ID and full name, while an exact
   expect(
     select("project", { url: cloneUrl, name }, cloneUrl).findings,
   ).toHaveLength(1);
-  expect(
-    select("project", { url, name: "other/project" }).findings,
-  ).toHaveLength(1);
-  expect(() =>
-    select("project", { url, id: 78, name: "other/project" }),
-  ).toThrow("project and ref");
+  const historicalProject = "old-group/project/api";
+  const sibling = { url, name: "old-group/project/cli" };
+  expect(select(historicalProject, sibling).findings).toHaveLength(1);
+  expect(() => select(historicalProject, { ...sibling, id: 78 })).toThrow(
+    "project and ref",
+  );
 });
 
 test("a fractional source position cannot round to an integer during projection", () => {
