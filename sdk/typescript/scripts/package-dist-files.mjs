@@ -32,6 +32,7 @@ const distModules = [
   "snyk-findings",
   "scanner-repository-url",
   "semgrep-findings",
+  "semgrep-platform-findings",
   "sonar-findings",
   "sonar-collector",
   "sonar-import",

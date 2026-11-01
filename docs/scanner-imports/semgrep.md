@@ -2,6 +2,8 @@
 
 Import native Code CLI or CI JSON to retain severities and available snippets.
 Self-contained Semgrep SARIF 2.1.0 is also supported. Either format can be gzipped.
+For selected findings from the Semgrep Platform API, use the
+[local SDK example](#import-selected-semgrep-platform-sast-findings-with-the-sdk).
 
 ## Quick start
 
@@ -76,8 +78,74 @@ When using `prepareNormalizedLocalImport` directly, pass the original SARIF
 repository references in the third argument's `sourceRepositories`. Use
 `{ url, platform: "github" }` for a verified custom GitHub host.
 
-### Existing Platform findings
+### Import selected Semgrep Platform SAST findings with the SDK
 
-Guardian, MCP and the Platform findings API return different records. For
-this file import, use a Code scan artifact.
-[Platform findings API](https://docs.semgrep.dev/semgrep-appsec-platform/semgrep-api)
+Request `issue_type=sast` and save the original project lookup and findings
+pages as response text. Pass each findings page separately. The SDK checks
+every row on pages that contain a selected ID for conflicting product evidence.
+When a page contains only fields shared by several products, the original
+request filter identifies the product. Guardian and MCP return different
+records. [Semgrep Web API](https://docs.semgrep.dev/semgrep-appsec-platform/semgrep-api),
+[Guardian for Codex](https://docs.semgrep.dev/semgrep-guardian/ide-setup/codex),
+[Semgrep MCP](https://github.com/semgrep/semgrep/blob/fe209763a4a2ccfcdf6434e6c332edc24a2f586e/cli/src/semgrep/mcp/server.py)
+
+Use the full ref from the findings, such as `refs/heads/main` or
+`refs/tags/v1`. Supply the credential-free HTTP(S) repository URL you verified
+for the checkout. The native `project.url` and any selected
+`finding.repository.url` must match it exactly.
+
+- An exact finding URL is sufficient when `repository.id` is absent, even if
+  the display names differ. If several projects share the URL and ref, choose
+  the finding IDs from the intended project.
+- Any `repository.id` supplied must match `project.id`. When the finding has
+  no URL, it must include both the matching project ID and a `repository.name`
+  equal to the decoded, namespace-qualified path in the supplied URL, such as
+  `example/project`.
+
+[Enable external imports](README.md#preview-a-report) and run the SDK from
+the matching checkout. Replace the example values and file paths with your
+selection. Pass the finding IDs as positive decimal strings without leading
+zeros to preserve 64-bit IDs.
+
+```js
+import { readFile } from "node:fs/promises";
+import {
+  normalizeSelectedSemgrepPlatformFindings,
+  prepareNormalizedLocalImport,
+} from "@openai/codex-security";
+
+const sourceRepositoryUrl = "https://github.com/example/project";
+const selected = normalizeSelectedSemgrepPlatformFindings({
+  deployment: "example",
+  ref: "refs/heads/main",
+  sourceRepositoryUrl,
+  projectResponse: await readFile("../reports/semgrep-project.json", "utf8"),
+  findingsResponses: [
+    await readFile("../reports/semgrep-findings-1.json", "utf8"),
+  ],
+  findingIds: ["123"],
+});
+const prepared = await prepareNormalizedLocalImport(
+  selected,
+  {
+    provider: "semgrep",
+    sourceKey: "example/project/platform/main",
+    repository: ".",
+  },
+  { sourceRepositories: [{ url: sourceRepositoryUrl }] },
+);
+console.log(prepared.preview);
+```
+
+Review the repository, findings and exclusions in the preview. To save the
+selection, call `await prepared.import()` and
+[read back the local records](README.md#save-or-publish-and-verify).
+Keep the same source key on replay. Each occurrence is identified by deployment,
+project ID, SAST product, full ref and native finding ID.
+
+The stored evidence includes the selected finding and the project's ID, name
+and URL. Larger positive integer IDs are retained without rounding. Equivalent
+numeric spellings (`2` and `2.0`) and key order do not change the stored record.
+Preview excludes findings that lack both a native rule name and a message.
+Only repository-relative files become locations. URI-like and directory-only
+paths stay in the native evidence.

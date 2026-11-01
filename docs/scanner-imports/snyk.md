@@ -18,7 +18,9 @@ snyk_report=../reports/snyk-open-source.json
 ```
 
 If you collected the report from a package subdirectory, return to the checkout
-root before previewing it with `--repository .`.
+root before previewing it with `--repository .`. Replace `root` in the source
+key below with the original scan target, such as `services/api`, so reports
+from different package directories keep separate records.
 
 ```sh
 codex-security publish findings "$snyk_report" --to local --repository . \

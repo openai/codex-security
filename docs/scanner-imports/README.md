@@ -12,7 +12,7 @@ in a local checkout and which source key to reuse on later imports.
 | [GitHub Dependabot](github-dependabot.md)                   | Dependency alerts exported from one repository                                  |
 | [GitHub Security Advisories](github-security-advisories.md) | Selected repository or global advisories                                        |
 | [OpenGrep](opengrep.md)                                     | Native scan JSON, optionally gzip-compressed                                    |
-| [Semgrep Code](semgrep.md)                                  | CLI or CI JSON, or a self-contained SARIF report                                |
+| [Semgrep Code](semgrep.md)                                  | CLI/CI JSON, self-contained SARIF, or selected Platform API pages (local SDK)   |
 | [Snyk Open Source](snyk.md)                                 | CLI JSON, a Codex plugin export, or SARIF                                       |
 | [SonarQube Cloud](sonar.md)                                 | Issues selected with the signed-in Sonar CLI, or saved issue-search pages       |
 | [Veracode Static Analysis](veracode.md)                     | Findings API pages for one application's policy flaws                           |
