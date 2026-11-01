@@ -22,7 +22,7 @@ import {
   record,
   relativePath,
   requiredText,
-  sarifRunContextForResult,
+  sarifRunContextSelector,
   stableId,
   text,
 } from "./scanner-import.js";
@@ -235,9 +235,11 @@ export function normalizeSemgrepSarif(
     const { results: _results, tool: _tool, ...runContext } = run;
     const { rules: _rules, ...driverContext } = driver;
     const { driver: _driver, ...toolContext } = tool;
+    const selectRunContext = sarifRunContextSelector(runContext);
     return array(run["results"] ?? [], "Semgrep results").map((result) => ({
       result,
       rulesById,
+      selectRunContext,
       hasRules: rules.length > 0,
       documentContext,
       runContext,
@@ -247,7 +249,7 @@ export function normalizeSemgrepSarif(
   });
   return normalizeRecords(
     entries,
-    ({ result: value, rulesById, hasRules, ...context }) => {
+    ({ result: value, rulesById, selectRunContext, hasRules, ...context }) => {
       const result = record(value, "Semgrep result");
       const properties = record(
         result["properties"] ?? {},
@@ -357,8 +359,7 @@ export function normalizeSemgrepSarif(
           },
           source_data: structuredClone({
             ...context,
-            runContext: sarifRunContextForResult(
-              context.runContext,
+            runContext: selectRunContext(
               result,
               rule,
               context.driverContext,
