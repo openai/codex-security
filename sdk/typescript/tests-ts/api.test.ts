@@ -3719,7 +3719,7 @@ if __name__ == "__main__":
           if (denied.has(path)) {
             const count = (attempts.get(path) ?? 0) + 1;
             attempts.set(path, count);
-            if (count === 3)
+            if (count === 3 && code !== "EMFILE")
               (path === logs[0] ? firstRepeated : secondRepeated)();
             throw Object.assign(
               new Error(`Synthetic ${code} for ${basename(path)}`),
@@ -3758,7 +3758,19 @@ if __name__ == "__main__":
       const keepAlive = setTimeout(() => {}, 10_000);
       const operation = client.run(repository, {
         onActivity: () => {},
-        onWarning: (warning) => warnings.push(warning),
+        onWarning: (warning) => {
+          warnings.push(warning);
+          // A poll can attempt both logs while reporting only its first error.
+          // Wait for diagnostics before advancing the EMFILE fixture's stream.
+          if (code === "EMFILE")
+            for (const log of logs) {
+              if (
+                warnings.filter((message) => message.includes(basename(log)))
+                  .length === 3
+              )
+                (log === logs[0] ? firstRepeated : secondRepeated)();
+            }
+        },
       });
       try {
         expect(await operation).toMatchObject({
