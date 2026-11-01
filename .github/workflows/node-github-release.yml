@@ -595,7 +595,8 @@ jobs:
           sfw npm ci --prefix runtime --ignore-scripts --include=optional --no-audit --no-fund \
             --registry=https://registry.npmjs.org/ --cache="$runtime_cache"
 
-      - name: Build Action distribution
+      - &action-build-distribution
+        name: Build Action distribution
         if: steps.distribution.outputs.existing != 'true'
         working-directory: release-source/github-action
         run: npm run build
@@ -657,10 +658,7 @@ jobs:
         working-directory: release-source/github-action
         run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Build Action distribution
-        if: steps.distribution.outputs.existing != 'true'
-        working-directory: release-source/github-action
-        run: npm run build
+      - *action-build-distribution
 
       - name: Check Action distribution before publication
         working-directory: release-source/github-action
