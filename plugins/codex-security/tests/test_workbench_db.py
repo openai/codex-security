@@ -2436,6 +2436,7 @@ def test_workbench_starts_diff_without_presentation_label(tmp_path: Path) -> Non
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
     revision = initialize_git_repository(target)
+    (target / "checkout-only.py").write_text("untracked = True\n")
     workspace_id = str(uuid.uuid4())
     create_workspace(state_dir, workspace_id)
     save_workspace(
@@ -2456,6 +2457,7 @@ def test_workbench_starts_diff_without_presentation_label(tmp_path: Path) -> Non
             "UPDATE workspaces SET target_summary = NULL WHERE id = ?", (workspace_id,)
         )
     started = start_scan_command(state_dir, workspace_id, "--scan-root", str(tmp_path / "scans"))
+    assert started["results"]["progress"]["coverage"]["filesTotal"] == 1
     assert started["results"]["diffTarget"]["headRevision"] == revision
     assert started["results"]["targetSummary"] == f"Commit {revision[:7]}"
 
