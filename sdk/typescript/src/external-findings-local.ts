@@ -23,6 +23,7 @@ import { localFindingRepositories } from "./external-findings-read.js";
 import {
   hasGitMetadata,
   localGitProtectionRoots,
+  importGitProtectionRoots,
 } from "./local-git-metadata.js";
 import {
   blackDuckReportRepositories,
@@ -596,16 +597,7 @@ async function localContext(
     ...new Set([
       repository,
       ...(await abortable(
-        () => localGitProtectionRoots(path, environment, dependencies.signal),
-        dependencies.signal,
-      )),
-      ...(await abortable(
-        () =>
-          localGitProtectionRoots(
-            process.cwd(),
-            environment,
-            dependencies.signal,
-          ),
+        () => importGitProtectionRoots(path, environment, dependencies.signal),
         dependencies.signal,
       )),
     ]),
