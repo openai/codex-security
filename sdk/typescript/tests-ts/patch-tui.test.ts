@@ -9,6 +9,7 @@ import { act, createElement } from "react";
 import type { Finding, SeverityLevel } from "../src/index.js";
 import { PatchTui, type PatchSelection } from "../src/patch-tui.js";
 import { fakeResult } from "./cli-fixtures.js";
+import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
 afterEach(() => cleanup());
 
@@ -443,6 +444,42 @@ describe("interactive patch finding browser", () => {
         instructions: { occ_1: "Ask the owner" },
       },
     ]);
+  });
+
+  test("shows the final source line of a large excerpt under Node", async () => {
+    await using repository = await scopedTemporaryDirectory(
+      "patch-large-excerpt-",
+    );
+    const lineCount = 150_000;
+    const path = "large.ts";
+    await writeFile(
+      join(repository.path, path),
+      "x\n".repeat(lineCount - 1) + "last source line\n",
+    );
+    const finding = {
+      ...fakeResult(["high"]).findings.findings[0]!,
+      title: "Large excerpt",
+      occurrenceId: "occ_large",
+      locations: [{ path, startLine: 1, endLine: lineCount }],
+    };
+    const built = await Bun.build({
+      entrypoints: [
+        join(import.meta.dirname, "fixtures", "patch-large-excerpt.ts"),
+      ],
+      target: "node",
+      packages: "external",
+    });
+    expect(built.success).toBe(true);
+    const result = spawnSync(
+      "node",
+      ["--input-type=module", "-", repository.path, JSON.stringify(finding)],
+      {
+        cwd: join(import.meta.dirname, ".."),
+        input: await built.outputs[0]!.text(),
+        encoding: "utf8",
+      },
+    );
+    expect(result.status, result.stderr).toBe(0);
   });
 
   test("uses the current finding and viewport for every buffered scroll key", async () => {
