@@ -16,6 +16,7 @@ import {
 } from "./deduplication-prompts.js";
 import type {
   DeduplicationReviewAttribution,
+  DeduplicationReviewRequest,
   DeduplicationReviewRunner,
 } from "./review.js";
 
@@ -89,7 +90,23 @@ export async function deduplicateRecords(
   input: DeduplicateRecordsInput,
   options: DeduplicateRecordsOptions,
 ): Promise<DeduplicateRecordsResult> {
-  options.signal?.throwIfAborted();
+  return await runRecords(
+    input,
+    (request) => options.reviewRunner.run(request, { signal: options.signal }),
+    options.signal,
+  );
+}
+
+/** The records transport can check a pending submission before releasing its host. */
+export async function runRecords(
+  input: DeduplicateRecordsInput,
+  runReview: (
+    request: DeduplicationReviewRequest,
+    validate: (value: unknown) => void,
+  ) => Promise<unknown>,
+  signal?: AbortSignal,
+): Promise<DeduplicateRecordsResult> {
+  signal?.throwIfAborted();
   // Snapshot before yielding: a host cannot mutate evidence during the review.
   const data = deduplicateRecordsInputSchema.parse(structuredClone(input));
   const references = new Map<string, string>();
@@ -140,9 +157,9 @@ export async function deduplicateRecords(
     }: CodexReview<T>): Promise<T> {
       try {
         return await abortable(async () => {
-          options.signal?.throwIfAborted();
+          signal?.throwIfAborted();
           return validate(
-            await options.reviewRunner.run(
+            await runReview(
               {
                 ...review,
                 requestId: randomUUID(),
@@ -160,12 +177,12 @@ export async function deduplicateRecords(
                     ? screeningFindingFormatInstructions
                     : pairFindingFormatInstructions,
                 ].join("\n\n"),
-                findingSchema: findingSchema(),
+                findingSchema: structuredClone(findingSchema()),
               },
-              { signal: options.signal },
+              validate,
             ),
           );
-        }, options.signal);
+        }, signal);
       } catch (error) {
         // Records mode discards the batch after any failed review.
         if (
@@ -190,16 +207,16 @@ export async function deduplicateRecords(
       },
     },
     reviewer,
-    options.signal,
+    signal,
     1,
   );
   let groups: string[][];
   try {
     const decisions = await algorithm.run(sourceFindingIds);
-    options.signal?.throwIfAborted();
+    signal?.throwIfAborted();
     groups = decisions.duplicateGroups;
   } catch (error) {
-    options.signal?.throwIfAborted();
+    signal?.throwIfAborted();
     result.status = "unresolved";
     result.unresolved = [...relationships.keys()].map((id) => ({
       observationId: id,

@@ -156,40 +156,6 @@ export async function preflightReadOnlyProfileCodex(
   return { permissionProfileId, configOverrides };
 }
 
-/** Older workers must inherit the same effective provider as the parent scan. */
-export async function legacyWorkerUsesScanProvider(
-  command: CodexCommand,
-  environment: Record<string, string>,
-  cwd: string,
-  modelProvider: string,
-  signal?: AbortSignal,
-): Promise<boolean> {
-  const preflight = await nativePermissionPreflight();
-  const env = bundledCodexSdkEnvironment(command.command, environment);
-  return await withCodexPreflightLock(env, signal, async () => {
-    const options = {
-      codexPath: executablePathForSpawn(command.command),
-      commandArgs: command.args,
-      cwd,
-      env,
-      signal: signal ?? new AbortController().signal,
-      context: "helper",
-    };
-    const worker = await preflight.readDeepScanRuntimeConfig({
-      ...options,
-      configOverrides: [],
-    });
-    const parent = await preflight.readDeepScanRuntimeConfig({
-      ...options,
-      configOverrides: [`model_provider=${JSON.stringify(modelProvider)}`],
-    });
-    return (
-      (worker.model_provider ?? "openai") ===
-      (parent.model_provider ?? "openai")
-    );
-  });
-}
-
 export async function withCodexPreflightLock<T>(
   env: Record<string, string> | undefined,
   signal: AbortSignal | undefined,

@@ -22,13 +22,13 @@ async function summary(
 ) {
   const { stdout, stderr, runCli } = createCliTest(main);
 
-  const result = options?.result ?? fakeResult(["high"], "partial");
+  const result = options?.result ?? fakeResult(["high"]);
   expect(
     await runCli(
       ["scan", ...args, "--json"],
       dependencies({ ...options, result }),
     ),
-  ).toBe(result.coverage.completeness === "complete" ? 0 : 2);
+  ).toBe(0);
   expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
   return stderr.text();
 }
@@ -57,15 +57,15 @@ describe("deep scan completion summary", () => {
       "time limit",
       {
         dispatchedCount: 3,
-        config: { maxDiscoveryRuns: 40, maxTimeHours: 0.5 },
+        config: { maxDiscoveryRuns: 40, maxTimeHours: 0.119 / 60 },
       },
-      "0.5-hour time limit",
-      "higher --max-time-hours",
+      "0.119-minute time limit",
+      "--max-time greater than 0.119",
     ],
     [
       "maximum time limit",
       { dispatchedCount: 3, completedAt: "2026-01-05T00:00:00Z" },
-      "96-hour time limit",
+      "5760-minute time limit",
       "rerun with --path",
     ],
     [

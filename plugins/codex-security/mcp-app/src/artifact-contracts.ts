@@ -20,7 +20,13 @@ function pattern(schema: z.ZodString, source: string) {
   });
 }
 
-const nonEmptyText = z.string().min(1).regex(/\S/);
+// Match Python str.strip in both runtimes; \S differs on BOM and C0/NEL whitespace.
+const nonEmptyText = z
+  .string()
+  .min(1)
+  .regex(
+    /[^\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/,
+  );
 
 const scanId = z
   .string()
@@ -29,7 +35,7 @@ const scanId = z
 
 const repositoryPath = pattern(
   z.string().min(1).max(4096),
-  "^(?:\\./)?(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(/|$))(?!.*//)(?!.*[\\u0000-\\u001f\\u007f])(?!.*\\/$).+$",
+  "^(?:\\./)?(?!/)(?![A-Za-z]:)(?![\\s\\S]*\\\\)(?![\\s\\S]*(?:^|/)\\.\\.?(/|$))(?![\\s\\S]*//)(?![\\s\\S]*[\\u0000-\\u001f\\u007f])(?![\\s\\S]*\\/$)[\\s\\S]+$",
 );
 
 const candidateId = z
@@ -174,7 +180,6 @@ const {
   confidence: draft_confidence,
   location: draft_location,
   codeEvidence,
-  legacyCodeEvidence: draft_legacyCodeEvidence,
   findingAssessment: draft_findingAssessment,
   textOrSummary: draft_textOrSummary,
   findingReachability: draft_findingReachability,
@@ -231,30 +236,20 @@ const draft_finding = z.looseObject({
     })
     .optional(),
   codeEvidence: z.array(draft_codeEvidence).optional(),
-  code_evidence: z.array(draft_legacyCodeEvidence).optional(),
+  code_evidence: z.never().optional(),
   rootCause: z
     .union([
       nonEmptyText,
       z.looseObject({
         summary: nonEmptyText,
-        code: nonEmptyText.optional(),
-        language: nonEmptyText.optional(),
+        code: z.never().optional(),
+        language: z.never().optional(),
         evidenceRefs: draft_textList.optional(),
+        evidence_refs: z.never().optional(),
       }),
     ])
     .optional(),
-  root_cause: z
-    .union([
-      nonEmptyText,
-      z.looseObject({
-        summary: nonEmptyText.optional(),
-        code: nonEmptyText.optional(),
-        language: nonEmptyText.optional(),
-        evidenceRefs: draft_textList.optional(),
-        evidence_refs: draft_textList.optional(),
-      }),
-    ])
-    .optional(),
+  root_cause: z.never().optional(),
   remediation: nonEmptyText,
   validation: z.union([draft_findingValidation, z.null()]).optional(),
   attackPath: z.union([draft_findingAttackPath, z.null()]).optional(),
@@ -340,11 +335,6 @@ const draft_coverage = z.looseObject({
   includePaths: z.never().optional(),
   excludePaths: z.never().optional(),
   receiptRefs: z.never().optional(),
-  completeness: z
-    .enum(["complete", "partial", "unknown"])
-    .describe(
-      "Use partial if any work is deferred or any surface needs follow-up; use complete only when no such work remains.",
-    ),
   inventoryStrategy: z.never().optional(),
   surfaces: z.array(draft_surface),
   explicitExclusions: z.array(
@@ -386,7 +376,7 @@ const draft_scanDraftInput = z.strictObject({
   complete: z
     .boolean()
     .describe(
-      "Set false to save progress without declaring this worker or parent audit finished. Omit or set true only for the terminal result. Put provisional candidates in coverage.deferred, not findings.",
+      "Set false to save progress without declaring this worker or parent audit finished. Omit or set true only for the terminal result. Put provisional candidates in reviewState.deferred, not findings.",
     )
     .optional(),
   scanId: scanId,
@@ -394,8 +384,17 @@ const draft_scanDraftInput = z.strictObject({
   scope: draft_scope.optional(),
   threatModel: draft_threatModel.optional(),
   findings: z.array(draft_finding),
-  coverage: draft_coverage,
+  reviewState: draft_coverage,
 });
+
+const deep_reductionInput = draft_scanDraftInput
+  .omit({ reviewState: true })
+  .extend({
+    complete: z
+      .boolean()
+      .describe("Omit or set true when submitting the finished aggregate.")
+      .optional(),
+  });
 
 /** Native tool contracts; JSON resources are generated compatibility exports. */
 export const artifactSchemaDocuments = {
@@ -480,7 +479,6 @@ export const artifactSchemaDocuments = {
       confidence: draft_confidence,
       taxonomy: draft_taxonomy,
       codeEvidence: draft_codeEvidence,
-      legacyCodeEvidence: draft_legacyCodeEvidence,
       findingAssessment: draft_findingAssessment,
       textOrSummary: draft_textOrSummary,
       findingReachability: draft_findingReachability,
@@ -490,7 +488,7 @@ export const artifactSchemaDocuments = {
       scope: draft_scope,
       threatModel: draft_threatModel,
       surface: draft_surface,
-      coverage: draft_coverage,
+      reviewState: draft_coverage,
       scanDraftInput: draft_scanDraftInput,
       completedScanInput: z.strictObject({
         scanId: scanId,
@@ -500,7 +498,7 @@ export const artifactSchemaDocuments = {
   },
   "tools/deep-reducer": {
     title: "Codex Security Deep Scan semantic reducer operations",
-    $ref: "#/$defs/reductionInput",
+    $ref: "#/$defs/reductionSubmission",
     $defs: {
       reducerInputs: z.strictObject({
         cursor: z
@@ -518,10 +516,13 @@ export const artifactSchemaDocuments = {
           )
           .optional(),
       }),
-      reductionInput: draft_scanDraftInput.omit({ coverage: true }).extend({
-        complete: z
-          .boolean()
-          .describe("Omit or set true when submitting the finished aggregate.")
+      reductionInput: deep_reductionInput,
+      reductionSubmission: deep_reductionInput.extend({
+        retainedFindingRefs: z
+          .array(z.string().regex(/^previous:(0|[1-9][0-9]*)$/))
+          .describe(
+            "Copy unchanged previous aggregate findings by previous:<zero-based index>. The host preserves their complete bodies, identities, and source references; do not also submit them in findings.",
+          )
           .optional(),
       }),
     },

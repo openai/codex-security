@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { JsonObject } from "./config.js";
 import type { Finding } from "./models.js";
-import type { NormalizedTarget } from "./targets.js";
 
 type DraftFinding = Omit<
   Finding,
@@ -195,7 +194,6 @@ function mockFindings(scanId: string): DraftFinding[] {
 export async function writeMockScanDraft(
   scanDir: string,
   scanId: string,
-  target: NormalizedTarget,
   registration: JsonObject,
   signal: AbortSignal,
 ): Promise<void> {
@@ -226,28 +224,21 @@ export async function writeMockScanDraft(
           runtimeStatus: "mock",
           limitations: [description],
         },
+        reviewState: {
+          surfaces: EXAMPLES.map((example) => ({
+            id: `mock-${example.id}`,
+            label: `[Mock] ${example.title}`,
+            disposition: "reported",
+            receiptRefs: [],
+            notes: description,
+          })),
+          explicitExclusions: [],
+          deferred: [],
+        },
         extensions: { mock: true },
       },
     },
     "findings.json": { findings: mockFindings(scanId) },
-    "coverage.json": {
-      completeness: "complete",
-      inventoryStrategy:
-        target.kind === "paths"
-          ? "scoped_path"
-          : target.kind === "repository"
-            ? "repository"
-            : "diff",
-      surfaces: EXAMPLES.map((example) => ({
-        id: `mock-${example.id}`,
-        label: `[Mock] ${example.title}`,
-        disposition: "reported",
-        receiptRefs: [],
-        notes: description,
-      })),
-      explicitExclusions: [],
-      deferred: [],
-    },
   };
   for (const [name, document] of Object.entries(documents)) {
     await writeFile(

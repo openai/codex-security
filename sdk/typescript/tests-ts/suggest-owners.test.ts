@@ -9,6 +9,7 @@ import { InvalidTargetError } from "../src/errors.js";
 import type { OwnerContext } from "../src/owner-evidence.js";
 import {
   suggestOwners,
+  suggestOwnersFromScan,
   type OwnerFinding,
   type SuggestOwnersOptions,
 } from "../src/suggest-owners.js";
@@ -134,6 +135,7 @@ test.each(["ISO-8859-1", "UTF-16LE"])(
         };
       });
       const report = await suggestOwners(repo.path, [finding], { codex });
+      expect(report.schemaVersion).toBe(2);
       expect(report.results[0]).toMatchObject({
         status: "identified",
         owner: { name, email },
@@ -524,6 +526,101 @@ test("keeps renamed-file blame citations at HEAD and inherits SDK model settings
   });
 });
 
+test.each(["author", "checkout"] as const)(
+  "scan hints after a rename validate the %s commit against blame",
+  async (supportingCommit) => {
+    const repo = await repository();
+    const path = "record [1].ts";
+    await repo.git("mv", "handler.ts", path);
+    await repo.git(
+      "-c",
+      "user.name=Blair Example",
+      "-c",
+      "user.email=blair@example.test",
+      "commit",
+      "-qm",
+      "Rename record handler",
+    );
+    const revision = await repo.git("rev-parse", "HEAD");
+    const { codex, calls } = fakeCodex();
+    const report = await suggestOwnersFromScan(
+      repo.path,
+      [
+        {
+          ...finding,
+          sourceRevision: revision,
+          locations: [{ path, startLine: 2, endLine: 3 }],
+          extensions: {
+            ownerSuggestion: {
+              email: "alex@example.test",
+              commit: supportingCommit === "author" ? repo.original : revision,
+              reason: "Alex authored the affected lines before the rename.",
+            },
+          },
+        },
+      ],
+      { codex },
+    );
+    expect(calls).toHaveLength(0);
+    const result = report.results[0]!;
+    if (supportingCommit === "author") {
+      expect(result).toMatchObject({
+        status: "identified",
+        owner: { name: "Alex Example", email: "alex@example.test" },
+      });
+      expect(result.evidence.find(({ kind }) => kind === "blame")).toEqual({
+        id: expect.any(String),
+        kind: "blame",
+        path,
+        commit: revision,
+        startLine: 2,
+        endLine: 3,
+      });
+    } else {
+      expect(result).toMatchObject({ status: "error", owner: null });
+    }
+  },
+);
+
+test("scan hints match the cited commit when Git emails differ in case", async () => {
+  const repo = await repository();
+  await writeFile(
+    join(repo.path, "handler.ts"),
+    "// Record access\nexport function readRecord(id) {\n  return records.get(id);\n}\n",
+  );
+  await repo.git(
+    "-c",
+    "user.email=Alex@Example.test",
+    "commit",
+    "-qam",
+    "Use a record map",
+  );
+  const revision = await repo.git("rev-parse", "HEAD");
+  const { codex, calls } = fakeCodex();
+  const report = await suggestOwnersFromScan(
+    repo.path,
+    [
+      {
+        ...finding,
+        sourceRevision: revision,
+        extensions: {
+          ownerSuggestion: {
+            email: "Alex@Example.test",
+            commit: revision,
+            reason: "Alex changed the affected record lookup.",
+          },
+        },
+      },
+    ],
+    { codex },
+  );
+  expect(calls).toHaveLength(0);
+  expect(report.results[0]).toMatchObject({
+    status: "identified",
+    owner: { name: "Alex Example", email: "Alex@Example.test" },
+  });
+});
+
 test("rejects invented identities and citations and preserves later results", async () => {
   const repo = await repository();
   const invalid: ((context: OwnerContext) => unknown)[] = [
@@ -618,6 +715,294 @@ test("propagates cancellation", async () => {
   ).rejects.toThrow("Canceled by caller");
 });
 
+test("prioritizes the first committed declared owner without a model call", async () => {
+  const repo = await repository();
+  await mkdir(join(repo.path, ".github"));
+  await mkdir(join(repo.path, "docs"));
+  await writeFile(
+    join(repo.path, ".github", "CODEOWNERS"),
+    "* @default\n/hand*.ts @example/maintainers @reviewer alex@example.test\n",
+  );
+  await writeFile(join(repo.path, "CODEOWNERS"), "* @wrong-root\n");
+  await writeFile(join(repo.path, "docs", "CODEOWNERS"), "* @wrong-docs\n");
+  await repo.git("add", ".");
+  await repo.git("commit", "-qm", "Declare owners");
+  const revision = await repo.git("rev-parse", "HEAD");
+  await writeFile(join(repo.path, ".github", "CODEOWNERS"), "* @uncommitted\n");
+  const { codex, calls } = fakeCodex(() => {
+    throw new Error("A declared owner does not require a model.");
+  });
+  const report = await suggestOwners(repo.path, [finding], { codex });
+  expect(calls).toHaveLength(0);
+  expect(report.revision).toBe(revision);
+  expect(report.schemaVersion).toBe(2);
+  expect(report.results[0]).toMatchObject({
+    findingId: finding.findingId,
+    status: "identified",
+    owner: {
+      kind: "group",
+      provider: "github",
+      handle: "example/maintainers",
+    },
+    evidence: [
+      {
+        kind: "codeowners",
+        path: ".github/CODEOWNERS",
+        commit: revision,
+        startLine: 2,
+        endLine: 2,
+        rule: "/hand*.ts @example/maintainers @reviewer alex@example.test",
+        matchedPath: "handler.ts",
+      },
+    ],
+  });
+  expect(report.results[0]!.evidence).toHaveLength(1);
+});
+
+test("loads CODEOWNERS once per invocation while matching each finding separately", async () => {
+  const repo = await repository();
+  await writeFile(join(repo.path, "other.ts"), "// Another owned file\n");
+  await writeFile(
+    join(repo.path, "CODEOWNERS"),
+    "/handler.ts @handler-owner\n/other.ts @other-owner\n",
+  );
+  await repo.git("add", ".");
+  await repo.git("commit", "-qm", "Declare owners");
+  const trace = join(await temporaryDirectory("owner-trace-"), "git.jsonl");
+  const { codex, calls } = fakeCodex();
+  const options = {
+    codex,
+    environment: { ...process.env, GIT_TRACE2_EVENT: trace },
+  };
+  const findings = [
+    finding,
+    {
+      ...finding,
+      findingId: "finding-two",
+      locations: [{ path: "other.ts" }],
+    },
+  ];
+  const first = await suggestOwners(repo.path, findings, options);
+  expect(first.results).toMatchObject([
+    {
+      owner: { handle: "handler-owner" },
+      evidence: [{ matchedPath: "handler.ts", startLine: 1 }],
+    },
+    {
+      owner: { handle: "other-owner" },
+      evidence: [{ matchedPath: "other.ts", startLine: 2 }],
+    },
+  ]);
+  await writeFile(join(repo.path, "CODEOWNERS"), "* @new-owner\n");
+  await repo.git("commit", "-qam", "Update owners");
+  const second = await suggestOwners(repo.path, findings, options);
+  expect(second.revision).not.toBe(first.revision);
+  expect(second.results.map(({ owner }) => owner)).toEqual([
+    { kind: "person", provider: "github", handle: "new-owner" },
+    { kind: "person", provider: "github", handle: "new-owner" },
+  ]);
+  const reads = (await readFile(trace, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { event: string; argv?: string[] })
+    .filter(
+      ({ event, argv }) => event === "start" && argv?.includes("cat-file"),
+    );
+  expect(reads.map(({ argv }) => argv!.at(-1))).toEqual([
+    `${first.revision}:CODEOWNERS`,
+    `${second.revision}:CODEOWNERS`,
+  ]);
+  expect(calls).toHaveLength(0);
+});
+
+test("reports a lazy CODEOWNERS load failure for each finding", async () => {
+  const repo = await repository();
+  await writeFile(join(repo.path, "CODEOWNERS"), "* @owner\n");
+  await repo.git("add", ".");
+  await repo.git("commit", "-qm", "Declare owner");
+  const blob = await repo.git("rev-parse", "HEAD:CODEOWNERS");
+  await rm(join(repo.path, ".git", "objects", blob.slice(0, 2), blob.slice(2)));
+  const { codex, calls } = fakeCodex();
+  expect((await suggestOwners(repo.path, [], { codex })).results).toEqual([]);
+  const report = await suggestOwners(
+    repo.path,
+    [finding, { ...finding, findingId: "finding-two" }],
+    { codex },
+  );
+  expect(
+    report.results.map(({ findingId, status }) => ({ findingId, status })),
+  ).toEqual([
+    { findingId: finding.findingId, status: "error" },
+    { findingId: "finding-two", status: "error" },
+  ]);
+  expect(report.results[0]!.reason).toContain("cat-file");
+  expect(calls).toHaveLength(0);
+});
+
+test.each([
+  ["@reviewer", { kind: "person", provider: "github", handle: "reviewer" }],
+  ["alex@example.test", { kind: "person", email: "alex@example.test" }],
+] as const)("returns the declared person %s", async (declaration, owner) => {
+  const repo = await repository();
+  await writeFile(join(repo.path, "CODEOWNERS"), `* ${declaration}\n`);
+  await repo.git("add", ".");
+  await repo.git("commit", "-qm", "Declare owner");
+  const { codex, calls } = fakeCodex();
+  const report = await suggestOwners(repo.path, [finding], { codex });
+  expect(report.results[0]!.owner).toEqual(owner);
+  expect(report.results[0]!.status).toBe("identified");
+  expect(calls).toHaveLength(0);
+});
+
+test.each(["CODEOWNERS", "docs/CODEOWNERS"])(
+  "uses %s when no higher-priority ownership file exists",
+  async (path) => {
+    const repo = await repository();
+    await mkdir(join(repo.path, "docs"));
+    await writeFile(join(repo.path, path), "* @example/maintainers\n");
+    await repo.git("add", ".");
+    await repo.git("commit", "-qm", "Declare owner");
+    const report = await suggestOwners(repo.path, [finding]);
+    expect(report.results[0]!.evidence[0]!.path).toBe(path);
+    expect(report.results[0]!.owner).toEqual({
+      kind: "group",
+      provider: "github",
+      handle: "example/maintainers",
+    });
+  },
+);
+
+test.each([
+  "/elsewhere/ @example/maintainers\n",
+  "* @default\n/handler.ts\n",
+  "/handler.ts invalid-owner\n",
+])(
+  "falls back to Git when CODEOWNERS has no applicable owner: %s",
+  async (source) => {
+    const repo = await repository();
+    await mkdir(join(repo.path, ".github"));
+    await writeFile(join(repo.path, ".github", "CODEOWNERS"), source);
+    await writeFile(join(repo.path, "CODEOWNERS"), "* @wrong-root\n");
+    await repo.git("add", ".");
+    await repo.git("commit", "-qm", "Declare owners");
+    const { codex, calls } = fakeCodex();
+    const report = await suggestOwners(repo.path, [finding], { codex });
+    expect(calls).toHaveLength(1);
+    expect(report.results[0]!.status).toBe("identified");
+    expect(report.results[0]!.owner).toEqual({
+      name: "Alex Example",
+      email: "alex@example.test",
+    });
+    expect(
+      report.results[0]!.evidence.every(({ kind }) => kind !== "codeowners"),
+    ).toBe(true);
+  },
+);
+
+test("selects the first affected path with a declared owner", async () => {
+  const repo = await repository();
+  await writeFile(join(repo.path, "other.ts"), "export const other = 1;\n");
+  await writeFile(
+    join(repo.path, "CODEOWNERS"),
+    "/handler.ts @handler-owner\n/other.ts @other-owner\n",
+  );
+  await repo.git("add", ".");
+  await repo.git("commit", "-qm", "Declare owners");
+  const report = await suggestOwners(repo.path, [
+    {
+      ...finding,
+      locations: [
+        { path: "missing.ts" },
+        { path: "other.ts" },
+        ...finding.locations,
+      ],
+    },
+  ]);
+  expect(report.results[0]!.owner).toEqual({
+    kind: "person",
+    provider: "github",
+    handle: "other-owner",
+  });
+  expect(report.results[0]!.evidence[0]!.matchedPath).toBe("other.ts");
+});
+
+test("ignores a CODEOWNERS symlink and uses the next regular ownership file", async () => {
+  const repo = await repository();
+  await mkdir(join(repo.path, ".github"));
+  await writeFile(join(repo.path, ".github", "CODEOWNERS"), "../CODEOWNERS\n");
+  await writeFile(join(repo.path, "CODEOWNERS"), "* @reviewer\n");
+  const blob = await repo.git("hash-object", "-w", ".github/CODEOWNERS");
+  await repo.git("add", ".");
+  await repo.git(
+    "update-index",
+    "--cacheinfo",
+    `120000,${blob},.github/CODEOWNERS`,
+  );
+  await repo.git("commit", "-qm", "Declare owner through regular file");
+  const report = await suggestOwners(repo.path, [finding]);
+  expect(report.results[0]!.evidence[0]!.path).toBe("CODEOWNERS");
+  expect(report.results[0]!.owner).toEqual({
+    kind: "person",
+    provider: "github",
+    handle: "reviewer",
+  });
+});
+
+test("ignores CODEOWNERS at GitHub's file-size limit and falls back to Git", async () => {
+  const repo = await repository();
+  const source = "* @reviewer\n#";
+  await writeFile(join(repo.path, "CODEOWNERS"), source.padEnd(3_000_000, "x"));
+  await repo.git("add", ".");
+  await repo.git("commit", "-qm", "Declare owner in oversized file");
+  const { codex, calls } = fakeCodex();
+  const report = await suggestOwners(repo.path, [finding], { codex });
+  expect(calls).toHaveLength(1);
+  expect(report.results[0]!.owner).toEqual({
+    name: "Alex Example",
+    email: "alex@example.test",
+  });
+  expect(report.results[0]!.limitations.join(" ")).toContain("3 MB");
+});
+
+test("matches CODEOWNERS for Unicode repository-relative paths from a subdirectory", async () => {
+  const repo = await repository();
+  const subdir = join(repo.path, "src");
+  await mkdir(subdir);
+  await writeFile(join(repo.path, "café.ts"), "export const root = 1;\n");
+  await writeFile(join(subdir, "café.ts"), "export const nested = 2;\n");
+  await writeFile(
+    join(repo.path, "CODEOWNERS"),
+    "/café.ts @root-owner\n/src/café.ts @example/nested-team\n",
+  );
+  await repo.git("add", ".");
+  await repo.git("commit", "-qm", "Declare owners for Unicode paths");
+  const { codex, calls } = fakeCodex();
+  const report = await suggestOwners(
+    subdir,
+    [
+      {
+        ...finding,
+        findingId: "root-finding",
+        locations: [{ path: "café.ts" }],
+      },
+      {
+        ...finding,
+        findingId: "nested-finding",
+        locations: [{ path: "src/café.ts" }],
+      },
+    ],
+    { codex },
+  );
+  expect(report.results.map((result) => result.owner)).toEqual([
+    { kind: "person", provider: "github", handle: "root-owner" },
+    { kind: "group", provider: "github", handle: "example/nested-team" },
+  ]);
+  expect(
+    report.results.map((result) => result.evidence[0]!.matchedPath),
+  ).toEqual(["café.ts", "src/café.ts"]);
+  expect(calls).toHaveLength(0);
+});
+
 test("subdirectory roots retain repository-relative paths when filenames collide", async () => {
   const repo = await repository();
   const subdir = join(repo.path, "src");
@@ -664,9 +1049,9 @@ test("subdirectory roots retain repository-relative paths when filenames collide
     ],
     { codex },
   );
-  expect(report.results.map((result) => result.owner?.email)).toEqual([
-    "alex@example.test",
-    "casey@example.test",
+  expect(report.results.map((result) => result.owner)).toEqual([
+    { name: "Alex Example", email: "alex@example.test" },
+    { name: "Casey Example", email: "casey@example.test" },
   ]);
   expect(calls).toHaveLength(2);
 });

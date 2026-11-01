@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -8,18 +7,6 @@ import { CodexSecurityError } from "./errors.js";
 import { executablePathForSpawn, type CodexCommand } from "./runtime.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 import { withCodexPreflightLock } from "./provider-profile.js";
-
-/** Older custom plugins retain their existing prompt-driven launch path. */
-export async function supportsDirectDeepScan(
-  pluginRoot: string,
-): Promise<boolean> {
-  // The native parent keeps the plugin's configured Node selection under Bun.
-  if (process.versions["bun"]) return false;
-  const manifest = JSON.parse(
-    await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"),
-  );
-  return manifest.codexSecurity?.directDeepScanEngine === 1;
-}
 
 export interface DirectDeepScanOptions {
   codexOptions: CodexOptions & { nativeProfile?: string };
@@ -31,6 +18,14 @@ export interface DirectDeepScanOptions {
   prompt: string;
   signal: AbortSignal;
 }
+
+// The direct coordinator records context but never calls a model itself.
+export const DIRECT_DEEP_SCAN_CONTROL_USAGE = {
+  input_tokens: 0,
+  cached_input_tokens: 0,
+  cache_write_input_tokens: 0,
+  output_tokens: 0,
+} as const;
 
 /** Run the same coordinator as the plugin, without a parent model turn. */
 export async function* runDeepScan(
@@ -108,12 +103,7 @@ export async function* runDeepScan(
   // existing scan tracker from the native sessions below this scan directory.
   yield {
     type: "turn.completed",
-    usage: {
-      input_tokens: 0,
-      cached_input_tokens: 0,
-      cache_write_input_tokens: 0,
-      output_tokens: 0,
-    },
+    usage: { ...DIRECT_DEEP_SCAN_CONTROL_USAGE },
   };
 }
 

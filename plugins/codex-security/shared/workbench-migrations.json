@@ -393,5 +393,88 @@
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN discovery_user_context_json TEXT;"
     ]
+  },
+  {
+    "version": 48,
+    "name": "share finding issue receipts across trackers",
+    "statements": [
+      "CREATE TABLE finding_issue_receipts (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    scan_id TEXT NOT NULL,\n    finding_id TEXT NOT NULL,\n    occurrence_id TEXT NOT NULL,\n    destination_key TEXT NOT NULL,\n    external_id TEXT NOT NULL,\n    external_url TEXT,\n    operation TEXT NOT NULL CHECK (operation IN ('create', 'update', 'reuse')),\n    readback_json TEXT,\n    created_at TEXT NOT NULL,\n    updated_at TEXT NOT NULL,\n    UNIQUE (occurrence_id, destination_key, external_id, operation)\n);",
+      "INSERT INTO finding_issue_receipts (\n    scan_id, finding_id, occurrence_id, destination_key, external_id, external_url,\n    operation, readback_json, created_at, updated_at\n) SELECT scan_id, finding_id, occurrence_id, json_array(destination_type, team_id, project_id),\n    external_id, external_url, 'create', NULL, created_at, created_at\nFROM finding_publications ORDER BY id;",
+      "DROP TABLE finding_publications;",
+      "CREATE INDEX finding_issue_receipts_by_finding\nON finding_issue_receipts(finding_id, destination_key, id);"
+    ]
+  },
+  {
+    "version": 49,
+    "name": "index finding issue receipt ownership",
+    "statements": [
+      "CREATE INDEX finding_issue_receipts_by_destination_issue\nON finding_issue_receipts(destination_key, external_id, finding_id);"
+    ]
+  },
+  {
+    "version": 50,
+    "name": "persist authorized source excerpt scopes",
+    "statements": ["ALTER TABLE scans ADD COLUMN source_scopes_json TEXT;"]
+  },
+  {
+    "version": 51,
+    "name": "preserve deep scan worker thread history",
+    "statements": [
+      "CREATE TABLE deep_scan_worker_threads (\n    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,\n    worker_id TEXT NOT NULL,\n    sdk_thread_id TEXT NOT NULL,\n    PRIMARY KEY (scan_id, worker_id, sdk_thread_id)\n);",
+      "INSERT INTO deep_scan_worker_threads (scan_id, worker_id, sdk_thread_id)\nSELECT scan_id, id, sdk_thread_id FROM deep_scan_workers\nWHERE sdk_thread_id IS NOT NULL;",
+      "CREATE TRIGGER record_deep_scan_worker_thread_insert\nAFTER INSERT ON deep_scan_workers\nWHEN NEW.sdk_thread_id IS NOT NULL\nBEGIN\n    INSERT OR IGNORE INTO deep_scan_worker_threads (scan_id, worker_id, sdk_thread_id)\n    VALUES (NEW.scan_id, NEW.id, NEW.sdk_thread_id);\nEND;",
+      "CREATE TRIGGER record_deep_scan_worker_thread_update\nAFTER UPDATE OF sdk_thread_id ON deep_scan_workers\nWHEN NEW.sdk_thread_id IS NOT NULL\nBEGIN\n    INSERT OR IGNORE INTO deep_scan_worker_threads (scan_id, worker_id, sdk_thread_id)\n    VALUES (NEW.scan_id, NEW.id, NEW.sdk_thread_id);\nEND;"
+    ]
+  },
+  {
+    "version": 52,
+    "name": "record severity classification review counts",
+    "statements": [
+      "ALTER TABLE finding_severity_assessments ADD COLUMN classification_runs INTEGER CHECK (classification_runs BETWEEN 1 AND 10);",
+      "ALTER TABLE scan_severity_assessments ADD COLUMN classification_runs INTEGER CHECK (classification_runs BETWEEN 1 AND 10);",
+      "ALTER TABLE scan_severity_classifications ADD COLUMN classification_runs INTEGER CHECK (classification_runs BETWEEN 1 AND 10);"
+    ]
+  },
+  {
+    "version": 53,
+    "name": "store external source findings without assessments",
+    "statements": [
+      "CREATE TABLE external_source_reports (\n    id TEXT PRIMARY KEY,\n    repository TEXT NOT NULL,\n    provider TEXT NOT NULL,\n    source_key TEXT NOT NULL,\n    source_finding_id TEXT NOT NULL,\n    evidence_json TEXT NOT NULL,\n    version INTEGER NOT NULL,\n    created_at TEXT NOT NULL,\n    updated_at TEXT NOT NULL,\n    UNIQUE (repository, provider, source_key, source_finding_id)\n);"
+    ]
+  },
+  {
+    "version": 54,
+    "name": "snapshot deep scan setup configuration",
+    "statements": [
+      "ALTER TABLE workspaces ADD COLUMN deep_scan_config_json TEXT;"
+    ]
+  },
+  {
+    "version": 55,
+    "name": "retain undelivered headless deep scan results",
+    "statements": [
+      "ALTER TABLE deep_scan_runs ADD COLUMN pending_target_project_path TEXT;"
+    ]
+  },
+  {
+    "version": 56,
+    "name": "recover unfinished legacy headless deep scans",
+    "statements": [
+      "UPDATE deep_scan_runs\nSET pending_target_project_path = ''\nWHERE pending_target_project_path IS NULL\n    AND status IN ('running', 'succeeded') AND cancel_requested = 0\n    AND discovery_user_context_json IS NOT NULL\n    AND EXISTS (\n        SELECT 1 FROM scans JOIN workspaces ON workspaces.id = scans.workspace_id\n        WHERE scans.id = deep_scan_runs.scan_id AND scans.mode = 'deep'\n            AND scans.status = 'running' AND scans.canceled_at IS NULL\n            AND scans.recipe_json IS NULL AND scans.handoff_status = 'delivered'\n            AND scans.handoff_claim_token IS NULL AND scans.continuation_thread_id IS NULL\n            AND workspaces.active_scan_id = scans.id AND workspaces.deep_scan_config_json IS NULL\n            AND workspaces.created_at = scans.created_at AND scans.created_at = deep_scan_runs.created_at\n    );"
+    ]
+  },
+  {
+    "version": 57,
+    "name": "freeze stopped scan checkpoint selections",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN retained_checkpoint_heads_json TEXT;"
+    ]
+  },
+  {
+    "version": 58,
+    "name": "record the final Deep Scan reviewed surface count",
+    "statements": [
+      "ALTER TABLE deep_scan_runs ADD COLUMN terminal_reviewed_surface_count INTEGER CHECK (terminal_reviewed_surface_count >= 0);"
+    ]
   }
 ]

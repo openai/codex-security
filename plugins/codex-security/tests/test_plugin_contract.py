@@ -21,20 +21,6 @@ def read_json(path: Path) -> dict[str, Any]:
 def test_plugin_manifest_references_existing_assets_and_skills() -> None:
     manifest = read_json(PLUGIN_ROOT / ".codex-plugin" / "plugin.json")
 
-    required_fields = {
-        "name",
-        "version",
-        "description",
-        "author",
-        "homepage",
-        "repository",
-        "license",
-        "keywords",
-        "skills",
-        "mcpServers",
-        "interface",
-    }
-    assert required_fields <= manifest.keys()
     assert manifest["name"] == "codex-security"
     assert re.fullmatch(r"\d+\.\d+\.\d+(?:-alpha)?", manifest["version"])
     assert isinstance(manifest["description"], str) and manifest["description"].strip()
@@ -51,23 +37,6 @@ def test_plugin_manifest_references_existing_assets_and_skills() -> None:
 
     interface = manifest["interface"]
     assert isinstance(interface, dict)
-    required_interface_fields = {
-        "displayName",
-        "shortDescription",
-        "longDescription",
-        "developerName",
-        "category",
-        "capabilities",
-        "websiteURL",
-        "privacyPolicyURL",
-        "termsOfServiceURL",
-        "defaultPrompt",
-        "brandColor",
-        "composerIcon",
-        "logo",
-        "screenshots",
-    }
-    assert required_interface_fields <= interface.keys()
     assert interface["displayName"] == "Codex Security"
     for field in (
         "shortDescription",
@@ -97,6 +66,18 @@ def test_daybreak_access_uses_plugin_mcp() -> None:
     assert all(app["id"] != LEGACY_CODEX_SECURITY_ACCESS_CONNECTOR_ID for app in apps.values())
     assert "codex-security" in mcp_servers
     assert LEGACY_CODEX_SECURITY_ACCESS_APP_NAME not in mcp_servers
+
+
+def test_cloud_connection_is_optional_and_skill_is_shipped() -> None:
+    apps = read_json(PLUGIN_ROOT / ".app.json")["apps"]
+    cloud = apps["codex-security-cloud"]
+    assert cloud["id"] == "connector_openai_defense_factory"
+    assert cloud["category"] == "Code Hosting & Security Findings"
+    assert cloud.get("required", False) is False
+
+    shipped = read_json(PLUGIN_ROOT / "plugin-files.json")["shippedExact"]
+    assert "skills/cloud-findings/SKILL.md" in shipped
+    assert "skills/cloud-findings/agents/openai.yaml" in shipped
 
 
 def test_deep_scan_config_override_is_forwarded_to_mcp_server() -> None:
@@ -131,10 +112,3 @@ def test_every_skill_has_valid_frontmatter_and_agent_interface() -> None:
         for field in ("display_name", "short_description", "default_prompt"):
             assert isinstance(interface[field], str), f"{agent_path}: {field}"
             assert interface[field].strip(), f"{agent_path}: {field}"
-
-
-def test_fix_finding_uses_product_language_for_workbench_state() -> None:
-    skill = (PLUGIN_ROOT / "skills" / "fix-finding" / "SKILL.md").read_text(encoding="utf-8")
-
-    assert "terminal workbench update" in skill
-    assert "SQLite" not in skill

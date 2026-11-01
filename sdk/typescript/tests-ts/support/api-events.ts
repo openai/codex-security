@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type { CodexOptions, ThreadEvent } from "@openai/codex-sdk";
 import { CodexSecurity, runScanEvents } from "../../src/api.js";
 import type { ScanOptions } from "../../src/index.js";
@@ -19,6 +20,7 @@ export function preparedRuntime(
 ): PreparedRuntime {
   return {
     codexHome,
+    deepScanConfigPath: join(codexHome, "deep-scan.toml"),
     plugin: {
       pluginRoot: PLUGIN_ROOT,
       marketplaceRoot,

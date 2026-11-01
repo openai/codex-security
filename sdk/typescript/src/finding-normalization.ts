@@ -1,41 +1,17 @@
-/* Generated from plugin finding-normalization.ts. Run `pnpm generate:models`. */
 import { isRecord as isObject } from "./record.js";
 
 type JsonObject = Record<string, unknown>;
 
-export function normalizePersistedFindingDetails(
-  finding: JsonObject,
-  profile: "draft" | "canonical",
-): void {
-  const canonicalEvidence =
-    profile === "draft" && Array.isArray(finding["codeEvidence"])
-      ? finding["codeEvidence"]
-      : [];
-  const evidenceIds = new Set(
-    canonicalEvidence.flatMap((evidence) => {
-      if (!isObject(evidence)) return [];
-      const id = evidence["id"];
-      return isNonEmptyString(id) ? [id] : [];
-    }),
-  );
+/** Compatibility for historical report reads; never use this to admit new writes. */
+export function normalizePersistedFindingDetails(finding: JsonObject): void {
   if (Array.isArray(finding["code_evidence"])) {
-    const compatibleEvidence: JsonObject[] = [];
-    for (const evidence of finding["code_evidence"]) {
-      if (!isObject(evidence)) continue;
-      const id = evidence["id"];
-      const code = evidence["code"];
-      if (
-        !isNonEmptyString(id) ||
-        !isNonEmptyString(code) ||
-        (profile === "draft" && evidenceIds.has(id))
-      ) {
-        continue;
-      }
-      if (profile === "draft") evidenceIds.add(id);
-      compatibleEvidence.push(evidence);
-    }
-    finding["code_evidence"] = compatibleEvidence;
-  } else if (profile === "draft" || finding["code_evidence"] !== null) {
+    finding["code_evidence"] = finding["code_evidence"].filter(
+      (evidence) =>
+        isObject(evidence) &&
+        isNonEmptyString(evidence["id"]) &&
+        isNonEmptyString(evidence["code"]),
+    );
+  } else if (finding["code_evidence"] !== null) {
     delete finding["code_evidence"];
   }
 
@@ -72,14 +48,6 @@ export function normalizePersistedFindingDetails(
     normalizePersistedStringLists(section, listFields);
   }
 
-  const rootCause = finding["rootCause"];
-  if (profile === "draft" && isObject(rootCause)) {
-    if (!isNonEmptyString(rootCause["summary"])) {
-      delete finding["rootCause"];
-    } else {
-      removeUnsupportedPersistedStrings(rootCause, ["code", "language"]);
-    }
-  }
   const legacyRootCause = finding["root_cause"];
   if (isObject(legacyRootCause)) {
     removeUnsupportedPersistedStrings(legacyRootCause, [
@@ -87,11 +55,7 @@ export function normalizePersistedFindingDetails(
       "code",
       "language",
     ]);
-  } else if (
-    profile === "draft"
-      ? !isNonEmptyString(legacyRootCause)
-      : legacyRootCause !== null && typeof legacyRootCause !== "string"
-  ) {
+  } else if (legacyRootCause !== null && typeof legacyRootCause !== "string") {
     delete finding["root_cause"];
   }
 
@@ -101,7 +65,6 @@ export function normalizePersistedFindingDetails(
       validation,
       ["method", "status", "summary", "disposition", "result"].filter(
         (field) =>
-          profile === "draft" ||
           !["status", "disposition", "result"].includes(field) ||
           validation[field] !== null,
       ),
@@ -150,29 +113,11 @@ export function normalizePersistedFindingDetails(
   ): void {
     for (const field of fields) {
       const value = section[field];
-      if (
-        profile === "canonical" &&
-        field === "evidence" &&
-        isNonEmptyString(value)
-      )
-        continue;
-      const normalized = isNonEmptyString(value)
-        ? [value]
-        : Array.isArray(value)
-          ? value.filter(isNonEmptyString)
-          : undefined;
-      if (
-        normalized !== undefined &&
-        (profile === "canonical" || normalized.length > 0)
-      )
-        section[field] = normalized;
+      if (isNonEmptyString(value)) {
+        if (field !== "evidence") section[field] = [value];
+      } else if (Array.isArray(value))
+        section[field] = value.filter(isNonEmptyString);
       else delete section[field];
-    }
-    if (profile === "canonical") return;
-    for (const field of ["evidenceRefs", "evidence_refs"]) {
-      const refs = section[field];
-      if (!Array.isArray(refs)) continue;
-      section[field] = refs.filter((ref) => evidenceIds.has(ref));
     }
   }
 
@@ -186,9 +131,6 @@ export function normalizePersistedFindingDetails(
   }
 
   function isNonEmptyString(value: unknown): value is string {
-    return (
-      typeof value === "string" &&
-      (profile === "canonical" ? value.length > 0 : value.trim().length > 0)
-    );
+    return typeof value === "string" && value.length > 0;
   }
 }

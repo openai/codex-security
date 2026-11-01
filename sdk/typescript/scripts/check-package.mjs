@@ -6,6 +6,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -102,12 +103,18 @@ function validatePackagePaths(entries) {
     "package/docs/cli.md",
     "package/docs/findings-service.md",
     "package/docs/dedupe-records.md",
+    "package/docs/classify-severity-records.md",
+    "package/docs/hosted-scans.md",
+    "package/docs/validate-records.md",
+    "package/docs/hosted-remediation.md",
+    "package/schemas/hosted-scan-v2.fixture.json",
     "package/LICENSE",
     "package/bin/codex-security.mjs",
     "package/dist/index.js",
     "package/dist/index.d.ts",
     "package/dist/cli.js",
     "package/schemas/project-config.schema.json",
+    "package/schemas/external-findings.schema.json",
     "package/_bundled_plugin/.codex-plugin/plugin.json",
   ];
 
@@ -230,6 +237,8 @@ function extractedArchiveFiles() {
   );
   try {
     chmodSync(extractionRoot, 0o700);
+    const fileList = join(extractionRoot, "members.list");
+    writeFileSync(fileList, [...logicalSizes.keys(), ""].join("\0"));
     try {
       tar([
         "-m",
@@ -242,11 +251,14 @@ function extractedArchiveFiles() {
         "-",
         "-C",
         extractionRoot,
-        ...logicalSizes.keys(),
+        "--null",
+        "-T",
+        fileList,
       ]);
     } finally {
       privateExtractionDirectories(extractionRoot);
     }
+    rmSync(fileList);
 
     const archiveFiles = new Map();
     let expandedBytes = 0;

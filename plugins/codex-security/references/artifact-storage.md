@@ -46,7 +46,7 @@ For standalone/legacy mutable ledgers, use the save tool to replace their comple
 
 ## Threat-model cache and completed results
 
-For a standalone repository threat model, use `targetPath: <repo_root>`, `storage: "persistent"`, `path: "threatmodel.md"`. Read a shared cached file only when the threat-model workflow allows cache reuse and its exact repository/version footer matches; if the new filename is absent, the legacy `threat_model.md` may be read under the same rules. For a running scan, retain the selected text as `{ "format": "markdown", "content": "<exact Markdown>" }` in its canonical `threatModel`, using an early `complete: false` semantic checkpoint with partial coverage. The host writes `<scan_dir>/threatmodel.md` from that content. Preserve the workflow's conditions that forbid reading or replacing the shared cache; saving or exporting a scan's model does not authorize a cache update.
+For a standalone repository threat model, use `targetPath: <repo_root>`, `storage: "persistent"`, `path: "threatmodel.md"`. Read a shared cached file only when the threat-model workflow allows cache reuse and its exact repository/version footer matches; if the new filename is absent, the legacy `threat_model.md` may be read under the same rules. For a running scan, retain the selected text as `{ "format": "markdown", "content": "<exact Markdown>" }` in its canonical `threatModel`, using an early `complete: false` semantic checkpoint with the reviewed surfaces and pending work. The host writes `<scan_dir>/threatmodel.md` from that content. Preserve the workflow's conditions that forbid reading or replacing the shared cache; saving or exporting a scan's model does not authorize a cache update.
 
 End each shared threat model with these two lines:
 

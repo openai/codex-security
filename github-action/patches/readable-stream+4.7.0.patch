@@ -1,0 +1,15 @@
+diff --git a/node_modules/readable-stream/lib/ours/errors.js b/node_modules/readable-stream/lib/ours/errors.js
+--- a/node_modules/readable-stream/lib/ours/errors.js
++++ b/node_modules/readable-stream/lib/ours/errors.js
+@@ -282,9 +282,9 @@
+   'ERR_MISSING_ARGS',
+   (...args) => {
+     assert(args.length > 0, 'At least one arg needs to be specified')
+-    let msg
++    let msg = ''
+     const len = args.length
+-    args = (Array.isArray(args) ? args : [args]).map((a) => `"${a}"`).join(' or ')
++    args = (Array.isArray(args) ? args : [args]).map((a) => `"${a}"`)
+     switch (len) {
+       case 1:
+         msg += `The ${args[0]} argument`

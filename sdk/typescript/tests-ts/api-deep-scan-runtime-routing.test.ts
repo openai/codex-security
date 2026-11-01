@@ -44,6 +44,13 @@ test.each([
     runtimeNode: null,
     route: "direct",
   },
+  {
+    name: "invalid code mode supplied by the caller",
+    dependencyNode: null,
+    runtimeNode: "selected runtime",
+    route: "parent",
+    codeMode: "mistyped",
+  },
 ])("Deep Scan respects $name", async (scenario) => {
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
@@ -59,6 +66,9 @@ test.each([
   const runtimeEnvironment: Record<string, string> =
     selectedNode === undefined ? {} : { CODEX_MCP_NODE_PATH: selectedNode };
   const originalRuntimeEnvironment = { ...runtimeEnvironment };
+  const codeMode = scenario.codeMode ?? {
+    direct_only_tool_namespaces: ["existing_tools"],
+  };
   const parentTurn = mock(async () => {
     throw new Error("parent route reached");
   });
@@ -75,7 +85,19 @@ test.each([
     expect(options.config).toMatchObject({
       model: "gpt-6.1-sol",
       model_reasoning_effort: "high",
-      features: { shell_tool: false },
+      features: {
+        shell_tool: false,
+        code_mode:
+          typeof codeMode === "string" || scenario.route === "direct"
+            ? codeMode
+            : {
+                direct_only_tool_namespaces: [
+                  "existing_tools",
+                  "mcp__codex_security",
+                  "codex_security",
+                ],
+              },
+      },
     });
     return {
       startThread: () => ({ id: null, runStreamed: parentTurn }),
@@ -86,7 +108,10 @@ test.each([
       codexOverrides: {
         model: "gpt-6.1-sol",
         model_reasoning_effort: "high",
-        features: { shell_tool: false },
+        features: {
+          shell_tool: false,
+          code_mode: codeMode,
+        },
       },
     },
     {
@@ -105,7 +130,7 @@ test.each([
         environment: runtimeEnvironment,
       }),
       // Keep the host's Bun fallback and account advisory out of this check.
-      supportsDirectDeepScan: async () => true,
+      canRunDirectDeepScan: () => true,
       createCodex,
       runDeepScan: directRun,
     },

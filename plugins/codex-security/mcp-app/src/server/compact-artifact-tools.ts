@@ -1,5 +1,8 @@
 import { readingAnnotations, writingAnnotations } from "./tool-annotations.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type {
+  McpServer,
+  ToolCallback,
+} from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ZodType } from "zod/v4";
 import type { JsonObject as JsonRecord } from "../types.js";
 import {
@@ -68,17 +71,8 @@ const modelOnlyMeta = {
 const semanticFindingGuidance =
   " Findings require severity:{level}, confidence:{level,rationale}, taxonomy:{category,cwe:[]}, locations:[{path,startLine,endLine?}], and provenance:{source}, alongside ruleId,title,summary,remediation. Use repository-relative paths. Each codeEvidence entry needs id,label,path,startLine,code,explanation. Omit host-owned findingId,occurrenceId,fingerprints and scope.includePaths/excludePaths.";
 
-const semanticCoverageGuidance =
-  ' Coverage shape: {completeness:"partial"|"complete"|"unknown",surfaces:[{label,disposition}],explicitExclusions:[{pattern,reason}],deferred:[{id?,reason}]}. Surface dispositions: reported,no_issue_found,rejected,not_applicable,needs_follow_up. Arrays may be empty. Omit host-owned coverage documentType,schemaVersion,scanId,mode,inventoryStrategy,includePaths,excludePaths,receiptRefs. Omit resolvedDeferred from complete:false checkpoints; on a terminal draft use it only for finished generic tasks, and resolve candidates with a finding carrying the saved candidate ID in provenance.candidateId or a rejected/not_applicable surface carrying candidateId.';
-
-function signalFromRequestContext(
-  requestContext: unknown,
-): AbortSignal | undefined {
-  if (typeof requestContext !== "object" || requestContext === null)
-    return undefined;
-  const signal = Reflect.get(requestContext, "signal");
-  return signal instanceof AbortSignal ? signal : undefined;
-}
+const reviewStateGuidance =
+  " Coverage shape: {surfaces:[{label,disposition}],explicitExclusions:[{pattern,reason}],deferred:[{id?,reason}]}. Surface dispositions: reported,no_issue_found,rejected,not_applicable,needs_follow_up. Arrays may be empty. Exclusions and unresolved review questions do not prevent a terminal result. Omit host-owned reviewState documentType,schemaVersion,scanId,mode,inventoryStrategy,includePaths,excludePaths,receiptRefs. Omit resolvedDeferred from complete:false checkpoints; on a terminal draft use it only for finished generic tasks, and resolve candidates with a finding carrying the saved candidate ID in provenance.candidateId or a rejected/not_applicable surface carrying candidateId.";
 
 export function registerCompactArtifactTools(
   server: McpServer,
@@ -176,9 +170,9 @@ export function registerCompactArtifactTools(
     name: "record_codex_security_scan_draft",
     title: "Record Codex Security Scan Draft",
     description:
-      "Save the canonical threat model, findings and coverage as an unsealed draft. Use complete:false as soon as a model is available, even with empty findings and partial coverage, then for progress checkpoints; use complete:true for the final result. The host derives threatmodel.md. Keep unvalidated candidates in coverage.deferred. On terminal Standard or diff drafts, close generic review tasks with coverage.resolvedDeferred:[{id,reason}], copying IDs from the returned coverage. Update linked surfaces by their saved IDs." +
+      "Save the canonical threat model, findings and reviewState as an unsealed draft. Use complete:false as soon as a model is available, even with empty findings, then for progress checkpoints; use complete:true for the final result. The host derives threatmodel.md. Keep unvalidated candidates in reviewState.deferred. On terminal Standard or diff drafts, close generic review tasks with reviewState.resolvedDeferred:[{id,reason}], copying IDs from the returned reviewState. Update linked surfaces by their saved IDs." +
       semanticFindingGuidance +
-      semanticCoverageGuidance,
+      reviewStateGuidance,
     inputSchema: scanDraftInputSchema,
     readOnly: false,
     handler: async (input, requestContext) => {
@@ -186,7 +180,7 @@ export function registerCompactArtifactTools(
         await scanContext(input, options, true, requestContext),
         input,
         options.runWorkbench,
-        signalFromRequestContext(requestContext),
+        requestContext.signal,
       );
     },
   });
@@ -275,9 +269,9 @@ export function registerCompactWorkerArtifactTools(
       name: "record_codex_security_scan_draft",
       title: "Record Codex Security Scan Draft",
       description:
-        "Save this Standard worker's semantic findings and coverage. Use complete:false for progress checkpoints, then complete:true for its final result; keep unvalidated candidates in coverage.deferred. On terminal drafts, close generic review tasks with coverage.resolvedDeferred:[{id,reason}], copying IDs from the returned coverage. Update linked surfaces by their saved IDs." +
+        "Save this Standard worker's semantic findings and reviewState. Use complete:false for progress checkpoints, then complete:true for its final result; keep unvalidated candidates in reviewState.deferred. On terminal drafts, close generic review tasks with reviewState.resolvedDeferred:[{id,reason}], copying IDs from the returned reviewState. Update linked surfaces by their saved IDs." +
         semanticFindingGuidance +
-        semanticCoverageGuidance,
+        reviewStateGuidance,
       inputSchema: scanDraftInputSchema,
       readOnly: false,
       handler: async (value) =>
@@ -315,7 +309,7 @@ export function registerCompactWorkerArtifactTools(
     name: "record_codex_security_deep_reduction",
     title: "Record Codex Security Deep Reduction",
     description:
-      "Record the merged findings and context for this Deep scan. Preserve every assigned provenance.sourceFindingIds reference; omit retained provenance.sourceFindings bodies." +
+      'Record the merged findings and context for this Deep scan. Preserve every assigned provenance.sourceFindingIds reference; omit retained provenance.sourceFindings bodies. Use retainedFindingRefs:["previous:N"] to copy unchanged previous findings without resubmitting their bodies.' +
       semanticFindingGuidance,
     inputSchema: deepReductionInputSchema,
     readOnly: false,
@@ -329,7 +323,10 @@ interface CompactToolRegistration<Input> {
   description: string;
   inputSchema: ZodType<Input>;
   readOnly: boolean;
-  handler: (value: Input, requestContext: unknown) => Promise<object>;
+  handler: (
+    value: Input,
+    requestContext: Parameters<ToolCallback<ZodType<Input>>>[1],
+  ) => Promise<object>;
 }
 
 function registerCompactTool<Input>(

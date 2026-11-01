@@ -3,8 +3,10 @@ import { once } from "node:events";
 import * as fsPromises from "node:fs/promises";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { createInterface } from "node:readline";
 import { expect, spyOn, test } from "bun:test";
 import { bootstrapPlugin } from "../src/runtime.js";
+import { nodeCommand } from "./support/shell.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 
 test.each(["unchanged", "missing", "truncated"] as const)(
@@ -74,29 +76,30 @@ async function checkWorkerReuse(
     );
     const expectedManifest = await readFile(manifest, "utf8");
     const worker = spawn(
-      process.execPath,
+      nodeCommand().command,
       [
         "--eval",
-        `process.once("message", () => {
+        `process.stdin.once("end", () => {
           try {
-            process.send(require("node:fs").readFileSync("scripts/helper.txt", "utf8"));
+            process.stdout.write(JSON.stringify(require("node:fs").readFileSync("scripts/helper.txt", "utf8")) + "\\n");
           } catch (error) {
-            process.send({ error: String(error) });
-          } finally {
-            process.disconnect();
+            process.stdout.write(JSON.stringify({ error: String(error) }) + "\\n");
           }
         });
-        process.send("ready");`,
+        process.stdin.resume();
+        process.stdout.write("ready\\n");`,
       ],
       {
         cwd: first.installedRoot,
-        stdio: ["ignore", "ignore", "ignore", "ipc"],
+        stdio: ["pipe", "pipe", "ignore"],
+        windowsHide: true,
       },
     );
     const exited = once(worker, "exit");
+    const output = createInterface({ input: worker.stdout });
+    const messages = output[Symbol.asyncIterator]();
     try {
-      const [ready] = await Promise.race([once(worker, "message"), exited]);
-      expect(ready).toBe("ready");
+      expect(await messages.next()).toEqual({ value: "ready", done: false });
       if (metadata === "missing") await rm(manifest);
       else if (metadata === "truncated") await writeFile(manifest, "{");
       const originalWrite = fsPromises.writeFile;
@@ -153,10 +156,10 @@ async function checkWorkerReuse(
         write?.mockRestore();
         rename?.mockRestore();
       }
-      const response = once(worker, "message");
-      worker.send("read");
-      const [content] = await Promise.race([response, exited]);
-      expect(content).toBe(helper);
+      worker.stdin.end();
+      const response = await messages.next();
+      expect(response.done).toBe(false);
+      expect(JSON.parse(response.value!)).toBe(helper);
       expect(installs).toBe(1);
       if (failReplacement && !concurrent) {
         if (metadata === "missing") {
@@ -179,6 +182,7 @@ async function checkWorkerReuse(
       await bootstrapPlugin(home, selected, options);
       expect(installs).toBe(1);
     } finally {
+      output.close();
       if (worker.exitCode === null && worker.signalCode === null) worker.kill();
       await exited;
     }
