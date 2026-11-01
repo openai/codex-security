@@ -81,6 +81,19 @@ function findings(severities: readonly SeverityLevel[]): Finding[] {
   return result.findings.findings;
 }
 
+function renderSelection(inputFindings: Finding[]) {
+  const selected: (PatchSelection | null)[] = [];
+  const app = render(
+    createElement(PatchTui, {
+      repository: "/work/example",
+      findings: inputFindings,
+      color: false,
+      onComplete: (value) => selected.push(value),
+    }),
+  );
+  return { app, selected };
+}
+
 async function press(
   app: ReturnType<typeof render>,
   input: string,
@@ -109,15 +122,7 @@ describe("interactive patch finding browser", () => {
       "high",
     ]);
     const originalOrder = inputFindings.map(({ occurrenceId }) => occurrenceId);
-    const selected: (PatchSelection | null)[] = [];
-    const app = render(
-      createElement(PatchTui, {
-        repository: "/work/example",
-        findings: inputFindings,
-        color: false,
-        onComplete: (value) => selected.push(value),
-      }),
-    );
+    const { app, selected } = renderSelection(inputFindings);
 
     const displayedFindings = (app.lastFrame() ?? "")
       .split("\n")
@@ -288,14 +293,8 @@ describe("interactive patch finding browser", () => {
   });
 
   test("combines severity presets with individual finding selection", async () => {
-    const selected: (PatchSelection | null)[] = [];
-    const app = render(
-      createElement(PatchTui, {
-        repository: "/work/example",
-        findings: findings(["high", "medium", "low"]),
-        color: false,
-        onComplete: (value) => selected.push(value),
-      }),
+    const { app, selected } = renderSelection(
+      findings(["high", "medium", "low"]),
     );
 
     await press(app, "2");
@@ -313,15 +312,7 @@ describe("interactive patch finding browser", () => {
   });
 
   test("edits instructions per finding and only returns selected guidance", async () => {
-    const selected: (PatchSelection | null)[] = [];
-    const app = render(
-      createElement(PatchTui, {
-        repository: "/work/example",
-        findings: findings(["high", "medium"]),
-        color: false,
-        onComplete: (value) => selected.push(value),
-      }),
-    );
+    const { app, selected } = renderSelection(findings(["high", "medium"]));
 
     await press(app, "i");
     expect(app.lastFrame()).toContain("Enter save");
@@ -357,15 +348,7 @@ describe("interactive patch finding browser", () => {
   });
 
   test("optionally creates a draft pull request after selected patches", async () => {
-    const selected: (PatchSelection | null)[] = [];
-    const app = render(
-      createElement(PatchTui, {
-        repository: "/work/example",
-        findings: findings(["high"]),
-        color: false,
-        onComplete: (value) => selected.push(value),
-      }),
-    );
+    const { app, selected } = renderSelection(findings(["high"]));
 
     expect(app.lastFrame()).toContain(
       "[ ] Create draft pull request or merge request after patching",
@@ -386,15 +369,7 @@ describe("interactive patch finding browser", () => {
   });
 
   test("cancels and clears finding instructions without leaving the browser", async () => {
-    const selected: (PatchSelection | null)[] = [];
-    const app = render(
-      createElement(PatchTui, {
-        repository: "/work/example",
-        findings: findings(["high"]),
-        color: false,
-        onComplete: (value) => selected.push(value),
-      }),
-    );
+    const { app, selected } = renderSelection(findings(["high"]));
 
     await press(app, "i");
     await press(app, "Discard this guidance.");
@@ -413,15 +388,7 @@ describe("interactive patch finding browser", () => {
   });
 
   test("deletes complete characters from finding instructions", async () => {
-    const selected: (PatchSelection | null)[] = [];
-    const app = render(
-      createElement(PatchTui, {
-        repository: "/work/example",
-        findings: findings(["high"]),
-        color: false,
-        onComplete: (value) => selected.push(value),
-      }),
-    );
+    const { app, selected } = renderSelection(findings(["high"]));
 
     await press(app, "i");
     await press(app, "Ask 👩‍💻");
@@ -442,15 +409,7 @@ describe("interactive patch finding browser", () => {
 
   test("allows selecting none and canceling without patching", async () => {
     for (const input of ["q", "\r"]) {
-      const selected: (PatchSelection | null)[] = [];
-      const app = render(
-        createElement(PatchTui, {
-          repository: "/work/example",
-          findings: findings(["high"]),
-          color: false,
-          onComplete: (value) => selected.push(value),
-        }),
-      );
+      const { app, selected } = renderSelection(findings(["high"]));
       if (input === "\r") {
         await press(app, "n");
         expect(app.lastFrame()).toContain("0/1 selected");

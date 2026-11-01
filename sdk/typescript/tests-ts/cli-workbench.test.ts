@@ -500,61 +500,36 @@ describe("CLI workbench", () => {
         { scan: { scanId: "legacy" } },
         { scanId: "legacy" },
       ],
-      [
-        [
-          "scans",
-          "compare",
-          "before",
-          "after",
-          "--model",
-          "synthetic-model",
-          "--effort",
-          "high",
-          "--json",
-        ],
-        [
-          "compare-scans",
-          "--before-scan-id",
-          "before",
-          "--after-scan-id",
-          "after",
-          "--include-matching-inputs",
-        ],
-        {
-          matchingCached: true,
-          matchingInputs: { before: [], after: [] },
-          summary: { persisting: 1, resolved: 1 },
-        },
-        { summary: { persisting: 1, resolved: 1 } },
-      ],
-      [
-        [
-          "scans",
-          "match",
-          "before",
-          "after",
-          "--model",
-          "synthetic-model",
-          "--effort",
-          "high",
-          "--json",
-        ],
-        [
-          "compare-scans",
-          "--before-scan-id",
-          "before",
-          "--after-scan-id",
-          "after",
-          "--include-matching-inputs",
-        ],
-        {
-          matchingCached: true,
-          matchingInputs: { before: [], after: [] },
-          summary: { persisting: 1, resolved: 1 },
-        },
-        { summary: { persisting: 1, resolved: 1 } },
-      ],
     ];
+    for (const command of ["compare", "match"]) {
+      cases.push([
+        [
+          "scans",
+          command,
+          "before",
+          "after",
+          "--model",
+          "synthetic-model",
+          "--effort",
+          "high",
+          "--json",
+        ],
+        [
+          "compare-scans",
+          "--before-scan-id",
+          "before",
+          "--after-scan-id",
+          "after",
+          "--include-matching-inputs",
+        ],
+        {
+          matchingCached: true,
+          matchingInputs: { before: [], after: [] },
+          summary: { persisting: 1, resolved: 1 },
+        },
+        { summary: { persisting: 1, resolved: 1 } },
+      ]);
+    }
     for (const [argv, expected, response, output] of cases) {
       const calls = mock((_args: readonly string[]) => {
         return response;
