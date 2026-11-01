@@ -2791,6 +2791,52 @@ test("a held retry reports the acknowledged batch after another resumer retires 
   ).toEqual([]);
 });
 
+test.each(["matching", "replaced", "missing"])(
+  "a held ordinary retry preserves the newer pending request when its original result is %s",
+  async (terminal) => {
+    const f = await fixture(
+      Array.from({ length: 101 }, (_, index) => normalized(`item-${index}`)),
+    );
+    const prepare = () => prepareExternalPublication(f.file, options, f.deps);
+    f.state.postBudget = 1;
+    await expect((await prepare()).publish()).rejects.toThrow("Slow down");
+    const held = await prepare();
+    f.state.postBudget = Infinity;
+    const completed = await (await prepare()).publish();
+    if (terminal === "replaced") await (await prepare()).publish();
+
+    const fresh = await prepare();
+    expect(fresh.preview.requests[0]!.request_id).not.toBe(
+      held.preview.requests[0]!.request_id,
+    );
+    f.state.postBudget = 0;
+    const staged = await fresh.publish().catch((error: unknown) => error);
+    if (!(staged instanceof ExternalPublicationError)) throw staged;
+    expect(staged.message).toContain("HTTP 429");
+    const path = staged.result.savedSubmission!;
+    const saved = await readFile(path, "utf8");
+    if (terminal === "missing")
+      await rm(path.replace(/\.pending\.json$/, ".result.json"));
+
+    const posts = [...f.posts];
+    if (terminal === "matching") {
+      expect(await held.publish()).toEqual(completed);
+    } else {
+      const error = await held.publish().catch((error: unknown) => error);
+      if (!(error instanceof ExternalPublicationError)) throw error;
+      expect(error.result).toMatchObject({
+        status: "interrupted",
+        counts: { created: 100, updated: 0, unchanged: 0, error: 0 },
+        unacknowledged: 1,
+      });
+      expect(error.result.receipts).toEqual([completed.receipts[0]!]);
+      expect(error.result).not.toHaveProperty("savedSubmission");
+    }
+    expect(f.posts).toEqual(posts);
+    expect(await readFile(path, "utf8")).toBe(saved);
+  },
+);
+
 test.each([1, 101])(
   "a prepared retry keeps its receipts after another resumer completes (%i items)",
   async (count) => {
@@ -5672,7 +5718,7 @@ test(concurrentBoxedApproval, async () => {
   if (runTestInSubprocess(import.meta.filename, concurrentBoxedApproval))
     return;
 
-  for (const replace of [false, true]) {
+  for (const state of ["original result", "newer pending", "newer complete"]) {
     const { f, prepare, directory, request } =
       await oldScoreApproval("evidence");
     const atLock = Promise.withResolvers<void>();
@@ -5701,13 +5747,30 @@ test(concurrentBoxedApproval, async () => {
       const completed = await (await prepare(new Number(2.5))).publish();
       expect(completed.receipts[0]!.id).toBe(request.request_id);
       expect(f.posts).toEqual([JSON.stringify(request)]);
-      if (replace) {
-        const newer = await (await prepare(2.5)).publish();
-        expect(newer.receipts[0]!.id).not.toBe(request.request_id);
+      let pending: { path: string; bytes: string } | undefined;
+      if (state !== "original result") {
+        const newer = await prepare(2.5);
+        const newerId = newer.preview.requests[0]!.request_id;
+        expect(newerId).not.toBe(request.request_id);
+        if (state === "newer pending") {
+          f.state.throttle = true;
+          await expect(newer.publish()).rejects.toThrow("Slow down");
+          const [name] = (await readdir(directory)).filter((name) =>
+            name.endsWith(".pending.json"),
+          );
+          const path = join(directory, name!);
+          pending = { path, bytes: await readFile(path, "utf8") };
+          expect(JSON.parse(pending.bytes).requests[0].request_id).toBe(
+            newerId,
+          );
+          f.state.throttle = false;
+        } else {
+          expect((await newer.publish()).receipts[0]!.id).toBe(newerId);
+        }
       }
       const before = [...f.posts];
       release.resolve();
-      if (replace) {
+      if (state === "newer complete") {
         await expect(waiting).rejects.toThrow(/changed while preparing/);
       } else {
         const trailing = await waiting;
@@ -5717,6 +5780,8 @@ test(concurrentBoxedApproval, async () => {
         );
         expect(await trailing.publish()).toEqual(completed);
       }
+      if (pending)
+        expect(await readFile(pending.path, "utf8")).toBe(pending.bytes);
       expect(f.posts).toEqual(before);
     } finally {
       release.resolve();

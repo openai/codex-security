@@ -1032,18 +1032,16 @@ async function preparePublicationInput(
     selected = await underLocks(lockKeys, async () => {
       const current = await selectedCheckpoint(fileKey);
       if (
-        !current &&
-        (await readCompletedPublication(observed.content.requests))
-      )
-        return observed;
-      if (
         !current ||
         current.fileKey !== fileKey ||
         !sameSubmission(current.content, observed.content)
-      )
+      ) {
+        if (await readCompletedPublication(observed.content.requests))
+          return observed;
         throw new CodexSecurityError(
           "The saved publication changed while preparing this input. Review it again.",
         );
+      }
       if (current.historical) {
         current.content.wireKey = key;
         await writeAtomicJson(pendingPath, current.content);
@@ -1371,29 +1369,31 @@ async function preparePublicationInput(
         acquired = true;
         // Re-read under the lock to keep checkpoints from another publisher.
         const selected = await selectedCheckpoint(saved ? fileKey : undefined);
-        if (!selected && saved) {
-          const completed = await readCompletedPublication(requests);
-          if (completed) return result(completed.receipts, completed.verified);
-          throw interruptedPreview(
-            "The saved publication changed after preview. Review its result before publishing again.",
-          );
-        }
-        if (selected && (selected.fileKey !== fileKey || selected.historical))
-          throw new CodexSecurityError(
-            "Another publication prepared this input. Run the command again to review and resume that saved request.",
-          );
-        if (!selected && (await readOptionalFile(pendingPath)) !== undefined)
-          throw occupiedCheckpoint();
         const pending = selected?.content;
         const current = pending ?? submission;
         const adoptProjectMap =
           submission.inspectorProjectMapRequired &&
           current.inspectorProjectMapRequired === undefined;
         if (adoptProjectMap) current.inspectorProjectMapRequired = true;
-        if (!sameSubmission(current, submission))
-          throw new CodexSecurityError(
-            "Another publication prepared this input. Run the command again to review and resume that saved request.",
-          );
+        if (
+          !selected ||
+          selected.fileKey !== fileKey ||
+          selected.historical ||
+          !sameSubmission(current, submission)
+        ) {
+          const message = selected
+            ? "Another publication prepared this input. Run the command again to review and resume that saved request."
+            : "The saved publication changed after preview. Review its result before publishing again.";
+          if (saved) {
+            const completed = await readCompletedPublication(requests);
+            if (completed)
+              return result(completed.receipts, completed.verified);
+            throw interruptedPreview(message);
+          }
+          if (selected) throw new CodexSecurityError(message);
+          if ((await readOptionalFile(pendingPath)) !== undefined)
+            throw occupiedCheckpoint();
+        }
         const receipts = (current.receipts ?? []).map(validateImportReceipt);
         if (receipts.length > requests.length)
           throw new CodexSecurityError(
