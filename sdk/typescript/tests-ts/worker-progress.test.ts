@@ -229,7 +229,11 @@ describe("worker progress events", () => {
       ),
     ).toEqual([liveProgress]);
     // A tilde fence is not closed by a backtick fence.
-    const liveDispatch = { phase: "validation", planned: 2, started: 2 };
+    const liveDispatch = {
+      phase: "validation" as const,
+      planned: 2,
+      started: 2,
+    };
     const text = [
       "~~~text",
       progressMarker,
