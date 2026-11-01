@@ -254,6 +254,12 @@ export class ScanCostTracker {
       this.#options.onActivity === undefined
         ? undefined
         : this.#options.repository;
+    const observeHealthySessions =
+      this.#options.maxCostUsd === undefined &&
+      (this.#options.onActivity !== undefined ||
+        this.#options.onProgress !== undefined ||
+        this.#options.onSessionEvent !== undefined ||
+        this.#options.onWorkerEvent !== undefined);
     const unreadable = new Map<SessionUsage, unknown>();
     for await (const path of sessionFiles(
       join(this.#options.codexHome, "sessions"),
@@ -266,7 +272,11 @@ export class ScanCostTracker {
       try {
         await readSessionUsage(path, session, repository);
       } catch (error) {
-        if (session.threadId === null && !isAccessDenied(error)) throw error;
+        if (
+          session.threadId === null &&
+          (!observeHealthySessions || !isAccessDenied(error))
+        )
+          throw error;
         unreadable.set(session, error);
       }
     }
@@ -312,6 +322,17 @@ export class ScanCostTracker {
       }
     } while (included.size !== previousSize);
 
+    // An unidentified log can belong to this scan even without a known parent.
+    let blocked =
+      unreadable.entries().find(([session]) => session.threadId === null) ??
+      unreadable
+        .entries()
+        .find(
+          ([session]) =>
+            session.threadId !== null && included.has(session.threadId),
+        );
+    if (blocked && !observeHealthySessions) throw blocked[1];
+
     const usages = new Map(this.#receipts);
     for (const [path, tracked] of this.#sessions) {
       const threadId = tracked.threadId;
@@ -332,7 +353,8 @@ export class ScanCostTracker {
         try {
           await readSessionUsage(path, session, repository);
         } catch (error) {
-          unreadable.set(tracked, error);
+          if (!observeHealthySessions) throw error;
+          blocked ??= [tracked, error];
           continue;
         }
         this.#sessions.set(path, session);
@@ -380,10 +402,7 @@ export class ScanCostTracker {
       }
     }
     // Healthy sessions can report activity even when a read blocks the total.
-    for (const [session, error] of unreadable) {
-      if (session.threadId === null || included.has(session.threadId))
-        throw error;
-    }
+    if (blocked) throw blocked[1];
     let usage: ScanTokenUsage | null = null;
     let complete = true;
     for (const value of usages.values()) {

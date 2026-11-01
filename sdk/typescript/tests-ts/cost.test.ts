@@ -1343,13 +1343,18 @@ describe("live scan cost tracking", () => {
   );
 
   test.each([
-    ["EACCES", true],
-    ["EACCES", false],
-    ["EPERM", true],
-    ["EPERM", false],
+    ["EACCES", true, "budget"],
+    ["EACCES", false, "budget"],
+    ["EPERM", true, "budget"],
+    ["EPERM", false, "budget"],
+    ["EACCES", true, "observe"],
+    ["EPERM", false, "observe"],
+    ["EACCES", true, "both"],
+    ["EPERM", false, "both"],
   ] as const)(
-    "retains and retries a %s worker when its parent appears later (already identified: %j)",
-    async (code, identified) => {
+    "retains and retries a %s worker when its parent appears later (identified: %j, tracking: %s)",
+    async (code, identified, tracking) => {
+      const capped = tracking !== "observe";
       const home = await codexHome();
       const usage = (input_tokens: number) => ({
         input_tokens,
@@ -1360,16 +1365,18 @@ describe("live scan cost tracking", () => {
         parent: "middle",
       });
       let denied = !identified;
+      let newLog: string | undefined;
       let attempts = 0;
       const opened = filesystem.open;
       const opening = spyOn(filesystem, "open").mockImplementation(
         async (...args: Parameters<typeof filesystem.open>) => {
-          if (String(args[0]) === worker && denied) {
+          const path = String(args[0]);
+          if (denied && (path === worker || path === newLog)) {
             attempts += 1;
             throw Object.assign(new Error(`Synthetic ${code}`), {
               code,
               syscall: "open",
-              path: worker,
+              path,
             });
           }
           return await opened(...args);
@@ -1381,12 +1388,14 @@ describe("live scan cost tracking", () => {
       const tracker = new ScanCostTracker({
         codexHome: home,
         model: "gpt-5.6-sol",
-        maxCostUsd: 1,
+        maxCostUsd: capped ? 1 : undefined,
         onCost: (cost) => reported.push(cost.inputTokens),
-        onProgress: (update) => progress.push(update.filesCompleted),
-        onSessionEvent: ({ threadId, event }) => {
-          if (event["type"] === "session_meta") observed.push(threadId);
-        },
+        ...(tracking !== "budget" && {
+          onProgress: (update) => progress.push(update.filesCompleted),
+          onSessionEvent: ({ threadId, event }) => {
+            if (event["type"] === "session_meta") observed.push(threadId);
+          },
+        }),
       });
       tracker.start("scan-thread");
       try {
@@ -1397,27 +1406,41 @@ describe("live scan cost tracking", () => {
         } else {
           await expect(tracker.refresh()).rejects.toMatchObject({ code });
         }
+        const appendWorkerUsage = () =>
+          appendFile(
+            worker,
+            JSON.stringify(legacyUsageRecord(usage(1_000_000))) + "\n",
+          );
+        if (capped) await appendWorkerUsage();
         const middle = await writeSession(home, "middle", usage(20), {
           parent: "scan-thread",
         });
         await expect(tracker.refresh()).rejects.toMatchObject({ code });
-        expect(observed.toSorted()).toEqual(["middle", "scan-thread"]);
-        await appendSessionItem(middle, progressMessage(1));
-        await appendFile(
-          worker,
-          JSON.stringify(legacyUsageRecord(usage(1_000_000))) + "\n",
+        expect(observed.filter((id) => id === "middle")).toHaveLength(
+          capped ? 0 : 1,
         );
+        await appendSessionItem(middle, progressMessage(1));
+        if (!capped) await appendWorkerUsage();
         await expect(tracker.refresh()).rejects.toMatchObject({ code });
-        expect(progress).toEqual([1]);
+        expect(progress).toEqual(capped ? [] : [1]);
         expect(reported).not.toContain(30);
+        if (!capped && identified) {
+          newLog = await writeSession(home, "z-new-log", usage(500));
+          await expect(tracker.refresh()).rejects.toMatchObject({
+            code,
+            path: newLog,
+          });
+        }
         denied = false;
         const snapshot = await tracker.stop();
-        expect(observed.toSorted()).toEqual([
-          "middle",
-          "scan-thread",
-          "worker",
-        ]);
-        expect(progress).toEqual([1]);
+        if (tracking !== "budget") {
+          expect(observed.toSorted()).toEqual([
+            "middle",
+            "scan-thread",
+            "worker",
+          ]);
+          expect(progress).toEqual([1]);
+        }
         expect(snapshot.cost?.inputTokens).toBe(1_000_030);
         expect(snapshot.cost!.estimatedUsd).toBeGreaterThan(1);
         expect(reported).toContain(1_000_030);
