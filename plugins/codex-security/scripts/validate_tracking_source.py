@@ -53,17 +53,13 @@ def validate_source(
     )
 
 
-def _parse_args(argv: list[str]) -> argparse.Namespace:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("scan_dir", type=Path)
     selector = parser.add_mutually_exclusive_group()
     selector.add_argument("--finding-id")
     selector.add_argument("--fingerprint")
-    return parser.parse_args(argv)
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = _parse_args(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(argv)
     try:
         findings = validate_source(
             args.scan_dir,

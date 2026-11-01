@@ -48,6 +48,12 @@ def canonical_documents() -> tuple[dict[str, object], dict[str, object], dict[st
     return manifest, findings, coverage
 
 
+def report_with_finding(**fields: object) -> str:
+    manifest, findings, coverage = canonical_documents()
+    findings["findings"][0].update(fields)
+    return PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+
 def test_projection_normalizes_structured_fields() -> None:
     markdown = PROJECTION.build_report_markdown(*canonical_documents())
 
@@ -63,12 +69,10 @@ def test_projection_normalizes_structured_fields() -> None:
 
 
 def test_projection_normalizes_tilde_fences_and_parenthesized_lists() -> None:
-    manifest, findings, coverage = canonical_documents()
-    finding = findings["findings"][0]
-    finding["summary"] = "~~~\ncode fence\n~~~"
-    finding["remediation"] = "1) Validate the record length."
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        summary="~~~\ncode fence\n~~~",
+        remediation="1) Validate the record length.",
+    )
 
     assert "\n~~~" not in markdown
     assert "Text: ~~~ code fence ~~~" in markdown
@@ -177,68 +181,64 @@ def test_projection_renders_inline_code_and_section_code_evidence() -> None:
 
 @pytest.mark.parametrize("reference_key", ["evidenceRefs", "evidence_refs"])
 def test_projection_renders_nested_attack_path_code_evidence(reference_key: str) -> None:
-    manifest, findings, coverage = canonical_documents()
-    finding = findings["findings"][0]
-    finding["codeEvidence"] = [
-        {
-            "id": "archive-source",
-            "label": "Attacker-controlled archive path",
-            "path": "src/archive.py",
-            "startLine": 20,
-            "code": "entry_path = archive_entry.name",
-            "explanation": "The archive controls the path.",
+    markdown = report_with_finding(
+        codeEvidence=[
+            {
+                "id": "archive-source",
+                "label": "Attacker-controlled archive path",
+                "path": "src/archive.py",
+                "startLine": 20,
+                "code": "entry_path = archive_entry.name",
+                "explanation": "The archive controls the path.",
+            },
+            {
+                "id": "archive-sink",
+                "label": "Unchecked filesystem write",
+                "path": "src/archive.py",
+                "startLine": 41,
+                "code": "destination.write_bytes(entry.read())",
+                "explanation": "The unchecked path reaches the write.",
+            },
+        ],
+        attackPath={
+            "dataflow": {
+                "summary": "An archive entry path reaches a filesystem write.",
+                "evidenceRefs": [],
+                "evidence_refs": ["archive-source"],
+            },
+            "reachability": {
+                "summary": "An authenticated uploader can trigger extraction.",
+                reference_key: ["archive-sink"],
+            },
         },
-        {
-            "id": "archive-sink",
-            "label": "Unchecked filesystem write",
-            "path": "src/archive.py",
-            "startLine": 41,
-            "code": "destination.write_bytes(entry.read())",
-            "explanation": "The unchecked path reaches the write.",
-        },
-    ]
-    finding["attackPath"] = {
-        "dataflow": {
-            "summary": "An archive entry path reaches a filesystem write.",
-            "evidenceRefs": [],
-            "evidence_refs": ["archive-source"],
-        },
-        "reachability": {
-            "summary": "An authenticated uploader can trigger extraction.",
-            reference_key: ["archive-sink"],
-        },
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    )
 
     assert "entry_path = archive_entry.name" in markdown
     assert "destination.write_bytes(entry.read())" in markdown
 
 
 def test_projection_normalizes_scalar_evidence_references() -> None:
-    manifest, findings, coverage = canonical_documents()
-    finding = findings["findings"][0]
-    finding["codeEvidence"] = [
-        {"id": "root-source", "code": "root_source()"},
-        {"id": "dataflow-source", "code": "dataflow_source()"},
-        {"id": "reachability-source", "code": "reachability_source()"},
-    ]
-    finding["root_cause"] = {
-        "summary": "The authorization check occurs after the write.",
-        "evidence_refs": "root-source",
-    }
-    finding["attackPath"] = {
-        "dataflow": {
-            "summary": "An attacker-controlled value reaches the write.",
-            "evidence_refs": "dataflow-source",
+    markdown = report_with_finding(
+        codeEvidence=[
+            {"id": "root-source", "code": "root_source()"},
+            {"id": "dataflow-source", "code": "dataflow_source()"},
+            {"id": "reachability-source", "code": "reachability_source()"},
+        ],
+        root_cause={
+            "summary": "The authorization check occurs after the write.",
+            "evidence_refs": "root-source",
         },
-        "reachability": {
-            "summary": "An authenticated caller can reach the handler.",
-            "evidence_refs": "reachability-source",
+        attackPath={
+            "dataflow": {
+                "summary": "An attacker-controlled value reaches the write.",
+                "evidence_refs": "dataflow-source",
+            },
+            "reachability": {
+                "summary": "An authenticated caller can reach the handler.",
+                "evidence_refs": "reachability-source",
+            },
         },
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    )
 
     assert "root_source()" in markdown
     assert "dataflow_source()" in markdown
@@ -246,17 +246,16 @@ def test_projection_normalizes_scalar_evidence_references() -> None:
 
 
 def test_projection_merges_transformations_across_data_flow_aliases() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["attackPath"] = {
-        "dataFlow": {"transformations": ["decode archive entry", "parse *input*"]},
-        "dataflow": {
-            "summary": "request -> archive extraction -> filesystem write",
-            "transformations": ["dispatch extraction", "decode archive entry"],
+    markdown = report_with_finding(
+        attackPath={
+            "dataFlow": {"transformations": ["decode archive entry", "parse *input*"]},
+            "dataflow": {
+                "summary": "request -> archive extraction -> filesystem write",
+                "transformations": ["dispatch extraction", "decode archive entry"],
+            },
+            "data_flow": {"transformations": None},
         },
-        "data_flow": {"transformations": None},
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    )
 
     assert markdown.count("- decode archive entry") == 1
     assert "- dispatch extraction" in markdown
@@ -264,22 +263,21 @@ def test_projection_merges_transformations_across_data_flow_aliases() -> None:
 
 
 def test_projection_merges_top_level_and_reachability_preconditions() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["attackPath"] = {
-        "preconditions": [
-            "The service processes uploaded archives.",
-            "The attacker can upload an archive.",
-        ],
-        "reachability": {
-            "summary": "An authenticated uploader can trigger extraction.",
+    markdown = report_with_finding(
+        attackPath={
             "preconditions": [
+                "The service processes uploaded archives.",
                 "The attacker can upload an archive.",
-                "Automatic extraction is enabled.",
             ],
+            "reachability": {
+                "summary": "An authenticated uploader can trigger extraction.",
+                "preconditions": [
+                    "The attacker can upload an archive.",
+                    "Automatic extraction is enabled.",
+                ],
+            },
         },
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    )
 
     assert markdown.count("- The service processes uploaded archives.") == 1
     assert markdown.count("- The attacker can upload an archive.") == 1
@@ -287,12 +285,11 @@ def test_projection_merges_top_level_and_reachability_preconditions() -> None:
 
 
 def test_projection_uses_top_level_attack_path_summary_as_reachability_fallback() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["attackPath"] = {
-        "summary": "An authenticated uploader can trigger parse_file to extract an archive."
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        attackPath={
+            "summary": "An authenticated uploader can trigger parse_file to extract an archive."
+        },
+    )
 
     reachability = markdown.split("#### Reachability", 1)[1].split("#### Severity", 1)[0]
     assert (
@@ -303,15 +300,14 @@ def test_projection_uses_top_level_attack_path_summary_as_reachability_fallback(
 
 
 def test_projection_renders_typed_attack_path_steps() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["attackPath"] = {
-        "steps": [
-            "Upload an archive with a traversal entry.",
-            "Trigger automatic extraction.",
-        ]
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        attackPath={
+            "steps": [
+                "Upload an archive with a traversal entry.",
+                "Trigger automatic extraction.",
+            ]
+        },
+    )
 
     dataflow = markdown.split("#### Dataflow", 1)[1].split("#### Reachability", 1)[0]
     assert "Attack steps:" in dataflow
@@ -320,26 +316,25 @@ def test_projection_renders_typed_attack_path_steps() -> None:
 
 
 def test_projection_renders_typed_assessments_and_validation_outcomes() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["validation"] = {
-        "status": "validated",
-        "disposition": "reported",
-        "result": "The traversal write was confirmed.",
-    }
-    findings["findings"][0]["attackPath"] = {
-        "impact": {
-            "level": "high",
-            "rationale": "The write can overwrite application files.",
-            "why": "The destination escapes the extraction root.",
+    markdown = report_with_finding(
+        validation={
+            "status": "validated",
+            "disposition": "reported",
+            "result": "The traversal write was confirmed.",
         },
-        "likelihood": "Likely for authenticated uploaders.",
-        "reachability": {
-            "source": "Attacker-controlled archive entry.",
-            "sink": "Unchecked filesystem write.",
+        attackPath={
+            "impact": {
+                "level": "high",
+                "rationale": "The write can overwrite application files.",
+                "why": "The destination escapes the extraction root.",
+            },
+            "likelihood": "Likely for authenticated uploaders.",
+            "reachability": {
+                "source": "Attacker-controlled archive entry.",
+                "sink": "Unchecked filesystem write.",
+            },
         },
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    )
 
     assert "- **Status:** validated" in markdown
     assert "- **Disposition:** reported" in markdown
@@ -354,15 +349,14 @@ def test_projection_renders_typed_assessments_and_validation_outcomes() -> None:
 
 
 def test_projection_renders_attack_path_context_lists() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["attackPath"] = {
-        "assumptions": ["Automatic extraction is enabled."],
-        "blindspots": ["A downstream sandbox was not exercised."],
-        "controls": ["Archive uploads require authentication."],
-        "limitations": ["The exploit was validated statically."],
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        attackPath={
+            "assumptions": ["Automatic extraction is enabled."],
+            "blindspots": ["A downstream sandbox was not exercised."],
+            "controls": ["Archive uploads require authentication."],
+            "limitations": ["The exploit was validated statically."],
+        },
+    )
 
     reachability = markdown.split("#### Reachability", 1)[1].split("#### Severity", 1)[0]
     assert "Assumptions:" in reachability
@@ -400,12 +394,9 @@ def test_projection_preserves_heading_like_source_evidence() -> None:
 
 
 def test_projection_renders_string_root_cause() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["rootCause"] = (
-        "The authorization check runs after the privileged `write`."
+    markdown = report_with_finding(
+        rootCause="The authorization check runs after the privileged `write`.",
     )
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
     assert (
         "#### Root Cause\n\nThe authorization check runs after the privileged `write`." in markdown
@@ -413,30 +404,28 @@ def test_projection_renders_string_root_cause() -> None:
 
 
 def test_projection_merges_root_cause_aliases() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["rootCause"] = {"summary": ""}
-    findings["findings"][0]["root_cause"] = {
-        "summary": "The destination is not contained before the write.",
-        "code": "destination.write_bytes(payload)",
-        "language": "python",
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        rootCause={"summary": ""},
+        root_cause={
+            "summary": "The destination is not contained before the write.",
+            "code": "destination.write_bytes(payload)",
+            "language": "python",
+        },
+    )
 
     assert "The destination is not contained before the write." in markdown
     assert "```python\ndestination.write_bytes(payload)\n```" in markdown
 
 
 def test_projection_ignores_malformed_root_cause_alias_fields() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["rootCause"] = {"summary": 42}
-    findings["findings"][0]["root_cause"] = {
-        "summary": "The valid legacy root cause.",
-        "evidence_refs": ["legacy-root"],
-    }
-    findings["findings"][0]["code_evidence"] = [{"id": "legacy-root", "code": "legacy_root()"}]
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        rootCause={"summary": 42},
+        root_cause={
+            "summary": "The valid legacy root cause.",
+            "evidence_refs": ["legacy-root"],
+        },
+        code_evidence=[{"id": "legacy-root", "code": "legacy_root()"}],
+    )
 
     assert "The valid legacy root cause." in markdown
     assert "legacy_root()" in markdown
@@ -444,68 +433,58 @@ def test_projection_ignores_malformed_root_cause_alias_fields() -> None:
 
 
 def test_projection_merges_scalar_and_list_root_cause_evidence_references() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["rootCause"] = {
-        "summary": "The source reaches the write.",
-        "evidenceRefs": ["canonical-root-source"],
-    }
-    findings["findings"][0]["root_cause"] = {"evidence_refs": "legacy-root-source"}
-    findings["findings"][0]["codeEvidence"] = [
-        {"id": "canonical-root-source", "code": "canonical_source()"}
-    ]
-    findings["findings"][0]["code_evidence"] = [
-        {"id": "legacy-root-source", "code": "legacy_source()"}
-    ]
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        rootCause={
+            "summary": "The source reaches the write.",
+            "evidenceRefs": ["canonical-root-source"],
+        },
+        root_cause={"evidence_refs": "legacy-root-source"},
+        codeEvidence=[{"id": "canonical-root-source", "code": "canonical_source()"}],
+        code_evidence=[{"id": "legacy-root-source", "code": "legacy_source()"}],
+    )
 
     assert "canonical_source()" in markdown
     assert "legacy_source()" in markdown
 
 
 def test_projection_merges_embedded_evidence_across_root_cause_aliases() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["rootCause"] = {
-        "summary": "The canonical root cause.",
-        "codeEvidence": [{"id": "canonical-root", "code": "canonical_evidence()"}],
-    }
-    findings["findings"][0]["root_cause"] = {
-        "codeEvidence": [{"id": "legacy-root", "code": "legacy_evidence()"}]
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        rootCause={
+            "summary": "The canonical root cause.",
+            "codeEvidence": [{"id": "canonical-root", "code": "canonical_evidence()"}],
+        },
+        root_cause={"codeEvidence": [{"id": "legacy-root", "code": "legacy_evidence()"}]},
+    )
 
     assert "canonical_evidence()" in markdown
     assert "legacy_evidence()" in markdown
 
 
 def test_projection_treats_whitespace_root_cause_fields_as_unpopulated() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["rootCause"] = {
-        "summary": "   ",
-        "code": "\t",
-        "language": "text",
-    }
-    findings["findings"][0]["root_cause"] = {
-        "summary": "The destination is not contained before the write.",
-        "code": "destination.write_bytes(payload)",
-        "language": "python",
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        rootCause={
+            "summary": "   ",
+            "code": "\t",
+            "language": "text",
+        },
+        root_cause={
+            "summary": "The destination is not contained before the write.",
+            "code": "destination.write_bytes(payload)",
+            "language": "python",
+        },
+    )
 
     assert "The destination is not contained before the write." in markdown
     assert "```python\ndestination.write_bytes(payload)\n```" in markdown
 
 
 def test_projection_ignores_malformed_data_flow_alias_values() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["attackPath"] = {
-        "dataFlow": {"summary": ["invalid canonical value"]},
-        "dataflow": {"summary": "request -> validated sink"},
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        attackPath={
+            "dataFlow": {"summary": ["invalid canonical value"]},
+            "dataflow": {"summary": "request -> validated sink"},
+        },
+    )
 
     assert "request -\\> validated sink" in markdown
 
@@ -682,10 +661,9 @@ def test_projection_rejects_unsafe_structural_hardening_portfolio() -> None:
 
 
 def test_projection_escapes_markdown_link_syntax_in_finding_title() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["title"] = "Parser ](https://example.com) [boundary"
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        title="Parser ](https://example.com) [boundary",
+    )
 
     assert "[Parser \\](https://example.com) \\[boundary](#finding-1)" in markdown
     assert "[Parser ](https://example.com) [boundary](" not in markdown
@@ -1007,21 +985,20 @@ def test_projection_includes_surface_evidence_receipts() -> None:
 def test_projection_preserves_identifier_text_and_code_path_spelling(
     source_path: str, rendered_location: str
 ) -> None:
-    manifest, findings, coverage = canonical_documents()
-    finding = findings["findings"][0]
-    finding["title"] = "__proto__ pollution"
-    finding["validation"] = {"evidenceRefs": ["source"]}
-    finding["codeEvidence"] = [
-        {
-            "id": "source",
-            "label": "Source control",
-            "path": source_path,
-            "startLine": 7,
-            "code": "handle(request)",
-            "explanation": "A source-backed operation.",
-        }
-    ]
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        title="__proto__ pollution",
+        validation={"evidenceRefs": ["source"]},
+        codeEvidence=[
+            {
+                "id": "source",
+                "label": "Source control",
+                "path": source_path,
+                "startLine": 7,
+                "code": "handle(request)",
+                "explanation": "A source-backed operation.",
+            }
+        ],
+    )
     assert "\\_\\_proto\\_\\_ pollution" in markdown
     assert rendered_location in markdown
 
@@ -1041,17 +1018,16 @@ def test_projection_preserves_identifier_text_and_code_path_spelling(
 def test_projection_normalizes_invalid_legacy_code_evidence_bounds(
     bounds: dict[str, object], rendered_location: str
 ) -> None:
-    manifest, findings, coverage = canonical_documents()
-    finding = findings["findings"][0]
-    finding["validation"] = {"evidenceRefs": ["source"]}
-    finding["code_evidence"] = [
-        {
-            "id": "source",
-            "label": "Source control",
-            "path": "src/evidence.py",
-            **bounds,
-            "code": "handle(request)",
-        }
-    ]
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    markdown = report_with_finding(
+        validation={"evidenceRefs": ["source"]},
+        code_evidence=[
+            {
+                "id": "source",
+                "label": "Source control",
+                "path": "src/evidence.py",
+                **bounds,
+                "code": "handle(request)",
+            }
+        ],
+    )
     assert rendered_location in markdown

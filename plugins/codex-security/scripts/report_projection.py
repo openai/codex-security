@@ -7,6 +7,8 @@ import argparse
 import json
 import re
 from collections import Counter
+from collections.abc import Iterator
+from itertools import chain
 from typing import Any
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "informational": 4}
@@ -60,12 +62,15 @@ def _text(value: Any, fallback: str) -> str:
     return _escape_markdown(normalized)
 
 
-def _strings(value: Any) -> list[str]:
+def _string_values(value: Any) -> Iterator[str]:
     if isinstance(value, str):
-        value = [value]
-    if not isinstance(value, list):
-        return []
-    return [text for item in value if (text := _text(item, ""))]
+        yield value
+    elif isinstance(value, list):
+        yield from (item for item in value if isinstance(item, str))
+
+
+def _strings(value: Any) -> list[str]:
+    return [text for item in _string_values(value) if (text := _text(item, ""))]
 
 
 def _path_label(value: str, *, ensure_ascii: bool = False) -> str:
@@ -139,7 +144,7 @@ def uses_deep_presentation(coverage: dict[str, Any], findings: list[dict[str, An
     return any(_has_deep_child_metadata(finding) for finding in findings)
 
 
-def _deep_title_parts(finding: dict[str, Any]) -> tuple[str, str | None]:
+def _deep_title_parts(finding: dict[str, Any], report_id: str) -> tuple[str, str | None]:
     title = finding.get("title")
     if not isinstance(title, str):
         return "Untitled finding", None
@@ -149,7 +154,7 @@ def _deep_title_parts(finding: dict[str, Any]) -> tuple[str, str | None]:
         return normalized, None
     annotation = match.group(2)
     extensions = finding.get("extensions")
-    recognized_ids = [_deep_report_id(finding)]
+    recognized_ids = [report_id]
     if isinstance(extensions, dict):
         ledger_row_id = extensions.get("ledgerRowId")
         if isinstance(ledger_row_id, str) and ledger_row_id.strip():
@@ -171,12 +176,6 @@ def _deep_finding_groups(
     return list(groups.values())
 
 
-def _deep_group_titles(group: list[tuple[int, dict[str, Any], str | None]]) -> str:
-    return "<br>".join(
-        dict.fromkeys(_cell(_deep_title_parts(finding)[0]) for _, finding, _ in group)
-    )
-
-
 def _deep_group_levels(
     group: list[tuple[int, dict[str, Any], str | None]],
     field: str,
@@ -186,45 +185,32 @@ def _deep_group_levels(
     return "<br>".join(sorted(levels, key=lambda level: order.get(level, len(order))))
 
 
-def _deep_group_report_labels(
-    group: list[tuple[int, dict[str, Any], str | None]],
-) -> list[str]:
+def _deep_group_row(group: list[tuple[int, dict[str, Any], str | None]]) -> str:
     report_ids = [_deep_report_id(finding) for _, finding, _ in group]
-    report_id_counts = Counter(report_ids)
-    labels = [
-        (_deep_title_parts(finding)[1] if report_id_counts[report_id] > 1 else report_id)
-        or report_id
-        for report_id, (_, finding, _) in zip(report_ids, group, strict=True)
-    ]
+    report_counts = Counter(report_ids)
+    titles = []
+    labels = []
+    for report_id, (_, finding, _) in zip(report_ids, group, strict=True):
+        title, annotation = _deep_title_parts(finding, report_id)
+        titles.append(_cell(title))
+        labels.append(annotation if report_counts[report_id] > 1 and annotation else report_id)
+
     label_counts = Counter(labels)
-    return [
-        (
-            finding.get("identity", {}).get("instance")
-            if label_counts[label] > 1 and isinstance(finding.get("identity"), dict)
-            else label
-        )
-        or _deep_report_id(finding)
-        for label, (_, finding, _) in zip(labels, group, strict=True)
-    ]
-
-
-def _deep_group_report_links(group: list[tuple[int, dict[str, Any], str | None]]) -> str:
-    labels = _deep_group_report_labels(group)
-    return "<br>".join(
-        f"[{_cell(label)}](#finding-{number})"
-        for label, (number, _, _) in zip(labels, group, strict=True)
+    report_links = []
+    writeup_links = []
+    for report_id, label, (number, finding, path) in zip(report_ids, labels, group, strict=True):
+        identity = finding.get("identity")
+        if label_counts[label] > 1 and isinstance(identity, dict):
+            label = identity.get("instance") or report_id
+        label = _cell(label)
+        report_links.append(f"[{label}](#finding-{number})")
+        writeup_links.append(f"[Open {label}]({path})" if path else f"{label}: inline below")
+    return (
+        f"| {'<br>'.join(dict.fromkeys(titles))} | {'<br>'.join(report_links)} "
+        f"| {_deep_group_levels(group, 'severity', SEVERITY_ORDER)} "
+        f"| {_deep_group_levels(group, 'confidence', CONFIDENCE_ORDER)} "
+        f"| {'<br>'.join(writeup_links)} |"
     )
-
-
-def _deep_group_writeup_links(group: list[tuple[int, dict[str, Any], str | None]]) -> str:
-    labels = _deep_group_report_labels(group)
-    links: list[str] = []
-    for label, (_, _, report_path) in zip(labels, group, strict=True):
-        report_id = _cell(label)
-        links.append(
-            f"[Open {report_id}]({report_path})" if report_path else f"{report_id}: inline below"
-        )
-    return "<br>".join(links)
 
 
 def _writeup_report_path(finding: dict[str, Any]) -> str | None:
@@ -255,51 +241,43 @@ def _bullet_section(heading: str, items: list[str]) -> list[str]:
     return ["", heading, *(f"- {item}" for item in items)] if items else []
 
 
-def _code_evidence_catalog(finding: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    catalog: dict[str, dict[str, Any]] = {}
-    for key in ("codeEvidence", "code_evidence"):
-        raw = finding.get(key, [])
-        if not isinstance(raw, list):
-            continue
-        for item in raw:
-            if (
-                isinstance(item, dict)
-                and isinstance(item.get("id"), str)
+def code_evidence_rows(*catalogs: Any) -> Iterator[dict[str, Any]]:
+    for items in catalogs:
+        if isinstance(items, list):
+            yield from (
+                item
+                for item in items
+                if isinstance(item, dict)
                 and isinstance(item.get("code"), str)
                 and item["code"].strip()
-            ):
-                catalog.setdefault(item["id"], item)
+            )
+
+
+def embedded_code_evidence(section: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    return code_evidence_rows(section.get("codeEvidence"), section.get("code_evidence"))
+
+
+def _code_evidence_catalog(finding: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    catalog = {}
+    for item in embedded_code_evidence(finding):
+        if isinstance(item.get("id"), str):
+            catalog.setdefault(item["id"], item)
     return catalog
 
 
 def _section_code_evidence(
-    finding: dict[str, Any], *sections: dict[str, Any]
+    catalog: dict[str, dict[str, Any]], *sections: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    catalog = _code_evidence_catalog(finding)
-    resolved: list[dict[str, Any]] = []
-    for section in sections:
-        for key in ("evidenceRefs", "evidence_refs"):
-            refs = section.get(key, [])
-            if isinstance(refs, str):
-                refs = [refs]
-            if isinstance(refs, list):
-                resolved.extend(
-                    catalog[ref] for ref in refs if isinstance(ref, str) and ref in catalog
-                )
-        for key in ("codeEvidence", "code_evidence"):
-            embedded = section.get(key, [])
-            if isinstance(embedded, list):
-                resolved.extend(
-                    item
-                    for item in embedded
-                    if isinstance(item, dict)
-                    and isinstance(item.get("code"), str)
-                    and item["code"].strip()
-                )
     unique: dict[tuple[str, str], dict[str, Any]] = {}
-    for item in resolved:
-        key = (str(item.get("id", "")), item["code"])
-        unique.setdefault(key, item)
+    for section in sections:
+        referenced = (
+            catalog[ref]
+            for key in ("evidenceRefs", "evidence_refs")
+            for ref in _string_values(section.get(key))
+            if ref in catalog
+        )
+        for item in chain(referenced, embedded_code_evidence(section)):
+            unique.setdefault((str(item.get("id", "")), item["code"]), item)
     return list(unique.values())
 
 
@@ -359,12 +337,7 @@ def merged_root_cause(value: dict[str, Any]) -> tuple[str | None, Any]:
     ]
     if evidence_values:
         merged["evidenceRefs"] = list(
-            dict.fromkeys(
-                item
-                for evidence in evidence_values
-                for item in (evidence if isinstance(evidence, list) else [evidence])
-                if isinstance(item, str)
-            )
+            dict.fromkeys(item for evidence in evidence_values for item in _string_values(evidence))
         )
 
     embedded_evidence = [
@@ -396,9 +369,9 @@ def merged_root_cause(value: dict[str, Any]) -> tuple[str | None, Any]:
 
 
 def _root_cause_code_evidence(
-    finding: dict[str, Any], root_cause: dict[str, Any]
+    finding: dict[str, Any], root_cause: dict[str, Any], catalog: dict[str, dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    evidence = _section_code_evidence(finding, root_cause)
+    evidence = _section_code_evidence(catalog, root_cause)
     legacy_code = root_cause.get("code")
     if not isinstance(legacy_code, str) or not legacy_code.strip():
         return evidence
@@ -599,33 +572,17 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         if isinstance((value := attack_path.get(key)), (str, dict))
     ]
     dataflow: dict[str, Any] = {}
-    for key in ("summary", "source", "sink", "outcome"):
-        value = next(
-            (
-                section[key]
-                for section in dataflow_sections
-                if key in section and isinstance(section[key], str) and section[key].strip()
-            ),
-            None,
-        )
-        if value is not None:
-            dataflow[key] = value
-    transformations = list(
-        dict.fromkeys(
-            transformation
-            for section in dataflow_sections
-            for transformation in (
-                [section.get("transformations")]
-                if isinstance(section.get("transformations"), str)
-                else section.get("transformations")
-                if isinstance(section.get("transformations"), list)
-                else []
-            )
-            if isinstance(transformation, str) and transformation.strip()
-        )
+    for section in dataflow_sections:
+        for key in ("summary", "source", "sink", "outcome"):
+            value = section.get(key)
+            if isinstance(value, str) and value.strip():
+                dataflow.setdefault(key, value)
+    transformations = dict.fromkeys(
+        value
+        for section in dataflow_sections
+        for value in _string_values(section.get("transformations"))
+        if value.strip()
     )
-    if transformations:
-        dataflow["transformations"] = transformations
     raw_reachability = attack_path.get("reachability")
     reachability = (
         {"summary": raw_reachability}
@@ -654,10 +611,11 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         raw_root_cause if isinstance(raw_root_cause, str) else root_cause.get("summary"),
         "",
     )
-    root_cause_code_evidence = _root_cause_code_evidence(finding, root_cause)
-    validation_code_evidence = _section_code_evidence(finding, validation)
-    dataflow_code_evidence = _section_code_evidence(finding, attack_path, *dataflow_sections)
-    reachability_code_evidence = _section_code_evidence(finding, reachability)
+    catalog = _code_evidence_catalog(finding)
+    root_cause_code_evidence = _root_cause_code_evidence(finding, root_cause, catalog)
+    validation_code_evidence = _section_code_evidence(catalog, validation)
+    dataflow_code_evidence = _section_code_evidence(catalog, attack_path, *dataflow_sections)
+    reachability_code_evidence = _section_code_evidence(catalog, reachability)
     dataflow_summary = _text(dataflow.get("summary"), "") or (
         f"The canonical finding records the affected path at {_locations(finding)}, "
         "but no expanded source-to-sink narrative was recorded."
@@ -704,7 +662,9 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     for label, key in (("Source", "source"), ("Sink", "sink"), ("Outcome", "outcome")):
         if dataflow.get(key):
             lines.extend(["", f"- **{label}:** {_text(dataflow[key], 'not recorded')}"])
-    lines.extend(_bullet_section("Transformations:", _strings(dataflow.get("transformations"))))
+    lines.extend(
+        _bullet_section("Transformations:", [_text(value, "") for value in transformations])
+    )
     lines.extend(_code_evidence_lines(dataflow_code_evidence))
     lines.extend(["", "#### Reachability", "", reachability_summary])
     for label, key in (
@@ -718,10 +678,7 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
             lines.extend(["", f"- **{label}:** {_text(reachability[key], 'not recorded')}"])
     preconditions = list(
         dict.fromkeys(
-            [
-                *_strings(attack_path.get("preconditions")),
-                *_strings(reachability.get("preconditions")),
-            ]
+            _strings(attack_path.get("preconditions")) + _strings(reachability.get("preconditions"))
         )
     )
     lines.extend(_bullet_section("Preconditions:", preconditions))
@@ -912,13 +869,7 @@ def build_report_markdown(
                     "| --- | --- | --- | --- | --- |",
                 ]
             )
-            for group in deep_finding_groups:
-                lines.append(
-                    f"| {_deep_group_titles(group)} | {_deep_group_report_links(group)} "
-                    f"| {_deep_group_levels(group, 'severity', SEVERITY_ORDER)} "
-                    f"| {_deep_group_levels(group, 'confidence', CONFIDENCE_ORDER)} "
-                    f"| {_deep_group_writeup_links(group)} |"
-                )
+            lines.extend(_deep_group_row(group) for group in deep_finding_groups)
         else:
             lines.extend(
                 [
