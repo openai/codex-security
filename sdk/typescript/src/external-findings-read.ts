@@ -163,6 +163,8 @@ export async function readExternalFindings(
       sourceRepositories: [{ url }],
     };
   }
+  // A new reader must choose its parser before reaching the Wiz replay path.
+  options.provider satisfies "wiz";
   const publication = await readVendorFindingsForPublication(path, target);
   const sourceRepositories = publication.current.findings.flatMap((finding) =>
     localFindingRepositories("wiz", finding),

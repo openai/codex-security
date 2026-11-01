@@ -7,13 +7,14 @@ import os
 from argparse import Namespace
 
 import pytest
-from test_deep_scan_successful_publication import add_worker, complete
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 from workbench_test_support import (
     read_review_state,
     saved_draft,
+    select_checkpoint,
     sort_checkpoint_entries,
     write_checkpoint,
+    write_result_draft,
 )
 
 
@@ -69,12 +70,10 @@ def test_canonical_candidate_resolution_keeps_legacy_checkpoint_authority(
         scan.scan_id,
         deferred=[{"candidateId": "candidate-review", "reason": "Validation is pending."}],
     )
-    checkpoint = write_checkpoint(scan.scan_dir / "checkpoints", pending)
-    os.utime(checkpoint, ns=(pending_time, pending_time))
+    checkpoint = write_checkpoint(scan.scan_dir / "checkpoints", pending, mtime_ns=pending_time)
     canonical_disposition(scan, disposition, complete_marker)
     original = checkpoint.read_bytes()
     saved = workbench_api["saved_results"]
-    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
     prepared_coverage = []
     write = saved._write_prepared_scan_finalization
 
@@ -85,18 +84,12 @@ def test_canonical_candidate_resolution_keeps_legacy_checkpoint_authority(
         return write(prepared, **kwargs)
 
     if flow in {"complete", "prepare"}:
-        completed = complete(workbench_api, workbench_db, scan, prepare_only=flow == "prepare")
+        completed = scan.complete(prepare_only=flow == "prepare")
         assert completed["progress"]["status"] == ("running" if flow == "prepare" else "complete")
     else:
         with monkeypatch.context() as patch:
             patch.setattr(saved, "_write_prepared_scan_finalization", publish)
-            saved.fail_scan(
-                context,
-                workbench_db,
-                Namespace(
-                    scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."
-                ),
-            )
+            scan.fail()
         if flow == "interrupted-stop":
             row = workbench_db.execute(
                 "SELECT * FROM scans WHERE id = ?", (scan.scan_id,)
@@ -107,13 +100,7 @@ def test_canonical_candidate_resolution_keeps_legacy_checkpoint_authority(
             # later file-authored draft reopens this candidate.
             late = {**scan.coverage, "deferred": pending["coverage"]["deferred"]}
             (scan.scan_dir / "coverage.json").write_text(json.dumps(late))
-        saved.preserve_scan_results(
-            context,
-            workbench_db,
-            Namespace(
-                scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
-            ),
-        )
+        scan.preserve()
     coverage = read_review_state(workbench_db, scan.scan_dir)
     assert "completeness" not in coverage
     for document in [coverage, *prepared_coverage]:
@@ -127,9 +114,7 @@ def test_canonical_candidate_resolution_keeps_legacy_checkpoint_authority(
         )
     if flow in {"stop", "interrupted-stop"}:
         before = (scan.scan_dir / "scan-manifest.json").read_bytes()
-        recovered = saved.recover_scan_results(
-            context, workbench_db, Namespace(scan_id=scan.scan_id)
-        )["scan"]
+        recovered = scan.recover()
         assert not recovered["resultsRecoveryNeeded"]
         assert (scan.scan_dir / "scan-manifest.json").read_bytes() == before
         assert read_review_state(workbench_db, scan.scan_dir) == coverage
@@ -145,24 +130,16 @@ def test_accepted_pending_root_tie_survives_canonical_disposition(
         scan.scan_id,
         deferred=[{"candidateId": "candidate-review", "reason": "Accepted pending review."}],
     )
-    checkpoint = write_checkpoint(scan.scan_dir / "checkpoints", pending)
-    os.utime(checkpoint, ns=(100, 100))
-    head = scan.scan_dir / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-    os.utime(head, ns=(200, 200))
+    checkpoint = write_checkpoint(scan.scan_dir / "checkpoints", pending, mtime_ns=100)
+    select_checkpoint(scan.scan_dir, checkpoint, mtime_ns=200)
     saved = workbench_api["saved_results"]
     saved._capture_saved_source(scan.scan_dir, "checkpoint-head.json", scan.scan_id)
     canonical_disposition(scan, disposition, True)
-    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
-    saved.fail_scan(
-        context,
-        workbench_db,
-        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-    )
+    scan.fail()
     coverage = read_review_state(workbench_db, scan.scan_dir)
     assert "completeness" not in coverage
     assert any(row.get("candidateId") == "candidate-review" for row in coverage["deferred"])
-    saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+    scan.recover()
     assert read_review_state(workbench_db, scan.scan_dir) == coverage
 
 
@@ -184,19 +161,15 @@ def test_restored_root_observation_keeps_tied_pending_payload(
     _, terminal = saved._read_saved_parent_result(scan.scan_dir, scan.scan_id)
     for name in ("scan-manifest.json", "findings.json", "coverage.json"):
         os.utime(scan.scan_dir / name, ns=(0, 0))
-    checkpoint = write_checkpoint(scan.scan_dir / "checkpoints", terminal)
-    os.utime(checkpoint, ns=(50, 50))
-    head = scan.scan_dir / "checkpoint-head.json"
+    checkpoint = write_checkpoint(scan.scan_dir / "checkpoints", terminal, mtime_ns=50)
     for observed in (100, 300, 100):
-        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-        os.utime(head, ns=(observed, observed))
+        select_checkpoint(scan.scan_dir, checkpoint, mtime_ns=observed)
         saved._capture_saved_source(scan.scan_dir, "checkpoint-head.json", scan.scan_id)
     pending = saved_draft(
         scan.scan_id,
         deferred=[{"candidateId": "candidate-review", "reason": "Review remains pending."}],
     )
-    pending_path = write_checkpoint(scan.scan_dir / "checkpoints", pending)
-    os.utime(pending_path, ns=(pending_time, pending_time))
+    write_checkpoint(scan.scan_dir / "checkpoints", pending, mtime_ns=pending_time)
     prepared_coverage = []
     write = saved._write_prepared_scan_finalization
 
@@ -206,28 +179,17 @@ def test_restored_root_observation_keeps_tied_pending_payload(
             raise OSError("Synthetic restored-observation publication interruption")
         return write(prepared, **kwargs)
 
-    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
     with monkeypatch.context() as patch:
         patch.setattr(saved, "_write_prepared_scan_finalization", publish)
-        saved.fail_scan(
-            context,
-            workbench_db,
-            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-        )
-    saved.preserve_scan_results(
-        context,
-        workbench_db,
-        Namespace(
-            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
-        ),
-    )
+        scan.fail()
+    scan.preserve()
     coverage = read_review_state(workbench_db, scan.scan_dir)
     assert len(prepared_coverage) == 1
     for document in [coverage, *prepared_coverage]:
         assert any(
             row.get("candidateId") == "candidate-review" for row in document["deferred"]
         ) is (pending_time >= 100)
-    saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+    scan.recover()
     assert read_review_state(workbench_db, scan.scan_dir) == coverage
 
 
@@ -269,20 +231,19 @@ def test_root_outcome_uses_its_own_completion_marker(
         os.utime(scan.scan_dir / name, ns=(0, 0))
 
     results = sorted(
-        [add_worker(workbench_db, scan), add_worker(workbench_db, scan)],
+        [scan.add_worker(), scan.add_worker()],
         key=lambda path: path.parent.name,
     )
     # Registration timestamps are equal, so IDs determine both arrival orders.
     for result, worker_complete in zip(results, [not complete_worker_last, complete_worker_last]):
-        result.write_text(
-            json.dumps(
-                saved_draft(
-                    scan.scan_id,
-                    complete=worker_complete,
-                )
-            )
+        write_result_draft(
+            result,
+            saved_draft(
+                scan.scan_id,
+                complete=worker_complete,
+            ),
+            mtime_ns=100,
         )
-        os.utime(result, ns=(100, 100))
     assert [
         row["result_manifest_path"]
         for row in workbench_db.execute(
@@ -296,19 +257,16 @@ def test_root_outcome_uses_its_own_completion_marker(
     )
     if flow == "recover":
         saved.fail_scan(context, workbench_db, stop_args)
-    selected = write_checkpoint(scan.scan_dir / "checkpoints", root_draft)
-    os.utime(selected, ns=(100, 100))
-    head = scan.scan_dir / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": selected.name}))
-    os.utime(head, ns=(200, 200))
+    selected = write_checkpoint(scan.scan_dir / "checkpoints", root_draft, mtime_ns=100)
+    select_checkpoint(scan.scan_dir, selected, mtime_ns=200)
     pending = write_checkpoint(
         scan.scan_dir / "checkpoints",
         saved_draft(
             scan.scan_id,
             deferred=[{"candidateId": "candidate-review", "reason": "Validation is pending."}],
         ),
+        mtime_ns=200,
     )
-    os.utime(pending, ns=(200, 200))
     originals = {path: path.read_bytes() for path in [selected, pending, *results]}
     prepared_coverage = []
     write = saved._write_prepared_scan_finalization
@@ -325,16 +283,10 @@ def test_root_outcome_uses_its_own_completion_marker(
             saved.fail_scan(context, workbench_db, stop_args)
         elif interrupted:
             with pytest.raises(OSError, match="Synthetic mixed-source publication interruption"):
-                saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+                scan.recover()
         else:
-            saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
-    published = saved.preserve_scan_results(
-        context,
-        workbench_db,
-        Namespace(
-            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
-        ),
-    )["scan"]
+            scan.recover()
+    published = scan.preserve()
     assert not published["resultsRecoveryNeeded"]
     coverage = read_review_state(workbench_db, scan.scan_dir)
     assert len(prepared_coverage) == 1
@@ -343,7 +295,7 @@ def test_root_outcome_uses_its_own_completion_marker(
             row.get("candidateId") == "candidate-review" for row in document["deferred"]
         ) is (root_complete is False)
     manifest = (scan.scan_dir / "scan-manifest.json").read_bytes()
-    saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+    scan.recover()
     assert read_review_state(workbench_db, scan.scan_dir) == coverage
     assert (scan.scan_dir / "scan-manifest.json").read_bytes() == manifest
     assert all(path.read_bytes() == contents for path, contents in originals.items())
@@ -406,8 +358,7 @@ def test_legacy_tied_root_parent_preserves_accepted_pending_evidence(
         checkpoint = write_checkpoint(scan.scan_dir / "checkpoints", draft)
         observed = 100 if name == "reported" else 500
         os.utime(checkpoint, ns=(observed, observed))
-        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-        os.utime(head, ns=(observed, observed))
+        select_checkpoint(scan.scan_dir, checkpoint, mtime_ns=observed)
         captures.update(
             saved._capture_saved_source(scan.scan_dir, "checkpoint-head.json", scan.scan_id)
         )
@@ -463,9 +414,7 @@ def test_legacy_tied_root_parent_preserves_accepted_pending_evidence(
         assert any(
             row.get("candidateId") == "candidate-review" for row in current_coverage["deferred"]
         )
-    replayed = saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))[
-        "scan"
-    ]
+    replayed = scan.recover()
     assert replayed["findingCount"] == 1
     assert not replayed["resultsRecoveryNeeded"]
     before_sources = json.loads(manifest)["scan"]["preservedSources"]
@@ -490,14 +439,11 @@ def test_legacy_tied_root_parent_preserves_accepted_pending_evidence(
     if wrapped:
         assert manifest_path.read_bytes() == manifest
     manifest = manifest_path.read_bytes()
-    saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+    scan.recover()
     assert manifest_path.read_bytes() == manifest
 
-    head.write_text(json.dumps({"checkpoint": checkpoints[later_selection].name}))
-    os.utime(head, ns=(600, 600))
-    recovered = saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))[
-        "scan"
-    ]
+    select_checkpoint(scan.scan_dir, checkpoints[later_selection], mtime_ns=600)
+    recovered = scan.recover()
     assert recovered["findingCount"] == (0 if later_selection == "rejected" else 1)
     assert not recovered["resultsRecoveryNeeded"]
     coverage = read_review_state(workbench_db, scan.scan_dir)
@@ -565,18 +511,15 @@ def test_legacy_pending_ties_aggregate_accepted_provenance(
     head = scan.scan_dir / "checkpoint-head.json"
     for draft, observed in observations:
         draft["coverage"] = {**scan.coverage, **draft["coverage"]}
-        checkpoint = write_checkpoint(scan.scan_dir / "checkpoints", draft)
-        os.utime(checkpoint, ns=(observed, observed))
-        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-        os.utime(head, ns=(observed, observed))
+        checkpoint = write_checkpoint(scan.scan_dir / "checkpoints", draft, mtime_ns=observed)
+        select_checkpoint(scan.scan_dir, checkpoint, mtime_ns=observed)
         captures.update(
             saved._capture_saved_source(scan.scan_dir, "checkpoint-head.json", scan.scan_id)
         )
     head.unlink()
     raw = saved_draft(scan.scan_id, deferred=[unobserved])
     raw["coverage"] = {**scan.coverage, **raw["coverage"]}
-    unobserved_path = write_checkpoint(scan.scan_dir / "checkpoints", raw)
-    os.utime(unobserved_path, ns=(100, 100))
+    unobserved_path = write_checkpoint(scan.scan_dir / "checkpoints", raw, mtime_ns=100)
     captures.update(
         saved._capture_saved_source(
             scan.scan_dir, unobserved_path.relative_to(scan.scan_dir).as_posix(), scan.scan_id

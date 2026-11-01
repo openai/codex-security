@@ -1,5 +1,6 @@
 import { hash } from "node:crypto";
 import { readFile, type FileHandle } from "node:fs/promises";
+import { posix } from "node:path";
 import { promisify } from "node:util";
 import { gunzip } from "node:zlib";
 import { CodexSecurityError, errorMessage } from "./errors.js";
@@ -43,6 +44,18 @@ export function relativePath(value: unknown): string | null {
     !path.split("/").includes("..")
     ? path
     : null;
+}
+
+export function repositoryFilePath(value: unknown): string | null {
+  const relative = relativePath(value);
+  if (!relative) return null;
+  const path = posix.normalize(relative);
+  // Anchor the SCP branch at the first eligible @ to avoid rescanning long filenames.
+  return path === "." ||
+    path.endsWith("/") ||
+    /^(?:[a-z][a-z\d+.-]*:|~[^/]*(?:\/|$)|[^/][^/@]*@[^/]+:)/iu.test(path)
+    ? null
+    : path;
 }
 
 export function stableId(prefix: string, fields: unknown[]): string {
@@ -120,13 +133,7 @@ const sarifArtifactLocationFields = new Set([
   "displayBase",
 ]);
 
-/** Keep original artifact indexes; omit only inventory unrelated to this finding. */
-export function sarifRunContextForResult(
-  runContext: Record<string, unknown>,
-  ...selectedEvidence: unknown[]
-): Record<string, unknown> {
-  const { artifacts, ...context } = runContext;
-  if (!Array.isArray(artifacts) || artifacts.length === 0) return runContext;
+function sarifArtifactReferences(evidence: unknown) {
   const locations: Record<string, unknown>[] = [];
   let hasArtifactLink = false;
   function visit(value: unknown): void {
@@ -151,41 +158,111 @@ export function sarifRunContextForResult(
         visit(child);
       }
   }
-  visit([context, ...selectedEvidence]);
-  if (hasArtifactLink) return runContext;
-  const unresolvedUri = /[%:\\]|(?:^|\/)\.\.?(?:\/|$)/u;
-  for (const location of locations) {
-    if (typeof location["index"] === "number" && location["index"] >= 0)
-      return runContext;
-    if (typeof location["uri"] !== "string") continue;
-    for (const artifact of artifacts) {
-      if (!isRecord(artifact) || !isRecord(artifact["location"])) continue;
-      const candidate = artifact["location"];
-      // Keep URI spellings that need resolution; evidence is never rewritten.
-      if (
-        location["uriBaseId"] !== candidate["uriBaseId"] ||
-        unresolvedUri.test(location["uri"]) ||
-        (typeof candidate["uri"] === "string" &&
-          unresolvedUri.test(candidate["uri"])) ||
-        location["uri"] === candidate["uri"]
-      )
-        return runContext;
-    }
-  }
-  return context;
+  visit(evidence);
+  return { locations, hasArtifactLink };
 }
 
+const unresolvedUri = /[%:\\]|(?:^|\/)\.\.?(?:\/|$)/u;
+
+function artifactUriMatcher(artifacts: unknown[]) {
+  const uris = new Set<string>();
+  let hasLocation = false;
+  let base: unknown;
+  for (const artifact of artifacts) {
+    if (!isRecord(artifact) || !isRecord(artifact["location"])) continue;
+    const { uri, uriBaseId } = artifact["location"];
+    // Mixed bases or a URI that needs resolution can match any direct reference.
+    if (
+      (hasLocation && uriBaseId !== base) ||
+      (typeof uri === "string" && unresolvedUri.test(uri))
+    )
+      return () => true;
+    hasLocation = true;
+    base = uriBaseId;
+    if (typeof uri === "string") uris.add(uri);
+  }
+  return (uri: string, uriBaseId: unknown) =>
+    hasLocation &&
+    (uriBaseId !== base || unresolvedUri.test(uri) || uris.has(uri));
+}
+
+/** Keep original artifact indexes; omit only inventory unrelated to this finding. */
+export function sarifRunContextSelector(runContext: Record<string, unknown>) {
+  const { artifacts, ...context } = runContext;
+  if (!Array.isArray(artifacts) || artifacts.length === 0)
+    return () => runContext;
+  let matchesUri: ReturnType<typeof artifactUriMatcher> | undefined;
+  return (...selectedEvidence: unknown[]) => {
+    const { locations, hasArtifactLink } = sarifArtifactReferences([
+      context,
+      ...selectedEvidence,
+    ]);
+    if (hasArtifactLink) return runContext;
+    for (const location of locations) {
+      const { index, uri, uriBaseId } = location;
+      if (typeof index === "number" && index >= 0) return runContext;
+      if (typeof uri === "string") {
+        matchesUri ??= artifactUriMatcher(artifacts);
+        if (matchesUri(uri, uriBaseId)) return runContext;
+      }
+    }
+    return context;
+  };
+}
+
+type IndexedSarifRule = { rule: Record<string, unknown>; index: number };
+
 /** Duplicate IDs cannot identify a single rule in this run. */
-export function indexSarifRules(rules: Record<string, unknown>[]) {
-  const byId = new Map<
-    unknown,
-    { rule: Record<string, unknown>; index: number } | null
-  >();
-  for (const [index, rule] of rules.entries()) {
+export function indexSarifRules(
+  entries: Iterable<[number, Record<string, unknown>]>,
+) {
+  const byId = new Map<unknown, IndexedSarifRule | null>();
+  for (const [index, rule] of entries) {
     const id = rule["id"];
     byId.set(id, byId.has(id) ? null : { rule, index });
   }
   return byId;
+}
+
+/** Keep the report and producer context shared by individual SARIF results. */
+export function sarifResultContext(
+  document: Record<string, unknown>,
+  run: Record<string, unknown>,
+  tool: Record<string, unknown>,
+  driver: Record<string, unknown>,
+  producer: "Endor" | "Semgrep",
+) {
+  const rules = array(driver["rules"] ?? [], `${producer} rules`).map((rule) =>
+    record(rule, `${producer} rule`),
+  );
+  const rulesById = indexSarifRules(rules.entries());
+  const { runs: _runs, ...documentContext } = document;
+  const { results: _results, tool: _tool, ...runContext } = run;
+  const { rules: _rules, ...driverContext } = driver;
+  const { driver: _driver, ...toolContext } = tool;
+  return {
+    rulesById,
+    selectRunContext: sarifRunContextSelector(runContext),
+    documentContext,
+    runContext,
+    driverContext,
+    toolContext,
+  };
+}
+
+export function matchesSarifRuleReference(
+  reference: Record<string, unknown>,
+  ruleId: string,
+  selected: IndexedSarifRule | undefined,
+) {
+  return (
+    reference["toolComponent"] === undefined &&
+    (reference["id"] === undefined || reference["id"] === ruleId) &&
+    (reference["index"] === undefined ||
+      reference["index"] === selected?.index) &&
+    (reference["guid"] === undefined ||
+      reference["guid"] === selected?.rule["guid"])
+  );
 }
 
 /** Exclude every colliding record: choosing the first could overwrite another occurrence. */

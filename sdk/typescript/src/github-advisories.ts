@@ -3,9 +3,15 @@ import {
   CANONICAL_GHSA_ID,
   githubRepositoryParts,
 } from "./github-identifiers.js";
-import { CodexSecurityError, errorMessage } from "./errors.js";
+import { CodexSecurityError } from "./errors.js";
 import { requireExternalImports } from "./external-imports-feature.js";
-import { createAuthenticatedGitHub } from "./github.js";
+import {
+  githubImportHost,
+  githubImportClient,
+  githubImportError,
+  type GitHubImportConnectionOptions,
+  type GitHubImportDependencies,
+} from "./github.js";
 
 export const GITHUB_ADVISORY_STATES = [
   "published",
@@ -14,7 +20,7 @@ export const GITHUB_ADVISORY_STATES = [
   "closed",
 ] as const;
 
-export interface GitHubAdvisoryImportOptions {
+export interface GitHubAdvisoryImportOptions extends GitHubImportConnectionOptions {
   /** Source repository, or the selected target for explicit global advisory IDs. */
   repository: string;
   /** Exact GHSA IDs. Required for the global advisory API. */
@@ -23,11 +29,6 @@ export interface GitHubAdvisoryImportOptions {
   source?: "repository" | "global";
   /** Repository list state (default: published). Exact IDs ignore state. */
   state?: (typeof GITHUB_ADVISORY_STATES)[number];
-  /** Defaults to GH_HOST or github.com. */
-  githubHost?: string;
-  /** Omit to use the authenticated GitHub CLI. */
-  githubToken?: string;
-  signal?: AbortSignal;
 }
 
 type RepositoryAdvisory = Awaited<ReturnType<typeof fetchRepositoryAdvisory>>;
@@ -44,16 +45,10 @@ export interface ImportedGitHubAdvisory {
   advisory: RepositoryAdvisory | GlobalAdvisory;
 }
 
-interface GitHubAdvisoryImportDependencies {
-  environment?: NodeJS.ProcessEnv;
-  currentDirectory?: string;
-  createGitHub?: (host: string, signal?: AbortSignal) => Promise<Octokit>;
-}
-
 /** Read repository disclosures or explicitly selected public GHSA records. */
 export async function importGitHubAdvisories(
   options: GitHubAdvisoryImportOptions,
-  dependencies: GitHubAdvisoryImportDependencies = {},
+  dependencies: GitHubImportDependencies = {},
 ): Promise<ImportedGitHubAdvisory[]> {
   options.signal?.throwIfAborted();
   const environment = dependencies.environment ?? process.env;
@@ -93,20 +88,15 @@ export async function importGitHubAdvisories(
     throw new CodexSecurityError(
       "--github-state only filters repository lists; omit it when selecting exact GHSA IDs.",
     );
-  const host =
-    options.githubHost?.trim() ??
-    (environment["GH_HOST"]?.trim() || "github.com");
-  if (!host) throw new CodexSecurityError("GitHub host must not be empty.");
+  const host = githubImportHost(options.githubHost, environment);
 
   try {
-    const github = dependencies.createGitHub
-      ? await dependencies.createGitHub(host, options.signal)
-      : await createAuthenticatedGitHub(host, {
-          token: options.githubToken,
-          environment,
-          currentDirectory: dependencies.currentDirectory,
-          signal: options.signal,
-        });
+    const github = await githubImportClient(
+      host,
+      options,
+      dependencies,
+      environment,
+    );
     const advisories: (RepositoryAdvisory | GlobalAdvisory)[] = [];
     if (ids.length > 0) {
       for (const id of ids) {
@@ -165,29 +155,13 @@ export async function importGitHubAdvisories(
       advisory,
     }));
   } catch (error) {
-    options.signal?.throwIfAborted();
-    if (error instanceof CodexSecurityError) throw error;
-    const status =
-      typeof error === "object" && error !== null && "status" in error
-        ? error.status
-        : undefined;
-    if (status === 401)
-      throw new CodexSecurityError("GitHub authentication failed.");
-    if (status === 403)
-      throw new CodexSecurityError(
+    throw githubImportError(error, options.signal, {
+      operation: "security advisory",
+      denied:
         "GitHub denied security advisory access. Check repository advisory permissions and API rate limits.",
-      );
-    if (status === 404)
-      throw new CodexSecurityError(
+      notFound:
         "GitHub repository or security advisory was not found or is not accessible.",
-      );
-    if (status === 429)
-      throw new CodexSecurityError(
-        "GitHub request was rate limited. Wait and retry.",
-      );
-    throw new CodexSecurityError(
-      `GitHub security advisory request failed${typeof status === "number" ? ` (HTTP ${status})` : ""}: ${errorMessage(error)}`,
-    );
+    });
   }
 }
 
