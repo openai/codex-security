@@ -1,17 +1,53 @@
-<!-- release-version: 0.8.2 -->
+<!-- release-version: 0.8.3 -->
 
 <!-- release-section: highlights:start -->
 
 ## Highlights
 
-Codex Security 0.8.2 adds threat-model explorers and Amazon Inspector imports, and improves scan progress and finding review.
-
-- **Threat-model explorers.** Turn an existing threat model into a shareable HTML explorer with interactive architecture, scenarios, controls, and source evidence. Export HTML or SVG from the bundled skill.
-- **Amazon Inspector imports.** With external imports enabled, import a complete Inspector Code Security repository findings export while retaining each finding's identity across imports. See the [Inspector import guide](https://github.com/openai/codex-security/blob/npm-v0.8.2/docs/scanner-imports/inspector.md).
-- **Dedupe corrections.** Hosted reviewers can correct rejected decisions in the original open review when the host supports pending-call validation.
-- **Interactive scans.** Finding review shows critical findings first, followed by high, medium, and low severity. Component tables show saved review progress, and scan titles resolve relative directory names.
-- **Output directories.** Existing scan output directories keep their permissions across scans, saved-result reads, and resume. Newly created directories remain private by default.
-- **Container releases.** The release workflow builds Debian and Wolfi images from the same verified scanner package and frozen runtime dependency lock. See the [container guide](https://github.com/openai/codex-security/blob/npm-v0.8.2/docker/README.md).
+- update SDK and MCP parser dependencies ([#2141](https://github.com/openai/codex-security/pull/2141))
+- do not split surrogate pairs in truncated report text ([#2133](https://github.com/openai/codex-security/pull/2133))
+- update vulnerable triage dependencies ([#2142](https://github.com/openai/codex-security/pull/2142))
+- defer CLI and plugin validators until first use ([#2140](https://github.com/openai/codex-security/pull/2140))
+- explain package provenance ([#361](https://github.com/openai/codex-security/pull/361))
+- speed up plugin setup and defer CLI prompts ([#2146](https://github.com/openai/codex-security/pull/2146))
+- track Black Duck SCA project-version vulnerabilities ([#2098](https://github.com/openai/codex-security/pull/2098))
+- avoid claiming output was kept after scan failures ([#359](https://github.com/openai/codex-security/pull/359))
+- track Veracode static application policy flaws ([#2099](https://github.com/openai/codex-security/pull/2099))
+- accept UTF-8 BOM in JSON project files ([#980](https://github.com/openai/codex-security/pull/980))
+- avoid duplicate plugin setup inspection and defer CLI YAML ([#2149](https://github.com/openai/codex-security/pull/2149))
+- accept UTF-8 BOMs in scan inputs and calibration datasets ([#2151](https://github.com/openai/codex-security/pull/2151))
+- preserve IPv6 verification URL brackets ([#232](https://github.com/openai/codex-security/pull/232))
+- bump the third-party group across 2 directories with 2 updates ([#2157](https://github.com/openai/codex-security/pull/2157))
+- bump ruff from 0.17.1 to 0.17.2 in /plugins/codex-security ([#2153](https://github.com/openai/codex-security/pull/2153))
+- bump docker/login-action from 4.6.0 to 4.7.0 ([#2155](https://github.com/openai/codex-security/pull/2155))
+- bump the codex group across 3 directories with 2 updates ([#2154](https://github.com/openai/codex-security/pull/2154))
+- keep whole characters when shortening publish progress ([#2158](https://github.com/openai/codex-security/pull/2158))
+- preserve local scan startup diagnostics ([#2115](https://github.com/openai/codex-security/pull/2115))
+- name the outermost rejected Windows ancestor ([#2065](https://github.com/openai/codex-security/pull/2065))
+- count only CR and LF as assessment line breaks ([#2147](https://github.com/openai/codex-security/pull/2147))
+- retain the reviewed surface count for completed Deep scans ([#2161](https://github.com/openai/codex-security/pull/2161))
+- show highest-severity findings first ([#2160](https://github.com/openai/codex-security/pull/2160))
+- bump taiki-e/install-action from 2.87.30 to 2.87.31 ([#2156](https://github.com/openai/codex-security/pull/2156))
+- align Unicode repository columns ([#2148](https://github.com/openai/codex-security/pull/2148))
+- link Markdown evidence to plain source lines ([#2032](https://github.com/openai/codex-security/pull/2032))
+- update MCP SDK to 1.32.2 and Stryker to 10.1.1 ([#2170](https://github.com/openai/codex-security/pull/2170))
+- import SonarQube Cloud security findings ([#2162](https://github.com/openai/codex-security/pull/2162))
+- share saved coverage logic and checkpoint fixtures ([#2185](https://github.com/openai/codex-security/pull/2185))
+- organize external scanner integration guides ([#2189](https://github.com/openai/codex-security/pull/2189))
+- index SARIF artifact URIs once per run ([#2191](https://github.com/openai/codex-security/pull/2191))
+- normalize GitHub scanner evidence for its destination ([#2192](https://github.com/openai/codex-security/pull/2192))
+- reuse Wiz replay projections for package reports ([#2193](https://github.com/openai/codex-security/pull/2193))
+- share local Git metadata discovery ([#2194](https://github.com/openai/codex-security/pull/2194))
+- require exhaustive scanner reader dispatch ([#2195](https://github.com/openai/codex-security/pull/2195))
+- normalize selected Semgrep Code findings for local import ([#2164](https://github.com/openai/codex-security/pull/2164))
+- share optional field parsing across GitHub and Wiz ([#2198](https://github.com/openai/codex-security/pull/2198))
+- share scanner Cloud publication and recovery guidance ([#2199](https://github.com/openai/codex-security/pull/2199))
+- share SARIF rule indexing and reference checks ([#2200](https://github.com/openai/codex-security/pull/2200))
+- isolate rejected publication progress callbacks ([#2203](https://github.com/openai/codex-security/pull/2203))
+- share connection and error handling for finding imports ([#2204](https://github.com/openai/codex-security/pull/2204))
+- avoid duplicate Git metadata discovery ([#2205](https://github.com/openai/codex-security/pull/2205))
+- skip Cloud number formatting for local evidence ([#2202](https://github.com/openai/codex-security/pull/2202))
+- give each scanner import a focused guide ([#2201](https://github.com/openai/codex-security/pull/2201))
 
 <!-- release-section: highlights:end -->
 
@@ -19,8 +55,6 @@ Codex Security 0.8.2 adds threat-model explorers and Amazon Inspector imports, a
 
 ## Upgrade notes
 
-No migration is required for existing CLI workflows. Hosted integrations that opt into pending-call validation must keep the original review session open until they handle the CLI's feedback; existing hosts can continue returning final results.
-
-Inspector imports remain opt-in. Cloud publication requires a connected GitHub repository and a deployment that accepts the Inspector provider. The import guide describes repository matching and complete-export requirements.
+No additional migration steps are documented for this release.
 
 <!-- release-section: upgrades:end -->
