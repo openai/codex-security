@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -95,16 +96,18 @@ def _coverage_comparison_row(row: Any, field: str) -> Any:
     return row
 
 
-def _aggregate_worker_coverage_rows(rows: list[Any], worker_id: str, field: str) -> list[Any]:
+def _worker_coverage_sources(
+    rows: list[Any], worker_id: str, field: str
+) -> Iterator[tuple[Any, Any]]:
     """Match accepted aggregate IDs without changing raw recovery identities."""
     reserved = {
         row["id"] for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)
     }
     emitted: set[str] = set()
-    projected = []
     for index, original in enumerate(rows):
-        row = copy.deepcopy(original)
+        row = original
         if isinstance(row, dict) and field != "openQuestions":
+            row = row.copy()
             generated = not isinstance(row.get("id"), str)
             identity = str(index) if generated else row["id"]
             base = identity
@@ -116,23 +119,28 @@ def _aggregate_worker_coverage_rows(rows: list[Any], worker_id: str, field: str)
             reserved.add(identity)
             emitted.add(identity)
             row["id"] = identity
-        projected.append(
-            _coverage_comparison_row(_project_worker_coverage_row(row, worker_id, field), field)
-        )
-    return projected
+        qualified = _project_worker_coverage_row(row, worker_id, field)
+        yield _coverage_comparison_row(qualified, field), original
 
 
-def _prepare_worker_coverage_recovery(
+_Row = dict[str, Any]
+_LegacySurfaceLink = tuple[_Row, str, _Row, _Row, _Row | None]
+
+
+def prepare_saved_coverage_projection(
     sources: list[tuple[str, dict[str, Any], str | None]],
     parent: dict[str, Any] | None,
     source_order: dict[str, tuple[int, int]],
     *,
-    enabled: bool,
-    receipt_resolver=None,
-) -> tuple[
-    bool, list[tuple[dict[str, Any], str, dict[str, Any], dict[str, Any], dict[str, Any] | None]]
-]:
+    project_worker_coverage: bool,
+    receipt_resolver,
+    preserve_canonical_parent=False,
+) -> tuple[bool, list[_LegacySurfaceLink]]:
     """Put bound worker evidence in parent coordinates without changing source files."""
+    if preserve_canonical_parent:
+        return False, []
+    # Older parent publications use worker/id identities. Reconcile those copies
+    # against their bound sources before projecting accepted attempt provenance.
     workers = {owner for _, _, owner in sources if owner is not None}
     parents = [
         draft
@@ -145,8 +153,8 @@ def _prepare_worker_coverage_recovery(
         # Prefer the selected parent over historical copies of a task's surface.
         parents.insert(0, parent)
     fields = ("surfaces", "explicitExclusions", "deferred", "openQuestions")
-    if not enabled:
-        enabled = any(
+    if not project_worker_coverage:
+        project_worker_coverage = any(
             isinstance(row, dict)
             and isinstance(row.get("workerId"), str)
             and row["workerId"] in workers
@@ -156,135 +164,105 @@ def _prepare_worker_coverage_recovery(
             )
             for draft in parents
             for field in fields
-            for row in (
-                draft["reviewState"].get(field, [])
-                if isinstance(draft["reviewState"].get(field, []), list)
-                else []
-            )
+            for row in _coverage_rows(draft["reviewState"], field)
         )
-    if not enabled:
+    if not project_worker_coverage:
         return False, []
-    projected: dict[str, list[Any]] = {field: [] for field in fields}
-    surface_sources: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    task_sources: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    surface_links: list[
-        tuple[dict[str, Any], str, dict[str, Any], dict[str, Any], dict[str, Any] | None]
-    ] = []
+    missing = object()
+    original_owners = {}
+    projected: dict[str, list[tuple[Any, Any]]] = {field: [] for field in fields}
+    surface_links: list[_LegacySurfaceLink] = []
     for relative, draft, owner in sources:
         if owner is None:
             continue
-        directory = Path(relative).parent
-        if directory.name == "checkpoints":
-            directory = directory.parent
         for field in fields:
-            rows = draft["reviewState"].get(field, [])
-            if not isinstance(rows, list):
-                continue
+            rows = _coverage_rows(draft["reviewState"], field)
             for index, row in enumerate(rows):
                 if field == "openQuestions" and isinstance(row, str):
                     row = {"question": row}
                     rows[index] = row
                 if not isinstance(row, dict):
                     continue
+                original_owners.setdefault(id(row), row.get("workerId", missing))
                 row["workerId"] = owner
-                if field == "surfaces" and receipt_resolver is not None:
-                    row["receiptRefs"] = receipt_resolver(relative, row, owner)
-                elif field == "surfaces" and isinstance(row.get("receiptRefs"), list):
-                    refs = []
-                    for ref in row["receiptRefs"]:
-                        if isinstance(ref, str):
-                            try:
-                                normalized = _require_portable_relative_path(
-                                    ref, "Worker coverage receipt"
-                                )
-                            except ContractError:
-                                pass  # Leave malformed refs to the existing per-record recovery.
-                            else:
-                                if normalized.startswith("artifacts/"):
-                                    ref = f"{directory.as_posix()}/{normalized}"
-                        refs.append(ref)
-                    row["receiptRefs"] = refs
                 if field == "surfaces":
-                    row.setdefault("receiptRefs", [])
-            aggregate_rows = _aggregate_worker_coverage_rows(rows, owner, field)
-            projected[field].extend(aggregate_rows)
-            if field in {"surfaces", "deferred"}:
-                originals = surface_sources if field == "surfaces" else task_sources
-                originals.extend(
-                    (aggregate, row)
-                    for aggregate, row in zip(aggregate_rows, rows)
-                    if isinstance(aggregate, dict) and isinstance(row, dict)
-                )
+                    row["receiptRefs"] = receipt_resolver(relative, row, owner)
+            projected[field].extend(_worker_coverage_sources(rows, owner, field))
+
+    def originals(field: str, row: Any):
+        comparison = _coverage_comparison_row(row, field)
+        return (
+            original
+            for aggregate, original in projected[field]
+            if aggregate is comparison or aggregate == comparison
+        )
+
     # A canonical aggregate contains copies of the same worker evidence. Let
     # the existing per-worker chronology reconcile those originals exactly once.
     # Keep parent-only evidence when its bound worker source is unavailable.
     for draft in parents:
-        if not draft["reviewState"]:
+        review = draft["reviewState"]
+        if not review:
             continue
         for field in fields:
-            rows = draft["reviewState"].get(field, [])
-            if isinstance(rows, list):
-                if field == "surfaces":
-                    tasks = draft["reviewState"].get("deferred", [])
-                    for row in rows:
-                        if not isinstance(row, dict) or not isinstance(row.get("id"), str):
-                            continue
-                        matching_sources = [
-                            original
-                            for aggregate, original in surface_sources
-                            if aggregate == _coverage_comparison_row(row, field)
-                        ]
-                        if not matching_sources:
-                            continue
-                        for task in tasks if isinstance(tasks, list) else []:
-                            if (
-                                isinstance(task, dict)
-                                and isinstance(task.get("surfaceIds"), list)
-                                and row["id"] in task["surfaceIds"]
-                            ):
-                                surface_links.extend(
-                                    (
-                                        task,
-                                        row["id"],
-                                        source,
-                                        row,
-                                        next(
-                                            (
-                                                original
-                                                for aggregate, original in task_sources
-                                                if aggregate == task
-                                            ),
-                                            None,
-                                        ),
-                                    )
-                                    for source in matching_sources
-                                )
-                draft["reviewState"][field] = [
-                    row
-                    for row in rows
-                    if _coverage_comparison_row(row, field) not in projected[field]
-                ]
+            rows = review.get(field, [])
+            if not isinstance(rows, list):
+                continue
+            remaining = []
+            for row in rows:
+                matches = originals(field, row)
+                first = next(matches, missing)
+                if first is missing:
+                    remaining.append(row)
+                    continue
+                if (
+                    field != "surfaces"
+                    or not isinstance(row, dict)
+                    or not isinstance(row.get("id"), str)
+                ):
+                    continue
+                surface_sources = [first, *matches]
+                for task in _coverage_rows(review, "deferred"):
+                    if (
+                        isinstance(task, dict)
+                        and isinstance(task.get("surfaceIds"), list)
+                        and row["id"] in task["surfaceIds"]
+                    ):
+                        source_task = next(originals("deferred", task), None)
+                        surface_links.extend(
+                            (task, row["id"], source, row, source_task)
+                            for source in surface_sources
+                        )
+            review[field] = remaining
+    # A selected parent may also be the result registered for a worker.
+    # Restore the retained input rows after comparing the published worker IDs.
+    for _, draft, owner in sources:
+        if owner is not None:
+            for field in fields:
+                for row in _coverage_rows(draft["reviewState"], field):
+                    if isinstance(row, dict):
+                        previous = original_owners[id(row)]
+                        if previous is missing:
+                            row.pop("workerId", None)
+                        else:
+                            row["workerId"] = previous
     return True, surface_links
 
 
 class SavedCoverageProjection:
     """Keep worker source links stable while legacy and accepted rows converge."""
 
-    def __init__(self, project_worker_coverage, legacy_surface_links, sources):
+    def __init__(self, project_worker_coverage, legacy_surface_links, projection_origins):
         self.project_worker_coverage = project_worker_coverage
         self.legacy_surface_links = legacy_surface_links
         self.legacy_source_outputs: dict[int, dict[str, Any]] = {}
         self.worker_row_owners: dict[int, str] = {}
         self.worker_surface_outputs: dict[tuple[str, str], dict[int, dict[str, Any]]] = {}
-        self.source_owner_by_id = {
-            id(row): owner
-            for _, draft, owner in sources
-            for field in ("surfaces", "deferred")
-            for rows in (draft["reviewState"].get(field, []),)
-            if isinstance(rows, list)
-            for row in rows
-            if isinstance(row, dict)
-        }
+        self.projection_origins = projection_origins
+
+    def source_owner(self, row, fallback=None):
+        origin = self.projection_origins.get(id(row))
+        return origin[0] if origin is not None else fallback
 
     def record_coverage_owner(self, retained, original, owner, field):
         if self.project_worker_coverage and owner is not None and isinstance(retained, dict):
@@ -335,8 +313,8 @@ class SavedCoverageProjection:
         return None
 
     def linked_surface(self, surface, outputs, named_outputs):
+        owner = self.source_owner(surface, surface.get("workerId"))
         retained = outputs.get(id(surface))
-        owner = self.source_owner_by_id.get(id(surface), surface.get("workerId"))
         if retained is None and isinstance(owner, str) and isinstance(surface.get("id"), str):
             matches = named_outputs.get((owner, surface["id"]), {})
             if len(matches) == 1:
@@ -395,32 +373,29 @@ class SavedCoverageProjection:
             coverage["surfaces"], retained, worker["id"], "surfaces", source, True
         )
 
-    def linked_tasks(self, task, published_id, source_task, candidates):
-        expected = None
-        if source_task is not None:
-            expected = self.legacy_source_outputs.get(id(source_task))
-            if expected is None:
-                expected = _project_worker_coverage_row(
-                    source_task, self.source_owner_by_id.get(id(source_task)), "deferred"
-                )
-        return [
-            retained
-            for owner, retained in candidates
-            if retained == task
-            or (
-                expected is not None
-                and (
-                    retained is expected
-                    or (
-                        owner == self.source_owner_by_id.get(id(source_task))
-                        and isinstance(retained, dict)
-                        and retained.get("id") == expected.get("id")
-                        and isinstance(retained.get("surfaceIds"), list)
-                        and published_id in retained["surfaceIds"]
+    def task_surface_links(self, candidates):
+        for task, published_id, surface, parent_surface, task_source in self.legacy_surface_links:
+            expected = None
+            if task_source is not None:
+                task_owner = self.source_owner(task_source)
+                expected = self.legacy_source_outputs.get(id(task_source))
+                if expected is None:
+                    expected = _project_worker_coverage_row(task_source, task_owner, "deferred")
+            for owner, retained in candidates:
+                if retained == task or (
+                    expected is not None
+                    and (
+                        retained is expected
+                        or (
+                            owner == task_owner
+                            and isinstance(retained, dict)
+                            and retained.get("id") == expected.get("id")
+                            and isinstance(retained.get("surfaceIds"), list)
+                            and published_id in retained["surfaceIds"]
+                        )
                     )
-                )
-            )
-        ]
+                ):
+                    yield retained, published_id, surface, parent_surface
 
     def finalize(
         self,
@@ -476,40 +451,31 @@ class SavedCoverageProjection:
             (self.worker_row_owners.get(id(row)), row)
             for row in (output_tasks if isinstance(output_tasks, list) else [])
         ]
-        for task, published_id, surface, _, task_source in self.legacy_surface_links:
+        for task, published_id, surface, _ in self.task_surface_links(task_candidates):
             retained_surface = self.linked_surface(
-                surface, self.legacy_source_outputs, self.worker_surface_outputs
+                surface,
+                self.legacy_source_outputs,
+                self.worker_surface_outputs,
             )
-            if retained_surface is None or not isinstance(retained_surface.get("id"), str):
-                continue
-            for retained_task in self.linked_tasks(
-                task, published_id, task_source, task_candidates
-            ):
-                _, links = retained_legacy_surface_links.setdefault(
-                    id(retained_task), (retained_task, {})
-                )
+            if retained_surface is not None and isinstance(retained_surface.get("id"), str):
+                _, links = retained_legacy_surface_links.setdefault(id(task), (task, {}))
                 links.setdefault(published_id, retained_surface)
         # A newer worker checkpoint may omit a surface still needed by a retained
         # task. Restore its parent copy only when no worker replacement survived.
-        for task, published_id, surface, parent_surface, task_source in self.legacy_surface_links:
-            for retained_task in self.linked_tasks(
-                task, published_id, task_source, task_candidates
-            ):
-                _, links = retained_legacy_surface_links.setdefault(
-                    id(retained_task), (retained_task, {})
+        for task, published_id, surface, parent_surface in self.task_surface_links(task_candidates):
+            _, links = retained_legacy_surface_links.setdefault(id(task), (task, {}))
+            if published_id not in links and isinstance(coverage.get("surfaces"), list):
+                retained_surface = self.retain_coverage_row(
+                    coverage["surfaces"], parent_surface, None, "surfaces"
                 )
-                if published_id not in links and isinstance(coverage.get("surfaces"), list):
-                    retained_surface = self.retain_coverage_row(
-                        coverage["surfaces"], parent_surface, None, "surfaces"
-                    )
-                    self.record_coverage_owner(
-                        retained_surface,
-                        surface,
-                        self.source_owner_by_id.get(id(surface), surface.get("workerId")),
-                        "surfaces",
-                    )
-                    _inherit_coverage_sources(retained_surface, [parent_surface], coverage_sources)
-                    links[published_id] = retained_surface
+                self.record_coverage_owner(
+                    retained_surface,
+                    surface,
+                    self.source_owner(surface, surface.get("workerId")),
+                    "surfaces",
+                )
+                _inherit_coverage_sources(retained_surface, [parent_surface], coverage_sources)
+                links[published_id] = retained_surface
         if self.project_worker_coverage:
             worker_surfaces: dict[tuple[str, str], dict[str, Any]] = {}
             named_surface_outputs = {
@@ -711,71 +677,17 @@ class SavedCoverageProjection:
                         prospective_surfaces[id(row)] = projected
             bound = {
                 (id(retained), published_id)
-                for task, published_id, surface, _, task_source in self.legacy_surface_links
+                for retained, published_id, surface, _ in self.task_surface_links(prospective_tasks)
                 if self.linked_surface(surface, prospective_surfaces, prospective_named) is not None
-                for retained in self.linked_tasks(
-                    task, published_id, task_source, prospective_tasks
-                )
             }
-            for task, published_id, _, parent_surface, task_source in self.legacy_surface_links:
-                for retained in self.linked_tasks(
-                    task, published_id, task_source, prospective_tasks
-                ):
-                    key = (id(retained), published_id)
-                    if key not in bound:
-                        fallback_surfaces.append(parent_surface)
-                        bound.add(key)
+            for retained, published_id, _, parent_surface in self.task_surface_links(
+                prospective_tasks
+            ):
+                key = (id(retained), published_id)
+                if key not in bound:
+                    fallback_surfaces.append(parent_surface)
+                    bound.add(key)
         return fallback_surfaces
-
-
-def prepare_saved_coverage_projection(
-    sources,
-    parent,
-    source_order,
-    *,
-    project_worker_coverage,
-    receipt_resolver,
-    preserve_canonical_parent=False,
-):
-    if preserve_canonical_parent:
-        return SavedCoverageProjection(False, [], sources)
-    # Older parent publications use worker/id identities. Reconcile those copies
-    # against their bound sources before projecting accepted attempt provenance.
-    projected_metadata = {
-        id(row): ("workerId" in row, row.get("workerId"))
-        for relative, draft, _ in sources
-        for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions")
-        for rows in (draft["reviewState"].get(field, []),)
-        if isinstance(rows, list)
-        for row in rows
-        if isinstance(row, dict)
-    }
-    project_worker_coverage, legacy_surface_links = _prepare_worker_coverage_recovery(
-        sources,
-        parent,
-        source_order,
-        enabled=project_worker_coverage,
-        receipt_resolver=receipt_resolver,
-    )
-    for _, draft, _ in sources:
-        for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
-            rows = draft["reviewState"].get(field, [])
-            if not isinstance(rows, list):
-                continue
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                present, value = projected_metadata.get(id(row), (False, None))
-                if present:
-                    row["workerId"] = value
-                else:
-                    row.pop("workerId", None)
-    return SavedCoverageProjection(project_worker_coverage, legacy_surface_links, sources)
-
-
-def _deferred_rows(coverage: dict[str, Any]) -> list[Any]:
-    rows = coverage.get("deferred", [])
-    return rows if isinstance(rows, list) else []
 
 
 def _resolved_deferred_rows(draft: dict[str, Any], schema: dict[str, Any]) -> list[dict[str, Any]]:
@@ -786,7 +698,7 @@ def _resolved_deferred_rows(draft: dict[str, Any], schema: dict[str, Any]) -> li
     try:
         # Invalid closure metadata cannot discard the evidence it names.
         _validate_schema_node(rows, schema, "coverage.resolvedDeferred")
-        _validate_resolved_deferred({**coverage, "deferred": _deferred_rows(coverage)})
+        _validate_resolved_deferred({**coverage, "deferred": _coverage_rows(coverage, "deferred")})
     except ContractError:
         return []
     return rows
@@ -855,7 +767,7 @@ def _merge_tied_parent_observations(
                     output.append(copy.deepcopy(row))
     pending_ids = {
         identity
-        for row in _deferred_rows(coverage)
+        for row in _coverage_rows(coverage, "deferred")
         if isinstance(row, dict)
         for identity in (row.get("id"), row.get("candidateId"))
         if isinstance(identity, str)
