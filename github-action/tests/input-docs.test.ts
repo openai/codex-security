@@ -11,6 +11,7 @@ test('input docs preserve escaped table values and reject reversed reference mar
   t.after(() => rm(root, { recursive: true, force: true }));
   const action = join(root, 'github-action');
   await mkdir(join(action, 'scripts'), { recursive: true });
+  await mkdir(join(action, 'examples'));
   await symlink(fileURLToPath(new URL('../node_modules', import.meta.url)), join(action, 'node_modules'), 'junction');
   const script = join(action, 'scripts', 'generate-input-docs.mjs');
   await copyFile(new URL('../scripts/generate-input-docs.mjs', import.meta.url), script);
@@ -24,7 +25,12 @@ test('input docs preserve escaped table values and reject reversed reference mar
     outputs: { example: { description: 'one|two' } },
   }));
   const readme = join(action, 'README.md');
-  await writeFile(readme, '<!-- action-reference:start -->\n<!-- action-reference:end -->\n');
+  let markers = '<!-- action-reference:start -->\n<!-- action-reference:end -->\n';
+  for (const name of ['repository', 'pull-request']) {
+    await writeFile(join(action, 'examples', `${name}.yml`), `name: ${name}\njobs: {}\n`);
+    markers += `<!-- action-workflow:${name}:start -->\n<!-- action-workflow:${name}:end -->\n`;
+  }
+  await writeFile(readme, markers);
   execFileSync(process.execPath, [script]);
   const generated = await readFile(readme, 'utf8');
   assert.ok(generated.includes(String.raw`Path C:\\temp\\\|value next line`), generated);
@@ -36,9 +42,18 @@ test('input docs preserve escaped table values and reject reversed reference mar
   assert.ok(generated.includes('`C:\\temp`'), generated);
   assert.ok(generated.includes('`one\\|two`'), generated);
   execFileSync(process.execPath, [script, '--check']);
+  await writeFile(join(action, 'examples', 'repository.yml'), 'name: updated repository\njobs: {}\n');
+  assert.throws(() => execFileSync(process.execPath, [script, '--check'], {stdio: 'pipe'}));
+  execFileSync(process.execPath, [script]);
+  assert.match(await readFile(readme, 'utf8'), /name: updated repository/);
+  execFileSync(process.execPath, [script, '--check']);
 
-  const reversed = '<!-- action-reference:end -->\nContributor notes\n<!-- action-reference:start -->\n';
-  await writeFile(readme, reversed);
-  assert.throws(() => execFileSync(process.execPath, [script], { stdio: 'pipe' }), /README must contain action reference markers in order/);
-  assert.equal(await readFile(readme, 'utf8'), reversed);
+  for (const [section, label] of [['action-reference', 'action reference'], ['action-workflow:repository', 'repository workflow'], ['action-workflow:pull-request', 'pull-request workflow']]) {
+    const start = `<!-- ${section}:start -->`;
+    const end = `<!-- ${section}:end -->`;
+    const reversed = markers.replace(`${start}\n${end}`, `${end}\nContributor notes\n${start}`);
+    await writeFile(readme, reversed);
+    assert.throws(() => execFileSync(process.execPath, [script], { stdio: 'pipe' }), new RegExp(`README must contain ${label} markers in order`));
+    assert.equal(await readFile(readme, 'utf8'), reversed);
+  }
 });
