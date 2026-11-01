@@ -1,0 +1,50 @@
+import { createCodexSecurityArtifactWriterServer } from "./artifact-writer-main.js";
+import { createCodexSecurityServer } from "./server.js";
+import { runCliDeepScan } from "./deep-scan-main.js";
+import { CodexSecurityStdioTransport } from "./src/stdio-transport.js";
+
+async function main(): Promise<void> {
+  if (process.argv.includes("--deep-scan-engine")) {
+    await runCliDeepScan();
+    return;
+  }
+  const artifactWriter = process.argv.includes("--artifact-writer");
+  const server = artifactWriter
+    ? await createCodexSecurityArtifactWriterServer()
+    : createCodexSecurityServer();
+  await server.connect(
+    new CodexSecurityStdioTransport(process.stdin, process.stdout, {
+      // Local scan checkpoints can exceed the SDK's default 10 MiB buffer.
+      maxBufferSize: Infinity,
+    }),
+  );
+  let closing = false;
+  const close = async (exitCode?: number): Promise<void> => {
+    if (closing) return;
+    closing = true;
+    if (exitCode !== undefined) process.exitCode = exitCode;
+    await server.close().catch((error: unknown) => {
+      console.error(
+        artifactWriter
+          ? "Codex Security artifact writer failed to close:"
+          : "Codex Security MCP server failed to close:",
+        error,
+      );
+    });
+  };
+  process.stdin.once("end", () => void close());
+  process.once("SIGINT", () => void close(130));
+  process.once("SIGTERM", () => void close(143));
+}
+
+main().catch((error) => {
+  console.error(
+    process.argv.includes("--deep-scan-engine")
+      ? "Codex Security Deep Scan failed:"
+      : process.argv.includes("--artifact-writer")
+        ? "Codex Security artifact writer failed to start:"
+        : "Codex Security MCP server failed to start:",
+    error,
+  );
+  process.exitCode = 1;
+});

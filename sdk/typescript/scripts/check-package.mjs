@@ -1,10 +1,33 @@
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import {
+  chmodSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { brotliDecompressSync, gunzipSync } from "node:zlib";
+import { gunzipSync } from "node:zlib";
+import { packageDistFiles } from "./package-dist-files.mjs";
+import {
+  assertPublicPackageContents,
+  MAX_EXPANDED_ASSET_BYTES,
+} from "./package-public-content.mjs";
 import { assertExpectedGitHead } from "./package-provenance.mjs";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
+import {
+  assertStoredSparseContents,
+  readTarArchive,
+} from "./package-tar-entries.mjs";
+import {
+  assertTarListingSizes,
+  regularTarListingLines,
+} from "./package-tar-listing.mjs";
+import { pluginContractFiles } from "./plugin-contract.mjs";
 
 const PACKAGE_SMOKE_PROCESS_TIMEOUT_MS =
   packageSmokeTimeouts().processTimeoutMs;
@@ -13,7 +36,10 @@ const args = process.argv.slice(2);
 if (args[0] === "--") args.shift();
 const [
   archive,
-  contractPath = new URL("../plugin-files.json", import.meta.url),
+  contractPath = new URL(
+    "../../../plugins/codex-security/plugin-files.json",
+    import.meta.url,
+  ),
 ] = args;
 if (archive === undefined || args.length > 2) {
   throw new Error(
@@ -21,13 +47,33 @@ if (archive === undefined || args.length > 2) {
   );
 }
 
-const MAX_EXPANDED_ASSET_BYTES = 32 * 1024 * 1024;
-const archiveBytes = gunzipSync(readFileSync(archive), {
+const archivePath = resolve(archive);
+const compressedArchive = readFileSync(archivePath);
+const archiveBytes = gunzipSync(compressedArchive, {
   maxOutputLength: MAX_EXPANDED_ASSET_BYTES,
 });
-const PUBLIC_LOGO_SHA256 =
-  "9b9c2b09b2fa064611fb62307d321d5c2ea70cf0789f7ce34cdb0fc0d9190b3a";
-const tarOptions = { maxBuffer: archiveBytes.byteLength + 1024 };
+const storedArchive = readTarArchive(archiveBytes);
+const rawEntries = storedArchive.entries;
+validatePackagePaths(rawEntries.map(({ path }) => path));
+assertPublicPackageContents(
+  storedArchive.files,
+  Buffer.concat(storedArchive.metadata.filter(Buffer.isBuffer)),
+);
+const processEnvironment = { ...process.env };
+delete processEnvironment.TAR_OPTIONS;
+const characterLocale =
+  processEnvironment.LC_ALL || processEnvironment.LC_CTYPE;
+delete processEnvironment.LC_ALL;
+const tarOptions = {
+  env: {
+    ...processEnvironment,
+    LC_CTYPE: characterLocale,
+    LC_MESSAGES: "C",
+    LC_NUMERIC: "C",
+  },
+  input: compressedArchive,
+  maxBuffer: archiveBytes.byteLength + 1024,
+};
 function tar(args, encoding = "buffer") {
   const result = spawnSync("tar", ["--ignore-zeros", ...args], {
     ...tarOptions,
@@ -43,174 +89,223 @@ function tar(args, encoding = "buffer") {
   return result.stdout;
 }
 
-let offset = 0;
-for (; offset + 512 <= archiveBytes.byteLength; ) {
-  const header = archiveBytes.subarray(offset, offset + 512);
-  if (header.every((byte) => byte === 0)) {
-    offset += 512;
-    continue;
-  }
-  const name = header.subarray(0, 100).toString("utf8").split("\0", 1)[0];
-  const prefix = header.subarray(345, 500).toString("utf8").split("\0", 1)[0];
-  const path = prefix === "" ? name : `${prefix}/${name}`;
-  const sizeField = header
-    .subarray(124, 136)
-    .toString("ascii")
-    .split("\0", 1)[0]
-    .trim();
-  if (!/^[0-7]*$/u.test(sizeField)) {
-    throw new Error("npm tarball contains an invalid tar entry.");
-  }
-  if (path.endsWith("/") && header[156] !== 0x35) {
-    throw new Error("npm tarball contains an invalid tar entry.");
-  }
-  const size = Number.parseInt(sizeField || "0", 8);
-  offset += 512 + Math.ceil(size / 512) * 512;
-}
-if (archiveBytes.subarray(offset).some((byte) => byte !== 0)) {
-  throw new Error("npm tarball contains trailing tar data.");
+function invalidTarEntry() {
+  throw new Error("npm tarball contains an invalid tar entry.");
 }
 
-const entries = tar(["-tzf", archive], "utf8").split(/\r?\n/u).filter(Boolean);
+function validatePackagePaths(entries) {
+  const files = new Set(entries);
+  if (files.size !== entries.length)
+    throw new Error("npm tarball contains duplicate paths.");
+  const required = [
+    "package/package.json",
+    "package/README.md",
+    "package/docs/cli.md",
+    "package/docs/findings-service.md",
+    "package/docs/dedupe-records.md",
+    "package/docs/classify-severity-records.md",
+    "package/docs/hosted-scans.md",
+    "package/docs/validate-records.md",
+    "package/docs/hosted-remediation.md",
+    "package/schemas/hosted-scan-v2.fixture.json",
+    "package/LICENSE",
+    "package/bin/codex-security.mjs",
+    "package/dist/index.js",
+    "package/dist/index.d.ts",
+    "package/dist/cli.js",
+    "package/schemas/project-config.schema.json",
+    "package/schemas/external-findings.schema.json",
+    "package/_bundled_plugin/.codex-plugin/plugin.json",
+  ];
+
+  for (const file of required) {
+    if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
+  }
+
+  const contract = JSON.parse(readFileSync(contractPath, "utf8"));
+  const pluginPaths = pluginContractFiles(contract);
+  if (new Set(pluginPaths).size !== pluginPaths.length) {
+    throw new Error("Plugin projection contract contains duplicate paths.");
+  }
+
+  const pluginEntries = new Set();
+  for (const file of pluginPaths) {
+    const pluginArchivePath = `package/_bundled_plugin/${file}`;
+    pluginEntries.add(pluginArchivePath);
+    if (!files.has(pluginArchivePath)) {
+      throw new Error(`npm tarball is missing ${pluginArchivePath}.`);
+    }
+  }
+
+  const distFiles = new Set(packageDistFiles);
+  for (const file of distFiles) {
+    if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
+  }
+  const allowedFiles = new Set([...required, ...distFiles, ...pluginEntries]);
+  for (const file of [...allowedFiles]) {
+    const parts = file.split("/");
+    for (let index = 1; index < parts.length; index++) {
+      allowedFiles.add(`${parts.slice(0, index).join("/")}/`);
+    }
+  }
+  const unsafePath = /(?:^|\/)\.{1,2}(?:\/|$)/u;
+  for (const file of files) {
+    if (
+      !allowedFiles.has(file) ||
+      unsafePath.test(file) ||
+      file.includes("\\")
+    ) {
+      const displayPath = file.replace(
+        /[\u0000-\u001f\u007f-\u009f]/gu,
+        (character) =>
+          `\\x${character.charCodeAt(0).toString(16).padStart(2, "0")}`,
+      );
+      throw new Error(
+        `npm tarball contains an unexpected file: ${displayPath}.`,
+      );
+    }
+  }
+}
+
+const entries = tar(["-tzf", "-"], "utf8").split(/\r?\n/u).filter(Boolean);
 const files = new Set(entries);
 if (files.size !== entries.length) {
   throw new Error("npm tarball contains duplicate paths.");
 }
-const required = [
-  "package/package.json",
-  "package/README.md",
-  "package/LICENSE",
-  "package/bin/codex-security.mjs",
-  "package/dist/index.js",
-  "package/dist/index.d.ts",
-  "package/dist/cli.js",
-  "package/_bundled_plugin/.codex-plugin/plugin.json",
-];
-
-for (const file of required) {
-  if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
-}
-
-const contract = JSON.parse(readFileSync(contractPath, "utf8"));
-const { externalOwnedExact, shippedExact } = contract;
 if (
-  !Array.isArray(externalOwnedExact) ||
-  !externalOwnedExact.every((path) => typeof path === "string") ||
-  !Array.isArray(shippedExact) ||
-  !shippedExact.every((path) => typeof path === "string")
+  rawEntries.length !== entries.length ||
+  rawEntries.some(({ path }, index) => path !== entries[index])
 ) {
-  throw new Error("Plugin projection contract contains invalid paths.");
-}
-const publicManifest = ".codex-plugin/plugin.json";
-if (!externalOwnedExact.includes(publicManifest)) {
-  throw new Error(
-    "Plugin projection contract must declare the public manifest as externally owned.",
-  );
-}
-const pluginPaths = [
-  publicManifest,
-  ...shippedExact.filter((path) => !path.startsWith("sdk/")),
-];
-const pluginFiles = new Set(pluginPaths);
-if (pluginFiles.size !== pluginPaths.length) {
-  throw new Error("Plugin projection contract contains duplicate paths.");
+  invalidTarEntry();
 }
 
-const pluginEntries = new Set();
-const pluginDirectories = new Set(["package/_bundled_plugin"]);
-for (const file of pluginFiles) {
-  const archivePath = `package/_bundled_plugin/${file}`;
-  pluginEntries.add(archivePath);
-  if (!files.has(archivePath)) {
-    throw new Error(`npm tarball is missing ${archivePath}.`);
-  }
-  const parts = file.split("/");
-  for (let index = 1; index < parts.length; index++) {
-    pluginDirectories.add(
-      `package/_bundled_plugin/${parts.slice(0, index).join("/")}`,
-    );
-  }
-}
-
-const allowedRoot = new Set([
-  "package/package.json",
-  "package/README.md",
-  "package/LICENSE",
-  "package/bin/codex-security.mjs",
-]);
-const distFiles = new Set(
-  [
-    "api",
-    "auth",
-    "bulk-scan-discovery",
-    "cli",
-    "config",
-    "contract",
-    "cost",
-    "errors",
-    "index",
-    "knowledge-base",
-    "models",
-    "multiscan",
-    "result",
-    "runtime",
-    "scan-comparison",
-    "scan-history-renderer",
-    "targets",
-    "trusted-executable",
-    "version",
-    "worker-progress",
-  ].flatMap((module) =>
-    ["js", "js.map", "d.ts", "d.ts.map"].map(
-      (extension) => `package/dist/${module}.${extension}`,
-    ),
-  ),
-);
-for (const file of distFiles) {
-  if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
-}
-const unsafePath = /(?:^|\/)\.{1,2}(?:\/|$)/u;
-for (const file of files) {
-  const normalized = file.endsWith("/") ? file.slice(0, -1) : file;
-  const allowed = file.endsWith("/")
-    ? normalized === "package" ||
-      normalized === "package/bin" ||
-      normalized === "package/dist" ||
-      pluginDirectories.has(normalized)
-    : allowedRoot.has(normalized) ||
-      distFiles.has(normalized) ||
-      pluginEntries.has(normalized);
-  if (!allowed || unsafePath.test(file) || file.includes("\\")) {
-    throw new Error(`npm tarball contains an unexpected file: ${file}.`);
-  }
-}
-
-const listing = tar(["-tvzf", archive], "utf8");
-if (/^[^d-]/mu.test(listing)) {
-  throw new Error(
-    "npm tarball contains a non-regular entry (symbolic or hard link, device, or pipe).",
-  );
-}
-const listingLines = listing.split(/\r?\n/u).filter(Boolean);
+const listing = tar(["--numeric-owner", "-tvzf", "-"], "utf8");
+const listingLines = regularTarListingLines(listing);
 if (
   listingLines.length !== entries.length ||
   listingLines.some(
     (line, index) => line.startsWith("d") !== entries[index].endsWith("/"),
   )
 ) {
-  throw new Error("npm tarball contains an invalid tar entry.");
+  invalidTarEntry();
 }
-const launcherPermissions =
-  listingLines[entries.indexOf("package/bin/codex-security.mjs")]?.split(
-    /\s/u,
-    1,
-  )[0] ?? "";
-if ([3, 6, 9].some((index) => launcherPermissions[index] !== "x")) {
-  throw new Error("npm package CLI launcher is not executable.");
-}
-const packageJson = JSON.parse(
-  tar(["-xOf", archive, "package/package.json"]).toString("utf8"),
+const listingSizes = assertTarListingSizes(
+  listingLines,
+  MAX_EXPANDED_ASSET_BYTES,
 );
+for (const [path, name] of [
+  ["package/bin/codex-security.mjs", "CLI"],
+  ["package/_bundled_plugin/scripts/launch_codex_security_mcp", "MCP"],
+]) {
+  const permissions =
+    listingLines[entries.indexOf(path)]?.split(/\s/u, 1)[0] ?? "";
+  if ([3, 6, 9].some((index) => permissions[index] !== "x")) {
+    throw new Error(`npm package ${name} launcher is not executable.`);
+  }
+}
+
+function privateExtractionDirectories(directory) {
+  chmodSync(directory, 0o700);
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      privateExtractionDirectories(join(directory, entry.name));
+    }
+  }
+}
+
+function extractedArchiveFiles() {
+  const logicalSizes = new Map();
+  const expectedPaths = new Map();
+  for (const [index, { path }] of rawEntries.entries()) {
+    const directory = path.endsWith("/");
+    const extractedPath = directory ? path.slice(0, -1) : path;
+    const type = directory ? "directory" : "file";
+    const previousType = expectedPaths.get(extractedPath);
+    if (previousType !== undefined && previousType !== type) invalidTarEntry();
+    if (!directory) logicalSizes.set(path, listingSizes[index]);
+    expectedPaths.set(extractedPath, type);
+    const parts = extractedPath.split("/");
+    for (let index = 1; index < parts.length; index++) {
+      const directory = parts.slice(0, index).join("/");
+      if (logicalSizes.has(directory)) invalidTarEntry();
+      expectedPaths.set(directory, "directory");
+    }
+  }
+
+  const extractionRoot = mkdtempSync(
+    join(tmpdir(), "codex-security-package-check-"),
+  );
+  try {
+    chmodSync(extractionRoot, 0o700);
+    const fileList = join(extractionRoot, "members.list");
+    writeFileSync(fileList, [...logicalSizes.keys(), ""].join("\0"));
+    try {
+      tar([
+        "-m",
+        "--keep-old-files",
+        "--no-same-owner",
+        "--no-same-permissions",
+        "--no-acls",
+        "--no-xattrs",
+        "-xzf",
+        "-",
+        "-C",
+        extractionRoot,
+        "--null",
+        "-T",
+        fileList,
+      ]);
+    } finally {
+      privateExtractionDirectories(extractionRoot);
+    }
+    rmSync(fileList);
+
+    const archiveFiles = new Map();
+    let expandedBytes = 0;
+    function visit(directory, relative = "") {
+      for (const name of readdirSync(directory)) {
+        const path = relative === "" ? name : `${relative}/${name}`;
+        const expectedType = expectedPaths.get(path);
+        if (expectedType === undefined) invalidTarEntry();
+        const extractedPath = join(extractionRoot, path);
+        const stats = lstatSync(extractedPath);
+        expectedPaths.delete(path);
+
+        if (expectedType === "directory") {
+          if (!stats.isDirectory()) invalidTarEntry();
+          visit(extractedPath, path);
+          continue;
+        }
+
+        if (
+          !stats.isFile() ||
+          stats.nlink !== 1 ||
+          stats.size !== logicalSizes.get(path) ||
+          stats.size > MAX_EXPANDED_ASSET_BYTES ||
+          expandedBytes > MAX_EXPANDED_ASSET_BYTES - stats.size
+        ) {
+          invalidTarEntry();
+        }
+        expandedBytes += stats.size;
+        chmodSync(extractedPath, 0o600);
+        archiveFiles.set(path, readFileSync(extractedPath));
+      }
+    }
+    visit(extractionRoot);
+
+    if (expectedPaths.size !== 0 || archiveFiles.size !== logicalSizes.size) {
+      invalidTarEntry();
+    }
+    return archiveFiles;
+  } finally {
+    rmSync(extractionRoot, { force: true, recursive: true });
+  }
+}
+
+const archiveFiles = extractedArchiveFiles();
+const npmManifest = storedArchive.npmFiles.get("package/package.json");
+if (npmManifest === undefined) invalidTarEntry();
+const packageJson = JSON.parse(npmManifest.toString("utf8"));
 if (
   packageJson.name !== "@openai/codex-security" ||
   packageJson.license !== "Apache-2.0"
@@ -222,65 +317,24 @@ assertExpectedGitHead(
   process.env.CODEX_SECURITY_EXPECTED_GIT_HEAD,
 );
 
-const internalMarker =
-  /(?:internal\.api\.openai\.org|gateway\.[a-z0-9.-]*internal|\.openai\.org|openai\.firewall\.socket\.dev|socket\x2dfirewall\x2dregistry|openai\.(?:enterprise\.)?slack\.com|app\.slack\.com\/client|(?:app\.notion\.com\/p|notion\.so)\/openai|linear\.app\/openai|(?:github\.com[:/]|api\.github\.com\/repos\/|raw\.githubusercontent\.com\/)openai\/openai(?:\.git)?(?:[^a-z0-9_-]|$)|LicenseRef\x2dProprietary|\/Users\/|\/home\/dev-user|flow\.apps\.openai\.org|(?:^|[^a-z0-9_-])go\/[a-z0-9_-]+)/iu;
-
-const payloads = [archiveBytes.toString("utf8")];
-const compressedFiles = [...files].filter((file) => /\.br$/iu.test(file));
-const compressedParts = new Map();
-for (const file of files) {
-  const match = /^(.*\.br)\.part-([0-9]+)$/iu.exec(file);
-  if (match === null) continue;
-  const [, name, part] = match;
-  const parts = compressedParts.get(name) ?? [];
-  parts.push({ file, part: Number(part) });
-  compressedParts.set(name, parts);
+assertPublicPackageContents(archiveFiles);
+assertStoredSparseContents(storedArchive, archiveFiles);
+for (const path of archiveFiles.keys()) {
+  if (
+    /\.(?:png|br(?:\.part-[0-9]+)?)$/iu.test(path) &&
+    !storedArchive.npmFiles.has(path)
+  )
+    invalidTarEntry();
 }
-
-function brotliPayload(bytes, file) {
-  const result = brotliDecompressSync(bytes, {
-    info: true,
-    maxOutputLength: MAX_EXPANDED_ASSET_BYTES,
-  });
-  if (result.engine.bytesWritten !== bytes.length) {
-    throw new Error(`npm tarball contains trailing Brotli data: ${file}.`);
-  }
-  return result.buffer;
-}
-
-for (const file of compressedFiles) {
-  payloads.push(
-    brotliPayload(tar(["-xOf", archive, file]), file).toString("utf8"),
-  );
-}
-for (const parts of compressedParts.values()) {
-  parts.sort((left, right) => left.part - right.part);
-  const bytes = Buffer.concat(
-    parts.map(({ file }) => tar(["-xOf", archive, file])),
-  );
-  payloads.push(brotliPayload(bytes, parts[0].file).toString("utf8"));
-}
-for (const file of files) {
-  if (/\.png$/iu.test(file)) {
-    const digest = createHash("sha256")
-      .update(tar(["-xOf", archive, file]))
-      .digest("hex");
-    if (digest !== PUBLIC_LOGO_SHA256) {
-      throw new Error(`npm tarball contains an unexpected PNG asset: ${file}.`);
-    }
-  }
-}
-
-for (const contents of payloads) {
-  if (internalMarker.test(contents)) {
-    throw new Error("npm tarball contains an internal reference.");
-  }
-}
+assertPublicPackageContents(storedArchive.npmFiles);
 
 if (args.length === 1) {
   const smoke = spawnSync(
     process.execPath,
-    [fileURLToPath(new URL("./smoke-package.mjs", import.meta.url)), archive],
+    [
+      fileURLToPath(new URL("./smoke-package.mjs", import.meta.url)),
+      archivePath,
+    ],
     {
       stdio: "inherit",
       timeout: PACKAGE_SMOKE_PROCESS_TIMEOUT_MS,
