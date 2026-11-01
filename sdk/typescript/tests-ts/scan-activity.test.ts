@@ -59,6 +59,70 @@ function commandActivityCase(
 }
 
 describe("scan activity", () => {
+  test("attributes escaped POSIX blanks only with explicit shell context", () => {
+    const command = "cat /repo/my\\ file.ts /repo/other.ts";
+    const expected = { paths: ["my file.ts", "other.ts"] };
+    for (const activity of [
+      scanActivityFromEvent(
+        {
+          type: "item.started",
+          item: { id: "posix-live", type: "command_execution", command, shell: "/bin/sh" },
+        },
+        "/repo",
+      ),
+      scanActivityFromEvent(
+        toolEvent("exec", { cmd: command, shell: "/bin/sh" }),
+        "/repo",
+      ),
+      scanActivityFromSessionEvent(
+        sessionEvent({
+          type: "function_call",
+          name: "exec_command",
+          call_id: "posix-saved",
+          arguments: JSON.stringify({ cmd: command, shell: "/bin/sh" }),
+        }),
+        "/repo",
+      ),
+    ]) {
+      expect(activity).toMatchObject(expected);
+    }
+  });
+
+  test("keeps saved argv values literal, including spaces and script arguments", () => {
+    for (const [command, paths] of [
+      [["cat", "/repo/my file.ts"], ["my file.ts"]],
+      [["sh", "-c", "cat /repo/inside.ts", "/repo/direct.ts"], ["direct.ts"]],
+    ] as const) {
+      expect(
+        scanActivityFromSessionEvent(
+          sessionEvent({
+            type: "local_shell_call",
+            call_id: "literal-argv",
+            action: { type: "exec", shell: "/bin/sh", command },
+          }),
+          "/repo",
+        ),
+      ).toMatchObject({ paths });
+    }
+  });
+
+  test("does not convert a POSIX backslash sibling into a repository file", () => {
+    expect(
+      scanActivityFromEvent(
+        {
+          type: "item.started",
+          item: {
+            id: "posix-sibling",
+            type: "command_execution",
+            shell: "/bin/bash",
+            command: "cat /repo/my\\ file.ts\\\\sibling.txt",
+          },
+        },
+        "/repo",
+      ),
+    ).toMatchObject({ paths: [] });
+  });
+
   test("reports repository files as soon as a read command starts", () => {
     expect(
       scanActivityFromEvent(
