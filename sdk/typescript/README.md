@@ -11,9 +11,8 @@ security plugin, and TypeScript declarations. It uses ES modules.
 - Review saved findings, identify duplicates, classify severity, and suggest owners.
 - Import GitHub code scanning alerts, export SARIF, JSON, or CSV, and publish
   findings to Linear or a findings service.
-- Import [Snyk Open Source findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md) from
-  official plugin JSON or native CLI JSON locally or into Cloud; Open Source
-  SARIF is also supported. License findings and other Snyk products are excluded.
+- Import saved scanner reports locally or publish them to Codex Security Cloud.
+  See the [scanner import guides](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md) for supported vendors and formats.
 - Automate scans across repositories and project components.
 
 See the [CLI reference](docs/cli.md),
@@ -658,9 +657,11 @@ contributors. Suggestions do not assign tickets. See
 
 `publish scan --to cloud` uploads selected findings to Codex Security Cloud.
 It requires ChatGPT credentials; inference API keys and AWS credentials do not
-grant Cloud access. See [Cloud publication](docs/cli.md#publish-findings-to-cloud)
+grant Cloud access. See [Cloud publication](docs/cli.md#publish-completed-scans)
 for setup and review steps, or [Linear publication](docs/cli.md#publish-completed-scans-to-linear)
 for issue creation.
+
+### Import external findings
 
 External vendor imports are opt-in. Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`
 to enable `publish findings`, `findings imported`, `import sonar`, `import github-advisories`, and
@@ -673,6 +674,8 @@ Omit `issueKeys` to collect the project's open security issues. An empty list is
 If you know the source repository, pass its Git URL in `options.sourceRepositoryUrl`
 to check the Sonar binding before fetching issues.
 Pure normalizers and file readers remain available.
+Use `normalizeSelectedSemgrepPlatformFindings` for selected SAST findings from saved
+Semgrep Web API responses. See the [Semgrep SDK example](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#import-selected-semgrep-platform-sast-findings-with-the-sdk).
 This does not affect scan publishing or the existing GitHub alert collector.
 
 The SDK also exposes `prepareExternalPublication(file, options)` for supported
@@ -684,70 +687,8 @@ use `ExternalPublicationOptions` for their supported formats. Both resolve the C
 calling `publish()`. Imported evidence remains not assessed by Codex, and saved
 requests and receipts support retries after interruption.
 
-Prefer each provider's supported native JSON for local and Cloud imports. Keep
-the same acquisition format for repeat imports: SARIF and CSV are compatibility
-options where supported, and changing formats can change record identities or
-replace richer evidence with less detail. See the
-[import guide](docs/cli.md#import-vendor-findings-locally) for format selection.
-
-For SonarQube Cloud, `codex-security import sonar` reads open security issues
-through the signed-in Sonar CLI. You can pass exact issue keys from the
-SonarQube plugin for Codex and save a local capture for later Cloud publication.
-See the [Sonar import commands](docs/cli.md#import-sonarqube-cloud-issues).
-
-For Amazon Inspector Code Security, use `--provider inspector` with a complete
-ListFindings JSON export and `--source-repository-url`. When the export identifies
-the repository by an ARN and name, pass `--inspector-project-arn ARN` with the ARN
-you verified for that Git URL in the SCM integration. See the
-[Inspector guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/inspector.md).
-
-For Black Duck SCA, use `--provider blackduck` with a BOM-6 vulnerable-components
-export for one project version. Map that version to its source repository with
-`--source-repository-url`. See the
-[Black Duck guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/blackduck.md).
-
-For Veracode Static Analysis policy findings, use `--provider veracode` with
-every Findings API page from one application. Set `--source-repository-url`
-to the source repository mapped to that application. See the
-[Veracode guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/veracode.md).
-
-For OpenGrep, use `--provider opengrep` with native JSON or gzip and an explicit
-`--source-repository-url`. Local and Cloud imports retain unassessed OpenGrep
-evidence through the existing Semgrep source-provider contract. See the
-[OpenGrep guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/opengrep.md) for preview commands,
-coverage diagnostics, stable source identities, and local SDK assessment.
-
-For Wiz, prefer supported native JSON acquired through an authorized MCP or API
-connection. The [CSV compatibility reader](docs/cli.md#import-wiz-findings) covers
-repository package vulnerabilities (SCA) only; it does not add SAST, CSPM or
-complete code-to-cloud coverage. Both formats support gzip. The acquisition path
-still needs validation with an authorized Wiz tenant.
-
-For GitHub code scanning and GHSA advisories, save complete JSON from
-`import github` or `import github-advisories`, respectively. **GHSA import
-does not establish an installed dependency or applicability to the repository.**
-For Dependabot, save the native REST alert records from one repository using the
-[Dependabot export guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/github-dependabot.md).
-The GitHub file reader accepts all three families. Secret-scanning alerts and
-writeback to GitHub are outside its scope.
-
-Use `publish findings FILE --to local --repository PATH --provider wiz
---source-key KEY` to store the same vendor evidence in the local workbench SQLite
-database. Preview with `--dry-run --format json`, then confirm interactively or
-use `--yes`. Read it with `findings imported [REPOSITORY] --format json`; the
-repository defaults to the current directory. No Cloud login or model call is
-needed. Use `--provider snyk` for native CLI JSON, a Snyk plugin SCA bundle or
-Open Source SARIF. Prefer JSON, and keep one format and stable source key per scan
-target; switching formats creates separate source identities. See
-[local imports](docs/cli.md#import-vendor-findings-locally).
-
-Use `--provider endor` with native Endor Finding JSON; existing endorctl SARIF is
-accepted as a lossy compatibility format. See
-[Endor imports](docs/cli.md#import-endor-labs-findings).
-
-For saved GitHub code-scanning alerts, GHSA advisories, or Dependabot alerts, use
-`--provider github` with a separate stable source key for each finding family.
-See [local imports](docs/cli.md#import-vendor-findings-locally).
+For CLI examples and supported input formats, see the
+[scanner import guides](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md).
 
 The SDK's `prepareLocalExternalImport(file, options)` returns a `preview` and a
 separate `import()` operation. `prepareNormalizedLocalImport(findings,
@@ -757,17 +698,15 @@ remain unassessed source evidence, separate from native scan findings. Repeated
 imports update the same repository/provider/source-key/source-ID record; omitted
 records remain stored, and unknown evidence fields are not inferred.
 
-File imports forward repository references from the reader automatically. Direct
-normalized callers should provide additional known references in the third
-argument's `sourceRepositories` when they are absent from
+File imports forward repository references from the reader automatically. With
+`prepareNormalizedLocalImport()`, supply additional known references in the
+third argument's `sourceRepositories` when they are absent from
 `evidence.details.repository.url`. For a known GitHub custom host, include
 `platform: "github"`, for example `{ sourceRepositories: [{ url:
 "https://git.example.test/example/project", platform: "github" }] }`. Named Wiz
 reports carry this platform in their repository inventory. If you export only the
 normalized finding rows to JSONL, supply that metadata separately; the original
 finding evidence does not include the surrounding inventory.
-
-See [Semgrep Code imports](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md) for native CLI/CI JSON, SARIF compatibility, and local or Cloud imports. Platform API and Guardian/MCP responses need a separate mapping.
 
 ## Findings storage and deduplication
 

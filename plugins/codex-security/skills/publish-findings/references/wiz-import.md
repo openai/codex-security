@@ -6,6 +6,8 @@ The importer reads JSON, normalized JSONL, and the repository package-vulnerabil
 
 Keep raw source records unchanged in `source_data`. Use the vendor occurrence ID, not a rule, CVE, title, or location. Missing IDs, severity, revisions, and locations must not be invented.
 
+For Cloud preview, approval, upload, and recovery, follow the [Cloud publication workflow](../SKILL.md#publish-to-cloud).
+
 ### Package vulnerabilities
 
 Supported inputs include a vulnerability finding, an array, `data.vulnerabilityFindings.nodes`, a downloaded vulnerability report, and JSONL package records. Keep `id`, `name`, `detailedName`, `vendorSeverity` (or `severity`), and `vulnerableAsset.id`, with available package and source metadata. Existing package occurrence IDs are unchanged.
@@ -41,24 +43,3 @@ SAST, repository-secret, and IaC CSV reports still require a reviewed mapping of
 | IaC                | Rule IDs/name, source range and matched content, platform, expected/actual content, file link, remediation instructions            |
 
 Select source paths and line numbers explicitly for secret reports; the standard metadata query lacks them. Preserve empty IaC comparison strings. Vendor status, AI verdicts, and secret validation remain vendor evidence, not Codex assessments. An introduced commit is not a scanned revision, and a logical IaC resource does not prove runtime deployment.
-
-## Deployment settings
-
-For staging or another Cloud deployment, set `CODEX_SECURITY_CLOUD_BASE_URL` to its API root before preview and upload. Use that deployment's login and an isolated state directory for tests. If the user or Cloud page supplies an app URL, also set `CODEX_SECURITY_CLOUD_WEB_URL` to that full URL. This setting controls the returned UI link, not API routing or authentication.
-
-Verify preview `cloudApiUrl` and any `cloudUrl` against the intended deployment: the former is the API endpoint, the latter the UI link. Saved retries are separated by deployment. `CODEX_SECURITY_CLOUD_PUBLISH_URL` routes native scan publication only, not vendor imports. Never fall back to production when staging is unavailable.
-
-## Results and recovery
-
-For Cloud publication, read the structured result even when the process exits nonzero; stderr progress does not replace it.
-
-| Status        | Exit code | Meaning                                                                              |
-| ------------- | --------- | ------------------------------------------------------------------------------------ |
-| `complete`    | 0         | All selected records were acknowledged and read back.                                |
-| `partial`     | 1         | Local exclusions or final item failures remain.                                      |
-| `interrupted` | 2         | Upload, verification, or receipt persistence stopped; acknowledged work is retained. |
-| `failed`      | 2         | Preparation failed before upload.                                                    |
-
-Cancellation retains the normal signal exit code. Report `failures` by vendor source ID, distinguish `verified` from `unacknowledged`, and retain `savedSubmission` and recovery errors.
-
-Retry with unchanged input and destination. The publisher resends only unacknowledged requests using saved IDs and bodies. Existing findings retain their original Cloud environment even if the repository default changes. After a repository reset, stop and show the error; fresh discovery and confirmation are required before a new publication.

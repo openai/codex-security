@@ -11,7 +11,7 @@ Use `codex-security import sonar` for [live SonarQube Cloud issues](#sonarqube-c
 
 ## Select the evidence
 
-Prefer the provider's supported native JSON from its authenticated CLI, plugin, or API. Keep the original records and complete the requested pagination. A JSON summary or a different product's API response is not interchangeable with the documented report. Use SARIF or CSV only when the installed provider reader supports that profile and native JSON is unavailable or the user supplies that format. Do not convert a richer JSON report to SARIF for import.
+Use a supplied report, connected tool or signed-in CLI that provides the requested native records for the selected account, repository and ref. Follow the [scanner import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md) to narrow broader reports and verify the selection in the JSON preview. Use a direct API only when the provider guide supports its response for the selected destination. Otherwise ask for a supported report. A fresh scan produces new findings. Keep the original records and complete the requested pagination. A JSON summary or a different product's API response is not interchangeable with the documented report. Use SARIF or CSV only when the installed provider reader supports that profile and native JSON is unavailable or the user supplies that format. Do not convert a richer JSON report to SARIF for import.
 
 Use the same acquisition format for repeated imports. Check the provider's identity rules before switching formats: another format can create a separate record or replace a richer snapshot with less detail. Importing findings does not reconcile equivalent vulnerabilities across formats. `--format json` controls command output, not the input report format; readers detect their supported inputs.
 
@@ -86,7 +86,7 @@ Prefer native Code/SAST CLI or CI JSON for this reader; use self-contained SARIF
 
 For a user-requested new scan, use the installed Semgrep CLI from the source repository root with the selected SAST rules: `semgrep scan --config /path/to/sast-rules.yaml --json-output /path/to/semgrep.json .`. Existing CI jobs can produce the same artifact using `--json-output`; authenticated `semgrep ci --code` follows the job's policy and baseline scope. Explain that this generates fresh scan findings, and do not substitute it for a request to retrieve existing Platform findings.
 
-For existing findings, the official [Semgrep Guardian Codex plugin](https://docs.semgrep.dev/semgrep-guardian/ide-setup/codex) can help select and inspect them. Importing its output needs a separate qualified response mapping and complete pagination for the selected repository/ref. The local `semgrep_findings` MCP tool and Platform REST API also use contracts distinct from CLI reports. Do not reshape a summary into a scan report or claim that a limited tool response is a complete export.
+For selected Semgrep Platform SAST findings, follow the [local SDK example](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#import-selected-semgrep-platform-sast-findings-with-the-sdk). It takes the original Web API project response, SAST findings pages and selected IDs. The [Semgrep Guardian Codex plugin](https://docs.semgrep.dev/semgrep-guardian/ide-setup/codex) can help select and inspect findings. Guardian and the `semgrep_findings` MCP tool return different records from the SDK inputs.
 
 Import the native report with `--provider semgrep`, a stable organization/project/branch `--source-key`, and `--source-repository-url` identifying the actual source repository. Use `--to local --repository /path/to/project` for local storage or `--to cloud --repository URL_OR_ID` for Cloud. The source URL is checked against configured local Git remotes or the Cloud destination. Preview with `--dry-run --format json` before confirming the import.
 
@@ -146,7 +146,7 @@ Use a separate stable source key for each GitHub finding family. Code-scanning i
 
 Resolve the user's destination to a connected GitHub or GitHub Enterprise repository URL or Cloud repository ID, including custom Enterprise hosts. Confirm the intended Cloud account and an authorized repository environment. Use the existing file-backed ChatGPT login; explain a missing or incompatible login rather than changing credential storage automatically.
 
-For another Cloud deployment, read [Deployment settings](references/wiz-import.md#deployment-settings) before previewing. Keep the selected deployment and login throughout the upload.
+For staging or another Cloud deployment, configure the [deployment settings](#deployment-settings) before previewing. Keep the selected deployment and login throughout the upload.
 
 ### Preview and approve
 
@@ -162,6 +162,25 @@ Obtain explicit confirmation for this concrete upload, including skipped records
 
 ### Upload and report
 
-Read [Results and recovery](references/wiz-import.md#results-and-recovery), including when the process exits nonzero. After a lost response or retryable failure, repeat the command with unchanged input and destination so the publisher resumes saved requests. A lost response does not mean nothing reached Cloud. A repository reset requires fresh discovery and confirmation before a new publication.
+Read the structured result even when the process exits nonzero. Progress appears on stderr.
 
-Report verified, unacknowledged, excluded, and failed records distinctly, retaining source IDs and recovery details. Receipts and source-record readback confirm stored vendor evidence; they do not establish a Codex assessment or visibility in the shared Cloud Findings view. Include the returned `cloudUrl` as a clickable repository link when available; do not invent a UI link from the API endpoint.
+| Status        | Exit code | Meaning                                                 |
+| ------------- | --------- | ------------------------------------------------------- |
+| `complete`    | 0         | All selected records were acknowledged and read back.   |
+| `partial`     | 1         | Some records were excluded or have final item failures. |
+| `interrupted` | 2         | Upload, verification, or receipt persistence stopped.   |
+| `failed`      | 2         | Preparation failed before upload.                       |
+
+Cancellation uses the normal signal exit code. Report verified, unacknowledged, excluded, and failed records separately. Include source IDs from `failures`, any `savedSubmission` path, and recovery errors. Receipts and readback confirm stored vendor evidence. Assessment and visibility in the shared Cloud Findings view require separate verification. Link to the returned `cloudUrl` when available.
+
+### Resume an interrupted upload
+
+After a lost response or retryable failure, repeat the command with the same input and destination. Cloud may already have accepted some records. The publisher reuses saved request IDs and bodies, resends only requests without a saved receipt, and verifies the acknowledged records. Existing findings keep their original Cloud environment when the repository default changes.
+
+If the repository was reset, stop and report the error. Rediscover the repository and get fresh confirmation before starting a new publication.
+
+### Deployment settings
+
+Set `CODEX_SECURITY_CLOUD_BASE_URL` to the deployment's API root for preview and upload. Use its login and an isolated state directory for tests. If the user or Cloud page supplies an app URL, set `CODEX_SECURITY_CLOUD_WEB_URL` to that full URL. This setting controls the returned UI link. The API root and login still determine routing and authentication.
+
+Check the preview's `cloudApiUrl` and any `cloudUrl` against the intended API endpoint and app. Saved retries are scoped to the deployment. `CODEX_SECURITY_CLOUD_PUBLISH_URL` applies only to native scan publication. If staging is unavailable, stop before uploading.

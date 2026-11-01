@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import {
@@ -9,7 +8,7 @@ import {
   sonarRepositoryUrls,
 } from "../src/sonar-findings.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
-import { sonarGitTestEnvironment } from "./support/sonar-import-fixtures.js";
+import { localFindingsFixture } from "./external-findings-local-helpers.js";
 
 const project = "team:application";
 const repository = "https://vcs.example.test/team/application";
@@ -230,25 +229,14 @@ test("validates the repository binding and native project or ref before attribut
 });
 
 test("normalized local imports verify both report and issue bindings against the checkout and projections", async () => {
-  await using tmp = await scopedTemporaryDirectory("sonar-binding-");
-  const checkout = join(tmp.path, "checkout");
-  await mkdir(checkout);
-  const environment = {
-    ...sonarGitTestEnvironment(),
-    CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
-    CODEX_SECURITY_STATE_DIR: join(tmp.path, "state"),
-  };
   const foreign = repository + "-other";
-  const git = (...args: string[]) =>
-    execFileSync("git", ["-C", checkout, ...args], { env: environment });
-  git("init", "--quiet");
-  git("remote", "add", "origin", foreign);
+  await using fixture = await localFindingsFixture({ remote: foreign });
   const options = {
-    repository: checkout,
+    repository: fixture.repository,
     provider: "sonar",
     sourceKey: project,
   } as const;
-  const deps = { environment };
+  const deps = { environment: fixture.environment };
   const { report, ...rows } = normalizeSonarFindings(
     capture([page([issue()])]),
     repository,
@@ -263,7 +251,7 @@ test("normalized local imports verify both report and issue bindings against the
   await expect(
     prepareNormalizedLocalImport(reportOnly, options, deps),
   ).rejects.toThrow("does not match a configured remote");
-  git("remote", "add", "upstream", repository);
+  fixture.git("remote", "add", "upstream", repository);
   expect(
     (await prepareNormalizedLocalImport(rows, options, deps))
       .matchesRepositoryRemote,

@@ -31,6 +31,7 @@ import {
   type ExternalFindingsReaderOptions,
 } from "./external-findings-read.js";
 import { canonicalJson } from "./record.js";
+import { notify } from "./value.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { wizFindingRepository } from "./wiz-findings.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
@@ -446,13 +447,8 @@ async function preparePublicationInput(
   dependencies: ExternalPublicationDependencies,
 ): Promise<PreparedExternalPublication> {
   const { inspectorProjectMap } = options;
-  const progress = (event: ExternalPublicationProgress): void => {
-    try {
-      dependencies.onProgress?.(event);
-    } catch {
-      // Optional progress must not interrupt preparation or publication.
-    }
-  };
+  const progress = (event: ExternalPublicationProgress): void =>
+    notify(() => dependencies.onProgress?.(event));
   if (
     !options.sourceKey.trim() ||
     options.sourceKey.includes("\0") ||
