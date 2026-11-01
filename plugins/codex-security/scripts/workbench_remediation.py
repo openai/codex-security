@@ -46,6 +46,18 @@ def require_request(
     return current
 
 
+def latest_attempt(connection: sqlite3.Connection, occurrence_id: str) -> sqlite3.Row | None:
+    return connection.execute(
+        """
+        SELECT * FROM finding_remediation_attempts
+        WHERE occurrence_id = ?
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT 1
+        """,
+        (occurrence_id,),
+    ).fetchone()
+
+
 def remediation_claim_is_active(remediation: sqlite3.Row) -> bool:
     if remediation["pending_action_claim_token"] is None:
         return False
@@ -173,15 +185,7 @@ def _cancel_generation(
     connection.execute(
         "DELETE FROM finding_remediation_attempts WHERE request_id = ?", (request_id,)
     )
-    previous = connection.execute(
-        """
-        SELECT * FROM finding_remediation_attempts
-        WHERE occurrence_id = ?
-        ORDER BY created_at DESC, rowid DESC
-        LIMIT 1
-        """,
-        (occurrence_id,),
-    ).fetchone()
+    previous = latest_attempt(connection, occurrence_id)
     if previous is None or previous["state"] != "superseded":
         return
     restored_state = "applied" if previous["applied_content_digest"] is not None else "generated"
