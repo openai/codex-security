@@ -33,10 +33,11 @@ const USAGE_LIMIT_MESSAGES = new Set([
 
 // Codex exec exposes only text for failed turns. Match its native quota messages here.
 export function codexWorkerTurnError(message: string): Error {
+  const reason = message.replace(/^Error running remote compact task: /, "");
   if (
-    USAGE_LIMIT_MESSAGES.has(message) ||
-    message.startsWith("You’ve hit your usage limit.") ||
-    message.startsWith("You’ve hit your usage limit for ")
+    USAGE_LIMIT_MESSAGES.has(reason) ||
+    reason.startsWith("You’ve hit your usage limit.") ||
+    reason.startsWith("You’ve hit your usage limit for ")
   ) {
     return new DeepScanNonRetryableError(message);
   }

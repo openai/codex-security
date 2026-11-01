@@ -3508,7 +3508,7 @@ async function testAbortPropagation() {
 
 function mockWorkerSpawn(
   executablePath: string,
-  onExec: (
+  onExec?: (
     child: ChildProcess,
     args: readonly string[],
     options: SpawnOptions,
@@ -3530,7 +3530,7 @@ function mockWorkerSpawn(
         : args,
       options,
     );
-    if (args[0] === "exec") onExec(child, args, options);
+    if (args[0] === "exec") onExec?.(child, args, options);
     return child;
   }) as typeof childProcess.spawn;
   syncBuiltinESMExports();
@@ -4065,30 +4065,17 @@ async function testWorkerCancellation() {
 
 async function testWorkerTerminalEvents() {
   const fixture = await fakeCodexFixture();
-  const previousPath = process.env.CODEX_CLI_PATH;
-  const originalSpawn = childProcess.spawn;
-  childProcess.spawn = ((
-    command: string,
-    args: readonly string[] = [],
-    options: SpawnOptions = {},
-  ) =>
-    originalSpawn(
-      command,
-      command === process.execPath ||
-        command === path.toNamespacedPath(process.execPath)
-        ? [fixture.executablePath, ...args]
-        : args,
-      options,
-    )) as typeof childProcess.spawn;
-  syncBuiltinESMExports();
-  process.env.CODEX_CLI_PATH = process.execPath;
+  const restoreSpawn = mockWorkerSpawn(fixture.executablePath);
   try {
     const promptPath = path.join(fixture.root, "prompt.md");
-    const quotaMessage = "Quota exceeded. Check your plan and billing details.";
+    const quotaMessage =
+      "Error running remote compact task: Quota exceeded. Check your plan and billing details.";
+    const disconnectMessage =
+      "Error running remote compact task: stream disconnected before completion: stream closed before response.completed";
     for (const event of [
       undefined,
       { type: "turn.failed", error: { message: quotaMessage } },
-      { type: "turn.failed", error: { message: "429 Too Many Requests" } },
+      { type: "turn.failed", error: { message: disconnectMessage } },
       { type: "error", message: quotaMessage },
       {
         type: "item.completed",
@@ -4104,15 +4091,9 @@ async function testWorkerTerminalEvents() {
       for (const kind of ["discovery", "dedup"] as const) {
         for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
           const onNonRetryableError = mock.fn();
-          const execution = new CodexSdkWorkerExecutor({
-            parentSandbox: trustedParentSandbox,
-          }).run({
+          const execution = runWorker(promptPath, fixture.root, {
             kind,
-            promptPath,
-            workingDirectory: fixture.root,
-            subagents: 0,
             resumeThreadId,
-            signal: new AbortController().signal,
             onNonRetryableError,
           });
           if (event?.type === "turn.failed") {
@@ -4136,8 +4117,6 @@ async function testWorkerTerminalEvents() {
       }
     }
   } finally {
-    childProcess.spawn = originalSpawn;
-    syncBuiltinESMExports();
-    restoreEnv("CODEX_CLI_PATH", previousPath);
+    restoreSpawn();
   }
 }
