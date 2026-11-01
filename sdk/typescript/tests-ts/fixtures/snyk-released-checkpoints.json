@@ -1,0 +1,131 @@
+{
+  "code": {
+    "file": "9f5e2365b32a81e81b8257099217472aa8f10616073188538ac0bd995591eb4c.pending.json",
+    "checkpoint": {
+      "accountId": "synthetic-account",
+      "requests": [
+        {
+          "request_id": "e13cc517-c37c-4ba0-ac03-866808c9a613",
+          "repository": {
+            "id": "repo-example",
+            "repo_connector_id": "github",
+            "environment_id": "environment-example",
+            "reset_marker": "generation-1"
+          },
+          "source": {
+            "provider": "snyk",
+            "source_key": "tenant-example/vulnerability-finding"
+          },
+          "items": [
+            {
+              "client_id": "item-1",
+              "source_finding_id": "snyk-rest:96875c30e9652a9e0b475e75cd19e0fb32bcba6dc0b8bfe3ef0169ee7408e95f",
+              "expected_version": 0,
+              "evidence": {
+                "title": "Synthetic finding",
+                "description": null,
+                "severity": "high",
+                "advisory_ids": [],
+                "locations": [
+                  {
+                    "path": "src/app.ts",
+                    "line": 3
+                  }
+                ],
+                "code_revision": "abc123",
+                "source_updated_at": 1767225600,
+                "details": {
+                  "kind": "sast",
+                  "repository": {
+                    "url": "https://github.com/example/project",
+                    "id": null,
+                    "name": null
+                  },
+                  "scanner_origin": "Snyk Code",
+                  "source_status": "open",
+                  "rule": {
+                    "id": "sample-rule",
+                    "short_id": null,
+                    "name": null
+                  },
+                  "weakness_ids": [],
+                  "scanner_verdict": null,
+                  "remediation_instructions": null,
+                  "code": null,
+                  "secret": null,
+                  "configuration": null,
+                  "file_url": null
+                },
+                "url": null,
+                "packages": [],
+                "branch": null,
+                "source_scan_id": null,
+                "image_digests": [],
+                "source_data": {}
+              }
+            }
+          ]
+        }
+      ],
+      "inputProjection": {
+        "inputDigest": "ab915d32fcdeb8b03c684d77c20c7371c188b9e4468ebd2fd4090d15a43d40a5",
+        "savedEvidenceDigest": "ab915d32fcdeb8b03c684d77c20c7371c188b9e4468ebd2fd4090d15a43d40a5"
+      }
+    }
+  },
+  "open-source": {
+    "file": "fff528eb227b82ed41cb3390cfd12473d1c1b756bdd4f399d8bc0117b67d9498.pending.json",
+    "checkpoint": {
+      "accountId": "synthetic-account",
+      "requests": [
+        {
+          "request_id": "dac96f20-5073-4ad4-89d8-3361cb30a072",
+          "repository": {
+            "id": "repo-example",
+            "repo_connector_id": "github",
+            "environment_id": "environment-example",
+            "reset_marker": "generation-1"
+          },
+          "source": {
+            "provider": "snyk",
+            "source_key": "tenant-example/vulnerability-finding"
+          },
+          "items": [
+            {
+              "client_id": "item-1",
+              "source_finding_id": "snyk-rest:1c938a65924060f2e39c4135d140fa882f2e6b0c4875202feee308e7e44ea815",
+              "expected_version": 0,
+              "evidence": {
+                "title": "Synthetic finding",
+                "description": null,
+                "severity": "high",
+                "advisory_ids": ["sample-rule"],
+                "packages": [
+                  {
+                    "name": "example-lib",
+                    "installed_version": "1.0.0",
+                    "ecosystem": "npm",
+                    "manifest_path": "app/package.json",
+                    "fixed_versions": []
+                  }
+                ],
+                "source_updated_at": 1767225600,
+                "url": null,
+                "locations": [],
+                "branch": null,
+                "code_revision": null,
+                "source_scan_id": null,
+                "image_digests": [],
+                "source_data": {}
+              }
+            }
+          ]
+        }
+      ],
+      "inputProjection": {
+        "inputDigest": "9facde5e89e65c58515c4b84f445b64adf796228af93a4fba49b894b16d807a9",
+        "savedEvidenceDigest": "9facde5e89e65c58515c4b84f445b64adf796228af93a4fba49b894b16d807a9"
+      }
+    }
+  }
+}

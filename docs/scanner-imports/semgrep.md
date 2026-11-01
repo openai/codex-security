@@ -8,7 +8,7 @@ Prefer native **Semgrep Code/SAST CLI or CI JSON** for this reader. It preserves
 the scanner's original severity and source evidence. Self-contained SARIF 2.1.0
 is a compatibility path. Both formats may be plain or gzip-compressed.
 
-For local import of selected existing Code findings, see [Existing Platform findings](#existing-platform-findings).
+To import selected existing Code findings, see [Existing Platform findings](#existing-platform-findings).
 
 To produce JSON locally, run the following from the source repository root with
 your selected SAST rules. This runs a new scan; it does not retrieve earlier
@@ -151,6 +151,23 @@ native finding. If unrelated SDK metadata uses the same v1 fields, move it to
 another key such as `source_data.ticket`, or submit those rows in an ordinary
 normalized batch without the Platform report marker or scope.
 
+To publish the selection to Cloud, use the same file and source key:
+
+```sh
+codex-security publish findings selected.json --to cloud --provider semgrep \
+  --repository https://github.com/example/project --source-key example/project/release/platform --dry-run
+```
+
+The publisher checks the original project's repository against the authorized destination, including
+Supply Chain findings with no typed repository field. After reviewing the
+preview, repeat without `--dry-run`.
+
+New marked approvals that include caller-managed rows record the collection
+scope for retry. On older approvals, the publisher checks the repository and
+any scope retained by the original native records. A caller-managed row can
+lack the original collection scope. Changing supplemental display metadata on
+a retry cannot change the approved request bytes, account or destination.
+
 ## Collect a Platform project and branch
 
 With a Web API token in `SEMGREP_APP_TOKEN`, collect all findings returned for a
@@ -188,13 +205,20 @@ report=$(mktemp ./semgrep-backlog.XXXXXX) &&
     --provider semgrep --source-key example/project/topic --dry-run --format json
 ```
 
+To preview this saved backlog in Cloud, keep its source key and choose the authorized repository.
+
+```sh
+codex-security publish findings "$report" --to cloud --provider semgrep \
+  --repository https://github.com/example/project --source-key example/project/topic --dry-run
+```
+
 Use `--semgrep-product sca` for Supply Chain or `ai_sast` for AI-powered
 detection. The default is `sast`. Use `--source-repository-url` on collection
-when the project has no repository URL. In that case the report records the mapping in
+when the project has no repository URL. The report records that mapping in
 `sourceRepositoryUrl`, and stored finding evidence retains a null native project URL.
-For SSH projects, the report keeps the original address in `nativeProjectUrl` alongside the resolved HTTP(S) address in `project.url`, and records any supplied mapping separately.
-Save the complete output from a successful
-command; the local importer checks the recorded finding count and repository/ref
+For SSH projects, the report stores the original address in `nativeProjectUrl` and the resolved HTTP(S) address in `project.url`.
+It records any supplied mapping separately. Save the complete output from a successful
+command. The importer checks the recorded finding count and repository/ref
 claims. It retains each original finding as JSON text so large IDs survive replay. The reader also accepts saved v1 project exports with native object rows and decimal type witnesses.
 
 To import a collected backlog with the TypeScript SDK, pass the normalized

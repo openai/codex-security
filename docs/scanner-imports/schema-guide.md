@@ -88,7 +88,7 @@ before preparing a fresh submission.
   Critical from High; both become diagnostic `error`, mapped to High, in Semgrep
   SARIF. Inspect the selected result for trace/fix details. Platform/MCP
   envelopes and general Supply Chain/Secrets feeds are not Code CLI or SARIF exports.
-- **Semgrep Platform findings.** The local reader binds each native finding ID to its deployment, project ID, ref and product. Individually selected Code findings and complete Code collections share the same identity. See the [Semgrep Platform examples](semgrep.md#existing-platform-findings).
+- **Semgrep Platform findings.** The local and Cloud readers bind each native finding ID to its deployment, project ID, ref and product. Individually selected Code findings and complete Code collections share the same identity. See the [Semgrep Platform examples](semgrep.md#existing-platform-findings).
 - **OpenGrep.** Use native JSON and supply `--source-repository-url`. The
   [OpenGrep guide](opengrep.md) covers export and occurrence identity.
 - **GitHub:** For code scanning, the selected instance supplies path/range, ref
@@ -188,6 +188,22 @@ recover:
   approved command with unchanged input, source key, destination and endpoint to
   resume its saved requests. This also applies if the initial request was saved
   but persisting a later receipt failed.
+  Older SDK checkpoints saved the destination repository ID without the catalog
+  URL. After a repository rename, retry those requests with the original
+  normalized findings and report metadata, omitting supplemental source
+  repository declarations. A new declaration needs a matching current catalog
+  entry or a URL recorded when the request was approved.
+- If a hosted Semgrep or Snyk request is pending, rerun the original input to
+  finish it before submitting updated evidence for any of the same findings.
+  Selections with distinct scanner-issued IDs can proceed independently on the
+  same deployment, account, repository, connector, provider and source key.
+  When an older checkpoint establishes only the source, finish that request
+  before submitting another selection for that source. Use the SDK build that
+  created the request and include the original report context and caller-added
+  fields. Older SDKs included some fields in the checkpoint filename without
+  retaining them in the saved request. If the publisher cannot identify the
+  deployment of an older request, rerun it on its original deployment. An
+  identified repository reset retires the request and requires fresh approval.
 - **No resumable checkpoint:** a repository reset retires the old request, and
   an initial checkpoint-write failure may leave no request to resume. Inspect
   the destination and correct the error; run a fresh `--dry-run` and get fresh

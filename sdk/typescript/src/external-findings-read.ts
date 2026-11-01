@@ -84,15 +84,16 @@ export function localFindingRepositories(
 }
 
 /** Repository claims retained by the Semgrep SARIF reader. */
-export function semgrepSarifRepositories({
-  evidence,
-}: ExternalFinding): { url: string; branch?: string }[] {
+export function semgrepSarifRepositories(
+  { evidence }: ExternalFinding,
+  allowPartialCloudUrl = false,
+): { url: string; branch?: string }[] {
   const data = evidence.source_data;
   const document = data?.["documentContext"];
   const driver = data?.["driverContext"];
+  const partial = allowPartialCloudUrl && document === undefined;
   if (
-    !isRecord(document) ||
-    document["version"] !== "2.1.0" ||
+    (!partial && (!isRecord(document) || document["version"] !== "2.1.0")) ||
     !isRecord(driver) ||
     typeof driver["name"] !== "string" ||
     !isSemgrepSarifDriver(driver["name"]) ||
@@ -111,9 +112,10 @@ export function semgrepSarifRepositories({
           ? [
               {
                 url: reference["repositoryUri"],
-                ...(typeof reference["branch"] === "string" && {
-                  branch: reference["branch"],
-                }),
+                ...(!partial &&
+                  typeof reference["branch"] === "string" && {
+                    branch: reference["branch"],
+                  }),
               },
             ]
           : [],
@@ -162,8 +164,8 @@ export async function readExternalFindings(
       target,
     );
     if (semgrepPlatformReportRepository(findings)) return { findings };
-    const sourceRepositories = findings.findings.flatMap(
-      semgrepSarifRepositories,
+    const sourceRepositories = findings.findings.flatMap((finding) =>
+      semgrepSarifRepositories(finding),
     );
     return { findings, sourceRepositories };
   }

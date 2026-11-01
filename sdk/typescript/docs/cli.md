@@ -1359,7 +1359,7 @@ remain stored; omission does not resolve or delete a finding. Excluded records
 are reported, and an import with exclusions exits with status 1. For existing
 Semgrep Platform findings, use the SDK to select individual Code findings or
 `import semgrep PROJECT --semgrep-deployment SLUG --semgrep-ref REF [--semgrep-product sast|sca|ai_sast]`
-to collect one project and branch. Both can be saved for local import. See the
+to collect one project and branch. Both can be saved for local or Cloud import. See the
 [Semgrep Platform workflows](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#existing-platform-findings).
 
 For OpenGrep, use `--provider opengrep` and supply `--source-repository-url`.
@@ -1420,7 +1420,7 @@ confirmation and retry flow below.
 
 For an existing monitored Snyk project, use
 `codex-security import snyk PROJECT_ID --snyk-org ORG_ID --source-repository-url URL --format json`
-and save its output for `publish findings --to local --provider snyk`. Set
+and save its output for `publish findings --provider snyk` with `--to local` or `--to cloud`. Set
 `SNYK_TOKEN` with read access. The default product is Open Source. Select
 `--snyk-product code` for Code and `--snyk-api-origin` for a regional API
 (default `https://api.snyk.io`). See the [hosted import example](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md#existing-issues-from-snyk).
