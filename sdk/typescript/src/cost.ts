@@ -255,21 +255,31 @@ export class ScanCostTracker {
         ? undefined
         : this.#options.repository;
     const unreadable = new Map<SessionUsage, unknown>();
-    for await (const path of sessionFiles(
-      join(this.#options.codexHome, "sessions"),
-    )) {
-      let session = this.#sessions.get(path);
-      if (session === undefined) {
-        session = createSessionUsage(observeUsage);
-        this.#sessions.set(path, session);
+    let traversalFailure: { error: unknown } | undefined;
+    try {
+      for await (const path of sessionFiles(
+        join(this.#options.codexHome, "sessions"),
+      )) {
+        let session = this.#sessions.get(path);
+        if (session === undefined) {
+          session = createSessionUsage(observeUsage);
+          this.#sessions.set(path, session);
+        }
+        try {
+          await readSessionUsage(path, session, repository);
+        } catch (error) {
+          if (
+            this.#options.maxCostUsd !== undefined &&
+            session.threadId === null
+          )
+            throw error;
+          unreadable.set(session, error);
+        }
       }
-      try {
-        await readSessionUsage(path, session, repository);
-      } catch (error) {
-        if (this.#options.maxCostUsd !== undefined && session.threadId === null)
-          throw error;
-        unreadable.set(session, error);
-      }
+    } catch (error) {
+      if (this.#options.maxCostUsd !== undefined || unreadable.size === 0)
+        throw error;
+      traversalFailure = { error };
     }
 
     const included = new Set([this.#threadId, ...this.#receipts.keys()]);
@@ -320,6 +330,7 @@ export class ScanCostTracker {
       }
     }
 
+    if (failure === undefined && traversalFailure) throw traversalFailure.error;
     if (failure && this.#options.maxCostUsd !== undefined) throw failure.error;
     const usages = new Map(this.#receipts);
     for (const [path, tracked] of this.#sessions) {

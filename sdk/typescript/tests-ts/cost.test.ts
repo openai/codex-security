@@ -1202,6 +1202,110 @@ describe("live scan cost tracking", () => {
     },
   );
 
+  test.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ] as const)(
+    "preserves accounting failure order after directory traversal fails (budget=%p, earlier log failure=%p)",
+    async (budget, earlierFailure) => {
+      const home = await codexHome();
+      await writeSession(home, "scan-thread", { input_tokens: 10 });
+      const healthy = await writeSession(
+        home,
+        "a-healthy-worker",
+        { input_tokens: 20 },
+        { parent: "scan-thread" },
+      );
+      const blocked = await writeSession(
+        home,
+        "z-blocked-worker",
+        { input_tokens: 30 },
+        { parent: "scan-thread" },
+      );
+      const output = {
+        id: "healthy-output",
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Healthy worker output." }],
+      };
+      await appendSessionItem(healthy, output);
+      await appendSessionItem(healthy, progressMessage(1));
+      const directory = join(home, "sessions", "2026", "07", "26");
+      const unavailable = join(directory, "zz-next");
+      await filesystem.mkdir(unavailable);
+      const first = Object.assign(new Error("Synthetic log denial"), {
+        code: "EACCES",
+      });
+      const later = Object.assign(new Error("Synthetic directory failure"), {
+        code: "EMFILE",
+      });
+      const opened = filesystem.open;
+      const listed = filesystem.readdir;
+      const opening = spyOn(filesystem, "open").mockImplementation(
+        async (...args: Parameters<typeof filesystem.open>) => {
+          if (earlierFailure && String(args[0]) === blocked) throw first;
+          return await opened(...args);
+        },
+      );
+      const listing = spyOn(filesystem, "readdir").mockImplementation(
+        async (...args) => {
+          if (String(args[0]) === unavailable) throw later;
+          const entries = await Reflect.apply(listed, filesystem, args);
+          if (String(args[0]) === directory)
+            entries.sort((left: { name: string }, right: { name: string }) =>
+              left.name.localeCompare(right.name),
+            );
+          return entries;
+        },
+      );
+      const activities: ScanActivity[] = [];
+      const progress: ScanProgress[] = [];
+      const events: ScanSessionEvent[] = [];
+      const tracker = costTracker(home, {
+        ...(budget ? { maxCostUsd: 1 } : {}),
+        repository: home,
+        onActivity: (activity) => activities.push(activity),
+        onProgress: (update) => progress.push(update),
+        onSessionEvent: (event) => events.push(event),
+      });
+      tracker.start("scan-thread");
+      try {
+        await expect(tracker.refresh()).rejects.toBe(
+          earlierFailure ? first : later,
+        );
+        await expect(tracker.refresh()).rejects.toBe(
+          earlierFailure ? first : later,
+        );
+        if (earlierFailure && !budget) {
+          expect(
+            activities.filter(
+              (activity) => activity.description === "Healthy worker output.",
+            ),
+          ).toHaveLength(1);
+          expect(progress).toHaveLength(1);
+          expect(
+            events.filter(
+              (event) =>
+                event.threadId === "a-healthy-worker" &&
+                JSON.stringify(event.event["payload"]) ===
+                  JSON.stringify(output),
+            ),
+          ).toHaveLength(1);
+        } else {
+          expect(activities).toHaveLength(0);
+          expect(progress).toHaveLength(0);
+          expect(events).toHaveLength(0);
+        }
+      } finally {
+        opening.mockRestore();
+        listing.mockRestore();
+        await tracker.stop();
+      }
+    },
+  );
+
   test("stops reading logs immediately when an explicit budget loses unidentified accounting", async () => {
     const home = await codexHome();
     const blocked = await writeSession(home, "a-blocked", { input_tokens: 10 });
