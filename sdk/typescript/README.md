@@ -687,8 +687,8 @@ use `ExternalPublicationOptions` for their supported formats. Both resolve the C
 calling `publish()`. Imported evidence remains not assessed by Codex, and saved
 requests and receipts support retries after interruption.
 
-For CLI examples, see [local import and readback](docs/cli.md#import-vendor-findings-locally)
-and [Cloud publication and confirmation](docs/cli.md#preview-and-publish).
+For CLI examples and supported input formats, see the
+[scanner import guides](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md).
 
 The SDK's `prepareLocalExternalImport(file, options)` returns a `preview` and a
 separate `import()` operation. `prepareNormalizedLocalImport(findings,
@@ -698,9 +698,9 @@ remain unassessed source evidence, separate from native scan findings. Repeated
 imports update the same repository/provider/source-key/source-ID record; omitted
 records remain stored, and unknown evidence fields are not inferred.
 
-File imports forward repository references from the reader automatically. Direct
-normalized callers should provide additional known references in the third
-argument's `sourceRepositories` when they are absent from
+File imports forward repository references from the reader automatically. With
+`prepareNormalizedLocalImport()`, supply additional known references in the
+third argument's `sourceRepositories` when they are absent from
 `evidence.details.repository.url`. For a known GitHub custom host, include
 `platform: "github"`, for example `{ sourceRepositories: [{ url:
 "https://git.example.test/example/project", platform: "github" }] }`. Named Wiz

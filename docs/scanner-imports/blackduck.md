@@ -1,18 +1,16 @@
 # Import Black Duck SCA findings
 
 Import vulnerable BOM components from one Black Duck SCA project version.
-Verify in the scan configuration that the version represents the Git repository
-you want to import into. A project name or component download URL cannot
-establish that connection.
+Verify in the scan configuration which Git repository that version represents.
 
 ## Quick start
 
-Use a read-only token to [export the BOM-6 collection](#export-the-bom-6-collection)
-to a private file outside the checkout. From the verified checkout root, replace the
-file path, Git URL and source key with values for your project version.
+[Enable external imports](README.md#preview-a-report) and use a read-only token to
+[export the BOM-6 collection](#export-the-bom-6-collection). From the matching
+checkout root, preview the saved file with the verified Git URL and a source key
+for this deployment, project, and version.
 
 ```sh
-export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
 codex-security publish findings /private/path/blackduck.json \
   --to local --repository . --provider blackduck \
   --source-repository-url https://github.com/example/project \
@@ -22,26 +20,11 @@ codex-security publish findings /private/path/blackduck.json \
 
 ## Import and verify
 
-Check the source, destination, and excluded rows. Remove `--dry-run` to import
-the ready records, then read the stored evidence.
-
-```sh
-codex-security findings imported . --format json
-```
-
-Reuse the same source key for that deployment, project, and version. A later
-export updates matching occurrences and leaves omitted occurrences in place.
-
-For Cloud, replace `--to local --repository .` with
-`--to cloud --repository CLOUD_REPOSITORY_ID` on a deployment that accepts
-`blackduck`. Preview again before confirming. Cloud compares declared and
-retained source repository URLs with the authorized GitHub repository. Local
-import compares them with the checkout’s Git remotes when comparable remotes
-exist. Importing a saved report locally requires neither a Black Duck nor a
-Cloud login.
-
-If a Cloud upload is interrupted, follow the
-[Cloud retry procedure](schema-guide.md#retry-a-cloud-submission).
+Check the source Git URL against the checkout’s configured remotes or the
+authorized GitHub repository in Cloud. A project name or component download
+URL alone cannot establish that link.
+[Save or publish and verify](README.md#save-or-publish-and-verify) using the same
+source key for subsequent exports of this project version.
 
 ## Reference
 
