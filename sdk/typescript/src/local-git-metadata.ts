@@ -1,6 +1,7 @@
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { environmentEntry } from "./auth.js";
+import { abortReason } from "./errors.js";
 import { canonicalConfigPath } from "./runtime.js";
 import {
   abortable,
@@ -183,6 +184,20 @@ export async function localGitProtectionRoots(
   for (const root of [...roots])
     roots.add(await abortable(() => canonicalConfigPath(root), signal));
   return [...roots];
+}
+
+/** Discover Git metadata for the selection, then for the current working directory. */
+export async function importGitProtectionRoots(
+  repository: string,
+  environment: NodeJS.ProcessEnv,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const roots = await localGitProtectionRoots(repository, environment, signal);
+  const cwd = process.cwd();
+  if (signal?.aborted) throw abortReason(signal);
+  if (cwd !== repository)
+    roots.push(...(await localGitProtectionRoots(cwd, environment, signal)));
+  return roots;
 }
 
 export async function hasGitMetadata(
