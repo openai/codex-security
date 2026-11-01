@@ -15,7 +15,8 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: node-release-pr
+  # A newer push can replace a pending push without displacing a manual run.
+  group: node-release-pr-${{ github.event_name == 'push' && 'push' || github.run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -24,21 +25,27 @@ jobs:
       github.repository == 'openai/codex-security' && github.ref == 'refs/heads/main' &&
       ((github.event_name == 'workflow_dispatch' && inputs.dry_run) ||
       (github.event_name != 'workflow_dispatch' && vars.RELEASE_PR_ENABLED != 'true'))
-    name: preview draft release PR
+    name: preview release PR
     runs-on: ubuntu-latest
+    # Keep the writer from changing the release branch while a preview reads it.
+    concurrency: &release-pr-queue
+      group: node-release-pr
+      queue: max
     env:
       RELEASE_PR_DRY_RUN: "true"
 
     steps:
-      - name: Checkout main, never the release PR
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - &checkout-main-never-the-release-pr
+        name: Checkout main, never the release PR
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Set up Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+      - &set-up-node-js
+        name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22.13.0"
 
@@ -52,8 +59,9 @@ jobs:
       github.repository == 'openai/codex-security' && github.ref == 'refs/heads/main' &&
       ((github.event_name == 'workflow_dispatch' && !inputs.dry_run) ||
       (github.event_name != 'workflow_dispatch' && vars.RELEASE_PR_ENABLED == 'true'))
-    name: maintain draft release PR
+    name: maintain release PR
     runs-on: ubuntu-latest
+    concurrency: *release-pr-queue
     permissions:
       contents: write
       pull-requests: write
@@ -61,22 +69,14 @@ jobs:
       RELEASE_PR_DRY_RUN: "false"
 
     steps:
-      - name: Checkout main, never the release PR
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          ref: main
-          fetch-depth: 0
-          persist-credentials: false
+      - *checkout-main-never-the-release-pr
 
-      - name: Set up Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
-        with:
-          node-version: "22.13.0"
+      - *set-up-node-js
 
       - name: Create repository-scoped release App token
         id: app-token
         if: vars.RELEASE_APP_CLIENT_ID != ''
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}

@@ -1,0 +1,1455 @@
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { afterEach, expect, test, mock } from "bun:test";
+import { ScanCostTracker } from "../src/cost.js";
+import type { ScanTokenUsage } from "../src/index.js";
+import {
+  CodexSecurity,
+  type ScanOptions,
+  type ValidationOptions,
+} from "../src/api.js";
+import { ScanResult } from "../src/result.js";
+import { main } from "../src/cli.js";
+import {
+  mergedCodexConfig,
+  type CodexSecurityConfig,
+  type JsonObject,
+} from "../src/config.js";
+import type { ProjectConfigInput } from "../src/project-config-schema.js";
+import { readProjectConfig } from "../src/project-config.js";
+import { git } from "./git-fixture.js";
+import { dependencies, fakeResult, fakeSecurity } from "./cli-fixtures.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { copyCompletedScanFixture } from "./plugin-root.js";
+import { rejecting, throwing } from "./support/errors.js";
+import {
+  createCliTest,
+  captureCli,
+  runCapturedCli,
+} from "./support/cli-run.js";
+
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "cli-project-config-",
+);
+afterEach(cleanup);
+
+const cliClientFactory =
+  (deps: NonNullable<ConstructorParameters<typeof CodexSecurity>[1]>) =>
+  (config: CodexSecurityConfig) =>
+    new CodexSecurity(config, { ...deps }, { surface: "cli" });
+
+async function fixture(input: ProjectConfigInput | string) {
+  const root = await temporaryDirectory();
+  const repository = join(root, "repository");
+  const configDirectory = join(root, "settings");
+  await mkdir(repository);
+  await mkdir(configDirectory);
+  await mkdir(join(repository, "src"));
+  await mkdir(join(repository, "lib"));
+  const config = join(
+    configDirectory,
+    typeof input === "string" ? "scan.yaml" : "scan.json",
+  );
+  await writeFile(
+    config,
+    typeof input === "string" ? input : JSON.stringify(input),
+  );
+  return { root, repository, configDirectory, config };
+}
+
+async function bulkInventory(
+  input: Awaited<ReturnType<typeof fixture>>,
+  rowModes: readonly string[],
+) {
+  git(input.repository, "init", "-q");
+  git(
+    input.repository,
+    "commit",
+    "--no-gpg-sign",
+    "--allow-empty",
+    "-qm",
+    "fixture",
+  );
+  const revision = git(input.repository, "rev-parse", "HEAD");
+  const csv = join(input.root, "repositories.csv");
+  await writeFile(
+    csv,
+    [
+      "id,repository,revision,mode",
+      ...rowModes.map(
+        (mode, index) =>
+          `source-${index},${input.repository},${revision},${mode}`,
+      ),
+      "",
+    ].join("\n"),
+  );
+  return csv;
+}
+
+test.each([
+  [undefined, "./node_modules"],
+  ["starter.json", "./node_modules"],
+  ["settings/starter.yaml", "../node_modules"],
+  ["settings/starter.json", "../node_modules"],
+])(
+  "init writes a valid unpinned starter and refuses overwrites: %s",
+  async (file, modules) => {
+    const input = await fixture({});
+    const args = ["init", ...(file === undefined ? [] : [file]), "--json"];
+    const output = captureCli(main, "stdout");
+    const deps = dependencies({
+      currentDirectory: input.root,
+      onConfig: throwing("No runtime for init"),
+    });
+    expect(await output.run(args, deps)).toBe(0);
+    const path = join(input.root, file ?? "codex-security.yaml");
+    expect(JSON.parse(output.text())).toEqual({ path });
+    const selected = await readProjectConfig(path);
+    expect(selected.input).toEqual({
+      $schema: `${modules}/@openai/codex-security/schemas/project-config.schema.json`,
+    });
+    const contents = await readFile(path, "utf8");
+    expect(await runCapturedCli(main, args, deps)).toBe(2);
+    expect(await readFile(path, "utf8")).toBe(contents);
+  },
+);
+
+test.each(["yaml", "json"])(
+  "init preserves URI-sensitive directory names in the %s schema reference",
+  async (extension) => {
+    const input = await fixture({});
+    const workspace = join(
+      input.root,
+      process.platform === "win32"
+        ? "project #draft %25"
+        : 'project #draft %25 ?review: "quoted"',
+    );
+    const schemaDirectory = join(
+      workspace,
+      "node_modules",
+      "@openai",
+      "codex-security",
+      "schemas",
+    );
+    await mkdir(schemaDirectory, { recursive: true });
+    const schema = join(schemaDirectory, "project-config.schema.json");
+    const contents = '{"type":"object"}\n';
+    await writeFile(schema, contents);
+    const path = join(input.configDirectory, `starter.${extension}`);
+
+    expect(
+      await runCapturedCli(
+        main,
+        ["init", path, "--json"],
+        dependencies({ currentDirectory: workspace }),
+      ),
+    ).toBe(0);
+
+    const selected = await readProjectConfig(path);
+    const reference = new URL(selected.input.$schema!, pathToFileURL(path));
+    expect(reference.hash).toBe("");
+    expect(reference.search).toBe("");
+    expect(await readFile(reference, "utf8")).toBe(contents);
+    expect(reference.href).toBe(pathToFileURL(schema).href);
+  },
+);
+
+test("info resolves a config and its sources without a target, prompt reads, or runtime", async () => {
+  const input = await fixture({
+    scan: {
+      mode: "deep",
+      instructions_file: "not-read.md",
+      deep: { workers: 2 },
+    },
+    codex: {
+      model: "gpt-5.6-terra",
+      synthetic_private_setting: "synthetic-private-value",
+    },
+  });
+  const home = join(input.root, "home");
+  await mkdir(join(home, "codex-security"), { recursive: true });
+  await writeFile(
+    join(home, "codex-security", "config.toml"),
+    "[deep_scan]\nsubagents = 1\n",
+  );
+  const stdout = captureCli(main, "stdout");
+  expect(
+    await stdout.run(
+      ["info", "-c", input.config, "--json"],
+      dependencies({
+        currentDirectory: input.configDirectory,
+        environment: { CODEX_HOME: home },
+        onConfig: throwing("No runtime for info"),
+      }),
+    ),
+  ).toBe(0);
+  expect(stdout.text()).not.toContain("synthetic-private-value");
+  expect(JSON.parse(stdout.text())).toMatchObject({
+    model: "gpt-5.6-terra",
+    configuration: {
+      path: input.config,
+      settings: {
+        mode: "deep",
+        workers: 2,
+        subagents: 1,
+        scanPromptFile: join(input.configDirectory, "not-read.md"),
+      },
+      sources: {
+        "scan.deep.workers": "project",
+        "scan.deep.subagents_per_worker": "legacy",
+        "scan.deep.max_time_hours": "default",
+        "policy.fail_on_severity": "default",
+      },
+    },
+  });
+});
+
+test("info without a file reports default sources, including unset settings", async () => {
+  const input = await fixture({});
+  const stdout = captureCli(main, "stdout");
+  expect(
+    await stdout.run(
+      ["info", "--json", "--filter-output", "configuration"],
+      dependencies({ currentDirectory: input.root }),
+    ),
+  ).toBe(0);
+  expect(JSON.parse(stdout.text())).toMatchObject({
+    configuration: {
+      sources: {
+        auth: "default",
+        "scan.mode": "default",
+        "scan.scope": "default",
+        "scan.knowledge_base": "default",
+        "scan.instructions_file": "default",
+        "scan.validation_file": "default",
+        "output.directory": "default",
+        "policy.fail_on_severity": "default",
+        "limits.max_cost_usd_per_scan": "default",
+      },
+    },
+  });
+});
+
+test("an explicit config flag overrides the operator-selected environment file", async () => {
+  const input = await fixture({ codex: { model: "gpt-5.6-terra" } });
+  const override = join(input.root, "override.json");
+  await writeFile(
+    override,
+    JSON.stringify({ codex: { model: "gpt-5.6-sol" } }),
+  );
+  for (const [flags, expected] of [
+    [[], "gpt-5.6-terra"],
+    [["-c", override], "gpt-5.6-sol"],
+  ] as const) {
+    const onConfig = mock<(config: CodexSecurityConfig) => void>();
+    expect(
+      await runCapturedCli(
+        main,
+        ["scan", ...flags, "--json"],
+        dependencies({
+          currentDirectory: input.repository,
+          environment: { CODEX_SECURITY_PROJECT_CONFIG: input.config },
+          onConfig,
+        }),
+      ),
+    ).toBe(0);
+    const selected = onConfig.mock.lastCall?.[0];
+    expect(selected?.codexOverrides?.["model"]).toBe(expected);
+  }
+});
+
+test.each([undefined, "standard", "daybreak_red"] as const)(
+  "scan and follow-up validation use Cyber selection from project or CLI override: %s",
+  async (override) => {
+    const input = await fixture({
+      scan: { cyber_access_program: "daybreak_blue" },
+    });
+    const onTurn = mock<(_target: string, options: ScanOptions) => void>();
+    const onValidate = mock(async (_options: ValidationOptions) => ({
+      disposition: "deferred" as const,
+      report: "Additional evidence is needed.",
+      outputDir: join(input.root, "evidence"),
+      threadId: "validation-thread",
+    }));
+    const result = new ScanResult({
+      ...fakeResult(["high"]),
+      scanDir: await temporaryDirectory(),
+    });
+    expect(
+      await runCapturedCli(
+        main,
+        [
+          "scan",
+          input.repository,
+          "-c",
+          input.config,
+          "--validate",
+          "--json",
+          ...(override === undefined
+            ? []
+            : ["--cyber-access-program", override]),
+        ],
+        dependencies({
+          currentDirectory: input.repository,
+          onTurn,
+          onValidate,
+          result,
+        }),
+      ),
+    ).toBe(0);
+    const selected = onTurn.mock.lastCall?.[1];
+    expect(selected?.cyberAccessProgram).toBe(override ?? "daybreak_blue");
+    expect(onValidate).toHaveBeenCalledTimes(1);
+    expect(onValidate.mock.lastCall?.[0].cyberAccessProgram).toBe(
+      override ?? "daybreak_blue",
+    );
+  },
+);
+
+test("a missing operator-selected environment file fails without falling back", async () => {
+  const input = await fixture({});
+  const onConfig = mock();
+  expect(
+    await runCapturedCli(
+      main,
+      ["scan", "--json"],
+      dependencies({
+        currentDirectory: input.repository,
+        environment: {
+          CODEX_SECURITY_PROJECT_CONFIG: join(input.root, "missing.yaml"),
+        },
+        onConfig,
+      }),
+    ),
+  ).toBe(2);
+  expect(onConfig).not.toHaveBeenCalled();
+});
+
+test.each([123, "", "   "])(
+  "a selected profile's invalid model is reported at the provider flag: %j",
+  async (model) => {
+    const input = await fixture({
+      codex: { profile: "selected", profiles: { selected: { model } } },
+    });
+    const onConfig = mock();
+    const stderr = captureCli(main, "stderr");
+    expect(
+      await stderr.run(
+        ["scan", "-c", input.config, "--provider", "amazon-bedrock", "--json"],
+        dependencies({
+          currentDirectory: input.repository,
+          onConfig,
+        }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "--model must be a nonempty string when using --provider amazon-bedrock",
+    );
+    expect(onConfig).not.toHaveBeenCalled();
+  },
+);
+
+test("rerun rejects a blank replacement when scan instructions are required", async () => {
+  const input = await fixture({});
+  const prompt = join(input.root, "empty.md");
+  await writeFile(prompt, " \n");
+  const stderr = captureCli(main, "stderr");
+  const onConfig = mock();
+  expect(
+    await stderr.run(
+      ["scans", "rerun", "saved", "--scan-prompt-file", prompt, "--json"],
+      dependencies({
+        currentDirectory: input.root,
+        onWorkbench: async () => ({
+          recipe: {
+            repository: input.repository,
+            target: { kind: "repository", paths: [] },
+            mode: "standard",
+            config: {},
+            requiresScanPrompt: true,
+          },
+        }),
+        onConfig,
+      }),
+    ),
+  ).toBe(2);
+  expect(stderr.text()).toContain("--scan-prompt-file must not be empty");
+  expect(onConfig).not.toHaveBeenCalled();
+});
+
+test.each(["instructions_file", "validation_file"] as const)(
+  "bulk %s retains directory-link protection for local CSV repositories",
+  async (file) => {
+    const input = await fixture({
+      scan: { [file]: "../repository/linked/prompt.md" },
+      output: { directory: "../batch-results" },
+    });
+    const external = join(input.root, "external");
+    await mkdir(external);
+    await writeFile(join(external, "prompt.md"), "Synthetic external data.");
+    await symlink(external, join(input.repository, "linked"), "junction");
+    const csv = join(input.root, "repositories.csv");
+    await writeFile(
+      csv,
+      `id,repository,revision\nsource,${input.repository},${"a".repeat(40)}\n`,
+    );
+    const onConfig = mock(throwing("Runtime must not start"));
+    const stderr = captureCli(main, "stderr");
+    const exit = await stderr.run(
+      ["bulk-scan", csv, "-c", input.config, "--json"],
+      dependencies({
+        currentDirectory: input.repository,
+        onConfig,
+      }),
+    );
+    expect(exit).toBe(2);
+    expect(stderr.text()).toContain(
+      "Input files must not follow repository directory links",
+    );
+    expect(onConfig).not.toHaveBeenCalled();
+  },
+);
+
+test.each([
+  ["standard", [""], { max_time_minutes: 6000 }, undefined],
+  [
+    "deep",
+    ["standard"],
+    { max_time_minutes: 15, deep: { max_time_hours: 2 } },
+    undefined,
+  ],
+  [
+    "standard",
+    ["standard", "deep"],
+    { max_time_minutes: 15, deep: { max_time_hours: 2 } },
+    "Conflicting",
+  ],
+  ["deep", [""], { max_time_minutes: 6000 }, "5760 minutes"],
+] as const)(
+  "bulk time settings use effective row modes: default %s, rows %j",
+  async (defaultMode, rowModes, time, message) => {
+    const input = await fixture({
+      scan: { mode: defaultMode, ...time },
+      output: { directory: "../batch-results" },
+    });
+    const csv = await bulkInventory(input, rowModes);
+    const selected: ScanOptions[] = [];
+    const { runCli, stderr } = createCliTest(main);
+    const result = await runCli(
+      ["bulk-scan", csv, "-c", input.config, "--json"],
+      dependencies({
+        currentDirectory: input.root,
+        onTurn: (_repository, options) => selected.push(options),
+      }),
+    );
+    expect(result, stderr.text()).toBe(message ? 2 : 0);
+    if (message) {
+      expect(stderr.text()).toContain(message);
+      expect(selected).toEqual([]);
+    } else {
+      expect(selected).toHaveLength(1);
+      expect(selected[0]).toMatchObject({
+        mode: "standard",
+        maxTimeMinutes: time.max_time_minutes,
+      });
+      expect(selected[0]?.maxTimeHours).toBeUndefined();
+    }
+  },
+);
+
+test("bulk scans apply config and linked operator prompts, preserve CSV scope overrides, and retain the policy on resume", async () => {
+  const config: ProjectConfigInput = {
+    auth: "api-key",
+    scan: {
+      scope: { paths: ["src"] },
+      knowledge_base: ["context.md"],
+      instructions_file: "linked/instructions.md",
+      deep: { workers: 2, subagents_per_worker: 0 },
+    },
+    codex: { model: "gpt-5.6-terra" },
+    limits: { max_cost_usd_per_scan: 5 },
+    policy: { fail_on_severity: "high" },
+    output: { directory: "../batch-results" },
+  };
+  const input = await fixture(config);
+  const promptDirectory = await temporaryDirectory("bulk-operator-prompts-");
+  await symlink(
+    promptDirectory,
+    join(input.configDirectory, "linked"),
+    "junction",
+  );
+  await writeFile(
+    join(input.configDirectory, "context.md"),
+    "Synthetic context.",
+  );
+  await writeFile(
+    join(promptDirectory, "instructions.md"),
+    "Review synthetic boundaries.",
+  );
+  await writeFile(
+    join(input.repository, "src", "index.ts"),
+    "export const value = 1;\n",
+  );
+  await writeFile(
+    join(input.repository, "lib", "index.ts"),
+    "export const value = 2;\n",
+  );
+  git(input.repository, "init", "-q");
+  git(input.repository, "config", "--local", "core.autocrlf", "false");
+  git(input.repository, "add", ".");
+  git(input.repository, "commit", "--no-gpg-sign", "-qm", "fixture");
+  const revision = git(input.repository, "rev-parse", "HEAD");
+  const csv = join(input.root, "repositories.csv");
+  await writeFile(
+    csv,
+    `id,repository,revision,mode,scope\nstandard,${input.repository},${revision},standard,lib\ndeep,${input.repository},${revision},deep,\n`,
+  );
+  const selected: ScanOptions[] = [];
+  const deps = dependencies({ currentDirectory: input.root });
+  deps.createSecurity = (native) => {
+    expect(native.codexOverrides?.["model"]).toBe("gpt-5.6-terra");
+    return fakeSecurity(async (_repository, options = {}) => {
+      selected.push(options);
+      const result = fakeResult(["high"]);
+      await mkdir(options.outputDir!, { recursive: true, mode: 0o700 });
+      await copyCompletedScanFixture(options.outputDir!);
+      await writeFile(
+        join(options.outputDir!, "report.md"),
+        "Synthetic report.",
+      );
+      return result;
+    });
+  };
+  const args = [
+    "bulk-scan",
+    csv,
+    "-c",
+    input.config,
+    "--max-cost",
+    "3",
+    "--json",
+  ];
+  const output = captureCli(main, "stdout");
+  expect(await output.run(args, deps)).toBe(1);
+  expect(JSON.parse(output.text())).toMatchObject({
+    completed: 2,
+    failed: 0,
+    policyFailed: true,
+  });
+  expect(selected.find((options) => options.mode === "standard")).toMatchObject(
+    {
+      target: [
+        join(input.root, "batch-results", "checkouts", "standard", "lib"),
+      ],
+      auth: "api-key",
+      maxCostUsd: 3,
+      failureSeverity: "high",
+      knowledgeBasePaths: [join(input.configDirectory, "context.md")],
+      scanPrompt: "Review synthetic boundaries.",
+    },
+  );
+  expect(
+    selected.find((options) => options.mode === "standard")?.workers,
+  ).toBeUndefined();
+  expect(selected.find((options) => options.mode === "deep")).toMatchObject({
+    target: ["src"],
+    workers: 2,
+    subagents: 0,
+  });
+  const resumed = captureCli(main, "stdout");
+  expect(await resumed.run(args, deps)).toBe(1);
+  expect(JSON.parse(resumed.text())).toMatchObject({
+    skipped: 2,
+    policyFailed: true,
+  });
+  expect(selected).toHaveLength(2);
+  await writeFile(
+    input.config,
+    JSON.stringify({ ...config, policy: { fail_on_severity: "low" } }),
+  );
+  const stderr = captureCli(main, "stderr");
+  expect(await stderr.run(args, deps)).toBe(2);
+  expect(stderr.text()).toContain("manifest does not match");
+  expect(selected).toHaveLength(2);
+});
+
+test.each(["standard", "deep"] as const)(
+  "component scans honor shared %s settings and severity policy",
+  async (mode) => {
+    const input = await fixture({
+      scan: {
+        mode,
+        scope: { paths: ["src"] },
+        instructions_file: "instructions.md",
+        ...(mode === "standard" ? { validation_file: "validation.md" } : {}),
+        deep: { workers: 2, subagents_per_worker: 0 },
+      },
+      codex: { model: "gpt-5.6-terra" },
+      limits: { max_cost_usd_per_scan: 7 },
+      policy: { fail_on_severity: "high" },
+      output: { directory: "../component-results" },
+    });
+    await writeFile(
+      join(input.repository, "lib", "index.ts"),
+      "export const value = 1;\n",
+    );
+    await writeFile(
+      join(input.configDirectory, "instructions.md"),
+      "Review synthetic boundaries.",
+    );
+    await writeFile(
+      join(input.configDirectory, "validation.md"),
+      "Validate synthetic boundaries.",
+    );
+    const onTurn = mock<(_target: string, options: ScanOptions) => void>();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    const result = fakeResult(["high"], "complete", {
+      input_tokens: 1250,
+      cached_input_tokens: 200,
+      output_tokens: 30,
+    });
+    expect(
+      await runCli(
+        [
+          "scan-components",
+          input.repository,
+          "-c",
+          input.config,
+          "--component",
+          "lib",
+          "--headless",
+          "--json",
+        ],
+        dependencies({
+          currentDirectory: input.root,
+          result,
+          costUpdates: [result.cost!],
+          onTurn,
+        }),
+      ),
+    ).toBe(1);
+    const selected = onTurn.mock.lastCall?.[1];
+    expect(selected).toMatchObject({
+      mode,
+      target: [join(input.repository, "lib")],
+      scanPrompt: "Review synthetic boundaries.",
+      failureSeverity: "high",
+      maxCostUsd: 7,
+    });
+    expect(stderr.text()).toContain("Cost: $0.00488");
+    if (mode === "deep")
+      expect(selected).toMatchObject({ workers: 2, subagents: 0 });
+    else
+      expect(selected?.validationPrompt).toBe("Validate synthetic boundaries.");
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      completed: 1,
+      failed: 0,
+      policyFailed: true,
+    });
+  },
+);
+
+test("actual CLI parsing preserves file values when flags are absent", async () => {
+  const input = await fixture({
+    auth: "api-key",
+    scan: {
+      mode: "deep",
+      scope: { paths: ["src"] },
+      deep: {
+        workers: 8,
+        subagents_per_worker: 0,
+        stop_after_consecutive_errors: 2,
+      },
+    },
+    limits: { max_cost_usd_per_scan: 7 },
+    policy: { fail_on_severity: "high" },
+    codex: { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
+  });
+  const onTurn = mock<(_target: string, options: ScanOptions) => void>();
+  const onConfig = mock<(config: CodexSecurityConfig) => void>();
+  const { stdout, stderr, runCli } = createCliTest(main);
+
+  expect(
+    await runCli(
+      ["scan", "-c", input.config, "--json"],
+      dependencies({
+        currentDirectory: input.repository,
+        environment: { OPENAI_API_KEY: "synthetic-test-key" },
+        onConfig,
+        onTurn,
+        result: fakeResult(["high"]),
+      }),
+    ),
+  ).toBe(1);
+  const repository = onTurn.mock.lastCall?.[0];
+  const selected = onTurn.mock.lastCall?.[1];
+  const native = onConfig.mock.lastCall?.[0];
+  expect(repository).toBe(input.repository);
+  expect(selected).toMatchObject({
+    auth: "api-key",
+    mode: "deep",
+    target: ["src"],
+    workers: 8,
+    subagents: 0,
+    stopAfterConsecutiveErrors: 2,
+    maxCostUsd: 7,
+    failureSeverity: "high",
+  });
+  expect(native?.codexOverrides).toMatchObject({
+    model: "gpt-5.6-terra",
+    model_reasoning_effort: "high",
+  });
+  expect(JSON.parse(stdout.text())).toMatchObject({
+    manifest: { scan: { status: "completed" } },
+  });
+  expect(stderr.text()).toContain("COST");
+});
+
+test("CLI values override matching file values, including native objects and lists", async () => {
+  const input = await fixture({
+    auth: "chatgpt",
+    scan: {
+      mode: "deep",
+      scope: { paths: ["src"] },
+      knowledge_base: ["file-context.md"],
+      deep: { workers: 8, subagents_per_worker: 3 },
+    },
+    limits: { max_cost_usd_per_scan: 7 },
+    policy: { fail_on_severity: "high" },
+    codex: {
+      model: "gpt-5.6-sol",
+      synthetic_setting: { enabled: true, names: ["first"] },
+    },
+  });
+  const onTurn = mock<(_target: string, options: ScanOptions) => void>();
+  const onConfig = mock<(config: CodexSecurityConfig) => void>();
+  expect(
+    await runCapturedCli(
+      main,
+      [
+        "scan",
+        "--config",
+        input.config,
+        "--auth",
+        "auto",
+        "--path",
+        "lib",
+        "--knowledge-base",
+        "cli-context.md",
+        "--subagents",
+        "0",
+        "--workers",
+        "2",
+        "--max-cost",
+        "3",
+        "--fail-on-severity",
+        "low",
+        "--model",
+        "gpt-5.6-terra",
+        "--codex",
+        "synthetic_setting.enabled=false",
+        "--codex",
+        "synthetic_setting.names=[]",
+        "--json",
+      ],
+      dependencies({
+        currentDirectory: input.repository,
+        onConfig,
+        onTurn,
+      }),
+    ),
+  ).toBe(0);
+  const selected = onTurn.mock.lastCall?.[1];
+  const native = onConfig.mock.lastCall?.[0];
+  expect(selected).toMatchObject({
+    auth: "auto",
+    mode: "deep",
+    target: ["lib"],
+    knowledgeBasePaths: [join(input.repository, "cli-context.md")],
+    workers: 2,
+    subagents: 0,
+    maxCostUsd: 3,
+    failureSeverity: "low",
+  });
+  expect(native?.codexOverrides).toMatchObject({
+    model: "gpt-5.6-terra",
+    synthetic_setting: { enabled: false, names: [] },
+  });
+});
+
+test("rerun accepts replacement scan and validation files relative to the invocation directory", async () => {
+  const input = await fixture({});
+  await writeFile(
+    join(input.configDirectory, "instructions.md"),
+    "Review the synthetic boundary.",
+  );
+  await writeFile(
+    join(input.configDirectory, "validation.md"),
+    "Validate the synthetic boundary.",
+  );
+  const recipe: JsonObject = {
+    repository: input.repository,
+    target: { kind: "repository", paths: [] },
+    mode: "standard",
+    config: {},
+    requiresScanPrompt: true,
+    validationMode: "custom",
+    cyberAccessProgram: "daybreak_blue",
+  };
+  const onTurn = mock<(_target: string, options: ScanOptions) => void>();
+  const stderr = captureCli(main, "stderr");
+  expect(
+    await stderr.run(
+      [
+        "scans",
+        "rerun",
+        "saved",
+        "--scan-prompt-file",
+        "instructions.md",
+        "--validation-prompt-file",
+        "validation.md",
+        "--json",
+      ],
+      dependencies({
+        currentDirectory: input.configDirectory,
+        onWorkbench: async () => ({ scanId: "saved", recipe }),
+        onTurn,
+      }),
+    ),
+  ).toBe(0);
+  const selected = onTurn.mock.lastCall?.[1];
+  expect(selected).toMatchObject({
+    scanPrompt: "Review the synthetic boundary.",
+    validationPrompt: "Validate the synthetic boundary.",
+    parentScanId: "saved",
+    cyberAccessProgram: "daybreak_blue",
+  });
+});
+
+test.each([
+  [
+    { paths: ["src"] },
+    ["--diff", "HEAD"],
+    { kind: "refs", base: "HEAD", head: "HEAD" },
+  ],
+  [{ diff: { base: "HEAD", head: "HEAD~1" } }, ["--path", "lib"], ["lib"]],
+  [
+    { diff: { base: "HEAD", head: "HEAD~1" } },
+    ["--head", "HEAD"],
+    { kind: "refs", base: "HEAD", head: "HEAD" },
+  ],
+  [
+    { working_tree: {} },
+    ["--base", "HEAD~1"],
+    { kind: "working_tree", base: "HEAD~1" },
+  ],
+  [{ working_tree: {} }, ["--no-working-tree"], "repository"],
+] as const)(
+  "resolves scope %j with overrides %j",
+  async (scope, flags, target) => {
+    const input = await fixture({
+      scan: { scope: structuredClone(scope) },
+    } as ProjectConfigInput);
+    const onTurn = mock<(_target: string, options: ScanOptions) => void>();
+    const stderr = captureCli(main, "stderr");
+    expect(
+      await stderr.run(
+        ["scan", "-c", input.config, ...flags, "--json"],
+        dependencies({
+          currentDirectory: input.repository,
+          onTurn,
+        }),
+      ),
+    ).toBe(0);
+    const selected = onTurn.mock.lastCall?.[1];
+    if (typeof target === "string" || Array.isArray(target))
+      expect(selected?.target).toEqual(target);
+    else expect(selected?.target).toMatchObject(target);
+  },
+);
+
+test.each([
+  [["--path", "src", "--diff", "HEAD"], "mutually exclusive"],
+  [["--head", "HEAD"], "--head requires --diff"],
+  [["--base", "HEAD"], "--base requires --working-tree"],
+  [["--workers", "2", "--mode", "standard"], "require deep mode"],
+  [
+    ["--model", "gpt-5.6-terra", "--codex", 'model="gpt-5.6-sol"'],
+    "--model conflicts",
+  ],
+] as const)(
+  "rejects incompatible explicit overrides: %j",
+  async (flags, message) => {
+    const input = await fixture({});
+    const onConfig = mock();
+    const stderr = captureCli(main, "stderr");
+    expect(
+      await stderr.run(
+        ["scan", "-c", input.config, ...flags, "--json"],
+        dependencies({
+          currentDirectory: input.repository,
+          onConfig,
+        }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(message);
+    expect(onConfig).not.toHaveBeenCalled();
+  },
+);
+
+test("selecting standard mode leaves inactive file deep settings out of the active scan", async () => {
+  const input = await fixture({
+    scan: {
+      mode: "deep",
+      deep: { workers: 8, stop_after_consecutive_errors: 2 },
+    },
+  });
+  const onTurn = mock<(_target: string, options: ScanOptions) => void>();
+  expect(
+    await runCapturedCli(
+      main,
+      ["scan", "-c", input.config, "--mode", "standard", "--json"],
+      dependencies({
+        currentDirectory: input.repository,
+        onTurn,
+      }),
+    ),
+  ).toBe(0);
+  const selected = onTurn.mock.lastCall?.[1];
+  expect(selected?.mode).toBe("standard");
+  expect(selected?.workers).toBeUndefined();
+  expect(selected?.stopAfterConsecutiveErrors).toBeUndefined();
+});
+
+test("file prompts use the config directory and CLI prompt overrides use the invocation directory", async () => {
+  const input = await fixture({
+    scan: { instructions_file: "scan.md", validation_file: "validate.md" },
+  });
+  await writeFile(
+    join(input.configDirectory, "scan.md"),
+    "Synthetic file instructions.",
+  );
+  await writeFile(
+    join(input.configDirectory, "validate.md"),
+    "Synthetic file validation.",
+  );
+  await writeFile(
+    join(input.repository, "validate.md"),
+    "Synthetic CLI validation.",
+  );
+  const onTurn = mock<(_target: string, options: ScanOptions) => void>();
+  expect(
+    await runCapturedCli(
+      main,
+      [
+        "scan",
+        "-c",
+        input.config,
+        "--validation-prompt-file",
+        "validate.md",
+        "--json",
+      ],
+      dependencies({
+        currentDirectory: input.repository,
+        onTurn,
+      }),
+    ),
+  ).toBe(0);
+  const selected = onTurn.mock.lastCall?.[1];
+  expect(selected).toMatchObject({
+    scanPrompt: "Synthetic file instructions.",
+    validationPrompt: "Synthetic CLI validation.",
+  });
+});
+
+test("an explicit file can supply the model required by a provider override", async () => {
+  const input = await fixture({
+    codex: { model: "synthetic-model" },
+  });
+  const onConfig = mock<(config: CodexSecurityConfig) => void>();
+  expect(
+    await runCapturedCli(
+      main,
+      ["scan", "-c", input.config, "--provider", "amazon-bedrock", "--json"],
+      dependencies({
+        currentDirectory: input.repository,
+        onConfig,
+      }),
+    ),
+  ).toBe(0);
+  const native = onConfig.mock.lastCall?.[0];
+  expect(native?.codexOverrides).toMatchObject({
+    model: "synthetic-model",
+    model_provider: "amazon-bedrock",
+  });
+});
+
+test.each(["file", "CLI"])(
+  "a profile selected by the %s supplies the provider model",
+  async (selection) => {
+    const overrideProfile = selection === "CLI";
+    const input = await fixture({
+      codex: {
+        profile: overrideProfile ? "other" : "review",
+        profiles: {
+          review: { model: "synthetic-profile-model" },
+          other: { model: "synthetic-other-model" },
+        },
+      },
+    });
+    const onConfig = mock<(config: CodexSecurityConfig) => void>();
+    expect(
+      await runCapturedCli(
+        main,
+        [
+          "scan",
+          "-c",
+          input.config,
+          "--provider",
+          "amazon-bedrock",
+          ...(overrideProfile ? ["--codex", 'profile="review"'] : []),
+          "--json",
+        ],
+        dependencies({
+          currentDirectory: input.repository,
+          onConfig,
+        }),
+      ),
+    ).toBe(0);
+    const native = onConfig.mock.lastCall?.[0];
+    expect(native?.codexOverrides).toMatchObject({
+      profile: "review",
+      profiles: { review: { model: "synthetic-profile-model" } },
+      model_provider: "amazon-bedrock",
+    });
+  },
+);
+
+test("an unselected file profile does not satisfy the provider model requirement", async () => {
+  const input = await fixture({
+    codex: {
+      profiles: { review: { model: "synthetic-profile-model" } },
+    },
+  });
+  const stderr = captureCli(main, "stderr");
+  const onConfig = mock();
+  expect(
+    await stderr.run(
+      ["scan", "-c", input.config, "--provider", "amazon-bedrock", "--json"],
+      dependencies({
+        currentDirectory: input.repository,
+        onConfig,
+      }),
+    ),
+  ).toBe(2);
+  expect(onConfig).not.toHaveBeenCalled();
+  expect(stderr.text()).toContain(
+    "--model is required when using --provider amazon-bedrock",
+  );
+});
+
+test.each([
+  { argv: ["scan", "--help"] },
+  { argv: ["scan", "--schema", "--json"] },
+  { argv: ["info", "--json"] },
+])("malformed unselected files do not affect %j", async ({ argv }) => {
+  const input = await fixture("scan: [");
+  await writeFile(join(input.repository, "codex-security.yaml"), "scan: [");
+  const onConfig = mock();
+  expect(
+    await runCapturedCli(
+      main,
+      [...argv],
+      dependencies({
+        currentDirectory: input.repository,
+        onConfig,
+      }),
+    ),
+  ).toBe(0);
+  expect(onConfig).not.toHaveBeenCalled();
+});
+
+test.each(["--help", "--schema"])(
+  "%s does not load even an explicitly selected invalid file",
+  async (flag) => {
+    const input = await fixture("scan: [");
+    const stdout = captureCli(main, "stdout");
+    expect(
+      await stdout.run(
+        ["scan", "-c", input.config, flag, "--json"],
+        dependencies({ currentDirectory: input.repository }),
+      ),
+    ).toBe(0);
+    if (flag === "--schema")
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        options: { properties: { config: { type: "string" } } },
+      });
+  },
+);
+
+test("a malformed selected file fails before constructing a client", async () => {
+  const input = await fixture("scan: [");
+  const onConfig = mock();
+  const { stdout, stderr, runCli } = createCliTest(main);
+
+  expect(
+    await runCli(
+      ["scan", "-c", input.config, "--dry-run", "--json"],
+      dependencies({
+        currentDirectory: input.repository,
+        onConfig,
+      }),
+    ),
+  ).toBe(2);
+  expect(onConfig).not.toHaveBeenCalled();
+  expect(stderr.text()).toContain(
+    `Cannot parse project configuration at ${input.config}: `,
+  );
+  expect(stderr.text()).toContain("end with a ]");
+  expect(JSON.parse(stdout.text())).toEqual({
+    status: "failed",
+    code: "SCAN_FAILED",
+    message: expect.stringContaining("end with a ]"),
+  });
+});
+
+test("dry-run reports native defaults restored by a CLI table", async () => {
+  const input = await fixture({
+    codex: { features: { multi_agent_v2: null } },
+  });
+  const onConfig = mock<(config: CodexSecurityConfig) => void>();
+  const { stdout, runCli } = createCliTest(main);
+  expect(
+    await runCli(
+      [
+        "scan",
+        input.repository,
+        "-c",
+        input.config,
+        "--codex",
+        "features.multi_agent_v2.max_concurrent_threads_per_session=2",
+        "--dry-run",
+        "--json",
+      ],
+      dependencies({
+        currentDirectory: input.repository,
+        onConfig,
+        onRun: throwing("Dry-run must not start a scan"),
+      }),
+    ),
+  ).toBe(0);
+  expect(JSON.parse(stdout.text())).toMatchObject({
+    dryRun: true,
+    projectConfig: {
+      sources: {
+        "codex.features.multi_agent_v2.enabled": "default",
+        "codex.features.multi_agent_v2.max_concurrent_threads_per_session":
+          "cli",
+      },
+    },
+  });
+  expect(
+    (await mergedCodexConfig(onConfig.mock.lastCall![0]))["features"],
+  ).toMatchObject({
+    multi_agent_v2: { enabled: true, max_concurrent_threads_per_session: 2 },
+  });
+});
+
+test("dry-run uses the real SDK without initializing its runtime and reports provenance", async () => {
+  const input = await fixture({
+    scan: {
+      mode: "deep",
+      scope: { paths: ["src"] },
+      deep: { workers: 8, stop_after_consecutive_errors: 2 },
+    },
+    codex: {
+      profile: "review",
+      model: "gpt-5.6-sol",
+      profiles: {
+        review: { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
+      },
+    },
+    policy: { fail_on_severity: "high" },
+  });
+  const ambient = join(input.root, "ambient");
+  await mkdir(join(ambient, "codex-security"), { recursive: true });
+  await writeFile(
+    join(ambient, "codex-security", "config.toml"),
+    "[deep_scan]\nworkers = 6\nsubagents = 1\nstop_after_no_new = 5\n",
+  );
+  const environment = {
+    codex_home: ambient,
+    CODEX_SECURITY_STATE_DIR: join(input.root, "state"),
+  };
+  const { stdout, runCli } = createCliTest(main);
+
+  const createCodex = mock(throwing("No inference in dry-run"));
+  const prepareRuntime = mock(rejecting("No runtime in dry-run"));
+  const deps = dependencies({
+    currentDirectory: input.repository,
+    environment,
+  });
+  deps.createSecurity = cliClientFactory({
+    environment,
+    createCodex,
+    prepareRuntime,
+  });
+  expect(
+    await runCli(
+      [
+        "scan",
+        "-c",
+        input.config,
+        "--subagents",
+        "0",
+        "--model",
+        "gpt-5.6-sol",
+        "--dry-run",
+        "--json",
+      ],
+      deps,
+    ),
+  ).toBe(0);
+  expect(createCodex).not.toHaveBeenCalled();
+  expect(prepareRuntime).not.toHaveBeenCalled();
+  expect(JSON.parse(stdout.text())).toMatchObject({
+    dryRun: true,
+    repository: input.repository,
+    mode: "deep",
+    model: "gpt-5.6-terra",
+    reasoningEffort: "high",
+    target: { kind: "paths", paths: ["src"] },
+    workers: 8,
+    subagents: 0,
+    stopAfterNoNew: 5,
+    stopAfterConsecutiveErrors: 2,
+    maxDiscoveryRuns: 40,
+    maxTimeHours: 96,
+    projectConfig: {
+      path: input.config,
+      sources: {
+        "scan.deep.workers": "project",
+        "scan.deep.subagents_per_worker": "cli",
+        "scan.deep.stop_after_no_new": "legacy",
+        "scan.deep.max_time_hours": "default",
+        "codex.model": "cli",
+        "codex.profiles.review.model": "project",
+      },
+    },
+    failOnSeverity: "high",
+  });
+});
+
+test.each([
+  [{ output: { directory: "../repository/artifacts" } }, "outside"],
+  [{ codex: { plugins: {} } }, "plugin"],
+  [{ scan: { mode: "deep", validation_file: "validate.md" } }, "Deep"],
+] as const)(
+  "project files retain active scan checks: %j",
+  async (config, message) => {
+    const input = await fixture(config as ProjectConfigInput);
+    await writeFile(
+      join(input.configDirectory, "validate.md"),
+      "Synthetic validation instructions.",
+    );
+    const environment = {
+      CODEX_HOME: join(input.root, "ambient"),
+      CODEX_SECURITY_STATE_DIR: join(input.root, "state"),
+    };
+    const stderr = captureCli(main, "stderr");
+    const createCodex = mock(throwing("No inference"));
+    const prepareRuntime = mock(rejecting("No runtime"));
+    const deps = dependencies({
+      currentDirectory: input.repository,
+      environment,
+    });
+    deps.createSecurity = cliClientFactory({
+      environment,
+      createCodex,
+      prepareRuntime,
+    });
+    expect(
+      await stderr.run(
+        ["scan", "-c", input.config, "--dry-run", "--json"],
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text().toLowerCase()).toContain(message.toLowerCase());
+    expect(createCodex).not.toHaveBeenCalled();
+    expect(prepareRuntime).not.toHaveBeenCalled();
+  },
+);
+
+test("rerun restores all saved deep settings and authentication without loading project files", async () => {
+  const input = await fixture("scan: [");
+  const deep = {
+    workers: 7,
+    subagents: 0,
+    stopAfterNoNew: 5,
+    stopAfterConsecutiveErrors: 2,
+    maxDiscoveryRuns: 12,
+    maxTimeHours: 3,
+  };
+  const recipe: JsonObject = {
+    repository: input.repository,
+    target: { kind: "repository", paths: [] },
+    mode: "deep",
+    config: {},
+    auth: "api-key",
+    deepScan: deep,
+    deepScanResolved: true,
+  };
+  const onTurn = mock<(_target: string, options: ScanOptions) => void>();
+  expect(
+    await runCapturedCli(
+      main,
+      ["scans", "rerun", "saved", "--json"],
+      dependencies({
+        currentDirectory: input.repository,
+        environment: {
+          OPENAI_API_KEY: "synthetic-test-key",
+          CODEX_SECURITY_PROJECT_CONFIG: input.config,
+        },
+        onWorkbench: async () => ({ scanId: "saved", recipe }),
+        onTurn,
+      }),
+    ),
+  ).toBe(0);
+  const selected = onTurn.mock.lastCall?.[1];
+  expect(selected).toMatchObject({
+    ...deep,
+    auth: "api-key",
+    parentScanId: "saved",
+  });
+});
+
+test.each([
+  [{ requiresScanPrompt: true }, "additional instructions"],
+  [{ maxTimeMinutes: 0 }, "invalid investigation time limit"],
+  [{ maxTimeMinutes: "15" }, "invalid investigation time limit"],
+  [{ maxTimeMinutes: 1e12 }, "deadline within the supported date range"],
+  [
+    { mode: "deep", deepScan: { workers: 7 }, deepScanResolved: true },
+    "missing resolved deep scan settings",
+  ],
+] as const)(
+  "rerun rejects an incomplete saved input: %j",
+  async (extra, message) => {
+    const input = await fixture({});
+    const recipe: JsonObject = {
+      repository: input.repository,
+      target: { kind: "repository", paths: [] },
+      mode: "standard",
+      config: {},
+      ...extra,
+    };
+    const { stdout, stderr, runCli } = createCliTest(main);
+    const onRun = mock();
+    expect(
+      await runCli(
+        ["scans", "rerun", "saved", "--json", "--full-output"],
+        dependencies({
+          currentDirectory: input.repository,
+          onWorkbench: async () => ({ recipe }),
+          onRun,
+        }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(message);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining(message) },
+    });
+    expect(onRun).not.toHaveBeenCalled();
+  },
+);
+
+test.each([
+  { model: "gpt-5.6-sol", showCost: false },
+  { model: "gpt-5.6-sol", showCost: true },
+  { model: "synthetic-unpriced-model", showCost: false },
+  { model: "synthetic-unpriced-model", showCost: true },
+])(
+  "headless component usage is printed once for %p",
+  async ({ model, showCost }) => {
+    const input = await fixture({
+      output: { directory: "../component-results" },
+    });
+    await writeFile(
+      join(input.repository, "lib", "index.ts"),
+      "export const value = 1;\n",
+    );
+    const usage: ScanTokenUsage = {
+      input_tokens: 1250,
+      cached_input_tokens: 200,
+      cache_write_input_tokens: 0,
+      output_tokens: 30,
+      reasoning_output_tokens: 0,
+      total_tokens: 1280,
+    };
+    const { stderr, runCli } = createCliTest(main);
+    const deps = dependencies({ currentDirectory: input.root });
+    deps.createSecurity = () =>
+      fakeSecurity(async (_repository, options) => {
+        const tracker = new ScanCostTracker({
+          codexHome: input.root,
+          model,
+          onUsage: options?.onUsage,
+          onCost: (cost, complete) => {
+            if (complete) options?.onCost?.(cost);
+          },
+        });
+        tracker.start("synthetic-scan-thread");
+        await tracker.stop(usage);
+        return fakeResult([], "complete", null);
+      });
+    expect(
+      await runCli(
+        [
+          "scan-components",
+          input.repository,
+          "-c",
+          input.config,
+          "--component",
+          "lib",
+          "--headless",
+          "--json",
+          ...(showCost ? ["--show-cost"] : []),
+        ],
+        deps,
+      ),
+    ).toBe(0);
+    expect(stderr.text().match(/Tokens:/g)).toHaveLength(1);
+    expect(stderr.text()).toContain("Tokens: 1,050 uncached input");
+    expect(stderr.text()).toContain("30 output");
+    expect(stderr.text().includes("Cost:")).toBe(
+      showCost && model === "gpt-5.6-sol",
+    );
+  },
+);
+
+test.each(["yaml", "toon", "json"])(
+  "a long framework error keeps its whole message with --format %s",
+  async (format) => {
+    const root = await temporaryDirectory();
+    const missing = join(
+      root,
+      "a-directory-name-long-enough-to-make-yaml-fold-the-line",
+      "nested\\scan.yaml",
+    );
+    const { stderr, runCli } = createCliTest(main);
+    expect(
+      await runCli(
+        ["info", "-c", missing, "--format", format],
+        dependencies({ currentDirectory: root }),
+      ),
+    ).toBe(2);
+    const message =
+      format === "json"
+        ? JSON.parse(stderr.text().replace(/^codex-security: /u, "")).message
+        : stderr.text();
+    expect(message).toContain(missing);
+  },
+);

@@ -1,3 +1,4 @@
+import { realpath } from "node:fs/promises";
 import type { main } from "../src/cli.js";
 import type {
   CodexSecurity,
@@ -13,11 +14,18 @@ import type {
   ScanProgress,
   ScanWorkerStatus,
   SeverityLevel,
+  ValidationOptions,
+  ValidationResult,
 } from "../src/index.js";
-import { ScanResult } from "../src/index.js";
+import { CodexSecurityError, ScanResult } from "../src/index.js";
 import type { UpdateNotice } from "../src/version.js";
+import { throwing } from "./support/errors.js";
 
 type MainDependencies = NonNullable<Parameters<typeof main>[3]>;
+
+export type OnCodex = (
+  ...arguments_: Parameters<MainDependencies["runCodex"]>
+) => number | Promise<number>;
 
 export const SYNTHETIC_CREDENTIALS = [
   "sk-proj-SYNTHETIC_KEY_123",
@@ -71,7 +79,7 @@ export const SYNTHETIC_CREDENTIALS = [
   "https://example.test/?redirect_uri=https%3A%2F%2Finner.test%2Fcb%3Frefresh_token%3DSYNTHETIC_NESTED_REFRESH_123%26password%3DSYNTHETIC_NESTED_PASSWORD_123%26safe%3D1",
 ].join(" ");
 
-export function capture(isTTY = false): {
+export function capture(isTTY: boolean | null = false): {
   stream: Pick<NodeJS.WriteStream, "write"> &
     Partial<Pick<NodeJS.WriteStream, "isTTY">>;
   text(): string;
@@ -79,7 +87,7 @@ export function capture(isTTY = false): {
   let value = "";
   return {
     stream: {
-      isTTY,
+      ...(isTTY === null ? {} : { isTTY }),
       write(chunk: string | Uint8Array): boolean {
         value += chunk.toString();
         return true;
@@ -103,9 +111,22 @@ export function fakePreflight(
   };
 }
 
+export const savedRecipe = (
+  config: JsonObject = {},
+  target: JsonObject = { kind: "repository", paths: [] },
+) => ({
+  scanId: "scan-original",
+  recipe: {
+    repository: "/original/repository",
+    target,
+    mode: "standard",
+    config,
+  },
+});
+
 export function fakeResult(
   severityLevels: readonly SeverityLevel[] = [],
-  completeness: CoverageDocument["completeness"] = "complete",
+  completeness?: "complete" | "partial" | "unknown",
   usage: unknown = null,
 ): ScanResult {
   const manifest = {
@@ -142,7 +163,7 @@ export function fakeResult(
     schemaVersion: "1.0",
     scanId: "scan",
     mode: "repository",
-    completeness,
+    ...(completeness === undefined ? {} : { completeness }),
     inventoryStrategy: "repository",
     includePaths: ["."],
     excludePaths: [],
@@ -186,24 +207,24 @@ export class FakeSignals {
 export function dependencies(
   options: {
     onConfig?: (config: CodexSecurityConfig) => void;
-    onTurn?: (repository: string, options: unknown) => void;
+    onTurn?: (repository: string, options: ScanOptions) => void;
     onRun?: () => void;
     onInterrupt?: () => void;
     onClose?: () => void | Promise<void>;
-    onCodex?: (
-      ...arguments_: Parameters<MainDependencies["runCodex"]>
-    ) => number | Promise<number>;
+    onValidate?: (options: ValidationOptions) => Promise<ValidationResult>;
+    onCodex?: OnCodex;
     linearClient?: MainDependencies["linearClient"];
     importGitHubAlerts?: MainDependencies["importGitHubAlerts"];
+    importGitHubAdvisories?: MainDependencies["importGitHubAdvisories"];
     onRepositoryCommand?: (
       ...arguments_: Parameters<MainDependencies["runRepositoryCommand"]>
     ) => string | Promise<string>;
-    bulkScan?: MainDependencies["bulkScan"];
     onWorkbench?: (
       args: readonly string[],
       input?: string,
       signal?: AbortSignal,
     ) => JsonObject | Promise<JsonObject>;
+    readSavedFindings?: MainDependencies["readSavedFindings"];
     onMatch?: MainDependencies["matchFindings"];
     onUpdateCheck?: (signal: AbortSignal) => Promise<UpdateNotice | undefined>;
     currentDirectory?: string;
@@ -219,8 +240,10 @@ export function dependencies(
 ): MainDependencies {
   const signals = options.signals ?? new FakeSignals();
   const result = options.result ?? fakeResult();
+  let scannedRepository: string | undefined;
   const security = {
     run: async (repository: string, runOptions: ScanOptions) => {
+      scannedRepository = repository;
       options.onTurn?.(repository, runOptions);
       const signal = runOptions.signal;
       signal?.addEventListener("abort", () => options.onInterrupt?.(), {
@@ -246,8 +269,15 @@ export function dependencies(
     },
     preflight: async (repository: string) =>
       options.preflight ?? fakePreflight(repository),
+    validate: async (validationOptions: ValidationOptions) =>
+      options.onValidate?.(validationOptions) ?? {
+        disposition: "deferred",
+        report: "Additional evidence is needed.",
+        outputDir: "/tmp/validation",
+        threadId: "validation-thread",
+      },
     close: async () => await options.onClose?.(),
-  } as Pick<CodexSecurity, "run" | "preflight" | "close">;
+  } as Pick<CodexSecurity, "run" | "preflight" | "validate" | "close">;
   return {
     createSecurity: (config) => {
       options.onConfig?.(config);
@@ -257,7 +287,7 @@ export function dependencies(
     checkForUpdate: async (signal) => await options.onUpdateCheck?.(signal),
     currentDirectory: () => options.currentDirectory ?? "/current/repository",
     now: () => 0,
-    setInterval: () => ({}) as NodeJS.Timeout,
+    setInterval: fakeInterval,
     clearInterval: () => {},
     addSignalListener: (signal, listener) => signals.add(signal, listener),
     removeSignalListener: (signal, listener) =>
@@ -271,16 +301,25 @@ export function dependencies(
         args,
         repository,
         commandOptions,
-      )) ?? "",
-    ...(options.bulkScan === undefined ? {} : { bulkScan: options.bulkScan }),
+      )) ?? (args.includes("--name-only") ? "src/finding-1.ts\0" : ""),
     ...(options.linearClient === undefined
       ? {}
       : { linearClient: options.linearClient }),
+    ...(options.importGitHubAdvisories === undefined
+      ? {}
+      : { importGitHubAdvisories: options.importGitHubAdvisories }),
     ...(options.importGitHubAlerts === undefined
       ? {}
       : { importGitHubAlerts: options.importGitHubAlerts }),
     runWorkbench: async (args, input, signal) =>
-      (await options.onWorkbench?.(args, input, signal)) ?? { scans: [] },
+      (await options.onWorkbench?.(args, input, signal)) ??
+      (args[0] === "get-scan" &&
+      args.includes("--check-target") &&
+      scannedRepository !== undefined
+        ? { scan: { targetPath: await realpath(scannedRepository) } }
+        : { scans: [] }),
+    readSavedFindings:
+      options.readSavedFindings ?? (async () => result.findings.findings),
     matchFindings: async (input, comparisonOptions) =>
       (await options.onMatch?.(input, comparisonOptions)) ?? {
         matches: [],
@@ -296,3 +335,32 @@ export function dependencies(
       ),
   };
 }
+
+export const mustNotInitializeCodex = throwing("must not initialize Codex");
+
+export function fakeSecurity(run: CodexSecurity["run"]) {
+  return {
+    ...dependencies().createSecurity({}),
+    run,
+    preflight: async () => fakePreflight(),
+  };
+}
+
+export function failingSecurity(message: string) {
+  return fakeSecurity(async () => {
+    throw new CodexSecurityError(message);
+  });
+}
+
+export function fakeInterval(_callback: () => void): NodeJS.Timeout {
+  return {} as NodeJS.Timeout;
+}
+
+export const warningResult =
+  (message: string, targetChanged = false) =>
+  async (_repository: string, options?: ScanOptions) => {
+    if (targetChanged)
+      options?.onWarning?.(message, { kind: "target_changed" });
+    else options?.onWarning?.(message);
+    return fakeResult();
+  };

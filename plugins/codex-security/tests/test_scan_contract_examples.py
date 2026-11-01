@@ -7,65 +7,61 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from jsonschema import Draft202012Validator, FormatChecker
+from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 from referencing import Registry, Resource
+from workbench_test_support import saved_coverage
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
-EXAMPLE_DIR = PLUGIN_DIR / "examples" / "completed-scan"
+EXAMPLE_DIR = PLUGIN_DIR / "examples" / "legacy-completed-scan"
 SCHEMA_DIR = PLUGIN_DIR / "schemas"
 
 
-def read_json(path: Path) -> dict[str, Any]:
+def read_object(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise AssertionError(f"{path}: expected an object")
     return payload
 
 
-def validate_schema_node(value: Any, schema: dict[str, Any], context: str) -> None:
-    Draft202012Validator.check_schema(schema)
-    validator = Draft202012Validator(schema, format_checker=FormatChecker())
-    errors = sorted(validator.iter_errors(value), key=lambda error: list(error.absolute_path))
-    if not errors:
-        return
-    error = errors[0]
-    path = ".".join(str(part) for part in error.absolute_path)
-    location = f"{context}.{path}" if path else context
-    raise AssertionError(f"{location}: {error.message}") from error
+def example(name: str) -> dict[str, Any]:
+    return read_object(EXAMPLE_DIR / f"{name}.json")
+
+
+def schema_validator(name: str, *references: str) -> Draft202012Validator:
+    def load(name: str) -> dict[str, Any]:
+        return read_object(SCHEMA_DIR / f"{name}.schema.json")
+
+    resources = [load(ref) for ref in references]
+    registry = Registry().with_resources(
+        (resource["$id"], Resource.from_contents(resource)) for resource in resources
+    )
+    return Draft202012Validator(load(name), registry=registry, format_checker=FormatChecker())
 
 
 class ScanContractExamplesTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.manifest = read_json(EXAMPLE_DIR / "scan-manifest.json")
-        self.findings = read_json(EXAMPLE_DIR / "findings.json")
-        self.coverage = read_json(EXAMPLE_DIR / "coverage.json")
+    def assert_invalid(self, schema: str, payload: dict[str, Any], message: str) -> None:
+        with self.assertRaises(ValidationError) as caught:
+            schema_validator(schema).validate(payload)
+        self.assertRegex(caught.exception.message, message)
 
     def test_examples_match_schemas(self) -> None:
-        for name, payload in (
-            ("scan-manifest", self.manifest),
-            ("findings", self.findings),
-            ("coverage", self.coverage),
-        ):
-            schema = read_json(SCHEMA_DIR / f"{name}.schema.json")
-            validate_schema_node(payload, schema, name)
+        for name in ("scan-manifest", "findings", "coverage"):
+            with self.subTest(name=name):
+                schema_validator(name).validate(example(name))
 
     def test_schemas_are_valid_draft_2020_12(self) -> None:
         for schema_path in sorted(SCHEMA_DIR.glob("*.schema.json")):
             with self.subTest(schema=schema_path.name):
-                Draft202012Validator.check_schema(read_json(schema_path))
+                Draft202012Validator.check_schema(read_object(schema_path))
 
     def test_deep_reducer_schema_accepts_standard_findings_without_coverage(self) -> None:
-        common_schema = read_json(SCHEMA_DIR / "definitions" / "artifact-common.schema.json")
-        scan_draft_schema = read_json(SCHEMA_DIR / "tools" / "scan-draft.schema.json")
-        reducer_schema = read_json(SCHEMA_DIR / "tools" / "deep-reducer.schema.json")
-        reduction_input = reducer_schema["$defs"]["reductionInput"]
-        self.assertNotIn("coverage", reduction_input["properties"])
+        validator = schema_validator(
+            "tools/deep-reducer", "definitions/artifact-common", "tools/scan-draft"
+        )
+        reduction_input = validator.schema["$defs"]["reductionInput"]
+        self.assertNotIn("reviewState", reduction_input["properties"])
         self.assertEqual(set(reduction_input["required"]), {"scanId", "findings"})
         self.assertFalse(reduction_input["additionalProperties"])
-        registry = Registry().with_resources(
-            (schema["$id"], Resource.from_contents(schema))
-            for schema in (common_schema, scan_draft_schema)
-        )
         finding = {
             "ruleId": "cross-site-scripting.response",
             "identity": {"anchor": "response-output"},
@@ -86,12 +82,7 @@ class ScanContractExamplesTest(unittest.TestCase):
             "explicitExclusions": [{"pattern": "docs/", "reason": "Documentation only."}],
         }
 
-        Draft202012Validator.check_schema(reducer_schema)
-        validator = Draft202012Validator(
-            reducer_schema,
-            registry=registry,
-            format_checker=FormatChecker(),
-        )
+        Draft202012Validator.check_schema(validator.schema)
         request = {
             "scanId": "7fc17317-9594-49e0-b06a-d72fd7e14bba",
             "findings": [finding],
@@ -108,50 +99,22 @@ class ScanContractExamplesTest(unittest.TestCase):
             }
         )
         validator.validate({**request, "findings": []})
-        self.assertFalse(validator.is_valid({**request, "coverage": coverage}))
+        self.assertFalse(validator.is_valid({**request, "reviewState": coverage}))
 
-        standard_validator = Draft202012Validator(
-            scan_draft_schema, registry=registry, format_checker=FormatChecker()
-        )
+        standard_validator = schema_validator("tools/scan-draft", "definitions/artifact-common")
         standard_request = {
             **request,
-            "coverage": {**coverage, "completeness": "complete", "deferred": []},
+            "reviewState": {**coverage, "deferred": []},
         }
         standard_validator.validate(standard_request)
         self.assertFalse(standard_validator.is_valid(request))
-        self.assertFalse(standard_validator.is_valid({**request, "coverage": coverage}))
-        for completeness in ("complete", "partial", "unknown"):
-            with self.subTest(standard_completeness=completeness):
-                standard_coverage_request = {
-                    **standard_request,
-                    "coverage": {
-                        **standard_request["coverage"],
-                        "completeness": completeness,
-                    },
-                }
-                standard_validator.validate(standard_coverage_request)
-                self.assertFalse(validator.is_valid(standard_coverage_request))
-        self.assertFalse(
-            standard_validator.is_valid(
-                {
-                    **standard_request,
-                    "coverage": {**standard_request["coverage"], "completeness": "invalid"},
-                }
-            )
-        )
-        for missing_field in ("completeness", "surfaces", "explicitExclusions", "deferred"):
+        self.assertFalse(standard_validator.is_valid({**request, "reviewState": coverage}))
+        for missing_field in ("surfaces", "explicitExclusions", "deferred"):
             with self.subTest(standard_missing_coverage_field=missing_field):
+                partial = dict(standard_request["reviewState"])
+                del partial[missing_field]
                 self.assertFalse(
-                    standard_validator.is_valid(
-                        {
-                            **standard_request,
-                            "coverage": {
-                                field: value
-                                for field, value in standard_request["coverage"].items()
-                                if field != missing_field
-                            },
-                        }
-                    )
+                    standard_validator.is_valid({**standard_request, "reviewState": partial})
                 )
         for extra_field in (
             "source_worker_id",
@@ -194,31 +157,20 @@ class ScanContractExamplesTest(unittest.TestCase):
                 )
         self.assertFalse(validator.is_valid({"candidates": [], "merges": []}))
 
-    def test_documents_refer_to_one_scan(self) -> None:
-        scan = self.manifest["scan"]
-        self.assertEqual(scan["id"], self.findings["scanId"])
-        self.assertEqual(scan["id"], self.coverage["scanId"])
+    def test_manifest_identifies_and_hashes_the_example_documents(self) -> None:
+        scan = example("scan-manifest")["scan"]
+        self.assertEqual(scan["id"], example("findings")["scanId"])
+        self.assertEqual(scan["id"], example("coverage")["scanId"])
         self.assertEqual(scan["findingsRef"], "findings.json")
         self.assertEqual(scan["coverageRef"], "coverage.json")
-
-    def test_manifest_lists_canonical_documents(self) -> None:
-        paths = {artifact["path"] for artifact in self.manifest["scan"]["artifacts"]}
         self.assertEqual(
-            paths,
-            {
-                "coverage.json",
-                "findings.json",
-            },
+            {item["path"] for item in scan["artifacts"]}, {"coverage.json", "findings.json"}
         )
-
-    def test_manifest_artifacts_exist_with_recorded_hashes(self) -> None:
-        for artifact in self.manifest["scan"]["artifacts"]:
+        for artifact in scan["artifacts"]:
             path = EXAMPLE_DIR / artifact["path"]
-            self.assertTrue(path.is_file(), artifact["path"])
             self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), artifact["sha256"])
 
     def test_manifest_requires_snapshot_signal_for_target_kind(self) -> None:
-        schema = read_json(SCHEMA_DIR / "scan-manifest.schema.json")
         for kind, missing_field in (
             ("git_revision", "revision"),
             ("git_worktree", "snapshotDigest"),
@@ -226,45 +178,37 @@ class ScanContractExamplesTest(unittest.TestCase):
             ("directory_snapshot", "snapshotDigest"),
         ):
             with self.subTest(kind=kind):
-                manifest = copy.deepcopy(self.manifest)
+                manifest = example("scan-manifest")
                 target = manifest["scan"]["target"]
                 target["kind"] = kind
                 target.pop(missing_field, None)
-                with self.assertRaisesRegex(AssertionError, missing_field):
-                    validate_schema_node(manifest, schema, "scan-manifest")
+                self.assert_invalid("scan-manifest", manifest, missing_field)
 
     def test_manifest_rejects_unversioned_snapshot_digest(self) -> None:
-        schema = read_json(SCHEMA_DIR / "scan-manifest.schema.json")
-        manifest = copy.deepcopy(self.manifest)
+        manifest = example("scan-manifest")
         manifest["scan"]["target"]["snapshotDigest"] = "sha256:worktree-example"
-        with self.assertRaisesRegex(AssertionError, "does not match"):
-            validate_schema_node(manifest, schema, "scan-manifest")
+        self.assert_invalid("scan-manifest", manifest, "does not match")
 
     def test_manifest_rejects_invalid_timestamp(self) -> None:
-        schema = read_json(SCHEMA_DIR / "scan-manifest.schema.json")
-        manifest = copy.deepcopy(self.manifest)
+        manifest = example("scan-manifest")
         manifest["scan"]["startedAt"] = "2026-99-99T00:00:00Z"
-        with self.assertRaisesRegex(AssertionError, "is not a 'date-time'"):
-            validate_schema_node(manifest, schema, "scan-manifest")
+        self.assert_invalid("scan-manifest", manifest, "is not a 'date-time'")
 
     def test_manifest_rejects_credential_bearing_remote(self) -> None:
-        schema = read_json(SCHEMA_DIR / "scan-manifest.schema.json")
         for remote in (
             "https://token@example.com/repo",
             "https://example.com/repo?token=secret",
             "https://example.com/repo#token",
         ):
             with self.subTest(remote=remote):
-                manifest = copy.deepcopy(self.manifest)
+                manifest = example("scan-manifest")
                 manifest["scan"]["target"]["remote"] = remote
-                with self.assertRaisesRegex(AssertionError, "does not match"):
-                    validate_schema_node(manifest, schema, "scan-manifest")
+                self.assert_invalid("scan-manifest", manifest, "does not match")
 
     def test_manifest_rejects_unsafe_artifact_path(self) -> None:
-        schema = read_json(SCHEMA_DIR / "scan-manifest.schema.json")
         for path in ("../../secret.json", "/tmp/secret.json", "exports\\results.sarif"):
             with self.subTest(path=path):
-                manifest = copy.deepcopy(self.manifest)
+                manifest = example("scan-manifest")
                 manifest["scan"]["artifacts"].append(
                     {
                         "path": path,
@@ -272,66 +216,43 @@ class ScanContractExamplesTest(unittest.TestCase):
                         "mediaType": "application/json",
                     }
                 )
-                with self.assertRaisesRegex(AssertionError, "does not match"):
-                    validate_schema_node(manifest, schema, "scan-manifest")
+                self.assert_invalid("scan-manifest", manifest, "does not match")
 
     def test_manifest_requires_one_record_for_each_canonical_document(self) -> None:
-        schema = read_json(SCHEMA_DIR / "scan-manifest.schema.json")
         for path in ("findings.json", "coverage.json"):
             with self.subTest(path=path):
-                manifest = copy.deepcopy(self.manifest)
+                manifest = example("scan-manifest")
                 artifacts = manifest["scan"]["artifacts"]
                 manifest["scan"]["artifacts"] = [
                     artifact for artifact in artifacts if artifact["path"] != path
                 ]
-                with self.assertRaisesRegex(AssertionError, "does not contain items matching"):
-                    validate_schema_node(manifest, schema, "scan-manifest")
+                self.assert_invalid("scan-manifest", manifest, "does not contain items matching")
 
                 manifest["scan"]["artifacts"] = artifacts + [copy.deepcopy(artifacts[0])]
                 manifest["scan"]["artifacts"][-1]["path"] = path
-                with self.assertRaisesRegex(AssertionError, "Too many items match"):
-                    validate_schema_node(manifest, schema, "scan-manifest")
+                self.assert_invalid("scan-manifest", manifest, "Too many items match")
 
     def test_manifest_accepts_only_fixed_hardening_portfolio_path(self) -> None:
-        schema = read_json(SCHEMA_DIR / "scan-manifest.schema.json")
-        manifest = copy.deepcopy(self.manifest)
+        manifest = example("scan-manifest")
         manifest["scan"]["hardening"] = {"portfolioPath": "hardening/hardening.md"}
-        validate_schema_node(manifest, schema, "scan-manifest")
+        schema_validator("scan-manifest").validate(manifest)
 
         manifest["scan"]["hardening"]["portfolioPath"] = "../hardening.md"
-        with self.assertRaisesRegex(AssertionError, "was expected"):
-            validate_schema_node(manifest, schema, "scan-manifest")
-
-    def test_coverage_rejects_unknown_completeness(self) -> None:
-        schema = read_json(SCHEMA_DIR / "coverage.schema.json")
-        coverage = copy.deepcopy(self.coverage)
-        coverage["completeness"] = "probably-complete"
-        with self.assertRaisesRegex(AssertionError, "is not one of"):
-            validate_schema_node(coverage, schema, "coverage")
+        self.assert_invalid("scan-manifest", manifest, "was expected")
 
     def test_findings_accept_safe_writeup_and_reject_unsafe_path(self) -> None:
-        schema = read_json(SCHEMA_DIR / "findings.schema.json")
-        findings = copy.deepcopy(self.findings)
+        findings = example("findings")
         findings["findings"][0]["writeup"] = {
             "reportPath": "findings/unsafe-archive/unsafe-archive.md"
         }
-        validate_schema_node(findings, schema, "findings")
+        schema_validator("findings").validate(findings)
 
         findings["findings"][0]["writeup"]["reportPath"] = "../outside.md"
-        with self.assertRaisesRegex(AssertionError, "does not match"):
-            validate_schema_node(findings, schema, "findings")
+        self.assert_invalid("findings", findings, "does not match")
 
     def test_findings_accept_code_evidence_call_stack_role(self) -> None:
-        schema = read_json(SCHEMA_DIR / "findings.schema.json")
-        common_schema = read_json(SCHEMA_DIR / "definitions" / "artifact-common.schema.json")
-        draft_schema = read_json(SCHEMA_DIR / "tools" / "scan-draft.schema.json")
-        registry = Registry().with_resource(
-            common_schema["$id"], Resource.from_contents(common_schema)
-        )
-        draft_validator = Draft202012Validator(
-            draft_schema, registry=registry, format_checker=FormatChecker()
-        )
-        findings = copy.deepcopy(self.findings)
+        draft_validator = schema_validator("tools/scan-draft", "definitions/artifact-common")
+        findings = example("findings")
         findings["findings"][0]["codeEvidence"] = [
             {
                 "id": "request-input",
@@ -343,7 +264,7 @@ class ScanContractExamplesTest(unittest.TestCase):
                 "explanation": "The request controls value before the handler forwards it.",
             }
         ]
-        validate_schema_node(findings, schema, "findings")
+        schema_validator("findings").validate(findings)
         draft_finding = {
             key: value
             for key, value in findings["findings"][0].items()
@@ -352,12 +273,7 @@ class ScanContractExamplesTest(unittest.TestCase):
         draft = {
             "scanId": "7fc17317-9594-49e0-b06a-d72fd7e14bba",
             "findings": [draft_finding],
-            "coverage": {
-                "completeness": "complete",
-                "surfaces": [],
-                "explicitExclusions": [],
-                "deferred": [],
-            },
+            "reviewState": saved_coverage(),
         }
         draft_validator.validate(draft)
 
@@ -368,57 +284,34 @@ class ScanContractExamplesTest(unittest.TestCase):
                 value = evidence.pop(field)
                 if replacement is not None:
                     evidence[replacement] = value
-                with self.assertRaisesRegex(AssertionError, f"'{field}' is a required property"):
-                    validate_schema_node(invalid_findings, schema, "findings")
+                self.assert_invalid(
+                    "findings", invalid_findings, f"'{field}' is a required property"
+                )
 
                 invalid_draft = copy.deepcopy(draft)
                 invalid_draft["findings"][0]["codeEvidence"][0] = evidence
                 self.assertFalse(draft_validator.is_valid(invalid_draft))
 
         findings["findings"][0]["codeEvidence"][0]["role"] = ""
-        with self.assertRaisesRegex(AssertionError, "should be non-empty"):
-            validate_schema_node(findings, schema, "findings")
+        self.assert_invalid("findings", findings, "should be non-empty")
 
     def test_coverage_rejects_receipt_ref_outside_artifacts(self) -> None:
-        schema = read_json(SCHEMA_DIR / "coverage.schema.json")
         for ref in ("report.md", "artifacts/../report.md", "artifacts\\receipt.jsonl"):
             with self.subTest(ref=ref):
-                coverage = copy.deepcopy(self.coverage)
+                coverage = example("coverage")
                 coverage["surfaces"][0]["receiptRefs"] = [ref]
-                with self.assertRaisesRegex(AssertionError, "does not match"):
-                    validate_schema_node(coverage, schema, "coverage")
+                self.assert_invalid("coverage", coverage, "does not match")
 
-    def test_coverage_rejects_complete_with_needs_follow_up_surface(self) -> None:
-        schema = read_json(SCHEMA_DIR / "coverage.schema.json")
-        coverage = copy.deepcopy(self.coverage)
-        coverage["surfaces"][0]["disposition"] = "needs_follow_up"
-        with self.assertRaisesRegex(AssertionError, "Too many items match"):
-            validate_schema_node(coverage, schema, "coverage")
-
-    def test_coverage_rejects_complete_with_deferred_work(self) -> None:
-        schema = read_json(SCHEMA_DIR / "coverage.schema.json")
-        coverage = copy.deepcopy(self.coverage)
-        coverage["deferred"] = [
-            {
-                "id": "deferred_archive_review",
-                "reason": "Archive extraction review was not completed.",
-            }
-        ]
-        with self.assertRaisesRegex(AssertionError, "Too many items match"):
-            validate_schema_node(coverage, schema, "coverage")
-
-    def test_coverage_allows_partial_with_deferred_work(self) -> None:
-        schema = read_json(SCHEMA_DIR / "coverage.schema.json")
-        coverage = copy.deepcopy(self.coverage)
-        coverage["completeness"] = "partial"
+    def test_coverage_accepts_unresolved_work(self) -> None:
+        coverage = example("coverage")
         coverage["surfaces"][0]["disposition"] = "needs_follow_up"
         coverage["deferred"] = [
             {
                 "id": "deferred_archive_review",
-                "reason": "Archive extraction review was not completed.",
+                "reason": "Runtime verification remains unavailable.",
             }
         ]
-        validate_schema_node(coverage, schema, "coverage")
+        schema_validator("coverage").validate(coverage)
 
 
 if __name__ == "__main__":

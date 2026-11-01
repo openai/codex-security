@@ -1,15 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-type PackageProvenance = {
-  assertExpectedGitHead: (
-    packageJson: { gitHead?: unknown },
-    expectedGitHead: string | undefined,
-  ) => void;
-};
-
-const { assertExpectedGitHead } = (await import(
-  new URL("../scripts/package-provenance.mjs", import.meta.url).href
-)) as PackageProvenance;
+import { assertExpectedGitHead } from "../scripts/package-provenance.mjs";
 
 const releaseCommit = "e94d6bef9797a192febfde89a26ec7f831bc09b2";
 

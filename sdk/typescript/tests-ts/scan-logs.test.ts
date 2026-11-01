@@ -1,25 +1,21 @@
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeJsonLines } from "./support/json.js";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { unlinkSync } from "node:fs";
 import { join } from "node:path";
+import { zstdCompressSync } from "node:zlib";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { readScanLogs } from "../src/scan-logs.js";
+import {
+  findScanSession,
+  readSavedScanLogs,
+  readScanLogs,
+} from "../src/scan-logs.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const directories: string[] = [];
+const { temporaryDirectory: temporaryHome, cleanup } = createApiTestFixtures(
+  "codex-security-scan-logs-",
+);
 
-afterEach(async () => {
-  await Promise.all(
-    directories
-      .splice(0)
-      .map((directory) => rm(directory, { recursive: true, force: true })),
-  );
-});
+afterEach(cleanup);
 
 async function writeSession(
   home: string,
@@ -31,39 +27,26 @@ async function writeSession(
 ): Promise<void> {
   const directory = join(home, "sessions", "2026", "08", "11");
   await mkdir(directory, { recursive: true });
-  await writeFile(
-    join(directory, `rollout-${threadId}.jsonl`),
-    [
-      {
-        type: "session_meta",
-        payload: {
-          id: threadId,
-          ...(startedAt === undefined ? {} : { timestamp: startedAt }),
-          ...(workingDirectory === undefined ? {} : { cwd: workingDirectory }),
-          ...(parentThreadId === undefined
-            ? {}
-            : {
-                source: {
-                  subagent: {
-                    thread_spawn: { parent_thread_id: parentThreadId },
-                  },
+  await writeJsonLines(join(directory, `rollout-${threadId}.jsonl`), [
+    {
+      type: "session_meta",
+      payload: {
+        id: threadId,
+        ...(startedAt === undefined ? {} : { timestamp: startedAt }),
+        ...(workingDirectory === undefined ? {} : { cwd: workingDirectory }),
+        ...(parentThreadId === undefined
+          ? {}
+          : {
+              source: {
+                subagent: {
+                  thread_spawn: { parent_thread_id: parentThreadId },
                 },
-              }),
-        },
+              },
+            }),
       },
-      ...events,
-    ]
-      .map((event) => JSON.stringify(event))
-      .join("\n"),
-  );
-}
-
-async function temporaryHome(): Promise<string> {
-  const directory = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-scan-logs-")),
-  );
-  directories.push(directory);
-  return directory;
+    },
+    ...events,
+  ]);
 }
 
 function commandEvent(command: string, id: string, timestamp?: string) {
@@ -80,6 +63,265 @@ function commandEvent(command: string, id: string, timestamp?: string) {
 }
 
 describe("saved scan logs", () => {
+  test.each([
+    ["prefix first", [0], [0, 1, 1, 2], 1, false, false],
+    ["complete first", [0, 1, 1, 2], [0], 0, false, false],
+    ["identical copies", [0, 1, 1, 2], [0, 1, 1, 2], 0, false, false],
+    ["longer divergent copy", [0, 2], [0, 1, 1, 2], 0, false, false],
+    ["shorter divergent copy", [0, 1, 1, 2], [0, 2], 0, false, false],
+    ["equal-length divergent copy", [0, 1], [0, 2], 0, false, false],
+    ["complete archived copy", [0], [0, 1, 1, 2], 1, true, false],
+    ["prefix archived copy", [0, 1, 1, 2], [0], 0, true, false],
+    ["identical archived copy", [0, 1, 1, 2], [0, 1, 1, 2], 0, true, false],
+    ["divergent archived copy", [0, 2], [0, 1, 1, 2], 0, true, false],
+    ["complete compressed copy", [0], [0, 1, 1, 2], 1, false, true],
+    ["prefix compressed copy", [0, 1, 1, 2], [0], 0, false, true],
+    ["identical compressed copy", [0, 1, 1, 2], [0, 1, 1, 2], 0, false, true],
+    ["divergent compressed copy", [0, 2], [0, 1, 1, 2], 0, false, true],
+    ["complete compressed archived copy", [0], [0, 1, 1, 2], 1, true, true],
+  ] as const)(
+    "retains complete copied rollout events and precedence: %s",
+    async (_label, first, second, selected, archived, compressed) => {
+      const homes = [await temporaryHome(), await temporaryHome()];
+      const activity = [
+        commandEvent("first", "first-call", "2026-08-11T12:00:03Z"),
+        commandEvent("repeated", "repeat-call", "2026-08-11T12:00:01Z"),
+        commandEvent("last", "last-call", "2026-08-11T12:00:02Z"),
+      ];
+      const copies = [first, second];
+      for (const [index, home] of homes.entries()) {
+        await writeSession(home, "parent", []);
+        await writeSession(
+          home,
+          "worker",
+          copies[index]!.map((event) => activity[event]!),
+          "parent",
+        );
+      }
+      if (compressed) {
+        const path = join(
+          homes[1]!,
+          "sessions",
+          "2026",
+          "08",
+          "11",
+          "rollout-worker.jsonl",
+        );
+        await writeFile(`${path}.zst`, zstdCompressSync(await readFile(path)));
+        unlinkSync(path);
+      }
+      if (archived) {
+        await rename(
+          join(homes[1]!, "sessions"),
+          join(homes[1]!, "archived_sessions"),
+        );
+      }
+      const result = await readSavedScanLogs(
+        {
+          scanId: "scan-1",
+          continuationThreadId: "parent",
+          executionThreadIds: ["parent"],
+        },
+        archived ? [...homes].reverse() : homes,
+      );
+      expect(result.sessions.map(({ threadId }) => threadId)).toEqual([
+        "parent",
+        "worker",
+      ]);
+      expect(result.sessions[1]!.path).toBe(
+        join(
+          homes[selected]!,
+          archived && selected === 1 ? "archived_sessions" : "sessions",
+          "2026",
+          "08",
+          "11",
+          `rollout-worker.jsonl${compressed && selected === 1 ? ".zst" : ""}`,
+        ),
+      );
+      expect(
+        result.events
+          .filter(({ threadId }) => threadId === "worker")
+          .slice(1)
+          .map(({ event }) => event),
+      ).toEqual(copies[selected]!.map((event) => activity[event]!));
+    },
+  );
+
+  test("keeps first-copy ownership when a longer copy has different session metadata", async () => {
+    const first = await temporaryHome();
+    const second = await temporaryHome();
+    const event = commandEvent("scan work", "scan-call");
+    await writeSession(first, "parent", []);
+    await writeSession(first, "worker", [event], "unrelated");
+    await writeSession(second, "worker", [event, event], "parent");
+    const result = await readSavedScanLogs(
+      {
+        scanId: "scan-1",
+        continuationThreadId: "parent",
+        executionThreadIds: ["parent"],
+      },
+      [first, second],
+    );
+    expect(result.sessions.map(({ threadId }) => threadId)).toEqual(["parent"]);
+  });
+
+  test("collects known desktop and CLI threads across active and archived homes without duplicates", async () => {
+    const desktop = await temporaryHome();
+    const cli = await temporaryHome();
+    await writeSession(desktop, "desktop-owner", [
+      commandEvent("desktop scan", "owner-call"),
+    ]);
+    await writeSession(desktop, "worker", [
+      commandEvent("stale archived copy", "stale-call"),
+    ]);
+    await writeSession(
+      desktop,
+      "worker-child",
+      [commandEvent("archived child", "child-call")],
+      "worker",
+    );
+    await writeSession(desktop, "unrelated", [
+      commandEvent("unrelated archived scan", "unrelated-call"),
+    ]);
+    await rename(join(desktop, "sessions"), join(desktop, "archived_sessions"));
+    await writeSession(cli, "worker", [
+      commandEvent("active worker", "worker-call"),
+    ]);
+    await writeSession(cli, "owner-child", [], "desktop-owner");
+    await writeSession(cli, "other-scan", [
+      commandEvent("unrelated CLI scan", "other-call"),
+    ]);
+
+    const result = await readSavedScanLogs(
+      {
+        scanId: "scan-1",
+        threadIds: ["desktop-owner", "worker", "worker"],
+        executionThreadIds: ["worker"],
+      },
+      [desktop, cli, desktop],
+      { allowMissingRoot: true },
+    );
+
+    expect(result.threadId).toBe("desktop-owner");
+    expect(result.sessions.map(({ threadId }) => threadId).sort()).toEqual([
+      "desktop-owner",
+      "worker",
+      "worker-child",
+    ]);
+    expect(
+      result.events.filter(({ threadId }) => threadId === "worker"),
+    ).toHaveLength(2);
+    expect(JSON.stringify(result)).toContain("desktop scan");
+    expect(JSON.stringify(result)).toContain("active worker");
+    expect(JSON.stringify(result)).toContain("archived child");
+    expect(JSON.stringify(result)).not.toContain("stale archived copy");
+    expect(JSON.stringify(result)).not.toContain("unrelated");
+  });
+
+  test.each([
+    ["omitted", undefined],
+    ["recorded", "missing-owner"],
+  ] as const)(
+    "feedback collects known worker descendants without the owner log with %s continuation",
+    async (_label, continuationThreadId) => {
+      const home = await temporaryHome();
+      await writeSession(home, "owner-child", [], "missing-owner");
+      await writeSession(home, "worker", [
+        commandEvent("independent worker", "worker-call"),
+      ]);
+      await writeSession(home, "worker-child", [], "worker");
+      await writeSession(home, "unrelated-child", [], "another-owner");
+      const scan = {
+        scanId: "scan-1",
+        ...(continuationThreadId === undefined ? {} : { continuationThreadId }),
+        threadIds: ["missing-owner", "worker"],
+        executionThreadIds: ["worker"],
+      };
+
+      const result = await readSavedScanLogs(scan, home, {
+        allowMissingRoot: true,
+      });
+      expect(result.threadId).toBe("missing-owner");
+      expect(result.sessions.map(({ threadId }) => threadId).sort()).toEqual([
+        "worker",
+        "worker-child",
+      ]);
+      if (continuationThreadId === undefined) {
+        expect(() => readSavedScanLogs(scan, home)).toThrow(
+          "No session is associated with scan scan-1.",
+        );
+      } else {
+        await expect(readSavedScanLogs(scan, home)).rejects.toThrow(
+          "No saved session logs are available for scan scan-1.",
+        );
+      }
+    },
+  );
+
+  test("feedback returns an empty log set when no scan threads are recorded", async () => {
+    const home = await temporaryHome();
+    await writeSession(home, "unrelated", []);
+    expect(
+      await readSavedScanLogs({ scanId: "scan-1" }, home, {
+        allowMissingRoot: true,
+      }),
+    ).toEqual({
+      scanId: "scan-1",
+      threadId: null,
+      sessions: [],
+      events: [],
+    });
+  });
+
+  test("keeps worker events when the parent rollout disappears after discovery", async () => {
+    const home = await temporaryHome();
+    await writeSession(home, "parent", []);
+    await writeSession(
+      home,
+      "worker",
+      [commandEvent("available worker", "worker-call")],
+      "parent",
+    );
+    const parentPath = join(
+      home,
+      "sessions",
+      "2026",
+      "08",
+      "11",
+      "rollout-parent.jsonl",
+    );
+    const originalParse = JSON.parse;
+    let removed = false;
+    const parseSpy = spyOn(JSON, "parse").mockImplementation(
+      (text, reviver) => {
+        const parsed = originalParse(text, reviver);
+        if (!removed && parsed?.payload?.id === "parent") {
+          unlinkSync(parentPath);
+          removed = true;
+        }
+        return parsed;
+      },
+    );
+    try {
+      const result = await readSavedScanLogs(
+        {
+          scanId: "scan-1",
+          continuationThreadId: "parent",
+          executionThreadIds: ["parent"],
+        },
+        home,
+        { allowMissingRoot: true },
+      );
+      expect(removed).toBe(true);
+      expect(result.events.map(({ threadId }) => threadId)).toEqual([
+        "worker",
+        "worker",
+      ]);
+    } finally {
+      parseSpy.mockRestore();
+    }
+  });
+
   test("returns complete parent and worker events without unrelated sessions", async () => {
     const home = await temporaryHome();
     await writeSession(home, "parent", [
@@ -144,6 +386,52 @@ describe("saved scan logs", () => {
     expect(JSON.stringify(result)).toContain("SYNTHETIC_KEY");
     expect(JSON.stringify(result)).toContain("private command output");
     expect(JSON.stringify(result)).not.toContain("private unrelated scan");
+  });
+
+  test("reads sessions that Codex compressed", async () => {
+    const home = await temporaryHome();
+    await writeSession(
+      home,
+      "parent",
+      [commandEvent("parent work", "parent-call")],
+      undefined,
+      undefined,
+      "/scan",
+    );
+    await writeSession(
+      home,
+      "worker",
+      [commandEvent("worker work", "worker-call")],
+      "parent",
+    );
+    const directory = join(home, "sessions", "2026", "08", "11");
+    for (const threadId of ["parent", "worker"]) {
+      const path = join(directory, `rollout-${threadId}.jsonl`);
+      await writeFile(`${path}.zst`, zstdCompressSync(await readFile(path)));
+      unlinkSync(path);
+    }
+
+    expect(await findScanSession(home, "parent")).toMatchObject({
+      workingDirectory: "/scan",
+      path: join(directory, "rollout-parent.jsonl.zst"),
+    });
+    const result = await readScanLogs({
+      scanId: "scan-1",
+      threadId: "parent",
+      codexHome: home,
+    });
+    expect(result.events).toEqual([
+      expect.objectContaining({ threadId: "parent" }),
+      {
+        threadId: "parent",
+        event: commandEvent("parent work", "parent-call"),
+      },
+      expect.objectContaining({ threadId: "worker" }),
+      {
+        threadId: "worker",
+        event: commandEvent("worker work", "worker-call"),
+      },
+    ]);
   });
 
   test("excludes inherited parent history from worker logs", async () => {
@@ -367,37 +655,48 @@ describe("saved scan logs", () => {
     );
   });
 
-  test("does not parse event bodies from unrelated saved sessions", async () => {
-    const home = await temporaryHome();
-    await writeSession(home, "parent", [
-      commandEvent("included", "parent-call"),
-    ]);
-    await writeSession(home, "unrelated", [
-      commandEvent("UNRELATED_PRIVATE_EVENT_BODY", "unrelated-call"),
-    ]);
-    const originalParse = JSON.parse;
-    let unrelatedBodies = 0;
-    const parseSpy = spyOn(JSON, "parse").mockImplementation(
-      (text, reviver) => {
-        if (text.includes("UNRELATED_PRIVATE_EVENT_BODY")) unrelatedBodies++;
-        return originalParse(text, reviver);
-      },
-    );
-
-    try {
-      const result = await readScanLogs({
-        scanId: "scan-1",
-        threadId: "parent",
-        codexHome: home,
-      });
-      expect(result.sessions.map(({ threadId }) => threadId)).toEqual([
-        "parent",
+  test.each([false, true])(
+    "does not parse event bodies from unrelated saved sessions (copied: %p)",
+    async (copied) => {
+      const home = await temporaryHome();
+      await writeSession(home, "parent", [
+        commandEvent("included", "parent-call"),
       ]);
-      expect(unrelatedBodies).toBe(0);
-    } finally {
-      parseSpy.mockRestore();
-    }
-  });
+      const unrelated = commandEvent(
+        "UNRELATED_PRIVATE_EVENT_BODY",
+        "unrelated-call",
+      );
+      await writeSession(home, "unrelated", [unrelated]);
+      const homes = [home];
+      if (copied) {
+        const copyHome = await temporaryHome();
+        await writeSession(copyHome, "unrelated", [unrelated, unrelated]);
+        homes.push(copyHome);
+      }
+      const originalParse = JSON.parse;
+      let unrelatedBodies = 0;
+      const parseSpy = spyOn(JSON, "parse").mockImplementation(
+        (text, reviver) => {
+          if (text.includes("UNRELATED_PRIVATE_EVENT_BODY")) unrelatedBodies++;
+          return originalParse(text, reviver);
+        },
+      );
+
+      try {
+        const result = await readScanLogs({
+          scanId: "scan-1",
+          threadId: "parent",
+          codexHome: homes,
+        });
+        expect(result.sessions.map(({ threadId }) => threadId)).toEqual([
+          "parent",
+        ]);
+        expect(unrelatedBodies).toBe(0);
+      } finally {
+        parseSpy.mockRestore();
+      }
+    },
+  );
 
   test("preserves large selected events and skips malformed metadata prefixes", async () => {
     const home = await temporaryHome();
