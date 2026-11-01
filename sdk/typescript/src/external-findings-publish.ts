@@ -31,6 +31,7 @@ import {
   type ExternalFindingsReaderOptions,
 } from "./external-findings-read.js";
 import { canonicalJson } from "./record.js";
+import { notify } from "./value.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { wizFindingRepository } from "./wiz-findings.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
@@ -42,6 +43,7 @@ import {
 } from "./blackduck-findings.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
+import { sonarRepositoryUrls } from "./sonar-findings.js";
 import {
   snapshotImportOptions,
   type ExternalFindings,
@@ -227,7 +229,19 @@ function reportForJson(report: ExternalFindings["report"]) {
   return { ...report, errors: JSON.parse(json) as unknown[] };
 }
 
-async function writeAtomicJson(path: string, value: unknown): Promise<void> {
+export function externalPublicationStateDirectory(
+  environment: NodeJS.ProcessEnv,
+): string {
+  return join(
+    codexSecurityStateDirectory(environment),
+    "external-finding-publications",
+  );
+}
+
+export async function writeAtomicJson(
+  path: string,
+  value: unknown,
+): Promise<void> {
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
     const file = await open(temporary, "wx", 0o600);
@@ -433,13 +447,8 @@ async function preparePublicationInput(
   dependencies: ExternalPublicationDependencies,
 ): Promise<PreparedExternalPublication> {
   const { inspectorProjectMap } = options;
-  const progress = (event: ExternalPublicationProgress): void => {
-    try {
-      dependencies.onProgress?.(event);
-    } catch {
-      // Optional progress must not interrupt preparation or publication.
-    }
-  };
+  const progress = (event: ExternalPublicationProgress): void =>
+    notify(() => dependencies.onProgress?.(event));
   if (
     !options.sourceKey.trim() ||
     options.sourceKey.includes("\0") ||
@@ -543,10 +552,9 @@ async function preparePublicationInput(
     );
   const destination = destinations[0]!;
   const source = { provider: options.provider, source_key: options.sourceKey };
-  const state = join(
-    codexSecurityStateDirectory(environment),
-    "external-finding-publications",
-  );
+  const importPrefix = source.provider === "sonar" ? "/v2" : "";
+  const sourceReportsPath = importPrefix + sourcePath(destination);
+  const state = externalPublicationStateDirectory(environment);
   const checkpointIdentity = [
     // Keep existing production checkpoints readable; other deployments must
     // never share a saved request or receipt with the production default.
@@ -743,7 +751,10 @@ async function preparePublicationInput(
       "Supply the verified Inspector project binding again to resume.",
     );
 
-  function checkRepositories(findings: ExternalFindings["findings"]) {
+  function checkRepositories(
+    findings: ExternalFindings["findings"],
+    report?: ExternalFindings["report"],
+  ) {
     function requireDestination(id: string, url: string | null | undefined) {
       if (
         url &&
@@ -756,6 +767,15 @@ async function preparePublicationInput(
     // Historical checkpoints already fixed the provider and request bytes.
     // Recheck any projected source against the destination discovered for this retry.
     const replay = saved && options.provider !== "blackduck";
+    if (!saved || options.provider === "sonar") {
+      for (const url of sonarRepositoryUrls(
+        options.provider,
+        findings,
+        report,
+        "cloud",
+      ))
+        requireDestination("Sonar source", url);
+    }
     const repositories = replay
       ? undefined
       : blackDuckReportRepositories(options.provider, findings, "cloud");
@@ -789,7 +809,8 @@ async function preparePublicationInput(
         replay &&
         !projected &&
         options.provider !== "inspector" &&
-        options.provider !== "veracode"
+        options.provider !== "veracode" &&
+        options.provider !== "sonar"
       )
         continue;
       const urls = [
@@ -815,9 +836,17 @@ async function preparePublicationInput(
       for (const url of urls) requireDestination(id, url);
     }
   }
-  checkRepositories(parsed.findings);
+  checkRepositories(parsed.findings, parsed.report);
   // A retry sends its saved projection, which may differ from today's reader.
-  if (saved) checkRepositories(submissionFindings(saved.requests));
+  if (saved) {
+    // A common Sonar ref can supply missing row refs. Only use the report
+    // associated with the input digest in the saved checkpoint.
+    const report =
+      saved.inputProjection?.inputDigest === inputDigest
+        ? parsed.report
+        : undefined;
+    checkRepositories(submissionFindings(saved.requests), report);
+  }
 
   let requests = saved?.requests;
   if (!requests) {
@@ -837,7 +866,7 @@ async function preparePublicationInput(
           limit: "2",
         });
         const summaries = validateSourceReports(
-          await request(`${sourcePath(destination)}?${query}`),
+          await request(`${sourceReportsPath}?${query}`),
         );
         if (summaries.has_more || summaries.data.length > 1)
           throw new CodexSecurityError(
@@ -1022,7 +1051,7 @@ async function preparePublicationInput(
           for (const [batchIndex, batch] of requests.entries()) {
             const receipt = validatePublicationReceipt(
               receipts[batchIndex] ??
-                (await request("/finding_imports", batch)),
+                (await request(`${importPrefix}/finding_imports`, batch)),
               batch,
             );
             acknowledged.push(receipt);
@@ -1065,7 +1094,7 @@ async function preparePublicationInput(
           await readInBatches(readbacks, async ({ item, expected, batch }) => {
             const report = validateSourceReport(
               await request(
-                `${sourcePath(destination)}/${encodeURIComponent(item.source_report_id!)}`,
+                `${sourceReportsPath}/${encodeURIComponent(item.source_report_id!)}`,
               ),
             );
             if (

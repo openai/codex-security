@@ -80,8 +80,8 @@ def test_context_stdin_is_not_read_before_argument_parsing(
     stdin.buffer.read.assert_not_called()
 
 
-# These two commands declare their option groups separately. All other commands
-# use the shared workbench declaration exercised by the parser tests above.
+# Exercise both workspace setup and Deep Scan creation before either can allocate state.
+# The parser-only cases above also check that conflicting options leave stdin untouched.
 @pytest.mark.parametrize(
     "command",
     [CREATE_WORKSPACE, ["begin-deep-scan", "--thread-id", "thread-context", "--target-path", "."]],
