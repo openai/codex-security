@@ -503,20 +503,14 @@ def list_unmatched_scan_pairs(
         )
         batches.append(
             {
-                "afterFindings": matching_findings[after["id"]],
                 "afterScanId": after["id"],
-                "beforeScans": [
-                    {
-                        "findings": matching_findings[before["id"]],
-                        "scanId": before["id"],
-                    }
-                    for before in previous
-                ],
+                "beforeScanIds": [before["id"] for before in previous],
                 **({"knownFindingGroups": known_groups} if known_groups else {}),
             }
         )
     return {
         "batches": batches,
+        "findingsByScanId": matching_findings,
         "repository": str(repository),
         "scanCount": len(selected),
         "skippedPairs": skipped,

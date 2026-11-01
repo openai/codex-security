@@ -1068,10 +1068,10 @@ def test_list_unmatched_scan_pairs_groups_pending_pairs_and_skips_saved_results(
     assert pending["skippedPairs"] == 1
     assert pending["unavailableScans"] == 0
     assert [batch["afterScanId"] for batch in pending["batches"]] == [third["scanId"]]
-    assert [[scan["scanId"] for scan in batch["beforeScans"]] for batch in pending["batches"]] == [
+    assert [batch["beforeScanIds"] for batch in pending["batches"]] == [
         [first["scanId"], second["scanId"]],
     ]
-    assert pending["batches"][0]["beforeScans"][0]["findings"][0]["rootCause"]["summary"]
+    assert pending["findingsByScanId"][first["scanId"]][0]["rootCause"]["summary"]
 
     forced = run_workbench(
         state_dir, "list-unmatched-scan-pairs", "--repository", str(repository), "--force"
@@ -1079,7 +1079,7 @@ def test_list_unmatched_scan_pairs_groups_pending_pairs_and_skips_saved_results(
     assert forced["scanCount"] == 3
     assert forced["skippedPairs"] == 0
     assert forced["unavailableScans"] == 0
-    assert [[scan["scanId"] for scan in batch["beforeScans"]] for batch in forced["batches"]] == [
+    assert [batch["beforeScanIds"] for batch in forced["batches"]] == [
         [first["scanId"]],
         [first["scanId"], second["scanId"]],
     ]
@@ -1108,7 +1108,7 @@ def test_automatic_matching_orders_instants_and_preserves_directed_cache(
     pending = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(repository))
     assert pending["skippedPairs"] == 0
     assert [batch["afterScanId"] for batch in pending["batches"]] == [after["scanId"]]
-    assert [scan["scanId"] for scan in pending["batches"][0]["beforeScans"]] == [before["scanId"]]
+    assert pending["batches"][0]["beforeScanIds"] == [before["scanId"]]
 
     save_scan_matches(state_dir, before, after)
     cached = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(repository))
@@ -1160,7 +1160,7 @@ def test_automatic_matching_keeps_unavailable_history_without_future_links(tmp_p
         current["scanId"],
         future["scanId"],
     ]
-    assert [scan["scanId"] for scan in pending["batches"][0]["beforeScans"]] == [earlier["scanId"]]
+    assert pending["batches"][0]["beforeScanIds"] == [earlier["scanId"]]
     assert pending["batches"][0]["knownFindingGroups"] == [
         sorted(finding["findingId"] for finding in findings[:2])
     ]
@@ -1196,7 +1196,7 @@ def test_list_unmatched_scan_pairs_skips_unavailable_scan_artifacts(tmp_path: Pa
     assert forced["skippedPairs"] == 0
     assert len(forced["batches"]) == 1
     assert forced["batches"][0]["afterScanId"] == last["scanId"]
-    assert forced["batches"][0]["beforeScans"][0]["scanId"] == first["scanId"]
+    assert forced["batches"][0]["beforeScanIds"][0] == first["scanId"]
 
 
 def test_semantic_scan_comparison_caches_matches_and_exposes_related_findings(
@@ -1582,7 +1582,7 @@ def test_semantic_scan_comparison_accepts_linked_git_worktrees(tmp_path: Path) -
         pending = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(target))
         assert pending["scanCount"] == 2
         assert pending["batches"][0]["afterScanId"] == after["scanId"]
-        assert pending["batches"][0]["beforeScans"][0]["scanId"] == before["scanId"]
+        assert pending["batches"][0]["beforeScanIds"][0] == before["scanId"]
 
     compared = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")
     assert compared["summary"]["new"] == 1
@@ -1623,7 +1623,7 @@ def test_semantic_scan_comparison_accepts_matching_git_origins(tmp_path: Path) -
         pending = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(target))
         assert pending["scanCount"] == 2
         assert pending["batches"][0]["afterScanId"] == after["scanId"]
-        assert pending["batches"][0]["beforeScans"][0]["scanId"] == before["scanId"]
+        assert pending["batches"][0]["beforeScanIds"][0] == before["scanId"]
 
     compared = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")
     assert compared["summary"]["new"] == 1

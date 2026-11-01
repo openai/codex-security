@@ -4495,12 +4495,12 @@ if __name__ == "__main__":
             }
             if (args[0] === "list-unmatched-scan-pairs") {
               return {
+                findingsByScanId: {
+                  prior: [previous],
+                  scan_example_001: [current],
+                },
                 batches: [
-                  {
-                    afterScanId: "scan_example_001",
-                    afterFindings: [current],
-                    beforeScans: [{ scanId: "prior", findings: [previous] }],
-                  },
+                  { afterScanId: "scan_example_001", beforeScanIds: ["prior"] },
                 ],
               };
             }

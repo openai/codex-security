@@ -84,9 +84,43 @@ export interface ScanComparisonInput {
 
 export interface ScanMatchingBatch {
   afterScanId: string;
-  afterFindings: readonly Finding[];
-  beforeScans: { scanId: string; findings: readonly Finding[] }[];
+  beforeScanIds: string[];
   knownFindingGroups?: readonly (readonly string[])[];
+}
+
+export type ScanMatchingPlan = JsonObject & {
+  repository: string;
+  scanCount: number;
+  unavailableScans: number;
+  skippedPairs: number;
+  batches: ScanMatchingBatch[];
+  findingsByScanId: Record<string, readonly Finding[]>;
+};
+
+export function matchingBatchFindings(
+  batch: ScanMatchingBatch,
+  findingsByScanId: ScanMatchingPlan["findingsByScanId"],
+) {
+  if (findingsByScanId === undefined) {
+    throw new CodexSecurityError(
+      "Scan matching requires the current workbench protocol. Update the custom plugin or use the bundled plugin.",
+    );
+  }
+  function findings(scanId: string): readonly Finding[] {
+    const rows = findingsByScanId[scanId];
+    if (!Array.isArray(rows))
+      throw new CodexSecurityError(
+        `Matching plan is missing findings for scan ${scanId}.`,
+      );
+    return rows;
+  }
+  return {
+    afterFindings: findings(batch.afterScanId),
+    beforeScans: batch.beforeScanIds.map((scanId) => ({
+      scanId,
+      findings: findings(scanId),
+    })),
+  };
 }
 
 export interface ScanComparisonProgress {
@@ -774,21 +808,23 @@ export async function matchCompletedScan(
     ),
   );
 
-  const { batches } = (await options.workbench([
+  const plan = (await options.workbench([
     "list-unmatched-scan-pairs",
     "--repository",
     options.repository,
-  ])) as {
-    batches?: ScanMatchingBatch[];
-  };
-  const batch = batches?.find(
+  ])) as ScanMatchingPlan;
+  const batch = plan.batches?.find(
     ({ afterScanId }) => afterScanId === options.scanId,
   );
   if (batch === undefined) return;
 
   // A saved comparison covers the whole pair. Let the catalogue group repeated
   // occurrences instead of dropping findings from the selected scans.
-  const beforeScans = batch.beforeScans.filter(({ scanId, findings }) =>
+  const { afterFindings, beforeScans: previousScans } = matchingBatchFindings(
+    batch,
+    plan.findingsByScanId,
+  );
+  const beforeScans = previousScans.filter(({ scanId, findings }) =>
     findings.some(
       (finding) =>
         previousOccurrences.has(finding.occurrenceId) ||
@@ -799,7 +835,7 @@ export async function matchCompletedScan(
 
   const input: ScanComparisonInput = {
     before: beforeScans.flatMap(({ findings }) => findings),
-    after: batch.afterFindings,
+    after: afterFindings,
     ...(batch.knownFindingGroups === undefined
       ? {}
       : { knownFindingGroups: batch.knownFindingGroups }),

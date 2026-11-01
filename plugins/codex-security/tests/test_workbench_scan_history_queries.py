@@ -383,18 +383,16 @@ def test_matching_reads_each_scan_once_and_skips_cached_links(
         )
 
     def batches(result):
-        return [
-            (batch["afterScanId"], [scan["scanId"] for scan in batch["beforeScans"]])
-            for batch in result["batches"]
-        ]
+        return [(batch["afterScanId"], batch["beforeScanIds"]) for batch in result["batches"]]
 
     result = pending()
     assert result["scanCount"] == 3
     assert batches(result) == [("scan-1", ["scan-0"]), ("scan-2", ["scan-0", "scan-1"])]
-    for batch in result["batches"]:
-        assert [row["occurrenceId"] for row in batch["afterFindings"]] == [batch["afterScanId"]]
-        for before in batch["beforeScans"]:
-            assert [row["occurrenceId"] for row in before["findings"]] == [before["scanId"]]
+    assert {
+        scan_id: [row["occurrenceId"] for row in findings]
+        for scan_id, findings in result["findingsByScanId"].items()
+    } == {scan_id: [scan_id] for scan_id in ("scan-0", "scan-1", "scan-2")}
+    assert json.dumps(result).count('"occurrenceId"') == 3
     assert sorted(backfilled) == ["scan-0", "scan-1", "scan-2"]
     assert sum("from finding_occurrences " in sql.lower() for sql in queries) <= 3
 

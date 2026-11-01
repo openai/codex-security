@@ -128,6 +128,29 @@ function captureProfileClient() {
 }
 
 describe("semantic scan comparison", () => {
+  test("requires the current workbench plan only for pending automatic matches", async () => {
+    const before = { occurrenceId: "before" };
+    const after = { occurrenceId: "after" };
+    const legacyBatch = {
+      afterScanId: "current",
+      afterFindings: [after],
+      beforeScans: [{ scanId: "previous", findings: [before] }],
+    };
+    const match = (batches: (typeof legacyBatch)[]) =>
+      matchCompletedScan({
+        scanId: "current",
+        repository: "/repository",
+        previousFindings: [before],
+        falsePositives: [],
+        findings: [after],
+        workbench: async () => ({ batches }),
+      });
+    await expect(match([])).resolves.toBeUndefined();
+    await expect(match([legacyBatch])).rejects.toThrow(
+      "Update the custom plugin or use the bundled plugin.",
+    );
+  });
+
   test.each([
     ["sdk", "matching"],
     ["cli", "matching"],
@@ -425,13 +448,8 @@ describe("semantic scan comparison", () => {
           async workbench(args) {
             if (args[0] === "list-unmatched-scan-pairs") {
               return {
-                batches: [
-                  {
-                    afterScanId: "current",
-                    afterFindings: [after],
-                    beforeScans: [{ scanId: "prior", findings: [before] }],
-                  },
-                ],
+                findingsByScanId: { prior: [before], current: [after] },
+                batches: [{ afterScanId: "current", beforeScanIds: ["prior"] }],
               };
             }
             saved = args[0] === "save-scan-comparison";
@@ -1368,13 +1386,14 @@ describe("semantic scan comparison", () => {
               async workbench(args) {
                 return args[0] === "list-unmatched-scan-pairs"
                   ? {
+                      findingsByScanId: {
+                        [`prior-${index}`]: [before],
+                        [scanId]: [after],
+                      },
                       batches: [
                         {
                           afterScanId: scanId,
-                          afterFindings: [after],
-                          beforeScans: [
-                            { scanId: `prior-${index}`, findings: [before] },
-                          ],
+                          beforeScanIds: [`prior-${index}`],
                         },
                       ],
                     }
@@ -1999,18 +2018,16 @@ describe("semantic scan comparison", () => {
           commands.push({ args, input: commandInput });
           return args[0] === "list-unmatched-scan-pairs"
             ? {
+                findingsByScanId: {
+                  "another-target": [{ ...dismissed, occurrenceId: "foreign" }],
+                  prior: [open, dismissed],
+                  current: [after],
+                },
                 batches: [
                   {
                     afterScanId: "current",
-                    afterFindings: [after],
+                    beforeScanIds: ["another-target", "prior"],
                     knownFindingGroups: [["dismissed", "historical-alias"]],
-                    beforeScans: [
-                      {
-                        scanId: "another-target",
-                        findings: [{ ...dismissed, occurrenceId: "foreign" }],
-                      },
-                      { scanId: "prior", findings: [open, dismissed] },
-                    ],
                   },
                 ],
               }
@@ -2089,15 +2106,16 @@ describe("semantic scan comparison", () => {
       async workbench(args, commandInput) {
         if (args[0] === "list-unmatched-scan-pairs") {
           return {
+            findingsByScanId: {
+              unselected: [unselected],
+              first: [firstShared, firstOther],
+              latest: [latestShared],
+              current: [after],
+            },
             batches: [
               {
                 afterScanId: "current",
-                afterFindings: [after],
-                beforeScans: [
-                  { scanId: "unselected", findings: [unselected] },
-                  { scanId: "first", findings: [firstShared, firstOther] },
-                  { scanId: "latest", findings: [latestShared] },
-                ],
+                beforeScanIds: ["unselected", "first", "latest"],
               },
             ],
           };
@@ -2153,13 +2171,8 @@ describe("semantic scan comparison", () => {
       const workbench = mock(async (args: readonly string[]) => {
         return args[0] === "list-unmatched-scan-pairs"
           ? {
-              batches: [
-                {
-                  afterScanId: "current",
-                  afterFindings: [after],
-                  beforeScans: [{ scanId: "prior", findings: [before] }],
-                },
-              ],
+              findingsByScanId: { prior: [before], current: [after] },
+              batches: [{ afterScanId: "current", beforeScanIds: ["prior"] }],
             }
           : {};
       });
@@ -2220,11 +2233,11 @@ describe("semantic scan comparison", () => {
         async workbench(args, commandInput) {
           if (args[0] === "list-unmatched-scan-pairs") {
             return {
+              findingsByScanId: { prior: before, current: after },
               batches: [
                 {
                   afterScanId: "current",
-                  afterFindings: after,
-                  beforeScans: [{ scanId: "prior", findings: before }],
+                  beforeScanIds: ["prior"],
                   knownFindingGroups,
                 },
               ],
@@ -2288,13 +2301,8 @@ describe("semantic scan comparison", () => {
         async workbench(args, commandInput) {
           if (args[0] === "list-unmatched-scan-pairs")
             return {
-              batches: [
-                {
-                  afterScanId: "current",
-                  afterFindings: after,
-                  beforeScans: [{ scanId: "prior", findings: before }],
-                },
-              ],
+              findingsByScanId: { prior: before, current: after },
+              batches: [{ afterScanId: "current", beforeScanIds: ["prior"] }],
             };
           saved.push(JSON.parse(commandInput!) as ScanComparisonResult);
           return {};

@@ -819,12 +819,9 @@ describe("CLI workbench", () => {
                     scanCount: 2,
                     unavailableScans: 0,
                     skippedPairs: 0,
+                    findingsByScanId: { before, after },
                     batches: [
-                      {
-                        afterScanId: "after",
-                        afterFindings: after,
-                        beforeScans: [{ scanId: "before", findings: before }],
-                      },
+                      { afterScanId: "after", beforeScanIds: ["before"] },
                     ],
                   };
                 }
@@ -953,12 +950,9 @@ describe("CLI workbench", () => {
               return command[0] === "compare-scans"
                 ? { matchingInputs: { before, after } }
                 : {
+                    findingsByScanId: { before, after },
                     batches: [
-                      {
-                        afterScanId: "after",
-                        afterFindings: after,
-                        beforeScans: [{ scanId: "before", findings: before }],
-                      },
+                      { afterScanId: "after", beforeScanIds: ["before"] },
                     ],
                   };
             },
@@ -1015,7 +1009,7 @@ describe("CLI workbench", () => {
                   summary: { persisting: 1 },
                 };
               if (command[0] === "list-unmatched-scan-pairs")
-                return { batches: [] };
+                return { findingsByScanId: {}, batches: [] };
               return { summary: { persisting: 1 } };
             },
           }),
@@ -1075,32 +1069,7 @@ describe("CLI workbench", () => {
 
   test("matches all scans once per later scan", async () => {
     const finding = (occurrenceId: string) => ({ occurrenceId });
-    const batches = [
-      {
-        afterScanId: "scan-b",
-        afterFindings: [finding("b"), finding("b-shared")],
-        beforeScans: [
-          {
-            scanId: "scan-a",
-            findings: [finding("a"), finding("a-shared")],
-          },
-        ],
-      },
-      {
-        afterScanId: "scan-c",
-        afterFindings: [finding("c"), finding("c-shared")],
-        beforeScans: [
-          {
-            scanId: "scan-a",
-            findings: [finding("a"), finding("a-shared")],
-          },
-          {
-            scanId: "scan-b",
-            findings: [finding("b"), finding("b-shared")],
-          },
-        ],
-      },
-    ];
+
     const calls: Array<readonly string[]> = [];
     const inputs: Array<string | undefined> = [];
     const matcherCalls = mock<typeof matchScanFindings>(async (input) => {
@@ -1155,7 +1124,18 @@ describe("CLI workbench", () => {
                   scanCount: 5,
                   unavailableScans: 2,
                   skippedPairs: 1,
-                  batches,
+                  findingsByScanId: {
+                    "scan-a": [finding("a"), finding("a-shared")],
+                    "scan-b": [finding("b"), finding("b-shared")],
+                    "scan-c": [finding("c"), finding("c-shared")],
+                  },
+                  batches: [
+                    { afterScanId: "scan-b", beforeScanIds: ["scan-a"] },
+                    {
+                      afterScanId: "scan-c",
+                      beforeScanIds: ["scan-a", "scan-b"],
+                    },
+                  ],
                 }
               : {};
           },
@@ -1237,13 +1217,14 @@ describe("CLI workbench", () => {
                   scanCount: 2,
                   unavailableScans: 0,
                   skippedPairs: 0,
+                  findingsByScanId: {
+                    "earlier-scan": before,
+                    "later-scan": after,
+                  },
                   batches: [
                     {
                       afterScanId: "later-scan",
-                      afterFindings: after,
-                      beforeScans: [
-                        { scanId: "earlier-scan", findings: before },
-                      ],
+                      beforeScanIds: ["earlier-scan"],
                       knownFindingGroups,
                     },
                   ],
@@ -1287,21 +1268,21 @@ describe("CLI workbench", () => {
                   scanCount: 4,
                   unavailableScans: 0,
                   skippedPairs: 0,
+                  findingsByScanId: {
+                    "first-scan": [first],
+                    "third-scan": [third],
+                    "second-scan": [second],
+                    "fourth-scan": [fourth],
+                  },
                   batches: [
                     {
                       afterScanId: "third-scan",
-                      afterFindings: [third],
-                      beforeScans: [
-                        { scanId: "first-scan", findings: [first] },
-                      ],
+                      beforeScanIds: ["first-scan"],
                       knownFindingGroups: existingGroups,
                     },
                     {
                       afterScanId: "fourth-scan",
-                      afterFindings: [fourth],
-                      beforeScans: [
-                        { scanId: "second-scan", findings: [second] },
-                      ],
+                      beforeScanIds: ["second-scan"],
                       knownFindingGroups: existingGroups,
                     },
                   ],
@@ -1345,18 +1326,11 @@ describe("CLI workbench", () => {
               scanCount: 2,
               unavailableScans: 0,
               skippedPairs: 0,
-              batches: [
-                {
-                  afterScanId: "after",
-                  afterFindings: [],
-                  beforeScans: [
-                    {
-                      scanId: "before",
-                      findings: [{ occurrenceId: "before" }],
-                    },
-                  ],
-                },
-              ],
+              findingsByScanId: {
+                before: [{ occurrenceId: "before" }],
+                after: [],
+              },
+              batches: [{ afterScanId: "after", beforeScanIds: ["before"] }],
             }
           : {};
       },
@@ -1391,31 +1365,19 @@ describe("CLI workbench", () => {
               scanCount: 3,
               unavailableScans: 0,
               skippedPairs: 1,
+              findingsByScanId: {
+                before: [{ occurrenceId: "confirmed", findingId: "shared" }],
+                earlier: [
+                  {
+                    occurrenceId: "earlier-uncertain",
+                    findingId: "earlier-other",
+                  },
+                  { occurrenceId: "uncertain", findingId: "other" },
+                ],
+                after: [{ occurrenceId: "after", findingId: "shared" }],
+              },
               batches: [
-                {
-                  afterScanId: "after",
-                  afterFindings: [
-                    { occurrenceId: "after", findingId: "shared" },
-                  ],
-                  beforeScans: [
-                    {
-                      scanId: "before",
-                      findings: [
-                        { occurrenceId: "confirmed", findingId: "shared" },
-                      ],
-                    },
-                    {
-                      scanId: "earlier",
-                      findings: [
-                        {
-                          occurrenceId: "earlier-uncertain",
-                          findingId: "earlier-other",
-                        },
-                        { occurrenceId: "uncertain", findingId: "other" },
-                      ],
-                    },
-                  ],
-                },
+                { afterScanId: "after", beforeScanIds: ["before", "earlier"] },
               ],
             };
           },
