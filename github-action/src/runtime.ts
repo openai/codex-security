@@ -9,6 +9,30 @@ import runtimeManifest from '../runtime/package.json' with { type: 'json' };
 export const SUPPORTED_CLI_VERSION = runtimeManifest.dependencies['@openai/codex-security'];
 const REGISTRY = 'https://registry.npmjs.org/';
 
+const AWS_ENVIRONMENT_VARIABLES = [
+  'AWS_BEARER_TOKEN_BEDROCK', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN',
+  'AWS_REGION', 'AWS_DEFAULT_REGION', 'AWS_PROFILE', 'AWS_CONFIG_FILE', 'AWS_SHARED_CREDENTIALS_FILE',
+  'AWS_ROLE_ARN', 'AWS_ROLE_SESSION_NAME', 'AWS_WEB_IDENTITY_TOKEN_FILE',
+  'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI', 'AWS_CONTAINER_CREDENTIALS_FULL_URI',
+  'AWS_CONTAINER_AUTHORIZATION_TOKEN', 'AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE',
+] as const;
+
+export const API_KEY_ENVIRONMENT_VARIABLES = {
+  openai: 'OPENAI_API_KEY', openrouter: 'OPENROUTER_API_KEY', fireworks: 'FIREWORKS_API_KEY',
+} as const;
+
+export type ScanCredentials = {provider: keyof typeof API_KEY_ENVIRONMENT_VARIABLES; apiKey: string}
+  | {provider: 'amazon-bedrock'; environment: NodeJS.ProcessEnv};
+
+/** Capture only the selected provider's credentials before asynchronous setup. */
+export function scanCredentials(provider: ScanCredentials['provider'], source: NodeJS.ProcessEnv): ScanCredentials {
+  if (provider !== 'amazon-bedrock') return {provider,
+    apiKey: source[API_KEY_ENVIRONMENT_VARIABLES[provider]] || (provider === 'openai' ? source.CODEX_API_KEY : undefined) || ''};
+  const environment: NodeJS.ProcessEnv = {};
+  for (const name of AWS_ENVIRONMENT_VARIABLES) if (source[name] !== undefined) environment[name] = source[name];
+  return {provider, environment};
+}
+
 export interface RuntimeOptions {
   actionRoot: string;
   tempRoot: string;
@@ -25,11 +49,11 @@ export interface Runtime {
   runnerPath?: string;
   runnerTrackingId?: string;
   runnerLibraryPath?: string;
-  env: (apiKey: string) => NodeJS.ProcessEnv;
+  env: (credentials: ScanCredentials) => NodeJS.ProcessEnv;
 }
 
 /** Deliberately construct a new environment: never copy process.env. */
-export function runtimeEnvironment(paths: Pick<Runtime, 'root' | 'home' | 'codexHome' | 'stateDirectory' | 'runnerPath' | 'runnerTrackingId' | 'runnerLibraryPath'>, apiKey?: string): NodeJS.ProcessEnv {
+export function runtimeEnvironment(paths: Pick<Runtime, 'root' | 'home' | 'codexHome' | 'stateDirectory' | 'runnerPath' | 'runnerTrackingId' | 'runnerLibraryPath'>, credentials?: ScanCredentials): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     PATH: `${join(paths.root, 'bin')}:${paths.runnerPath ?? '/usr/bin:/bin'}`,
     HOME: paths.home, CODEX_HOME: paths.codexHome,
@@ -52,9 +76,13 @@ export function runtimeEnvironment(paths: Pick<Runtime, 'root' | 'home' | 'codex
     env.CODEX_MCP_NODE_PATH = join(paths.root, 'bin', 'node');
   }
   if (paths.runnerLibraryPath !== undefined) env.LD_LIBRARY_PATH = paths.runnerLibraryPath;
-  if (apiKey !== undefined) {
-    if (!apiKey || /[\r\n\u0000]/.test(apiKey)) throw new Error('OPENAI_API_KEY must be a nonempty single-line value.');
-    env.OPENAI_API_KEY = apiKey;
+  if (credentials?.provider === 'amazon-bedrock') {
+    Object.assign(env, credentials.environment);
+  } else if (credentials) {
+    const { apiKey } = credentials;
+    const name = API_KEY_ENVIRONMENT_VARIABLES[credentials.provider];
+    if (!apiKey || /[\r\n\u0000]/.test(apiKey)) throw new Error(`${name} must be a nonempty single-line value.`);
+    env[name] = apiKey;
   }
   return env;
 }
@@ -142,7 +170,7 @@ export async function setupRuntime(options: RuntimeOptions): Promise<Runtime> {
     // root so downstream upload-sarif remains usable after the post action.
     const resultsDirectory = await mkdtemp(join(tempRoot, 'codex-security-reports-'));
     await chmod(resultsDirectory, 0o700);
-    return { ...paths, nodePath, cliPath, resultsDirectory, env: (apiKey) => runtimeEnvironment(paths, apiKey) };
+    return { ...paths, nodePath, cliPath, resultsDirectory, env: (credentials) => runtimeEnvironment(paths, credentials) };
   } catch (error) {
     await cleanupRuntime(root, tempRoot);
     throw error;

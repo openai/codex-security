@@ -98,7 +98,11 @@ test("forwards resolved efforts through the SDK independently for concurrent thr
         "Capture the invocation.",
         {},
         { ...options, codex, workingDirectory: repository },
-        { surface: "sdk", threadSource: "security_scan_comparison" },
+        {
+          surface: "sdk",
+          command: "compare",
+          threadSource: "security_scan_comparison",
+        },
       );
       const args: string[] = JSON.parse(response);
       expect(

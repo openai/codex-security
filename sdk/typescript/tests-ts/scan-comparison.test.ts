@@ -16,6 +16,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join, relative, win32 } from "node:path";
+import { pathToFileURL } from "node:url";
 import { parse, stringify, type TomlTable } from "smol-toml";
 import {
   Codex,
@@ -48,6 +49,9 @@ import {
   removeTemporaryDirectory,
 } from "./support/temporary-directories.js";
 import { fail } from "./support/errors.js";
+import { planComponents } from "../src/component-plan.js";
+import { VERSION } from "../src/version.js";
+import { nodeCommand } from "./support/shell.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -124,6 +128,201 @@ function captureProfileClient() {
 }
 
 describe("semantic scan comparison", () => {
+  test.each([
+    ["sdk", "matching"],
+    ["cli", "matching"],
+    ["sdk", "planning"],
+    ["cli", "planning"],
+  ] as const)(
+    "preserves request metadata and attributes %s %s at the model boundary",
+    async (surface, helper) => {
+      const root = await temporaryDirectory();
+      const home = join(root, "home");
+      const repository = join(root, "repository");
+      await mkdir(home);
+      await mkdir(repository);
+      await writeFile(join(repository, "source.ts"), "export {};\n");
+      await writeFile(
+        join(home, "config.toml"),
+        stringify({
+          responses_api_metadata: {
+            synthetic_home: "preserved",
+            codex_security_surface: "previous",
+          },
+        }),
+      );
+      const options = {
+        config: {
+          codexOverrides: {
+            responses_api_metadata: {
+              synthetic_caller: "preserved",
+              codex_security_command: "previous",
+            },
+          },
+        },
+        environment: {
+          PATH: process.env["PATH"],
+          SystemRoot: process.env["SystemRoot"],
+          CODEX_HOME: home,
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          OPENAI_API_KEY: "synthetic-key",
+        },
+      };
+      let captured: CodexOptions | undefined;
+      const { codex } = fakeCodex(
+        helper === "matching"
+          ? { matches: [], uncertain: [] }
+          : { components: [{ name: "Source", paths: ["source.ts"] }] },
+      );
+      const startThread = observeCodexOptions(codex, (options) => {
+        captured = options;
+      });
+      try {
+        if (helper === "planning") {
+          await planComponents(repository, {
+            ...options,
+            ...(surface === "cli" ? { surface } : {}),
+          });
+        } else {
+          const input = {
+            before: [finding("before")],
+            after: [finding("after")],
+          };
+          if (surface === "sdk") await matchScanFindings(input, options);
+          else await matchScanFindingsInternal(input, options, { surface });
+        }
+        expect(startThread).toHaveBeenCalledTimes(1);
+        expect(captured?.config).not.toHaveProperty("responses_api_metadata");
+        expect(
+          parse(captured!.configOverrides!.join("\n"))[
+            "responses_api_metadata"
+          ],
+        ).toEqual({
+          synthetic_home: "preserved",
+          synthetic_caller: "preserved",
+          codex_security_surface: surface,
+          codex_security_command:
+            helper === "matching" ? "compare" : "scan-components",
+          codex_security_package_version: VERSION,
+        });
+      } finally {
+        startThread.mockRestore();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "preserves literal metadata keys in SDK arguments with provider profile %p",
+    async (withProfile) => {
+      const home = await temporaryDirectory();
+      const preload = join(home, "capture-codex.mjs");
+      await writeFile(
+        join(home, "config.toml"),
+        stringify({
+          responses_api_metadata: {
+            "team.tag": "from-home",
+            "overlap.tag": "home",
+          },
+        }),
+      );
+      await writeFile(
+        preload,
+        [
+          "for await (const _chunk of process.stdin) {}",
+          "const send = (event) => console.log(JSON.stringify(event));",
+          'send({ type: "thread.started", thread_id: "fixture-thread" });',
+          'send({ type: "item.completed", item: { id: "reply", type: "agent_message", text: JSON.stringify(process.argv.slice(2)) } });',
+          'send({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } });',
+          "process.exit(0);",
+        ].join("\n"),
+      );
+      let captured: CodexOptions | undefined;
+      const profileClient = captureProfileClient();
+      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      const startThread = observeCodexOptions(codex, (options) => {
+        captured = options;
+      });
+      try {
+        await matchScanFindings(
+          { before: [finding("before")], after: [finding("after")] },
+          {
+            environment: {
+              PATH: process.env["PATH"],
+              SystemRoot: process.env["SystemRoot"],
+              CODEX_HOME: home,
+              CODEX_SECURITY_STATE_DIR: join(home, "state"),
+              OPENAI_API_KEY: "synthetic-key",
+            },
+            workingDirectory: home,
+            config: {
+              codexOverrides: {
+                responses_api_metadata: {
+                  "caller.tag": "from-caller",
+                  "overlap.tag": "caller",
+                },
+                ...(withProfile
+                  ? {
+                      model_provider: "synthetic",
+                      model_providers: {
+                        synthetic: {
+                          name: "Synthetic",
+                          wire_api: "responses",
+                          base_url: "https://provider.example.test/v1",
+                        },
+                      },
+                    }
+                  : {}),
+              },
+            },
+          },
+        );
+      } finally {
+        startThread.mockRestore();
+        profileClient.spy.mockRestore();
+      }
+      expect(captured).toBeDefined();
+      expect(profileClient.profiles).toHaveLength(withProfile ? 1 : 0);
+      const capture = new Codex({
+        ...captured,
+        codexPathOverride: nodeCommand().command,
+        env: {
+          ...captured!.env,
+          NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+        },
+      });
+      const turn = await capture
+        .startThread({ workingDirectory: home, skipGitRepoCheck: true })
+        .run("Capture the invocation.");
+      const args: string[] = JSON.parse(turn.finalResponse);
+      const metadataOverrides = args
+        .flatMap((arg, index) => (arg === "--config" ? [args[index + 1]!] : []))
+        .filter((value) => value.startsWith("responses_api_metadata"));
+      expect(metadataOverrides).toHaveLength(1);
+      expect(parse(metadataOverrides[0]!)).toEqual({
+        responses_api_metadata: {
+          "team.tag": "from-home",
+          "caller.tag": "from-caller",
+          "overlap.tag": "caller",
+          codex_security_surface: "sdk",
+          codex_security_command: "compare",
+          codex_security_package_version: VERSION,
+          ...(withProfile ? { codex_security_provider: "custom" } : {}),
+        },
+      });
+      const parsed = await runCodexCommand(
+        resolveCodexCommand(captured!.env),
+        [
+          ...metadataOverrides.flatMap((value) => ["-c", value]),
+          "mcp",
+          "list",
+          "--json",
+        ],
+        captured!.env!,
+      );
+      expect(parsed).toMatchObject({ success: true });
+    },
+  );
+
   test("uses comparison attribution for CLI comparison turns", async () => {
     const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
     await matchScanFindingsInternal(
@@ -268,6 +467,16 @@ describe("semantic scan comparison", () => {
           "synthetic-command-marker",
         );
         expect(parse(captured!.configOverrides!.join("\n"))).toEqual({
+          responses_api_metadata: {
+            codex_security_surface: "sdk",
+            codex_security_command: "compare",
+            codex_security_package_version: VERSION,
+            codex_security_provider: ["fireworks", "amazon-bedrock"].includes(
+              selection,
+            )
+              ? selection
+              : "custom",
+          },
           default_permissions: "codex_security_deep_scan_worker",
           permissions: {
             codex_security_deep_scan_worker: {
@@ -802,27 +1011,38 @@ describe("semantic scan comparison", () => {
     },
   );
 
-  test.each(["unselected", "default", "home", "overrides", "override-profile"])(
+  test.each([
+    "unselected",
+    "default",
+    "home",
+    "overrides",
+    "override-profile",
+    "toggle-only",
+  ])(
     "preserves Cyber selection and %s feature gates at read-only SDK boundaries",
     async (selection) => {
       const home = await temporaryDirectory("codex-security-cyber-helper-");
       const disabled = {
+        cli_daybreak: false,
         api_key_cyber_access_programs: false,
         api_key_model_discovery: false,
         shell_tool: true,
       };
       const profile = {
+        daybreak: true,
         profile: "selected",
-        features: { api_key_cyber_access_programs: true },
-        profiles: { selected: { features: disabled } },
+        features: { cli_daybreak: true, api_key_cyber_access_programs: true },
+        profiles: { selected: { daybreak: false, features: disabled } },
       };
       await writeFile(
         join(home, "config.toml"),
         stringify(selection === "home" ? { features: disabled } : {}),
       );
-      const options = {
+      const options: ScanComparisonOptions = {
         cyberAccessProgram:
-          selection === "unselected" ? undefined : ("daybreak_blue" as const),
+          selection === "unselected" || selection === "toggle-only"
+            ? undefined
+            : ("daybreak_blue" as const),
         environment: {
           PATH: process.env["PATH"],
           SystemRoot: process.env["SystemRoot"],
@@ -831,11 +1051,17 @@ describe("semantic scan comparison", () => {
           OPENAI_API_KEY: "synthetic-key",
         },
         workingDirectory: home,
-        ...(selection === "overrides"
-          ? { config: { codexOverrides: { features: disabled } } }
-          : selection === "override-profile"
-            ? { config: { codexOverrides: profile } }
-            : {}),
+        ...(selection === "home"
+          ? { config: { codexOverrides: { daybreak: true } } }
+          : selection === "overrides" || selection === "toggle-only"
+            ? {
+                config: {
+                  codexOverrides: { daybreak: true, features: disabled },
+                },
+              }
+            : selection === "override-profile"
+              ? { config: { codexOverrides: profile } }
+              : {}),
       };
       let captured: CodexOptions | undefined;
       const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
@@ -852,6 +1078,7 @@ describe("semantic scan comparison", () => {
           } else {
             await runReadOnlyCodex("Plan components.", {}, options, {
               surface: "cli",
+              command: "scan-components",
               threadSource: "security_scan",
             });
           }
@@ -862,6 +1089,16 @@ describe("semantic scan comparison", () => {
             string,
             unknown
           >;
+          expect(captured?.config?.["daybreak"]).toBe(
+            selection === "unselected" || selection === "default"
+              ? undefined
+              : selection !== "override-profile",
+          );
+          expect(features["cli_daybreak"]).toBe(
+            selection === "unselected" || selection === "default"
+              ? undefined
+              : false,
+          );
           expect(features["api_key_cyber_access_programs"]).toBe(
             selection === "unselected" ? undefined : selection === "default",
           );
@@ -1015,7 +1252,14 @@ describe("semantic scan comparison", () => {
             "synthetic-ambient-key",
           );
           expect(captured?.config?.["model_provider"]).toBe("openai");
-          expect(captured?.configOverrides).toBeUndefined();
+          expect(parse(captured!.configOverrides!.join("\n"))).toEqual({
+            responses_api_metadata: {
+              codex_security_surface: "sdk",
+              codex_security_command: "compare",
+              codex_security_package_version: VERSION,
+              codex_security_provider: "openai",
+            },
+          });
           expect(profileClient.profiles).toHaveLength(0);
         }
         expect(threadOptions).toMatchObject({

@@ -70,18 +70,9 @@ export function readSavedScanLogs(
 // zstd, so they still read plain rollouts only.
 const readsCompressedSessions = typeof zlib.createZstdDecompress === "function";
 
-interface SessionLog {
-  threadId: string;
-  parentThreadId: string | null;
-  startedAt: number | null;
-  workingDirectory: string | null;
-  path: string;
-}
+type SessionLog = NonNullable<Awaited<ReturnType<typeof findScanSession>>>;
 
-async function* scanSessions(
-  codexHome: string,
-  directory = "sessions",
-): AsyncGenerator<SessionLog> {
+async function* scanSessions(codexHome: string, directory = "sessions") {
   for await (const path of sessionFiles(
     join(codexHome, directory),
     readsCompressedSessions,
@@ -106,10 +97,7 @@ async function* scanSessions(
   }
 }
 
-export async function findScanSession(
-  codexHome: string,
-  threadId: string,
-): Promise<SessionLog | null> {
+export async function findScanSession(codexHome: string, threadId: string) {
   for await (const session of scanSessions(codexHome)) {
     if (session.threadId === threadId) return session;
   }

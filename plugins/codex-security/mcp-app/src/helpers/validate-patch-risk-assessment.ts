@@ -1,3 +1,4 @@
+import type { PatchRiskAssessment } from "../patch-risk-schema.js";
 import { parseArgs } from "node:util";
 import Ajv2020 from "ajv/dist/2020.js";
 import { decodeUtf8 } from "./utf8";
@@ -10,26 +11,8 @@ import {
 import { decodePosixBytes } from "./posix-path";
 import { object, parseJson } from "./json";
 
-interface Assessment {
-  recommendation: "merge" | "revise" | "no_op" | "block" | "hold_for_evidence";
-  workflowLabel: string;
-  impact: { rating: string };
-  regressionLikelihood: { rating: string };
-  regressionProtection: { rating: string; exactHeadChecksPassed: boolean };
-  recoverability: { rating: string };
-  confidence: { rating: string };
-  applicability: { status: string };
-  statusQuoRisk: { rating: string };
-  affectedRuntimeRoots: string[];
-  autoMergeExclusions: string[];
-  materialBoundaries: { result: string }[];
-  validation: { status: string }[];
-  unknowns: { decisionCritical: boolean }[];
-  evidencePlan: unknown[];
-}
-
 const ajv = new Ajv2020({ strict: false });
-const assessmentValidator = ajv.compile(assessmentSchema);
+const assessmentValidator = ajv.compile<PatchRiskAssessment>(assessmentSchema);
 
 const nonApplicable = new Set([
   "no_live_effect",
@@ -38,15 +21,14 @@ const nonApplicable = new Set([
   "superseded",
 ]);
 
-export function validatePatchRiskAssessment(value: unknown): string[] {
-  if (!object(value)) return ["assessment must be a JSON object"];
-  if (!assessmentValidator(value))
+export function validatePatchRiskAssessment(assessment: unknown): string[] {
+  if (!object(assessment)) return ["assessment must be a JSON object"];
+  if (!assessmentValidator(assessment))
     return [
       ajv.errorsText(assessmentValidator.errors, {
         dataVar: "patch-risk-assessment.schema",
       }),
     ];
-  const assessment = value as unknown as Assessment;
   const {
     recommendation,
     workflowLabel,
@@ -78,6 +60,8 @@ export function validatePatchRiskAssessment(value: unknown): string[] {
       errors.push("merge cannot retain a failed validation");
     if (evidencePlan.length)
       errors.push("merge cannot retain an evidence plan");
+    if (assessment.regressionLikelihood.rating === "critical")
+      errors.push("merge cannot retain critical regression likelihood");
   } else if (workflowLabel !== recommendation) {
     errors.push("non-merge workflow label must match the recommendation");
   }
@@ -141,7 +125,9 @@ function readAssessment(path: string): unknown {
   const text =
     path === "-"
       ? decodePosixBytes(contents)
-      : decodeUtf8(contents).replace(/\r\n?/gu, "\n");
+      : decodeUtf8(contents)
+          .replace(/^\uFEFF/u, "")
+          .replace(/\r\n?/gu, "\n");
   try {
     return parseJson(text);
   } catch (error) {

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "codex-security://schemas/tools/deep-reducer.schema.json",
   "title": "Codex Security Deep Scan semantic reducer operations",
-  "$ref": "#/$defs/reductionInput",
+  "$ref": "#/$defs/reductionSubmission",
   "$defs": {
     "reducerInputs": {
       "type": "object",
@@ -34,7 +34,7 @@
           "description": "Omit or set true when submitting the finished aggregate."
         },
         "scanId": {
-          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/scanId"
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/scanId"
         },
         "handoffClaimToken": {
           "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/handoffClaimToken"
@@ -46,7 +46,47 @@
           "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/threatModel"
         },
         "findings": {
-          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/scanDraftInput/properties/findings"
+          "type": "array",
+          "items": {
+            "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/finding"
+          }
+        }
+      },
+      "required": ["scanId", "findings"],
+      "additionalProperties": false
+    },
+    "reductionSubmission": {
+      "type": "object",
+      "properties": {
+        "complete": {
+          "type": "boolean",
+          "description": "Omit or set true when submitting the finished aggregate."
+        },
+        "scanId": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/scanId"
+        },
+        "handoffClaimToken": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/handoffClaimToken"
+        },
+        "scope": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/scope"
+        },
+        "threatModel": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/threatModel"
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/finding"
+          }
+        },
+        "retainedFindingRefs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^previous:(0|[1-9][0-9]*)$"
+          },
+          "description": "Copy unchanged previous aggregate findings by previous:<zero-based index>. The host preserves their complete bodies, identities, and source references; do not also submit them in findings."
         }
       },
       "required": ["scanId", "findings"],

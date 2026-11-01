@@ -1,0 +1,480 @@
+name: container-publish
+
+on:
+  workflow_call:
+    inputs:
+      release-sha:
+        required: true
+        type: string
+      release-version:
+        required: true
+        type: string
+      combined-approval:
+        required: true
+        type: boolean
+      refresh-wolfi-recipe:
+        type: boolean
+        default: false
+      release-integrity:
+        type: string
+      release-tarball-artifact:
+        type: string
+      runtime-lock-artifact:
+        type: string
+    outputs:
+      debian-digest:
+        value: ${{ jobs.complete.outputs.debian-digest }}
+      wolfi-digest:
+        value: ${{ jobs.complete.outputs.wolfi-digest }}
+
+concurrency:
+  group: container-release-publish
+  queue: max
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    if: github.workflow_ref == 'openai/codex-security/.github/workflows/node-github-release.yml@refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
+    outputs:
+      sha: ${{ inputs.release-sha }}
+      recipe-sha: ${{ inputs.refresh-wolfi-recipe && github.sha || inputs.release-sha }}
+      image: ${{ steps.release.outputs.image }}
+      version: ${{ inputs.release-version }}
+      wolfi: ${{ steps.release.outputs.wolfi }}
+      labels: ${{ steps.metadata.outputs.labels }}
+      metadata: ${{ steps.metadata.outputs.json }}
+      existing-digest: ${{ steps.existing.outputs.digest }}
+      complete: ${{ steps.existing.outputs.complete }}
+    steps:
+      - name: Checkout release history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate protected release source and version
+        id: release
+        env:
+          RELEASE_SHA: ${{ inputs.release-sha }}
+          RELEASE_VERSION: ${{ inputs.release-version }}
+          CLI_INTEGRITY: ${{ inputs.release-integrity }}
+          TARBALL: ${{ inputs.release-tarball-artifact }}
+          RUNTIME_LOCK: ${{ inputs.runtime-lock-artifact }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ $RELEASE_SHA =~ ^[0-9a-f]{40}$ && $RELEASE_VERSION =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || exit 1
+          if [[ $GITHUB_REF != refs/heads/main ]]; then
+            echo 'Coordinated image releases must run on main with an exact release commit.' >&2
+            exit 1
+          fi
+          if [[ $(git rev-parse "refs/tags/npm-v$RELEASE_VERSION^{commit}") != "$RELEASE_SHA" ]]; then
+            echo 'The container source must match the immutable npm release tag.' >&2
+            exit 1
+          fi
+          if [[ $(git show "$RELEASE_SHA:sdk/typescript/package.json" | jq -r .version) != "$RELEASE_VERSION" ]]; then
+            echo 'The container version must match the CLI package version.' >&2
+            exit 1
+          fi
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$RELEASE_SHA" refs/remotes/origin/main; then
+            echo 'Container releases must be built from a commit on the protected main branch.' >&2
+            exit 1
+          fi
+          if git cat-file -e "$RELEASE_SHA:.github/workflows/wolfi-build.yml"; then
+            test "$GITHUB_REF_PROTECTED" = true
+            [[ ${TARBALL:-} =~ ^[0-9]+$ && ${RUNTIME_LOCK:-} =~ ^[0-9]+$ && ${CLI_INTEGRITY:-} == sha512-* ]] || exit 1
+            echo 'wolfi=true' >> "$GITHUB_OUTPUT"
+          fi
+          owner=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          printf 'image=ghcr.io/%s/codex-security\n' "$owner" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release image metadata
+        id: metadata
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ steps.release.outputs.image }}
+          tags: type=raw,value=${{ inputs.release-version }}
+          labels: |
+            org.opencontainers.image.title=Codex Security
+            org.opencontainers.image.description=Codex Security scanner.
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.vendor=OpenAI
+            org.opencontainers.image.revision=${{ inputs.release-sha }}
+            org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}/releases/tag/npm-v${{ inputs.release-version }}
+            org.opencontainers.image.documentation=${{ github.server_url }}/${{ github.repository }}/blob/${{ inputs.release-sha }}/docker/README.md
+
+      - &buildx
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Verify an existing immutable container release
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HAS_WOLFI: ${{ steps.release.outputs.wolfi == 'true' }}
+          IMAGE: ${{ steps.release.outputs.image }}
+          VERSION: ${{ inputs.release-version }}
+          RELEASE_SHA: ${{ inputs.release-sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          endpoint="orgs/$owner/packages/container/codex-security"
+          versions=$(gh api --paginate "$endpoint/versions?per_page=100" | jq -s .)
+          tag_digest() {
+            jq -r --arg tag "$1" '[.[][] | select(any(.metadata.container.tags[]?; . == $tag)) | .name] | unique[]' <<< "$versions"
+          }
+          version_digest=$(tag_digest "$VERSION")
+          sha_digest=$(tag_digest "sha-$RELEASE_SHA")
+          latest_digest=$(tag_digest latest)
+          digest=${version_digest:-${sha_digest:-$latest_digest}}
+          if [[ -z $digest ]]; then exit 0; fi
+          [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          [[ -z $sha_digest || $sha_digest == "$digest" ]] || exit 1
+          reference="$IMAGE@$digest"
+          manifest=$(docker buildx imagetools inspect "$reference" --raw)
+          if [[ -z $version_digest && -z $sha_digest ]] &&
+            [[ $(jq -r '.annotations["org.opencontainers.image.version"]' <<< "$manifest") != "$VERSION" ]]; then
+            exit 0
+          fi
+          jq -e --arg version "$VERSION" --arg sha "$RELEASE_SHA" '
+            .annotations["org.opencontainers.image.version"] == $version
+            and .annotations["org.opencontainers.image.revision"] == $sha
+            and ([.manifests[] | select(.platform.os == "linux") | .platform.architecture] | sort == ["amd64","arm64"])
+          ' <<< "$manifest" > /dev/null
+          verify_provenance() {
+            local workflow=$1 ref=$2
+            shift 2
+            gh attestation verify "oci://$reference" --repo "$GITHUB_REPOSITORY" \
+              --cert-identity "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/$workflow.yml@$ref" \
+              --source-ref "$ref" "$@"
+          }
+          if ! verify_provenance container-publish refs/heads/main; then
+            [[ $HAS_WOLFI == false ]] || exit 1
+            verify_provenance container-release refs/heads/main ||
+              verify_provenance container-release "refs/tags/container-v$VERSION" --source-digest "$RELEASE_SHA"
+          fi
+          docker logout ghcr.io
+          # Classic Docker stores one local platform per index digest.
+          arm64_digest=$(jq -er '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64") | .digest' <<< "$manifest")
+          docker pull --platform linux/arm64 "$IMAGE@$arm64_digest"
+          docker pull --platform linux/amd64 "$reference"
+          actual_version=$(docker run --rm --platform linux/amd64 "$reference" --version)
+          test "$actual_version" = "$VERSION"
+          GITHUB_OUTPUT="$RUNNER_TEMP/debian-version" sh docker/verify-container-release-version.sh "$endpoint" "$VERSION" "$digest"
+          complete=false
+          if [[ $version_digest == "$digest" && $sha_digest == "$digest" ]] && { grep -Fxq 'publish_latest=false' "$RUNNER_TEMP/debian-version" || [[ $latest_digest == "$digest" ]]; }; then
+            complete=true
+          fi
+          printf 'digest=%s\ncomplete=%s\n' "$digest" "$complete" >> "$GITHUB_OUTPUT"
+
+  native:
+    needs: source
+    if: needs.source.outputs.wolfi != 'true' && needs.source.outputs.existing-digest == ''
+    uses: ./.github/workflows/native-artifacts.yml
+    with:
+      ref: ${{ needs.source.outputs.sha }}
+
+  validate:
+    needs: [source, native]
+    if: >-
+      !cancelled() && needs.source.result == 'success' && needs.source.outputs.existing-digest == '' &&
+      (needs.source.outputs.wolfi == 'true' || needs.native.result == 'success')
+    uses: ./.github/workflows/container-validate.yml
+    with:
+      ref: ${{ needs.source.outputs.sha }}
+      release-version: ${{ needs.source.outputs.version }}
+      release-integrity: ${{ inputs.release-integrity }}
+      release-tarball-artifact: ${{ inputs.release-tarball-artifact }}
+      runtime-lock-artifact: ${{ inputs.runtime-lock-artifact }}
+      labels: ${{ needs.source.outputs.labels }}
+
+  debian:
+    needs: [source, validate]
+    if: ${{ !cancelled() && needs.validate.result == 'success' }}
+    runs-on: ubuntu-24.04
+    outputs:
+      digest: ${{ steps.index.outputs.digest }}
+      artifact: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: codex-security-oci-*
+          path: ${{ runner.temp }}/platforms
+      - name: Prepare the tested multiarchitecture index
+        id: index
+        env:
+          IMAGE_METADATA: ${{ needs.source.outputs.metadata }}
+        run: |
+          cd "$RUNNER_TEMP"
+          digest=$(bash "$GITHUB_WORKSPACE/docker/prepare-container-index.sh" \
+            platforms/codex-security-oci-amd64/image.tar platforms/codex-security-oci-arm64/image.tar debian)
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+          printf 'Debian amd64 and arm64: `%s`\n' "$digest" >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Retain the Debian index and its tested platform images
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: debian-index-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/debian
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+
+  wolfi:
+    needs: source
+    if: needs.source.outputs.wolfi == 'true'
+    permissions:
+      contents: read
+      attestations: read
+    uses: ./.github/workflows/wolfi-build.yml
+    with:
+      recipe-sha: ${{ needs.source.outputs.recipe-sha }}
+      release-sha: ${{ needs.source.outputs.sha }}
+      release-version: ${{ needs.source.outputs.version }}
+      release-integrity: ${{ inputs.release-integrity }}
+      release-tarball-artifact: ${{ inputs.release-tarball-artifact }}
+      runtime-lock-artifact: ${{ inputs.runtime-lock-artifact }}
+
+  preflight:
+    name: Verify container publication prerequisites
+    needs: [source, debian, wolfi]
+    if: >-
+      !cancelled() && needs.source.result == 'success' &&
+      (needs.debian.result == 'success' || needs.source.outputs.existing-digest != '') &&
+      (needs.wolfi.result == 'success' || needs.source.outputs.wolfi != 'true') &&
+      (needs.source.outputs.complete != 'true' || (needs.source.outputs.wolfi == 'true' && needs.wolfi.outputs.existing != 'true'))
+    runs-on: ubuntu-24.04
+    outputs:
+      npm-approved: ${{ steps.preflight.outputs.npm-approved }}
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - &require-public-registry
+        name: Require a public registry before uploading either image
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api "orgs/${GITHUB_REPOSITORY_OWNER,,}/packages/container/codex-security" | jq -e '.visibility == "public"'
+      - name: Check whether npm approval covers the image inputs
+        id: preflight
+        shell: bash
+        env:
+          COMBINED_APPROVAL: ${{ inputs.combined-approval }}
+          PUBLISH_WOLFI: ${{ needs.source.outputs.wolfi == 'true' && needs.wolfi.outputs.existing != 'true' }}
+          RECIPE_SHA: ${{ needs.source.outputs.recipe-sha }}
+          RELEASE_SHA: ${{ needs.source.outputs.sha }}
+        run: |
+          if [[ $COMBINED_APPROVAL == true && ( $PUBLISH_WOLFI == false || $RECIPE_SHA == "$RELEASE_SHA" ) ]]; then
+            echo 'npm-approved=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  authorize:
+    name: authorize-container-publication
+    needs: preflight
+    if: >-
+      !cancelled() && needs.preflight.result == 'success' &&
+      needs.preflight.outputs.npm-approved != 'true'
+    runs-on: ubuntu-24.04
+    environment: container
+    permissions:
+      packages: read
+    steps:
+      # A backfill can wait for review after the initial registry check.
+      - *require-public-registry
+
+  manifest:
+    name: publish-and-verify-multiarchitecture-candidate
+    needs: [source, debian, preflight, authorize]
+    if: >-
+      !cancelled() && needs.preflight.result == 'success' &&
+      (needs.preflight.outputs.npm-approved == 'true' || needs.authorize.result == 'success') &&
+      needs.debian.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.debian.outputs.artifact }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/debian
+      - &login
+        name: Sign in to GitHub Container Registry
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Upload the approved index and verify its anonymous digest
+        env:
+          IMAGE: ${{ needs.source.outputs.image }}
+          DIGEST: ${{ needs.debian.outputs.digest }}
+          RELEASE_SHA: ${{ needs.source.outputs.sha }}
+          VERSION: ${{ needs.source.outputs.version }}
+        run: |
+          set -euo pipefail
+          [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]
+          skopeo inspect --raw "oci:$RUNNER_TEMP/debian:scanner" | sha256sum | cut -d' ' -f1 | grep -Fxq "${DIGEST#sha256:}"
+          skopeo copy --all --preserve-digests --digestfile "$RUNNER_TEMP/registry-digest" \
+            "oci:$RUNNER_TEMP/debian:scanner" "docker://$IMAGE:release-candidate-$RELEASE_SHA"
+          [[ $(cat "$RUNNER_TEMP/registry-digest") == "$DIGEST" ]]
+          docker logout ghcr.io
+          skopeo copy --all --src-no-creds --preserve-digests --digestfile "$RUNNER_TEMP/public-digest" \
+            "docker://$IMAGE@$DIGEST" "oci:$RUNNER_TEMP/public:scanner"
+          test "$(cat "$RUNNER_TEMP/public-digest")" = "$DIGEST"
+          skopeo copy "oci:$RUNNER_TEMP/public:scanner" docker-daemon:codex-security:public-candidate
+          actual_version=$(docker run --rm --pull=never codex-security:public-candidate --version)
+          test "$actual_version" = "$VERSION"
+      - name: Verify hardened customer Compose against the public candidate
+        env:
+          CODEX_SECURITY_IMAGE: codex-security:public-candidate
+        run: source docker/verify-container-compose.sh
+
+  attest:
+    name: attest-verified-multiarchitecture-candidate
+    needs: [source, debian, manifest]
+    if: ${{ !cancelled() && needs.manifest.result == 'success' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      attestations: write
+      artifact-metadata: write
+      contents: read
+      id-token: write
+      packages: write
+    steps:
+      - *login
+      - name: Sign verified multiarchitecture candidate provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          push-to-registry: true
+          subject-name: ${{ needs.source.outputs.image }}
+          subject-digest: ${{ needs.debian.outputs.digest }}
+      - name: Verify the published provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ needs.source.outputs.image }}
+          DIGEST: ${{ needs.debian.outputs.digest }}
+        run: |
+          gh attestation verify "oci://$IMAGE@$DIGEST" --repo "$GITHUB_REPOSITORY" \
+            --cert-identity "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/container-publish.yml@refs/heads/main" \
+            --source-ref refs/heads/main
+
+  publish-wolfi:
+    needs: [source, preflight, authorize, attest, wolfi]
+    if: >-
+      !cancelled() && needs.preflight.result == 'success' &&
+      (needs.preflight.outputs.npm-approved == 'true' || needs.authorize.result == 'success') &&
+      needs.wolfi.result == 'success' &&
+      needs.wolfi.outputs.existing != 'true' && (needs.attest.result == 'success' || needs.source.outputs.existing-digest != '')
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      artifact-metadata: write
+      id-token: write
+    uses: ./.github/workflows/publish-wolfi.yml
+    with:
+      artifact: ${{ needs.wolfi.outputs.artifact }}
+      digest: ${{ needs.wolfi.outputs.digest }}
+      tag: ${{ needs.wolfi.outputs.tag }}
+      sbom-sha: ${{ needs.wolfi.outputs.sbom-sha }}
+
+  promote:
+    name: promote-verified-and-attested-release
+    needs: [source, preflight, authorize, debian, attest, wolfi, publish-wolfi]
+    if: >-
+      !cancelled() && needs.preflight.result == 'success' &&
+      (needs.preflight.outputs.npm-approved == 'true' || needs.authorize.result == 'success') &&
+      needs.source.outputs.complete != 'true' &&
+      (needs.attest.result == 'success' || needs.source.outputs.existing-digest != '') &&
+      (needs.source.outputs.wolfi != 'true' || needs.wolfi.outputs.existing == 'true' || needs.publish-wolfi.result == 'success')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ${{ needs.source.outputs.image }}
+      VERSION: ${{ needs.source.outputs.version }}
+      RELEASE_SHA: ${{ needs.source.outputs.sha }}
+      MANIFEST_DIGEST: ${{ needs.source.outputs.existing-digest || needs.debian.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - *buildx
+      - *login
+      - name: Recheck immutable version and select the latest tag
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh docker/verify-container-release-version.sh "orgs/${GITHUB_REPOSITORY_OWNER,,}/packages/container/codex-security" "$VERSION" "$MANIFEST_DIGEST"
+      - name: Promote and verify each release tag
+        env:
+          PUBLISH_LATEST: ${{ steps.version.outputs.publish_latest }}
+        run: |
+          set -euo pipefail
+          tags=("$VERSION" "sha-$RELEASE_SHA")
+          if [[ $PUBLISH_LATEST == true ]]; then tags+=(latest); fi
+          for tag in "${tags[@]}"; do
+            docker buildx imagetools create --tag "$IMAGE:$tag" "$IMAGE@$MANIFEST_DIGEST"
+            actual=$(skopeo inspect --no-creds --raw "docker://$IMAGE:$tag" | sha256sum | cut -d' ' -f1)
+            [[ "sha256:$actual" == "$MANIFEST_DIGEST" ]]
+          done
+          docker logout ghcr.io
+          docker pull "$IMAGE:$VERSION"
+          actual_version=$(docker run --rm --entrypoint codex-security "$IMAGE:$VERSION" --version)
+          test "$actual_version" = "$VERSION"
+
+  complete:
+    name: verify required container publications
+    needs: [source, debian, wolfi, promote, publish-wolfi]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    outputs:
+      debian-digest: ${{ steps.result.outputs.debian }}
+      wolfi-digest: ${{ steps.result.outputs.wolfi }}
+    steps:
+      - id: result
+        env:
+          DEBIAN: ${{ needs.source.outputs.existing-digest || needs.debian.outputs.digest }}
+          DEBIAN_OK: ${{ needs.source.outputs.complete == 'true' || needs.promote.result == 'success' }}
+          WOLFI_REQUIRED: ${{ needs.source.outputs.wolfi }}
+          WOLFI: ${{ needs.wolfi.outputs.digest }}
+          WOLFI_OK: ${{ needs.wolfi.outputs.existing == 'true' || needs.publish-wolfi.result == 'success' }}
+          SOURCE_OK: ${{ needs.source.result }}
+          IMAGE: ${{ needs.source.outputs.image }}
+          VERSION: ${{ needs.source.outputs.version }}
+        run: |
+          set -euo pipefail
+          [[ $SOURCE_OK == success && $DEBIAN_OK == true && $DEBIAN =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          verify_tag() {
+            skopeo inspect --no-creds --raw "docker://$IMAGE:$1" | sha256sum | cut -d' ' -f1 | grep -Fxq "${2#sha256:}"
+          }
+          verify_tag "$VERSION" "$DEBIAN"
+          if [[ $WOLFI_REQUIRED == true ]]; then
+            [[ $WOLFI_OK == true && $WOLFI =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+            verify_tag "$VERSION-wolfi-amd64" "$WOLFI"
+          fi
+          printf 'debian=%s\nwolfi=%s\n' "$DEBIAN" "$WOLFI" >> "$GITHUB_OUTPUT"
