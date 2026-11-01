@@ -46,13 +46,17 @@ and [security advisories](github-security-advisories.md) have separate guides.
 
 In Codex, replace the host, repository and private output path in this request:
 
-> Export all native Dependabot alerts for https://HOST/OWNER/REPO to
-> /private/path/dependabot.jsonl, across all states and classifications.
+> Use the scoped GitHub read procedure in the Codex Security triage-finding skill.
+> Export the unmodified REST Dependabot alert objects for https://HOST/OWNER/REPO
+> across all states and classifications. Write each page as one compact JSON array
+> per line to a private temporary file beside /private/path/dependabot.jsonl.
+> Rename it to that destination only after verifying and saving every page.
 
 Follow the [scoped GitHub read procedure](../../plugins/codex-security/skills/triage-finding/references/github-rest-intake.md#github-finding-retrieval)
 for the selected transport and identity. Ask before changing either. A connected
-app must return complete native records and confirm it enumerated every matching
-page. For HTTPS, use a credential with Dependabot alerts read access to request
+app must return complete, unmodified REST alert objects, including `html_url`,
+`security_advisory` and `security_vulnerability`, and confirm it enumerated every
+matching page. For HTTPS, use a credential with Dependabot alerts read access to request
 `GET /repos/OWNER/REPO/dependabot/alerts?per_page=100` on the selected host's API. Omit `state` and `classification` to export every alert
 the deployment exposes. Note any unknown malware coverage. For HTTPS,
 reject redirects and rebuild each next page on the same API origin and repository

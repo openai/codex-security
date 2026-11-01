@@ -25,39 +25,37 @@ GitHub Issues are not part of `all` and are not a default source. Fetch and norm
 
 ## GitHub Finding Retrieval
 
-Honor the selected host and port, repository, ref, account, credential and transport. If a requested route cannot enforce that scope or return the evidence, explain the limitation and ask before switching. For example, if the user requires raw `gh api`, offer a scoped HTTPS read with the same login and wait for agreement.
+Honor the selected host and port, repository, ref, account, credential and transport. If a requested route cannot enforce that scope or return the evidence, explain the limitation and wait for agreement before looking up a fallback credential or switching transports. For example, if the user requires raw `gh api`, offer a scoped HTTPS read with the same login and wait for agreement.
 
-Prefer a read-only connected GitHub app or MCP operation that can return the requested evidence and pages within scope. Otherwise use scoped HTTPS with a credential approved for the selected host and account. Run the HTTPS client and any `gh` lookup from a trusted working directory. Resolve their executables, modules and helpers outside the entire checkout, including symlink targets, using trusted absolute paths and a trusted child `PATH`.
+Prefer a read-only connected GitHub app or MCP operation that can return the requested evidence and pages within scope. Verify a requested account through that same app session. When the app cannot perform the authorized read, use scoped HTTPS with a credential approved for the selected API origin and account. Preserve the approved API authority and transport. For gh’s `http_unix_socket`, use a client that sends HTTP over the approved socket with the API Host, or ask before changing routes. Before changing directories, resolve the effective gh configuration directory and any relative socket path against the original working directory. Keep their trusted absolute paths in the child. Use trusted user configuration, executables, modules and helpers outside the checkout, including symlink targets, and a trusted working directory and child `PATH`.
 
 - For a named environment credential, use only its nonempty value.
-- For a saved login, clear `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN` and `GITHUB_ENTERPRISE_TOKEN` in the child. Capture `gh auth token --hostname HOST` once through a private pipe with no TTY, pager or tracing. For a named saved account, check that `gh` supports `--user ACCOUNT` and use it for the lookup. If unavailable, ask before using the active login. With explicit approval for that fallback, verify the active credential identifies the requested account before reading any findings.
-- Keep that credential in memory for every request and any required identity check. Keep it out of arguments, files, logs and tool output. If it is unavailable, empty or cannot establish the requested identity, ask for a scoped connection or the finding content. Do not extract app credentials, try another identity or request private records anonymously.
+- Establish the saved login’s exact credential host before lookup. If gh would normalize it to another host, require approval for that binding. For a non-default HTTPS port, confirm approval to use that login on the exact origin before credential lookup. If the user pins a backing store, use a lookup that guarantees that store or ask first. A named gh lookup can consult the system keyring even with a selected configuration directory.
+- For a saved login, clear `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN` and `GITHUB_ENTERPRISE_TOKEN` in the child. On versions that renew tokens, pass `--no-refresh` unless renewal was approved. For a local-only lookup, use an initialized gh configuration known to require no startup migration. If this cannot be established within scope, ask before launching gh. Ask before renewal if a usable credential is unavailable. Capture `gh auth token --hostname HOST` once through a private pipe with no TTY, pager or tracing. For a named saved account, use the unique case-insensitive match on the selected host and pass its stored spelling to `--user ACCOUNT` when supported. If unavailable, ask before using the active login.
+- For direct HTTP reads under a named account, verify the captured credential’s current identity on the approved origin before reading findings, even after a successful named lookup. Keep the credential in memory across requests. Keep it out of arguments, files, logs and tool output. If it is unavailable, empty or cannot establish the requested identity, ask for a scoped connection or the finding content. Do not extract app credentials, try another identity or request private records anonymously.
 
-Build authenticated GETs from the selected repository. Use `https://api.github.com`, `https://api.SUBDOMAIN.ghe.com`, or the approved Enterprise Server origin (including its port) with `/api/v3`. Reject redirects. Pass the credential in the authorization header, with `Accept: application/vnd.github+json` and `X-GitHub-Api-Version: 2022-11-28`. For exact IDs, read only the selected records and their requested evidence.
+Build authenticated GETs from the selected repository. Pass literal query values, including refs and parsed cursors, to the HTTP client's query-parameter builder so each value is encoded exactly once. Use a trusted `api_host` override only if the installed client honors it for this host or the user explicitly approves that gateway. Preserve the API path. Otherwise use `https://api.github.com`, `https://api.SUBDOMAIN.ghe.com`, or the approved Enterprise Server origin (including its port) with `/api/v3`. Resolve the authority before any identity or finding request. Reject redirects. Pass the credential in the authorization header, with a valid `User-Agent`, `Accept: application/vnd.github+json` and `X-GitHub-Api-Version: 2022-11-28`. For exact IDs, read only the selected records and their requested evidence.
 
 ## Endpoints
 
 ### Code Scanning
 
-List open alerts on the selected ref, or the default branch when no ref was selected. Selecting all states still covers one ref.
+For alert discovery, default to the default branch and `state=open` unless the user specifies another ref or state. An exact alert number has no implied state filter. For all states, omit `state` and keep the ref. The list embeds the latest instance on its ref. If reading that evidence would exceed an instance restriction, use a source that enforces the restriction or ask before listing.
 
 ```text
 GET /repos/{owner}/{repo}/code-scanning/alerts?state=open&ref=REF&per_page=100
-```
-
-For each listed alert, read its instances. For exact alert numbers, skip the repository list.
-
-```text
 GET /repos/{owner}/{repo}/code-scanning/alerts/{alert_number}/instances?ref=REF&per_page=100
 ```
 
-Pin the selected branch on both lists and every page. For default-branch triage, resolve it once. A standalone alert list may omit `ref` to read the current default. Both endpoints accept `BRANCH` or `refs/heads/BRANCH`. For an exact number limited to a ref, start with its filtered instances and report no match if empty. Use only matching evidence. For all instances across refs, paginate that alert's `/instances` endpoint without `ref`. Fetch `/repos/{owner}/{repo}/code-scanning/alerts/{alert_number}` if its metadata is needed. The detail includes default-branch evidence, so ask first if it would widen a ref-restricted read.
+For exact alert numbers, skip discovery. For instances alone, read that alert’s numbered `/instances` endpoint. If its default branch must be resolved, use authorized repository metadata or ask for the ref. Exact alert detail cannot filter by ref or state and may include default-branch evidence. Read it only when the full record is authorized. Dismissal in alert metadata applies across branches. Establish open or fixed detection from evidence for the selected ref. Keep individual occurrence states separate from the aggregate alert state and report any state the authorized evidence cannot establish as unknown.
 
-Normalize alerts as `source_type: "sarif"`. Preserve the alert URL, alert number, rule id, tool name, instance locations and GitHub provenance in `input_id`, `title`, `normalized_input.references` and the normalized free-text fields when available.
+Read instances on the alert ref unless the user specifies another scope. Omit the instances’ `ref` only for all refs. Pin required refs across reads and pages, resolving the default once. Only a standalone first page of the repository alert list may use its implicit default. Apply an instance-state result filter to native instance states. If state restricts which records may be read, require a source that enforces it before reading. An empty authorized selection has no matches.
+
+Normalize as `source_type: "sarif"`. Preserve the alert number and URL, rule, tool, instance locations, ref and commit when available.
 
 ### Dependabot Vulnerabilities
 
-Keep the requested filters on every page. Use `state=open` as the triage default and omit `state` when all states are requested. For both classifications or all sources, paginate `/repos/{owner}/{repo}/dependabot/alerts` once, omitting only `classification`. Use only reported classifications and note any unknown malware coverage. For a single classification, use its filtered request below only if the deployment can enforce it. Otherwise report that source unavailable.
+Keep the requested filters on every page. Use `state=open` as the triage default and omit `state` when all states are requested. For both classifications or all sources, start with an unfiltered classification list, preserving the other filters. When the records omit a needed classification, match their alert numbers against the same repository and filters using a supported server-side classification filter. Keep unresolved classifications unknown. For a single classification, prefer a filtered request. If reading other classifications is authorized, filter complete native records by their reported classification. If the route cannot enforce a hard read restriction or identify the requested class, report the limitation.
 
 List open non-malware Dependabot alerts:
 
@@ -110,7 +108,9 @@ title, body, author, and GitHub provenance.
 
 ## Pagination
 
-Read each list to completion in response order, including each selected alert's instances. Use `per_page=100`. For REST, build each next request on the original origin and endpoint with the same repository, ref and filters. Verify the origin, endpoint and filters in the next link before copying only its page or cursor. If the link uses a numeric repository path, verify the ID belongs to the selected repository. Stop on a conflicting or unverifiable link. Never follow an arbitrary URL or enable automatic pagination.
+Read requested lists and alert instances in response order. Stop at any requested page or record limit even if another page exists. For unbounded requests, read to completion. Use `per_page=100` by default. For a hard read limit, cap cursor requests at the remaining count. On numbered endpoints keep a fixed size that fits the limit (e.g., two pages of 75 for 150), or preserve the verified next offset exactly when resizing. Honor explicit page sizes and stop before a request would exceed a hard read limit.
+
+For REST, rebuild each continuation on the approved request origin and transport with the same endpoint, repository, ref and filters. A gateway may return a next link for the selected repository’s canonical API origin. Accept only that canonical origin or the approved request origin. Verify the endpoint and filters, then copy only the continuation position. If the link uses a numeric repository path, verify the ID belongs to the selected repository. Stop on a conflicting or unverifiable link. Never follow an arbitrary URL or enable automatic pagination.
 
 ## Status Handling
 

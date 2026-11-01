@@ -224,6 +224,11 @@ const checks: Record<
       .filter(([key, value]) => {
         if (key === "alerts_ref" || key === "instances_ref")
           return !matchesRef(decision[key], value);
+        if (key === "account" && typeof value === "string")
+          return (
+            typeof decision[key] !== "string" ||
+            decision[key].toLowerCase() !== value.toLowerCase()
+          );
         return decision[key] !== value;
       })
       .map(([key, value]) => `expected ${key} to be ${value}`);

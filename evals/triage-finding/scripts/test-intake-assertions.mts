@@ -222,19 +222,23 @@ for (const repository of ["{owner}/{repo}", "example/project"]) {
     expectGitHub("code_scanning", text);
   }
 }
-for (const [request, ref, pass] of [
-  ["instances", undefined, false],
-  ["instances", "trunk", true],
-  ["instances", "refs/tags/trunk", false],
-  ["instances", "refs/heads/other", false],
-  ["alerts", "refs/heads/trunk", true],
-  ["alerts", undefined, false],
-  ["alerts", "trunk", true],
-  ["alerts", "refs/pull/123/merge", false],
-  ["alerts", "refs/heads/other", false],
+for (const [request, parameter, value, pass] of [
+  ["instances", "ref", undefined, false],
+  ["instances", "ref", "trunk", true],
+  ["instances", "ref", "refs/tags/trunk", false],
+  ["instances", "ref", "refs/heads/other", false],
+  ["alerts", "ref", "refs/heads/trunk", true],
+  ["alerts", "ref", undefined, false],
+  ["alerts", "ref", "trunk", true],
+  ["alerts", "ref", "refs/pull/123/merge", false],
+  ["alerts", "ref", "refs/heads/other", false],
+  ["instances", "per_page", undefined, false],
+  ["instances", "per_page", 1000, false],
+  ["alerts", "state", "closed", false],
+  ["alerts", "per_page", undefined, false],
 ] as const) {
   const answer = JSON.parse(JSON.stringify(codeScanning));
-  answer[request].parameters.ref = ref;
+  answer[request].parameters[parameter] = value;
   expectGitHub("code_scanning", JSON.stringify(answer), pass);
 }
 for (const invalid of [
@@ -245,28 +249,12 @@ for (const invalid of [
   { ...codeScanning, findings: [] },
   { ...codeScanning, schema_version: "triage-finding/v0", findings: [] },
   { ...codeScanning, findings: [{ verdict: "confirmed" }] },
-  { ...codeScanning, instances: { ...codeScanning.instances, parameters: {} } },
-  {
-    ...codeScanning,
-    instances: { ...codeScanning.instances, parameters: { per_page: 1000 } },
-  },
   {
     ...codeScanning,
     instances: {
       ...codeScanning.instances,
       path: "/repos/example/other/code-scanning/alerts/{alert_number}/instances",
     },
-  },
-  {
-    ...codeScanning,
-    alerts: {
-      ...codeScanning.alerts,
-      parameters: { state: "closed", per_page: 100 },
-    },
-  },
-  {
-    ...codeScanning,
-    alerts: { ...codeScanning.alerts, parameters: { state: "open" } },
   },
 ]) {
   expectGitHub("code_scanning", JSON.stringify(invalid), false);
