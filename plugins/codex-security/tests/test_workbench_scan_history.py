@@ -183,6 +183,7 @@ def create_cli_scan(
     extra_anchors: tuple[str, ...] = (),
     finding: bool = True,
     identity_anchor: str = "archive-entry-write-without-containment",
+    identity_instance: str | None = None,
     mode: str = "standard",
     parent_scan_id: str | None = None,
     paths: list[str] | None = None,
@@ -237,9 +238,11 @@ def create_cli_scan(
         target_revision=target_revision,
         snapshot_digest=snapshot_digest,
     )
-    if not finding or extra_anchors:
+    if not finding or extra_anchors or identity_instance is not None:
         findings_path = scan_dir / "findings.json"
         findings = json.loads(findings_path.read_text())
+        if identity_instance is not None:
+            findings["findings"][0]["identity"]["instance"] = identity_instance
         if not finding:
             findings["findings"] = []
         else:
@@ -1047,6 +1050,96 @@ def test_scan_comparison_requires_saved_matches_and_remains_read_only(tmp_path: 
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT * FROM scan_comparisons").fetchall() == comparisons
         assert connection.execute("SELECT * FROM finding_occurrences").fetchall() == occurrences
+
+
+@pytest.mark.parametrize(
+    ("before_instance", "after_instance"),
+    [(None, None), ("entry", "entry"), ("first", "second"), (None, "entry"), ("entry", None)],
+)
+def test_scan_matching_selects_cross_mode_evidence_for_compatible_instances(
+    tmp_path: Path, before_instance: str | None, after_instance: str | None
+) -> None:
+    state_dir, repository = empty_history_paths(tmp_path)
+    root = tmp_path / "results"
+    before = create_cli_scan(state_dir, root, repository, identity_instance=before_instance)
+
+    after = create_cli_scan(
+        state_dir,
+        root,
+        repository,
+        mode="deep",
+        identity_anchor="unchecked-extraction",
+        identity_instance=after_instance,
+    )
+    inputs = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")[
+        "matchingInputs"
+    ]
+    if before_instance != after_instance:
+        assert "crossModeOccurrenceIds" not in inputs
+    else:
+        assert inputs["crossModeOccurrenceIds"] == [
+            inputs[side][0]["occurrenceId"] for side in ("before", "after")
+        ]
+
+
+def test_matching_plan_keeps_cross_mode_context_with_each_scan_pair(tmp_path: Path) -> None:
+    state_dir, repository = empty_history_paths(tmp_path)
+    root = tmp_path / "results"
+    before = create_cli_scan(state_dir, root, repository)
+    after = create_cli_scan(
+        state_dir, root, repository, mode="deep", identity_anchor="unchecked-write"
+    )
+    # In mixed history, only Standard vs Deep pairs receive this context.
+    later = create_cli_scan(
+        state_dir, root, repository, mode="deep", identity_anchor="untrusted-output"
+    )
+    plan = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(repository))
+    first, second = plan["batches"]
+    old = first["beforeScans"][0]
+    assert old["crossModeOccurrenceIds"] == [
+        old["findings"][0]["occurrenceId"],
+        first["afterFindings"][0]["occurrenceId"],
+    ]
+    assert second["afterScanId"] == later["scanId"]
+    prior, same_mode = second["beforeScans"]
+    assert prior["crossModeOccurrenceIds"] == [
+        old["findings"][0]["occurrenceId"],
+        second["afterFindings"][0]["occurrenceId"],
+    ]
+    assert "crossModeOccurrenceIds" not in same_mode
+    compared = save_scan_matches(state_dir, before, after)
+    assert sorted(item["status"] for item in compared["findings"]) == ["new", "not_observed"]
+
+
+def test_scan_comparison_keeps_changed_content_and_ambiguous_locations_for_semantic_matching(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / "extract.py").write_text("original\n")
+    root = tmp_path / "results"
+    original = create_cli_scan(state_dir, root, repository)
+    (repository / "extract.py").write_text("changed\n")
+    changed = create_cli_scan(
+        state_dir, root, repository, mode="deep", identity_anchor="renamed-archive-entry-write"
+    )
+    compared = compare_scan_pair(state_dir, original, changed, "--include-matching-inputs")
+    assert "crossModeOccurrenceIds" not in compared["matchingInputs"]
+    assert compared["summary"]["new"] == 1
+    assert compared["summary"]["not_observed"] == 1
+
+    siblings = create_cli_scan(
+        state_dir,
+        root,
+        repository,
+        identity_anchor="sibling-archive-entry-write",
+        extra_anchors=("second-sibling-archive-entry-write",),
+    )
+    ambiguous = compare_scan_pair(state_dir, changed, siblings, "--include-matching-inputs")
+    assert "crossModeOccurrenceIds" not in ambiguous["matchingInputs"]
+    assert ambiguous["summary"]["new"] == 2
+    assert ambiguous["summary"]["not_observed"] == 1
 
 
 def test_list_unmatched_scan_pairs_groups_pending_pairs_and_skips_saved_results(

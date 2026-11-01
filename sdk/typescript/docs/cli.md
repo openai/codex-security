@@ -2013,6 +2013,12 @@ One comparison ID is compared with the latest completed scan.
 codex-security scans match --all --force --model gpt-6.1-sol --effort high
 ```
 
+When comparing saved Standard and Deep scans with the same starting target,
+revision, and snapshot, Codex is prompted to inspect the original evidence if
+different anchors leave the match unclear. This applies when the rule, primary
+source range, and optional instance identify one finding in each scan. Automatic
+matching under a cost limit uses its usual single comparison call.
+
 Only high-confidence root-cause matches are grouped. Uncertain and related
 findings remain separate. Rebuilding retains stable identities, triage, and
 sealed artifacts; interruption preserves completed comparisons. Model/effort
