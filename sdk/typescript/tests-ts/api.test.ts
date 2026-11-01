@@ -3715,29 +3715,66 @@ if __name__ == "__main__":
     },
   );
 
-  test("keeps an independent abort that precedes caller cancellation during cleanup", async () => {
-    const { repository, codexHome, scanDir } = await scanDirectories();
-    const controller = new AbortController();
-    async function* events(): AsyncGenerator<ThreadEvent> {
-      throw new DOMException("subprocess interrupted", "AbortError");
-    }
-    let stopped: readonly string[] | undefined;
-    await using client = TestClient.withDependencies({
-      ...scanRuntimeDependencies(codexHome, scanDir),
-      createCodex: codexFactory(async () => ({ events: events() })),
-      runWorkbench: async (options, args, input) => {
-        if (args[0] === "get-scan" && !options.signal) controller.abort();
-        if (args[0] === "fail-scan") stopped = args;
-        return mockWorkbench(args, input);
-      },
-    });
-    await expect(
-      client.run(repository, { signal: controller.signal }),
-    ).rejects.toBeInstanceOf(ScanInterruptedError);
-    expect(controller.signal.aborted).toBe(true);
-    expect(stopped).toContain("--message=subprocess interrupted");
-    expect(stopped).not.toContain("--canceled");
-  });
+  test.each([
+    ["pending read", true],
+    ["between reads", false],
+    ["during cleanup", false],
+    ["independent AbortError", false],
+  ] as const)(
+    "records a stream failure with caller cancellation %s",
+    async (timing, canceled) => {
+      const { repository, codexHome, scanDir } = await scanDirectories();
+      const controller = new AbortController();
+      const reading = Promise.withResolvers<void>();
+      const streamError =
+        timing === "independent AbortError"
+          ? new DOMException("subprocess interrupted", "AbortError")
+          : new Error('Failed to parse item: {"type":', {
+              cause: new SyntaxError("Unexpected end of JSON input"),
+            });
+      async function* events(): AsyncGenerator<ThreadEvent> {
+        if (timing === "between reads")
+          yield { type: "thread.started", thread_id: "thread-1" };
+        if (timing === "pending read") {
+          reading.resolve();
+          await once(controller.signal, "abort");
+        }
+        throw streamError;
+      }
+      let stopped: readonly string[] | undefined;
+      await using client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        createCodex: codexFactory(async () => ({ events: events() })),
+        runWorkbench: async (options, args, input) => {
+          if (args[0] === "get-scan" && !options.signal) controller.abort();
+          if (args[0] === "fail-scan") stopped = args;
+          return mockWorkbench(args, input);
+        },
+      });
+      const scan = client.run(repository, {
+        signal: controller.signal,
+        onScanStarted() {
+          if (timing === "between reads") controller.abort();
+        },
+      });
+      if (timing === "pending read") {
+        await reading.promise;
+        controller.abort();
+      }
+      const error = await scan.catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(ScanInterruptedError);
+      const interrupted = error as ScanInterruptedError;
+      const abortedBeforeFailure =
+        timing === "between reads" || timing === "pending read";
+      expect(interrupted.cause).toBe(
+        abortedBeforeFailure ? streamError : controller.signal.reason,
+      );
+      expect(stopped).toContain(
+        `--message=${abortedBeforeFailure ? interrupted.message : streamError.message}`,
+      );
+      expect(stopped?.includes("--canceled")).toBe(canceled);
+    },
+  );
 
   test("reports a Deep Scan terminal failure instead of a completion-state error", async () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();

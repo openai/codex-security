@@ -1261,7 +1261,7 @@ test("cancellation after registration retains scan identity before executor disp
   ]);
 });
 
-test("invalid host input fails a registered scan before dispatch", async () => {
+test("invalid host input records a registered scan as failed when pre-dispatch cleanup completes", async () => {
   const params = await fixture();
   const input = new PassThrough();
   const run = spyOn(hostedScan, "runHostedScan");
