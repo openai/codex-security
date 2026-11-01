@@ -189,7 +189,7 @@ const publication = await prepareNormalizedExternalPublication(findings, {
   repository,
   sourceKey: "example/project/release/platform",
 });
-console.log(publication.preview);
+console.log(JSON.stringify(publication.preview, null, 2));
 ```
 
 Review the destination, findings and exclusions before calling

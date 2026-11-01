@@ -685,7 +685,9 @@ export async function prepareNormalizedLocalImport(
 }
 
 // A scanner can repeat the same repository reference for every finding in a run.
-function distinctSources(sources: readonly ExternalSourceRepository[]) {
+export function distinctSourceRepositories(
+  sources: readonly ExternalSourceRepository[],
+) {
   const seen = new Set<string>();
   return sources.filter(({ url, platform }) => {
     const key = JSON.stringify({ url, platform });
@@ -704,8 +706,8 @@ export async function prepareLocalImport(
   parsedInput: readonly ExternalSourceRepository[] = [],
 ): Promise<PreparedLocalExternalImport> {
   requireIdentity(options.sourceKey, "Source key");
-  const readerSources = distinctSources(readerInput);
-  const parsedSources = distinctSources(parsedInput);
+  const readerSources = distinctSourceRepositories(readerInput);
+  const parsedSources = distinctSourceRepositories(parsedInput);
   const current = structuredClone(input);
   // structuredClone omits inherited or non-enumerable SDK reader properties.
   if (!("snykRestContext" in current) && "snykRestContext" in input)
