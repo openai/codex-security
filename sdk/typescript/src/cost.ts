@@ -266,6 +266,8 @@ export class ScanCostTracker {
       try {
         await readSessionUsage(path, session, repository);
       } catch (error) {
+        if (this.#options.maxCostUsd !== undefined && session.threadId === null)
+          throw error;
         unreadable.set(session, error);
       }
     }
@@ -318,6 +320,7 @@ export class ScanCostTracker {
       }
     }
 
+    if (failure && this.#options.maxCostUsd !== undefined) throw failure.error;
     const usages = new Map(this.#receipts);
     for (const [path, tracked] of this.#sessions) {
       const threadId = tracked.threadId;
@@ -336,6 +339,7 @@ export class ScanCostTracker {
           session = replayed;
           this.#sessions.set(path, session);
         } catch (error) {
+          if (this.#options.maxCostUsd !== undefined) throw error;
           failure ??= { error };
         }
       }
@@ -357,7 +361,11 @@ export class ScanCostTracker {
           event,
         });
       }
-      if (worker !== undefined) {
+      if (
+        worker !== undefined &&
+        (this.#options.onSessionEvent === undefined ||
+          session.events !== undefined)
+      ) {
         for (const activity of session.activities.splice(0)) {
           this.#options.onActivity?.({
             ...activity,

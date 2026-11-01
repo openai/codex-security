@@ -1134,7 +1134,6 @@ describe("live scan cost tracking", () => {
       const events: ScanSessionEvent[] = [];
       const costs: { tokens: number; complete: boolean }[] = [];
       const tracker = costTracker(home, {
-        maxCostUsd: 1,
         repository: home,
         onActivity: (activity) => activities.push(activity),
         onProgress: (update) => progress.push(update),
@@ -1203,6 +1202,43 @@ describe("live scan cost tracking", () => {
     },
   );
 
+  test("stops reading logs immediately when an explicit budget loses unidentified accounting", async () => {
+    const home = await codexHome();
+    const blocked = await writeSession(home, "a-blocked", { input_tokens: 10 });
+    await writeSession(
+      home,
+      "z-healthy",
+      { input_tokens: 20 },
+      { parent: "scan-thread" },
+    );
+    await writeSession(home, "scan-thread", { input_tokens: 10 });
+    const failure = Object.assign(new Error("Synthetic accounting denial"), {
+      code: "EACCES",
+    });
+    const attempts: string[] = [];
+    const opened = filesystem.open;
+    const opening = spyOn(filesystem, "open").mockImplementation(
+      async (...args: Parameters<typeof filesystem.open>) => {
+        attempts.push(String(args[0]));
+        if (String(args[0]) === blocked) throw failure;
+        return await opened(...args);
+      },
+    );
+    const tracker = costTracker(home, { maxCostUsd: 1 });
+    tracker.start("scan-thread");
+    try {
+      await expect(tracker.refresh()).rejects.toBe(failure);
+      const index = attempts.indexOf(blocked);
+      expect(index).toBeGreaterThanOrEqual(0);
+      expect(attempts.slice(index + 1).every((path) => path === blocked)).toBe(
+        true,
+      );
+    } finally {
+      opening.mockRestore();
+      await tracker.stop();
+    }
+  });
+
   test("keeps healthy observations when replaying a newly associated log fails", async () => {
     const home = await codexHome();
     const usage = { input_tokens: 10, output_tokens: 0 };
@@ -1220,6 +1256,12 @@ describe("live scan cost tracking", () => {
       content: [{ type: "output_text", text: "Healthy worker output." }],
     };
     await appendSessionItem(healthy, output);
+    await appendSessionItem(blocked, {
+      ...output,
+      id: "blocked-output",
+      content: [{ type: "output_text", text: "Recovered worker output." }],
+    });
+    await appendSessionItem(blocked, progressMessage(1));
     const failure = Object.assign(new Error("Synthetic replay denial"), {
       code: "EACCES",
       syscall: "open",
@@ -1237,11 +1279,17 @@ describe("live scan cost tracking", () => {
     const activities: ScanActivity[] = [];
     const events: ScanSessionEvent[] = [];
     const complete: boolean[] = [];
+    const progress: ScanProgress[] = [];
+    const subtotals: number[] = [];
     const tracker = costTracker(home, {
       repository: home,
       onActivity: (activity) => activities.push(activity),
       onSessionEvent: (event) => events.push(event),
-      onCost: (_cost, allUsageKnown) => complete.push(allUsageKnown),
+      onProgress: (update) => progress.push(update),
+      onCost: (cost, allUsageKnown) => {
+        complete.push(allUsageKnown);
+        subtotals.push(cost.inputTokens);
+      },
     });
     tracker.start("scan-thread");
     try {
@@ -1250,8 +1298,23 @@ describe("live scan cost tracking", () => {
         expect.objectContaining({ description: "Healthy worker output." }),
       );
       expect(complete.at(-1)).toBe(false);
+      expect(subtotals.at(-1)).toBe(30);
+      expect(
+        activities.some(
+          (activity) => activity.description === "Recovered worker output.",
+        ),
+      ).toBe(false);
+      expect(progress).toHaveLength(0);
       denied = false;
       expect((await tracker.stop()).cost?.inputTokens).toBe(30);
+      expect(
+        activities.filter(
+          (activity) => activity.description === "Recovered worker output.",
+        ),
+      ).toHaveLength(1);
+      expect(progress).toContainEqual(
+        expect.objectContaining({ filesCompleted: 1 }),
+      );
       expect(complete.at(-1)).toBe(true);
       expect(
         events.filter(
