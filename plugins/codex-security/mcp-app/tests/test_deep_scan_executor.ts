@@ -4070,10 +4070,12 @@ async function testWorkerTerminalEvents() {
     const promptPath = path.join(fixture.root, "prompt.md");
     const quotaMessage =
       "Error running remote compact task: Quota exceeded. Check your plan and billing details.";
+    const disconnectMessage =
+      "Error running remote compact task: stream disconnected before completion: stream closed before response.completed";
     for (const event of [
       undefined,
       { type: "turn.failed", error: { message: quotaMessage } },
-      { type: "turn.failed", error: { message: "429 Too Many Requests" } },
+      { type: "turn.failed", error: { message: disconnectMessage } },
       { type: "error", message: quotaMessage },
       {
         type: "item.completed",
