@@ -18,6 +18,7 @@ import {
   cloudFindingsUrl,
   DEFAULT_CLOUD_BASE_URL,
 } from "./cloud-endpoint.js";
+import { isSemgrepSelectionEvidence } from "./semgrep-platform-findings.js";
 import { CodexSecurityError } from "./errors.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import {
@@ -354,6 +355,13 @@ async function withImportLock<T>(
   }
 }
 
+function rejectLocalSelections(input: ExternalFindings): void {
+  if (input.findings.some(isSemgrepSelectionEvidence))
+    throw new CodexSecurityError(
+      "Semgrep Platform selections require a local import.",
+    );
+}
+
 export async function prepareExternalPublication(
   path: string,
   options: ExternalPublicationOptions,
@@ -362,6 +370,7 @@ export async function prepareExternalPublication(
   requireExternalImports(dependencies.environment);
   const settings = snapshotImportOptions(options);
   const parsed = await readExternalFindings(path, settings);
+  rejectLocalSelections(parsed.findings);
   return preparePublicationInput(
     parsed.publication ?? normalizedPublicationInput(parsed.findings),
     { ...settings, provider: EXTERNAL_FINDINGS_PROVIDERS[settings.provider] },
@@ -376,6 +385,7 @@ export async function prepareNormalizedExternalPublication(
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
   requireExternalImports(dependencies.environment);
+  rejectLocalSelections(input);
   const settings = snapshotImportOptions(options);
   return preparePublicationInput(
     normalizedPublicationInput(input),

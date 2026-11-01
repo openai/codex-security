@@ -8,9 +8,7 @@ Prefer native **Semgrep Code/SAST CLI or CI JSON** for this reader. It preserves
 the scanner's original severity and source evidence. Self-contained SARIF 2.1.0
 is a compatibility path. Both formats may be plain or gzip-compressed.
 
-For existing Semgrep Platform SAST findings, the SDK can
-[import selected finding IDs](#import-selected-semgrep-platform-sast-findings-with-the-sdk)
-from Web API responses. The CLI file reader accepts the CLI/CI reports described below.
+For local import of selected existing Code findings, see [Existing Platform findings](#existing-platform-findings).
 
 To produce JSON locally, run the following from the source repository root with
 your selected SAST rules. This runs a new scan; it does not retrieve earlier
@@ -56,17 +54,89 @@ accepted findings. Unknown Git hosts keep case-sensitive repository paths.
 
 ## Existing Platform findings
 
-Semgrep's official
+Use the SDK to select exact IDs from **Semgrep Code (SAST)**. The official
 [Guardian Codex plugin](https://docs.semgrep.dev/semgrep-guardian/ide-setup/codex)
-can select and inspect existing findings. The separate local `semgrep mcp` server
-also exposes `semgrep_findings`. Its output lacks continuation metadata.
-[Official MCP implementation](https://github.com/semgrep/semgrep/blob/fe209763a4a2ccfcdf6434e6c332edc24a2f586e/cli/src/semgrep/mcp/server.py).
+can help identify them. For import, save the native
+[project response](https://docs.semgrep.dev/api-reference/v1/projectsservice/get-project-details)
+and the [Findings API pages](https://docs.semgrep.dev/api-reference/v1/findingsservice/list-code-supply-chain-or-ai-powered-detection-findings)
+for that deployment, project ID and fully qualified Git ref (for example,
+`refs/heads/release` or `refs/tags/release`), using `issue_type=sast` and
+`dedup=false`. Use a Web API token with read access. Read through the pages
+until you have the requested IDs. Use a project with an HTTP(S) repository URL.
+For Git fetch URLs on an IP address, use its canonical spelling in the checkout
+(for example, `127.0.0.1` or `[::1]`) so the HTTP host identifies the same source.
+Each selected finding must match the requested ref. When the finding includes
+a repository URL or project ID, each must match the selected project. If the URL
+is absent, the native project ID and full repository name must match the decoded
+path of the project URL.
 
-The [Semgrep Web API](https://docs.semgrep.dev/semgrep-appsec-platform/semgrep-api)
-supports project lookups and paginated findings queries with a Web API token.
-Supply its original JSON responses to the
-[SDK selection adapter](#import-selected-semgrep-platform-sast-findings-with-the-sdk).
-The adapter requires native finding IDs and repository/ref evidence.
+Pass the response text directly to the selector to preserve numeric IDs and
+other numeric evidence exactly. Keep the responses and selection together in a
+private directory outside the checkout. Run this example in that directory
+with the SDK installed. Local preview compares the project URL with Git’s
+named fetch URLs offline. If a checkout only has legacy or unreadable Git remote
+metadata, configure a normal named fetch URL first, for example
+`git remote add scanner-origin <verified-url>`. Checkouts with empty or absent
+legacy remote directories can also use Git's default fetch source. With legacy
+metadata present, use a named remote with a nonempty final URL entry. The local
+Git and SSH clients control SSH command overrides and DNS routing.
+
+```js
+import { readFile, writeFile } from "node:fs/promises";
+import { selectSemgrepPlatformFindings } from "@openai/codex-security";
+
+const selected = selectSemgrepPlatformFindings({
+  deployment: "example",
+  ref: "refs/heads/release",
+  projectResponse: await readFile("project.json", "utf8"),
+  findingsResponses: [await readFile("page-0.json", "utf8")],
+  findingIds: ["101", "103"],
+});
+await writeFile("selected.json", JSON.stringify(selected), {
+  flag: "wx",
+  mode: 0o600,
+});
+```
+
+Preview and import the saved selection into the local workbench:
+
+```sh
+codex-security publish findings /path/to/private/selected.json --to local --provider semgrep \
+  --repository /path/to/project --source-key example/project/release/platform --dry-run
+```
+
+After review, repeat without `--dry-run` and confirm the import. Reusing the
+same source key updates the same records, keyed by deployment, project ID,
+product, ref and finding ID. Semgrep's native signed 64-bit IDs match across the SDK
+and file workflows. For synthetic IDs above that range, the two workflows can
+produce different keys, even from a new capture. To replay those IDs, use the
+same workflow and preserve the original ID spelling and JSON type (number or
+string).
+
+Replay preserves the exact ref of an existing selection, including an older
+short ref. The archive reader compares the stored ref as literal identity text
+and never evaluates it as a Git revision. For URL-less rows with a matching
+native repository ID and ref, the saved-file reader also accepts the complete
+percent-encoded repository path. New captures require the decoded path.
+Importing the same findings reports unchanged
+records even if the API reordered JSON object keys. Use a separate source key
+for CLI scans. The selected native finding is retained as JSON text in
+`source_data.semgrepPlatformFindingJson`, including locations that cannot be mapped to the repository.
+Relative Windows paths use forward slashes in projected code locations. If a
+POSIX filename contains a literal backslash, consult the original
+`location.file_path` for its exact spelling. The API row does not identify
+the path convention. For a custom GitHub Enterprise host, supply the trusted
+repository URL and `platform: "github"` in the SDK `sourceRepositories` option
+when selecting and preparing the records. For an independently known self-managed
+GitLab instance, `platform: "gitlab"` allows its HTTPS web and clone URLs to
+differ by the usual `.git` suffix. For an internationalized hostname, use its
+ASCII (Punycode) spelling in the Git SSH remote. OpenSSH can send the literal
+UTF-8 hostname to DNS while the HTTPS project URL uses its ASCII spelling.
+
+When passing normalized findings to the SDK, keep each generated Semgrep
+`source_finding_id` with the native row it identifies. To migrate a row to a
+caller-managed identity, use an opaque ID of your own. The generated Semgrep ID
+requires the original scoped evidence on every import.
 
 ## Evidence and identity
 

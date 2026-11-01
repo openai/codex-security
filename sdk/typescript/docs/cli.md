@@ -1356,9 +1356,10 @@ Repeated imports update the same record by repository, provider, source key, and
 source finding ID. The result reports created, updated, and unchanged counts.
 Keep the source key stable across exports. Records omitted from a later selection
 remain stored; omission does not resolve or delete a finding. Excluded records
-are reported, and an import with exclusions exits with status 1. Both destinations
-read the same vendor formats; Cloud's field, size and nesting limits do not apply
-to local file imports.
+are reported, and an import with exclusions exits with status 1. The local
+importer accepts selected Semgrep Platform findings. See the
+[Semgrep selection example](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#existing-platform-findings).
+Cloud's field, size and nesting limits apply to Cloud imports.
 
 For OpenGrep, use `--provider opengrep` and supply `--source-repository-url`.
 The reader supports native JSON and gzip for both destinations. It uses the
