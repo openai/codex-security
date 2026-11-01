@@ -1,8 +1,5 @@
 import { asRecord } from "./record.js";
 import type * as z from "zod/v4";
-import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
-import validationSchema from "../../schemas/tools/candidate-validations.schema.json";
-import attackPathSchema from "../../schemas/tools/candidate-attack-paths.schema.json";
 import { candidateSchemaV1 } from "./deep-scan/artifact-contracts.js";
 import {
   artifactDestination,
@@ -10,48 +7,18 @@ import {
   replaceArtifactJsonl,
   type ArtifactContext,
 } from "./artifact-io.js";
-import {
-  loadArtifactZodSchema,
-  type SchemaDocument,
-} from "./artifact-schema-loader.js";
+import { artifactSchemaDocuments } from "./artifact-contracts.js";
 
-const documents = [
-  commonSchema,
-  validationSchema,
-  attackPathSchema,
-] as SchemaDocument[];
-
-export interface CandidateValidationRecord {
-  disposition: "reportable" | "suppressed" | "not_applicable" | "deferred";
-  method: string;
-  confidence: "high" | "medium" | "low";
-  confidence_rationale: string;
-  rubric:
-    string | Record<string, unknown> | Array<string | Record<string, unknown>>;
-  evidence: string | string[];
-  counterevidence_or_proof_gap: string;
-  remaining_uncertainty: string;
-  artifact_paths?: string[];
-  source?: string;
-  control?: string;
-  sink?: string;
-  preconditions?: string | string[];
-  [field: string]: unknown;
-}
-
-interface CandidateValidationUpdates {
-  validations: {
-    candidateId: string;
-    validation: CandidateValidationRecord;
-  }[];
-}
-
-/** Public workbench input; the bound context, never the caller, selects the artifact. */
-export const candidateValidationsInputSchema = loadArtifactZodSchema(
-  documents,
-  validationSchema.$id,
-  "input",
-) as z.ZodType<CandidateValidationUpdates & { scanId: string }>;
+const validationDefinitions =
+  artifactSchemaDocuments["tools/candidate-validations"].$defs;
+export const candidateValidationsInputSchema = validationDefinitions.input;
+export type CandidateValidationRecord = z.infer<
+  typeof validationDefinitions.validationRecord
+>;
+type CandidateValidationUpdates = Pick<
+  z.infer<typeof candidateValidationsInputSchema>,
+  "validations"
+>;
 
 /** Complete one existing validation phase without changing discovery or attack-path data. */
 export async function recordCodexSecurityCandidateValidations(
@@ -109,41 +76,16 @@ export async function recordCodexSecurityCandidateValidations(
   };
 }
 
-type ImpactLevel = "high" | "medium" | "low" | "ignore" | "unknown";
-type ReportableSeverity = "critical" | "high" | "medium" | "low";
-
-export type CandidateAttackPathRecord = {
-  dataflow: string;
-  reachability: string;
-  counterevidence: string;
-  impact: ImpactLevel;
-  likelihood: ImpactLevel;
-  severity_rationale: string;
-  change_conditions: string;
-  [field: string]: unknown;
-} & (
-  | { decision: "reportable"; severity: ReportableSeverity }
-  | { decision: "ignore"; severity: "ignore" }
-  | {
-      decision: "deferred";
-      severity: ReportableSeverity | "unknown";
-      proof_gap: string;
-    }
-);
-
-interface CandidateAttackPathsPayload {
-  attackPaths: {
-    candidateId: string;
-    attackPath: CandidateAttackPathRecord;
-  }[];
-}
-
-/** The checked-in public schema controls both tools/list and call validation. */
-export const candidateAttackPathsInputSchema = loadArtifactZodSchema(
-  documents,
-  attackPathSchema.$id,
-  "input",
-) as z.ZodType<CandidateAttackPathsPayload & { scanId: string }>;
+const attackPathDefinitions =
+  artifactSchemaDocuments["tools/candidate-attack-paths"].$defs;
+export const candidateAttackPathsInputSchema = attackPathDefinitions.input;
+export type CandidateAttackPathRecord = z.infer<
+  typeof attackPathDefinitions.attackPath
+>;
+type CandidateAttackPathsPayload = Pick<
+  z.infer<typeof candidateAttackPathsInputSchema>,
+  "attackPaths"
+>;
 
 /** Add attack-path judgments to eligible canonical Deep candidate rows. */
 export async function recordCodexSecurityCandidateAttackPaths(

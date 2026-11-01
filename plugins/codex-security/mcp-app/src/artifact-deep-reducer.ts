@@ -1,18 +1,12 @@
-import { join } from "node:path";
-import type { ZodType } from "zod/v4";
-import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
-import reducerSchema from "../../schemas/tools/deep-reducer.schema.json";
-import scanDraftSchema from "../../schemas/tools/scan-draft.schema.json";
+import { dirname, join, posix, relative, sep } from "node:path";
 import type { ArtifactContext } from "./artifact-context.js";
-import type { DeepReducerPageInput } from "./artifact-deep-reducer-pages.js";
 import {
   parsePersistedScanDraft,
+  retainRecordedReceiptOwnership,
   saveScanDraftCheckpoint,
 } from "./artifact-scan-draft.js";
-import {
-  loadArtifactZodSchema,
-  type SchemaDocument,
-} from "./artifact-schema-loader.js";
+import { artifactSchemaDocuments } from "./artifact-contracts.js";
+import { projectArtifactToolSchema } from "./artifact-schema-loader.js";
 import { saveThreatModelDocument } from "./threat-model-document.js";
 import {
   createDeepScanArtifacts,
@@ -21,33 +15,37 @@ import {
   writeJsonAtomic,
 } from "./deep-scan/artifacts.js";
 import {
+  deepReductionForPersistence,
   parseDeepReduction,
+  projectDiscoveryCoverage,
   parseStoredScanDraft,
   reconcileDeepReduction,
   type DeepReductionInput,
   type DeepReductionSources,
 } from "./deep-scan/artifact-validation.js";
 
-const schemaDocuments = [
-  commonSchema,
-  scanDraftSchema,
-  reducerSchema,
-] as SchemaDocument[];
-
-export const deepReducerInputsInputSchema = loadArtifactZodSchema(
-  schemaDocuments,
-  reducerSchema.$id,
-  "reducerInputs",
-) as ZodType<DeepReducerPageInput>;
-
-export const deepReductionInputSchema = loadArtifactZodSchema(
-  schemaDocuments,
-  reducerSchema.$id,
-  "reductionInput",
-) as ZodType<DeepReductionInput>;
+const reducerDefinitions = artifactSchemaDocuments["tools/deep-reducer"].$defs;
+export const deepReducerInputsInputSchema = reducerDefinitions.reducerInputs;
+export const deepReductionInputSchema = projectArtifactToolSchema(
+  reducerDefinitions.reductionSubmission,
+);
 
 /** Read the findings and scan context assigned to this reducer. */
 export async function getCodexSecurityDeepReducerInputs(
+  context: ArtifactContext,
+): Promise<DeepReductionSources> {
+  const inputs = await readDeepReductionSources(context);
+  return {
+    discoveries: inputs.discoveries.map(({ workerId, result }) => ({
+      workerId,
+      result,
+    })),
+    previous: inputs.previous,
+  };
+}
+
+/** Snapshot accepted source review separately from the reducer's model inputs. */
+export async function readDeepReductionSources(
   context: ArtifactContext,
 ): Promise<DeepReductionSources> {
   return withLogicalReducerErrors(context, async () => {
@@ -58,8 +56,13 @@ export async function getCodexSecurityDeepReducerInputs(
           worker.resultPath,
           bound.artifacts.workersRoot,
         );
+        const stored = await readJsonObject(worker.resultPath);
+        await retainRecordedReceiptOwnership(
+          { ...context, root: dirname(worker.resultPath), layout: "worker" },
+          stored,
+        );
         const result = parseStoredScanDraft(
-          await readJsonObject(worker.resultPath),
+          stored,
           "Accepted Standard worker " + worker.id,
           bound.scanId,
           parsePersistedScanDraft,
@@ -74,8 +77,60 @@ export async function getCodexSecurityDeepReducerInputs(
           const provenance = finding.provenance as Record<string, unknown>;
           provenance.sourceFindingIds = [`${worker.id}:${index}`];
         }
-        const { coverage: _coverage, ...reduction } = result;
-        return { workerId: worker.id, result: reduction };
+        const { reviewState: coverage, ...reduction } = result;
+        const scanReceiptRefs = new Map<number, ReadonlySet<string>>();
+        for (const [index, surface] of (
+          coverage.surfaces as Record<string, unknown>[]
+        ).entries()) {
+          const surfaceScanRefs = new Set<string>();
+          scanReceiptRefs.set(index, surfaceScanRefs);
+          for (const ref of (surface.receiptRefs as string[] | undefined) ??
+            []) {
+            const normalized = posix.normalize(ref);
+            const inheritedScanRefs = (
+              surface.provenance as Record<string, unknown> | undefined
+            )?.scanReceiptRefs;
+            if (
+              Array.isArray(inheritedScanRefs) &&
+              inheritedScanRefs.includes(normalized)
+            ) {
+              surfaceScanRefs.add(normalized);
+              continue;
+            }
+            try {
+              await requireRegularFile(
+                join(dirname(worker.resultPath), normalized),
+                dirname(worker.resultPath),
+                true,
+              );
+              continue;
+            } catch {
+              // Shared receipts are a fallback when no valid worker-local file was found.
+            }
+            try {
+              await requireRegularFile(
+                join(bound.artifacts.scanDir, normalized),
+                bound.artifacts.scanDir,
+                true,
+              );
+              surfaceScanRefs.add(normalized);
+            } catch {
+              // Worker-local receipts are qualified below; finalization validates evidence.
+            }
+          }
+        }
+        return {
+          workerId: worker.id,
+          coverage: projectDiscoveryCoverage(
+            coverage,
+            worker,
+            relative(bound.artifacts.scanDir, dirname(worker.resultPath))
+              .split(sep)
+              .join("/"),
+            scanReceiptRefs,
+          ),
+          result: reduction,
+        };
       }),
     );
     const previous = await readPreviousReduction(bound);
@@ -105,13 +160,14 @@ export async function recordCodexSecurityDeepReduction(
 }> {
   return withLogicalReducerErrors(context, async () => {
     const bound = bindDeepReducer(context);
-    const submitted = deepReductionInputSchema.parse(input);
-    let reduction = parseDeepReduction(submitted);
+    const { retainedFindingRefs = [], ...submission } =
+      deepReductionInputSchema.parse(input);
+    let reduction = parseDeepReduction(submission);
     if (reduction.complete === false)
       throw new Error(
         "Deep reduction is only a checkpoint, not a complete result.",
       );
-    const inputs = await getCodexSecurityDeepReducerInputs(context);
+    const inputs = await readDeepReductionSources(context);
     const expectedScanId =
       bound.scanId ??
       inputs.previous?.scanId ??
@@ -125,10 +181,12 @@ export async function recordCodexSecurityDeepReduction(
       reduction,
       inputs.discoveries,
       inputs.previous,
+      retainedFindingRefs,
     );
 
-    await saveScanDraftCheckpoint(context, reduction);
-    await writeJsonAtomic(bound.resultPath, reduction);
+    const persisted = deepReductionForPersistence(reduction);
+    await saveScanDraftCheckpoint(context, persisted);
+    await writeJsonAtomic(bound.resultPath, persisted);
     const documentWarning = await saveThreatModelDocument(
       context,
       reduction.threatModel,
@@ -192,7 +250,7 @@ async function readPreviousReduction(
     await readJsonObject(previousReducerResultPath),
     "The previous accepted Deep reduction",
     bound.scanId,
-    (value) => parseDeepReduction(value, true),
+    parseDeepReduction,
     " has an invalid Standard scan result: ",
     " belongs to a different scan.",
   );

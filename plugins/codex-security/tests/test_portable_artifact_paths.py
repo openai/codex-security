@@ -17,8 +17,7 @@ def scan_case():
 
 
 def test_rejects_case_aliases_for_sealed_artifacts(scan_case) -> None:
-    scan_case.write_scan()
-    FINALIZER.finalize_scan(scan_case.scan_dir)
+    scan_case.write_sealed_scan()
     manifest = scan_case.read_json("scan-manifest.json")
     artifact = copy.deepcopy(manifest["scan"]["artifacts"][0])
     artifact["path"] = artifact["path"].upper()
@@ -45,8 +44,7 @@ def test_rejects_case_aliases_for_sealed_artifacts(scan_case) -> None:
     ],
 )
 def test_rejects_windows_ambiguous_artifact_paths(scan_case, path: str) -> None:
-    scan_case.write_scan()
-    FINALIZER.finalize_scan(scan_case.scan_dir)
+    scan_case.write_sealed_scan()
     manifest = scan_case.read_json("scan-manifest.json")
     manifest["scan"]["artifacts"].append(
         {"path": path, "sha256": "0" * 64, "mediaType": "text/plain"}
@@ -62,6 +60,5 @@ def test_preserves_unix_valid_source_paths(scan_case) -> None:
     scan_case.coverage["includePaths"] = [source]
     scan_case.coverage["surfaces"][0]["paths"] = [source]
     scan_case.findings["findings"][0]["locations"][0]["path"] = source
-    scan_case.write_scan()
-    _, findings, _ = FINALIZER.finalize_scan(scan_case.scan_dir)
+    _, findings, _ = scan_case.write_sealed_scan()
     assert findings["findings"][0]["locations"][0]["path"] == source

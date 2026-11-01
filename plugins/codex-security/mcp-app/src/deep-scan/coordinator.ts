@@ -2,18 +2,23 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { readDeepReductionSources } from "../artifact-deep-reducer.js";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   createDeepScanArtifacts,
   ensureDeepScanDirectories,
 } from "./artifacts.js";
 import {
+  aggregateSourceCoverage,
+  deepReductionToScanDraft,
   validateDiscoveryArtifacts,
   validateReducerArtifacts,
   type DeepReductionInput,
 } from "./artifact-validation.js";
 import {
   scanDraftInputSchema,
+  type DeepScanPublication,
+  findingsWithinScope,
   type ScanDraftInput,
 } from "../artifact-scan-draft.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
@@ -24,12 +29,12 @@ import type {
   DiscoveryOutcome,
 } from "./worker-runner.js";
 import {
-  boundedDeepScanErrorPair,
   confirmedOwnershipChange,
   errorNameWithCode,
   abortError,
   errorMessage,
-  boundedDeepScanErrorMessage,
+  deepScanErrorMessage,
+  DeepScanNonRetryableError,
 } from "./errors.js";
 import type {
   CodexWorkerExecutor,
@@ -56,6 +61,12 @@ interface SchedulerResult {
   reason: DeepScanTerminalReason;
   omittedWorkerIds: string[];
   result?: DeepReductionInput;
+  resultPath?: string;
+}
+
+export interface ParentScanState {
+  status: string | undefined;
+  failureMessage?: string;
 }
 
 export interface CoordinatorOptions {
@@ -75,8 +86,13 @@ export interface CoordinatorOptions {
     run: DeepScanRunState,
     signal: AbortSignal,
   ) => Promise<DeepScanRunState>;
-  onComplete?: (draft: ScanDraftInput, signal: AbortSignal) => Promise<void>;
+  onComplete?: (
+    draft: ScanDraftInput,
+    signal: AbortSignal,
+    publication: DeepScanPublication,
+  ) => Promise<void>;
   onStopped?: (run: DeepScanRunState) => Promise<void>;
+  onStart?: (coordinator: DeepScanCoordinator) => void;
 }
 
 export { DeepScanNonRetryableError } from "./errors.js";
@@ -107,6 +123,7 @@ export class DeepScanCoordinator {
   private terminal = false;
   private canceled = false;
   private externallyFailed = false;
+  private failurePersisted = false;
   private setupComplete = false;
   private discoveryDeadlineReached = false;
   private state: DeepScanRunState;
@@ -114,7 +131,13 @@ export class DeepScanCoordinator {
   constructor(private readonly options: CoordinatorOptions) {
     this.state = cloneState(options.run);
     this.clock = options.clock ?? systemClock;
-    this.log = options.log ?? (() => undefined);
+    this.log = (event) => {
+      try {
+        void Promise.resolve(options.log?.(event)).catch(() => {});
+      } catch {
+        // Optional logging must not interrupt scan control flow.
+      }
+    };
     this.artifacts = createDeepScanArtifacts(this.state.scanDir);
     const workerOptions = {
       run: this.state,
@@ -126,6 +149,7 @@ export class DeepScanCoordinator {
       random: options.random ?? Math.random,
       log: this.log,
       retryDelaysMs: options.retryDelaysMs ?? RETRY_DELAYS_MS,
+      onNonRetryableError: (error: Error) => this.abortController.abort(error),
     } satisfies Omit<
       ConstructorParameters<typeof DeepScanWorkerRunner>[0],
       "signal"
@@ -234,27 +258,95 @@ export class DeepScanCoordinator {
   async cancelAfterPersistence(
     reason: string,
     persistCancellation: () => Promise<void>,
+    readParentState: () => Promise<ParentScanState>,
   ): Promise<DeepScanRunState> {
-    if (this.terminal || this.state.status !== "running")
+    const existing = this.cancellationPersistence;
+    if (existing) {
+      try {
+        await existing.promise;
+      } catch (error) {
+        if (existing.failure) await this.settled();
+        throw error;
+      }
       return await this.settled();
-    this.cancellationPersistence ??= Promise.withResolvers<void>();
-    this.cancel(reason);
-    await this.cancellationReady.promise;
+    }
+    if (
+      this.terminal ||
+      this.canceled ||
+      this.failurePersisted ||
+      this.state.status === "canceled" ||
+      this.state.status === "interrupted"
+    )
+      return await this.settled();
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    // Cancellation callers share operation errors; terminal waiters inspect only
+    // persistence failures below. Handle a rejection even with no joined caller.
+    void promise.catch(() => {});
+    const persistence: NonNullable<typeof this.cancellationPersistence> = {
+      promise,
+      resolve,
+    };
+    this.cancellationPersistence = persistence;
     try {
-      await persistCancellation();
+      const parent = await readParentState();
+      const parentStatus = parent.status;
+      if (parentStatus === "failed")
+        this.failExternallyPersisted(parent.failureMessage);
+      if (parentStatus === "canceled") this.cancel(reason);
+      if (
+        parentStatus === "running" &&
+        !this.failurePersisted &&
+        !["canceled", "interrupted"].includes(this.state.status)
+      ) {
+        // Terminal discovery has no active writers to stop. Keep its outcome
+        // until the parent actually accepts cancellation.
+        if (this.state.status === "running") this.cancel(reason);
+        await this.cancellationReady.promise;
+        if (!this.failurePersisted) {
+          try {
+            await persistCancellation();
+            this.cancel(reason);
+          } catch (error) {
+            let parentStopped = false;
+            if (this.state.status === "succeeded") {
+              try {
+                parentStopped = ["complete", "failed"].includes(
+                  (await readParentState()).status ?? "",
+                );
+              } catch {
+                // Preserve the cancellation diagnostic if reconciliation fails.
+              }
+            }
+            if (!parentStopped) persistence.failure = { error };
+            throw error;
+          }
+        }
+      }
     } catch (error) {
-      this.cancellationPersistence.failure = { error };
+      reject(error);
+      if (!persistence.failure) {
+        this.cancellationPersistence = undefined;
+        throw error;
+      }
     } finally {
       // Cleanup still inspects durable state and preserves results when the
       // process lost a committed response, then reports the persistence failure.
-      this.cancellationPersistence.resolve();
+      persistence.resolve();
     }
-    return await this.settled();
+    const settled = await this.settled();
+    if (persistence.failure) throw persistence.failure.error;
+    return settled;
   }
 
-  failExternallyPersisted(reason: string): void {
+  failExternallyPersisted(reason: string | undefined): void {
     if (this.externallyFailed || this.terminal) return;
     this.externallyFailed = true;
+    this.failurePersisted = true;
     this.state = { ...this.state, status: "failed", error: reason };
     this.log({
       event: "coordinator_external_failure",
@@ -276,22 +368,11 @@ export class DeepScanCoordinator {
       const schedulerResult = await this.runScheduler();
       if (this.canceled || this.externallyFailed) return;
       const draft = schedulerResult.result
-        ? {
-            ...structuredClone(schedulerResult.result),
-            // Readers require coverage.json. The coordinator has accepted this
-            // result, so mark it complete and leave review notes empty.
-            coverage: {
-              completeness: "complete",
-              surfaces: [],
-              explicitExclusions: [],
-              deferred: [],
-            },
-          }
+        ? deepReductionToScanDraft(schedulerResult.result)
         : scanDraftInputSchema.parse({
             scanId: this.state.scanId,
             findings: [],
-            coverage: {
-              completeness: "partial",
+            reviewState: {
               surfaces: [],
               explicitExclusions: [],
               deferred: [
@@ -307,9 +388,19 @@ export class DeepScanCoordinator {
           "Deep Scan aggregate does not match its authoritative scan identity.",
         );
       }
+      // Publish the current scope without rewriting accepted source artifacts.
+      draft.findings = findingsWithinScope(
+        draft.findings,
+        this.state.includePaths ?? [this.state.scope],
+        this.state.filePaths,
+      );
       await this.options.onComplete?.(
         draft,
         this.publicationAbortController.signal,
+        {
+          coordinatorGeneration: this.state.coordinatorGeneration,
+          resultPath: schedulerResult.resultPath ?? null,
+        },
       );
       if (this.canceled || this.externallyFailed) return;
       const completed = await this.options.store.finish({
@@ -332,8 +423,13 @@ export class DeepScanCoordinator {
       if (await this.stopAfterOwnershipChange(this.options.threadId, error)) {
         return;
       }
+      if (
+        this.abortController.signal.reason instanceof DeepScanNonRetryableError
+      ) {
+        error = this.abortController.signal.reason;
+      }
       const message = errorMessage(error);
-      const persistedMessage = boundedDeepScanErrorMessage(error);
+      const persistedMessage = deepScanErrorMessage(error);
       if (!this.setupComplete) {
         this.log({
           event: "setup_failed",
@@ -352,6 +448,7 @@ export class DeepScanCoordinator {
         );
         if (this.canceled || this.externallyFailed) return;
         this.state = failed;
+        this.failurePersisted ||= this.state.status === "failed";
       } catch (persistError) {
         if (this.canceled || this.externallyFailed) return;
         if (
@@ -384,20 +481,29 @@ export class DeepScanCoordinator {
       await this.settleSchedulerWork();
       await this.ownershipCheck;
       this.cancellationReady.resolve();
-      await this.cancellationPersistence?.promise;
       if (this.options.onStopped && this.options.threadId) {
         let current: DeepScanRunState | undefined;
-        try {
-          current = await this.options.store.get(
-            this.state.scanId,
-            this.options.threadId,
-          );
-        } catch (error) {
-          this.log({
-            event: "coordinator_terminal_state_read_failed",
-            scanId: this.state.scanId,
-            reason: errorKind(error),
-          });
+        let persistence: Promise<void> | undefined;
+        do {
+          persistence = this.cancellationPersistence?.promise;
+          await persistence?.catch(() => {});
+          current = undefined;
+          try {
+            current = await this.options.store.get(
+              this.state.scanId,
+              this.options.threadId,
+            );
+          } catch (error) {
+            this.log({
+              event: "coordinator_terminal_state_read_failed",
+              scanId: this.state.scanId,
+              reason: errorKind(error),
+            });
+          }
+        } while (persistence !== this.cancellationPersistence?.promise);
+        if (current?.status === "failed" || current?.status === "canceled") {
+          this.state = current;
+          this.failurePersisted = current.status === "failed";
         }
         if (
           current &&
@@ -408,16 +514,10 @@ export class DeepScanCoordinator {
           try {
             await this.options.onStopped(current);
           } catch (error) {
-            const publicationFailure = boundedDeepScanErrorMessage(
-              `Saved result publication failed: ${boundedDeepScanErrorMessage(error)}`,
-            );
+            const publicationFailure = `Saved result publication failed: ${deepScanErrorMessage(error)}`;
             const originalFailure = current.error?.trim();
             const diagnostic = originalFailure
-              ? boundedDeepScanErrorPair(
-                  publicationFailure,
-                  "\nOriginal Deep Scan failure:\n",
-                  originalFailure,
-                )
+              ? `${publicationFailure}\nOriginal Deep Scan failure:\n${originalFailure}`
               : publicationFailure;
             const localState = {
               ...this.state,
@@ -453,10 +553,13 @@ export class DeepScanCoordinator {
           scanId: this.state.scanId,
         });
       }
-      if (this.cancellationPersistence?.failure) {
+      if (this.cancellationPersistence)
+        await this.cancellationPersistence.promise.catch(() => {});
+      if (this.cancellationPersistence?.failure && !this.failurePersisted) {
         throw this.cancellationPersistence.failure.error;
       }
-      if (this.canceled) this.state = { ...this.state, status: "canceled" };
+      if (this.canceled && !this.failurePersisted)
+        this.state = { ...this.state, status: "canceled" };
       if (this.stopLocally())
         this.terminalResult.resolve(cloneState(this.state));
     }
@@ -563,6 +666,7 @@ export class DeepScanCoordinator {
     let current = confirmedOwnershipChange(error, this.state.scanId)?.run;
     try {
       current ??= await this.options.store.get(this.state.scanId, threadId);
+      this.failurePersisted ||= current.status === "failed";
     } catch (readError) {
       this.log({
         event: "coordinator_ownership_read_failed",
@@ -591,6 +695,7 @@ export class DeepScanCoordinator {
           current,
           this.observationAbortController.signal,
         );
+        this.failurePersisted ||= this.state.status === "failed";
       } catch (observeError) {
         this.log({
           event: "coordinator_replacement_observation_failed",
@@ -610,16 +715,15 @@ export class DeepScanCoordinator {
   }
 
   /**
-   * Keep the discovery pool full until the reducer establishes convergence or
-   * the configured run cap is exhausted. Completed discoveries enter a stable
-   * FIFO buffer. One reducer claims the current buffer snapshot; discoveries
-   * that finish during that reduction wait for the next one.
+   * Refill discovery between reductions so a slow reducer cannot build an
+   * unchecked backlog. One reducer claims the FIFO buffer. Discoveries that
+   * finish during reduction wait for the next one.
    */
   private async runScheduler(): Promise<SchedulerResult> {
     const config = this.state.config;
     const active = new Map<string, Promise<DiscoveryOutcome>>();
     const recovered = await this.recoverAcceptedDiscoveries();
-    let acceptedCount = recovered.length;
+    const acceptedIds = new Set(recovered.map((worker) => worker.id));
     const mergedIds = new Set(
       (this.state.persistedWorkers ?? [])
         .filter(
@@ -787,7 +891,7 @@ export class DeepScanCoordinator {
       phase: "discovery",
       handoffClaimToken: this.options.handoffClaimToken,
     });
-    this.logProgress(acceptedCount);
+    this.logProgress(acceptedIds.size);
 
     while (!stopReason) {
       if (this.abortController.signal.aborted) {
@@ -799,6 +903,7 @@ export class DeepScanCoordinator {
       }
       if (settlements.length === 0) {
         while (
+          !reducer &&
           !this.discoveryDeadlineReached &&
           (!previousReducerResultPath ||
             this.state.noNewStreak < config.stopAfterNoNew) &&
@@ -835,6 +940,7 @@ export class DeepScanCoordinator {
               label: `dedup-${String(reducerSequence).padStart(4, "0")}`,
               consumed,
               previousReducerResultPath,
+              previousSourceCoverage: latestResult?.sourceCoverage,
             }),
           );
           observe(reducer);
@@ -902,10 +1008,10 @@ export class DeepScanCoordinator {
           }
           continue;
         }
-        acceptedCount += 1;
+        acceptedIds.add(outcome.worker.id);
         this.state = { ...this.state, consecutiveErrors: 0 };
         buffer.push(outcome.worker);
-        this.logProgress(acceptedCount);
+        this.logProgress(acceptedIds.size);
         continue;
       }
 
@@ -952,7 +1058,7 @@ export class DeepScanCoordinator {
 
     if (
       !previousReducerResultPath &&
-      !(this.discoveryDeadlineReached && acceptedCount === 0)
+      !(this.discoveryDeadlineReached && acceptedIds.size === 0)
     ) {
       throw new Error(
         "Deep Scan ended without a successfully reduced Standard scan.",
@@ -962,6 +1068,7 @@ export class DeepScanCoordinator {
       reason: stopReason,
       omittedWorkerIds: [...new Set(omittedWorkerIds)],
       result: latestResult,
+      resultPath: previousReducerResultPath,
     };
   }
 
@@ -979,11 +1086,13 @@ export class DeepScanCoordinator {
         this.artifacts,
         worker.resultManifestPath,
         this.state.scanId,
+        this.state,
       );
       recovered.push({
         id: worker.id,
         resultPath: worker.resultManifestPath,
         completionSequence: worker.completionSequence,
+        attempt: worker.attempt,
       });
     }
     return recovered.sort(compareCompletionSequence);
@@ -1038,6 +1147,34 @@ export class DeepScanCoordinator {
           previousReducerResultPath: resultPath,
         },
         this.state.scanId,
+      );
+      const accepted = discoveries.filter((source) =>
+        inputs.some(
+          (input) =>
+            input.dedupWorkerId === worker.id &&
+            input.discoveryWorkerId === source.id,
+        ),
+      );
+      const sources = await readDeepReductionSources({
+        root: worker.artifactDir,
+        repoRoot: this.state.targetPath,
+        scanId: this.state.scanId,
+        layout: "reducer",
+        scope: this.state.scope,
+        includePaths: this.state.includePaths,
+        filePaths: this.state.filePaths,
+        deepReducer: {
+          scanRoot: this.artifacts.scanDir,
+          claimedWorkers: accepted.map((source) => ({
+            id: source.id,
+            resultPath: source.resultPath,
+            attempt: source.attempt,
+          })),
+        },
+      });
+      result.sourceCoverage = aggregateSourceCoverage(
+        sources.discoveries,
+        latestResult ?? null,
       );
       latestResult = result;
       resultPath = worker.resultManifestPath;

@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parse } from "smol-toml";
+import { forwardExternalImportSetting } from "./external-imports-feature.js";
 import type { JsonObject } from "./config.js";
 import {
   CodexSecurityError,
@@ -37,12 +38,14 @@ export function environmentEntry(
 export function withoutOpenAiApiKeys<Value>(
   environment: Record<string, Value>,
 ): Record<string, Value> {
-  return Object.fromEntries(
+  const child = Object.fromEntries(
     Object.entries(environment).filter(
       ([name]) =>
         !["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
     ),
   );
+  forwardExternalImportSetting(environment, child);
+  return child;
 }
 
 /** @internal */
@@ -78,12 +81,9 @@ export async function readCodexHomeConfig(
   }
 }
 
-export interface LoginResult {
-  success: boolean;
-  exitCode: number | null;
-  stdout: string;
-  stderr: string;
-}
+export interface LoginResult extends Awaited<
+  ReturnType<typeof runCodexCommand>
+> {}
 
 export interface AccountStatus {
   authenticated: boolean;
@@ -336,7 +336,14 @@ function preferredAuthUrl(value: string): string | null {
   for (const match of plainTerminalText(value).matchAll(
     /https?:\/\/[^\s<>"']+/g,
   )) {
-    const url = match[0].replace(/[.,;:!?)\]}]+$/, "");
+    // A bracket ending an IPv6 authority belongs to the URL, even in prose.
+    const candidate = match[0];
+    const ipv6Authority =
+      candidate.match(/^https?:\/\/(?:[^\\/?#]*@)?\[[\da-fA-F:.]+\]/)?.[0] ??
+      "";
+    const url =
+      ipv6Authority +
+      candidate.slice(ipv6Authority.length).replace(/[.,;:!?)\]}]+$/, "");
     try {
       const parsed = new URL(url);
       const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
@@ -372,7 +379,7 @@ function userCodeFromOutput(value: string): string | null {
 
 function plainTerminalText(value: string): string {
   return value
-    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
+    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "")
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/\r/g, "");
 }

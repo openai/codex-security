@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { parse } from "yaml";
 import runtimeVars from "./runtime-vars.mts";
 
 const evalRoot = path.resolve(import.meta.dirname, "..");
@@ -101,24 +102,57 @@ try {
 for (const name of [
   "promptfooconfig.yaml",
   "promptfooconfig.calibration.yaml",
-  "sastbench/promptfooconfig.sastbench.yaml",
+  "promptfooconfig.sastbench.yaml",
 ]) {
-  const config = fs.readFileSync(path.join(evalRoot, name), "utf8");
-  assert.match(config, /":minimal": read\n\s+":workspace_roots": read/);
-  assert.match(config, /plugins: false/);
-  assert.match(config, /memories: false/);
-  assert.doesNotMatch(config, /working_dir:|CODEX_MCP_NODE_PATH:/);
+  const suite = parse(fs.readFileSync(path.join(evalRoot, name), "utf8"));
+  const providerPath = path.resolve(evalRoot, suite.providers[0].$ref);
+  const { id, config } = parse(fs.readFileSync(providerPath, "utf8"));
+  assert.match(id, /^openai:codex-sdk:/);
+  assert.deepEqual(
+    config.cli_config.permissions[config.cli_config.default_permissions],
+    {
+      filesystem: { ":minimal": "read", ":workspace_roots": "read" },
+      network: { enabled: false },
+    },
+  );
+  assert.deepEqual(config.cli_config.features, {
+    plugins: false,
+    memories: false,
+  });
+  assert.equal(config.skip_git_repo_check, true);
+  assert.equal(config.approval_policy, "never");
+  assert.equal(config.working_dir, undefined);
+  assert.equal(config.cli_env?.CODEX_MCP_NODE_PATH, undefined);
+  assert.equal(config.sandbox_mode, undefined);
+  assert.equal(config.network_access_enabled, undefined);
+  if (name !== "promptfooconfig.sastbench.yaml") {
+    for (const proxy of [
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "ALL_PROXY",
+      "NO_PROXY",
+    ]) {
+      assert.equal(config.cli_env[proxy], `{{env.${proxy}}}`);
+    }
+  }
   if (name === "promptfooconfig.calibration.yaml") {
-    assert.ok(config.includes("{{calibration_repo}}"));
-    assert.match(config, /transformVars:/);
+    assert.ok(
+      config.additional_directories[0].includes("{{calibration_repo}}"),
+    );
+    assert.equal(
+      suite.defaultTest.options.transformVars,
+      "file://./scripts/runtime-vars.mts",
+    );
   }
 }
-assert.match(
-  fs.readFileSync(
-    path.join(evalRoot, "promptfooconfig.calibration-smoke.yaml"),
-    "utf8",
-  ),
-  /\$ref: \.\/promptfooconfig\.calibration\.yaml/,
+assert.equal(
+  parse(
+    fs.readFileSync(
+      path.join(evalRoot, "promptfooconfig.calibration-smoke.yaml"),
+      "utf8",
+    ),
+  ).$ref,
+  "./promptfooconfig.calibration.yaml",
 );
 assert.ok(
   fs
@@ -127,4 +161,4 @@ assert.ok(
       "Read and follow plugins/codex-security/skills/triage-finding/SKILL.md",
     ),
 );
-console.log("triage Promptfoo target path tests passed");
+console.log("triage Promptfoo runtime tests passed");

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import os
 import unittest
+import unittest.mock as mock
 from datetime import datetime, timezone
-from unittest import mock
 
 import test_finalize_scan_contract as fixtures
 

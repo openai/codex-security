@@ -1,20 +1,17 @@
+import { workbenchArgs } from "./src/workbench-arguments.js";
+import { CodexSecurityStdioTransport } from "./src/stdio-transport.js";
 import {
   readingAnnotations,
   writingAnnotations,
 } from "./src/server/tool-annotations.js";
 import type { JsonObject } from "./src/types.js";
 import { isRecord as isJsonObject } from "./src/record.js";
-import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { promises as fs } from "node:fs";
-import { join, resolve } from "node:path";
-import { promisify } from "node:util";
+import { realpath, stat } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
-import {
-  missingPythonHelperMessage,
-  resolvePythonCommand,
-} from "./src/python_command.js";
+import { resolvePythonCommand } from "./src/python_command.js";
 import { version as MCP_APP_VERSION } from "./package.json";
 import {
   handoffClaimTokenSchema,
@@ -23,30 +20,29 @@ import {
   type HandoffWorkspaceState as WorkspaceState,
 } from "./src/server/handoff-tools.js";
 import { registerCompactArtifactTools } from "./src/server/compact-artifact-tools.js";
-import { createScanArtifactContext } from "./src/artifact-context.js";
-import { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.js";
+import { registerFindingIssueTools } from "./src/server/finding-issue-tools.js";
 import {
   DeepScanCoordinatorRegistry,
+  DeepScanCoordinator,
   AsyncLock,
-  startOrJoinDeepScanCoordinator,
 } from "./src/deep-scan/registry.js";
-import { CodexSdkWorkerExecutor } from "./src/deep-scan/executor.js";
+import { startDeepScanEngine } from "./src/deep-scan/engine.js";
+import type { DeepScanParentTurn } from "./src/deep-scan/permission-profile-preflight.js";
 import {
   CODEX_SANDBOX_STATE_META_CAPABILITY,
   resolveDeepWorkerParentSandbox,
   type DeepWorkerParentSandbox,
 } from "./src/deep-scan/parent-sandbox.js";
 import { WorkbenchDeepScanStore } from "./src/deep-scan/store.js";
+import { readDeepScanProjectConfig } from "./src/deep-scan/project-config.js";
 import type { DeepScanRunState } from "./src/deep-scan/types.js";
-import { WORKBENCH_PYTHON } from "./src/server/workbench-process.js";
+import { PLUGIN_ROOT, runWorkbench, scanRoot } from "./src/workbench-client.js";
 
-const execFileAsync = promisify(execFile);
-const CONFIGURED_SCAN_ROOT = process.env.CODEX_SECURITY_SCAN_ROOT?.trim();
-const PLUGIN_ROOT =
-  process.env.CODEX_SECURITY_PLUGIN_ROOT || resolve(__dirname, "..");
 const USER_INPUT_WAIT_TIMEOUT_MS = 14 * 60 * 1000;
-const userContextSchema = z.string().trim().min(1);
-const editableUserContextSchema = z.string().trim();
+const trimmedText = z.string().trim();
+const requiredText = trimmedText.min(1);
+const nonnegativeInteger = z.number().int().nonnegative();
+const positiveInteger = z.number().int().positive();
 const pathSchema = z
   .string()
   .min(1)
@@ -97,40 +93,24 @@ const daybreakEntitlementContextSchema = z.object({
   }),
 });
 
-async function scanRoot(): Promise<string> {
-  const result = await runWorkbench([
-    "resolve-scan-root",
-    ...optionalArg("--scan-root", CONFIGURED_SCAN_ROOT),
-  ]);
-  if (typeof result.scanRoot !== "string")
-    throw new Error("Missing scan artifact root.");
-  return result.scanRoot;
-}
-
 const diffTargetSchema = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("working_tree"),
-    baseRevision: z.string().trim().min(1).max(512).optional(),
-    contentDigest: z.string().trim().min(1).max(128).optional(),
-    headRevision: z.string().trim().min(1).max(512).optional(),
+    baseRevision: requiredText.max(512).optional(),
+    contentDigest: requiredText.max(128).optional(),
+    headRevision: requiredText.max(512).optional(),
   }),
   z.strictObject({
     kind: z.literal("commit"),
-    baseRevision: z.string().trim().min(1).max(512).optional(),
-    headRevision: z.string().trim().min(1).max(512),
+    baseRevision: requiredText.max(512).optional(),
+    headRevision: requiredText.max(512),
   }),
   z.strictObject({
     kind: z.literal("range"),
-    baseRevision: z.string().trim().min(1).max(512),
-    headRevision: z.string().trim().min(1).max(512),
+    baseRevision: requiredText.max(512),
+    headRevision: requiredText.max(512),
   }),
 ]);
-const currentScanPreflightCheckSchema = z.strictObject({
-  capability: z.string().trim().min(1).max(128),
-  reason: z.string().trim().min(1).max(1200),
-  severity: z.enum(["block", "warn", "suggest"]),
-  status: z.enum(["pass", "fail", "unknown"]),
-});
 const openSchema = {
   diffTarget: diffTargetSchema
     .optional()
@@ -154,29 +134,23 @@ const openSchema = {
   targetPath: pathSchema
     .optional()
     .describe("Optional resolved local target path."),
-  targetSummary: z
-    .string()
-    .trim()
-    .min(1)
+  targetSummary: requiredText
     .max(2400)
     .optional()
     .describe("Optional bounded target/security context."),
-  targetTitle: z
-    .string()
-    .trim()
-    .min(1)
+  targetTitle: requiredText
     .max(200)
     .optional()
     .describe("Optional human-readable target name."),
-  userContext: userContextSchema
+  userContext: requiredText
     .optional()
     .describe("Optional security focus supplied by the user."),
 };
 const sessionSchema = { sessionId: z.string().uuid() };
 const startScanSchema = {
   ...sessionSchema,
-  model: z.string().trim().min(1).max(200).optional(),
-  reasoningEffort: z.string().trim().min(1).max(32).optional(),
+  model: requiredText.max(200).optional(),
+  reasoningEffort: requiredText.max(32).optional(),
 };
 const startPromptOnlyScanSchema = {
   diffTarget: diffTargetSchema
@@ -191,14 +165,11 @@ const startPromptOnlyScanSchema = {
     "Directory inside targetPath. Use '.' for the whole target.",
   ),
   targetPath: pathSchema.describe("Resolved local target path."),
-  targetSummary: z
-    .string()
-    .trim()
-    .min(1)
+  targetSummary: requiredText
     .max(2400)
     .optional()
     .describe("Optional bounded target or change-set context."),
-  userContext: userContextSchema
+  userContext: requiredText
     .optional()
     .describe("Optional security focus supplied by the user."),
 };
@@ -209,31 +180,24 @@ const startHeadlessStandardScanSchema = {
     .describe(
       "Optional directory inside targetPath. Omit it or use '.' for the whole target.",
     ),
-  targetSummary: z
-    .string()
-    .trim()
+  targetSummary: trimmedText
     .max(2400)
     .optional()
     .describe("Optional bounded target context."),
-  userContext: editableUserContextSchema
+  userContext: trimmedText
     .optional()
     .describe("Optional security focus supplied by the user."),
 };
-type PromptOnlyScanInput = {
-  diffTarget?: z.output<typeof diffTargetSchema>;
-  mode: "diff" | "standard";
-  scope: string;
-  targetPath: string;
-  targetSummary?: string;
-  userContext?: string;
-};
+type PromptOnlyScanInput = z.output<
+  z.ZodObject<typeof startPromptOnlyScanSchema>
+>;
 const userInputOptionSchema = z.strictObject({
-  description: z.string().trim().min(1).max(1200),
-  label: z.string().trim().min(1).max(200),
+  description: requiredText.max(1200),
+  label: requiredText.max(200),
 });
 const userInputQuestionSchema = z
   .strictObject({
-    header: z.string().trim().min(1).max(64),
+    header: requiredText.max(64),
     id: z
       .string()
       .regex(
@@ -245,7 +209,7 @@ const userInputQuestionSchema = z
         "Question IDs must not use reserved object property names.",
       ),
     options: z.array(userInputOptionSchema).min(2).max(3),
-    question: z.string().trim().min(1).max(1200),
+    question: requiredText.max(1200),
   })
   .superRefine((question, context) => {
     const labels = new Set<string>();
@@ -285,16 +249,23 @@ const requestUserInputSchema = {
 const targetInspectionSchema = {
   targetPath: pathSchema,
 };
+const projectConfigPathSchema = pathSchema
+  .optional()
+  .describe(
+    "Project YAML/JSON configuration explicitly selected by the user. Never discover or select a repository file automatically. Supported for Deep Scan only.",
+  );
 const submissionSchema = {
+  projectConfigPath: projectConfigPathSchema,
   diffTarget: diffTargetSchema.optional(),
   mode: z.enum(["diff", "standard", "deep"]),
   scope: pathSchema,
   sessionId: z.string().uuid(),
   targetPath: pathSchema,
-  targetSummary: z.string().trim().max(2400).optional(),
-  userContext: editableUserContextSchema.optional(),
+  targetSummary: trimmedText.max(2400).optional(),
+  userContext: trimmedText.optional(),
 };
 const setupInspectionSchema = {
+  projectConfigPath: projectConfigPathSchema,
   diffTarget: diffTargetSchema.optional(),
   mode: z.enum(["diff", "standard", "deep"]),
   scope: pathSchema,
@@ -302,6 +273,7 @@ const setupInspectionSchema = {
 };
 const scanSchema = { scanId: z.string().uuid() };
 const startDeepScanSchema = {
+  projectConfigPath: projectConfigPathSchema,
   scanId: z
     .string()
     .uuid()
@@ -317,7 +289,7 @@ const startDeepScanSchema = {
     .describe(
       "Scope inside targetPath. Deep Scan currently requires the whole target.",
     ),
-  userContext: editableUserContextSchema
+  userContext: trimmedText
     .optional()
     .describe("Optional security focus supplied by the user."),
   handoffClaimToken: handoffClaimTokenSchema
@@ -336,13 +308,13 @@ const continuationMutationClaimSchema = {
 const scanContextUpdateSchema = {
   ...scanSchema,
   ...continuationMutationClaimSchema,
-  userContext: editableUserContextSchema.describe(
+  userContext: trimmedText.describe(
     "Complete replacement context for the running scan. Pass an empty string to clear it.",
   ),
 };
 const appScanContextUpdateSchema = {
   ...scanSchema,
-  userContext: editableUserContextSchema,
+  userContext: trimmedText,
 };
 const phaseProgressUnitSchema = z.enum([
   "checks",
@@ -353,10 +325,7 @@ const phaseProgressUnitSchema = z.enum([
   "report_artifacts",
 ]);
 const progressSchema = {
-  deepReviewPass: z
-    .number()
-    .int()
-    .positive()
+  deepReviewPass: positiveInteger
     .optional()
     .describe(
       "Current Deep Scan discovery pass. Send it when starting each pass together with that pass's total and zero completed items.",
@@ -374,18 +343,12 @@ const progressSchema = {
     .describe(
       "Current workflow phase. Send it immediately when the scan enters a new phase so persisted progress advances.",
     ),
-  phaseItemsCompleted: z
-    .number()
-    .int()
-    .nonnegative()
+  phaseItemsCompleted: nonnegativeInteger
     .optional()
     .describe(
       "Completed authoritative coverage, receipts, or artifacts for the current phase. Increase it only after the corresponding work product exists.",
     ),
-  phaseItemsTotal: z
-    .number()
-    .int()
-    .nonnegative()
+  phaseItemsTotal: nonnegativeInteger
     .optional()
     .describe(
       "Expected authoritative coverage, receipts, or artifacts for the current phase. Increase it before newly discovered work begins.",
@@ -395,26 +358,13 @@ const progressSchema = {
     .describe(
       "What phaseItemsTotal and phaseItemsCompleted count for the current phase.",
     ),
-  preflightChecks: z
-    .array(currentScanPreflightCheckSchema)
-    .max(32)
-    .optional()
-    .describe(
-      "Current standard or diff scan preflight results. Project every helper results entry to capability, reason, severity, and status only. The server derives the item counts and visible block/warn attention items.",
-    ),
-  reportableFindingsCount: z.number().int().nonnegative().optional(),
-  reviewItemsCompleted: z
-    .number()
-    .int()
-    .nonnegative()
+  reportableFindingsCount: nonnegativeInteger.optional(),
+  reviewItemsCompleted: nonnegativeInteger
     .optional()
     .describe(
       "Cumulative completed reviews or coverage surfaces in the current discovery pass. Increment only after the corresponding review is complete.",
     ),
-  reviewItemsTotal: z
-    .number()
-    .int()
-    .nonnegative()
+  reviewItemsTotal: nonnegativeInteger
     .optional()
     .describe(
       "Expected reviews or coverage surfaces in the current discovery pass. Increase it before assigning newly discovered work.",
@@ -424,14 +374,14 @@ const progressSchema = {
 };
 const failSchema = {
   ...continuationMutationClaimSchema,
-  message: z.string().trim().min(1).max(2400),
+  message: requiredText,
   scanId: z.string().uuid(),
 };
 const completeScanSchema = {
   ...scanSchema,
   ...continuationMutationClaimSchema,
 };
-const occurrenceIdSchema = z.string().trim().min(1).max(256);
+const occurrenceIdSchema = requiredText.max(256);
 const scanReadSchema = {
   ...scanSchema,
   occurrenceId: occurrenceIdSchema
@@ -452,14 +402,14 @@ const findingTriageSchema = {
   closeReason: z
     .enum(["already_fixed", "wont_fix", "false_positive"])
     .optional(),
-  note: z.string().trim().max(2400).optional(),
+  note: trimmedText.max(2400).optional(),
   occurrenceId: occurrenceIdSchema,
   status: z.enum(["open", "closed"]),
 };
 const findingRemediationSchema = {
   actionToken: z.string().uuid(),
-  baseRevision: z.string().trim().min(1).max(512).optional(),
-  expectedVersion: z.number().int().positive(),
+  baseRevision: requiredText.max(512).optional(),
+  expectedVersion: positiveInteger,
   occurrenceId: occurrenceIdSchema,
   patchDigest: z
     .string()
@@ -468,13 +418,13 @@ const findingRemediationSchema = {
   patchPath: pathSchema.optional(),
   requestId: z.string().uuid(),
   state: z.enum(["generated", "applied", "verifying", "verified", "failed"]),
-  summary: z.string().trim().max(2400).optional(),
-  verificationSummary: z.string().trim().max(2400).optional(),
+  summary: trimmedText.max(2400).optional(),
+  verificationSummary: trimmedText.max(2400).optional(),
 };
 const findingRemediationActionRequestSchema = {
   action: z.enum(["apply", "verify"]),
   actionToken: z.string().uuid(),
-  expectedVersion: z.number().int().positive(),
+  expectedVersion: positiveInteger,
   occurrenceId: occurrenceIdSchema,
   requestId: z.string().uuid(),
 };
@@ -489,19 +439,19 @@ const findingsExportSchema = {
   scanId: z.string().uuid(),
 };
 const collectionPageSchema = {
-  limit: z.number().int().positive().max(50).optional(),
-  offset: z.number().int().nonnegative().optional(),
+  limit: positiveInteger.max(50).optional(),
+  offset: nonnegativeInteger.optional(),
 };
 const findingCollectionFiltersSchema = {
-  query: z.string().trim().max(512).optional(),
+  query: trimmedText.max(512).optional(),
   severity: z
     .enum(["critical", "high", "medium", "low", "informational"])
     .optional(),
   status: z.enum(["open", "closed"]).optional(),
 };
 const targetCollectionFiltersSchema = {
-  query: z.string().trim().max(512).optional(),
-  targetId: z.string().trim().min(1).max(256).optional(),
+  query: trimmedText.max(512).optional(),
+  targetId: requiredText.max(256).optional(),
 };
 const findingsPageSchema = {
   ...collectionPageSchema,
@@ -510,9 +460,9 @@ const findingsPageSchema = {
 };
 const globalFindingsPageSchema = {
   ...findingCollectionFiltersSchema,
-  limit: z.number().int().positive().max(20).optional(),
-  offset: z.number().int().nonnegative().optional(),
-  targetId: z.string().trim().min(1).max(256).optional(),
+  limit: positiveInteger.max(20).optional(),
+  offset: nonnegativeInteger.optional(),
+  targetId: requiredText.max(256).optional(),
 };
 const scanListSchema = {
   ...collectionPageSchema,
@@ -527,7 +477,11 @@ const repositoryListSchema = {
 };
 export function createCodexSecurityServer(): McpServer {
   const server = new McpServer(
-    { name: "codex-security", version: MCP_APP_VERSION },
+    {
+      name: "codex-security",
+      title: "Codex Security",
+      version: MCP_APP_VERSION,
+    },
     {
       capabilities: {
         experimental: { [CODEX_SANDBOX_STATE_META_CAPABILITY]: {} },
@@ -537,6 +491,10 @@ export function createCodexSecurityServer(): McpServer {
     },
   );
   const deepScanCoordinators = new DeepScanCoordinatorRegistry();
+  const deepScanCompletions = new WeakMap<
+    DeepScanCoordinator,
+    Promise<ReturnType<typeof deepScanTerminalResult>>
+  >();
   // Serialize start-or-join so a scan creates only one coordinator.
   const deepScanStartLock = new AsyncLock();
   const deepScanStore = new WorkbenchDeepScanStore(runWorkbench);
@@ -692,7 +650,7 @@ export function createCodexSecurityServer(): McpServer {
           scanDir,
           handoffClaimToken,
         },
-        `${started.startDisposition === "created" ? "Started" : "Rejoined"} Standard scan ${scanId}. When the scan is in preflight, complete security_scan preflight before reviewing the target or creating a goal. Preserve the returned handoffClaimToken for scan progress, the semantic draft, and completion.`,
+        `${started.startDisposition === "created" ? "Started" : "Rejoined"} Standard scan ${scanId}. When the scan is in preflight, follow references/scan-runtime.md, then advance to threat_model before reviewing the target. Use available workers or parent fallback. Preserve the returned handoffClaimToken for scan progress, the semantic draft, and completion.`,
       );
     },
   );
@@ -848,11 +806,9 @@ export function createCodexSecurityServer(): McpServer {
       _meta: appMeta,
     },
     async ({ targetPath }) => {
-      const target = await runWorkbench([
-        "inspect-target",
-        "--target-path",
-        targetPath,
-      ]);
+      const target = await runWorkbench(
+        workbenchArgs("inspect-target", { targetPath }),
+      );
       return scanActionResult(
         { target },
         "Validated the local Codex Security target.",
@@ -865,20 +821,26 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Validate Codex Security Setup",
       description:
-        "App-only. Resolve and validate the complete local target, scope, mode, and exact Git change set without saving setup.",
+        "Resolve and validate the local target, scope, mode, and exact Git change set without saving setup. Deep Scan returns effective limits and their sources before model work; projectConfigPath must be explicitly selected by the user.",
       inputSchema: setupInspectionSchema,
       annotations: readingAnnotations,
-      _meta: appMeta,
+      _meta: { ui: { visibility: ["app", "model"] } },
     },
-    async ({ targetPath, scope, mode, diffTarget }) => {
+    async ({ targetPath, scope, mode, diffTarget, projectConfigPath }) => {
+      const selected = await deepScanProjectSetup(
+        targetPath,
+        projectConfigPath,
+        "preview",
+      );
       const setup = await runWorkbench([
         "inspect-setup",
         "--target-path",
-        targetPath,
+        selected.targetPath,
         `--scope=${scope}`,
         "--mode",
         mode,
         ...diffTargetArgs(diffTarget),
+        ...optionalArg("--deep-scan-project-json", selected.projectConfigJson),
       ]);
       return scanActionResult(
         { setup },
@@ -905,7 +867,13 @@ export function createCodexSecurityServer(): McpServer {
       targetSummary,
       userContext,
       diffTarget,
+      projectConfigPath,
     }) => {
+      const selected = await deepScanProjectSetup(
+        targetPath,
+        projectConfigPath,
+        "save",
+      );
       return workspaceResult(
         (await runWorkbench(
           [
@@ -913,13 +881,17 @@ export function createCodexSecurityServer(): McpServer {
             "--workspace-id",
             sessionId,
             "--target-path",
-            targetPath,
+            selected.targetPath,
             `--scope=${scope}`,
             "--mode",
             mode,
             ...definedArg("--target-summary", targetSummary),
             ...(userContext ? ["--user-context-stdin"] : []),
             ...diffTargetArgs(diffTarget),
+            ...optionalArg(
+              "--deep-scan-project-json",
+              selected.projectConfigJson,
+            ),
           ],
           userContext,
         )) as WorkspaceState,
@@ -956,13 +928,20 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Start or Join Codex Security Deep Scan",
       description:
-        "Run or rejoin independent Standard security scans and semantically merge their validated findings. Pass scanId and its handoffClaimToken to resume, or targetPath to start headlessly. The call blocks until the aggregate draft is ready, fails, or is canceled. On success, use the returned scanId and scanDir; manifestPath identifies the canonical parent scan-manifest.json. Call complete_codex_security_scan once.",
+        "Run or rejoin independent Standard security scans and semantically merge their validated findings. Pass scanId and its handoffClaimToken to resume, or targetPath to start headlessly. The coordinator finalizes the parent even if this caller detaches. For an SDK-registered scan it returns the aggregate to the SDK for finalization. Follow the returned instructions for the authoritative scanId, scanDir, and manifestPath.",
       inputSchema: startDeepScanSchema,
       annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
     async (
-      { scanId, targetPath, scope, userContext, handoffClaimToken },
+      {
+        scanId,
+        targetPath,
+        scope,
+        userContext,
+        handoffClaimToken,
+        projectConfigPath,
+      },
       extra,
     ) => {
       const hasScanId = scanId !== undefined;
@@ -975,10 +954,12 @@ export function createCodexSecurityServer(): McpServer {
       }
       if (
         hasScanId &&
-        (scope !== undefined || normalizedUserContext !== undefined)
+        (scope !== undefined ||
+          normalizedUserContext !== undefined ||
+          projectConfigPath !== undefined)
       ) {
         return toolErrorResult(
-          "When scanId is present, omit targetPath, scope, and userContext; the persisted scan is authoritative.",
+          "When scanId is present, omit targetPath, scope, userContext, and projectConfigPath; the persisted scan is authoritative.",
         );
       }
       if (hasTarget && !wholeTargetScope(scope, targetPath)) {
@@ -1004,6 +985,41 @@ export function createCodexSecurityServer(): McpServer {
       } catch (error: unknown) {
         return toolErrorResult(deepScanInvocationFailureMessage(error));
       }
+      const completeDeepScan = async (run: DeepScanRunState) => {
+        if (run.status !== "succeeded" || run.sdkOwnsCompletion)
+          return deepScanTerminalResult(run);
+        try {
+          const turnMetadata = codexTurnMetadataFromExtra(extra);
+          const turnId =
+            turnMetadata?.thread_source === "security_scan"
+              ? turnMetadata.turn_id
+              : undefined;
+          const completion = await runWorkbench([
+            "complete-scan",
+            "--scan-id",
+            run.scanId,
+            ...optionalArg("--claim-token", handoffClaimToken),
+            ...optionalArg("--thread-id", threadId),
+            ...optionalArg(
+              "--turn-id",
+              typeof turnId === "string" ? turnId : undefined,
+            ),
+          ]);
+          return deepScanTerminalResult(run, completion);
+        } catch (error) {
+          logDeepScanEvent({
+            event: "coordinator_completion_failed",
+            scanId: run.scanId,
+            reason: failureDiagnostic(error),
+          });
+          return {
+            ...toolErrorResult(
+              `${completionFailureMessage(error)}\nScan ID: ${run.scanId}`,
+            ),
+            structuredContent: { scanId: run.scanId },
+          };
+        }
+      };
       const preparation = await deepScanStartLock
         .run(async () => {
           const begun = await deepScanStore.begin({
@@ -1013,6 +1029,7 @@ export function createCodexSecurityServer(): McpServer {
             userContext: normalizedUserContext,
             handoffClaimToken,
             threadId,
+            projectConfigPath,
             ...modelSettings,
             scanRoot: await scanRoot(),
           });
@@ -1023,67 +1040,56 @@ export function createCodexSecurityServer(): McpServer {
             });
           }
           const immediate = deepScanTerminalResult(begun);
-          if (immediate) return { begun, immediate };
-          const started = await startOrJoinDeepScanCoordinator({
+          if (immediate) {
+            const coordinator = deepScanCoordinators.get(begun.scanId);
+            return {
+              begun,
+              immediate,
+              completion: {
+                result:
+                  (coordinator && deepScanCompletions.get(coordinator)) ??
+                  completeDeepScan(begun),
+              },
+            };
+          }
+          const completion: {
+            result?: Promise<ReturnType<typeof deepScanTerminalResult>>;
+          } = {};
+          const onStart = (coordinator: DeepScanCoordinator) => {
+            completion.result = deepScanCompletions.get(coordinator);
+            if (!completion.result) {
+              // The same hook runs when a remote observer adopts an expired lease.
+              // Completion belongs to the coordinator, not an abortable RPC waiter.
+              completion.result = coordinator
+                .settled()
+                .then(completeDeepScan, (error) =>
+                  toolErrorResult(deepScanInvocationFailureMessage(error)),
+                );
+              deepScanCompletions.set(coordinator, completion.result);
+            }
+          };
+          const started = await startDeepScanEngine({
             run: begun,
             registry: deepScanCoordinators,
-            options: {
-              store: deepScanStore,
-              executor: new CodexSdkWorkerExecutor({
-                ...modelSettings,
-                parentSandbox,
-                artifactContext: {
-                  pluginRoot: PLUGIN_ROOT,
-                  repoRoot: begun.targetPath,
-                  scanId: begun.scanId,
-                  scope: begun.scope,
-                  pythonCommand: await resolvePythonCommand(),
-                },
-              }),
-              pluginRoot: PLUGIN_ROOT,
-              log: logDeepScanEvent,
-              handoffClaimToken,
-              threadId,
-              onComplete: async (draft, signal) => {
-                const context = await createScanArtifactContext(
-                  begun.scanId,
-                  runWorkbench,
-                  {
-                    requireRunning: true,
-                    requireClaim: true,
-                    handoffClaimToken,
-                    pluginRoot: PLUGIN_ROOT,
-                  },
-                );
-                await recordCodexSecurityScanDraftViaWorkbench(
-                  context,
-                  {
-                    ...draft,
-                    ...(handoffClaimToken === undefined
-                      ? {}
-                      : { handoffClaimToken }),
-                  },
-                  runWorkbench,
-                  signal,
-                );
-              },
-              onStopped: async (run) => {
-                await runWorkbench([
-                  "preserve-scan-results",
-                  "--scan-id",
-                  run.scanId,
-                  "--thread-id",
-                  threadId,
-                  ...optionalArg("--claim-token", handoffClaimToken),
-                  ...optionalArg(
-                    "--coordinator-generation",
-                    run.coordinatorGeneration?.toString(),
-                  ),
-                ]);
-              },
-            },
+            store: deepScanStore,
+            runWorkbench,
+            ...modelSettings,
+            parentSandbox,
+            parentTurn: codexParentTurnFromExtra(extra),
+            pythonCommand: await resolvePythonCommand(),
+            pluginRoot: PLUGIN_ROOT,
+            log: logDeepScanEvent,
+            handoffClaimToken,
+            threadId,
+            onStart,
           });
-          return { begun, ...started };
+          if (
+            !completion.result &&
+            started.coordinator instanceof DeepScanCoordinator
+          ) {
+            onStart(started.coordinator);
+          }
+          return { begun, ...started, completion };
         })
         .catch((error: unknown) => ({
           invocationFailure: toolErrorResult(
@@ -1092,23 +1098,56 @@ export function createCodexSecurityServer(): McpServer {
         }));
       if ("invocationFailure" in preparation)
         return preparation.invocationFailure;
-      if (preparation.immediate) return preparation.immediate;
-      const { begun, coordinator, joined } = preparation;
-      if (joined) {
-        logDeepScanEvent({
-          event: "coordinator_joined",
-          scanId: begun.scanId,
-        });
+      const { begun } = preparation;
+      let result;
+      if (preparation.immediate) {
+        result = (await preparation.completion.result) ?? preparation.immediate;
+      } else {
+        const { coordinator, joined } = preparation;
+        if (joined) {
+          logDeepScanEvent({
+            event: "coordinator_joined",
+            scanId: begun.scanId,
+          });
+        }
+        const terminal = await coordinator.wait(abortSignalFromExtra(extra));
+        result = preparation.completion.result
+          ? await preparation.completion.result
+          : await completeDeepScan(terminal);
       }
-      const terminal = await coordinator.wait(abortSignalFromExtra(extra));
-      const result = deepScanTerminalResult(terminal);
       if (!result) {
         return toolErrorResult(
           deepScanInvocationFailureMessage(
             new Error(
-              `Deep Scan ${terminal.scanId} ended without a terminal result.`,
+              `Deep Scan ${begun.scanId} ended without a terminal result.`,
             ),
           ),
+        );
+      }
+      // A canceled waiter or a transport size error never delivers the scan ID.
+      const transport = server.server.transport;
+      if (
+        !handoffClaimToken &&
+        "structuredContent" in result &&
+        "completion" in result.structuredContent &&
+        transport instanceof CodexSecurityStdioTransport
+      ) {
+        transport.afterResultSent(extra.requestId, extra.signal, () =>
+          deepScanStartLock.run(async () => {
+            try {
+              await runWorkbench(
+                workbenchArgs("acknowledge-deep-scan-result", {
+                  scanId: begun.scanId,
+                }),
+              );
+            } catch (error) {
+              logDeepScanEvent({
+                event: "target_result_acknowledgment_failed",
+                scanId: begun.scanId,
+                reason: failureDiagnostic(error),
+              });
+            }
+          }),
         );
       }
       return result;
@@ -1132,9 +1171,26 @@ export function createCodexSecurityServer(): McpServer {
       async () => {
         workspace = await runWorkbench(args);
       },
+      async () => {
+        const current = (await runWorkbench(["get-scan", "--scan-id", scanId]))[
+          "workspace"
+        ] as JsonObject;
+        const scan = current["results"];
+        const progress = isJsonObject(scan) ? scan["progress"] : undefined;
+        return {
+          status:
+            isJsonObject(progress) && typeof progress["status"] === "string"
+              ? progress["status"]
+              : undefined,
+          failureMessage:
+            isJsonObject(scan) && typeof scan["failureMessage"] === "string"
+              ? scan["failureMessage"]
+              : undefined,
+        };
+      },
     );
     if (workspace === undefined && canceledLocally) {
-      workspace = (await runWorkbench(["get-scan", "--scan-id", scanId]))[
+      workspace = (await runWorkbench(workbenchArgs("get-scan", { scanId })))[
         "workspace"
       ] as JsonObject;
     }
@@ -1195,7 +1251,7 @@ export function createCodexSecurityServer(): McpServer {
     },
     async ({ scanId }) =>
       scanActionResult(
-        await runWorkbench(["recover-scan-results", "--scan-id", scanId]),
+        await runWorkbench(workbenchArgs("recover-scan-results", { scanId })),
         "Recovered retained Codex Security scan results.",
       ),
   );
@@ -1438,7 +1494,7 @@ export function createCodexSecurityServer(): McpServer {
       _meta: appMeta,
     },
     async ({ scanId, userContext }) => {
-      const current = await runWorkbench(["get-scan", "--scan-id", scanId]);
+      const current = await runWorkbench(workbenchArgs("get-scan", { scanId }));
       const workspace = isJsonObject(current.workspace)
         ? current.workspace
         : undefined;
@@ -1473,7 +1529,6 @@ export function createCodexSecurityServer(): McpServer {
         phaseItemsTotal,
         phaseItemsCompleted,
         phaseProgressUnit,
-        preflightChecks,
         reviewItemsTotal,
         reviewItemsCompleted,
         reportableFindingsCount,
@@ -1482,7 +1537,7 @@ export function createCodexSecurityServer(): McpServer {
       extra,
     ) => {
       const modelSettings = codexModelSettingsFromExtra(extra);
-      const current = await runWorkbench(["get-scan", "--scan-id", scanId]);
+      const current = await runWorkbench(workbenchArgs("get-scan", { scanId }));
       const scan = isJsonObject(current.scan) ? current.scan : undefined;
       const progress =
         scan && isJsonObject(scan.progress) ? scan.progress : undefined;
@@ -1505,66 +1560,32 @@ export function createCodexSecurityServer(): McpServer {
           "Deep Scan is still preparing. Discovery progress begins after its setup worker succeeds.",
         );
       }
-      if (
-        preflightChecks !== undefined &&
-        (phaseItemsTotal !== undefined ||
-          phaseItemsCompleted !== undefined ||
-          phaseProgressUnit !== undefined)
-      ) {
-        throw new Error(
-          "preflightChecks derives phaseItemsTotal, phaseItemsCompleted, and phaseProgressUnit; omit those fields.",
-        );
-      }
-      const preflightIssues = preflightChecks?.filter(
-        (check) =>
-          (check.severity === "block" || check.severity === "warn") &&
-          (check.status === "fail" || check.status === "unknown"),
-      );
-      const derivedPhaseItemsTotal = preflightChecks?.length ?? phaseItemsTotal;
-      const derivedPhaseItemsCompleted = preflightChecks
-        ? preflightChecks.filter((check) => check.status !== "unknown").length
-        : phaseItemsCompleted;
-      const derivedPhaseProgressUnit = preflightChecks
-        ? "checks"
-        : phaseProgressUnit;
-      const serializedPreflightIssues = preflightIssues
-        ? JSON.stringify(preflightIssues)
-        : undefined;
       return scanActionResult(
-        await runWorkbench(
-          [
-            "update-progress",
-            "--scan-id",
-            scanId,
-            ...(scan?.mode === "deep"
-              ? deepScanStore.coordinatorLeaseArgs(scanId)
-              : []),
-            ...optionalArg("--model", modelSettings.model),
-            ...optionalArg("--reasoning-effort", modelSettings.reasoningEffort),
-            ...optionalArg("--claim-token", handoffClaimToken),
-            ...optionalNumberArg("--deep-review-pass", deepReviewPass),
-            ...optionalArg("--phase", phase),
-            ...optionalNumberArg("--phase-items-total", derivedPhaseItemsTotal),
-            ...optionalNumberArg(
-              "--phase-items-completed",
-              derivedPhaseItemsCompleted,
-            ),
-            ...optionalArg("--phase-progress-unit", derivedPhaseProgressUnit),
-            ...(serializedPreflightIssues
-              ? ["--preflight-issues-json-stdin"]
-              : []),
-            ...optionalNumberArg("--review-items-total", reviewItemsTotal),
-            ...optionalNumberArg(
-              "--review-items-completed",
-              reviewItemsCompleted,
-            ),
-            ...optionalNumberArg(
-              "--reportable-findings-count",
-              reportableFindingsCount,
-            ),
-          ],
-          serializedPreflightIssues,
-        ),
+        await runWorkbench([
+          "update-progress",
+          "--scan-id",
+          scanId,
+          ...(scan?.mode === "deep"
+            ? deepScanStore.coordinatorLeaseArgs(scanId)
+            : []),
+          ...optionalArg("--model", modelSettings.model),
+          ...optionalArg("--reasoning-effort", modelSettings.reasoningEffort),
+          ...optionalArg("--claim-token", handoffClaimToken),
+          ...optionalNumberArg("--deep-review-pass", deepReviewPass),
+          ...optionalArg("--phase", phase),
+          ...optionalNumberArg("--phase-items-total", phaseItemsTotal),
+          ...optionalNumberArg("--phase-items-completed", phaseItemsCompleted),
+          ...optionalArg("--phase-progress-unit", phaseProgressUnit),
+          ...optionalNumberArg("--review-items-total", reviewItemsTotal),
+          ...optionalNumberArg(
+            "--review-items-completed",
+            reviewItemsCompleted,
+          ),
+          ...optionalNumberArg(
+            "--reportable-findings-count",
+            reportableFindingsCount,
+          ),
+        ]),
         "Updated Codex Security scan progress.",
       );
     },
@@ -1575,12 +1596,17 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Complete Codex Security Scan",
       description:
-        "Finalization only: validate and seal already-authored scan-manifest.json, findings.json, and coverage.json, generate report.md, index findings, and mark the scan complete. For an app-backed running scan, scan-manifest.json is an unsealed draft and must omit scan.sealedAt and scan.artifacts; this tool supplies the exact workbench timestamps, seal, artifact digests, and derived finding identities. Call only after those canonical files exist; this tool does not create missing artifacts or run skipped phases. If it fails, surface the exact error and stop the current response without retrying completion or returning a final, no-findings, structured, or benchmark response.",
+        "Finalization only: validate and seal already-authored scan-manifest.json and findings.json, generate report.md, index findings, and mark the scan complete. For an app-backed running scan, scan-manifest.json is an unsealed draft and must omit scan.sealedAt and scan.artifacts; this tool supplies the exact workbench timestamps, seal, artifact digests, and derived finding identities. Call only after those canonical files exist; this tool does not create missing artifacts or run skipped phases. If it fails, surface the exact error and stop the current response without retrying completion or returning a final, no-findings, structured, or benchmark response.",
       inputSchema: completeScanSchema,
       annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
-    async ({ scanId, handoffClaimToken }) => {
+    async ({ scanId, handoffClaimToken }, extra) => {
+      const turnMetadata = codexTurnMetadataFromExtra(extra);
+      const turnId =
+        turnMetadata?.thread_source === "security_scan"
+          ? turnMetadata.turn_id
+          : undefined;
       try {
         return scanActionResult(
           await runWorkbench([
@@ -1588,6 +1614,11 @@ export function createCodexSecurityServer(): McpServer {
             "--scan-id",
             scanId,
             ...optionalArg("--claim-token", handoffClaimToken),
+            ...optionalArg("--thread-id", threadIdFromExtra(extra)),
+            ...optionalArg(
+              "--turn-id",
+              typeof turnId === "string" ? turnId : undefined,
+            ),
           ]),
           "Validated and indexed the completed Codex Security scan.",
         );
@@ -1595,6 +1626,35 @@ export function createCodexSecurityServer(): McpServer {
         throw new Error(completionFailureMessage(error));
       }
     },
+  );
+
+  server.registerTool(
+    "finalize_codex_security_scan_usage",
+    {
+      title: "Finalize Codex Security Scan Usage",
+      description:
+        "App-only. Record final measured usage after the scan's completion turn has finished. Pass the exact thread and turn returned in usage.completion; do not call while that turn is running.",
+      inputSchema: {
+        ...scanSchema,
+        threadId: z.string().trim().min(1),
+        turnId: z.string().trim().min(1),
+        turnStatus: z.enum(["completed", "interrupted", "failed"]),
+      },
+      annotations: writingAnnotations,
+      _meta: appMeta,
+    },
+    async ({ scanId, threadId, turnId, turnStatus }) =>
+      scanActionResult(
+        await runWorkbench(
+          workbenchArgs("finalize-scan-usage", {
+            scanId,
+            threadId,
+            turnId,
+            turnStatus,
+          }),
+        ),
+        "Recorded final Codex Security scan usage.",
+      ),
   );
 
   server.registerTool(
@@ -1615,7 +1675,10 @@ export function createCodexSecurityServer(): McpServer {
         `--message=${message}`,
         ...optionalArg("--claim-token", handoffClaimToken),
       ]);
-      deepScanCoordinators.get(scanId)?.failExternallyPersisted(message);
+      const scan = failed["scan"];
+      const progress = isJsonObject(scan) ? scan["progress"] : undefined;
+      if (isJsonObject(progress) && progress["status"] === "failed")
+        deepScanCoordinators.get(scanId)?.failExternallyPersisted(message);
       return scanActionResult(
         failed,
         "Recorded the Codex Security scan failure.",
@@ -1660,15 +1723,13 @@ export function createCodexSecurityServer(): McpServer {
     },
     async ({ occurrenceId, requestId, actionToken }) =>
       scanActionResult(
-        await runWorkbench([
-          "request-finding-remediation",
-          "--occurrence-id",
-          occurrenceId,
-          "--request-id",
-          requestId,
-          "--action-token",
-          actionToken,
-        ]),
+        await runWorkbench(
+          workbenchArgs("request-finding-remediation", {
+            occurrenceId,
+            requestId,
+            actionToken,
+          }),
+        ),
         "Queued the local Codex Security finding remediation request.",
       ),
   );
@@ -1685,19 +1746,15 @@ export function createCodexSecurityServer(): McpServer {
     },
     async ({ occurrenceId, requestId, expectedVersion, action, actionToken }) =>
       scanActionResult(
-        await runWorkbench([
-          "request-finding-remediation-action",
-          "--occurrence-id",
-          occurrenceId,
-          "--request-id",
-          requestId,
-          "--expected-version",
-          String(expectedVersion),
-          "--action",
-          action,
-          "--action-token",
-          actionToken,
-        ]),
+        await runWorkbench(
+          workbenchArgs("request-finding-remediation-action", {
+            occurrenceId,
+            requestId,
+            expectedVersion: String(expectedVersion),
+            action,
+            actionToken,
+          }),
+        ),
         `Queued the local Codex Security finding remediation ${action} request.`,
       ),
   );
@@ -1862,6 +1919,7 @@ export function createCodexSecurityServer(): McpServer {
       ),
   );
 
+  registerFindingIssueTools(server, runWorkbench);
   registerCompactArtifactTools(server, {
     runWorkbench,
     pluginRoot: PLUGIN_ROOT,
@@ -1975,6 +2033,55 @@ async function startHeadlessStandardScan(
     ],
     input.userContext,
   );
+}
+
+async function deepScanProjectSetup(
+  targetPath: string,
+  projectConfigPath: string | undefined,
+  action: "preview" | "save",
+) {
+  if (projectConfigPath === undefined) return { targetPath };
+  const inspectWithSetup =
+    action === "preview" && (await isCanonicalDirectory(targetPath));
+  if (!inspectWithSetup) targetPath = await inspectProjectTarget(targetPath);
+  try {
+    const project = await readDeepScanProjectConfig(
+      projectConfigPath,
+      targetPath,
+    );
+    return { targetPath, projectConfigJson: JSON.stringify(project) };
+  } catch (error) {
+    // Target or Git errors take precedence over an invalid project file.
+    if (inspectWithSetup) await inspectProjectTarget(targetPath);
+    throw error;
+  }
+}
+
+async function isCanonicalDirectory(targetPath: string): Promise<boolean> {
+  // Leave home expansion, UNC paths and drive-relative paths to the workbench.
+  if (
+    process.platform === "win32"
+      ? !/^[A-Za-z]:[/\\]/.test(targetPath)
+      : !isAbsolute(targetPath)
+  )
+    return false;
+  try {
+    return (
+      (await realpath(targetPath)) === targetPath &&
+      (await stat(targetPath)).isDirectory()
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function inspectProjectTarget(targetPath: string): Promise<string> {
+  const inspected = await runWorkbench(
+    workbenchArgs("inspect-target", { targetPath }),
+  );
+  if (typeof inspected.targetPath !== "string")
+    throw new Error("Missing scan target path.");
+  return inspected.targetPath;
 }
 
 function wholeTargetScope(
@@ -2155,15 +2262,21 @@ function boundedErrorData(error: unknown): { message: string; name: string } {
   };
 }
 
-function deepScanTerminalResult(run: DeepScanRunState) {
+function deepScanTerminalResult(
+  run: DeepScanRunState,
+  completion?: JsonObject,
+) {
   if (run.status === "succeeded") {
     if (!run.manifestPath) return undefined;
-    const instructions = `Deep Scan discovery completed. Independent Standard scans have already performed validation and attack-path analysis and have been consolidated into the canonical scan-manifest.json, findings.json, and coverage.json under ${run.scanDir}. The returned manifestPath is the canonical scan-manifest.json, not a legacy discovery manifest. Any instructions requiring parent candidate listing, centralized validation, attack-path analysis, or another draft apply only to the old discovery-only workflow and must be skipped. The authoritative scan ID is ${run.scanId}. Immediately call complete_codex_security_scan once using that scan ID to seal and publish the scan. Return output only after completion succeeds and generated report.md exists. If completion fails, surface that exact error and return no final, no-findings, structured, or benchmark response.`;
+    const instructions = run.sdkOwnsCompletion
+      ? `Deep Scan ${run.scanId} aggregated its validated findings under ${run.scanDir}. End this turn with the returned scanId and manifestPath. The SDK owns finalization and report generation after the turn ends.`
+      : `Deep Scan ${run.scanId} completed. The coordinator validated and sealed scan-manifest.json and findings.json and generated report.md under ${run.scanDir}. Independent Standard scans have already performed validation and attack-path analysis. Use the returned authoritative scanId, scanDir, and manifestPath. Do not call complete_codex_security_scan again, rerun worker phases, list candidates, submit another draft, or start a replacement scan. Report the completed results and link the generated report.`;
     return scanActionResult(
       {
         scanId: run.scanId,
         scanDir: run.scanDir,
         manifestPath: run.manifestPath,
+        ...(completion === undefined ? {} : { completion }),
         instructions,
       },
       instructions,
@@ -2205,108 +2318,6 @@ function logDeepScanEvent(event: {
   console.error(
     JSON.stringify({ component: "codex_security_deep_scan", ...event }),
   );
-}
-
-async function runWorkbench(
-  args: string[],
-  input?: string | Buffer,
-): Promise<JsonObject> {
-  let pythonCommand: string | undefined;
-  try {
-    pythonCommand = await resolvePythonCommand();
-    return await executeWorkbench(pythonCommand, args, input);
-  } catch (error) {
-    const launchError = pythonCommand
-      ? missingPythonHelperMessage(error, pythonCommand)
-      : undefined;
-    if (launchError) {
-      throw new Error(launchError, { cause: error });
-    }
-    if (isExecError(error) && error.stderr.trim()) {
-      throw new Error(error.stderr.trim(), { cause: error });
-    }
-    throw error;
-  }
-}
-
-async function executeWorkbench(
-  pythonCommand: string,
-  args: string[],
-  input?: string | Buffer,
-): Promise<JsonObject> {
-  const timeout = [
-    "begin-deep-scan",
-    "cancel-scan",
-    "fail-scan",
-    "claim-deep-scan-dedup",
-    "commit-deep-scan-dedup",
-    "complete-scan",
-    "export-findings",
-    "finish-deep-scan",
-    "get-scan",
-    "get-deep-scan",
-    "get-workspace",
-    "inspect-setup",
-    "list-findings",
-    "preserve-scan-results",
-    "recover-scan-results",
-    "request-finding-remediation",
-    "request-finding-remediation-action",
-    "save-workspace",
-    "set-finding-triage",
-    "set-finding-remediation",
-    "start-headless-standard-scan",
-    "start-prompt-only-scan",
-    "start-scan",
-    "upsert-deep-scan-worker",
-  ].includes(args[0] ?? "")
-    ? 300_000
-    : 30_000;
-  const execution = execFileAsync(
-    pythonCommand,
-    ["-c", WORKBENCH_PYTHON, workbenchScriptPath()],
-    {
-      cwd: PLUGIN_ROOT,
-      windowsHide: true,
-      env: process.env,
-      encoding: "utf8" as const,
-      // Artifact bytes are base64-encoded here; retain the existing file-size behavior.
-      maxBuffer: args[0] === "read-artifact" ? Infinity : 4 * 1024 * 1024,
-      timeout,
-    },
-  );
-  execution.child.stdin!.on("error", () => {
-    // The workbench may exit before consuming stdin; surface its process error.
-  });
-  // Match native argv's UTF-8 encoding while framing NUL separately from stdin.
-  execution.child.stdin!.write(
-    `${JSON.stringify(args.map((argument) => argument.toWellFormed()))}\n`,
-  );
-  execution.child.stdin!.end(input);
-  const { stdout } = await execution.catch((error: unknown) => {
-    if (
-      error instanceof Error &&
-      "killed" in error &&
-      error.killed === true &&
-      "signal" in error &&
-      error.signal === "SIGTERM"
-    ) {
-      throw new Error(
-        `Codex Security workbench ${args[0]} timed out after ${timeout / 1000} seconds: ${error.message}`,
-        { cause: error },
-      );
-    }
-    throw error;
-  });
-  const result = JSON.parse(stdout) as unknown;
-  if (!isJsonObject(result)) {
-    throw new Error("Codex Security workbench helper returned invalid JSON.");
-  }
-  return result;
-}
-
-function workbenchScriptPath(): string {
-  return join(PLUGIN_ROOT, "scripts", "workbench_db.py");
 }
 
 function optionalArg(name: string, value: string | undefined): string[] {
@@ -2371,18 +2382,39 @@ function threadIdFromExtra(extra: unknown): string | undefined {
   const thread = isJsonObject(metadata?.thread) ? metadata.thread : undefined;
   if (typeof thread?.id === "string" && thread.id.trim())
     return thread.id.trim();
-  return undefined;
+  const threadId = codexTurnMetadataFromExtra(extra)?.thread_id;
+  return typeof threadId === "string" && threadId.trim()
+    ? threadId.trim()
+    : undefined;
+}
+
+function codexTurnMetadataFromExtra(extra: unknown): JsonObject | undefined {
+  const metadata = requestMetadataFromExtra(extra);
+  return isJsonObject(metadata?.["x-codex-turn-metadata"])
+    ? metadata["x-codex-turn-metadata"]
+    : undefined;
+}
+
+function codexParentTurnFromExtra(
+  extra: unknown,
+): DeepScanParentTurn | undefined {
+  const metadata = codexTurnMetadataFromExtra(extra);
+  const threadId = metadata?.thread_id;
+  const turnId = metadata?.turn_id;
+  return typeof threadId === "string" &&
+    threadId &&
+    typeof turnId === "string" &&
+    turnId
+    ? { threadId, turnId }
+    : undefined;
 }
 
 function codexModelSettingsFromExtra(extra: unknown): {
   model?: string;
   reasoningEffort?: string;
 } {
-  const metadata = requestMetadataFromExtra(extra);
   // Codex supplies the already-resolved runtime model and effective effort on every MCP call.
-  const turnMetadata = isJsonObject(metadata?.["x-codex-turn-metadata"])
-    ? metadata["x-codex-turn-metadata"]
-    : undefined;
+  const turnMetadata = codexTurnMetadataFromExtra(extra);
   const model =
     typeof turnMetadata?.model === "string"
       ? turnMetadata.model.trim()
@@ -2400,15 +2432,6 @@ function codexModelSettingsFromExtra(extra: unknown): {
 function abortSignalFromExtra(extra: unknown): AbortSignal | undefined {
   if (!isJsonObject(extra)) return undefined;
   return extra.signal instanceof AbortSignal ? extra.signal : undefined;
-}
-
-function isExecError(error: unknown): error is { stderr: string } {
-  return Boolean(
-    error &&
-    typeof error === "object" &&
-    "stderr" in error &&
-    typeof error.stderr === "string",
-  );
 }
 
 function failureDiagnostic(error: unknown): string {
@@ -2444,7 +2467,7 @@ function deepScanFailureMessage(run: DeepScanRunState): string {
       run.manifestPath ? ` Failure manifest: ${run.manifestPath}.` : ""
     }`,
     "This is a terminal failure of this logical Deep Scan; no successful discovery manifest was returned.",
-    "Stop further scanning and surface this exact stable MCP failure. Read the existing scan context to report saved findings and pending candidates separately, with incomplete coverage.",
+    "Stop further scanning and surface this exact stable MCP failure. Read the existing scan context to report saved findings and pending candidates separately, with the reason execution stopped.",
     "Do not call start_codex_security_deep_scan again in this response.",
     "Do not call complete_codex_security_scan in this response.",
     "Do not start a replacement Deep Scan, call cancel for this terminal scan, claim a successful or no-findings scan, satisfy a successful-scan output schema, or emit benchmark JSON.",

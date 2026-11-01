@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { runNodePython } from "./python-probe.js";
 import { join } from "node:path";
-import { expect } from "bun:test";
+import assert from "node:assert/strict";
 
 export const scanThreadId = "scan-thread";
 export const lowerUuid7Turn = "019f9e4d-b3ba-7000-8000-000000000001";
@@ -84,6 +84,11 @@ export function ownershipRollout(
     uuid7TokenSnapshot(1_000, 100),
     uuid7TaskStarted(higherUuid7Turn),
     uuid7TokenSnapshot(1_100, 110),
+    {
+      type: "event_msg",
+      timestamp: uuid7EventTimestamp,
+      payload: { type: "task_complete" },
+    },
   ];
 }
 
@@ -92,7 +97,7 @@ export function readPythonRolloutUsage(
   rolloutPath: string,
 ): unknown {
   const python = Bun.which("python3") ?? Bun.which("python");
-  expect(python).not.toBeNull();
+  assert.notEqual(python, null);
   const probe = [
     "import json, sys",
     "from datetime import datetime, timezone",
@@ -100,12 +105,12 @@ export function readPythonRolloutUsage(
     "sys.path.insert(0, sys.argv[1])",
     "import workbench_scan_usage",
     "session = workbench_scan_usage.RolloutSession(sys.argv[3], sys.argv[4], Path(sys.argv[2]))",
-    "usage, warnings = workbench_scan_usage._read_rollout_usage(",
+    "usage = workbench_scan_usage._read_rollout_usage(",
     "    session,",
     "    started_at=datetime(2026, 7, 26, 12, tzinfo=timezone.utc),",
     "    completed_at=None,",
     ")",
-    "print(json.dumps({'usage': usage, 'warnings': sorted(warnings)}, sort_keys=True))",
+    "print(json.dumps({'usage': usage.tokens, 'warnings': sorted(usage.warnings)}, sort_keys=True))",
   ].join("\n");
   const result = runNodePython(python!, [
     "-c",
@@ -116,8 +121,8 @@ export function readPythonRolloutUsage(
     scanThreadId,
   ]);
 
-  expect(result.error).toBeUndefined();
-  expect(result.status, result.stderr).toBe(0);
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
   return JSON.parse(result.stdout) as unknown;
 }
 

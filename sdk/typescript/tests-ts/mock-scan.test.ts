@@ -1,4 +1,4 @@
-import type { ScanOptions } from "../src/index.js";
+import type { JsonObject, ScanOptions } from "../src/index.js";
 import {
   mkdir,
   mkdtemp,
@@ -47,6 +47,7 @@ async function fixture() {
     {
       environment,
       runWorkbench,
+      resolvePluginPython: async () => python!,
       prepareRuntime: rejecting("Mock scan initialized Codex"),
       matchFindings: rejecting("Mock scan called model matching"),
     },
@@ -57,6 +58,9 @@ async function fixture() {
 test("mock scans seal real artifacts and index shared and unique findings without Codex", async () => {
   const { repository, client, environment, python } = await fixture();
   const callbacks: string[] = [];
+  const registrations: Array<
+    Parameters<NonNullable<ScanOptions["onScanRegistered"]>>[0]
+  > = [];
   try {
     const first = await client.run(repository, {
       mock: true,
@@ -64,12 +68,22 @@ test("mock scans seal real artifacts and index shared and unique findings withou
       maxCostUsd: 0.01,
       failureSeverity: "informational",
       onAuthentication: () => callbacks.push("authentication"),
+      onScanRegistered: (scan) => {
+        callbacks.push("registered");
+        registrations.push(scan);
+      },
       onScanStarted: () => callbacks.push("started"),
     });
     const second = await client.run(repository, { mock: true });
-    expect(callbacks).toEqual(["started"]);
+    expect(callbacks).toEqual(["registered", "started"]);
+    expect(registrations).toEqual([
+      {
+        scanId: first.manifest.scan.id,
+        scanDir: first.scanDir,
+      },
+    ]);
     expect(first.findings.findings).toHaveLength(12);
-    expect(first.coverage.completeness).toBe("complete");
+    expect(first.review).not.toHaveProperty("status");
     expect(first.manifest.scan.status).toBe("completed");
     expect(first.manifest.scan.sealedAt).toBeTruthy();
     expect(first.turnResult["mock"]).toBe(true);
@@ -85,7 +99,8 @@ test("mock scans seal real artifacts and index shared and unique findings withou
     ).toEqual({
       manifest: first.manifest,
       findings: first.findings,
-      coverage: first.coverage,
+      review: first.review,
+      mode: first.mode,
     });
     const previousIds = new Set(
       first.findings.findings.map((finding) => finding.findingId),
@@ -127,6 +142,27 @@ test("mock scans seal real artifacts and index shared and unique findings withou
       ["list-scans", "--repository", repository],
     );
     expect(history["scans"]).toHaveLength(2);
+    const saved = await runWorkbench(
+      { python, pluginRoot: PLUGIN_ROOT, environment },
+      ["get-scan", "--scan-id", first.manifest.scan.id],
+    );
+    const savedScan = saved["scan"] as JsonObject;
+    expect(typeof savedScan["updatedAt"]).toBe("string");
+    const showOutput = capture(true);
+    const showDiagnostics = capture();
+    expect(
+      await main(
+        ["scans", "show", first.manifest.scan.id],
+        showOutput.stream,
+        showDiagnostics.stream,
+        dependencies({ onWorkbench: async () => saved }),
+      ),
+    ).toBe(0);
+    expect(showDiagnostics.text()).toContain(
+      `updated ${savedScan["updatedAt"]}`,
+    );
+    expect(showOutput.text()).toContain("UPDATED");
+    expect(showOutput.text()).toContain(savedScan["updatedAt"] as string);
     const recipe = await runWorkbench(
       { python, pluginRoot: PLUGIN_ROOT, environment },
       ["get-scan-recipe", "--scan-id", first.manifest.scan.id],
@@ -185,8 +221,8 @@ test("mock scans preserve output protection and archive existing completed resul
       original,
     );
     expect(second.manifest.scan.id).not.toBe(first.manifest.scan.id);
-    expect(first.coverage.mode).toBe("scoped_path");
-    expect(first.coverage.includePaths).toEqual(["example.ts"]);
+    expect(first.manifest.scan.mode).toBe("scoped_path");
+    expect(first.manifest.scan.scope.includePaths).toEqual(["example.ts"]);
     const resumed = await client.run(repository, firstOptions);
     expect(resumed.manifest).toEqual(first.manifest);
     expect(resumed.scanDir).toBe(archive);
@@ -251,8 +287,7 @@ test("mock scans bind clean Git, committed diff, and working-tree snapshots", as
       target: DiffTarget.refs({ base: "HEAD~1" }),
     });
     expect(diff.manifest.scan.target.kind).toBe("git_diff");
-    expect(diff.coverage.completeness).toBe("complete");
-    expect(diff.coverage.mode).toBe("branch_diff");
+    expect(diff.manifest.scan.mode).toBe("branch_diff");
     await writeFile(
       join(repository, "example.ts"),
       "export const example = 3;\n",
@@ -262,8 +297,7 @@ test("mock scans bind clean Git, committed diff, and working-tree snapshots", as
       target: DiffTarget.workingTree({}),
     });
     expect(workingTree.manifest.scan.target.kind).toBe("git_diff");
-    expect(workingTree.coverage.completeness).toBe("complete");
-    expect(workingTree.coverage.mode).toBe("working_tree");
+    expect(workingTree.manifest.scan.mode).toBe("working_tree");
   } finally {
     await client.close();
   }

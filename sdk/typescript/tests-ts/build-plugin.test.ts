@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import {
   chmod,
+  copyFile,
   cp,
   mkdir,
   readFile,
@@ -63,6 +64,20 @@ async function snapshot(root: string) {
 afterEach(temporaryDirectories.cleanup);
 
 describe("bundled plugin build", () => {
+  test("ships the Cloud connection and skill unchanged", async () => {
+    for (const path of [
+      ".app.json",
+      "skills/cloud-findings/SKILL.md",
+      "skills/cloud-findings/agents/openai.yaml",
+    ]) {
+      const source = await readFile(
+        new URL(`../../../plugins/codex-security/${path}`, import.meta.url),
+        "utf8",
+      );
+      expect(await readFile(join(PLUGIN_ROOT, path), "utf8")).toBe(source);
+    }
+  });
+
   test("copies Python contracts and completed examples unchanged from source", async () => {
     const source = fileURLToPath(
       new URL("../../../plugins/codex-security/", import.meta.url),
@@ -74,7 +89,7 @@ describe("bundled plugin build", () => {
       (path) =>
         (path.startsWith("scripts/") && path.endsWith(".py")) ||
         path.startsWith("schemas/") ||
-        path.startsWith("examples/completed-scan/"),
+        path.startsWith("examples/legacy-completed-scan/"),
     )) {
       expect(await readFile(join(PLUGIN_ROOT, path)), path).toEqual(
         await readFile(join(source, path)),
@@ -82,156 +97,273 @@ describe("bundled plugin build", () => {
     }
   });
 
-  test.each(["missing", "stale"])(
-    "builds the MCP runtime from source with %s native wrappers and no npm launcher",
-    async (emitted) => {
-      const root = await temporaryDirectory();
-      const plugin = fileURLToPath(
-        new URL("../../../plugins/codex-security/", import.meta.url),
-      );
-      const source = join(root, "plugin");
-      await cp(join(plugin, "mcp-app"), join(source, "mcp-app"), {
+  test("builds the MCP runtime from source with missing and stale native wrappers and no npm launcher", async () => {
+    const root = await temporaryDirectory();
+    const plugin = fileURLToPath(
+      new URL("../../../plugins/codex-security/", import.meta.url),
+    );
+    const source = join(root, "plugin");
+    await cp(join(plugin, "mcp-app"), join(source, "mcp-app"), {
+      recursive: true,
+      filter: (path) => !["node_modules", ".preview"].includes(basename(path)),
+    });
+    for (const directory of ["schemas", "shared"]) {
+      await cp(join(plugin, directory), join(source, directory), {
         recursive: true,
-        filter: (path) =>
-          !["node_modules", ".preview"].includes(basename(path)),
       });
-      for (const directory of ["schemas", "shared"]) {
-        await cp(join(plugin, directory), join(source, directory), {
-          recursive: true,
-        });
-      }
-      for (const file of [
-        "reserved_artifact_paths.json",
-        "codex_profile.mjs",
-        "codex_profile.d.mts",
-      ]) {
-        await writeFixture(
-          source,
-          `scripts/${file}`,
-          await readFile(join(plugin, "scripts", file), "utf8"),
-        );
-      }
-      await symlink(
-        join(plugin, "mcp-app", "node_modules"),
-        join(source, "mcp-app", "node_modules"),
-        "junction",
-      );
-      for (const name of await readdir(join(plugin, "native"))) {
-        if (name.endsWith(".mts")) {
-          await writeFixture(
-            source,
-            `native/${name}`,
-            await readFile(join(plugin, "native", name), "utf8"),
-          );
-        }
-      }
-      await symlink(
-        join(plugin, "native", "prebuilt"),
-        join(source, "native", "prebuilt"),
-        "junction",
-      );
+    }
+    for (const file of [
+      "reserved_artifact_paths.json",
+      "codex_profile.mjs",
+      "codex_profile.d.mts",
+      "codex_session.mjs",
+      "codex_session.d.mts",
+    ]) {
       await writeFixture(
         source,
-        "plugin-files.json",
-        await readFile(join(plugin, "plugin-files.json"), "utf8"),
+        `scripts/${file}`,
+        await readFile(join(plugin, "scripts", file), "utf8"),
       );
-      const platformSource = join(source, "native", "platform.mts");
-      await writeFile(
-        platformSource,
-        `Object.defineProperty(globalThis, "syntheticNativeWrapper", { value: "fresh-wrapper-source" });\n${await readFile(platformSource, "utf8")}`,
-      );
-      if (emitted === "stale") {
+    }
+    await symlink(
+      join(plugin, "mcp-app", "node_modules"),
+      join(source, "mcp-app", "node_modules"),
+      "junction",
+    );
+    for (const name of await readdir(join(plugin, "native"))) {
+      if (name.endsWith(".mts")) {
         await writeFixture(
           source,
-          "native/platform.mjs",
-          'throw new Error("stale-wrapper-output");\n',
+          `native/${name}`,
+          await readFile(join(plugin, "native", name), "utf8"),
         );
       }
-      const bin = join(root, "bin");
-      const launcher = process.platform === "win32" ? "npm.cmd" : "npm";
-      await writeFixture(
-        bin,
-        launcher,
-        process.platform === "win32"
-          ? "@exit /b 91\r\n"
-          : "#!/bin/sh\nexit 91\n",
+    }
+    await symlink(
+      join(plugin, "native", "prebuilt"),
+      join(source, "native", "prebuilt"),
+      "junction",
+    );
+    await writeFixture(
+      source,
+      "plugin-files.json",
+      await readFile(join(plugin, "plugin-files.json"), "utf8"),
+    );
+    for (const name of ["platform", "windows-files"]) {
+      const path = join(source, "native", name + ".mts");
+      await writeFile(
+        path,
+        `Object.defineProperty(globalThis, "${name}-marker", { value: "${name}-source-marker" });\n${await readFile(path, "utf8")}`,
       );
-      if (process.platform !== "win32") await chmod(join(bin, launcher), 0o755);
+    }
+    await writeFixture(
+      source,
+      "native/platform.mjs",
+      'throw new Error("stale-wrapper-output");\n',
+    );
+    const bin = join(root, "bin");
+    const launcher = process.platform === "win32" ? "npm.cmd" : "npm";
+    await writeFixture(
+      bin,
+      launcher,
+      process.platform === "win32" ? "@exit /b 91\r\n" : "#!/bin/sh\nexit 91\n",
+    );
+    if (process.platform !== "win32") await chmod(join(bin, launcher), 0o755);
 
-      const destination = join(root, "mcp");
-      await execFileAsync(
-        "node",
-        [
-          join(source, "mcp-app", "scripts", "build_mcp_app.mjs"),
-          "--output",
-          destination,
-        ],
-        {
-          env: {
-            ...process.env,
-            PATH: [bin, process.env["PATH"]].filter(Boolean).join(delimiter),
-          },
+    const destination = join(root, "mcp");
+    await execFileAsync(
+      "node",
+      [
+        join(source, "mcp-app", "scripts", "build_mcp_app.mjs"),
+        "--output",
+        destination,
+      ],
+      {
+        env: {
+          ...process.env,
+          PATH: [bin, process.env["PATH"]].filter(Boolean).join(delimiter),
         },
-      );
+      },
+    );
 
-      const contract = JSON.parse(
-        await readFile(
-          new URL(
-            "../../../plugins/codex-security/plugin-files.json",
-            import.meta.url,
-          ),
-          "utf8",
+    const contract = JSON.parse(
+      await readFile(
+        new URL(
+          "../../../plugins/codex-security/plugin-files.json",
+          import.meta.url,
         ),
-      ) as { shippedExact: string[] };
-      expect(await files(destination)).toEqual(
-        contract.shippedExact
-          .filter((path) => path.startsWith("mcp/"))
-          .map((path) => path.slice(4))
-          .sort(),
+        "utf8",
+      ),
+    ) as { shippedExact: string[] };
+    expect(await files(destination)).toEqual(
+      contract.shippedExact
+        .filter((path) => path.startsWith("mcp/"))
+        .map((path) => path.slice(4))
+        .sort(),
+    );
+    const chunks = (await readdir(destination))
+      .filter((name) => name.startsWith("helpers.mjs.br.part-"))
+      .sort();
+    const runtime = brotliDecompressSync(
+      Buffer.concat(
+        await Promise.all(
+          chunks.map((name) => readFile(join(destination, name))),
+        ),
+      ),
+    ).toString("utf8");
+    for (const marker of [
+      "platform-source-marker",
+      "windows-files-source-marker",
+    ]) {
+      expect(runtime.includes(marker), marker).toBe(true);
+    }
+    expect(
+      runtime.includes("stale-wrapper-output"),
+      "stale-wrapper-output",
+    ).toBe(false);
+    const helper = await execFileAsync("node", [
+      join(destination, "helpers.mjs"),
+      "resolve-security-md",
+      "--repo",
+      root,
+      "--list",
+    ]);
+    expect(helper.stdout).toBe("[]\n");
+    expect(helper.stderr).toBe("");
+    const repository = await temporaryDirectory();
+    const policy = "Preserve this synthetic inherited security policy.";
+    await writeFixture(
+      repository,
+      "SECURITY.md",
+      `# Synthetic policy\n${policy}\n`,
+    );
+    const alias = join(await temporaryDirectory(), "plugin link");
+    await symlink(
+      root,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    await mkdir(join(root, "scripts"), { recursive: true });
+    await copyFile(
+      join(plugin, "scripts", "launch_codex_security_mcp"),
+      join(root, "scripts", "launch_codex_security_mcp"),
+    );
+    const node = (
+      await execFileAsync("node", ["--print", "process.execPath"])
+    ).stdout.trim();
+    for (const pluginPath of [root, alias]) {
+      const linkedHelper = join(pluginPath, "mcp", "helpers.mjs");
+      const list = await execFileAsync(
+        process.platform === "win32" ? node : "/bin/sh",
+        [
+          ...(process.platform === "win32"
+            ? [linkedHelper]
+            : [
+                join(pluginPath, "scripts", "launch_codex_security_mcp"),
+                "--helper",
+              ]),
+          "resolve-security-md",
+          "--repo",
+          repository,
+          "--list",
+        ],
+        { env: { ...process.env, CODEX_MCP_NODE_PATH: node, NODE_PATH: "" } },
       );
-      const chunks = (await readdir(destination))
-        .filter((name) => name.startsWith("helpers.mjs.br.part-"))
-        .sort();
-      const runtime = brotliDecompressSync(
-        Buffer.concat(
-          await Promise.all(
-            chunks.map((name) => readFile(join(destination, name))),
-          ),
-        ),
-      ).toString("utf8");
-      expect(runtime.includes("fresh-wrapper-source")).toBe(true);
-      expect(runtime.includes("stale-wrapper-output")).toBe(false);
-      const helper = await execFileAsync("node", [
-        join(destination, "helpers.mjs"),
+      expect(list.stdout).toBe('["SECURITY.md"]\n');
+      expect(list.stderr).toBe("");
+      const guidance = await execFileAsync(node, [
+        linkedHelper,
         "resolve-security-md",
         "--repo",
-        root,
-        "--list",
+        repository,
+        "--scope",
+        repository,
+        "--out",
+        "-",
       ]);
-      expect(helper.stdout).toBe("[]\n");
-      expect(helper.stderr).toBe("");
-      const preflight = await execFileAsync(
-        "node",
-        [
-          "--input-type=module",
-          "--eval",
-          `const runtime = await import(process.argv[1]);
+      expect(guidance.stdout).toContain(policy);
+      expect(guidance.stderr).toBe("");
+    }
+
+    const imported = await execFileAsync(
+      "node",
+      [
+        "--input-type=module",
+        "--eval",
+        `
+          import assert from "node:assert/strict";
+          import { pathToFileURL } from "node:url";
+          const { default: helpers } = await import(pathToFileURL(process.argv[2]).href);
+          const input = {
+            scanId: "synthetic-scan",
+            manifest: { scan: {} },
+            findings: { findings: [] },
+            reviewState: {
+              surfaces: [], explicitExclusions: [], deferred: [],
+            },
+          };
+          assert.equal(helpers.parseCanonicalScanDraft(input).scanId, input.scanId);
+          assert.throws(() => helpers.parseCanonicalScanDraft({
+            ...input, reviewState: { ...input.reviewState, surfaces: "invalid" },
+          }));
+          assert.equal(process.exitCode, undefined);
+        `,
+        "helper-import-test",
+        join(destination, "helpers.mjs"),
+      ],
+      { cwd: root, env: { ...process.env, NODE_PATH: "" } },
+    );
+    expect(imported.stdout).toBe("");
+    expect(imported.stderr).toBe("");
+    const workerImport = await execFileAsync(
+      "node",
+      [
+        "--input-type=module",
+        "--eval",
+        `
+          import assert from "node:assert/strict";
+          import { Worker } from "node:worker_threads";
+          import { pathToFileURL } from "node:url";
+          const worker = new Worker(
+            "const { parentPort, workerData } = require('node:worker_threads');" +
+            "import(workerData).then(() => parentPort.postMessage('imported'));",
+            { eval: true, workerData: pathToFileURL(process.argv[1]).href, execArgv: [] },
+          );
+          const messages = [];
+          worker.on("message", (message) => messages.push(message));
+          await new Promise((resolve, reject) => {
+            worker.on("error", reject);
+            worker.on("exit", (code) => code === 0 ? resolve() : reject(new Error(String(code))));
+          });
+          assert.deepEqual(messages, ["imported"]);
+          `,
+        join(destination, "helpers.mjs"),
+      ],
+      { cwd: root, env: { ...process.env, NODE_PATH: "" } },
+    );
+    expect(workerImport.stdout).toBe("");
+    expect(workerImport.stderr).toBe("");
+    const preflight = await execFileAsync(
+      "node",
+      [
+        "--input-type=module",
+        "--eval",
+        `const runtime = await import(process.argv[1]);
          console.log(JSON.stringify({
            preflight: typeof runtime.preflightDeepScanWorkerPermissionProfile,
            profileId: runtime.DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
          }));`,
-          pathToFileURL(join(destination, "permission-profile-preflight.mjs"))
-            .href,
-        ],
-        { cwd: root },
-      );
-      expect(JSON.parse(preflight.stdout)).toEqual({
-        preflight: "function",
-        profileId: "codex_security_deep_scan_worker",
-      });
-      expect(preflight.stderr).toBe("");
-    },
-  );
+        pathToFileURL(join(destination, "permission-profile-preflight.mjs"))
+          .href,
+      ],
+      { cwd: root },
+    );
+    expect(JSON.parse(preflight.stdout)).toEqual({
+      preflight: "function",
+      profileId: "codex_security_deep_scan_worker",
+    });
+    expect(preflight.stderr).toBe("");
+  });
 
   test.each(["compiler", "file contract"])(
     "preserves the previous bundle when the %s fails",
@@ -474,43 +606,4 @@ describe("generated plugin ownership", () => {
       "Generated plugin payload must not be tracked: _bundled_plugin/mcp/server.mjs",
     );
   });
-});
-
-test("failed compiler preserves the previous bundle and its diagnostics", async () => {
-  const root = await temporaryDirectory();
-  const source = join(root, "source");
-  const destination = join(root, "bundle");
-  const contractPath = join(source, "plugin-files.json");
-  await writeFixture(
-    source,
-    "plugin-files.json",
-    JSON.stringify({
-      externalOwnedExact: [".codex-plugin/plugin.json"],
-      shippedExact: ["mcp/server.mjs"],
-    }),
-  );
-  await writeFixture(source, ".codex-plugin/plugin.json", "{}");
-  await writeFixture(
-    source,
-    "mcp-app/scripts/build_mcp_app.mjs",
-    'console.log("synthetic compiler diagnostic"); process.exit(1);',
-  );
-  await writeFixture(destination, "previous.txt", "previous valid bundle");
-  const driver = join(root, "driver.mjs");
-  await writeFile(
-    driver,
-    `import { buildBundledPlugin } from ${JSON.stringify(new URL("../scripts/build-plugin.mjs", import.meta.url).href)};
-try { await buildBundledPlugin(${JSON.stringify({ contractPath, destination, source })}); }
-catch (error) { console.error(error.message); process.exitCode = 1; }`,
-  );
-  const result = await execFileAsync(process.execPath, [driver]).then(
-    () => {
-      throw new Error("synthetic compiler unexpectedly succeeded");
-    },
-    (error: { stdout: string; stderr: string }) => error,
-  );
-  expect(result.stdout).toContain("synthetic compiler diagnostic");
-  expect(await readFile(join(destination, "previous.txt"), "utf8")).toBe(
-    "previous valid bundle",
-  );
 });

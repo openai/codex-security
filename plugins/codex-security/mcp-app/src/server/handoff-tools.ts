@@ -1,3 +1,4 @@
+import { workbenchArgs } from "../workbench-arguments.js";
 import { writingAnnotations } from "./tool-annotations.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -86,16 +87,12 @@ export function registerScanHandoffTools(
         _meta: appMeta,
       },
       async (input: z.infer<typeof inputSchema>) => {
-        const arguments_ = [
-          command,
-          "--scan-id",
-          input.scanId,
-          "--claim-token",
-          input.claimToken,
-        ];
-        if ("takeOverStale" in input && input.takeOverStale)
-          arguments_.push("--take-over-stale");
-        if ("threadId" in input) arguments_.push("--thread-id", input.threadId);
+        const arguments_ = workbenchArgs(command, {
+          scanId: input.scanId,
+          claimToken: input.claimToken,
+          takeOverStale: "takeOverStale" in input && input.takeOverStale,
+          threadId: "threadId" in input ? input.threadId : undefined,
+        });
         return workspaceResult(
           (await runWorkbench(arguments_)) as HandoffWorkspaceState,
         );

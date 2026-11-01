@@ -89,8 +89,8 @@ try {
           "const deepScanCoordinators = globalThis.cancelResponseFixture.registry;",
         )
         .replace(
-          "async function runWorkbench(",
-          "const runWorkbench = (...args) => globalThis.cancelResponseFixture.workbench(...args);\nasync function unusedRunWorkbench(",
+          'import { PLUGIN_ROOT, runWorkbench, scanRoot } from "./src/workbench-client.js";',
+          'import { PLUGIN_ROOT, scanRoot } from "./src/workbench-client.js";\nconst runWorkbench = (...args) => globalThis.cancelResponseFixture.workbench(...args);',
         ),
       loader: "ts",
       resolveDir: applicationRoot,

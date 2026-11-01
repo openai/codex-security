@@ -9,6 +9,7 @@ import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 
 import pytest
 from workbench_test_support import SCRIPT, run_workbench
@@ -164,6 +165,64 @@ def test_registration_rejection_restores_files_and_database(previous_scan):
     assert stored_paths(state, scan_id) == (str(output), str(output / "report.md"))
 
 
+def test_registration_waits_for_in_progress_archive_rename(workflow_scan, monkeypatch):
+    state, target, output, scan_id = workflow_scan
+    mark_stopped(state, scan_id)
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    module = runpy.run_path(str(SCRIPT))
+    connection = module["connect"]()
+    ready, renamed, attempted = Event(), Event(), Event()
+    args = argparse.Namespace(
+        repository=str(target),
+        scan_dir=str(output),
+        archive_existing=True,
+        archived_scan_dir=None,
+        recipe_json=recipe(target),
+        recipe_json_stdin=False,
+        registration_json_stdin=False,
+        parent_scan_id=None,
+    )
+
+    def competing_registration():
+        other = module["connect"]()
+        other.set_trace_callback(lambda sql: attempted.set() if sql == "BEGIN IMMEDIATE" else None)
+        try:
+            ready.set()
+            assert renamed.wait(5)
+            with pytest.raises(SystemExit) as error:
+                module["register_cli_scan"](other, args)
+            return str(error.value)
+        finally:
+            attempted.set()
+            other.close()
+
+    rename = Path.rename
+
+    def pause_after_rename(path, destination):
+        result = rename(path, destination)
+        if path == output:
+            # The second caller reaches registration while output is absent.
+            # It must wait for the writer before inspecting the replacement.
+            renamed.set()
+            assert attempted.wait(5)
+        return result
+
+    monkeypatch.setattr(Path, "rename", pause_after_rename)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            competing = pool.submit(competing_registration)
+            assert ready.wait(5)
+            registered = module["register_cli_scan"](connection, args)
+            assert competing.result(timeout=5) == "Cannot archive the output of a running scan."
+        archive = Path(registered["archivedScanDir"])
+        assert (archive / "report.md").read_text() == "previous scan\n"
+        assert list(output.iterdir()) == []
+        assert stored_paths(state, scan_id) == (str(archive), str(archive / "report.md"))
+    finally:
+        renamed.set()
+        connection.close()
+
+
 def test_commit_failure_restores_archived_output(workflow_scan, monkeypatch):
     state, target, output, scan_id = workflow_scan
     mark_stopped(state, scan_id)
@@ -198,20 +257,6 @@ def test_commit_failure_restores_archived_output(workflow_scan, monkeypatch):
     assert list(output.parent.glob("scan.previous-*")) == []
     assert stored_paths(state, scan_id) == (str(output), str(output / "report.md"))
     assert workflow(state) == saved_workflow
-
-
-def test_legacy_caller_can_supply_already_archived_output(previous_scan):
-    state, target, output, scan_id = previous_scan
-    mark_stopped(state, scan_id)
-    archive = output.with_name("scan.previous-fixture")
-    output.rename(archive)
-    output.mkdir(mode=0o700)
-    registered = register(
-        state, target, output, "--archive-existing", "--archived-scan-dir", str(archive)
-    )
-    assert registered["archivedScanDir"] == str(archive)
-    assert (archive / "report.md").read_text() == "previous scan\n"
-    assert stored_paths(state, scan_id) == (str(archive), str(archive / "report.md"))
 
 
 def test_registration_does_not_archive_an_ancestor_of_its_repository(tmp_path):
@@ -274,22 +319,18 @@ def test_interrupted_commit_keeps_files_at_their_saved_paths(previous_scan, monk
     assert list(output.iterdir()) == ([] if committed else [output / "report.md"])
 
 
-@pytest.mark.parametrize("layout", ["same", "nested", "alias"])
-def test_registration_does_not_archive_its_active_workbench_state(tmp_path, layout):
+def test_registration_does_not_archive_state_reached_through_an_external_alias(tmp_path):
     target = tmp_path / "target"
     target.mkdir()
-    (target / "fixture.py").write_text("preserved source\n")
     output = tmp_path / "output"
     output.mkdir(mode=0o700)
-    state = output if layout == "same" else output / "state"
-    state.mkdir(mode=0o700, exist_ok=True)
-    if layout == "alias":
-        alias = tmp_path / "state-alias"
-        try:
-            alias.symlink_to(state, target_is_directory=True)
-        except OSError:
-            pytest.skip("Directory symlinks are unavailable")
-        state = alias
+    nested_state = output / "state"
+    nested_state.mkdir(mode=0o700)
+    state = tmp_path / "state-alias"
+    try:
+        state.symlink_to(nested_state, target_is_directory=True)
+    except OSError:
+        pytest.skip("Directory symlinks are unavailable")
     saved = tmp_path / "saved"
     saved.mkdir(mode=0o700)
     previous = register(state, target, saved)

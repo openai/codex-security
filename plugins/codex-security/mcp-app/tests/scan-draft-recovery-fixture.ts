@@ -36,11 +36,33 @@ export async function recordCodexSecurityScanDraft(
     input,
     async (args: string[]) => {
       const draft = await readJson(args[args.indexOf("--draft-path") + 1]);
-      const rawContents = await fs.readFile(
+      let rawContents = await fs.readFile(
         args[args.indexOf("--checkpoint-path") + 1],
         "utf8",
       );
       const checkpoint = JSON.parse(rawContents);
+      const { complete, scope, threatModel } = draft.manifest.scan;
+      const projected = {
+        scanId: checkpoint.scanId,
+        ...(complete === undefined ? {} : { complete }),
+        ...(scope === undefined ? {} : { scope }),
+        ...(threatModel === undefined ? {} : { threatModel }),
+        findings: draft.findings.findings,
+        reviewState: draft.reviewState,
+      };
+      if (context.mode === "deep") {
+        const head = await readJson(context.root, "checkpoint-head.json").catch(
+          (error) => {
+            if (error.code !== "ENOENT") throw error;
+            return undefined;
+          },
+        );
+        checkpoint.publication = {
+          previousCheckpoint: head?.checkpoint ?? null,
+          previousInputCheckpoint: head?.inputCheckpoint ?? null,
+        };
+        rawContents = JSON.stringify(checkpoint);
+      }
       const rawName =
         createHash("sha256").update(rawContents).digest("hex") + ".json";
       await replaceArtifactText(
@@ -51,21 +73,30 @@ export async function recordCodexSecurityScanDraft(
         ),
         rawContents,
       );
-      const { complete, scope, threatModel } = draft.manifest.scan;
       await draftApi.saveScanDraftCheckpoint(
         { ...context, layout: "worker" },
+        projected,
+        false,
+      );
+      await replaceArtifactJson(
+        await artifactDestination(
+          context,
+          ["checkpoint-head.json"],
+          "scan checkpoint head",
+        ),
         {
-          scanId: checkpoint.scanId,
-          ...(complete === undefined ? {} : { complete }),
-          ...(scope === undefined ? {} : { scope }),
-          ...(threatModel === undefined ? {} : { threatModel }),
-          findings: draft.findings.findings,
-          coverage: draft.coverage,
+          checkpoint:
+            createHash("sha256")
+              .update(JSON.stringify(projected))
+              .digest("hex") + ".json",
+          ...(checkpoint.publication ? { inputCheckpoint: rawName } : {}),
         },
       );
+      // Retain the legacy file-authored layout for recovery compatibility tests.
+      draft.manifest.scan.coverageRef = "coverage.json";
       for (const [key, name] of [
         ["findings", "findings.json"],
-        ["coverage", "coverage.json"],
+        ["reviewState", "coverage.json"],
         ["manifest", "scan-manifest.json"],
       ]) {
         await replaceArtifactJson(
@@ -83,6 +114,16 @@ export const scanId = "7b95abf2-dc04-47a9-9950-53b5c2057f49";
 export const claimToken = "19bfba38-0913-4bd7-86ef-134e9a4d9a42";
 
 type Layout = "standard" | "diff" | "deep" | "worker";
+
+// Fixtures also exercise malformed and legacy inputs before runtime validation.
+type DraftFixture = Omit<
+  ScanDraftInput,
+  "findings" | "reviewState" | "threatModel"
+> & {
+  findings: Record<string, unknown>[];
+  reviewState: Record<string, unknown>;
+  threatModel?: Record<string, unknown>;
+};
 
 export function draftFixture(root: string, layout: Layout) {
   const context: ArtifactContext = {
@@ -115,33 +156,45 @@ export function draftFixture(root: string, layout: Layout) {
     },
   };
   const draft = (
-    coverage: { deferred?: unknown[]; [key: string]: unknown } = {},
+    reviewState: { deferred?: unknown[]; [key: string]: unknown } = {},
     complete = false,
-  ): ScanDraftInput => ({
+  ): DraftFixture => ({
     scanId,
     ...(layout === "worker" ? {} : { handoffClaimToken: claimToken }),
     complete,
     findings: [],
-    coverage: {
-      completeness:
-        complete && !coverage.deferred?.length ? "complete" : "partial",
+    reviewState: {
       surfaces: [],
       explicitExclusions: [],
       deferred: [],
-      ...coverage,
+      ...reviewState,
     },
   });
+  const findingsDraft = (
+    findings: DraftFixture["findings"],
+    options: Pick<DraftFixture, "complete"> = {},
+  ) => ({ ...draft({}, options.complete), findings });
+  const write = (input: unknown) =>
+    layout === "worker"
+      ? draftApi.recordCodexSecurityWorkerScanDraft(context, input)
+      : recordCodexSecurityScanDraft(context, input);
   return {
     root,
     context,
     draft,
-    write: (input: ScanDraftInput) =>
-      layout === "worker"
-        ? draftApi.recordCodexSecurityWorkerScanDraft(context, input)
-        : recordCodexSecurityScanDraft(context, input),
+    findingsDraft,
+    write,
+    writeReviewState: (...args: Parameters<typeof draft>) =>
+      write(draft(...args)),
+    writeFindings: (
+      findings: DraftFixture["findings"],
+      options?: Pick<DraftFixture, "complete">,
+    ) => write(findingsDraft(findings, options)),
+    checkpoint: (input: unknown) =>
+      draftApi.saveScanDraftCheckpoint(context, input, false),
     read: async () =>
       layout === "worker"
-        ? (await readJson(root, "result.json")).coverage
+        ? (await readJson(root, "result.json")).reviewState
         : await readJson(root, "coverage.json"),
   };
 }
@@ -182,3 +235,23 @@ export const surfaceDisposition = ({
   id: string;
   disposition: string;
 }) => ({ id, disposition });
+
+/** Stop after the admitted raw checkpoint and before the projected checkpoint. */
+export async function interruptDraftAfterRaw(action: () => Promise<unknown>) {
+  const rename = fs.rename;
+  let checkpoints = 0;
+  fs.rename = async (source, destination) => {
+    if (
+      path.basename(path.dirname(String(destination))) === "checkpoints" &&
+      ++checkpoints === 2
+    )
+      throw new Error("interrupted projected checkpoint");
+    return rename(source, destination);
+  };
+  try {
+    await assert.rejects(action(), /interrupted projected checkpoint/);
+    assert.equal(checkpoints, 2);
+  } finally {
+    fs.rename = rename;
+  }
+}

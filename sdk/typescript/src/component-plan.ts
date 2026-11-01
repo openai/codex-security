@@ -1,11 +1,8 @@
-import { execFile as execFileCallback } from "node:child_process";
 import { lstat, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, posix } from "node:path";
-import { promisify } from "node:util";
-import { z } from "incur";
+import { isAbsolute, join, posix, resolve } from "node:path";
+import { z } from "zod";
 import type { CodexSecuritySurface, ScanAuthMode } from "./api.js";
-import type { CodexSecurityConfig } from "./config.js";
 import {
   runReadOnlyCodex,
   type ReadOnlyCodexOptions,
@@ -14,13 +11,12 @@ import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 import {
   nullIfMissingFile,
   enclosingGitWorktreeRoot,
+  gitOutput,
   normalizeRepository,
   normalizeTarget,
   validatedGitEnvironment,
 } from "./targets.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
 
-const execFile = promisify(execFileCallback);
 /** @internal */
 export const componentPlanSchema = z.strictObject({
   components: z
@@ -37,16 +33,16 @@ export interface ComponentPlan {
   components: Array<{ name: string; paths: string[] }>;
 }
 
-export interface ComponentPlanningOptions {
+export interface ComponentPlanningOptions extends Pick<
+  ReadOnlyCodexOptions,
+  "config" | "environment" | "signal"
+> {
   /** @internal Calling surface, inherited from the component scan. */
   surface?: CodexSecuritySurface;
   /** @internal Authentication already selected by the calling scan. */
   auth?: ScanAuthMode;
   /** @internal Cyber access program already selected by the calling scan. */
   cyberAccessProgram?: ReadOnlyCodexOptions["cyberAccessProgram"];
-  config?: CodexSecurityConfig;
-  environment?: NodeJS.ProcessEnv;
-  signal?: AbortSignal;
   /** @internal */
   codex?: ReadOnlyCodexOptions["codex"];
 }
@@ -57,8 +53,15 @@ export async function normalizeComponentPlan(
   signal?: AbortSignal,
 ): Promise<ComponentPlan> {
   const plan = componentPlanSchema.parse(value);
+  repository = await normalizeRepository(repository, signal);
   for (const component of plan.components) {
-    const target = await normalizeTarget(repository, component.paths, signal);
+    const target = await normalizeTarget(
+      repository,
+      component.paths.map((path) =>
+        isAbsolute(path) ? path : resolve(repository, path),
+      ),
+      signal,
+    );
     component.paths = [...target.paths];
   }
   return plan;
@@ -270,16 +273,15 @@ async function inventoryFiles(
 ): Promise<string[]> {
   signal?.throwIfAborted();
   const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-  if (await enclosingGitWorktreeRoot(repository, signal)) {
+  if (
+    await enclosingGitWorktreeRoot(repository, signal, {
+      requireIfPresent: true,
+    })
+  ) {
     validatedGitEnvironment();
-    const git = await resolveTrustedExecutable("git", process.env, repository);
-    if (git === null)
-      throw new Error("Git is required to inventory this repository.");
-    const { stdout } = await execFile(
-      git.executable,
+    const stdout = await gitOutput(
+      repository,
       [
-        "-C",
-        repository,
         "ls-files",
         "--cached",
         "--others",
@@ -289,7 +291,10 @@ async function inventoryFiles(
         "--",
         ".",
       ],
-      { env: git.environment, signal, maxBuffer: Infinity, encoding: "buffer" },
+      signal,
+      undefined,
+      undefined,
+      "buffer",
     );
     const files: string[] = [];
     for (const path of stdout.toString("latin1").split("\0").filter(Boolean)) {

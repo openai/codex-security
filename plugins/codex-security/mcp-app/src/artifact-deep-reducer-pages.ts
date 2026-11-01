@@ -1,3 +1,4 @@
+import type * as z from "zod/v4";
 import type { ArtifactContext } from "./artifact-context.js";
 import {
   deepReducerInputsInputSchema,
@@ -8,11 +9,7 @@ import type {
   DeepReductionSources,
 } from "./deep-scan/artifact-validation.js";
 
-export interface DeepReducerPageInput {
-  cursor?: string;
-  maxBytes: number;
-  findingRef?: string;
-}
+export type DeepReducerPageInput = z.infer<typeof deepReducerInputsInputSchema>;
 
 /** Concatenate every json fragment for one document before parsing it. */
 export interface DeepReducerPage {
@@ -111,7 +108,7 @@ function projectFinding(finding: Finding, refs?: string[]): Finding {
     previousFindings: _previous,
     originalCandidates: _candidates,
     ...provenance
-  } = finding.provenance as Record<string, unknown>;
+  } = finding.provenance;
   return {
     ...finding,
     provenance: {

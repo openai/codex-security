@@ -1,3 +1,4 @@
+import { SCAN_SEVERITIES } from "../scan-settings.js";
 import { findingGroupRoots } from "../finding-catalogue.js";
 import type { Finding } from "../models.js";
 import type { FindingNeighborhood } from "../finding-retrieval.js";
@@ -83,14 +84,6 @@ export interface DeduplicationResult {
   /** Refused reviews are kept separate without claiming a DISTINCT verdict. */
   refusals?: DeduplicationRefusal[];
 }
-
-const severityOrder: Record<Finding["severity"]["level"], number> = {
-  critical: 0,
-  high: 1,
-  medium: 2,
-  low: 3,
-  informational: 4,
-};
 
 /** @internal */
 export interface ContradictionGroupingMetrics {
@@ -373,8 +366,8 @@ export class FindingDeduplicator {
         if (!groupMembers.some((member) => selected.has(member))) continue;
         groupMembers.sort(
           (left, right) =>
-            severityOrder[findings.get(left)!.severity.level] -
-              severityOrder[findings.get(right)!.severity.level] ||
+            SCAN_SEVERITIES.indexOf(findings.get(left)!.severity.level) -
+              SCAN_SEVERITIES.indexOf(findings.get(right)!.severity.level) ||
             (left < right ? -1 : left > right ? 1 : 0),
         );
         duplicateGroups.push(groupMembers);

@@ -1,5 +1,6 @@
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { setTimeout } from "node:timers/promises";
 import { join } from "node:path";
 import { rm } from "node:fs/promises";
 import {
@@ -16,7 +17,7 @@ export async function removeTemporaryDirectory(path: string): Promise<void> {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EBUSY" || attempt === 10)
         throw error;
-      await Bun.sleep(100 * (attempt + 1));
+      await setTimeout(100 * (attempt + 1));
     }
   }
 }
@@ -45,6 +46,17 @@ export function temporaryDirectory(
   canonicalize = true,
 ): Promise<string> {
   return createPluginTemporaryDirectory(prefix, canonicalize);
+}
+
+export async function scopedTemporaryDirectory(
+  prefix: string,
+  canonicalize = true,
+) {
+  const path = await temporaryDirectory(prefix, canonicalize);
+  return {
+    path,
+    [Symbol.asyncDispose]: () => rm(path, { recursive: true, force: true }),
+  };
 }
 
 export function createTemporaryDirectoriesSync(canonicalize = false) {

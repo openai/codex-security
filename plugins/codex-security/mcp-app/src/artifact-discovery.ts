@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 import { decodeUtf8 } from "./helpers/utf8.js";
+import { decodePosixBytes } from "./helpers/posix-path.js";
 import { resolvePythonCommand, runPythonWithInput } from "./python_command.js";
 import {
   stableJson,
@@ -12,8 +13,6 @@ import {
   type normalizeCandidateBatch,
 } from "./helpers/normalize-candidates.js";
 import type * as z from "zod/v4";
-import discoveryCandidateDefinitions from "../../schemas/definitions/discovery-candidate.schema.json";
-import discoveryCandidatesToolSchema from "../../schemas/tools/discovery-candidates.schema.json";
 import type { ArtifactContext } from "./artifact-context.js";
 import {
   artifactDestination,
@@ -23,70 +22,32 @@ import {
   artifactSourcePath,
   replaceArtifactText,
 } from "./artifact-io.js";
-import {
-  loadArtifactZodSchema,
-  type SchemaDocument,
-} from "./artifact-schema-loader.js";
-import { candidateSchemaV1 } from "./deep-scan/artifact-contracts.js";
+import { artifactSchemaDocuments } from "./artifact-contracts.js";
 
 const discoveryComponents = ["artifacts", "02_discovery"] as const;
 const discoveryLabel = "discovery candidates";
-const discoverySchemaDocuments = [
-  discoveryCandidateDefinitions,
-  discoveryCandidatesToolSchema,
-] as SchemaDocument[];
-
-export type RawDiscoveryLocationRole =
-  | "entrypoint"
-  | "entrypoint/wrapper"
-  | "source"
-  | "root_control"
-  | "sink"
-  | "concrete_implementation"
-  | "evidence";
-
-export interface RawDiscoveryLocation {
-  path: string;
-  start_line: number;
-  end_line?: number;
-  role: RawDiscoveryLocationRole;
-}
-
-export interface RawDiscoveryCandidate {
-  cwe_ids: string[];
-  locations: RawDiscoveryLocation[];
-  summary: string;
-  evidence: string;
-  context?: string;
-  instance?: string;
-}
-
-export interface DiscoveryCandidatesInput {
-  candidates: RawDiscoveryCandidate[];
-}
-
-export type CompactDiscoveryCandidate = z.infer<typeof candidateSchemaV1> &
-  Record<string, unknown>;
-
-/** Every exposed validator is derived from the checked-in JSON Schema source. */
-export const compactDiscoveryCandidateSchema = loadArtifactZodSchema(
-  discoverySchemaDocuments,
-  discoveryCandidateDefinitions.$id,
-  "discoveryCandidate",
-) as z.ZodType<CompactDiscoveryCandidate>;
-
-export const workbenchDiscoveryCandidatesInputSchema = loadArtifactZodSchema(
-  discoverySchemaDocuments,
-  discoveryCandidatesToolSchema.$id,
-  "workbenchRecordDiscoveryCandidatesInput",
-) as z.ZodType<DiscoveryCandidatesInput & { scanId: string }>;
-
-export const workbenchListCodexSecurityCandidatesInputSchema =
-  loadArtifactZodSchema(
-    discoverySchemaDocuments,
-    discoveryCandidatesToolSchema.$id,
-    "workbenchListCandidatesInput",
-  ) as z.ZodType<ArtifactPage & { scanId: string }>;
+const definitions =
+  artifactSchemaDocuments["definitions/discovery-candidate"].$defs;
+export type RawDiscoveryLocationRole = z.infer<typeof definitions.locationRole>;
+export type RawDiscoveryLocation = z.infer<
+  typeof definitions.rawDiscoveryLocation
+>;
+export type RawDiscoveryCandidate = z.infer<
+  typeof definitions.rawDiscoveryCandidate
+>;
+export const compactDiscoveryCandidateSchema = definitions.discoveryCandidate;
+export type CompactDiscoveryCandidate = z.infer<
+  typeof compactDiscoveryCandidateSchema
+>;
+export const {
+  workbenchRecordDiscoveryCandidatesInput:
+    workbenchDiscoveryCandidatesInputSchema,
+  workbenchListCandidatesInput: workbenchListCodexSecurityCandidatesInputSchema,
+} = artifactSchemaDocuments["tools/discovery-candidates"].$defs;
+export type DiscoveryCandidatesInput = Pick<
+  z.infer<typeof workbenchDiscoveryCandidatesInputSchema>,
+  "candidates"
+>;
 
 /**
  * Normalize in memory and replace the bound canonical candidate ledger.
@@ -161,7 +122,12 @@ async function diffCandidateSources(
   }
   const nativePath = (value: string) =>
     process.platform === "win32" ? value.replaceAll("\\", "/") : value;
-  const paths = decodeUtf8(await readFile(inventory))
+  const contents = await readFile(inventory);
+  const paths = (
+    process.platform === "win32"
+      ? decodeUtf8(contents)
+      : decodePosixBytes(contents)
+  )
     .split(/\r?\n/u)
     .filter(Boolean)
     .map(nativePath);

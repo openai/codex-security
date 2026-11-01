@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   canonicalDirectory,
@@ -42,6 +43,25 @@ export async function createCodexSecurityArtifactWriterServer(
   const scope = environment.CODEX_SECURITY_SCOPE
     ? environment.CODEX_SECURITY_SCOPE
     : undefined;
+  const scopeInput: unknown =
+    environment.CODEX_SECURITY_INCLUDE_PATHS_FILE === undefined
+      ? undefined
+      : JSON.parse(
+          await readFile(environment.CODEX_SECURITY_INCLUDE_PATHS_FILE, "utf8"),
+        );
+  // Older coordinators sent only the requested paths, with lexical scope matching.
+  const includePaths = isRecord(scopeInput) ? scopeInput.paths : scopeInput;
+  const filePaths = isRecord(scopeInput) ? scopeInput.filePaths : undefined;
+  for (const paths of [includePaths, filePaths]) {
+    if (
+      paths !== undefined &&
+      (!Array.isArray(paths) || paths.some((path) => typeof path !== "string"))
+    ) {
+      throw new Error(
+        "The coordinator-bound include paths must be an array of paths.",
+      );
+    }
+  }
   const pluginRoot = environment.CODEX_SECURITY_PLUGIN_ROOT
     ? environment.CODEX_SECURITY_PLUGIN_ROOT
     : undefined;
@@ -58,6 +78,8 @@ export async function createCodexSecurityArtifactWriterServer(
     layout,
     ...defined("scanId", scanId),
     ...defined("scope", scope),
+    ...defined("includePaths", includePaths as string[] | undefined),
+    ...defined("filePaths", filePaths as string[] | undefined),
     ...defined("pluginRoot", pluginRoot),
     ...defined("pythonCommand", pythonCommand),
     ...defined("deepReducer", deepReducer),

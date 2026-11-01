@@ -1,25 +1,26 @@
 {
   "name": "codex-security-mcp-app",
-  "version": "0.1.160",
+  "version": "0.1.161",
   "type": "module",
   "private": true,
   "scripts": {
-    "build": "tsc --noEmit",
+    "build": "node scripts/generate-artifact-schemas.mjs && tsc --noEmit",
     "build:mcp": "node scripts/build_mcp_app.mjs --output .preview/mcp",
     "test:mcp": "node --experimental-strip-types --test --test-concurrency=2 --test-reporter=./scripts/test_reporter.mts \"tests/test_*.ts\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "node scripts/generate-artifact-schemas.mjs --check && tsc --noEmit"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.31.0",
-    "@openai/codex-sdk": "0.162.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@openai/codex-sdk": "0.166.0",
     "ajv": "8.20.0",
-    "smol-toml": "1.9.0",
-    "zod": "^4.6.5"
+    "smol-toml": "1.9.1",
+    "zod": "^4.6.7",
+    "yaml": "2.9.1"
   },
   "devDependencies": {
-    "@types/node": "^26.6.4",
+    "@types/node": "^26.6.5",
     "esbuild": "^0.28.2",
-    "prettier": "3.9.9",
+    "prettier": "3.9.10",
     "typescript": "^7.0.2"
   }
 }

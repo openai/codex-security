@@ -1,5 +1,7 @@
+import { workbenchArgs } from "./workbench-arguments.js";
 import { existsSync } from "node:fs";
 import { isRecord } from "./record.js";
+import { notify } from "./value.js";
 import { dirname, join } from "node:path";
 import {
   Codex,
@@ -9,7 +11,7 @@ import {
   type ThreadOptions,
   type TurnOptions,
 } from "@openai/codex-sdk";
-import { z } from "incur";
+import { z } from "zod";
 import { parse, stringify } from "smol-toml";
 import type { CodexSecuritySurface, ScanAuthMode } from "./api.js";
 import {
@@ -23,7 +25,6 @@ import {
   DEFAULT_CODEX_CONFIG,
   deepMerge,
   hasCommandAuth,
-  inlineToml,
   mergedCodexConfig,
   normalizeLegacyWindowsSandboxOverride,
   resolveCodexProfile,
@@ -36,7 +37,7 @@ import {
   type JsonObject,
 } from "./config.js";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
-import { codexSecurityRequestMetadata } from "./request-metadata.js";
+import { codexSecurityRequestContext } from "./request-metadata.js";
 import {
   createProfileCodex,
   createProviderProfile,
@@ -97,22 +98,12 @@ export interface ScanComparisonProgress {
   pages?: number;
 }
 
-interface ScanComparisonMatch {
-  beforeOccurrenceIds: string[];
-  afterOccurrenceIds: string[];
-  confidence: "high";
-  reason: string;
-}
+type ScanComparisonPair = z.infer<typeof findingPairSchema>;
 
-interface ScanComparisonPair {
-  beforeOccurrenceId: string;
-  afterOccurrenceId: string;
-  reason: string;
-}
-
-export interface ScanComparisonResult {
-  matches: ScanComparisonMatch[];
-  uncertain: ScanComparisonPair[];
+export interface ScanComparisonResult extends Omit<
+  z.infer<typeof comparisonSchema>,
+  "related"
+> {
   related?: ScanComparisonPair[];
 }
 
@@ -319,19 +310,15 @@ export async function matchScanFindingsInternal(
     after: new Map<string, EvidenceCursor>(),
   };
   const progress = (phase: ScanComparisonProgress["phase"], page?: number) => {
-    try {
-      void Promise.resolve(
-        options.onProgress?.({
-          phase,
-          beforeFindings: input.before.length,
-          beforeIssues: catalogue.size,
-          afterFindings: input.after.length,
-          ...(page === undefined ? {} : { page, pages: pages.length }),
-        }),
-      ).catch(() => {});
-    } catch {
-      // Progress observers must not interrupt matching.
-    }
+    notify(() =>
+      options.onProgress?.({
+        phase,
+        beforeFindings: input.before.length,
+        beforeIssues: catalogue.size,
+        afterFindings: input.after.length,
+        ...(page === undefined ? {} : { page, pages: pages.length }),
+      }),
+    );
   };
   const turnOptions = {
     // Native structured output requires every field; saved results can omit related.
@@ -582,15 +569,21 @@ async function startReadOnlyCodexThread(
     );
   }
   const sdkConfig = structuredCodexConfig(config);
-  const requestMetadata = {
-    ...(homeExecutionConfig["responses_api_metadata"] as
-      JsonObject | undefined),
-    ...(sdkConfig["responses_api_metadata"] as JsonObject | undefined),
-    ...codexSecurityRequestMetadata(
-      runtimeOptions.surface,
-      runtimeOptions.command,
-    ),
-  };
+  const requestContext = codexSecurityRequestContext(
+    {
+      ...sdkConfig,
+      responses_api_metadata: {
+        ...(homeExecutionConfig["responses_api_metadata"] as
+          JsonObject | undefined),
+        ...(sdkConfig["responses_api_metadata"] as JsonObject | undefined),
+      },
+    },
+    {
+      surface: runtimeOptions.surface,
+      command: runtimeOptions.command,
+      providerResolved: sdkConfig["model_provider"] !== undefined,
+    },
+  );
   delete sdkConfig["responses_api_metadata"];
   delete sdkConfig["default_permissions"];
   const providerSettings = commandAuth ? providerConfig : (config ?? {});
@@ -606,8 +599,7 @@ async function startReadOnlyCodexThread(
   );
   const command = resolveCodexCommand(environment);
   const codexOptions: CodexOptions = {
-    // A single table preserves literal keys that the SDK would split on dots.
-    configOverrides: [`responses_api_metadata=${inlineToml(requestMetadata)}`],
+    configOverrides: [requestContext.configOverride],
     codexPathOverride: executablePathForSpawn(command.command),
     env: environment,
     // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
@@ -627,6 +619,7 @@ async function startReadOnlyCodexThread(
       allow_login_shell: false,
       project_doc_max_bytes: 0,
       features: {
+        cli_daybreak: effectiveFeatures?.["cli_daybreak"],
         api_key_cyber_access_programs:
           effectiveFeatures?.["api_key_cyber_access_programs"],
         api_key_model_discovery: effectiveFeatures?.["api_key_model_discovery"],
@@ -829,14 +822,11 @@ export async function matchCompletedScan(
   for (const { scanId, projected } of comparisons) {
     options.signal?.throwIfAborted();
     await options.workbench(
-      [
-        "save-scan-comparison",
-        "--before-scan-id",
-        scanId,
-        "--after-scan-id",
-        options.scanId,
-        "--matches-json-stdin",
-      ],
+      workbenchArgs("save-scan-comparison", {
+        beforeScanId: scanId,
+        afterScanId: options.scanId,
+        matchesJsonStdin: true,
+      }),
       JSON.stringify(projected),
     );
   }

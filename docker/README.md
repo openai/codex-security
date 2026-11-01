@@ -1,19 +1,20 @@
 # Container releases
 
-`container-release` publishes `ghcr.io/openai/codex-security` from the default
-`scanner` Docker target. The image runs the scanner CLI; saved-scan
-deduplication uses the runner's local SQLite database directly.
+Each scanner release publishes two images to `ghcr.io/openai/codex-security`
+from the same verified npm tarball and runtime dependency lock. Both run the
+scanner CLI and use the runner's local SQLite database for saved-scan deduplication.
 
-Releases use the SDK package version, native Linux `amd64`/`arm64` builds,
-BuildKit SBOMs and maximum-mode provenance, and a GitHub provenance attestation.
-Each native image passes scanner checks before
-publishing the multiarchitecture manifest. Anonymous
-pulls and attestation must succeed before promoting version, `sha-<commit>`, and
-`latest` tags. Stable version tags cannot be overwritten.
+| Tag                                       | Image                             | Platforms             |
+| ----------------------------------------- | --------------------------------- | --------------------- |
+| `X.Y.Z`, `sha-<scanner-commit>`, `latest` | Debian                            | Linux amd64 and arm64 |
+| `X.Y.Z-wolfi-amd64`                       | Wolfi                             | Linux amd64           |
+| `X.Y.Z-wolfi-amd64-rN`                    | Wolfi OS update for scanner X.Y.Z | Linux amd64           |
+
+Version tags are immutable. Only the newest stable Debian release gets `latest`.
 
 ## Image metadata and verification
 
-Release images include OCI metadata in each platform's image labels and in the
+Debian release images include OCI metadata in each platform's image labels and in the
 final multiarchitecture index: title, description, source, license, vendor,
 version, source commit, build timestamp, release notes, and documentation pinned
 to that commit. GHCR reads the multiarchitecture description from the index,
@@ -35,9 +36,16 @@ digest="$(docker buildx imagetools inspect "$image:$version" --format '{{.Manife
 reference="$image@$digest"
 
 docker buildx imagetools inspect "$reference" --raw | jq '.annotations'
-gh attestation verify "oci://$reference" --repo openai/codex-security
+gh attestation verify "oci://$reference" --repo openai/codex-security \
+  --cert-identity 'https://github.com/openai/codex-security/.github/workflows/container-publish.yml@refs/heads/main' \
+  --source-ref refs/heads/main
 docker pull "$reference"
 ```
+
+Older Debian releases were signed by `container-release.yml`. For those releases,
+use that filename in the certificate identity. For an older image published from
+a `container-vVERSION` tag, use `refs/tags/container-vVERSION` for both refs
+and pass `--source-digest` with the release commit.
 
 Set `CODEX_SECURITY_IMAGE` to the verified
 `reference` when using Compose. The index selects the native `amd64` or `arm64`
@@ -72,8 +80,10 @@ Prepare the [universal native payload](../plugins/codex-security/native/README.m
    **Public**, and grant the repository **Write** under **Manage Actions access**.
    The workflow uses `GITHUB_TOKEN` and refuses missing, private, or unreadable
    packages. Verify `docker pull` works after logging out of GHCR.
-3. Protect the repository's `container` environment with required reviewers and
-   deployment rules for protected `main` and approved `container-v*` tags.
+3. Configure the protected `npm` environment with release reviewers authorized
+   for both npm and GHCR and limit it to `npm-v*` tags. For image backfills
+   and standalone Wolfi OS updates, protect the `container` environment with
+   required reviewers and deployment rules for `main` and approved `container-v*` tags.
    Allow the workflow's pinned actions, package writes, and OIDC attestations.
    Update branch-protection check names if they reference the old release jobs.
 
@@ -82,15 +92,40 @@ and [package access settings](https://docs.github.com/en/packages/learn-github-p
 
 ## Publishing
 
-After merging to `main`, push `container-v<version>` matching the SDK package
-version or run `container-release` manually on `main`. Releases require a commit
-on protected `main`; pull requests only build and test.
+After verifying the published npm tarball and installation, `node-github-release`
+publishes the matching Action. Its immutable `action-vX.Y.Z` tag preserves the
+runtime lock for future backfills. The workflow passes the verified archive and
+lock to `container-publish`. Debian builds on amd64 and arm64 and Wolfi builds
+on amd64, both using recipes from the scanner release commit. Approving
+**Publish npm and container images** in the `npm` environment authorizes both
+images for that release. Publication uses the tested digests, verifies
+anonymous pulls, and attests the images before promoting their version tags.
+Debian carries BuildKit SBOMs and maximum-mode provenance. Wolfi carries build
+provenance and an SPDX inventory of its OS packages, installed npm packages,
+and native components.
 
-If a release fails, fix the cause and rerun only failed jobs. Promotion retries
-require the existing stable version to reference the verified digest. If a newer
-stable version exists, promotion leaves `latest` untouched; otherwise a retry
-also requires `latest` to reference that digest. `bootstrap` and
-`release-candidate-<commit>` tags are not consumer releases.
+To backfill a release, dispatch `node-github-release` on protected `main` with
+the original `npm-vX.Y.Z` tag. A manual `container-release` run on `main`
+requests the coordinated release for the current package version. Pushing a
+`container-vX.Y.Z` tag runs the container workflow at the tagged commit.
+The release source determines which images are required.
+Sources from 0.5.0 onward with a Dockerfile but predating coordinated Wolfi
+builds use the original Debian release path. Earlier releases skip image
+publication. A default backfill uses the scanner release commit's recipes.
+If the Wolfi build needs updated OS pins, dispatch `node-github-release` with
+`refresh-wolfi-recipe=true` to use the recipe from protected `main` with the
+original scanner tarball and runtime lock. Review and approve the `container`
+deployment when publishing with a different recipe commit or recovering
+images for a release whose approval covered only npm. A backfill that
+verifies all existing tags finishes without a deployment approval.
+
+Promotion updates tags separately. If publication stops partway through, rerun
+the failed jobs to reuse the retained artifacts. The publisher verifies existing
+version tags and refuses to replace a different digest. The `release status`
+summary lists both digests when the coordinated release finishes. For a Wolfi
+OS update between scanner releases, see [Wolfi-only OS updates](wolfi/README.md#wolfi-only-os-updates).
+The `bootstrap` and `release-candidate-<commit>` tags are for registry setup
+and release validation.
 
 ## Workflow runner
 
@@ -98,15 +133,17 @@ also requires `latest` to reference that digest. `bootstrap` and
 not start a findings service or implement another workflow engine. It passes
 commands, output, and exit codes through the existing scanner entrypoint.
 
-Run these commands from the repository root. After the selected scanner release
-is available, prepare private directories and choose the host user's UID/GID so
-the runner can write its bind mounts:
+Run these commands from the repository root after
+[verifying an image](#image-metadata-and-verification). Keep the verified
+`reference` in the same shell. Prepare the output and state directories, keep
+state private, and choose the host user's UID/GID so the runner can write its
+bind mounts:
 
 ```bash
 mkdir -p results state
-chmod 700 results state
+chmod 700 state
 export CODEX_SECURITY_USER="$(id -u):$(id -g)"
-export CODEX_SECURITY_IMAGE=ghcr.io/openai/codex-security:latest
+export CODEX_SECURITY_IMAGE="$reference"
 docker compose -f compose.runner.yaml pull
 docker compose -f compose.runner.yaml run --rm codex-security login --device-auth
 ```
@@ -128,16 +165,21 @@ docker build --target scanner -t codex-security:local .
 export CODEX_SECURITY_IMAGE=codex-security:local
 ```
 
+To build the Linux amd64 Wolfi image locally, see the
+[melange and apko recipe](wolfi/README.md).
+
 The existing `CODEX_SECURITY_RESULTS` and `CODEX_SECURITY_STATE` settings select
 the host directories (default `./results` and `./state`):
 
-| Container path                  | Durable contents                                    |
-| ------------------------------- | --------------------------------------------------- |
-| `/output`                       | Scan artifacts and any source checkouts stored here |
-| `/output/.codex-security-state` | CLI scan history and workbench database             |
-| `/state`                        | Codex sign-in and configuration                     |
+| Container path                             | Durable contents                                              |
+| ------------------------------------------ | ------------------------------------------------------------- |
+| `/output`                                  | Scan artifacts and any source checkouts stored here           |
+| `/output/.codex-security-state`            | CLI scan history and workbench database                       |
+| `/output/.codex-security-state/codex-home` | Wrapper sign-in credentials and private runtime configuration |
+| `/state`                                   | Ambient Codex configuration and credentials imported at setup |
 
-Keep all three across runner replacements. Keep the approved source checkout
+Keep both host mounts across runner replacements. The results mount also holds
+the wrapper's private credential directory. Keep the approved source checkout
 available at the same container path for later source reviews. For example,
 place a checkout under `results/repository`, then scan it with artifacts outside
 the checkout:

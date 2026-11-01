@@ -45,8 +45,8 @@ export interface PolicyCommandDependencies {
 }
 
 const STAGES: Record<SecurityPolicyStage, string> = {
-  architecture: "[1/3] Understanding the system and its security boundaries",
-  threat_model: "[2/3] Building the source-backed threat model",
+  architecture: "[1/3] Reading the source",
+  threat_model: "[2/3] Writing the threat model",
   policy: "[3/3] Drafting SECURITY.md",
 };
 
@@ -122,7 +122,7 @@ export async function runPolicyCommand(
               signal: AbortSignal,
             ) => {
               write(
-                "A few details could change this policy. Leave an answer blank to keep it unresolved.",
+                "Answer what you know; leave other answers blank for later review.",
               );
               const answers: string[] = [];
               for (const question of questions) {
@@ -162,7 +162,7 @@ export async function runPolicyCommand(
         ...(draft.reviewNotes.length === 0
           ? []
           : [
-              "\nOwner review:",
+              "\nReview notes:",
               ...draft.reviewNotes.map((note) => `- ${display(note)}`),
             ]),
       ].join("\n");
@@ -177,7 +177,7 @@ export async function runPolicyCommand(
         write(`Threat model: ${display(draft.threatModelPath)}`);
       if (changed)
         write(
-          "No repository files changed. Review the saved SECURITY.md before copying it into the repository.",
+          "No repository files changed. Review the draft, then copy only SECURITY.md to the Policy target shown.",
         );
     }
     const seconds = Math.max(0, (dependencies.now() - started) / 1000);
