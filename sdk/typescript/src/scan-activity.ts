@@ -70,24 +70,41 @@ export function scanActivityFromEvent(
         ? "completed"
         : "running";
 
+  const rawCommand = item["command"];
+  const argv =
+    Array.isArray(rawCommand) &&
+    rawCommand.every((part) => typeof part === "string")
+      ? (rawCommand as string[])
+      : undefined;
   if (
     item["type"] === "command_execution" &&
-    typeof item["command"] === "string"
+    (typeof rawCommand === "string" || argv !== undefined)
   ) {
-    const command = unwrapCommand(item["command"]);
+    const command = unwrapCommand(
+      typeof rawCommand === "string" ? rawCommand : argv!.join(" "),
+    );
     return {
       id: item["id"],
       kind: "command",
       status,
       description: command.replaceAll(/\s+/gu, " "),
-      paths: commandRepositoryPaths(command, repository),
+      paths: commandRepositoryPaths(command, repository, item["shell"], argv),
     };
   }
 
   if (item["type"] === "mcp_tool_call" && typeof item["tool"] === "string") {
     const arguments_ = isRecord(item["arguments"]) ? item["arguments"] : {};
     const value = arguments_["cmd"] ?? arguments_["command"];
-    const command = typeof value === "string" ? unwrapCommand(value) : null;
+    const argv =
+      Array.isArray(value) && value.every((part) => typeof part === "string")
+        ? (value as string[])
+        : undefined;
+    const command =
+      typeof value === "string"
+        ? unwrapCommand(value)
+        : argv === undefined
+          ? null
+          : argv.join(" ");
     return {
       id: item["id"],
       kind: "tool",
@@ -98,7 +115,12 @@ export function scanActivityFromEvent(
           : toolDescription(item["tool"], arguments_, item["arguments"]),
       paths:
         item["tool"] === "exec" && command !== null
-          ? commandRepositoryPaths(command, repository)
+          ? commandRepositoryPaths(
+              command,
+              repository,
+              arguments_["shell"] ?? item["shell"],
+              argv,
+            )
           : argumentRepositoryPaths(arguments_, repository),
     };
   }
@@ -210,11 +232,10 @@ export function scanActivityFromSessionEvent(
     arguments_["command"] ??
     customShellCommand(name, payload["input"]);
   const command =
-    typeof value === "string"
+    typeof value === "string" ||
+    (Array.isArray(value) && value.every((part) => typeof part === "string"))
       ? value
-      : Array.isArray(value) && value.every((part) => typeof part === "string")
-        ? value.join(" ")
-        : null;
+      : null;
   if (
     command !== null &&
     /^(?:exec|exec_command|shell_command|shell)$/u.test(name)
@@ -222,7 +243,7 @@ export function scanActivityFromSessionEvent(
     return scanActivityFromEvent(
       {
         type: "item.started",
-        item: { id, type: "command_execution", command },
+        item: { id, type: "command_execution", command, shell: arguments_["shell"] },
       },
       repository,
     );
@@ -371,7 +392,53 @@ function sessionCallArguments(
   return isRecord(parsed) ? parsed : {};
 }
 
-function commandRepositoryPaths(command: string, repository: string): string[] {
+// Recorded argv contains literal operands, not a command to re-lex.
+function literalRepositoryPaths(
+  values: readonly string[],
+  repository: string,
+  windows: boolean,
+): string[] {
+  const normalize = (value: string) =>
+    windows ? value.replaceAll("\\", "/") : value;
+  const prefix = normalize(repository).replace(/\/$/u, "") + "/";
+  const paths = new Set<string>();
+  for (const value of values) {
+    const normalized = normalize(value);
+    if (!normalized.startsWith(prefix)) continue;
+    const relative = normalized.slice(prefix.length);
+    if (relative !== "" && !relative.split("/").includes(".."))
+      paths.add(relative);
+    if (paths.size >= MAX_ACTIVITY_PATHS) break;
+  }
+  return [...paths];
+}
+
+function commandRepositoryPaths(
+  command: string,
+  repository: string,
+  shell?: unknown,
+  argv?: readonly string[],
+): string[] {
+  const posix =
+    typeof shell === "string" && /(?:^|\/)(?:sh|bash|zsh)$/u.test(shell);
+  if (argv !== undefined)
+    return literalRepositoryPaths(
+      argv,
+      repository,
+      !posix && process.platform === "win32",
+    );
+
+  // Only whole, unquoted words with escaped blanks need POSIX decoding.
+  // All other command strings retain their existing attribution behavior.
+  if (posix && /\\[ \t]/u.test(command)) {
+    const words = Array.from(
+      command.matchAll(
+        /(?:^|[\s|;&<>])((?:\\[ \t]|[^\s\\|;&<>"'\x60$()])+)(?=$|[\s|;&<>])/gu,
+      ),
+      (match) => match[1]!.replace(/\\([ \t])/gu, "$1"),
+    );
+    return literalRepositoryPaths(words, repository, false);
+  }
   const paths = new Set<string>();
   const repositoryPrefix = repository.replaceAll("\\", "/").replace(/\/$/u, "");
   for (const token of command.match(SHELL_TOKEN) ?? []) {
