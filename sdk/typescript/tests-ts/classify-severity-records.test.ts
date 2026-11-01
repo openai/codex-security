@@ -12,7 +12,7 @@ import { capture, dependencies } from "./cli-fixtures.js";
 
 const hash = (value: string) =>
   createHash("sha256").update(value, "utf8").digest("hex");
-function input(): ClassifySeverityRecordsInput & {
+function input(effort = "high"): ClassifySeverityRecordsInput & {
   rubric: NonNullable<ClassifySeverityRecordsInput["rubric"]>;
 } {
   const markdown =
@@ -23,7 +23,7 @@ function input(): ClassifySeverityRecordsInput & {
     version: 1,
     rubric: { revision: 4, markdown, sha256: hash(markdown) },
     model: "synthetic-model",
-    effort: "high",
+    effort,
     records: [
       {
         id: "canonical-one",
@@ -46,8 +46,9 @@ function answer(request: SeverityClassificationReviewRequest) {
   };
 }
 
-test("binds assessments to exact UTF-8 snapshots without rewriting the original report", async () => {
-  const original = input();
+const efforts = ["", "\t", " synthetic-effort "];
+test.each(efforts)("preserves UTF-8 records and effort %p", async (effort) => {
+  const original = input(effort);
   const before = structuredClone(original);
   const requests: SeverityClassificationReviewRequest[] = [];
   const result = await classifySeverityRecords(original, {
@@ -55,7 +56,7 @@ test("binds assessments to exact UTF-8 snapshots without rewriting the original 
       async run(request) {
         requests.push(request);
         expect(request.model).toBe(original.model);
-        expect(request.effort).toBe("high");
+        expect(request.effort).toBe(original.effort);
         expect(JSON.parse(request.prompt).rubric).toEqual([
           original.rubric.markdown,
         ]);
@@ -89,6 +90,8 @@ test("binds assessments to exact UTF-8 snapshots without rewriting the original 
 });
 
 test.each([
+  "missing-effort",
+  "numeric-effort",
   "rubric-hash",
   "finding-hash",
   "duplicate",
@@ -99,6 +102,8 @@ test.each([
   "unsafe-revision",
 ])("rejects %s before any host work", async (scenario) => {
   const data = input();
+  if (scenario === "missing-effort") Reflect.deleteProperty(data, "effort");
+  if (scenario === "numeric-effort") Reflect.set(data, "effort", 1);
   if (scenario === "rubric-hash") data.rubric.markdown += " ";
   if (scenario === "finding-hash") data.records[0]!.findingJson += " ";
   if (scenario === "duplicate") data.records.push(data.records[0]!);
@@ -296,7 +301,7 @@ test.each([
       capture().stream,
       deps,
     );
-    const params: ClassifySeverityRecordsInput = input();
+    const params: ClassifySeverityRecordsInput = input("none");
     if (scenario === "default-rubric") delete params.rubric;
     const completed = [
       "completed",
