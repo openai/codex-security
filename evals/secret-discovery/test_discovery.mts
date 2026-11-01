@@ -832,23 +832,15 @@ test("stages production prompt unchanged and no labels; grades only the final SD
           );
           return {
             events: (async function* () {
-              yield {
-                type: "item.completed",
-                item: {
-                  type: "agent_message",
-                  text: JSON.stringify(retainedResult(prepared.fixture)),
-                },
-              };
-              yield {
-                type: "item.completed",
-                item: {
-                  type: "agent_message",
-                  text: JSON.stringify({
-                    findings: [],
-                    coverage: {},
-                  }),
-                },
-              };
+              for (const result of [
+                retainedResult(prepared.fixture),
+                { findings: [], coverage: {} },
+              ]) {
+                yield {
+                  type: "item.completed",
+                  item: { type: "agent_message", text: JSON.stringify(result) },
+                };
+              }
               yield {
                 type: "turn.completed",
                 usage: { input_tokens: 1, output_tokens: 1 },

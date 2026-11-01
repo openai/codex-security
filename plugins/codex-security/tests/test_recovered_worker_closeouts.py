@@ -10,6 +10,7 @@ from workbench_test_support import (
     saved_binding,
     saved_discovery_worker,
     saved_draft,
+    select_checkpoint,
     write_checkpoint,
 )
 
@@ -37,8 +38,7 @@ def saved_worker(root: Path, worker_id: str, *, headed: bool = False):
     result.write_text(json.dumps(complete))
     observed(result, 20)
     if headed:
-        head = output / "checkpoint-head.json"
-        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+        head = select_checkpoint(output, checkpoint)
         observed(head, 20)
     worker = saved_discovery_worker(output, worker_id, 2)
     worker.update(status="succeeded", result_manifest_path=str(result))
@@ -103,8 +103,7 @@ def test_worker_reopening_invalidates_its_copied_parent_closeout(
     reopened = {"id": "review-a", "reason": "New evidence requires another review."}
     checkpoint = write_checkpoint(output / "checkpoints", saved_draft(SCAN_ID, deferred=[reopened]))
     observed(checkpoint, reopened_at)
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    head = select_checkpoint(output, checkpoint)
     observed(head, reopened_at)
     coverage = recover(tmp_path, workbench_api["saved_results"], [worker])
     assert sorted(coverage.get("resolvedDeferred", []), key=lambda row: row["id"]) == (
