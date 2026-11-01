@@ -148,6 +148,7 @@ import {
 import {
   AuthenticationRequiredError,
   CodexSecurityError,
+  HostProtocolError,
   ConfigurationError,
   IncompleteScanError,
   OutputDirectoryError,
@@ -6337,7 +6338,8 @@ function isCancellationDerivedFailure(
   costSignal?: AbortSignal,
 ): boolean {
   if (
-    !signal.aborted ||
+    (!(failure instanceof ScanExecutionError) &&
+      (!signal.aborted || signal.reason instanceof HostProtocolError)) ||
     (costSignal?.aborted && Object.is(costSignal.reason, signal.reason))
   )
     return false;

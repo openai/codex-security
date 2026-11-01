@@ -1048,7 +1048,7 @@ test.each([
     expect(terminal.status).toBe(terminalStatus);
     expect(terminal.execution).toEqual(execution);
     expect(terminal.artifacts).toEqual([]);
-    const canceled = callerAborts && status === "canceled";
+    const canceled = status === "canceled";
     const saved = await hostedWorkbench(input, [
       "get-scan",
       "--scan-id",
@@ -1239,7 +1239,7 @@ test("cancellation after registration retains scan identity before executor disp
         event.progress.phase === "preflight" &&
         event.progress.filesTotal > 0
       )
-        controller.abort();
+        controller.abort(new Error("Invalid JSON."));
     },
     executor,
   });
@@ -1259,6 +1259,48 @@ test("cancellation after registration retains scan identity before executor disp
       progress: { status: "canceled" },
     },
   ]);
+});
+
+test("invalid host input fails a registered scan before dispatch", async () => {
+  const params = await fixture();
+  const input = new PassThrough();
+  const run = spyOn(hostedScan, "runHostedScan");
+  try {
+    const output = capture();
+    const finished = runHostedScanProtocol(input, {
+      write(chunk) {
+        output.stream.write(chunk);
+        const frame = JSON.parse(chunk.toString());
+        const progress = frame.params?.event?.progress;
+        if (progress?.phase === "preflight" && progress.filesTotal > 0)
+          input.write("invalid JSON\n");
+        return true;
+      },
+    });
+    send(input, { id: "run", method: "run", params });
+    expect(await finished).toBe(2);
+    const messages = parseJsonLines(output.text());
+    expect(messages.at(-1)?.error).toMatchObject({
+      code: -32700,
+      message: "Invalid JSON.",
+    });
+    expect(messages.some((frame) => frame.method === "execution.run")).toBe(
+      false,
+    );
+    // The protocol can report the input error before the scan finishes its cleanup.
+    await run.mock.results[0]!.value;
+    const history = await hostedWorkbench(params, [
+      "list-scans",
+      "--repository",
+      params.repository,
+    ]);
+    expect(history["scans"]).toMatchObject([
+      { scanDir: params.outputDirectory, progress: { status: "failed" } },
+    ]);
+  } finally {
+    run.mockRestore();
+    input.destroy();
+  }
 });
 
 test("mismatched execution receipts are never accepted or retried", async () => {
