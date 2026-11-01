@@ -3757,8 +3757,11 @@ if __name__ == "__main__":
       const cause = late ? controller.signal.reason : nativeError;
       if (reason) expect(interrupted).toBe(reason);
       else expect(interrupted.cause).toBe(cause);
+      expect(stopped?.slice(1, 3)).toEqual(["--scan-id", "scan_example_001"]);
       const message = late ? nativeError.message : interrupted.message;
-      expect(stopped).toContain(`--message=${message}`);
+      if (reason && !canceled)
+        expect(stopped).toContainEqual(expect.stringMatching(/^--message=.+/));
+      else expect(stopped).toContain(`--message=${message}`);
       expect(stopped?.includes("--canceled")).toBe(canceled);
     },
   );
