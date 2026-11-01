@@ -74,7 +74,7 @@ export async function testWorkerCyberAccessSettings({
     {
       name: "explicit-false",
       configuration:
-        'daybreak = false\nservice_tier = "flex"\n[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\ncli_daybreak = false\napi_key_cyber_access_programs = false\napi_key_model_discovery = false\n',
+        'profile = "selected"\ndaybreak = false\nservice_tier = "flex"\n[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\ncli_daybreak = false\napi_key_cyber_access_programs = true\napi_key_model_discovery = false\n[profiles.selected.features]\napi_key_cyber_access_programs = false\n',
       daybreak: false,
       serviceTier: "flex",
       program: "daybreak_blue",
