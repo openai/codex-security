@@ -5,6 +5,8 @@ import { isRecord } from "./record.js";
 import {
   array,
   hasSarifExternalPropertyReferences,
+  indexSarifRules,
+  matchesSarifRuleReference,
   normalizeRecords,
   readScannerJson,
   record,
@@ -263,14 +265,10 @@ export function normalizeSnykSarif(
     const rules = array(driver["rules"], "SARIF rules").map((rule) =>
       record(rule, "SARIF rule"),
     );
-    const rulesById = new Map<
-      unknown,
-      { rule: Record<string, unknown>; index: number } | null
-    >();
-    rules.forEach((rule, index) => {
-      const id = rule["id"];
-      rulesById.set(id, rulesById.has(id) ? null : { rule, index });
-    });
+    // SDK inputs can leave descriptor slots empty. Keep the original rule indexes.
+    const rulesById = indexSarifRules(
+      rules.entries().filter(([index]) => index in rules),
+    );
     const project = snykSarifProject(run);
     const { results: _results, tool: _tool, ...runContext } = run;
     const { rules: _rules, ...driverContext } = driver;
@@ -309,12 +307,7 @@ export function normalizeSnykSarif(
         throw new Error("Result ruleIndex and ruleId disagree.");
       if (result["rule"] !== undefined) {
         const ref = record(result["rule"], "Rule reference");
-        if (
-          ref["toolComponent"] !== undefined ||
-          (ref["id"] !== undefined && ref["id"] !== id) ||
-          (ref["index"] !== undefined && ref["index"] !== index) ||
-          (ref["guid"] !== undefined && ref["guid"] !== rule["guid"])
-        )
+        if (!matchesSarifRuleReference(ref, id, match))
           throw new Error(
             "Result uses an inconsistent or external rule reference.",
           );

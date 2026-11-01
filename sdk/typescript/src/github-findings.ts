@@ -10,13 +10,8 @@ import {
   isGitHubDependabotAlert,
   normalizeGitHubDependabotAlerts,
 } from "./github-dependabot-findings.js";
+import { asRecord } from "./record.js";
 import { parseJsonOrJsonl, readScannerText, text } from "./scanner-import.js";
-
-function object(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
 
 function repositoryName(value: unknown): string {
   const repository = text(value);
@@ -58,7 +53,7 @@ function codeScanningFinding(
   target: ExternalImportTarget = "cloud",
 ): ExternalFinding {
   const repository = repositoryName(record["repository"]);
-  const alert = object(record["alert"]);
+  const alert = asRecord(record["alert"]);
   const number = record["number"];
   if (
     !alert ||
@@ -84,16 +79,16 @@ function codeScanningFinding(
     throw new Error(
       "GitHub alert URL does not match the selected repository and alert.",
     );
-  const rule = object(alert["rule"]);
-  const instance = object(alert["most_recent_instance"]);
+  const rule = asRecord(alert["rule"]);
+  const instance = asRecord(alert["most_recent_instance"]);
   const ref = text(instance?.["ref"]);
   if (!ref)
     throw new Error(
       "GitHub code-scanning evidence requires the selected instance ref.",
     );
-  const location = object(instance?.["location"]);
-  const tool = object(alert["tool"]);
-  const message = text(object(instance?.["message"])?.["text"]);
+  const location = asRecord(instance?.["location"]);
+  const tool = asRecord(alert["tool"]);
+  const message = text(asRecord(instance?.["message"])?.["text"]);
   const description =
     text(rule?.["full_description"]) ?? text(rule?.["description"]);
   const tags = Array.isArray(rule?.["tags"]) ? rule["tags"] : [];
@@ -158,7 +153,7 @@ function advisoryFinding(
   target: ExternalImportTarget = "cloud",
 ): ExternalFinding {
   const repository = repositoryName(record["repository"]);
-  const advisory = object(record["advisory"]);
+  const advisory = asRecord(record["advisory"]);
   const id = text(record["ghsaId"]);
   const selection = record["selection"];
   if (
@@ -202,11 +197,11 @@ function advisoryFinding(
   const advisoryIds = [
     id,
     text(advisory["cve_id"]),
-    ...identifiers.map((identifier) => text(object(identifier)?.["value"])),
+    ...identifiers.map((identifier) => text(asRecord(identifier)?.["value"])),
   ].filter((value): value is string => value !== null);
   const packages = vulnerabilities.flatMap((value) => {
-    const vulnerability = object(value);
-    const pkg = object(vulnerability?.["package"]);
+    const vulnerability = asRecord(value);
+    const pkg = asRecord(vulnerability?.["package"]);
     const name = text(pkg?.["name"]);
     // GitHub permits incomplete package metadata in advisory disclosures.
     // Preserve it in source_data without inventing a typed package identity.
@@ -255,7 +250,7 @@ function advisoryFinding(
               (selection === "global" ? "published" : null)),
           scanner_origin: "GitHub Security Advisories",
           weakness_ids: cwes
-            .map((value) => text(object(value)?.["cwe_id"]))
+            .map((value) => text(asRecord(value)?.["cwe_id"]))
             .filter((value): value is string => value !== null),
         },
       },
@@ -275,7 +270,7 @@ function normalizeRecords(
   };
   const identities = new Set<string>();
   for (const [index, value] of records.entries()) {
-    const record = object(value);
+    const record = asRecord(value);
     try {
       if (!record) throw new Error("GitHub finding must be an object.");
       let finding: ExternalFinding;

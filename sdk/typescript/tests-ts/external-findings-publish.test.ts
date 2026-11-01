@@ -3731,13 +3731,25 @@ test("read lookups and verification run concurrently with bounded requests and o
 
 test("progress is optional and stderr progress never corrupts JSON results", async () => {
   const f = await fixture();
+  const phases = new Set<ExternalPublicationProgress["phase"]>();
   const prepared = await prepareExternalPublication(f.file, options, {
     ...f.deps,
-    onProgress: () => {
+    onProgress: ({ phase }) => {
+      phases.add(phase);
+      if (phase === "reading")
+        return Promise.reject(new Error("Optional async observer failed"));
       throw new Error("Optional observer failed");
     },
   });
   expect((await prepared.publish()).status).toBe("complete");
+  expect([...phases]).toEqual([
+    "reading",
+    "discovering",
+    "preparing",
+    "waiting",
+    "uploading",
+    "verifying",
+  ]);
   const cli = createCliTest(main, { stderr: true });
   expect(await cli.runCli([...f.command, "--yes"], f.cliDeps)).toBe(0);
   expect(JSON.parse(cli.stdout.text())).toMatchObject({

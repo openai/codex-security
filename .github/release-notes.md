@@ -40,6 +40,12 @@
 - share local Git metadata discovery ([#2194](https://github.com/openai/codex-security/pull/2194))
 - require exhaustive scanner reader dispatch ([#2195](https://github.com/openai/codex-security/pull/2195))
 - normalize selected Semgrep Code findings for local import ([#2164](https://github.com/openai/codex-security/pull/2164))
+- share optional field parsing across GitHub and Wiz ([#2198](https://github.com/openai/codex-security/pull/2198))
+- share scanner Cloud publication and recovery guidance ([#2199](https://github.com/openai/codex-security/pull/2199))
+- share SARIF rule indexing and reference checks ([#2200](https://github.com/openai/codex-security/pull/2200))
+- isolate rejected publication progress callbacks ([#2203](https://github.com/openai/codex-security/pull/2203))
+- share connection and error handling for finding imports ([#2204](https://github.com/openai/codex-security/pull/2204))
+- avoid duplicate Git metadata discovery ([#2205](https://github.com/openai/codex-security/pull/2205))
 
 <!-- release-section: highlights:end -->
 
