@@ -1109,6 +1109,19 @@ async function readReceipts(
           `${path}:${lineNumber}: invalid campaign receipt: ${errorMessage(error)}. Rerun with --recover to preserve the damaged ledger and recover saved attempts.`,
           { cause: error },
         );
+      const knowledge = repairKnowledgeReceipt(value);
+      if (knowledge !== undefined) {
+        // Extraction failures have no scan directory; retain their attempt watermark.
+        const id = knowledge.id.toLowerCase();
+        const previous = receipts.get(id);
+        receipts.set(id, {
+          maxAttempt: Math.max(previous?.maxAttempt ?? 0, knowledge.attempt),
+          scan: previous?.scan,
+        });
+        retained.push(Buffer.from(`${JSON.stringify(knowledge)}\n`));
+        repaired = true;
+        continue;
+      }
       const id =
         isRecord(value) && typeof value["id"] === "string"
           ? value["id"].toLowerCase()
@@ -1232,6 +1245,21 @@ async function readReceipts(
     await truncate(path, committedEnd);
   }
   return receipts;
+}
+
+function repairKnowledgeReceipt(value: unknown): MultiscanReceipt | undefined {
+  if (
+    !isRecord(value) ||
+    value["knowledgeBaseFailure"] !== true ||
+    value["status"] !== "failed"
+  )
+    return undefined;
+  const { warnings: _warnings, ...receipt } = value;
+  try {
+    return parseMultiscanReceipt(receipt);
+  } catch {
+    return undefined;
+  }
 }
 
 function parseMultiscanReceipt(value: unknown): MultiscanReceipt {

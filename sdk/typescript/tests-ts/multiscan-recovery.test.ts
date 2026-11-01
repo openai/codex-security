@@ -2323,8 +2323,14 @@ describe("multiscan", () => {
           scenario === "fresh" || scenario === "mixed saved scan" ? 2 : 1,
         );
         const retained = Buffer.from(
-          lines.filter((_line, index) => !rejected.includes(index)).join("\n") +
-            "\n",
+          lines
+            .flatMap((line, index) => {
+              if (!rejected.includes(index)) return [line];
+              if (rows[index]!["knowledgeBaseFailure"] !== true) return [];
+              const { warnings: _warnings, ...receipt } = rows[index]!;
+              return [JSON.stringify(receipt)];
+            })
+            .join("\n") + "\n",
         );
         expect(
           (await readFile(initial.resultsPath)).subarray(0, retained.length),
@@ -2404,6 +2410,68 @@ describe("multiscan", () => {
     );
     expect(backups).toHaveLength(1);
     expect(await readFile(join(paths.output, backups[0]!))).toEqual(damaged);
+  });
+
+  test("receipt repair preserves the watermark of a malformed knowledge-only failure without scan artifacts", async () => {
+    const { paths } = await repositoryFixture("knowledge-watermark");
+    const run = mock(completeRun);
+    const configured = options(paths, client(run));
+    const initial = await runMultiscan(configured);
+    const original = await readFile(initial.resultsPath);
+    const [receipt] = await results(initial.resultsPath);
+    const failed = {
+      ...receipt,
+      status: "failed",
+      attempt: 2,
+      outputDir: join(
+        paths.output,
+        "artifacts",
+        "knowledge-watermark",
+        "attempt-2",
+      ),
+      knowledgeBaseFailure: true,
+      error: "Synthetic extraction failure",
+      warnings: {},
+    };
+    const damaged = Buffer.concat([
+      original,
+      Buffer.from(`${JSON.stringify(failed)}\n`),
+    ]);
+    await writeFile(initial.resultsPath, damaged);
+    const recoverScan = mock(async () => undefined);
+    for (let repeat = 0; repeat < 2; repeat++) {
+      expect(await runMultiscan({ ...configured, recoverScan })).toMatchObject({
+        completed: 1,
+        skipped: 1,
+        failed: 0,
+      });
+      expect((await results(initial.resultsPath)).at(-1)).toMatchObject({
+        attempt: 2,
+        knowledgeBaseFailure: true,
+        error: "Synthetic extraction failure",
+      });
+    }
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(recoverScan).not.toHaveBeenCalled();
+    expect(
+      await readdir(join(paths.output, "artifacts", "knowledge-watermark")),
+    ).toEqual(["attempt-1"]);
+    const backups = (await readdir(paths.output)).filter((name) =>
+      name.startsWith("results.corrupt-"),
+    );
+    expect(backups).toHaveLength(1);
+    expect(await readFile(join(paths.output, backups[0]!))).toEqual(damaged);
+    await rm(join(receipt!["outputDir"] as string, "findings.json"));
+    expect(await runMultiscan({ ...configured, recoverScan })).toMatchObject({
+      completed: 1,
+      failed: 0,
+      skipped: 0,
+    });
+    expect((await results(initial.resultsPath)).at(-1)).toMatchObject({
+      attempt: 3,
+    });
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(recoverScan).not.toHaveBeenCalled();
   });
 
   test("receipt repair retains legacy coverage notes and knowledge-failure history", async () => {
