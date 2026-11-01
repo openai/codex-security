@@ -10,6 +10,7 @@ import * as sdk from "../../sdk/typescript/dist/api.js";
 import {
   bundledPluginRoot,
   pluginMetadata,
+  resolvePluginPython,
 } from "../../sdk/typescript/dist/runtime.js";
 import type { FindingsDocument } from "../../sdk/typescript/src/models.js";
 import { prepareStandardEval } from "./fixtures.mts";
@@ -20,6 +21,11 @@ const { CodexSecurity } =
 
 const threadId = "synthetic-eval-thread";
 
+async function readCheckpoint(scanDir: string) {
+  const { checkpoint } = await readJson(scanDir, "checkpoint-head.json");
+  return readJson(scanDir, "checkpoints", checkpoint);
+}
+
 for (const deferLast of [false, true]) {
   test(`completion retains checkpoint findings and grades ${deferLast ? "only validated" : "all five"} cases`, async (t) => {
     const root = await temporaryDirectory("eval-validation-survival-", true);
@@ -29,7 +35,7 @@ for (const deferLast of [false, true]) {
     const { positives, files } = prepared.fixture;
     const candidates = positives.map(({ id, path, line, cwes }) => ({
       ruleId: id,
-      identity: { anchor: id },
+      identity: { anchor: `fixture-${id}` },
       title: `Synthetic ${id}`,
       summary: "Synthetic benchmark finding.",
       severity: { level: "high" },
@@ -67,11 +73,32 @@ for (const deferLast of [false, true]) {
             id: withheld.ruleId,
             candidateId: withheld.ruleId,
             candidate: withheld,
-            reason: "Awaiting verification.",
+            reason: `Verify ${withheld.title}.`,
             paths: [withheld.locations[0]!.path],
           },
         ]
       : [];
+
+    function assertAcceptedFindings(findings: FindingsDocument["findings"]) {
+      assert.equal(findings.length, accepted.length);
+      for (const expected of accepted) {
+        const retained = findings.find(
+          ({ ruleId }) => ruleId === expected.ruleId,
+        );
+        assert.ok(retained, expected.ruleId);
+        assert.equal(
+          retained.provenance.candidateId,
+          expected.provenance.candidateId,
+        );
+        for (const field of [
+          "identity",
+          "locations",
+          "validation",
+          "codeEvidence",
+        ] as const)
+          assert.deepEqual(retained[field], expected[field]);
+      }
+    }
 
     async function* scanEvents(
       env: Record<string, string>,
@@ -113,6 +140,12 @@ for (const deferLast of [false, true]) {
             _meta: { "openai/threadId": threadId },
           });
           assert.notEqual(result.isError, true, JSON.stringify(result.content));
+          if (!complete) {
+            const progress = await readCheckpoint(env.CODEX_SECURITY_SCAN_DIR!);
+            assert.equal(progress.complete, false);
+            assertAcceptedFindings(progress.findings);
+            assert.deepEqual(progress.reviewState.deferred, deferred);
+          }
         }
       } finally {
         await client.close();
@@ -136,7 +169,8 @@ for (const deferLast of [false, true]) {
       outputRoot: join(root, "results"),
       environment: {
         PATH: process.env.PATH,
-        PYTHON: process.env.PYTHON,
+        LD_LIBRARY_PATH: process.env.LD_LIBRARY_PATH,
+        PYTHON: await resolvePluginPython(),
         SystemRoot: process.env.SystemRoot,
         HOME: root,
         USERPROFILE: root,
@@ -196,33 +230,19 @@ for (const deferLast of [false, true]) {
     const scanDir = report.scanDir!;
     const archived: FindingsDocument = await readJson(scanDir, "findings.json");
     assert.deepEqual(semanticResult.findings, archived.findings);
-    assert.equal(archived.findings.length, accepted.length);
+    assertAcceptedFindings(archived.findings);
     const markdown = await readFile(report.reportPath!, "utf8");
-    for (const expected of accepted) {
-      const retained = archived.findings.find(
-        ({ ruleId }) => ruleId === expected.ruleId,
-      );
-      assert.ok(retained, expected.ruleId);
-      assert.equal(
-        retained.provenance.candidateId,
-        expected.provenance.candidateId,
-      );
-      for (const field of [
-        "identity",
-        "locations",
-        "validation",
-        "codeEvidence",
-      ] as const)
-        assert.deepEqual(retained[field], expected[field]);
-      assert.ok(markdown.includes(expected.title), expected.title);
+    const sections = markdown.split(/^### \[\d+\] /m).slice(1);
+    assert.equal(sections.length, accepted.length);
+    for (const { title, validation } of accepted) {
+      const section = sections.find((body) => body.startsWith(title + "\n"));
+      assert.ok(section?.includes(validation.summary), title);
     }
-    if (deferLast) assert.ok(!markdown.includes(withheld.title));
     const { scan } = await readJson(scanDir, "scan-manifest.json");
     assert.equal(scan.id, report.scanId);
     assert.equal(scan.status, "completed");
     assert.ok(scan.sealedAt);
-    const { checkpoint } = await readJson(scanDir, "checkpoint-head.json");
-    const terminal = await readJson(scanDir, "checkpoints", checkpoint);
+    const terminal = await readCheckpoint(scanDir);
     assert.notEqual(terminal.complete, false);
     assert.deepEqual(terminal.reviewState.deferred, deferred);
   });
