@@ -1807,6 +1807,7 @@ codex-security classify-severity --scan-dir /path/to/completed-scan --json
 ```
 
 For repository-free canonical records, use `classify-severity --records` (optionally with `--runs N`).
+A records host can opt in to the CLI’s structured diagnostic records on its existing JSON-RPC connection. See the [records diagnostic protocol](classify-severity-records.md#cli-diagnostic-records).
 The [records protocol](classify-severity-records.md) accepts immutable Markdown and
 report snapshots and delegates model execution to the host.
 

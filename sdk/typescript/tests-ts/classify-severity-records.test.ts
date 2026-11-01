@@ -346,6 +346,7 @@ test("records mode is discoverable and rejects saved-scan flags", async () => {
     ),
   ).toBe(0);
   expect(output.text()).toContain("--records");
+  expect(output.text()).toContain("codex-security-records-logs-v1");
   expect(
     await main(
       ["classify-severity", "--records", "--scan", "latest"],
@@ -527,3 +528,60 @@ test.each([0, -1, 11, 1.5, NaN, Infinity])(
     expect(calls).toBe(0);
   },
 );
+
+test("SDK cancellation from the final diagnostic callback wins", async () => {
+  const controller = new AbortController();
+  const result = classifySeverityRecords(input(), {
+    classificationRuns: 1,
+    signal: controller.signal,
+    onDiagnostic: (code) => {
+      if (code === "vote_resolved")
+        controller.abort(new Error("Final callback canceled"));
+    },
+    reviewRunner: {
+      async run(request) {
+        return answer(request);
+      },
+    },
+  });
+  await expect(result).rejects.toThrow("Final callback canceled");
+});
+
+test("a diagnostic observer canceling before dispatch cannot start a host review", async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  const result = classifySeverityRecords(input(), {
+    signal: controller.signal,
+    onDiagnostic(code) {
+      if (code === "review_requested") controller.abort();
+    },
+    reviewRunner: {
+      async run() {
+        calls++;
+        throw new Error("unreachable");
+      },
+    },
+  });
+  await expect(result).rejects.toThrow();
+  expect(calls).toBe(0);
+});
+
+test("the SDK reports a failed review and isolates callback exceptions", async () => {
+  const events: [string, number | undefined][] = [];
+  const result = await classifySeverityRecords(input(), {
+    classificationRuns: 1,
+    onDiagnostic: (code, ordinal) => {
+      events.push([code, ordinal]);
+      throw new Error("observer unavailable");
+    },
+    reviewRunner: {
+      async run() {
+        throw new Error("synthetic host failure");
+      },
+    },
+  });
+  expect(result.status).toBe("unresolved");
+  expect(events).toContainEqual(["review_requested", 1]);
+  expect(events).toContainEqual(["review_failed", 1]);
+  expect(events.some(([code]) => code === "review_accepted")).toBe(false);
+});

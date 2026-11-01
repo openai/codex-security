@@ -137,6 +137,10 @@ import {
   classifySeverityRecords,
   type ClassifySeverityRecordsInput,
 } from "./classify-severity-records.js";
+import {
+  createSeverityDiagnostics,
+  severityDiagnosticsEnabled,
+} from "./classify-severity-diagnostics.js";
 import { runHostedScanProtocol } from "./hosted-scan-protocol.js";
 import { runHostedRemediationProtocol } from "./hosted-remediation-protocol.js";
 import { runValidationRecordsProtocol } from "./validation-records.js";
@@ -1985,6 +1989,12 @@ export async function main(
       );
       return 2;
     }
+    // A namespaced Node condition lets a host use the same command with
+    // older releases, whose records protocol ignores the condition.
+    const diagnostics =
+      argv[0] === "classify-severity" && severityDiagnosticsEnabled()
+        ? createSeverityDiagnostics(() => dependencies.now())
+        : undefined;
     const controller = new AbortController();
     const removeSignals = listenForAbort(dependencies, controller);
     let exitCode: number;
@@ -2004,8 +2014,10 @@ export async function main(
                 classifySeverityRecords(value as ClassifySeverityRecordsInput, {
                   ...options,
                   classificationRuns,
+                  ...(diagnostics ? { onDiagnostic: diagnostics.emit } : {}),
                 }),
               controller.signal,
+              diagnostics?.take,
             )
           : remediationOperation !== undefined
             ? await runHostedRemediationProtocol(
@@ -4955,7 +4967,7 @@ export async function main(
           .boolean()
           .default(false)
           .describe(
-            "Classify canonical records through host-provided reviews over version 1 JSON-RPC; accepts --runs.",
+            "Classify canonical records through host-provided reviews over version 1 JSON-RPC. Accepts --runs. Hosts can enable CLI diagnostics with the Node condition codex-security-records-logs-v1.",
           ),
         reprocess: z
           .boolean()
