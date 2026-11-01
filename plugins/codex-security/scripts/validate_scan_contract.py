@@ -57,14 +57,10 @@ def receipt(validated: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _parse_args(argv: list[str]) -> argparse.Namespace:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scan-dir", required=True, type=Path)
-    return parser.parse_args(argv)
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = _parse_args(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(argv)
     try:
         validated = validate_contract(args.scan_dir)
     except (OSError, ValueError, RecursionError) as exc:

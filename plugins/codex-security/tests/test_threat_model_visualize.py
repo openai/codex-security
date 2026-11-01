@@ -18,6 +18,22 @@ builder = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(builder)
 
 
+def run_builder(model_file, source, output):
+    return subprocess.run(
+        [
+            sys.executable,
+            str(Path(builder.__file__)),
+            str(model_file),
+            "--assessment",
+            str(source),
+            "--output",
+            str(output),
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+
 class EmbeddedHtml(HTMLParser):
     """Extract script and style bodies while preserving their exact contents."""
 
@@ -110,6 +126,9 @@ class ControlValidation(unittest.TestCase):
     def check(self, model=None):
         builder.validate(self.model if model is None else model, b"policy denies this caller")
 
+    def assert_invalid(self, expected, model=None):
+        self.assertRaisesRegex(ValueError, expected, self.check, model)
+
     def effect(self):
         return self.model["scenarios"][0]["controls"][0]["effect"]
 
@@ -130,19 +149,7 @@ class ControlValidation(unittest.TestCase):
             if existing_html is not None:
                 output.write_text(existing_html, encoding="utf-8")
             original_model = model_file.read_bytes()
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(Path(builder.__file__)),
-                    str(model_file),
-                    "--assessment",
-                    str(source),
-                    "--output",
-                    str(output),
-                ],
-                text=True,
-                capture_output=True,
-            )
+            result = run_builder(model_file, source, output)
             self.assertEqual(model_file.read_bytes(), original_model)
             self.assertEqual(source.read_bytes(), assessment_bytes)
             if error:
@@ -261,8 +268,7 @@ class ControlValidation(unittest.TestCase):
                     del target[path[-1]]
                 else:
                     target[path[-1]] = value
-                with self.assertRaisesRegex(ValueError, message):
-                    self.check(model)
+                self.assert_invalid(message, model)
 
         self.model["nodes"][0]["title"] = None
         self.build_html(b"policy denies this caller", error="a.title must be a string")
@@ -293,19 +299,7 @@ class ControlValidation(unittest.TestCase):
                             )
                     elif alias == "hardlink":
                         output.hardlink_to(target)
-                    result = subprocess.run(
-                        [
-                            sys.executable,
-                            str(Path(builder.__file__)),
-                            str(inputs["model"]),
-                            "--assessment",
-                            str(inputs["assessment"]),
-                            "--output",
-                            str(output),
-                        ],
-                        text=True,
-                        capture_output=True,
-                    )
+                    result = run_builder(inputs["model"], inputs["assessment"], output)
                     self.assertEqual(result.returncode, 2)
                     self.assertIn("output must not overwrite", result.stderr)
                     for name, path in inputs.items():
@@ -348,8 +342,7 @@ class ControlValidation(unittest.TestCase):
                 for key in path[:-1]:
                     target = target[key]
                 target[path[-1]] = value
-                with self.assertRaisesRegex(ValueError, message):
-                    self.check(model)
+                self.assert_invalid(message, model)
         # A 240 × 72 marker fits exactly at either corner of the 800 × 500 canvas.
         for x, y in ((0, 0), (560, 428)):
             self.effect()["marker"].update(x=x, y=y)
@@ -359,21 +352,18 @@ class ControlValidation(unittest.TestCase):
 
     def test_unknown_effect_is_not_a_block(self):
         self.effect()["basis"] = "unverified"
-        with self.assertRaisesRegex(ValueError, "unverified effect cannot block"):
-            self.check()
+        self.assert_invalid("unverified effect cannot block")
         self.effect()["outcome"] = "unknown"
         self.check()
 
     def test_proposed_cannot_be_verified(self):
         self.model["scenarios"][0]["controls"][0]["kind"] = "proposed"
         self.effect()["basis"] = "verified"
-        with self.assertRaisesRegex(ValueError, "hypothetical"):
-            self.check()
+        self.assert_invalid("hypothetical")
 
     def test_effect_requires_evidence(self):
         self.model["scenarios"][0]["controls"][0]["evidence"] = []
-        with self.assertRaisesRegex(ValueError, "require assessment evidence"):
-            self.check()
+        self.assert_invalid("require assessment evidence")
 
     def test_evidence_paths_require_an_array_of_strings(self):
         evidence = self.model["evidence"][0]
@@ -388,15 +378,13 @@ class ControlValidation(unittest.TestCase):
             evidence["paths"] = valid
             self.check()
         evidence["paths"] = ["not quoted"]
-        with self.assertRaisesRegex(ValueError, "cited path not present"):
-            self.check()
+        self.assert_invalid("cited path not present")
         del evidence["paths"]
         self.check()
 
     def test_disconnected_steps_do_not_hide_an_independent_branch(self):
         self.model["scenarios"][0]["steps"][1] = {"from": "a", "to": "b", "edge": "ab"}
-        with self.assertRaisesRegex(ValueError, "continuous ordered path"):
-            self.check()
+        self.assert_invalid("continuous ordered path")
 
     def test_repeated_edge_cannot_hide_an_earlier_traversal(self):
         self.model["edges"].append(
@@ -414,8 +402,19 @@ class ControlValidation(unittest.TestCase):
             {"from": "b", "to": "a", "edge": "ba"},
             {"from": "a", "to": "b", "edge": "ab"},
         ]
-        with self.assertRaisesRegex(ValueError, "cannot reuse an edge"):
-            self.check()
+        self.assert_invalid("cannot reuse an edge")
+
+    def add_edge(self, edge_id, source, destination):
+        self.model["edges"].append(
+            {
+                "id": edge_id,
+                "from": source,
+                "to": destination,
+                "points": [[0, 0], [20, 0]],
+                "labelX": 0,
+                "labelY": 0,
+            }
+        )
 
     def routed(self):
         s = self.model["scenarios"][0]
@@ -429,58 +428,35 @@ class ControlValidation(unittest.TestCase):
         s = self.routed()
         self.check()
         s["routes"][0]["edges"] = ["bc", "ab"]
-        with self.assertRaisesRegex(ValueError, "disconnected route"):
-            self.check()
+        self.assert_invalid("disconnected route")
 
     def test_route_cannot_omit_controlled_transition(self):
         s = self.routed()
         s["routes"][0]["edges"] = ["bc"]
-        with self.assertRaisesRegex(ValueError, "steps in order"):
-            self.check()
+        self.assert_invalid("steps in order")
 
     def test_route_requires_evidence_and_explicit_focus(self):
         s = self.routed()
         del s["focusNodes"]
-        with self.assertRaisesRegex(ValueError, "explicit focusNodes"):
-            self.check()
+        self.assert_invalid("explicit focusNodes")
         s["focusNodes"] = []
         s["routes"][0]["evidence"] = []
-        with self.assertRaisesRegex(ValueError, "route requires assessment evidence"):
-            self.check()
+        self.assert_invalid("route requires assessment evidence")
 
     def test_unattached_dependency_rejected(self):
         s = self.routed()
         self.model["nodes"].extend(
             [{"id": n, "title": n, "x": 0, "y": 0, "w": 20, "h": 20} for n in "xy"]
         )
-        self.model["edges"].append(
-            {
-                "id": "xy",
-                "from": "x",
-                "to": "y",
-                "points": [[0, 0], [20, 0]],
-                "labelX": 0,
-                "labelY": 0,
-            }
-        )
+        self.add_edge("xy", "x", "y")
         s["routes"][0]["branches"] = [{"edges": ["xy"], "evidence": ["ev"]}]
-        with self.assertRaisesRegex(ValueError, "unattached"):
-            self.check()
+        self.assert_invalid("unattached")
 
     def test_prerequisite_branch_must_identify_its_decision(self):
         s = self.routed()
         self.effect()["arrival"] = True
         self.model["nodes"].append({"id": "d", "title": "d", "x": 0, "y": 0, "w": 20, "h": 20})
-        self.model["edges"].append(
-            {
-                "id": "bd",
-                "from": "b",
-                "to": "d",
-                "points": [[0, 0], [20, 0]],
-                "labelX": 0,
-                "labelY": 0,
-            }
-        )
+        self.add_edge("bd", "b", "d")
         branch = {"edges": ["bd"], "evidence": ["ev"], "beforeStep": 1}
         s["routes"][0]["branches"] = [branch]
         self.check()
@@ -495,8 +471,7 @@ class ControlValidation(unittest.TestCase):
         self.check()  # b is an earlier, explicitly ordered prerequisite origin.
         self.model["edges"][-1]["from"] = "c"
         branch["beforeStep"] = 1
-        with self.assertRaisesRegex(ValueError, "at or before its decision"):
-            self.check()
+        self.assert_invalid("at or before its decision")
 
     def test_decision_destination_prerequisite_requires_arrival(self):
         s = self.routed()
@@ -515,10 +490,7 @@ class ControlValidation(unittest.TestCase):
                     if arrival is True:
                         self.check()
                     else:
-                        with self.assertRaisesRegex(
-                            ValueError, "destination requires arrival:true"
-                        ):
-                            self.check()
+                        self.assert_invalid("destination requires arrival:true")
 
     def test_prerequisite_arrival_guard_honors_control_scope(self):
         s = self.routed()
@@ -541,24 +513,14 @@ class ControlValidation(unittest.TestCase):
         control["sourceIds"] = ["origin"]
         self.check()  # This source cannot select the route with the destination branch.
         control["sourceIds"] = ["second"]
-        with self.assertRaisesRegex(ValueError, "destination requires arrival:true"):
-            self.check()
+        self.assert_invalid("destination requires arrival:true")
         control["routeIds"] = ["r"]
         self.check()  # The additional route restriction excludes that branch again.
 
     def test_later_branch_guard_requires_one_unambiguous_step(self):
         s = self.routed()
         self.model["nodes"].append({"id": "d", "title": "d", "x": 0, "y": 0, "w": 20, "h": 20})
-        self.model["edges"].append(
-            {
-                "id": "bd",
-                "from": "b",
-                "to": "d",
-                "points": [[0, 0], [20, 0]],
-                "labelX": 0,
-                "labelY": 0,
-            }
-        )
+        self.add_edge("bd", "b", "d")
         branch = {"edges": ["bd"], "evidence": ["ev"], "afterStep": 2}
         s["routes"][0]["branches"] = [branch]
         self.check()
@@ -571,8 +533,7 @@ class ControlValidation(unittest.TestCase):
                 self.check()
         branch["afterStep"] = 1
         branch["beforeStep"] = 1
-        with self.assertRaisesRegex(ValueError, "cannot have both"):
-            self.check()
+        self.assert_invalid("cannot have both")
 
     def test_connector_warnings_distinguish_bent_legs_and_node_interiors(self):
         ab, bc = self.model["edges"]
@@ -597,24 +558,20 @@ class ControlValidation(unittest.TestCase):
         effect["arrival"] = True
         self.check()
         effect["arrival"] = "yes"
-        with self.assertRaisesRegex(ValueError, "arrival must be a boolean"):
-            self.check()
+        self.assert_invalid("arrival must be a boolean")
         effect["arrival"] = True
         effect["traffic"] = "continues"
-        with self.assertRaisesRegex(ValueError, "arrival must be a boolean"):
-            self.check()
+        self.assert_invalid("arrival must be a boolean")
         del effect["arrival"]
         for key in ("step", "edge", "marker"):
             del effect[key]
         self.model["scenarios"][0]["steps"] = []
         self.check()  # Data-only prevention need not invent a sequence.
         effect["traffic"] = "maybe"
-        with self.assertRaisesRegex(ValueError, "traffic must be stops or continues"):
-            self.check()
+        self.assert_invalid("traffic must be stops or continues")
         effect["traffic"] = "continues"
         effect["outcome"] = "limits"
-        with self.assertRaisesRegex(ValueError, "traffic must be stops or continues"):
-            self.check()
+        self.assert_invalid("traffic must be stops or continues")
 
     def test_builder_embeds_new_contract_and_assessment_in_standalone_html(self):
         self.effect()["traffic"] = "continues"
@@ -732,31 +689,24 @@ class ControlValidation(unittest.TestCase):
                 if valid:
                     self.check()
                 else:
-                    with self.assertRaisesRegex(ValueError, "each applicable route"):
-                        self.check()
+                    self.assert_invalid("each applicable route")
         control.pop("routeIds")
         control["sourceIds"] = ["origin"]
         source.pop("routeIds")
-        with self.assertRaisesRegex(ValueError, "each applicable route"):
-            self.check()
+        self.assert_invalid("each applicable route")
 
         # A detector attached to an edge only runs on routes that use it.
         self.effect().pop("traffic")
         self.effect()["outcome"] = "detects"
-        with self.assertRaisesRegex(ValueError, "each applicable route"):
-            self.check()
+        self.assert_invalid("each applicable route")
         control["routeIds"] = ["r"]
         self.check()
 
     def test_prerequisite_on_a_revisited_decision_node_is_valid(self):
         s = self.routed()
         self.model["nodes"].append({"id": "d", "title": "d", "x": 0, "y": 0, "w": 20, "h": 20})
-        self.model["edges"].extend(
-            [
-                {"id": i, "from": a, "to": b, "points": [[0, 0], [20, 0]], "labelX": 0, "labelY": 0}
-                for i, a, b in [("cb", "c", "b"), ("bd", "b", "d")]
-            ]
-        )
+        self.add_edge("cb", "c", "b")
+        self.add_edge("bd", "b", "d")
         s["steps"] = [
             {"from": "b", "to": "c", "edge": "bc"},
             {"from": "c", "to": "b", "edge": "cb"},
@@ -767,19 +717,14 @@ class ControlValidation(unittest.TestCase):
         self.check()
         # An earlier visit does not establish receipt of this later decision.
         self.effect().update(step=2, edge="cb")
-        with self.assertRaisesRegex(ValueError, "destination requires arrival:true"):
-            self.check()
+        self.assert_invalid("destination requires arrival:true")
         self.effect()["arrival"] = True
         self.check()
 
     def test_route_bridges_conceptual_steps(self):
         s = self.routed()
-        self.model["edges"].extend(
-            [
-                {"id": i, "from": a, "to": b, "points": [[0, 0], [20, 0]], "labelX": 0, "labelY": 0}
-                for i, a, b in [("ba", "b", "a"), ("ac", "a", "c")]
-            ]
-        )
+        self.add_edge("ba", "b", "a")
+        self.add_edge("ac", "a", "c")
         s["steps"][1] = {"from": "a", "to": "c", "edge": "ac"}
         s["routes"][0]["edges"] = ["ab", "ba", "ac"]
         self.effect()["step"] = 2
@@ -805,28 +750,23 @@ class ControlValidation(unittest.TestCase):
         source["node"] = None
         self.check()
         source["node"] = "listener-that-is-not-present"
-        with self.assertRaisesRegex(ValueError, "source node"):
-            self.check()
+        self.assert_invalid("source node")
 
     def test_source_requires_evidence_and_starting_authority(self):
         source = self.origin()
         source["evidence"] = []
-        with self.assertRaisesRegex(ValueError, "source role requires assessment evidence"):
-            self.check()
+        self.assert_invalid("source role requires assessment evidence")
         source["evidence"] = ["ev"]
         source["authority"] = ""
-        with self.assertRaisesRegex(ValueError, "requires authority"):
-            self.check()
+        self.assert_invalid("requires authority")
 
     def test_source_basis_and_role_are_explicit(self):
         source = self.origin()
         source["basis"] = "inferred-safe"
-        with self.assertRaisesRegex(ValueError, "explicit basis"):
-            self.check()
+        self.assert_invalid("explicit basis")
         source["basis"] = "unknown"
         source["kind"] = "authenticated-therefore-benign"
-        with self.assertRaisesRegex(ValueError, "invalid source role"):
-            self.check()
+        self.assert_invalid("invalid source role")
 
     def test_source_cannot_leak_to_unrelated_route(self):
         self.routed()
@@ -834,8 +774,7 @@ class ControlValidation(unittest.TestCase):
         source["routeIds"] = ["r"]
         self.check()
         source["routeIds"] = ["other-scenario-route"]
-        with self.assertRaisesRegex(ValueError, "source routeIds"):
-            self.check()
+        self.assert_invalid("source routeIds")
 
     def test_privileged_component_cannot_stand_in_for_authorized_user(self):
         self.model["participants"] = [
@@ -848,8 +787,7 @@ class ControlValidation(unittest.TestCase):
                 "evidence": ["ev"],
             }
         ]
-        with self.assertRaisesRegex(ValueError, "authorized user needs an actor"):
-            self.check()
+        self.assert_invalid("authorized user needs an actor")
         self.model["nodes"][1]["kind"] = "actor"
         self.check()
 
@@ -857,8 +795,7 @@ class ControlValidation(unittest.TestCase):
         source = self.origin()
         scenario = self.model["scenarios"][0]
         scenario["sources"].append(dict(source, id="other"))
-        with self.assertRaisesRegex(ValueError, "explicit sourceMode"):
-            self.check()
+        self.assert_invalid("explicit sourceMode")
         scenario["sourceMode"] = "alternatives"
         self.check()
 
@@ -868,31 +805,25 @@ class ControlValidation(unittest.TestCase):
         scenario["sourceMode"] = "alternatives"
         source["relatedNodes"] = []
         source["relatedEdges"] = []
-        with self.assertRaisesRegex(ValueError, "unordered views"):
-            self.check()
+        self.assert_invalid("unordered views")
         scenario["steps"] = []
         scenario["controls"] = []
         self.check()
         source["relatedNodes"] = ["missing"]
-        with self.assertRaisesRegex(ValueError, "unique resolved"):
-            self.check()
+        self.assert_invalid("unique resolved")
         source["relatedNodes"] = ["a", "a"]
-        with self.assertRaisesRegex(ValueError, "unique resolved"):
-            self.check()
+        self.assert_invalid("unique resolved")
         source["relatedNodes"] = ["a"]
         source["relatedEdges"] = ["missing"]
-        with self.assertRaisesRegex(ValueError, "unique resolved"):
-            self.check()
+        self.assert_invalid("unique resolved")
         source["relatedEdges"] = ["ab"]
         self.check()
         scenario["sourceMode"] = "combined"
-        with self.assertRaisesRegex(ValueError, "unordered views"):
-            self.check()
+        self.assert_invalid("unordered views")
         scenario["sourceMode"] = "alternatives"
         scenario["focusNodes"] = []
         scenario["routes"] = [{"id": "r", "label": "Flow", "edges": ["ab"], "evidence": ["ev"]}]
-        with self.assertRaisesRegex(ValueError, "without routes"):
-            self.check()
+        self.assert_invalid("without routes")
 
     def test_unordered_effect_honors_each_source_relationship_override(self):
         source = self.origin()
@@ -928,8 +859,7 @@ class ControlValidation(unittest.TestCase):
                 if valid:
                     self.check()
                 else:
-                    with self.assertRaisesRegex(ValueError, "effect edge"):
-                        self.check()
+                    self.assert_invalid("effect edge")
 
     def test_control_scope_requires_resolved_nonempty_unique_ids(self):
         self.origin()
@@ -943,12 +873,10 @@ class ControlValidation(unittest.TestCase):
             original = c[field]
             for invalid in ([], ["missing"], original * 2, "not-array"):
                 c[field] = invalid
-                with self.assertRaisesRegex(ValueError, "nonempty unique resolved"):
-                    self.check()
+                self.assert_invalid("nonempty unique resolved")
             c[field] = original
         scenario["sourceMode"] = "combined"
-        with self.assertRaisesRegex(ValueError, "combined semantics"):
-            self.check()
+        self.assert_invalid("combined semantics")
         del c["sourceIds"]
         self.check()  # Combined sources may still have route-scoped controls.
 

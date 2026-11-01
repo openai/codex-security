@@ -2201,17 +2201,9 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
         legacy_evidence = finding.get("code_evidence")
         if isinstance(legacy_evidence, list):
             compatible_legacy_evidence = []
-            for evidence in legacy_evidence:
-                if not isinstance(evidence, dict):
-                    continue
+            for evidence in report_projection.code_evidence_rows(legacy_evidence):
                 evidence_id = evidence.get("id")
-                evidence_code = evidence.get("code")
-                if (
-                    not isinstance(evidence_id, str)
-                    or not evidence_id.strip()
-                    or not isinstance(evidence_code, str)
-                    or not evidence_code.strip()
-                ):
+                if not isinstance(evidence_id, str) or not evidence_id.strip():
                     continue
                 if evidence_id in evidence_ids:
                     continue
@@ -2520,23 +2512,17 @@ def _finding_evidence_strength(finding: dict[str, Any]) -> int:
         section = finding.get(section_name)
         if not isinstance(section, dict):
             continue
-        for evidence_name in ("codeEvidence", "code_evidence"):
-            embedded = section.get(evidence_name)
-            if not isinstance(embedded, list):
+        for item in report_projection.embedded_code_evidence(section):
+            code = item["code"]
+            if code in seen_codes:
                 continue
-            for item in embedded:
-                if not isinstance(item, dict):
+            evidence_id = item.get("id")
+            if isinstance(evidence_id, str) and evidence_id.strip():
+                if evidence_id in seen_ids:
                     continue
-                code = item.get("code")
-                if not isinstance(code, str) or not code.strip() or code in seen_codes:
-                    continue
-                evidence_id = item.get("id")
-                if isinstance(evidence_id, str) and evidence_id.strip():
-                    if evidence_id in seen_ids:
-                        continue
-                    seen_ids.add(evidence_id)
-                seen_codes.add(code)
-                strength += 1
+                seen_ids.add(evidence_id)
+            seen_codes.add(code)
+            strength += 1
         code = section.get("code")
         if isinstance(code, str) and code.strip() and code not in seen_codes:
             seen_codes.add(code)
