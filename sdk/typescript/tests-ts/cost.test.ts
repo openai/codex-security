@@ -1387,9 +1387,14 @@ describe("live scan cost tracking", () => {
     },
   );
 
-  test.each([false, true])(
-    "stops pending replay opens after descriptor exhaustion, earlier error=%s",
-    async (earlier) => {
+  test.each([
+    ["EMFILE", false],
+    ["EMFILE", true],
+    ["ENFILE", false],
+    ["ENFILE", true],
+  ] as const)(
+    "stops pending replay opens after %s, earlier error=%s",
+    async (code, earlier) => {
       const home = await codexHome(),
         usage = { input_tokens: 10 };
       await writeSession(home, "scan-thread", usage);
@@ -1435,7 +1440,7 @@ describe("live scan cost tracking", () => {
         }),
         exhausted = Object.assign(
           new Error("Synthetic descriptor exhaustion"),
-          { code: "EMFILE", syscall: "open" },
+          { code, syscall: "open" },
         );
       let attempts = 0;
       const opened = filesystem.open;
@@ -1521,6 +1526,86 @@ describe("live scan cost tracking", () => {
     );
     expect(result.status, result.stderr).toBe(0);
   });
+
+  test.each([
+    [true, false],
+    [false, false],
+    [false, true],
+  ] as const)(
+    "keeps fatal new-file errors distinct, budget=%s, prior blocker=%s",
+    async (budget, priorBlocker) => {
+      const home = await codexHome(),
+        usage = { input_tokens: 10 };
+      await writeSession(home, "scan-thread", usage);
+      const knownFile = await writeSession(home, "b-known", usage, {
+        parent: "scan-thread",
+      });
+      const secondary: unknown[] = [];
+      const options: ConstructorParameters<typeof ScanCostTracker>[0] = {
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        onError: (error) => secondary.push(error),
+      };
+      const tracker = new ScanCostTracker(options);
+      tracker.start("scan-thread");
+      options.onSessionEvent = () => {};
+      await tracker.refresh();
+      if (budget) options.maxCostUsd = 5;
+      const directory = parse(knownFile).dir,
+        denied = priorBlocker
+          ? join(directory, "rollout-a-new.jsonl")
+          : knownFile,
+        fatalPath = join(directory, "rollout-z-fatal.jsonl");
+      await appendFile(denied, "{}\n");
+      await writeFile(fatalPath, "{}\n");
+      const first = Object.assign(new Error("Synthetic denied open"), {
+        code: "EACCES",
+        syscall: "open",
+        path: denied,
+      });
+      const fatal = Object.assign(new Error("Synthetic fatal stat"), {
+        code: "EIO",
+        syscall: "stat",
+        path: fatalPath,
+      });
+      const opened = filesystem.open,
+        stated = filesystem.stat,
+        listed = filesystem.readdir;
+      const opening = spyOn(filesystem, "open").mockImplementation(
+        async (...args: Parameters<typeof filesystem.open>) => {
+          if (String(args[0]) === denied) throw first;
+          return opened(...args);
+        },
+      );
+      const stating = spyOn(filesystem, "stat").mockImplementation((async (
+        ...args: Parameters<typeof filesystem.stat>
+      ) => {
+        if (String(args[0]) === fatalPath) throw fatal;
+        return await Reflect.apply(stated, filesystem, args);
+      }) as typeof filesystem.stat);
+      const listing = spyOn(filesystem, "readdir").mockImplementation(
+        async (...args) => {
+          const entries = await Reflect.apply(listed, filesystem, args);
+          if (String(args[0]) === directory)
+            entries.sort((a: { name: string }, b: { name: string }) =>
+              a.name.localeCompare(b.name),
+            );
+          return entries;
+        },
+      );
+      try {
+        await expect(tracker.refresh()).rejects.toBe(
+          priorBlocker ? first : fatal,
+        );
+        expect(secondary).toEqual(priorBlocker ? [fatal] : []);
+      } finally {
+        opening.mockRestore();
+        stating.mockRestore();
+        listing.mockRestore();
+        await tracker.stop();
+      }
+    },
+  );
 
   test.each([...parentFields])(
     "observes worker metadata without status markers or usage via %s",

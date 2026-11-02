@@ -323,6 +323,7 @@ export class ScanCostTracker {
     };
     let blocked: [SessionUsage, unknown] | undefined;
     let traversalFailure: { error: unknown } | undefined;
+    let fatalFileFailure: { error: unknown } | undefined;
     try {
       for await (const path of sessionFiles(
         join(this.#options.codexHome, "sessions"),
@@ -347,8 +348,10 @@ export class ScanCostTracker {
             capturedEvents.set(session, session.events);
         } catch (error) {
           if (session.threadId === null) {
-            if (!observeHealthySessions || !isBlockedLogRead(error))
+            if (!observeHealthySessions || !isBlockedLogRead(error)) {
+              fatalFileFailure = { error };
               throw error;
+            }
             blocked ??= [session, error];
           }
           unreadable.set(session, error);
@@ -358,6 +361,7 @@ export class ScanCostTracker {
         }
       }
     } catch (error) {
+      if (fatalFileFailure && !blocked) throw fatalFileFailure.error;
       if (unreadable.size === 0) throw error;
       traversalFailure = { error };
     }
@@ -1104,14 +1108,18 @@ function subtractTokenUsage(
 }
 
 function isDescriptorExhaustion(error: unknown): boolean {
-  return isRecord(error) && error["code"] === "EMFILE";
+  return (
+    isRecord(error) &&
+    (error["code"] === "EMFILE" || error["code"] === "ENFILE")
+  );
 }
 
 function trackingFailureKey(error: unknown, path?: string): unknown {
   if (!isRecord(error)) return error;
   const code = error["code"],
     syscall = error["syscall"];
-  if (code === "EMFILE") return "descriptor-exhaustion";
+  if (code === "EMFILE" || code === "ENFILE")
+    return JSON.stringify([code, "descriptor-exhaustion"]);
   if (
     (code === "EACCES" || code === "EPERM") &&
     (syscall === "stat" || syscall === "statx") &&
