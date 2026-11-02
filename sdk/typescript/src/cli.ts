@@ -3951,7 +3951,10 @@ export async function main(
                 renderedOutput = renderExternalPublicationSummary(error.result);
               return { ...error.result };
             }
-            if (selection && !machineFormat) showExclusions(selection.excluded);
+            if (selection && !machineFormat) {
+              showExclusions(selection.excluded);
+              writeDiagnostic(coverageWarnings(selection));
+            }
             const failure = {
               status: "failed",
               error: message,

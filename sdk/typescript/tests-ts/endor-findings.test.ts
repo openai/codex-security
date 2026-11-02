@@ -669,6 +669,12 @@ test("zero-result SARIF retains coverage warnings and resolves notification seve
     findings: [],
     report: { notifications: [notification] },
   });
+  const mixed = normalizeEndorSarif({
+    ...report,
+    runs: [run, endorSarif().runs[0]],
+  });
+  expect(mixed.findings.length).toBeGreaterThan(0);
+  expect(mixed.report?.["notifications"]).toMatchObject([notification]);
   run.tool.driver.globalMessageStrings = {
     skipped: { text: "File {0} was skipped" },
   };
@@ -743,4 +749,9 @@ test("Endor accepts a nullable native list with no remaining page", () => {
   expect(
     normalizeEndorFindings({ list: { objects: null, response: null } }),
   ).toMatchObject({ findings: [], read: 0, excluded: [] });
+  expect(() =>
+    normalizeEndorFindings({
+      list: { objects: null, response: { total_size: 13 } },
+    }),
+  ).toThrow("list.objects");
 });

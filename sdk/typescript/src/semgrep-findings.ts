@@ -321,7 +321,7 @@ export function normalizeSemgrepSarif(
     },
     ({ result, context }) => sarifIdentity(result, context.runContext),
     target,
-    { emptyNotifications: notifications },
+    { notifications },
   );
 }
 

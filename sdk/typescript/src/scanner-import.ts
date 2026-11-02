@@ -613,7 +613,7 @@ export function normalizeRecords<T>(
   target: "local" | "cloud" = "cloud",
   options: {
     report?: ExternalFindings["report"];
-    emptyNotifications?: unknown[];
+    notifications?: unknown[];
     filter?: SelectionFilter;
   } = {},
 ): ExternalFindings {
@@ -663,10 +663,10 @@ export function normalizeRecords<T>(
   }
   result.excluded.sort((a, b) => a.position - b.position);
   const normalized = selection.finish(options.filter);
-  if (!normalized.findings.length && options.emptyNotifications?.length) {
+  if (options.notifications?.length) {
     normalized.report = {
       ...normalized.report,
-      notifications: structuredClone(options.emptyNotifications),
+      notifications: structuredClone(options.notifications),
     };
   }
   return normalized;

@@ -1224,6 +1224,41 @@ test("failed or malformed vendor collections never report a successful empty imp
   expect(terminal.stdout.text() + terminal.stderr.text()).toContain(
     "Code scan denied",
   );
+  const excludedReport = endorSarif();
+  const run = excludedReport.runs[0]!;
+  await writeFile(
+    f.file,
+    JSON.stringify({
+      ...excludedReport,
+      runs: [
+        {
+          ...run,
+          results: [{ ...run.results[0], properties: {} }],
+          invocations: [
+            {
+              executionSuccessful: true,
+              toolExecutionNotifications: [
+                { level: "warning", message: { text: "Manifest skipped" } },
+              ],
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  const excludedTerminal = createCliTest(main);
+  expect(
+    await excludedTerminal.runCli(
+      [
+        ...f.command
+          .slice(0, -2)
+          .map((argument) => (argument === "wiz" ? "endor" : argument)),
+        "--yes",
+      ],
+      f.cliDeps,
+    ),
+  ).toBe(2);
+  expect(excludedTerminal.stderr.text()).toContain("Manifest skipped");
   const unsupported = plugin.findings[0]!;
   await writeFile(
     f.file,

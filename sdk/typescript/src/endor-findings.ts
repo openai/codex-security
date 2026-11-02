@@ -52,8 +52,10 @@ export function normalizeEndorFindings(
     }
     // Endor can omit the empty repeated objects field, leaving only pagination.
     if (
-      list["objects"] === undefined &&
-      (Object.keys(list).some((key) => key !== "response") ||
+      list["objects"] == null &&
+      (Object.keys(list).some(
+        (key) => key !== "objects" && key !== "response",
+      ) ||
         Object.keys(response).some(
           (key) => key !== "next_page_id" && key !== "next_page_token",
         ))
@@ -327,7 +329,7 @@ export function normalizeEndorSarif(
         "Endor finding-uuid",
       ),
     target,
-    { emptyNotifications: notifications },
+    { notifications },
   );
 }
 
