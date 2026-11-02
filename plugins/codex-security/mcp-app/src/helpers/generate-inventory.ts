@@ -45,6 +45,7 @@ import {
   directoryFilteringRoot,
   encodeGitPath,
   git,
+  gitWorkingTree,
   runRipgrep,
 } from "./inventory-git";
 import { PREVIEW_BYTES, previewForBytes, sampleFile } from "./source-preview";
@@ -71,7 +72,7 @@ export interface InventoryOptions {
   mode?: string;
 }
 
-function scopePath(
+export function scopePath(
   repo: string,
   scope: string,
   home: string | undefined,
@@ -122,7 +123,11 @@ function scopePath(
   return resolved;
 }
 
-async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
+async function scopeCandidates(
+  repo: string,
+  scope: string,
+  temporaryDirectory: string,
+): Promise<string[]> {
   if (regular(scope)) return [scope];
   const diagnostics: string[] = [];
   const usable = (path: string) => {
@@ -147,6 +152,10 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
   };
   const filteringRoot = await directoryFilteringRoot(scope);
   const configuredIgnore = await configuredIgnoreFile(repo);
+  const searchRoot =
+    configuredIgnore === undefined
+      ? repo
+      : ((await gitWorkingTree(repo)) ?? repo);
   let extraIgnore: string | undefined;
   if (configuredIgnore !== undefined && configuredIgnore !== "") {
     try {
@@ -178,9 +187,9 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
         "--glob",
         "!**/{.git,.svn}/**",
         "--",
-        relative(repo, filteringRoot) || ".",
+        relative(searchRoot, filteringRoot) || ".",
       ],
-      repo,
+      searchRoot,
     );
   } catch {
     const isIgnoreFile = (path: string) => {
@@ -306,24 +315,71 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
   const selected = decodePosixBytes(result.stdout)
     .split("\0")
     .filter(Boolean)
-    .map((path) => append(repo, path));
+    .map((path) => append(searchRoot, path));
   // Match the existing inventory command's override for Git-ignored tracked files.
-  const tracked = await git(scope, [
-    "ls-files",
-    "--cached",
-    "--ignored",
-    "--exclude-standard",
-    "-z",
-    "--",
-    ".",
-  ]);
-  if (tracked.status === 0)
-    selected.push(
-      ...decodeGitPath(tracked.stdout)
-        .split("\0")
-        .filter(Boolean)
-        .map((path) => append(scope, path)),
+  const ignoredTracked = new Map<string, string[]>();
+  await directoryPaths(scope, diagnostics, ignoredTracked);
+  selected.push(...(ignoredTracked.get(scope) ?? []));
+  const candidates = new Set(
+    [...ignoredTracked]
+      .filter(([root]) => root !== scope)
+      .flatMap(([, paths]) => paths)
+      .filter(usable)
+      .map((path) => canonical(path)),
+  );
+  if (candidates.size) {
+    // Prune to indexed paths in a file, below native .ignore/.rgignore precedence.
+    // This avoids entering unrelated Git-excluded subtrees or growing process argv.
+    const rules = ["/*"],
+      directories = new Set<string>();
+    const literal = (path: string) => path.replace(/[\\*?\[]/gu, "\\$&");
+    for (const path of candidates) {
+      const parts = relative(searchRoot, path).split(sep);
+      for (let index = 1; index < parts.length; index += 1) {
+        const directory = literal(parts.slice(0, index).join("/"));
+        if (directories.has(directory)) continue;
+        directories.add(directory);
+        rules.push(`!/${directory}/`, `/${directory}/*`);
+      }
+      rules.push(`!/${literal(parts.join("/"))}`);
+    }
+    const pruning = append(
+      temporaryDirectory,
+      `.inventory-${randomBytes(12).toString("hex")}.ignore`,
     );
+    mkdir(temporaryDirectory);
+    writeFile(pruning, [encodePosixPath(rules.join("\n") + "\n")], true);
+    try {
+      const tracked = await runRipgrep(
+        [
+          "--files",
+          "--hidden",
+          "--no-ignore-vcs",
+          "--no-require-git",
+          "--null",
+          "--ignore-file",
+          pruning,
+          "--",
+          ".",
+        ],
+        searchRoot,
+      );
+      if (tracked.status !== 0 && tracked.status !== 1)
+        diagnostics.push(
+          tracked.stderr.trim() || "Could not enumerate ignored tracked files",
+        );
+      selected.push(
+        ...decodePosixBytes(tracked.stdout)
+          .split("\0")
+          .filter(Boolean)
+          .map((path) => append(searchRoot, path))
+          .filter((path) => candidates.has(canonical(path))),
+      );
+    } finally {
+      if (windows) windowsFiles().unlink(Buffer.from(pruning, "utf16le"));
+      else unlinkSync(fsPath(pruning));
+    }
+  }
   if (failed) {
     diagnostics.push(
       result.stderr.trim() ||
@@ -331,7 +387,6 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
     );
     if (!selected.some(usable)) throw new Error(diagnostics.join("\n"));
   }
-  if (!selected.some(usable)) await directoryPaths(scope, diagnostics);
   return finish(selected);
 }
 
@@ -557,7 +612,11 @@ export async function generateInventory(
       scopePath(repo, value, home, true, true),
     );
     for (const selected of resolved) {
-      for (const path of await scopeCandidates(repo, selected)) {
+      for (const path of await scopeCandidates(
+        repo,
+        selected,
+        dirname(output),
+      )) {
         let name: string;
         try {
           if (!regular(path)) continue;

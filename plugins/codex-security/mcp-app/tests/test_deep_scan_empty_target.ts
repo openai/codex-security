@@ -44,6 +44,71 @@ const artifactInventory = await importSource("src/artifact-inventory.ts", {
 
 after(() => temporaryDirectories.cleanup());
 
+for (const selection of ["file", "replaced file", "directory"])
+  test(`the packaged engine preserves a registered ${selection} selection`, async () => {
+    const fixture = await fixtureRun();
+    fixture.run.includePaths = ["selected"];
+    fixture.run.filePaths = selection === "directory" ? [] : ["selected"];
+    await mkdir(fixture.run.targetPath, { recursive: true });
+    const selected = path.join(fixture.run.targetPath, "selected");
+    if (selection === "file") await writeFile(selected, "export {};\n");
+    else {
+      await mkdir(selected);
+      await writeFile(path.join(selected, "nested.ts"), "export {};\n");
+    }
+    const store = new FakeStore(fixture.run);
+    const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
+    const registry = new DeepScanCoordinatorRegistry();
+    const start = registry.start.bind(registry);
+    registry.start = (options: CoordinatorOptions) =>
+      start({ ...options, executor });
+    const { coordinator } = await startDeepScanEngine({
+      run: store.run,
+      store,
+      registry,
+      runWorkbench: async (args: string[]) => {
+        if (args[0] === "preserve-scan-results") return {};
+        assert.equal(args[0], "get-scan");
+        return {
+          scan: {
+            scanId: fixture.run.scanId,
+            scanDir: fixture.run.scanDir,
+            targetPath: fixture.run.targetPath,
+            scope: "selected",
+            mode: "deep",
+            status: "running",
+            contract: {
+              scope: {
+                requiredIncludePaths: ["selected"],
+                requiredExcludePaths: [],
+              },
+            },
+          },
+        };
+      },
+      pluginRoot: path.resolve(
+        import.meta.dirname,
+        "../../../../sdk/typescript/_bundled_plugin",
+      ),
+      pythonCommand: "fixture-python",
+      parentSandbox: { filesystemDenies: [] },
+      threadId: "fixture-owner",
+    });
+    if (selection === "replaced file") {
+      const terminal = await coordinator.wait(undefined, 10_000);
+      coordinator.cancel("fixture complete");
+      assert.equal(terminal?.status, "failed");
+      assert.match(terminal?.error ?? "", /selected file.*regular file/iu);
+      assert.equal(executor.discoveryCalls, 0);
+      assert.equal(executor.dedupCalls, 0);
+    } else {
+      await executor.discoveryStarted.promise;
+      assert.equal(executor.discoveryCalls, 1);
+      coordinator.cancel("fixture complete");
+      await coordinator.wait(undefined, 10_000);
+    }
+  });
+
 test("a fresh empty target fails before discovery or reduction", async () => {
   const fixture = await fixtureRun();
   const store = new FakeStore(fixture.run);

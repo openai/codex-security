@@ -70,7 +70,10 @@ export function startDeepScanEngine(options: {
             pythonCommand: options.pythonCommand,
           },
         );
-        return preflightCodexSecurityReviewItems(context, signal);
+        return preflightCodexSecurityReviewItems(
+          { ...context, filePaths: run.filePaths },
+          signal,
+        );
       },
       onComplete: async (draft, signal, publication) => {
         const context = await createScanArtifactContext(

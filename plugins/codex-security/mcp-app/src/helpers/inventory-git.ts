@@ -556,6 +556,7 @@ function requireSuccess(result: ToolResult): Buffer {
 export async function directoryPaths(
   target: string,
   diagnostics?: string[],
+  ignoredTracked?: Map<string, string[]>,
 ): Promise<string[] | undefined> {
   const root = await git(target, ["rev-parse", "--show-toplevel"]);
   if (root.status !== 0 || !root.stdout.length) return undefined;
@@ -589,6 +590,21 @@ export async function directoryPaths(
   const listing = paths(requireSuccess(listingResult));
   if (listingResult.stderr.trim())
     diagnostics?.push(listingResult.stderr.trim());
+  if (ignoredTracked) {
+    const ignored = await git(target, [
+      "ls-files",
+      "--cached",
+      "--ignored",
+      "--exclude-standard",
+      "-z",
+      "--",
+      ".",
+    ]);
+    ignoredTracked.set(
+      target,
+      paths(requireSuccess(ignored)).map((path) => append(target, path)),
+    );
+  }
   const found = new Set<string>(),
     matching = new Map<string, boolean>();
   for (const name of listing) {
@@ -609,6 +625,12 @@ export async function directoryPaths(
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === "ENOENT" || code === "ENOTDIR") continue;
+      if (diagnostics && (code === "EACCES" || code === "EPERM")) {
+        diagnostics.push(
+          error instanceof Error ? error.message : String(error),
+        );
+        continue;
+      }
       throw error;
     }
     found.add(path);
@@ -619,9 +641,17 @@ export async function directoryPaths(
       const nestedRoot = await git(path, ["rev-parse", "--show-toplevel"]);
       const nested =
         nestedRoot.status === 0 && sameFile(gitLine(nestedRoot.stdout), path)
-          ? await directoryPaths(path, diagnostics)
+          ? await directoryPaths(path, diagnostics, ignoredTracked)
           : undefined;
-      for (const child of nested ?? walk(path, true, true)) found.add(child);
+      const errors: unknown[] = [];
+      if (nestedRoot.status !== 0 && nestedRoot.stderr.trim())
+        diagnostics?.push(nestedRoot.stderr.trim());
+      for (const child of nested ?? walk(path, true, true, errors))
+        found.add(child);
+      for (const error of errors)
+        diagnostics?.push(
+          error instanceof Error ? error.message : String(error),
+        );
     }
   }
   // Stale index entries, metadata and links do not make a warned listing usable.
@@ -690,6 +720,13 @@ export async function configuredIgnoreFile(
     root.status === 0 ? canonical(gitLine(root.stdout)) : repo,
     path,
   );
+}
+
+export async function gitWorkingTree(
+  target: string,
+): Promise<string | undefined> {
+  const root = await git(target, ["rev-parse", "--show-toplevel"]);
+  return root.status === 0 ? canonical(gitLine(root.stdout)) : undefined;
 }
 
 export interface Change {

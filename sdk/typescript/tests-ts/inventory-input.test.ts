@@ -13,7 +13,15 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { delimiter, dirname, join, parse, relative, sep } from "node:path";
+import {
+  delimiter,
+  dirname,
+  join,
+  parse,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { nodeCommand } from "./support/shell.js";
 import { git } from "./git-fixture.js";
@@ -136,6 +144,44 @@ process.exitCode = result.status;
     toolEnvironment,
   };
 }
+
+for (const indexed of [false, true])
+  for (const ignore of [undefined, ".ignore", ".rgignore"])
+    test(`scope input restores nested ignored tracked files, indexed=${indexed}, rules=${ignore}`, () => {
+      const f = fixture();
+      f.write("selected/nested/tracked.py");
+      const nested = join(f.repo, "selected", "nested");
+      git(nested, "init", "-q");
+      git(nested, "add", ".");
+      git(nested, "commit", "-qm", "nested source");
+      if (indexed) f.commit();
+      const excludes = resolve(
+        nested,
+        git(nested, "rev-parse", "--git-path", "info/exclude"),
+      );
+      writeFileSync(excludes, "tracked.py\n");
+      if (ignore) f.write(ignore, "nested/\n");
+      expect(
+        f
+          .rows("make-repo-scope-input", f.scopeArgs("selected"))
+          .map((row) => row.path),
+      ).toEqual(ignore ? [] : ["selected/nested/tracked.py"]);
+    });
+
+for (const anchored of [false, true])
+  test(`scope input keeps configured ignore anchors at the Git root, anchored=${anchored}`, () => {
+    const f = fixture();
+    f.write("selected/source.py");
+    const ignore = join(f.root, "configured-ignore");
+    writeFileSync(ignore, `${anchored ? "/" : ""}source.py\n`);
+    git(f.repo, "config", "core.excludesFile", ignore);
+    const rows = f.rows("make-repo-scope-input", [
+      "--repo",
+      join(f.repo, "selected"),
+      ...f.scopeArgs(),
+    ]);
+    expect(rows.map((row) => row.path)).toEqual(anchored ? ["source.py"] : []);
+  });
 
 test("committed binary detection agrees beyond the preview window", () => {
   const f = fixture();
@@ -955,6 +1001,47 @@ test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
     }
   },
 );
+
+for (const kept of [false, true])
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    `nested Git fallback preserves read errors with kept=${kept}`,
+    () => {
+      const f = fixture();
+      f.write("selected/nested/source.py");
+      const nested = join(f.repo, "selected", "nested");
+      git(nested, "init", "-q");
+      git(nested, "add", ".");
+      git(nested, "commit", "-qm", "nested source");
+      f.commit();
+      if (kept) f.write("selected/visible.py");
+      const tools = join(f.root, "no-ripgrep");
+      mkdirSync(tools);
+      writeFileSync(f.out, "previous\n");
+      chmodSync(nested, 0);
+      try {
+        const result = f.run("make-repo-scope-input", f.scopeArgs("selected"), {
+          ...f.toolEnvironment,
+          PATH: tools,
+          CODEX_SECURITY_GIT: Bun.which("git")!,
+        });
+        if (kept) {
+          expect(result.status, result.stderr).toBe(0);
+          expect(
+            readFileSync(f.out, "utf8")
+              .trim()
+              .split(/\r?\n/u)
+              .map((line) => JSON.parse(line).path),
+          ).toEqual(["selected/visible.py"]);
+        } else {
+          expect(result.status).toBe(1);
+          expect(result.stderr).toMatch(/EACCES|permission denied/iu);
+          expect(readFileSync(f.out, "utf8")).toBe("previous\n");
+        }
+      } finally {
+        chmodSync(nested, 0o700);
+      }
+    },
+  );
 
 for (const kept of [false, true])
   test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(

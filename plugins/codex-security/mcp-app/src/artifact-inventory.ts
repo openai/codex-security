@@ -14,6 +14,8 @@ import { decodeUtf8 } from "./helpers/utf8.js";
 import { runTool } from "./helpers/inventory-git";
 import { environmentValue } from "./helpers/helper-files";
 import { decodePosixBytes, encodePosixPath } from "./helpers/posix-path";
+import { scopePath } from "./helpers/generate-inventory";
+import { regular } from "./helpers/inventory-paths";
 
 const inventoryComponents = ["artifacts", "02_discovery", "in_scope_files.txt"];
 const preflightComponents = [
@@ -92,6 +94,19 @@ export async function preflightCodexSecurityReviewItems(
   if (context.mode === "diff")
     return prepareCodexSecurityReviewItems(context, signal);
 
+  const includePaths = authoritativeIncludePaths(context);
+  const filePaths = new Set(context.filePaths ?? []);
+  for (const selected of includePaths) {
+    signal?.throwIfAborted();
+    if (
+      filePaths.has(selected) &&
+      !regular(scopePath(context.repoRoot, selected, undefined, true, true))
+    )
+      throw new Error(
+        `${label}: selected file is no longer a regular file: ${selected}`,
+      );
+  }
+
   const destination = await artifactDestination(
     context,
     preflightComponents,
@@ -101,16 +116,12 @@ export async function preflightCodexSecurityReviewItems(
   const scopesFile = `${destination}.${suffix}.scopes.json`;
   const output = `${destination}.${suffix}.tmp`;
   try {
-    await writeFile(
-      scopesFile,
-      JSON.stringify(authoritativeIncludePaths(context)),
-      {
-        encoding: "utf8",
-        mode: 0o600,
-        flag: "wx",
-        signal,
-      },
-    );
+    await writeFile(scopesFile, JSON.stringify(includePaths), {
+      encoding: "utf8",
+      mode: 0o600,
+      flag: "wx",
+      signal,
+    });
     await runInventoryHelper(
       context,
       [
