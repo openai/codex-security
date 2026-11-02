@@ -18,6 +18,7 @@ import { readBlackDuckFindings } from "./blackduck-findings.js";
 import { readInspectorFindings } from "./inspector-findings.js";
 import { isRecord } from "./record.js";
 import {
+  readLocalWizFindings,
   readVendorFindingsForPublication,
   wizFindingRepository,
 } from "./wiz-findings.js";
@@ -165,16 +166,16 @@ export async function readExternalFindings(
   }
   // A new reader must choose its parser before reaching the Wiz replay path.
   options.provider satisfies "wiz";
-  const publication = await readVendorFindingsForPublication(path, target);
-  const sourceRepositories = publication.current.findings.flatMap((finding) =>
+  const wiz =
+    target === "local"
+      ? await readLocalWizFindings(path)
+      : await readVendorFindingsForPublication(path, target);
+  const sourceRepositories = wiz.current.findings.flatMap((finding) =>
     localFindingRepositories("wiz", finding),
   );
   return {
-    findings: publication.current,
-    publication,
-    sourceRepositories: [
-      ...publication.sourceRepositories,
-      ...sourceRepositories,
-    ],
+    findings: wiz.current,
+    ...("legacy" in wiz && { publication: wiz }),
+    sourceRepositories: [...wiz.sourceRepositories, ...sourceRepositories],
   };
 }
