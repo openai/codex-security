@@ -98,9 +98,14 @@ export type StoreInput<Method extends keyof DeepScanStore> = Parameters<
 
 export class FakeStore {
   run: DeepScanRunState;
+  freshStart = false;
   declare failProgressAt: number | undefined;
   constructor(run: DeepScanRunState) {
     this.run = structuredClone(run);
+  }
+
+  isFreshStart(_run: DeepScanRunState): boolean {
+    return this.freshStart;
   }
 
   workerUpdates: DeepScanWorkerMutation[] = [];

@@ -1,3 +1,5 @@
+import { readdir, stat } from "node:fs/promises";
+import { join } from "node:path";
 import { createScanArtifactContext } from "../artifact-context.js";
 import { recordCodexSecurityScanDraftViaWorkbench } from "../artifact-scan-draft.js";
 import { workbenchArgs } from "../workbench-arguments.js";
@@ -31,6 +33,7 @@ export function startDeepScanEngine(options: {
 }) {
   const { run, runWorkbench, pluginRoot, threadId, handoffClaimToken } =
     options;
+  const freshStart = options.store.isFreshStart(run);
   return startOrJoinDeepScanCoordinator({
     run,
     registry: options.registry,
@@ -57,6 +60,7 @@ export function startDeepScanEngine(options: {
       onStart: options.onStart,
       handoffClaimToken,
       threadId,
+      checkFreshTarget: freshStart ? checkFreshTarget : undefined,
       onComplete: async (draft, signal, publication) => {
         const context = await createScanArtifactContext(
           run.scanId,
@@ -91,4 +95,31 @@ export function startDeepScanEngine(options: {
       },
     },
   });
+}
+
+async function checkFreshTarget(
+  run: DeepScanRunState,
+  signal: AbortSignal,
+): Promise<void> {
+  const exactFiles = new Set(run.filePaths ?? []);
+  let readError: unknown;
+
+  for (const selectedPath of run.includePaths ?? [run.scope]) {
+    signal.throwIfAborted();
+    if (exactFiles.has(selectedPath)) return;
+
+    const target = join(run.targetPath, selectedPath);
+    try {
+      if (!(await stat(target)).isDirectory()) return;
+      if ((await readdir(target)).length > 0) return;
+    } catch (error) {
+      readError ??= error;
+    }
+    signal.throwIfAborted();
+  }
+
+  if (readError) throw readError;
+  throw new Error(
+    "Deep Scan target is empty; no security audit was performed.",
+  );
 }

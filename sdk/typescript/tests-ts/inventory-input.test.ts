@@ -1829,6 +1829,29 @@ for (const setting of [
     },
   );
 
+test("scope inventory honors core.excludesFile from command configuration", () => {
+  const f = fixture();
+  f.write("kept.py");
+  f.write("generated.py");
+  const excludes = join(f.root, "global-ignore");
+  writeFileSync(excludes, "generated.py\n");
+
+  const result = f.run("make-repo-scope-input", f.scopeArgs(), {
+    ...f.toolEnvironment,
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "core.excludesFile",
+    GIT_CONFIG_VALUE_0: excludes,
+  });
+
+  expect(result.status, result.stderr).toBe(0);
+  expect(
+    readFileSync(f.out, "utf8")
+      .trim()
+      .split(/\r?\n/u)
+      .map((line) => JSON.parse(line).path),
+  ).toEqual(["kept.py"]);
+});
+
 test("absolute file scopes work when the repository is a filesystem root", () => {
   const f = fixture();
   const source = f.write("source.py");
