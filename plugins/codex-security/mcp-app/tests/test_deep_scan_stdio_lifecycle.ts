@@ -3,6 +3,10 @@ import type { PersistedDeepScanWorker } from "../src/deep-scan/types.js";
 import { readJson, readJsonLines } from "./support/json.ts";
 import { assertNoError, assertFlagPair } from "./assertions.ts";
 import { readOnlyParentSandboxState } from "./sandbox-state.ts";
+import {
+  withGitEnvironmentDeny,
+  workerPermissionProfileOverride,
+} from "./support/worker-permissions.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { parse as parseToml } from "smol-toml";
@@ -15,6 +19,7 @@ import {
   readFile,
   realpath,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -347,7 +352,7 @@ model_reasoning_summary = "none"
       startedWorker.argv.includes('model_reasoning_summary="none"'),
       true,
     );
-    assertReadOnlyWorkerInvocation(startedWorker.argv, codexHome);
+    assertReadOnlyWorkerInvocation(startedWorker, codexHome);
     assertWorkerArtifactEnvironment(
       startedWorker.argv,
       pluginRoot,
@@ -621,7 +626,7 @@ model_reasoning_summary = "none"
       failedWorker.argv.includes('model_reasoning_effort="high"'),
       true,
     );
-    assertReadOnlyWorkerInvocation(failedWorker.argv, codexHome);
+    assertReadOnlyWorkerInvocation(failedWorker, codexHome);
     assert.equal(
       activeFailureState.workers.some(
         (worker: PersistedDeepScanWorker) => worker.kind === "setup",
@@ -767,6 +772,7 @@ model_reasoning_summary = "none"
     assertNoError(started);
     const resumedScan = started.result.structuredContent.workspace.results;
     const resumedScanId = resumedScan.scanId;
+    await chmod(resumedScan.scanDir, 0o755);
     const handoffClaimToken = randomUUID();
     for (const [id, name, arguments_] of [
       [
@@ -999,6 +1005,7 @@ model_reasoning_summary = "none"
         threadId: resumedThreadId,
       });
       assert.equal(finished.status, "succeeded");
+      assert.equal((await stat(resumedScan.scanDir)).mode & 0o777, 0o755);
       assert.equal(
         finished.coordinatorGeneration,
         partial!.coordinatorGeneration + 1,
@@ -1061,7 +1068,7 @@ model_reasoning_summary = "none"
       );
       for (const [index, execution] of executions.entries()) {
         const afterRestart = index + restartStartIndex >= resumedStartIndex;
-        assertReadOnlyWorkerInvocation(execution.argv, codexHome);
+        assertReadOnlyWorkerInvocation(execution, codexHome);
         assert.equal(execution.readCoreScanReference, true);
         const context = discoveryPromptContext(execution.stdin);
         if (context.workerLabel) {
@@ -1287,7 +1294,8 @@ async function testCliDeepScanEngine({
   const threadId = "cli-engine-session";
   const register = async (name: string, scoped = false) => {
     const scanDir = path.join(canonicalRoot, name);
-    await mkdir(scanDir, { mode: 0o700 });
+    await mkdir(scanDir, { mode: 0o775 });
+    await chmod(scanDir, 0o775);
     const registration = await runWorkbench(
       environment,
       [
@@ -1380,7 +1388,7 @@ async function testCliDeepScanEngine({
     ),
   );
   for (const entry of starts) {
-    assertReadOnlyWorkerInvocation(entry.argv, codexHome);
+    assertReadOnlyWorkerInvocation(entry, codexHome);
     assertFlagPair(entry.argv, "--model", "gpt-6.1-sol");
     assert.ok(entry.argv.includes('model_reasoning_effort="max"'));
     assert.equal(entry.hasExpectedApiKey, true);
@@ -1400,6 +1408,7 @@ async function testCliDeepScanEngine({
     code: "ENOENT",
   });
   await launch(completed.scanId);
+  assert.equal((await stat(completed.scanDir)).mode & 0o777, 0o775);
   assert.equal(
     (await readLogLines(environment.FAKE_CODEX_START_LOG!)).length,
     count,
@@ -1582,7 +1591,11 @@ function assertWorkerArtifactEnvironment(
   assert.equal(env.CODEX_SECURITY_PYTHON_COMMAND, expectedPython);
 }
 
-function assertReadOnlyWorkerInvocation(args: string[], deniedHome: string) {
+function assertReadOnlyWorkerInvocation(
+  invocation: { argv: string[]; gitEnvironmentFile: string },
+  deniedHome: string,
+) {
+  const args = invocation.argv;
   assert.equal(args.includes("--sandbox"), false);
   assert.equal(args.includes("--add-dir"), false);
   assert.equal(
@@ -1599,21 +1612,19 @@ function assertReadOnlyWorkerInvocation(args: string[], deniedHome: string) {
     ),
     false,
   );
-  assert.equal(
-    args.includes('default_permissions="codex_security_deep_scan_worker"'),
-    true,
-  );
-  const overrides = args.filter((arg) =>
-    arg.startsWith("permissions.codex_security_deep_scan_worker="),
-  );
-  assert.deepEqual(
-    overrides.map((value) => parseToml(value)),
-    [
-      parseToml(
-        `permissions.codex_security_deep_scan_worker={extends=":read-only",filesystem={":root"="read",${JSON.stringify(deniedHome)}={"."="deny"}},network={enabled=false}}`,
+  const override = workerPermissionProfileOverride(args);
+  assert.deepEqual(JSON.parse(JSON.stringify(parseToml(override))), {
+    permissions: {
+      codex_security_deep_scan_worker: withGitEnvironmentDeny(
+        {
+          extends: ":read-only",
+          filesystem: { ":root": "read", [deniedHome]: { ".": "deny" } },
+          network: { enabled: false },
+        },
+        invocation.gitEnvironmentFile,
       ),
-    ],
-  );
+    },
+  });
 }
 
 async function waitForScanId({
@@ -1716,7 +1727,7 @@ ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
       } else if (message.method === 'thread/read') {
         result = { thread: { id: message.params.threadId, path: path.join(process.env.CODEX_HOME, message.params.threadId + '.jsonl') } };
       } else if (message.method === 'config/read') {
-        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: { extends: ':read-only', filesystem: { ':root': 'read', [process.env.FAKE_CODEX_DENIED_HOME]: { '.': 'deny' } }, network: { enabled: false } } } }, origins: {}, layers: null };
+        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: { extends: ':read-only', filesystem: { ':root': 'read', [process.env.FAKE_CODEX_DENIED_HOME]: { '.': 'deny' }, [path.dirname(process.env.CODEX_SECURITY_GIT_ENVIRONMENT_FILE)]: { '.': 'deny' } }, network: { enabled: false } } } }, origins: {}, layers: null };
       } else if (message.method === 'permissionProfile/list') {
         result = { data: [{ id: 'codex_security_deep_scan_worker', description: null, allowed: true }], nextCursor: null };
       } else if (message.method === 'account/read') {
@@ -1732,7 +1743,7 @@ const stdin = (await process.stdin.toArray()).join('');
 const context = JSON.parse(stdin.match(/\`\`\`json\\n([\\s\\S]*?)\\n\`\`\`/u)[1]);
 const root = process.argv[process.argv.indexOf('--cd') + 1];
 const readCoreScanReference = !context.workerLabel || readFileSync(path.join(context.pluginRoot, 'references', 'core-scan.md'), 'utf8').length > 0;
-appendFileSync(process.env.FAKE_CODEX_START_LOG, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2), stdin, readCoreScanReference, hasExpectedApiKey: process.env.CODEX_API_KEY === 'synthetic-stdio-key', knowledgeBase: process.env.CODEX_SECURITY_KNOWLEDGE_BASE }) + '\\n');
+appendFileSync(process.env.FAKE_CODEX_START_LOG, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2), gitEnvironmentFile: process.env.CODEX_SECURITY_GIT_ENVIRONMENT_FILE, stdin, readCoreScanReference, hasExpectedApiKey: process.env.CODEX_API_KEY === 'synthetic-stdio-key', knowledgeBase: process.env.CODEX_SECURITY_KNOWLEDGE_BASE }) + '\\n');
 console.log(JSON.stringify({ type: 'thread.started', thread_id: \`stdio-fixture-\${process.pid}\` }));
 if (existsSync(process.env.FAKE_CODEX_RESTART_CONTROL)) {
   const phase = readFileSync(process.env.FAKE_CODEX_RESTART_CONTROL, 'utf8');

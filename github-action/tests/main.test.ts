@@ -197,6 +197,29 @@ test('PR severity failure retains SARIF outputs despite unrelated scope notes', 
   assert.match(annotation[2], /filesystem write without containment validation/);
 });
 
+test('a Critical finding after 50 Low findings leads the PR summary and annotations', async (t) => {
+  const app = await harness(t, 'pr');
+  app.setInput('fail-on-severity', 'high');
+  app.setInput('annotations', 'true');
+  app.configure({ scanResult: value => {
+    const [finding] = value.findings.findings;
+    const lowFindings = Array.from({ length: 50 }, (_, i) => ({
+      ...finding, title: `Low finding ${i + 1}`, severity: { level: 'low' },
+    }));
+    value.findings.findings = [...lowFindings, { ...finding, title: 'Blocking finding', severity: { level: 'critical' } }];
+  }});
+
+  const result = await app.run();
+  assert.equal(result.outputs['policy-status'], 'failed');
+  const headings = [...result.summary.matchAll(/<h3>([^<]+)<\/h3>/g)].map(match => match[1]);
+  const annotations = result.logs.split(/\r?\n/).filter(line => line.startsWith('::warning '));
+  assert.equal(headings.length, 30);
+  assert.equal(annotations.length, 50);
+  assert.deepEqual(headings.slice(0, 2), ['CRITICAL: Blocking finding', 'LOW: Low finding 1']);
+  assert.match(annotations[0], /title=CRITICAL%3A Blocking finding/);
+  assert.match(annotations[1], /title=LOW%3A Low finding 1/);
+});
+
 test('scheduled complete report-only scan succeeds', async (t) => {
   const app = await harness(t);
   process.env.INPUT_FOO = 'unrelated workflow value';
@@ -376,6 +399,13 @@ for (const scenario of ['schedule', 'pr'] as const) {
     assert.doesNotMatch(result.logs, /Findings meet the configured failure threshold/);
   });
 }
+
+test('missing RUNNER_TEMP fails with setup guidance', async (t) => {
+  const app = await harness(t); delete process.env.RUNNER_TEMP;
+  const result = await app.run();
+  assert.equal(result.exitCode, 1); assert.equal(result.setups, 0); assert.equal(result.processes, 0);
+  assert.match(result.summary, /RUNNER_TEMP is required\./);
+});
 
 test('cleanup failure fails the job and appears in the summary and final error', async (t) => {
   const app = await harness(t); app.configure({cleanupFails: true});

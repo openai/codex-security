@@ -5455,7 +5455,11 @@ if __name__ == "__main__":
             cost: { estimatedUsd: 0.0036 },
           });
         else if (scenario === "canceled")
-          await expect(scan).rejects.toBeInstanceOf(ScanInterruptedError);
+          await expect(scan).rejects.toMatchObject({
+            name: ScanInterruptedError.name,
+            message: `Codex Security scan was interrupted; output directory: ${scanDir}.`,
+            scanDir,
+          });
         else
           await expect(scan).rejects.toMatchObject({
             name: ScanCostLimitExceededError.name,
@@ -5566,7 +5570,7 @@ if __name__ == "__main__":
       "fail-scan",
       "--scan-id",
       "scan_example_001",
-      `--message=Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at ${scanDir}.`,
+      `--message=Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); scan output directory: ${scanDir}.`,
       "--cost-json",
       JSON.stringify(cost),
     ]);
@@ -5683,7 +5687,7 @@ if __name__ == "__main__":
           expect(recovered.threadId).toBe("scan-thread");
           expect(recovered.cost?.estimatedUsd).toBe(0.00488);
           expect(warnings).toEqual([
-            `Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at ${scanDir}.`,
+            `Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); scan output directory: ${scanDir}.`,
           ]);
           expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
           expect(

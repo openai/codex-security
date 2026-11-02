@@ -1,4 +1,8 @@
-import { outputText as textFor, hasTriageJson } from "./output.mts";
+import {
+  gradeFailures,
+  outputText as textFor,
+  hasTriageJson,
+} from "./output.mts";
 import type { AssertionContext } from "../types.ts";
 
 function repositoryName(value: string) {
@@ -259,12 +263,5 @@ export default (output: unknown, context: AssertionContext) => {
     ? check(text, context)
     : [`unknown expected_github_rest_behavior: ${behavior}`];
 
-  return {
-    pass: failures.length === 0,
-    score: failures.length === 0 ? 1 : 0,
-    reason:
-      failures.length === 0
-        ? "GitHub REST intake behavior matched."
-        : failures.join("; "),
-  };
+  return gradeFailures(failures, "GitHub REST intake behavior matched.");
 };

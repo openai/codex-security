@@ -14,6 +14,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
+import { EOL } from "node:os";
 import { delimiter, dirname, join, parse, relative, sep } from "node:path";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { nodeCommand } from "./support/shell.js";
@@ -1189,7 +1190,7 @@ Module._extensions[".node"] = (loaded, path) => {
                 : inventory
                   ? name + "\n"
                   : JSON.stringify({ path: name, area: "diff", preview: "" }) +
-                    "\n",
+                    EOL,
             );
           }
         },

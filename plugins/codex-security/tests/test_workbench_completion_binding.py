@@ -16,6 +16,7 @@ import pytest
 from workbench_test_support import (
     create_saved_workspace,
     create_workspace,
+    empty_target_paths,
     empty_target_scan,
     fail_scan,
     get_scan,
@@ -44,9 +45,7 @@ def _start_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Path]:
 
 
 def _start_deep_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Path]:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(
         state_dir, target, thread_id="thread-completion-binding", mode="deep"
     )
@@ -188,11 +187,10 @@ def _start_diff_scan_with_draft(tmp_path: Path, kind: str) -> tuple[Path, Path, 
             )
         registered = start_delivered_scan(
             state_dir,
-            "--workspace-id",
             workspace_id,
             "--scan-root",
             str(tmp_path / "scans"),
-        )["results"]
+        )
     else:
         if kind == "working_tree":
             (target / "README.md").write_text("uncommitted fixture\n")
@@ -462,9 +460,7 @@ def test_cli_scan_completes_when_draft_omits_registered_scope(
 
 
 def test_prepared_completion_does_not_publish_scan_before_acceptance(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     scan_dir = tmp_path / "scan"
     registered = register_cli_scan(state_dir, target, scan_dir)
     scan_id = str(registered["scanId"])
@@ -547,9 +543,7 @@ def test_incompatible_sealed_deep_scan_remains_recoverable(tmp_path: Path) -> No
 
 
 def test_rejected_prepared_completion_can_be_marked_failed(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     scan_dir = tmp_path / "scan"
     registered = register_cli_scan(state_dir, target, scan_dir)
     scan_id = str(registered["scanId"])
@@ -617,23 +611,8 @@ def test_scoped_cli_completion_adopts_registered_revision_kind(tmp_path: Path) -
         text=True,
     ).stdout.strip()
     scan_dir = tmp_path / "scan"
-    scan_dir.mkdir(mode=0o700)
-    registered = run_workbench(
-        state_dir,
-        "register-cli-scan",
-        "--repository",
-        str(target),
-        "--scan-dir",
-        str(scan_dir),
-        "--recipe-json",
-        json.dumps(
-            {
-                "config": {},
-                "mode": "standard",
-                "repository": str(target),
-                "target": {"kind": "paths", "paths": ["app"]},
-            }
-        ),
+    registered = register_cli_scan(
+        state_dir, target, scan_dir, scan_target={"kind": "paths", "paths": ["app"]}
     )
     assert registered["contract"]["target"]["allowedKinds"] == ["git_revision"]
     scan_id = str(registered["scanId"])
@@ -736,23 +715,11 @@ def test_cli_completion_adopts_diff_kind_with_bound_range_digest(tmp_path: Path)
     (target / "README.md").write_text("second fixture\n")
     subprocess.run(["git", "commit", "-qam", "Second commit"], cwd=target, check=True)
     scan_dir = tmp_path / "scan"
-    scan_dir.mkdir(mode=0o700)
-    registered = run_workbench(
+    registered = register_cli_scan(
         state_dir,
-        "register-cli-scan",
-        "--repository",
-        str(target),
-        "--scan-dir",
-        str(scan_dir),
-        "--recipe-json",
-        json.dumps(
-            {
-                "config": {},
-                "mode": "standard",
-                "repository": str(target),
-                "target": {"kind": "refs", "paths": [], "base": "HEAD~1", "head": "HEAD"},
-            }
-        ),
+        target,
+        scan_dir,
+        scan_target={"kind": "refs", "paths": [], "base": "HEAD~1", "head": "HEAD"},
     )
     assert registered["contract"]["target"]["allowedKinds"] == ["git_diff"]
     scan_id = str(registered["scanId"])
@@ -1005,7 +972,7 @@ def test_rejected_completion_restores_parent_head_before_corrected_retry(
     coverage = read_review_state(state_dir, scan_dir)
 
     coverage["deferred"] = [{"id": "review", "reason": "Review remains."}]
-    independent = write_checkpoint(
+    write_checkpoint(
         scan_dir / "checkpoints",
         {
             "scanId": scan_id,
@@ -1015,15 +982,15 @@ def test_rejected_completion_restores_parent_head_before_corrected_retry(
                 "deferred": [{"id": "other-review", "reason": "Independent earlier review."}],
             },
         },
+        mtime_ns=50,
     )
-    os.utime(independent, ns=(50, 50))
     head_path = scan_dir / "checkpoint-head.json"
     if existing_head:
         checkpoint = write_checkpoint(
             scan_dir / "checkpoints",
             saved_results._parent_scan_draft(scan_id, manifest["scan"], findings, coverage),
+            mtime_ns=100,
         )
-        os.utime(checkpoint, ns=(100, 100))
         head_path.write_text(json.dumps({"checkpoint": checkpoint.name}, indent=3))
         os.utime(head_path, ns=(100, 100))
         saved_results._capture_saved_source(scan_dir, "checkpoint-head.json", scan_id)

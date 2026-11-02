@@ -90,6 +90,8 @@ function testWorkerErrorClassificationPreservesExplicitFailures() {
     "Codex Exec exited with code 2: failed to load configuration: invalid value",
     "chatgpt authentication required for remote plugin catalog; api key auth is not supported",
     "chatgpt authentication required to sync remote plugins; api key auth is not supported",
+    "required MCP servers failed to initialize: codex_security_artifacts: timed out handshaking with MCP server after 30s",
+    "required MCP servers failed to initialize: other_server: request timed out",
   ]) {
     const original = new Error(message);
     assert.equal(classifyCodexWorkerError(original), original);

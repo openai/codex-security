@@ -469,5 +469,12 @@
     "statements": [
       "ALTER TABLE scans ADD COLUMN retained_checkpoint_heads_json TEXT;"
     ]
+  },
+  {
+    "version": 58,
+    "name": "record the final Deep Scan reviewed surface count",
+    "statements": [
+      "ALTER TABLE deep_scan_runs ADD COLUMN terminal_reviewed_surface_count INTEGER CHECK (terminal_reviewed_surface_count >= 0);"
+    ]
   }
 ]

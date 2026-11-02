@@ -226,23 +226,13 @@ if (result.status !== 0) throw new Error(result.stderr);
 process.stdout.write(result.stdout);
 `,
       );
-      const octal = [
-        ...Buffer.concat([
-          Buffer.from("refs/fixture-"),
-          Buffer.from([0xff]),
-          Buffer.from("/"),
-        ]),
-      ]
-        .map((byte) => `\\0${byte.toString(8).padStart(3, "0")}`)
-        .join("");
-      const native = childProcess.spawnSync("/bin/sh", [
-        "-c",
-        `GIT_REPLACE_REF_BASE=$(printf '%b' '${octal}'); export GIT_REPLACE_REF_BASE; exec "$@"`,
-        "raw-selector",
-        process.execPath,
-        "--experimental-strip-types",
-        probe,
-      ]);
+      const native = childProcess.spawnSync(
+        "/bin/sh",
+        ["-s", "--", process.execPath, "--experimental-strip-types", probe],
+        {
+          input: `GIT_REPLACE_REF_BASE=$(printf 'refs/fixture-\\377/') exec "$@"`,
+        },
+      );
       assert.equal(native.status, 0, native.stderr.toString());
       assert.deepEqual(native.stdout, replacement);
     } finally {

@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { appendFile, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { startRpc } from "./package-rpc.mjs";
 import { parse } from "./package-toml.cjs";
@@ -21,6 +21,18 @@ async function trace(event) {
     process.env.PACKAGE_DEEP_TRACE,
     `${JSON.stringify({ ...event, python: process.env.PYTHON })}\n`,
   );
+}
+
+function expectedWorkerProfile() {
+  const directory = dirname(process.env.CODEX_SECURITY_GIT_ENVIRONMENT_FILE);
+  return {
+    extends: ":read-only",
+    filesystem: {
+      ":root": "read",
+      [directory]: { ".": "deny" },
+    },
+    network: { enabled: false },
+  };
 }
 
 async function run() {
@@ -77,11 +89,7 @@ async function run() {
             config: {
               default_permissions: "codex_security_deep_scan_worker",
               permissions: {
-                codex_security_deep_scan_worker: {
-                  extends: ":read-only",
-                  filesystem: { ":root": "read" },
-                  network: { enabled: false },
-                },
+                codex_security_deep_scan_worker: expectedWorkerProfile(),
               },
             },
             origins: {},
@@ -118,6 +126,8 @@ async function run() {
       overrides.push(args[++index]);
   }
   const config = parse(overrides.join("\n"));
+  const profile = config.permissions.codex_security_deep_scan_worker;
+  assert.deepEqual(JSON.parse(JSON.stringify(profile)), expectedWorkerProfile());
   const artifacts = config.mcp_servers.cs_artifacts;
   const env = artifacts.env;
   const root = env.CODEX_SECURITY_ARTIFACT_ROOT;

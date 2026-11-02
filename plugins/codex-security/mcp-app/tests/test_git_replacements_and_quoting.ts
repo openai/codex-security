@@ -325,16 +325,8 @@ assert.deepEqual(await gitInspectionEnvironment(environment,process.argv[3],proc
       );
       execFileSync(
         "/bin/sh",
-        [
-          "-c",
-          'ulimit -s 512; exec "$@"',
-          "quote-fixture",
-          process.execPath,
-          runner,
-          root,
-          executable,
-        ],
-        { env: configuration(), stdio: "pipe" },
+        ["-s", "--", process.execPath, runner, root, executable],
+        { env: configuration(), input: 'ulimit -s 512; exec "$@"' },
       );
     } finally {
       await temporary.cleanup();
