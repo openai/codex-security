@@ -93,6 +93,33 @@ def start_empty_target_scan(tmp_path: Path, *, config: str | None = None) -> Dee
     return DeepScan(state_dir, codex_home, str(run["scanId"]), Path(str(run["scanDir"])))
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+def test_discovery_phase_survives_without_dispatched_workers(tmp_path: Path, legacy: bool) -> None:
+    deep = start_empty_target_scan(tmp_path)
+    initial = deep.read("thread-deep-scan")
+    assert initial["discoveryStarted"] is False
+    if legacy:
+        connection = sqlite3.connect(deep.state_dir / "workbench.sqlite3")
+        try:
+            connection.execute("UPDATE scans SET phase = 'discovery' WHERE id = ?", (deep.id,))
+            connection.commit()
+        finally:
+            connection.close()
+    else:
+        claimed = claim_deep_scan_coordinator(deep.state_dir, deep.codex_home, deep.id)
+        deep.command(
+            "update-progress",
+            "--phase",
+            "discovery",
+            "--coordinator-generation",
+            str(claimed["deepScan"]["coordinatorGeneration"]),
+        )
+    resumed = deep.read("thread-deep-scan")
+    assert resumed["discoveryStarted"] is True
+    assert resumed["dispatchedCount"] == 0
+    assert resumed["workers"] == []
+
+
 def restore_v53_schema(state_dir: Path) -> None:
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN terminal_reviewed_surface_count")

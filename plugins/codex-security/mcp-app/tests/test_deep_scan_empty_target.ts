@@ -35,6 +35,26 @@ const { startDeepScanEngine } = await importSource("src/deep-scan/engine.ts", {
 });
 after(() => temporaryDirectories.cleanup());
 
+for (const checkpoint of ["persisted phase", "dispatched worker"]) {
+  test(`resumed ${checkpoint} preserves admission before any accepted result`, async () => {
+    const fixture = await fixtureRun({ maxDiscoveryRuns: 2 });
+    fixture.run.discoveryStarted = checkpoint === "persisted phase";
+    fixture.run.dispatchedCount = checkpoint === "dispatched worker" ? 1 : 0;
+    const store = new FakeStore(fixture.run),
+      executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
+    let checks = 0;
+    const coordinator = createCoordinator(fixture, store, executor, {
+      checkTarget: async () => {
+        checks++;
+        throw new Error("Admission must not repeat");
+      },
+    });
+    coordinator.start();
+    await assertDiscoveryThenCancel(coordinator, executor);
+    assert.equal(checks, 0);
+  });
+}
+
 test(
   "POSIX encoded directories retain their filesystem bytes",
   { skip: process.platform === "win32" },

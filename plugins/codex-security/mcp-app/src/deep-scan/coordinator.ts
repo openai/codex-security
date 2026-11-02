@@ -368,6 +368,8 @@ export class DeepScanCoordinator {
       if (
         this.options.checkTarget &&
         !this.discoveryDeadlineReached &&
+        !this.state.discoveryStarted &&
+        this.state.dispatchedCount === 0 &&
         !hasAcceptedWorkerResults(this.state)
       ) {
         const checkTarget = this.options.checkTarget;
