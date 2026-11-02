@@ -106,28 +106,33 @@ export function linkedParent(scope: string, path: string): boolean {
   return false;
 }
 export const sourceMetadata = new Set([".git", ".svn"]);
-export function* walk(
-  path: string,
-  skipMetadata = false,
-  ignoreDirectoryReadErrors = false,
-): Iterable<string> {
-  let names: Buffer[];
-  try {
-    names = windows
-      ? windowsFiles()
-          .entriesWithTypes(Buffer.from(path, "utf16le"))
-          .map((entry) => entry.name)
-      : readdirSync(fsPath(path), { encoding: "buffer" });
-  } catch (error) {
-    if (!ignoreDirectoryReadErrors) throw error;
-    return;
-  }
-  const children = names
+function directoryEntries(path: string, skipMetadata = false): string[] {
+  const names = windows
+    ? windowsFiles()
+        .entriesWithTypes(Buffer.from(path, "utf16le"))
+        .map((entry) => entry.name)
+    : readdirSync(fsPath(path), { encoding: "buffer" });
+  return names
     .map((name) =>
       windows ? name.toString("utf16le") : decodePosixBytes(name),
     )
     .filter((name) => !skipMetadata || !sourceMetadata.has(name))
     .map((name) => append(path, name));
+}
+export function* walk(
+  path: string,
+  skipMetadata = false,
+  ignoreDirectoryReadErrors = false,
+  diagnostics?: unknown[],
+): Iterable<string> {
+  let children: string[];
+  try {
+    children = directoryEntries(path, skipMetadata);
+  } catch (error) {
+    if (!ignoreDirectoryReadErrors) throw error;
+    diagnostics?.push(error);
+    return;
+  }
   yield* children;
   for (const child of children) {
     const info = lstat(child);
@@ -135,7 +140,7 @@ export function* walk(
       info.isDirectory() &&
       !("isNameSurrogate" in info && info.isNameSurrogate())
     )
-      yield* walk(child, skipMetadata, ignoreDirectoryReadErrors);
+      yield* walk(child, skipMetadata, ignoreDirectoryReadErrors, diagnostics);
   }
 }
 export function executable(path: string): boolean {
