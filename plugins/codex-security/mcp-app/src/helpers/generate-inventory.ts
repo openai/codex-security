@@ -127,12 +127,18 @@ async function scopeCandidates(
   repo: string,
   scope: string,
   temporaryDirectory: string,
+  diagnostics: string[],
 ): Promise<string[]> {
   if (regular(scope)) return [scope];
-  const diagnostics: string[] = [];
   const usable = (path: string) => {
     try {
       inside(scope, path);
+      if (
+        inside(repo, path)
+          .split("/")
+          .some((part) => sourceMetadata.has(part))
+      )
+        return false;
     } catch {
       return false;
     }
@@ -168,8 +174,6 @@ async function scopeCandidates(
     const selected = [
       ...new Set(paths.filter(usable).map((path) => canonical(path))),
     ];
-    if (!selected.length && diagnostics.length)
-      throw new Error(diagnostics.join("\n"));
     return selected;
   };
   let result;
@@ -301,7 +305,8 @@ async function scopeCandidates(
       throw new Error(
         "Could not safely enumerate ignored scoped files without Git or ripgrep.",
       );
-    if (!files.some(usable) && errors.length) throw errors[0];
+    for (const error of errors)
+      diagnostics.push(error instanceof Error ? error.message : String(error));
     return finish(files);
   }
   const failed = result.status !== 0 && result.status !== 1;
@@ -332,7 +337,7 @@ async function scopeCandidates(
     // This avoids entering unrelated Git-excluded subtrees or growing process argv.
     const rules = ["/*"],
       directories = new Set<string>();
-    const literal = (path: string) => path.replace(/[\\*?\[]/gu, "\\$&");
+    const literal = (path: string) => path.replace(/[\\*?\[\]{} ]/gu, "\\$&");
     for (const path of candidates) {
       const parts = relative(searchRoot, path).split(sep);
       for (let index = 1; index < parts.length; index += 1) {
@@ -385,7 +390,6 @@ async function scopeCandidates(
       result.stderr.trim() ||
         "ripgrep could not finish enumerating the selected files",
     );
-    if (!selected.some(usable)) throw new Error(diagnostics.join("\n"));
   }
   return finish(selected);
 }
@@ -611,11 +615,13 @@ export async function generateInventory(
     const resolved = scopes.map((value) =>
       scopePath(repo, value, home, true, true),
     );
+    const diagnostics: string[] = [];
     for (const selected of resolved) {
       for (const path of await scopeCandidates(
         repo,
         selected,
         dirname(output),
+        diagnostics,
       )) {
         let name: string;
         try {
@@ -628,6 +634,8 @@ export async function generateInventory(
         rankRows.set(name, { path: name });
       }
     }
+    if (rankRows.size === 0 && diagnostics.length)
+      throw new Error(diagnostics.join("\n"));
   }
   if (inventory) {
     const unique = [

@@ -369,6 +369,7 @@ export class DeepScanCoordinator {
 
       if (
         this.options.prepareReviewItems &&
+        !this.discoveryDeadlineReached &&
         !hasAcceptedWorkerResults(this.state)
       ) {
         const inventory = await this.options.prepareReviewItems(

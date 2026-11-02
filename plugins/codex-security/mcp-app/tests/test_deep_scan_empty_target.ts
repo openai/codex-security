@@ -11,6 +11,7 @@ import {
   FakeStore,
   createCoordinator,
   fixtureRun,
+  immediateClock,
   runCoordinator,
   standardScanDraft,
   temporaryDirectories,
@@ -44,26 +45,41 @@ const artifactInventory = await importSource("src/artifact-inventory.ts", {
 
 after(() => temporaryDirectories.cleanup());
 
-for (const selection of ["file", "replaced file", "directory"])
+for (const selection of [
+  "file",
+  "replaced file",
+  "directory",
+  "joining empty directory",
+])
   test(`the packaged engine preserves a registered ${selection} selection`, async () => {
     const fixture = await fixtureRun();
     fixture.run.includePaths = ["selected"];
-    fixture.run.filePaths = selection === "directory" ? [] : ["selected"];
+    fixture.run.filePaths = ["file", "replaced file"].includes(selection)
+      ? ["selected"]
+      : [];
     await mkdir(fixture.run.targetPath, { recursive: true });
     const selected = path.join(fixture.run.targetPath, "selected");
     if (selection === "file") await writeFile(selected, "export {};\n");
     else {
       await mkdir(selected);
-      await writeFile(path.join(selected, "nested.ts"), "export {};\n");
+      if (selection !== "joining empty directory")
+        await writeFile(path.join(selected, "nested.ts"), "export {};\n");
     }
     const store = new FakeStore(fixture.run);
+    let claims = 0;
+    const claim = store.claimCoordinator.bind(store);
+    store.claimCoordinator = async () => {
+      claims++;
+      return claim();
+    };
     const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
     const registry = new DeepScanCoordinatorRegistry();
     const start = registry.start.bind(registry);
     registry.start = (options: CoordinatorOptions) =>
       start({ ...options, executor });
     const { coordinator } = await startDeepScanEngine({
-      run: store.run,
+      run:
+        selection === "joining empty directory" ? await store.get() : store.run,
       store,
       registry,
       runWorkbench: async (args: string[]) => {
@@ -94,13 +110,22 @@ for (const selection of ["file", "replaced file", "directory"])
       parentSandbox: { filesystemDenies: [] },
       threadId: "fixture-owner",
     });
-    if (selection === "replaced file") {
+    if (
+      selection === "replaced file" ||
+      selection === "joining empty directory"
+    ) {
       const terminal = await coordinator.wait(undefined, 10_000);
       coordinator.cancel("fixture complete");
       assert.equal(terminal?.status, "failed");
-      assert.match(terminal?.error ?? "", /selected file.*regular file/iu);
+      assert.match(
+        terminal?.error ?? "",
+        selection === "replaced file"
+          ? /selected file.*regular file/iu
+          : /no reviewable source files/iu,
+      );
       assert.equal(executor.discoveryCalls, 0);
       assert.equal(executor.dedupCalls, 0);
+      assert.equal(claims, 1);
     } else {
       await executor.discoveryStarted.promise;
       assert.equal(executor.discoveryCalls, 1);
@@ -167,6 +192,40 @@ test("an inventory failure is not treated as an empty target", async () => {
   assert.equal(executor.dedupCalls, 0);
   assert.deepEqual(store.workerUpdates, []);
 });
+
+for (const reviewItemsTotal of [0, 1])
+  test(`an expired finite run preserves its capped result with ${reviewItemsTotal} source items`, async () => {
+    const fixture = await fixtureRun({ maxTimeHours: 1 });
+    fixture.run.createdAt = new Date(
+      immediateClock.now() - 2 * 60 * 60 * 1_000,
+    ).toISOString();
+    const store = new FakeStore(fixture.run);
+    const executor = new FakeExecutor();
+    let preflightCalls = 0;
+    let published = false;
+    const terminal = await runCoordinator(fixture, store, executor, {
+      prepareReviewItems: async () => {
+        preflightCalls++;
+        return { reviewItemsTotal };
+      },
+      onComplete: async (draft) => {
+        assert.deepEqual(draft.findings, []);
+        assert.match(
+          JSON.stringify(draft.reviewState),
+          /discovery time limit elapsed/iu,
+        );
+        published = true;
+      },
+    });
+    assert.equal(terminal?.status, "succeeded", terminal?.error);
+    assert.equal(terminal?.terminalReason, "capped");
+    assert.equal(preflightCalls, 0);
+    assert.equal(executor.discoveryCalls, 0);
+    assert.equal(executor.dedupCalls, 0);
+    assert.equal(store.finishCalls.length, 1);
+    assert.deepEqual(store.failureMessages, []);
+    assert.equal(published, true);
+  });
 
 test("resume preserves accepted work without replacing the source inventory", async () => {
   const fixture = await fixtureRun();

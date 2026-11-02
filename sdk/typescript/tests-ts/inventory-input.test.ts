@@ -183,6 +183,72 @@ for (const anchored of [false, true])
     expect(rows.map((row) => row.path)).toEqual(anchored ? ["source.py"] : []);
   });
 
+for (const name of ["brace{a,b}.py", "source.py "])
+  test.skipIf(process.platform === "win32" && name.endsWith(" "))(
+    `scope input restores the literal nested tracked filename ${JSON.stringify(name)}`,
+    () => {
+      const f = fixture();
+      const nested = join(f.repo, "selected", "nested");
+      f.write(`selected/nested/${name}`);
+      git(nested, "init", "-q");
+      git(nested, "add", ".");
+      git(nested, "commit", "-qm", "nested source");
+      writeFileSync(
+        resolve(nested, git(nested, "rev-parse", "--git-path", "info/exclude")),
+        "*.py*\n",
+      );
+      expect(
+        f
+          .rows("make-repo-scope-input", f.scopeArgs("selected"))
+          .map((row) => row.path),
+      ).toEqual([`selected/nested/${name}`]);
+    },
+  );
+
+test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+  "excluded SVN metadata cannot hide an incomplete source listing",
+  () => {
+    const f = fixture();
+    f.write(".gitignore", ".svn/\n");
+    f.write("selected/.svn/wc.db");
+    git(f.repo, "add", "--force", "selected/.svn/wc.db");
+    f.write("selected/private/source.py");
+    const blocked = join(f.repo, "selected", "private");
+    writeFileSync(f.out, "previous\n");
+    chmodSync(blocked, 0);
+    try {
+      const result = f.run("make-repo-scope-input", f.scopeArgs("selected"));
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/EACCES|permission denied/iu);
+      expect(readFileSync(f.out, "utf8")).toBe("previous\n");
+    } finally {
+      chmodSync(blocked, 0o700);
+    }
+  },
+);
+
+for (const reverse of [false, true])
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    `scope input combines partial listings before checking errors, reverse=${reverse}`,
+    () => {
+      const f = fixture();
+      f.write("good/source.py");
+      f.write("bad/private/source.py");
+      const blocked = join(f.repo, "bad", "private");
+      chmodSync(blocked, 0);
+      try {
+        const scopes = reverse
+          ? f.scopeArgs("bad", "good")
+          : f.scopeArgs("good", "bad");
+        expect(
+          f.rows("make-repo-scope-input", scopes).map((row) => row.path),
+        ).toEqual(["good/source.py"]);
+      } finally {
+        chmodSync(blocked, 0o700);
+      }
+    },
+  );
+
 test("committed binary detection agrees beyond the preview window", () => {
   const f = fixture();
   f.write("existing.py");
