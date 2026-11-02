@@ -391,29 +391,31 @@ test("Cloud measures caller fields at their exported numeric size", () => {
   }
 });
 
-test("local numeric evidence and GitHub batches fit in a 64 MiB Node heap", async () => {
-  const bundle = await Bun.build({
-    entrypoints: ["external-import-contract", "github-findings"].map((source) =>
-      join(import.meta.dir, "..", "src", source + ".ts"),
-    ),
-    target: "node",
-    format: "cjs",
-  });
-  expect(bundle.success).toBe(true);
-  async function run(entrypoint: string, script: string) {
-    const source = bundle.outputs.find((output) =>
-      output.path.endsWith(entrypoint + ".js"),
-    )!;
+test("local numeric evidence and GitHub batches fit in a 64 MiB Node heap", () => {
+  const sdk = join(import.meta.dir, "..");
+  function run(entrypoint: string, script: string) {
+    const source = execFileSync(
+      process.execPath,
+      [
+        "build",
+        join(sdk, "src", entrypoint + ".ts"),
+        "--target=node",
+        "--format=cjs",
+        "--packages=external",
+      ],
+      { encoding: "utf8" },
+    );
     return execFileSync(
       "node",
       ["--max-old-space-size=64", "--input-type=commonjs"],
       {
-        input: `${await source.text()}\n{${script}}`,
+        input: `${source}\n{${script}}`,
+        cwd: sdk,
         encoding: "utf8",
       },
     );
   }
-  const direct = await run(
+  const direct = run(
     "external-import-contract",
     `
     const samples = Array.from({length: 400_000}, (_, index) => index % 10);
@@ -433,7 +435,7 @@ test("local numeric evidence and GitHub batches fit in a 64 MiB Node heap", asyn
     const samples = alert
       ? "Array(650_000).fill(1)"
       : "Buffer.alloc(512 * 1024)";
-    const retained = await run(
+    const retained = run(
       "github-findings",
       `
       const record = ${JSON.stringify(record)};

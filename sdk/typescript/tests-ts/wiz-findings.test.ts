@@ -18,6 +18,7 @@ import { main } from "../src/cli.js";
 import {
   ExternalPublicationError,
   prepareExternalPublication,
+  prepareNormalizedExternalPublication,
 } from "../src/external-findings-publish.js";
 import { DEFAULT_CLOUD_BASE_URL } from "../src/cloud-endpoint.js";
 import { validateExternalEvidence } from "../src/external-import-contract.js";
@@ -1585,6 +1586,34 @@ function legacyCheckpointKey(identity: unknown[]) {
   );
   return hash("sha256", encoded);
 }
+
+test("a normalized Wiz retry reads its acknowledged locale-era receipt before using fresh JSON", async () => {
+  const f = await previewCheckpointFixture();
+  await writeFile(join(f.directory, localPreviewFilename()), savedPreview);
+  const input = await readVendorFindings(f.file);
+  const data = input.findings[0]!.evidence.source_data!;
+  Object.defineProperty(data, "toJSON", { value: () => ({ ...data, Z: 7 }) });
+  const prepare = () =>
+    prepareNormalizedExternalPublication(input, f.options, {
+      ...f.deps,
+      environment: {
+        ...f.environment,
+        CODEX_SECURITY_CLOUD_BASE_URL: DEFAULT_CLOUD_BASE_URL,
+      },
+    });
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect<unknown[]>(retry.preview.requests).toEqual(previewCheckpoint.requests);
+  const completed = await retry.publish();
+  expect(completed.verified).toBe(1);
+  expect<unknown[]>(completed.receipts).toEqual(previewCheckpoint.receipts);
+  expect(f.posts).toHaveLength(1); // Only the original import seeded by the fixture.
+  const fresh = await prepare();
+  expect(fresh.preview.resumed).toBe(false);
+  expect(fresh.preview.requests[0]!.items[0]!.evidence.source_data?.["Z"]).toBe(
+    7,
+  );
+});
 
 test.each(["distinct", "duplicate"] as const)(
   "a migrated preview checkpoint completes readback with a %s older file",

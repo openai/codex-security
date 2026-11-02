@@ -1,21 +1,27 @@
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { hash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { isProxy } from "node:util/types";
 import { GHSA_ID, githubRepositoryParts } from "./github-identifiers.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import {
   exportedGitHubRecord,
+  previousGitHubExclusion,
   validateExternalEvidenceFields,
   validateExternalEvidence,
 } from "./external-import-contract.js";
-import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
+import type { ExternalFindings } from "./external-findings.js";
 import type { ImportedGitHubCodeScanningAlert } from "./github.js";
 import type { ImportedGitHubAdvisory } from "./github-advisories.js";
 import {
   isGitHubDependabotAlert,
   normalizeGitHubDependabotAlerts,
 } from "./github-dependabot-findings.js";
-import { asRecord, canonicalJson } from "./record.js";
+import {
+  asRecord,
+  canonicalJson,
+  canSnapshotWithoutGetters,
+} from "./record.js";
 import { parseJsonOrJsonl, readScannerText, text } from "./scanner-import.js";
 
 function repositoryName(value: unknown): string {
@@ -259,9 +265,10 @@ function advisoryFinding(record: Record<string, unknown>): {
 interface LegacyGitHubSelection {
   sourceFindingIds: string[];
   snapshot?: ExternalFindings;
+  unprovenIdPrefixes?: string[];
 }
 const previousSelections = new WeakMap<
-  ExternalFindings,
+  object,
   { exported: string; previous: LegacyGitHubSelection }
 >();
 
@@ -270,11 +277,19 @@ export function legacyGitHubFindings(
   input: ExternalFindings,
   current: ExternalFindings,
 ): LegacyGitHubSelection | undefined {
-  const selection = previousSelections.get(input);
+  const selection =
+    previousSelections.get(input) ??
+    (!isProxy(input) &&
+      previousSelections.get(
+        Object.getOwnPropertyDescriptor(input, "findings")?.value,
+      ));
   if (!selection) return undefined;
   return hash("sha256", canonicalJson(current)) === selection.exported
     ? selection.previous
-    : { sourceFindingIds: selection.previous.sourceFindingIds };
+    : {
+        sourceFindingIds: selection.previous.sourceFindingIds,
+        unprovenIdPrefixes: selection.previous.unprovenIdPrefixes,
+      };
 }
 
 function mapRecord(input: unknown) {
@@ -289,6 +304,49 @@ function mapRecord(input: unknown) {
   );
 }
 
+function nativeGitHubRecord(
+  value: unknown,
+): Record<string, unknown> | undefined {
+  if (!canSnapshotWithoutGetters(value, true)) return;
+  try {
+    return asRecord(structuredClone(value));
+  } catch {
+    return;
+  }
+}
+
+function codeOccurrencePrefix(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || isProxy(value)) return;
+  const field = (key: string): unknown =>
+    Object.getOwnPropertyDescriptor(value, key)?.value;
+  const repository = field("repository"),
+    number = field("number"),
+    url = field("url");
+  if (
+    field("source") !== "github-code-scanning" ||
+    typeof repository !== "string" ||
+    !githubRepositoryParts(repository) ||
+    typeof number !== "number" ||
+    !Number.isSafeInteger(number) ||
+    number <= 0 ||
+    typeof url !== "string"
+  )
+    return;
+  try {
+    const { parsed, host } = sourceUrl(url);
+    if (
+      ["security/code-scanning", "code-scanning"].some(
+        (route) =>
+          parsed.pathname.toLowerCase() ===
+          `/${repository.toLowerCase()}/${route}/${number}`,
+      )
+    )
+      return `${host}/${repository.toLowerCase()}/code-scanning/${number}/`;
+  } catch {
+    /* No validated occurrence anchor. */
+  }
+}
+
 function normalizeRecords(
   records: readonly unknown[],
   target: ExternalImportTarget = "cloud",
@@ -299,53 +357,96 @@ function normalizeRecords(
     findings: [],
     excluded: [],
   };
-  const originals =
-    snapshot && target === "cloud" ? ([] as ExternalFinding[]) : undefined;
-  const oldExcluded: ExternalFindings["excluded"] = [];
-  let canProvePrevious = true;
+  const previous =
+    snapshot && target === "cloud"
+      ? ({
+          read: records.length,
+          findings: [],
+          excluded: [],
+        } as ExternalFindings)
+      : undefined;
+  const checks: { input: unknown; before: unknown; prefix?: string }[] = [];
+  const potentialIds: string[] = [];
+  const prefixes = new Set<string>();
+  let uncertain = false;
   const identities = new Set<string>();
-  for (const [index, value] of records.entries()) {
-    let exported = value;
-    let oldChecked = false;
-    function exclusion(input: unknown, reason: string) {
-      return {
-        position: index + 1,
-        source_finding_id: text(asRecord(input)?.["url"]),
-        reason,
-      };
+  for (const [index, input] of records.entries()) {
+    let exported = input;
+    const before = previous ? nativeGitHubRecord(input) : undefined;
+    let prefix = previous ? codeOccurrencePrefix(input) : undefined;
+    function possible() {
+      uncertain = true;
+      if (prefix) prefixes.add(prefix);
     }
+    const exclusion = (record: unknown, reason: string) => ({
+      position: index + 1,
+      source_finding_id: text(asRecord(record)?.["url"]),
+      reason,
+    });
+    let possibleFreshId = false;
     try {
       if (snapshot) {
-        let previous: ExternalFinding | undefined;
-        if (originals) {
-          try {
-            const mapped = mapRecord(value);
-            previous = {
-              source_finding_id: mapped.source_finding_id,
-              evidence: validateExternalEvidenceFields(mapped.evidence, target),
-            };
-          } catch (error) {
-            // The old mapper rejected this row before it could inspect a serializer.
-            oldExcluded.push(exclusion(value, errorMessage(error)));
-            oldChecked = true;
+        const source = exportedGitHubRecord(input, index, target);
+        exported = source.record;
+        if (previous) {
+          prefix ??= codeOccurrencePrefix(exported);
+          if (!before) {
+            // With no independent native observation, only an occurrence can
+            // identify a possible older approval. It cannot authorize a retry.
+            const rawSizeExcludes =
+              source.adjustment === Infinity ||
+              source.bytes + source.adjustment > 256 * 1024;
+            if (
+              !rawSizeExcludes ||
+              !canSnapshotWithoutGetters(input, true) ||
+              (input && typeof input === "object" && "toJSON" in input)
+            ) {
+              possible();
+              possibleFreshId = true;
+            } else
+              previous.excluded.push(
+                exclusion(
+                  exported,
+                  "Evidence exceeds the Cloud limit of 256 KiB.",
+                ),
+              );
+          } else {
+            checks.push({ input, before, prefix });
+            try {
+              const row = mapRecord(before);
+              const knownOldId = row.source_finding_id;
+              const evidence = validateExternalEvidenceFields(
+                row.evidence,
+                target,
+              );
+              const keySensitive =
+                input && typeof input === "object" && "toJSON" in input;
+              if (keySensitive) possible();
+              const reason = keySensitive
+                ? undefined
+                : previousGitHubExclusion(
+                    evidence,
+                    source.bytes,
+                    source.adjustment,
+                  );
+              if (reason) previous.excluded.push(exclusion(before, reason));
+              else {
+                previous.findings.push({
+                  source_finding_id: knownOldId,
+                  evidence,
+                });
+                potentialIds.push(knownOldId);
+              }
+            } catch (error) {
+              previous.excluded.push(exclusion(before, errorMessage(error)));
+            }
           }
         }
-        exported = exportedGitHubRecord(
-          value,
-          index,
-          target,
-          previous?.evidence,
-          (reason, exact) => {
-            if (!previous) return;
-            if (!exact) canProvePrevious = false;
-            oldChecked = true;
-            if (reason) oldExcluded.push(exclusion(value, reason));
-            else originals!.push(previous);
-          },
-        );
+        if (source.invalid) throw source.invalid;
       }
-      const mapped = mapRecord(exported);
-      const id = mapped.source_finding_id;
+      const mapped = mapRecord(exported),
+        id = mapped.source_finding_id;
+      if (possibleFreshId) potentialIds.push(id);
       const evidence = validateExternalEvidence(mapped.evidence, target);
       if (identities.has(id))
         throw new CodexSecurityError(
@@ -356,31 +457,39 @@ function normalizeRecords(
     } catch (error) {
       if (error instanceof CodexSecurityError) throw error;
       const reason = errorMessage(error);
-      result.excluded.push(exclusion(exported, reason));
-      if (originals && !oldChecked) oldExcluded.push(exclusion(value, reason));
+      result.excluded.push(
+        exclusion(exported === input ? before : exported, reason),
+      );
+      if (previous && exported === input) {
+        // A serializer may throw at its array key while the old source_data
+        // key produced a valid record. Keep only evidence for refusing a match.
+        possible();
+        if (before)
+          try {
+            potentialIds.push(mapRecord(before).source_finding_id);
+          } catch {
+            /* No old identity. */
+          }
+      }
     }
   }
-  if (originals?.length) {
-    let native: ExternalFinding[] | undefined;
-    try {
-      if (canProvePrevious) native = structuredClone(originals);
-    } catch {
-      /* No complete previous SDK snapshot could be reproduced. */
+  if (previous) {
+    for (const { input, before, prefix } of checks) {
+      if (!isDeepStrictEqual(before, nativeGitHubRecord(input))) {
+        uncertain = true;
+        if (prefix) prefixes.add(prefix);
+      }
     }
-    if (!isDeepStrictEqual(native, result.findings)) {
-      const previous: LegacyGitHubSelection = {
-        sourceFindingIds: originals.map((row) => row.source_finding_id),
-      };
-      if (native)
-        previous.snapshot = {
-          read: result.read,
-          findings: native,
-          excluded: oldExcluded,
-        };
-      previousSelections.set(result, {
+    if (uncertain || !isDeepStrictEqual(previous.findings, result.findings)) {
+      const prior: LegacyGitHubSelection = { sourceFindingIds: potentialIds };
+      if (uncertain) prior.unprovenIdPrefixes = [...prefixes];
+      else prior.snapshot = previous;
+      const selection = {
         exported: hash("sha256", canonicalJson(result)),
-        previous,
-      });
+        previous: prior,
+      };
+      previousSelections.set(result, selection);
+      previousSelections.set(result.findings, selection);
     }
   }
   return result;

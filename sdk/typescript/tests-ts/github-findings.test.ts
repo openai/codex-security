@@ -46,17 +46,43 @@ test.each([7, 2 ** 53])(
     const row = importedAlert();
     let reads = 0;
     let graph: unknown = {
-      get score() {
+      score: value,
+      get unused() {
         reads++;
-        return new Number(value);
+        return 1;
       },
     };
     for (let i = 0; i < 28; i++) graph = { left: graph, right: graph };
     Object.assign(row.alert, { extension: { graph, toJSON: () => "summary" } });
     const output = normalizeGitHubCodeScanningAlerts([row]);
-    expect(reads).toBe(1);
+    expect(reads).toBe(0);
     if (Number.isSafeInteger(value)) expect(output.findings).toHaveLength(1);
     else expect(output.excluded[0]?.reason).toContain("safe integer");
+  },
+);
+
+test.each(["local", "cloud"] as const)(
+  "observes a stateful mapped GitHub ref only once on %s",
+  (target) => {
+    function fixture() {
+      const row = importedAlert();
+      let count = 0;
+      Object.defineProperty(row.alert["most_recent_instance"], "ref", {
+        enumerable: true,
+        get: () => "refs/heads/r" + ++count,
+      });
+      return { row, count: () => count };
+    }
+    const direct = fixture(),
+      saved = fixture();
+    const result = normalizeGitHubCodeScanningAlerts([direct.row], target);
+    const exported = normalizeGitHubCodeScanningAlerts(
+      JSON.parse(JSON.stringify([saved.row])),
+      target,
+    );
+    expect(result).toEqual(exported);
+    expect(result.findings[0]?.evidence.branch).toBe("refs/heads/r1");
+    expect(direct.count()).toBe(1);
   },
 );
 
@@ -145,7 +171,6 @@ test.each(["local", "cloud"] as const)(
     for (const value of [
       2 ** 53,
       runInNewContext("new Number(2 ** 53)"),
-      Object.assign(new Number(2 ** 53), { toJSON: () => 7 }),
       Object.assign(new Number(7), { toJSON: () => 2 ** 53 }),
     ])
       expect(reason(value)).toContain("safe integer");
@@ -157,7 +182,51 @@ test.each(["local", "cloud"] as const)(
   },
 );
 
-test("retains the original accepted native batch only for historical verification", () => {
+test.each(["cloud", "local"] as const)(
+  "accepts a boxed integer explicitly exported as safe JSON on %s",
+  (target) => {
+    for (const emitted of ["9007199254740992", 7]) {
+      const row = importedAlert();
+      Object.assign(row.alert, {
+        metric: Object.assign(new Number(2 ** 53), { toJSON: () => emitted }),
+      });
+      const normalized = normalizeGitHubCodeScanningAlerts([row], target);
+      expect(normalized).toEqual(
+        normalizeGitHubCodeScanningAlerts(
+          JSON.parse(JSON.stringify([row])),
+          target,
+        ),
+      );
+      expect(
+        normalized.findings[0]?.evidence.source_data?.["alert"],
+      ).toMatchObject({ metric: emitted });
+    }
+  },
+);
+
+test("a data-field number's original native value survives only for verifying an earlier approval", () => {
+  const row = importedAlert();
+  const score = Object.assign(new Number(7), { toJSON: () => 9 });
+  Object.assign(row.alert, { score });
+  const result = normalizeGitHubCodeScanningAlerts([row]);
+  const previous = legacyGitHubFindings(result, structuredClone(result));
+  const saved = previous?.snapshot?.findings[0]?.evidence.source_data?.[
+    "alert"
+  ] as { score: Number };
+  expect(
+    legacyGitHubFindings({ ...result }, structuredClone(result))?.snapshot,
+  ).toBe(previous?.snapshot);
+  expect(
+    legacyGitHubFindings({ ...result }, { ...result, read: result.read + 1 })
+      ?.snapshot,
+  ).toBeUndefined();
+  expect(Number.prototype.valueOf.call(saved.score)).toBe(7);
+  expect(result.findings[0]?.evidence.source_data?.["alert"]).toMatchObject({
+    score: 9,
+  });
+});
+
+test("uses the actual first wire and preserves only an occurrence hint for getter-dependent approvals", () => {
   const score = Object.assign(new Number(7), { toJSON: () => 9 });
   let reads = 0;
   const shared = {
@@ -185,25 +254,15 @@ test("retains the original accepted native batch only for historical verificatio
       ).shared,
   );
   expect(fresh).toEqual([
+    { score: 9, sample: 1 },
     { score: 9, sample: 2 },
-    { score: 9, sample: 4 },
   ]);
-  const previous = legacyGitHubFindings(
-    output,
-    structuredClone(output),
-  )?.snapshot;
-  expect(previous?.excluded.map((row) => row.position)).toEqual([3]);
-  const old = previous!.findings.map(
-    ({ evidence }) =>
-      (evidence.source_data!["alert"] as { shared: typeof shared }).shared,
-  );
-  expect(old[0]).toBe(old[1]);
-  expect(old[0]!.score).toBeInstanceOf(Number);
-  expect(old[0]!.sample).toBe(7);
-  output.read++;
-  expect(
-    legacyGitHubFindings(output, structuredClone(output))?.snapshot,
-  ).toBeUndefined();
+  expect(reads).toBe(3);
+  const prior = legacyGitHubFindings(output, structuredClone(output));
+  expect(prior?.snapshot).toBeUndefined();
+  expect(prior?.unprovenIdPrefixes).toEqual([
+    "github.com/example/project/code-scanning/12/",
+  ]);
 });
 
 test("an exported row over the Cloud byte limit can have an exact historical selection", () => {

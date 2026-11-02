@@ -4,6 +4,7 @@ import {
   requireExternalImports,
 } from "./external-imports-feature.js";
 import {
+  cloneImportPreview,
   snapshotImportOptions,
   snapshotNormalizedFindings,
   snapshotSourceRepositories,
@@ -912,7 +913,7 @@ export async function prepareLocalImport(
   );
   dependencies.signal?.throwIfAborted();
   const preview = {
-    ...snapshotNormalizedFindings(current),
+    ...cloneImportPreview(current),
     repository,
     source: { provider: options.provider, source_key: options.sourceKey },
   };

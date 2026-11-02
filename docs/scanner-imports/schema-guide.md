@@ -106,9 +106,10 @@ Use the same SDK version throughout a submission when possible.
 After an SDK upgrade, retry with the original input. An older SDK could approve
 different bytes from those its JSON export contained. When the SDK verifies
 the old selection and request bytes, it resumes with the original request IDs
-and skips batches that already have receipts. If it finds a matching checkpoint
-but cannot verify what was approved, it preserves the checkpoint and stops
-before uploading. If you kept the original normalized findings, retry with them.
+and skips batches that already have receipts. If it cannot verify the original
+request, it preserves the checkpoint and stops before uploading. This can happen
+when verification would require running a caller’s getter again, or when a
+saved JSON export lacks information from the original SDK input.
 
 See [results and exit codes](../../sdk/typescript/docs/cli.md#results-and-exit-codes)
 for cumulative counts and interrupted readback.

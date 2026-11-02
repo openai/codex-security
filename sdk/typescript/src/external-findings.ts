@@ -1,4 +1,4 @@
-import { isNumberObject } from "node:util/types";
+import { isNativeError, isNumberObject } from "node:util/types";
 import { CodexSecurityError } from "./errors.js";
 import type { ExternalPublicationOptions } from "./external-findings-publish.js";
 import { requireJsonNumber } from "./external-import-contract.js";
@@ -34,6 +34,8 @@ export interface ExternalFindings {
   }[];
 }
 
+const isScannerError = Error.isError ?? isNativeError;
+
 /** @internal Capture fresh input once, so preview, limits and storage use the same JSON. */
 export function snapshotNormalizedFindings<T extends Partial<ExternalFindings>>(
   input: T,
@@ -47,7 +49,10 @@ export function snapshotNormalizedFindings<T extends Partial<ExternalFindings>>(
       while (parents.length && parents.at(-1)!.value !== this) parents.pop();
       if (isNumberObject(value)) value = +value;
       if (typeof value === "number") {
-        if (parents[1]?.key === "report")
+        if (
+          parents[1]?.key === "report" ||
+          (parents.length === 1 && key === "report")
+        )
           requireJsonNumber(value, "Scanner report");
         if (parents[1]?.key === "findings" && parents[3]?.key === "evidence")
           checkEvidenceNumber(value);
@@ -56,13 +61,14 @@ export function snapshotNormalizedFindings<T extends Partial<ExternalFindings>>(
         // The SDK exposes native Errors in report.errors and renders their messages
         // in saved receipts. Remember only those paths during the actual JSON read.
         if (
-          value instanceof Error &&
+          isScannerError(value) &&
           parents[1]?.key === "report" &&
           parents[2]?.key === "errors" &&
           Array.isArray(parents[2].value)
         ) {
           let error = new Error();
-          if (!Object.prototype.propertyIsEnumerable.call(value, "message")) {
+          const message = Object.getOwnPropertyDescriptor(value, "message");
+          if (!message?.enumerable || Object.hasOwn(message, "value")) {
             try {
               error = structuredClone(value);
             } catch {
@@ -92,6 +98,14 @@ export function snapshotNormalizedFindings<T extends Partial<ExternalFindings>>(
     parent[key] = error;
   }
   return result;
+}
+
+/** @internal Clone owned values without serializing the evidence again in every preview view. */
+export function cloneImportPreview<T extends ExternalFindings>(input: T): T {
+  const copy = structuredClone(input);
+  if (input.report !== undefined)
+    copy.report = snapshotNormalizedFindings({ report: input.report }).report;
+  return copy;
 }
 
 /** @internal Keep earlier provider projections only for immutable request replay. */

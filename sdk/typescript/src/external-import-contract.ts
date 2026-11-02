@@ -1,5 +1,5 @@
 import { isIP } from "node:net";
-import { isNumberObject } from "node:util/types";
+import { isNumberObject, isProxy } from "node:util/types";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import schema from "../schemas/external-findings.schema.json" with { type: "json" };
 import type {
@@ -376,6 +376,14 @@ function serializeImportJson(input: unknown, number: ValidateNumber): string {
   });
 }
 
+function* dataValues(value: object): Generator<unknown> {
+  if (isProxy(value)) return;
+  for (const key of Object.keys(value)) {
+    const field = Object.getOwnPropertyDescriptor(value, key);
+    if (field && Object.hasOwn(field, "value")) yield field.value;
+  }
+}
+
 // Validate original numeric fields even if a serializer omits them. Object.values
 // reads siblings before descending, as the released provider reader did.
 function rawJsonNumbers(
@@ -383,6 +391,7 @@ function rawJsonNumbers(
   target: ExternalImportTarget,
   number: ValidateNumber,
   oldSize = false,
+  dataOnly = false,
 ): number {
   const pending: unknown[] = [input];
   const depths: number[] = [0];
@@ -408,8 +417,10 @@ function rawJsonNumbers(
         continue;
       }
       ancestors[depth] = value;
-      if (isNumberObject(value)) number(Number.prototype.valueOf.call(value));
-      for (const child of Object.values(value)) {
+      // On raw GitHub records, the JSON export determines what a wrapper emits.
+      if (!dataOnly && isNumberObject(value))
+        number(Number.prototype.valueOf.call(value));
+      for (const child of dataOnly ? dataValues(value) : Object.values(value)) {
         if (typeof child === "number") {
           number(child);
           if (oldSize) adjustment += cloudNumberByteAdjustment(child);
@@ -458,53 +469,53 @@ export function validateExternalEvidenceJson(
   );
 }
 
-/** Observe the exported vendor record once. An original evidence envelope also
- * supplies the old reader's wire size when its root uses ordinary JSON. */
+/** Use the array index as toJSON's key, as when saving the supplied GitHub records. */
 export function exportedGitHubRecord(
   value: unknown,
   index: number,
   target: ExternalImportTarget,
-  original?: ExternalFindingEvidence,
-  previous?: (exclusion: string | undefined, exact: boolean) => void,
-): unknown {
-  // An array item receives its index as toJSON's key. The released reader
-  // serialized the record under source_data, so that hook cannot prove both.
-  const useEnvelope =
-    original && !(value && typeof value === "object" && "toJSON" in value);
-  if (original && !useEnvelope) previous?.(undefined, false);
-  const envelope = useEnvelope ? original : { [index]: value };
-  let invalid: unknown;
-  function serialize() {
-    return serializeImportJson(envelope, (number) => {
-      if (!invalid)
-        try {
-          evidenceNumber(number);
-        } catch (error) {
-          invalid = error;
-        }
-    });
-  }
-  let text = target === "local" ? serialize() : undefined;
+) {
+  // Check caller-owned data without reading accessors or triggering proxy traps.
   const adjustment = rawJsonNumbers(
-    original ?? envelope,
+    { source_data: value },
     target,
     evidenceNumber,
     target === "cloud",
+    true,
   );
-  text ??= serialize();
-  if (useEnvelope && previous)
-    previous(
-      adjustment === Infinity
-        ? "Evidence exceeds the Cloud JSON depth limit of 20."
-        : Buffer.byteLength(text) + adjustment > 256 * 1024
-          ? "Evidence exceeds the Cloud limit of 256 KiB."
-          : undefined,
-      true,
-    );
-  if (invalid) throw invalid;
-  return (JSON.parse(text) as Record<string, unknown>)[
-    useEnvelope ? "source_data" : index
-  ];
+  let invalid: unknown;
+  const text = serializeImportJson({ [index]: value }, (number) => {
+    if (!invalid)
+      try {
+        evidenceNumber(number);
+      } catch (error) {
+        invalid = error;
+      }
+  });
+  const record: unknown = JSON.parse(text)[index];
+  const bytes =
+    Buffer.byteLength(text) -
+    Buffer.byteLength(JSON.stringify({ [index]: null })) +
+    4;
+  return { record, bytes, adjustment, invalid };
+}
+
+/** Combine the observed vendor bytes with the old native mapping's typed fields. */
+export function previousGitHubExclusion(
+  evidence: ExternalFindingEvidence,
+  sourceBytes: number,
+  adjustment: number,
+): string | undefined {
+  if (adjustment === Infinity)
+    return "Evidence exceeds the Cloud JSON depth limit of 20.";
+  const envelope = { ...evidence, source_data: null };
+  const bytes = Buffer.byteLength(JSON.stringify(envelope)) - 4 + sourceBytes;
+  return bytes +
+    adjustment +
+    rawJsonNumbers(envelope, "cloud", evidenceNumber, true) >
+    256 * 1024
+    ? "Evidence exceeds the Cloud limit of 256 KiB."
+    : undefined;
 }
 
 export function validateImportRequest(input: unknown): FindingImportRequest {
