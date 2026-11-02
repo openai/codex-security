@@ -459,6 +459,10 @@ jobs:
       - name: Test deterministic triage eval contracts
         working-directory: evals/triage-finding
         run: node --run test:deterministic
+      - name: Test dependency reachability eval contracts
+        run: |
+          node --experimental-strip-types --test evals/dependency-reachability/test_*.mts
+          python3 -B -m unittest discover -s evals/dependency-reachability/fixtures/zip -p test_catalog.py
       - name: Test secret discovery eval contracts
         run: node --experimental-strip-types --test evals/secret-discovery/test_*.mts
       - name: Build host plugin for Standard eval integration

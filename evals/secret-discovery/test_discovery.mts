@@ -843,7 +843,13 @@ test("stages production prompt unchanged and no labels; grades only the final SD
               }
               yield {
                 type: "turn.completed",
-                usage: { input_tokens: 1, output_tokens: 1 },
+                usage: {
+                  input_tokens: 1,
+                  cached_input_tokens: 0,
+                  cache_write_input_tokens: 0,
+                  output_tokens: 1,
+                  reasoning_output_tokens: 0,
+                },
               };
             })(),
           };

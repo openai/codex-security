@@ -12,7 +12,7 @@ const sdkTest = /^sdk\/typescript\/tests-ts\/[^/]+\.test\.ts$/;
 const actionFiles =
   /^(?:action\.yml|github-action\/(?:README\.md|(?:runtime\/)?package(?:-lock)?\.json|dist\/(?:index|post)\.cjs|(?:src|scripts|tests)\/[^/]+\.(?:mjs|ts)))$/;
 const evalFiles =
-  /^evals\/(?:standard-time-budget\/(?:[^/]+\.mts|experiment\.json|README\.md)|triage-finding\/(?:package\.json|pnpm-lock\.yaml|README\.md|(?:assertions|scripts)\/[^/]+\.mts))$/;
+  /^evals\/(?:dependency-reachability\/(?:[^/]+\.mts|README\.md|fixtures\/.+)|standard-time-budget\/(?:[^/]+\.mts|experiment\.json|README\.md)|triage-finding\/(?:package\.json|pnpm-lock\.yaml|README\.md|(?:assertions|scripts)\/[^/]+\.mts))$/;
 
 const packageManifest = JSON.parse(
   readFileSync(

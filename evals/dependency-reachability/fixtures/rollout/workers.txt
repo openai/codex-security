@@ -1,0 +1,15 @@
+# ss -lntp
+LISTEN 0 128 127.0.0.1:9100 0.0.0.0:* users:(("gunicorn",pid=431,fd=3))
+LISTEN 0 128 127.0.0.1:9101 0.0.0.0:* users:(("gunicorn",pid=692,fd=3))
+
+# /proc/431/maps (WebP libraries)
+7faceaa00000-7faceaa51000 r-xp 00010000 08:01 3741 /usr/lib/libwebp.so.7.1.7 (deleted)
+7faceab00000-7faceab06000 r-xp 00001000 08:01 3744 /usr/lib/libwebpdemux.so.2.0.13 (deleted)
+
+# /proc/692/maps (WebP libraries)
+7f988c300000-7f988c351000 r-xp 00010000 08:01 8930 /usr/lib/libwebp.so.7.1.7
+7f988c400000-7f988c406000 r-xp 00001000 08:01 8933 /usr/lib/libwebpdemux.so.2.0.13
+
+# worker startup metrics (PIL.features.version_module("webp"))
+pillow_webp_version_info{pid="431",version="1.3.1"} 1
+pillow_webp_version_info{pid="692",version="1.3.1"} 1

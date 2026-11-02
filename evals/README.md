@@ -3,6 +3,9 @@
 Model-based evaluations live here so they can evolve with the plugin without
 being embedded in its source tree or shipped npm runtime.
 
+- [Dependency reachability](dependency-reachability/README.md) checks whether a
+  caller can reach third-party CVEs in MailParser services, Pillow wheels and
+  downstream builds, and Backstage’s Scaffolder task workflow.
 - [Triage finding](triage-finding/README.md): Promptfoo input contracts, OSS
   calibration, and SastBench. This suite owns its private package and lockfile.
 - [Deep reducer](deep-reducer/README.md): optional model evaluation of real IPC
@@ -18,6 +21,6 @@ being embedded in its source tree or shipped npm runtime.
   production skills route natural-language requests to the appropriate workflow,
   stopping before workflow execution.
 
-Model runs are opt-in. CI runs the deterministic triage, secret-discovery,
-time-budget, and workflow-routing helper checks and the real-IPC reducer
+Model runs are opt-in. CI runs the deterministic triage, dependency-reachability,
+secret-discovery, time-budget, and workflow-routing helper checks and the real-IPC reducer
 regression through the normal MCP test suite.

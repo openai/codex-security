@@ -1,4 +1,7 @@
-import type { ThreadOptions } from "../../sdk/typescript/node_modules/@openai/codex-sdk/dist/index.js";
+import type {
+  ThreadOptions,
+  Usage,
+} from "../../sdk/typescript/node_modules/@openai/codex-sdk/dist/index.js";
 import { createHash } from "node:crypto";
 import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -24,7 +27,7 @@ interface EvalEvent {
   type: string;
   message?: string;
   item?: { type: string; text?: string; message?: string };
-  usage?: unknown;
+  usage?: Usage;
   error?: { message: string };
 }
 export interface EvalCodex {
@@ -281,9 +284,11 @@ function environmentEntry(environment: NodeJS.ProcessEnv, requested: string) {
   )?.[1];
 }
 
-export async function runPreparedEval(
-  prepared: PreparedEval,
+export async function runStructuredTurn(
+  prepared: Pick<PreparedEval, "repo" | "runtime">,
   codex: EvalCodex,
+  prompt: string,
+  schema: unknown,
   { model, signal }: { model?: string; signal?: AbortSignal } = {},
 ) {
   const thread = codex.startThread(threadSettings(prepared, model));
@@ -291,8 +296,8 @@ export async function runPreparedEval(
   const combinedSignal = signal
     ? AbortSignal.any([signal, controller.signal])
     : controller.signal;
-  const { events } = await thread.runStreamed(prepared.prompt, {
-    outputSchema,
+  const { events } = await thread.runStreamed(prompt, {
+    outputSchema: schema,
     signal: combinedSignal,
   });
   let finalResponse = "";
@@ -324,6 +329,8 @@ export async function runPreparedEval(
         usage = event.usage;
       } else if (event.type === "turn.failed") {
         failure = new Error(event.error!.message);
+      } else if (event.type === "error") {
+        failure = new Error(event.message);
       }
     }
   } catch (error) {
@@ -332,6 +339,21 @@ export async function runPreparedEval(
   if (failure) throw failure;
   combinedSignal.throwIfAborted();
   if (!completed) throw new Error("Eval stream ended before turn.completed");
+  return { finalResponse, usage };
+}
+
+export async function runPreparedEval(
+  prepared: PreparedEval,
+  codex: EvalCodex,
+  { model, signal }: { model?: string; signal?: AbortSignal } = {},
+) {
+  const { finalResponse, usage } = await runStructuredTurn(
+    prepared,
+    codex,
+    prepared.prompt,
+    outputSchema,
+    { model, signal },
+  );
   const semanticResult = JSON.parse(finalResponse);
   const report = {
     requestedModel: model ?? null,
