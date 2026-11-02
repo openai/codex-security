@@ -415,6 +415,7 @@ test.each([
   ["github.com", "https://reader%0A@github.com/example/project", false],
   ["github.com", "https://a:b%0a@github.com/example/project", false],
   ["github.com", "https://a%00b@github.com/example/project", false],
+  ["github.com", "https://a:b%00c@github.com/example/project", true],
   ["git.example.test", "https://git.example.test/example/project.git", false],
   ["git.example.test", "ssh://git@git.example.test/example/project", false],
   ["git.example.test", "ssh://git@git.example.test:443/example/project", false],
