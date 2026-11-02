@@ -5,9 +5,6 @@ import { appendFile, writeFile } from "node:fs/promises";
 import * as fs from "node:fs/promises";
 import { join, parse, sep } from "node:path";
 import { Codex } from "@openai/codex-sdk";
-import { spawnSync } from "node:child_process";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { nodeCommand } from "./support/shell.js";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   estimateScanCost,
@@ -1134,6 +1131,7 @@ describe("live scan cost tracking", () => {
       await filesystem.mkdir(unavailable);
       const first = Object.assign(new Error("Synthetic log denial"), {
         code: "EACCES",
+        syscall: "open",
       });
       const later = Object.assign(new Error("Synthetic directory failure"), {
         code: "EMFILE",
@@ -1485,48 +1483,6 @@ describe("live scan cost tracking", () => {
     },
   );
 
-  test("unrelated historical outputs do not accumulate in the scan event buffer", async () => {
-    const home = await codexHome(),
-      sessions = join(home, "sessions");
-    await filesystem.mkdir(sessions);
-    await writeFile(
-      join(sessions, "a-scan.jsonl"),
-      JSON.stringify({ type: "session_meta", payload: { id: "scan-thread" } }) +
-        "\n",
-    );
-    const padding = "x".repeat(3 * 1024 * 1024);
-    for (let index = 0; index < 24; index++)
-      await writeFile(
-        join(sessions, `history-${index}.jsonl`),
-        [
-          JSON.stringify({
-            type: "session_meta",
-            payload: { id: `unrelated-${index}` },
-          }),
-          JSON.stringify({
-            type: "synthetic_history",
-            payload: { output: String(index) + padding },
-          }),
-          "",
-        ].join("\n"),
-      );
-    const built = await Bun.build({
-      entrypoints: [fileURLToPath(new URL("../src/cost.ts", import.meta.url))],
-      outdir: home,
-      naming: "cost.mjs",
-      target: "node",
-      format: "esm",
-    });
-    expect(built.success).toBe(true);
-    const code = `import {ScanCostTracker} from ${JSON.stringify(pathToFileURL(join(home, "cost.mjs")).href)};let events=0;const options={codexHome:process.argv[1],model:"gpt-5.6-sol"};const tracker=new ScanCostTracker(options);tracker.start("scan-thread");options.onSessionEvent=()=>events++;await tracker.refresh();await tracker.stop();if(events!==1)throw new Error("Active scan events were lost or duplicated");`;
-    const result = spawnSync(
-      nodeCommand().command,
-      ["--max-old-space-size=64", "--input-type=module", "-e", code, home],
-      { encoding: "utf8", timeout: 20_000 },
-    );
-    expect(result.status, result.stderr).toBe(0);
-  });
-
   test.each([
     [true, false],
     [false, false],
@@ -1602,6 +1558,39 @@ describe("live scan cost tracking", () => {
         opening.mockRestore();
         stating.mockRestore();
         listing.mockRestore();
+        await tracker.stop();
+      }
+    },
+  );
+
+  test.each(["stat", "statx"])(
+    "unidentified %s permission failures stop metadata traversal",
+    async (syscall) => {
+      const home = await codexHome(),
+        directory = join(home, "sessions");
+      await filesystem.mkdir(directory);
+      for (let index = 0; index < 5; index++)
+        await writeFile(join(directory, `${index}.jsonl`), "{}\n");
+      const options: ConstructorParameters<typeof ScanCostTracker>[0] = {
+        codexHome: home,
+        model: "gpt-5.6-sol",
+      };
+      const tracker = new ScanCostTracker(options);
+      tracker.start("scan-thread");
+      options.onSessionEvent = () => {};
+      const failure = Object.assign(new Error("Synthetic search denial"), {
+        code: "EACCES",
+        syscall,
+      });
+      const stating = spyOn(filesystem, "stat").mockRejectedValue(failure);
+      try {
+        await expect(tracker.refresh()).rejects.toBe(failure);
+        expect(stating).toHaveBeenCalledTimes(1);
+        stating.mockClear();
+        await expect(tracker.stop()).rejects.toBe(failure);
+        expect(stating).toHaveBeenCalledTimes(1);
+      } finally {
+        stating.mockRestore();
         await tracker.stop();
       }
     },

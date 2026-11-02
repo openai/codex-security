@@ -847,6 +847,15 @@ try {
   run(
     process.execPath,
     [
+      join(packageRoot, "scripts", "fixtures", "package-cost-memory.mjs"),
+      installedRoot,
+    ],
+    { cwd: consumer },
+  );
+
+  run(
+    process.execPath,
+    [
       join(packageRoot, "scripts", "fixtures", "package-deep-scan.mjs"),
       installedRoot,
     ],

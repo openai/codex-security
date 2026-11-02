@@ -1134,8 +1134,8 @@ function isBlockedLogRead(error: unknown): boolean {
     isRecord(error) &&
     (error["code"] === "EACCES" ||
       error["code"] === "EPERM" ||
-      (error["code"] === "EIO" &&
-        (error["syscall"] === "open" || error["syscall"] === "read")))
+      error["code"] === "EIO") &&
+    (error["syscall"] === "open" || error["syscall"] === "read")
   );
 }
 
