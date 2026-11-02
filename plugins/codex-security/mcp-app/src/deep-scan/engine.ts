@@ -1,8 +1,11 @@
+import childProcess from "node:child_process";
 import { promises as fs } from "node:fs";
-import type { Dir } from "node:fs";
 import { join } from "node:path";
+import type { Readable } from "node:stream";
 import { createScanArtifactContext } from "../artifact-context.js";
 import { recordCodexSecurityScanDraftViaWorkbench } from "../artifact-scan-draft.js";
+import { encodeGitPath } from "../helpers/inventory-git.js";
+import { encodePosixPath } from "../helpers/posix-path.js";
 import { workbenchArgs } from "../workbench-arguments.js";
 import { CodexSdkWorkerExecutor } from "./executor.js";
 import type { DeepWorkerParentSandbox } from "./parent-sandbox.js";
@@ -108,16 +111,20 @@ export async function checkFreshTarget(
     if (signal.aborted) return;
 
     const target = join(run.targetPath, selectedPath);
+    const nativeTarget =
+      process.platform === "win32"
+        ? encodeGitPath(target)
+        : encodePosixPath(target);
     try {
       const metadata = await abortableFilesystemOperation(
-        fs.stat(target),
+        fs.stat(nativeTarget),
         signal,
       );
       if (metadata === filesystemOperationAborted) return;
       if (signal.aborted) return;
       if (exactFiles.has(selectedPath)) return;
       if (!metadata.isDirectory()) return;
-      const hasEntry = await directoryHasEntry(target, signal);
+      const hasEntry = await directoryHasEntry(nativeTarget, signal);
       if (signal.aborted) return;
       if (hasEntry) return;
     } catch (error) {
@@ -135,54 +142,174 @@ export async function checkFreshTarget(
 const filesystemOperationAborted = Symbol("filesystemOperationAborted");
 
 async function directoryHasEntry(
-  target: string,
+  target: Buffer,
   signal: AbortSignal,
 ): Promise<boolean> {
-  const open = fs.opendir(target);
-  const directory = await abortableFilesystemOperation(open, signal);
-  if (directory === filesystemOperationAborted) {
-    void open.then(closeDirectoryEventually, () => {});
-    return false;
+  if (signal.aborted) return false;
+  const probe = childProcess.spawn(
+    process.execPath,
+    [
+      "--input-type=commonjs",
+      "-e",
+      directoryProbeScript,
+      target.toString("base64"),
+    ],
+    {
+      stdio: ["ignore", "pipe", "pipe", "pipe"],
+      windowsHide: true,
+    },
+  );
+  const protocolStream = probe.stdio[3] as Readable | null;
+  if (protocolStream === null) {
+    probe.kill("SIGKILL");
+    throw new Error("Directory probe protocol pipe was not created.");
   }
-  let closeStarted = false;
-  const close = async (wait: boolean): Promise<void> => {
-    if (closeStarted) return;
-    closeStarted = true;
-    let closing: Promise<void>;
-    try {
-      closing = directory.close();
-    } catch (error) {
-      if (wait && !signal.aborted) throw error;
-      return;
-    }
-    if (!wait) {
-      void closing.catch(() => {});
-      return;
-    }
-    await abortableFilesystemOperation(closing, signal);
-  };
-  let operationError: unknown;
+  return await new Promise<boolean>((resolve, reject) => {
+    let settled = false;
+    let protocol = "";
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback();
+    };
+    const terminate = () => {
+      if (probe.exitCode === null && probe.signalCode === null) {
+        try {
+          probe.kill("SIGKILL");
+        } catch {
+          // The child may have exited between the state check and the signal.
+        }
+      }
+      probe.stdout?.destroy();
+      probe.stderr?.destroy();
+      protocolStream.destroy();
+      probe.unref();
+    };
+    const onAbort = () =>
+      finish(() => {
+        terminate();
+        resolve(false);
+      });
+    signal.addEventListener("abort", onAbort, { once: true });
+    probe.stdout?.resume();
+    probe.stderr?.resume();
+    protocolStream.on("data", (chunk: Buffer) => {
+      protocol = (protocol + chunk.toString()).slice(-64 * 1024);
+    });
+    const rejectProbe = (error: Error) =>
+      finish(() => {
+        terminate();
+        reject(error);
+      });
+    protocolStream.on("error", rejectProbe);
+    probe.on("error", rejectProbe);
+    probe.on("close", (code, childSignal) => {
+      finish(() => {
+        const message = directoryProbeMessage(protocol, code, childSignal);
+        if (message.ok) resolve(message.nonempty);
+        else reject(directoryProbeError(message.error));
+      });
+    });
+    if (signal.aborted) onAbort();
+  });
+}
+
+const directoryProbeScript = String.raw`
+const { opendir } = require("node:fs/promises");
+const { writeSync } = require("node:fs");
+const target = Buffer.from(process.argv[1], "base64");
+const errorPayload = (error) => ({
+  code: typeof error?.code === "string" ? error.code : undefined,
+  errno: typeof error?.errno === "number" ? error.errno : undefined,
+  message: error instanceof Error ? error.message : String(error),
+  syscall: typeof error?.syscall === "string" ? error.syscall : undefined,
+});
+(async () => {
+  let directory;
+  let failure;
+  let nonempty = false;
   try {
-    if (signal.aborted) return false;
-    const read = directory.read();
-    const entry = await abortableFilesystemOperation(read, signal);
-    if (entry === filesystemOperationAborted) {
-      void close(false);
-      return false;
-    }
-    return entry !== null;
+    directory = await opendir(target, { encoding: "buffer", bufferSize: 1 });
+    const entry = await directory.read();
+    nonempty = entry !== null;
   } catch (error) {
-    operationError = error;
-    throw error;
+    failure = error;
   } finally {
-    if (!closeStarted) {
+    if (directory !== undefined) {
       try {
-        await close(true);
+        await directory.close();
       } catch (error) {
-        if (operationError === undefined && !signal.aborted) throw error;
+        if (failure === undefined) failure = error;
       }
     }
   }
+  const message = failure === undefined
+    ? { ok: true, nonempty }
+    : { ok: false, error: errorPayload(failure) };
+  writeSync(3, JSON.stringify(message));
+  if (failure !== undefined) process.exitCode = 1;
+})().catch((error) => {
+  process.exitCode = 1;
+  try {
+    writeSync(3, JSON.stringify({ ok: false, error: errorPayload(error) }));
+  } catch {}
+});
+`;
+
+type DirectoryProbeMessage =
+  | { ok: true; nonempty: boolean }
+  | {
+      ok: false;
+      error: {
+        code?: string;
+        errno?: number;
+        message: string;
+        syscall?: string;
+      };
+    };
+
+function directoryProbeMessage(
+  protocol: string,
+  code: number | null,
+  signal: NodeJS.Signals | null,
+): DirectoryProbeMessage {
+  try {
+    const parsed = JSON.parse(protocol) as Partial<DirectoryProbeMessage>;
+    if (
+      code === 0 &&
+      parsed.ok === true &&
+      typeof parsed.nonempty === "boolean"
+    )
+      return { ok: true, nonempty: parsed.nonempty };
+    if (
+      code !== 0 &&
+      parsed.ok === false &&
+      parsed.error !== undefined &&
+      typeof parsed.error.message === "string"
+    )
+      return { ok: false, error: parsed.error };
+  } catch {
+    // Fall through to a bounded parent-owned protocol diagnostic.
+  }
+  return {
+    ok: false,
+    error: {
+      message: `Directory probe failed${signal ? ` with ${signal}` : ` with exit code ${code ?? "unknown"}`}.`,
+    },
+  };
+}
+
+function directoryProbeError(
+  payload: Extract<DirectoryProbeMessage, { ok: false }>["error"],
+): Error {
+  const error = new Error(payload.message);
+  const filesystemError = error as NodeJS.ErrnoException;
+  filesystemError.code = payload.code;
+  filesystemError.errno = payload.errno;
+  filesystemError.syscall = payload.syscall;
+  return error;
 }
 
 async function abortableFilesystemOperation<T>(
@@ -215,13 +342,4 @@ async function abortableFilesystemOperation<T>(
       },
     );
   });
-}
-
-async function closeDirectoryEventually(directory: Dir): Promise<void> {
-  try {
-    await directory.close();
-  } catch {
-    // Cancellation won before the open completed. The handle is no longer part
-    // of admission, and a late close failure must not become unhandled.
-  }
 }
