@@ -88,6 +88,34 @@ Select the same two commits from your repository,
 passing the base to `--diff` and the head to `--head`. See the
 [CLI quick start](../README.md#quick-start).
 
+If model access prevents the scan from starting, you can still generate the
+raw candidate inventory with CLI 0.8.2's bundled helper. Use a full clone you
+created or control, checked out at the original head with both revisions' blobs
+available locally. On Linux, macOS, or WSL, start in a trusted directory outside
+the checkout where you can write files and run executables. Substitute the
+absolute checkout path and the original base and head commit IDs. If you have
+`--dry-run --json` output, it also reports those IDs in `target.base` and `target.head`.
+
+```sh
+repo="/absolute/path/to/checkout"
+base=BASE_COMMIT_ID
+head=HEAD_COMMIT_ID
+scratch=$(mktemp -d "$PWD/codex-security-inventory.XXXXXXXX") && (
+  cd "$scratch" &&
+    npm pack --ignore-scripts @openai/codex-security@0.8.2 &&
+    tar -xzf openai-codex-security-0.8.2.tgz &&
+    GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL='' \
+      ./package/_bundled_plugin/scripts/launch_codex_security_mcp \
+        --helper generate-in-scope-files --repo "$repo" --scope . \
+        --diff-mode revisions --diff-base "$base" --diff-head "$head" \
+        --out "$PWD/in_scope_files.txt" &&
+    printf '%s\n' "$PWD/in_scope_files.txt"
+)
+```
+
+The file at the printed path is the raw inventory. A full scan validates its
+paths before finding discovery.
+
 ## Give an agent CLI guidance
 
 The full plugin, generated CLI skills, and CLI MCP registration serve different
