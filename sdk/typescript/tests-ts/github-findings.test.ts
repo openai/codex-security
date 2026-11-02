@@ -85,6 +85,33 @@ test("advisory membership with a hidden numeric getter is uncertain without read
   ]);
 });
 
+test("a getter can mutate a later GitHub row before its historical evidence is observed", () => {
+  const first = importedAlert("refs/heads/first");
+  const middle = importedAlert("refs/heads/middle");
+  const last = importedAlert("refs/heads/last");
+  const counter = { count: 0 };
+  Object.assign(middle.alert, {
+    extension: {
+      get sample() {
+        return ++counter.count;
+      },
+    },
+  });
+  Object.assign(last.alert, { extension: counter });
+  const fresh = normalizeGitHubCodeScanningAlerts([first, middle, last]);
+  const prior = previousReaderSelection(fresh, structuredClone(fresh));
+  expect(counter.count).toBe(1);
+  expect(prior?.sourceFindingIds).toEqual(
+    fresh.findings.map((row) => row.source_finding_id),
+  );
+  expect(prior?.uncertainFindingIds).toEqual([
+    fresh.findings[1]!.source_finding_id,
+  ]);
+  expect(prior?.knownFindings?.map((row) => row.source_finding_id)).toEqual([
+    fresh.findings[0]!.source_finding_id,
+  ]);
+});
+
 test("locally normalized GitHub output retains the original Buffer for Cloud checkpoint verification", () => {
   const row = importedAlert();
   Object.assign(row.alert, { payload: Buffer.from([5, 17, 129]) });

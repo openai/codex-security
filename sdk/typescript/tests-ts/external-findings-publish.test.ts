@@ -4491,6 +4491,70 @@ test.each(["getter", "data property"])(
   },
 );
 
+test("a shared mutation across two GitHub alerts preserves their released approval", async () => {
+  const { normalizeGitHubCodeScanningAlerts } =
+    await import("../src/github-findings.js");
+  const f = await fixture();
+  const prepare = () => {
+    const counter = { n: new Number(0) };
+    const first = {
+      get sample() {
+        counter.n = new Number(Number(counter.n) + 1);
+        return counter.n;
+      },
+      counter,
+    };
+    class Metrics {
+      score = Object.assign(new Number(7), { toJSON: () => 9 });
+      counter = counter;
+    }
+    const rows = [first, new Metrics()].map((extension, i) => {
+      const row = importedAlert();
+      row.number = row.alert.number = 12 + i;
+      row.url = row.alert.html_url = row.url.replace(/12$/, String(row.number));
+      Object.assign(row.alert, { extension });
+      return row;
+    });
+    return prepareNormalizedExternalPublication(
+      normalizeGitHubCodeScanningAlerts(rows),
+      { ...options, provider: "github" },
+      releasedDependencies(f),
+    );
+  };
+
+  const request = JSON.parse(
+    JSON.stringify((await prepare()).preview.requests[0]),
+  );
+  const first = request.items[0].evidence.source_data.alert.extension;
+  const second = request.items[1].evidence.source_data.alert.extension;
+  expect([first.counter.n, second.counter.n, second.score]).toEqual([1, 1, 9]);
+  // The released publisher captured both alerts after three getter reads.
+  first.sample = first.counter.n = second.counter.n = 3;
+  second.score = 7;
+  request.request_id = "035de7b2-7e71-4166-be9a-99ae1251217b";
+  expect(hash("sha256", JSON.stringify(request))).toBe(
+    "8ce6e5a6d4be2062a39ba7325554f7849096b472a67ae1672fd614c681db9a37",
+  );
+  const digest =
+    "1fa6cbfd77fccdeec029930585f46595118e9f95b8083480239ac50176fb9a52";
+  const saved = JSON.stringify({
+    accountId: boxedNumberCheckpoints.accountId,
+    requests: [request],
+    inputProjection: { inputDigest: digest, savedEvidenceDigest: digest },
+  });
+  const directory = join(f.root, "state", "external-finding-publications");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const path = join(
+    directory,
+    "a7b6eecd18536c47e5bcd5e1db25a45b3faca1715eab39e2884b06bf67b1e62f.pending.json",
+  );
+  await writeFile(path, saved, { mode: 0o600 });
+
+  await expect(prepare()).rejects.toThrow("cannot be matched");
+  expect(f.posts).toHaveLength(0);
+  expect(await readFile(path, "utf8")).toBe(saved);
+});
+
 test("an uncertain newly eligible advisory cannot replace a released subset", async () => {
   const { normalizeGitHubAdvisories } =
     await import("../src/github-findings.js");
@@ -4606,6 +4670,48 @@ test("a fresh boxed approval cannot claim a different getter-backed JSON import"
     score: 2,
   });
   expect(f.posts).toEqual([JSON.stringify(first.preview.requests[0])]);
+});
+
+test("a finding serializer cannot replace the ID of an older approval", async () => {
+  const { f, path, saved } = await oldScoreApproval("unreported");
+  const input = scoredFindings(2.5);
+  const stored = input.findings[0]!;
+  const prepare = () =>
+    prepareNormalizedExternalPublication(
+      input,
+      options,
+      releasedDependencies(f),
+    );
+  class ScannerFinding {
+    exportedId() {
+      return "exported-id";
+    }
+    toJSON() {
+      return { ...stored, source_finding_id: this.exportedId() };
+    }
+  }
+  const finding = Object.assign(new ScannerFinding(), stored);
+  input.findings[0] = finding;
+  await expect(prepare()).rejects.toThrow("cannot be matched");
+  let idReads = 0;
+  Object.defineProperty(finding, "source_finding_id", {
+    enumerable: true,
+    get() {
+      idReads++;
+      return stored.source_finding_id;
+    },
+  });
+  await expect(prepare()).rejects.toThrow("cannot be matched");
+  expect(idReads).toBe(0);
+  expect(await readFile(path, "utf8")).toBe(saved);
+  expect(f.posts).toEqual([]);
+
+  input.findings[0] = { ...stored, source_finding_id: "independent-id" };
+  Object.defineProperty(input.findings[0].evidence.source_data, "score", {
+    enumerable: true,
+    get: () => 2.5,
+  });
+  expect((await prepare()).preview.resumed).toBe(false);
 });
 
 test("a vendor evidence class resumes its released title and exports its JSON title for a fresh import", async () => {

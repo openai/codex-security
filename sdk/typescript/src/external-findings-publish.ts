@@ -465,7 +465,7 @@ interface PublicationSelection extends ExternalPublicationInput {
     hasBoxedScalars: boolean;
   };
 
-  potentialIds?: string[];
+  potentialIds?: (string | undefined)[] | null;
   uncertainFindingIds?: string[];
   knownFindings?: ExternalFindings["findings"];
   unprovenIdPrefixes?: string[];
@@ -476,6 +476,20 @@ function ownData(value: unknown, key: string) {
   return isRecord(value) && !isProxy(value)
     ? (Object.getOwnPropertyDescriptor(value, key)?.value as unknown)
     : undefined;
+}
+
+// When native capture would invoke caller code, only the original data
+// properties can identify the earlier selection. Unknown IDs cannot rule it out.
+function previousFindingIds(
+  input: ExternalFindings,
+): (string | undefined)[] | null {
+  const rows = ownData(input, "findings");
+  if (!Array.isArray(rows) || isProxy(rows)) return null;
+  return Array.from({ length: rows.length }, (_, index) => {
+    const row: unknown = Object.getOwnPropertyDescriptor(rows, index)?.value;
+    const id = ownData(row, "source_finding_id");
+    return typeof id === "string" ? id : undefined;
+  });
 }
 
 function withDataProperty<T extends object>(
@@ -622,6 +636,7 @@ function normalizedPublicationInput(
   } catch {
     /* A valid JSON export can contain an uncloneable value. */
   }
+  const priorIds = native ? undefined : previousFindingIds(input);
   let current: ExternalFindings;
   let freshError: Error | undefined;
   try {
@@ -683,9 +698,7 @@ function normalizedPublicationInput(
       reader?.sourceFindingIds ??
       (original
         ? undefined
-        : (native?.findings ?? current.findings).map(
-            (row) => row.source_finding_id,
-          )),
+        : (native?.findings.map((row) => row.source_finding_id) ?? priorIds)),
   };
 }
 
@@ -762,6 +775,7 @@ async function preparePublicationInput(
   if (
     !parsed.findings.length &&
     !input.original?.parsed.findings.length &&
+    input.potentialIds !== null &&
     !input.potentialIds?.length &&
     !input.uncertainFindingIds?.length &&
     !input.unprovenIdPrefixes?.length
@@ -1187,31 +1201,37 @@ async function preparePublicationInput(
   // Some getter-backed batches cannot reproduce a released filename. Their IDs
   // can stop a conflicting upload, but never authorize replay of a saved request.
   const potentialIds =
-    input.potentialIds ??
-    (changedCapture
-      ? original?.parsed.findings.map((row) => row.source_finding_id)
-      : undefined);
+    input.potentialIds === null
+      ? null
+      : (input.potentialIds ??
+        (changedCapture
+          ? original?.parsed.findings.map((row) => row.source_finding_id)
+          : undefined));
   const unprovenPrefixes = new Set(input.unprovenIdPrefixes);
   const uncertainIds = new Set(input.uncertainFindingIds);
   const uncertainMembership =
     uncertainIds.size > 0 || unprovenPrefixes.size > 0;
-  function uncertainRow({
-    source_finding_id: id,
-  }: ExternalFindings["findings"][number]) {
+  function uncertainId(id: string) {
     return (
       uncertainIds.has(id) ||
       unprovenPrefixes.has(id.replace(/\/[a-f0-9]{64}$/u, "/"))
     );
   }
-  // Only admission for uncertain occurrences could differ across the SDKs.
-  const stableRows = uncertainMembership
-    ? (input.knownFindings ?? parsed.findings)
-        .filter((row) => !uncertainRow(row))
-        .map(wireFinding)
+  const stableIds = uncertainMembership
+    ? (
+        potentialIds ?? parsed.findings.map((row) => row.source_finding_id)
+      ).filter((id) => id === undefined || !uncertainId(id))
     : undefined;
+  const knownRows = new Map(
+    input.knownFindings?.map((row) => [
+      row.source_finding_id,
+      wireFinding(row),
+    ]),
+  );
   let originalInputDigest: string | undefined;
   const cannotCaptureOriginal =
-    !input.original && !!(potentialIds?.length || uncertainMembership);
+    !input.original &&
+    (potentialIds === null || !!(potentialIds?.length || uncertainMembership));
   function potentialOriginal(record: SavedSubmission, fileKey: string) {
     const projection = record.inputProjection;
     if (
@@ -1254,23 +1274,40 @@ async function preparePublicationInput(
         wireJson(rows) === wireJson(original.parsed.findings.map(wireFinding))
       )
         return false;
-      if (stableRows) {
-        // A saved subset can belong to this batch only if every proven row
-        // still matches in order. Uncertain occurrences can stop an upload,
-        // but never establish which submission to replay.
-        const stableSaved = rows.filter((row) => !uncertainRow(row));
-        if (!rows.length || wireJson(stableSaved) !== wireJson(stableRows))
+      if (stableIds) {
+        // Earlier caller code can change a sibling's evidence before it is
+        // observed. Compare its bytes only when the reader proved them independently.
+        const stableSaved = rows.filter(
+          (row) => !uncertainId(row.source_finding_id),
+        );
+        if (
+          !rows.length ||
+          stableSaved.length !== stableIds.length ||
+          !stableSaved.every((row, i) => {
+            const known = knownRows.get(row.source_finding_id);
+            return (
+              row.source_finding_id === stableIds[i] &&
+              (!known || wireJson(row) === wireJson(known))
+            );
+          })
+        )
           return false;
         readSaved(record);
         return true;
       }
       const candidates = original?.parsed.findings ?? parsed.findings;
       const ids =
-        potentialIds ?? parsed.findings.map((row) => row.source_finding_id);
+        potentialIds === undefined
+          ? parsed.findings.map((row) => row.source_finding_id)
+          : potentialIds;
       if (
-        !ids.length ||
-        rows.length !== ids.length ||
-        !rows.every((row, i) => row.source_finding_id === ids[i])
+        ids &&
+        (!ids.length ||
+          rows.length !== ids.length ||
+          !rows.every(
+            (row, i) =>
+              ids[i] === undefined || row.source_finding_id === ids[i],
+          ))
       )
         return false;
       if (

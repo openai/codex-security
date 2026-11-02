@@ -341,6 +341,7 @@ function normalizeRecords(
   const checks: { input: unknown; before: unknown; uncertain: () => void }[] =
     [];
   const uncertainIds = new Set<string>();
+  let independentlyObserved = Infinity;
   let largeLocalSelection = false;
   const potentialIds: string[] = [];
   const prefixes = new Set<string>();
@@ -394,8 +395,11 @@ function normalizeRecords(
     let prefix = previous ? codeOccurrencePrefix(input) : undefined;
     const rowIds = new Set<string>();
     let rowUncertain = false;
+    const priorRowCount = previous?.findings.length ?? 0;
     function possible() {
       uncertain = rowUncertain = true;
+      // A caller getter can mutate a later row before its native evidence is seen.
+      independentlyObserved = Math.min(independentlyObserved, priorRowCount);
       for (const id of rowIds) uncertainIds.add(id);
       if (prefix) prefixes.add(prefix);
     }
@@ -578,9 +582,9 @@ function normalizeRecords(
         prior.unprovenIdPrefixes = [...prefixes];
         prior.uncertainFindingIds = [...uncertainIds];
         if (!largeLocalSelection)
-          prior.knownFindings = previous.findings.filter(
-            (finding) => !uncertainIds.has(finding.source_finding_id),
-          );
+          prior.knownFindings = previous.findings
+            .slice(0, independentlyObserved)
+            .filter((finding) => !uncertainIds.has(finding.source_finding_id));
       } else prior.snapshot = previous;
       rememberPreviousSelection(result, prior);
     }

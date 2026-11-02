@@ -108,9 +108,9 @@ different bytes from those its JSON export contained. When the SDK verifies
 the old selection and request bytes, it resumes with the original request IDs
 and skips batches that already have receipts. If it cannot verify the original
 request, it preserves the checkpoint and stops before uploading. A saved JSON
-export can lose information from the original SDK input. If a getter might
-have changed a finding’s title or which findings an earlier reader included,
-the SDK can also stop a new submission for the same occurrence.
+export can lose information from the original SDK input. If a getter makes it
+impossible to identify which findings were approved, the SDK can also stop a
+new submission for the same source and destination.
 
 See [results and exit codes](../../sdk/typescript/docs/cli.md#results-and-exit-codes)
 for cumulative counts and interrupted readback.
