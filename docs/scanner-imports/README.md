@@ -3,6 +3,15 @@
 Choose the guide for your report. Each guide shows how to preview the findings
 in a local checkout and which source key to reuse on later imports.
 
+Use a supported report or retrieve the full records for the requested repository
+and ref with a connected tool or signed-in CLI. Fetch selected IDs directly when
+the provider supports it. If a saved report or collector covers more findings,
+use the provider's selection controls or retain only the selected native records
+where the report format permits. Check the accepted findings and their evidence
+in the JSON preview against the requested selection before saving or publishing.
+Use an API response only for an input and destination supported by the provider
+guide. Otherwise, ask for a supported report. A fresh scan produces new results.
+
 | Guide                                                       | Supported input                                                                 |
 | ----------------------------------------------------------- | ------------------------------------------------------------------------------- |
 | [Amazon Inspector](inspector.md)                            | Inspector2 `ListFindings` JSON for one Code Security repository                 |

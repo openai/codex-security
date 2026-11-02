@@ -217,6 +217,7 @@ import {
   LocalPluginBootstrapError,
   OutputDirectoryError,
   OutputInsideProtectedRootError,
+  PluginBootstrapError,
   PluginPythonUnavailableError,
   SandboxUnavailableError,
   errorMessage,
@@ -309,6 +310,7 @@ import {
   type HistoryCommand,
 } from "./scan-history-renderer.js";
 import { ScanDashboard } from "./scan-dashboard.js";
+import { graphemes } from "./terminal-columns.js";
 import {
   ACCOUNT_LIMITS_UNAVAILABLE,
   formatAccountLimits,
@@ -406,9 +408,6 @@ const HIDE_CURSOR = "\u001B[?25l";
 const SHOW_CURSOR = "\u001B[?25h";
 const CHILD_TERMINATION_GRACE_MS = 1_000;
 const DUPLICATE_SIGNAL_WINDOW_MS = 500;
-const PUBLICATION_GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, {
-  granularity: "grapheme",
-});
 
 type Writable = Pick<NodeJS.WriteStream, "write"> & {
   on?(event: "error", listener: (error: Error) => void): unknown;
@@ -496,6 +495,35 @@ const ASSESS_PATCH_RISK_OPTION = z
 
 function optionValue(flag: string) {
   return z.string().min(1, `${flag} must not be empty.`);
+}
+
+function remediationInputOptions(verb: "Patch" | "Verify") {
+  return z.object({
+    scan: optionValue("--scan")
+      .optional()
+      .describe(
+        `${verb} open findings from a saved scan ID or the latest completed scan.`,
+      ),
+    severity: z
+      .enum(REPORTABLE_SEVERITIES)
+      .optional()
+      .describe(`${verb} saved findings at or above LEVEL.`),
+    linearIssue: z
+      .array(optionValue("--linear-issue"))
+      .default([])
+      .describe("Linear issue identifier or URL; repeat for more issues."),
+    linearProject: optionValue("--linear-project")
+      .optional()
+      .describe(
+        verb === "Patch"
+          ? "Patch every open issue in this Linear project."
+          : "Verify issues in this Linear project.",
+      ),
+    linearFilter: optionValue("--linear-filter")
+      .optional()
+      .describe("JSON Linear issue filter for --linear-project."),
+    linearApiKey: linearApiKeyOption(),
+  });
 }
 
 function linearApiKeyOption() {
@@ -607,9 +635,7 @@ function publicationScanAge(timestamp: string, now: number): string {
 }
 
 function publicationDisplayWidth(value: string): number {
-  const segments = PUBLICATION_GRAPHEME_SEGMENTER.segment(
-    stripVTControlCharacters(value),
-  );
+  const segments = graphemes.segment(stripVTControlCharacters(value));
   let width = 0;
 
   for (const { segment } of segments) {
@@ -633,9 +659,7 @@ function fitProgressLine(line: string, width: number): string {
   const plain = stripVTControlCharacters(line);
   let ellipsisIndex = 0;
   let used = 0;
-  for (const { index, segment } of PUBLICATION_GRAPHEME_SEGMENTER.segment(
-    plain,
-  )) {
+  for (const { index, segment } of graphemes.segment(plain)) {
     used += stringWidth(segment.toWellFormed());
     if (used > width)
       return width > 0 ? `${plain.slice(0, ellipsisIndex)}…` : "";
@@ -806,18 +830,12 @@ class PublicationProgressPresenter {
     }
 
     if (event.type === "codex_event") {
-      if (
-        typeof event.event !== "object" ||
-        event.event === null ||
-        Array.isArray(event.event)
-      ) {
-        return;
-      }
+      if (!isJsonObject(event.event)) return;
       for (const activity of scanActivitiesFromEvent(
-        event.event as Record<string, unknown>,
+        event.event,
         this.#repository,
       )) {
-        const item = (event.event as Record<string, unknown>)["item"];
+        const item = event.event["item"];
         const tool = isJsonObject(item) ? item["tool"] : undefined;
         const hidesShellCommand =
           activity.kind === "command" ||
@@ -841,11 +859,10 @@ class PublicationProgressPresenter {
         if (this.#seenActivities.has(key)) continue;
         this.#seenActivities.add(key);
         const label =
-          visibleActivity.kind === "reasoning"
+          visibleActivity.kind === "reasoning" ||
+          visibleActivity.kind === "message"
             ? "Codex"
-            : visibleActivity.kind === "message"
-              ? "Codex"
-              : "Tool";
+            : "Tool";
         this.#write(`${label}: ${visibleActivity.description}`, true);
       }
       return;
@@ -3247,7 +3264,6 @@ export async function main(
               { scanId: string; scanDir: string }
             >();
             const rows = scans.flatMap((scan) => {
-              if (!isJsonObject(scan)) return [];
               const progress = scan["progress"];
               const scanId = scan["scanId"];
               const directory = scan["scanDir"];
@@ -3314,20 +3330,17 @@ export async function main(
                 "No completed Codex Security scans are available to publish.",
               );
             }
-            const repositoryWidth = Math.max(
-              publicationDisplayWidth("REPOSITORY"),
-              ...rows.map(({ repository }) =>
-                publicationDisplayWidth(repository),
-              ),
-            );
-            const findingsWidth = Math.max(
-              publicationDisplayWidth("FINDINGS"),
-              ...rows.map(({ findings }) => publicationDisplayWidth(findings)),
-            );
-            const ageWidth = Math.max(
-              publicationDisplayWidth("AGE"),
-              ...rows.map(({ age }) => publicationDisplayWidth(age)),
-            );
+            const columnWidth = (
+              heading: string,
+              field: "repository" | "findings" | "age",
+            ) =>
+              Math.max(
+                publicationDisplayWidth(heading),
+                ...rows.map((row) => publicationDisplayWidth(row[field])),
+              );
+            const repositoryWidth = columnWidth("REPOSITORY", "repository");
+            const findingsWidth = columnWidth("FINDINGS", "findings");
+            const ageWidth = columnWidth("AGE", "age");
             const header = [
               padPublicationColumn("REPOSITORY", repositoryWidth),
               padPublicationColumn("FINDINGS", findingsWidth),
@@ -6052,26 +6065,7 @@ export async function main(
         verificationMode: VERIFICATION_MODE_OPTION,
         auth: SKILL_AUTH_OPTION,
         ...MODEL_OPTIONS.shape,
-        scan: optionValue("--scan")
-          .optional()
-          .describe(
-            "Verify open findings from a saved scan ID or the latest completed scan.",
-          ),
-        severity: z
-          .enum(REPORTABLE_SEVERITIES)
-          .optional()
-          .describe("Verify saved findings at or above LEVEL."),
-        linearIssue: z
-          .array(optionValue("--linear-issue"))
-          .default([])
-          .describe("Linear issue identifier or URL; repeat for more issues."),
-        linearProject: optionValue("--linear-project")
-          .optional()
-          .describe("Verify issues in this Linear project."),
-        linearFilter: optionValue("--linear-filter")
-          .optional()
-          .describe("JSON Linear issue filter for --linear-project."),
-        linearApiKey: linearApiKeyOption(),
+        ...remediationInputOptions("Verify").shape,
         codex: SKILL_CONFIG_OPTIONS.shape.codex,
       }),
       examples: [
@@ -6091,31 +6085,10 @@ export async function main(
         try {
           if (options.host)
             throw new CodexSecurityError("Use verify-fix --host alone.");
-          const linear =
-            options.linearIssue.length > 0 || !!options.linearProject;
-          if (options.linearIssue.length > 0 && options.linearProject) {
-            throw new CodexSecurityError(
-              "Use either --linear-issue or --linear-project, not both.",
-            );
-          }
-          if (options.linearFilter && !options.linearProject) {
-            throw new CodexSecurityError(
-              "--linear-filter requires --linear-project.",
-            );
-          }
-          if (options.linearApiKey !== undefined && !linear) {
-            throw new CodexSecurityError(
-              "--linear-api-key requires --linear-issue or --linear-project.",
-            );
-          }
-          const savedFindings =
-            options.scan !== undefined ||
-            (positionals.length > 0 && positionals.every(isFindingIdentifier));
-          if (savedFindings && linear) {
-            throw new CodexSecurityError(
-              "Saved findings cannot be combined with Linear issues or projects.",
-            );
-          }
+          const { savedFindings, linear } = resolveRemediationInputs(
+            options,
+            positionals,
+          );
           if (options.severity !== undefined && !savedFindings) {
             throw new CodexSecurityError(
               "--severity requires a saved finding identifier or --scan.",
@@ -6137,10 +6110,7 @@ export async function main(
             : undefined;
           const imports = linear
             ? await importLinearIssues({
-                issues: options.linearIssue,
-                project: options.linearProject,
-                filter: options.linearFilter,
-                apiKey: options.linearApiKey,
+                ...linear,
                 environment: dependencies.environment,
                 linearClient: dependencies.linearClient,
               })
@@ -6284,26 +6254,7 @@ export async function main(
           .describe(
             "Use the container's isolation instead of the Codex sandbox (default: false).",
           ),
-        scan: optionValue("--scan")
-          .optional()
-          .describe(
-            "Patch open findings from a saved scan ID or the latest completed scan.",
-          ),
-        severity: z
-          .enum(REPORTABLE_SEVERITIES)
-          .optional()
-          .describe("Patch saved findings at or above LEVEL."),
-        linearIssue: z
-          .array(optionValue("--linear-issue"))
-          .default([])
-          .describe("Linear issue identifier or URL; repeat for more issues."),
-        linearProject: optionValue("--linear-project")
-          .optional()
-          .describe("Patch every open issue in this Linear project."),
-        linearFilter: optionValue("--linear-filter")
-          .optional()
-          .describe("JSON Linear issue filter for --linear-project."),
-        linearApiKey: linearApiKeyOption(),
+        ...remediationInputOptions("Patch").shape,
         createPr: CREATE_PR_OPTION,
         assessPatchRisk: ASSESS_PATCH_RISK_OPTION,
         validationPromptFile: optionValue("--validation-prompt-file")
@@ -6342,8 +6293,6 @@ export async function main(
         try {
           if (options.host)
             throw new CodexSecurityError("Use patch --host alone.");
-          const linear =
-            options.linearIssue.length > 0 || !!options.linearProject;
           if (options.resumePr !== undefined) {
             if (
               positionals.length > 0 ||
@@ -6354,7 +6303,8 @@ export async function main(
               options.validationPromptFile !== undefined ||
               options.externalSandbox ||
               options.verificationMode !== undefined ||
-              linear ||
+              options.linearIssue.length > 0 ||
+              options.linearProject ||
               options.linearFilter !== undefined ||
               options.linearApiKey !== undefined ||
               options.model !== undefined ||
@@ -6377,29 +6327,10 @@ export async function main(
             }
             return;
           }
-          if (options.linearIssue.length > 0 && options.linearProject) {
-            throw new CodexSecurityError(
-              "Use either --linear-issue or --linear-project, not both.",
-            );
-          }
-          if (options.linearFilter && !options.linearProject) {
-            throw new CodexSecurityError(
-              "--linear-filter requires --linear-project.",
-            );
-          }
-          if (options.linearApiKey !== undefined && !linear) {
-            throw new CodexSecurityError(
-              "--linear-api-key requires --linear-issue or --linear-project.",
-            );
-          }
-          const savedFindings =
-            options.scan !== undefined ||
-            (positionals.length > 0 && positionals.every(isFindingIdentifier));
-          if (savedFindings && linear) {
-            throw new CodexSecurityError(
-              "Saved findings cannot be combined with Linear issues or projects.",
-            );
-          }
+          const { savedFindings, linear } = resolveRemediationInputs(
+            options,
+            positionals,
+          );
           if (options.externalSandbox) {
             errorOutput.write(
               "WARNING: --external-sandbox disables Codex sandbox enforcement for patching. The container must provide isolation.\n",
@@ -6482,7 +6413,7 @@ export async function main(
                   verifiedPatchFiles(selected, patches),
                   errorOutput,
                   dependencies,
-                  patchRisk?.summary,
+                  patchRisk,
                 )
               : undefined;
             if (structuredOutput) {
@@ -6514,10 +6445,7 @@ export async function main(
           );
           const imports = linear
             ? await importLinearIssues({
-                issues: options.linearIssue,
-                project: options.linearProject,
-                filter: options.linearFilter,
-                apiKey: options.linearApiKey,
+                ...linear,
                 environment: dependencies.environment,
                 linearClient: dependencies.linearClient,
               })
@@ -6604,7 +6532,7 @@ export async function main(
               files,
               errorOutput,
               dependencies,
-              patchRisk?.summary,
+              patchRisk,
               identifier === undefined
                 ? "Applies a security fix generated from supplied issue data."
                 : `Applies a security fix generated for ${identifier}.`,
@@ -7850,6 +7778,44 @@ function isFindingIdentifier(value: string): boolean {
   return /^(?:occ|csf)_[A-Za-z0-9_-]+$/u.test(value);
 }
 
+function resolveRemediationInputs(
+  {
+    scan,
+    linearIssue: issues,
+    linearProject: project,
+    linearFilter: filter,
+    linearApiKey: apiKey,
+  }: z.infer<ReturnType<typeof remediationInputOptions>>,
+  positionals: readonly string[],
+) {
+  if (issues.length > 0 && project) {
+    throw new CodexSecurityError(
+      "Use either --linear-issue or --linear-project, not both.",
+    );
+  }
+  if (filter && !project) {
+    throw new CodexSecurityError("--linear-filter requires --linear-project.");
+  }
+  const linear =
+    issues.length > 0 || project
+      ? { issues, project, filter, apiKey }
+      : undefined;
+  if (apiKey !== undefined && !linear) {
+    throw new CodexSecurityError(
+      "--linear-api-key requires --linear-issue or --linear-project.",
+    );
+  }
+  const savedFindings =
+    scan !== undefined ||
+    (positionals.length > 0 && positionals.every(isFindingIdentifier));
+  if (savedFindings && linear) {
+    throw new CodexSecurityError(
+      "Saved findings cannot be combined with Linear issues or projects.",
+    );
+  }
+  return { savedFindings, linear };
+}
+
 async function* workbenchFindings(
   arguments_: readonly string[],
   dependencies: CliDependencies,
@@ -8059,20 +8025,6 @@ function patchPullRequestBodyKey(branch: string): string {
   return `branch.${branch}.codexSecurityPatchPullRequestBody`;
 }
 
-function patchPullRequestBody(
-  patchRiskSummary?: string,
-  introduction = PATCH_PR_BODY,
-): string {
-  if (patchRiskSummary === undefined) return introduction;
-  const summary = safePatchReport(patchRiskSummary);
-  if (!summary) {
-    throw new CodexSecurityError(
-      "Patch risk assessment returned an empty pull request summary.",
-    );
-  }
-  return `${introduction}\n\n## Patch risk assessment\n\n${summary}`;
-}
-
 function directPatchIdentifier(
   positionals: readonly string[],
   imports: readonly ImportedIssue[],
@@ -8195,7 +8147,7 @@ async function createPatchPullRequest(
   files: readonly string[],
   stderr: Writable,
   dependencies: CliDependencies,
-  patchRiskSummary?: string,
+  patchRisk?: PatchRiskAssessment,
   introduction = PATCH_PR_BODY,
 ): Promise<{ branch: string; url: string } | undefined> {
   if (files.length === 0) {
@@ -8204,7 +8156,10 @@ async function createPatchPullRequest(
   }
 
   const branch = `codex-security/patch-${patchId.replaceAll(/[^a-z\d._-]/giu, "-")}`;
-  const body = patchPullRequestBody(patchRiskSummary, introduction);
+  const body =
+    patchRisk === undefined
+      ? introduction
+      : `${introduction}\n\n## Patch risk assessment\n\n${patchRisk.summary}`;
   const run = (args: string[]) =>
     dependencies.runRepositoryCommand("git", args, repository);
   stderr.write(
@@ -10404,21 +10359,19 @@ async function executeScan(
   if (failed) {
     const costLimitFailure =
       failure instanceof ScanCostLimitExceededError ? failure : undefined;
+    const classification = classifyScanFailure(failure);
     const message =
       failure instanceof OutputInsideProtectedRootError
         ? errorMessage(protectedRootErrorMessage(failure))
         : scanFailureMessage(
             failure,
+            classification,
             selectedAuthentication,
             providerOptions.provider,
           );
     diagnostic("scan.failed", {
       classification:
-        costLimitFailure !== undefined
-          ? "cost_limit_exceeded"
-          : isLocalScanFailure(failure)
-            ? "local"
-            : classifyConnectionFailure(failure),
+        costLimitFailure !== undefined ? "cost_limit_exceeded" : classification,
       max_cost_usd: costLimitFailure?.maxCostUsd,
       estimated_usd: costLimitFailure?.cost.estimatedUsd,
       cost_estimate:
@@ -10569,7 +10522,7 @@ async function executeScan(
       (await (
         dependencies.confirmPatchReview ??
         createTerminalPrompt(errorOutput).confirm
-      )("Review and patch these findings?"));
+      )("Open findings for review?"));
     if (confirmed) {
       const selectPatches =
         dependencies.patchEditor ??
@@ -10712,6 +10665,15 @@ function isLocalScanFailure(error: unknown): boolean {
   );
 }
 
+function classifyScanFailure(error: unknown) {
+  if (isLocalScanFailure(error)) return "local";
+  const classification = classifyConnectionFailure(error);
+  // Installing the plugin can be denied filesystem access before any model request.
+  if (classification === "forbidden" && error instanceof PluginBootstrapError)
+    return "plugin_bootstrap";
+  return classification;
+}
+
 function authenticationFailureMessage(
   authentication: ScanAuthentication | null,
 ): string {
@@ -10754,14 +10716,14 @@ function authenticationFailureMessage(
 
 function scanFailureMessage(
   error: unknown,
+  classification: ReturnType<typeof classifyScanFailure>,
   authentication: ScanAuthentication | null,
   provider?: string,
 ): string {
   // A local failure keeps its own message. Classification matches bare words
   // such as "permission denied" anywhere in the text, so an EACCES from a
   // read-only TMPDIR would otherwise be reported as a credential problem.
-  if (isLocalScanFailure(error)) return diagnosticValue(error);
-  const classification = classifyConnectionFailure(error);
+  if (classification === "local") return diagnosticValue(error);
   if (
     provider === "amazon-bedrock" ||
     authentication?.method === "aws_credentials"
@@ -10836,6 +10798,7 @@ function scanFailureMessage(
     case "rate_limited":
       return `${detail}The configured account reached its rate limit. Wait and retry.`;
     case "network_error":
+    case "plugin_bootstrap":
     case "timeout":
     case "unknown":
       return diagnosticValue(error);
