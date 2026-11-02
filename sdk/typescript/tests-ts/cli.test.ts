@@ -250,11 +250,21 @@ describe("CLI", () => {
         const { stdout, stderr, runCli } = createCliTest(main);
         expect(
           await runCli(
-            ["scan", ".", flag, value, ...(json ? ["--json"] : [])],
+            [
+              "scan",
+              ".",
+              flag,
+              value,
+              "--verbose",
+              ...(json ? ["--json"] : []),
+            ],
             deps,
           ),
         ).toBe(2);
         expect(stderr.text()).toContain(message);
+        expect(stderr.text()).toContain(
+          'scan.failed classification="plugin_bootstrap"',
+        );
         expect(stderr.text()).not.toContain("cannot access the configured");
         if (json) expect(JSON.parse(stdout.text()).message).toBe(message);
         else expect(stdout.text()).toBe("");
