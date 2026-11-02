@@ -92,6 +92,7 @@
 - reuse scoped GitHub connections for finding intake ([#2223](https://github.com/openai/codex-security/pull/2223))
 - clarify the post-scan findings review prompt ([#2255](https://github.com/openai/codex-security/pull/2255))
 - remove Daybreak latest alias pricing ([#2165](https://github.com/openai/codex-security/pull/2165))
+- opt in to the remote rubric for standalone reclassification ([#2257](https://github.com/openai/codex-security/pull/2257))
 
 <!-- release-section: highlights:end -->
 
