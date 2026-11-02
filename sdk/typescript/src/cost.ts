@@ -1,4 +1,4 @@
-import { parseJson } from "./value.js";
+import { notify, parseJson } from "./value.js";
 import { open, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -205,7 +205,7 @@ export class ScanCostTracker {
       polling = true;
       void this.refresh()
         .catch((error: unknown) => {
-          this.#options.onError?.(error);
+          notify(() => this.#options.onError?.(error));
         })
         .finally(() => {
           polling = false;
@@ -323,15 +323,17 @@ export class ScanCostTracker {
       }
     } while (included.size !== previousSize);
     let failure: { error: unknown } | undefined;
+    const failures: unknown[] = [];
     for (const [session, error] of unreadable) {
       if (session.threadId === null || included.has(session.threadId)) {
-        failure = { error };
-        break;
+        failure ??= { error };
+        failures.push(error);
       }
     }
 
     if (failure === undefined && traversalFailure) throw traversalFailure.error;
     if (failure && this.#options.maxCostUsd !== undefined) throw failure.error;
+    if (traversalFailure) failures.push(traversalFailure.error);
     const usages = new Map(this.#receipts);
     for (const [path, tracked] of this.#sessions) {
       const threadId = tracked.threadId;
@@ -352,6 +354,7 @@ export class ScanCostTracker {
         } catch (error) {
           if (this.#options.maxCostUsd !== undefined) throw error;
           failure ??= { error };
+          failures.push(error);
         }
       }
       let worker: number | undefined;
@@ -420,7 +423,12 @@ export class ScanCostTracker {
       this.#reportCost(cost, complete);
     }
     // Keep healthy observations flowing before reporting unavailable accounting.
-    if (failure) throw failure.error;
+    if (failure) {
+      // The caller handles the first error; report other failures from this pass too.
+      for (const error of failures.slice(1))
+        notify(() => this.#options.onError?.(error));
+      throw failure.error;
+    }
   }
 
   #reportUsageObservation(

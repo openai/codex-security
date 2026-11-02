@@ -3719,7 +3719,7 @@ if __name__ == "__main__":
           if (denied.has(path)) {
             const count = (attempts.get(path) ?? 0) + 1;
             attempts.set(path, count);
-            if (count === 3 && code !== "EMFILE")
+            if (count === 3)
               (path === logs[0] ? firstRepeated : secondRepeated)();
             throw Object.assign(
               new Error(`Synthetic ${code} for ${basename(path)}`),
@@ -3758,19 +3758,7 @@ if __name__ == "__main__":
       const keepAlive = setTimeout(() => {}, 10_000);
       const operation = client.run(repository, {
         onActivity: () => {},
-        onWarning: (warning) => {
-          warnings.push(warning);
-          // A poll can attempt both logs while reporting only its first error.
-          // Wait for diagnostics before advancing the EMFILE fixture's stream.
-          if (code === "EMFILE")
-            for (const log of logs) {
-              if (
-                warnings.filter((message) => message.includes(basename(log)))
-                  .length === 3
-              )
-                (log === logs[0] ? firstRepeated : secondRepeated)();
-            }
-        },
+        onWarning: (warning) => warnings.push(warning),
       });
       try {
         expect(await operation).toMatchObject({
@@ -3797,6 +3785,104 @@ if __name__ == "__main__":
       }
     },
   );
+
+  test("reports a one-off second log failure in the same cost poll", async () => {
+    const { root, repository, codexHome, scanDir } = await scanDirectories();
+    const sessions = join(codexHome, "sessions");
+    await mkdir(sessions);
+    const firstPath = join(sessions, "a-synthetic.jsonl");
+    const secondPath = join(sessions, "b-synthetic.jsonl");
+    await writeFile(firstPath, "{}\n");
+    await writeFile(secondPath, "{}\n");
+    const first = Promise.withResolvers<void>();
+    const second = Promise.withResolvers<void>();
+    let denied = true;
+    let firstAttempts = 0;
+    let secondFailures = 0;
+    let failSecond = false;
+    const opened = fsPromises.open;
+    const listed = fsPromises.readdir;
+    const listing = spyOn(fsPromises, "readdir").mockImplementation(
+      async (...args) => {
+        const entries = await Reflect.apply(listed, fsPromises, args);
+        if (String(args[0]) === sessions)
+          entries.sort((a: { name: string }, b: { name: string }) =>
+            a.name.localeCompare(b.name),
+          );
+        return entries;
+      },
+    );
+    const opening = spyOn(fsPromises, "open").mockImplementation(
+      async (...args: Parameters<typeof fsPromises.open>) => {
+        const path = String(args[0]);
+        if (path === firstPath && denied) {
+          if (++firstAttempts === 3) {
+            await appendFile(secondPath, "{}\n");
+            failSecond = true;
+            first.resolve();
+          }
+          throw Object.assign(
+            new Error("Synthetic EMFILE for a-synthetic.jsonl"),
+            { code: "EMFILE", syscall: "open", path },
+          );
+        }
+        if (path === secondPath && failSecond) {
+          failSecond = false;
+          secondFailures++;
+          second.resolve();
+          throw Object.assign(
+            new Error("Synthetic EMFILE for b-synthetic.jsonl"),
+            { code: "EMFILE", syscall: "open", path },
+          );
+        }
+        return await opened(...args);
+      },
+    );
+    const warnings: string[] = [];
+    const client = TestClient.withDependencies({
+      ...scanRuntimeDependencies(codexHome, scanDir),
+      createCodex: () => ({
+        startThread: () => ({
+          id: null,
+          async runStreamed() {
+            await copyCompletedScan(root);
+            async function* events(): AsyncGenerator<ThreadEvent> {
+              yield { type: "thread.started", thread_id: "thread-1" };
+              await first.promise;
+              denied = false;
+              await second.promise;
+              for await (const event of completedEvents())
+                if (event.type !== "thread.started") yield event;
+            }
+            return { events: events() };
+          },
+        }),
+      }),
+    });
+    const keepAlive = setTimeout(() => {}, 10_000);
+    const operation = client.run(repository, {
+      onActivity: () => {},
+      onWarning: (warning) => warnings.push(warning),
+    });
+    try {
+      await expect(operation).resolves.toMatchObject({ threadId: "thread-1" });
+      expect(firstAttempts).toBeGreaterThanOrEqual(3);
+      expect(secondFailures).toBe(1);
+      expect(
+        warnings.filter((message) => message.includes("b-synthetic.jsonl")),
+      ).toHaveLength(1);
+    } finally {
+      denied = false;
+      failSecond = false;
+      first.resolve();
+      second.resolve();
+      clearTimeout(keepAlive);
+      await operation.catch(() => {});
+      await client.close();
+      opening.mockRestore();
+      listing.mockRestore();
+    }
+  });
 
   test.each(["agent_message", "command_execution"] as const)(
     "uses the actual scanner inventory instead of a stale workbench estimate (%s)",

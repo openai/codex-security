@@ -1343,6 +1343,58 @@ describe("live scan cost tracking", () => {
     }
   });
 
+  test("manual refresh retains its first error and reports secondary log failures", async () => {
+    const home = await codexHome();
+    const firstPath = await writeSession(
+      home,
+      "a-worker",
+      { input_tokens: 10 },
+      { parent: "scan-thread" },
+    );
+    const secondPath = await writeSession(
+      home,
+      "b-worker",
+      { input_tokens: 20 },
+      { parent: "scan-thread" },
+    );
+    const first = Object.assign(new Error("Synthetic first EMFILE"), {
+      code: "EMFILE",
+    });
+    const second = Object.assign(new Error("Synthetic second EMFILE"), {
+      code: "EMFILE",
+    });
+    const opened = filesystem.open;
+    const listed = filesystem.readdir;
+    const listing = spyOn(filesystem, "readdir").mockImplementation(
+      async (...args) => {
+        const entries = await Reflect.apply(listed, filesystem, args);
+        return entries.sort((a: { name: string }, b: { name: string }) =>
+          a.name.localeCompare(b.name),
+        );
+      },
+    );
+    const opening = spyOn(filesystem, "open").mockImplementation(
+      async (...args: Parameters<typeof filesystem.open>) => {
+        if (String(args[0]) === firstPath) throw first;
+        if (String(args[0]) === secondPath) throw second;
+        return opened(...args);
+      },
+    );
+    const errors: unknown[] = [];
+    const tracker = costTracker(home, {
+      onError: (error) => errors.push(error),
+    });
+    tracker.start("scan-thread");
+    try {
+      await expect(tracker.refresh()).rejects.toBe(first);
+      expect(errors).toEqual([second]);
+    } finally {
+      opening.mockRestore();
+      listing.mockRestore();
+      await tracker.stop();
+    }
+  });
+
   test("keeps healthy observations when replaying a newly associated log fails", async () => {
     const home = await codexHome();
     const usage = { input_tokens: 10, output_tokens: 0 };
