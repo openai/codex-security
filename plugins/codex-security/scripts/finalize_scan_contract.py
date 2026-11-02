@@ -1842,6 +1842,18 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
     _require_safe_json_value(coverage, "coverage.json")
 
 
+def _require_unique_artifact_path(artifact: Any, context: str, collision_keys: set[str]) -> str:
+    if not isinstance(artifact, dict):
+        raise ContractError(f"{context}: expected an object")
+    value = _require_str(artifact, "path", context)
+    path = _require_portable_relative_path(value, f"{context}.path")
+    collision_key = path.lower()
+    if collision_key in collision_keys:
+        raise ContractError(f"{context}.path: duplicate artifact path")
+    collision_keys.add(collision_key)
+    return path
+
+
 def _validate_manifest(manifest: dict[str, Any]) -> None:
     if manifest.get("documentType") != "codex-security.scan-manifest":
         raise ContractError("manifest.documentType: expected codex-security.scan-manifest")
@@ -1873,16 +1885,8 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
     artifact_collision_keys: set[str] = set()
     for index, artifact in enumerate(artifacts):
         context = f"manifest.scan.artifacts[{index}]"
-        if not isinstance(artifact, dict):
-            raise ContractError(f"{context}: expected an object")
-        path = _require_portable_relative_path(
-            _require_str(artifact, "path", context), f"{context}.path"
-        )
-        collision_key = path.lower()
-        if collision_key in artifact_collision_keys:
-            raise ContractError(f"{context}.path: duplicate artifact path")
+        path = _require_unique_artifact_path(artifact, context, artifact_collision_keys)
         artifact_paths.add(path)
-        artifact_collision_keys.add(collision_key)
         _require_str(artifact, "sha256", context)
         _require_str(artifact, "mediaType", context)
     for required_path in ("findings.json", *(["coverage.json"] if "coverageRef" in scan else [])):
@@ -2201,17 +2205,9 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
         legacy_evidence = finding.get("code_evidence")
         if isinstance(legacy_evidence, list):
             compatible_legacy_evidence = []
-            for evidence in legacy_evidence:
-                if not isinstance(evidence, dict):
-                    continue
+            for evidence in report_projection.code_evidence_rows(legacy_evidence):
                 evidence_id = evidence.get("id")
-                evidence_code = evidence.get("code")
-                if (
-                    not isinstance(evidence_id, str)
-                    or not evidence_id.strip()
-                    or not isinstance(evidence_code, str)
-                    or not evidence_code.strip()
-                ):
+                if not isinstance(evidence_id, str) or not evidence_id.strip():
                     continue
                 if evidence_id in evidence_ids:
                     continue
@@ -2520,23 +2516,17 @@ def _finding_evidence_strength(finding: dict[str, Any]) -> int:
         section = finding.get(section_name)
         if not isinstance(section, dict):
             continue
-        for evidence_name in ("codeEvidence", "code_evidence"):
-            embedded = section.get(evidence_name)
-            if not isinstance(embedded, list):
+        for item in report_projection.embedded_code_evidence(section):
+            code = item["code"]
+            if code in seen_codes:
                 continue
-            for item in embedded:
-                if not isinstance(item, dict):
+            evidence_id = item.get("id")
+            if isinstance(evidence_id, str) and evidence_id.strip():
+                if evidence_id in seen_ids:
                     continue
-                code = item.get("code")
-                if not isinstance(code, str) or not code.strip() or code in seen_codes:
-                    continue
-                evidence_id = item.get("id")
-                if isinstance(evidence_id, str) and evidence_id.strip():
-                    if evidence_id in seen_ids:
-                        continue
-                    seen_ids.add(evidence_id)
-                seen_codes.add(code)
-                strength += 1
+                seen_ids.add(evidence_id)
+            seen_codes.add(code)
+            strength += 1
         code = section.get("code")
         if isinstance(code, str) and code.strip() and code not in seen_codes:
             seen_codes.add(code)
@@ -2776,15 +2766,7 @@ def _validate_existing_seal(
     artifact_collision_keys: set[str] = set()
     for index, artifact in enumerate(artifacts):
         context = f"manifest.scan.artifacts[{index}]"
-        if not isinstance(artifact, dict):
-            raise ContractError(f"{context}: expected an object")
-        path = _require_portable_relative_path(
-            _require_str(artifact, "path", context), f"{context}.path"
-        )
-        collision_key = path.lower()
-        if collision_key in artifact_collision_keys:
-            raise ContractError(f"{context}.path: duplicate artifact path")
-        artifact_collision_keys.add(collision_key)
+        path = _require_unique_artifact_path(artifact, context, artifact_collision_keys)
         expected_sha256 = _require_str(artifact, "sha256", context)
         contents = (artifact_contents or {}).get(path)
         actual_sha256 = (

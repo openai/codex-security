@@ -1,6 +1,3 @@
-import { lstat, readFile, realpath, stat } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
-import { isNumberObject } from "node:util/types";
 import {
   semgrepLegacyRepositoryWitnesses,
   semgrepPlatformFindingBinding,
@@ -9,24 +6,29 @@ import {
   isSemgrepPlatformEvidence,
   semgrepReferenceMatches,
 } from "./semgrep-platform-findings.js";
-import { hostedRepositoryMatches } from "./hosted-git-repository.js";
+import {
+  gitPathToHttpPath,
+  gitTransportBytes,
+  hostedRepositoryMatches,
+} from "./hosted-git-repository.js";
 import { readHostedGitRemotes } from "./hosted-git-remotes.js";
-import { environmentEntry } from "./auth.js";
 import { CodexSecurityError } from "./errors.js";
 import {
   forwardExternalImportSetting,
   requireExternalImports,
 } from "./external-imports-feature.js";
 import {
+  cloneImportPreview,
   snapshotImportOptions,
+  snapshotNormalizedFindings,
   snapshotSourceRepositories,
   type ExternalFindings,
   type ExternalSourceRepository,
 } from "./external-findings.js";
 import {
   cloudRepositoryUrlKey,
+  requireSafeJsonInteger,
   repositoryUrlKey,
-  validateExternalReport,
 } from "./external-import-contract.js";
 import type {
   ExternalFindingEvidence,
@@ -37,12 +39,25 @@ import {
   semgrepSarifRepositories,
 } from "./external-findings-read.js";
 import {
+  hasGitMetadata,
+  localGitProtectionRoots,
+  importGitProtectionRoots,
+} from "./local-git-metadata.js";
+import {
   blackDuckReportRepositories,
   projectedBlackDuckRepositoryUrl,
 } from "./blackduck-findings.js";
-import { isGitHubCloudHost, parseGitRemote } from "./git-remote.js";
+import {
+  azureReposHttpsUrl,
+  isGitHubCloudHost,
+  isGitHubSshOverHttps,
+  isGitSsh,
+  parseGitRemote,
+} from "./git-remote.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
+import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
+import { sonarRepositoryUrls } from "./sonar-findings.js";
 import { isRecord } from "./record.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import {
@@ -57,11 +72,9 @@ import {
 } from "./runtime.js";
 import {
   abortable,
-  gitMarkerRoot,
+  enclosingGitWorktreeRoot,
   gitOutput,
-  gitProtectionRoots,
   normalizeRepository,
-  nullIfMissingPath,
 } from "./targets.js";
 
 /** A scanner source record, independent of a Codex assessment or completed scan. */
@@ -84,6 +97,8 @@ export interface NormalizedLocalImportOptions {
   provider: Provider;
   /** Stable scanner organization/project/branch namespace across imports. */
   sourceKey: string;
+  /** Explicitly verified Sonar repository when a checkout uses an SSH host alias. */
+  sourceRepositoryUrl?: string;
   /** Full Inspector project ARNs mapped to independently verified repository URLs. */
   inspectorProjectMap?: ReadonlyMap<string, string>;
 }
@@ -112,6 +127,8 @@ export interface LocalExternalImportResult {
 }
 
 export interface PreparedLocalExternalImport {
+  /** Every declared source matched a configured Git remote of the checkout. */
+  matchesRepositoryRemote: boolean;
   preview: LocalExternalImportPreview;
   import(): Promise<LocalExternalImportResult>;
 }
@@ -124,6 +141,14 @@ function requireIdentity(
     throw new CodexSecurityError(
       `${field} must be nonempty and contain no NUL characters.`,
     );
+}
+
+function checkStoredNumber(value: number): void {
+  if (!Number.isFinite(value))
+    throw new TypeError(
+      "Stored finding JSON cannot contain non-finite numbers.",
+    );
+  requireSafeJsonInteger(value, "Stored finding JSON");
 }
 
 const gitTransportPorts: Readonly<Record<string, string>> = {
@@ -144,10 +169,28 @@ interface RemoteRepositoryIdentity {
   homeRelative?: boolean;
 }
 
+function sonarHostedGit(hostname: string) {
+  return (
+    isGitHubCloudHost(hostname) ||
+    hostname === "gitlab.com" ||
+    hostname === "bitbucket.org"
+  );
+}
+
+function sonarHostedHostname(hostname: string) {
+  const name = hostname.toLowerCase().replace(/\.$/u, "");
+  return sonarHostedGit(name) ||
+    ["ssh.github.com", "ssh.dev.azure.com", "dev.azure.com"].includes(name)
+    ? name
+    : undefined;
+}
+
 function remoteRepository(
   value: string,
   provider: Provider,
   bound: boolean,
+  platform: Provider = provider,
+  possibleSshHost?: string,
 ): RemoteRepositoryIdentity | undefined {
   if (/^[A-Za-z]:[\\/]/u.test(value)) return undefined;
   const transport = bound
@@ -172,20 +215,23 @@ function remoteRepository(
   if (!remote || !Object.hasOwn(gitTransportPorts, remote.url.protocol))
     return undefined;
   const { url, path, scpStyle } = remote;
-  const ssh = url.protocol.includes("ssh");
+  const ssh = isGitSsh(url.protocol);
   const protocol = url.protocol === "http:" ? "http:" : "https:";
-  const githubSshOverHttps =
-    ssh &&
-    url.hostname.toLowerCase() === "ssh.github.com" &&
-    url.port === "443";
-  const hostname = githubSshOverHttps ? "github.com" : url.hostname;
+  const hosted = sonarHostedHostname(url.hostname);
+  if (provider === "sonar" && hosted) url.hostname = hosted;
+  const githubSshOverHttps = isGitHubSshOverHttps(url);
+  let hostname = githubSshOverHttps ? "github.com" : url.hostname;
+  // An unresolved SSH name can be a local Host alias. Only substitute the
+  // supplied hostname when checking the path of an unverified manual mapping.
+  if (possibleSshHost && ssh && (!hosted || hosted === "dev.azure.com"))
+    hostname = sonarHostedHostname(possibleSshHost) ?? possibleSshHost;
   const port =
     githubSshOverHttps || url.port === gitTransportPorts[url.protocol]
       ? ""
       : url.port;
   // A GitHub source identifies a case-insensitive repository on custom Enterprise
   // hosts too; other providers can refer to VCS hosts with case-sensitive paths.
-  const key = provider === "github" ? cloudRepositoryUrlKey : repositoryUrlKey;
+  const key = platform === "github" ? cloudRepositoryUrlKey : repositoryUrlKey;
   const origin = `${protocol}//${hostname}${port ? `:${port}` : ""}/`;
   if (!bound) return { key: key(origin + path) };
 
@@ -209,16 +255,8 @@ function remoteRepository(
   }
 
   // Git passes the original path (including dot segments, '?' and '#') to upload-pack.
-  const literal = (raw: string) => {
-    const bytes = Buffer.from(raw).toString("latin1");
-    return scpStyle
-      ? bytes
-      : bytes.replace(/%(?!00)([\da-f]{2})/giu, (_, hex: string) =>
-          String.fromCharCode(parseInt(hex, 16)),
-        );
-  };
   if (!scpStyle && !transport) return { key: value };
-  const gitPath = literal(transport?.[2] ?? path);
+  const gitPath = gitTransportBytes(transport?.[2] ?? path, scpStyle);
   const login = scpStyle
     ? /^([^@/:\s?#]+)@/u.exec(value)?.[1]
     : /^(.*)@/u.exec(authority ?? "")?.[1];
@@ -226,25 +264,26 @@ function remoteRepository(
     /^\/?~(?:\/|$)/u.test(gitPath) || (scpStyle && !/^[~/]/u.test(gitPath));
   const suffix = /[?#].*$/su.exec(gitPath);
   // Express upload-pack bytes as a URL path for comparison with the HTTP source.
-  const name = gitPath
-    .slice(0, suffix?.index)
-    .replace(/^\//u, "")
-    .replace(
-      /[%\x00-\x20\x7f-\xff]/gu,
-      (byte) =>
-        "%" + byte.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0"),
-    );
+  const name = gitPathToHttpPath(gitPath.slice(0, suffix?.index));
+  // Azure's generated SCP clone URL spells spaces as %20, even though Git sends SCP paths literally.
+  const azure =
+    provider === "sonar" && !(scpStyle && path.startsWith("/"))
+      ? azureReposHttpsUrl(
+          url,
+          scpStyle ? name.replace(/%2520/gu, "%20") : name,
+        )
+      : undefined;
   const repository = suffix
     ? key(origin + name + "?") +
       "\0" +
       suffix[0].replace(/\/$/u, "").replace(/\.git$/u, "")
-    : key(origin + name);
+    : key(azure ?? origin + name);
   return {
     key: repository,
-    account: ssh && login ? literal(login) : undefined,
+    account: ssh && login ? gitTransportBytes(login, scpStyle) : undefined,
     // GitHub serves the same repository path through its SCP and SSH URLs.
     homeRelative:
-      ssh && provider !== "github" && !isGitHubCloudHost(hostname.toLowerCase())
+      ssh && platform !== "github" && !isGitHubCloudHost(hostname.toLowerCase())
         ? homeRelative
         : undefined,
   };
@@ -266,13 +305,118 @@ function matchingRemote(
   );
 }
 
+// Within one fetch key and home-relative mode, matchingRemote can use any
+// account, the requested login, or an unspecified login.
+function fetchAliasMatcher(
+  rows: readonly { fetch: RemoteRepositoryIdentity }[],
+) {
+  const homes = Map.groupBy(rows, ({ fetch }) => fetch.homeRelative);
+  const accounts = Array.from(
+    homes.values(),
+    (group) => new Map(group.map(({ fetch }) => [fetch.account, fetch])),
+  );
+  return (fetch: RemoteRepositoryIdentity) =>
+    accounts.some((group) =>
+      [
+        group.values().next().value,
+        group.get(fetch.account),
+        group.get(undefined),
+      ].some(
+        (candidate) =>
+          candidate !== undefined && matchingRemote(fetch, candidate),
+      ),
+    );
+}
+
+function fetchAliasMatchers<
+  Row extends { fetch: RemoteRepositoryIdentity },
+  Key,
+>(rows: readonly Row[], key: (row: Row) => Key) {
+  return new Map(
+    Array.from(
+      Map.groupBy(rows, key),
+      ([name, group]) => [name, fetchAliasMatcher(group)] as const,
+    ),
+  );
+}
+
+/** A credential-free Sonar repository binding from a supported Git fetch transport. */
+export function sonarRepositoryForRemote(origin: string): string | undefined {
+  try {
+    if (/[\s\\\p{Cc}?#]/u.test(origin)) return;
+    const remote = parseGitRemote(origin);
+    if (!remote) return;
+    const { url } = remote;
+    // Git dispatches remote helpers by the literal scheme, while URL lowercases it.
+    if (!remote.scpStyle && !origin.startsWith(url.protocol + "//")) return;
+    // Git passes literal SSH paths to upload-pack. URL.pathname collapses dot segments.
+    const path = remote.scpStyle
+      ? remote.path
+      : /^[^:/]+:\/\/[^/]+\/(.+)$/u.exec(origin)?.[1];
+    if (!path) return;
+    const hostname = url.hostname.toLowerCase();
+    let candidate: string | undefined;
+    if (url.protocol === "http:" || url.protocol === "https:") {
+      candidate = `${url.origin}/${path}`;
+    } else if (url.username === "git" && isGitHubSshOverHttps(url)) {
+      candidate = `https://github.com/${path}`;
+    } else if (
+      isGitSsh(url.protocol) &&
+      url.username === "git" &&
+      (!url.port || url.port === "22") &&
+      sonarHostedGit(hostname)
+    ) {
+      candidate = `https://${hostname}/${path}`;
+    } else {
+      candidate = azureReposHttpsUrl(url, path);
+    }
+    if (!candidate) return;
+    const source = declaredScannerRepositoryUrl(
+      candidate.replace(/\.git$/iu, ""),
+      "Sonar",
+      "local",
+    );
+    const candidateRemote = remoteRepository(origin, "sonar", true);
+    const target = remoteRepository(source, "sonar", true);
+    if (isGitSsh(url.protocol) && candidateRemote?.account !== "git") return;
+    return candidateRemote && target && matchingRemote(candidateRemote, target)
+      ? source
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Use the same executable and configuration boundaries for every Git query proving a binding. */
+export function boundSonarWorktree(
+  repository: string,
+  protectedRoots: string | readonly string[],
+  environment: NodeJS.ProcessEnv | undefined,
+  signal?: AbortSignal,
+) {
+  return enclosingGitWorktreeRoot(repository, signal, {
+    requireIfPresent: true,
+    readGit: (directory, args) =>
+      gitOutput(
+        directory,
+        args,
+        signal,
+        undefined,
+        undefined,
+        "utf8",
+        protectedRoots,
+        environment,
+      ),
+  });
+}
+
 function localRepositoryPlatform(
   provider: Provider,
   sources: readonly ExternalSourceRepository[],
   bound: boolean,
 ) {
   const githubKey = (url: string) =>
-    remoteRepository(url, "github", bound)?.key;
+    remoteRepository(url, provider, bound, "github")?.key;
   const githubRepositories = new Set(
     sources.flatMap((source) => {
       if (source.platform !== "github") return [];
@@ -306,233 +450,41 @@ function sameScannerRepositories(
   return true;
 }
 
-async function bareMetadataRoots(
-  repository: string,
-  signal?: AbortSignal,
-): Promise<string[]> {
-  const roots: string[] = [];
-  let directory = repository;
-  for (;;) {
-    signal?.throwIfAborted();
-    const present = async (name: string) =>
-      (await abortable(
-        () => lstat(join(directory, name)).catch(nullIfMissingPath),
-        signal,
-      )) !== null;
-    // Git also discovers bare repositories and linked metadata without .git.
-    const head = await abortable(
-      () => lstat(join(directory, "HEAD")).catch(nullIfMissingPath),
-      signal,
-    );
-    if (
-      (head?.isFile() || head?.isSymbolicLink()) &&
-      ((await present("commondir")) ||
-        ((await present("objects")) && (await present("refs"))))
-    )
-      roots.push(directory);
-    const parent = dirname(directory);
-    if (parent === directory) return roots;
-    directory = parent;
-  }
+/** @internal */
+export interface ConfiguredFetchRemote {
+  name: string;
+  url: string;
 }
 
-async function metadataPointer(
-  path: string,
-  prefix: string,
-  context: { directory: string; environment: NodeJS.ProcessEnv },
-  signal?: AbortSignal,
-): Promise<string | undefined> {
-  const metadata = await abortable(
-    () => stat(path).catch(nullIfMissingPath),
-    signal,
-  );
-  if (!metadata?.isFile()) return undefined;
-  const text = await abortable(() => readFile(path, "utf8"), signal);
-  if (!text.startsWith(prefix) || (prefix === "" && text.length === 0))
-    return undefined;
-  const payload = text.slice(prefix.length).replace(/[\r\n]+$/u, "");
-  if (prefix !== "" && payload.length === 0) return undefined;
-  // Git checks emptiness before consuming the path as a NUL-terminated string.
-  const value = payload.split("\0", 1)[0]!;
-  // Preserve filesystem traversal through links before '..'.
-  let target = isAbsolute(value) ? value : `${dirname(path)}${sep}${value}`;
-  if (process.platform === "win32") {
-    const drive = /^[A-Za-z]:(?![\\/])/u.exec(value)?.[0].toUpperCase();
-    if (drive !== undefined) {
-      const directory =
-        context.directory.slice(0, 2).toUpperCase() === drive
-          ? context.directory
-          : environmentEntry(context.environment, `=${drive}`) || `${drive}\\`;
-      target = resolve(directory, value.slice(2));
-    } else if (isAbsolute(value)) target = resolve(context.directory, value);
-  }
-  return (
-    (await abortable(
-      () => realpath(target).catch(nullIfMissingPath),
-      signal,
-    )) ?? undefined
-  );
-}
-
-async function associatedMetadataRoots(
-  directory: string,
-  context: { directory: string; environment: NodeJS.ProcessEnv },
-  signal?: AbortSignal,
-  configurationDirectory?: string,
-): Promise<string[]> {
-  const head = await abortable(
-    () => lstat(join(directory, "HEAD")).catch(nullIfMissingPath),
-    signal,
-  );
-  if (!head || (!head.isFile() && !head.isSymbolicLink())) return [];
-  const commonMarker = join(directory, "commondir");
-  const hasCommon = await abortable(
-    () => lstat(commonMarker).catch(nullIfMissingPath),
-    signal,
-  );
-  const common = hasCommon
-    ? await metadataPointer(commonMarker, "", context, signal)
-    : undefined;
-  if (hasCommon && common === undefined) return [];
-  const storage = common ?? directory;
-  for (const name of ["objects", "refs"]) {
-    const metadata = await abortable(
-      () => stat(join(storage, name)).catch(nullIfMissingPath),
-      signal,
-    );
-    if (!metadata?.isDirectory()) return [];
-  }
-  const roots = common === undefined ? [directory] : [directory, common];
-  if (
-    process.platform === "win32" &&
-    configurationDirectory !== undefined &&
-    configurationDirectory !== context.directory
-  ) {
-    // Git rereads commondir after changing to the discovered repository root.
-    roots.push(
-      ...(await associatedMetadataRoots(
-        directory,
-        {
-          ...context,
-          directory: await abortable(
-            () => canonicalConfigPath(configurationDirectory),
-            signal,
-          ),
-        },
-        signal,
-      )),
-    );
-  }
-  return roots;
-}
-
-async function localGitProtectionRoots(
-  repository: string,
-  environment: NodeJS.ProcessEnv,
-  signal?: AbortSignal,
-): Promise<string[]> {
-  const roots = new Set(
-    await abortable(() => gitProtectionRoots(repository, signal), signal),
-  );
-  const context = {
-    directory: await abortable(() => canonicalConfigPath(repository), signal),
-    environment,
-  };
-  const paths = new Set([resolve(repository), context.directory]);
-  for (const path of paths) {
-    for (const root of await bareMetadataRoots(path, signal)) {
-      roots.add(root);
-      for (const associated of await associatedMetadataRoots(
-        root,
-        context,
-        signal,
-        root,
-      ))
-        roots.add(associated);
-    }
-    let directory = path;
-    for (;;) {
-      signal?.throwIfAborted();
-      const marker = join(directory, ".git");
-      const metadata = await abortable(
-        () => stat(marker).catch(nullIfMissingPath),
-        signal,
-      );
-      if (metadata !== null) {
-        roots.add(directory);
-        const gitDirectory = metadata.isDirectory()
-          ? await abortable(() => realpath(marker), signal)
-          : await metadataPointer(marker, "gitdir: ", context, signal);
-        if (gitDirectory !== undefined)
-          for (const associated of await associatedMetadataRoots(
-            gitDirectory,
-            context,
-            signal,
-            directory,
-          ))
-            roots.add(associated);
-      }
-      const parent = dirname(directory);
-      if (parent === directory) break;
-      directory = parent;
-    }
-  }
-  for (const root of [...roots])
-    roots.add(await abortable(() => canonicalConfigPath(root), signal));
-  return [...roots];
-}
-
-async function hasGitMetadata(
-  repository: string,
-  signal?: AbortSignal,
-): Promise<boolean> {
-  return (
-    (await abortable(
-      () => gitMarkerRoot(repository, signal, "nearest"),
-      signal,
-    )) !== null || (await bareMetadataRoots(repository, signal)).length !== 0
-  );
-}
-
-async function requireMatchingRepository(
+/** @internal Effective fetch URLs from the selected, protected checkout. */
+export async function configuredFetchRemotes(
   repository: string,
   provider: Provider,
-  sources: readonly ExternalSourceRepository[],
-  strictSources: ReadonlyMap<string, Provider>,
-  hostedSources: ReadonlyMap<string, ExternalSourceRepository>,
-  platformFor: (source: ExternalSourceRepository, bound: boolean) => Provider,
   protectedRoots: WorkbenchCommandOptions["protectedRoot"],
   environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
-): Promise<void> {
-  if (sources.length === 0 && hostedSources.size === 0) return;
-  if (!(await hasGitMetadata(repository, signal))) return;
+): Promise<ConfiguredFetchRemote[]> {
+  if (!(await hasGitMetadata(repository, signal))) return [];
   const gitProtectedRoots = [
     ...(typeof protectedRoots === "string"
       ? [protectedRoots]
       : (protectedRoots ?? [])),
-    await abortable(() => canonicalConfigPath(process.cwd()), signal),
   ];
-  if (hostedSources.size > 0) {
-    const remotes = await abortable(
-      () =>
-        readHostedGitRemotes(
-          repository,
-          gitProtectedRoots,
-          environment,
-          signal,
-        ),
-      signal,
+  // The Sonar caller includes the discovered Git roots for both checkouts.
+  if (provider !== "sonar")
+    gitProtectedRoots.push(
+      await abortable(() => canonicalConfigPath(process.cwd()), signal),
     );
-    if (remotes) {
-      for (const source of hostedSources.values())
-        if (!remotes.some((remote) => hostedRepositoryMatches(source, remote)))
-          throw new CodexSecurityError(
-            `Imported repository ${JSON.stringify(source.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
-          );
-    }
-    if (!sources.length) return;
-  }
+  if (
+    provider === "sonar" &&
+    !(await boundSonarWorktree(
+      repository,
+      gitProtectedRoots,
+      environment,
+      signal,
+    ))
+  )
+    return [];
   const readGit = (args: readonly string[]) =>
     abortable(
       () =>
@@ -566,31 +518,131 @@ async function requireMatchingRepository(
           error.stderr.trimEnd(),
         ))
     )
-      return;
+      return [];
     throw error;
   }
-  const remotes: string[] = [];
+  const remotes: ConfiguredFetchRemote[] = [];
   for (const name of remoteNames.split(/\r?\n/u).filter(Boolean)) {
-    const urls = await readGit(["remote", "get-url", "--all", "--", name]);
-    remotes.push(...urls.split(/\r?\n/u));
+    if (provider === "sonar") {
+      // Git fetches from only the first URL, after insteadOf rewrites.
+      const url = await readGit(["remote", "get-url", "--", name]);
+      if (/[\r\n]/u.test(url))
+        throw new CodexSecurityError(
+          "A configured Git remote URL contains a line break. Configure each fetch URL as a separate Git value.",
+        );
+      remotes.push({ name, url });
+    } else {
+      const urls = await readGit(["remote", "get-url", "--all", "--", name]);
+      for (const url of urls.split(/\r?\n/u)) remotes.push({ name, url });
+    }
   }
+  return remotes;
+}
+
+async function requireMatchingRepository(
+  repository: string,
+  provider: Provider,
+  sources: readonly ExternalSourceRepository[],
+  strictSources: ReadonlyMap<string, Provider>,
+  hostedSources: readonly ExternalSourceRepository[],
+  platformFor: (source: ExternalSourceRepository, bound: boolean) => Provider,
+  protectedRoots: string[],
+  environment: WorkbenchCommandOptions["environment"],
+  signal?: AbortSignal,
+  possibleSshHost?: string,
+  fetchRemotes?: readonly ConfiguredFetchRemote[],
+): Promise<boolean> {
+  if (sources.length === 0 && hostedSources.length === 0) return false;
+  let allSourcesMatched = true;
+  if (hostedSources.length) {
+    if (!(await hasGitMetadata(repository, signal))) return false;
+    const remotes = await readHostedGitRemotes(
+      repository,
+      [
+        ...protectedRoots,
+        await abortable(() => canonicalConfigPath(process.cwd()), signal),
+      ],
+      environment,
+      signal,
+    );
+    allSourcesMatched = remotes !== undefined;
+    if (remotes) {
+      for (const source of hostedSources)
+        if (!remotes.some((remote) => hostedRepositoryMatches(source, remote)))
+          throw new CodexSecurityError(
+            `Imported repository ${JSON.stringify(source.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
+          );
+    }
+    if (!sources.length) return allSourcesMatched;
+  }
+  const remotes =
+    fetchRemotes ??
+    (await configuredFetchRemotes(
+      repository,
+      provider,
+      protectedRoots,
+      environment,
+      signal,
+    ));
   const boundProvider =
+    provider === "sonar" ||
     provider === "inspector" ||
     provider === "blackduck" ||
     provider === "veracode";
+  const comparable: string[] = [];
+  const unverified: string[] = [];
+  for (const { url: remote } of remotes) {
+    const verified =
+      provider === "sonar" ? sonarRepositoryForRemote(remote) : remote;
+    if (verified) comparable.push(verified);
+    else if (!/[\s\\\p{Cc}?#]/u.test(remote)) unverified.push(remote);
+  }
   for (const source of sources) {
     const bound = boundProvider || strictSources.has(source.url);
     const platform =
       strictSources.get(source.url) ?? platformFor(source, bound);
-    const identity = (url: string) => remoteRepository(url, platform, bound);
-    const targets = remotes.flatMap((remote) => identity(remote) ?? []);
-    if (!targets.length) continue;
+    const identity = (url: string) =>
+      remoteRepository(url, provider, bound, platform);
+    const targets = comparable.flatMap((remote) => identity(remote) ?? []);
     const target = identity(source.url);
-    if (!target || !targets.some((remote) => matchingRemote(remote, target)))
+    if (target && targets.some((remote) => matchingRemote(remote, target)))
+      continue;
+    allSourcesMatched = false;
+    // A custom SSH upstream can agree with a manual mapping even when a
+    // recognized HTTPS remote points at a fork. It cannot prove a Cloud binding.
+    const configured = unverified.flatMap(
+      (remote) =>
+        remoteRepository(remote, provider, bound, platform, possibleSshHost) ??
+        [],
+    );
+    if (target && configured.some((remote) => matchingRemote(remote, target)))
+      continue;
+    if (targets.length || configured.length)
       throw new CodexSecurityError(
         `Imported repository ${JSON.stringify(source.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
       );
   }
+  return allSourcesMatched;
+}
+
+export function sonarCheckoutMatchesSource(
+  repository: string,
+  url: string,
+  protectedRoots: readonly string[],
+  environment: NodeJS.ProcessEnv,
+  signal?: AbortSignal,
+) {
+  return requireMatchingRepository(
+    repository,
+    "sonar",
+    [{ url }],
+    new Map(),
+    [],
+    () => "sonar",
+    [...protectedRoots],
+    environment,
+    signal,
+  );
 }
 
 async function localContext(
@@ -612,16 +664,7 @@ async function localContext(
     ...new Set([
       repository,
       ...(await abortable(
-        () => localGitProtectionRoots(path, environment, dependencies.signal),
-        dependencies.signal,
-      )),
-      ...(await abortable(
-        () =>
-          localGitProtectionRoots(
-            process.cwd(),
-            environment,
-            dependencies.signal,
-          ),
+        () => importGitProtectionRoots(path, environment, dependencies.signal),
         dependencies.signal,
       )),
     ]),
@@ -671,10 +714,10 @@ export async function prepareLocalImport(
   dependencies: LocalExternalImportDependencies,
   readerSources = snapshotSourceRepositories(dependencies.sourceRepositories),
   parsedSources: readonly ExternalSourceRepository[] = [],
+  fetchRemotes?: readonly ConfiguredFetchRemote[],
 ): Promise<PreparedLocalExternalImport> {
   requireIdentity(options.sourceKey, "Source key");
-  const current = structuredClone(input);
-  validateExternalReport(current.report);
+  const current = snapshotNormalizedFindings(input, checkStoredNumber);
   let dependabotSource: string | undefined;
   const identities = new Set<string>();
   for (const finding of current.findings) {
@@ -749,7 +792,9 @@ export async function prepareLocalImport(
     true,
   );
   const identify = (url: string) =>
-    remoteRepository(url, platformFor({ url }), true) ?? { key: url };
+    remoteRepository(url, options.provider, true, platformFor({ url })) ?? {
+      key: url,
+    };
   // A hint from an independent reader applies across projected rows. A native
   // GitHub asset in one row only identifies the platform of that row's claims.
   const operatorPlatform = localRepositoryPlatform(
@@ -865,7 +910,12 @@ export async function prepareLocalImport(
         !sameScannerRepositories(
           claims.map(
             (claim) =>
-              remoteRepository(claim, rowPlatform(claim), true) ?? {
+              remoteRepository(
+                claim,
+                options.provider,
+                true,
+                rowPlatform(claim),
+              ) ?? {
                 key: claim,
               },
           ),
@@ -891,23 +941,69 @@ export async function prepareLocalImport(
       hosted.some((source) => semgrepReferenceMatches(source, ref.url)),
     ),
   );
-  // A Platform fetch alias is shared only when the ordinary reader recognizes that transport.
-  const ordinaryClaims = hostedReferences.size
-    ? Array.from(sources.keys(), identify)
-    : [];
-  const hostedOnlyReferences = new Set(
-    [...hostedReferences].filter((ref) => {
-      const alias = identify(ref.url);
-      return !ordinaryClaims.some((claim) => matchingRemote(claim, alias));
-    }),
-  );
+  const sharedReferences = new Set<ExternalSourceRepository>();
+  const ordinaryReferences = new Set<ExternalSourceRepository>();
+  if (hostedReferences.size) {
+    const readerPlatform = localRepositoryPlatform(
+      options.provider,
+      [...sources.values(), ...references],
+      false,
+    );
+    const ordinaryIdentity = (url: string) =>
+      remoteRepository(
+        url,
+        options.provider,
+        false,
+        readerPlatform({ url }),
+      ) ?? { key: url };
+    const aliases = references.map((ref) => ({
+      ref,
+      fetch: identify(ref.url),
+      ordinary: ordinaryIdentity(ref.url).key,
+    }));
+    const claims = Map.groupBy(
+      Array.from(sources.keys(), (url) => ({
+        fetch: identify(url),
+        ordinary: strictSources.has(url)
+          ? undefined
+          : ordinaryIdentity(url).key,
+      })),
+      (claim) => claim.fetch.key,
+    );
+    for (const [key, refs] of Map.groupBy(
+      aliases,
+      (alias) => alias.fetch.key,
+    )) {
+      const hosted = refs.filter(({ ref }) => hostedReferences.has(ref));
+      const group = claims.get(key);
+      if (!hosted.length || !group) continue;
+      const shared = fetchAliasMatcher(group);
+      const readers = fetchAliasMatchers(refs, (alias) => alias.ordinary);
+      // Keep a sole fetch alias subject to checkout validation. A redundant
+      // Platform spelling can be dropped when another reference serves the reader.
+      const required = fetchAliasMatchers(group, ({ fetch, ordinary }) =>
+        ordinary !== undefined && readers.get(ordinary)?.(fetch)
+          ? ordinary
+          : undefined,
+      );
+      for (const alias of hosted) {
+        if (!shared(alias.fetch)) continue;
+        sharedReferences.add(alias.ref);
+        if (
+          required.get(undefined)?.(alias.fetch) ||
+          required.get(alias.ordinary)?.(alias.fetch)
+        )
+          ordinaryReferences.add(alias.ref);
+      }
+    }
+  }
   if (mixed) {
     // Other caller references must identify an ordinary row or one of its Git aliases.
     const rows = [...sources.keys(), ...known].map(identify);
     const byKey = Map.groupBy(rows, (remote) => remote.key);
     const represented = new Set(rows.map((remote) => JSON.stringify(remote)));
     const aliases = readerSources
-      .filter((ref) => !hostedOnlyReferences.has(ref))
+      .filter((ref) => !hostedReferences.has(ref) || sharedReferences.has(ref))
       .map(({ url }) => identify(url))
       .filter((remote) => !represented.has(JSON.stringify(remote)));
     for (const [key, group] of Map.groupBy(aliases, (remote) => remote.key)) {
@@ -923,15 +1019,29 @@ export async function prepareLocalImport(
       Array.from(strictSources.keys(), (url) => identify(url).key),
     );
     for (const source of references)
-      if (!strictSources.has(source.url) && keys.has(identify(source.url).key))
+      if (
+        !strictSources.has(source.url) &&
+        keys.has(identify(source.url).key)
+      ) {
         strictSources.set(source.url, platformFor(source));
+        if (sharedReferences.has(source)) ordinaryReferences.add(source);
+      }
   }
   if (inspector) {
     const platform =
       inspector.platform === "github" ? "github" : options.provider;
-    const native = remoteRepository(inspector.url, platform, true);
+    const native = remoteRepository(
+      inspector.url,
+      options.provider,
+      true,
+      platform,
+    );
     for (const url of sources.keys()) {
-      if (!native || remoteRepository(url, platform, true)?.key !== native.key)
+      if (
+        !native ||
+        remoteRepository(url, options.provider, true, platform)?.key !==
+          native.key
+      )
         throw new CodexSecurityError(
           `Imported repository ${JSON.stringify(url)} does not match the retained Inspector repository ${JSON.stringify(inspector.url)}.`,
         );
@@ -953,7 +1063,11 @@ export async function prepareLocalImport(
       "The reader's source repository does not match the selected Semgrep project.",
     );
   for (const source of [...(inspector ? [inspector] : []), ...references]) {
-    if (!ordinaryRowNeedsReferences && hostedOnlyReferences.has(source))
+    if (
+      !ordinaryRowNeedsReferences &&
+      hostedReferences.has(source) &&
+      !ordinaryReferences.has(source)
+    )
       continue;
     // A reader's platform must not loosen an operator-supplied Inspector map.
     if (sources.get(source.url)?.platform !== "github")
@@ -962,6 +1076,29 @@ export async function prepareLocalImport(
         options.inspectorProjectMap ? { url: source.url } : source,
       );
   }
+  const sonarSources = sonarRepositoryUrls(
+    options.provider,
+    current.findings,
+    current.report,
+    "local",
+  );
+  const manualSource =
+    options.provider === "sonar" && options.sourceRepositoryUrl
+      ? declaredScannerRepositoryUrl(
+          options.sourceRepositoryUrl,
+          "Sonar",
+          "local",
+        )
+      : undefined;
+  if (manualSource) sonarSources.add(manualSource);
+  for (const url of sonarSources)
+    if (!sources.has(url)) sources.set(url, { url });
+  if (sonarSources.size && !sameRepositories(sources.keys()))
+    throw new CodexSecurityError(
+      manualSource
+        ? "The Sonar evidence does not match the declared source repository."
+        : "The retained Sonar repository does not match the other source repository claims.",
+    );
   if (
     options.provider === "blackduck" &&
     current.findings.length &&
@@ -983,40 +1120,37 @@ export async function prepareLocalImport(
     [...ordinarySources, ...hostedReferences],
     false,
   );
-  await requireMatchingRepository(
+  const selected = manualSource ? new URL(manualSource) : undefined;
+  const matchesRepositoryRemote = await requireMatchingRepository(
     repository,
     options.provider,
     ordinarySources,
     strictSources,
-    hostedSources,
+    hosted,
     (source, bound) => (bound ? platformFor(source) : loosePlatformFor(source)),
     workbenchOptions.protectedRoot,
     workbenchOptions.environment,
     dependencies.signal,
+    selected?.protocol === "https:" ? selected.hostname : undefined,
+    fetchRemotes,
   );
   dependencies.signal?.throwIfAborted();
   const preview = {
-    ...structuredClone(current),
+    ...cloneImportPreview(current),
     repository,
     source: { provider: options.provider, source_key: options.sourceKey },
   };
-  const payload = JSON.stringify(
-    {
-      repository,
-      provider: options.provider,
-      sourceKey: options.sourceKey,
-      findings: current.findings,
-    },
-    (_key, value: unknown) => {
-      if (isNumberObject(value)) value = +value;
-      if (typeof value === "number" && !Number.isFinite(value))
-        throw new TypeError(
-          "Stored finding JSON cannot contain non-finite numbers.",
-        );
-      return value;
-    },
-  );
+  const payload = JSON.stringify({
+    repository,
+    provider: options.provider,
+    sourceKey: options.sourceKey,
+    findings: current.findings.map(({ source_finding_id, evidence }) => ({
+      source_finding_id,
+      evidence,
+    })),
+  });
   return {
+    matchesRepositoryRemote,
     preview,
     async import() {
       dependencies.signal?.throwIfAborted();
@@ -1058,7 +1192,7 @@ export async function prepareLocalImport(
         read: current.read,
         ...(current.report === undefined
           ? {}
-          : { report: structuredClone(current.report) }),
+          : snapshotNormalizedFindings({ report: current.report })),
         ready: current.findings.length,
         excluded: structuredClone(current.excluded),
         findings: result["findings"] as unknown as StoredExternalFinding[],

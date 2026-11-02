@@ -415,6 +415,7 @@ test.each([
   ["github.com", "https://reader%0A@github.com/example/project", false],
   ["github.com", "https://a:b%0a@github.com/example/project", false],
   ["github.com", "https://a%00b@github.com/example/project", false],
+  ["github.com", "https://a:b%00c@github.com/example/project", true],
   ["git.example.test", "https://git.example.test/example/project.git", false],
   ["git.example.test", "ssh://git@git.example.test/example/project", false],
   ["git.example.test", "ssh://git@git.example.test:443/example/project", false],
@@ -934,12 +935,47 @@ test("a row without a repository URL needs the same project ID and name", () => 
   ).toThrow("project and ref");
 });
 
-test("selection rejects rows explicitly identified as other Semgrep products", () => {
-  for (const fields of [{ issue_type: "ai_sast" }, { product: "sca" }])
+test("SAST selection, saved files and retained evidence reject other Semgrep products", async () => {
+  await using fixture = await localReportFixture(url);
+  const valid = selectRow({});
+  const report = normalizeSemgrepFindings(
+    valid,
+    { sourceRepositoryUrl: url },
+    "local",
+  );
+  for (const fields of [
+    { ai_impact: "Synthetic impact" },
+    { epss_score: { score: 0 } },
+    { fix_recommendations: [] },
+    { found_dependency: {} },
+    { is_malicious: false },
+    { reachability: "reachable" },
+    { reachable_condition: "imported" },
+    { usage: {} },
+    { vulnerability_identifier: "CVE-2099-0001" },
+    { issue_type: "ai_sast" },
+    { product: "sca" },
+  ]) {
     expect(() => selectRow(fields)).toThrow("SAST");
+    const row = JSON.stringify({
+      ...JSON.parse(valid.findings[0]!),
+      ...fields,
+    });
+    await fixture.writeJson({ ...valid, findings: [row] });
+    await expect(fixture.prepare()).rejects.toThrow("SAST");
+    const forged = structuredClone(report);
+    forged.findings[0]!.evidence.source_data![rawFindingKey] = row;
+    await expect(
+      prepareNormalizedLocalImport(
+        forged,
+        { ...platformSource, repository: fixture.repository },
+        { environment: fixture.environment },
+      ),
+    ).rejects.toThrow("SAST");
+  }
 });
 
-test("projects Windows-relative paths and retains the original spelling", () => {
+test("projects the original relative path including literal backslashes", () => {
   const file_path = "src\\example.ts";
   const selection = selectRow({
     location: { file_path, line: 2, end_line: 4 },
@@ -950,7 +986,7 @@ test("projects Windows-relative paths and retains the original spelling", () => 
     "local",
   );
   expect(findings[0]!.evidence.locations).toEqual([
-    { path: "src/example.ts", line: 2 },
+    { path: file_path, line: 2 },
   ]);
   expect(
     JSON.parse(String(findings[0]!.evidence.source_data?.[rawFindingKey]))
@@ -1366,6 +1402,119 @@ test("a selected project preserves an ordinary row's shared SARIF provenance", a
   expect(
     (await prepare([...hosted, ...ordinary], native)).preview.findings,
   ).toHaveLength(2);
+});
+
+test("mixed Semgrep imports preserve each reader's SSH alias semantics", async () => {
+  const { findings } = normalizedProject(url);
+  const ordinary = projectedSarif(url, url);
+  const alias = "ssh://git@github.com/ex%61mple/project";
+  await using fixture = await localReportFixture(url);
+  const combined = [...findings, ...ordinary];
+  expect(
+    (await prepareMixed(fixture, combined, url)).preview.findings,
+  ).toHaveLength(2);
+  expect(
+    (await prepareMixed(fixture, combined, url, alias)).preview.findings,
+  ).toHaveLength(2);
+  await expect(prepareMixed(fixture, ordinary, url, alias)).rejects.toThrow(
+    "configured remote",
+  );
+  delete ordinary[0]!.evidence.details!.repository;
+  await expect(prepareMixed(fixture, combined, alias)).rejects.toThrow(
+    "configured remote",
+  );
+  expect(
+    (await prepareMixed(fixture, combined, url, alias)).preview.findings,
+  ).toHaveLength(2);
+  fixture.git("remote", "add", "encoded", alias);
+  expect(
+    (await prepareMixed(fixture, combined, alias)).preview.findings,
+  ).toHaveLength(2);
+});
+
+test("projected SARIF provenance keeps literal SSH fetch paths", async () => {
+  const source = "https://git.example.test/team/repo";
+  const other = "ssh://git@git.example.test/team/repo?other";
+  const ordinary = projectedSarif(source, source);
+  delete ordinary[0]!.evidence.details!.repository;
+  await using fixture = await localReportFixture(url);
+  fixture.git("remote", "add", "other", other);
+  const rows = [...normalizedProject(url).findings, ...ordinary];
+  await expect(prepareMixed(fixture, rows, url, other)).rejects.toThrow(
+    "supply the projected Semgrep SARIF repository",
+  );
+});
+
+test("a hosted alias stays separate from a different SARIF fetch path in a mixed projection", async () => {
+  const encoded = "https://github.com/ex%61mple/project";
+  const ssh = "ssh://git@github.com/ex%61mple/project";
+  const projected = "https://git.example.test/team/other";
+  await using fixture = await localReportFixture(ssh);
+  fixture.git("remote", "add", "projected", projected);
+  const rows = [
+    ...normalizedProject(url).findings,
+    ...projectedSarif(encoded, encoded),
+    projectedBlackDuck(projected),
+  ];
+  expect(
+    (await prepareMixed(fixture, rows, ssh, encoded, projected)).preview
+      .findings,
+  ).toHaveLength(3);
+});
+
+test("a shared reader reference still checks the projected SSH account", async () => {
+  const rows = [
+    ...normalizedProject(url).findings,
+    ...projectedSarif(url, url),
+    {
+      ...projectedBlackDuck(url),
+      evidence: {
+        title: "Projected finding",
+        severity: "low" as const,
+        details: {
+          kind: "sast" as const,
+          repository: { url: "deploy@github.com:example/project" },
+        },
+      },
+    },
+    {
+      source_finding_id: "ordinary",
+      evidence: { title: "Example", severity: "low" as const },
+    },
+  ];
+  await using fixture = await localReportFixture();
+  await expect(
+    prepareMixed(fixture, rows, "ssh://git@github.com/ex%61mple/project"),
+  ).rejects.toThrow("Reader repository");
+});
+
+test("a redundant Platform alias retains a projected row's checkout account", async () => {
+  const git = "ssh://git@github.com/example/project";
+  const deploy = "deploy@github.com:example/project";
+  const row = (id: string, url: string) => ({
+    source_finding_id: id,
+    evidence: {
+      title: "Projected finding",
+      severity: "low" as const,
+      details: { kind: "sast" as const, repository: { url } },
+    },
+  });
+  const rows = [
+    ...normalizedProject(url).findings,
+    row("ordinary", url),
+    row("ssh", git),
+    row("blackduck-bom:" + "a".repeat(64), deploy),
+  ];
+  await using fixture = await localReportFixture(deploy);
+  fixture.git(
+    "remote",
+    "add",
+    "encoded",
+    "https://github.com/ex%61mple/project",
+  );
+  await expect(
+    prepareMixed(fixture, rows, url, "ssh://git@github.com/ex%61mple/project"),
+  ).rejects.toThrow("configured remote");
 });
 
 test("shared Platform aliases preserve the ordinary Black Duck SSH account check", async () => {

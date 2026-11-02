@@ -1,5 +1,6 @@
 import {
   validateCodeLineRange,
+  canonicalNumber,
   validateExternalEvidence,
   type ExternalImportTarget,
 } from "./external-import-contract.js";
@@ -164,39 +165,36 @@ export function responseRecord(value: unknown, label: string) {
   );
 }
 
+// These v1 Findings API response fields belong only to AI detections or Supply Chain.
+const nonSastFields = [
+  "ai_impact",
+  "epss_score",
+  "fix_recommendations",
+  "found_dependency",
+  "is_malicious",
+  "reachability",
+  "reachable_condition",
+  "usage",
+  "vulnerability_identifier",
+];
+
+function identifiesNonSastProduct(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    nonSastFields.some((field) => value[field] != null) ||
+    [value["issue_type"], value["product"]].some(
+      (product) =>
+        typeof product === "string" &&
+        /^(?:sca|ai_sast|secrets)$/iu.test(product),
+    )
+  );
+}
+
+// Node 22 supports JSON source text and raw values. The SDK targets the ES2022 type library.
 const wireJson = JSON as JSON & {
   rawJSON(source: string): { rawJSON: string };
   isRawJSON(value: unknown): value is { rawJSON: string };
 };
-
-// Normalize equivalent JSON numbers exactly. Keep very large exponents compact.
-function canonicalNumber(token: string, fixedDigits = 21): string {
-  const [, sign = "", integer, fraction = "", exponent = "0"] =
-    /^(-?)(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/iu.exec(token)!;
-  const significant = (integer + fraction).replace(/^0+/u, "");
-  if (!significant) return "0";
-  let end = significant.length;
-  while (significant[end - 1] === "0") end--;
-  const digits = significant.slice(0, end);
-  const point = BigInt(exponent) + BigInt(significant.length - fraction.length);
-  // Ordinary evidence follows JSON.stringify’s fixed/scientific notation thresholds.
-  if (point > -6n && point <= BigInt(fixedDigits)) {
-    const split = Number(point);
-    if (split <= 0) return sign + "0." + "0".repeat(-split) + digits;
-    if (split >= digits.length) return sign + digits.padEnd(split, "0");
-    return sign + digits.slice(0, split) + "." + digits.slice(split);
-  }
-  const trailing = digits.slice(1);
-  const scientific = point - 1n;
-  return (
-    sign +
-    digits.charAt(0) +
-    (trailing ? "." + trailing : "") +
-    "e" +
-    (scientific >= 0n ? "+" : "") +
-    scientific
-  );
-}
 
 function sourceLine(value: unknown, coerceStrings: boolean): number | null {
   if (value == null) return null;
@@ -634,7 +632,12 @@ export function checkSemgrepPlatformRow(
     throw new Error(
       "Semgrep finding repository does not match the selected project and ref.",
     );
-  if (scope.product !== "sca" && hasSemgrepScaEvidence(finding))
+  if (
+    (scope.product === "sast" &&
+      !capture &&
+      identifiesNonSastProduct(finding)) ||
+    (scope.product === "ai_sast" && hasSemgrepScaEvidence(finding))
+  )
     throw new Error("Select Semgrep Code (SAST) findings.");
   return (
     scope.product === "sast" &&
@@ -707,10 +710,12 @@ function selectedRows(
       ? [options.findingsResponses]
       : options.findingsResponses;
   for (const page of pages) {
-    for (const finding of array(
+    const findings = array(
       parseSemgrepResponse(page)["findings"],
       "Semgrep findings",
-    )) {
+    );
+    const previousCount = selected.size;
+    for (const finding of findings) {
       if (!isRecord(finding)) continue;
       const id = semgrepPlatformIdOrUndefined(finding["id"]);
       if (!id || !wanted.has(id)) continue;
@@ -727,6 +732,12 @@ function selectedRows(
       );
       selected.set(id, finding);
     }
+    // The v1 findings endpoint returns a single product per response page.
+    if (
+      selected.size !== previousCount &&
+      findings.some(identifiesNonSastProduct)
+    )
+      throw new Error("Select Semgrep Code (SAST) findings.");
   }
   const rows = Array.from(wanted, (id) => {
     const value = selected.get(id);
@@ -1087,8 +1098,11 @@ export function semgrepPlatformFindingRepository(
 }
 
 function platformLocationPath(value: unknown) {
-  const path = relativePath(value);
-  return path && !path.endsWith("/.") && repositoryFilePath(path) ? path : null;
+  const path = text(value);
+  const relative = relativePath(path);
+  return relative && !relative.endsWith("/.") && repositoryFilePath(relative)
+    ? path
+    : null;
 }
 
 function platformLocation(
