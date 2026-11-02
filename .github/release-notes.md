@@ -95,6 +95,7 @@
 - opt in to the remote rubric for standalone reclassification ([#2257](https://github.com/openai/codex-security/pull/2257))
 - accept a host-supplied severity rubric for Standard scans ([#2253](https://github.com/openai/codex-security/pull/2253))
 - submit selected scanner findings to the private inbox ([#2177](https://github.com/openai/codex-security/pull/2177))
+- apply native profiles across scan workflows ([#1018](https://github.com/openai/codex-security/pull/1018))
 
 <!-- release-section: highlights:end -->
 
