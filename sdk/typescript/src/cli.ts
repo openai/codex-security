@@ -4955,7 +4955,7 @@ export async function main(
     })
     .command("classify-severity", {
       description: "Assess severity for saved findings or canonical records.",
-      hint: "Use --rubric to override the built-in policy or --records for host-provided classification.",
+      hint: "For saved findings, use --rubric for your own policy or set CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC=1 for the Statsig default. For host-provided reviews, use --records.",
       destructive: true,
       mcp: false,
       options: z.object({
@@ -4985,7 +4985,7 @@ export async function main(
         rubric: optionValue("--rubric")
           .optional()
           .describe(
-            "Classification policy document; omit to classify with the built-in severity rubric.",
+            "Classification policy document. Takes precedence over the default rubric.",
           ),
         knowledgeBase: z
           .array(optionValue("--knowledge-base"))

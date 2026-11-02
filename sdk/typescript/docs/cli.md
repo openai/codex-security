@@ -170,7 +170,8 @@ and project have access. An omitted `access_programs.cyber` field does not by
 itself mean that Daybreak treatment is disabled.
 
 Choose a compatible model available to your project and select Daybreak Blue
-explicitly:
+explicitly. If you use `--max-cost` or the SDK's `maxCostUsd`, choose a model
+with built-in pricing so the scan can enforce the limit.
 
 ```bash
 codex-security scan /path/to/repository \
@@ -183,11 +184,8 @@ Use `--mode deep` in the CLI or `mode: "deep"` in SDK scan options for Deep Scan
 The selection reaches discovery and reducer workers, including resumed workers. See [Select a Cyber access program](#select-a-cyber-access-program)
 for configuration precedence and the API-key feature setting.
 
-The previously documented `gpt-daybreak-blue-latest` alias is
-[deprecated](https://developers.openai.com/api/docs/models/gpt-daybreak-blue-latest).
-Use a current model available to your project. `access_programs.cyber` is a
-Responses API field; use the supported selector instead of passing it as a
-`--codex` configuration key.
+`access_programs.cyber` is a Responses API field. Use `--cyber-access-program`
+instead of passing it as a `--codex` configuration key.
 
 ### Select a Cyber access program
 
@@ -1698,12 +1696,19 @@ The [records protocol](classify-severity-records.md) accepts immutable Markdown 
 report snapshots and delegates model execution to the host.
 
 For saved findings, use exactly one of `--scan` (ID, prefix, or `latest`) and `--scan-dir`.
-Omitting `--rubric` runs classification with the [built-in severity rubric](https://github.com/openai/codex-security/blob/main/sdk/typescript/src/default-severity-rubric.ts).
+By default, saved findings are classified with the [built-in severity rubric](https://github.com/openai/codex-security/blob/main/sdk/typescript/src/default-severity-rubric.ts).
 It evaluates attacker access, boundary crossing, additional harm, and evidence for
 Critical, High, Medium, Low, and Informational findings. Confidence remains separate
-from severity; missing proof alone does not justify a downgrade. An explicit
-`--rubric` replaces the default policy completely. Rubrics and repeatable
-`--knowledge-base` context accept text, PDF, DOCX, and directories.
+from severity; missing proof alone does not justify a downgrade.
+
+Set `CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC=1` to fetch the current default
+from Statsig once per reclassification. Only the exact value `1` enables the
+request. It sends the config name without findings or account identifiers.
+If the request fails, times out, or returns an invalid rubric, the built-in
+rubric is used. An explicit `--rubric` (SDK `rubricPath`) skips the lookup and
+uses your policy for every review. Rubrics and repeatable `--knowledge-base`
+context accept text, PDF, DOCX, and directories.
+
 Each finding is classified three times by default. `--runs N` accepts
 an integer from 1 through 10; SDK options use `classificationRuns` with the same
 default and bounds. Each review runs in an independent read-only turn using the
@@ -1807,7 +1812,7 @@ await publishScan(scanDirectory, {
 
 `classifySeverity()` accepts `findingId`, `title`, `summary`, and available
 evidence/metadata. Imported reports may lack severity or occurrence IDs; omitting
-`rubricPath` uses the built-in policy even when a scanner severity is present.
+`rubricPath` uses the selected default policy even when a scanner severity is present.
 Scan wrappers persist checkpoints (including for
 external directories), accept `reprocess: true`, and treat `findingIds: []` as an
 empty selection. Use the same `CODEX_SECURITY_STATE_DIR` for classification and
