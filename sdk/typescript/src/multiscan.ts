@@ -861,7 +861,7 @@ async function inspectLock(
     processStartedAt?: number;
   };
   try {
-    identity = JSON.parse(owner) as typeof identity;
+    identity = (JSON.parse(owner) ?? {}) as typeof identity;
   } catch {
     return { owner, stale: Date.now() - modifiedAt > LOCK_LEASE_MS };
   }
