@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { execFile as nodeExecFile } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { after, test } from "node:test";
+import { after, mock, test } from "node:test";
+import { promises as filesystem, type Dir } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { promisify } from "node:util";
 import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
 import {
@@ -47,6 +49,52 @@ const { startDeepScanEngine } = await importSource("src/deep-scan/engine.ts", {
   },
 });
 after(() => temporaryDirectories.cleanup());
+
+for (const cancel of [false, true]) {
+  test(
+    `POSIX admission consumes one entry and closes its handle, cancel=${cancel}`,
+    { skip: process.platform === "win32" },
+    async () => {
+      const fixture = await fixtureRun();
+      await mkdir(fixture.run.targetPath, { recursive: true });
+      const controller = new AbortController();
+      let reads = 0,
+        closes = 0;
+      const handle = {
+        async read() {
+          reads++;
+          if (cancel) controller.abort("Canceled directory read");
+          return { name: "source.py" };
+        },
+        async close() {
+          closes++;
+        },
+      };
+      const { checkSelectedTargets } = await importSource(
+        "src/deep-scan/target-admission.ts",
+      );
+      const opener = mock.method(
+        filesystem,
+        "opendir",
+        async () => handle as unknown as Dir,
+      );
+      syncBuiltinESMExports();
+      try {
+        if (cancel)
+          await assert.rejects(
+            checkSelectedTargets(fixture.run, controller.signal),
+            (error) => error === "Canceled directory read",
+          );
+        else await checkSelectedTargets(fixture.run, controller.signal);
+        assert.equal(reads, 1);
+        assert.equal(closes, 1);
+      } finally {
+        opener.mock.restore();
+        syncBuiltinESMExports();
+      }
+    },
+  );
+}
 
 for (const nonempty of [false, true]) {
   test(
