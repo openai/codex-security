@@ -127,7 +127,10 @@ async function run() {
   }
   const config = parse(overrides.join("\n"));
   const profile = config.permissions.codex_security_deep_scan_worker;
-  assert.deepEqual(JSON.parse(JSON.stringify(profile)), expectedWorkerProfile());
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(profile)),
+    expectedWorkerProfile(),
+  );
   const artifacts = config.mcp_servers.cs_artifacts;
   const env = artifacts.env;
   const root = env.CODEX_SECURITY_ARTIFACT_ROOT;

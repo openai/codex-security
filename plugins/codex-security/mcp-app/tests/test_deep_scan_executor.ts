@@ -53,7 +53,7 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { rootCertificates } from "node:tls";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { importModule } from "./import-module.ts";
 
 import type {
@@ -68,6 +68,12 @@ import { testWorkerCyberAccessSettings } from "./deep_scan_worker_settings_cases
 import { testWorkerGitConfiguration } from "./deep_scan_git_environment_cases.ts";
 
 const executorSource = new URL("../src/deep-scan/executor.ts", import.meta.url);
+const bundledPluginRoot =
+  process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT ??
+  path.resolve(
+    import.meta.dirname,
+    "../../../../sdk/typescript/_bundled_plugin",
+  );
 const { bundledCodexSdkEnvironment } =
   process.platform === "win32"
     ? {}
@@ -92,10 +98,7 @@ const {
 } = await importModule({
   define: {
     "import.meta.url": JSON.stringify(
-      new URL(
-        "../../../../sdk/typescript/_bundled_plugin/mcp/server.mjs",
-        import.meta.url,
-      ).href,
+      pathToFileURL(path.join(bundledPluginRoot, "mcp", "server.mjs")).href,
     ),
   },
   stdin: {

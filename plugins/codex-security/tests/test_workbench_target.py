@@ -837,8 +837,15 @@ def test_local_diff_count_excludes_metadata_before_git_filters(tmp_path: Path) -
     assert calls.exists()
 
 
-@pytest.mark.cross_platform
-@pytest.mark.parametrize("change", ["stat_only", "mode_only", "rename", "binary"])
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param("stat_only", marks=pytest.mark.cross_platform),
+        pytest.param("mode_only", marks=pytest.mark.native_macos),
+        pytest.param("rename", marks=pytest.mark.cross_platform),
+        pytest.param("binary", marks=pytest.mark.cross_platform),
+    ],
+)
 def test_local_diff_count_preserves_content_changes(tmp_path: Path, change: str) -> None:
     import workbench_target
 
@@ -1137,8 +1144,13 @@ def test_local_diff_batch_preserves_native_failures_and_readable_peers(
         assert calls == 2
 
 
-@pytest.mark.cross_platform
-@pytest.mark.parametrize("index_kind", ["symlink", "unmerged"])
+@pytest.mark.parametrize(
+    "index_kind",
+    [
+        pytest.param("symlink", marks=pytest.mark.native_macos),
+        pytest.param("unmerged", marks=pytest.mark.cross_platform),
+    ],
+)
 @pytest.mark.parametrize("modified", [False, True])
 def test_local_diff_normalizes_working_text_with_nonregular_or_unmerged_index(
     tmp_path: Path, index_kind: str, modified: bool
