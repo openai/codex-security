@@ -80,6 +80,7 @@
 - bump taiki-e/install-action from 2.87.31 to 2.87.32 ([#2244](https://github.com/openai/codex-security/pull/2244))
 - distinguish library defaults from caller obligations ([#2245](https://github.com/openai/codex-security/pull/2245))
 - preserve boxed numeric evidence across retries ([#2224](https://github.com/openai/codex-security/pull/2224))
+- restore concrete discovery guidance for Standard and Deep scans ([#2246](https://github.com/openai/codex-security/pull/2246))
 
 <!-- release-section: highlights:end -->
 
