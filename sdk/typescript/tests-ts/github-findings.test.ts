@@ -270,6 +270,48 @@ test.each([{ toJSON: () => "formatted" }, new WeakMap()])(
   },
 );
 
+test("groups rows by the original wire size before native numeric capture", () => {
+  const shape = importedAlert("refs/heads/review");
+  Object.assign(shape.alert, {
+    metrics: { score: 9, sample: { id: 1 } },
+    reducer: 0,
+    warning: { detail: "" },
+  });
+  const bytes = Buffer.byteLength(
+    JSON.stringify(
+      normalizeGitHubCodeScanningAlerts([shape]).findings[0]!.evidence,
+    ),
+  );
+  let reads = 0;
+  const score = Object.assign(new Number(7), { toJSON: () => 9 });
+  const shared = {
+    get score() {
+      return score;
+    },
+    get sample() {
+      return { id: ++reads };
+    },
+  };
+  const first = importedAlert(),
+    second = importedAlert("refs/heads/review");
+  Object.assign(first.alert, { metrics: shared });
+  Object.assign(second.alert, {
+    metrics: shared,
+    reducer: Object.assign(new Number(123456789012345), { toJSON: () => 0 }),
+    warning: Object.assign(new Error("warning"), {
+      detail: "x".repeat(256 * 1024 - bytes),
+    }),
+  });
+  const output = normalizeGitHubCodeScanningAlerts([first, second]);
+  expect(output.excluded).toEqual([]);
+  const retained = output.findings.map(
+    ({ evidence }) =>
+      (evidence.source_data!["alert"] as { metrics: typeof shared }).metrics,
+  );
+  expect(retained[0]).toBe(retained[1]);
+  expect(retained.map((value) => value.sample.id)).toEqual([5, 5]);
+});
+
 test("applies the Cloud byte limit to numbers returned by a vendor serializer", () => {
   const row = importedAlert();
   const score = Object.assign(new Number(1), { toJSON: () => 123456 });

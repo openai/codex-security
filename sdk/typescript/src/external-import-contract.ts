@@ -535,6 +535,16 @@ export function retainNumberFields<T>(input: T, changed: Set<object>): T {
   return retain(input) as T;
 }
 
+function cloudNumberByteAdjustment(value: number): number {
+  if (!value || Math.abs(value) >= 1e-4) return 0;
+  const wire = JSON.stringify(value);
+  const cloud = (wire.includes(".") ? value.toExponential() : wire).replace(
+    /e-(\d)$/u,
+    "e-0$1",
+  );
+  return cloud.length - wire.length;
+}
+
 function checkedEvidenceJson<T>(
   input: T,
   target: ExternalImportTarget,
@@ -560,6 +570,8 @@ function checkedEvidenceJson<T>(
   const indirectNumbers = new Set<object>();
   let hasFunction = false;
   let numericByteAdjustment = 0;
+  let originalNumericByteAdjustment = 0;
+  let useOriginalWire = false;
   function wireValue(this: object, key: string, value: unknown) {
     const raw: unknown =
       batch &&
@@ -573,16 +585,10 @@ function checkedEvidenceJson<T>(
         raw,
         value === intrinsic && wireMatches.get(raw) !== false,
       );
-      value = intrinsic;
+      if (!useOriginalWire) value = intrinsic;
     }
     if (target === "cloud" && typeof value === "number") {
-      const wire = JSON.stringify(value);
-      const cloud = (
-        wire.includes(".") && Math.abs(value) < 1e-4
-          ? value.toExponential()
-          : wire
-      ).replace(/e-(\d)$/u, "e-0$1");
-      numericByteAdjustment += cloud.length - wire.length;
+      numericByteAdjustment += cloudNumberByteAdjustment(value);
     }
     return value;
   }
@@ -634,9 +640,17 @@ function checkedEvidenceJson<T>(
       }
     } else if (typeof value === "number") {
       requireJsonNumber(value, "Evidence");
+      if (batch && target === "cloud")
+        originalNumericByteAdjustment += cloudNumberByteAdjustment(value);
     }
   }
-  if (target === "cloud") serialize();
+  if (target === "cloud") {
+    // Rows that may need native capture must be grouped by the JSON the older
+    // reader actually admitted, before replacing numeric hooks with intrinsic values.
+    useOriginalWire =
+      !!batch && customNumber && (hasFunction || indirectNumbers.size > 0);
+    serialize();
+  }
   if (customNumber && !batch)
     return checkedEvidenceJson(
       snapshotEvidence(input),
@@ -644,17 +658,24 @@ function checkedEvidenceJson<T>(
       additionalCloudBytes,
       false,
     );
-  const bytes =
+  const wireBytes =
     target === "cloud" && !failed
-      ? Buffer.byteLength(json!) + numericByteAdjustment + additionalCloudBytes
+      ? Buffer.byteLength(json!) + additionalCloudBytes
       : 0;
+  const bytes = wireBytes + numericByteAdjustment;
   if (
     customNumber &&
     (failed ||
-      (hasFunction && [...wireMatches.values()].includes(false)) ||
+      ((hasFunction || useOriginalWire) &&
+        [...wireMatches.values()].includes(false)) ||
       [...indirectNumbers].some((number) => wireMatches.get(number) !== true))
   ) {
-    return retained(0, true, bytes > 256 * 1024);
+    return retained(
+      0,
+      true,
+      target === "cloud" &&
+        (!!failed || wireBytes + originalNumericByteAdjustment > 256 * 1024),
+    );
   }
   if (failed) throw failed.reason;
   if (bytes > 256 * 1024)
