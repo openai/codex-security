@@ -799,6 +799,11 @@ describe("read-only finding verification", () => {
         await runCredentialPreparationInterruption(signal);
 
       expect(status).toBe(0);
+      expect(output).toContain("LOCK_CONTENDER_ATTEMPTED");
+      expect(output).toContain("LOCK_OWNER_PRESERVED");
+      expect(output).toContain("LOCK_REACQUIRED");
+      expect(output).toContain("ABORT_LISTENERS_0");
+      expect(output).toContain("SIGNAL_LISTENERS_0_0");
       expect(output).toContain(`PREPARATION_ABORT_${signal}`);
     },
   );
