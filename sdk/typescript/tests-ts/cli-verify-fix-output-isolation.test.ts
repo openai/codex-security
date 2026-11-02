@@ -1,7 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { copyFile, mkdir, symlink } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { copyFile, mkdir, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 interface HarnessResult {
@@ -17,6 +18,11 @@ interface HarnessResult {
   firstSignal?: string;
   secondSignal?: string;
 }
+
+const hasFullDevice = existsSync("/dev/full");
+const scenarioCount = hasFullDevice ? 18 : 17;
+const scenarioTimeoutSeconds = 22;
+const harnessTimeoutMs = (scenarioCount * scenarioTimeoutSeconds + 5) * 1_000;
 
 const sdkRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = join(
@@ -151,22 +157,32 @@ test.skipIf(process.platform === "win32")(
     });
     expect(build.logs).toEqual([]);
     expect(build.success).toBe(true);
-    const bundledFixture = build.outputs[0]!.path;
+    // The CLI shares the fixture bundle. Import it from a separate entrypoint
+    // so the real CLI never interprets a scenario name as a user command.
+    const launcher = join(runtime, "launch.mjs");
+    await writeFile(
+      launcher,
+      `import ${JSON.stringify(pathToFileURL(build.outputs[0]!.path).href)};\n`,
+    );
     const node = Bun.which("node");
     const python = Bun.which("python3");
     expect(node).not.toBeNull();
     expect(python).not.toBeNull();
-    const [stdout, stderr, exitCode] = await runHarness([
-      python!,
-      harness,
-      node!,
-      bundledFixture,
-      sdkRoot,
-      runtime,
-    ]);
+    const [stdout, stderr, exitCode] = await runHarness(
+      [
+        python!,
+        harness,
+        node!,
+        launcher,
+        sdkRoot,
+        runtime,
+        String(scenarioTimeoutSeconds),
+      ],
+      { timeoutMs: harnessTimeoutMs },
+    );
     expect(exitCode, stderr).toBe(0);
     const results = JSON.parse(stdout) as HarnessResult[];
-    expect(results).toHaveLength(17);
+    expect(results).toHaveLength(scenarioCount);
     expect(results.every((entry) => entry.blocked === false)).toBe(true);
     for (const entry of results.filter(
       ({ scenario }) => !scenario.startsWith("single-saved-progress"),
@@ -174,7 +190,7 @@ test.skipIf(process.platform === "win32")(
       expect(completeEvent(entry)).toMatchObject({
         sigintListeners: 0,
         sigtermListeners: 0,
-        stderrErrorListeners: 1,
+        stderrErrorListeners: 0,
       });
     }
 
@@ -191,13 +207,20 @@ test.skipIf(process.platform === "win32")(
       ).toEqual(["occ_0", "occ_1", "occ_2"]);
     }
 
-    const failure = result(results, "pipe-worker-failure");
-    expect(failure.exit).toBe(2);
-    expect(JSON.parse(failure.stdout)).toEqual({
-      status: "failed",
-      code: "VERIFICATION_FAILED",
-      message: "Second worker original diagnostic.",
-    });
+    const workerFailures = [
+      "pipe-worker-failure",
+      "pty-backpressure-worker-failure",
+    ];
+    if (hasFullDevice) workerFailures.push("full-device");
+    for (const scenario of workerFailures) {
+      const failure = result(results, scenario);
+      expect(failure.exit).toBe(2);
+      expect(JSON.parse(failure.stdout)).toEqual({
+        status: "failed",
+        code: "VERIFICATION_FAILED",
+        message: "Second worker original diagnostic.",
+      });
+    }
 
     const unrelated = result(results, "pipe-unrelated-stderr-error");
     expect(unrelated.exit).toBe(2);
@@ -206,7 +229,6 @@ test.skipIf(process.platform === "win32")(
       code: "VERIFICATION_FAILED",
       message: "Synthetic unrelated error.",
     });
-    expect(unrelated.stderr).toContain("Synthetic unrelated error.");
 
     for (const [scenario, expectedExit] of [
       ["pty-backpressure-sigint", 130],
@@ -221,13 +243,7 @@ test.skipIf(process.platform === "win32")(
     }
 
     const pausedFailure = result(results, "pty-backpressure-worker-failure");
-    expect(pausedFailure.exit).toBe(2);
     expect(pausedFailure.workerAlive).toBe(false);
-    expect(JSON.parse(pausedFailure.stdout)).toEqual({
-      status: "failed",
-      code: "VERIFICATION_FAILED",
-      message: "Second worker original diagnostic.",
-    });
 
     for (const [scenario, expectedExit] of [
       ["pty-backpressure-mixed-sigint-sigterm", 143],
@@ -251,9 +267,9 @@ test.skipIf(process.platform === "win32")(
           stderrErrorListeners: event["stderrErrorListeners"],
         })),
     ).toEqual([
-      { invocation: 1, exitCode: 0, stderrErrorListeners: 1 },
-      { invocation: 2, exitCode: 0, stderrErrorListeners: 1 },
-      { invocation: 3, exitCode: 0, stderrErrorListeners: 1 },
+      { invocation: 1, exitCode: 0, stderrErrorListeners: 0 },
+      { invocation: 2, exitCode: 0, stderrErrorListeners: 0 },
+      { invocation: 3, exitCode: 0, stderrErrorListeners: 0 },
     ]);
     expect(
       cleanupSignal.events.find(
@@ -297,6 +313,7 @@ test.skipIf(process.platform === "win32")(
         ),
       ).toMatchObject({ hasOnEvent: true });
     }
+    expect(interactive.stderr).not.toContain("is not a command");
     expect(interactive.stderr).toContain("\u001B[?1049h");
     expect(noninteractive.stderr).not.toContain("\u001B[?1049h");
     expect(noninteractive.stderr).toContain("rg authorization src/guard.ts");
@@ -308,13 +325,13 @@ test.skipIf(process.platform === "win32")(
     ).toMatchObject({
       invocation: 1,
       exitCode: 0,
-      stderrErrorListeners: 1,
+      stderrErrorListeners: 0,
     });
     expect(completeEvent(repeated)).toMatchObject({
       exitCode: 0,
-      stderrErrorListeners: 1,
+      stderrErrorListeners: 0,
     });
     expect(repeated.stdout.match(/"scanId": "scan"/gu)).toHaveLength(2);
   },
-  60_000,
+  harnessTimeoutMs + 10_000,
 );

@@ -66,7 +66,7 @@ export async function verificationBatches(
       characterCount(JSON.stringify(finding.occurrenceId));
     if (overhead + size > limit) {
       throw new CodexSecurityError(
-        `Finding ${finding.occurrenceId} cannot fit in one complete Codex verification request. The request requires ${overhead + size} characters, but Codex accepts at most ${limit}. To verify another finding from this scan, run codex-security verify-fix OCCURRENCE_ID with its ID. For this finding, run a narrower scan that records smaller evidence, then retry.`,
+        `Finding ${finding.occurrenceId} cannot fit in one complete Codex verification request. The request requires ${overhead + size} characters, but Codex accepts at most ${limit}. To verify another finding from this scan, run codex-security verify-fix --scan SCAN_ID OCCURRENCE_ID. For this finding, run a narrower scan that records smaller evidence, then retry.`,
       );
     }
     if (size > remaining) {

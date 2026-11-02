@@ -17,7 +17,7 @@ import threading
 import time
 
 
-NODE, FIXTURE, CWD, STATE_ROOT = sys.argv[1:]
+NODE, FIXTURE, CWD, STATE_ROOT, SCENARIO_TIMEOUT = sys.argv[1:]
 
 
 class HarnessTermination(Exception):
@@ -179,10 +179,16 @@ class RunningProcess:
 
 @contextmanager
 def running(scenario: str, stderr: int | None = subprocess.PIPE):
+    def timeout(_signal_number, _frame):
+        raise TimeoutError(f"Verification fixture timed out: {scenario}")
+
     fixture = RunningProcess(scenario, stderr)
+    signal.signal(signal.SIGALRM, timeout)
+    signal.alarm(int(SCENARIO_TIMEOUT))
     try:
         yield fixture
     finally:
+        signal.alarm(0)
         fixture.cleanup()
 
 
@@ -246,11 +252,11 @@ def disconnected_pipe(scenario: str):
         return {"scenario": f"pipe-{scenario}", **fixture.finish(events)}
 
 
-def connected_pipe(scenario: str):
-    with running(scenario) as fixture:
+def connected_output(scenario: str, name: str, stderr=subprocess.PIPE):
+    with running(scenario, stderr) as fixture:
         events = fixture.event_until("worker-started", 2)
         fixture.send()
-        return {"scenario": f"pipe-{scenario}", **fixture.finish(events)}
+        return {"scenario": name, **fixture.finish(events)}
 
 
 def disconnected_pty():
@@ -313,9 +319,18 @@ def paused_worker_failure():
     master, slave = open_pty()
     try:
         with running(scenario, slave) as fixture:
+            events = fixture.event_until("worker-started", 2)
+            # Open a separate description so the worker's stderr stays blocking.
+            with open(os.ttyname(slave), "wb", buffering=0) as filler:
+                os.set_blocking(filler.fileno(), False)
+                for chunk in (b"x" * 4096, b"x"):
+                    try:
+                        while True:
+                            os.write(filler.fileno(), chunk)
+                    except BlockingIOError:
+                        pass
             os.close(slave)
             slave = -1
-            events = fixture.event_until("worker-started", 2)
             fixture.send()
             events.extend(fixture.event_until("progress-queued"))
             worker_pid = wait_for_worker(fixture.state)
@@ -453,7 +468,7 @@ results = [
     disconnected_pipe("quiet-success"),
     disconnected_pipe("progress-success"),
     disconnected_pipe("worker-failure"),
-    connected_pipe("unrelated-stderr-error"),
+    connected_output("unrelated-stderr-error", "pipe-unrelated-stderr-error"),
     disconnected_pty(),
     paused_pty("pty-backpressure-success", None),
     paused_pty("pty-backpressure-sigint", signal.SIGINT),
@@ -468,4 +483,7 @@ results = [
     simple_process("wrong-id"),
     simple_process("repeated-main"),
 ]
+if Path("/dev/full").exists():
+    with open("/dev/full", "wb", buffering=0) as full_device:
+        results.append(connected_output("worker-failure", "full-device", full_device))
 print(json.dumps(results))

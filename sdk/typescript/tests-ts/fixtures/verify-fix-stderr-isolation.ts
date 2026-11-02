@@ -66,6 +66,13 @@ function setSingleRequest(value: boolean): void {
   }
 }
 
+const publishWorkerPid = `
+const { writeFileSync, renameSync } = require("node:fs");
+const statePath = process.env.VERIFY_FIX_WORKER_STATE;
+writeFileSync(statePath + ".tmp", JSON.stringify({ pid: process.pid }));
+renameSync(statePath + ".tmp", statePath);
+`;
+
 let invocationWorker = 0;
 const base = dependencies({
   environment: {
@@ -152,8 +159,7 @@ const base = dependencies({
           [
             "-e",
             `
-const { writeFileSync } = require("node:fs");
-writeFileSync(process.env.VERIFY_FIX_WORKER_STATE, JSON.stringify({ pid: process.pid }));
+${publishWorkerPid}
 process.stderr.write("Second worker original diagnostic.\\n", () => process.exit(7));
 `,
           ],
@@ -177,9 +183,8 @@ process.stderr.write("Second worker original diagnostic.\\n", () => process.exit
         const state = process.env["VERIFY_FIX_WORKER_STATE"];
         if (state === undefined) throw new Error("Missing worker state path.");
         const source = `
-const { writeFileSync } = require("node:fs");
 ${scenario.includes("mixed") ? 'process.on("SIGINT", () => {}); process.on("SIGTERM", () => {});' : ""}
-writeFileSync(process.env.VERIFY_FIX_WORKER_STATE, JSON.stringify({ pid: process.pid }));
+${publishWorkerPid}
 setInterval(() => {}, 1_000);
 `;
         return runCodexSkillCommand(
@@ -198,7 +203,8 @@ setInterval(() => {}, 1_000);
       const error = Object.assign(new Error("Synthetic unrelated error."), {
         code: "EBADF",
       });
-      process.stderr.emit("error", error);
+      process.nextTick(() => process.stderr.emit("error", error));
+      await new Promise<void>((resolve) => setImmediate(resolve));
     }
     if (batchWorker === 2 && scenario === "missing-id") {
       output?.stdout.write(JSON.stringify({ results: [] }));

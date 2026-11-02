@@ -557,7 +557,7 @@ describe("read-only finding verification", () => {
         if (scenario === "oversized finding") {
           expect(failure.message).toContain("Finding occ_1 cannot fit");
           expect(failure.message).toContain(
-            "codex-security verify-fix OCCURRENCE_ID",
+            "codex-security verify-fix --scan SCAN_ID OCCURRENCE_ID",
           );
         }
         expect(failure.code).toBe("VERIFICATION_FAILED");
@@ -571,6 +571,51 @@ describe("read-only finding verification", () => {
       }
     },
   );
+
+  test("verifies a historical occurrence directly in the selected scan", async () => {
+    const result = fakeResult(["high"]);
+    Object.assign(result.findings.findings[0]!, {
+      occurrenceId: "occ_earlier",
+      findingId: "csf_guard",
+    });
+    const verdict = {
+      id: "occ_earlier",
+      status: "fixed",
+      evidence: "The guard rejects the original input.",
+    };
+    const stdout = captureCli(main, "stdout");
+    const status = await stdout.run(
+      ["verify-fix", "--scan", "earlier", "occ_earlier", "--json"],
+      dependencies({
+        result,
+        onWorkbench: (args) => {
+          expect(args).toEqual([
+            "get-scan",
+            "--scan-id",
+            "earlier",
+            "--occurrence-id",
+            "occ_earlier",
+          ]);
+          return {
+            scan: {
+              scanId: "earlier",
+              targetPath: "/saved/repository",
+              findings: result.findings.findings as unknown as JsonObject[],
+            },
+          };
+        },
+        onCodex: (_args, output) => {
+          output!.stdout.write(JSON.stringify({ results: [verdict] }));
+          return 0;
+        },
+      }),
+    );
+    expect(status).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      scanId: "earlier",
+      results: [verdict],
+    });
+  });
 
   test("batches at the exact decoded prompt limit and rejects an oversized finding", async () => {
     const findings = fakeResult(["high", "high"]).findings.findings.map(

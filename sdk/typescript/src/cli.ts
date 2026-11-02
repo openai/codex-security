@@ -13,6 +13,7 @@ import {
   spawn,
 } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { errorMonitor } from "node:events";
 import {
   accessSync,
   constants,
@@ -1971,25 +1972,24 @@ async function skillDaybreakConfigOverrides(
   return overrides;
 }
 
-const processLifetimeVerificationStderr = new WeakSet<Writable>();
-
-function ignoreDisconnectedVerificationStderr(error: Error): void {
-  const code = (error as NodeJS.ErrnoException).code;
-  if (code !== "EPIPE" && code !== "EIO") throw error;
+function guardDisconnectedVerificationTerminal(stream: Writable): void {
+  if (stream !== process.stderr || !stream.isTTY) return;
+  const stderr = process.stderr;
+  if (!stderr.listeners(errorMonitor).includes(handleDisconnectedResize)) {
+    stderr.on(errorMonitor, handleDisconnectedResize);
+  }
 }
 
-function protectProcessStderrForBatchedVerification(
-  errorOutput: Writable,
-): boolean {
-  if (errorOutput !== process.stderr) return false;
-  if (!processLifetimeVerificationStderr.has(errorOutput)) {
-    // SIGWINCH can make Node emit getWindowSize EIO after main() returns. Once
-    // a real batched CLI invocation owns fd 2, keep this exact stream protected
-    // through process shutdown; repeated in-process main() calls reuse it.
-    process.stderr.on("error", ignoreDisconnectedVerificationStderr);
-    processLifetimeVerificationStderr.add(errorOutput);
+// Node refreshes the TTY size on SIGWINCH even after main() returns. Handle
+// only a disconnected terminal's resize when no other consumer handles it.
+function handleDisconnectedResize(error: NodeJS.ErrnoException): void {
+  if (
+    error.code === "EIO" &&
+    error.syscall === "getWindowSize" &&
+    process.stderr.listenerCount("error") === 0
+  ) {
+    process.stderr.once("error", () => {});
   }
-  return true;
 }
 
 export async function main(
@@ -2097,6 +2097,7 @@ export async function main(
   let frameworkExit: number | undefined;
   const frameworkCapture = captureOutput();
   let rawExportOutput = false;
+  let quietVerificationTerminal = false;
   let streamedLogs: Awaited<ReturnType<typeof readSavedScanLogs>> | undefined;
   let renderedOutput: string | undefined;
   let structuredError = false;
@@ -6125,7 +6126,8 @@ export async function main(
       async run({ format, options, error: incurError }) {
         let failureReported = false;
         const reportDiagnostic = (chunk: string | Uint8Array): void => {
-          void writeCliOutput(errorOutput, chunk).catch(() => {});
+          if (!quietVerificationTerminal)
+            void writeCliOutput(errorOutput, chunk).catch(() => {});
         };
         try {
           if (options.host)
@@ -6182,6 +6184,12 @@ export async function main(
               imports.length === 0
                 ? undefined
                 : withoutLinearCredentials(dependencies.environment);
+            // A synchronous terminal write can block delivery of the structured
+            // failure, including when the planner rejects an oversized finding.
+            quietVerificationTerminal =
+              selected !== undefined &&
+              errorOutput.isTTY === true &&
+              (format === "json" || format === "jsonl");
             const batches = selected
               ? await verificationBatches(
                   selected.findings,
@@ -6193,6 +6201,7 @@ export async function main(
             // optional progress off that execution path so terminal failures
             // and backpressure cannot prevent a complete stdout result.
             const presentProgress = batches.length === 1;
+            if (presentProgress) quietVerificationTerminal = false;
             const progress = new FindingProgressPresenter(
               errorOutput,
               dependencies,
@@ -6202,13 +6211,15 @@ export async function main(
             );
             const controller =
               batches.length > 1 ? new AbortController() : undefined;
-            const processLifetimeStderr =
-              controller !== undefined &&
-              protectProcessStderrForBatchedVerification(errorOutput);
-            const scopedStderrHandler =
-              controller !== undefined && !processLifetimeStderr;
-            if (scopedStderrHandler)
-              errorOutput.on?.("error", ignoreDisconnectedVerificationStderr);
+            let stderrError: Error | undefined;
+            const observeStderr = (error: Error): void => {
+              const code = (error as NodeJS.ErrnoException).code;
+              if (code !== "EPIPE" && code !== "EIO") stderrError ??= error;
+            };
+            if (controller) {
+              guardDisconnectedVerificationTerminal(errorOutput);
+              errorOutput.on?.("error", observeStderr);
+            }
             const removeSignals =
               controller && listenForAbort(dependencies, controller);
             let restoration: Promise<void> | undefined;
@@ -6271,6 +6282,7 @@ export async function main(
                       `Codex verification failed with exit code ${exitCode}.`,
                   );
                 }
+                if (stderrError) throw stderrError;
                 results.push(
                   ...parseFindingVerifications(response.text(), batchIds),
                 );
@@ -6288,11 +6300,7 @@ export async function main(
                 const stopped = stopProgress();
                 if (output.isTTY) await stopped;
               } finally {
-                if (scopedStderrHandler)
-                  errorOutput.off?.(
-                    "error",
-                    ignoreDisconnectedVerificationStderr,
-                  );
+                if (controller) errorOutput.off?.("error", observeStderr);
               }
             }
             if (controller?.signal.aborted) {
@@ -7390,7 +7398,7 @@ export async function main(
     renderedOutput = failureOutput.text();
   }
   let frameworkOutput = frameworkCapture.text();
-  if (notice !== undefined) {
+  if (notice !== undefined && !quietVerificationTerminal) {
     try {
       errorOutput.write(formatUpdateNotice(notice));
     } catch {}
