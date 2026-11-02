@@ -1,3 +1,4 @@
+import { hash } from "node:crypto";
 import { defaultSeverityRubric } from "../src/default-severity-rubric.js";
 import { workflowDigest } from "../src/finding-workflow.js";
 import { modelResponseText } from "./support/model-response-text.js";
@@ -93,7 +94,8 @@ test.each([undefined, "0", "true", " 1"])(
     expect(JSON.parse(calls[0]!.prompt.split("\n\n").at(-1)!).rubric).toEqual([
       defaultSeverityRubric,
     ]);
-    expect(result.rubricSha256).toBe(workflowDigest([defaultSeverityRubric]));
+    expect(result.rubricSha256).toBe(hash("sha256", defaultSeverityRubric));
+    expect(result.rubricRevision).toBe(1);
     expect(result.assessments[0]).toMatchObject({
       findingId: finding.findingId,
       occurrenceId: finding.occurrenceId,
@@ -135,9 +137,8 @@ test("opt-in fetches only the named config once for all reviews", async () => {
       remoteConfig.value.markdown,
     ]);
   }
-  expect(result.rubricSha256).toBe(
-    workflowDigest([remoteConfig.value.markdown]),
-  );
+  expect(result.rubricSha256).toBe(hash("sha256", remoteConfig.value.markdown));
+  expect(result.rubricRevision).toBe(remoteConfig.value.revision);
 });
 
 test.each([
@@ -163,7 +164,8 @@ test.each([
     expect(JSON.parse(calls[0]!.prompt.split("\n\n").at(-1)!).rubric).toEqual([
       defaultSeverityRubric,
     ]);
-    expect(result.rubricSha256).toBe(workflowDigest([defaultSeverityRubric]));
+    expect(result.rubricSha256).toBe(hash("sha256", defaultSeverityRubric));
+    expect(result.rubricRevision).toBe(1);
   },
 );
 
@@ -213,7 +215,10 @@ test("supplies complete evidence and separate policy/context to a restricted str
     ...assessed,
     source: "rubric",
   });
-  expect(result.rubricSha256).toMatch(/^[a-f0-9]{64}$/u);
+  expect(result.rubricSha256).toBe(
+    hash("sha256", "Assign MEDIUM to bounded unauthorized metadata reads."),
+  );
+  expect(result.rubricRevision).toBeUndefined();
   expect(result.knowledgeBaseSha256).toMatch(/^[a-f0-9]{64}$/u);
   expect(calls).toHaveLength(3);
   expect(new Set(calls.map((call) => call.thread)).size).toBe(3);
@@ -266,6 +271,17 @@ test("represents policy exclusions independently from Low", async () => {
     level: null,
   });
   expect(validateSeverityClassification(result, [finding])).toEqual(result);
+});
+
+test("rubric directories retain the ordered document digest without a revision", async () => {
+  const directory = await temporaryDirectory();
+  await writeFile(join(directory, "01.md"), "First policy");
+  await writeFile(join(directory, "02.md"), "Second policy");
+  const result = await classifySeverity([], { rubricPath: directory });
+  expect(result.rubricSha256).toBe(
+    workflowDigest(["First policy", "Second policy"]),
+  );
+  expect(result.rubricRevision).toBeUndefined();
 });
 
 test("classifies imported reports without severity using the default rubric", async () => {

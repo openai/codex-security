@@ -1795,6 +1795,12 @@ the original `rubricLabel`, rationale, confidence, and a `reviewTrigger` for
 missing facts that could change the result. Exclusions have a null level.
 Finding/occurrence IDs and input hashes bind each assessment to its evidence.
 
+For a single rubric document, the classification result reports the SHA-256 of
+the exact UTF-8 text supplied to the reviewer in `rubricSha256`. For multiple
+documents it reports the digest of the ordered text collection. A bundled or
+remote default also records its `rubricRevision`. Older saved results retain
+their original digest and may omit the revision.
+
 Successful assessments checkpoint immediately in local SQLite. Retries reuse
 matching evidence, rubric, context hashes, and classification run count; failed/canceled runs keep completed
 work. Default-rubric assessments use `source: "rubric"` and a content hash; former
