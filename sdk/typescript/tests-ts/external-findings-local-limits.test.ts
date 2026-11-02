@@ -1,4 +1,5 @@
 import { expect, mock, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
@@ -387,6 +388,31 @@ test("Cloud measures caller fields at their retained numeric size", () => {
       validateExternalEvidenceJson(input, "cloud", padding + 1),
     ).toThrow("256 KiB");
   }
+});
+
+test("local numeric samples fit in a 64 MiB Node heap", async () => {
+  const bundle = await Bun.build({
+    entrypoints: [
+      join(import.meta.dir, "..", "src", "external-import-contract.ts"),
+    ],
+    target: "node",
+    format: "cjs",
+  });
+  expect(bundle.success).toBe(true);
+  const output = execFileSync(
+    "node",
+    ["--max-old-space-size=64", "--input-type=commonjs"],
+    {
+      input: `${await bundle.outputs[0]!.text()}
+      const samples = Array.from({length: 400_000}, (_, index) => index % 10);
+      const input = {title: "Samples", severity: "low", source_data: {samples}};
+      const result = module.exports.validateExternalEvidence(input, "local");
+      process.stdout.write(String(result.source_data.samples.length));
+    `,
+      encoding: "utf8",
+    },
+  );
+  expect(output).toBe("400000");
 });
 
 test("local evidence validation keeps structure, paths, links and numeric integrity", () => {

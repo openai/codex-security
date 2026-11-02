@@ -609,9 +609,13 @@ function checkedEvidenceJson<T>(
   if (target === "local") serialize();
   const ancestors: object[] = [];
   let customNumber = false;
-  const pending: [unknown, number, boolean][] = [[input, 0, false]];
+  const pending: unknown[] = [input];
+  const depths = target === "cloud" || failed ? [0] : undefined;
+  const indirectPaths = batch && [false];
   while (pending.length) {
-    const [value, depth, indirect] = pending.pop()!;
+    const value = pending.pop();
+    const depth = depths?.pop() ?? 0;
+    const indirect = indirectPaths?.pop() ?? false;
     if (target === "cloud" && depth > 20)
       throw new Error("Evidence exceeds the Cloud JSON depth limit of 20.");
     if (value !== null && typeof value === "object") {
@@ -628,15 +632,23 @@ function checkedEvidenceJson<T>(
           if (batch && indirect) indirectNumbers.add(value);
         }
       }
-      const ordinary = !batch || canCopyFields(value);
+      if (!batch) {
+        for (const child of Object.values(value)) {
+          pending.push(child);
+          depths?.push(depth + 1);
+        }
+        continue;
+      }
+      const ordinary = canCopyFields(value);
       for (const [key, child] of Object.entries(value)) {
-        if (batch && isNumberObject(child)) numberOwners.add(value);
-        if (batch && typeof child === "function" && !isNumberObject(value))
+        if (isNumberObject(child)) numberOwners.add(value);
+        if (typeof child === "function" && !isNumberObject(value))
           hasFunction = true;
-        const getter =
-          batch && Object.getOwnPropertyDescriptor(value, key)?.get;
+        const getter = Object.getOwnPropertyDescriptor(value, key)?.get;
         if (getter) (getters ??= new Set()).add(value);
-        pending.push([child, depth + 1, indirect || !ordinary || !!getter]);
+        pending.push(child);
+        depths?.push(depth + 1);
+        indirectPaths!.push(indirect || !ordinary || !!getter);
       }
     } else if (typeof value === "number") {
       requireJsonNumber(value, "Evidence");
