@@ -27,15 +27,15 @@ import {
 import {
   array,
   hasSarifExternalPropertyReferences,
-  indexSarifRules,
   normalizeRecords,
   readScannerJson,
   record,
   relativePath,
   requiredText,
-  sarifRunContextForResult,
+  sarifRunResults,
   stableId,
   text,
+  validateSarifRuleReference,
 } from "./scanner-import.js";
 
 export interface SemgrepImportOptions {
@@ -118,6 +118,16 @@ function sarifArtifactUri(
   return base === "%SRCROOT%" ? uri : decodeURIComponent(uri);
 }
 
+function primarySarifLocation(result: Record<string, unknown>) {
+  const locations = array(result["locations"] ?? [], "Semgrep locations");
+  if (locations.length !== 1)
+    throw new Error("Expected Semgrep's single primary result location.");
+  const location = record(locations[0], "Location");
+  const physical = record(location["physicalLocation"], "Physical location");
+  const artifact = record(physical["artifactLocation"], "Artifact location");
+  return { physical, artifact };
+}
+
 function sarifIdentity(
   value: unknown,
   runContext: Record<string, unknown>,
@@ -129,17 +139,8 @@ function sarifIdentity(
     ],
   );
   if (supplied) return stableId("semgrep", [supplied]);
-  const locations = array(result["locations"] ?? [], "Semgrep locations");
-  if (locations.length !== 1)
-    throw new Error("Expected Semgrep's single primary result location.");
-  const physical = record(
-    record(locations[0], "Location")["physicalLocation"],
-    "Physical location",
-  );
-  const uri = sarifArtifactUri(
-    record(physical["artifactLocation"], "Artifact location"),
-    runContext,
-  );
+  const { physical, artifact } = primarySarifLocation(result);
+  const uri = sarifArtifactUri(artifact, runContext);
   if (uri === null)
     throw new Error(
       "Cannot derive a Semgrep CE identity from an indexed or unresolved base-relative artifact URI.",
@@ -252,27 +253,11 @@ export function normalizeSemgrepSarif(
       )
         throw new Error("Semgrep SARIF contains scan error notifications.");
     }
-    const rules = array(driver["rules"] ?? [], "Semgrep rules").map((r) =>
-      record(r, "Semgrep rule"),
-    );
-    const rulesById = indexSarifRules(rules);
-    const { runs: _runs, ...documentContext } = document;
-    const { results: _results, tool: _tool, ...runContext } = run;
-    const { rules: _rules, ...driverContext } = driver;
-    const { driver: _driver, ...toolContext } = tool;
-    return array(run["results"] ?? [], "Semgrep results").map((result) => ({
-      result,
-      rulesById,
-      hasRules: rules.length > 0,
-      documentContext,
-      runContext,
-      driverContext,
-      toolContext,
-    }));
+    return sarifRunResults(document, run, tool, driver, "Semgrep");
   });
   return normalizeRecords(
     entries,
-    ({ result: value, rulesById, hasRules, ...context }) => {
+    ({ result: value, context }) => {
       const result = record(value, "Semgrep result");
       const properties = record(
         result["properties"] ?? {},
@@ -286,39 +271,14 @@ export function normalizeSemgrepSarif(
           "This adapter supports Semgrep SAST; Supply Chain reports need separate qualification.",
         );
       const ruleId = requiredText(result["ruleId"], "Semgrep ruleId");
-      const selectedRule = rulesById.get(ruleId);
-      if (selectedRule === null || (hasRules && selectedRule === undefined))
+      const selectedRule = context.rulesById.get(ruleId) ?? undefined;
+      if (context.rulesById.size > 0 && !selectedRule)
         throw new Error(
           "Semgrep result must reference exactly one rule in its run.",
         );
       const rule = selectedRule?.rule;
-      const ruleIndex = selectedRule?.index;
-      if (
-        result["ruleIndex"] !== undefined &&
-        result["ruleIndex"] !== ruleIndex
-      )
-        throw new Error("Semgrep ruleIndex and ruleId disagree.");
-      if (result["rule"] !== undefined) {
-        const ref = record(result["rule"], "Semgrep rule reference");
-        if (
-          ref["toolComponent"] !== undefined ||
-          (ref["id"] !== undefined && ref["id"] !== ruleId) ||
-          (ref["index"] !== undefined && ref["index"] !== ruleIndex) ||
-          (ref["guid"] !== undefined && ref["guid"] !== rule?.["guid"])
-        )
-          throw new Error("Inconsistent or external Semgrep rule reference.");
-      }
-      const locations = array(result["locations"] ?? [], "Semgrep locations");
-      if (locations.length !== 1)
-        throw new Error("Expected Semgrep's single primary result location.");
-      const physical = record(
-        record(locations[0], "Location")["physicalLocation"],
-        "Physical location",
-      );
-      const artifact = record(
-        physical["artifactLocation"],
-        "Artifact location",
-      );
+      validateSarifRuleReference(result, ruleId, selectedRule, "Semgrep");
+      const { physical, artifact } = primarySarifLocation(result);
       const rawPath = sarifArtifactUri(artifact, context.runContext);
       const region = record(physical["region"], "Semgrep region");
       const line = position(region["startLine"], "Start line");
@@ -380,24 +340,12 @@ export function normalizeSemgrepSarif(
                 ? "suppressed"
                 : null,
           },
-          source_data: structuredClone({
-            ...context,
-            runContext: sarifRunContextForResult(
-              context.runContext,
-              result,
-              rule,
-              context.driverContext,
-              context.toolContext,
-              context.documentContext,
-            ),
-            ...(rule ? { rule } : {}),
-            result,
-          }),
+          source_data: context.sourceData(result, rule),
         },
         target,
       );
     },
-    ({ result, runContext }) => sarifIdentity(result, runContext),
+    ({ result, context }) => sarifIdentity(result, context.runContext),
     target,
   );
 }
