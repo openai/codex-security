@@ -822,14 +822,33 @@ async function preparePublicationInput(
           legacyKey === historicalKey &&
           legacyKey !== legacyIdentityKey &&
           prior?.inputProjection &&
-          prior.inputProjection.inputDigest !== legacyInputDigest &&
-          (prior.inputProjection.identityFormat === 2 ||
-            (prior.inputProjection.inputDigest ===
-              hash("sha256", wireJson(legacyParsed.findings)) &&
-              prior.inputProjection.savedEvidenceDigest ===
-                hash("sha256", wireJson(submissionFindings(prior.requests)))))
-        )
-          return;
+          prior.inputProjection.inputDigest !== legacyInputDigest
+        ) {
+          const projection = prior.inputProjection;
+          const rows = legacyParsed.findings;
+          if (
+            projection.identityFormat === 2 ||
+            (projection.inputDigest === hash("sha256", wireJson(rows)) &&
+              projection.savedEvidenceDigest ===
+                hash("sha256", wireJson(submissionFindings(prior.requests))))
+          )
+            return;
+          // The released SDK hashed report-free rows as an array and boxed scores as {}.
+          if (
+            hasBoxedScalars &&
+            legacyParsed.report !== undefined &&
+            legacyKey ===
+              hash("sha256", canonicalJson([...checkpointIdentity, rows])) &&
+            projection.inputDigest === hash("sha256", canonicalJson(rows)) &&
+            projection.savedEvidenceDigest ===
+              hash("sha256", canonicalJson(rows.map(wireFinding))) &&
+            sameFindingSelection(
+              submissionFindings(readSaved(prior).requests),
+              rows,
+            )
+          )
+            return;
+        }
         const content = validateSaved(
           serialized === undefined ? JSON.parse(captured) : prior,
           true,

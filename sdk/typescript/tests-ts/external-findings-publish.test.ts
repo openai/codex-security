@@ -4286,6 +4286,61 @@ async function oldScoreApproval(field: string, stageApproval = true) {
   return { f, prepare, directory, path, filename, request, saved };
 }
 
+test.each([
+  { first: "reported", reportedScore: 2.5 },
+  { first: "report-free", reportedScore: 2.5 },
+  { first: "reported", reportedScore: 7 },
+])(
+  "distinct released boxed approvals preserve both selections when $first resumes first (reported score $reportedScore)",
+  async ({ first, reportedScore }) => {
+    const { f, prepare, directory, path, request, saved } =
+      await oldScoreApproval("evidence");
+    // The released SDK used this report-bound digest for either boxed score.
+    const reportedPath = join(
+      directory,
+      "ad28704f08feeeaf1adb30d1010204b8ac942fa0c215c5b4eabb4990d338f23a.pending.json",
+    );
+    const recorded = JSON.parse(saved);
+    const reportedRequest = structuredClone(request);
+    reportedRequest.request_id =
+      reportedScore === 7
+        ? "fdfa27bc-13f6-4c83-8abc-fc3619e3b512"
+        : "ec3a5d47-b29e-493a-90ea-effa70148ef4";
+    reportedRequest.items[0]!.evidence.source_data.score = reportedScore;
+    recorded.requests = [reportedRequest];
+    recorded.inputProjection.inputDigest =
+      "53cc56f227da631bd73c1301c623b9d8c55aca65e03feb324808ae9c886ed1da";
+    await writeFile(reportedPath, JSON.stringify(recorded), { mode: 0o600 });
+
+    const reported = {
+      report: { version: "1" },
+      score: reportedScore,
+      path: reportedPath,
+      request: reportedRequest,
+    };
+    const plain = { report: undefined, score: 2.5, path, request };
+    const order = first === "reported" ? [reported, plain] : [plain, reported];
+    f.state.throttle = true;
+    for (const selection of order) {
+      const sibling = selection === reported ? plain : reported;
+      const siblingBytes = await readFile(sibling.path, "utf8");
+      const prepared = await prepare(
+        new Number(selection.score),
+        selection.report,
+      );
+      expect(prepared.preview.resumed).toBe(true);
+      expect(prepared.preview.requests[0]!.request_id).toBe(
+        selection.request.request_id,
+      );
+      await expect(prepared.publish()).rejects.toThrow("Slow down");
+      expect(await readFile(sibling.path, "utf8")).toBe(siblingBytes);
+    }
+    expect(f.posts).toEqual(
+      order.map((selection) => JSON.stringify(selection.request)),
+    );
+  },
+);
+
 test.each(["released", "fresh"])(
   "a primitive retry uses the lookup for a %s boxed approval without reading unrelated checkpoints",
   async (kind) => {
