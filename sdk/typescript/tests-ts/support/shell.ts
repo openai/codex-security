@@ -7,8 +7,15 @@ export function bashCommand(): string {
   if (process.platform !== "win32") return "bash";
   const git = Bun.which("git");
   if (git === null) return "bash";
-  const gitBash = join(dirname(dirname(git)), "bin", "bash.exe");
-  return existsSync(gitBash) ? gitBash : "bash";
+  const parent = dirname(dirname(git));
+  const nestedGit =
+    /[\\/](?:mingw32|mingw64|ucrt64|clangarm64)[\\/]bin[\\/]git\.exe$/iu;
+  const roots = nestedGit.test(git) ? [parent, dirname(parent)] : [parent];
+  for (const root of roots) {
+    const gitBash = join(root, "bin", "bash.exe");
+    if (existsSync(gitBash)) return gitBash;
+  }
+  return "bash";
 }
 
 export function workflowBashCommand(): string {
