@@ -111,6 +111,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         ? undefined
         : resolve(dirname(request.promptPath), `limits-${randomUUID()}.toml`);
     let gitEnvironmentDirectory: string | undefined;
+    let runError: Error | undefined;
     try {
       const parentSandbox = this.modelSettings.parentSandbox;
       if (!parentSandbox) {
@@ -120,7 +121,8 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       }
       const originalCwd = process.cwd();
       let childEnv = await snapshotWorkerEnvironment();
-      Object.assign(childEnv, gitConfigurationEnvironment(childEnv));
+      const inheritedGit = gitConfigurationEnvironment(childEnv);
+      Object.assign(childEnv, inheritedGit);
       // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
       const runtimeSettings = await (this.runtimeSettings ??=
         workerRuntimeSettings(childEnv));
@@ -137,11 +139,19 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const repository =
         this.modelSettings.artifactContext?.repoRoot ??
         request.workingDirectory;
+      const workerGit = gitConfigurationEnvironment({
+        ...inheritedGit,
+        ...runtimeSettings.environment,
+      });
+      const git =
+        Object.keys(workerGit).length > 0
+          ? trustedGitExecutable(repository, childEnv)
+          : undefined;
       childEnv = Object.fromEntries(
         Object.entries(
           await gitInspectionEnvironment(
             childEnv,
-            trustedGitExecutable(repository, childEnv),
+            git,
             repository,
             request.signal,
           ),
@@ -153,31 +163,35 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         )
           delete childEnv[name];
       }
-      const codexHome = childEnv.CODEX_HOME || join(homedir(), ".codex");
-      createPrivateDirectory(codexHome);
-      gitEnvironmentDirectory = await fs.mkdtemp(
-        join(codexHome, "codex-security-git-"),
-      );
-      if ((process.umask() & 0o700) !== 0)
-        await fs.chmod(gitEnvironmentDirectory, 0o700);
-      gitEnvironmentDirectory = await fs.realpath(gitEnvironmentDirectory);
-      const gitEnvironmentFile = join(
-        gitEnvironmentDirectory,
-        "environment.json",
-      );
-      await writePrivateFile(
-        gitEnvironmentFile,
-        JSON.stringify(gitConfigurationEnvironment(childEnv)),
-      );
-      if ((process.umask() & 0o600) !== 0)
-        await fs.chmod(gitEnvironmentFile, 0o600);
-      childEnv.CODEX_SECURITY_GIT_ENVIRONMENT_FILE = gitEnvironmentFile;
+      const literalFilesystemDenies = [
+        ...(parentSandbox.literalFilesystemDenies ?? []),
+      ];
+      if (this.modelSettings.artifactContext) {
+        // Only the compact artifact server needs a private Git environment file.
+        const codexHome = childEnv.CODEX_HOME || join(homedir(), ".codex");
+        createPrivateDirectory(codexHome);
+        gitEnvironmentDirectory = await fs.mkdtemp(
+          join(codexHome, "codex-security-git-"),
+        );
+        if ((process.umask() & 0o700) !== 0)
+          await fs.chmod(gitEnvironmentDirectory, 0o700);
+        gitEnvironmentDirectory = await fs.realpath(gitEnvironmentDirectory);
+        const gitEnvironmentFile = join(
+          gitEnvironmentDirectory,
+          "environment.json",
+        );
+        await writePrivateFile(
+          gitEnvironmentFile,
+          JSON.stringify(gitConfigurationEnvironment(childEnv)),
+        );
+        if ((process.umask() & 0o600) !== 0)
+          await fs.chmod(gitEnvironmentFile, 0o600);
+        childEnv.CODEX_SECURITY_GIT_ENVIRONMENT_FILE = gitEnvironmentFile;
+        literalFilesystemDenies.push(gitEnvironmentDirectory);
+      }
       const workerProfile = workerPermissionProfile({
         ...parentSandbox,
-        literalFilesystemDenies: [
-          ...(parentSandbox.literalFilesystemDenies ?? []),
-          gitEnvironmentDirectory,
-        ],
+        literalFilesystemDenies,
       });
       if (deepConfigFile !== undefined) {
         const config = this.modelSettings.deepScanConfig!;
@@ -388,14 +402,33 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         request.signal.removeEventListener("abort", forwardAbort);
       }
     } catch (error) {
-      throw classifyCodexWorkerError(error);
+      runError = classifyCodexWorkerError(error);
+      throw runError;
     } finally {
-      if (includePathsFile !== undefined)
-        await fs.rm(includePathsFile, { force: true });
-      if (deepConfigFile !== undefined)
-        await fs.rm(deepConfigFile, { force: true });
-      if (gitEnvironmentDirectory !== undefined)
-        await fs.rm(gitEnvironmentDirectory, { recursive: true, force: true });
+      const cleanupErrors: unknown[] = [];
+      for (const path of [
+        includePathsFile,
+        deepConfigFile,
+        gitEnvironmentDirectory,
+      ]) {
+        if (path === undefined) continue;
+        try {
+          await fs.rm(path, {
+            force: true,
+            recursive: path === gitEnvironmentDirectory,
+          });
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+      }
+      if (cleanupErrors.length > 0) {
+        if (runError) cleanupErrors.unshift(runError);
+        if (cleanupErrors.length === 1) throw cleanupErrors[0];
+        throw new AggregateError(
+          cleanupErrors,
+          "Deep Scan worker cleanup failed.",
+        );
+      }
     }
   }
 

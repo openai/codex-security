@@ -76,7 +76,7 @@ test("local diff classifies binary files before Git normalization", async () => 
     );
     for (const command of ["generate-in-scope-files", "make-diff-rank-input"]) {
       const out = join(root, command);
-      assert.equal(
+      assert.deepEqual(
         await generateInventory(command, {
           repo,
           out,
@@ -84,7 +84,7 @@ test("local diff classifies binary files before Git normalization", async () => 
           head: "HEAD",
           mode: "local-patch",
         }),
-        names.length,
+        { count: names.length, output: out },
       );
       const rows = (await readFile(out, "utf8")).trim().split("\n");
       assert.deepEqual(

@@ -1056,6 +1056,7 @@ async function testSdkInvocationAndThreadCapture() {
       "mcp_servers.codex-security.enabled": false,
     });
     assertReadOnlyWorkerPolicy(invocation.argv);
+    assert.equal(invocation.gitEnvironmentFile, undefined);
     assert.deepEqual(
       JSON.parse(
         JSON.stringify(
@@ -1064,10 +1065,7 @@ async function testSdkInvocationAndThreadCapture() {
         ),
       ),
       {
-        codex_security_deep_scan_worker: withGitEnvironmentDeny(
-          deniedWorkerPermissionProfile,
-          invocation.gitEnvironmentFile,
-        ),
+        codex_security_deep_scan_worker: deniedWorkerPermissionProfile,
       },
     );
     const preflight = await readJson(fixture.preflightMarkerPath);

@@ -146,6 +146,14 @@ export async function testWorkerGitConfiguration({
         "deny",
       );
     }
+    // withWorkerFixture selects a JavaScript file; Windows requires a native executable.
+    const fixtureCli = process.env.CODEX_CLI_PATH;
+    if (
+      fixtureCli &&
+      (command === fixtureCli || command === path.toNamespacedPath(fixtureCli))
+    ) {
+      return originalSpawn(process.execPath, [fixtureCli, ...args], options);
+    }
     return originalSpawn(command, args, options);
   }) as typeof childProcess.spawn;
   syncBuiltinESMExports();

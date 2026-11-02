@@ -82,7 +82,7 @@ test("local diff batches normalization across selected text files", async () => 
     syncBuiltinESMExports();
     const before = await readFile(join(f.repo, ".git/index"));
     const out = join(f.root, "inventory");
-    assert.equal(
+    assert.deepEqual(
       await generateInventory("generate-in-scope-files", {
         repo: f.repo,
         out,
@@ -90,7 +90,7 @@ test("local diff batches normalization across selected text files", async () => 
         head: "HEAD",
         mode: "local-patch",
       }),
-      expected.length,
+      { count: expected.length, output: out },
     );
     assert.deepEqual(
       (await readFile(out, "utf8")).trim().split("\n").sort(),
@@ -277,7 +277,7 @@ for (const indexKind of ["symlink", "unmerged"])
           }
           await writeFile(source, modified ? "changed\n" : "before\n");
           const out = join(f.root, "inventory");
-          assert.equal(
+          assert.deepEqual(
             await generateInventory("generate-in-scope-files", {
               repo: f.repo,
               out,
@@ -285,7 +285,7 @@ for (const indexKind of ["symlink", "unmerged"])
               head: "HEAD",
               mode: "local-patch",
             }),
-            Number(modified),
+            { count: Number(modified), output: out },
           );
         } finally {
           await f.cleanup();

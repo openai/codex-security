@@ -65,9 +65,7 @@ test.each(["standard", "deep"] as const)(
   async (mode) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
-    const codexHome = join(root, "codex-home");
     await mkdir(repository);
-    await mkdir(codexHome);
     git(repository, "init", "-q");
     await writeFile(join(repository, "old.py"), "value = 1\n");
     git(repository, "add", ".");
@@ -165,7 +163,9 @@ test.each(["standard", "deep"] as const)(
     await Promise.all(
       cases.map(async (scenario, index) => {
         const scanDir = join(root, `scan-${index}`);
+        const codexHome = join(root, `codex-home-${index}`);
         await mkdir(scanDir, { mode: 0o700 });
+        await mkdir(codexHome, { mode: 0o700 });
         const environment = {
           PATH: process.env["PATH"],
           HOME: process.env["HOME"],

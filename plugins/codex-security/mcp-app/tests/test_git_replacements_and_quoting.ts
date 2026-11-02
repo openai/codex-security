@@ -144,7 +144,7 @@ for (const view of [
         "make-diff-rank-input",
       ]) {
         const out = join(root, command);
-        assert.equal(
+        assert.deepEqual(
           await generateInventory(command, {
             repo,
             out,
@@ -152,7 +152,7 @@ for (const view of [
             head: "HEAD",
             mode: "local-patch",
           }),
-          Number(expected),
+          { count: Number(expected), output: out },
         );
         const rows = (await readFile(out, "utf8"))
           .trim()

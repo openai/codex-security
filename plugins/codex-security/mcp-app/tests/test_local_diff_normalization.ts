@@ -80,7 +80,7 @@ for (const normalization of ["text_auto", "autocrlf", "changed_filter"])
         "make-diff-rank-input",
       ]) {
         const out = join(root, command);
-        assert.equal(
+        assert.deepEqual(
           await generateInventory(command, {
             repo,
             out,
@@ -88,7 +88,7 @@ for (const normalization of ["text_auto", "autocrlf", "changed_filter"])
             head: "HEAD",
             mode: "local-patch",
           }),
-          expected.length,
+          { count: expected.length, output: out },
         );
         const contents = (await readFile(out, "utf8")).trim();
         const rows = contents ? contents.split("\n") : [];
@@ -172,7 +172,7 @@ test(
       }) as typeof childProcess.spawn;
       syncBuiltinESMExports();
       const out = join(root, "inventory");
-      assert.equal(
+      assert.deepEqual(
         await generateInventory("generate-in-scope-files", {
           repo,
           out,
@@ -180,7 +180,7 @@ test(
           head: "HEAD",
           mode: "local-patch",
         }),
-        1,
+        { count: 1, output: out },
       );
       assert.equal(await readFile(out, "utf8"), "large.txt\n");
       assert.ok(statuses.length > 0);
