@@ -9,6 +9,9 @@ overrides:
 
 packageExtensionsChecksum: sha256-jY3VCk8SNzNH6nheUuuxEhQHsFHtrV0hJuz7o7OW5e8=
 
+patchedDependencies:
+  '@isaacs/nonrecursive-glob-match@1.0.3': 511378784ba43893dac7a2014f2d918f105f6adf66c93bb730940279ad00c52f
+
 importers:
 
   .:
@@ -2100,7 +2103,7 @@ snapshots:
     optionalDependencies:
       '@types/node': 26.6.5
 
-  '@isaacs/nonrecursive-glob-match@1.0.3': {}
+  '@isaacs/nonrecursive-glob-match@1.0.3(patch_hash=511378784ba43893dac7a2014f2d918f105f6adf66c93bb730940279ad00c52f)': {}
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
@@ -2774,7 +2777,7 @@ snapshots:
 
   minimatch@11.0.1:
     dependencies:
-      '@isaacs/nonrecursive-glob-match': 1.0.3
+      '@isaacs/nonrecursive-glob-match': 1.0.3(patch_hash=511378784ba43893dac7a2014f2d918f105f6adf66c93bb730940279ad00c52f)
       brace-expansion: 5.0.12
 
   minimist@1.2.8: {}

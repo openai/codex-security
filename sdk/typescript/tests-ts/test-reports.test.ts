@@ -335,6 +335,28 @@ ${testcase("&#97; &#38; &#x22; &#39; &#60; &#62;")}
     }
   });
 
+  test("matches literal carets and discarded ranges in report filename classes", async () => {
+    const fixture = await fixtures();
+    const caret = testcase("caret");
+    const letter = testcase("letter");
+    const baseline = await fixture.report("baseline.xml", [caret, letter]);
+    const unicode = testcase("unicode");
+    const caretPath = await fixture.report("shard-^.xml", [caret]);
+    await fixture.report("shard-a.xml", [letter]);
+    await fixture.report("shard-😀.xml", [unicode]);
+    await fixture.report("shard-x.txt", [testcase("wrong extension")]);
+
+    const all = await fixture.report("all.xml", [caret, letter, unicode]);
+    for (const [expected, pattern] of [
+      [baseline, "shard-[^a].xml"],
+      [caretPath, "shard-[z-a^].xml"],
+      [all, "shard-[!😀-^].xml"],
+    ] as const) {
+      const result = compare(expected, join(fixture.root, pattern));
+      expect(result.status, result.stderr).toBe(0);
+    }
+  });
+
   test("detects error status and nested summary failures with failure overriding skipped", async () => {
     const fixture = await fixtures();
     const baseline = await fixture.report("baseline.xml", [
