@@ -1228,6 +1228,12 @@ manual repair even when older receipts or scan artifacts remain: those do not
 establish which later work was lost. Use the preserved backup to repair the ledger manually
 before retrying recovery; missing history is not classified as never started.
 
+Repaired scan receipts retain their attempt numbers and a recovery-required
+state until recovery succeeds. If repair is interrupted after replacing the
+ledger, ordinary resume requires `--recover` instead of starting from attempt 1.
+If the saved outcome cannot be established, restore a complete backup containing
+all committed attempts or start a separate campaign with a new `--output-dir`.
+
 New attempts use `recovery-checkouts/<id>/attempt-<n>`. Recovery defaults to four
 workers and one recovery/new attempt per repository. A resume connection failure
 stops only that repository for this invocation. Failed recovery checkouts remain;

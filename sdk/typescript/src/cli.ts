@@ -212,6 +212,7 @@ import {
   CodexSecurityError,
   AuthenticationRequiredError,
   ConfigurationError,
+  ContractValidationError,
   InvalidTargetError,
   IncompleteScanError,
   LocalPluginBootstrapError,
@@ -5699,11 +5700,19 @@ export async function main(
                     if (scan === undefined) return undefined;
                     const status = (scan["progress"] as JsonObject)["status"];
                     if (status === "complete") {
-                      const contract = await loadContract(scanDir, {
-                        pluginRoot: await bundledPluginRoot(),
-                        expectedScanId: scan.scanId,
-                        signal: controller.signal,
-                      });
+                      let contract;
+                      try {
+                        contract = await loadContract(scanDir, {
+                          pluginRoot: await bundledPluginRoot(),
+                          expectedScanId: scan.scanId,
+                          signal: controller.signal,
+                        });
+                      } catch (error) {
+                        controller.signal.throwIfAborted();
+                        if (error instanceof ContractValidationError)
+                          return undefined;
+                        throw error;
+                      }
                       return {
                         manifest: contract.manifest,
                         findings: contract.findings,

@@ -1948,7 +1948,7 @@ describe("multiscan", () => {
       expect(await readFile(initial.resultsPath)).toEqual(damaged);
       expect(run).toHaveBeenCalledTimes(1);
 
-      const recoverScan = mock(async () => undefined);
+      const recoverScan = mock(async () => fakeResult());
       const identifiable =
         typeof corruption !== "string" &&
         !["non-string ID", "invalid attempt"].includes(_name);
@@ -1969,10 +1969,24 @@ describe("multiscan", () => {
         return;
       }
       const recovered = await runMultiscan({ ...configured, recoverScan });
-      expect(recovered).toMatchObject({ completed: 1, failed: 0, skipped: 1 });
+      const reconciled =
+        _name === "invalid status" || _name === "invalid output path";
+      expect(recovered).toMatchObject({
+        completed: 1,
+        failed: 0,
+        skipped: reconciled ? 0 : 1,
+      });
       expect(run).toHaveBeenCalledTimes(1);
-      expect(recoverScan).not.toHaveBeenCalled();
-      expect(await readFile(initial.resultsPath)).toEqual(original);
+      expect(recoverScan).toHaveBeenCalledTimes(reconciled ? 1 : 0);
+      if (reconciled) {
+        expect(
+          (await readFile(initial.resultsPath)).subarray(0, original.length),
+        ).toEqual(original);
+        expect((await results(initial.resultsPath)).at(-1)).toMatchObject({
+          attempt: 1,
+          status: "completed",
+        });
+      } else expect(await readFile(initial.resultsPath)).toEqual(original);
       const backups = (await readdir(paths.output)).filter((name) =>
         name.startsWith("results.corrupt-"),
       );
@@ -2322,19 +2336,15 @@ describe("multiscan", () => {
         expect(run).toHaveBeenCalledTimes(
           scenario === "fresh" || scenario === "mixed saved scan" ? 2 : 1,
         );
-        const retained = Buffer.from(
-          lines
-            .flatMap((line, index) => {
-              if (!rejected.includes(index)) return [line];
-              if (rows[index]!["knowledgeBaseFailure"] !== true) return [];
-              const { warnings: _warnings, ...receipt } = rows[index]!;
-              return [JSON.stringify(receipt)];
-            })
-            .join("\n") + "\n",
-        );
-        expect(
-          (await readFile(initial.resultsPath)).subarray(0, retained.length),
-        ).toEqual(retained);
+        const repairedText = await readFile(initial.resultsPath, "utf8");
+        for (const [index, line] of lines.entries())
+          if (!rejected.includes(index))
+            expect(repairedText).toContain(line + "\n");
+        const repairedRows = await results(initial.resultsPath);
+        for (const row of rows)
+          expect(
+            repairedRows.some((saved) => saved["attempt"] === row["attempt"]),
+          ).toBe(true);
         expect((await results(initial.resultsPath)).at(-1)).toMatchObject({
           attempt:
             scenario === "fresh" ? 4 : scenario === "mixed saved scan" ? 2 : 1,
@@ -2485,7 +2495,9 @@ describe("multiscan", () => {
             signal: controller.signal,
           }),
         ).rejects.toBe(failure);
-        expect(await readFile(initial.resultsPath, "utf8")).toBe("");
+        expect(await results(initial.resultsPath)).toMatchObject([
+          { attempt: 1, recoveryRequired: "completed" },
+        ]);
       } finally {
         renaming.mockRestore();
       }

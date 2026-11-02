@@ -19,11 +19,11 @@ import {
 } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 import Papa from "papaparse";
 import type { CodexSecurity } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
-import { ContractSchemaError, loadContract } from "./contract.js";
+import { ContractSchemaError, loadContract, readScanFile } from "./contract.js";
 import type { ScanCost } from "./cost.js";
 import { deepScanOptions } from "./deep-config.js";
 import { readThreatModelPath } from "./artifact-export.js";
@@ -77,6 +77,7 @@ interface MultiscanReceipt extends MultiscanTask {
   policyFailed?: boolean;
   knowledgeBaseFailure?: true;
   cleanupPending?: "checkout" | "recovery-checkout";
+  recoveryRequired?: "completed" | "scan" | "unknown";
 }
 
 interface MultiscanHistory {
@@ -299,6 +300,14 @@ async function runCampaign(
   for (const task of tasks) {
     const history = receipts.get(task.id.toLowerCase());
     const receipt = history?.scan;
+    if (receipt?.recoveryRequired !== undefined) {
+      if (options.recoverScan === undefined)
+        throw new Error(
+          `Campaign receipt for ${task.id} requires --recover before ordinary resume. Restore a complete backup of all committed attempts or start a separate campaign with a new --output-dir if recovery cannot establish its saved state.`,
+        );
+      pending.push(task);
+      continue;
+    }
     if (
       receipt === undefined ||
       knowledgeByMode[task.mode]?.failure !== undefined
@@ -435,24 +444,6 @@ async function runCampaign(
         const latest = await latestArtifactAttempt(artifactRoot);
         maxAttempt = Math.max(maxAttempt, latest);
         recoveryAttempt = Math.max(recoveryAttempt, latest);
-        if (recoveryAttempt > 0) {
-          const candidate = join(artifactRoot, `attempt-${recoveryAttempt}`);
-          const existing = await lstat(candidate).catch(undefinedIfMissingFile);
-          if (existing !== undefined && !rejectedCompleted.has(candidate)) {
-            await ensureOutputDirectory(candidate);
-            if (await hasCompletedManifest(candidate, options.signal)) {
-              if (
-                !(await hasCompletedContract(
-                  candidate,
-                  await resumePluginRoot(),
-                  options.signal,
-                )) ||
-                !(await hasArtifacts(candidate))
-              )
-                rejectedCompleted.add(candidate);
-            }
-          }
-        }
       }
       for (let retry = 0; retry < options.maxAttempts; retry += 1) {
         options.signal?.throwIfAborted();
@@ -487,34 +478,56 @@ async function runCampaign(
             const existing = await lstat(scanDir).catch(undefinedIfMissingFile);
             if (existing !== undefined) {
               await ensureOutputDirectory(scanDir);
-              const retainedCheckout = join(
-                output,
-                "recovery-checkouts",
-                task.id,
-                `attempt-${attempt}`,
-              );
-              const retained = await lstat(retainedCheckout).catch(
-                (error: NodeJS.ErrnoException) => {
-                  if (error.code !== "ENOENT") throw error;
-                  return undefined;
-                },
-              );
-              if (retained !== undefined) protectedRoot = retainedCheckout;
               attemptedResume = true;
-              notifyProgress(options, {
-                repository: task.id,
-                attempt,
-                status: "started",
-              });
-              if (knowledge?.failure !== undefined) {
-                knowledgeBaseFailure = true;
-                throw knowledge.failure.error;
+              const savedState = await savedManifestState(
+                scanDir,
+                options.signal,
+              );
+              const knownCompleted =
+                (history?.scan?.attempt === attempt &&
+                  history.scan.recoveryRequired === "completed") ||
+                (savedState.status === "completed" && savedState.sealed);
+              if (
+                knownCompleted &&
+                (!(await hasCompletedContract(
+                  scanDir,
+                  await resumePluginRoot(),
+                  options.signal,
+                )) ||
+                  !(await hasArtifacts(scanDir)))
+              )
+                rejectedCompleted.add(scanDir);
+              if (rejectedCompleted.has(scanDir)) attemptedResume = false;
+              if (!rejectedCompleted.has(scanDir)) {
+                const retainedCheckout = join(
+                  output,
+                  "recovery-checkouts",
+                  task.id,
+                  `attempt-${attempt}`,
+                );
+                const retained = await lstat(retainedCheckout).catch(
+                  (error: NodeJS.ErrnoException) => {
+                    if (error.code !== "ENOENT") throw error;
+                    return undefined;
+                  },
+                );
+                if (retained !== undefined) protectedRoot = retainedCheckout;
+                attemptedResume = true;
+                notifyProgress(options, {
+                  repository: task.id,
+                  attempt,
+                  status: "started",
+                });
+                if (knowledge?.failure !== undefined) {
+                  knowledgeBaseFailure = true;
+                  throw knowledge.failure.error;
+                }
+                result = await options.recoverScan(scanDir, {
+                  ...options,
+                  knowledgeBaseSnapshot: knowledge?.snapshot,
+                });
+                attemptedResume = result !== undefined;
               }
-              result = await options.recoverScan(scanDir, {
-                ...options,
-                knowledgeBaseSnapshot: knowledge?.snapshot,
-              });
-              attemptedResume = result !== undefined;
             }
           }
           const scanSettings = options.scanOptionsByMode?.[task.mode];
@@ -616,6 +629,7 @@ async function runCampaign(
             throw new Error(`Multiscan scan ${result.manifest.scan.status}.`);
         } catch (error) {
           if (options.signal?.aborted === true) options.signal.throwIfAborted();
+          if (error instanceof ContractSchemaError) throw error;
           if (error instanceof ScanCostLimitExceededError) {
             cost = error.cost;
             exhaustedBudget = true;
@@ -659,6 +673,11 @@ async function runCampaign(
               ? { cleanupPending: "checkout" }
               : {}),
           ...(knowledgeBaseFailure ? { knowledgeBaseFailure: true } : {}),
+          ...(failure !== undefined &&
+          history?.scan?.attempt === attempt &&
+          history.scan.recoveryRequired !== undefined
+            ? { recoveryRequired: history.scan.recoveryRequired }
+            : {}),
           ...(runWarnings.length === 0 ? {} : { warnings: runWarnings }),
           policyFailed: attemptPolicyFailed,
         };
@@ -1084,7 +1103,8 @@ async function readReceipts(
     throw error;
   }
   const committedEnd = contents.lastIndexOf(0x0a) + 1;
-  const retained: Buffer[] = [];
+  const retained: Array<Buffer | MultiscanReceipt> = [];
+  const rows: MultiscanReceipt[] = [];
   const tasksById = new Map(tasks.map((task) => [task.id.toLowerCase(), task]));
   const rejectedAttempts = new Map<string, number | undefined>();
   const rejectedKnowledgeAttempts = new Map<string, number | undefined>();
@@ -1126,6 +1146,7 @@ async function readReceipts(
           scan: previous?.scan,
         });
         retained.push(Buffer.from(`${JSON.stringify(knowledge)}\n`));
+        rows.push(knowledge);
         repaired = true;
         continue;
       }
@@ -1150,6 +1171,57 @@ async function readReceipts(
           id,
           attempt === undefined ? previous : Math.max(previous ?? 0, attempt),
         );
+        if (attempt !== undefined && isRecord(value)) {
+          const task = tasksById.get(id)!;
+          const prior = receipts.get(id)?.scan;
+          if (
+            prior?.status === "completed" &&
+            value["status"] === "completed"
+          ) {
+            const { warnings: _damagedWarnings, ...candidateFields } = value;
+            const { warnings: _retainedWarnings, ...retainedFields } = prior;
+            if (isDeepStrictEqual(candidateFields, retainedFields)) {
+              repaired = true;
+              continue;
+            }
+          }
+          const completed =
+            value["status"] === "completed" ||
+            value["status"] === "completed_with_incomplete_coverage" ||
+            value["error"] === "Multiscan repository coverage is incomplete.";
+          const marker = {
+            ...value,
+            ...task,
+            attempt,
+            status: "failed",
+            outputDir: join(
+              dirname(path),
+              "artifacts",
+              task.id,
+              `attempt-${attempt}`,
+            ),
+            warnings:
+              Array.isArray(value["warnings"]) &&
+              value["warnings"].every((item) => typeof item === "string")
+                ? value["warnings"]
+                : undefined,
+            policyFailed:
+              typeof value["policyFailed"] === "boolean"
+                ? value["policyFailed"]
+                : undefined,
+            knowledgeBaseFailure: undefined,
+            cleanupPending: undefined,
+            recoveryRequired: isRecoveryState(value["recoveryRequired"])
+              ? value["recoveryRequired"]
+              : completed
+                ? "completed"
+                : value["status"] === "failed"
+                  ? "scan"
+                  : "unknown",
+          } as unknown as MultiscanReceipt;
+          retained.push(marker);
+          rows.push(marker);
+        }
       } else {
         unidentifiedReceipt = true;
       }
@@ -1157,6 +1229,7 @@ async function readReceipts(
       continue;
     }
     retained.push(line);
+    rows.push(receipt);
     const id = receipt.id.toLowerCase();
     const previous = receipts.get(id);
     receipts.set(id, {
@@ -1218,13 +1291,57 @@ async function readReceipts(
         `Cannot repair ${path}: unresolved attempted history for ${task.id}; ${missing}. The active ledger is unchanged. Repair the ledger manually using the original bytes in ${backup} before retrying recovery.`,
       );
     }
+    const repairedHistory = new Map<string, MultiscanHistory>();
+    for (const row of rows) {
+      const id = row.id.toLowerCase();
+      const previous = repairedHistory.get(id);
+      repairedHistory.set(id, {
+        maxAttempt: Math.max(previous?.maxAttempt ?? 0, row.attempt),
+        scan: row.knowledgeBaseFailure ? previous?.scan : row,
+      });
+    }
+    for (const history of repairedHistory.values()) {
+      const marker = history.scan;
+      if (marker?.recoveryRequired !== "unknown") continue;
+      const existing = await lstat(marker.outputDir).catch(
+        undefinedIfMissingFile,
+      );
+      if (existing !== undefined) await ensureOutputDirectory(marker.outputDir);
+      const state =
+        existing === undefined
+          ? { status: null, sealed: false }
+          : await savedManifestState(marker.outputDir, signal);
+      if (state.status === "completed" && state.sealed)
+        marker.recoveryRequired = "completed";
+      else if (
+        state.status === "running" ||
+        state.status === "failed" ||
+        (state.status === "completed" && !state.sealed)
+      )
+        marker.recoveryRequired = "scan";
+      else
+        throw new Error(
+          `Cannot safely repair ${path}: the saved outcome for ${marker.id} is indeterminate. The active ledger is unchanged. Restore a complete backup of all committed attempts, including the original ledger in ${backup}, or start a separate campaign with a new --output-dir.`,
+        );
+    }
     try {
-      await writeReceiptRepair(replacement, Buffer.concat(retained));
+      await writeReceiptRepair(
+        replacement,
+        Buffer.concat(
+          retained.map((row) =>
+            Buffer.isBuffer(row)
+              ? row
+              : Buffer.from(`${JSON.stringify(row)}\n`),
+          ),
+        ),
+      );
       signal?.throwIfAborted();
       await rename(replacement, path);
     } finally {
       await rm(replacement, { force: true });
     }
+    receipts.clear();
+    for (const [id, history] of repairedHistory) receipts.set(id, history);
   } else if (committedEnd < contents.length) {
     if (recover) {
       await writeFile(
@@ -1254,6 +1371,12 @@ function repairKnowledgeReceipt(value: unknown): MultiscanReceipt | undefined {
   }
 }
 
+function isRecoveryState(
+  value: unknown,
+): value is NonNullable<MultiscanReceipt["recoveryRequired"]> {
+  return value === "completed" || value === "scan" || value === "unknown";
+}
+
 function parseMultiscanReceipt(value: unknown): MultiscanReceipt {
   if (
     !isRecord(value) ||
@@ -1272,7 +1395,9 @@ function parseMultiscanReceipt(value: unknown): MultiscanReceipt {
     (value["policyFailed"] !== undefined &&
       typeof value["policyFailed"] !== "boolean") ||
     (value["knowledgeBaseFailure"] !== undefined &&
-      typeof value["knowledgeBaseFailure"] !== "boolean")
+      typeof value["knowledgeBaseFailure"] !== "boolean") ||
+    (value["recoveryRequired"] !== undefined &&
+      !isRecoveryState(value["recoveryRequired"]))
   ) {
     throw new Error("Invalid receipt fields.");
   }
@@ -1327,21 +1452,32 @@ async function hasArtifacts(path: string): Promise<boolean> {
   }
 }
 
-async function hasCompletedManifest(
+async function savedManifestState(
   path: string,
   signal?: AbortSignal,
-): Promise<boolean> {
-  const contents = await readFile(join(path, "scan-manifest.json"), {
-    encoding: "utf8",
+): Promise<{ status: string | null; sealed: boolean }> {
+  if (
+    (await lstat(join(path, "scan-manifest.json")).catch(
+      undefinedIfMissingFile,
+    )) === undefined
+  )
+    return { status: null, sealed: false };
+  const contents = await readScanFile(
+    path,
+    "scan-manifest.json",
+    "saved scan manifest",
     signal,
-  }).catch(undefinedIfMissingFile);
-  if (contents === undefined) return false;
-  const manifest = parseJson(() => contents);
-  return (
-    isRecord(manifest) &&
-    isRecord(manifest["scan"]) &&
-    manifest["scan"]["status"] === "completed"
   );
+  const manifest = parseJson(() => contents.toString("utf8"));
+  const scan =
+    isRecord(manifest) && isRecord(manifest["scan"]) ? manifest["scan"] : null;
+  return {
+    status:
+      scan !== null && typeof scan["status"] === "string"
+        ? scan["status"]
+        : null,
+    sealed: scan !== null && typeof scan["sealedAt"] === "string",
+  };
 }
 
 async function hasCompletedContract(
