@@ -6,7 +6,13 @@ import { abortable } from "../targets.js";
 import type { CodexReview } from "./codex-review.js";
 import { FindingDeduplicator } from "./deduplication.js";
 import { CodexDeduplicationReviewer } from "./deduplication-reviewer.js";
-import { findingSchema, requireFinding } from "./finding-schema.js";
+import {
+  findingSchema,
+  importedFindingSchema,
+  requireFinding,
+  requireImportedFinding,
+  type ImportedFinding,
+} from "./finding-schema.js";
 import {
   sourceReviewInstructions,
   screeningInstructions,
@@ -47,11 +53,37 @@ export function recordsReviewAttribution(
   };
 }
 
+function reviewFindingSchema(
+  ids: readonly string[],
+  importedIds: ReadonlySet<string>,
+): object {
+  const imported = ids.filter((id) => importedIds.has(id));
+  if (!imported.length) return findingSchema();
+  if (imported.length === ids.length) return importedFindingSchema();
+  const native = findingSchema();
+  return {
+    ...importedFindingSchema(),
+    if: { properties: { findingId: { enum: imported } } },
+    else: {
+      required: native.required,
+      properties: { locations: native.properties.locations },
+    },
+  };
+}
+
 const id = z.string().min(1);
-const record = z.strictObject({
-  id,
-  finding: z.unknown().transform((value) => requireFinding(value)),
-});
+const record = z.discriminatedUnion("kind", [
+  z.strictObject({
+    id,
+    kind: z.undefined().optional(),
+    finding: z.unknown().transform(requireFinding),
+  }),
+  z.strictObject({
+    id,
+    kind: z.literal("imported"),
+    finding: z.unknown().transform(requireImportedFinding),
+  }),
+]);
 
 const deduplicateRecordsInputSchema = z.strictObject({
   version: z.literal(1),
@@ -110,12 +142,14 @@ export async function runRecords(
   // Snapshot before yielding: a host cannot mutate evidence during the review.
   const data = deduplicateRecordsInputSchema.parse(structuredClone(input));
   const references = new Map<string, string>();
-  const observations = new Map<string, Finding>();
+  const observations = new Map<string, Finding | ImportedFinding>();
+  const importedIds = new Set<string>();
   for (const entry of data.observations) {
     if (observations.has(entry.id))
       throw new Error(`Duplicate observation ID: ${entry.id}`);
     // Original finding IDs can repeat across scans; host IDs identify observations.
     const findingId = `csf_${hash("sha256", entry.id).slice(0, 24)}`;
+    if (entry.kind === "imported") importedIds.add(findingId);
     observations.set(entry.id, { ...entry.finding, findingId });
     references.set(findingId, entry.id);
   }
@@ -149,7 +183,7 @@ export async function runRecords(
   const sourceFindingIds = [...relationships.keys()].map(
     (id) => observations.get(id)!.findingId,
   );
-  const reviewer = new CodexDeduplicationReviewer({
+  const runner = {
     async run<T>({
       validate,
       findingIds,
@@ -177,7 +211,9 @@ export async function runRecords(
                     ? screeningFindingFormatInstructions
                     : pairFindingFormatInstructions,
                 ].join("\n\n"),
-                findingSchema: structuredClone(findingSchema()),
+                findingSchema: structuredClone(
+                  reviewFindingSchema(findingIds ?? [], importedIds),
+                ),
               },
               validate,
             ),
@@ -193,7 +229,8 @@ export async function runRecords(
         throw error;
       }
     },
-  });
+  };
+  const reviewer = new CodexDeduplicationReviewer(runner, {}, importedIds);
   const algorithm = new FindingDeduplicator(
     {
       async potentialDuplicates(findingId) {
