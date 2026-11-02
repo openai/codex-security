@@ -66,7 +66,12 @@ describe("scan activity", () => {
       scanActivityFromEvent(
         {
           type: "item.started",
-          item: { id: "posix-live", type: "command_execution", command, shell: "/bin/sh" },
+          item: {
+            id: "posix-live",
+            type: "command_execution",
+            command,
+            shell: "/bin/sh",
+          },
         },
         "/repo",
       ),

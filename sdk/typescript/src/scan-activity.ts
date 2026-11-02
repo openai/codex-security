@@ -243,7 +243,12 @@ export function scanActivityFromSessionEvent(
     return scanActivityFromEvent(
       {
         type: "item.started",
-        item: { id, type: "command_execution", command, shell: arguments_["shell"] },
+        item: {
+          id,
+          type: "command_execution",
+          command,
+          shell: arguments_["shell"],
+        },
       },
       repository,
     );
