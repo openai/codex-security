@@ -1,0 +1,2131 @@
+import { codexWithRun } from "./support/codex.js";
+import { createCliTest } from "./support/cli-run.js";
+import { gitText, nodeCommand } from "./support/shell.js";
+import { resolving } from "./support/promises.js";
+import { execFileSync } from "node:child_process";
+import {
+  mkdir,
+  chmod,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  stat,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import { delimiter, dirname, join, relative, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { afterEach, expect, spyOn, test, mock } from "bun:test";
+import { parse as parseToml } from "smol-toml";
+import type { ScanOptions } from "../src/api.js";
+import { writeThreatModel } from "../src/artifact-export.js";
+import { main } from "../src/cli.js";
+import {
+  componentPlanningBatches,
+  normalizeComponentPlan,
+  planComponents,
+  type ComponentPlan,
+  type ComponentPlanningOptions,
+} from "../src/component-plan.js";
+import {
+  runComponentScans,
+  type ComponentScanEvent,
+  type ComponentScanOptions,
+} from "../src/component-scan.js";
+import type { Finding, SeverityLevel } from "../src/models.js";
+import { ScanResult } from "../src/result.js";
+import * as runtime from "../src/runtime.js";
+import { normalizeTarget, nullIfMissingFile } from "../src/targets.js";
+import {
+  matchScanFindings,
+  type ScanComparisonInput,
+  type ScanComparisonOptions,
+  type ScanComparisonResult,
+} from "../src/scan-comparison.js";
+import {
+  dependencies,
+  fakePreflight,
+  fakeResult,
+  FakeSignals,
+} from "./cli-fixtures.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { readJson } from "./support/json.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
+import { rejecting, throwing } from "./support/errors.js";
+import { mockWorkbench } from "./support/api-client.js";
+import { preparedRuntime } from "./support/api-events.js";
+
+const { temporaryDirectory, cleanup } =
+  createApiTestFixtures("component-scan-");
+const components: ComponentPlan["components"] = [
+  { name: "API", paths: ["apps/api"] },
+  { name: "Web", paths: ["apps/web"] },
+  { name: "Shared", paths: ["shared"] },
+];
+const noMatches: ScanComparisonResult = { matches: [], uncertain: [] };
+type Fixture = Awaited<ReturnType<typeof fixture>>;
+
+afterEach(cleanup);
+
+async function fixture() {
+  const root = await temporaryDirectory();
+  const repository = join(root, "repo");
+  for (const file of [
+    "package.json",
+    "apps/api/app.ts",
+    "apps/web/app.ts",
+    "shared/util.ts",
+  ]) {
+    await mkdir(dirname(join(repository, file)), { recursive: true });
+    await writeFile(join(repository, file), "{}\n");
+  }
+  return { root, repository, outputDir: join(root, "results") };
+}
+
+function largePlanningFiles() {
+  // Exceed the prompt limit with paths short enough for macOS fixtures.
+  return Array.from(
+    { length: 300 },
+    (_, index) =>
+      `apps/large/branch-${String(index).padStart(3, "0")}/${("directory-" + "x".repeat(50) + "/").repeat(10)}package.json`,
+  );
+}
+
+async function largePlanningFixture() {
+  const paths = await fixture();
+  const files = largePlanningFiles();
+  for (const file of files) {
+    await mkdir(dirname(join(paths.repository, file)), { recursive: true });
+    await writeFile(join(paths.repository, file), "{}\n");
+  }
+  files.push(
+    "apps/api/app.ts",
+    "apps/web/app.ts",
+    "package.json",
+    "shared/util.ts",
+  );
+  return { ...paths, files: files.sort() };
+}
+
+const json = readJson<any>;
+
+function finding(
+  id: string,
+  level: SeverityLevel = "high",
+  fingerprint = id,
+): Finding {
+  return {
+    findingId: fingerprint,
+    occurrenceId: id,
+    fingerprints: { algorithm: "codex-security/v1", primary: fingerprint },
+    title: id,
+    severity: { level },
+  } as Finding;
+}
+
+function scope(repository: string, options: ScanOptions): string {
+  return String(
+    (options.target as string[]).map((path) =>
+      relative(repository, path).split(sep).join("/"),
+    ),
+  );
+}
+
+async function completed(
+  repository: string,
+  options: ScanOptions,
+  findings = [finding(scope(repository, options))],
+  coverage?: "complete" | "partial",
+  threatModelPath: string | null = null,
+) {
+  const original = fakeResult([], coverage);
+  const scanId = scope(repository, options);
+  original.manifest.scan.id = scanId;
+  original.findings.scanId = scanId;
+  original.findings.findings = findings;
+  const result = new ScanResult({
+    ...original,
+    scanDir: options.outputDir!,
+    threadId: scanId,
+    sarifPath: null,
+    threatModelPath,
+  });
+  await mkdir(result.scanDir, { recursive: true });
+  for (const [name, value] of Object.entries({
+    "scan-manifest.json": result.manifest,
+    "findings.json": result.findings,
+    "report.md": "Original report",
+  })) {
+    await writeFile(
+      join(result.scanDir, name),
+      typeof value === "string" ? value : JSON.stringify(value),
+    );
+  }
+  return result;
+}
+
+function client(
+  run: (
+    repository: string,
+    options: ScanOptions,
+  ) => Promise<ScanResult> = async (repository, options) =>
+    completed(repository, options),
+  close = async () => {},
+) {
+  return () => ({
+    ...dependencies().createSecurity({}),
+    run: async (repository: string, options: ScanOptions = {}) =>
+      run(repository, options),
+    preflight: async (repository: string) => fakePreflight(repository),
+    close,
+  });
+}
+
+function scan(paths: Fixture, options: Partial<ComponentScanOptions> = {}) {
+  return runComponentScans({
+    ...paths,
+    components,
+    workers: 1,
+    createSecurity: client(),
+    matchFindings: async () => noMatches,
+    ...options,
+  });
+}
+
+async function cli(
+  paths: Fixture,
+  args: string[],
+  overrides: Partial<ReturnType<typeof dependencies>> = {},
+) {
+  const { stdout, stderr, runCli } = createCliTest(main);
+
+  const code = await runCli(
+    [
+      "scan-components",
+      paths.repository,
+      "--output-dir",
+      paths.outputDir,
+      ...args,
+      "--json",
+    ],
+    { ...dependencies({ currentDirectory: paths.root }), ...overrides },
+  );
+  return { code, stdout: stdout.text(), stderr: stderr.text() };
+}
+
+function fakeCodex(
+  response: () => unknown,
+): NonNullable<ComponentPlanningOptions["codex"]> {
+  return codexWithRun(async () => ({
+    finalResponse: JSON.stringify(await response()),
+  }));
+}
+
+async function scopedInventory(paths: Fixture, scope: string) {
+  const python =
+    process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
+  expect(python).not.toBeNull();
+  const scopesFile = join(paths.root, "scopes.json");
+  const output = join(paths.root, "scoped-source-input.jsonl");
+  await writeFile(scopesFile, JSON.stringify([scope]));
+  execFileSync(nodeCommand().command, [
+    join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+    "make-repo-scope-input",
+    "--repo",
+    paths.repository,
+    "--scopes-file",
+    scopesFile,
+    "--out",
+    output,
+  ]);
+  const stdout = execFileSync(
+    python!,
+    [
+      "-I",
+      "-B",
+      "-c",
+      [
+        "import json, sys",
+        "from argparse import Namespace",
+        "from pathlib import Path",
+        "sys.path.insert(0, sys.argv[1])",
+        "import workbench_target as target",
+        "repo, scope, scopes, output = sys.argv[2:]",
+        "rows = [json.loads(line)['path'] for line in Path(output).read_text().splitlines()]",
+        "count = target.directory_snapshot_regular_file_count((Path(repo) / scope).resolve())",
+        "print(json.dumps({'paths': rows, 'count': count}))",
+      ].join("\n"),
+      join(PLUGIN_ROOT, "scripts"),
+      paths.repository,
+      scope,
+      scopesFile,
+      output,
+    ],
+    { encoding: "utf8", stdio: "pipe" },
+  );
+  return JSON.parse(stdout.trim().split("\n").at(-1)!) as {
+    paths: string[];
+    count: number;
+  };
+}
+
+function matcher(
+  response: (
+    input: ScanComparisonInput,
+    options: ScanComparisonOptions,
+  ) => unknown,
+): typeof matchScanFindings {
+  return async (input, options = {}) =>
+    matchScanFindings(input, {
+      ...options,
+      codex: fakeCodex(() => response(input, options)),
+    });
+}
+
+function match(
+  beforeOccurrenceIds: string[],
+  afterOccurrenceIds: string[],
+): ScanComparisonResult["matches"][number] {
+  return {
+    beforeOccurrenceIds,
+    afterOccurrenceIds,
+    confidence: "high",
+    reason: "Same root cause and remediation.",
+  };
+}
+
+function uncertain(
+  beforeOccurrenceId: string,
+  afterOccurrenceId: string,
+): ScanComparisonResult["uncertain"][number] {
+  return {
+    beforeOccurrenceId,
+    afterOccurrenceId,
+    reason: "Possibly independent controls.",
+  };
+}
+
+test("links independently scoped saved models including a failed component", async () => {
+  const paths = await fixture();
+  execFileSync("git", ["-C", paths.repository, "init", "--quiet"]);
+  const python = spyOn(runtime, "resolvePluginPython");
+  let summary: Awaited<ReturnType<typeof scan>>;
+  try {
+    summary = await scan(paths, {
+      components: components.slice(0, 2),
+      createSecurity: client(async (repository, options) => {
+        await mkdir(options.outputDir!, { recursive: true });
+        const failed = scope(repository, options).includes("web");
+        await writeFile(
+          join(
+            options.outputDir!,
+            failed ? "THREAT_MODEL.md" : "threatmodel.md",
+          ),
+          `# Model\n\nScope: ${scope(repository, options)}\n`,
+        );
+        if (failed) throw new Error("Synthetic component failure");
+        return completed(
+          repository,
+          options,
+          [],
+          "complete",
+          join(options.outputDir!, "threatmodel.md"),
+        );
+      }),
+    });
+    expect(python).toHaveBeenCalledWith(
+      expect.objectContaining({ protectedRoot: paths.repository }),
+    );
+  } finally {
+    python.mockRestore();
+  }
+  const saved = await json(summary.summaryPath!);
+  const report = await readFile(summary.reportPath!, "utf8");
+  for (const [index, scope] of ["apps/api", "apps/web"].entries()) {
+    const filename = index === 0 ? "threatmodel.md" : "THREAT_MODEL.md";
+    const expected = join(paths.outputDir, `component-${index + 1}`, filename);
+    expect(saved.components[index].threatModelPath).toBe(expected);
+    expect(await readFile(expected, "utf8")).toContain(scope);
+    expect(report).toContain(`./component-${index + 1}/${filename}`);
+  }
+  expect(summary).toMatchObject({ completed: 1, failed: 1 });
+});
+
+test("omits a failed component's stale model link while retaining its model", async () => {
+  const paths = await fixture();
+  execFileSync("git", ["-C", paths.repository, "init", "--quiet"]);
+  const summary = await scan(paths, {
+    components: components.slice(0, 1),
+    createSecurity: client(async (_repository, options) => {
+      const directory = options.outputDir!;
+      await mkdir(directory, { recursive: true });
+      const manifest = {
+        documentType: "codex-security.policy-draft",
+        status: "threat_model_ready",
+        threatModel: { format: "markdown", content: "# Earlier model\n" },
+      };
+      await writeFile(
+        join(directory, "policy-draft.json"),
+        JSON.stringify(manifest),
+      );
+      await writeThreatModel(directory);
+      manifest.threatModel.content = "# Updated model\n";
+      await writeFile(
+        join(directory, "policy-draft.json"),
+        JSON.stringify(manifest),
+      );
+      throw new Error("Synthetic component failure after checkpoint");
+    }),
+  });
+  const saved = await json(summary.summaryPath!);
+  expect(saved.components[0].threatModelPath).toBeUndefined();
+  expect(
+    (await json(join(paths.outputDir, "component-1", "policy-draft.json")))
+      .threatModel.content,
+  ).toBe("# Updated model\n");
+  expect(await readFile(summary.reportPath!, "utf8")).not.toContain(
+    "[Threat model]",
+  );
+});
+
+test("bounds standard scans, continues after failure, and preserves partial results", async () => {
+  const paths = await fixture();
+  let active = 0,
+    peak = 0;
+  const close = mock(async () => {});
+  const bothStarted = Promise.withResolvers<void>();
+  const seen: ScanOptions[] = [];
+  const summary = await scan(paths, {
+    workers: 2,
+    scanOptions: {
+      auth: "chatgpt",
+      scanPrompt: "Check access controls",
+      maxCostUsd: 3,
+    },
+    onProgress: throwing("optional observer"),
+    createSecurity: client(async (repository, options) => {
+      expect(repository).toBe(paths.repository);
+      seen.push(options);
+      peak = Math.max(peak, ++active);
+      if (active === 2) bothStarted.resolve();
+      await bothStarted.promise;
+      try {
+        expect(options).toMatchObject({
+          mode: "standard",
+          auth: "chatgpt",
+          scanPrompt: "Check access controls",
+          maxCostUsd: 3,
+        });
+        if (scope(repository, options) === "apps/api")
+          throw new Error("Authorization: Bearer SYNTHETIC_SECRET_123");
+        return await completed(
+          repository,
+          options,
+          undefined,
+          scope(repository, options) === "apps/web" ? "partial" : "complete",
+        );
+      } finally {
+        active--;
+      }
+    }, close),
+  });
+  expect([peak, close.mock.calls.length]).toEqual([2, 2]);
+  expect(seen.map(({ target }) => target)).toEqual(
+    components.map(({ paths: scopes }) =>
+      scopes.map((scope) => join(paths.repository, scope)),
+    ),
+  );
+  expect(summary).toMatchObject({
+    total: 3,
+    completed: 2,
+    failed: 1,
+  });
+  const saved = await json(summary.findingsPath!);
+  expect(saved.documentType).toBe("codex-security.component-findings");
+  expect(saved.findings).toHaveLength(2);
+  expect(
+    saved.findings.flatMap(({ sources }: { sources: { scanId: string }[] }) =>
+      sources.map(({ scanId }) => scanId),
+    ),
+  ).toEqual(["apps/web", "shared"]);
+  expect(await json(summary.summaryPath!)).toMatchObject({
+    findingCount: 2,
+    components: expect.arrayContaining([
+      expect.objectContaining({
+        id: "component-1",
+        error: "Authorization: Bearer SYNTHETIC_SECRET_123",
+      }),
+    ]),
+  });
+  expect(await json(summary.retryPlanPath!)).toEqual({
+    components: [components[0]],
+  });
+  expect(
+    await readFile(join(paths.outputDir, "component-2", "report.md"), "utf8"),
+  ).toBe("Original report");
+  expect(await readFile(summary.reportPath!, "utf8")).toContain(
+    "./component-2/report.md",
+  );
+});
+
+test("forwards scan events with their component identity without letting observers stop scans", async () => {
+  const paths = await fixture();
+  const events: ComponentScanEvent[] = [];
+  let planned = false;
+  const summary = await scan(paths, {
+    workers: 2,
+    onPlan(receipts) {
+      expect(receipts.map(({ status }) => status)).toEqual([
+        "pending",
+        "pending",
+        "pending",
+      ]);
+      for (const receipt of receipts) receipt.paths.splice(0);
+      planned = true;
+      throw new Error("optional plan observer");
+    },
+    onScanEvent(event) {
+      events.push(event);
+      throw new Error("optional event observer");
+    },
+    onProgress(receipt) {
+      receipt.paths[0] = "changed-by-observer";
+    },
+    createSecurity: client(async (repository, options) => {
+      expect(planned).toBe(true);
+      const target = scope(repository, options);
+      options.onAuthentication?.({
+        method: "stored_credentials",
+        verified: false,
+      });
+      options.onProgress?.({
+        phase: "discovery",
+        filesCompleted: 1,
+        filesTotal: 2,
+      });
+      options.onActivity?.({
+        id: "same-id",
+        kind: "message",
+        status: "completed",
+        description: target,
+        paths: [],
+      });
+      options.onSessionEvent?.({
+        threadId: target,
+        parentThreadId: null,
+        event: {},
+      });
+      options.onCost?.(fakeResult([], "complete", { input_tokens: 100 }).cost!);
+      options.onUsage?.({
+        input_tokens: 100,
+        cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        output_tokens: 10,
+        reasoning_output_tokens: 0,
+        total_tokens: 110,
+      });
+      options.onUsageObservation?.({
+        tokensUpdatedAt: null,
+        accountRateLimits: [
+          {
+            limitId: target,
+            observedAt: "2026-01-01T00:00:00Z",
+            primary: { usedPercent: 75, windowMinutes: 300, resetsAt: null },
+            secondary: null,
+          },
+        ],
+      });
+      options.onWorkerStatus?.({
+        kind: "dispatch",
+        phase: "validation",
+        planned: 1,
+        started: 1,
+      });
+      options.onWarning?.("synthetic warning");
+      return completed(repository, options);
+    }),
+  });
+  expect(summary).toMatchObject({
+    completed: 3,
+    findingCount: 3,
+    sourceFindingCount: 3,
+  });
+  for (const [index, component] of components.entries()) {
+    const received = events.filter(
+      ({ componentId }) => componentId === `component-${index + 1}`,
+    );
+    expect(received.map(({ type }) => type)).toEqual([
+      "authentication",
+      "progress",
+      "activity",
+      "session",
+      "cost",
+      "usage",
+      "usage-observation",
+      "workers",
+      "warning",
+    ]);
+    expect(received.find(({ type }) => type === "activity")).toMatchObject({
+      value: { description: component.paths.join(",") },
+    });
+    expect(
+      received.find(({ type }) => type === "usage-observation"),
+    ).toMatchObject({
+      value: { accountRateLimits: [{ limitId: component.paths.join(",") }] },
+    });
+  }
+});
+
+test.each([
+  ["dashboard", []],
+  ["headless", []],
+  ["ci", []],
+  ["dashboard", ["--show-cost"]],
+  ["headless", ["--show-cost"]],
+  ["ci", ["--max-cost", "20"]],
+] as const)(
+  "CLI component presentation: %s, flags: %j",
+  async (presentation, costFlags) => {
+    const paths = await fixture();
+    const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
+
+    const signals = new FakeSignals();
+    const code = await runCli(
+      [
+        "scan-components",
+        paths.repository,
+        "--component",
+        "apps/api",
+        "--output-dir",
+        paths.outputDir,
+        ...(presentation === "headless" ? ["--headless"] : []),
+        ...costFlags,
+        "--json",
+      ],
+      {
+        ...dependencies({
+          currentDirectory: paths.root,
+          signals,
+          environment:
+            presentation === "ci" ? { CI: "true" } : { NO_COLOR: "1" },
+        }),
+        createSecurity: client(async (repository, options) => {
+          expect(typeof options.onProgress).toBe("function");
+          options.onAuthentication?.({
+            method: "stored_credentials",
+            credentialType: presentation === "ci" ? "api_key" : "chatgpt",
+            verified: false,
+          });
+          if (presentation !== "dashboard")
+            expect(
+              stderr
+                .text()
+                .includes("apps/api | ChatGPT allowance not reported"),
+            ).toBe(presentation === "headless");
+          for (const filesTotal of [0, 2]) {
+            options.onProgress?.({
+              phase: "preflight",
+              filesCompleted: 0,
+              filesTotal,
+            });
+          }
+          options.onProgress?.({
+            phase: "validation",
+            filesCompleted: 2,
+            filesTotal: 2,
+          });
+          options.onUsage?.({
+            input_tokens: 100,
+            cached_input_tokens: 10,
+            cache_write_input_tokens: 0,
+            output_tokens: 20,
+            reasoning_output_tokens: 0,
+            total_tokens: 120,
+          });
+          options.onUsageObservation?.({
+            tokensUpdatedAt: "2026-01-01T07:08:09Z",
+            accountRateLimits: [],
+          });
+          options.onCost?.({
+            model: "gpt-5.6",
+            inputTokens: 100,
+            cachedInputTokens: 10,
+            cacheWriteInputTokens: 0,
+            outputTokens: 20,
+            estimatedUsd: 0.00123,
+          });
+          return completed(repository, options);
+        }),
+      },
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      completed: 1,
+      findingCount: 1,
+    });
+    expect(stderr.text().includes("\u001B[?1049h")).toBe(
+      presentation === "dashboard",
+    );
+    expect(stderr.text()).toContain("Report:");
+    expect(stderr.text().includes("$0.00123")).toBe(costFlags.length > 0);
+    if (costFlags.length === 0)
+      expect(stderr.text()).not.toMatch(/\bCOST\b|\bCost:/u);
+    if (presentation === "dashboard") {
+      expect(stderr.text()).toContain("validating findings");
+      expect(stderr.text().indexOf("\u001B[?1049l")).toBeLessThan(
+        stderr.text().indexOf("Component scans:"),
+      );
+    } else expect(stderr.text()).toContain("apps/api completed");
+    if (presentation !== "dashboard") {
+      expect(stderr.text()).toContain("apps/api preflight | File inventory: 0");
+      expect(stderr.text()).toContain("apps/api preflight | File inventory: 2");
+      expect(stderr.text()).toContain(
+        "apps/api validating findings | Files: 2/2",
+      );
+      expect(stderr.text()).toContain(
+        "apps/api | Tokens: 90 uncached input, 10 cache reads, 0 cache writes, 20 output, 120 total",
+      );
+      expect(stderr.text()).toMatch(/apps\/api \| .*07:08:09 UTC/u);
+    }
+    expect(
+      [...signals.listeners.values()].every(
+        (listeners) => listeners.size === 0,
+      ),
+    ).toBe(true);
+  },
+);
+
+test("CLI escapes component failure controls while preserving the saved error", async () => {
+  const paths = await fixture();
+  const failure = "Component failed: token=SYNTHETIC_VALUE\u001b[2J\ncontinued";
+  const { stdout, stderr, runCli } = createCliTest(main);
+
+  expect(
+    await runCli(
+      [
+        "scan-components",
+        paths.repository,
+        "--component",
+        "apps/api",
+        "--output-dir",
+        paths.outputDir,
+        "--json",
+      ],
+      {
+        ...dependencies({ currentDirectory: paths.root }),
+        createSecurity: client(rejecting(failure)),
+      },
+    ),
+  ).toBe(2);
+  expect(stderr.text()).toContain(
+    "Component failed: token=SYNTHETIC_VALUE [2J continued\n",
+  );
+  expect(stderr.text()).not.toContain("\u001b");
+  const result = JSON.parse(stdout.text());
+  expect(await json(result.summaryPath)).toMatchObject({
+    components: [expect.objectContaining({ error: failure })],
+  });
+});
+
+test("CLI restores the dashboard and reports saved partial results on cancellation", async () => {
+  const paths = await fixture();
+  const { stderr, runCli } = createCliTest(main, { stderr: true });
+
+  const signals = new FakeSignals();
+  const code = await runCli(
+    [
+      "scan-components",
+      paths.repository,
+      "--component",
+      "apps/api",
+      "--component",
+      "apps/web",
+      "--workers",
+      "1",
+      "--output-dir",
+      paths.outputDir,
+      "--json",
+    ],
+    {
+      ...dependencies({ currentDirectory: paths.root, signals }),
+      createSecurity: client(async (repository, options) => {
+        const result = await completed(repository, options);
+        signals.emit("SIGINT");
+        return result;
+      }),
+    },
+  );
+  expect(code).toBe(130);
+  expect(await json(join(paths.outputDir, "retry-components.json"))).toEqual({
+    components: [{ name: "apps/web", paths: ["apps/web"] }],
+  });
+  expect(stderr.text()).toContain("1 complete, 1 failed");
+  expect(stderr.text()).toContain("Retry with --components-file");
+  expect(stderr.text().indexOf("\u001B[?1049l")).toBeLessThan(
+    stderr.text().indexOf("Component scans:"),
+  );
+  expect(
+    [...signals.listeners.values()].every((listeners) => listeners.size === 0),
+  ).toBe(true);
+});
+
+test("merges confirmed root causes with complete evidence and the highest severity", async () => {
+  const paths = await fixture();
+  const config = {
+    codexOverrides: {
+      model: "synthetic-model",
+      model_provider: "synthetic-provider",
+      model_reasoning_effort: "high",
+    },
+  };
+  const inputs: ScanComparisonInput[] = [];
+  const batches = [
+    [finding("a1"), finding("a2"), finding("u1")],
+    [finding("b1"), finding("b2", "critical"), finding("u2")],
+    [finding("c1"), finding("c2")],
+  ];
+  let batch = 0;
+  const onDeduplicationStarted = mock(throwing("optional observer"));
+  const summary = await scan(paths, {
+    config,
+    onDeduplicationStarted,
+    createSecurity: client(async (repository, options) =>
+      completed(repository, options, batches[batch++]),
+    ),
+    matchFindings: matcher((input, options) => {
+      inputs.push(input);
+      expect(options).toMatchObject({
+        config,
+        allowHistoricalUncertainty: true,
+      });
+      return inputs.length === 1
+        ? {
+            matches: [match(["a1", "a2"], ["b1", "b2"])],
+            uncertain: [uncertain("u1", "u2")],
+          }
+        : {
+            matches: [match(["a1", "b1"], ["c1"]), match(["u1", "u2"], ["c2"])],
+            uncertain: [],
+          };
+    }),
+  });
+  expect(onDeduplicationStarted).toHaveBeenCalledTimes(1);
+  expect(
+    inputs.map(({ before, after }) => [before.length, after.length]),
+  ).toEqual([
+    [3, 3],
+    [6, 2],
+  ]);
+  expect(summary.deduplication).toEqual({
+    status: "completed",
+    confirmedGroups: 3,
+    uncertainPairs: 0,
+  });
+  const saved = await json(summary.findingsPath!);
+  expect(
+    saved.findings.map(({ sources }: { sources: unknown[] }) => sources.length),
+  ).toEqual([5, 3]);
+  expect(saved.findings[0].finding).toMatchObject({
+    occurrenceId: "b2",
+    severity: { level: "critical" },
+  });
+  expect(saved.deduplication.matches).toHaveLength(3);
+  expect(saved.deduplication.uncertain).toEqual([]);
+  expect(
+    (await json(join(paths.outputDir, "component-1", "findings.json")))
+      .findings,
+  ).toHaveLength(3);
+});
+
+test("keeps uncertain findings separate even when their fingerprints match", async () => {
+  const paths = await fixture();
+  const summary = await scan(paths, {
+    components: components.slice(0, 2),
+    createSecurity: client(async (repository, options) =>
+      completed(repository, options, [
+        finding(scope(repository, options), "high", "same"),
+      ]),
+    ),
+    matchFindings: matcher(({ before, after }) => ({
+      matches: [],
+      uncertain: [uncertain(before[0]!.occurrenceId, after[0]!.occurrenceId)],
+    })),
+  });
+  const saved = await json(summary.findingsPath!);
+  expect(saved.findings).toHaveLength(2);
+  expect(
+    saved.findings.map(
+      ({ finding }: { finding: Finding }) => finding.findingId,
+    ),
+  ).toEqual(["same", "same"]);
+  expect(saved.deduplication.uncertain).toHaveLength(1);
+});
+
+test("preserves distinct related findings in the component findings artifact", async () => {
+  const paths = await fixture();
+  const reason = "These nearby controls need independent corrections.";
+  const summary = await scan(paths, {
+    components: components.slice(0, 2),
+    matchFindings: matcher(({ before, after }) => ({
+      matches: [],
+      uncertain: [],
+      related: [
+        {
+          beforeOccurrenceId: before[0]!.occurrenceId,
+          afterOccurrenceId: after[0]!.occurrenceId,
+          reason,
+        },
+      ],
+    })),
+  });
+  const saved = await json(summary.findingsPath!);
+
+  expect(saved.findings).toHaveLength(2);
+  expect(saved.deduplication).toMatchObject({
+    confirmedGroups: 0,
+    uncertainPairs: 0,
+    related: [
+      {
+        beforeOccurrenceId: "apps/api",
+        afterOccurrenceId: "apps/web",
+        reason,
+      },
+    ],
+  });
+});
+
+test("retains earlier confirmed matches if later matching fails", async () => {
+  const paths = await fixture();
+  let calls = 0;
+  const summary = await scan(paths, {
+    matchFindings: matcher(({ before, after }) => {
+      if (++calls === 2) throw new Error("Matching unavailable.");
+      return {
+        matches: [match([before[0]!.occurrenceId], [after[0]!.occurrenceId])],
+        uncertain: [],
+      };
+    }),
+  });
+  expect(summary).toMatchObject({
+    completed: 3,
+    failed: 0,
+    deduplication: { status: "failed", confirmedGroups: 1 },
+  });
+  expect(
+    (await json(summary.findingsPath!)).findings.map(
+      ({ sources }: { sources: unknown[] }) => sources.length,
+    ),
+  ).toEqual([2, 1]);
+});
+
+test.each([0, 1])(
+  "skips matching with %i populated components",
+  async (populated) => {
+    const paths = await fixture();
+    const matchFindings = mock(rejecting("unexpected model call"));
+    const summary = await scan(paths, {
+      createSecurity: client(async (repository, options) =>
+        completed(
+          repository,
+          options,
+          populated && scope(repository, options) === "apps/web"
+            ? [finding("one")]
+            : [],
+        ),
+      ),
+      matchFindings,
+    });
+    expect(matchFindings).toHaveBeenCalledTimes(0);
+    expect(summary.deduplication).toEqual({
+      status: "completed",
+      confirmedGroups: 0,
+      uncertainPairs: 0,
+    });
+  },
+);
+
+test.each(["scan", "matching"])(
+  "preserves completed results when canceled during %s",
+  async (phase) => {
+    const paths = await fixture();
+    const controller = new AbortController();
+    let runs = 0;
+    await expect(
+      scan(paths, {
+        signal: controller.signal,
+        createSecurity: client(async (repository, options) => {
+          runs++;
+          const result = await completed(repository, options);
+          if (phase === "scan") controller.abort();
+          return result;
+        }),
+        matchFindings: async (_input, options) => {
+          controller.abort();
+          options?.signal?.throwIfAborted();
+          return noMatches;
+        },
+      }),
+    ).rejects.toThrow();
+    const finished = phase === "scan" ? 1 : 3;
+    expect(runs).toBe(finished);
+    expect(await json(join(paths.outputDir, "summary.json"))).toMatchObject({
+      completed: finished,
+      failed: 3 - finished,
+      deduplication: { status: "failed" },
+    });
+    expect(
+      (await json(join(paths.outputDir, "findings.json"))).findings,
+    ).toHaveLength(finished);
+  },
+);
+
+test("rejects escaped component paths and output inside the enclosing worktree", async () => {
+  const paths = await fixture();
+  const observeRuns = mock(rejecting("unexpected"));
+  await expect(
+    scan(paths, {
+      components: [...components, { name: "outside", paths: ["../"] }],
+      createSecurity: client(observeRuns),
+    }),
+  ).rejects.toThrow("outside the repository");
+  await symlink(
+    paths.root,
+    join(paths.repository, "outside"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  await expect(
+    normalizeComponentPlan(paths.repository, {
+      components: [{ name: "link", paths: ["outside"] }],
+    }),
+  ).rejects.toThrow("outside the repository");
+  expect(observeRuns).toHaveBeenCalledTimes(0);
+  execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+  await expect(
+    scan(paths, {
+      repository: join(paths.repository, "apps"),
+      outputDir: join(paths.repository, "results"),
+      components: [{ name: "API", paths: ["api"] }],
+    }),
+  ).rejects.toThrow();
+});
+
+test("keeps literal component paths through planning and execution", async () => {
+  const name = "keeps literal component paths through planning and execution";
+  if (runTestInSubprocess(import.meta.path, name)) return;
+  const paths = await fixture();
+  const home = join(paths.repository, "home");
+  const os = { ...(await import("node:os")) };
+  mock.module("node:os", () => ({ ...os, homedir: () => home }));
+  const literals = ["~/src", "$HOME/src", "%HOME%/src", "space name"];
+  for (const path of ["home/src", ...literals]) {
+    await mkdir(join(paths.repository, path), { recursive: true });
+    await writeFile(join(paths.repository, path, "app.ts"), "export {};\n");
+  }
+  const proposed = {
+    components: literals.map((path) => ({ name: path, paths: [path] })),
+  };
+  const plan = await normalizeComponentPlan(paths.repository, proposed);
+  expect(plan).toEqual(proposed);
+  expect(await normalizeComponentPlan(paths.repository, plan)).toEqual(plan);
+  expect(
+    await normalizeComponentPlan(paths.repository, {
+      components: [{ name: "Aliases", paths: ["./~/src", "~/src"] }],
+    }),
+  ).toEqual({ components: [{ name: "Aliases", paths: ["~/src"] }] });
+  expect(await normalizeTarget(paths.repository, ["~/src"])).toMatchObject({
+    paths: ["home/src"],
+  });
+  execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+  const automatic = await planComponents(paths.repository, {
+    codex: fakeCodex(() => ({ components: [proposed.components[0]] })),
+  });
+  expect(automatic.components[0]).toEqual(proposed.components[0]);
+  const observed: (readonly string[])[] = [];
+  const summary = await scan(paths, {
+    components: plan.components,
+    createSecurity: client(async (repository, options) => {
+      const target = await normalizeTarget(repository, options.target!);
+      observed.push(target.paths);
+      expect(options.target).toEqual(
+        target.paths.map((path) => join(repository, path)),
+      );
+      return await completed(repository, options, []);
+    }),
+  });
+  expect(summary).toMatchObject({ completed: literals.length, failed: 0 });
+  expect(observed).toEqual(literals.map((path) => [path]));
+  expect(await json(summary.planPath)).toEqual(proposed);
+});
+
+test("component inventory uses the shared Git runner without fsmonitor callbacks", async () => {
+  const paths = await fixture();
+  execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+  const marker = join(paths.root, "fsmonitor-called");
+  const hook = join(paths.root, "fsmonitor-hook");
+  await writeFile(
+    hook,
+    `#!/bin/sh\nprintf called > '${marker.replaceAll("'", `'"'"'`)}'\nprintf '\\0'\n`,
+  );
+  await chmod(hook, 0o700);
+  execFileSync("git", [
+    "-C",
+    paths.repository,
+    "config",
+    "core.fsmonitor",
+    hook,
+  ]);
+  const plan = await planComponents(paths.repository, {
+    codex: fakeCodex(() => ({
+      components: [{ name: "Source", paths: ["."] }],
+    })),
+  });
+  expect(plan.components).toHaveLength(1);
+  expect(await stat(marker).catch(() => null)).toBeNull();
+});
+
+test.each(["inline", "global"])(
+  "component inventory preserves inherited %s Git exclusions",
+  async (configuration) => {
+    const paths = await fixture();
+    execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+    const excludes = join(paths.root, "excludes");
+    const config = join(paths.root, "gitconfig");
+    await writeFile(excludes, "ignored.ts\n");
+    await writeFile(join(paths.repository, "ignored.ts"), "export {};\n");
+    execFileSync("git", [
+      "config",
+      "--file",
+      config,
+      "core.excludesFile",
+      excludes,
+    ]);
+    const previousEnvironment = process.env;
+    process.env = {
+      ...previousEnvironment,
+      ...(configuration === "inline"
+        ? {
+            GIT_CONFIG_COUNT: "1",
+            GIT_CONFIG_KEY_0: "core.excludesFile",
+            GIT_CONFIG_VALUE_0: excludes,
+          }
+        : { GIT_CONFIG_GLOBAL: config }),
+    };
+    try {
+      const plan = await planComponents(paths.repository, {
+        codex: {
+          startThread: () => ({
+            async run(prompt) {
+              expect(prompt).not.toContain("ignored.ts");
+              return {
+                finalResponse: JSON.stringify({ components: [components[0]] }),
+              };
+            },
+          }),
+        },
+      });
+      expect(plan.components.flatMap(({ paths }) => paths)).not.toContain(
+        "ignored.ts",
+      );
+    } finally {
+      process.env = previousEnvironment;
+    }
+  },
+);
+
+test("component inventory reports broken Git configuration without walking ignored files", async () => {
+  const paths = await fixture();
+  execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+  await writeFile(join(paths.repository, ".git", "config"), "[broken config\n");
+  let planned = false;
+  await expect(
+    planComponents(paths.repository, {
+      codex: fakeCodex(() => {
+        planned = true;
+        return { components: [{ name: "Source", paths: ["."] }] };
+      }),
+    }),
+  ).rejects.toThrow("bad config line");
+  expect(planned).toBe(false);
+});
+
+test("component inventory preserves non-ASCII Git failure diagnostics", async () => {
+  const paths = await fixture();
+  const name = "git-日本語-😀";
+  const metadata = join(paths.root, name);
+  execFileSync("git", [
+    "-C",
+    paths.repository,
+    "init",
+    "-q",
+    "--separate-git-dir",
+    metadata,
+  ]);
+  execFileSync("git", [
+    "--git-dir",
+    metadata,
+    "config",
+    "core.worktree",
+    paths.repository,
+  ]);
+  await writeFile(join(metadata, "index"), "broken index");
+  const response = mock(() => ({ components: [components[0]!] }));
+  await expect(
+    planComponents(paths.repository, { codex: fakeCodex(response) }),
+  ).rejects.toThrow(name);
+  expect(response).not.toHaveBeenCalled();
+});
+
+test("plans from a Git inventory without tools or ignored files", async () => {
+  const paths = await fixture();
+  execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+  await writeFile(join(paths.repository, ".gitignore"), "ignored/\n");
+  await mkdir(join(paths.repository, "ignored"));
+  await writeFile(join(paths.repository, "ignored", "secret.txt"), "synthetic");
+  const plan = await planComponents(paths.repository, {
+    cyberAccessProgram: "daybreak_blue",
+    codex: {
+      startThread(options) {
+        expect(options).toMatchObject({
+          threadSource: "security_scan",
+          sandboxMode: "read-only",
+          approvalPolicy: "never",
+          networkAccessEnabled: false,
+        });
+        return {
+          async run(prompt, options) {
+            expect(prompt).toContain("apps/api");
+            expect(prompt).not.toContain("secret.txt");
+            expect(options.outputSchema).toBeDefined();
+            expect(options.cyberAccessProgram).toBe("daybreak_blue");
+            return {
+              finalResponse: JSON.stringify({ components: [components[0]] }),
+            };
+          },
+        };
+      },
+    },
+  });
+  expect(plan.components).toEqual([
+    components[0]!,
+    {
+      name: "Other files",
+      paths: [".gitignore", "apps/web", "package.json", "shared"],
+    },
+  ]);
+  await mkdir(join(paths.repository, "~"));
+  await writeFile(join(paths.repository, "~", "app.ts"), "export {};\n");
+  const wholeRepository = {
+    components: [{ name: "Repository", paths: ["."] }],
+  };
+  expect(
+    await planComponents(paths.repository, {
+      codex: fakeCodex(() => wholeRepository),
+    }),
+  ).toEqual(wholeRepository);
+  for (const path of ["ignored", "ignored/secret.txt"]) {
+    const proposed = { components: [{ name: "Ignored", paths: [path] }] };
+    await expect(
+      planComponents(paths.repository, { codex: fakeCodex(() => proposed) }),
+    ).rejects.toThrow("file inventory");
+    expect(await normalizeComponentPlan(paths.repository, proposed)).toEqual(
+      proposed,
+    );
+  }
+});
+
+// Windows and macOS do not support the synthetic 0xff filename fixture.
+for (const rawByteNames of [false, true]) {
+  test
+    .skipIf(rawByteNames && ["win32", "darwin"].includes(process.platform))
+    .each(["Git", "plain directory"])(
+    `preserves exact UTF-8 paths in a %s component inventory${rawByteNames ? " with raw-byte entries" : ""}`,
+    async (kind) => {
+      const repository = join(await temporaryDirectory(), "repository");
+      await mkdir(repository);
+      if (kind === "Git") execFileSync("git", ["-C", repository, "init", "-q"]);
+      const paths = ["name-\uFFFD.ts", "\uFEFF来源.ts", "résumé.ts", "🙂.ts"];
+      for (const path of paths)
+        await writeFile(join(repository, path), "export {};\n");
+      const proposed = { components: [{ name: "Sources", paths }] };
+      const response = mock(() => proposed);
+      const options = { codex: fakeCodex(response) };
+      if (rawByteNames) {
+        const invalid = Buffer.concat([
+          Buffer.from(join(repository, "name-")),
+          Buffer.from([0xff]),
+          Buffer.from(".ts"),
+        ]);
+        await writeFile(invalid, "export {};\n");
+        await expect(
+          planComponents(repository, options),
+        ).rejects.toBeInstanceOf(TypeError);
+        expect(response).not.toHaveBeenCalled();
+        await unlink(invalid);
+        await symlink("missing.ts", invalid);
+      }
+      expect(await planComponents(repository, options)).toEqual(proposed);
+      expect(response).toHaveBeenCalledTimes(1);
+    },
+  );
+}
+
+test("plans Unicode files when directory entry types are unknown", async () => {
+  if (
+    runTestInSubprocess(
+      import.meta.path,
+      "plans Unicode files when directory entry types are unknown",
+    )
+  )
+    return;
+  const root = await temporaryDirectory();
+  const repository = join(root, "repository");
+  const paths = ["name-\uFFFD.ts", "\uFEFF来源.ts", "résumé/🙂.ts"];
+  for (const path of [...paths, "nested/.git/ignored.ts"]) {
+    await mkdir(dirname(join(repository, path)), { recursive: true });
+    await writeFile(join(repository, path), "export {};\n");
+  }
+  const source = new URL("../src/component-plan.ts", import.meta.url);
+  const built = await Bun.build({
+    entrypoints: [fileURLToPath(source)],
+    target: "node",
+    format: "esm",
+    define: { "import.meta.url": JSON.stringify(source.href) },
+  });
+  expect(built.success).toBe(true);
+  const module = join(root, "component-plan.mjs");
+  await writeFile(module, await built.outputs[0]!.text());
+  const proposed = { components: [{ name: "Sources", paths }] };
+  const output = execFileSync(
+    nodeCommand().command,
+    [
+      "--input-type=module",
+      "--eval",
+      `
+      import assert from "node:assert/strict";
+      const binding = process.binding("fs");
+      const original = binding.readdir;
+      let unknownEntries = 0;
+      binding.readdir = async function (...args) {
+        const result = await original.apply(this, args);
+        if (args[2] === true) {
+          unknownEntries += result[1].length;
+          result[1].fill(0);
+        }
+        return result;
+      };
+      const { planComponents } = await import(${JSON.stringify(pathToFileURL(module).href)});
+      const proposed = ${JSON.stringify(proposed)};
+      const plan = await planComponents(${JSON.stringify(repository)}, {
+        codex: { startThread: () => ({ run: async () => ({ finalResponse: JSON.stringify(proposed) }) }) },
+      });
+      assert.ok(unknownEntries > 0);
+      console.log(JSON.stringify(plan));
+    `,
+    ],
+    { encoding: "utf8" },
+  );
+  expect(JSON.parse(output)).toEqual(proposed);
+});
+
+test.each(["directories", "manifests", "root files"])(
+  "batches oversized %s without dropping inventory paths",
+  (layout) => {
+    const files = Array.from({ length: 12_000 }, (_, index) => {
+      const name = `unit-${String(index).padStart(5, "0")}-${"x".repeat(100)}`;
+      return layout === "root files"
+        ? `${name}.ts`
+        : `packages/${name}/${layout === "manifests" ? "package.json" : "app.ts"}`;
+    });
+    const batches = [...componentPlanningBatches(files)];
+    expect(batches.length).toBeGreaterThan(1);
+    expect(batches.flatMap(({ files }) => files)).toEqual(files);
+    for (const { files: batch, prompt } of batches) {
+      expect(prompt.length).toBeLessThanOrEqual(1_048_576);
+      const inventory = JSON.parse(prompt.split("\n").at(-1)!);
+      expect(inventory.scopes).not.toContain(".");
+      for (const file of batch) {
+        expect(
+          inventory.scopes.some(
+            (path: string) => file === path || file.startsWith(`${path}/`),
+          ),
+        ).toBe(true);
+      }
+      if (layout === "manifests") expect(inventory.manifests).toEqual(batch);
+      if (layout === "root files") expect(inventory.rootFiles).toEqual(batch);
+    }
+  },
+);
+
+test("plans large inventories in separate contexts and fills omissions within each batch", async () => {
+  const paths = await largePlanningFixture();
+  const batches: string[][] = [];
+  let threads = 0;
+  const plan = await planComponents(paths.repository, {
+    cyberAccessProgram: "daybreak_red",
+    codex: {
+      startThread: () => {
+        threads++;
+        return {
+          run: async (prompt, options) => {
+            expect(options.cyberAccessProgram).toBe("daybreak_red");
+            expect(prompt.length).toBeLessThanOrEqual(1_048_576);
+            const { scopes } = JSON.parse(prompt.split("\n").at(-1)!);
+            batches.push(scopes);
+            return {
+              finalResponse: JSON.stringify({
+                components: [{ name: "Selected", paths: [scopes[0]] }],
+              }),
+            };
+          },
+        };
+      },
+    },
+  });
+  expect(threads).toBeGreaterThan(1);
+  expect(threads).toBe(batches.length);
+  expect(plan.components.some(({ name }) => name === "Other files")).toBe(true);
+  const contains = (parent: string, file: string) =>
+    file === parent || file.startsWith(`${parent}/`);
+  const selected = plan.components.flatMap(({ paths }) => paths);
+  for (const file of paths.files) {
+    expect(selected.filter((path) => contains(path, file))).toHaveLength(1);
+  }
+  for (const component of plan.components) {
+    expect(
+      batches.some((scopes) =>
+        component.paths.every((path) =>
+          scopes.some((scope) => contains(scope, path)),
+        ),
+      ),
+    ).toBe(true);
+  }
+  expect(await normalizeComponentPlan(paths.repository, plan)).toEqual(plan);
+});
+
+test.each([".", "apps"])(
+  "rejects a model scope spanning automatic planning batches: %s",
+  async (path) => {
+    const paths = await largePlanningFixture();
+    await expect(
+      planComponents(paths.repository, {
+        codex: fakeCodex(() => ({
+          components: [{ name: "Too broad", paths: [path] }],
+        })),
+      }),
+    ).rejects.toThrow("outside its planning batch");
+  },
+);
+
+test("does not start another automatic planning call after cancellation", async () => {
+  const paths = await largePlanningFixture();
+  const controller = new AbortController();
+  const run = mock(async (prompt: string) => {
+    controller.abort(new Error("planning canceled"));
+    const { scopes } = JSON.parse(prompt.split("\n").at(-1)!);
+    return {
+      finalResponse: JSON.stringify({
+        components: [{ name: "Files", paths: scopes }],
+      }),
+    };
+  });
+  await expect(
+    planComponents(paths.repository, {
+      signal: controller.signal,
+      codex: codexWithRun(run),
+    }),
+  ).rejects.toThrow("planning canceled");
+  expect(run).toHaveBeenCalledTimes(1);
+});
+
+test("keeps scoped inventories and plans aligned after a case-only Git rename", async () => {
+  const paths = await fixture();
+  const source = "src";
+  const uppercase = source.toUpperCase();
+  const git = (...args: string[]) =>
+    gitText(
+      [
+        "-C",
+        paths.repository,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "-c",
+        "commit.gpgSign=false",
+        "-c",
+        "core.hooksPath=" + join(paths.root, "hooks"),
+        ...args,
+      ],
+      {
+        stdio: "pipe",
+        env: {
+          ...process.env,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: join(paths.root, "gitconfig"),
+        },
+      },
+    ).trim();
+  await mkdir(join(paths.repository, source, "nested"), { recursive: true });
+  await writeFile(join(paths.repository, source, "app.ts"), "export {};\n");
+  await writeFile(
+    join(paths.repository, source, "nested", "util.ts"),
+    "export {};\n",
+  );
+  await mkdir(join(paths.repository, source, "build"));
+  await writeFile(
+    join(paths.repository, source, "build", "tracked.ts"),
+    "export {};\n",
+  );
+  await writeFile(join(paths.repository, ".gitignore"), "build/\n");
+  git("init", "-q", "-b", "main");
+  git("add", ".");
+  git("add", "--force", source + "/build/tracked.ts");
+  git("commit", "-qm", "Initial fixture");
+  const ordinaryPaths = [
+    source + "/app.ts",
+    source + "/build/tracked.ts",
+    source + "/nested/util.ts",
+  ];
+  expect(await scopedInventory(paths, source)).toEqual({
+    paths: ordinaryPaths,
+    count: 3,
+  });
+  git("switch", "-c", "case-rename");
+  git("mv", source, "renaming");
+  git("mv", "renaming", uppercase);
+  git("commit", "-qm", "Rename source directory");
+  await writeFile(
+    join(paths.repository, uppercase, "build", "cache.tmp"),
+    "ignored build output\n",
+  );
+  git("switch", "main");
+  expect(git("status", "--porcelain")).toBe("");
+  expect(
+    git("ls-files", "-z", "--", source).split("\0").filter(Boolean),
+  ).toEqual(ordinaryPaths);
+  const entries = await readdir(paths.repository);
+  expect(entries).toContain(uppercase);
+
+  const inventory = async (scope: string) => {
+    const selected = await scopedInventory(paths, scope);
+    if (scope === ".") {
+      selected.paths = (
+        await Promise.all(
+          selected.paths.map(async (path) =>
+            relative(
+              paths.repository,
+              await realpath(join(paths.repository, path)),
+            )
+              .split(sep)
+              .join("/"),
+          ),
+        )
+      ).sort();
+    }
+    return selected;
+  };
+
+  const target = await normalizeTarget(paths.repository, [source]);
+  const scope = target.paths[0]!;
+  const expectedInventory = {
+    paths: [
+      scope + "/app.ts",
+      scope + "/build/tracked.ts",
+      scope + "/nested/util.ts",
+    ],
+    count: 3,
+  };
+  expect(await inventory(scope)).toEqual(expectedInventory);
+  await writeFile(
+    join(paths.repository, scope, "untracked.ts"),
+    "export {};\n",
+  );
+  const mixedInventory = {
+    paths: [...expectedInventory.paths, scope + "/untracked.ts"].sort(),
+    count: 4,
+  };
+  expect(await scopedInventory(paths, scope)).toEqual(mixedInventory);
+  const repositoryInventory = {
+    paths: [
+      ".gitignore",
+      "apps/api/app.ts",
+      "apps/web/app.ts",
+      "package.json",
+      "shared/util.ts",
+      ...mixedInventory.paths,
+    ].sort(),
+    count: 9,
+  };
+  expect(await inventory(".")).toEqual(repositoryInventory);
+  const proposed = { components: [{ name: "Source", paths: [source] }] };
+  const other = {
+    name: "Other files",
+    paths: [".gitignore", "apps", "package.json", "shared"],
+  };
+  expect(
+    await planComponents(paths.repository, {
+      codex: fakeCodex(() => proposed),
+    }),
+  ).toEqual({
+    components: [{ name: "Source", paths: [scope] }, other],
+  });
+
+  if (entries.includes(source)) {
+    await writeFile(
+      join(paths.repository, uppercase, "app.ts"),
+      "export {};\n",
+    );
+    expect(await inventory(source)).toEqual(mixedInventory);
+    expect(await inventory(uppercase)).toEqual({
+      paths: [uppercase + "/app.ts"],
+      count: 1,
+    });
+    expect(await inventory(".")).toEqual({
+      paths: [...repositoryInventory.paths, uppercase + "/app.ts"].sort(),
+      count: 10,
+    });
+    const separate = { name: "Separate source", paths: [uppercase] };
+    expect(
+      await planComponents(paths.repository, {
+        codex: fakeCodex(() => ({
+          components: [...proposed.components, separate],
+        })),
+      }),
+    ).toEqual({ components: [...proposed.components, separate, other] });
+  }
+});
+
+test("retains tracked Unicode aliases when scoped Git matching is incomplete", async () => {
+  const paths = await fixture();
+  const source = "sourcé";
+  const uppercase = source.toUpperCase();
+  await mkdir(join(paths.repository, source, "build"), { recursive: true });
+  await writeFile(join(paths.repository, source, "app.ts"), "export {};\n");
+  await writeFile(
+    join(paths.repository, source, "build", "tracked.ts"),
+    "export {};\n",
+  );
+  await writeFile(join(paths.repository, ".gitignore"), "build/\n");
+  const nonCased = "项目api";
+  await mkdir(join(paths.repository, nonCased));
+  await writeFile(join(paths.repository, nonCased, "app.ts"), "export {};\n");
+  execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+  execFileSync("git", [
+    "-C",
+    paths.repository,
+    "config",
+    "--local",
+    "core.autocrlf",
+    "false",
+  ]);
+  execFileSync("git", ["-C", paths.repository, "add", "--force", "."]);
+  expect(await scopedInventory(paths, nonCased)).toEqual({
+    paths: [nonCased + "/app.ts"],
+    count: 1,
+  });
+  await rename(
+    join(paths.repository, source),
+    join(paths.repository, "renaming"),
+  );
+  await rename(
+    join(paths.repository, "renaming"),
+    join(paths.repository, uppercase),
+  );
+  const aliases =
+    (await realpath(join(paths.repository, source)).catch(
+      nullIfMissingFile,
+    )) !== null;
+  await writeFile(
+    join(paths.repository, uppercase, "untracked.ts"),
+    "export {};\n",
+  );
+  const selected = [
+    uppercase + "/app.ts",
+    uppercase + "/untracked.ts",
+    ...(aliases ? [uppercase + "/build/tracked.ts"] : []),
+  ].sort();
+  const inventory = await scopedInventory(paths, uppercase);
+  const identities = async (files: string[]) =>
+    (
+      await Promise.all(
+        files.map(async (file) => {
+          const { dev, ino } = await stat(join(paths.repository, file), {
+            bigint: true,
+          });
+          return `${dev}:${ino}`;
+        }),
+      )
+    ).sort();
+  expect(await identities(inventory.paths)).toEqual(await identities(selected));
+  expect(inventory.count).toBe(selected.length);
+});
+
+test("plans plain directories and rejects unsafe or overlapping model scopes", async () => {
+  const paths = await fixture();
+  const proposed = { components: [{ name: "Apps", paths: ["apps"] }] };
+  expect(
+    (
+      await planComponents(paths.repository, {
+        codex: fakeCodex(() => proposed),
+      })
+    ).components,
+  ).toEqual([
+    ...proposed.components,
+    { name: "Other files", paths: ["package.json", "shared"] },
+  ]);
+  for (const [plan, error] of [
+    [
+      { components: [{ name: "outside", paths: ["../"] }] },
+      "outside the repository",
+    ],
+    [
+      { components: [components[0], ...proposed.components] },
+      "overlapping paths",
+    ],
+  ] as const) {
+    await expect(
+      planComponents(paths.repository, { codex: fakeCodex(() => plan) }),
+    ).rejects.toThrow(error);
+  }
+});
+
+test.each(["auto", "explicit", "file"])(
+  "CLI saves a reusable %s plan without scanning",
+  async (selection) => {
+    const paths = await fixture();
+    const planFile = join(paths.root, "plan.json");
+    const selected = components.slice(0, 2);
+    await writeFile(planFile, JSON.stringify({ components: selected }));
+    const args =
+      selection === "auto"
+        ? ["--auto"]
+        : selection === "file"
+          ? ["--components-file", planFile]
+          : selected.flatMap(({ paths }) => ["--component", paths[0]!]);
+    const result = await cli(paths, [...args, "--plan-only"], {
+      planComponents: async () => ({ components: selected }),
+      createSecurity: throwing("unexpected scan"),
+    });
+    expect(result.code).toBe(0);
+    expect(await json(join(paths.outputDir, "components.json"))).toEqual({
+      components:
+        selection === "explicit"
+          ? selected.map(({ paths }) => ({ name: paths[0], paths }))
+          : selected,
+    });
+    expect(JSON.parse(result.stdout).planPath).toBe(
+      join(paths.outputDir, "components.json"),
+    );
+  },
+);
+
+test.each(["auto", "chatgpt", "api-key"] as const)(
+  "CLI uses %s authentication and the selected Cyber program for planning, scans, and matching",
+  async (auth) => {
+    const paths = await fixture();
+    const environment = {
+      OPENAI_API_KEY: "synthetic-openai-key",
+      CODEX_API_KEY: "synthetic-codex-key",
+      CODEX_HOME: join(paths.root, "synthetic-home"),
+    };
+    const expectedEnvironment =
+      auth === "chatgpt" ? { CODEX_HOME: environment.CODEX_HOME } : environment;
+    let planned = false,
+      matched = false;
+    const result = await cli(
+      paths,
+      [
+        "--auto",
+        "--cyber-access-program",
+        "daybreak_blue",
+        ...(auth === "auto" ? [] : ["--auth", auth]),
+      ],
+      {
+        ...dependencies({ currentDirectory: paths.root, environment }),
+        planComponents: async (_repository, options) => {
+          expect(options?.surface).toBe("cli");
+          expect(options?.auth).toBe(auth);
+          expect(options?.cyberAccessProgram).toBe("daybreak_blue");
+          expect(options?.environment).toEqual(expectedEnvironment);
+          planned = true;
+          return { components: components.slice(0, 2) };
+        },
+        createSecurity: client(async (repository, options) => {
+          expect(options.auth).toBe(auth);
+          expect(options.cyberAccessProgram).toBe("daybreak_blue");
+          return completed(repository, options);
+        }),
+        matchFindings: async (_input, options) => {
+          expect(options?.auth).toBe(auth);
+          expect(options?.cyberAccessProgram).toBe("daybreak_blue");
+          expect(options?.environment).toEqual(expectedEnvironment);
+          matched = true;
+          return noMatches;
+        },
+      },
+    );
+    expect(result.code).toBe(0);
+    expect([planned, matched]).toEqual([true, true]);
+    expect(environment.OPENAI_API_KEY).toBe("synthetic-openai-key");
+  },
+);
+
+test.each([
+  ["openrouter", "api-key"],
+  ["openrouter", "chatgpt"],
+  ["fireworks", "api-key"],
+  ["fireworks", "chatgpt"],
+] as const)(
+  "component planning honors command authentication for %s with %s selection",
+  async (provider, auth) => {
+    const paths = await fixture();
+    const plan = mock(async () => ({ components }));
+    const result = await scan(paths, {
+      components: undefined,
+      auto: true,
+      planOnly: true,
+      environment: {},
+      config: {
+        codexOverrides: {
+          model_provider: provider,
+          model_providers: {
+            [provider]: { auth: { command: "synthetic-auth-helper" } },
+          },
+        },
+      },
+      scanOptions: { auth },
+      planComponents: plan,
+    });
+    expect(result.total).toBe(components.length);
+    expect(plan).toHaveBeenCalledTimes(1);
+  },
+);
+
+test("default scan clients use the component scan environment", async () => {
+  const paths = await fixture();
+  const summary = await scan(paths, {
+    components: components.slice(0, 1),
+    createSecurity: undefined,
+    environment: { ...process.env, GIT_DIR: join(paths.root, "synthetic.git") },
+  });
+  expect(summary.failed).toBe(1);
+  expect(await json(summary.summaryPath!)).toMatchObject({
+    components: [
+      expect.objectContaining({
+        error: "GIT_DIR is not supported for Codex Security scans.",
+      }),
+    ],
+  });
+});
+
+test.each([
+  ["standard", "api-key"],
+  ["deep", "api-key"],
+  ["standard", "chatgpt"],
+  ["deep", "chatgpt"],
+] as const)(
+  "isolates concurrent default %s component scans with %s authentication at the Codex child boundary",
+  async (mode, auth) => {
+    const name = `isolates concurrent default ${mode} component scans with ${auth} authentication at the Codex child boundary`;
+    if (runTestInSubprocess(import.meta.path, name)) return;
+    const originalEnvironment = { ...process.env };
+    const node = nodeCommand().command;
+    const ready = Promise.withResolvers<void>();
+    let arrivals = 0;
+    const resolveCommand = runtime.resolveCodexCommand;
+    const spies = [
+      spyOn(runtime, "resolveCodexCommand").mockImplementation(
+        (environment) => {
+          if (environment?.["CODEX_CLI_PATH"] !== node)
+            throw new Error(
+              "Component scan environment did not reach the runtime.",
+            );
+          return resolveCommand(environment);
+        },
+      ),
+      spyOn(runtime, "bootstrapPlugin").mockImplementation(async () => {
+        if (++arrivals === 2) ready.resolve();
+        await ready.promise;
+        return preparedRuntime("unused").plugin;
+      }),
+      spyOn(runtime, "probeCodexSandbox").mockImplementation(async () => {}),
+      spyOn(runtime, "resolvePluginPython").mockResolvedValue(
+        "/managed/python",
+      ),
+      spyOn(runtime, "prepareScanArtifactRestorer").mockResolvedValue({
+        restore: async () => {},
+      }),
+      spyOn(runtime, "runWorkbench").mockImplementation(
+        async (_options, args, input) => mockWorkbench(args, input),
+      ),
+    ];
+    try {
+      const outcomes = await Promise.allSettled(
+        ["first", "second"].map(async (value) => {
+          const paths = await fixture();
+          const preload = join(paths.root, "codex.mjs");
+          const receipt = join(paths.root, "child.json");
+          const environment = {
+            ...Object.fromEntries(
+              Object.entries(process.env).filter(([key]) =>
+                /^(path|systemroot|comspec|temp|tmp|tmpdir)$/iu.test(key),
+              ),
+            ),
+            OPENAI_API_KEY: `synthetic-${value}-key`,
+            CODEX_HOME: join(paths.root, "ambient-home"),
+            CODEX_SECURITY_STATE_DIR: join(paths.root, "state"),
+            CODEX_CLI_PATH: node,
+            NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+            SYNTHETIC_COMPONENT: value,
+          };
+          const original = { ...environment };
+          const storedAuthentication = {
+            auth_mode: "chatgpt",
+            synthetic_identity: value,
+          };
+          await mkdir(environment.CODEX_HOME, { mode: 0o700 });
+          await writeFile(
+            join(environment.CODEX_HOME, "auth.json"),
+            JSON.stringify(storedAuthentication),
+          );
+          await writeFile(
+            preload,
+            [
+              'import { cpSync, existsSync, readFileSync, writeFileSync } from "node:fs";',
+              'import { join } from "node:path";',
+              "for await (const chunk of process.stdin) {}",
+              `const scan = process.env.CODEX_SECURITY_SCAN_DIR; cpSync(${JSON.stringify(join(PLUGIN_ROOT, "examples", "completed-scan"))}, scan, { recursive: true });`,
+              'writeFileSync(join(scan, "report.md"), "# Synthetic scan\\n");',
+              'const manifestPath = join(scan, "scan-manifest.json"); const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));',
+              'manifest.scan.mode = "scoped_path"; writeFileSync(manifestPath, JSON.stringify(manifest));',
+              'const authPath = join(process.env.CODEX_HOME, "auth.json");',
+              `writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ executable: process.execPath, home: process.env.CODEX_HOME, state: process.env.CODEX_SECURITY_STATE_DIR, key: process.env.CODEX_API_KEY ?? null, auth: existsSync(authPath) ? JSON.parse(readFileSync(authPath, "utf8")) : null, value: process.env.SYNTHETIC_COMPONENT, python: process.env.PYTHON, workerConfig: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH ? readFileSync(process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, "utf8") : null }));`,
+              'console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-thread" }));',
+              'console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "scan complete" } }));',
+              'console.log(JSON.stringify({ type: "turn.completed", usage: null }));',
+              "process.exit(0);",
+            ].join("\n"),
+          );
+          const summary = await scan(paths, {
+            components: [{ name: "Source", paths: ["."] }],
+            createSecurity: undefined,
+            environment,
+            config: {
+              pluginPath: PLUGIN_ROOT,
+              codexOverrides: {
+                shell_environment_policy: {
+                  set: { SYNTHETIC_COMPONENT: `worker-${value}` },
+                },
+              },
+            },
+            scanOptions: { auth, mode },
+          }).finally(ready.resolve);
+          expect(
+            summary,
+            JSON.stringify(await json(summary.summaryPath!)),
+          ).toMatchObject({ completed: 1, failed: 0 });
+          const child = await json(receipt);
+          expect(await realpath(child.executable)).toBe(await realpath(node));
+          expect(child).toMatchObject({
+            home: join(environment.CODEX_SECURITY_STATE_DIR, "codex-home"),
+            state: environment.CODEX_SECURITY_STATE_DIR,
+            key: auth === "api-key" ? environment.OPENAI_API_KEY : null,
+            auth: auth === "chatgpt" ? storedAuthentication : null,
+            value,
+            python: "/managed/python",
+          });
+          if (mode === "deep") {
+            expect(parseToml(child.workerConfig)).toMatchObject({
+              worker_runtime: {
+                shell_environment_policy: {
+                  set: { SYNTHETIC_COMPONENT: `worker-${value}` },
+                },
+              },
+            });
+          } else expect(child.workerConfig).toBeNull();
+          expect(environment).toEqual(original);
+          expect(await json(join(environment.CODEX_HOME, "auth.json"))).toEqual(
+            storedAuthentication,
+          );
+        }),
+      );
+      for (const outcome of outcomes)
+        if (outcome.status === "rejected") throw outcome.reason;
+      expect(arrivals).toBe(2);
+      expect(Bun.deepEquals(process.env, originalEnvironment)).toBe(true);
+    } finally {
+      ready.resolve();
+      for (const spy of spies) spy.mockRestore();
+    }
+  },
+);
+
+test("CLI requires an explicitly selected API key before automatic planning", async () => {
+  const paths = await fixture();
+  const planComponentsMock = mock(resolving({ components }));
+  const result = await cli(
+    paths,
+    ["--auto", "--plan-only", "--auth", "api-key"],
+    {
+      ...dependencies({ currentDirectory: paths.root, environment: {} }),
+      planComponents: planComponentsMock,
+    },
+  );
+  expect(result.code).toBe(2);
+  expect(result.stderr).toContain("API-key authentication requires");
+  expect(planComponentsMock).not.toHaveBeenCalled();
+});
+
+test("CLI forwards scan settings and accepts legacy scope notes", async () => {
+  const paths = await fixture();
+  const planFile = join(paths.root, "plan.json");
+  await writeFile(
+    planFile,
+    `\uFEFF${JSON.stringify({ components: [components[0]] })}`,
+  );
+  const signals = new FakeSignals();
+  const createSecurity = mock((_value: unknown) => {
+    return client(run)();
+  });
+  const run = mock(async (repository: string, options: ScanOptions) => {
+    return completed(repository, options, [], "partial");
+  });
+  const result = await cli(
+    paths,
+    [
+      "--components-file",
+      planFile,
+      "--model",
+      "gpt-5.6-terra",
+      "--effort",
+      "high",
+      "--max-cost",
+      "2",
+    ],
+    {
+      ...dependencies({ currentDirectory: paths.root, signals }),
+      createSecurity,
+    },
+  );
+  expect(result.code).toBe(0);
+  expect(createSecurity.mock.lastCall?.[0]).toMatchObject({
+    codexOverrides: { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
+  });
+  expect(run.mock.lastCall?.[1]).toMatchObject({
+    target: [join(paths.repository, "apps/api")],
+    mode: "standard",
+    maxCostUsd: 2,
+  });
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    completed: 1,
+  });
+  expect(
+    [...signals.listeners.values()].every((listeners) => listeners.size === 0),
+  ).toBe(true);
+});
+
+test.each([false, true])(
+  "CLI reports matching completion (failure: %j)",
+  async (failMatching) => {
+    const paths = await fixture();
+    const failure = "Authorization: Bearer SYNTHETIC_MATCH_SECRET_123";
+    let calls = 0;
+    const result = await cli(
+      paths,
+      [
+        "--component",
+        "apps/api",
+        "--component",
+        "apps/web",
+        "--model",
+        "gpt-5.6-terra",
+        "--effort",
+        "high",
+      ],
+      {
+        createSecurity: client(),
+        matchFindings: async ({ before, after }, options) => {
+          calls++;
+          expect(options?.config?.codexOverrides).toMatchObject({
+            model: "gpt-5.6-terra",
+            model_reasoning_effort: "high",
+          });
+          if (failMatching) throw new Error(failure);
+          return {
+            matches: [
+              match([before[0]!.occurrenceId], [after[0]!.occurrenceId]),
+            ],
+            uncertain: [],
+          };
+        },
+      },
+    );
+    expect([result.code, calls]).toEqual([failMatching ? 2 : 0, 1]);
+    const saved = await readFile(
+      join(paths.outputDir, "findings.json"),
+      "utf8",
+    );
+    expect(JSON.parse(saved).findings).toHaveLength(failMatching ? 2 : 1);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      completed: 2,
+      failed: 0,
+      deduplication: { status: failMatching ? "failed" : "completed" },
+    });
+    expect(JSON.parse(saved).deduplication.error).toBe(
+      failMatching ? failure : undefined,
+    );
+    expect(JSON.parse(result.stdout).deduplication.error).toBe(
+      failMatching ? failure : undefined,
+    );
+  },
+);
+
+test("CLI rejects ambiguous component selection", async () => {
+  const paths = await fixture();
+  for (const selection of [[], ["--auto", "--component", "apps/api"]]) {
+    const result = await cli(paths, selection);
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("Choose exactly one");
+  }
+});
+
+(process.platform === "win32" ? test.skip : test)(
+  "component inventory excludes checkout-local Git when planning a subdirectory",
+  async () => {
+    if (
+      runTestInSubprocess(
+        "./tests-ts/component-scan.test.ts",
+        "component inventory excludes checkout-local Git when planning a subdirectory",
+      )
+    )
+      return;
+    const paths = await fixture();
+    execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+    const actualGit = Bun.which("git")!;
+    const bin = join(paths.repository, "bin");
+    const marker = join(paths.root, "local-git-called");
+    await mkdir(bin);
+    await writeFile(
+      join(bin, "git"),
+      `#!/bin/sh\nprintf called > '${marker.replaceAll("'", `'"'"'`)}'\nexec '${actualGit.replaceAll("'", `'"'"'`)}' "$@"\n`,
+      { mode: 0o700 },
+    );
+    const previous = process.env["PATH"];
+    process.env["PATH"] = bin + delimiter + previous;
+    try {
+      const plan = await planComponents(join(paths.repository, "apps", "api"), {
+        codex: fakeCodex(() => ({
+          components: [{ name: "Source", paths: ["."] }],
+        })),
+      });
+      expect(plan.components).toHaveLength(1);
+      expect(await stat(marker).catch(() => null)).toBeNull();
+    } finally {
+      if (previous === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = previous;
+    }
+  },
+);
