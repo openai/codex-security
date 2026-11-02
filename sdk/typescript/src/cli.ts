@@ -144,6 +144,7 @@ import {
   FindingPatchSchema as findingPatchSchema,
   parseFindingVerifications,
   remediationPrompt,
+  verificationBatches,
   VerificationModeSchema,
   type FindingPatch,
   type FindingVerification,
@@ -983,7 +984,10 @@ class FindingProgressPresenter {
     }
   }
 
-  public observe(event: Readonly<Record<string, unknown>>): void {
+  public observe(
+    event: Readonly<Record<string, unknown>>,
+    idPrefix = "",
+  ): void {
     const method = event["method"];
     const params = event["params"];
     if (!isJsonObject(params)) {
@@ -1041,7 +1045,7 @@ class FindingProgressPresenter {
       this.#repository,
     )) {
       if (this.#dashboard !== null) {
-        this.#dashboard.record(activity);
+        this.#dashboard.record({ ...activity, id: idPrefix + activity.id });
         continue;
       }
       const key = `${activity.id}\0${activity.description}`;
@@ -1055,9 +1059,17 @@ class FindingProgressPresenter {
     }
   }
 
-  public complete(results: readonly FindingVerification[]): void {
+  public updateVerification(results: readonly FindingVerification[]): void {
+    this.#reasoning.clear();
+    this.#seenActivities.clear();
     if (this.#dashboard === null) return;
     this.#dashboard.setPublicationProgress(results.length, this.#total);
+    if (results.length < this.#total) {
+      this.#dashboard.setStage(
+        `Verifying findings · ${results.length}/${this.#total}`,
+      );
+      return;
+    }
     this.#dashboard.setStage(
       `Verification complete · ${results.length}/${this.#total}`,
     );
@@ -1171,6 +1183,7 @@ type SkillThreadSource = Extract<
 >;
 
 interface SkillCommandOutput {
+  readonly signal?: AbortSignal;
   readonly responseSchema?: ValidateFunction;
   readonly directory?: string;
   readonly auth?: ScanAuthMode;
@@ -1203,6 +1216,7 @@ const SANDBOX_UNAVAILABLE_MESSAGE =
   "The patch sandbox could not start. Check the runner's sandbox permissions and retry. No patch was applied; 0 files changed.";
 
 interface SkillRunOptions {
+  readonly signal?: AbortSignal;
   context?: string;
   contextFile?: string;
   knowledgeBasePath?: string;
@@ -1563,15 +1577,17 @@ export async function runCodexSkillCommand(
         );
         const protectedRoots = [
           directory,
-          ...(await enclosingGitWorktreeRoots(directory)),
+          ...(await enclosingGitWorktreeRoots(directory, output.signal)),
         ];
         const codexHome = await prepareCodexSecurityCredentialHome(
           selected,
           (path) =>
             requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
         );
-        releaseCredentialHome =
-          await acquireCodexSecurityCredentialHomeLock(codexHome);
+        releaseCredentialHome = await acquireCodexSecurityCredentialHomeLock(
+          codexHome,
+          output.signal,
+        );
         let credentialsAvailable: boolean;
         const ambientAuthConfig = await readCodexHomeConfig(selected);
         credentialConfig = await readCodexHomeConfig({
@@ -1612,9 +1628,10 @@ export async function runCodexSkillCommand(
           CODEX_HOME: codexHome,
           CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(selected),
         };
+        output.signal?.throwIfAborted();
         if (
           !credentialsAvailable &&
-          !(await accountStatus(command, selected)).authenticated
+          !(await accountStatus(command, selected, output.signal)).authenticated
         ) {
           throw new AuthenticationRequiredError(NO_CREDENTIALS_MESSAGE);
         }
@@ -1626,10 +1643,10 @@ export async function runCodexSkillCommand(
         );
         if (output.appServer !== undefined) {
           const controller = new AbortController();
-          const removeSignals = listenForAbort(
-            DEFAULT_DEPENDENCIES,
-            controller,
-          );
+          const signal = output.signal ?? controller.signal;
+          const removeSignals = output.signal
+            ? undefined
+            : listenForAbort(DEFAULT_DEPENDENCIES, controller);
           try {
             args = [
               ...args,
@@ -1639,15 +1656,14 @@ export async function runCodexSkillCommand(
                 selected,
                 directory,
                 ambientConfig,
-                controller.signal,
+                signal,
               )),
             ];
           } catch (error) {
-            if (controller.signal.aborted)
-              return controller.signal.reason === "SIGINT" ? 130 : 143;
+            if (signal.aborted) return signal.reason === "SIGINT" ? 130 : 143;
             throw error;
           } finally {
-            removeSignals();
+            removeSignals?.();
           }
         }
       } else if (authentication.method === "api_key" && requiresOpenAiAuth) {
@@ -1702,6 +1718,7 @@ export async function runCodexSkillCommand(
         expandHome(configuredHome, processEnvironment),
       );
     }
+    output?.signal?.throwIfAborted();
     const invocation = spawn(
       executablePathForSpawn(command.command),
       [...args],
@@ -1952,6 +1969,27 @@ async function skillDaybreakConfigOverrides(
     overrides.push("--config", `${key}=${inlineToml(value)}`);
   }
   return overrides;
+}
+
+const processLifetimeVerificationStderr = new WeakSet<Writable>();
+
+function ignoreDisconnectedVerificationStderr(error: Error): void {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code !== "EPIPE" && code !== "EIO") throw error;
+}
+
+function protectProcessStderrForBatchedVerification(
+  errorOutput: Writable,
+): boolean {
+  if (errorOutput !== process.stderr) return false;
+  if (!processLifetimeVerificationStderr.has(errorOutput)) {
+    // SIGWINCH can make Node emit getWindowSize EIO after main() returns. Once
+    // a real batched CLI invocation owns fd 2, keep this exact stream protected
+    // through process shutdown; repeated in-process main() calls reuse it.
+    process.stderr.on("error", ignoreDisconnectedVerificationStderr);
+    processLifetimeVerificationStderr.add(errorOutput);
+  }
+  return true;
 }
 
 export async function main(
@@ -6085,8 +6123,10 @@ export async function main(
       ],
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ format, options, error: incurError }) {
-        const diagnostics = captureOutput();
         let failureReported = false;
+        const reportDiagnostic = (chunk: string | Uint8Array): void => {
+          void writeCliOutput(errorOutput, chunk).catch(() => {});
+        };
         try {
           if (options.host)
             throw new CodexSecurityError("Use verify-fix --host alone.");
@@ -6136,71 +6176,129 @@ export async function main(
           }
           const repository =
             selected?.repository ?? dependencies.currentDirectory();
-          let results: FindingVerification[] = [];
+          const results: FindingVerification[] = [];
           if (identifiers.length > 0) {
             const environment =
               imports.length === 0
                 ? undefined
                 : withoutLinearCredentials(dependencies.environment);
-            const response = captureOutput();
+            const batches = selected
+              ? await verificationBatches(
+                  selected.findings,
+                  await bundledPluginRoot(),
+                  options.verificationMode,
+                )
+              : [undefined];
+            // Multi-batch verification can outlive its stderr reader. Keep
+            // optional progress off that execution path so terminal failures
+            // and backpressure cannot prevent a complete stdout result.
+            const presentProgress = batches.length === 1;
             const progress = new FindingProgressPresenter(
               errorOutput,
               dependencies,
               repository,
               identifiers.length,
+              presentProgress,
             );
-            progress.startVerification();
-            const verificationErrors = new NodeWritable({
-              write(chunk, _encoding, callback) {
-                diagnostics.stream.write(chunk);
+            const controller =
+              batches.length > 1 ? new AbortController() : undefined;
+            const processLifetimeStderr =
+              controller !== undefined &&
+              protectProcessStderrForBatchedVerification(errorOutput);
+            const scopedStderrHandler =
+              controller !== undefined && !processLifetimeStderr;
+            if (scopedStderrHandler)
+              errorOutput.on?.("error", ignoreDisconnectedVerificationStderr);
+            const removeSignals =
+              controller && listenForAbort(dependencies, controller);
+            let restoration: Promise<void> | undefined;
+            const stopProgress = () => {
+              if (!restoration) {
                 progress.stop();
-                void writeCliOutput(errorOutput, chunk).then(
-                  () => callback(),
-                  callback,
-                );
-              },
+                restoration = Promise.resolve().then(removeSignals);
+              }
+              return restoration;
+            };
+            controller?.signal.addEventListener("abort", stopProgress, {
+              once: true,
             });
             try {
-              exitCode = await runSkill(
-                "verify-fix",
-                selected === undefined ? [...positionals, ...imports] : [],
-                options,
-                response.stream,
-                verificationErrors,
-                dependencies,
-                {
-                  directory: repository,
-                  ...(selected === undefined
-                    ? {}
-                    : { findings: selected.findings }),
-                  auth: options.auth,
-                  verificationIds: identifiers,
-                  verificationMode: options.verificationMode,
-                  environment,
-                  onEvent: progress.observe.bind(progress),
-                },
-              );
-              if (exitCode !== 0) {
+              if (presentProgress) progress.startVerification();
+              for (const [index, findings] of batches.entries()) {
+                const batchIds =
+                  findings?.map(({ occurrenceId }) => occurrenceId) ??
+                  identifiers;
+                const response = captureOutput();
+                const diagnostics = captureOutput();
+                const verificationErrors = {
+                  write(chunk: string | Uint8Array) {
+                    diagnostics.stream.write(chunk);
+                    progress.stop();
+                    reportDiagnostic(chunk);
+                    return true;
+                  },
+                };
+                exitCode = await runSkill(
+                  "verify-fix",
+                  selected === undefined ? [...positionals, ...imports] : [],
+                  options,
+                  response.stream,
+                  verificationErrors,
+                  dependencies,
+                  {
+                    directory: repository,
+                    findings,
+                    auth: options.auth,
+                    verificationIds: batchIds,
+                    signal: controller?.signal,
+                    verificationMode: options.verificationMode,
+                    environment,
+                    onEvent: presentProgress
+                      ? (event) => progress.observe(event, `${index}:`)
+                      : undefined,
+                  },
+                );
                 if (exitCode === 130 || exitCode === 143) {
                   frameworkExit = exitCode;
                   return undefined;
                 }
-                failureReported = diagnostics.text().trim().length > 0;
-                throw new CodexSecurityError(
-                  diagnostics.text().trim() ||
-                    `Codex verification failed with exit code ${exitCode}.`,
+                controller?.signal.throwIfAborted();
+                if (exitCode !== 0) {
+                  const message = diagnostics.text().trim();
+                  failureReported = message.length > 0;
+                  throw new CodexSecurityError(
+                    message ||
+                      `Codex verification failed with exit code ${exitCode}.`,
+                  );
+                }
+                results.push(
+                  ...parseFindingVerifications(response.text(), batchIds),
                 );
+                progress.updateVerification(results);
               }
-
-              results = parseFindingVerifications(response.text(), identifiers);
-              progress.complete(results);
               exitCode = results.some(({ status }) => status === "inconclusive")
                 ? 2
                 : results.some(({ status }) => status === "still_vulnerable")
                   ? 1
                   : 0;
+            } catch (error) {
+              if (!controller?.signal.aborted) throw error;
             } finally {
-              progress.stop();
+              try {
+                const stopped = stopProgress();
+                if (output.isTTY) await stopped;
+              } finally {
+                if (scopedStderrHandler)
+                  errorOutput.off?.(
+                    "error",
+                    ignoreDisconnectedVerificationStderr,
+                  );
+              }
+            }
+            if (controller?.signal.aborted) {
+              exitCode = controller.signal.reason === "SIGINT" ? 130 : 143;
+              frameworkExit = exitCode;
+              return undefined;
             }
           }
 
@@ -6222,7 +6320,7 @@ export async function main(
           exitCode = 2;
           const message = errorMessage(error);
           if (!failureReported)
-            errorOutput.write(`codex-security: ${diagnosticValue(message)}\n`);
+            reportDiagnostic(`codex-security: ${diagnosticValue(message)}\n`);
           return finishScan(
             { exitCode, error: message },
             format,
@@ -8892,6 +8990,7 @@ async function runSkill(
       providerResolved: provider !== undefined || validate,
     },
   );
+  options.signal?.throwIfAborted();
   return dependencies.runCodex(
     [
       ...(appServer
@@ -8961,6 +9060,7 @@ async function runSkill(
     ],
     {
       command: verify ? "verify-fix" : patch || assess ? "patch" : "validate",
+      signal: options.signal,
       auth: options.auth ?? "auto",
       directory,
       modelProvider: provider,

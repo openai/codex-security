@@ -191,3 +191,82 @@ for (const operation of ["account", "logout"] as const) {
     }
   });
 }
+
+const verificationAbort =
+  "batched verification cancels stored authentication before starting a worker";
+test(verificationAbort, async () => {
+  if (runTestInSubprocess(import.meta.filename, verificationAbort)) return;
+
+  const root = await fs.realpath(
+    await fs.mkdtemp(join(tmpdir(), "verify-auth-")),
+  );
+  const directory = join(root, "repository");
+  const environment = {
+    CODEX_HOME: join(root, "ambient"),
+    CODEX_SECURITY_STATE_DIR: join(root, "state"),
+  };
+  const controller = new AbortController();
+  const reason = new Error("Verification interrupted");
+  const signals: Array<AbortSignal | undefined> = [];
+  const targets = { ...(await import("../src/targets.js")) };
+  const runtime = { ...(await import("../src/runtime.js")) };
+  const auth = { ...(await import("../src/auth.js")) };
+  mock.module("../src/targets.js", () => ({
+    ...targets,
+    enclosingGitWorktreeRoots: async (
+      _directory: string,
+      signal?: AbortSignal,
+    ) => {
+      signals.push(signal);
+      return [];
+    },
+  }));
+  mock.module("../src/runtime.js", () => ({
+    ...runtime,
+    acquireCodexSecurityCredentialHomeLock: (
+      ...args: Parameters<typeof runtime.acquireCodexSecurityCredentialHomeLock>
+    ) => {
+      signals.push(args[1]);
+      return runtime.acquireCodexSecurityCredentialHomeLock(...args);
+    },
+  }));
+  mock.module("../src/auth.js", () => ({
+    ...auth,
+    accountStatus: async (...args: Parameters<typeof auth.accountStatus>) => {
+      signals.push(args[2]);
+      controller.abort(reason);
+      args[2]?.throwIfAborted();
+      return { authenticated: false, details: "" };
+    },
+  }));
+  try {
+    await fs.mkdir(directory);
+    const { runCodexSkillCommand } = await import("../src/cli.js");
+    const sink = { write: () => true };
+    await expect(
+      runCodexSkillCommand(
+        [],
+        {
+          auth: "chatgpt",
+          command: "verify-fix",
+          directory,
+          signal: controller.signal,
+          stdout: sink,
+          stderr: sink,
+        },
+        { command: process.execPath },
+        environment,
+      ),
+    ).rejects.toBe(reason);
+    expect(signals).toEqual([
+      controller.signal,
+      controller.signal,
+      controller.signal,
+    ]);
+    const home = await runtime.prepareCodexSecurityCredentialHome(environment);
+    const release = await runtime.acquireCodexSecurityCredentialHomeLock(home);
+    await release();
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});

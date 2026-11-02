@@ -5,10 +5,16 @@ import { join } from "node:path";
 import { Writable } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
 import { main, runCodexSkillCommand } from "../src/cli.js";
+import { remediationPrompt, verificationBatches } from "../src/remediation.js";
 import { VERSION } from "../src/version.js";
 import type { Finding, JsonObject } from "../src/index.js";
 import type { LinearClientFactory } from "../src/linear.js";
-import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
+import {
+  capture,
+  dependencies,
+  FakeSignals,
+  fakeResult,
+} from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createCliTest, captureCli } from "./support/cli-run.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -389,6 +395,207 @@ describe("read-only finding verification", () => {
       scanId: "scan-1",
       results: [{ id: "occ_1", status: "fixed", evidence }],
     });
+  });
+
+  test.each([
+    ["complete", 1],
+    ["redirected output", 1],
+    ["wrong ID", 2],
+    ["transport failure", 2],
+    ["closed stderr", 2],
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+    ["repeated signal", 130],
+    ["interrupted worker", 143],
+    ["oversized finding", 2],
+  ] as const)(
+    "handles %s across saved verification batches",
+    async (scenario, expectedExit) => {
+      const result = fakeResult(["high", "high", "high", "low"]);
+      const evidence = '"quoted"\n'.repeat(60_000);
+      result.findings.findings.forEach((finding, i) => {
+        Object.assign(finding, {
+          occurrenceId: `occ_${i}`,
+          findingId: `csf_${i}`,
+          codeEvidence: [
+            {
+              path: "src/check.ts",
+              code:
+                scenario === "oversized finding" && i === 1
+                  ? evidence.repeat(2)
+                  : evidence,
+            },
+          ],
+        });
+      });
+      const signals = new FakeSignals();
+      const { stdout, stderr } = createCliTest(main, {
+        stdout: scenario !== "redirected output",
+        stderr: true,
+      });
+      const seen: string[] = [];
+      const forceExit = mock(() => {});
+      const deps = dependencies({
+        result,
+        signals,
+        onWorkbench: () => ({
+          scan: {
+            scanId: "scan",
+            targetPath: "/saved/repository",
+            findings: result.findings.findings as unknown as JsonObject[],
+          },
+        }),
+        onCodex: (_args, output) => {
+          const prompt = output!.appServer!.prompt;
+          expect([...prompt].length).toBeLessThanOrEqual(1 << 20);
+          const batch = JSON.parse(prompt.split("\n").at(-1)!) as Finding[];
+          expect(batch).toHaveLength(1);
+          expect(batch[0]!.codeEvidence![0]!.code).toBe(evidence);
+          const id = batch[0]!.occurrenceId;
+          seen.push(id);
+          expect(output!.appServer!.onEvent).toBeUndefined();
+          output!.appServer!.onEvent?.({
+            method: "item/reasoning/summaryTextDelta",
+            params: { itemId: "reason_0", delta: `Checked ${id}.` },
+          });
+          output!.appServer!.onEvent?.({
+            method: "item/completed",
+            params: {
+              item: {
+                type: "reasoning",
+                id: "reason_0",
+                summary: [`Checked ${id}.`],
+              },
+            },
+          });
+          if (seen.length === 1 && scenario === "transport failure")
+            output!.stderr.write("First batch diagnostic.\n");
+          if (seen.length === 2 && scenario === "transport failure") return 1;
+          if (seen.length === 2 && scenario === "interrupted worker") {
+            signals.emit("SIGINT");
+            signals.emit("SIGTERM");
+            return 143;
+          }
+          if (seen.length === 2 && scenario === "closed stderr") {
+            output!.stderr.write("Second worker failed.\n");
+            return 1;
+          }
+          if (
+            seen.length === 1 &&
+            (scenario === "SIGINT" || scenario === "SIGTERM")
+          )
+            setImmediate(() => signals.emit(scenario));
+          if (seen.length === 1 && scenario === "repeated signal")
+            setImmediate(() => {
+              signals.emit("SIGINT");
+              signals.emit("SIGTERM");
+            });
+          output!.stdout.write(
+            JSON.stringify({
+              results: [
+                {
+                  id:
+                    seen.length === 2 && scenario === "wrong ID" ? "occ_0" : id,
+                  status: seen.length === 1 ? "still_vulnerable" : "fixed",
+                  evidence: "Verified against source.",
+                },
+              ],
+            }),
+          );
+          return 0;
+        },
+      });
+      const errorOutput =
+        scenario === "closed stderr"
+          ? new Writable({
+              write(chunk, _encoding, done) {
+                done(
+                  chunk.includes("Second worker")
+                    ? new Error("EPIPE")
+                    : undefined,
+                );
+              },
+            })
+          : stderr.stream;
+      const exit = await main(
+        ["verify-fix", "--scan", "scan", "--severity", "high", "--json"],
+        stdout.stream,
+        errorOutput,
+        { ...deps, forceExit },
+      );
+      expect(forceExit).not.toHaveBeenCalled();
+      expect(exit).toBe(expectedExit);
+      expect(
+        [...signals.listeners.values()].every(
+          (listeners) => listeners.size === 0,
+        ),
+      ).toBe(true);
+      if (scenario === "closed stderr")
+        expect((errorOutput as Writable).listenerCount("error")).toBe(0);
+      if (scenario === "complete" || scenario === "redirected output") {
+        expect(seen).toEqual(["occ_0", "occ_1", "occ_2"]);
+        expect(stderr.text()).toBe("");
+        expect(
+          JSON.parse(stdout.text()).results.map(({ id }: { id: string }) => id),
+        ).toEqual(seen);
+      } else if (
+        scenario === "SIGINT" ||
+        scenario === "SIGTERM" ||
+        scenario === "repeated signal" ||
+        scenario === "interrupted worker"
+      ) {
+        expect(seen).toEqual(
+          scenario === "interrupted worker" ? ["occ_0", "occ_1"] : ["occ_0"],
+        );
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toBe("");
+      } else {
+        expect(seen).toEqual(
+          scenario === "oversized finding" ? [] : ["occ_0", "occ_1"],
+        );
+        const failure = JSON.parse(stdout.text());
+        if (scenario === "oversized finding") {
+          expect(failure.message).toContain("Finding occ_1 cannot fit");
+          expect(failure.message).toContain(
+            "codex-security verify-fix OCCURRENCE_ID",
+          );
+        }
+        expect(failure.code).toBe("VERIFICATION_FAILED");
+        expect(failure.results).toBeUndefined();
+        if (scenario === "transport failure")
+          expect(failure.message).toBe(
+            "Codex verification failed with exit code 1.",
+          );
+        if (scenario === "closed stderr")
+          expect(failure.message).toBe("Second worker failed.");
+      }
+    },
+  );
+
+  test("batches at the exact decoded prompt limit and rejects an oversized finding", async () => {
+    const findings = fakeResult(["high", "high"]).findings.findings.map(
+      (finding, i) => ({
+        ...finding,
+        occurrenceId: `occ_${i}`,
+        title: "",
+      }),
+    );
+    const prompt = await remediationPrompt({
+      operation: "verify",
+      contents: findings,
+      verificationIds: findings.map(({ occurrenceId }) => occurrenceId),
+      pluginRoot: PLUGIN_ROOT,
+      verificationMode: "static",
+    });
+    const batches = () => verificationBatches(findings, PLUGIN_ROOT, "static");
+    findings[1]!.title = "🚀".repeat((1 << 20) - [...prompt].length);
+    expect((await batches()).map((batch) => batch.length)).toEqual([2]);
+    findings[1]!.title += "x";
+    expect((await batches()).map((batch) => batch.length)).toEqual([1, 1]);
+    findings[1]!.title += "x".repeat(1024);
+    await expect(batches()).rejects.toThrow(
+      "Finding occ_1 cannot fit in one complete Codex verification request",
+    );
   });
 
   test("reports inconclusive findings without treating them as fixed", async () => {

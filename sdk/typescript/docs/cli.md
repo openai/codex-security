@@ -2597,6 +2597,16 @@ credentials out of the patch subprocess. URLs must match the selected workspace.
 finding IDs, `--scan`, and the Linear issue/project selectors above. Explicitly
 filter for completed Linear issues to check a finished backlog.
 
+Large saved selections use multiple requests, keeping each finding intact. The
+CLI prints verdicts in selection order after every request returns valid results.
+Optional per-event progress is disabled for these selections so stderr terminal
+failures and backpressure cannot interfere with verification results.
+
+If one finding exceeds the input limit on its own, verification stops before
+the first request. The error reports its occurrence ID and required request
+size. To verify another finding from the same scan, pass that finding's ID to
+`codex-security verify-fix OCCURRENCE_ID`.
+
 `--verification-mode static` selects source-only assessment, as described above
 for `patch`. Omit it or use `--verification-mode standard` for the default checks.
 
