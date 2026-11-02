@@ -15,6 +15,10 @@ import {
   snapshotImportOptions,
   snapshotSourceRepositories,
 } from "./external-findings.js";
+import {
+  scannerDisplayReports,
+  withScannerDisplayReport,
+} from "./scanner-import.js";
 import { abortable } from "./targets.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 
@@ -64,7 +68,10 @@ export async function prepareLocalExternalImport(
   }
   const { environment, runWorkbench, signal } = dependencies;
   return prepareLocalImport(
-    parsed.findings,
+    withScannerDisplayReport(
+      parsed.findings,
+      scannerDisplayReports.get(parsed.findings),
+    ),
     normalizedOptions,
     { environment, runWorkbench, signal },
     readerSources,

@@ -39,9 +39,17 @@ import {
 import { notify } from "./value.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { wizFindingRepository } from "./wiz-findings.js";
+import {
+  scannerDisplayReports,
+  withScannerDisplayReport,
+  type ScannerDisplayReport,
+} from "./scanner-import.js";
 import { previousReaderSelection } from "./reader-selection.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
-import { snykRepositoryUrls } from "./snyk-findings.js";
+import {
+  normalizeSnykGitRepositoryUrl,
+  snykRepositoryUrls,
+} from "./snyk-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
 import {
   blackDuckReportRepositories,
@@ -464,6 +472,7 @@ export async function prepareExternalPublication(
     parsed.publication ?? normalizedPublicationInput(parsed.findings),
     { ...settings, provider: EXTERNAL_FINDINGS_PROVIDERS[settings.provider] },
     dependencies,
+    scannerDisplayReports.get(parsed.findings),
   );
 }
 
@@ -747,9 +756,7 @@ function normalizedPublicationInput(
     // Only the old selection can be reviewed when fresh validation failed.
     current = { read: original.parsed.read, findings: [], excluded: [] };
   }
-  const identity = reader?.reportFreeIdentity
-    ? current.findings
-    : publicationIdentity(current);
+  const identity = publicationIdentity(current);
   return {
     current,
     legacy: current,
@@ -813,6 +820,7 @@ async function preparePublicationInput(
   input: PublicationSelection,
   options: NormalizedExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies,
+  display?: ScannerDisplayReport,
 ): Promise<PreparedExternalPublication> {
   const { inspectorProjectMap } = options;
   const progress = (event: ExternalPublicationProgress): void =>
@@ -845,7 +853,9 @@ async function preparePublicationInput(
     !input.unprovenOccurrenceCount &&
     !input.unprovenIdPrefixes?.length
   )
-    throw new NoPublishableFindingsError(parsed);
+    throw new NoPublishableFindingsError(
+      withScannerDisplayReport(parsed, display),
+    );
   progress({ phase: "discovering", completed: 0 });
   const apiBaseUrl = cloudBaseUrl(environment);
   const cloudApiUrl = `${apiBaseUrl}/external`;
@@ -1674,7 +1684,10 @@ async function preparePublicationInput(
   }
   const saved = selected?.content ?? recovered;
   if (historicalOnly && !saved) throw unmatchedPreviousNumbers();
-  if (!parsed.findings.length) throw new NoPublishableFindingsError(parsed);
+  if (!parsed.findings.length)
+    throw new NoPublishableFindingsError(
+      withScannerDisplayReport(parsed, display),
+    );
   if (saved) {
     await retireIfReset(saved, () =>
       underLocks(lockKeys, async () => {
@@ -1705,6 +1718,13 @@ async function preparePublicationInput(
           `Finding ${JSON.stringify(id)} belongs to ${JSON.stringify(url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
         );
     }
+    for (const url of display?.repositories ?? [])
+      requireDestination(
+        "SARIF scanner notification",
+        options.provider === "snyk"
+          ? normalizeSnykGitRepositoryUrl(url, destination.url)
+          : url,
+      );
     // Historical checkpoints already fixed the provider and request bytes.
     // Recheck any projected source against the destination discovered for this retry.
     const replay = saved && options.provider !== "blackduck";
@@ -1895,7 +1915,7 @@ async function preparePublicationInput(
   };
   if (inspectorProjectMap) submission.inspectorProjectMapRequired = true;
   const preview: ExternalPublicationPreview = {
-    ...parsed,
+    ...withScannerDisplayReport(parsed, display),
     findings: submissionFindings(requests),
     cloudApiUrl,
     cloudUrl: cloudFindingsUrl(environment, destination.id),

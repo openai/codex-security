@@ -1305,6 +1305,19 @@ test("failed or malformed vendor collections never report a successful empty imp
       { position: 1, reason: expect.stringContaining("Only Snyk Open Source") },
     ],
   });
+  const excludedPlugin = JSON.parse(await readFile(f.file, "utf8"));
+  await writeFile(
+    f.file,
+    JSON.stringify({ ...excludedPlugin, collection: partialCollection }),
+  );
+  const onlyExcluded = createCliTest(main);
+  expect(
+    await onlyExcluded.runCli(
+      f.command.slice(0, -2).map((arg) => (arg === "wiz" ? "snyk" : arg)),
+      f.cliDeps,
+    ),
+  ).toBe(2);
+  expect(onlyExcluded.stderr.text()).toContain("Code scan denied");
 });
 
 test("Sonar replays the selected evidence locally and to Cloud without signing in to Sonar again", async () => {
@@ -6561,10 +6574,10 @@ for (const [provider, report, normalize, dryRunTitle] of [
     const cli = createCliTest(main);
     expect(await cli.runCli(command, f.cliDeps)).toBe(0);
     expect(cli.stderr.text()).toContain("Example manifest was skipped");
-    const old = structuredClone(normalize(input));
-    delete old.report;
+    const rows = normalize(input);
+    expect(rows.report).toBeUndefined();
     const original = await prepareNormalizedExternalPublication(
-      old,
+      rows,
       settings,
       f.deps,
     );
@@ -6573,6 +6586,28 @@ for (const [provider, report, normalize, dryRunTitle] of [
     const retry = await prepareExternalPublication(f.file, settings, f.deps);
     expect(retry.preview.resumed).toBe(true);
     expect(retry.preview.requests).toEqual(original.preview.requests);
+    const restored = await prepareNormalizedExternalPublication(
+      JSON.parse(JSON.stringify(rows)),
+      settings,
+      f.deps,
+    );
+    expect(restored.preview.resumed).toBe(true);
+    expect(restored.preview.requests).toEqual(original.preview.requests);
+
+    const otherRun = {
+      ...input.runs[0],
+      results: [],
+      versionControlProvenance: [
+        { repositoryUri: "https://github.com/other/project" },
+      ],
+    };
+    await writeFile(
+      f.file,
+      JSON.stringify({ ...input, runs: [...input.runs, otherRun] }),
+    );
+    await expect(
+      prepareExternalPublication(f.file, settings, f.deps),
+    ).rejects.toThrow("does not match the selected Cloud repository");
   });
   test(dryRunTitle, async () => {
     const f = await fixture(report());

@@ -168,6 +168,30 @@ test.each(["snyk", "endor"] as const)(
         "version control provenance must be an array",
       );
     }
+    const notification = {
+      level: "warning",
+      message: { text: "Example manifest skipped" },
+    };
+    await fixture.writeJson({
+      ...sarif,
+      runs: [
+        {
+          ...run,
+          results: [{}],
+          invocations: [
+            {
+              executionSuccessful: true,
+              toolExecutionNotifications: [notification],
+            },
+          ],
+        },
+      ],
+    });
+    const excluded = await fixture.prepare();
+    expect(excluded.preview.excluded).toHaveLength(1);
+    expect(excluded.preview.report?.["notifications"]).toMatchObject([
+      notification,
+    ]);
     await fixture.writeJson({
       ...sarif,
       runs: [

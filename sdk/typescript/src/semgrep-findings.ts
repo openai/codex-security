@@ -191,7 +191,10 @@ export function normalizeSemgrepSarif(
   const document = record(input, "Semgrep SARIF");
   if (document["version"] !== "2.1.0")
     throw new Error("Expected Semgrep SARIF 2.1.0.");
-  const notifications: unknown[] = [];
+  const coverage = {
+    notifications: [] as unknown[],
+    repositories: new Set<string>(),
+  };
   const entries = sarifRuns(document).flatMap((value) => {
     const run = record(value, "SARIF run");
     for (const declared of sarifRepositoryUrls(run, "Semgrep")) {
@@ -217,7 +220,7 @@ export function normalizeSemgrepSarif(
     for (const details of successfulSarifInvocations(
       run,
       "Semgrep",
-      notifications,
+      coverage,
     )) {
       if (
         optionalArray(
@@ -321,7 +324,7 @@ export function normalizeSemgrepSarif(
     },
     ({ result, context }) => sarifIdentity(result, context.runContext),
     target,
-    { notifications },
+    { coverage },
   );
 }
 

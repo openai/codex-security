@@ -3672,11 +3672,7 @@ export async function main(
                     `Scanner notification: ${diagnosticValue(JSON.stringify(entry))}\n`,
                 )
               : [];
-            const collection =
-              selection.report?.["collection"] ??
-              (options.provider === "snyk"
-                ? selection.findings[0]?.evidence.source_data?.["collection"]
-                : undefined);
+            const collection = selection.report?.["collection"];
             if (
               isJsonObject(collection) &&
               isJsonObject(collection["completeness"]) &&
@@ -3724,7 +3720,7 @@ export async function main(
           };
           const showScannerReport = (preview: ExternalFindings) => {
             if (
-              preview.findings.length &&
+              preview.read > 0 &&
               !(humanSummary && options.to === "local" && options.dryRun)
             )
               writeDiagnostic(coverageWarnings(preview));

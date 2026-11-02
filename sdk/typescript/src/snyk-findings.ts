@@ -7,6 +7,7 @@ import {
   hasSarifExternalPropertyReferences,
   indexSarifRules,
   normalizeRecords,
+  scannerDisplayReports,
   optionalArray,
   readScannerJson,
   record,
@@ -175,7 +176,14 @@ export function normalizeSnykFindingsExport(
     }
     successfulSca = true;
   }
-  if (parsed.read) return parsed;
+  if (parsed.read) {
+    const completeness = collection["completeness"];
+    if (isRecord(completeness) && completeness["collection"] === "partial")
+      scannerDisplayReports.set(parsed, {
+        report: { collection: structuredClone(collection) },
+      });
+    return parsed;
+  }
   if (!successfulSca)
     throw new Error(
       "An empty Snyk plugin bundle must identify a successful SCA scan.",
@@ -183,7 +191,7 @@ export function normalizeSnykFindingsExport(
   return { ...parsed, report: { collection: structuredClone(collection) } };
 }
 
-function normalizeGitRepositoryUrl(
+export function normalizeSnykGitRepositoryUrl(
   repository: string,
   cloudRepositoryUrl?: string,
 ): string {
@@ -248,7 +256,7 @@ export function snykRepositoryUrls(
     if (repository === null || repository === "unknown") return [];
     return [
       normalizeGitRemote
-        ? normalizeGitRepositoryUrl(repository, cloudRepositoryUrl)
+        ? normalizeSnykGitRepositoryUrl(repository, cloudRepositoryUrl)
         : repository,
     ];
   }
@@ -264,7 +272,7 @@ export function snykRepositoryUrls(
     return [];
   const urls = sarifRepositoryUrls(source["run"], "Snyk");
   return normalizeGitRemote
-    ? urls.map((url) => normalizeGitRepositoryUrl(url, cloudRepositoryUrl))
+    ? urls.map((url) => normalizeSnykGitRepositoryUrl(url, cloudRepositoryUrl))
     : urls;
 }
 
@@ -276,10 +284,13 @@ export function normalizeSnykSarif(
   const document = record(input, "Snyk SARIF");
   if (document["version"] !== "2.1.0")
     throw new Error("Expected Snyk Open Source SARIF 2.1.0.");
-  const notifications: unknown[] = [];
+  const coverage = {
+    notifications: [] as unknown[],
+    repositories: new Set<string>(),
+  };
   const entries = sarifRuns(document).flatMap((value) => {
     const run = record(value, "SARIF run");
-    successfulSarifInvocations(run, "Snyk", notifications);
+    successfulSarifInvocations(run, "Snyk", coverage);
     const driver = record(
       record(run["tool"], "SARIF tool")["driver"],
       "SARIF driver",
@@ -422,7 +433,7 @@ export function normalizeSnykSarif(
     },
     ({ result, project }) => snykIdentity(result, project),
     target,
-    { notifications },
+    { coverage },
   );
 }
 

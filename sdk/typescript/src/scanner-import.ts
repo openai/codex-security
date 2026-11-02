@@ -88,10 +88,31 @@ function notificationDescriptors(value: unknown) {
   };
 }
 
+export interface ScannerDisplayReport {
+  report: NonNullable<ExternalFindings["report"]>;
+  repositories?: Set<string>;
+}
+
+// Scanner summaries describe the selected file. Keep them outside the SDK rows
+// used for immutable Cloud requests, including when callers round-trip JSON.
+export const scannerDisplayReports = new WeakMap<
+  ExternalFindings,
+  ScannerDisplayReport
+>();
+
+export function withScannerDisplayReport<T extends ExternalFindings>(
+  selection: T,
+  display?: ScannerDisplayReport,
+): T {
+  return display
+    ? { ...selection, report: { ...selection.report, ...display.report } }
+    : selection;
+}
+
 export function successfulSarifInvocations(
   run: Record<string, unknown>,
   producer: string,
-  retained?: unknown[],
+  retained?: { notifications: unknown[]; repositories: Set<string> },
 ): Record<string, unknown>[] {
   function validateInvocation(
     value: unknown,
@@ -172,7 +193,11 @@ export function successfulSarifInvocations(
       throw new Error(
         `${producer} SARIF contains scan error notifications: ${JSON.stringify(messages)}`,
       );
-    if (retained) for (const message of messages) retained.push(message);
+    if (retained && messages.length) {
+      for (const message of messages) retained.notifications.push(message);
+      for (const url of sarifRepositoryUrls(run, producer))
+        retained.repositories.add(url);
+    }
     return invocation;
   }
   if (run["conversion"] !== undefined) {
@@ -200,10 +225,7 @@ export function requiredText(value: unknown, label: string): string {
 }
 
 /** SARIF repository claims must be checked even when a run has no results. */
-export function sarifRepositoryUrls(
-  run: unknown,
-  producer: "Endor" | "Semgrep" | "Snyk",
-): string[] {
+export function sarifRepositoryUrls(run: unknown, producer: string): string[] {
   if (run == null) return [];
   return array(
     record(run, `${producer} run context`)["versionControlProvenance"] ?? [],
@@ -544,11 +566,8 @@ export function trackReaderSelection(result: ExternalFindings) {
       changes.push({ index, position, id, previous });
   }
 
-  function finish(
-    filter?: SelectionFilter,
-    notifications?: unknown[],
-  ): ExternalFindings {
-    if (!changes.length && !uncertainIds.size && !notifications?.length) {
+  function finish(filter?: SelectionFilter): ExternalFindings {
+    if (!changes.length && !uncertainIds.size) {
       filter?.(result);
       return result;
     }
@@ -580,13 +599,6 @@ export function trackReaderSelection(result: ExternalFindings) {
     // A removed sibling could have depended on an unproven row for its scope.
     filter?.(previous, uncertainIds.size ? uncertainIds : undefined);
     filter?.(result);
-    const reportFreeIdentity = Boolean(notifications?.length && !result.report);
-    // Older SARIF readers retained invocations in the rows, without a summary.
-    if (notifications?.length)
-      result.report = {
-        ...result.report,
-        notifications: structuredClone(notifications),
-      };
     const sourceFindingIds = [
       ...new Set([
         ...previous.findings.map((row) => row.source_finding_id),
@@ -596,7 +608,6 @@ export function trackReaderSelection(result: ExternalFindings) {
     if (uncertainIds.size) {
       rememberPreviousSelection(result, {
         sourceFindingIds,
-        reportFreeIdentity,
         uncertainFindingIds: [...uncertainIds],
         knownFindings: structuredClone(
           previous.findings.filter(
@@ -607,7 +618,6 @@ export function trackReaderSelection(result: ExternalFindings) {
     } else {
       rememberPreviousSelection(result, {
         sourceFindingIds,
-        reportFreeIdentity,
         snapshot: structuredClone(previous),
       });
     }
@@ -625,7 +635,7 @@ export function normalizeRecords<T>(
   target: "local" | "cloud" = "cloud",
   options: {
     report?: ExternalFindings["report"];
-    notifications?: unknown[];
+    coverage?: { notifications: unknown[]; repositories: Set<string> };
     filter?: SelectionFilter;
   } = {},
 ): ExternalFindings {
@@ -674,5 +684,16 @@ export function normalizeRecords<T>(
     selection.append(position, id, () => projectEvidence(value, id));
   }
   result.excluded.sort((a, b) => a.position - b.position);
-  return selection.finish(options.filter, options.notifications);
+  const normalized = selection.finish(options.filter);
+  const coverage = options.coverage;
+  if (coverage?.notifications.length) {
+    const report = { notifications: coverage.notifications };
+    if (!normalized.read) normalized.report = report;
+    else
+      scannerDisplayReports.set(normalized, {
+        report,
+        repositories: coverage.repositories,
+      });
+  }
+  return normalized;
 }
