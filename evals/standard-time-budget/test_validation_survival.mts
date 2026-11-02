@@ -27,7 +27,7 @@ async function readCheckpoint(scanDir: string) {
 }
 
 for (const deferLast of [false, true]) {
-  test(`completion retains checkpoint findings and grades ${deferLast ? "only validated" : "all five"} cases`, async (t) => {
+  test(`completion retains checkpoint findings and grades ${deferLast ? "only validated" : "all"} cases`, async (t) => {
     const root = await temporaryDirectory("eval-validation-survival-", true);
     t.after(() => rm(root, { recursive: true, force: true }));
     const pluginRoot = await bundledPluginRoot();
@@ -108,7 +108,7 @@ for (const deferLast of [false, true]) {
     ): AsyncGenerator<ThreadEvent> {
       yield { type: "thread.started", thread_id: threadId };
       yield { type: "turn.started" };
-      // Discovery mentions all five candidates, including any deferred case.
+      // Discovery mentions every candidate, including any deferred case.
       yield {
         type: "item.completed",
         item: {
