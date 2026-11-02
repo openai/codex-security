@@ -25,6 +25,7 @@ import {
   sarifRepositoryUrls,
   sarifRunResults,
   stableId,
+  sarifRuns,
   successfulSarifInvocations,
   text,
   validateSarifRuleReference,
@@ -190,7 +191,8 @@ export function normalizeSemgrepSarif(
   const document = record(input, "Semgrep SARIF");
   if (document["version"] !== "2.1.0")
     throw new Error("Expected Semgrep SARIF 2.1.0.");
-  const entries = array(document["runs"], "SARIF runs").flatMap((value) => {
+  const notifications: unknown[] = [];
+  const entries = sarifRuns(document).flatMap((value) => {
     const run = record(value, "SARIF run");
     for (const declared of sarifRepositoryUrls(run, "Semgrep")) {
       if (
@@ -212,7 +214,11 @@ export function normalizeSemgrepSarif(
       hasSarifExternalPropertyReferences(run["externalPropertyFileReferences"])
     )
       throw new Error("Use a self-contained Semgrep SARIF report.");
-    for (const details of successfulSarifInvocations(run, "Semgrep")) {
+    for (const details of successfulSarifInvocations(
+      run,
+      "Semgrep",
+      notifications,
+    )) {
       if (
         optionalArray(
           details["toolExecutionNotifications"],
@@ -315,6 +321,12 @@ export function normalizeSemgrepSarif(
     },
     ({ result, context }) => sarifIdentity(result, context.runContext),
     target,
+    {
+      report:
+        !entries.length && notifications.length
+          ? { notifications: structuredClone(notifications) }
+          : undefined,
+    },
   );
 }
 

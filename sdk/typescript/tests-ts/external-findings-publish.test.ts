@@ -878,6 +878,18 @@ test("a zero-record report needs no Cloud account, destination lookup, confirmat
     expect(selection).not.toHaveProperty("destination");
     expect(selection).not.toHaveProperty("accountId");
   }
+  for (const format of ["json", "md"]) {
+    const cli = createCliTest(main);
+    const args = [...f.command];
+    args[args.indexOf("--source-key") + 1] = "source-\x1b[2J";
+    args[args.indexOf("--format") + 1] = format;
+    expect(await cli.runCli(args, deps)).toBe(0);
+    if (format === "json")
+      expect(JSON.parse(cli.stdout.text()).source.source_key).toBe(
+        "source-\x1b[2J",
+      );
+    else expect(cli.stdout.text()).not.toContain("\x1b[2J");
+  }
   expect(requests).toBe(0);
   await expect(readdir(f.environment.CODEX_SECURITY_STATE_DIR)).rejects.toThrow(
     "ENOENT",

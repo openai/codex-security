@@ -1386,8 +1386,9 @@ destination or asking for confirmation. A local import still checks the selected
 checkout and creates no workbench database. Existing findings stay open.
 A failed scan or a selection consisting entirely of Cloud exclusions returns an
 error. JSON and JSONL include every excluded position, source ID when known, and
-reason. SARIF runs must contain result arrays. Failed invocations, error
-notifications and malformed results stop the import. An empty Snyk plugin
+reason. SARIF reports must contain a scanner run with a results array. Failed
+invocations, error notifications and malformed arrays stop the import. Invalid
+individual results are excluded and reported alongside any remaining findings. An empty Snyk plugin
 bundle must show a successful Open Source scan.
 
 With `--format json` or `--format jsonl`, add `--full-output` for an envelope.

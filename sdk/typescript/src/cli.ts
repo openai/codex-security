@@ -3784,6 +3784,11 @@ export async function main(
               };
               if (!structured) showPreview();
               if (options.dryRun) {
+                if (
+                  hasNoExternalRecords(preview) &&
+                  !isEmptyExternalReport(preview)
+                )
+                  throw new NoPublishableFindingsError(preview);
                 if (humanSummary)
                   renderedOutput = "Dry run complete. No findings stored.\n";
                 return {
@@ -3892,10 +3897,14 @@ export async function main(
                 status: "empty",
                 published: false,
                 ready: 0,
-                repository: options.repository,
+                repository: machineFormat
+                  ? options.repository
+                  : diagnosticValue(options.repository),
                 source: {
                   provider: EXTERNAL_FINDINGS_PROVIDERS[options.provider],
-                  source_key: options.sourceKey,
+                  source_key: machineFormat
+                    ? options.sourceKey
+                    : diagnosticValue(options.sourceKey),
                 },
                 ...(options.dryRun ? { dryRun: true } : {}),
               };

@@ -15,6 +15,7 @@ import {
   sarifRunContextSelector,
   stableId,
   strings,
+  sarifRuns,
   successfulSarifInvocations,
   text,
   validateSarifRuleReference,
@@ -151,7 +152,6 @@ export function normalizeSnykFindingsExport(
     pluginIdentity,
     target,
   );
-  if (parsed.read && !parsed.findings.length) return parsed;
   let successfulSca = false;
   for (const entry of optionalArray(
     collection["scans"],
@@ -161,10 +161,18 @@ export function normalizeSnykFindingsExport(
     if (!parsed.read && scan["outcome"] === "succeeded")
       requireEmptyIssueCount(scan["issueCount"], "Snyk plugin issueCount");
     if (scan["category"] !== "sca") continue;
-    if (scan["outcome"] !== "succeeded")
-      throw new Error(
-        `Snyk plugin SCA scan did not succeed (outcome: ${String(scan["outcome"])}).${scan["error"] ? " " + JSON.stringify(scan["error"]) : ""}`,
-      );
+    if (scan["outcome"] !== "succeeded") {
+      const failure = `Snyk plugin SCA scan did not succeed (outcome: ${String(scan["outcome"])}).${scan["error"] ? " " + JSON.stringify(scan["error"]) : ""}`;
+      if (parsed.read && !parsed.findings.length)
+        return {
+          ...parsed,
+          report: {
+            collection: structuredClone(collection),
+            errors: [failure],
+          },
+        };
+      throw new Error(failure);
+    }
     successfulSca = true;
   }
   if (parsed.read) return parsed;
@@ -268,9 +276,10 @@ export function normalizeSnykSarif(
   const document = record(input, "Snyk SARIF");
   if (document["version"] !== "2.1.0")
     throw new Error("Expected Snyk Open Source SARIF 2.1.0.");
-  const entries = array(document["runs"], "SARIF runs").flatMap((value) => {
+  const notifications: unknown[] = [];
+  const entries = sarifRuns(document).flatMap((value) => {
     const run = record(value, "SARIF run");
-    successfulSarifInvocations(run, "Snyk");
+    successfulSarifInvocations(run, "Snyk", notifications);
     const driver = record(
       record(run["tool"], "SARIF tool")["driver"],
       "SARIF driver",
@@ -413,6 +422,12 @@ export function normalizeSnykSarif(
     },
     ({ result, project }) => snykIdentity(result, project),
     target,
+    {
+      report:
+        !entries.length && notifications.length
+          ? { notifications: structuredClone(notifications) }
+          : undefined,
+    },
   );
 }
 

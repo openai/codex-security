@@ -14,6 +14,7 @@ import {
   sarifRepositoryUrls,
   sarifRunResults,
   strings,
+  sarifRuns,
   successfulSarifInvocations,
   text,
   validateSarifRuleReference,
@@ -212,9 +213,10 @@ export function normalizeEndorSarif(
   const document = record(input, "Endor SARIF");
   if (document["version"] !== "2.1.0")
     throw new Error("Expected Endor SARIF 2.1.0.");
-  const entries = array(document["runs"], "SARIF runs").flatMap((value) => {
+  const notifications: unknown[] = [];
+  const entries = sarifRuns(document).flatMap((value) => {
     const run = record(value, "SARIF run");
-    successfulSarifInvocations(run, "Endor");
+    successfulSarifInvocations(run, "Endor", notifications);
     const tool = record(run["tool"], "SARIF tool");
     const driver = record(tool["driver"], "SARIF driver");
     if (driver["name"] !== "endorctl")
@@ -326,6 +328,12 @@ export function normalizeEndorSarif(
         "Endor finding-uuid",
       ),
     target,
+    {
+      report:
+        !entries.length && notifications.length
+          ? { notifications: structuredClone(notifications) }
+          : undefined,
+    },
   );
 }
 

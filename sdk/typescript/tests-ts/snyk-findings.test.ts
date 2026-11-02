@@ -883,3 +883,18 @@ test.each(snykRepositoryContexts)(
     });
   },
 );
+
+test("an excluded Snyk Code occurrence retains the failed SCA scan diagnostic", () => {
+  const input = snykPluginExport();
+  input.findings[0]!.originatingScanner = "snyk-code";
+  Object.assign(input.collection.scans[0]!, {
+    outcome: "failed",
+    error: "SCA timed out",
+  });
+  expect(normalizeSnykFindingsExport(input)).toMatchObject({
+    read: 1,
+    findings: [],
+    excluded: [{ position: 1 }],
+    report: { errors: [expect.stringContaining("SCA timed out")] },
+  });
+});

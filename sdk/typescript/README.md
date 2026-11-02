@@ -688,7 +688,9 @@ calling `publish()`. Imported evidence remains not assessed by Codex, and saved
 requests and receipts support retries after interruption.
 
 If there is no upload to prepare, both SDK methods throw
-`NoPublishableFindingsError` before Cloud discovery. Its `selection` contains
+`NoPublishableFindingsError`. When the SDK can rule out a previously saved
+submission, preparation stops before Cloud discovery. Historical selections
+may require the account and repository to check for a pending submission. Its `selection` contains
 `read`, `findings`, every `excluded` record, and any scanner metadata in
 `report`. For a zero-record report, inspect scanner diagnostics before treating
 the selection as empty. An empty import leaves previously imported findings open.

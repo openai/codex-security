@@ -146,12 +146,14 @@ test.each(["local", "cloud"])(
       command[command.indexOf("--repository") + 1] = "example/project";
     const input = { ...opengrepJson(), results: [] };
     await writeFile(f.file, JSON.stringify(input));
-    const failed = createCliTest(main);
-    expect(await failed.runCli(command, f.deps)).toBe(2);
-    expect(JSON.parse(failed.stdout.text())).toMatchObject({
-      error: expect.stringContaining(input.errors[0]!.message),
-      report: { errors: input.errors, paths: input.paths },
-    });
+    for (const flags of [[], ["--dry-run"]]) {
+      const failed = createCliTest(main);
+      expect(await failed.runCli([...command, ...flags], f.deps)).toBe(2);
+      expect(JSON.parse(failed.stdout.text())).toMatchObject({
+        error: expect.stringContaining(input.errors[0]!.message),
+        report: { errors: input.errors, paths: input.paths },
+      });
+    }
 
     const path = "src/example\u001b[2J\u009b.ts";
     const paths = { scanned: [path] };

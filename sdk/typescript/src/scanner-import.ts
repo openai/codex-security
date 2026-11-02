@@ -24,11 +24,83 @@ export function optionalArray(value: unknown, label: string): unknown[] {
   return value === undefined ? [] : array(value, label);
 }
 
+export function sarifRuns(document: Record<string, unknown>): unknown[] {
+  const runs = array(document["runs"], "SARIF runs");
+  if (!runs.length)
+    throw new Error("The SARIF report contains no scanner runs.");
+  return runs;
+}
+
+// SARIF notifications may inherit a descriptor default or an invocation override.
+function inheritedNotificationLevel(
+  reference: unknown,
+  tool: unknown,
+  invocation: Record<string, unknown>,
+): unknown {
+  if (!isRecord(reference) || !isRecord(tool)) return;
+  function resolveDescriptor(ref: Record<string, unknown>) {
+    let component = (tool as Record<string, unknown>)["driver"];
+    const target = ref["toolComponent"];
+    if (isRecord(target)) {
+      const extensions = optionalArray(
+        (tool as Record<string, unknown>)["extensions"],
+        "SARIF tool extensions",
+      );
+      component =
+        typeof target["index"] === "number" && target["index"] >= 0
+          ? extensions[target["index"]]
+          : [component, ...extensions].find(
+              (value) =>
+                isRecord(value) &&
+                ((typeof target["guid"] === "string" &&
+                  value["guid"] === target["guid"]) ||
+                  (typeof target["name"] === "string" &&
+                    value["name"] === target["name"])),
+            );
+    }
+    if (!isRecord(component)) return;
+    const descriptors = optionalArray(
+      component["notifications"],
+      "SARIF notification descriptors",
+    );
+    return typeof ref["index"] === "number" && ref["index"] >= 0
+      ? descriptors[ref["index"]]
+      : descriptors.find(
+          (item) =>
+            isRecord(item) &&
+            ((typeof ref["guid"] === "string" &&
+              item["guid"] === ref["guid"]) ||
+              (typeof ref["id"] === "string" && item["id"] === ref["id"])),
+        );
+  }
+  const descriptor = resolveDescriptor(reference);
+  if (!isRecord(descriptor)) return;
+  for (const override of optionalArray(
+    invocation["notificationConfigurationOverrides"],
+    "SARIF notification overrides",
+  )) {
+    if (
+      isRecord(override) &&
+      isRecord(override["descriptor"]) &&
+      resolveDescriptor(override["descriptor"]) === descriptor &&
+      isRecord(override["configuration"]) &&
+      override["configuration"]["level"] !== undefined
+    )
+      return override["configuration"]["level"];
+  }
+  const defaults = descriptor["defaultConfiguration"];
+  return isRecord(defaults) ? defaults["level"] : undefined;
+}
+
 export function successfulSarifInvocations(
   run: Record<string, unknown>,
   producer: string,
+  retained?: unknown[],
 ): Record<string, unknown>[] {
-  function validateInvocation(value: unknown): Record<string, unknown> {
+  function validateInvocation(
+    value: unknown,
+    tool: unknown,
+  ): Record<string, unknown> {
     const invocation = record(value, `${producer} invocation`);
     const successful = invocation["executionSuccessful"];
     if (typeof successful !== "boolean")
@@ -45,10 +117,18 @@ export function successfulSarifInvocations(
       );
       for (const entry of notifications) {
         const notification = record(entry, `${producer} notification`);
-        if (notification["level"] === "error")
+        const level =
+          notification["level"] ??
+          inheritedNotificationLevel(
+            notification["descriptor"],
+            tool,
+            invocation,
+          );
+        if (level === "error")
           throw new Error(
             `${producer} SARIF contains scan error notifications: ${JSON.stringify(notification)}`,
           );
+        retained?.push(notification);
       }
     }
     if (!successful)
@@ -58,10 +138,10 @@ export function successfulSarifInvocations(
   if (run["conversion"] !== undefined) {
     const conversion = record(run["conversion"], `${producer} conversion`);
     if (conversion["invocation"] !== undefined)
-      validateInvocation(conversion["invocation"]);
+      validateInvocation(conversion["invocation"], conversion["tool"]);
   }
   return optionalArray(run["invocations"], `${producer} invocations`).map(
-    validateInvocation,
+    (invocation) => validateInvocation(invocation, run["tool"]),
   );
 }
 

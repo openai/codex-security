@@ -644,3 +644,32 @@ test.each([
     expect(input).toEqual(original);
   },
 );
+
+test("zero-result SARIF retains coverage warnings and resolves notification severity", () => {
+  const report: any = endorSarif();
+  const run = report.runs[0];
+  run.results = [];
+  run.tool.driver.notifications = [
+    { id: "coverage", defaultConfiguration: { level: "error" } },
+  ];
+  const notification = {
+    descriptor: { id: "coverage" },
+    message: { text: "File skipped" },
+  };
+  const invocation = {
+    executionSuccessful: true,
+    toolExecutionNotifications: [notification],
+  };
+  run.invocations = [invocation];
+  expect(() => normalizeEndorSarif(report)).toThrow("File skipped");
+  run.invocations[0].notificationConfigurationOverrides = [
+    { descriptor: { index: 0 }, configuration: { level: "warning" } },
+  ];
+  expect(normalizeEndorSarif(report)).toMatchObject({
+    findings: [],
+    report: { notifications: [notification] },
+  });
+  expect(() => normalizeEndorSarif({ ...report, runs: [] })).toThrow(
+    "no scanner runs",
+  );
+});
