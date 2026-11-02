@@ -99441,7 +99441,8 @@ function resultSummary(result, inputs, target) {
 
 <pre>${esc(finding.summary, 1200)}</pre>`);
   }
-  if (result.findings.length > 30) parts.push(`${result.findings.length - 30} additional findings are available in the JSON/SARIF reports.`);
+  const additional = result.findings.length - 30;
+  if (additional > 0) parts.push(`${additional} additional ${additional === 1 ? "finding is" : "findings are"} available in the JSON/SARIF reports.`);
   parts.push("Use the action outputs for full JSON and SARIF. Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.");
   return Buffer.from(parts.join("\n\n")).subarray(0, 58e3).toString("utf8").replace(/\uFFFD$/, "");
 }
