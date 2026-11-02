@@ -1,5 +1,6 @@
 import { requestMetadata } from "./support/request-metadata.js";
 import { afterEach, describe, expect, test, mock } from "bun:test";
+import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -13,7 +14,12 @@ import {
 import { VERSION } from "../src/version.js";
 import type { Finding, JsonObject } from "../src/index.js";
 import type { LinearClientFactory } from "../src/linear.js";
-import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
+import {
+  capture,
+  dependencies,
+  FakeSignals,
+  fakeResult,
+} from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createCliTest, captureCli } from "./support/cli-run.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -36,6 +42,66 @@ function turnStartTextCharacters(prompt: string): number {
     params: { input: [{ text: string }] };
   };
   return [...decoded.params.input[0].text].length;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+async function runLinuxPtyInterruption(signal: "SIGINT" | "SIGTERM") {
+  const fixture = join(
+    import.meta.dirname,
+    "fixtures",
+    "verify-fix-signal-gap.ts",
+  );
+  const child = spawn(
+    "script",
+    [
+      "-q",
+      "-e",
+      "-c",
+      `${shellQuote(process.execPath)} ${shellQuote(fixture)} ${signal}`,
+      "/dev/null",
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let output = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk) => {
+    output += chunk;
+  });
+  child.stderr.setEncoding("utf8").on("data", (chunk) => {
+    output += chunk;
+  });
+  const status = await new Promise<number | null>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  });
+  return { output, status };
+}
+
+async function runCredentialPreparationInterruption(
+  signal: "SIGINT" | "SIGTERM",
+) {
+  const fixture = join(
+    import.meta.dirname,
+    "fixtures",
+    "verify-fix-auth-signal.ts",
+  );
+  const child = spawn(process.execPath, [fixture, signal], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk) => {
+    output += chunk;
+  });
+  child.stderr.setEncoding("utf8").on("data", (chunk) => {
+    output += chunk;
+  });
+  const status = await new Promise<number | null>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  });
+  return { output, status };
 }
 
 async function linearIssue(identifier: string) {
@@ -522,6 +588,146 @@ describe("read-only finding verification", () => {
       `Input exceeds the maximum length of ${CODEX_INPUT_LIMIT} characters.`,
     );
   });
+
+  test.skipIf(process.platform !== "linux").each([
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+  ] as const)(
+    "restores a real Linux PTY when %s arrives between verification requests",
+    async (signal, expectedStatus) => {
+      const { output, status } = await runLinuxPtyInterruption(signal);
+
+      expect(status).toBe(expectedStatus);
+      expect(output).toContain("\u001B[?1049h\u001B[?25l");
+      expect(output).toContain("PTY_WORKER_1");
+      expect(output).toContain("PTY_SIGNAL_BETWEEN_BATCHES");
+      expect(output).not.toContain("PTY_WORKER_2");
+      expect(output).toContain("\u001B[?25h\u001B[?1049l");
+      expect(output).toContain(`PTY_EXIT_${expectedStatus}`);
+      expect(output).not.toContain('"results"');
+    },
+  );
+
+  test.each([
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+  ] as const)(
+    "restores the dashboard when %s arrives during request planning",
+    async (signal, expectedStatus) => {
+      const signals = new FakeSignals();
+      const onCodex = mock(() => 0);
+      const { result, findings } = savedScanWithEvidence(
+        ["high", "high", "high"],
+        "x".repeat(525_000),
+      );
+      const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
+      const deps = dependencies({
+        result,
+        signals,
+        onWorkbench: () => ({
+          scan: {
+            scanId: "scan-planning-interruption",
+            targetPath: "/saved/repository",
+            findings: findings as unknown as JsonObject[],
+          },
+        }),
+        onCodex,
+      });
+      deps.setInterval = () => {
+        queueMicrotask(() => signals.emit(signal));
+        return {} as NodeJS.Timeout;
+      };
+
+      expect(
+        await runCli(
+          ["verify-fix", "--scan", "scan-planning-interruption", "--json"],
+          deps,
+        ),
+      ).toBe(expectedStatus);
+      expect(onCodex).not.toHaveBeenCalled();
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain("\u001B[?1049h\u001B[?25l");
+      expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
+      expect(signals.listeners.get("SIGINT")?.size ?? 0).toBe(0);
+      expect(signals.listeners.get("SIGTERM")?.size ?? 0).toBe(0);
+    },
+  );
+
+  test.skipIf(process.platform === "win32").each([
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+  ] as const)(
+    "cancels an active Codex child through %s without duplicate process listeners",
+    async (signal, expectedStatus) => {
+      const controller = new AbortController();
+      const stdout = capture();
+      const stderr = capture();
+      const interruptListeners = process.listenerCount("SIGINT");
+      const terminateListeners = process.listenerCount("SIGTERM");
+      const status = runCodexSkillCommand(
+        ["-e", "setInterval(() => {}, 1000)"],
+        {
+          command: "verify-fix",
+          stdout: stdout.stream,
+          stderr: stderr.stream,
+          signal: controller.signal,
+        },
+        { command: process.execPath },
+        {},
+      );
+
+      expect(process.listenerCount("SIGINT")).toBe(interruptListeners);
+      expect(process.listenerCount("SIGTERM")).toBe(terminateListeners);
+      controller.abort(signal);
+      expect(await status).toBe(expectedStatus);
+      expect(process.listenerCount("SIGINT")).toBe(interruptListeners);
+      expect(process.listenerCount("SIGTERM")).toBe(terminateListeners);
+    },
+  );
+
+  test.each(["SIGINT", "SIGTERM"] as const)(
+    "cancels stored-auth preparation waiting for the credential lock on %s",
+    async (signal) => {
+      const { output, status } =
+        await runCredentialPreparationInterruption(signal);
+
+      expect(status).toBe(0);
+      expect(output).toContain(`PREPARATION_ABORT_${signal}`);
+    },
+  );
+
+  test.each([
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+  ] as const)(
+    "restores the dashboard when %s arrives during an active verification",
+    async (signal, expectedStatus) => {
+      const signals = new FakeSignals();
+      const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
+      let calls = 0;
+
+      expect(
+        await runCli(
+          ["verify-fix", "Synthetic finding", "--json"],
+          dependencies({
+            signals,
+            onCodex: (_arguments, output) => {
+              calls += 1;
+              signals.emit(signal);
+              expect(output?.signal?.aborted).toBe(true);
+              return 0;
+            },
+          }),
+        ),
+      ).toBe(expectedStatus);
+      expect(calls).toBe(1);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain("\u001B[?1049h\u001B[?25l");
+      expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
+      expect(signals.listeners.get("SIGINT")?.size ?? 0).toBe(0);
+      expect(signals.listeners.get("SIGTERM")?.size ?? 0).toBe(0);
+    },
+  );
 
   test("uses the real prompt size at the Codex input boundary", async () => {
     const contents = [

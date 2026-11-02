@@ -1142,6 +1142,7 @@ interface SkillCommandOutput {
   readonly command: "validate" | "patch" | "verify-fix";
   readonly stdout: Writable;
   readonly stderr: Writable;
+  readonly signal?: AbortSignal;
   readonly appServer?: {
     readonly directory: string;
     readonly prompt: string;
@@ -1183,6 +1184,7 @@ interface SkillRunOptions {
   verificationMode?: z.infer<typeof VerificationModeSchema>;
   verificationIds?: readonly string[];
   onEvent?: (event: Readonly<Record<string, unknown>>) => void;
+  signal?: AbortSignal;
   provider?: string;
   providerConfiguration?: JsonObject;
   environment?: NodeJS.ProcessEnv;
@@ -1488,6 +1490,7 @@ export async function runCodexSkillCommand(
 ): Promise<number> {
   let releaseCredentialHome: (() => Promise<void>) | undefined;
   try {
+    output?.signal?.throwIfAborted();
     let apiKey: string | undefined;
     let authentication: ScanAuthentication | null = null;
     let modelProvider: string | undefined;
@@ -1532,8 +1535,11 @@ export async function runCodexSkillCommand(
           (path) =>
             requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
         );
-        releaseCredentialHome =
-          await acquireCodexSecurityCredentialHomeLock(codexHome);
+        releaseCredentialHome = await acquireCodexSecurityCredentialHomeLock(
+          codexHome,
+          output.signal,
+        );
+        output.signal?.throwIfAborted();
         let credentialsAvailable: boolean;
         const ambientAuthConfig = await readCodexHomeConfig(selected);
         credentialConfig = await readCodexHomeConfig({
@@ -1569,6 +1575,7 @@ export async function runCodexSkillCommand(
           configuredCodexHome(selected),
           codexHome,
         );
+        output.signal?.throwIfAborted();
         selected = {
           ...selected,
           CODEX_HOME: codexHome,
@@ -1576,22 +1583,26 @@ export async function runCodexSkillCommand(
         };
         if (
           !credentialsAvailable &&
-          !(await accountStatus(command, selected)).authenticated
+          !(await accountStatus(command, selected, output.signal)).authenticated
         ) {
           throw new AuthenticationRequiredError(NO_CREDENTIALS_MESSAGE);
         }
+        output.signal?.throwIfAborted();
         authentication = await runtimeScanAuthentication(
           selected,
           codexHome,
           output.auth,
           provider,
         );
+        output.signal?.throwIfAborted();
         if (output.appServer !== undefined) {
-          const controller = new AbortController();
-          const removeSignals = listenForAbort(
-            DEFAULT_DEPENDENCIES,
-            controller,
-          );
+          const controller =
+            output.signal === undefined ? new AbortController() : undefined;
+          const signal = output.signal ?? controller!.signal;
+          const removeSignals =
+            controller === undefined
+              ? () => {}
+              : listenForAbort(DEFAULT_DEPENDENCIES, controller);
           try {
             args = [
               ...args,
@@ -1601,12 +1612,11 @@ export async function runCodexSkillCommand(
                 selected,
                 directory,
                 ambientConfig,
-                controller.signal,
+                signal,
               )),
             ];
           } catch (error) {
-            if (controller.signal.aborted)
-              return controller.signal.reason === "SIGINT" ? 130 : 143;
+            if (signal.aborted) return signal.reason === "SIGINT" ? 130 : 143;
             throw error;
           } finally {
             removeSignals();
@@ -1664,6 +1674,7 @@ export async function runCodexSkillCommand(
         expandHome(configuredHome, processEnvironment),
       );
     }
+    output?.signal?.throwIfAborted();
     const invocation = spawn(
       executablePathForSpawn(command.command),
       [...args],
@@ -1715,8 +1726,20 @@ export async function runCodexSkillCommand(
     const onTerminate = (): void => {
       requestTermination("SIGTERM");
     };
-    process.on("SIGINT", onInterrupt);
-    process.on("SIGTERM", onTerminate);
+    const onAbort = (): void => {
+      const signal = output?.signal?.reason;
+      if (signal === "SIGINT" || signal === "SIGTERM") {
+        requestTermination(signal);
+      }
+    };
+    if (output?.signal === undefined) {
+      process.on("SIGINT", onInterrupt);
+      process.on("SIGTERM", onTerminate);
+    } else if (output.signal.aborted) {
+      onAbort();
+    } else {
+      output.signal.addEventListener("abort", onAbort, { once: true });
+    }
     try {
       let diagnostic = "";
       invocation.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
@@ -1817,8 +1840,12 @@ export async function runCodexSkillCommand(
       if (forcedTermination !== undefined) clearTimeout(forcedTermination);
       forceStatusCompletion = null;
       forceCaptureCompletion = null;
-      process.off("SIGINT", onInterrupt);
-      process.off("SIGTERM", onTerminate);
+      if (output?.signal === undefined) {
+        process.off("SIGINT", onInterrupt);
+        process.off("SIGTERM", onTerminate);
+      } else {
+        output.signal.removeEventListener("abort", onAbort);
+      }
     }
   } finally {
     await releaseCredentialHome?.();
@@ -5911,7 +5938,19 @@ export async function main(
               repository,
               identifiers.length,
             );
-            progress.startVerification();
+            const controller = new AbortController();
+            const stopProgress = (): void => progress.stop();
+            controller.signal.addEventListener("abort", stopProgress, {
+              once: true,
+            });
+            const removeSignals = listenForAbort(
+              dependencies,
+              controller,
+              (signal) => {
+                progress.stop();
+                dependencies.forceExit(signal);
+              },
+            );
             const verificationErrors = new NodeWritable({
               write(chunk, _encoding, callback) {
                 diagnostics.stream.write(chunk);
@@ -5923,6 +5962,8 @@ export async function main(
               },
             });
             try {
+              progress.startVerification();
+              controller.signal.throwIfAborted();
               const requests =
                 selected === undefined
                   ? [
@@ -5937,7 +5978,9 @@ export async function main(
                       verificationIds: identifiers,
                       verificationMode: options.verificationMode,
                     });
+              controller.signal.throwIfAborted();
               for (const request of requests) {
+                controller.signal.throwIfAborted();
                 const response = captureOutput();
                 const diagnosticsOffset = diagnostics.text().length;
                 exitCode = await runSkill(
@@ -5957,8 +6000,15 @@ export async function main(
                     verificationMode: options.verificationMode,
                     environment,
                     onEvent: progress.observe.bind(progress),
+                    signal: controller.signal,
                   },
                 );
+                const interrupted = interruptedExitCode(controller.signal);
+                if (interrupted !== undefined) {
+                  exitCode = interrupted;
+                  frameworkExit = interrupted;
+                  return undefined;
+                }
                 if (exitCode !== 0) {
                   if (exitCode === 130 || exitCode === 143) {
                     frameworkExit = exitCode;
@@ -5987,8 +6037,18 @@ export async function main(
                 : results.some(({ status }) => status === "still_vulnerable")
                   ? 1
                   : 0;
+            } catch (error) {
+              const interrupted = interruptedExitCode(controller.signal);
+              if (interrupted !== undefined) {
+                exitCode = interrupted;
+                frameworkExit = interrupted;
+                return undefined;
+              }
+              throw error;
             } finally {
+              controller.signal.removeEventListener("abort", stopProgress);
               progress.stop();
+              removeSignals();
             }
           }
 
@@ -8456,6 +8516,7 @@ async function runSkill(
   dependencies: CliDependencies,
   options: SkillRunOptions = {},
 ): Promise<number> {
+  options.signal?.throwIfAborted();
   const { codex, model: selectedModel, effort } = configuration;
   const overrides = parseCodexOverrides(codex, selectedModel, effort);
   if (
@@ -8693,6 +8754,7 @@ async function runSkill(
       providerResolved: provider !== undefined || validate,
     },
   );
+  options.signal?.throwIfAborted();
   return dependencies.runCodex(
     [
       ...(appServer
@@ -8768,6 +8830,7 @@ async function runSkill(
       codexOverrides: effectiveOverrides,
       stdout,
       stderr,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
       ...(responseSchema === undefined ? {} : { responseSchema }),
       ...(appServer
         ? {
