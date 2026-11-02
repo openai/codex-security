@@ -17,7 +17,6 @@ const commands = [
   ["findings", "imported"],
   ["import", "github-advisories"],
   ["import", "snyk"],
-  ["import", "semgrep"],
 ];
 
 const publishLocal = [
@@ -34,6 +33,25 @@ const publishLocal = [
   "synthetic/findings",
   "--yes",
 ];
+
+test("Semgrep import advertises its saved report format and native finding JSON strings", async () => {
+  const cli = createCliTest(main);
+  const code = await cli.runCli(
+    ["import", "semgrep", "--schema", "--json"],
+    dependencies({
+      environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+    }),
+  );
+  expect(code).toBe(0);
+  expect(JSON.parse(cli.stdout.text()).output).toMatchObject({
+    properties: {
+      format: { const: "semgrep-platform-findings/v2" },
+      project: { properties: { id: { type: "string" } } },
+      product: { enum: ["sast", "sca", "ai_sast"] },
+      findings: { type: "array", items: { type: "string" } },
+    },
+  });
+});
 
 test("disabled commands distinguish discovery requests from filter values", async () => {
   const deps = dependencies({ environment: {} });
@@ -81,7 +99,6 @@ test("disabled commands cannot invoke import, storage, or publication handlers",
       importGitHubAdvisories: unexpected,
       onWorkbench: unexpected,
     }),
-    hostedScannerFetch: unexpected,
     prepareLocalExternalImport: unexpected,
     listLocalExternalFindings: unexpected,
     cloudFetch: unexpected,
@@ -104,24 +121,6 @@ test("disabled commands cannot invoke import, storage, or publication handlers",
     ],
     ["findings", "imported", "."],
     ["import", "github-advisories", "example/project"],
-    [
-      "import",
-      "snyk",
-      "project",
-      "--snyk-org",
-      "org",
-      "--source-repository-url",
-      "https://example.invalid/project",
-    ],
-    [
-      "import",
-      "semgrep",
-      "example/project",
-      "--semgrep-deployment",
-      "example",
-      "--semgrep-ref",
-      "refs/heads/main",
-    ],
   ]) {
     const cli = createCliTest(main);
     expect(await cli.runCli(command, deps)).not.toBe(0);
@@ -182,13 +181,8 @@ test("disabled commands cannot invoke import, storage, or publication handlers",
         ),
       ).toBe(2);
       expect(unsupported.stdout.text()).toContain("INVALID_ARGUMENTS");
-    } else if (command[0] === "import") {
-      const advisory = command[1] === "github-advisories";
-      const code = advisory ? "GITHUB_IMPORT_FAILED" : "HOSTED_IMPORT_FAILED";
-      const formats = advisory
-        ? [undefined, "json", "jsonl", "yaml", "md", "toon"]
-        : ["json"];
-      for (const format of formats) {
+    } else if (command[1] === "github-advisories") {
+      for (const format of [undefined, "json", "jsonl", "yaml", "md", "toon"]) {
         const formatted = createCliTest(main);
         expect(
           await formatted.runCli(
@@ -203,10 +197,10 @@ test("disabled commands cannot invoke import, storage, or publication handlers",
         if (format === "json" || format === "jsonl") {
           expect(JSON.parse(formatted.stdout.text())).toMatchObject({
             ok: false,
-            error: { code },
+            error: { code: "GITHUB_IMPORT_FAILED" },
           });
         } else {
-          expect(formatted.stdout.text()).toContain(code);
+          expect(formatted.stdout.text()).toContain("GITHUB_IMPORT_FAILED");
         }
         expect(formatted.stdout.text()).toContain(
           "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1",

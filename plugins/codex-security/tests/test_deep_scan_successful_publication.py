@@ -364,12 +364,38 @@ def test_deep_publication_does_not_require_old_worker_files(
         assert result.read_text() == "{old worker output is unavailable"
 
 
-def test_deep_prepare_and_complete_preserve_the_same_aggregate(
-    workbench_api, workbench_db, publication_scan
-):
+REVIEWED_SURFACE = {
+    "id": "archive",
+    "label": "Archive review",
+    "disposition": "no_issue_found",
+    "receiptRefs": [],
+}
+
+
+@pytest.fixture(params=[False, True], ids=["review-state", "coverage-file"])
+def reviewed_deep_scan(publication_scan, request):
     scan = publication_scan()
+    scan.coverage["surfaces"] = [REVIEWED_SURFACE]
+    if request.param:
+        (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
+    else:
+        manifest_path = scan.scan_dir / "scan-manifest.json"
+        draft = json.loads(manifest_path.read_text())
+        draft["scan"].update(mode="deep_repository", reviewState=scan.coverage)
+        manifest_path.write_text(json.dumps(draft))
+        (scan.scan_dir / "coverage.json").unlink()
+    return scan
+
+
+def test_deep_prepare_and_complete_preserve_the_same_aggregate(
+    workbench_api, workbench_db, reviewed_deep_scan
+):
+    scan = reviewed_deep_scan
+    count = "SELECT terminal_reviewed_surface_count FROM deep_scan_runs WHERE scan_id = ?"
+    assert workbench_db.execute(count, (scan.scan_id,)).fetchone()[0] is None
     prepared = complete(workbench_api, workbench_db, scan, prepare_only=True)
     assert prepared["progress"]["status"] == "running"
+    assert workbench_db.execute(count, (scan.scan_id,)).fetchone()[0] == 1
     names = ("scan-manifest.json", "findings.json")
     published = {name: (scan.scan_dir / name).read_bytes() for name in names}
 
@@ -385,8 +411,75 @@ def test_deep_prepare_and_complete_preserve_the_same_aggregate(
     repeated = complete(workbench_api, workbench_db, scan)
 
     assert repeated["progress"]["status"] == "complete"
+    assert workbench_db.execute(count, (scan.scan_id,)).fetchone()[0] == 1
     assert {name: (scan.scan_dir / name).read_bytes() for name in names} == published
     assert_published_aggregate(scan)
+
+
+def test_complete_prepared_deep_scan_after_count_migration(
+    workbench_api, workbench_db, reviewed_deep_scan
+):
+    scan = reviewed_deep_scan
+    complete(workbench_api, workbench_db, scan, prepare_only=True)
+    count = "SELECT terminal_reviewed_surface_count FROM deep_scan_runs WHERE scan_id = ?"
+    clear = "UPDATE deep_scan_runs SET terminal_reviewed_surface_count = NULL WHERE scan_id = ?"
+    # A seal produced before the migration has no stored count.
+    with workbench_db:
+        workbench_db.execute(clear, (scan.scan_id,))
+    complete(workbench_api, workbench_db, scan)
+    sealed = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
+    expected = 1 if "coverageRef" in sealed["scan"] else None
+    assert workbench_db.execute(count, (scan.scan_id,)).fetchone()[0] == expected
+
+    with workbench_db:
+        workbench_db.execute(clear, (scan.scan_id,))
+    complete(workbench_api, workbench_db, scan)
+    assert workbench_db.execute(count, (scan.scan_id,)).fetchone()[0] is None
+
+
+@pytest.mark.parametrize(
+    ("state", "count"),
+    [({}, None), ({"surfaces": []}, 0), ({"surfaces": [REVIEWED_SURFACE]}, 1)],
+    ids=["omitted", "empty", "reviewed"],
+)
+def test_complete_sealed_deep_scan_with_inline_review_state(
+    workbench_api, workbench_db, publication_scan, state, count
+):
+    scan = publication_scan()
+    path = scan.scan_dir / "scan-manifest.json"
+    draft = json.loads(path.read_bytes())
+    draft["scan"].update(mode="deep_repository", reviewState=state)
+    path.write_text(json.dumps(draft))
+    (scan.scan_dir / "coverage.json").unlink()
+    binding = workbench_api["workbench_completion_binding"](
+        workbench_api["require_scan"](workbench_db, scan.scan_id), workbench_api["now"](), draft
+    )
+    sealed, _, _ = workbench_api["finalize_scan"](scan.scan_dir, completion_binding=binding)
+    sealed["scan"]["reviewState"] = state
+    path.write_text(json.dumps(sealed, indent=2, sort_keys=True) + "\n")
+
+    complete(workbench_api, workbench_db, scan)
+    query = "SELECT terminal_reviewed_surface_count FROM deep_scan_runs WHERE scan_id = ?"
+    assert workbench_db.execute(query, (scan.scan_id,)).fetchone()[0] == count
+
+
+@pytest.mark.parametrize("stop", ["cancel", "fail"])
+def test_stopping_prepared_deep_scan_clears_its_surface_count(
+    workbench_api, workbench_db, reviewed_deep_scan, stop
+):
+    scan = reviewed_deep_scan
+    complete(workbench_api, workbench_db, scan, prepare_only=True)
+    count = "SELECT terminal_reviewed_surface_count FROM deep_scan_runs WHERE scan_id = ?"
+    assert workbench_db.execute(count, (scan.scan_id,)).fetchone()[0] == 1
+    if stop == "cancel":
+        workbench_api["saved_results"].cancel_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
+            workbench_db,
+            Namespace(scan_id=scan.scan_id, thread_id=None),
+        )
+    else:
+        fail_scan(workbench_api, workbench_db, scan)
+    assert workbench_db.execute(count, (scan.scan_id,)).fetchone()[0] is None
 
 
 @pytest.mark.parametrize("mode", ["standard", "deep"])
@@ -821,11 +914,24 @@ def test_deep_publication_write_failure_keeps_original_terminal_cause(
         == "running"
     )
     run = workbench_db.execute(
-        "SELECT status, terminal_reason FROM deep_scan_runs WHERE scan_id = ?", (scan.scan_id,)
+        "SELECT status, terminal_reason, terminal_reviewed_surface_count "
+        "FROM deep_scan_runs WHERE scan_id = ?",
+        (scan.scan_id,),
     ).fetchone()
-    assert tuple(run) == ("succeeded", "saturated")
+    assert tuple(run) == ("succeeded", "saturated", 0)
+    scan.coverage["surfaces"] = [
+        {"id": "entry", "label": "Entry review", "disposition": "no_issue_found", "receiptRefs": []}
+    ]
+    (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
     completed = complete(workbench_api, workbench_db, scan)
     assert completed["progress"]["status"] == "complete"
+    assert (
+        workbench_db.execute(
+            "SELECT terminal_reviewed_surface_count FROM deep_scan_runs WHERE scan_id = ?",
+            (scan.scan_id,),
+        ).fetchone()[0]
+        == 1
+    )
     assert completed["warnings"] == warnings
     if missing_writeup:
         scan.findings[0].pop("writeup")

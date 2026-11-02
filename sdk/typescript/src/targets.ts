@@ -751,6 +751,28 @@ export async function gitHistoryIdentity(
   return { commonDirectory, origin };
 }
 
+/** Resolve Git and its sanitized executable search path for a single selected checkout. */
+export async function trustedGitCommand(
+  repository: string,
+  preserveConfiguration: boolean,
+  sourceEnvironment: NodeJS.ProcessEnv,
+  protectedRoots: string | readonly string[],
+  signal?: AbortSignal,
+) {
+  const command = await resolveTrustedExecutable(
+    "git",
+    isolatedGitEnvironment(preserveConfiguration, sourceEnvironment),
+    [
+      (await gitMarkerRoot(repository, signal, "outermost")) ?? repository,
+      ...(typeof protectedRoots === "string"
+        ? [protectedRoots]
+        : protectedRoots),
+    ],
+  );
+  if (!command) throw new Error("Git is not available on a trusted PATH.");
+  return command;
+}
+
 export function gitOutput(
   repository: string,
   args: readonly string[],
@@ -782,30 +804,28 @@ export async function gitOutput(
   sourceEnvironment: NodeJS.ProcessEnv = process.env,
 ): Promise<string | Buffer> {
   throwIfAborted(signal);
-  const command = await resolveTrustedExecutable(
-    "git",
-    isolatedGitEnvironment(
-      args[0] === "rev-parse" ||
-        args[0] === "config" ||
-        (args[0] === "fetch-pack" &&
-          args[1] === "--diag-url" &&
-          args.length === 3) ||
-        args[0] === "ls-files" ||
-        (args[0] === "remote" &&
-          (args.length === 1 ||
-            (args[1] === "get-url" &&
-              (args[2] === "--all" || args[2] === "--")))),
-      sourceEnvironment,
-    ),
-    [
-      (await gitMarkerRoot(repository, signal, "outermost")) ?? repository,
-      ...(typeof protectedRoots === "string"
-        ? [protectedRoots]
-        : protectedRoots),
-    ],
+  const command = await trustedGitCommand(
+    repository,
+    args[0] === "rev-parse" ||
+      (args[0] === "symbolic-ref" &&
+        args[1] === "--quiet" &&
+        args[2] === "HEAD" &&
+        args.length === 3) ||
+      (args[0] === "--exec-path" && args.length === 1) ||
+      args[0] === "config" ||
+      (args[0] === "fetch-pack" &&
+        args[1] === "--diag-url" &&
+        args.length === 3) ||
+      (args[0] === "ls-remote" &&
+        args[1] === "--get-url" &&
+        (args.length === 2 || (args[2] === "--" && args.length === 4))) ||
+      args[0] === "ls-files" ||
+      (args[0] === "remote" &&
+        (args.length === 1 || (args[1] === "get-url" && args[2] === "--all"))),
+    sourceEnvironment,
+    protectedRoots,
+    signal,
   );
-  if (command === null)
-    throw new Error("Git is not available on a trusted PATH.");
   throwIfAborted(signal);
   const { stdout } = await execFile(
     command.executable,

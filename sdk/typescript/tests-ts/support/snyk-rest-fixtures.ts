@@ -1,140 +1,110 @@
-import type {
-  SnykIssuesExport,
-  SnykIssuesProduct,
+import { isolatedGitReportFixture } from "../external-findings-local-helpers.js";
+import { canonicalJson } from "../../src/record.js";
+import {
+  SNYK_REST_ISSUES_FORMAT,
+  type CollectSnykIssuesOptions,
+  type SnykIssuesExport,
+  type SnykIssuesProduct,
 } from "../../src/snyk-rest-findings.js";
 
-export const organizationId = "11111111-1111-4111-8111-111111111111";
-export const projectId = "22222222-2222-4222-8222-222222222222";
-export const targetId = "33333333-3333-4333-8333-333333333333";
-export const issueId = "44444444-4444-4444-8444-444444444444";
-export const apiOrigin = "https://api.eu.snyk.io";
-export const sourceRepositoryUrl = "https://github.com/example/repository";
+export const snykOptions = {
+  apiOrigin: "https://api.eu.snyk.io",
+  organizationId: "11111111-1111-4111-8111-111111111111",
+  projectId: "22222222-2222-4222-8222-222222222222",
+  sourceRepositoryUrl: "https://github.com/example/repository",
+  product: "open-source",
+} satisfies CollectSnykIssuesOptions;
 
-export function snykRestProject({
+export function snykLocalFixture(checkout?: { remote?: string }) {
+  return isolatedGitReportFixture(
+    "snyk.json",
+    { provider: "snyk", sourceKey: snykOptions.projectId },
+    checkout,
+  );
+}
+
+export function snykProject(
   manager = "npm",
-  origin = "github",
-  remote = sourceRepositoryUrl + ".git",
-  expanded = true,
-  id = projectId,
-  org = organizationId,
-}: {
-  manager?: string;
-  origin?: string;
-  remote?: string | null;
-  expanded?: boolean;
-  id?: string;
-  org?: string;
-} = {}) {
+  url = snykOptions.sourceRepositoryUrl,
+) {
   return {
-    id,
-    type: "project",
-    attributes: {
-      type: manager,
-      name: "example/project:manifest",
-      origin,
-      target_reference: "release",
-      target_file: manager === "sast" ? "" : "app/package.json",
-    },
-    relationships: {
-      organization: { data: { type: "org", id: org } },
-      target: {
-        data: {
-          type: "target",
-          id: targetId,
-          ...(expanded && {
-            attributes: {
-              display_name: "https://example.invalid/not-a-repository-claim",
-              url: remote,
-            },
-          }),
+    data: {
+      type: "project",
+      id: snykOptions.projectId,
+      attributes: {
+        type: manager,
+        origin: "github",
+        target_file: "app/package.json",
+      },
+      relationships: {
+        organization: { data: { type: "org", id: snykOptions.organizationId } },
+        target: {
+          data: {
+            type: "target",
+            id: "33333333-3333-4333-8333-333333333333",
+            attributes: { url },
+          },
         },
-        links: { related: { href: "https://unrelated.invalid/targets" } },
       },
     },
   };
 }
 
-export function snykRestIssue(
-  attributes: Record<string, unknown> = {},
-  {
-    id = issueId,
-    org = organizationId,
-    project = projectId,
-    itemType = "project",
-  } = {},
-) {
+export function snykIssue(code: boolean, projectId = snykOptions.projectId) {
+  const representation = code
+    ? {
+        sourceLocation: {
+          file: "src/app.ts",
+          region: { start: { line: 3 } },
+          commit_id: "abc123",
+        },
+      }
+    : { dependency: { package_name: "example-lib", package_version: "1.0.0" } };
   return {
-    id,
     type: "issue",
+    id: "44444444-4444-4444-8444-444444444444",
     attributes: {
-      type: "package_vulnerability",
-      key: "opaque-key",
-      title: "Synthetic issue",
+      key: "opaque-issue-key",
+      type: code ? "code" : "package_vulnerability",
+      title: "Synthetic finding",
+      status: "open",
+      ignored: true,
       effective_severity_level: "high",
-      status: "resolved",
-      ignored: false,
-      created_at: "2025-01-01T00:00:00Z",
-      updated_at: "2025-02-03T04:05:06.123Z",
-      ...attributes,
+      updated_at: "2026-01-01T00:00:00Z",
+      problems: [{ type: "rule", id: "sample-rule" }],
+      coordinates: [{ state: "open", representations: [representation] }],
     },
     relationships: {
-      organization: { data: { type: "organization", id: org } },
-      scan_item: { data: { type: itemType, id: project } },
+      organization: {
+        data: { type: "organization", id: snykOptions.organizationId },
+      },
+      scan_item: { data: { type: "project", id: projectId } },
     },
   };
 }
 
-export function snykRestDocument(data: unknown, next?: unknown) {
-  return {
-    jsonapi: { version: "1.0" },
-    data,
-    ...(next !== undefined && { links: { next } }),
-  };
-}
-
+/** A complete project response and issue page saved by the Snyk collector. */
 export function snykRestFixture(
   product: SnykIssuesProduct,
-  {
-    sourceRepositoryUrl: repository = sourceRepositoryUrl,
-    title = "Synthetic issue",
-    updatedAt = "2025-02-03T04:05:06.123Z",
-    issues,
-  }: {
-    sourceRepositoryUrl?: string;
-    title?: string;
-    updatedAt?: string;
-    issues?: unknown[];
-  } = {},
-) {
+  { sourceRepositoryUrl = snykOptions.sourceRepositoryUrl } = {},
+): SnykIssuesExport {
   const code = product === "code";
   return {
-    format: "snyk-rest-issues/v1",
-    apiVersion: "2026-03-25",
-    apiOrigin,
+    ...snykOptions,
     product,
-    organizationId,
-    projectId,
-    sourceRepositoryUrl: repository,
+    sourceRepositoryUrl,
+    format: SNYK_REST_ISSUES_FORMAT,
+    apiVersion: "2026-03-25",
     complete: true,
-    project: snykRestProject({
-      manager: code ? "sast" : "npm",
-      remote: repository,
-    }),
-    target: null,
+    projectJson: canonicalJson(
+      snykProject(code ? "sast" : "npm", sourceRepositoryUrl).data,
+    ),
+    targetJson: "null",
     pages: [
       {
         startingAfter: null,
-        response: snykRestDocument(
-          issues ?? [
-            snykRestIssue({
-              type: code ? "code" : "package_vulnerability",
-              title,
-              ignored: true,
-              updated_at: updatedAt,
-            }),
-          ],
-        ),
+        responseJson: canonicalJson({ data: [snykIssue(code)] }),
       },
     ],
-  } satisfies SnykIssuesExport;
+  };
 }

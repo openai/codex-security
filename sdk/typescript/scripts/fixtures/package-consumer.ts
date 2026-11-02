@@ -1,4 +1,5 @@
 import {
+  normalizeTrivyFindings,
   CodexSecurity,
   importGitHubCodeScanningAlerts,
   importGitHubAdvisories,
@@ -11,11 +12,6 @@ import {
   type NormalizedLocalImportOptions,
   type StoredExternalFinding,
   normalizeSnykFindingsExport,
-  normalizeSemgrepSarif,
-  type SemgrepImportOptions,
-  collectSnykIssues,
-  collectSemgrepPlatformFindings,
-  normalizeTrivyFindings,
   prepareNormalizedExternalPublication,
   type ExternalFindings,
   type FindingImportRequest,
@@ -316,9 +312,6 @@ export async function externalPublication(
     ...options,
     provider: fromFile.preview.source.provider,
   });
-  prepared.preview.sourceRepositoryUrl satisfies string | undefined;
-  prepared.preview.sourceRepositoryPlatform satisfies
-    "github" | "other" | undefined;
   return prepared.publish();
 }
 
@@ -430,9 +423,6 @@ export async function importLocalEvidence(
   options: NormalizedLocalImportOptions,
 ): Promise<StoredExternalFinding[]> {
   const prepared = await prepareNormalizedLocalImport(input, options);
-  prepared.preview.sourceRepositoryUrl satisfies string | undefined;
-  prepared.preview.sourceRepositoryPlatform satisfies
-    "github" | "other" | undefined;
   await prepared.import();
   return listLocalExternalFindings({ repository: options.repository });
 }
@@ -448,20 +438,6 @@ export async function importLocalFile(
 export function snykPluginFindings(bundle: unknown): ExternalFindings {
   return normalizeSnykFindingsExport(bundle);
 }
-
-export function semgrepSarifFindings(
-  report: unknown,
-  options: Parameters<typeof normalizeSemgrepSarif>[1],
-): ExternalFindings {
-  const declared: SemgrepImportOptions = options;
-  declared.sourceRepositoryUrl satisfies string;
-  return normalizeSemgrepSarif(report, declared);
-}
-
-export const hostedCollectors = {
-  snyk: collectSnykIssues,
-  semgrep: collectSemgrepPlatformFindings,
-};
 
 export function trivyFindings(report: unknown): ExternalFindings {
   return normalizeTrivyFindings(report, "local", ".");

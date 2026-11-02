@@ -1,7 +1,10 @@
 import { expect } from "bun:test";
+import type { ExternalFindings } from "../src/external-findings.js";
+import { EXTERNAL_FINDINGS_PROVIDERS } from "../src/external-findings-read.js";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import {
   listLocalExternalFindings,
+  prepareNormalizedLocalImport,
   type StoredExternalFinding,
 } from "../src/external-findings-local.js";
 import type { ExternalPublicationOptions } from "../src/external-findings-publish.js";
@@ -11,22 +14,39 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 /** Real Git checkout and separate state, shared by normalized and vendor import tests. */
-export async function localFindingsFixture(options: { remote?: string } = {}) {
+type Checkout = {
+  remote?: string;
+  environment?: NodeJS.ProcessEnv;
+  isolatedGit?: boolean;
+};
+
+export async function localFindingsFixture(options: Checkout = {}) {
   const root = await mkdtemp(
     join(await realpath(tmpdir()), "codex-security-external-local-"),
   );
+  let environment = options.environment ?? process.env;
+  if (options.isolatedGit) {
+    const config = join(root, "global.gitconfig");
+    await writeFile(config, "");
+    environment = {
+      ...Object.fromEntries(
+        Object.entries(environment).filter(
+          ([name]) => !name.toUpperCase().startsWith("GIT_"),
+        ),
+      ),
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: config,
+    };
+  }
   const repository = join(root, "repository");
   await mkdir(repository);
-  execFileSync("git", ["init", "--quiet", repository]);
+  execFileSync("git", ["init", "--quiet", repository], { env: environment });
   if (options.remote !== undefined)
-    execFileSync("git", [
-      "-C",
-      repository,
-      "remote",
-      "add",
-      "origin",
-      options.remote,
-    ]);
+    execFileSync(
+      "git",
+      ["-C", repository, "remote", "add", "origin", options.remote],
+      { env: environment },
+    );
   const stateDirectory = join(root, "state");
   const dispose = () => rm(root, { recursive: true, force: true });
   return {
@@ -35,13 +55,11 @@ export async function localFindingsFixture(options: { remote?: string } = {}) {
     stateDirectory,
     environment: {
       ...Object.fromEntries(
-        Object.entries(process.env).filter(
+        Object.entries(environment).filter(
           ([name]) =>
             name.toUpperCase() !== "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
         ),
       ),
-      GIT_CONFIG_GLOBAL: join(root, "global-git-config"),
-      GIT_CONFIG_NOSYSTEM: "1",
       CODEX_SECURITY_STATE_DIR: stateDirectory,
       CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
     },
@@ -50,30 +68,45 @@ export async function localFindingsFixture(options: { remote?: string } = {}) {
   };
 }
 
-export async function localReportFixture<
-  Source extends Omit<ExternalPublicationOptions, "repository">,
->(filename: string, source: Source, checkout: { remote?: string } = {}) {
+export async function localReportFixture(
+  filename: string,
+  source: Omit<ExternalPublicationOptions, "repository">,
+  checkout: Checkout = {},
+) {
   const fixture = await localFindingsFixture(checkout);
   const file = join(fixture.root, filename);
   const options = { ...source, repository: fixture.repository };
+  const normalizedOptions = {
+    ...options,
+    provider: EXTERNAL_FINDINGS_PROVIDERS[source.provider],
+  };
   const dependencies = { environment: fixture.environment };
   return {
     ...fixture,
     file,
-    options,
-    dependencies,
     sourceKey: source.sourceKey,
     writeJson: (report: unknown) => writeFile(file, JSON.stringify(report)),
-    prepare: (
-      overrides: Pick<ExternalPublicationOptions, "sourceRepositoryUrl"> = {},
-    ) =>
+    prepare: (overrides: Pick<typeof source, "sourceRepositoryUrl"> = {}) =>
       prepareLocalExternalImport(
         file,
         { ...options, ...overrides },
         dependencies,
       ),
+    prepareNormalized: (input: ExternalFindings) =>
+      prepareNormalizedLocalImport(input, normalizedOptions, dependencies),
     read: () => listLocalExternalFindings(options, dependencies),
   };
+}
+
+export function isolatedGitReportFixture(
+  filename: string,
+  source: Omit<ExternalPublicationOptions, "repository">,
+  checkout: Checkout = {},
+) {
+  return localReportFixture(filename, source, {
+    ...checkout,
+    isolatedGit: true,
+  });
 }
 
 type LocalReportFixture = Awaited<ReturnType<typeof localReportFixture>>;

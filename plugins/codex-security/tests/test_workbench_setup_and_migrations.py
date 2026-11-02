@@ -100,6 +100,7 @@ EXPECTED_MIGRATIONS = [
     (55, "retain undelivered headless deep scan results"),
     (56, "recover unfinished legacy headless deep scans"),
     (57, "freeze stopped scan checkpoint selections"),
+    (58, "record the final Deep Scan reviewed surface count"),
 ]
 
 
@@ -1567,7 +1568,7 @@ def test_workbench_repairs_recorded_deep_scan_migration(
         assert connection.execute(
             "SELECT name FROM schema_migrations WHERE version = 28"
         ).fetchone() == ("persist deep scan discovery time limit",)
-        assert "max_time_hours" in {
+        assert {"max_time_hours", "terminal_reviewed_surface_count"} <= {
             row[1] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
         }
         assert {

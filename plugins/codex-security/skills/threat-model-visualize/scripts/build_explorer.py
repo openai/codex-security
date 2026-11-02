@@ -15,7 +15,7 @@ def require(condition, message):
         raise ValueError(message)
 
 
-def validate(model, assessment):
+def validate(model, assessment_bytes: bytes):
     def indexed(key, default=None):
         items = model.get(key, default)
         require(isinstance(items, list), f"{key} must be a list")
@@ -446,12 +446,17 @@ def validate(model, assessment):
                     any(a != b for a, b in pairwise(points)),
                     f"{c['id']}: marker edge must have nonzero length",
                 )
-    lines = assessment.splitlines(keepends=True)
+    # Byte lines keep CR, LF and CRLF intact and leave Unicode separators inside the line.
+    lines = assessment_bytes.splitlines(keepends=True)
     for e in evidence.values():
         require(
             isinstance(e.get("quote"), str) and e["quote"].strip(), f"{e['id']}: quotation required"
         )
-        require(e["quote"] in assessment, f"{e['id']}: quotation is not exact assessment text")
+        # A lone surrogate in a JSON quote cannot match strictly decoded UTF-8 input.
+        quote_bytes = e["quote"].encode("utf-8", errors="surrogatepass")
+        require(
+            quote_bytes in assessment_bytes, f"{e['id']}: quotation is not exact assessment text"
+        )
         if "startLine" in e or "endLine" in e:
             a, b = e.get("startLine"), e.get("endLine")
             require(
@@ -459,7 +464,7 @@ def validate(model, assessment):
                 f"{e['id']}: invalid assessment line range",
             )
             require(
-                e["quote"] in "".join(lines[a - 1 : b]),
+                quote_bytes in b"".join(lines[a - 1 : b]),
                 f"{e['id']}: quotation outside stated range",
             )
         paths = e.get("paths", [])
@@ -471,7 +476,7 @@ def validate(model, assessment):
             require(path in e["quote"], f"{e['id']}: cited path not present in quotation: {path}")
     if model.get("assessmentSha256"):
         require(
-            hashlib.sha256(assessment.encode("utf-8")).hexdigest() == model["assessmentSha256"],
+            hashlib.sha256(assessment_bytes).hexdigest() == model["assessmentSha256"],
             "Assessment SHA256 mismatch",
         )
 
@@ -519,14 +524,15 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     try:
-        model = json.loads(args.model.read_text(encoding="utf-8"))
-        assessment = args.assessment.read_bytes().decode("utf-8")
+        model = json.loads(args.model.read_text(encoding="utf-8-sig"))
+        assessment_bytes = args.assessment.read_bytes()
+        assessment = assessment_bytes.decode("utf-8")
         if args.output.exists():
             require(
                 not any(args.output.samefile(path) for path in (args.model, args.assessment)),
                 "output must not overwrite the model or assessment input",
             )
-        validate(model, assessment)
+        validate(model, assessment_bytes)
         assets = Path(__file__).resolve().parents[1] / "assets"
         template = (assets / "explorer.html").read_text(encoding="utf-8")
         replacements = {

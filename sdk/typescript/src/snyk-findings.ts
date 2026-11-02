@@ -1,29 +1,25 @@
 import type { ExternalImportTarget } from "./external-import-contract.js";
-import {
-  hostedRepositoryUrlKey,
-  validateExternalEvidence,
-} from "./external-import-contract.js";
+import { validateExternalEvidence } from "./external-import-contract.js";
 import type {
   ExternalFindings,
-  HostedExternalFindings,
+  ExternalSourceRepository,
 } from "./external-findings.js";
-import { isRecord } from "./record.js";
 import {
-  normalizeSnykIssues,
-  SNYK_REST_ISSUES_FORMAT,
-  snykRestFindingRepository,
-  snykRestReportRepository,
-} from "./snyk-rest-findings.js";
+  encodeSnykV1File,
+  isSnykRestFormat,
+  parseSnykReport,
+  SNYK_REST_ISSUES_V1,
+} from "./snyk-rest-v1.js";
+import type { SnykIssuesFindings } from "./snyk-rest-findings.js";
+import { isRecord } from "./record.js";
 import {
   array,
   hasSarifExternalPropertyReferences,
-  indexSarifRules,
   normalizeRecords,
   readScannerJson,
   record,
   requiredText,
   sarifRunContextForResult,
-  scannerSeverity,
   stableId,
   strings,
   text,
@@ -119,7 +115,11 @@ export function normalizeSnykFindingsExport(
           description: text(
             record(finding["description"] ?? {}, "Snyk description")["text"],
           ),
-          severity: scannerSeverity(severity),
+          severity: ["critical", "high", "medium", "low"].includes(
+            severity ?? "",
+          )
+            ? severity
+            : "unknown",
           advisory_ids: [
             ...new Set([
               requiredText(rule["id"], "Snyk advisory ID"),
@@ -151,19 +151,74 @@ export function normalizeSnykFindingsExport(
   );
 }
 
+function normalizeGitRepositoryUrl(
+  repository: string,
+  cloudRepositoryUrl?: string,
+): string {
+  // Cloud's selected catalog repository supplies connected GitHub host context;
+  // imported evidence alone cannot establish an Enterprise host's SSH aliases.
+  const destination = cloudRepositoryUrl
+    ? new URL(cloudRepositoryUrl)
+    : undefined;
+  const connectedHost =
+    destination?.protocol === "https:"
+      ? destination.hostname.toLowerCase()
+      : undefined;
+  const connectedTenant = /^([^.]+)\.ghe\.com$/u.exec(connectedHost ?? "")?.[1];
+  const isGitHubSshUser = (username: string, hostname: string) =>
+    (username === "git" &&
+      (hostname === "github.com" || hostname === connectedHost)) ||
+    (username === connectedTenant && hostname === connectedHost);
+  const scp = /^([^@/:]+)@([^/:]+):(.+)$/u.exec(repository);
+  if (scp && isGitHubSshUser(scp[1]!, scp[2]!.toLowerCase()))
+    return `https://${scp[2]}/${scp[3]}`;
+  // Compare Git's literal SSH userinfo before URL strips tabs or newlines.
+  const ssh = /^ssh:\/\/([^/]+)@/u.exec(repository);
+  if (ssh) {
+    // Git retains these bytes, but URL parsing would erase them from the alias.
+    if (/[\t\r\n]/u.test(repository)) return repository;
+    const url = new URL(repository);
+    const hostname = url.hostname.toLowerCase();
+    const githubSsh =
+      isGitHubSshUser(ssh[1]!, hostname) &&
+      (url.port === "" || url.port === "22");
+    const githubSshOverHttps =
+      ssh[1] === "git" && hostname === "ssh.github.com" && url.port === "443";
+    if (githubSshOverHttps) return `https://github.com${url.pathname}`;
+    if (githubSsh) return `https://${hostname}${url.pathname}`;
+  }
+  return repository;
+}
+
 /** @internal Repository claims retained in original Snyk evidence. */
-export function snykRepositoryClaims(
-  source: unknown,
-): ReturnType<typeof snykRestFindingRepository>[] {
-  if (!isRecord(source)) return [];
-  if (source["format"] === SNYK_REST_ISSUES_FORMAT)
-    return [snykRestFindingRepository(source)];
+export function snykRepositoryUrls(
+  sourceData: unknown,
+  {
+    normalizeGitRemote = true,
+    cloudRepositoryUrl,
+  }: {
+    normalizeGitRemote?: boolean;
+    /** The selected destination from the authenticated Cloud repository catalog. */
+    cloudRepositoryUrl?: string;
+  } = {},
+): string[] {
+  if (
+    !sourceData ||
+    typeof sourceData !== "object" ||
+    Array.isArray(sourceData)
+  )
+    return [];
+  const source = sourceData as Record<string, unknown>;
   if (source["format"] === "snyk-findings-export/v1") {
     const collection = record(source["collection"], "Snyk collection");
     const target = record(collection["target"], "Snyk target");
     const repository = text(target["repository"]);
     if (repository === null || repository === "unknown") return [];
-    return [{ url: repository }];
+    return [
+      normalizeGitRemote
+        ? normalizeGitRepositoryUrl(repository, cloudRepositoryUrl)
+        : repository,
+    ];
   }
   // Generic normalized evidence may use these field names for opaque metadata.
   const document = source["document"];
@@ -185,67 +240,10 @@ export function snykRepositoryClaims(
       record(entry, "Snyk repository provenance")["repositoryUri"],
       "Snyk repository URI",
     );
-    return { url: repository };
+    return normalizeGitRemote
+      ? normalizeGitRepositoryUrl(repository, cloudRepositoryUrl)
+      : repository;
   });
-}
-
-/** Retain each Snyk repository claim's authority when combining normalized findings. */
-export function snykRepositoryScope(input: HostedExternalFindings) {
-  const project = snykRestReportRepository(input.snykRestContext);
-  const projects: ReturnType<typeof snykRestFindingRepository>[] = project
-    ? [project]
-    : [];
-  const claims = new Map<
-    Record<string, unknown>,
-    ReturnType<typeof snykRepositoryClaims>
-  >();
-  const literalUrls = new Set<string>();
-  let unbound = false;
-  for (const { evidence } of input.findings) {
-    const data = evidence.source_data;
-    const native = snykRepositoryClaims(data);
-    if (data) claims.set(data, native);
-    const url = evidence.details?.repository?.url;
-    if (data?.["format"] === SNYK_REST_ISSUES_FORMAT) {
-      const source = native[0]!;
-      projects.push(source);
-      if (!source.gitlab && url) literalUrls.add(url);
-    } else if (!url && !native.length) unbound = true;
-  }
-  for (const source of projects) {
-    if (!source.gitlab) {
-      literalUrls.add(source.url);
-      if (source.nativeUrl) literalUrls.add(source.nativeUrl);
-    }
-  }
-  const gitlab = projects.some((source) => source.gitlab);
-  // A literal project admits only its selected spelling, while a verified GitLab
-  // project can also match the same repository with the optional clone suffix.
-  const sourceUrl = (projects.find((source) => !source.gitlab) ?? projects[0])
-    ?.url;
-  // With no header, an unbound sibling can use either spelling if both were
-  // explicitly selected by GitLab projects that match the same repository.
-  const destinationSuffix =
-    gitlab &&
-    !literalUrls.size &&
-    (!unbound ||
-      (!input.sourceRepositoryUrl &&
-        new Set(projects.map(({ url }) => hostedRepositoryUrlKey(url))).size >
-          1));
-  // Unbound siblings keep the destination literal. They do not invalidate a verified
-  // project's own clone alias or another finding's independently checkable URL.
-  return {
-    project,
-    projects,
-    claims,
-    sourceUrl,
-    destinationSuffix,
-    allowsSuffix: (url?: string | null) =>
-      gitlab &&
-      (url == null
-        ? !unbound && literalUrls.size === 0
-        : !literalUrls.has(url)),
-  };
 }
 
 /** Snyk Open Source's formatter groups all dependency paths for an advisory in a project. */
@@ -275,7 +273,14 @@ export function normalizeSnykSarif(
     const rules = array(driver["rules"], "SARIF rules").map((rule) =>
       record(rule, "SARIF rule"),
     );
-    const rulesById = indexSarifRules(rules);
+    const rulesById = new Map<
+      unknown,
+      { rule: Record<string, unknown>; index: number } | null
+    >();
+    rules.forEach((rule, index) => {
+      const id = rule["id"];
+      rulesById.set(id, rulesById.has(id) ? null : { rule, index });
+    });
     const project = snykSarifProject(run);
     const { results: _results, tool: _tool, ...runContext } = run;
     const { rules: _rules, ...driverContext } = driver;
@@ -468,7 +473,11 @@ export function normalizeSnykJson(
             "Snyk vulnerability title",
           ),
           description: text(vulnerability["description"]),
-          severity: scannerSeverity(severity),
+          severity: ["critical", "high", "medium", "low"].includes(
+            severity ?? "",
+          )
+            ? severity
+            : "unknown",
           advisory_ids: [
             ...new Set([
               requiredText(vulnerability["id"], "Snyk advisory ID"),
@@ -514,30 +523,40 @@ export function normalizeSnykJson(
   );
 }
 
-export function normalizeSnykInput(
-  input: unknown,
-  target: ExternalImportTarget = "cloud",
-): HostedExternalFindings {
-  if (Array.isArray(input)) return normalizeSnykJson(input, target);
-  const document = record(input, "Snyk findings");
-  if (
-    typeof document["format"] === "string" &&
-    document["format"].startsWith("snyk-rest-issues/")
-  )
-    return normalizeSnykIssues(document, target);
-  if (document["format"] === "snyk-findings-export/v1")
-    return normalizeSnykFindingsExport(document, target);
-  if (document["version"] === "2.1.0")
-    return normalizeSnykSarif(document, target);
-  return normalizeSnykJson(document, target);
+/** @internal Keep the native JSON snapshot for catalog-bound file publication. */
+export function readSnykReport(path: string): Promise<unknown> {
+  return readScannerJson(path, parseSnykReport);
 }
 
 export async function readSnykFindings(
   path: string,
   target: ExternalImportTarget = "cloud",
-): Promise<HostedExternalFindings> {
-  return normalizeSnykInput(
-    await readScannerJson(path, SNYK_REST_ISSUES_FORMAT),
-    target,
-  );
+  references: readonly ExternalSourceRepository[] = [],
+): Promise<ExternalFindings & Partial<SnykIssuesFindings>> {
+  return normalizeSnykFile(await readSnykReport(path), target, references);
+}
+
+/** @internal Dispatch a parsed Snyk file using the same rules as readSnykFindings. */
+export async function normalizeSnykFile(
+  input: unknown,
+  target: ExternalImportTarget,
+  references: readonly ExternalSourceRepository[],
+): Promise<ExternalFindings & Partial<SnykIssuesFindings>> {
+  if (Array.isArray(input)) return normalizeSnykJson(input, target);
+  const document = record(input, "Snyk findings");
+  if (isSnykRestFormat(document["format"])) {
+    const { normalizeSnykIssues } = await import("./snyk-rest-findings.js");
+    return normalizeSnykIssues(
+      document["format"] === SNYK_REST_ISSUES_V1
+        ? encodeSnykV1File(document)
+        : document,
+      target,
+      references,
+    );
+  }
+  if (document["format"] === "snyk-findings-export/v1")
+    return normalizeSnykFindingsExport(document, target);
+  if (document["version"] === "2.1.0")
+    return normalizeSnykSarif(document, target);
+  return normalizeSnykJson(document, target);
 }

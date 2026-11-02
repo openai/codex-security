@@ -1,16 +1,14 @@
 import { posix, sep } from "node:path";
 import type { ExternalImportTarget } from "./external-import-contract.js";
-import {
-  hostedRepositoryUrlKey,
-  validateExternalEvidence,
-} from "./external-import-contract.js";
+import { validateExternalEvidence } from "./external-import-contract.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
+import { isGitHubCloudHost, parseGitRemote } from "./git-remote.js";
 import {
-  isGitHubCloudHost,
-  normalizeGitRepositoryUrl,
-  parseGitRemote,
-} from "./git-remote.js";
-import { validateHostedRepositoryUrl } from "./hosted-scanner-http.js";
+  ambiguousHostedHttpPath,
+  hostedRepositoryUrlKey,
+  normalizeHostedGitRepositoryUrl,
+} from "./hosted-git-repository.js";
+import { CodexSecurityError } from "./errors.js";
 import { isRecord } from "./record.js";
 import {
   array,
@@ -23,6 +21,21 @@ import {
   strings,
   text,
 } from "./scanner-import.js";
+
+export function validateTrivyRepositoryUrl(value: string): void {
+  if (
+    /[\x00-\x20\x7f]/u.test(value) &&
+    (/^https?:\/\//iu.test(value) ||
+      /^https?:$/u.test(URL.parse(value)?.protocol ?? ""))
+  )
+    throw new CodexSecurityError(
+      "HTTP(S) repository URLs must percent-encode spaces and control characters.",
+    );
+  if (ambiguousHostedHttpPath(value))
+    throw new CodexSecurityError(
+      "The repository URL has an HTTP path that does not match its Git path.",
+    );
+}
 
 type NativeRecord = Record<string, unknown>;
 
@@ -92,7 +105,11 @@ function comparableGitHubRemote(
   const githubUrl =
     cloudRepositoryUrl ??
     (isGitHubCloudHost(host) ? `https://${host}` : undefined);
-  const normalized = normalizeGitRepositoryUrl(remote, githubUrl);
+  const normalized = normalizeHostedGitRepositoryUrl(
+    remote,
+    githubUrl,
+    githubUrl !== undefined,
+  );
   if (!/^https?:\/\//iu.test(normalized)) return undefined;
   if (
     !isGitHubCloudHost(new URL(normalized).hostname) &&
@@ -179,7 +196,7 @@ export function trivyBatchSourceUrls(
     const typedUrl = finding.evidence.details?.repository?.url;
     const row = trivyReportRemotes(retainedTrivyReport(finding));
     if (typedUrl && (bind || batch.urls.length || row.urls.length))
-      validateHostedRepositoryUrl(typedUrl);
+      validateTrivyRepositoryUrl(typedUrl);
     if (bind) requireTrivyBinding(row);
     if (batch.urls.length && !typedUrl && !row.urls.length)
       throw new Error(

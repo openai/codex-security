@@ -1,44 +1,40 @@
-import { isUtf8 } from "node:buffer";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { isNumberObject } from "node:util/types";
-import { environmentEntry } from "./auth.js";
+import {
+  semgrepLegacyRepositoryWitnesses,
+  semgrepPlatformFindingBinding,
+  semgrepPlatformReportScope,
+  semgrepPlatformRepositoryReference,
+  isSemgrepPlatformEvidence,
+  semgrepReferenceMatches,
+} from "./semgrep-platform-findings.js";
 import {
   retainedTrivyReport,
   trivyBatchSourceUrls,
   trivyRemoteKey,
   trivyReportRemotes,
 } from "./trivy-findings.js";
-import { snykRepositoryScope } from "./snyk-findings.js";
-import { semgrepSarifSourceRepositories } from "./semgrep-findings.js";
-import {
-  isSemgrepPlatformReport,
-  semgrepPlatformFindingRepository,
-} from "./semgrep-platform-findings.js";
+import { hostedRepositoryMatches } from "./hosted-git-repository.js";
+import { readHostedGitRemotes } from "./hosted-git-remotes.js";
+import { environmentEntry } from "./auth.js";
 import { CodexSecurityError } from "./errors.js";
-import {
-  hostedRepositoryUrl,
-  validateHostedRepositoryUrl,
-} from "./hosted-scanner-http.js";
 import {
   forwardExternalImportSetting,
   requireExternalImports,
 } from "./external-imports-feature.js";
 import {
-  checkRetainedFindingProvider,
-  snapshotExternalFindings,
+  checkRetainedTrivyProvider,
+  checkTrivyReportProvider,
   snapshotImportOptions,
   snapshotSourceRepositories,
   type ExternalFindings,
-  type HostedExternalFindings,
-  type NormalizedFindingsFor,
   type ExternalSourceRepository,
 } from "./external-findings.js";
 import {
   cloudRepositoryUrlKey,
-  hostedRepositoryUrlKey,
   repositoryUrlKey,
-  isVerifiedGitHubRepository,
+  validateExternalEvidence,
   validateExternalReport,
 } from "./external-import-contract.js";
 import type {
@@ -46,18 +42,23 @@ import type {
   Provider,
 } from "./external-import-models.js";
 import {
-  gitPathToHttpPath,
-  gitTransportBytes,
-  isGitHubCloudHost,
-  isGitSshRemote,
-  isLocalGitRemote,
-  isWindowsGitDrive,
-  normalizeHostedGitRepositoryUrl,
-  parseGitRemote,
-} from "./git-remote.js";
+  localFindingRepositories,
+  semgrepSarifRepositories,
+} from "./external-findings-read.js";
+import {
+  blackDuckReportRepositories,
+  projectedBlackDuckRepositoryUrl,
+} from "./blackduck-findings.js";
+import { isGitHubCloudHost, parseGitRemote } from "./git-remote.js";
+import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import { isRecord } from "./record.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
+import {
+  type SnykIssuesFindings,
+  snykRestImportRepository,
+  snykRestCheckoutMatches,
+} from "./snyk-rest-findings.js";
 import {
   bundledPluginRoot,
   canonicalConfigPath,
@@ -110,7 +111,7 @@ export interface LocalExternalImportDependencies {
   sourceRepositories?: readonly ExternalSourceRepository[];
 }
 
-export interface LocalExternalImportPreview extends HostedExternalFindings {
+export interface LocalExternalImportPreview extends ExternalFindings {
   repository: string;
   source: { provider: Provider; source_key: string };
 }
@@ -151,27 +152,24 @@ const gitTransportPorts: Readonly<Record<string, string>> = {
   "ftps:": "990",
 };
 
-// Imported scanner paths retain their source machine's drive, independent of this checkout's OS.
-const windowsDrivePath = /^[a-z]:[\\/]/iu;
-
-// libcurl rejects multiple unescaped userinfo separators before making a request.
-const invalidCurlUserinfo = /^(?:https?|ftps?):\/\/[^/?#@]*@[^/?#@]*@/iu;
-
 /** Compare transport forms without changing retained scanner evidence. */
+interface RemoteRepositoryIdentity {
+  key: string;
+  account?: string;
+  homeRelative?: boolean;
+}
+
 function remoteRepository(
   value: string,
   provider: Provider,
   bound: boolean,
-  hostedKey?: (url: string) => string,
-): { key: string; account?: string; homeRelative?: boolean } | undefined {
-  if (invalidCurlUserinfo.test(value)) return undefined;
-  const key =
-    hostedKey ??
-    (provider === "github" ? cloudRepositoryUrlKey : repositoryUrlKey);
-  const transport = /^(?:ssh|git\+ssh|ssh\+git|git):\/\/([^/]*)(.*)$/isu.exec(
-    value,
-  );
+): RemoteRepositoryIdentity | undefined {
+  if (/^[A-Za-z]:[\\/]/u.test(value)) return undefined;
+  const transport = bound
+    ? /^(?:ssh|git\+ssh|ssh\+git|git):\/\/([^/]*)(.*)$/isu.exec(value)
+    : null;
   const authority = transport?.[1];
+  const http = bound && /^https?:\/\//iu.test(value.trimStart());
   // Git decodes the authority before locating its path. An encoded delimiter
   // cannot prove a match to another spelling through WHATWG URL's hostname.
   if (
@@ -184,14 +182,11 @@ function remoteRepository(
   try {
     remote = parseGitRemote(value);
   } catch {
-    return bound && (transport || /^https?:\/\//iu.test(value.trimStart()))
-      ? { key: "\0" + value }
-      : undefined;
+    return transport || http ? { key: "\0" + value } : undefined;
   }
   if (!remote || !Object.hasOwn(gitTransportPorts, remote.url.protocol))
     return undefined;
-  const { url, scpStyle } = remote;
-  let path = remote.path;
+  const { url, path, scpStyle } = remote;
   const ssh = url.protocol.includes("ssh");
   const protocol = url.protocol === "http:" ? "http:" : "https:";
   const githubSshOverHttps =
@@ -203,48 +198,42 @@ function remoteRepository(
     githubSshOverHttps || url.port === gitTransportPorts[url.protocol]
       ? ""
       : url.port;
+  // A GitHub source identifies a case-insensitive repository on custom Enterprise
+  // hosts too; other providers can refer to VCS hosts with case-sensitive paths.
+  const key = provider === "github" ? cloudRepositoryUrlKey : repositoryUrlKey;
   const origin = `${protocol}//${hostname}${port ? `:${port}` : ""}/`;
-  const httpTransport = url.protocol === "http:" || url.protocol === "https:";
-  const rawSuffix = /[?#].*$/su.exec(value)?.[0] ?? "";
-  // Git appends its HTTP service path before libcurl strips fragment text.
-  const requestSuffix = httpTransport
-    ? rawSuffix.replace(/#.*$/su, "#").replace(/\/$/u, "")
-    : "";
-  const requestKey = (path: string) => {
-    const repository = key(origin + path);
-    return requestSuffix
-      ? JSON.stringify([repository, requestSuffix])
-      : repository;
-  };
-  if (!bound) {
-    // SCP paths are literal. SSH URI paths include their query and fragment text.
-    if (scpStyle) path = path.replaceAll("%", "%25");
-    else if (ssh || url.protocol === "git:") path += rawSuffix;
-    // Keep literal path delimiters in URL-escaped form, separate from HTTP selectors.
-    return {
-      key: requestKey(path.replace(/%3f|\?/giu, "%3F").replaceAll("#", "%23")),
-    };
-  }
+  if (!bound) return { key: key(origin + path) };
 
   if (!ssh && url.protocol !== "git:") {
-    if (httpTransport) {
+    if (url.protocol === "http:" || url.protocol === "https:") {
       // libcurl and WHATWG differ on backslashes and encoded dot segments.
       const raw = /^https?:\/\/[^/\\?#\s]+(\/[^\\?#]*)?(?:[?#].*)?$/iu.exec(
         value,
       );
-      if (!raw) return { key: "\0" + value };
-      // The hosted HTTP key normalizes the raw Git path. URL.pathname escapes literal braces.
-      if (hostedKey) path = (raw[1] ?? "").slice(1);
-      else if (/\/(?:%2e|\.%2e|%2e\.|%2e%2e)(?:\/|$)/iu.test(raw[1] ?? ""))
+      if (!raw || /\/(?:%2e|\.%2e|%2e\.|%2e%2e)(?:\/|$)/iu.test(raw[1] ?? ""))
         return { key: "\0" + value };
     }
-    if (rawSuffix && !httpTransport) return { key: key(origin + path) + "\0" };
-    return { key: requestKey(path) };
+    const suffix = /[?#].*$/su.exec(value)?.[0] ?? "";
+    // HTTP sends the query and omits fragment text from repository requests.
+    if (suffix && !["http:", "https:"].includes(url.protocol))
+      return { key: key(origin + path) + "\0" };
+    return {
+      key:
+        key(origin + path) + suffix.replace(/#.*$/su, "#").replace(/\/$/u, ""),
+    };
   }
 
   // Git passes the original path (including dot segments, '?' and '#') to upload-pack.
+  const literal = (raw: string) => {
+    const bytes = Buffer.from(raw).toString("latin1");
+    return scpStyle
+      ? bytes
+      : bytes.replace(/%(?!00)([\da-f]{2})/giu, (_, hex: string) =>
+          String.fromCharCode(parseInt(hex, 16)),
+        );
+  };
   if (!scpStyle && !transport) return { key: value };
-  const gitPath = gitTransportBytes(transport?.[2] ?? path, scpStyle);
+  const gitPath = literal(transport?.[2] ?? path);
   const login = scpStyle
     ? /^([^@/:\s?#]+)@/u.exec(value)?.[1]
     : /^(.*)@/u.exec(authority ?? "")?.[1];
@@ -252,7 +241,14 @@ function remoteRepository(
     /^\/?~(?:\/|$)/u.test(gitPath) || (scpStyle && !/^[~/]/u.test(gitPath));
   const suffix = /[?#].*$/su.exec(gitPath);
   // Express upload-pack bytes as a URL path for comparison with the HTTP source.
-  const name = gitPathToHttpPath(gitPath.slice(0, suffix?.index));
+  const name = gitPath
+    .slice(0, suffix?.index)
+    .replace(/^\//u, "")
+    .replace(
+      /[%\x00-\x20\x7f-\xff]/gu,
+      (byte) =>
+        "%" + byte.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0"),
+    );
   const repository = suffix
     ? key(origin + name + "?") +
       "\0" +
@@ -260,13 +256,69 @@ function remoteRepository(
     : key(origin + name);
   return {
     key: repository,
-    account: ssh && login ? gitTransportBytes(login, scpStyle) : undefined,
+    account: ssh && login ? literal(login) : undefined,
     // GitHub serves the same repository path through its SCP and SSH URLs.
     homeRelative:
       ssh && provider !== "github" && !isGitHubCloudHost(hostname.toLowerCase())
         ? homeRelative
         : undefined,
   };
+}
+
+function matchingRemote(
+  left: RemoteRepositoryIdentity,
+  right: RemoteRepositoryIdentity,
+) {
+  return (
+    left.key === right.key &&
+    (left.homeRelative === undefined ||
+      right.homeRelative === undefined ||
+      left.homeRelative === right.homeRelative) &&
+    ((left.homeRelative === false && right.homeRelative === false) ||
+      left.account === undefined ||
+      right.account === undefined ||
+      left.account === right.account)
+  );
+}
+
+function localRepositoryPlatform(
+  provider: Provider,
+  sources: readonly ExternalSourceRepository[],
+  bound: boolean,
+) {
+  const githubKey = (url: string) =>
+    remoteRepository(url, "github", bound)?.key;
+  const githubRepositories = new Set(
+    sources.flatMap((source) => {
+      if (source.platform !== "github") return [];
+      const key = githubKey(source.url);
+      return key === undefined ? [] : [key];
+    }),
+  );
+  return (source: ExternalSourceRepository): Provider => {
+    if (source.platform === "github") return "github";
+    if (githubRepositories.size === 0) return provider;
+    const key = githubKey(source.url);
+    return key !== undefined && githubRepositories.has(key)
+      ? "github"
+      : provider;
+  };
+}
+
+function sameScannerRepositories(
+  remotes: Iterable<RemoteRepositoryIdentity>,
+): boolean {
+  let known: RemoteRepositoryIdentity | undefined;
+  for (const remote of remotes) {
+    if (known && !matchingRemote(known, remote)) return false;
+    // HTTPS does not specify the login or path interpretation carried by SSH.
+    known = {
+      key: remote.key,
+      account: remote.account ?? known?.account,
+      homeRelative: remote.homeRelative ?? known?.homeRelative,
+    };
+  }
+  return true;
 }
 
 async function bareMetadataRoots(
@@ -457,239 +509,6 @@ async function hasGitMetadata(
   );
 }
 
-type HostedRepository = ExternalSourceRepository & { gitlab?: boolean };
-
-function hostedRepositoryMatches(
-  source: HostedRepository,
-  value: string,
-  expectedKey?: string,
-  gitlab = source.gitlab,
-): boolean {
-  if (!/^https?:\/\//iu.test(source.url)) return source.url === value;
-  const github = source.platform === "github";
-  const url = normalizeHostedGitRepositoryUrl(value, source.url, github);
-  return (
-    hostedRepositoryUrlKey(url, github, gitlab) ===
-    (expectedKey ?? hostedRepositoryUrlKey(source.url, github, gitlab))
-  );
-}
-
-async function checkoutRemotes(
-  repository: string,
-  provider: Provider,
-  hasSources: boolean,
-  protectedRoots: WorkbenchCommandOptions["protectedRoot"],
-  environment: WorkbenchCommandOptions["environment"],
-  signal?: AbortSignal,
-) {
-  if (!(await hasGitMetadata(repository, signal))) return;
-  const gitProtectedRoots = [
-    ...(typeof protectedRoots === "string"
-      ? [protectedRoots]
-      : (protectedRoots ?? [])),
-    await abortable(() => canonicalConfigPath(process.cwd()), signal),
-  ];
-  const readGit = (args: readonly string[]) => {
-    const overrides: NodeJS.ProcessEnv = { LC_ALL: "C" };
-    // GIT_CONFIG redirects only git config; read the same configuration as git remote.
-    if (args[0] === "config")
-      for (const name of Object.keys(environment ?? process.env))
-        if (
-          (process.platform === "win32" ? name.toUpperCase() : name) ===
-          "GIT_CONFIG"
-        )
-          overrides[name] = undefined;
-    return abortable(async () => {
-      try {
-        const output = await gitOutput(
-          repository,
-          args,
-          signal,
-          overrides,
-          undefined,
-          "buffer",
-          gitProtectedRoots,
-          environment,
-        );
-        // Keep a byte per character until Git's record boundaries and config keys have been matched.
-        return output.toString("latin1").replace(/\n$/u, "");
-      } catch (error) {
-        // The SDK exposes Git's original UTF-8 diagnostics on command errors.
-        if (error instanceof Error) {
-          if ("stderr" in error && Buffer.isBuffer(error.stderr))
-            error.stderr = error.stderr.toString("utf8");
-          if ("stdout" in error && Buffer.isBuffer(error.stdout))
-            error.stdout = error.stdout.toString("utf8");
-        }
-        throw error;
-      }
-    }, signal);
-  };
-  const utf8 = (raw: string) => {
-    const bytes = Buffer.from(raw, "latin1");
-    return isUtf8(bytes) ? bytes.toString("utf8") : undefined;
-  };
-  let remoteNames: string;
-  try {
-    if (provider === "trivy") {
-      const root = resolve(
-        Buffer.from(
-          await readGit(["rev-parse", "--show-toplevel"]),
-          "latin1",
-        ).toString("utf8"),
-      );
-      if (
-        root !== repository &&
-        !(await abortable(() => sameFile(root, repository), signal))
-      )
-        throw new CodexSecurityError(
-          `Trivy finding paths are checkout-relative. Git found the checkout at ${JSON.stringify(root)}. Select it with --repository and set --trivy-scan-root relative to it.`,
-        );
-      if (!hasSources) return;
-    }
-    remoteNames = await readGit(["remote"]);
-  } catch (error) {
-    signal?.throwIfAborted();
-    // A local source directory need not be a Git checkout.
-    if (
-      error instanceof Error &&
-      "code" in error &&
-      error.code === 128 &&
-      "stderr" in error &&
-      typeof error.stderr === "string" &&
-      (error.stderr.trimEnd() ===
-        "fatal: not a git repository (or any of the parent directories): .git" ||
-        /^fatal: not a git repository \(or any parent up to mount point [^\r\n]+\)\r?\nStopping at filesystem boundary \(GIT_DISCOVERY_ACROSS_FILESYSTEM not set\)\.$/u.test(
-          error.stderr.trimEnd(),
-        ))
-    )
-      return;
-    throw error;
-  }
-  if (!remoteNames) return;
-  const remoteConfig = (
-    await readGit([
-      "config",
-      "--null",
-      "--get-regexp",
-      "^(remote\\..*\\.(url|vcs)|url\\..*\\.insteadof)$",
-    ]).catch((error: unknown) => {
-      if (error instanceof Error && "code" in error && error.code === 1)
-        return "";
-      throw error;
-    })
-  ).split("\0");
-  const multilinePrefixes = remoteConfig
-    .filter((entry) => entry.startsWith("url."))
-    .map((entry) => entry.slice(entry.indexOf("\n") + 1))
-    .filter((prefix) => prefix.includes("\n"))
-    .sort((a, b) => b.length - a.length);
-  const remotes: { url: string; forcedHelper: boolean }[] = [];
-  let hasUnverifiedRemote = false;
-  for (const rawName of remoteNames.split("\n").filter(Boolean)) {
-    const name = utf8(rawName);
-    if (name === undefined) {
-      hasUnverifiedRemote = true;
-      continue;
-    }
-    const vcsKey = `remote.${rawName}.vcs\n`;
-    const configuredHelper = remoteConfig
-      .findLast((entry) => entry.startsWith(vcsKey))
-      ?.slice(vcsKey.length);
-    const output = await readGit(["remote", "get-url", "--all", "--", name]);
-    const lines = output.split("\n");
-    const urlKey = `remote.${rawName}.url\n`;
-    const configured = remoteConfig
-      .filter((entry) => entry.startsWith(urlKey))
-      .map((entry) => entry.slice(urlKey.length));
-    let urls = lines;
-    // Each effective URL after a list reset contributes at least one line.
-    if (
-      lines.length > 1 &&
-      configured.slice(-lines.length).some((url) => url.includes("\n"))
-    ) {
-      // A rewrite can consume line breaks in its longest matching insteadOf prefix.
-      // Git config keys (including the replacement URL) cannot contain a newline.
-      // Git emits either the full list or the suffix after the last empty URL.
-      const afterReset = configured.lastIndexOf("") + 1;
-      const records: string[] = [];
-      let end = lines.length;
-      for (let i = configured.length - 1; i >= 0 && end > 0; i--) {
-        const original = configured[i]!;
-        const prefix = multilinePrefixes.find((value) =>
-          original.startsWith(value),
-        );
-        const start =
-          end - original.slice(prefix?.length ?? 0).split("\n").length;
-        if (start < 0 || (start === 0 && i !== 0 && i !== afterReset)) break;
-        records.push(lines.slice(start, end).join("\n"));
-        end = start;
-      }
-      if (end === 0) urls = records.reverse();
-      else {
-        hasUnverifiedRemote = true;
-        urls = [await readGit(["remote", "get-url", "--", name])];
-      }
-    }
-    for (const rawUrl of urls) {
-      // Explicit helper:: takes precedence over remote.<name>.vcs.
-      const explicit = /^([a-z0-9][a-z0-9+.-]*)::/iu.exec(rawUrl);
-      const helper = explicit?.[1] ?? configuredHelper;
-      const address = explicit ? rawUrl.slice(explicit[0].length) : rawUrl;
-      if (helper === undefined && isLocalGitRemote(address)) continue;
-      const url = utf8(address);
-      if (url === undefined) {
-        hasUnverifiedRemote = true;
-        continue;
-      }
-      const transport = /^([a-z0-9][a-z0-9+.-]*:)\/\//iu.exec(url)?.[1] ?? "";
-      const curl = /^(?:https?|ftps?):$/u.test(transport.toLowerCase());
-      // A configured URL has a case-insensitive scheme. An explicit Git helper
-      // has a case-sensitive name and only the standard curl names take URL arguments.
-      const recognized = curl
-        ? helper === undefined || /^(?:https?|ftps?)$/u.test(helper)
-        : helper === undefined &&
-          (!url.includes("://") ||
-            Object.hasOwn(gitTransportPorts, transport) ||
-            // Inspector can retain an unrecognized spelling as a literal repository key.
-            (provider === "inspector" &&
-              remoteRepository(url, provider, true)?.key === url));
-      // libcurl rejects raw ASCII control characters and spaces that URL() may discard.
-      if (
-        !recognized ||
-        (curl &&
-          (/[\x00-\x20\x7f]/u.test(url) || invalidCurlUserinfo.test(url)))
-      ) {
-        hasUnverifiedRemote = true;
-        continue;
-      }
-      if (isWindowsGitDrive(url) && !url.startsWith("-")) {
-        // Git's Windows path validity rules decide between a drive and an SSH host.
-        // Diagnostic mode opens no repository. gitOutput disables all transports before SSH setup.
-        try {
-          await readGit(["fetch-pack", "--diag-url", url]);
-          continue;
-        } catch (error) {
-          if (!(
-            error instanceof Error &&
-            "code" in error &&
-            error.code === 128 &&
-            "stderr" in error &&
-            typeof error.stderr === "string" &&
-            error.stderr
-              .split(/\r?\n/u)
-              .filter((line) => line.startsWith("fatal: "))
-              .join("\n") === "fatal: transport 'ssh' not allowed"
-          ))
-            throw error;
-        }
-      }
-      remotes.push({ url, forcedHelper: helper !== undefined });
-    }
-  }
-  return hasUnverifiedRemote || remotes.length ? remotes : undefined;
-}
-
 // Typed web links and explicit curl helper arguments use a case-insensitive URL scheme.
 function trivyUrlArgument(url: string) {
   return url.replace(/^(?:https?|ftps?):\/\//iu, (scheme) =>
@@ -717,123 +536,164 @@ async function requireMatchingRepository(
   repository: string,
   provider: Provider,
   sources: readonly ExternalSourceRepository[],
-  hosted: HostedRepository | undefined,
+  strictSources: ReadonlyMap<string, Provider>,
+  hostedSources: ReadonlyMap<string, ExternalSourceRepository>,
+  platformFor: (source: ExternalSourceRepository, bound: boolean) => Provider,
+  snyk: ReturnType<typeof snykRestImportRepository>,
   protectedRoots: WorkbenchCommandOptions["protectedRoot"],
   environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
   trivy?: ExternalFindings,
 ): Promise<void> {
-  if (!sources.length && !trivy) return;
-  const remotes = await checkoutRemotes(
-    repository,
-    provider,
-    sources.length > 0,
-    protectedRoots,
-    environment,
-    signal,
-  );
-  const mismatch = (url: string) =>
-    new CodexSecurityError(
-      `Imported repository ${JSON.stringify(url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
+  if (!trivy && !snyk && sources.length === 0 && hostedSources.size === 0)
+    return;
+  const hasMetadata = await hasGitMetadata(repository, signal);
+  if (!trivy && !hasMetadata) return;
+  const gitProtectedRoots = [
+    ...(typeof protectedRoots === "string"
+      ? [protectedRoots]
+      : (protectedRoots ?? [])),
+    await abortable(() => canonicalConfigPath(process.cwd()), signal),
+  ];
+  const readHostedRemotes = (literalTrivySources?: ReadonlySet<string>) =>
+    abortable(
+      () =>
+        readHostedGitRemotes(
+          repository,
+          gitProtectedRoots,
+          environment,
+          signal,
+          literalTrivySources,
+        ),
+      signal,
     );
   if (trivy) {
+    const trivyKeys = new Set(sources.map(({ url }) => trivyRemoteKey(url)));
+    let remotes: string[] | undefined;
+    if (hasMetadata) {
+      const root = resolve(
+        await abortable(
+          () =>
+            gitOutput(
+              repository,
+              ["rev-parse", "--show-toplevel"],
+              signal,
+              { LC_ALL: "C" },
+              undefined,
+              "utf8",
+              gitProtectedRoots,
+              environment,
+            ),
+          signal,
+        ),
+      );
+      if (
+        root !== repository &&
+        !(await abortable(() => sameFile(root, repository), signal))
+      )
+        throw new CodexSecurityError(
+          `Trivy finding paths are checkout-relative. Git found the checkout at ${JSON.stringify(root)}. Select it with --repository and set --trivy-scan-root relative to it.`,
+        );
+      if (sources.length) remotes = await readHostedRemotes(trivyKeys);
+    }
     if (remotes) trivyBatchSourceUrls(trivy, true);
-    const keys = new Set(sources.map(({ url }) => trivyRemoteKey(url)));
-    if (keys.size > 1)
+    if (trivyKeys.size > 1)
       throw new CodexSecurityError(
         "Trivy source URLs identify different repositories.",
       );
-    const source = sources[0];
+    const source = sources[0]!;
     if (
       remotes &&
-      source &&
-      !remotes.some(({ url, forcedHelper }) =>
-        keys.has(
-          trivyRemoteKey(
-            forcedHelper ? trivyUrlArgument(url) : url,
-            undefined,
-            true,
-          ),
-        ),
+      !remotes.some(
+        (url) =>
+          !/^(?:https?|ftps?):\/\/[^/?#@]*@[^/?#@]*@/iu.test(url) &&
+          trivyKeys.has(trivyRemoteKey(url, undefined, true)),
       )
     )
-      throw mismatch(source.url);
+      throw new CodexSecurityError(
+        `Imported repository ${JSON.stringify(source.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
+      );
     return;
   }
-  if (!remotes) return;
-  const drive = sources.find(({ url }) => windowsDrivePath.test(url));
-  if (drive) throw mismatch(drive.url);
-  if (hosted) {
-    const platform = hosted.platform ?? provider;
-    const key = (url: string) =>
-      hostedRepositoryUrlKey(url, hosted.platform === "github", hosted.gitlab);
-    const http = /^https?:\/\//iu;
-    const httpKey = http.test(hosted.url)
-      ? remoteRepository(hosted.url, platform, true, key)?.key
-      : undefined;
-    for (const { url: remote } of remotes) {
-      const parsed = remoteRepository(remote, platform, true, key);
-      if (!parsed) continue;
-      // Git's HTTP credentials and default port don't change the checkout repository.
-      if (
-        httpKey && http.test(remote)
-          ? parsed.key === httpKey
-          : hostedRepositoryMatches(hosted, remote, httpKey)
-      )
-        return;
-    }
-    throw mismatch(hosted.url);
-  }
-  const ftpAddress = (value: string) => {
-    const scheme = /^ftps?:\/\//iu.exec(value)?.[0];
-    if (!scheme) return undefined;
-    // FTP login and path bytes can select a different repository. Fold only the ASCII DNS hostname.
-    const address = value
-      .slice(scheme.length)
-      .replace(
-        /^([^/?#@]*@)?([\w.-]+)(?=[:/?#]|$)/u,
-        (_, login: string = "", host: string) => login + host.toLowerCase(),
-      );
-    return scheme.toLowerCase() + address;
-  };
-  const identity = (value: string, platform: Provider) =>
-    remoteRepository(value, platform, provider === "inspector");
-  const githubRepositories = new Set(
-    sources.flatMap((source) => {
-      if (source.platform !== "github") return [];
-      const key = identity(source.url, "github")?.key;
-      return key === undefined ? [] : [key];
-    }),
-  );
-  for (const source of sources) {
-    const githubKey = identity(source.url, "github")?.key;
-    const sourceProvider =
-      source.platform === "github" ||
-      (githubKey !== undefined && githubRepositories.has(githubKey))
-        ? "github"
-        : provider;
-    const targets = remotes.flatMap(({ url, forcedHelper }) => {
-      // A curl helper uses the inner URL's transport. An FTP login or path can identify
-      // a different repository from the same host's HTTPS endpoint.
-      if (forcedHelper && ftpAddress(url) !== ftpAddress(source.url)) return [];
-      return identity(url, sourceProvider) ?? [];
-    });
-    const target = identity(source.url, sourceProvider);
+  if (snyk) {
+    const remotes = await readHostedRemotes();
     if (
-      !target ||
-      !targets.some(
-        ({ key, account, homeRelative }) =>
-          key === target.key &&
-          (homeRelative === undefined ||
-            target.homeRelative === undefined ||
-            homeRelative === target.homeRelative) &&
-          ((homeRelative === false && target.homeRelative === false) ||
-            account === undefined ||
-            target.account === undefined ||
-            account === target.account),
-      )
+      remotes &&
+      !remotes.some((remote) => snykRestCheckoutMatches(snyk, remote))
     )
-      throw mismatch(source.url);
+      throw new CodexSecurityError(
+        `Imported repository ${JSON.stringify(snyk.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
+      );
+    return;
+  }
+  if (hostedSources.size > 0) {
+    const remotes = await readHostedRemotes();
+    if (remotes) {
+      for (const source of hostedSources.values())
+        if (!remotes.some((remote) => hostedRepositoryMatches(source, remote)))
+          throw new CodexSecurityError(
+            `Imported repository ${JSON.stringify(source.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
+          );
+    }
+    if (!sources.length) return;
+  }
+  const readGit = (args: readonly string[]) =>
+    abortable(
+      () =>
+        gitOutput(
+          repository,
+          args,
+          signal,
+          { LC_ALL: "C" },
+          undefined,
+          "utf8",
+          gitProtectedRoots,
+          environment,
+        ),
+      signal,
+    );
+  let remoteNames: string;
+  try {
+    remoteNames = await readGit(["remote"]);
+  } catch (error) {
+    signal?.throwIfAborted();
+    // A local source directory need not be a Git checkout.
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      error.code === 128 &&
+      "stderr" in error &&
+      typeof error.stderr === "string" &&
+      (error.stderr.trimEnd() ===
+        "fatal: not a git repository (or any of the parent directories): .git" ||
+        /^fatal: not a git repository \(or any parent up to mount point [^\r\n]+\)\r?\nStopping at filesystem boundary \(GIT_DISCOVERY_ACROSS_FILESYSTEM not set\)\.$/u.test(
+          error.stderr.trimEnd(),
+        ))
+    )
+      return;
+    throw error;
+  }
+  const remotes: string[] = [];
+  for (const name of remoteNames.split(/\r?\n/u).filter(Boolean)) {
+    const urls = await readGit(["remote", "get-url", "--all", "--", name]);
+    remotes.push(...urls.split(/\r?\n/u));
+  }
+  const boundProvider =
+    provider === "inspector" ||
+    provider === "blackduck" ||
+    provider === "veracode";
+  for (const source of sources) {
+    const bound = boundProvider || strictSources.has(source.url);
+    const platform =
+      strictSources.get(source.url) ?? platformFor(source, bound);
+    const identity = (url: string) => remoteRepository(url, platform, bound);
+    const targets = remotes.flatMap((remote) => identity(remote) ?? []);
+    if (!targets.length) continue;
+    const target = identity(source.url);
+    if (!target || !targets.some((remote) => matchingRemote(remote, target)))
+      throw new CodexSecurityError(
+        `Imported repository ${JSON.stringify(source.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
+      );
   }
 }
 
@@ -894,9 +754,9 @@ async function localContext(
 }
 
 /** Prepare scanner evidence without writing state or performing a security assessment. */
-export async function prepareNormalizedLocalImport<P extends Provider>(
-  input: NormalizedFindingsFor<P>,
-  options: NormalizedLocalImportOptions & { provider: P },
+export async function prepareNormalizedLocalImport(
+  input: ExternalFindings,
+  options: NormalizedLocalImportOptions,
   dependencies: LocalExternalImportDependencies = {},
 ): Promise<PreparedLocalExternalImport> {
   dependencies.signal?.throwIfAborted();
@@ -910,15 +770,26 @@ export async function prepareNormalizedLocalImport<P extends Provider>(
 
 /** @internal Prepare evidence using settings captured by either local import entrypoint. */
 export async function prepareLocalImport(
-  input: HostedExternalFindings,
-  options: NormalizedLocalImportOptions,
+  input: ExternalFindings & Partial<SnykIssuesFindings>,
+  options: NormalizedLocalImportOptions & { sourceRepositoryUrl?: string },
   dependencies: LocalExternalImportDependencies,
-  sourceRepositories = snapshotSourceRepositories(
-    dependencies.sourceRepositories,
-  ),
+  readerSources = snapshotSourceRepositories(dependencies.sourceRepositories),
+  parsedSources: readonly ExternalSourceRepository[] = [],
 ): Promise<PreparedLocalExternalImport> {
   requireIdentity(options.sourceKey, "Source key");
-  const current = snapshotExternalFindings(input, options.provider);
+  const current = structuredClone(input);
+  // structuredClone omits inherited or non-enumerable SDK reader properties.
+  if (!("snykRestContext" in current) && "snykRestContext" in input)
+    current.snykRestContext = structuredClone(input.snykRestContext);
+  if (options.provider === "snyk" || current.snykRestContext !== undefined) {
+    for (const key of [
+      "sourceRepositoryUrl",
+      "sourceRepositoryPlatform",
+    ] as const)
+      if (key in input && !(key in current))
+        Object.assign(current, { [key]: structuredClone(input[key]) });
+  }
+  checkTrivyReportProvider(options.provider, current.report);
   validateExternalReport(current.report);
   let dependabotSource: string | undefined;
   const identities = new Set<string>();
@@ -931,7 +802,7 @@ export async function prepareLocalImport(
     identities.add(finding.source_finding_id);
     if (!isRecord(finding.evidence))
       throw new CodexSecurityError("Imported evidence must be an object.");
-    checkRetainedFindingProvider(options.provider, finding, "local");
+    checkRetainedTrivyProvider(options.provider, finding, "local");
     if (options.provider !== "github") continue;
     const native = dependabotRepository(finding);
     if (!native) continue;
@@ -954,89 +825,253 @@ export async function prepareLocalImport(
     dependencies,
   );
   const sources = new Map<string, ExternalSourceRepository>();
-  const reportUrl = current.sourceRepositoryUrl || undefined;
-  if (reportUrl) sources.set(reportUrl, { url: reportUrl });
-  const snyk =
-    options.provider === "snyk" ? snykRepositoryScope(current) : undefined;
-  const snykProject = snyk?.project;
-  for (const url of [snykProject?.url, snykProject?.nativeUrl])
-    if (url) sources.set(url, { url });
-  let hostedUrl = reportUrl ?? snyk?.sourceUrl;
-  const reportPlatform = current.sourceRepositoryPlatform;
-  const singleProject = Boolean(
-    hostedUrl ||
-    reportPlatform ||
-    (options.provider === "semgrep" &&
-      current.findings.some(({ evidence }) =>
-        isSemgrepPlatformReport(evidence.source_data),
-      )),
-  );
-  let hostedPlatform = snykProject?.platform;
-  if (snyk && !snykProject && !current.findings.length)
-    hostedPlatform = reportPlatform;
-  let hostedGitHub =
-    reportPlatform !== "other" && hostedPlatform && hostedPlatform === "github";
-  for (const { evidence } of current.findings) {
-    const url = evidence.details?.repository?.url;
-    if (url) sources.set(url, { url });
-    const data = evidence.source_data;
-    if (snyk && data) {
-      for (const source of snyk.claims.get(data) ?? []) {
-        sources.set(source.url, { url: source.url });
-        if (source.nativeUrl)
-          sources.set(source.nativeUrl, { url: source.nativeUrl });
-        // A native plugin may report its local drive path. Check it against the checkout below.
-        if (
-          reportPlatform === "other" &&
-          windowsDrivePath.test(source.url) &&
-          isGitSshRemote(source.url)
-        )
-          hostedUrl ??= source.url;
-        // Only retained or independent evidence can establish GitHub on a populated report.
-        if (source.platform !== undefined)
-          hostedGitHub = (hostedGitHub ?? true) && source.platform === "github";
-      }
-    }
-    if (options.provider === "semgrep") {
-      const native = semgrepPlatformFindingRepository(
-        data,
-        (url) =>
-          reportPlatform !== "other" &&
-          isVerifiedGitHubRepository(url, sourceRepositories),
-      );
-      if (native) {
-        hostedUrl ??= native;
-        sources.set(native, { url: native });
-      } else if (singleProject) {
-        for (const source of semgrepSarifSourceRepositories(data))
-          sources.set(source.url, source);
-      }
-    }
-  }
+  const references = [...readerSources, ...parsedSources];
   const inspector = inspectorReportRepository(
     options.provider,
     current.findings,
     "local",
     options.inspectorProjectMap,
   );
+  const projected =
+    options.provider === "blackduck"
+      ? []
+      : current.findings.filter((finding) =>
+          projectedBlackDuckRepositoryUrl(finding, "local"),
+        );
+  const mixed = projected.length > 0 && readerSources.length > 0;
+  const nativeSources = new Map(
+    (mixed ? current.findings : projected)
+      .filter(
+        ({ evidence }) =>
+          options.provider !== "endor" ||
+          isRecord(evidence.source_data?.["runContext"]),
+      )
+      .map(
+        (finding) =>
+          [
+            finding,
+            localFindingRepositories(options.provider, finding),
+          ] as const,
+      ),
+  );
+  const platformFor = localRepositoryPlatform(
+    options.provider,
+    options.inspectorProjectMap
+      ? []
+      : [
+          ...references,
+          ...Array.from(nativeSources.values()).flat(),
+          ...(inspector ? [inspector] : []),
+        ],
+    true,
+  );
+  const identify = (url: string) =>
+    remoteRepository(url, platformFor({ url }), true) ?? { key: url };
+  // A hint from an independent reader applies across projected rows. A native
+  // GitHub asset in one row only identifies the platform of that row's claims.
+  const operatorPlatform = localRepositoryPlatform(
+    options.provider,
+    readerSources,
+    true,
+  );
+  const sameRepositories = (urls: Iterable<string>) =>
+    sameScannerRepositories(Array.from(urls, identify));
+  const bound = blackDuckReportRepositories(
+    options.provider,
+    current.findings,
+    "local",
+    sameRepositories,
+  );
+  for (const source of veracodeReportRepositories(
+    options.provider,
+    current.findings,
+    "local",
+    sameRepositories,
+  ).values()) {
+    sources.set(source.url, source);
+  }
+  const strictSources = new Map<string, Provider>();
+  const hostedSources = new Map<string, ExternalSourceRepository>();
+  const semgrepReportScope = semgrepPlatformReportScope(
+    current,
+    options.provider,
+    readerSources,
+  );
+  const semgrepPlatformRepositoryUrl = semgrepReportScope?.url;
+  function addSemgrepSource(url: string) {
+    if (options.provider !== "semgrep")
+      throw new CodexSecurityError(
+        "Use the semgrep provider for Semgrep Platform findings.",
+      );
+    const source = semgrepPlatformRepositoryReference(url, readerSources);
+    if (
+      semgrepPlatformRepositoryUrl &&
+      semgrepPlatformRepositoryUrl !== url &&
+      !semgrepReferenceMatches(source, semgrepPlatformRepositoryUrl)
+    )
+      throw new CodexSecurityError(
+        "The Semgrep report repository does not match the native finding's project.",
+      );
+    hostedSources.set(source.url, source);
+  }
+  if (semgrepPlatformRepositoryUrl)
+    addSemgrepSource(semgrepPlatformRepositoryUrl);
+  const known = new Set<string>(parsedSources.map(({ url }) => url));
+  const legacyWitnesses = semgrepLegacyRepositoryWitnesses(
+    current.findings,
+    options.provider,
+    readerSources,
+  );
+  const hasPlatformEvidence =
+    options.provider === "semgrep" &&
+    (semgrepReportScope !== undefined ||
+      current.findings.some((row) =>
+        isSemgrepPlatformEvidence(row, options.provider),
+      ));
+  let hasOrdinaryRows = false;
+  let ordinaryRowNeedsReferences = false;
+  for (const finding of current.findings) {
+    const retained = bound.get(finding.source_finding_id);
+    const native = nativeSources.get(finding) ?? [];
+    const sarif = hasPlatformEvidence ? semgrepSarifRepositories(finding) : [];
+    const semgrep = semgrepPlatformFindingBinding(
+      finding,
+      options.provider,
+      readerSources,
+      legacyWitnesses,
+      semgrepReportScope,
+      [retained, ...native, ...sarif],
+    );
+    if (semgrep) {
+      addSemgrepSource(semgrep.url);
+      if (semgrep.sourceData) finding.evidence.source_data = semgrep.sourceData;
+      if (semgrep.migration) Object.assign(finding.evidence, semgrep.migration);
+    } else hasOrdinaryRows = true;
+    const { evidence } = finding;
+    const url = evidence.details?.repository?.url;
+    // A selected row's projected URL was already verified against its hosted source.
+    if (!semgrep && url) sources.set(url, { url });
+    if (hasPlatformEvidence && !semgrep && !retained && !native.length) {
+      for (const source of sarif) sources.set(source.url, source);
+      if (!url && !sarif.length) ordinaryRowNeedsReferences = true;
+      if (!url && references.length) {
+        for (const source of sarif) {
+          const claim = identify(source.url);
+          if (
+            !references.some((ref) => matchingRemote(claim, identify(ref.url)))
+          )
+            throw new CodexSecurityError(
+              `The reader must supply the projected Semgrep SARIF repository ${JSON.stringify(source.url)} for the configured remote.`,
+            );
+        }
+      }
+    }
+    if (retained) {
+      const claims = [
+        retained.url,
+        ...(url ? [url] : []),
+        ...native.map((ref) => ref.url),
+      ];
+      const rowPlatform = (claim: string) =>
+        options.provider !== "wiz"
+          ? platformFor({ url: claim })
+          : native.some((source) => source.platform === "github")
+            ? "github"
+            : operatorPlatform({ url: claim });
+      if (
+        !sameScannerRepositories(
+          claims.map(
+            (claim) =>
+              remoteRepository(claim, rowPlatform(claim), true) ?? {
+                key: claim,
+              },
+          ),
+        )
+      )
+        throw new CodexSecurityError(
+          "The retained scanner repository does not match the original provider finding.",
+        );
+      for (const source of [retained, ...native])
+        sources.set(source.url, source);
+      for (const claim of claims) {
+        const platform = rowPlatform(claim);
+        if (!strictSources.has(claim) || platform !== "github")
+          strictSources.set(claim, platform);
+      }
+    }
+    for (const source of native) known.add(source.url);
+  }
+  // Match references for native Platform rows using their hosted Git identity.
+  const hosted = Array.from(hostedSources.values());
+  const hostedReferences = new Set(
+    references.filter((ref) =>
+      hosted.some((source) => semgrepReferenceMatches(source, ref.url)),
+    ),
+  );
+  // A Platform fetch alias is shared only when the ordinary reader recognizes that transport.
+  const ordinaryClaims = hostedReferences.size
+    ? Array.from(sources.keys(), identify)
+    : [];
+  const hostedOnlyReferences = new Set(
+    [...hostedReferences].filter((ref) => {
+      const alias = identify(ref.url);
+      return !ordinaryClaims.some((claim) => matchingRemote(claim, alias));
+    }),
+  );
+  if (mixed) {
+    // Other caller references must identify an ordinary row or one of its Git aliases.
+    const rows = [...sources.keys(), ...known].map(identify);
+    const byKey = Map.groupBy(rows, (remote) => remote.key);
+    const represented = new Set(rows.map((remote) => JSON.stringify(remote)));
+    const aliases = readerSources
+      .filter((ref) => !hostedOnlyReferences.has(ref))
+      .map(({ url }) => identify(url))
+      .filter((remote) => !represented.has(JSON.stringify(remote)));
+    for (const [key, group] of Map.groupBy(aliases, (remote) => remote.key)) {
+      const candidates = byKey.get(key);
+      if (!candidates || !sameScannerRepositories([...candidates, ...group]))
+        throw new CodexSecurityError(
+          "Reader repository does not match a source in the normalized findings.",
+        );
+    }
+  }
+  if (strictSources.size && options.provider !== "blackduck") {
+    const keys = new Set(
+      Array.from(strictSources.keys(), (url) => identify(url).key),
+    );
+    for (const source of references)
+      if (!strictSources.has(source.url) && keys.has(identify(source.url).key))
+        strictSources.set(source.url, platformFor(source));
+  }
   if (inspector) {
-    const platform = inspector.platform ?? options.provider;
+    const platform =
+      inspector.platform === "github" ? "github" : options.provider;
     const native = remoteRepository(inspector.url, platform, true);
     for (const url of sources.keys()) {
-      if (
-        windowsDrivePath.test(url) ||
-        !native ||
-        remoteRepository(url, platform, true)?.key !== native.key
-      )
+      if (!native || remoteRepository(url, platform, true)?.key !== native.key)
         throw new CodexSecurityError(
           `Imported repository ${JSON.stringify(url)} does not match the retained Inspector repository ${JSON.stringify(inspector.url)}.`,
         );
     }
   }
-  for (const source of [
-    ...(inspector ? [inspector] : []),
-    ...sourceRepositories,
-  ]) {
+  if (
+    readerSources.length &&
+    hosted.length &&
+    ((!hasOrdinaryRows &&
+      !readerSources.every((ref) => hostedReferences.has(ref))) ||
+      hosted.some(
+        (source) =>
+          !readerSources.some((ref) =>
+            semgrepReferenceMatches(source, ref.url),
+          ),
+      ))
+  )
+    throw new CodexSecurityError(
+      "The reader's source repository does not match the selected Semgrep project.",
+    );
+  for (const source of [...(inspector ? [inspector] : []), ...references]) {
+    if (!ordinaryRowNeedsReferences && hostedOnlyReferences.has(source))
+      continue;
     // A reader's platform must not loosen an operator-supplied Inspector map.
     if (sources.get(source.url)?.platform !== "github")
       sources.set(
@@ -1044,66 +1079,66 @@ export async function prepareLocalImport(
         options.inspectorProjectMap ? { url: source.url } : source,
       );
   }
-  let hosted: HostedRepository | undefined;
-  const references = [...sources.values()];
-  const projectedUrl =
-    singleProject && !hostedUrl
-      ? (
-          references.find(({ url }) => /^https?:\/\//iu.test(url)) ??
-          references[0]
-        )?.url
-      : undefined;
-  const source = hostedUrl ?? projectedUrl;
-  if (source) {
-    const github =
-      hostedGitHub ?? references.some(({ platform }) => platform === "github");
-    const url = projectedUrl
-      ? normalizeHostedGitRepositoryUrl(projectedUrl, undefined, github)
-      : source;
-    // A case-sensitive report may retain only its private SSH selector.
-    if (
-      projectedUrl &&
-      !(
-        reportPlatform === "other" &&
-        !windowsDrivePath.test(url) &&
-        isGitSshRemote(url)
-      )
-    )
-      hostedRepositoryUrl(url, "Projected source repository URL");
-    hosted = {
-      url,
-      platform: github ? "github" : undefined,
-      gitlab: snyk?.destinationSuffix,
-    };
-    // Validate the entire report even when the checkout has several remotes or none.
-    for (const url of sources.keys()) {
-      validateHostedRepositoryUrl(url);
-      if (
-        !hostedRepositoryMatches(
-          hosted,
-          url,
-          undefined,
-          snyk?.allowsSuffix(url),
-        )
-      )
-        throw new CodexSecurityError(
-          "The normalized repository does not match the hosted scanner project.",
-        );
-    }
-  }
+  if (
+    options.provider === "blackduck" &&
+    current.findings.length &&
+    sources.size > 1 &&
+    !sameScannerRepositories(Array.from(sources.keys(), identify))
+  )
+    throw new CodexSecurityError(
+      "Black Duck occurrences must belong to the same project version and source repository.",
+    );
   if (dependabotSource)
     sources.set(dependabotSource, {
       url: dependabotSource,
       platform: "github",
     });
+  const snyk = snykRestImportRepository(
+    current,
+    options.provider,
+    [
+      ...sources.keys(),
+      ...(options.sourceRepositoryUrl === undefined
+        ? []
+        : [options.sourceRepositoryUrl]),
+    ],
+    readerSources,
+    (finding, source) => {
+      finding.evidence.source_data = source;
+    },
+  );
+  if (snyk) {
+    // Preserve reader display fields while validating their complete native evidence.
+    for (const { evidence } of current.findings)
+      validateExternalEvidence(structuredClone(evidence), "local");
+  } else if (options.provider === "snyk" && current.sourceRepositoryUrl) {
+    const declared = { url: current.sourceRepositoryUrl };
+    const native = current.findings.flatMap((finding) =>
+      localFindingRepositories("snyk", finding),
+    );
+    for (const source of [declared, ...native])
+      if (!sources.has(source.url)) sources.set(source.url, source);
+    if (!sameRepositories(sources.keys()))
+      throw new CodexSecurityError(
+        "The normalized repository does not match the Snyk reader's repository.",
+      );
+  }
+  const ordinarySources = [...sources.values()];
+  // A reader can identify the VCS for both a hosted project and an ordinary row.
+  const loosePlatformFor = localRepositoryPlatform(
+    options.provider,
+    [...ordinarySources, ...hostedReferences],
+    false,
+  );
   const trivy = options.provider === "trivy" ? current : undefined;
   await requireMatchingRepository(
     repository,
     options.provider,
-    trivy
-      ? localTrivySources(trivy, sourceRepositories)
-      : [...sources.values()],
-    hosted,
+    trivy ? localTrivySources(trivy, references) : ordinarySources,
+    strictSources,
+    hostedSources,
+    (source, bound) => (bound ? platformFor(source) : loosePlatformFor(source)),
+    snyk,
     workbenchOptions.protectedRoot,
     workbenchOptions.environment,
     dependencies.signal,

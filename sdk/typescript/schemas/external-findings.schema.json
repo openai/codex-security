@@ -385,6 +385,8 @@
             "github",
             "semgrep",
             "inspector",
+            "blackduck",
+            "veracode",
             "trivy"
           ],
           "title": "Provider",
