@@ -21,7 +21,11 @@ import { z } from "zod";
 import { CodexSecurity } from "./api.js";
 import { severityRubricSnapshotSchema } from "./classify-severity-records.js";
 import { ScanInterruptedError, errorMessage } from "./errors.js";
-import { normalizeRepository, repositoryRevision } from "./targets.js";
+import {
+  abortable,
+  normalizeRepository,
+  repositoryRevision,
+} from "./targets.js";
 import { isWithin } from "./trusted-executable.js";
 
 /** Hosted v2 mirrors repository/paths targets; only Standard scans are supported. */
@@ -117,21 +121,24 @@ export function normalizeHostedPaths(
 }
 
 /** Validate every path at the frozen commit before registering a scan/executing. */
-async function prepareHostedScan(input: HostedScanInput, signal?: AbortSignal) {
-  const scope = { paths: normalizeHostedPaths(input.scope?.paths) };
+async function prepareHostedRepository(
+  input: Pick<ScanExecutionRequest, "repository" | "revision" | "scope">,
+  signal?: AbortSignal,
+) {
   const repository = await normalizeRepository(input.repository, signal);
   if ((await repositoryRevision(repository, signal)) !== input.revision)
     throw new HostedScanPreparationError(
       "revision_mismatch",
       "Checkout does not match the frozen revision.",
     );
-  for (const path of scope.paths) {
+  for (const path of input.scope.paths) {
     const selected = resolve(repository, path);
     let target: string;
     try {
-      target = await realpath(selected);
+      target = await abortable(() => realpath(selected), signal);
     } catch (error) {
       if (
+        (signal?.aborted && error === signal.reason) ||
         !(error instanceof Error) ||
         !("code" in error) ||
         error.code !== "ENOENT"
@@ -156,15 +163,7 @@ async function prepareHostedScan(input: HostedScanInput, signal?: AbortSignal) {
       );
     }
   }
-  return {
-    repository,
-    revision: input.revision,
-    scope,
-    identity: input.identity,
-    ...(input.severityRubric === undefined
-      ? {}
-      : { severityRubric: input.severityRubric }),
-  };
+  return repository;
 }
 
 function hostedScanEnvironment(stateDirectory: string): Record<string, string> {
@@ -205,10 +204,54 @@ export async function runHostedScan(
   options: HostedScanOptions,
 ) {
   const input = HostedScanInputSchema.parse(value);
-  const context = await prepareHostedScan(input, options.signal);
+  const context = {
+    repository: input.repository,
+    revision: input.revision,
+    scope: { paths: normalizeHostedPaths(input.scope?.paths) },
+    identity: input.identity,
+    ...(input.severityRubric === undefined
+      ? {}
+      : { severityRubric: input.severityRubric }),
+  };
   let execution: ScanExecutionResult | undefined;
   let request: ScanExecutionRequest | undefined;
   let scanId: string | undefined;
+  let outputDirectory = resolve(input.outputDirectory);
+  const base = () => ({
+    version: 2 as const,
+    ...context,
+    outputDirectory,
+    ...(scanId === undefined ? {} : { scanId }),
+    ...(request === undefined
+      ? {}
+      : {
+          pluginVersion: request.runtime.pluginVersion,
+        }),
+    provenance: {
+      cliVersion: VERSION,
+      buildId: input.identity.buildId,
+      ...(request === undefined
+        ? {}
+        : { pluginVersion: request.runtime.pluginVersion }),
+    },
+    ...(execution === undefined ? {} : { execution }),
+  });
+  try {
+    context.repository = await prepareHostedRepository(context, options.signal);
+  } catch (error) {
+    if (
+      options.signal?.aborted &&
+      (Object.is(error, options.signal.reason) ||
+        (error instanceof DOMException && error.name === "AbortError"))
+    )
+      return {
+        ...base(),
+        status: "canceled" as const,
+        error: `Canceled before checkout verification finished: ${errorMessage(error)}`,
+        artifacts: [],
+      };
+    throw error;
+  }
   const onEvent = (event: ScanExecutionEvent): void => {
     void Promise.resolve()
       .then(() => options.onEvent?.(event))
@@ -240,26 +283,6 @@ export async function runHostedScan(
     },
     { surface: "sdk" },
   );
-  let outputDirectory = resolve(input.outputDirectory);
-  const base = () => ({
-    version: 2 as const,
-    ...context,
-    outputDirectory,
-    ...(scanId === undefined ? {} : { scanId }),
-    ...(request === undefined
-      ? {}
-      : {
-          pluginVersion: request.runtime.pluginVersion,
-        }),
-    provenance: {
-      cliVersion: VERSION,
-      buildId: input.identity.buildId,
-      ...(request === undefined
-        ? {}
-        : { pluginVersion: request.runtime.pluginVersion }),
-    },
-    ...(execution === undefined ? {} : { execution }),
-  });
   try {
     const result = await client.run(context.repository, {
       target:

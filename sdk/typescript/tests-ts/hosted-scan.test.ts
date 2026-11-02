@@ -556,7 +556,10 @@ test.each(["missing", "file"] as const)(
         signal: controller.signal,
       });
       if (timing === "during") queueMicrotask(() => controller.abort(reason));
-      await expect(pending).rejects.toBe(reason);
+      await expect(pending).resolves.toMatchObject({
+        status: "canceled",
+        error: expect.stringContaining(reason.message),
+      });
     }
     for (const options of [{}, { signal: new AbortController().signal }]) {
       await expect(
@@ -772,17 +775,52 @@ test("malformed run input returns one protocol error", async () => {
   expect((await protocolError({ version: 2 })).code).toBe(-32602);
 });
 
-test("hosted protocol rejects a severity rubric whose hash differs before dispatch", async () => {
-  const error = await protocolError({
-    ...(await fixture()),
-    severityRubric: {
-      ...severityRubric,
-      markdown: severityRubric.markdown.trimEnd(),
-    },
-  });
-  expect(error.code).toBe(-32602);
-  expect(error.message).toContain("SHA-256");
-});
+test.each(["valid", "tampered"] as const)(
+  "scan --host receives an immediate cancellation with a %s rubric",
+  async (rubric) => {
+    const params = await fixture();
+    params.severityRubric =
+      rubric === "valid"
+        ? severityRubric
+        : { ...severityRubric, markdown: severityRubric.markdown.trimEnd() };
+    const input = new PassThrough();
+    const output = capture();
+    const run = main(["scan", "--host"], output.stream, capture().stream, {
+      ...dependencies(),
+      recordsInput: input,
+    });
+    try {
+      send(input, { id: "run", method: "run", params });
+      send(input, { method: "cancel", params: { id: "run" } });
+      expect(await run).toBe(rubric === "valid" ? 1 : 2);
+      const messages = parseJsonLines(output.text());
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({ jsonrpc: "2.0", id: "run" });
+      if (rubric === "tampered") {
+        expect(messages[0].error).toMatchObject({
+          code: -32602,
+          message: expect.stringContaining("SHA-256"),
+        });
+      } else {
+        expect(messages[0].result).toMatchObject({
+          status: "canceled",
+          identity: params.identity,
+          repository: params.repository,
+          revision: params.revision,
+          scope: params.scope,
+          severityRubric,
+          outputDirectory: params.outputDirectory,
+          provenance: { buildId: params.identity.buildId },
+          artifacts: [],
+        });
+        expect(messages[0].result).not.toHaveProperty("scanId");
+        expect(messages[0].result).not.toHaveProperty("execution");
+      }
+    } finally {
+      input.destroy();
+    }
+  },
+);
 
 test.each([
   { path: "missing", reason: "scope_missing" },
@@ -1334,6 +1372,50 @@ test("same Cloud attempt does not create CLI cross-invocation replay decisions",
   }
   expect(requests).toHaveLength(2);
   expect(requests[0]).not.toBe(requests[1]);
+});
+
+test("a host retry can resupply the saved rubric in a fresh attempt", async () => {
+  const input = await fixture();
+  const saved = join(dirname(input.repository), "host-rubric.json");
+  await writeJson(saved, severityRubric);
+  const requestIds = new Set<string>();
+  for (const [attemptId, status] of [
+    ["first", "canceled"],
+    ["retry", "completed"],
+  ] as const) {
+    const identity = { ...input.identity, attemptId };
+    const executor = {
+      run: mock<ScanExecutor["run"]>(async (request) => {
+        if (status === "completed") await writeDraft(request);
+        return receipt(request, { status });
+      }),
+    };
+    const result = await runHostedScan(
+      {
+        ...input,
+        identity,
+        outputDirectory: join(input.outputDirectory, attemptId),
+        stateDirectory: join(input.stateDirectory, attemptId),
+        severityRubric: await readJson<typeof severityRubric>(saved),
+      },
+      { executor },
+    );
+    expect(executor.run).toHaveBeenCalledTimes(1);
+    const [request] = executor.run.mock.calls[0]!;
+    expect(request.identity).toEqual(identity);
+    expect(request.severityRubric).toEqual(severityRubric);
+    expect(request.prompt).toContain(
+      JSON.stringify({ severityRubric: request.severityRubric }),
+    );
+    expect(result).toMatchObject({
+      identity,
+      status,
+      severityRubric,
+      execution: { requestId: request.requestId, status },
+    });
+    requestIds.add(request.requestId);
+  }
+  expect(requestIds.size).toBe(2);
 });
 
 test.each(["cancel", "disconnect", "signal"])(
