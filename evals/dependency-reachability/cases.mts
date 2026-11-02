@@ -1,4 +1,11 @@
 import type { EvidenceGroup, Verdict } from "./grade.mts";
+import {
+  excerpts,
+  installedNodemailerVersion,
+  mail390,
+  nodemailer7010,
+  nodemailerFile,
+} from "./case-data.mts";
 import { sanitizerCases } from "./sanitizer-cases.mts";
 import { serviceCases } from "./service-cases.mts";
 import { rolloutCases } from "./rollout-cases.mts";
@@ -36,11 +43,6 @@ export interface ReachabilityCase {
   stage: readonly StageFile[];
 }
 
-// Each group accepts any of its source excerpts. All groups are required.
-function excerpts(path: string, ...markers: string[]): EvidenceGroup {
-  return markers.map((contains) => ({ path, contains }));
-}
-
 const pillowAffected = "6e28ed1f36d0eb74053af54e1eddc9c29db698cd";
 const pillowFixed = "e34d346f10c0b1c814661e662a3e0c1ef084cf1c";
 const webpPlugin = "src/PIL/WebPImagePlugin.py";
@@ -50,8 +52,7 @@ const decode =
   "An attacker supplies the bytes in request_body to Image.open(BytesIO(request_body)).load().";
 const encode =
   "An attacker controls raw RGB pixel values in a validated, fixed-length 64x64 buffer. " +
-  "The only image operation is Image.frombytes('RGB', (64, 64), pixels).save(output, format='WEBP', lossless=True). " +
-  "No encoded image is accepted or opened.";
+  "The only image operation is Image.frombytes('RGB', (64, 64), pixels).save(output, format='WEBP', lossless=True).";
 
 function pillowCase(
   id: string,
@@ -80,9 +81,8 @@ function pillowCase(
     question:
       "Assess CVE-2023-4863 in libwebp for this Pillow checkout. The flaw is a heap overflow " +
       "when decoding Huffman tables in a crafted lossless WebP. Upstream fixed it in 1.3.2. Assume the official Linux " +
-      "CPython 3.12 x86_64 manylinux_2_28 wheel built for this release. Its public wheel build " +
-      `recipe is staged under pillow-wheels/. ${operation} Use the checkout to trace this specific ` +
-      "operation through the Python and native code and establish the bundled libwebp version.",
+      `CPython 3.12 x86_64 manylinux_2_28 wheel built for this release. ${operation} ` +
+      "Can this caller trigger the advisory? Report the bundled libwebp version.",
     evidenceGroups:
       operation === decode
         ? [
@@ -122,17 +122,14 @@ function pillowCase(
 }
 
 const mail392 = "bb325f156d35c28d78a18c7f61c0f2a54a2b7854";
-const mail390 = "3e1e0291d7757501d334d19fe6553a78b45cc1eb";
-const nodemailer7010 = "4175e4baf92ffc4e20791a11fc0886025228a2ac";
 const nodemailer7011 = "3d17dbec49ab3e3f0e13e62871e5534be5b99994";
 const addressSource = "lib/addressparser/index.js";
 const installedAddress = "node_modules/nodemailer/" + addressSource;
 
 const surface =
-  "Assess the deployed mail service in service/ for an unauthenticated caller who controls " +
-  "the raw email body of POST /inbox. Scope the verdict to requests through this endpoint and give " +
-  "evidence for the decisive step in the path. Report the dependency version in the supplied image. " +
-  "If later processing occurs in another image, distinguish what is known about that worker.";
+  "An unauthenticated caller controls the raw email submitted to POST /inbox. " +
+  "Can this caller trigger the advisory through that endpoint as deployed? " +
+  "Report the dependency version in the supplied image.";
 const links =
   surface +
   " The finding is CVE-2026-48801 in linkify-it. In versions through 5.0.0, " +
@@ -178,7 +175,7 @@ const addressVersion = [
     "nodemailer-7.0.10.tgz",
     '"node_modules/nodemailer": {\n            "version": "7.0.10"',
   ),
-  ...excerpts("node_modules/nodemailer/package.json", '"version": "7.0.10"'),
+  ...installedNodemailerVersion,
 ];
 const directRoute = excerpts(deployment, '"/inbox": "direct"');
 const parseBody = excerpts(
@@ -208,18 +205,10 @@ function mailFiles(
   files.push({ kind: "json", destination: deployment, value: profile });
   if (addressRevision) {
     // The downstream parser may be patched while its package metadata remains unchanged.
-    for (const [source, revision] of [
-      ["package.json", nodemailer7010],
-      [addressSource, addressRevision],
-    ] as const) {
-      files.push({
-        kind: "git",
-        repository: "nodemailer/nodemailer",
-        revision,
-        source,
-        destination: `node_modules/nodemailer/${source}`,
-      });
-    }
+    files.push(
+      nodemailerFile("package.json"),
+      nodemailerFile(addressSource, addressRevision),
+    );
   }
   if (profile.nativeCharset) {
     files.push({
@@ -409,8 +398,7 @@ export const cases: readonly ReachabilityCase[] = [
       "The repository destination is fixed. The user cannot edit the registered template or its skeleton. " +
       "Scope this to server-side task execution. The advisory describes a sandbox escape in vm2 through " +
       "3.9.19 that requires attacker-controlled JavaScript execution inside the VM. Can this requester " +
-      "meet that precondition? Trace the name from submission through the background task and file " +
-      "rendering. Report the resolved vm2 version.",
+      "meet that precondition? Report the resolved vm2 version.",
     evidenceGroups: [
       excerpts(
         "yarn.lock",

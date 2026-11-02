@@ -120,6 +120,22 @@ test("Pillow independently varies the release and the calling operation", () => 
   assert.equal(encode.verdict, "ruled_out");
 });
 
+test("the two ZIP imports differ only in their deployed catalog", () => {
+  const first = scenario("zip-import-alpha");
+  const second = scenario("zip-import-beta");
+  assert.equal(first.question, second.question);
+  assert.deepEqual(
+    [first.verdict, second.verdict],
+    ["exploitable", "ruled_out"],
+  );
+  const catalog = "bundle/catalog.py";
+  assert.notDeepEqual(overlay(first, catalog), overlay(second, catalog));
+  assert.deepEqual(
+    first.stage.filter((file) => file.destination !== catalog),
+    second.stage.filter((file) => file.destination !== catalog),
+  );
+});
+
 test("the backport changes only the installed address parser, keeping the vulnerable package version", () => {
   const raw = scenario("address-groups");
   const patched = scenario("address-backport");

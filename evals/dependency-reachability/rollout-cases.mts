@@ -1,3 +1,4 @@
+import { excerpts } from "./case-data.mts";
 import type { ReachabilityCase, StageFile } from "./cases.mts";
 import type { Verdict } from "./grade.mts";
 
@@ -54,9 +55,8 @@ function rolloutCase(
   const question =
     "Assess CVE-2023-4863 for the next anonymous POST /thumbnail in the captured deployment. " +
     "The requester supplies the image bytes. The flaw is a heap overwrite while building Huffman tables for a crafted lossless WebP. " +
-    "Both workers run app/thumbnail.py using Alpine's py3-pillow, built from this Pillow source. " +
-    "The snapshot includes the active edge configuration, a process capture, and package-manager file receipts and recipes for this host. " +
-    "Assume no further routing, package, or process changes. Report the upstream libwebp version in the serving worker.";
+    "The application uses Alpine's py3-pillow built from this checkout. Assume the captured deployment stays in effect. " +
+    "Can this request trigger the advisory? Report the upstream libwebp version used for the request.";
   return {
     id,
     suite: "pillow",
@@ -97,39 +97,22 @@ function rolloutCase(
       },
     ],
     evidenceGroups: [
-      [{ path: endpoint, contains: dial }],
-      [{ path: workers, contains: dial }],
-      [{ path: workers, contains: `08:01 ${inode} /usr/lib/libwebp.so` }],
-      [
-        {
-          path: packages,
-          contains: `libwebp-${missing ? "1.3.1-r0" : revision}`,
-        },
-      ],
-      [
-        {
-          path: root + revision + "/APKBUILD",
-          contains: prior ? "CVE-2023-4863.patch" : "libwebp-$pkgver.tar.gz",
-        },
-      ],
+      excerpts(endpoint, dial),
+      excerpts(workers, dial),
+      excerpts(workers, `08:01 ${inode} /usr/lib/libwebp.so`),
+      excerpts(packages, `libwebp-${missing ? "1.3.1-r0" : revision}`),
+      excerpts(
+        root + revision + "/APKBUILD",
+        prior ? "CVE-2023-4863.patch" : "libwebp-$pkgver.tar.gz",
+      ),
       ...(verdict === "ruled_out"
         ? [
-            [
-              {
-                path: patch,
-                contains:
-                  "+  if (root_table->curr_segment->curr_table + total_size >=",
-              },
-              {
-                path: patch,
-                contains: "+    next->size = total_size > segment_size",
-              },
-              {
-                path: patch,
-                contains:
-                  "BuildHuffmanTable is called to check if the data is valid.\nIf it is and the table is not big enough, more memory is allocated.",
-              },
-            ],
+            excerpts(
+              patch,
+              "+  if (root_table->curr_segment->curr_table + total_size >=",
+              "+    next->size = total_size > segment_size",
+              "BuildHuffmanTable is called to check if the data is valid.\nIf it is and the table is not big enough, more memory is allocated.",
+            ),
           ]
         : []),
     ],

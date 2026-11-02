@@ -1,0 +1,29 @@
+# MAIL_IMAGE contains the application and its dependencies under /opt/mail.
+x-app: &app
+  image: ${MAIL_IMAGE:?}
+  working_dir: /opt/mail
+
+x-archive: &archive
+  AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:?}
+  ARCHIVE_BUCKET: ${STACK_NAME:?}-messages
+
+x-imports: &imports
+  <<: *archive
+  QUEUE_NAME: ${STACK_NAME:?}-imports
+
+services:
+  intake:
+    <<: *app
+    command: python3 -m archive.ingest
+    environment: *imports
+    ports: ["8080:8080"]
+  index:
+    <<: *app
+    command: python3 -m archive.importer
+    environment: *imports
+  preview:
+    <<: *app
+    command: python3 -m preview.consumer
+    environment:
+      <<: *archive
+      QUEUE_NAME: ${STACK_NAME:?}-previews

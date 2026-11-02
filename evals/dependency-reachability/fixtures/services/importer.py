@@ -9,20 +9,23 @@ import boto3
 
 
 bucket = os.environ["ARCHIVE_BUCKET"]
-queue_url = os.environ["IMPORT_QUEUE_URL"]
 objects = boto3.client("s3")
 jobs = boto3.client("sqs")
+queue_url = jobs.get_queue_url(QueueName=os.environ["QUEUE_NAME"])["QueueUrl"]
 
 
-def import_job(message):
-    locator = json.loads(message["Body"])
-    obj = objects.get_object(Bucket=bucket, Key=locator["key"], VersionId=locator["generation"])
-    subprocess.run(["node", Path(__file__).with_name("index-mail.cjs")], input=obj["Body"].read(), check=True)
-    jobs.delete_message(QueueUrl=queue_url, ReceiptHandle=message["ReceiptHandle"])
+def archived_version(locator):
+    return objects.get_object(Bucket=bucket, Key=locator["key"], VersionId=locator["generation"])
+
+
+def consume(open_object):
+    while True:
+        batch = jobs.receive_message(QueueUrl=queue_url, WaitTimeSeconds=20)
+        for message in batch.get("Messages", []):
+            obj = open_object(json.loads(message["Body"]))
+            subprocess.run(["node", Path(__file__).with_name("index-mail.cjs")], input=obj["Body"].read(), check=True)
+            jobs.delete_message(QueueUrl=queue_url, ReceiptHandle=message["ReceiptHandle"])
 
 
 if __name__ == "__main__":
-    while True:
-        batch = jobs.receive_message(QueueUrl=queue_url, WaitTimeSeconds=20)
-        for job in batch.get("Messages", []):
-            import_job(job)
+    consume(archived_version)

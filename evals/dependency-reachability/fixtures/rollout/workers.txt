@@ -13,3 +13,8 @@ LISTEN 0 128 127.0.0.1:9101 0.0.0.0:* users:(("gunicorn",pid=692,fd=3))
 # worker startup metrics (PIL.features.version_module("webp"))
 pillow_webp_version_info{pid="431",version="1.3.1"} 1
 pillow_webp_version_info{pid="692",version="1.3.1"} 1
+
+# ps -ww -o pid,args -p 431,692
+  PID COMMAND
+  431 gunicorn: worker [app.thumbnail:application]
+  692 gunicorn: worker [app.thumbnail:application]

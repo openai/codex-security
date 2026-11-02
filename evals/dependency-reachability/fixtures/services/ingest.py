@@ -13,9 +13,9 @@ import boto3
 
 
 bucket = os.environ["ARCHIVE_BUCKET"]
-queue_url = os.environ["IMPORT_QUEUE_URL"]
 objects = boto3.client("s3")
 jobs = boto3.client("sqs")
+queue_url = jobs.get_queue_url(QueueName=os.environ["QUEUE_NAME"])["QueueUrl"]
 media_policy = json.loads(Path(__file__).with_name("media.json").read_text())
 
 

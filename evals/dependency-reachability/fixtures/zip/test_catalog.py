@@ -1,9 +1,14 @@
 """Exercise the deployed selectors using ordinary mail, without a model or network."""
 
+import os
+import sys
 from io import BytesIO
 from pathlib import Path
 from queue import Queue
 from runpy import run_path
+from shutil import copy
+from subprocess import run
+from tempfile import TemporaryDirectory
 from unittest import TestCase, main
 from unittest.mock import patch
 from warnings import catch_warnings, simplefilter
@@ -11,7 +16,6 @@ from zipfile import ZipFile
 
 import catalog_a
 import catalog_b
-import worker
 
 
 def bundle(*messages):
@@ -49,15 +53,28 @@ class CatalogContract(TestCase):
                     with self.assertRaises(ValueError):
                         submit(bundle(other, allowed), jobs)
                     self.assertTrue(jobs.empty())
-                    submit(bundle(allowed, allowed), jobs)
                     expected = [allowed, allowed]
                 else:
-                    submit(bundle(other, allowed), jobs)
                     expected = [other, allowed]
-                with patch.object(worker.subprocess, "run") as index:
-                    worker.import_next(jobs)
-                delivered = [call.kwargs["input"] for call in index.call_args_list]
-                self.assertEqual(delivered, expected)
+                # Exercise the entrypoint and worker in distinct processes; echo
+                # the indexer's input so both delivered members can be checked.
+                with TemporaryDirectory() as directory:
+                    deployed = Path(directory)
+                    for name in ["gateway.py", "worker.py", "submit_bundle.py"]:
+                        copy(Path(__file__).with_name(name), deployed / name)
+                    copy(catalog.__file__, deployed / "catalog.py")
+                    (deployed / "index-mail.cjs").write_text(
+                        "process.stdin.pipe(process.stdout);\n"
+                    )
+                    result = run(
+                        [sys.executable, deployed / "submit_bundle.py"],
+                        cwd=deployed,
+                        env={**os.environ, "PYTHONPATH": directory},
+                        input=bundle(*expected),
+                        capture_output=True,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, b"".join(expected))
 
 
 if __name__ == "__main__":
