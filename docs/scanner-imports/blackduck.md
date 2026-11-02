@@ -47,6 +47,12 @@ repository ownership.
 
 ### Export the BOM-6 collection
 
+The [Black Duck SCA MCP](https://github.com/blackducksoftware/sca-mcp#capabilities)
+can locate the project version with `search_projects_versions`. Its
+`fetch_project_vulnerabilities` tool returns a summary and CSV. Use the REST
+export below for BOM rows. The MCP’s `scan` starts a new scan. Coverity and
+Polaris reports use different formats.
+
 Request the project version’s `vulnerable-components` relation with media type
 `application/vnd.blackducksoftware.bill-of-materials-6+json`. The importer
 requires BOM-6. If the deployment only serves BOM-8 or another inventory format,

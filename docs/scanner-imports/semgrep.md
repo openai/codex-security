@@ -84,10 +84,17 @@ Request `issue_type=sast` and save the original project lookup and findings
 pages as response text. Pass each findings page separately. The SDK checks
 every row on pages that contain a selected ID for conflicting product evidence.
 When a page contains only fields shared by several products, the original
-request filter identifies the product. Guardian and MCP return different
-records. [Semgrep Web API](https://docs.semgrep.dev/semgrep-appsec-platform/semgrep-api),
-[Guardian for Codex](https://docs.semgrep.dev/semgrep-guardian/ide-setup/codex),
-[Semgrep MCP](https://github.com/semgrep/semgrep/blob/fe209763a4a2ccfcdf6434e6c332edc24a2f586e/cli/src/semgrep/mcp/server.py)
+request filter identifies the product.
+
+To find existing Code findings in Codex, sign in to Guardian and ask for the
+deployment, project and full ref you want to inspect. Guardian returns a
+selection for review. For this SDK import, confirm the candidate findings in
+the original Web API results and use the IDs from those records. The SDK also
+accepts saved responses from an authorized operator. Fetching new responses
+directly requires Web API read access.
+[Guardian sign-in](https://docs.semgrep.dev/semgrep-guardian/quickstart) ·
+[Query existing findings](https://semgrep.dev/products/product-updates/query-your-semgrep-findings-by-asking-guardian/) ·
+[Findings Web API](https://docs.semgrep.dev/api-reference/v1/findingsservice/list-code-supply-chain-or-ai-powered-detection-findings)
 
 Use the full ref from the findings, such as `refs/heads/main` or
 `refs/tags/v1`. Supply the credential-free HTTP(S) repository URL you verified

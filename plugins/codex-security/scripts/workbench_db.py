@@ -1685,16 +1685,7 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
         timestamp = now()
         occurrence = require_occurrence(connection, args.occurrence_id)
         if args.status == "closed":
-            remediation = connection.execute(
-                """
-                SELECT *
-                FROM finding_remediation_attempts
-                WHERE occurrence_id = ?
-                ORDER BY created_at DESC, rowid DESC
-                LIMIT 1
-                """,
-                (occurrence["id"],),
-            ).fetchone()
+            remediation = remediation_state.latest_attempt(connection, occurrence["id"])
             if (
                 remediation is not None
                 and remediation["pending_action"] is not None
@@ -1796,16 +1787,7 @@ def request_finding_remediation(
                 raise SystemExit("This remediation request belongs to a different finding.")
             connection.commit()
             return scan_context(connection, occurrence["scan_id"])
-        latest = connection.execute(
-            """
-            SELECT *
-            FROM finding_remediation_attempts
-            WHERE occurrence_id = ?
-            ORDER BY created_at DESC, rowid DESC
-            LIMIT 1
-            """,
-            (occurrence["id"],),
-        ).fetchone()
+        latest = remediation_state.latest_attempt(connection, occurrence["id"])
         if latest is not None:
             active_operation = latest["pending_action"] is not None or latest["state"] in {
                 "requested",

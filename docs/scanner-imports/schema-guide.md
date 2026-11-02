@@ -47,6 +47,17 @@ defines the fields the reader can populate.
 | `details`                      | Optional context for `sast`, `secret`, `iac` or `advisory` findings. For GHSA, `details.advisory.source` distinguishes repository and global disclosures. |
 | `source_data`                  | The vendor fields retained for this record. Keep the original export when you need scan-wide diagnostics or inventory.                                    |
 
+Use finite JSON numbers in evidence and report metadata. Supply integers outside
+JavaScript’s safe range as strings to preserve their value. In SDK inputs, use
+primitive numbers in plain data fields for predictable JSON exports. Supply
+precise decimals as strings if converting a `JSON.rawJSON()` number to a
+JavaScript number would round its value.
+
+When you supply normalized findings to the SDK, new imports use their JSON
+representation. For example, `new Number(7)` exports as `7`. If its `toJSON()`
+returns `9`, the new import uses `9`. The GitHub code-scanning and advisory
+readers also apply the Cloud size limit to the evidence they return.
+
 ## Operate the two destinations
 
 **Local.** Run `codex-security findings imported PATH --format json` with the
@@ -92,7 +103,16 @@ With the SDK, repeat the preparation call that created the submission, using
 the same options. For `prepareExternalPublication()`, supply the original
 export file. For `prepareNormalizedExternalPublication()`, supply the original
 `ExternalFindings`. Check `preview.resumed` before calling `publish()`.
-Changing the findings prepares a new submission.
+Use the same SDK version throughout a submission when possible.
+
+After an SDK upgrade, retry with the original input. An older SDK could approve
+different bytes from those its JSON export contained. When the SDK verifies
+the old selection and request bytes, it resumes with the original request IDs
+and skips batches that already have receipts. If it cannot verify the original
+request, it preserves the checkpoint and stops before uploading. A saved JSON
+export can lose information from the original SDK input. If a getter makes it
+impossible to identify which findings were approved, the SDK can also stop a
+new submission for the same source and destination.
 
 See [results and exit codes](../../sdk/typescript/docs/cli.md#results-and-exit-codes)
 for cumulative counts and interrupted readback.

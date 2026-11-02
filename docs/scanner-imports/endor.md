@@ -51,9 +51,11 @@ available. See the [Endor CLI API](https://docs.endorlabs.com/developers-api/cli
 and [Finding model](https://github.com/endorlabs/endorlabs-sdk/blob/8a41756890c2dee3bb089fee881cae4f2adbde03/src/endorlabs/generated/models/finding_service.py).
 
 The [Endor Labs Agent Kit for Codex](https://github.com/endorlabs/ai-plugins/tree/main/plugins/codex/endor-labs-agent-kit)
-can help with setup or investigation. Findings Browser summaries, counts, and
-field-masked results omit fields needed for import. Codex Security reads the
-saved export offline. It does not change findings in Endor.
+can identify UUIDs. For a fresh export, append `and uuid in ["UUID_A","UUID_B"]`
+to the project and context filter above, using the requested UUIDs. For a saved
+export, select their complete objects from `list.objects`. Before import, verify
+the preview contains each requested UUID once, no other IDs, and no exclusions.
+[Endor filter syntax](https://docs.endorlabs.com/developers-api/rest-api/using-the-rest-api/filters#values)
 
 ### SARIF and repeat imports
 
