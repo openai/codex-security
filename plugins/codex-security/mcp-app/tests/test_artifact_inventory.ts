@@ -602,13 +602,15 @@ test(async function testInventoryChildPreservesRawPaths(t) {
       [
         // Raw environment bytes are valid on macOS even though APFS names are UTF-8.
         'HOME=$(printf "/fixture/home-\\377"); export HOME',
-        `GIT_CONFIG_GLOBAL=$(printf '%b' '${octal(config)}'); export GIT_CONFIG_GLOBAL`,
-        `CODEX_SECURITY_GIT=$(printf '%b' '${octal(git)}'); export CODEX_SECURITY_GIT`,
+        'GIT_CONFIG_GLOBAL=$(printf "%b" "$3"); export GIT_CONFIG_GLOBAL',
+        'CODEX_SECURITY_GIT=$(printf "%b" "$4"); export CODEX_SECURITY_GIT',
         'exec "$1" "$2"',
       ].join("\n"),
       "inventory-fixture",
       process.execPath,
       driver,
+      octal(config),
+      octal(git),
     ],
     { encoding: "utf8" },
   );
