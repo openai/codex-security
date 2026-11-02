@@ -47,6 +47,7 @@ import {
   prepareNormalizedExternalPublication,
   type ExternalPublicationOptions,
   type ExternalPublicationProgress,
+  type ExternalPublicationResult,
   type PreparedExternalPublication,
 } from "../src/external-findings-publish.js";
 import {
@@ -345,6 +346,60 @@ test("a Wiz Raw Event export explains the finding-report path before contacting 
     }),
   ).rejects.toThrow("scan metadata rather than vulnerability records");
   expect(contactedCloud).toBe(false);
+});
+
+test("Dependabot keeps an older approval when an emitted boxed number excludes a row", async () => {
+  const f = await fixture();
+  const selection = {
+    ...options,
+    provider: "github" as const,
+    sourceKey: "github.com/example/project/dependabot",
+  };
+  const a = githubDependabotAlert(1);
+  const b = { ...githubDependabotAlert(2), score: new Number(NaN) };
+  const prepare = (rows: unknown[], target: "local" | "cloud" = "cloud") =>
+    prepareNormalizedExternalPublication(
+      normalizeGitHubDependabotAlerts(rows, target),
+      selection,
+      releasedDependencies(f),
+    );
+  expect((await prepare([a, b])).preview.requests[0]!.items).toHaveLength(1);
+
+  // The released reader admitted both rows and serialized the non-finite wrapper to null.
+  const request = {
+    ...(await prepare([a, { ...b, score: null }])).preview.requests[0]!,
+    request_id: "e1a703b7-7e69-4a6b-a6c5-02ff7a47fd45",
+  };
+  expect(hash("sha256", JSON.stringify(request))).toBe(
+    "c26b480acaefaa832105d472abf05a372c9eb3d7c0749c15700e802466cb4b3a",
+  );
+  const digest =
+    "7b23cc522ea792cfa321415c62c5732421fb63f5c1efbba9fa6f81fb086c9e7f";
+  const saved = JSON.stringify({
+    accountId: "synthetic-account",
+    requests: [request],
+    inputProjection: { inputDigest: digest, savedEvidenceDigest: digest },
+  });
+  const directory = join(f.root, "state", "external-finding-publications");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const path = join(
+    directory,
+    "a79e3af4845c4c7b5e0abffb5ed37054bb2debdf57b8a8b10acf3d7bd36a5e9f.pending.json",
+  );
+  await writeFile(path, saved, { mode: 0o600 });
+
+  for (const target of ["local", "cloud"] as const) {
+    await expect(prepare([a, b], target)).rejects.toThrow(
+      "checkpoint was preserved",
+    );
+  }
+  expect(f.posts).toHaveLength(0);
+  expect(await readFile(path, "utf8")).toBe(saved);
+  const changed = {
+    ...a,
+    security_advisory: { ...a.security_advisory, summary: "Changed advisory" },
+  };
+  expect((await prepare([changed, b])).preview.resumed).toBe(false);
 });
 
 test("Dependabot retries the approved subset when a numeric size correction admits another alert", async () => {
@@ -4555,6 +4610,82 @@ test("a shared mutation across two GitHub alerts preserves their released approv
   expect(await readFile(path, "utf8")).toBe(saved);
 });
 
+test("a Sonar report resumes its released request after a size change", async () => {
+  const { normalizeSonarFindings: normalize } =
+    await import("../src/sonar-findings.js");
+  const repository = "https://github.com/example/project";
+  const issue = {
+    key: "issue-one",
+    project: "example",
+    component: "example:one",
+    rule: "example:S1",
+    message: "Synthetic finding",
+    type: "VULNERABILITY",
+  };
+  const boundary = {
+    ...issue,
+    key: "issue-two",
+    score: new Number(0.00001),
+    pad: "",
+  };
+  const raw = {
+    paging: { pageIndex: 1, pageSize: 10, total: 2 },
+    issues: [issue, boundary],
+  };
+  const base = normalize(raw, repository);
+  boundary.pad = "p".repeat(
+    262_145 - Buffer.byteLength(JSON.stringify(base.findings[1]!.evidence)),
+  );
+  const selection = normalize(raw, repository);
+  const f = await fixture();
+  const selected = { ...options, provider: "sonar" as const };
+  const dependencies = releasedDependencies(f);
+  const prepare = () =>
+    prepareNormalizedExternalPublication(selection, selected, dependencies);
+  const fresh = await prepare();
+  expect(fresh.preview.findings.map((row) => row.source_finding_id)).toEqual([
+    "issue-one",
+    "issue-two",
+  ]);
+  // The earlier SDK approved only the first issue and retained the Sonar report.
+  const batch = fresh.preview.requests[0]!;
+  const request = {
+    ...batch,
+    request_id: "bd9002e4-5abe-469b-ad2d-a64514f82e1b",
+    items: [batch.items[0]!],
+  };
+  expect(hash("sha256", JSON.stringify(request))).toBe(
+    "e6bc41119d363155e2d2388985ce3b476dfd3c6898297b5154a9b09ab192ac95",
+  );
+  const directory = join(f.root, "state", "external-finding-publications");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await writeFile(
+    join(
+      directory,
+      "bb2529dff62d8c9bb1c064d18f2b649c412b3d310914a8d4221c115a00f71e4c.pending.json",
+    ),
+    JSON.stringify({
+      accountId: "synthetic-account",
+      requests: [request],
+      inputProjection: {
+        inputDigest:
+          "62f0d447578728d3c8afa0ebfa0d1a2d8d7ab5c9d1a96af2855508bc5e6da986",
+        savedEvidenceDigest:
+          "25716f8958e0b38376fe5fdaad85b648ca3b0ed23a86c37a246a1537a75c848d",
+      },
+    }),
+    { mode: 0o600 },
+  );
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect(retry.preview.report).toEqual(selection.report);
+  expect(retry.preview.findings.map((row) => row.source_finding_id)).toEqual([
+    "issue-one",
+  ]);
+  expect((await retry.publish()).verified).toBe(1);
+  expect(f.posts).toEqual([JSON.stringify(request)]);
+});
+
 test("an uncertain newly eligible advisory cannot replace a released subset", async () => {
   const { normalizeGitHubAdvisories } =
     await import("../src/github-findings.js");
@@ -4670,6 +4801,51 @@ test("a fresh boxed approval cannot claim a different getter-backed JSON import"
     score: 2,
   });
   expect(f.posts).toEqual([JSON.stringify(first.preview.requests[0])]);
+});
+
+test("a root serializer cannot add a report to distinguish a released approval", async () => {
+  const { f, directory, request } = await oldScoreApproval("unreported", false);
+  const { source_finding_id, evidence } = scoredFindings(2.5).findings[0]!;
+  class ScannerBatch {
+    read = 1;
+    excluded = [];
+    findings = [{ source_finding_id, evidence }];
+    reportForJson() {
+      return { version: "1" };
+    }
+    toJSON() {
+      return { ...this, report: this.reportForJson() };
+    }
+  }
+  const input = new ScannerBatch();
+  const deps = releasedDependencies(f);
+  const prepare = () =>
+    prepareNormalizedExternalPublication(input, options, deps);
+  const held = await prepare();
+  const path = join(
+    directory,
+    "29fc89c807be65a8b3a173feeb64e86595e3debbdb91dc00b1a9cfb6eea869cc.pending.json",
+  );
+  const inputDigest =
+    "875a8aec2f1b7c573a6d05d983f6afa0f964a6e1c96d22c8c8691cc2de824ccc";
+  const saved = JSON.stringify({
+    accountId: boxedNumberCheckpoints.accountId,
+    requests: [
+      { ...request, request_id: "7e77248b-2906-44a7-b467-5225966ac7a2" },
+    ],
+    inputProjection: { inputDigest, savedEvidenceDigest: inputDigest },
+  });
+  await writeFile(path, saved, { mode: 0o600 });
+  await expect(prepare()).rejects.toThrow("cannot be matched");
+  await expect(held.publish()).rejects.toThrow("cannot be matched");
+  expect(await readFile(path, "utf8")).toBe(saved);
+  expect(f.posts).toEqual([]);
+  const independent = await prepareNormalizedExternalPublication(
+    { ...input, report: input.reportForJson() },
+    options,
+    deps,
+  );
+  expect(independent.preview.resumed).toBe(false);
 });
 
 test("a finding serializer cannot replace the ID of an older approval", async () => {
@@ -4892,62 +5068,125 @@ test.each([
   },
 );
 
-test("a getter-backed finding keeps released approvals scoped to their deployment", async () => {
-  const f = await fixture();
-  const finding = {
-    source_finding_id: "synthetic-score",
-    evidence: {
-      title: "Score",
-      severity: "high" as const,
-      source_data: {
-        get score() {
-          return 2.5;
-        },
-      },
-    },
-  };
-  const prepare = (host: string) =>
-    prepareNormalizedExternalPublication(
-      { read: 1, excluded: [], findings: [finding] },
-      options,
-      {
-        ...f.deps,
-        environment: {
-          ...f.environment,
-          CODEX_SECURITY_CLOUD_BASE_URL: `https://${host}.example.test/backend-api/aardvark`,
-          CODEX_SECURITY_CLOUD_WEB_URL: `https://${host}.example.test`,
-        },
-      },
-    );
-  // Recorded with the released SDK on deployment one.
-  const directory = join(f.root, "state", "external-finding-publications");
-  const path = join(
+test("an opaque retry cannot choose between independent old and new approvals", async () => {
+  const {
+    f,
+    path: oldPath,
+    saved,
     directory,
-    "b4eed57e616f2289bf467f18fba85e2e9ba305a360a798d9e9d8125b06e148fe.pending.json",
-  );
-  const request = {
-    ...(await prepare("one")).preview.requests[0]!,
-    request_id: "bf6f1063-9647-43d8-82b9-982961522482",
-  };
-  const digest =
-    "01ad76cac2893a22136a81e7e61aeef35edb7a51e97f2944713e744756362721";
-  const saved = JSON.stringify({
-    accountId: boxedNumberCheckpoints.accountId,
-    requests: [request],
-    inputProjection: { inputDigest: digest, savedEvidenceDigest: digest },
-  });
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  await writeFile(path, saved, { mode: 0o600 });
-  expect((await prepare("one")).preview.requests).toEqual([request]);
-  const independent = await prepare("two");
-  expect(independent.preview.resumed).toBe(false);
-  expect(independent.preview.requests[0]!.request_id).not.toBe(
-    request.request_id,
-  );
-  expect((await independent.publish()).verified).toBe(1);
-  expect(f.posts).toEqual([JSON.stringify(independent.preview.requests[0])]);
-  expect(await readFile(path, "utf8")).toBe(saved);
+  } = await oldScoreApproval("unreported", false);
+  const exported = scoredFindings(9);
+  exported.findings[0]!.source_finding_id = "exported-row";
+  const opaque = scoredFindings(2.5);
+  const nativeRows = opaque.findings;
+  Object.defineProperty(opaque, "findings", { get: () => nativeRows });
+  Object.defineProperty(opaque, "toJSON", { value: () => exported });
+  const prepare = (input: typeof opaque) =>
+    prepareNormalizedExternalPublication(
+      input,
+      options,
+      releasedDependencies(f),
+    );
+
+  const newer = await prepare(exported);
+  const request = newer.preview.requests[0]!;
+  const body = JSON.stringify(request);
+  f.state.throttle = true;
+  await expect(newer.publish()).rejects.toThrow("Slow down");
+  const filename = (await readdir(directory)).find((name) =>
+    name.endsWith(".pending.json"),
+  )!;
+  const newPath = join(directory, filename);
+  const newerBytes = await readFile(newPath, "utf8");
+  const held = await prepare(opaque);
+  expect(held.preview.requests[0]!.request_id).toBe(request.request_id);
+  f.state.throttle = false;
+  await writeFile(oldPath, saved, { mode: 0o600 });
+
+  await expect(prepare(opaque)).rejects.toThrow();
+  await expect(held.publish()).rejects.toThrow();
+  expect(f.posts).toEqual([body]);
+  expect(await readFile(oldPath, "utf8")).toBe(saved);
+  expect(await readFile(newPath, "utf8")).toBe(newerBytes);
+  const approved = await prepare(exported);
+  expect((await approved.publish()).receipts[0]!.id).toBe(request.request_id);
+  expect(f.posts).toEqual([body, body]);
+  expect(await readFile(oldPath, "utf8")).toBe(saved);
 });
+
+test.each([false, true])(
+  "a getter-backed approval stays scoped to its deployment (with report: %s)",
+  async (reported) => {
+    const f = await fixture();
+    const finding = {
+      source_finding_id: "synthetic-score",
+      evidence: {
+        title: "Score",
+        severity: "high" as const,
+        source_data: {
+          get score() {
+            return 2.5;
+          },
+        },
+      },
+    };
+    const prepare = (host: string) =>
+      prepareNormalizedExternalPublication(
+        {
+          read: 1,
+          excluded: [],
+          findings: [finding],
+          report: reported ? { version: "1" } : undefined,
+        },
+        options,
+        {
+          ...f.deps,
+          environment: {
+            ...f.environment,
+            CODEX_SECURITY_CLOUD_BASE_URL: `https://${host}.example.test/backend-api/aardvark`,
+            CODEX_SECURITY_CLOUD_WEB_URL: `https://${host}.example.test`,
+          },
+        },
+      );
+    // Recorded with the released SDK on deployment one.
+    const directory = join(f.root, "state", "external-finding-publications");
+    const path = join(
+      directory,
+      reported
+        ? "66fdd41e29ebfe07ca8fe9e54689df0027301c08a19b8b17b82254aadb536b44.pending.json"
+        : "b4eed57e616f2289bf467f18fba85e2e9ba305a360a798d9e9d8125b06e148fe.pending.json",
+    );
+    const request = {
+      ...(await prepare("one")).preview.requests[0]!,
+      request_id: reported
+        ? "afcc3987-d289-4b85-9e7c-8ff755ebb64b"
+        : "bf6f1063-9647-43d8-82b9-982961522482",
+    };
+    const digest =
+      "01ad76cac2893a22136a81e7e61aeef35edb7a51e97f2944713e744756362721";
+    const saved = JSON.stringify({
+      accountId: boxedNumberCheckpoints.accountId,
+      requests: [request],
+      inputProjection: {
+        inputDigest: reported
+          ? "af3bca9d5d1b53284f6da3d32b4de04d196cf14f96a0b7a00711dcd6e90e896d"
+          : digest,
+        savedEvidenceDigest: digest,
+      },
+    });
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await writeFile(path, saved, { mode: 0o600 });
+    expect((await prepare("one")).preview.requests).toEqual([request]);
+    const independent = await prepare("two");
+    expect(independent.preview.resumed).toBe(false);
+    expect(independent.preview.requests[0]!.request_id).not.toBe(
+      request.request_id,
+    );
+    expect((await independent.publish()).verified).toBe(1);
+    expect(f.posts).toEqual([JSON.stringify(independent.preview.requests[0])]);
+    expect(await readFile(path, "utf8")).toBe(saved);
+  },
+);
 
 test.each([
   { first: "reported", reportedScore: 2.5 },
@@ -5577,8 +5816,38 @@ test.each([Error, TypeError])(
     expect(f.posts).toEqual([]);
     expect(await readFile(path, "utf8")).toBe(saved);
 
+    const prepareUnsafeExport = (error: Error, beforeExport?: () => void) => {
+      const input = scoredFindings(2.5, { errors: [error] });
+      Object.setPrototypeOf(input.findings[0]!.evidence.source_data, {
+        toJSON() {
+          beforeExport?.();
+          return { score: 2 ** 53 };
+        },
+      });
+      return prepareNormalizedExternalPublication(
+        input,
+        options,
+        releasedDependencies(f),
+      );
+    };
+    const changed = diagnostic();
+    await expect(
+      prepareUnsafeExport(changed, () =>
+        Object.defineProperty(changed, "stack", {
+          get() {
+            stackReads++;
+            return "custom stack";
+          },
+        }),
+      ),
+    ).rejects.toThrow("safe integer");
+    expect(stackReads).toBe(0);
+    expect(f.posts).toEqual([]);
+    expect(await readFile(path, "utf8")).toBe(saved);
+
     const report = { errors: [diagnostic()] };
-    const retry = await prepare(2.5, report);
+    expect((await prepare(2.5, report)).preview.resumed).toBe(true);
+    const retry = await prepareUnsafeExport(report.errors[0]!);
     expect(retry.preview.resumed).toBe(true);
     const completed = await retry.publish();
     expect(completed.receipts[0]!.id).toBe(request.request_id);
@@ -5591,12 +5860,20 @@ test.each([Error, TypeError])(
       expect(error.cause).toBe(expected.cause);
       expect(error).not.toHaveProperty("code");
     }
-    const receipt = (await readdir(directory)).find((name) =>
-      name.endsWith(".result.json"),
-    )!;
-    expect(
-      JSON.parse(await readFile(join(directory, receipt), "utf8")).report,
-    ).toEqual({
+    const results = await Promise.all(
+      (await readdir(directory))
+        .filter((name) => name.endsWith(".result.json"))
+        .map(
+          async (name) =>
+            JSON.parse(
+              await readFile(join(directory, name), "utf8"),
+            ) as ExternalPublicationResult,
+        ),
+    );
+    const receipt = results.find(
+      (result) => result.receipts[0]?.id === request.request_id,
+    );
+    expect(receipt?.report).toEqual({
       errors: [{ message: "scanner message" }],
     });
     expect(f.posts).toEqual([JSON.stringify(request)]);

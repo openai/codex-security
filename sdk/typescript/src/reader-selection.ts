@@ -1,19 +1,62 @@
-import { hash } from "node:crypto";
+import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { isBoxedPrimitive, isProxy } from "node:util/types";
 import type { ExternalFindings } from "./external-findings.js";
-import { canonicalJson } from "./record.js";
+import { canSnapshotWithoutGetters, canonicalJson } from "./record.js";
 
 export interface LegacyReaderSelection {
   sourceFindingIds: string[];
   snapshot?: ExternalFindings;
   unprovenIdPrefixes?: string[];
   uncertainFindingIds?: string[];
+  unprovenOccurrenceCount?: number;
   knownFindings?: ExternalFindings["findings"];
 }
 const previousSelections = new WeakMap<
   object,
-  { exported?: string; previous: LegacyReaderSelection }
+  {
+    exported?: string;
+    native?: ExternalFindings;
+    previous: LegacyReaderSelection;
+  }
 >();
+
+function nativeSelection(
+  value: ExternalFindings,
+): ExternalFindings | undefined {
+  if (!canSnapshotWithoutGetters(value, true)) return;
+  try {
+    return structuredClone(value);
+  } catch {
+    return;
+  }
+}
+
+// The registry digest is process-local. Frame both ordered lists separately so a
+// local import never needs one JSON string containing all its findings.
+function exportedSelectionDigest(
+  result: ExternalFindings,
+  preserveScalar?: (value: object) => boolean,
+): string {
+  const { findings, excluded, ...metadata } = result;
+  const digest = createHash("sha256");
+  digest.update(canonicalJson(metadata, undefined, preserveScalar));
+  for (const rows of [excluded, findings]) {
+    digest.update("[");
+    for (let index = 0; index < rows.length; index++) {
+      // Keep the array index supplied to toJSON. An omitted entry in an array
+      // is JSON null, just like an explicit null or a hole.
+      const entry = canonicalJson(
+        { [index]: rows[index] },
+        undefined,
+        preserveScalar,
+      );
+      digest.update(entry === "{}" ? `{"${index}":null}` : entry);
+    }
+    digest.update("]");
+  }
+  return digest.digest("hex");
+}
 
 export function rememberPreviousSelection(
   result: ExternalFindings,
@@ -22,9 +65,13 @@ export function rememberPreviousSelection(
   // Stop-only hints do not require hashing unbounded local evidence.
   const exported =
     prior.snapshot || prior.knownFindings
-      ? hash("sha256", canonicalJson(result, undefined, isBoxedPrimitive))
+      ? exportedSelectionDigest(result, isBoxedPrimitive)
       : undefined;
-  const selection = { exported, previous: prior };
+  const selection = {
+    exported,
+    native: exported ? nativeSelection(result) : undefined,
+    previous: prior,
+  };
   previousSelections.set(result, selection);
   previousSelections.set(result.findings, selection);
 }
@@ -33,6 +80,7 @@ export function rememberPreviousSelection(
 export function previousReaderSelection(
   input: ExternalFindings,
   current: ExternalFindings,
+  native?: ExternalFindings | null,
 ): LegacyReaderSelection | undefined {
   const selection =
     previousSelections.get(input) ??
@@ -41,12 +89,33 @@ export function previousReaderSelection(
         Object.getOwnPropertyDescriptor(input, "findings")?.value,
       ));
   if (!selection) return undefined;
-  return selection.exported &&
-    hash("sha256", canonicalJson(current)) === selection.exported
-    ? selection.previous
-    : {
-        sourceFindingIds: selection.previous.sourceFindingIds,
-        unprovenIdPrefixes: selection.previous.unprovenIdPrefixes,
-        uncertainFindingIds: selection.previous.uncertainFindingIds,
-      };
+  const observed = native === undefined ? nativeSelection(input) : native;
+  if (selection.native && observed && selection.exported) {
+    // Callers can attach a report after normalizing rows. Historical validation
+    // and the saved approval still bind the independently captured report.
+    const attachedReport =
+      !Object.hasOwn(selection.native, "report") &&
+      !Object.hasOwn(selection.previous.snapshot ?? {}, "report") &&
+      observed.report !== undefined;
+    const rows = (value: ExternalFindings) => {
+      if (!attachedReport) return value;
+      const { report: _report, ...readerOutput } = value;
+      return readerOutput;
+    };
+    if (
+      isDeepStrictEqual(selection.native, rows(observed)) &&
+      exportedSelectionDigest(rows(current)) === selection.exported
+    ) {
+      const prior = selection.previous;
+      return attachedReport && prior.snapshot
+        ? { ...prior, snapshot: { ...prior.snapshot, report: observed.report } }
+        : prior;
+    }
+  }
+  return {
+    sourceFindingIds: selection.previous.sourceFindingIds,
+    unprovenIdPrefixes: selection.previous.unprovenIdPrefixes,
+    uncertainFindingIds: selection.previous.uncertainFindingIds,
+    unprovenOccurrenceCount: selection.previous.unprovenOccurrenceCount,
+  };
 }

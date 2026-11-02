@@ -337,15 +337,14 @@ export function validateExternalEvidenceFields(
   return result;
 }
 
-// Only a changed admission needs a witness. The detached evidence is still available
-// here when the fresh limit excludes a row that an older reader would have kept.
-const previousSizeAdmissions = new WeakMap<
+// Bind changed admission to the validated row or the error returned to its reader.
+const previousAdmissions = new WeakMap<
   object,
-  ExternalFindingEvidence | null
+  ExternalFindingEvidence | null | "uncertain"
 >();
 
-export function legacySizeOutcome(value: object) {
-  return previousSizeAdmissions.get(value);
+export function previousAdmission(value: object) {
+  return previousAdmissions.get(value);
 }
 
 export function validateExternalEvidence(
@@ -361,10 +360,10 @@ export function validateExternalEvidence(
     });
   } catch (error) {
     if (changed && error instanceof Error)
-      previousSizeAdmissions.set(error, result);
+      previousAdmissions.set(error, result);
     throw error;
   }
-  if (changed) previousSizeAdmissions.set(result, null);
+  if (changed) previousAdmissions.set(result, null);
   return result;
 }
 
@@ -435,7 +434,23 @@ function* dataValues(value: object, skipped?: () => void): Generator<unknown> {
     skipped?.();
     return;
   }
-  for (const key of Object.keys(value)) {
+  const keys = Object.keys(value);
+  // Array indices precede named keys. Dense arrays retain every index in a native clone.
+  if (
+    Array.isArray(value) &&
+    value.length &&
+    keys[value.length - 1] !== String(value.length - 1) &&
+    Object.getOwnPropertyNames(value).some(
+      (key) =>
+        /^(?:0|[1-9]\d*)$/u.test(key) &&
+        Number(key) < value.length &&
+        !Object.prototype.propertyIsEnumerable.call(value, key),
+    )
+  ) {
+    // The released mapper could read non-enumerable indices before cloning them away.
+    skipped?.();
+  }
+  for (const key of keys) {
     const field = Object.getOwnPropertyDescriptor(value, key);
     if (field && Object.hasOwn(field, "value")) yield field.value;
     else skipped?.();
@@ -476,9 +491,6 @@ function rawJsonNumbers(
         continue;
       }
       ancestors[depth] = value;
-      // On raw GitHub records, the JSON export determines what a wrapper emits.
-      if (!dataOnly && isNumberObject(value))
-        number(Number.prototype.valueOf.call(value));
       for (const child of dataOnly
         ? dataValues(value, skipped)
         : Object.values(value)) {
@@ -520,18 +532,42 @@ export function validateExternalEvidenceJson(
   additionalCloudBytes = 0,
   observe?: (previousBytes: number, currentBytes: number) => void,
 ): number {
-  if (target === "local") JSON.stringify(input);
-  const rawAdjustment = rawJsonNumbers(input, target, evidenceNumber);
-  if (target === "local") return 0;
   let adjustment = 0;
-  const text = serializeImportJson(
-    input,
-    (value) => {
+  const validateNumber = (value: number) => {
+    try {
       evidenceNumber(value);
-      adjustment += cloudNumberByteAdjustment(value);
-    },
-    true,
-  );
+    } catch (error) {
+      // The released walk checked primitive numeric fields, not JSON-emitted wrappers.
+      if (error instanceof Error) previousAdmissions.set(error, "uncertain");
+      throw error;
+    }
+    if (target === "cloud") adjustment += cloudNumberByteAdjustment(value);
+  };
+  // Keep local serialization before the raw walk. If an emitted number is invalid,
+  // ordinary invalid primitive fields still give a definitive historical exclusion.
+  if (target === "local") {
+    let invalid: Error | undefined;
+    try {
+      serializeImportJson(input, validateNumber);
+    } catch (error) {
+      if (!(error instanceof Error) || previousAdmission(error) !== "uncertain")
+        throw error;
+      invalid = error;
+    }
+    rawJsonNumbers(input, target, evidenceNumber);
+    if (invalid) throw invalid;
+    return 0;
+  }
+  const rawAdjustment = rawJsonNumbers(input, target, evidenceNumber);
+  let text: string;
+  try {
+    text = serializeImportJson(input, validateNumber, true);
+  } catch (error) {
+    // A serializer can introduce levels that were absent from the raw evidence.
+    if (error instanceof CloudEvidenceDepthError)
+      previousAdmissions.set(error, "uncertain");
+    throw error;
+  }
   const bytes = Buffer.byteLength(text) + additionalCloudBytes;
   observe?.(bytes + rawAdjustment, bytes + adjustment);
   return checkEvidenceSize(bytes + adjustment);

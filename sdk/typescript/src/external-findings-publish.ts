@@ -467,6 +467,7 @@ interface PublicationSelection extends ExternalPublicationInput {
 
   potentialIds?: (string | undefined)[] | null;
   uncertainFindingIds?: string[];
+  unprovenOccurrenceCount?: number;
   knownFindings?: ExternalFindings["findings"];
   unprovenIdPrefixes?: string[];
   freshError?: Error;
@@ -516,6 +517,24 @@ const nativeDiagnosticPrototypes = new Set<unknown>([
   URIError.prototype,
 ]);
 
+function previousDiagnosticMessage(diagnostic: Error): string | undefined {
+  const stack = Object.getOwnPropertyDescriptor(diagnostic, "stack");
+  const message = ownData(diagnostic, "message");
+  const cause = Object.getOwnPropertyDescriptor(diagnostic, "cause");
+  const name = Object.getOwnPropertyDescriptor(diagnostic, "name");
+  if (
+    !nativeDiagnosticPrototypes.has(Object.getPrototypeOf(diagnostic)) ||
+    typeof message !== "string" ||
+    (stack?.get && stack.get !== nativeErrorStackGetter) ||
+    (name && typeof name.value !== "string") ||
+    (cause &&
+      (!Object.hasOwn(cause, "value") ||
+        !canSnapshotWithoutGetters(cause.value, true)))
+  )
+    return;
+  return message;
+}
+
 function previousDiagnosticInput(
   input: ExternalFindings,
   nativeDiagnostics: Map<number, Error>,
@@ -529,20 +548,8 @@ function previousDiagnosticInput(
     const descriptor = Object.getOwnPropertyDescriptor(errors, index);
     const diagnostic: unknown = descriptor?.value;
     if (!descriptor || !isNativeError(diagnostic)) continue;
-    const stack = Object.getOwnPropertyDescriptor(diagnostic, "stack");
-    const message = ownData(diagnostic, "message");
-    const cause = Object.getOwnPropertyDescriptor(diagnostic, "cause");
-    const name = Object.getOwnPropertyDescriptor(diagnostic, "name");
-    if (
-      !nativeDiagnosticPrototypes.has(Object.getPrototypeOf(diagnostic)) ||
-      typeof message !== "string" ||
-      (stack?.get && stack.get !== nativeErrorStackGetter) ||
-      (name && typeof name.value !== "string") ||
-      (cause &&
-        (!Object.hasOwn(cause, "value") ||
-          !canSnapshotWithoutGetters(cause.value, true)))
-    )
-      return input;
+    const message = previousDiagnosticMessage(diagnostic);
+    if (message === undefined) return input;
     nativeDiagnostics.set(index, diagnostic);
     (entries ??= Object.getOwnPropertyDescriptors(errors as object))[index] = {
       ...descriptor,
@@ -650,25 +657,34 @@ function normalizedPublicationInput(
     const historical = native.report!["errors"] as Error[];
     const exported = current.report?.["errors"];
     for (const [index, source] of nativeDiagnostics) {
-      const diagnostic: unknown = Array.isArray(exported) && exported[index];
-      // The released native clone discarded enumerable scanner fields, but its
-      // SDK report retained the error, stack and cause. Use only detached errors
-      // after the fresh export, so an optional capture cannot run a stack hook.
+      const message = historical[index]!.message;
+      let diagnostic: unknown = Array.isArray(exported) && exported[index];
+      // A failed export may never reach the report. Its hooks have already run,
+      // so check the original descriptors again before native cloning reads a stack.
+      if (freshError && previousDiagnosticMessage(source) === message)
+        diagnostic = source;
       if (
-        !isNativeError(diagnostic) ||
-        Object.getPrototypeOf(diagnostic) !== Object.getPrototypeOf(source) ||
-        diagnostic.message !== historical[index]!.message
+        isNativeError(diagnostic) &&
+        Object.getPrototypeOf(diagnostic) === Object.getPrototypeOf(source)
       ) {
-        if (freshError) throw freshError;
-        native = undefined;
-        break;
+        try {
+          const copy = structuredClone(diagnostic);
+          if (copy.message === message) {
+            historical[index] = copy;
+            continue;
+          }
+        } catch {
+          // A failed native clone cannot establish a historical report.
+        }
       }
-      historical[index] = structuredClone(diagnostic);
+      if (freshError) throw freshError;
+      native = undefined;
+      break;
     }
   }
   const reader = freshError
     ? undefined
-    : previousReaderSelection(input, current);
+    : previousReaderSelection(input, current, native ?? null);
   if (reader) native = reader.snapshot;
   const original = historicalPublication(native);
   try {
@@ -693,6 +709,7 @@ function normalizedPublicationInput(
     freshError,
     unprovenIdPrefixes: reader?.unprovenIdPrefixes,
     uncertainFindingIds: reader?.uncertainFindingIds,
+    unprovenOccurrenceCount: reader?.unprovenOccurrenceCount,
     knownFindings: reader?.knownFindings,
     potentialIds:
       reader?.sourceFindingIds ??
@@ -778,6 +795,7 @@ async function preparePublicationInput(
     input.potentialIds !== null &&
     !input.potentialIds?.length &&
     !input.uncertainFindingIds?.length &&
+    !input.unprovenOccurrenceCount &&
     !input.unprovenIdPrefixes?.length
   )
     noFindings();
@@ -1210,7 +1228,9 @@ async function preparePublicationInput(
   const unprovenPrefixes = new Set(input.unprovenIdPrefixes);
   const uncertainIds = new Set(input.uncertainFindingIds);
   const uncertainMembership =
-    uncertainIds.size > 0 || unprovenPrefixes.size > 0;
+    input.unprovenOccurrenceCount ||
+    uncertainIds.size > 0 ||
+    unprovenPrefixes.size > 0;
   function uncertainId(id: string) {
     return (
       uncertainIds.has(id) ||
@@ -1221,6 +1241,9 @@ async function preparePublicationInput(
     ? (
         potentialIds ?? parsed.findings.map((row) => row.source_finding_id)
       ).filter((id) => id === undefined || !uncertainId(id))
+    : undefined;
+  const knownMembership = input.unprovenOccurrenceCount
+    ? new Set(stableIds)
     : undefined;
   const knownRows = new Map(
     input.knownFindings?.map((row) => [
@@ -1244,16 +1267,29 @@ async function preparePublicationInput(
       return false;
     try {
       const rows = submissionFindings(record.requests);
+      const savedWire = wireJson(rows);
       if (
         !record.wireKey &&
-        projection.inputDigest === projection.savedEvidenceDigest &&
-        projection.inputDigest === hash("sha256", wireJson(rows))
+        projection.savedEvidenceDigest === hash("sha256", savedWire)
       ) {
-        // These rows reconstruct the complete old report-free identity. A
-        // different deployment's filename cannot belong to this selection.
-        if (fileKey !== scopeKey(rows, false) && fileKey !== localeKey(rows))
+        // Matching old digests reconstruct its scoped filename. A report from
+        // this caller is useful only when the saved digest independently binds it.
+        const reportFree =
+          projection.inputDigest === projection.savedEvidenceDigest;
+        const identity = reportFree
+          ? rows
+          : parsed.report !== undefined
+            ? { findings: rows, report: reportForJson(parsed.report) }
+            : undefined;
+        if (
+          identity &&
+          (reportFree ||
+            projection.inputDigest === hash("sha256", wireJson(identity))) &&
+          fileKey !== scopeKey(identity, false) &&
+          fileKey !== localeKey(rows)
+        )
           return false;
-        if (original && originalWire !== wireJson(rows)) return false;
+        if (reportFree && original && originalWire !== savedWire) return false;
       }
       if (
         original &&
@@ -1275,11 +1311,19 @@ async function preparePublicationInput(
       )
         return false;
       if (stableIds) {
-        // Earlier caller code can change a sibling's evidence before it is
-        // observed. Compare its bytes only when the reader proved them independently.
-        const stableSaved = rows.filter(
+        // An opaque occurrence may have had a different old ID. Compare all
+        // definite members and count the remaining IDs without claiming them.
+        const certain = rows.filter(
           (row) => !uncertainId(row.source_finding_id),
         );
+        const stableSaved = knownMembership
+          ? certain.filter((row) => knownMembership.has(row.source_finding_id))
+          : certain;
+        if (
+          certain.length - stableSaved.length >
+          (input.unprovenOccurrenceCount ?? 0)
+        )
+          return false;
         if (
           !rows.length ||
           stableSaved.length !== stableIds.length ||
@@ -1310,6 +1354,10 @@ async function preparePublicationInput(
           ))
       )
         return false;
+      readSaved(record);
+      // An opaque serializer can add a report or replace every visible field.
+      // Only scoped, independently known occurrences can rule out its old request.
+      if (cannotCaptureOriginal) return true;
       if (
         projection.inputDigest === projection.savedEvidenceDigest &&
         parsed.report !== undefined
@@ -1321,10 +1369,8 @@ async function preparePublicationInput(
           projection.savedEvidenceDigest === hash("sha256", wireJson(rows)))
       )
         return false;
-      readSaved(record);
       return (
         !sameFindingSelection(rows, candidates) ||
-        cannotCaptureOriginal ||
         rows.every((row, i) => {
           const { source_data: savedData, ...savedFields } = row.evidence;
           const { source_data: selectedData, ...selectedFields } =
@@ -1462,6 +1508,7 @@ async function preparePublicationInput(
     // tagged its old filename but had not yet written the optional lookup.
     if (
       selected &&
+      !cannotCaptureOriginal &&
       !selected.historical &&
       (selected.fileKey !== key ||
         selected.content.canonicalChecked ||
@@ -1481,7 +1528,10 @@ async function preparePublicationInput(
       if (!known.has(fileKey))
         selected = await readCandidate(fileKey, selected);
     }
-    if (!selected && (differentOldWire || unprovenOriginal))
+    if (
+      (!selected && differentOldWire) ||
+      (unprovenOriginal && (!selected || cannotCaptureOriginal))
+    )
       throw unmatchedPreviousNumbers();
     if (!selected && stagingPathOccupied) throw occupiedCheckpoint();
     if (!selected && unidentified)

@@ -157,6 +157,15 @@ function codeScanningFinding(record: Record<string, unknown>): {
   };
 }
 
+function advisorySourceId(
+  host: string,
+  selection: "global" | "repository",
+  repository: string,
+  id: string,
+): string {
+  return `${host}/${selection === "repository" ? repository.toLowerCase() : "global"}/security-advisory/${id.toUpperCase()}`;
+}
+
 function advisoryFinding(record: Record<string, unknown>): {
   source_finding_id: string;
   evidence: unknown;
@@ -231,7 +240,7 @@ function advisoryFinding(record: Record<string, unknown>): {
   });
   const cwes = Array.isArray(advisory["cwes"]) ? advisory["cwes"] : [];
   return {
-    source_finding_id: `${host}/${selection === "repository" ? repository.toLowerCase() : "global"}/security-advisory/${id.toUpperCase()}`,
+    source_finding_id: advisorySourceId(host, selection, repository, id),
     evidence: {
       title: text(advisory["summary"]) ?? id,
       severity: severity(advisory["severity"]),
@@ -289,15 +298,48 @@ function nativeGitHubRecord(
   }
 }
 
-function codeOccurrencePrefix(value: unknown): string | undefined {
-  if (!value || typeof value !== "object" || isProxy(value)) return;
-  const field = (key: string): unknown =>
-    Object.getOwnPropertyDescriptor(value, key)?.value;
-  const repository = field("repository"),
-    number = field("number"),
-    url = field("url");
+function ownData(value: unknown, key: string): unknown {
+  if (value && typeof value === "object" && !isProxy(value))
+    return Object.getOwnPropertyDescriptor(value, key)?.value;
+}
+
+function priorAdvisoryId(value: unknown): string | undefined {
+  if (ownData(value, "source") !== "github-security-advisory") return;
+  const id = text(ownData(value, "ghsaId"));
+  const host = text(ownData(value, "githubHost"))?.toLowerCase();
+  const selection = ownData(value, "selection");
+  const repository = text(ownData(value, "repository"));
   if (
-    field("source") !== "github-code-scanning" ||
+    id &&
+    GHSA_ID.test(id) &&
+    host &&
+    repository &&
+    githubRepositoryParts(repository) &&
+    (selection === "repository" || selection === "global")
+  )
+    return advisorySourceId(host, selection, repository, id);
+}
+
+// Determine whether JSON can call a serializer without evaluating a getter.
+function maySerialize(value: unknown): boolean {
+  while (value && typeof value === "object") {
+    if (isProxy(value)) return true;
+    const field = Object.getOwnPropertyDescriptor(value, "toJSON");
+    if (field)
+      return (
+        !Object.hasOwn(field, "value") || typeof field.value === "function"
+      );
+    value = Object.getPrototypeOf(value) as unknown;
+  }
+  return false;
+}
+
+function codeOccurrencePrefix(value: unknown): string | undefined {
+  const repository = ownData(value, "repository"),
+    number = ownData(value, "number"),
+    url = ownData(value, "url");
+  if (
+    ownData(value, "source") !== "github-code-scanning" ||
     typeof repository !== "string" ||
     !githubRepositoryParts(repository) ||
     typeof number !== "number" ||
@@ -341,6 +383,7 @@ function normalizeRecords(
   const checks: { input: unknown; before: unknown; uncertain: () => void }[] =
     [];
   const uncertainIds = new Set<string>();
+  const unidentifiedRows = new Set<number>();
   let independentlyObserved = Infinity;
   let largeLocalSelection = false;
   const potentialIds: string[] = [];
@@ -389,10 +432,12 @@ function normalizeRecords(
             : (prototype === Object.prototype ||
                 prototype === null ||
                 prototype === Array.prototype) &&
-              !("toJSON" in value);
+              !maySerialize(value);
         })
       : undefined;
-    let prefix = previous ? codeOccurrencePrefix(input) : undefined;
+    const priorPrefix = previous ? codeOccurrencePrefix(input) : undefined;
+    let priorId = previous ? priorAdvisoryId(input) : undefined;
+    let prefix = priorPrefix;
     const rowIds = new Set<string>();
     let rowUncertain = false;
     const priorRowCount = previous?.findings.length ?? 0;
@@ -402,6 +447,8 @@ function normalizeRecords(
       independentlyObserved = Math.min(independentlyObserved, priorRowCount);
       for (const id of rowIds) uncertainIds.add(id);
       if (prefix) prefixes.add(prefix);
+      if (priorId) uncertainIds.add(priorId);
+      else if (!priorPrefix) unidentifiedRows.add(index);
     }
     const exclusion = (record: unknown, reason: string) => ({
       position: index + 1,
@@ -446,7 +493,7 @@ function normalizeRecords(
               target === "local" ||
               !rawSizeExcludes ||
               !canSnapshotWithoutGetters(input, true) ||
-              (input && typeof input === "object" && "toJSON" in input)
+              maySerialize(input)
             ) {
               possible();
               possibleFreshId = true;
@@ -463,6 +510,8 @@ function normalizeRecords(
             try {
               const row = mapRecord(before);
               const knownOldId = row.source_finding_id;
+              priorId = knownOldId;
+              unidentifiedRows.delete(index);
               rowIds.add(knownOldId);
               if (rowUncertain) uncertainIds.add(knownOldId);
               const evidence = validateExternalEvidenceFields(
@@ -470,8 +519,7 @@ function normalizeRecords(
                 target,
               );
               if (source.previousInvalid) throw source.previousInvalid;
-              const keySensitive =
-                input && typeof input === "object" && "toJSON" in input;
+              const keySensitive = maySerialize(input);
               if (keySensitive) possible();
               const reason =
                 keySensitive || target === "local"
@@ -512,7 +560,12 @@ function normalizeRecords(
       if (error instanceof CodexSecurityError) throw error;
       const reason = errorMessage(error);
       result.excluded.push(
-        exclusion(snapshot && exported === input ? before : exported, reason),
+        exclusion(
+          snapshot && exported === input
+            ? { url: ownData(input, "url") }
+            : exported,
+          reason,
+        ),
       );
       if (previous && exported === input) {
         if (
@@ -563,6 +616,8 @@ function normalizeRecords(
         if (before)
           try {
             const id = mapRecord(before).source_finding_id;
+            priorId = id;
+            unidentifiedRows.delete(index);
             potentialIds.push(id);
             uncertainIds.add(id);
           } catch {
@@ -581,6 +636,8 @@ function normalizeRecords(
       if (uncertain) {
         prior.unprovenIdPrefixes = [...prefixes];
         prior.uncertainFindingIds = [...uncertainIds];
+        if (unidentifiedRows.size)
+          prior.unprovenOccurrenceCount = unidentifiedRows.size;
         if (!largeLocalSelection)
           prior.knownFindings = previous.findings
             .slice(0, independentlyObserved)

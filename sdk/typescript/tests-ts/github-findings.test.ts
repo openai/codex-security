@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { Octokit } from "@octokit/core";
 import { runInNewContext } from "node:vm";
 import { importGitHubCodeScanningAlerts } from "../src/github.js";
@@ -112,6 +112,98 @@ test("a getter can mutate a later GitHub row before its historical evidence is o
   ]);
 });
 
+test.each(["malformed details", "hidden ID", "unobservable ID"] as const)(
+  "retains the old scope when an advisory has %s",
+  (kind) => {
+    const first = importedAdvisory("repository"),
+      second = importedAdvisory("global");
+    const oldId = normalizeGitHubAdvisories([second]).findings[0]!
+      .source_finding_id;
+    if (kind === "hidden ID")
+      Object.defineProperty(second, "ghsaId", {
+        value: second.ghsaId,
+        enumerable: false,
+      });
+    else {
+      const old = second.ghsaId;
+      if (kind === "unobservable ID")
+        Object.defineProperty(second, "ghsaId", {
+          get: () => old,
+          enumerable: true,
+        });
+      Object.defineProperty(second.advisory, "score", {
+        enumerable: true,
+        get: () => 7,
+      });
+      Object.defineProperty(second.advisory, "toJSON", {
+        value: () => ({ ...second.advisory, vulnerabilities: "invalid" }),
+      });
+    }
+    const fresh = normalizeGitHubAdvisories([first, second]);
+    expect(fresh.findings).toHaveLength(1);
+    const hints = previousReaderSelection(fresh, structuredClone(fresh));
+    expect(hints?.snapshot).toBeUndefined();
+    if (kind === "unobservable ID")
+      expect(hints?.unprovenOccurrenceCount).toBe(1);
+    else expect(hints?.uncertainFindingIds).toContain(oldId);
+  },
+);
+
+test("an inert toJSON field retains ordinary advisory selection semantics", () => {
+  const item = Object.assign(importedAdvisory(), { toJSON: null });
+  const result = normalizeGitHubAdvisories([item]);
+  expect(result.findings).toHaveLength(1);
+  expect(
+    previousReaderSelection(result, structuredClone(result)),
+  ).toBeUndefined();
+});
+
+test("a caller-added report accompanies the earlier selection without changing its row binding", () => {
+  const row = importedAlert();
+  Object.assign(row.alert, { bytes: Buffer.from([5, 17, 129]) });
+  const result = normalizeGitHubCodeScanningAlerts([row]);
+  const input = { ...result, report: { run: "1" } };
+  const exported = structuredClone(input);
+  const prior = previousReaderSelection(input, exported)?.snapshot;
+  expect(prior?.report).toEqual({ run: "1" });
+  expect(prior?.findings[0]?.evidence.source_data?.["alert"]).toMatchObject({
+    bytes: Uint8Array.from([5, 17, 129]),
+  });
+  input.report.run = "2";
+  expect(prior?.report).toEqual({ run: "1" });
+  expect(
+    previousReaderSelection(input, structuredClone(input))?.snapshot?.report,
+  ).toEqual({ run: "2" });
+  expect(
+    previousReaderSelection(result, structuredClone(result))?.snapshot?.report,
+  ).toBeUndefined();
+  expect(
+    previousReaderSelection(input, exported, null)?.snapshot,
+  ).toBeUndefined();
+  expect(
+    previousReaderSelection(input, { ...exported, read: 2 })?.snapshot,
+  ).toBeUndefined();
+});
+
+test("reader provenance distinguishes native mutations hidden by unchanged JSON", () => {
+  const item = importedAlert();
+  Object.assign(item.alert, {
+    score: Object.assign(new Number(7), { toJSON: () => 9 }),
+  });
+  const result = normalizeGitHubCodeScanningAlerts([item]);
+  const exported = structuredClone(result);
+  expect(
+    previousReaderSelection({ ...result }, exported)?.snapshot?.findings,
+  ).toHaveLength(1);
+  const alert = result.findings[0]!.evidence.source_data!["alert"] as Record<
+    string,
+    unknown
+  >;
+  alert["score"] = Object.assign(new Number(8), { toJSON: () => 9 });
+  expect(JSON.parse(JSON.stringify(result))).toEqual(exported);
+  expect(previousReaderSelection(result, exported)?.snapshot).toBeUndefined();
+});
+
 test("locally normalized GitHub output retains the original Buffer for Cloud checkpoint verification", () => {
   const row = importedAlert();
   Object.assign(row.alert, { payload: Buffer.from([5, 17, 129]) });
@@ -123,6 +215,29 @@ test("locally normalized GitHub output retains the original Buffer for Cloud che
   expect(
     prior?.snapshot?.findings[0]?.evidence.source_data?.["alert"],
   ).toMatchObject({ payload: Uint8Array.from([5, 17, 129]) });
+});
+
+test("local reader provenance serializes selections one finding at a time", () => {
+  const first = importedAlert();
+  Object.assign(first.alert, { payload: Buffer.from([5, 17]) });
+  const stringify = spyOn(JSON, "stringify");
+  try {
+    const current = normalizeGitHubCodeScanningAlerts(
+      [first, importedAlert("refs/heads/second")],
+      "local",
+    );
+    const lookup = structuredClone(current);
+    expect(
+      previousReaderSelection(current, lookup)?.snapshot?.findings,
+    ).toHaveLength(2);
+    const batches = [current.findings, lookup.findings];
+    const serializedBatch = stringify.mock.calls.some(
+      ([value]) => batches.includes(value) || batches.includes(value?.findings),
+    );
+    expect(serializedBatch).toBe(false);
+  } finally {
+    stringify.mockRestore();
+  }
 });
 
 test.each([7, 2 ** 53])(
@@ -820,4 +935,51 @@ test("discarded native Buffer fields cannot establish an old GitHub selection", 
   const current = normalizeGitHubCodeScanningAlerts([row]);
   expect(current.excluded[0]?.reason).toContain("depth limit");
   expect(previousReaderSelection(current, current)?.snapshot).toBeUndefined();
+});
+
+test("historical GitHub mapping cannot use a native clone with a hidden array index", () => {
+  const row = importedAlert();
+  const tags = Object.defineProperty([], "0", {
+    value: "external/cwe/cwe-089",
+  });
+  Object.assign(row.alert.rule!, { tags });
+  const result = normalizeGitHubCodeScanningAlerts([row]);
+  expect(result.findings[0]?.evidence.details?.weakness_ids).toEqual([
+    "CWE-89",
+  ]);
+  const previous = previousReaderSelection(result, structuredClone(result));
+  expect(previous?.snapshot).toBeUndefined();
+  expect(previous?.uncertainFindingIds).toEqual([
+    result.findings[0]!.source_finding_id,
+  ]);
+});
+
+test("a failed GitHub serializer retains an own URL without reading a URL getter", () => {
+  const row = importedAlert();
+  let calls = 0;
+  Object.assign(row, {
+    toJSON() {
+      calls++;
+      throw new Error("synthetic export failure");
+    },
+  });
+  expect(normalizeGitHubCodeScanningAlerts([row]).excluded).toEqual([
+    {
+      position: 1,
+      source_finding_id: row.url,
+      reason: "synthetic export failure",
+    },
+  ]);
+  let urlReads = 0;
+  Object.defineProperty(row, "url", {
+    get() {
+      urlReads++;
+      return "unused";
+    },
+  });
+  expect(
+    normalizeGitHubCodeScanningAlerts([row]).excluded[0]?.source_finding_id,
+  ).toBeNull();
+  expect(urlReads).toBe(0);
+  expect(calls).toBe(2);
 });

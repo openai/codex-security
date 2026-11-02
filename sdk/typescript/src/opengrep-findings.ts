@@ -1,6 +1,6 @@
 import { posix } from "node:path";
 import {
-  legacySizeOutcome,
+  previousAdmission,
   validateExternalEvidenceJson,
   validateExternalReport,
   type ExternalImportTarget,
@@ -19,7 +19,7 @@ import {
   readScannerJson,
   record,
   relativePath,
-  rememberReaderSizeUncertainty,
+  rememberReaderUncertainty,
   finishReaderSizeSelection,
   requiredText,
   stableId,
@@ -65,6 +65,8 @@ export function normalizeOpenGrepFindings(
     parsed: ReturnType<typeof parseNativeJsonResult>;
   };
   function exclude(position: number, id: string | null, error: unknown) {
+    if (id && error instanceof Error && previousAdmission(error) !== undefined)
+      rememberReaderUncertainty(output, id);
     output.excluded.push({
       position,
       source_finding_id: id,
@@ -135,6 +137,8 @@ export function normalizeOpenGrepFindings(
           projectedBytes,
         );
       } catch (error) {
+        if (error instanceof Error && previousAdmission(error) !== undefined)
+          rememberReaderUncertainty(output, id);
         singletonErrors.set(observation, errorMessage(error));
       }
     }
@@ -209,7 +213,7 @@ export function normalizeOpenGrepFindings(
                   0,
                   (previousBytes, currentBytes) => {
                     if (previousBytes !== currentBytes)
-                      rememberReaderSizeUncertainty(output, id);
+                      rememberReaderUncertainty(output, id);
                   },
                 );
                 observation.parsed.result = result;
@@ -236,12 +240,10 @@ export function normalizeOpenGrepFindings(
         if (retained.length === ordered.length) throw error;
         evidence = projectGroup(retained);
       }
-      if (legacySizeOutcome(evidence) === null)
-        rememberReaderSizeUncertainty(output, id);
+      if (previousAdmission(evidence) === null)
+        rememberReaderUncertainty(output, id);
       output.findings.push({ source_finding_id: id, evidence });
     } catch (error) {
-      if (error instanceof Error && legacySizeOutcome(error) !== undefined)
-        rememberReaderSizeUncertainty(output, id);
       for (const observation of retained)
         exclude(observation.position, id, error);
     }

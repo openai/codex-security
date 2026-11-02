@@ -6,7 +6,7 @@ import { gunzip } from "node:zlib";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
 import { isRecord } from "./record.js";
-import { legacySizeOutcome } from "./external-import-contract.js";
+import { previousAdmission } from "./external-import-contract.js";
 import { rememberPreviousSelection } from "./reader-selection.js";
 
 export function record(value: unknown, label: string): Record<string, unknown> {
@@ -306,8 +306,8 @@ function readerChanges(result: ExternalFindings) {
   return changes;
 }
 
-/** One OpenGrep occurrence can retain a different subset of traces under the old limit. */
-export function rememberReaderSizeUncertainty(
+/** An earlier batch may have included this row or retained different observations. */
+export function rememberReaderUncertainty(
   result: ExternalFindings,
   id: string,
 ) {
@@ -336,17 +336,22 @@ export function appendReaderFinding(
   }
   const previous =
     outcome && typeof outcome === "object"
-      ? legacySizeOutcome(outcome)
+      ? previousAdmission(outcome)
       : undefined;
-  if (previous !== undefined)
+  if (previous === "uncertain") rememberReaderUncertainty(result, id);
+  else if (previous !== undefined)
     readerChanges(result).rows.push({ index, position, id, previous });
 }
 
 export function finishReaderSizeSelection(
   result: ExternalFindings,
+  filter?: (selection: ExternalFindings) => void,
 ): ExternalFindings {
   const changes = sizeChanges.get(result);
-  if (!changes) return result;
+  if (!changes) {
+    filter?.(result);
+    return result;
+  }
   const findings: ExternalFinding[] = [];
   const excluded: ExternalFindings["excluded"] = [];
   const restoredPositions = new Set<number>();
@@ -370,9 +375,24 @@ export function finishReaderSizeSelection(
   for (const row of result.excluded) {
     if (!restoredPositions.has(row.position)) excluded.push(row);
   }
+  excluded.sort((a, b) => a.position - b.position);
+  const previous = { ...result, findings, excluded };
+  // A row excluded by size can no longer supply repository evidence to a sibling.
+  const possibleIds =
+    filter && changes.uncertain.size
+      ? new Set(findings.map((row) => row.source_finding_id))
+      : undefined;
+  filter?.(previous);
+  if (possibleIds && previous.findings.length < possibleIds.size) {
+    // An unproven row could have supplied the scope of a removed sibling.
+    for (const row of previous.findings)
+      possibleIds.delete(row.source_finding_id);
+    for (const id of possibleIds) changes.uncertain.add(id);
+  }
+  filter?.(result);
   const sourceFindingIds = [
     ...new Set([
-      ...findings.map((row) => row.source_finding_id),
+      ...previous.findings.map((row) => row.source_finding_id),
       ...changes.uncertain,
     ]),
   ];
@@ -381,14 +401,15 @@ export function finishReaderSizeSelection(
       sourceFindingIds,
       uncertainFindingIds: [...changes.uncertain],
       knownFindings: structuredClone(
-        findings.filter((row) => !changes.uncertain.has(row.source_finding_id)),
+        previous.findings.filter(
+          (row) => !changes.uncertain.has(row.source_finding_id),
+        ),
       ),
     });
   } else {
-    excluded.sort((a, b) => a.position - b.position);
     rememberPreviousSelection(result, {
       sourceFindingIds,
-      snapshot: structuredClone({ ...result, findings, excluded }),
+      snapshot: structuredClone(previous),
     });
   }
   return result;
@@ -400,11 +421,16 @@ export function normalizeRecords<T>(
   projectEvidence: (record: T, id: string) => ExternalFinding["evidence"],
   identify: (record: T) => string,
   target: "local" | "cloud" = "cloud",
+  options: {
+    report?: ExternalFindings["report"];
+    filter?: (selection: ExternalFindings) => void;
+  } = {},
 ): ExternalFindings {
   const result: ExternalFindings = {
     read: records.length,
     findings: [],
     excluded: [],
+    ...(options.report === undefined ? {} : { report: options.report }),
   };
   const identified: { position: number; value: T; id: string }[] = [];
   const counts = new Map<string, number>();
@@ -444,5 +470,5 @@ export function normalizeRecords<T>(
     appendReaderFinding(result, position, id, () => projectEvidence(value, id));
   }
   result.excluded.sort((a, b) => a.position - b.position);
-  return finishReaderSizeSelection(result);
+  return finishReaderSizeSelection(result, options.filter);
 }
