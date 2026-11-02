@@ -1,13 +1,22 @@
+import {
+  FINDINGS_ERROR_STATUS,
+  type FindingsErrorCode,
+  type FindingsErrorResponse,
+} from "../findings-errors.js";
+
 export class FindingsError extends Error {
   constructor(
-    readonly code:
-      | "invalid_request"
-      | "finding_conflict"
-      | "embedding_unavailable"
-      | "embedding_failed"
-      | "finding_not_indexed",
+    readonly code: FindingsErrorCode,
     message: string,
   ) {
     super(message);
+  }
+
+  get status(): number {
+    return FINDINGS_ERROR_STATUS[this.code];
+  }
+
+  toJSON(): FindingsErrorResponse {
+    return { error: this.code, message: this.message };
   }
 }

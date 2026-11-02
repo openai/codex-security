@@ -1,13 +1,24 @@
+import { forwardExternalImportSetting } from "./external-imports-feature.js";
+import { executablePathForSpawn } from "./executable-path.js";
+export { executablePathForSpawn } from "./executable-path.js";
+import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
 import { gitProtectionRoots } from "./targets.js";
-import { isNonEmptyString } from "./value.js";
-import { execFile as execFileCallback, spawn } from "node:child_process";
+import { isNonEmptyString, notify } from "./value.js";
+import {
+  execFile as execFileCallback,
+  spawn,
+  type ChildProcessWithoutNullStreams,
+  type SpawnOptionsWithoutStdio,
+} from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   chmodSync,
+  close as closeCallback,
   constants,
   createWriteStream,
-  existsSync,
-  readdirSync,
+  fstat as fstatCallback,
+  open as openCallback,
+  read as readCallback,
   type BigIntStats,
   type Stats,
 } from "node:fs";
@@ -36,6 +47,7 @@ import {
   basename,
   dirname,
   extname,
+  isAbsolute,
   join,
   relative,
   resolve,
@@ -47,7 +59,7 @@ import { promisify } from "node:util";
 import { pipeline } from "node:stream/promises";
 import { crc32 } from "node:zlib";
 import { setTimeout as delay } from "node:timers/promises";
-import { openPromise as openZip } from "yauzl";
+import { fromFdPromise, type ZipFile } from "yauzl";
 import { parse } from "smol-toml";
 import {
   CodexSecurityError,
@@ -55,6 +67,7 @@ import {
   OutputDirectoryNotEmptyError,
   OutputInsideProtectedRootError,
   PluginBootstrapError,
+  LocalPluginBootstrapError,
   PluginPythonUnavailableError,
   type ProtectedScanPathKind,
   SandboxUnavailableError,
@@ -74,6 +87,12 @@ import {
 } from "./windows-path.js";
 
 const execFile = promisify(execFileCallback);
+
+export type StartCodex = (
+  command: string,
+  args: readonly string[],
+  options: SpawnOptionsWithoutStdio & { stdio: ["pipe", "pipe", "pipe"] },
+) => ChildProcessWithoutNullStreams;
 
 export const MARKETPLACE_NAME = "codex-security-sdk";
 export const PLUGIN_NAME = "codex-security";
@@ -106,13 +125,13 @@ const CREDENTIAL_LOCK_HEARTBEAT_MILLISECONDS = 5_000;
 const CREDENTIAL_LOCK_POLL_MILLISECONDS = 25;
 const INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS = 30_000;
 const MAX_PROCESS_ID = 2_147_483_647;
-const MAX_WINDOWS_CREDENTIAL_ACL_STDERR = 64 * 1024;
 const SANDBOX_PROBE_TIMEOUT_MILLISECONDS = 10_000;
 const PLUGIN_HELPER_SECRET_ENVIRONMENT_VARIABLES = new Set([
   "OPENAI_API_KEY",
   "CODEX_API_KEY",
   "OPENROUTER_API_KEY",
   "FIREWORKS_API_KEY",
+  "CHEAPER_INFERENCE_API_KEY",
 ]);
 const PREPARE_SCAN_ARTIFACT_RESTORER_PROGRAM = `
 from pathlib import Path
@@ -271,8 +290,13 @@ export async function prepareCodexSecurityCredentialHome(
     return canonical;
   } catch (error) {
     if (error instanceof OutputDirectoryError) throw error;
+    const code = nodeErrorCode(error);
+    const recovery =
+      code === "EACCES" || code === "EPERM" || code === "EROFS"
+        ? "\nCheck permissions or set CODEX_SECURITY_STATE_DIR to a private, writable directory outside the repository."
+        : "";
     throw new OutputDirectoryError(
-      `Unable to prepare the Codex Security credential home: ${path}`,
+      `Unable to prepare the Codex Security credential home: ${path}\n${errorMessage(error)}${recovery}`,
       { cause: error },
     );
   }
@@ -363,26 +387,31 @@ export async function requirePrivateCredentialHome(
   await requirePrivateDirectory(metadata, path, "credential home", options);
 }
 
-export async function requirePrivatePolicyOutputDirectory(
+export async function preparePolicyOutputDirectory(
   path: string,
   options: Parameters<typeof requirePrivateDirectory>[3] = {},
 ): Promise<void> {
+  const metadata = await lstat(path);
+  if ((options.platform ?? process.platform) !== "win32") {
+    requireOutputDirectoryOwnership(metadata, path);
+    return;
+  }
   await requirePrivateDirectory(
-    await lstat(path),
+    metadata,
     path,
     "policy output directory",
     options,
   );
 }
 
-async function requirePrivateDirectory(
+export async function requirePrivateDirectory(
   metadata: Pick<Stats, "mode" | "uid">,
   path: string,
   description: string,
   options: {
     platform?: NodeJS.Platform;
     secureWindowsHome?: (path: string) => Promise<void>;
-  },
+  } = {},
 ): Promise<void> {
   if ((options.platform ?? process.platform) !== "win32") {
     requirePrivateOutputDirectory(metadata, path);
@@ -409,10 +438,7 @@ function windowsCredentialAclFailure(error: unknown): string {
     typeof stderr === "string" && stderr.trim() !== ""
       ? stderr
       : errorMessage(error);
-  const normalized = errorMessage(detail)
-    .replace(/\s+/gu, " ")
-    .trim()
-    .slice(0, 512);
+  const normalized = errorMessage(detail).replace(/\s+/gu, " ").trim();
   return normalized === "" ? "" : `. ${normalized}`;
 }
 
@@ -632,10 +658,7 @@ export function inspectWindowsCredentialAcl(
   };
 }
 
-function windowsSecurityDescriptorRule(value: string): {
-  rule: string;
-  rest: string;
-} {
+function windowsSecurityDescriptorRule(value: string) {
   let depth = 0;
   let quoted = false;
   let escaped = false;
@@ -714,8 +737,7 @@ export async function streamWindowsCredentialAclDescriptors(
   let stderr = "";
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk: string) => {
-    const remaining = MAX_WINDOWS_CREDENTIAL_ACL_STDERR - stderr.length;
-    if (remaining > 0) stderr += chunk.slice(0, remaining);
+    stderr += chunk;
   });
 
   let descendantsChanged = false;
@@ -775,6 +797,31 @@ export async function streamWindowsCredentialAclDescriptors(
   }
 }
 
+// win32.parse stops at the UNC marker for extended-length share paths.
+const WINDOWS_CREDENTIAL_UNC_ROOT =
+  /^[\\/]{2}[?.][\\/]UNC[\\/][^\\/]+[\\/][^\\/]+[\\/]?/iu;
+
+function windowsCredentialRootLength(path: string): number {
+  const root =
+    WINDOWS_CREDENTIAL_UNC_ROOT.exec(path)?.[0] ?? win32.parse(path).root;
+  if (win32.isAbsolute(path) && win32.relative(root, path) === "") {
+    throw new Error(
+      "A private Windows directory must be below a volume or share root",
+    );
+  }
+  return root.length;
+}
+
+export function windowsCredentialAncestorAclScript(path: string): string {
+  const rootLength = windowsCredentialRootLength(path);
+  return [
+    "$path = $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
+    // Stop at the drive or UNC share root, then inspect the outermost ancestor first.
+    `$ancestors = @(while ($path.Length -gt ${rootLength}) { $parent = Microsoft.PowerShell.Management\\Split-Path -Path $path -Parent; if (-not $parent -or $parent -eq $path) { break }; $parent; $path = $parent })`,
+    "for ($i = $ancestors.Count - 1; $i -ge 0; $i--) { Write-CredentialAcl $ancestors[$i] }",
+  ].join("\n");
+}
+
 export async function inspectWindowsCredentialAclSnapshot(
   path: string,
   currentUserSid: string,
@@ -789,11 +836,16 @@ export async function inspectWindowsCredentialAclSnapshot(
   home: WindowsCredentialAcl;
   descendantsArePrivate: boolean;
 }> {
-  let ancestors = 0;
-  for (let ancestor = dirname(path); ; ancestor = dirname(ancestor)) {
-    ancestors += 1;
-    if (ancestor === dirname(ancestor)) break;
+  const rootLength = windowsCredentialRootLength(path);
+  const ancestors: string[] = [];
+  let ancestor = win32.dirname(path);
+  while (true) {
+    ancestors.push(ancestor);
+    const parent = win32.dirname(ancestor);
+    if (ancestor.length <= rootLength || ancestor === parent) break;
+    ancestor = parent;
   }
+  ancestors.reverse();
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     let home: WindowsCredentialAcl | undefined;
@@ -826,24 +878,41 @@ export async function inspectWindowsCredentialAclSnapshot(
           inspected += 1;
           await options.resolveDescriptorAliases?.(descriptor);
 
-          if (index < ancestors) {
-            const ancestor = inspectWindowsCredentialAcl(
-              descriptor,
-              currentUserSid,
-              {
-                resolvedAliases: options.resolvedAliases,
-                scope: "ancestor",
-              },
-            );
-            if (ancestor.untrustedPrincipals.length !== 0) {
+          if (index < ancestors.length) {
+            const ancestorPath = ancestors[index]!;
+            try {
+              const ancestor = inspectWindowsCredentialAcl(
+                descriptor,
+                currentUserSid,
+                {
+                  resolvedAliases: options.resolvedAliases,
+                  scope: "ancestor",
+                },
+              );
+              if (ancestor.untrustedPrincipals.length !== 0) {
+                throw new Error(
+                  "Windows credential-home ancestor allows another identity to replace the directory",
+                );
+              }
+            } catch (error) {
+              let guidance =
+                "Choose a location outside this ancestor with trusted ownership and permissions.";
+              if (index === 0) {
+                guidance = WINDOWS_CREDENTIAL_UNC_ROOT.test(
+                  win32.toNamespacedPath(ancestorPath),
+                )
+                  ? "This share root is unsupported. Choose a location outside this share with trusted ownership and permissions."
+                  : "This volume root is unsupported. Choose a location on a volume with trusted ancestry; another directory on the same volume will not resolve this.";
+              }
               throw new Error(
-                "Windows credential-home ancestor allows another identity to replace the directory",
+                `Windows private-directory ancestor could not be trusted: ${ancestorPath}. ${errorMessage(error)}. ${guidance}`,
+                { cause: error },
               );
             }
             return;
           }
 
-          if (index === ancestors) {
+          if (index === ancestors.length) {
             try {
               home = inspectWindowsCredentialAcl(descriptor, currentUserSid, {
                 resolvedAliases: options.resolvedAliases,
@@ -878,7 +947,7 @@ export async function inspectWindowsCredentialAclSnapshot(
       if (error instanceof WindowsCredentialDescendantsChangedError) continue;
       throw error;
     }
-    if (inspected <= ancestors) {
+    if (inspected <= ancestors.length) {
       throw new Error("Windows credential-home ancestry could not be verified");
     }
     if (!completed) {
@@ -893,6 +962,7 @@ export async function inspectWindowsCredentialAclSnapshot(
 }
 
 async function secureWindowsCredentialHome(path: string): Promise<void> {
+  const ancestorAclScript = windowsCredentialAncestorAclScript(path);
   const systemRoot = process.env["SystemRoot"] ?? "C:\\Windows";
   const systemDirectory = join(systemRoot, "System32");
   const powershell = join(
@@ -961,8 +1031,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     "    if ($entry.PSIsContainer) { Read-CredentialDescendants $entry.FullName }",
     "  }",
     "}",
-    "$path = $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
-    "while ($true) { $parent = Microsoft.PowerShell.Management\\Split-Path -Path $path -Parent; if (-not $parent -or $parent -eq $path) { break }; Write-CredentialAcl $parent; $path = $parent }",
+    ancestorAclScript,
     "Write-CredentialAcl $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
     "Read-CredentialDescendants $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
     `"${WINDOWS_CREDENTIAL_ACL_COMPLETE_PREFIX}$script:descriptorCount"`,
@@ -1568,6 +1637,16 @@ export async function preparePersistentOutputRoot(
   return root;
 }
 
+const WORKBENCH_ARGUMENTS_PROGRAM = String.raw`
+import json, sys
+sys.argv[2:] = json.loads(sys.stdin.buffer.readline())
+`;
+const WORKBENCH_SCRIPT_PROGRAM = String.raw`
+import runpy, sys
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+`;
+
 const ARCHIVE_READY = "codex-security-archive-ready\n";
 const ARCHIVE_REGISTRATION_PROGRAM = String.raw`
 import io, json, runpy, sys
@@ -1584,18 +1663,13 @@ def before_archive():
 workbench["main"](before_archive=before_archive)
 `;
 
-const workbenchComparisonSupport = new Map<
-  string,
-  { stdin: boolean; related: boolean }
->();
-
 export async function runWorkbench(
   options: Omit<WorkbenchCommandOptions, "python"> & { python?: string },
   args: readonly string[],
   input?: string,
 ): Promise<JsonObject> {
   const script = join(options.pluginRoot, "scripts", "workbench_db.py");
-  let signal = options.signal;
+  const signal = options.signal;
   const run = async (
     arguments_: readonly string[],
     input?: string,
@@ -1605,10 +1679,14 @@ export async function runWorkbench(
       "database-info",
       "store-findings",
       "list-stored-findings",
+      "store-external-findings",
+      "list-external-findings",
       "find-potential-duplicates",
       "store-dedupe-groups",
       "list-dedupe-groups",
       "dashboard",
+      "severity-classification",
+      "read-severity-classification",
     ].includes(arguments_[0] ?? "");
     const node =
       native && process.versions["bun"]
@@ -1635,6 +1713,12 @@ export async function runWorkbench(
       ? (options.stateDirectory ??
         codexSecurityStateDirectory(options.environment))
       : undefined;
+    // Workbench text fields can contain NUL or exceed OS command-line limits.
+    const framedArguments = !native;
+    let program = archiveHandshake ? ARCHIVE_REGISTRATION_PROGRAM : undefined;
+    if (framedArguments)
+      program =
+        WORKBENCH_ARGUMENTS_PROGRAM + (program ?? WORKBENCH_SCRIPT_PROGRAM);
     const result = await runCodexCommand(
       { command },
       native
@@ -1644,9 +1728,9 @@ export async function runWorkbench(
             "-X",
             "utf8",
             "-B",
-            ...(archiveHandshake ? ["-c", ARCHIVE_REGISTRATION_PROGRAM] : []),
+            ...(program === undefined ? [] : ["-c", program]),
             script,
-            ...arguments_,
+            ...(framedArguments ? [] : arguments_),
           ],
       pluginHelperEnvironment(node?.environment ?? options.environment),
       // The SDK owns configuration normalization; the helper receives its resolved location.
@@ -1662,6 +1746,10 @@ export async function runWorkbench(
         : input,
       signal,
       archiveHandshake,
+      // Match native argv's UTF-8 encoding for the private argument frame.
+      framedArguments
+        ? `${JSON.stringify(arguments_.map((argument) => argument.toWellFormed()))}\n`
+        : undefined,
     );
     if (!result.success) {
       throw new Error(
@@ -1673,143 +1761,19 @@ export async function runWorkbench(
     return result.stdout;
   };
   let stdout: string;
-  const savedScanIdentities = async (scanDir: string): Promise<string> => {
-    const result: unknown = JSON.parse(
-      await run(["list-scans", "--scan-root", scanDir]),
-    );
-    if (!isRecord(result) || !Array.isArray(result["scans"])) {
-      throw new Error(
-        "The workbench returned an invalid scan history response.",
-      );
-    }
-    return JSON.stringify(
-      result["scans"]
-        .map((scan: unknown) => {
-          if (
-            !isRecord(scan) ||
-            typeof scan["scanId"] !== "string" ||
-            typeof scan["scanDir"] !== "string"
-          ) {
-            throw new Error(
-              "The workbench returned an invalid scan history entry.",
-            );
-          }
-          return JSON.stringify([scan["scanId"], scan["scanDir"]]);
-        })
-        .sort(),
-    );
-  };
-  let legacyArchive:
-    { scanDir: string; archiveDir: string; savedScans: string } | undefined;
   try {
-    const arguments_ = [...args];
-    let archiveHandshake = false;
-    if (
-      arguments_[0] === "register-cli-scan" &&
-      arguments_.includes("--archive-existing") &&
-      !arguments_.includes("--archived-scan-dir")
-    ) {
-      const help = (await run(["register-cli-scan", "--help"])).replace(
-        /\s+/gu,
-        " ",
-      );
-      if (help.includes("Supports cancellable archival preparation.")) {
-        archiveHandshake = signal !== undefined;
-      } else if (
-        help.includes("Archive output in the registration transaction.")
-      ) {
-        // Earlier transactional helpers cannot acknowledge the safe cancellation
-        // boundary. Keep their move and database commit together.
-        signal?.throwIfAborted();
-        signal = undefined;
-      } else {
-        const scanDir = arguments_[arguments_.indexOf("--scan-dir") + 1]!;
-        const archiveDir = await planOutputArchive(scanDir);
-        if (archiveDir !== null) {
-          const savedScans = await savedScanIdentities(scanDir);
-          signal?.throwIfAborted();
-          await rename(scanDir, archiveDir);
-          legacyArchive = { scanDir, archiveDir, savedScans };
-          await mkdir(scanDir, { mode: 0o700 });
-          if ((process.umask() & 0o700) !== 0) await chmod(scanDir, 0o700);
-          arguments_.push("--archived-scan-dir", archiveDir);
-        }
-      }
-    }
-    const matchesStdinIndex = arguments_.indexOf("--matches-json-stdin");
-    if (
-      arguments_[0] === "save-scan-comparison" &&
-      matchesStdinIndex !== -1 &&
-      input !== undefined
-    ) {
-      const key = JSON.stringify([options.python, script]);
-      let support = workbenchComparisonSupport.get(key);
-      if (support === undefined) {
-        const help = await run(["save-scan-comparison", "--help"]);
-        options.signal?.throwIfAborted();
-        support = {
-          stdin: help.includes("--matches-json-stdin"),
-          related: help
-            .replace(/\s+/gu, " ")
-            .includes("Comparison payload supports related findings."),
-        };
-        workbenchComparisonSupport.set(key, support);
-      }
-      const comparison: unknown = JSON.parse(input);
-      if (isRecord(comparison) && "related" in comparison && !support.related) {
-        delete comparison["related"];
-        input = JSON.stringify(comparison);
-      }
-      if (!support.stdin) {
-        arguments_.splice(matchesStdinIndex, 1, "--matches-json", input);
-        input = undefined;
-      }
-    }
-    stdout = await run(arguments_, input, archiveHandshake);
+    const archiveHandshake =
+      signal !== undefined &&
+      args[0] === "register-cli-scan" &&
+      args.includes("--archive-existing") &&
+      !args.includes("--archived-scan-dir");
+    stdout = await run(args, input, archiveHandshake);
   } catch (error) {
-    if (legacyArchive !== undefined) {
-      // Cancellation can stop legacy registration; recovery must still settle.
-      signal = undefined;
-      try {
-        // A helper can commit registration and lose its response. Restore only
-        // when saved identities prove that registration did not change them.
-        if (
-          (await savedScanIdentities(legacyArchive.scanDir)) ===
-          legacyArchive.savedScans
-        ) {
-          await rmdir(legacyArchive.scanDir).catch(
-            (error: NodeJS.ErrnoException) => {
-              if (error.code !== "ENOENT") throw error;
-            },
-          );
-          await rename(legacyArchive.archiveDir, legacyArchive.scanDir);
-        }
-      } catch (restoreError) {
-        throw new AggregateError(
-          [error, restoreError],
-          `Scan registration failed: ${processErrorDetail(error)}. Previous output remains at ${legacyArchive.archiveDir}; restoration could not be verified or completed: ${processErrorDetail(restoreError)}`,
-          { cause: error },
-        );
-      }
-    }
     if (options.signal?.aborted) throw error;
     const detail = processErrorDetail(error);
-    const databaseFailure =
-      /\b(?:unable to open database file|attempt to write a readonly database|readonly database|disk i\/o error)\b/iu.test(
-        detail,
-      );
     const failure =
       options.failureMessage ?? "Could not run the Codex Security workbench";
-    throw new CodexSecurityError(
-      databaseFailure
-        ? `${failure}: cannot open the workbench database at ${join(
-            options.stateDirectory ??
-              codexSecurityStateDirectory(options.environment),
-            "workbench.sqlite3",
-          )}. Ensure the state directory and SQLite journal files are writable, or set CODEX_SECURITY_STATE_DIR to a writable directory outside the scanned repository.`
-        : `${failure}: ${detail}`,
-      { cause: error },
-    );
+    throw new CodexSecurityError(`${failure}: ${detail}`, { cause: error });
   }
   let result: unknown;
   try {
@@ -1825,8 +1789,6 @@ export async function runWorkbench(
       "The Codex Security workbench returned an invalid response.",
     );
   }
-  if (legacyArchive !== undefined)
-    result["archivedScanDir"] = legacyArchive.archiveDir;
   return result as JsonObject;
 }
 
@@ -1869,7 +1831,7 @@ export async function validateOutputDir(
       if (!archiveExisting && (await readdir(path)).length !== 0) {
         throw new OutputDirectoryNotEmptyError(path);
       }
-      requirePrivateOutputDirectory(metadata, path);
+      requireOutputDirectoryOwnership(metadata, path);
       await requireSecureOutputAncestry(path);
       const canonical = await realpath(path);
       requireModelSafeOutputDir(canonical);
@@ -2012,7 +1974,11 @@ export async function planOutputArchive(
   if (outputDirectory === null) return null;
   const entries = await readdir(outputDirectory).catch(nullIfMissingFileError);
   if (entries === null || entries.length === 0) return null;
-  return `${outputDirectory}.previous-${new Date()
+  return `${outputDirectory}${outputArchiveSuffix()}`;
+}
+
+function outputArchiveSuffix(): string {
+  return `.previous-${new Date()
     .toISOString()
     .replaceAll(/[-:]/g, "")
     .replace(/\.\d{3}Z$/, "")}-${randomUUID().slice(0, 8)}`;
@@ -2115,11 +2081,23 @@ async function prepareOutputDirectory(
   );
   validateLocation?.(path ?? (await realpath(temporaryRoot)));
   if (path === null) {
-    const created = await mkdtemp(
-      join(temporaryRoot, `codex-security-${safePrefix(repositoryName)}-`),
-    );
-    if ((process.umask() & 0o700) !== 0) await chmod(created, 0o700);
+    const prefix = `codex-security-${safePrefix(repositoryName)}`;
+    let created: string;
+    if (process.platform === "win32") {
+      const suffix = `-${randomUUID()}`;
+      // Reserve room within NTFS's 255-unit component limit for later archival.
+      // The SDK suffix is longer than the workbench's .previous-<tempname> suffix.
+      const prefixLength = 255 - suffix.length - outputArchiveSuffix().length;
+      created = join(
+        temporaryRoot,
+        `${prefix.slice(0, prefixLength)}${suffix}`,
+      );
+      await createWindowsOutputDirectory(created, false);
+    } else {
+      created = await mkdtemp(join(temporaryRoot, `${prefix}-`));
+    }
     try {
+      if ((process.umask() & 0o700) !== 0) await chmod(created, 0o700);
       return await validatePreparedOutputDir(created, validateLocation);
     } catch (error) {
       await rmdir(created).catch(() => undefined);
@@ -2133,12 +2111,15 @@ async function prepareOutputDirectory(
       const archiveDir = await planOutputArchive(path);
       if (archiveDir !== null) {
         await rename(path, archiveDir);
-        onOutputArchived?.(archiveDir);
+        notify(() => onOutputArchived?.(archiveDir));
         existing = null;
       }
     }
     if (existing === null) {
-      createdRoot = await mkdir(path, { recursive: true, mode: 0o700 });
+      createdRoot =
+        process.platform === "win32"
+          ? await createWindowsOutputDirectory(path, true)
+          : await mkdir(path, { recursive: true, mode: 0o700 });
       if ((process.umask() & 0o700) !== 0) await chmod(path, 0o700);
     }
     return await validatePreparedOutputDir(
@@ -2160,6 +2141,44 @@ async function prepareOutputDirectory(
   }
 }
 
+export async function createWindowsOutputDirectory(
+  path: string,
+  recursive: boolean,
+): Promise<string | undefined> {
+  const native = createRequire(import.meta.url)(
+    join(
+      await bundledPluginRoot(),
+      "mcp",
+      "native",
+      `win32-${process.arch}`,
+      "windows.node",
+    ),
+  ) as { createPrivateWindowsDirectory(path: Buffer): number };
+  const create = async (target: string): Promise<string | undefined> => {
+    const createOne = () =>
+      native.createPrivateWindowsDirectory(
+        Buffer.from(win32.toNamespacedPath(target), "utf16le"),
+      );
+    let error = createOne();
+    let firstCreated: string | undefined;
+    if (
+      recursive &&
+      (error === 2 || error === 3) &&
+      dirname(target) !== target
+    ) {
+      firstCreated = await create(dirname(target));
+      error = createOne();
+    }
+    if (error === 0) return firstCreated ?? target;
+    if (recursive && error === 183 && (await stat(target)).isDirectory())
+      return firstCreated;
+    throw new OutputDirectoryError(
+      `Unable to create private Windows output directory (Windows error ${error}): ${target}`,
+    );
+  };
+  return create(path);
+}
+
 export async function validatePreparedOutputDir(
   path: string,
   validateLocation?: (path: string) => void,
@@ -2178,7 +2197,7 @@ export async function validatePreparedOutputDir(
       `Scan output directory must be empty: ${path}`,
     );
   }
-  requirePrivateOutputDirectory(metadata, path);
+  requireOutputDirectoryOwnership(metadata, path);
   await requireSecureOutputAncestry(canonical);
   return canonical;
 }
@@ -2194,6 +2213,15 @@ export function requirePrivateOutputDirectory(
       `Scan output directory must not be accessible to other users (chmod 700): ${path}`,
     );
   }
+  requireOutputDirectoryOwnership(metadata, path, effectiveUid);
+}
+
+export function requireOutputDirectoryOwnership(
+  metadata: Pick<Stats, "uid">,
+  path: string,
+  effectiveUid = process.geteuid?.(),
+): void {
+  if (process.platform === "win32") return;
   if (effectiveUid !== undefined && metadata.uid !== effectiveUid) {
     throw new OutputDirectoryError(
       `Scan output directory must be owned by the current user: ${path}`,
@@ -2201,7 +2229,7 @@ export function requirePrivateOutputDirectory(
   }
 }
 
-/** Reject shared parents whose owner can rename or replace private scan output. */
+/** Reject shared parents whose owner can rename or replace scan output. */
 export async function requireSecureOutputAncestry(
   path: string,
   effectiveUid = process.geteuid?.(),
@@ -2383,11 +2411,10 @@ export async function extractPluginZip(
   );
   try {
     throwIfSignalAborted(signal);
-    await rejectBackslashZipNames(archivePath, signal);
     let expandedSize = 0;
     const paths = new Set<string>();
     const checksums: Array<{ path: string; checksum: number }> = [];
-    const zip = await openZip(archivePath, { strictFileNames: true });
+    const zip = await openPluginZip(archivePath, signal);
     try {
       for await (const entry of zip.eachEntry()) {
         throwIfSignalAborted(signal);
@@ -2470,19 +2497,23 @@ export async function extractPluginZip(
   }
 }
 
-async function rejectBackslashZipNames(
+async function openPluginZip(
   path: string,
   signal?: AbortSignal,
-): Promise<void> {
-  const handle = await open(path, "r");
+): Promise<ZipFile> {
+  const fd = await promisify(openCallback)(
+    path,
+    constants.O_RDONLY |
+      (process.platform === "win32" ? 0 : constants.O_NONBLOCK),
+  );
   try {
-    const metadata = await handle.stat();
+    const metadata = await promisify(fstatCallback)(fd);
     if (!metadata.isFile() || metadata.size < 22) {
       throw new Error("missing end of central directory");
     }
     const tailSize = Math.min(metadata.size, 65_557);
     const tail = await readExactly(
-      handle,
+      fd,
       tailSize,
       metadata.size - tailSize,
       signal,
@@ -2520,12 +2551,7 @@ async function rejectBackslashZipNames(
     if (centralOffset + centralSize > endOffset) {
       throw new Error("invalid central directory bounds");
     }
-    const central = await readExactly(
-      handle,
-      centralSize,
-      centralOffset,
-      signal,
-    );
+    const central = await readExactly(fd, centralSize, centralOffset, signal);
     let offset = 0;
     for (let index = 0; index < entries; index += 1) {
       if (
@@ -2552,8 +2578,14 @@ async function rejectBackslashZipNames(
     if (offset !== central.byteLength) {
       throw new Error("invalid central directory size");
     }
-  } finally {
-    await handle.close();
+    // Yauzl owns the descriptor only after construction succeeds.
+    return await fromFdPromise(fd, {
+      autoClose: true,
+      strictFileNames: true,
+    });
+  } catch (error) {
+    await promisify(closeCallback)(fd);
+    throw error;
   }
 }
 
@@ -2562,26 +2594,32 @@ export async function resolvePluginPath(
   workspace: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  if (pluginPath === undefined) {
-    return await bundledPluginRoot();
-  }
+  try {
+    if (pluginPath === undefined) {
+      return await bundledPluginRoot();
+    }
 
-  const path = resolve(expandHome(pluginPath));
-  const metadata = await lstat(path).catch(() => null);
-  if (metadata?.isFile() && extname(path).toLowerCase() === ".zip") {
-    return await extractPluginZip(
-      path,
-      join(workspace, "extracted-plugin"),
-      signal,
+    const path = resolve(expandHome(pluginPath));
+    const metadata = await lstat(path).catch(() => null);
+    if (metadata?.isFile() && extname(path).toLowerCase() === ".zip") {
+      return await extractPluginZip(
+        path,
+        join(workspace, "extracted-plugin"),
+        signal,
+      );
+    }
+    if (metadata?.isDirectory()) {
+      throwIfSignalAborted(signal);
+      return await validatePluginRoot(path);
+    }
+    throw new PluginBootstrapError(
+      `Plugin path must be a directory or ZIP: ${path}`,
     );
+  } catch (error) {
+    if (signal?.aborted || error instanceof LocalPluginBootstrapError)
+      throw error;
+    throw new LocalPluginBootstrapError(errorMessage(error), { cause: error });
   }
-  if (metadata?.isDirectory()) {
-    throwIfSignalAborted(signal);
-    return await validatePluginRoot(path);
-  }
-  throw new PluginBootstrapError(
-    `Plugin path must be a directory or ZIP: ${path}`,
-  );
 }
 
 export async function createMarketplace(
@@ -2589,20 +2627,26 @@ export async function createMarketplace(
   pluginRoot: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  throwIfSignalAborted(signal);
-  const root = await realpath(pluginRoot);
-  const marketplace = join(codexHome, "sdk-marketplace");
-  const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
-  await copyPluginTree(root, pluginDestination, signal);
-  const projection = await legacyPluginProjection(pluginDestination, signal);
-  for (const [path, file] of projection?.files ?? []) {
-    const destination = join(pluginDestination, path);
-    await mkdir(dirname(destination), { recursive: true });
-    await writeFile(destination, file.contents, { mode: file.mode, signal });
-    if (file.mode !== undefined) await chmod(destination, file.mode);
+  try {
+    throwIfSignalAborted(signal);
+    const root = await realpath(pluginRoot);
+    const marketplace = join(codexHome, "sdk-marketplace");
+    const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
+    await copyPluginTree(root, pluginDestination, signal);
+    const projection = await pluginRuntimeProjection(pluginDestination, signal);
+    for (const [path, file] of projection?.files ?? []) {
+      const destination = join(pluginDestination, path);
+      await mkdir(dirname(destination), { recursive: true });
+      await writeFile(destination, file.contents, { mode: file.mode, signal });
+      if (file.mode !== undefined) await chmod(destination, file.mode);
+    }
+    await writeMarketplaceManifest(marketplace, signal);
+    return marketplace;
+  } catch (error) {
+    if (signal?.aborted || error instanceof LocalPluginBootstrapError)
+      throw error;
+    throw new LocalPluginBootstrapError(errorMessage(error), { cause: error });
   }
-  await writeMarketplaceManifest(marketplace, signal);
-  return marketplace;
 }
 
 async function writeMarketplaceManifest(
@@ -2639,15 +2683,15 @@ async function writeMarketplaceManifest(
   }
 }
 
-type LegacyPluginProjection = {
+type PluginRuntimeProjection = {
   root: string;
   files: Map<string, { contents: Buffer; mode?: number }>;
 };
 
-async function legacyPluginProjection(
+async function pluginRuntimeProjection(
   root: string,
   signal?: AbortSignal,
-): Promise<LegacyPluginProjection | undefined> {
+): Promise<PluginRuntimeProjection | undefined> {
   const path = join(root, ".mcp.json");
   // Keep the source link checks ahead of any configuration read.
   if (!(await lstat(path).catch(nullIfMissingFileError))?.isFile()) return;
@@ -2661,14 +2705,12 @@ async function legacyPluginProjection(
   if (
     !isRecord(server) ||
     (server["command"] !== "./scripts/launch_codex_security_mcp" &&
-      server["command"] !== "./scripts/launch_codex_security_mcp.cmd" &&
-      !isLegacyNodeMcpServer(server))
+      server["command"] !== "./scripts/launch_codex_security_mcp.cmd")
   ) {
     return;
   }
   const environment = server["env_vars"];
   if (environment !== undefined && !Array.isArray(environment)) return;
-  const directNode = isLegacyNodeMcpServer(server);
   if (
     !Array.isArray(environment) ||
     !environment.includes("CODEX_SECURITY_PLUGIN_ROOT")
@@ -2678,67 +2720,35 @@ async function legacyPluginProjection(
       "CODEX_SECURITY_PLUGIN_ROOT",
     ];
   }
-  const files: LegacyPluginProjection["files"] = new Map();
-  if (directNode) {
-    const args = [...(server["args"] as string[])];
-    args[args.findIndex(isLegacyNodeMcpEntry)] =
-      "./mcp/codex_security_sdk_bridge.mjs";
-    server["args"] = args;
-    files.set("mcp/codex_security_sdk_bridge.mjs", {
-      contents: Buffer.from(
-        'import { runMain } from "node:module";\n' +
-          'import { dirname, join } from "node:path";\n' +
-          'import { fileURLToPath } from "node:url";\n' +
-          "const root = process.env.CODEX_SECURITY_PLUGIN_ROOT;\n" +
-          'process.argv[1] = root ? join(root, "mcp", "server.mjs") : join(dirname(fileURLToPath(import.meta.url)), "server.mjs");\n' +
-          "runMain(process.argv[1]);\n",
-      ),
-      mode: 0o644,
-    });
-  } else {
-    server["command"] =
-      server["command"] === "./scripts/launch_codex_security_mcp.cmd"
-        ? "./scripts/launch_codex_security_mcp_sdk.cmd"
-        : "./scripts/launch_codex_security_mcp_sdk";
-    files.set("scripts/launch_codex_security_mcp_sdk", {
-      contents: Buffer.from(
-        "#!/bin/sh\n" +
-          'if [ -n "${CODEX_SECURITY_PLUGIN_ROOT:-}" ]; then\n' +
-          '  exec "$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" "$@"\n' +
-          "fi\n" +
-          'exec "$(dirname "$0")/launch_codex_security_mcp" "$@"\n',
-      ),
-      mode: 0o755,
-    });
-    files.set("scripts/launch_codex_security_mcp_sdk.cmd", {
-      contents: Buffer.from(
-        "@echo off\r\nsetlocal DisableDelayedExpansion\r\n" +
-          "if not defined CODEX_SECURITY_PLUGIN_ROOT goto codex_security_sdk_original\r\n" +
-          '"%CODEX_SECURITY_PLUGIN_ROOT%\\scripts\\launch_codex_security_mcp.cmd" %*\r\n' +
-          "exit /b\r\n:codex_security_sdk_original\r\n" +
-          '"%~dp0launch_codex_security_mcp.cmd" %*\r\n',
-      ),
-      mode: 0o755,
-    });
-  }
+  const files: PluginRuntimeProjection["files"] = new Map();
+  server["command"] =
+    server["command"] === "./scripts/launch_codex_security_mcp.cmd"
+      ? "./scripts/launch_codex_security_mcp_sdk.cmd"
+      : "./scripts/launch_codex_security_mcp_sdk";
+  files.set("scripts/launch_codex_security_mcp_sdk", {
+    contents: Buffer.from(
+      "#!/bin/sh\n" +
+        'if [ -n "${CODEX_SECURITY_PLUGIN_ROOT:-}" ]; then\n' +
+        '  exec "$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" "$@"\n' +
+        "fi\n" +
+        'exec "$(dirname "$0")/launch_codex_security_mcp" "$@"\n',
+    ),
+    mode: 0o755,
+  });
+  files.set("scripts/launch_codex_security_mcp_sdk.cmd", {
+    contents: Buffer.from(
+      "@echo off\r\nsetlocal DisableDelayedExpansion\r\n" +
+        "if not defined CODEX_SECURITY_PLUGIN_ROOT goto codex_security_sdk_original\r\n" +
+        '"%CODEX_SECURITY_PLUGIN_ROOT%\\scripts\\launch_codex_security_mcp.cmd" %*\r\n' +
+        "exit /b\r\n:codex_security_sdk_original\r\n" +
+        '"%~dp0launch_codex_security_mcp.cmd" %*\r\n',
+    ),
+    mode: 0o755,
+  });
   files.set(".mcp.json", {
     contents: Buffer.from(`${JSON.stringify(configuration, null, 2)}\n`),
   });
   return { root, files };
-}
-
-function isLegacyNodeMcpEntry(argument: unknown): boolean {
-  return argument === "./mcp/server.mjs" || argument === "mcp/server.mjs";
-}
-
-function isLegacyNodeMcpServer(server: Record<string, unknown>): boolean {
-  const command = server["command"];
-  return (
-    typeof command === "string" &&
-    ["node", "node.exe"].includes(basename(command).toLowerCase()) &&
-    Array.isArray(server["args"]) &&
-    server["args"].some(isLegacyNodeMcpEntry)
-  );
 }
 
 export function resolveCodexCommand(
@@ -2746,55 +2756,52 @@ export function resolveCodexCommand(
 ): CodexCommand {
   const configured = environmentValue(environment, "CODEX_CLI_PATH");
   const expanded =
-    configured === undefined ? undefined : expandHome(configured, environment);
+    configured === undefined
+      ? undefined
+      : expandExecutableHome(configured, environment);
   if (
     expanded &&
     (process.platform !== "win32" || /\.(?:exe|com)$/iu.test(expanded))
   ) {
-    return { command: resolve(expanded) };
+    return {
+      command:
+        process.platform === "win32"
+          ? resolve(expanded)
+          : isAbsolute(expanded)
+            ? expanded
+            : `${process.cwd()}${sep}${expanded}`,
+    };
   }
 
-  const platform = process.platform === "android" ? "linux" : process.platform;
-  const packageName = `@openai/codex-${platform}-${process.arch}`;
-  let packageJson: string;
-  try {
-    const require = createRequire(import.meta.url);
-    const codexPackageJson = require.resolve("@openai/codex/package.json");
-    packageJson = createRequire(codexPackageJson).resolve(
-      `${packageName}/package.json`,
-    );
-  } catch (error) {
-    throw new PluginBootstrapError(
-      `The bundled Codex executable could not be resolved from ${packageName}. Reinstall @openai/codex with optional dependencies enabled, or set CODEX_CLI_PATH to an installed Codex executable.`,
-      { cause: error },
-    );
-  }
-  const vendor = join(dirname(packageJson), "vendor");
-  const target = readdirSync(vendor, { withFileTypes: true }).find((entry) =>
-    entry.isDirectory(),
-  );
-  const command = join(
-    vendor,
-    target?.name ?? "",
-    "bin",
-    process.platform === "win32" ? "codex.exe" : "codex",
-  );
-  if (target === undefined || !existsSync(command)) {
-    throw new PluginBootstrapError(
-      `The ${packageName} package does not contain the Codex executable. Reinstall @openai/codex with optional dependencies enabled, or set CODEX_CLI_PATH to an installed Codex executable.`,
-    );
-  }
-  return { command };
+  return { command: resolveBundledCodexExecutable() };
 }
 
-export function executablePathForSpawn(command: string): string {
-  if (process.platform !== "win32" || !win32.isAbsolute(command))
-    return command;
-  // Root-relative paths still depend on the child's drive and working directory.
-  const root = win32.parse(command).root;
-  return root === "\\" || root === "/"
-    ? command
-    : win32.toNamespacedPath(command);
+export async function codexExecutableReadPaths(
+  command: string,
+): Promise<string[]> {
+  const executable = await realpath(command);
+  const packageJson = resolve(dirname(executable), "..", "package.json");
+  try {
+    const metadata = JSON.parse(await readFile(packageJson, "utf8"));
+    if (
+      metadata?.name !== "@openai/codex" ||
+      typeof metadata.bin?.codex !== "string"
+    )
+      return [executable];
+    const launcher = await realpath(
+      resolve(dirname(packageJson), metadata.bin.codex),
+    );
+    if (launcher !== executable) return [executable];
+  } catch {
+    // A custom executable need not belong to a readable, valid npm package.
+    return [executable];
+  }
+
+  // npm's entrypoint launches a native binary, which Linux re-executes in the sandbox.
+  return [
+    executable,
+    await realpath(resolveBundledCodexExecutable(packageJson)),
+  ];
 }
 
 export async function bootstrapPlugin(
@@ -2814,7 +2821,14 @@ export async function bootstrapPlugin(
 ): Promise<PluginInstall> {
   const root = await realpath(pluginRoot);
   const { name, version } = await pluginMetadata(root);
-  const projection = await legacyPluginProjection(root, options.signal);
+  const projection = await pluginRuntimeProjection(root, options.signal).catch(
+    (error: unknown) => {
+      if (options.signal?.aborted) throw error;
+      throw new LocalPluginBootstrapError(errorMessage(error), {
+        cause: error,
+      });
+    },
+  );
   const marketplace = join(codexHome, "sdk-marketplace");
   throwIfSignalAborted(options.signal);
   const command =
@@ -2826,7 +2840,7 @@ export async function bootstrapPlugin(
   const run = options.runCodex ?? runPluginCommand;
   const existing = await lstat(marketplace).catch(nullIfMissingFileError);
   if (existing !== null && !existing.isDirectory()) {
-    throw new PluginBootstrapError(
+    throw new LocalPluginBootstrapError(
       `Codex Security plugin marketplace path must be a directory: ${marketplace}`,
     );
   }
@@ -2983,7 +2997,7 @@ async function pluginContentsMatch(
   destination: string,
   signal?: AbortSignal,
   allowExtraFiles = false,
-  projection?: LegacyPluginProjection,
+  projection?: PluginRuntimeProjection,
 ): Promise<boolean> {
   throwIfSignalAborted(signal);
 
@@ -3079,18 +3093,21 @@ export async function pluginMetadata(
     }
     manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   } catch (error) {
-    throw new PluginBootstrapError(`Invalid Codex plugin directory: ${root}`, {
-      cause: error,
-    });
+    throw new LocalPluginBootstrapError(
+      `Invalid Codex plugin directory: ${root}`,
+      {
+        cause: error,
+      },
+    );
   }
   if (!isRecord(manifest) || manifest["name"] !== PLUGIN_NAME) {
-    throw new PluginBootstrapError(
+    throw new LocalPluginBootstrapError(
       "Plugin manifest must have name 'codex-security'.",
     );
   }
   const version = manifest["version"];
   if (typeof version !== "string" || version.trim().length === 0) {
-    throw new PluginBootstrapError(
+    throw new LocalPluginBootstrapError(
       "Plugin manifest must have a non-empty version.",
     );
   }
@@ -3190,11 +3207,14 @@ export function pluginExecutionEnvironment(
   python: string,
   environment: ProcessEnvironment = process.env,
 ): ProcessEnvironment {
-  return {
+  const child = {
     ...pythonUtf8Environment(environment),
     PYTHON: python,
+    CODEX_SECURITY_PYTHON_COMMAND: python,
     CODEX_CLI_PATH: resolveCodexCommand(environment).command,
   };
+  forwardExternalImportSetting(environment, child);
+  return child;
 }
 
 export function environmentWithGit(
@@ -3249,9 +3269,11 @@ export async function runCodexCommand(
   input?: string | Uint8Array,
   signal?: AbortSignal,
   archiveHandshake = false,
+  stdinPrefix?: string,
 ): Promise<CodexCommandResult> {
   const cancellation = archiveHandshake ? new AbortController() : undefined;
   const abort = () => cancellation?.abort(signal?.reason);
+  const commandSignal = cancellation?.signal ?? signal;
   let awaitingArchive = archiveHandshake;
   const child = spawn(
     executablePathForSpawn(command.command),
@@ -3260,7 +3282,7 @@ export async function runCodexCommand(
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
-      signal: cancellation?.signal ?? signal,
+      signal: commandSignal,
     },
   );
   let stdout = "";
@@ -3301,16 +3323,30 @@ export async function runCodexCommand(
         : reject(processError),
     );
   });
+  const releaseCanceledPipes = () => {
+    if (!commandSignal?.aborted) return;
+    if (child.exitCode === null && child.signalCode === null) return;
+    child.stdin.destroy();
+    child.stdout.destroy();
+    child.stderr.destroy();
+  };
+  commandSignal?.addEventListener("abort", releaseCanceledPipes, {
+    once: true,
+  });
+  child.once("exit", releaseCanceledPipes);
   if (archiveHandshake) {
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
   }
   try {
+    if (stdinPrefix !== undefined) child.stdin.write(stdinPrefix);
     if (archiveHandshake) child.stdin.write(`${JSON.stringify(input ?? "")}\n`);
     else child.stdin.end(input);
     return await completion;
   } finally {
     if (archiveHandshake) signal?.removeEventListener("abort", abort);
+    commandSignal?.removeEventListener("abort", releaseCanceledPipes);
+    child.removeListener("exit", releaseCanceledPipes);
   }
 }
 
@@ -3342,8 +3378,12 @@ export async function probeCodexSandbox(
     signal?.throwIfAborted();
     detail = processErrorDetail(error);
   }
+  const guidance =
+    process.platform === "linux"
+      ? "\nOn Linux this usually means unprivileged user namespaces are restricted (kernel.apparmor_restrict_unprivileged_userns=1 on Ubuntu 24.04 and later), which Bubblewrap needs; inside the container image, use the AppArmor profile and Compose override from the SDK README."
+      : "";
   throw new SandboxUnavailableError(
-    `Codex could not run a command in its sandbox; reproduce with '${command.command} ${args.join(" ")}'. On Linux this usually means unprivileged user namespaces are restricted (kernel.apparmor_restrict_unprivileged_userns=1 on Ubuntu 24.04 and later), which Bubblewrap needs; inside the container image, use the AppArmor profile and Compose override from the SDK README. Codex reported: ${detail}`,
+    `Codex could not run a command in its sandbox: ${detail}\nTo reproduce, run '${command.command} ${args.join(" ")}'.${guidance}`,
   );
 }
 
@@ -3429,7 +3469,7 @@ async function copyPluginTree(
 }
 
 async function readExactly(
-  handle: Awaited<ReturnType<typeof open>>,
+  fd: number,
   length: number,
   position: number,
   signal?: AbortSignal,
@@ -3438,7 +3478,8 @@ async function readExactly(
   let offset = 0;
   while (offset < length) {
     throwIfSignalAborted(signal);
-    const { bytesRead } = await handle.read(
+    const { bytesRead } = await promisify(readCallback)(
+      fd,
       buffer,
       offset,
       length - offset,
@@ -3501,7 +3542,7 @@ async function usablePython(
 ): Promise<string | null> {
   const command = await resolveTrustedExecutable(
     isPythonPathCandidate(candidate)
-      ? expandHome(candidate, environment)
+      ? expandExecutableHome(candidate, environment)
       : candidate,
     environment,
     protectedRoot,
@@ -3518,7 +3559,8 @@ async function usablePython(
       {
         env: command.environment,
         encoding: "utf8",
-        timeout: 5_000,
+        // Cold Python startup can exceed five seconds on busy Windows hosts.
+        timeout: 30_000,
         windowsHide: true,
         signal,
       },
@@ -3555,6 +3597,17 @@ export function sameFile(left: string, right: string): Promise<boolean> {
       leftMetadata.ino === rightMetadata.ino,
     () => false,
   );
+}
+
+function expandExecutableHome(
+  value: string,
+  environment: ProcessEnvironment,
+): string {
+  const path = value.startsWith("~\\") ? value.replaceAll("\\", "/") : value;
+  // Expand only the home prefix; joining the suffix would collapse symlink/.. paths.
+  return path.startsWith("~/")
+    ? `${expandHome("~", environment)}${sep}${path.slice(2)}`
+    : expandHome(path, environment);
 }
 
 export function expandHome(

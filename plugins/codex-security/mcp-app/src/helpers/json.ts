@@ -1,5 +1,12 @@
-export function object(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+export { isRecord as object } from "../record.ts";
+
+export function requireFiniteNumbers(value: unknown): void {
+  if (typeof value === "number" && !Number.isFinite(value))
+    throw new TypeError(
+      "Stored finding JSON cannot contain non-finite numbers.",
+    );
+  if (value !== null && typeof value === "object")
+    for (const item of Object.values(value)) requireFiniteNumbers(item);
 }
 
 export function escapeControls(text: string): string {

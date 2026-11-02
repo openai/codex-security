@@ -3,7 +3,6 @@ import { lstat, mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { stdin } from "node:process";
 import { Writable } from "node:stream";
-import { checkbox, confirm, input, search, Separator } from "@inquirer/prompts";
 import { Octokit } from "@octokit/core";
 import Papa from "papaparse";
 import { createAuthenticatedGitHub } from "./github.js";
@@ -17,6 +16,7 @@ const GITHUB_REPOSITORIES_QUERY = `
         after: $cursor
         isArchived: false
         isFork: false
+        ownerAffiliations: [OWNER]
         orderBy: { field: PUSHED_AT, direction: DESC }
       ) {
         nodes {
@@ -345,12 +345,17 @@ export function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
     write: (value) => {
       output.write(value);
     },
-    confirm: (message, defaultValue = false, signal) =>
-      confirm({ message, default: defaultValue }, context(signal)),
-    input: (message, defaultValue, signal) =>
-      input({ message, default: defaultValue }, context(signal)),
-    checkbox: (message, options, presentation, signal) =>
-      checkbox(
+    async confirm(message, defaultValue = false, signal) {
+      const { confirm } = await import("@inquirer/prompts");
+      return confirm({ message, default: defaultValue }, context(signal));
+    },
+    async input(message, defaultValue, signal) {
+      const { input } = await import("@inquirer/prompts");
+      return input({ message, default: defaultValue }, context(signal));
+    },
+    async checkbox(message, options, presentation, signal) {
+      const { checkbox, Separator } = await import("@inquirer/prompts");
+      return checkbox(
         {
           message,
           choices: [
@@ -366,9 +371,11 @@ export function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
           required: presentation?.required,
         },
         context(signal),
-      ),
-    select: (message, options, presentation, signal) =>
-      search(
+      );
+    },
+    async select(message, options, presentation, signal) {
+      const { search } = await import("@inquirer/prompts");
+      return search(
         {
           message,
           ...(presentation?.header === undefined
@@ -393,6 +400,7 @@ export function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
               })),
         },
         context(signal),
-      ),
+      );
+    },
   };
 }

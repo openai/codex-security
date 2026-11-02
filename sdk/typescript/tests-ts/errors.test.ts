@@ -56,7 +56,7 @@ describe("error messages", () => {
     expect(limit.message).toContain("$1.00");
     expect(limit.message).toContain("short-context budget baseline $2.00");
     expect(limit.message).toContain("legacy estimate, context unknown");
-    expect(limit.message).toContain("/scan");
+    expect(limit.message).toContain("scan output directory: /scan");
   });
 
   test.each([
@@ -66,6 +66,12 @@ describe("error messages", () => {
     "basic validation failed",
     "unable to open database file",
   ])("preserves error messages exactly: %s", (message) => {
+    expect(errorMessage(new Error(message))).toBe(message);
+    expect(errorMessage(message)).toBe(message);
+  });
+
+  test("preserves whitespace and Unicode in diagnostics", () => {
+    const message = "  first line\nsecond line: café 雪  ";
     expect(errorMessage(new Error(message))).toBe(message);
     expect(errorMessage(message)).toBe(message);
   });

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Publish Findings"
+  short_description: "Import vendor findings locally or to Cloud"
+  default_prompt: "Use $publish-findings to preview selected vendor findings for my repository and import them to my chosen destination."
+policy:
+  allow_implicit_invocation: true

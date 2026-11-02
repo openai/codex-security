@@ -6,8 +6,6 @@ export const readingAnnotations = {
 };
 
 export const writingAnnotations = {
+  ...readingAnnotations,
   readOnlyHint: false,
-  destructiveHint: false,
-  idempotentHint: true,
-  openWorldHint: false,
 };

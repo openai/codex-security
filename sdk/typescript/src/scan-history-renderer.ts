@@ -1,5 +1,11 @@
 import { basename, relative } from "node:path";
+import stringWidth from "string-width";
+import { fitCell, graphemes } from "./terminal-columns.js";
 import type { JsonObject } from "./config.js";
+import {
+  formatCoverageScopeParts,
+  type CoverageSummary,
+} from "./coverage-presentation.js";
 
 export type HistoryCommand =
   "list" | "show" | "findings" | "compare" | "match-all";
@@ -19,6 +25,7 @@ const STATUS_STYLES: Record<string, { color: number; icon: string }> = {
   reopened: { color: 31, icon: "↻" },
   new: { color: 31, icon: "+" },
   persisting: { color: 33, icon: "●" },
+  not_observed: { color: 36, icon: "○" },
   not_rescanned: { color: 36, icon: "○" },
   unknown: { color: 35, icon: "?" },
 };
@@ -76,16 +83,37 @@ export function renderScanHistory(
     `  ${accent("━".repeat(width - 4))}`,
   ];
 
-  const wrap = (value: string, indent: number, prefix?: string): void => {
+  const wrap = (
+    value: string | readonly string[],
+    indent: number,
+    prefix?: string,
+  ): void => {
     const available = width - indent - 2;
     let line = "";
-    for (const word of clean(value).split(/\s+/)) {
-      if (line.length > 0 && line.length + word.length + 1 > available) {
+    let lineWidth = 0;
+    const words =
+      typeof value === "string" ? clean(value).split(/\s+/) : value.map(clean);
+    for (const word of words) {
+      if (line.length > 0 && lineWidth + stringWidth(word) + 1 > available) {
         lines.push(`${prefix || " ".repeat(indent)}${line}`);
         prefix = undefined;
-        line = word;
-      } else {
-        line = line.length > 0 ? `${line} ${word}` : word;
+        line = "";
+        lineWidth = 0;
+      }
+      if (line.length > 0) {
+        line += " ";
+        lineWidth += 1;
+      }
+      for (const { segment } of graphemes.segment(word)) {
+        const segmentWidth = stringWidth(segment);
+        if (lineWidth + segmentWidth > available) {
+          lines.push(`${prefix || " ".repeat(indent)}${line}`);
+          prefix = undefined;
+          line = "";
+          lineWidth = 0;
+        }
+        line += segment;
+        lineWidth += segmentWidth;
       }
     }
     if (line.length > 0) {
@@ -102,7 +130,7 @@ export function renderScanHistory(
     const after = entry["afterOccurrenceIds"] as string[] | undefined;
     const grouped =
       before?.length || after?.length
-        ? `  ${accent("·")}  ${before?.length ?? 1} → ${after?.length ?? 1}`
+        ? `  ${accent("·")}  ${before?.length ?? (entry["beforeOccurrenceId"] ? 1 : 0)} → ${after?.length ?? (entry["afterOccurrenceId"] ? 1 : 0)}`
         : "";
     const matches = entry["matches"] as JsonObject[] | undefined;
     const related = entry["related"] as JsonObject[] | undefined;
@@ -189,7 +217,7 @@ export function renderScanHistory(
     const multipleRepositories =
       options.repository === undefined &&
       new Set(scans.map((scan) => scan["targetPath"])).size > 1;
-    const wide = width >= (multipleRepositories ? 96 : 80);
+    const wide = width >= (multipleRepositories ? 97 : 80);
     lines.push(
       `  ${strong(clean(repository))}  ${accent("·")}  ${scans.length} ${scans.length === 1 ? "scan" : "scans"}${latest === undefined ? "" : `  ${accent("·")}  latest: ${clean(latest)} findings`}`,
       "",
@@ -212,13 +240,22 @@ export function renderScanHistory(
       const scanRepository = basename(clean(scan["targetPath"]));
       if (wide) {
         lines.push(
-          `  ${clean(scan["scanId"]).padEnd(36)} ${started.padEnd(10)} ${clean(scan["mode"]).padEnd(8)}${multipleRepositories ? ` ${scanRepository.slice(0, 18).padEnd(18)}` : ""} ${findings.padEnd(8)} ${statusLabel}`,
+          `  ${clean(scan["scanId"]).padEnd(36)} ${started.padEnd(10)} ${clean(scan["mode"]).padEnd(8)}${multipleRepositories ? ` ${fitCell(scanRepository, 18, "")}` : ""} ${findings.padEnd(8)} ${statusLabel}`,
         );
       } else {
-        lines.push(
-          `  ${clean(scan["scanId"])}`,
-          `    ${started}${multipleRepositories ? `  ${accent("·")}  ${clean(scanRepository)}` : ""}  ${accent("·")}  ${findings} findings  ${accent("·")}  ${statusLabel}`,
-        );
+        lines.push(`  ${clean(scan["scanId"])}`);
+        const separator = `  ${accent("·")}  `;
+        const summary = `${findings} findings${separator}${statusLabel}`;
+        const location = multipleRepositories
+          ? `${scanRepository}${separator}`
+          : "";
+        const line = `    ${started}${separator}${location}${summary}`;
+        if (multipleRepositories && stringWidth(line) > width) {
+          lines.push(`    ${started}${separator}${summary}`);
+          wrap([scanRepository], 4);
+        } else {
+          lines.push(line);
+        }
       }
     }
   } else if (command === "findings") {
@@ -241,6 +278,19 @@ export function renderScanHistory(
       `  ${strong(clean(basename(result["targetPath"] as string)))}  ${accent("·")}  ${clean(result["scanId"])}`,
       `  ${paint(`${status === "complete" ? "✓" : "●"} ${status.toUpperCase()}`, statusColor)}  ${accent("·")}  ${clean(result["mode"])}`,
     );
+    if (typeof result["startedAt"] === "string") {
+      lines.push(`  ${strong("STARTED")}  ${clean(result["startedAt"])}`);
+    } else if (typeof result["updatedAt"] === "string") {
+      lines.push(`  ${strong("UPDATED")}  ${clean(result["updatedAt"])}`);
+    }
+    const canonicalCoverage = result["coverage"] as CoverageSummary | undefined;
+    if (canonicalCoverage) {
+      wrap(
+        formatCoverageScopeParts(canonicalCoverage),
+        11,
+        `  ${strong("SCOPE")}  `,
+      );
+    }
     if (result["failureMessage"]) {
       wrap(String(result["failureMessage"]), 11, `  ${paint("ERROR", 31)}  `);
     }
@@ -262,6 +312,11 @@ export function renderScanHistory(
       lines.push(
         `  ${Object.entries(summary)
           .filter(([, count]) => count)
+          .sort(
+            ([left], [right]) =>
+              Object.keys(SEVERITY_COLORS).indexOf(left.toUpperCase()) -
+              Object.keys(SEVERITY_COLORS).indexOf(right.toUpperCase()),
+          )
           .map(([severity, count]) => {
             const label = severity.toUpperCase();
             return paint(
@@ -273,6 +328,18 @@ export function renderScanHistory(
       );
     }
     const recipe = result["recipe"] as JsonObject | undefined;
+    const target = recipe?.["target"] as JsonObject | undefined;
+    if (target) {
+      lines.push(
+        `  ${strong("SAVED SCOPE")}  ${clean(JSON.stringify(target))}`,
+      );
+    }
+    const deepScan = recipe?.["deepScan"] as JsonObject | undefined;
+    if (deepScan) {
+      lines.push(
+        `  ${strong("DEEP SCAN")}  ${clean(JSON.stringify(deepScan))}`,
+      );
+    }
     const config = recipe?.["config"] as JsonObject | undefined;
     if (config && Object.keys(config).length > 0) {
       lines.push(
@@ -298,7 +365,7 @@ export function renderScanHistory(
       ];
       if (parts.length > 0) {
         lines.push(
-          `  ${strong("COVERAGE")}  ${parts.join(`  ${accent("·")}  `)}`,
+          `  ${strong("REVIEW")}  ${parts.join(`  ${accent("·")}  `)}`,
         );
       }
     }
@@ -308,6 +375,23 @@ export function renderScanHistory(
       lines.push(
         `  ${strong("KNOWLEDGE BASE")}  ${knowledgeBase.map((path) => dim(clean(path))).join(", ")}`,
       );
+    }
+    const inputs = recipe?.["scanInputs"] as JsonObject | undefined;
+    if (inputs) {
+      lines.push(
+        `  ${strong("SCAN INSTRUCTIONS")}  ${inputs["scanPromptSha256"] ? `sha256:${clean(inputs["scanPromptSha256"])}` : "none"}`,
+      );
+      const knowledge = inputs["knowledgeBase"] as JsonObject | null;
+      if (knowledge) {
+        lines.push(
+          `  ${strong("KNOWLEDGE SNAPSHOT")}  sha256:${clean(knowledge["sha256"])}`,
+        );
+        for (const document of knowledge["documents"] as JsonObject[]) {
+          lines.push(
+            `    ${clean(document["name"])}  sha256:${clean(document["sha256"])}`,
+          );
+        }
+      }
     }
     const artifacts = result["artifacts"] as JsonObject | undefined;
     if (artifacts && Object.keys(artifacts).length > 0) {
@@ -352,12 +436,6 @@ export function renderScanHistory(
     lines.push(
       `  ${clean(result["beforeScanId"]).slice(0, 8)} → ${clean(result["afterScanId"]).slice(0, 8)}`,
     );
-    const coverage = (result["coverage"] as JsonObject)["afterCompleteness"];
-    if (coverage !== "complete") {
-      lines.push(
-        `  ${paint(`⚠ Follow-up coverage is ${clean(coverage)}; resolved findings cannot be confirmed.`, 33)}`,
-      );
-    }
     const findings = (result["findings"] as JsonObject[]).map((entry) =>
       entry["status"] === "unknown" &&
       entry["reason"] ===

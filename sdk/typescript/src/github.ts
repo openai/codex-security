@@ -1,8 +1,10 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { Octokit } from "@octokit/core";
+import { githubRepositoryParts } from "./github-identifiers.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
+import { isGitHubCloudHost } from "./git-remote.js";
 
 const execFile = promisify(execFileCallback);
 type GitHubAlert = Awaited<ReturnType<typeof fetchGitHubAlert>>;
@@ -15,7 +17,15 @@ export const GITHUB_ALERT_STATES = [
   "all",
 ] as const;
 
-export interface GitHubCodeScanningImportOptions {
+export interface GitHubImportConnectionOptions {
+  /** Defaults to GH_HOST or github.com. */
+  githubHost?: string;
+  /** Omit to use the authenticated GitHub CLI, including its token environment. */
+  githubToken?: string;
+  signal?: AbortSignal;
+}
+
+export interface GitHubCodeScanningImportOptions extends GitHubImportConnectionOptions {
   /** GitHub repository in OWNER/REPO form. */
   repository: string;
   /** Exact alert numbers, regardless of state. Omit to list matching alerts. */
@@ -24,11 +34,6 @@ export interface GitHubCodeScanningImportOptions {
   state?: (typeof GITHUB_ALERT_STATES)[number];
   /** Git reference to inspect; omitted lists the default branch. */
   ref?: string;
-  /** Defaults to GH_HOST or github.com. */
-  githubHost?: string;
-  /** Omit to use the authenticated GitHub CLI, including its token environment. */
-  githubToken?: string;
-  signal?: AbortSignal;
 }
 
 export interface ImportedGitHubCodeScanningAlert {
@@ -40,7 +45,7 @@ export interface ImportedGitHubCodeScanningAlert {
   alert: GitHubAlert;
 }
 
-interface GitHubImportDependencies {
+export interface GitHubImportDependencies {
   environment?: NodeJS.ProcessEnv;
   currentDirectory?: string;
   createGitHub?: (host: string, signal?: AbortSignal) => Promise<Octokit>;
@@ -56,6 +61,7 @@ export async function createAuthenticatedGitHub(
   } = {},
 ): Promise<Octokit> {
   options.signal?.throwIfAborted();
+  host = host.toLowerCase();
   let token = options.token;
   if (token === undefined) {
     const trusted = await resolveTrustedExecutable(
@@ -87,8 +93,65 @@ export async function createAuthenticatedGitHub(
   }
   return new Octokit({
     auth: token,
-    ...(host === "github.com" ? {} : { baseUrl: `https://${host}/api/v3` }),
+    baseUrl: isGitHubCloudHost(host)
+      ? `https://api.${host}`
+      : `https://${host}/api/v3`,
   });
+}
+
+export function githubImportHost(
+  githubHost: string | undefined,
+  environment: NodeJS.ProcessEnv,
+): string {
+  const host =
+    githubHost?.trim() ?? (environment["GH_HOST"]?.trim() || "github.com");
+  if (!host) throw new CodexSecurityError("GitHub host must not be empty.");
+  return host;
+}
+
+export function githubImportClient(
+  host: string,
+  options: GitHubImportConnectionOptions,
+  dependencies: GitHubImportDependencies,
+  environment: NodeJS.ProcessEnv,
+): Promise<Octokit> {
+  return dependencies.createGitHub
+    ? dependencies.createGitHub(host, options.signal)
+    : createAuthenticatedGitHub(host, {
+        token: options.githubToken,
+        environment,
+        currentDirectory: dependencies.currentDirectory,
+        signal: options.signal,
+      });
+}
+
+export function githubImportError(
+  error: unknown,
+  signal: AbortSignal | undefined,
+  messages: { operation: string; denied: string; notFound: string },
+): CodexSecurityError {
+  signal?.throwIfAborted();
+  if (error instanceof CodexSecurityError) return error;
+  const status =
+    typeof error === "object" && error !== null && "status" in error
+      ? error.status
+      : undefined;
+  switch (status) {
+    case 401:
+      return new CodexSecurityError("GitHub authentication failed.");
+    case 403:
+      return new CodexSecurityError(messages.denied);
+    case 404:
+      return new CodexSecurityError(messages.notFound);
+    case 429:
+      return new CodexSecurityError(
+        "GitHub request was rate limited. Wait and retry.",
+      );
+    default:
+      return new CodexSecurityError(
+        `GitHub ${messages.operation} request failed${typeof status === "number" ? ` (HTTP ${status})` : ""}: ${errorMessage(error)}`,
+      );
+  }
 }
 
 export async function importGitHubCodeScanningAlerts(
@@ -97,15 +160,10 @@ export async function importGitHubCodeScanningAlerts(
 ): Promise<ImportedGitHubCodeScanningAlert[]> {
   options.signal?.throwIfAborted();
   const repository = options.repository.trim();
-  const parts = /^([a-z0-9_.-]+)\/([a-z0-9_.-]+)$/iu.exec(repository);
-  if (
-    parts === null ||
-    parts.slice(1).some((part) => /^\.{1,2}$/u.test(part))
-  ) {
+  const parts = githubRepositoryParts(repository);
+  if (!parts)
     throw new CodexSecurityError("GitHub repository must be OWNER/REPO.");
-  }
-  const owner = parts[1]!;
-  const repo = parts[2]!;
+  const [owner, repo] = parts;
   const numbers = [...new Set(options.alertNumbers ?? [])];
   if (numbers.some((number) => !Number.isSafeInteger(number) || number < 1)) {
     throw new CodexSecurityError(
@@ -126,22 +184,15 @@ export async function importGitHubCodeScanningAlerts(
     throw new CodexSecurityError("GitHub reference must not be empty.");
   }
   const environment = dependencies.environment ?? process.env;
-  const host =
-    options.githubHost?.trim() ??
-    (environment["GH_HOST"]?.trim() || "github.com");
-  if (host.length === 0) {
-    throw new CodexSecurityError("GitHub host must not be empty.");
-  }
+  const host = githubImportHost(options.githubHost, environment);
 
   try {
-    const github = dependencies.createGitHub
-      ? await dependencies.createGitHub(host, options.signal)
-      : await createAuthenticatedGitHub(host, {
-          token: options.githubToken,
-          environment,
-          currentDirectory: dependencies.currentDirectory,
-          signal: options.signal,
-        });
+    const github = await githubImportClient(
+      host,
+      options,
+      dependencies,
+      environment,
+    );
     const selected = new Map<number, GitHubAlert["most_recent_instance"]>();
     if (numbers.length === 0 || ref !== undefined) {
       let page = 1;
@@ -204,31 +255,13 @@ export async function importGitHubCodeScanningAlerts(
     }
     return alerts;
   } catch (error) {
-    options.signal?.throwIfAborted();
-    if (error instanceof CodexSecurityError) throw error;
-    const status =
-      typeof error === "object" && error !== null && "status" in error
-        ? error.status
-        : undefined;
-    if (status === 401)
-      throw new CodexSecurityError("GitHub authentication failed.");
-    if (status === 403) {
-      throw new CodexSecurityError(
+    throw githubImportError(error, options.signal, {
+      operation: "code scanning",
+      denied:
         "GitHub denied code scanning access. Check repository permissions, code scanning availability, and API rate limits.",
-      );
-    }
-    if (status === 404) {
-      throw new CodexSecurityError(
+      notFound:
         "GitHub repository or code scanning alert was not found or is not accessible.",
-      );
-    }
-    if (status === 429)
-      throw new CodexSecurityError(
-        "GitHub request was rate limited. Wait and retry.",
-      );
-    throw new CodexSecurityError(
-      `GitHub code scanning request failed${typeof status === "number" ? ` (HTTP ${status})` : ""}: ${errorMessage(error)}`,
-    );
+    });
   }
 }
 

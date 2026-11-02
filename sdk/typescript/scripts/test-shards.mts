@@ -1,25 +1,34 @@
-/** Place the longest measured files first, without omitting new test files. */
-export function shardTestFiles(
+export type TestTimings = Record<
+  string,
+  Partial<Record<NodeJS.Platform, number>>
+>;
+
+export function partitionTests(
   files: readonly string[],
   count: number,
-  durations: Readonly<Record<string, number>> = {},
-) {
+  timings: TestTimings,
+  platform: NodeJS.Platform,
+): string[][] {
+  const known = files.flatMap((file) => {
+    const seconds = timings[file]?.[platform];
+    return seconds === undefined ? [] : [seconds];
+  });
+  const fallback = known.length
+    ? known.reduce((total, seconds) => total + seconds, 0) / known.length
+    : 1;
+  const duration = (file: string) => timings[file]?.[platform] ?? fallback;
   const shards = Array.from({ length: count }, () => ({
     files: [] as string[],
     seconds: 0,
   }));
-  const duration = (file: string) => durations[file] ?? 1;
-  const ordered = [...files].sort(
-    (left, right) =>
-      duration(right) - duration(left) ||
-      (left < right ? -1 : left > right ? 1 : 0),
-  );
-  for (const file of ordered) {
-    const shard = shards.reduce((shortest, candidate) =>
-      candidate.seconds < shortest.seconds ? candidate : shortest,
+  for (const file of [...files]
+    .sort()
+    .sort((left, right) => duration(right) - duration(left))) {
+    const shard = shards.reduce((least, candidate) =>
+      candidate.seconds < least.seconds ? candidate : least,
     );
     shard.files.push(file);
     shard.seconds += duration(file);
   }
-  return shards;
+  return shards.map((shard) => shard.files.sort());
 }

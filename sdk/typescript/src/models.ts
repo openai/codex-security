@@ -11,6 +11,7 @@ export interface ScanManifest {
       [k: string]: unknown;
     };
     status: "completed" | "failed" | "canceled" | "interrupted";
+    warnings?: string[];
     startedAt: string;
     completedAt: string;
     sealedAt: string;
@@ -68,7 +69,22 @@ export interface ScanManifest {
       portfolioPath: "hardening/hardening.md";
       [k: string]: unknown;
     };
-    coverageRef: "coverage.json";
+    coverageRef?: "coverage.json";
+    mode?:
+      | "repository"
+      | "scoped_path"
+      | "diff"
+      | "commit"
+      | "branch_diff"
+      | "working_tree"
+      | "deep_repository";
+    review?: {
+      excludedPaths: string[];
+      [k: string]: unknown;
+    };
+    reviewState?: {
+      [k: string]: unknown;
+    };
     findingsRef: "findings.json";
     /**
      * @minItems 1
@@ -300,7 +316,6 @@ export interface CoverageDocument {
     | "branch_diff"
     | "working_tree"
     | "deep_repository";
-  completeness: "complete" | "partial" | "unknown";
   inventoryStrategy:
     "repository" | "scoped_path" | "diff" | "directory" | "custom";
   includePaths: string[];
@@ -405,8 +420,6 @@ export type AttackPathReachability = Extract<
 export type FindingProvenance = Finding["provenance"];
 
 export type CoverageMode = CoverageDocument["mode"];
-
-export type CoverageCompleteness = CoverageDocument["completeness"];
 
 export type InventoryStrategy = CoverageDocument["inventoryStrategy"];
 

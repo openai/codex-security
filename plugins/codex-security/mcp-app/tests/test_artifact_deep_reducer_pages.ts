@@ -25,7 +25,7 @@ const {
       export * from "./artifact-deep-reducer-pages.ts";
       export * from "./artifact-deep-reducer.ts";
     `,
-    resolveDir: new URL("../src/", import.meta.url).pathname,
+    resolveDir: path.join(import.meta.dirname, "../src/"),
   },
 });
 
@@ -111,7 +111,7 @@ try {
     scanId,
     findings: [fresh],
     scope: { summary: largeText },
-    coverage: workerDraft([]).coverage,
+    reviewState: workerDraft([]).reviewState,
   };
   const previous = {
     scanId,

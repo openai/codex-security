@@ -1,0 +1,10 @@
+{
+  "overrides": [
+    {
+      "files": ".github/release-notes.md",
+      "options": {
+        "proseWrap": "never"
+      }
+    }
+  ]
+}
