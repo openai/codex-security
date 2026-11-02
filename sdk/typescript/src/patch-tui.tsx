@@ -5,6 +5,7 @@ import { Box, Text, render, useApp, useInput, useStdout } from "ink";
 import { useMemo, useRef, useState } from "react";
 import type { Finding, FindingCodeEvidence } from "./models.js";
 import { SCAN_SEVERITIES } from "./scan-settings.js";
+import { graphemes } from "./terminal-columns.js";
 
 const SEVERITY_COLORS = {
   critical: "redBright",
@@ -18,9 +19,6 @@ type PatchSeverity = keyof typeof SEVERITY_COLORS;
 const SEVERITIES = Object.keys(SEVERITY_COLORS) as PatchSeverity[];
 const HEADING = /^[A-Z][A-Z ]+$/u;
 const SOURCE_LINE = /^([› ]\s*\d* │ )(.*)$/u;
-const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, {
-  granularity: "grapheme",
-});
 
 const DETAIL_ORDER = [
   "summary",
@@ -443,12 +441,10 @@ export function PatchTui({
         });
         setEditing(null);
       } else if (key.backspace || key.delete) {
-        setDraft((previous) =>
-          previous.slice(
-            0,
-            Array.from(GRAPHEME_SEGMENTER.segment(previous)).at(-1)?.index ?? 0,
-          ),
-        );
+        setDraft((text) => {
+          const last = graphemes.segment(text).containing(text.length - 1);
+          return text.slice(0, last?.index ?? 0);
+        });
       } else if (!key.ctrl && !key.meta && input.length > 0) {
         setDraft((previous) => previous + input);
       }
