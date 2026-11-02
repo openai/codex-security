@@ -61,10 +61,29 @@ function commandActivityCase(
 describe("scan activity", () => {
   test("preserves ordinary paths alongside narrowly decoded POSIX words", () => {
     const cases = [
-      {"command":"cat /repo/my\\ file.ts \"/repo/quoted path.ts\" /repo/regular.ts","repository":"/repo","paths":["my file.ts","quoted path.ts","regular.ts"]},
-      {"command":"cat /code/project\\ files/app.ts /code/project\\ files/another.ts","repository":"/code/project files","paths":["app.ts","another.ts"]},
-      {"command":"cat ${CODEX_SECURITY_REPOSITORY}/my\\ file.ts \"/repo/quoted.ts\"","repository":"/repo","paths":["my file.ts","quoted.ts"]},
-      {"command":"cat /repo/my\\ file.ts\\\\sibling /repo/safe.ts","repository":"/repo","paths":["safe.ts"]},
+      {
+        command:
+          'cat /repo/my\\ file.ts "/repo/quoted path.ts" /repo/regular.ts',
+        repository: "/repo",
+        paths: ["my file.ts", "quoted path.ts", "regular.ts"],
+      },
+      {
+        command:
+          "cat /code/project\\ files/app.ts /code/project\\ files/another.ts",
+        repository: "/code/project files",
+        paths: ["app.ts", "another.ts"],
+      },
+      {
+        command:
+          'cat ${CODEX_SECURITY_REPOSITORY}/my\\ file.ts "/repo/quoted.ts"',
+        repository: "/repo",
+        paths: ["my file.ts", "quoted.ts"],
+      },
+      {
+        command: "cat /repo/my\\ file.ts\\\\sibling /repo/safe.ts",
+        repository: "/repo",
+        paths: ["safe.ts"],
+      },
     ];
     for (const { command, repository, paths } of cases) {
       expect(
