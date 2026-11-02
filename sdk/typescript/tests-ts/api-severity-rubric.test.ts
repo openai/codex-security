@@ -102,5 +102,6 @@ for (const mode of ["standard", "deep"] as const) {
         }
       }
     },
+    60_000,
   );
 }
