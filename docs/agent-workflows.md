@@ -72,49 +72,32 @@ and failure output.
 
 ### Check a revision-range scan for missing files
 
-If your scan retained `artifacts/02_discovery/in_scope_files.txt`, open it in
-the saved results directory. It lists the paths selected for discovery. For a
-scan between two commits, find `baseRevision` and `headRevision` under
-`scan.target` in the saved `scan-manifest.json`. In your Git client, compare
-the two commit trees directly (`base..head`). A three-dot PR comparison uses
-the merge base and can show different files when the commits have diverged.
-Current diff scans select regular text files regardless of extension. Git can
-also list changes to binary files, symlinks, and submodules.
+If the scan saved `artifacts/02_discovery/in_scope_files.txt`, compare its paths
+with a direct Git diff (`base..head`) between `scan.target.baseRevision` and
+`scan.target.headRevision` in `scan-manifest.json`. The inventory selects changed
+regular text files of any extension. Git also lists binaries, symlinks, and submodules.
 
-Plugin 0.1.32 could omit changed Perl files (`.cgi`, `.pl`, `.pm`, and `.t`).
-CLI 0.3.0 was the first release to bundle the fix. To repeat the scan with
-that version or later, use a clean, full checkout at the original head.
-Select the same two commits from your repository,
-passing the base to `--diff` and the head to `--head`. See the
-[CLI quick start](../README.md#quick-start).
+Plugin 0.1.32 could omit Perl files (`.cgi`, `.pl`, `.pm`, `.t`). CLI 0.3.0
+first bundled the fix. To rescan, use `--diff BASE_SHA --head HEAD_SHA` in a
+clean, full checkout at the original head.
 
-If model access prevents the scan from starting, you can still generate the
-raw candidate inventory with CLI 0.8.2's bundled helper. Use a full clone you
-created or control, checked out at the original head with both revisions' blobs
-available locally. On Linux, macOS, or WSL, start in a trusted directory outside
-the checkout where you can write files and run executables. Substitute the
-absolute checkout path and the original base and head commit IDs. If you have
-`--dry-run --json` output, it also reports those IDs in `target.base` and `target.head`.
+To generate the inventory without model access, use your original clone with
+both revisions' blobs on disk. Use the original commit IDs (`target.base` and
+`target.head` in `--dry-run --json` output saved for that range). On x64 or arm64
+Linux, macOS, or WSL, run the helper from an empty, trusted directory outside
+the checkout where you can write and execute files.
 
 ```sh
-repo="/absolute/path/to/checkout"
-base=BASE_COMMIT_ID
-head=HEAD_COMMIT_ID
-scratch=$(mktemp -d "$PWD/codex-security-inventory.XXXXXXXX") && (
-  cd "$scratch" &&
-    npm pack --ignore-scripts @openai/codex-security@0.8.2 &&
-    tar -xzf openai-codex-security-0.8.2.tgz &&
-    GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL='' \
-      ./package/_bundled_plugin/scripts/launch_codex_security_mcp \
-        --helper generate-in-scope-files --repo "$repo" --scope . \
-        --diff-mode revisions --diff-base "$base" --diff-head "$head" \
-        --out "$PWD/in_scope_files.txt" &&
-    printf '%s\n' "$PWD/in_scope_files.txt"
-)
+npm pack --ignore-scripts @openai/codex-security@0.8.2 &&
+  tar -xzf openai-codex-security-0.8.2.tgz &&
+  GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL='' \
+    ./package/_bundled_plugin/scripts/launch_codex_security_mcp \
+      --helper generate-in-scope-files --repo "/absolute/path/to/checkout" --scope . \
+      --diff-base BASE_SHA --diff-head HEAD_SHA --out in_scope_files.txt
 ```
 
-The file at the printed path is the raw inventory. A full scan validates its
-paths before finding discovery.
+Open `in_scope_files.txt` for the raw candidate paths. A full scan validates
+them before finding discovery.
 
 ## Give an agent CLI guidance
 
