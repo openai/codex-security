@@ -42,6 +42,31 @@ export interface SemgrepPlatformSelection extends SemgrepPlatformScope {
   findings: string[];
 }
 
+// These v1 Findings API response fields belong only to AI detections or Supply Chain.
+const nonSastFields = [
+  "ai_impact",
+  "epss_score",
+  "fix_recommendations",
+  "found_dependency",
+  "is_malicious",
+  "reachability",
+  "reachable_condition",
+  "usage",
+  "vulnerability_identifier",
+];
+
+function identifiesNonSastProduct(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    nonSastFields.some((field) => value[field] != null) ||
+    [value["issue_type"], value["product"]].some(
+      (product) =>
+        typeof product === "string" &&
+        /^(?:sca|ai_sast|secrets)$/iu.test(product),
+    )
+  );
+}
+
 // Node 22 supports JSON source text and raw values. The SDK targets the ES2022 type library.
 const wireJson = JSON as JSON & {
   rawJSON(source: string): { rawJSON: string };
@@ -281,10 +306,8 @@ function checkRow(
     )
       throw new Error("Select Semgrep Code (SAST) findings.");
   }
-  if (
-    finding["found_dependency"] != null ||
-    finding["vulnerability_identifier"] != null
-  )
+  // Saved rows and normalized evidence have no original page to check.
+  if (!capture && identifiesNonSastProduct(finding))
     throw new Error("Select Semgrep Code (SAST) findings.");
 }
 
@@ -336,10 +359,12 @@ function selectedRows(
       ? [options.findingsResponses]
       : options.findingsResponses;
   for (const page of pages) {
-    for (const finding of array(
+    const findings = array(
       parseSemgrepResponse(page)["findings"],
       "Semgrep findings",
-    )) {
+    );
+    const previousCount = selected.size;
+    for (const finding of findings) {
       if (!isRecord(finding)) continue;
       const id = platformId(finding["id"]);
       if (!id || !wanted.has(id)) continue;
@@ -348,6 +373,12 @@ function selectedRows(
       checkRow(finding, scope, repository, true);
       selected.set(id, finding);
     }
+    // The v1 findings endpoint returns a single product per response page.
+    if (
+      selected.size !== previousCount &&
+      findings.some(identifiesNonSastProduct)
+    )
+      throw new Error("Select Semgrep Code (SAST) findings.");
   }
   const rows = Array.from(wanted, (id) => {
     const value = selected.get(id);
@@ -557,10 +588,11 @@ function normalizeSelectionRows(
         finding["location"] ?? {},
         "Semgrep location",
       );
-      const relative = relativePath(location["file_path"]);
+      const rawPath = text(location["file_path"]);
+      const relative = relativePath(rawPath);
       const path =
         relative && !relative.endsWith("/.") && repositoryFilePath(relative)
-          ? relative
+          ? rawPath
           : null;
       const severity = text(finding["severity"])?.toLowerCase() ?? "";
       const startLine = path ? sourceLine(location["line"]) : null;

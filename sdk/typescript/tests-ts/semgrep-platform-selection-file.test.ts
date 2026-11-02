@@ -935,12 +935,47 @@ test("a row without a repository URL needs the same project ID and name", () => 
   ).toThrow("project and ref");
 });
 
-test("selection rejects rows explicitly identified as other Semgrep products", () => {
-  for (const fields of [{ issue_type: "ai_sast" }, { product: "sca" }])
+test("SAST selection, saved files and retained evidence reject other Semgrep products", async () => {
+  await using fixture = await localReportFixture(url);
+  const valid = selectRow({});
+  const report = normalizeSemgrepFindings(
+    valid,
+    { sourceRepositoryUrl: url },
+    "local",
+  );
+  for (const fields of [
+    { ai_impact: "Synthetic impact" },
+    { epss_score: { score: 0 } },
+    { fix_recommendations: [] },
+    { found_dependency: {} },
+    { is_malicious: false },
+    { reachability: "reachable" },
+    { reachable_condition: "imported" },
+    { usage: {} },
+    { vulnerability_identifier: "CVE-2099-0001" },
+    { issue_type: "ai_sast" },
+    { product: "sca" },
+  ]) {
     expect(() => selectRow(fields)).toThrow("SAST");
+    const row = JSON.stringify({
+      ...JSON.parse(valid.findings[0]!),
+      ...fields,
+    });
+    await fixture.writeJson({ ...valid, findings: [row] });
+    await expect(fixture.prepare()).rejects.toThrow("SAST");
+    const forged = structuredClone(report);
+    forged.findings[0]!.evidence.source_data![rawFindingKey] = row;
+    await expect(
+      prepareNormalizedLocalImport(
+        forged,
+        { ...platformSource, repository: fixture.repository },
+        { environment: fixture.environment },
+      ),
+    ).rejects.toThrow("SAST");
+  }
 });
 
-test("projects Windows-relative paths and retains the original spelling", () => {
+test("projects the original relative path including literal backslashes", () => {
   const file_path = "src\\example.ts";
   const selection = selectRow({
     location: { file_path, line: 2, end_line: 4 },
@@ -951,7 +986,7 @@ test("projects Windows-relative paths and retains the original spelling", () => 
     "local",
   );
   expect(findings[0]!.evidence.locations).toEqual([
-    { path: "src/example.ts", line: 2 },
+    { path: file_path, line: 2 },
   ]);
   expect(
     JSON.parse(String(findings[0]!.evidence.source_data?.[rawFindingKey]))

@@ -137,6 +137,29 @@ test("each selected finding must match the independently named project, ref, and
     });
   const unrelated = '{"findings":[{"rule_name":"no-id"},{"id":2.5}]}';
   expect(select([first, unrelated, second]).findings).toHaveLength(2);
+  const findingsPage = (rows: unknown[]) => JSON.stringify({ findings: rows });
+  const selectedRow = {
+    id: ids[1],
+    ref,
+    repository: { url },
+    rule_name: "example.rule",
+  };
+  for (const other of [
+    { ai_impact: "Synthetic impact" },
+    { is_malicious: false },
+    { issue_type: "ai_sast" },
+  ]) {
+    const sibling = { ...selectedRow, id: "99", ...other };
+    expect(() => select([first, findingsPage([selectedRow, sibling])])).toThrow(
+      "SAST",
+    );
+    expect(() => select([first, findingsPage([sibling, selectedRow])])).toThrow(
+      "SAST",
+    );
+    expect(
+      select([first, findingsPage([sibling]), second]).findings,
+    ).toHaveLength(2);
+  }
   const unknown = select([
     first,
     second.replace('"severity":"medium"', '"severity":"WARNING"'),
@@ -324,16 +347,21 @@ test("only repository-relative files are projected and original paths remain in 
     normalizeSelectedSemgrepPlatformFindings({
       ...source,
       findingIds: ["8"],
-      findingsResponses: page("8").replace("src/app.ts", path),
+      findingsResponses: page("8").replace(
+        '"src/app.ts"',
+        JSON.stringify(path),
+      ),
     }).findings[0]!.evidence;
-  const literal = "src/vendor://app.ts";
-  expect(evidenceFor(literal).locations).toEqual([{ path: literal, line: 2 }]);
+  for (const path of ["src/vendor://app.ts", "src/a\\b.ts", "src/a/b.ts"]) {
+    expect(evidenceFor(path).locations).toEqual([{ path, line: 2 }]);
+  }
   for (const path of [
     "file:src/app.ts",
     "data:text/plain,hello",
     "generated:/api.ts",
     "./C:/work/app.ts",
     "git@host:team/repo/app.ts",
+    "src\\..\\outside.ts",
     ".",
     "src/",
   ]) {

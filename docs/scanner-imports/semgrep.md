@@ -122,10 +122,9 @@ Importing the same findings reports unchanged
 records even if the API reordered JSON object keys. Use a separate source key
 for CLI scans. The selected native finding is retained as JSON text in
 `source_data.semgrepPlatformFindingJson`, including locations that cannot be mapped to the repository.
-Relative Windows paths use forward slashes in projected code locations. If a
-POSIX filename contains a literal backslash, consult the original
-`location.file_path` for its exact spelling. The API row does not identify
-the path convention. For a custom GitHub Enterprise host, supply the trusted
+Projected code locations retain the original spelling of a valid relative
+`location.file_path`, including literal backslashes. The API row does not
+identify the path convention. For a custom GitHub Enterprise host, supply the trusted
 repository URL and `platform: "github"` in the SDK `sourceRepositories` option
 when selecting and preparing the records. For an independently known self-managed
 GitLab instance, `platform: "gitlab"` allows its HTTPS web and clone URLs to
