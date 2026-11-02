@@ -1094,9 +1094,9 @@ test("v2 files require exact counts and string project IDs", async () => {
 });
 
 const historicalPaths = [
-  ["src\\service.ts", null, "src/service.ts", "all", 3, 5],
-  ["src\\backlog.ts", null, "src/backlog.ts", "backlog", "3", "5"],
-  ["src\\strong.ts", null, "src/strong.ts", "legacy", "3", "5"],
+  ["src\\service.ts", null, "src\\service.ts", "all", 3, 5],
+  ["src\\backlog.ts", null, "src\\backlog.ts", "backlog", "3", "5"],
+  ["src\\strong.ts", null, "src\\strong.ts", "legacy", "3", "5"],
   ["src\\zero.ts", null, null, "legacy", 0, 5],
   ["src\\reversed.ts", null, null, "legacy", 3, 2],
   ["pkg:service.ts", "pkg:service.ts", null, "all", 3, 5],
