@@ -86,6 +86,10 @@ export interface CoordinatorOptions {
     run: DeepScanRunState,
     signal: AbortSignal,
   ) => Promise<DeepScanRunState>;
+  checkFreshTarget?: (
+    run: DeepScanRunState,
+    signal: AbortSignal,
+  ) => Promise<void>;
   onComplete?: (
     draft: ScanDraftInput,
     signal: AbortSignal,
@@ -362,6 +366,14 @@ export class DeepScanCoordinator {
   private async run(): Promise<void> {
     try {
       await ensureDeepScanDirectories(this.artifacts);
+      if (this.canceled || this.externallyFailed) return;
+
+      if (this.options.checkFreshTarget && isFreshRun(this.state)) {
+        await this.options.checkFreshTarget(
+          this.state,
+          this.abortController.signal,
+        );
+      }
       if (this.canceled || this.externallyFailed) return;
 
       this.setupComplete = true;
@@ -1252,6 +1264,14 @@ function workerLabelSequence(
 
 function cloneState(state: DeepScanRunState): DeepScanRunState {
   return { ...state, config: { ...state.config } };
+}
+
+function isFreshRun(state: DeepScanRunState): boolean {
+  return (
+    state.dispatchedCount === 0 &&
+    (state.persistedWorkers?.length ?? 0) === 0 &&
+    (state.persistedDedupInputs?.length ?? 0) === 0
+  );
 }
 
 function latestPersistedReplaceableFailure(
