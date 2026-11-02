@@ -2079,7 +2079,7 @@ test.each([false, true])(
     const firstBody = f.posts[0];
     f.state.holdReadback = null;
     const second = await run().result;
-    expect(second.code).toBe(0);
+    expect(second.code, second.stderr).toBe(0);
     if (abrupt) expect(f.posts).toHaveLength(1);
     else expect(f.posts[1]).toBe(firstBody);
     expect(f.receipts.size).toBe(1);

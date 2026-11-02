@@ -511,24 +511,28 @@ export function retainNumberFields<T>(input: T, changed: Set<object>): T {
       return number;
     }
     if (!canCopyFields(value)) return value;
-    const properties = Object.getOwnPropertyDescriptors(value);
-    let copy = false;
+    let changedFields: Map<PropertyKey, PropertyDescriptor> | undefined;
     for (const key of Object.keys(value)) {
-      const property = properties[key]!;
-      if (!Object.hasOwn(property, "value")) continue;
+      const property = Object.getOwnPropertyDescriptor(value, key);
+      if (!property || !Object.hasOwn(property, "value")) continue;
       const next = retain(property.value);
       if (next !== property.value) {
         property.value = next;
-        copy = true;
+        (changedFields ??= new Map()).set(key, property);
       }
     }
-    if (!copy) return value;
-    for (const descriptor of Object.values(properties))
-      if (descriptor.get) descriptor.get = descriptor.get.bind(value);
+    if (!changedFields) return value;
     const retained: object = Array.isArray(value)
       ? []
       : Object.create(Object.getPrototypeOf(value) as object | null);
-    Object.defineProperties(retained, properties);
+    for (const key of Reflect.ownKeys(value)) {
+      const descriptor =
+        changedFields.get(key) ?? Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor) continue;
+      if (typeof key === "string" && descriptor.get)
+        descriptor.get = descriptor.get.bind(value);
+      Object.defineProperty(retained, key, descriptor);
+    }
     captures.set(value, retained);
     return retained;
   }

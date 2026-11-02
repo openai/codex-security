@@ -432,16 +432,23 @@ test("local numeric evidence and GitHub batches fit in a 64 MiB Node heap", asyn
     const samples = alert
       ? "Array(650_000).fill(1)"
       : "Buffer.alloc(512 * 1024)";
-    const count = await run(
+    const retained = await run(
       "github-findings",
       `
       const record = ${JSON.stringify(record)};
-      record.${kind}.samples = ${samples};
+      const samples = ${samples};
+      const score = Object.assign(new Number(7), {toJSON: () => 9});
+      record.${kind}.samples = samples;
+      record.${kind}.score = score;
+      if (Array.isArray(samples)) samples[samples.length - 1] = score;
       const result = module.exports.${reader}([record], "local");
-      process.stdout.write(String(result.findings[0].evidence.source_data.${kind}.samples.length));
+      const row = result.findings[0].evidence.source_data.${kind};
+      process.stdout.write(JSON.stringify([row.samples.length, row.samples.at(-1), row.score]));
     `,
     );
-    expect(count).toBe(alert ? "650000" : "524288");
+    expect(JSON.parse(retained)).toEqual(
+      alert ? [650_000, 7, 7] : [524_288, 0, 7],
+    );
   }
 });
 
