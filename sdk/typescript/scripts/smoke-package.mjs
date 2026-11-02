@@ -849,6 +849,7 @@ try {
     [
       join(packageRoot, "scripts", "fixtures", "package-cost-memory.mjs"),
       installedRoot,
+      consumer,
     ],
     { cwd: consumer },
   );

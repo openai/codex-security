@@ -105,7 +105,8 @@ interface ScanCostTrackerOptions {
   onProgress?: (progress: ScanProgress) => void;
   onSessionEvent?: (event: ScanSessionEvent) => void;
   onWorkerEvent?: (event: ScanWorkerEvent) => void;
-  onError?: (error: unknown) => void;
+  /** Secondary diagnostics are deduplicated until their read recovers or changes. */
+  onError?: (error: unknown, secondary?: boolean) => void;
 }
 
 interface ScanCostSnapshot {
@@ -153,6 +154,7 @@ export class ScanCostTracker {
   readonly #workers = new Map<string, number>();
   readonly #workerProgress = new Map<string, number>();
   readonly #reportedProgress = new Set<string>();
+  readonly #reportedFailures = new Map<string, unknown>();
   #threadId: string | null = null;
   #observingWorkers = true;
   #timer: NodeJS.Timeout | null = null;
@@ -265,6 +267,7 @@ export class ScanCostTracker {
       session: SessionUsage;
       error: unknown;
       path: string;
+      phase?: "replay";
     }> = [];
     let blocked: [SessionUsage, unknown] | undefined;
     let traversalFailure: { error: unknown } | undefined;
@@ -280,6 +283,7 @@ export class ScanCostTracker {
         }
         try {
           await readSessionUsage(path, session, repository);
+          this.#reportedFailures.delete(JSON.stringify(["read", path]));
         } catch (error) {
           if (session.threadId === null) {
             if (!observeHealthySessions || !isBlockedLogRead(error)) {
@@ -292,6 +296,7 @@ export class ScanCostTracker {
           failures.push({ session, error, path });
         }
       }
+      this.#reportedFailures.delete("traversal");
     } catch (error) {
       if (fatalFileFailure && !blocked) throw fatalFileFailure.error;
       if (this.#options.maxCostUsd !== undefined || unreadable.size === 0)
@@ -358,15 +363,25 @@ export class ScanCostTracker {
           session === primarySession && error === primaryError,
       );
       const seen = new Set([trackingFailureKey(primaryError, first?.path)]);
-      const remaining: Array<{ error: unknown; path?: string }> = [
-        ...relevant,
-        ...(traversalFailure ? [traversalFailure] : []),
+      const remaining = [
+        ...relevant.filter(({ phase }) => phase !== "replay"),
+        ...(traversalFailure
+          ? [{ ...traversalFailure, path: undefined, phase: undefined }]
+          : []),
+        ...relevant.filter(({ phase }) => phase === "replay"),
       ];
       for (const failure of remaining) {
         const key = trackingFailureKey(failure.error, failure.path);
+        const identity =
+          failure.path === undefined
+            ? "traversal"
+            : JSON.stringify([failure.phase ?? "read", failure.path]);
+        const previous = this.#reportedFailures.get(identity);
+        this.#reportedFailures.set(identity, key);
         if (seen.has(key)) continue;
         seen.add(key);
-        notify(() => this.#options.onError?.(failure.error));
+        if (previous !== key)
+          notify(() => this.#options.onError?.(failure.error, true));
       }
     };
     if (!blocked && traversalFailure) throw traversalFailure.error;
@@ -398,10 +413,11 @@ export class ScanCostTracker {
         session.events = [];
         try {
           await readSessionUsage(path, session, repository);
+          this.#reportedFailures.delete(JSON.stringify(["replay", path]));
         } catch (error) {
           if (!observeHealthySessions) throw error;
           blocked ??= [tracked, error];
-          relevant.push({ session: tracked, error, path });
+          relevant.push({ session: tracked, error, path, phase: "replay" });
           replayExhausted ||= isDescriptorExhaustion(error);
           continue;
         }

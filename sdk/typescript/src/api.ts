@@ -2343,7 +2343,7 @@ export class CodexSecurity {
         notifyObserver(options, "onWorkerStatus")(status);
       };
       const reportedInaccessibleSessionLogs = new Set<string>();
-      const reportTrackingError = (error: unknown): void => {
+      const reportTrackingError = (error: unknown, secondary = false): void => {
         if (options.maxCostUsd !== undefined) {
           costAbortController.abort(error);
           return;
@@ -2355,7 +2355,7 @@ export class CodexSecurity {
           typeof error["path"] === "string"
         ) {
           const path = error["path"];
-          if (reportedInaccessibleSessionLogs.has(path)) return;
+          if (!secondary && reportedInaccessibleSessionLogs.has(path)) return;
           reportedInaccessibleSessionLogs.add(path);
         }
         notifyObserver(

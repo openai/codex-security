@@ -3786,6 +3786,96 @@ if __name__ == "__main__":
     },
   );
 
+  test("reports recovered or changed secondary permission errors without repeating unchanged warnings", async () => {
+    const { root, repository, codexHome, scanDir } = await scanDirectories();
+    const sessions = join(codexHome, "sessions");
+    await mkdir(sessions);
+    const primary = join(sessions, "a-primary.jsonl"),
+      secondary = join(sessions, "b-secondary.jsonl");
+    await writeFile(primary, "{}\n");
+    await writeFile(secondary, "{}\n");
+    let denied = true,
+      code = "EACCES",
+      polls = 0;
+    const gates = Array.from({ length: 4 }, () =>
+      Promise.withResolvers<void>(),
+    );
+    const originalOpen = fsPromises.open;
+    const opening = spyOn(fsPromises, "open").mockImplementation(
+      async (...args: Parameters<typeof fsPromises.open>) => {
+        const path = String(args[0]);
+        if (path === primary || (path === secondary && denied))
+          throw Object.assign(
+            new Error(
+              `Synthetic ${path === primary ? "EIO" : code} ${basename(path)}`,
+            ),
+            {
+              code: path === primary ? "EIO" : code,
+              syscall: "open",
+              path,
+            },
+          );
+        return originalOpen(...args);
+      },
+    );
+    const warnings: string[] = [];
+    const warningCounts: number[] = [];
+    const secondaryWarnings = () =>
+      warnings.filter((warning) => warning.includes("b-secondary.jsonl"));
+    const client = TestClient.withDependencies({
+      ...scanRuntimeDependencies(codexHome, scanDir),
+      createCodex: () => ({
+        startThread: () => ({
+          id: null,
+          async runStreamed() {
+            await copyCompletedScan(root);
+            async function* events(): AsyncGenerator<ThreadEvent> {
+              yield { type: "thread.started", thread_id: "thread-1" };
+              await gates[0]!.promise;
+              warningCounts.push(secondaryWarnings().length);
+              denied = false;
+              await gates[1]!.promise;
+              denied = true;
+              await appendFile(secondary, "{}\n");
+              await gates[2]!.promise;
+              warningCounts.push(secondaryWarnings().length);
+              code = "EPERM";
+              await gates[3]!.promise;
+              warningCounts.push(secondaryWarnings().length);
+              denied = false;
+              for await (const event of completedEvents())
+                if (event.type !== "thread.started") yield event;
+            }
+            return { events: events() };
+          },
+        }),
+      }),
+    });
+    const keepAlive = setTimeout(() => {}, 10_000);
+    try {
+      await expect(
+        client.run(repository, {
+          onActivity: () => {},
+          onWarning: (warning) => {
+            warnings.push(warning);
+            if (warning.includes("a-primary.jsonl")) {
+              polls++;
+              const index = [3, 4, 7, 8].indexOf(polls);
+              if (index !== -1) gates[index]!.resolve();
+            }
+          },
+        }),
+      ).resolves.toMatchObject({ threadId: "thread-1" });
+      expect(warningCounts).toEqual([1, 2, 3]);
+      expect(secondaryWarnings()).toHaveLength(3);
+    } finally {
+      clearTimeout(keepAlive);
+      for (const gate of gates) gate.resolve();
+      await client.close();
+      opening.mockRestore();
+    }
+  });
+
   test.each(["agent_message", "command_execution"] as const)(
     "uses the actual scanner inventory instead of a stale workbench estimate (%s)",
     async (itemType) => {

@@ -1300,6 +1300,159 @@ describe("live scan cost tracking", () => {
     },
   );
 
+  test.each(["EACCES", "EIO"])(
+    "reports unchanged secondary %s errors once until recovery or change",
+    async (code) => {
+      const home = await codexHome(),
+        directory = join(home, "sessions");
+      await filesystem.mkdir(directory);
+      const paths = Array.from({ length: 6 }, (_, index) =>
+        join(directory, `${index}.jsonl`),
+      );
+      for (const path of paths) await writeFile(path, "{}\n");
+      const failed = new Set(paths);
+      const messages = new Map<string, string>();
+      const diagnostics: Array<{ error: unknown; secondary?: boolean }> = [];
+      const options: ConstructorParameters<typeof ScanCostTracker>[0] = {
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        onError: (error, secondary) => diagnostics.push({ error, secondary }),
+      };
+      const tracker = new ScanCostTracker(options);
+      tracker.start("scan-thread");
+      options.onSessionEvent = () => {};
+      const opened = filesystem.open,
+        listed = filesystem.readdir;
+      let attempts = 0;
+      const opening = spyOn(filesystem, "open").mockImplementation(
+        async (...args: Parameters<typeof filesystem.open>) => {
+          const path = String(args[0]);
+          if (failed.has(path)) {
+            attempts++;
+            throw Object.assign(
+              new Error(messages.get(path) ?? `Synthetic ${code} ${path}`),
+              {
+                code,
+                syscall: "open",
+                path,
+              },
+            );
+          }
+          return opened(...args);
+        },
+      );
+      const listing = spyOn(filesystem, "readdir").mockImplementation(
+        async (...args) => {
+          const entries = await Reflect.apply(listed, filesystem, args);
+          if (String(args[0]) === directory)
+            entries.sort((a: { name: string }, b: { name: string }) =>
+              a.name.localeCompare(b.name),
+            );
+          return entries;
+        },
+      );
+      const refresh = () =>
+        expect(tracker.refresh()).rejects.toMatchObject({ path: paths[0] });
+      try {
+        for (let index = 0; index < 3; index++) await refresh();
+        expect(attempts).toBe(18);
+        expect(diagnostics).toHaveLength(5);
+        failed.delete(paths[1]!);
+        await refresh();
+        failed.add(paths[1]!);
+        await appendFile(paths[1]!, "{}\n");
+        await refresh();
+        expect(diagnostics).toHaveLength(6);
+        failed.clear();
+        await tracker.refresh();
+        for (const path of paths) {
+          failed.add(path);
+          await appendFile(path, "{}\n");
+        }
+        for (let index = 0; index < 3; index++) await refresh();
+        expect(diagnostics).toHaveLength(11);
+        messages.set(paths[2]!, "Synthetic changed I/O diagnostic");
+        await refresh();
+        expect(diagnostics).toHaveLength(12);
+        expect(diagnostics.every(({ secondary }) => secondary === true)).toBe(
+          true,
+        );
+      } finally {
+        opening.mockRestore();
+        listing.mockRestore();
+        await tracker.stop();
+      }
+    },
+  );
+
+  test.each(["EMFILE", "ENFILE"])(
+    "preserves the first directory %s diagnostic before a replay failure",
+    async (code) => {
+      const home = await codexHome(),
+        usage = { input_tokens: 10 };
+      await writeSession(home, "scan-thread", usage);
+      const worker = await writeSession(home, "a-worker", usage, {
+        parent: "scan-thread",
+      });
+      const options: ConstructorParameters<typeof ScanCostTracker>[0] = {
+        codexHome: home,
+        model: "gpt-5.6-sol",
+      };
+      const diagnostics: unknown[] = [];
+      options.onError = (error) => diagnostics.push(error);
+      const tracker = new ScanCostTracker(options);
+      tracker.start("scan-thread");
+      options.onActivity = () => {};
+      await tracker.refresh();
+      options.onSessionEvent = () => {};
+      await appendFile(worker, "{}\n");
+      const tail = join(parse(worker).dir, "zz-next");
+      await filesystem.mkdir(tail);
+      const denied = Object.assign(new Error("Synthetic worker denial"), {
+        code: "EACCES",
+        syscall: "open",
+        path: worker,
+      });
+      const directoryError = Object.assign(
+        new Error("Synthetic directory exhaustion"),
+        { code, syscall: "scandir", path: tail },
+      );
+      const replayError = Object.assign(
+        new Error("Synthetic replay exhaustion"),
+        { code, syscall: "open" },
+      );
+      const listed = filesystem.readdir;
+      const listing = spyOn(filesystem, "readdir").mockImplementation(
+        async (...args) => {
+          if (String(args[0]) === tail) throw directoryError;
+          const entries = await Reflect.apply(listed, filesystem, args);
+          if (String(args[0]) === parse(worker).dir)
+            entries.sort((a: { name: string }, b: { name: string }) =>
+              a.name.localeCompare(b.name),
+            );
+          return entries;
+        },
+      );
+      let replayAttempts = 0;
+      const opening = spyOn(filesystem, "open").mockImplementation(
+        async (...args: Parameters<typeof filesystem.open>) => {
+          if (String(args[0]) === worker) throw denied;
+          replayAttempts++;
+          throw replayError;
+        },
+      );
+      try {
+        await expect(tracker.refresh()).rejects.toBe(denied);
+        expect(replayAttempts).toBe(1);
+        expect(diagnostics).toEqual([directoryError]);
+      } finally {
+        opening.mockRestore();
+        listing.mockRestore();
+        await tracker.stop();
+      }
+    },
+  );
+
   test.each([false, true])(
     "keeps budget traversal errors and uncapped file priority, budget=%s",
     async (budget) => {

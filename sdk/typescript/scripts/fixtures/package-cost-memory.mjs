@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { packageSmokeTimeouts } from "../package-smoke-timeouts.mjs";
 
 const installedRoot = await realpath(process.argv[2]);
-const temporaryRoot = await realpath(tmpdir());
+const temporaryRoot = await realpath(process.argv[3]);
 const root = await realpath(
   await mkdtemp(join(temporaryRoot, "package-cost-history-")),
 );
