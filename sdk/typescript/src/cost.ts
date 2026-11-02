@@ -362,7 +362,8 @@ export class ScanCostTracker {
       }
     } catch (error) {
       if (fatalFileFailure && !blocked) throw fatalFileFailure.error;
-      if (unreadable.size === 0) throw error;
+      if (this.#options.maxCostUsd !== undefined || unreadable.size === 0)
+        throw error;
       traversalFailure = { error };
     }
 

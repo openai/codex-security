@@ -1298,7 +1298,7 @@ describe("live scan cost tracking", () => {
   );
 
   test.each([false, true])(
-    "retains an identified file failure before a traversal failure, budget=%s",
+    "keeps budget traversal errors and uncapped file priority, budget=%s",
     async (budget) => {
       const home = await codexHome(),
         usage = { input_tokens: 10 };
@@ -1365,7 +1365,7 @@ describe("live scan cost tracking", () => {
         },
       );
       try {
-        await expect(tracker.refresh()).rejects.toBe(first);
+        await expect(tracker.refresh()).rejects.toBe(budget ? later : first);
         expect(
           activity.filter(
             (value) => value.description === "Healthy worker output.",
