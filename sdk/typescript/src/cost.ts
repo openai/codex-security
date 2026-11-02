@@ -1,6 +1,6 @@
-import { parseJson } from "./value.js";
+import { notify, parseJson } from "./value.js";
 import { open, readdir, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
@@ -261,7 +261,17 @@ export class ScanCostTracker {
         this.#options.onSessionEvent !== undefined ||
         this.#options.onWorkerEvent !== undefined);
     const unreadable = new Map<SessionUsage, unknown>();
+    const failures: Array<{
+      session: SessionUsage;
+      error: unknown;
+      path: string;
+    }> = [];
+    const capturedEvents = new Map<
+      SessionUsage,
+      NonNullable<SessionUsage["events"]>
+    >();
     let blocked: [SessionUsage, unknown] | undefined;
+    let traversalFailure: { error: unknown } | undefined;
     try {
       for await (const path of sessionFiles(
         join(this.#options.codexHome, "sessions"),
@@ -271,8 +281,14 @@ export class ScanCostTracker {
           session = createSessionUsage(observeUsage);
           this.#sessions.set(path, session);
         }
+        const capture =
+          this.#options.onSessionEvent !== undefined &&
+          session.events === undefined &&
+          session.offset === 0;
+        if (capture) session.events = [];
         try {
           await readSessionUsage(path, session, repository);
+          if (capture) capturedEvents.set(session, session.events!);
         } catch (error) {
           if (session.threadId === null) {
             if (!observeHealthySessions || !isBlockedLogRead(error))
@@ -280,11 +296,14 @@ export class ScanCostTracker {
             blocked ??= [session, error];
           }
           unreadable.set(session, error);
+          failures.push({ session, error, path });
+        } finally {
+          if (capture) session.events = undefined;
         }
       }
     } catch (error) {
-      // Traversal stopped. Preserve the read error that already blocked this poll.
-      if (!blocked) throw error;
+      if (unreadable.size === 0) throw error;
+      traversalFailure = { error };
     }
 
     const included = new Set([this.#threadId, ...this.#receipts.keys()]);
@@ -334,7 +353,38 @@ export class ScanCostTracker {
         ([session]) =>
           session.threadId !== null && included.has(session.threadId),
       );
-    if (blocked && !observeHealthySessions) throw blocked[1];
+    const relevant = failures.filter(
+      ({ session }) =>
+        session.threadId === null || included.has(session.threadId),
+    );
+    const reportSecondary = () => {
+      if (!blocked || this.#options.onError === undefined) return;
+      const [primarySession, primaryError] = blocked;
+      const first = relevant.find(
+        ({ session, error }) =>
+          session === primarySession && error === primaryError,
+      );
+      const seen = new Set([trackingFailureKey(primaryError, first?.path)]);
+      const remaining: Array<{ error: unknown; path?: string }> = [
+        ...relevant,
+        ...(traversalFailure ? [traversalFailure] : []),
+      ];
+      for (const failure of remaining) {
+        const key = trackingFailureKey(failure.error, failure.path);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        notify(() => this.#options.onError?.(failure.error));
+      }
+    };
+    if (!blocked && traversalFailure) throw traversalFailure.error;
+    if (blocked && !observeHealthySessions) {
+      if (this.#options.maxCostUsd === undefined) reportSecondary();
+      throw blocked[1];
+    }
+    let replayExhausted =
+      relevant.some(({ error }) => isDescriptorExhaustion(error)) ||
+      (traversalFailure !== undefined &&
+        isDescriptorExhaustion(traversalFailure.error));
 
     const usages = new Map(this.#receipts);
     for (const [path, tracked] of this.#sessions) {
@@ -346,10 +396,13 @@ export class ScanCostTracker {
       )
         continue;
       let session = tracked;
+      const captured = capturedEvents.get(tracked);
+      if (captured !== undefined) session.events = captured;
       if (
         this.#options.onSessionEvent !== undefined &&
         session.events === undefined
       ) {
+        if (replayExhausted) continue;
         // Replay only newly associated sessions, including their early events.
         session = createSessionUsage(observeUsage);
         session.events = [];
@@ -358,6 +411,8 @@ export class ScanCostTracker {
         } catch (error) {
           if (!observeHealthySessions) throw error;
           blocked ??= [tracked, error];
+          relevant.push({ session: tracked, error, path });
+          replayExhausted ||= isDescriptorExhaustion(error);
           continue;
         }
         this.#sessions.set(path, session);
@@ -405,7 +460,10 @@ export class ScanCostTracker {
       }
     }
     // Healthy sessions can report activity even when a read blocks the total.
-    if (blocked) throw blocked[1];
+    if (blocked) {
+      reportSecondary();
+      throw blocked[1];
+    }
     let usage: ScanTokenUsage | null = null;
     let complete = true;
     for (const value of usages.values()) {
@@ -978,6 +1036,24 @@ function subtractTokenUsage(
     reasoning_output_tokens:
       usage.reasoning_output_tokens - inherited.reasoning_output_tokens,
   });
+}
+
+function isDescriptorExhaustion(error: unknown): boolean {
+  return isRecord(error) && error["code"] === "EMFILE";
+}
+
+function trackingFailureKey(error: unknown, path?: string): unknown {
+  if (!isRecord(error)) return error;
+  const code = error["code"],
+    syscall = error["syscall"];
+  if (code === "EMFILE") return "descriptor-exhaustion";
+  if (
+    (code === "EACCES" || code === "EPERM") &&
+    (syscall === "stat" || syscall === "statx") &&
+    path !== undefined
+  )
+    return JSON.stringify([code, syscall, dirname(path)]);
+  return JSON.stringify([code, syscall, error["path"], error["message"]]);
 }
 
 function isBlockedLogRead(error: unknown): boolean {

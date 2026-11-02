@@ -1225,6 +1225,258 @@ describe("live scan cost tracking", () => {
     }
   });
 
+  test.each([false, true])(
+    "reports secondary I/O failures with pathless=%s",
+    async (pathless) => {
+      const home = await codexHome(),
+        directory = join(home, "sessions");
+      await filesystem.mkdir(directory);
+      const first = join(directory, "a.jsonl"),
+        others = Array.from({ length: pathless ? 5 : 1 }, (_, index) =>
+          join(directory, `b${index}.jsonl`),
+        );
+      for (const file of [first, ...others]) await writeFile(file, "{}\n");
+      const primary = Object.assign(new Error("Synthetic denied open"), {
+        code: "EACCES",
+        syscall: "open",
+        path: first,
+      });
+      const secondary: unknown[] = [],
+        reads: Array<{ mockRestore(): void }> = [];
+      const options: ConstructorParameters<typeof ScanCostTracker>[0] = {
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        onError: (error) => secondary.push(error),
+      };
+      const tracker = new ScanCostTracker(options);
+      tracker.start("scan-thread");
+      options.onSessionEvent = () => {};
+      const opened = filesystem.open,
+        listed = filesystem.readdir;
+      const listing = spyOn(filesystem, "readdir").mockImplementation(
+        async (...args) => {
+          const entries = await Reflect.apply(listed, filesystem, args);
+          if (String(args[0]) === directory)
+            entries.sort((a: { name: string }, b: { name: string }) =>
+              a.name.localeCompare(b.name),
+            );
+          return entries;
+        },
+      );
+      const opening = spyOn(filesystem, "open").mockImplementation(
+        async (...args: Parameters<typeof filesystem.open>) => {
+          if (String(args[0]) === first) throw primary;
+          if (others.includes(String(args[0]))) {
+            const failure = Object.assign(
+              new Error("Synthetic I/O read failure"),
+              {
+                code: "EIO",
+                syscall: pathless ? "read" : "open",
+                ...(pathless ? {} : { path: String(args[0]) }),
+              },
+            );
+            if (!pathless) throw failure;
+            const handle = await opened(...args);
+            reads.push(spyOn(handle, "read").mockRejectedValue(failure));
+            return handle;
+          }
+          return opened(...args);
+        },
+      );
+      try {
+        await expect(tracker.refresh()).rejects.toBe(primary);
+        expect(secondary).toHaveLength(1);
+        expect(secondary[0]).toMatchObject({ code: "EIO" });
+      } finally {
+        opening.mockRestore();
+        listing.mockRestore();
+        for (const read of reads) read.mockRestore();
+        await tracker.stop();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "retains an identified file failure before a traversal failure, budget=%s",
+    async (budget) => {
+      const home = await codexHome(),
+        usage = { input_tokens: 10 };
+      await writeSession(home, "scan-thread", usage);
+      const healthy = await writeSession(home, "a-healthy", usage, {
+          parent: "scan-thread",
+        }),
+        blocked = await writeSession(home, "z-blocked", usage, {
+          parent: "scan-thread",
+        });
+      const activity: ScanActivity[] = [],
+        events: ScanSessionEvent[] = [],
+        secondary: unknown[] = [];
+      const options: ConstructorParameters<typeof ScanCostTracker>[0] = {
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        repository: home,
+        onError: (error) => secondary.push(error),
+      };
+      const tracker = new ScanCostTracker(options);
+      tracker.start("scan-thread");
+      options.onActivity = (value) => activity.push(value);
+      options.onSessionEvent = (value) => events.push(value);
+      await tracker.refresh();
+      activity.length = events.length = 0;
+      if (budget) options.maxCostUsd = 5;
+      const output = {
+        id: "healthy-output",
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Healthy worker output." }],
+      };
+      await appendSessionItem(healthy, output);
+      await appendFile(blocked, "{}\n");
+      const tail = join(parse(healthy).dir, "zz-next");
+      await filesystem.mkdir(tail);
+      const first = Object.assign(new Error("Synthetic denied worker"), {
+          code: "EACCES",
+          syscall: "open",
+          path: blocked,
+        }),
+        later = Object.assign(new Error("Synthetic directory failure"), {
+          code: "EIO",
+          syscall: "scandir",
+          path: tail,
+        });
+      const opened = filesystem.open,
+        listed = filesystem.readdir;
+      const opening = spyOn(filesystem, "open").mockImplementation(
+        async (...args: Parameters<typeof filesystem.open>) => {
+          if (String(args[0]) === blocked) throw first;
+          return opened(...args);
+        },
+      );
+      const listing = spyOn(filesystem, "readdir").mockImplementation(
+        async (...args) => {
+          if (String(args[0]) === tail) throw later;
+          const entries = await Reflect.apply(listed, filesystem, args);
+          if (String(args[0]) === parse(healthy).dir)
+            entries.sort((a: { name: string }, b: { name: string }) =>
+              a.name.localeCompare(b.name),
+            );
+          return entries;
+        },
+      );
+      try {
+        await expect(tracker.refresh()).rejects.toBe(first);
+        expect(
+          activity.filter(
+            (value) => value.description === "Healthy worker output.",
+          ),
+        ).toHaveLength(budget ? 0 : 1);
+        expect(secondary).toEqual(budget ? [] : [later]);
+      } finally {
+        opening.mockRestore();
+        listing.mockRestore();
+        await tracker.stop();
+      }
+      expect(
+        activity.filter(
+          (value) => value.description === "Healthy worker output.",
+        ),
+      ).toHaveLength(1);
+    },
+  );
+
+  test.each([false, true])(
+    "stops pending replay opens after descriptor exhaustion, earlier error=%s",
+    async (earlier) => {
+      const home = await codexHome(),
+        usage = { input_tokens: 10 };
+      await writeSession(home, "scan-thread", usage);
+      const denied = await writeSession(home, "a-denied", usage, {
+          parent: "scan-thread",
+        }),
+        healthy = await writeSession(home, "b-healthy", usage, {
+          parent: "scan-thread",
+        });
+      const legacy: string[] = [];
+      for (let index = 0; index < 12; index++)
+        legacy.push(
+          await writeSession(home, `c-legacy-${index}`, usage, {
+            parent: "middle",
+          }),
+        );
+      const events: ScanSessionEvent[] = [],
+        activity: ScanActivity[] = [],
+        secondary: unknown[] = [];
+      const options: ConstructorParameters<typeof ScanCostTracker>[0] = {
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        repository: home,
+        onError: (error) => secondary.push(error),
+      };
+      const tracker = new ScanCostTracker(options);
+      tracker.start("scan-thread");
+      options.onSessionEvent = (value) => events.push(value);
+      options.onActivity = (value) => activity.push(value);
+      await tracker.refresh();
+      await writeSession(home, "middle", usage, { parent: "scan-thread" });
+      await appendSessionItem(healthy, {
+        id: "buffered",
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Buffered worker output." }],
+      });
+      await appendFile(denied, "{}\n");
+      const first = Object.assign(new Error("Synthetic denied worker"), {
+          code: "EACCES",
+          syscall: "open",
+          path: denied,
+        }),
+        exhausted = Object.assign(
+          new Error("Synthetic descriptor exhaustion"),
+          { code: "EMFILE", syscall: "open" },
+        );
+      let attempts = 0;
+      const opened = filesystem.open;
+      const opening = spyOn(filesystem, "open").mockImplementation(
+        async (...args: Parameters<typeof filesystem.open>) => {
+          const file = String(args[0]);
+          if (earlier && file === denied) throw first;
+          if (legacy.includes(file)) {
+            attempts++;
+            throw exhausted;
+          }
+          return opened(...args);
+        },
+      );
+      try {
+        await expect(tracker.refresh()).rejects.toBe(
+          earlier ? first : exhausted,
+        );
+        expect(attempts).toBe(1);
+        expect(secondary).toEqual(earlier ? [exhausted] : []);
+        expect(
+          activity.filter(
+            (value) => value.description === "Buffered worker output.",
+          ),
+        ).toHaveLength(1);
+      } finally {
+        opening.mockRestore();
+        await tracker.stop();
+      }
+      expect(
+        events.filter(
+          (value) =>
+            value.threadId.startsWith("c-legacy-") &&
+            value.event["type"] === "session_meta",
+        ),
+      ).toHaveLength(12);
+      expect(
+        activity.filter(
+          (value) => value.description === "Buffered worker output.",
+        ),
+      ).toHaveLength(1);
+    },
+  );
+
   test.each([...parentFields])(
     "observes worker metadata without status markers or usage via %s",
     async (parentField) => {
