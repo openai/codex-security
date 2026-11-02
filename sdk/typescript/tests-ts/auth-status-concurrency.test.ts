@@ -1,8 +1,9 @@
+import * as childProcess from "node:child_process";
 import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expect, mock, test } from "bun:test";
+import { expect, mock, spyOn, test } from "bun:test";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 for (const surface of ["CLI", "SDK"] as const) {
@@ -210,7 +211,6 @@ test(verificationAbort, async () => {
   const signals: Array<AbortSignal | undefined> = [];
   const targets = { ...(await import("../src/targets.js")) };
   const runtime = { ...(await import("../src/runtime.js")) };
-  const auth = { ...(await import("../src/auth.js")) };
   mock.module("../src/targets.js", () => ({
     ...targets,
     enclosingGitWorktreeRoots: async (
@@ -230,15 +230,14 @@ test(verificationAbort, async () => {
       return runtime.acquireCodexSecurityCredentialHomeLock(...args);
     },
   }));
-  mock.module("../src/auth.js", () => ({
-    ...auth,
-    accountStatus: async (...args: Parameters<typeof auth.accountStatus>) => {
-      signals.push(args[2]);
-      controller.abort(reason);
-      args[2]?.throwIfAborted();
-      return { authenticated: false, details: "" };
-    },
-  }));
+  const start = childProcess.spawn;
+  using probes = spyOn(childProcess, "spawn").mockImplementation(((
+    ...args: Parameters<typeof start>
+  ) => {
+    const child = start(...args);
+    child.stdout!.once("data", () => controller.abort(reason));
+    return child;
+  }) as typeof start);
   try {
     await fs.mkdir(directory);
     const { runCodexSkillCommand } = await import("../src/cli.js");
@@ -254,15 +253,23 @@ test(verificationAbort, async () => {
           stdout: sink,
           stderr: sink,
         },
-        { command: process.execPath },
+        {
+          command: process.execPath,
+          args: [
+            "-e",
+            "if (process.argv.slice(-2).join(' ') !== 'login status') process.exit(1); " +
+              "process.on('SIGTERM', () => {}); process.stdout.write('ready'); " +
+              "setTimeout(() => process.exit(1), 4_000);",
+            "--",
+          ],
+        },
         environment,
       ),
-    ).rejects.toBe(reason);
-    expect(signals).toEqual([
-      controller.signal,
-      controller.signal,
-      controller.signal,
-    ]);
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(signals).toEqual([controller.signal, controller.signal]);
+    expect(probes).toHaveBeenCalledTimes(1);
+    const probe = probes.mock.results[0]!.value as ReturnType<typeof start>;
+    if (process.platform !== "win32") expect(probe.signalCode).toBe("SIGKILL");
     const home = await runtime.prepareCodexSecurityCredentialHome(environment);
     const release = await runtime.acquireCodexSecurityCredentialHomeLock(home);
     await release();

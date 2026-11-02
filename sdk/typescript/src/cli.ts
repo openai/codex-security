@@ -402,6 +402,7 @@ const FRAMEWORK_VALUE_OPTIONS = new Set([
   "--token-limit",
   "--token-offset",
 ]);
+const TOKEN_OUTPUT_OPTION = /^--token-(?:count|limit|offset)(?:=|$)/u;
 const OUTPUT_OPTION =
   /^--(?:format|filter-output|full-output|token-count|token-limit|token-offset)(?:=|$)/u;
 const HIDE_CURSOR = "\u001B[?25l";
@@ -6129,9 +6130,9 @@ export async function main(
       async run({ format, options, error: incurError }) {
         let failureReported = false;
         const structured = format === "json" || format === "jsonl";
-        const reportDiagnostic = (chunk: string | Uint8Array): void => {
-          if (!batchedVerification || !structured)
-            void writeCliOutput(errorOutput, chunk).catch(() => {});
+        const reportDiagnostic = async (chunk: string): Promise<void> => {
+          if (!batchedVerification || !structured || frameworkFlags.tokenOutput)
+            await writeCliOutput(errorOutput, chunk).catch(() => {});
         };
         try {
           if (options.host)
@@ -6214,8 +6215,6 @@ export async function main(
             const controller = batchedVerification
               ? new AbortController()
               : undefined;
-            const ignoreStderrError = (): void => {};
-            if (controller) errorOutput.on?.("error", ignoreStderrError);
             const removeSignals =
               controller && listenForAbort(dependencies, controller);
             let restoration: Promise<void> | undefined;
@@ -6237,16 +6236,18 @@ export async function main(
                   identifiers;
                 const response = captureOutput();
                 const diagnostics = captureOutput();
-                const verificationErrors = {
-                  write(chunk: string | Uint8Array) {
-                    diagnostics.stream.write(chunk);
-                    if (presentProgress) {
-                      progress.stop();
-                      reportDiagnostic(chunk);
-                    }
-                    return true;
-                  },
-                };
+                const verificationErrors = presentProgress
+                  ? new NodeWritable({
+                      write(chunk, _encoding, callback) {
+                        diagnostics.stream.write(chunk);
+                        progress.stop();
+                        void writeCliOutput(errorOutput, chunk).then(
+                          () => callback(),
+                          callback,
+                        );
+                      },
+                    })
+                  : diagnostics.stream;
                 exitCode = await runSkill(
                   "verify-fix",
                   selected === undefined ? [...positionals, ...imports] : [],
@@ -6276,7 +6277,7 @@ export async function main(
                   const message = diagnostics.text().trim();
                   failureReported = message.length > 0;
                   if (batchedVerification && failureReported)
-                    reportDiagnostic(diagnostics.text());
+                    await reportDiagnostic(diagnostics.text());
                   throw new CodexSecurityError(
                     message ||
                       `Codex verification failed with exit code ${exitCode}.`,
@@ -6295,12 +6296,8 @@ export async function main(
             } catch (error) {
               if (!controller?.signal.aborted) throw error;
             } finally {
-              try {
-                const stopped = stopProgress();
-                if (output.isTTY) await stopped;
-              } finally {
-                if (controller) errorOutput.off?.("error", ignoreStderrError);
-              }
+              const stopped = stopProgress();
+              if (output.isTTY) await stopped;
             }
             if (controller?.signal.aborted) {
               exitCode = controller.signal.reason === "SIGINT" ? 130 : 143;
@@ -6327,7 +6324,9 @@ export async function main(
           exitCode = 2;
           const message = errorMessage(error);
           if (!failureReported)
-            reportDiagnostic(`codex-security: ${diagnosticValue(message)}\n`);
+            await reportDiagnostic(
+              `codex-security: ${diagnosticValue(message)}\n`,
+            );
           return finishScan(
             { exitCode, error: message },
             format,
@@ -7375,7 +7374,7 @@ export async function main(
     const failureArguments = ["render", "--format", filteredScanFailure.format];
     for (let index = 0; index < argv.length; index += 1) {
       const argument = argv[index]!;
-      if (!/^--token-(?:count|limit|offset)(?:=|$)/u.test(argument)) continue;
+      if (!TOKEN_OUTPUT_OPTION.test(argument)) continue;
       const separator = argument.indexOf("=");
       if (separator !== -1)
         failureArguments.push(
@@ -7742,6 +7741,7 @@ function frameworkOutputFlags(argv: readonly string[]) {
   let hideDisabledRoute = false;
   let fullOutput = false;
   let rawCollector = false;
+  let tokenOutput = false;
   for (let index = 0; index < argv.length; index++) {
     const value = argv[index]!;
     if (
@@ -7753,6 +7753,7 @@ function frameworkOutputFlags(argv: readonly string[]) {
       hideDisabledRoute = true;
     if (value === "--full-output") fullOutput = true;
     if (value === "--json") rawCollector = true;
+    if (TOKEN_OUTPUT_OPTION.test(value)) tokenOutput = true;
     if (FRAMEWORK_VALUE_OPTIONS.has(value)) {
       const operand = argv[++index];
       if (value === "--format")
@@ -7760,7 +7761,11 @@ function frameworkOutputFlags(argv: readonly string[]) {
           operand === "json" || operand === "jsonl" || operand === "yaml";
     }
   }
-  return { hideDisabledRoute, rawCollector: rawCollector && !fullOutput };
+  return {
+    hideDisabledRoute,
+    rawCollector: rawCollector && !fullOutput,
+    tokenOutput,
+  };
 }
 
 function cliValueOptions(

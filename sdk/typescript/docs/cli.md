@@ -2618,9 +2618,11 @@ fixed, `1` when any remain vulnerable, and `2` for inconclusive/failed checks.
 With `--json` or `--format jsonl`, authentication and execution failures return
 `status: "failed"`, `code: "VERIFICATION_FAILED"`, and `message`. With
 `--full-output`, these failures use an `ok: false` error envelope. If a saved
-selection exceeds one request, the CLI sends the failure message only to
-the structured output. Other formats report failures
-on stderr. Interruptions retain exit codes `130` and `143` without a result.
+selection exceeds one request, the CLI sends the failure message only to the
+structured output. With `--token-count`, `--token-limit`, or `--token-offset`,
+stderr also carries the diagnostic so it remains available alongside a count
+or a partial result. Other formats report failures on stderr. Interruptions
+retain exit codes `130` and `143` without a result.
 
 ## Command discovery and integrations
 

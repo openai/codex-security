@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Writable } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
+import { writeArtifactOutput } from "../src/artifact-export.js";
 import { main, runCodexSkillCommand } from "../src/cli.js";
 import { remediationPrompt, verificationBatches } from "../src/remediation.js";
 import { VERSION } from "../src/version.js";
@@ -396,6 +397,57 @@ describe("read-only finding verification", () => {
       results: [{ id: "occ_1", status: "fixed", evidence }],
     });
   });
+
+  test.each(["worker", "planner"])(
+    "retains a saved verification %s failure on stderr with token-limited stdout",
+    async (failure) => {
+      const result = fakeResult(["high", "high"]);
+      for (const [index, finding] of result.findings.findings.entries()) {
+        finding.occurrenceId = `occ_${index}`;
+        finding.title = "x".repeat(failure === "worker" ? 530_000 : 1 << 20);
+      }
+      const workerMessage = "Synthetic verification worker failed.";
+      const message =
+        failure === "worker" ? workerMessage : "Finding occ_0 cannot fit";
+      const deps = dependencies({
+        result,
+        onWorkbench: () => ({
+          scan: {
+            scanId: "scan",
+            targetPath: "/saved/repository",
+            findings: result.findings.findings as unknown as JsonObject[],
+          },
+        }),
+        onCodex: (_args, output) => {
+          output!.stderr.write(`${workerMessage}\n`);
+          return 1;
+        },
+      });
+      for (const flags of [
+        ["--json", "--token-count"],
+        ["--format=jsonl", "--full-output", "--token-count"],
+        ["--format", "jsonl", "--token-limit=1"],
+        [
+          "--json",
+          "--filter-output=results",
+          "--token-offset",
+          "20",
+          "--token-limit",
+          "1",
+        ],
+      ]) {
+        const { stdout, stderr, runCli } = createCliTest(main);
+        expect(
+          await runCli(["verify-fix", "--scan", "scan", ...flags], deps),
+        ).toBe(2);
+        if (flags.includes("--token-count"))
+          expect(stdout.text()).toMatch(/^\d+\n$/u);
+        else expect(stdout.text()).toContain("[truncated:");
+        expect(stdout.text()).not.toContain(message);
+        expect(stderr.text().split(message)).toHaveLength(2);
+      }
+    },
+  );
 
   test.each([
     ["complete", 1],
@@ -1044,4 +1096,36 @@ lines.once("line", () => process.stdout.write(JSON.stringify({
       expect(onCodex).not.toHaveBeenCalled();
     },
   );
+
+  test("waits for a single worker's stderr diagnostic", async () => {
+    const message = "One worker failed.\n";
+    const writeStarted = Promise.withResolvers<() => void>();
+    const stderr = new Writable({
+      write(chunk, _encoding, callback) {
+        if (chunk.toString() === message) writeStarted.resolve(callback);
+        else callback();
+      },
+    });
+    let workerFinished = false;
+    const operation = main(
+      ["verify-fix", "Finding"],
+      capture().stream,
+      stderr,
+      dependencies({
+        onCodex: async (_args, output) => {
+          await writeArtifactOutput(output!.stderr, message);
+          workerFinished = true;
+          return 1;
+        },
+      }),
+    );
+    const finishWrite = await writeStarted.promise;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const finishedBeforeWrite = workerFinished;
+    finishWrite();
+    expect(await operation).toBe(2);
+    expect(finishedBeforeWrite).toBe(false);
+    expect(workerFinished).toBe(true);
+    expect(stderr.writableEnded).toBe(false);
+  });
 });

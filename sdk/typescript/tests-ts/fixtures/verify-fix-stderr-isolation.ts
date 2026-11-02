@@ -1,3 +1,4 @@
+import { throws } from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import { createInterface } from "node:readline";
@@ -244,6 +245,10 @@ setInterval(() => {}, 1_000);
       const error = Object.assign(new Error("Synthetic unrelated error."), {
         code: "EBADF",
       });
+      throws(
+        () => process.stderr.emit("error", error),
+        (caught) => caught === error,
+      );
       const observed = new Promise<Error>((resolve) =>
         process.stderr.once("error", resolve),
       );
