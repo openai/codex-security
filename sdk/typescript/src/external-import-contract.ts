@@ -363,8 +363,40 @@ const evidenceNumber: ValidateNumber = (value) =>
 const rawJson = JSON as JSON & {
   isRawJSON?(value: unknown): value is { rawJSON: string };
 };
-function serializeImportJson(input: unknown, number: ValidateNumber): string {
-  return JSON.stringify(input, (_key, value: unknown) => {
+export class CloudEvidenceDepthError extends Error {
+  constructor() {
+    super("Evidence exceeds the Cloud JSON depth limit of 20.");
+  }
+}
+
+/** JSON omits these object properties, but emits null for the same array elements. */
+export function requireCloudEvidenceDepth(
+  depth: number,
+  holder: object,
+  value: unknown,
+): void {
+  if (
+    depth > 20 &&
+    (Array.isArray(holder) ||
+      (value !== undefined &&
+        typeof value !== "symbol" &&
+        typeof value !== "function"))
+  )
+    throw new CloudEvidenceDepthError();
+}
+
+function serializeImportJson(
+  input: unknown,
+  number: ValidateNumber,
+  limitDepth = false,
+): string {
+  const parents: object[] = [];
+  return JSON.stringify(input, function (this: object, _key, value: unknown) {
+    if (limitDepth) {
+      while (parents.length && parents.at(-1) !== this) parents.pop();
+      requireCloudEvidenceDepth(parents.length, this, value);
+      if (value !== null && typeof value === "object") parents.push(value);
+    }
     // JSON applies Number conversion to wrappers after calling toJSON.
     if (isNumberObject(value)) value = +value;
     if (typeof value === "number") number(value);
@@ -460,10 +492,14 @@ export function validateExternalEvidenceJson(
   rawJsonNumbers(input, target, evidenceNumber);
   if (target === "local") return 0;
   let adjustment = 0;
-  const text = serializeImportJson(input, (value) => {
-    evidenceNumber(value);
-    adjustment += cloudNumberByteAdjustment(value);
-  });
+  const text = serializeImportJson(
+    input,
+    (value) => {
+      evidenceNumber(value);
+      adjustment += cloudNumberByteAdjustment(value);
+    },
+    true,
+  );
   return checkEvidenceSize(
     Buffer.byteLength(text) + adjustment + additionalCloudBytes,
   );
@@ -475,29 +511,41 @@ export function exportedGitHubRecord(
   index: number,
   target: ExternalImportTarget,
 ) {
-  // Check caller-owned data without reading accessors or triggering proxy traps.
-  const adjustment = rawJsonNumbers(
-    { source_data: value },
-    target,
-    evidenceNumber,
-    target === "cloud",
-    true,
-  );
+  // Only the released Cloud reader validated numeric fields hidden by serializers.
+  let adjustment = 0;
+  let previousInvalid: unknown;
+  if (target === "cloud") {
+    try {
+      adjustment = rawJsonNumbers(
+        { source_data: value },
+        target,
+        evidenceNumber,
+        true,
+        true,
+      );
+    } catch (error) {
+      previousInvalid = error;
+    }
+  }
   let invalid: unknown;
-  const text = serializeImportJson({ [index]: value }, (number) => {
-    if (!invalid)
-      try {
-        evidenceNumber(number);
-      } catch (error) {
-        invalid = error;
-      }
-  });
+  const text = serializeImportJson(
+    { [index]: value },
+    (number) => {
+      if (!invalid)
+        try {
+          evidenceNumber(number);
+        } catch (error) {
+          invalid = error;
+        }
+    },
+    target === "cloud",
+  );
   const record: unknown = JSON.parse(text)[index];
   const bytes =
     Buffer.byteLength(text) -
     Buffer.byteLength(JSON.stringify({ [index]: null })) +
     4;
-  return { record, bytes, adjustment, invalid };
+  return { record, bytes, adjustment, previousInvalid, invalid };
 }
 
 /** Combine the observed vendor bytes with the old native mapping's typed fields. */

@@ -49,6 +49,10 @@ import {
   type ExternalPublicationProgress,
   type PreparedExternalPublication,
 } from "../src/external-findings-publish.js";
+import {
+  snapshotNormalizedFindings,
+  type ExternalFindings,
+} from "../src/external-findings.js";
 import { readGitHubFindings } from "../src/github-findings.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
 import {
@@ -101,6 +105,41 @@ const normalized = (id = "vendor-1", severity = "high") => ({
     severity,
     source_data: { id },
   },
+});
+
+test("Cloud stops before expanding a shared subtree beyond its JSON depth limit", async () => {
+  const f = await fixture();
+  let reads = 0;
+  let subtree: Record<string, unknown> = {
+    get score() {
+      reads++;
+      return 7;
+    },
+  };
+  for (let i = 0; i < 7; i++) subtree = { left: subtree, right: subtree };
+  for (let i = 0; i < 20; i++) subtree = { child: subtree };
+  const input: ExternalFindings = {
+    read: 1,
+    findings: [
+      {
+        source_finding_id: "shared-tree",
+        evidence: {
+          title: "Shared tree",
+          severity: "high",
+          source_data: subtree,
+        },
+      },
+    ],
+    excluded: [],
+  };
+
+  await expect(
+    prepareNormalizedExternalPublication(input, options, f.deps),
+  ).rejects.toThrow("Cloud JSON depth limit of 20");
+  expect(reads).toBe(0);
+  expect(f.posts).toHaveLength(0);
+  expect(snapshotNormalizedFindings(input).findings).toHaveLength(1);
+  expect(reads).toBe(128);
 });
 
 test("external publication requires opt-in before reading input or accessing Cloud", async () => {
@@ -5120,6 +5159,56 @@ test("normalized SDK publication rejects unserializable report metadata before u
   expect(f.posts).toHaveLength(0);
 });
 
+test("a native scanner error resumes its released message-only approval", async () => {
+  const { f, directory, prepare, request } = await oldScoreApproval(
+    "evidence",
+    false,
+  );
+  request.request_id = "15ab6427-635d-4537-9975-f7f536155b49";
+  const path = join(
+    directory,
+    "19d4eb5e5738ac54ae3d847f50534f09ac60882b0145fa5abc4260299e7f02b6.pending.json",
+  );
+  const saved = JSON.stringify({
+    accountId: boxedNumberCheckpoints.accountId,
+    requests: [request],
+    inputProjection: {
+      inputDigest:
+        "603ea14278affa7a9a27fc2a624f5a2ce8fd85460f99175bef69a0572430b59b",
+      savedEvidenceDigest:
+        "875a8aec2f1b7c573a6d05d983f6afa0f964a6e1c96d22c8c8691cc2de824ccc",
+    },
+  });
+  await writeFile(path, saved, { mode: 0o600 });
+  const diagnostic = () =>
+    Object.assign(new Error("scanner message"), { code: "E_TEST" });
+  const uncertain = diagnostic();
+  let stackReads = 0;
+  Object.defineProperty(uncertain, "stack", {
+    get() {
+      stackReads++;
+      return "custom stack";
+    },
+  });
+  await expect(prepare(2.5, { errors: [uncertain] })).rejects.toThrow(
+    "cannot be matched",
+  );
+  expect(stackReads).toBe(0);
+  expect(f.posts).toEqual([]);
+  expect(await readFile(path, "utf8")).toBe(saved);
+
+  const report = { errors: [diagnostic()] };
+  const retry = await prepare(2.5, report);
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).receipts[0]!.id).toBe(request.request_id);
+  expect(f.posts).toEqual([JSON.stringify(request)]);
+  const fresh = await prepare(2.5, report);
+  expect(fresh.preview.resumed).toBe(false);
+  expect(fresh.preview.report?.["errors"]).toEqual([
+    expect.objectContaining({ message: "scanner message", code: "E_TEST" }),
+  ]);
+});
+
 test("publication JSON retains native Error messages and scanner diagnostics", async () => {
   const scannerErrors = opengrepJson().errors;
   const error = Object.assign(
@@ -6627,7 +6716,7 @@ test("the GitHub reader resumes a released boxed score whose Buffer fit the Clou
     );
 
   // Rebuild the released request without storing the 256 KiB row in the fixture.
-  const priorReader = { ...normalize() };
+  const priorReader = structuredClone(normalize());
   priorReader.findings[0]!.evidence.source_data = { ...row };
   const template = await prepare();
   const request = JSON.parse(JSON.stringify(template.preview.requests[0]));

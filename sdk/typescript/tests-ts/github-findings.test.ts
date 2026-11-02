@@ -41,7 +41,7 @@ test("captures a record-root serializer with its selection index once", () => {
 });
 
 test.each([7, 2 ** 53])(
-  "a compact export with a deeply shared raw number %i checks that leaf once",
+  "a compact export with a deeply shared raw number %i uses the emitted value",
   (value) => {
     const row = importedAlert();
     let reads = 0;
@@ -56,8 +56,9 @@ test.each([7, 2 ** 53])(
     Object.assign(row.alert, { extension: { graph, toJSON: () => "summary" } });
     const output = normalizeGitHubCodeScanningAlerts([row]);
     expect(reads).toBe(0);
-    if (Number.isSafeInteger(value)) expect(output.findings).toHaveLength(1);
-    else expect(output.excluded[0]?.reason).toContain("safe integer");
+    expect(output.findings[0]?.evidence.source_data?.["alert"]).toMatchObject({
+      extension: "summary",
+    });
   },
 );
 
@@ -160,7 +161,7 @@ test.each(["local", "cloud"] as const)(
 );
 
 test.each(["local", "cloud"] as const)(
-  "rejects unsafe original and exported GitHub numbers on %s",
+  "checks emitted GitHub numbers and retains previous numeric exclusions on %s",
   (target) => {
     function reason(value: unknown) {
       const row = importedAlert();
@@ -174,11 +175,30 @@ test.each(["local", "cloud"] as const)(
       Object.assign(new Number(7), { toJSON: () => 2 ** 53 }),
     ])
       expect(reason(value)).toContain("safe integer");
-    for (const value of [
-      { toJSON: () => NaN },
-      Object.assign(new Number(7), { hidden: Infinity }),
-    ])
-      expect(reason(value)).toContain("finite JSON");
+    expect(reason({ toJSON: () => NaN })).toContain("finite JSON");
+    for (const [metric, exported, previousReason] of [
+      [Object.assign(new Number(7), { hidden: Infinity }), 7, "finite JSON"],
+      [{ x: 2 ** 53, toJSON: () => "summary" }, "summary", "safe integer"],
+    ] as const) {
+      const allowed = importedAlert("refs/heads/first");
+      const row = importedAlert();
+      Object.assign(row.alert, { metric });
+      const result = normalizeGitHubCodeScanningAlerts([allowed, row], target);
+      expect(result.excluded).toEqual([]);
+      expect(result.findings[1]?.evidence.source_data?.["alert"]).toMatchObject(
+        { metric: exported },
+      );
+      if (target === "cloud") {
+        const previous = legacyGitHubFindings(
+          result,
+          structuredClone(result),
+        )?.snapshot;
+        expect(previous?.findings.map((f) => f.source_finding_id)).toEqual([
+          result.findings[0]!.source_finding_id,
+        ]);
+        expect(previous?.excluded[0]?.reason).toContain(previousReason);
+      }
+    }
   },
 );
 
@@ -632,4 +652,81 @@ test("real GitHub readers and mappings preserve explicit ports in repository evi
   }
   expect(codeIds.size).toBe(3);
   expect(advisoryIds.size).toBe(3);
+});
+
+test("Cloud rejects over-depth exported GitHub rows before reading shared leaves", () => {
+  const row = importedAlert();
+  let reads = 0;
+  let graph: unknown = {
+    get value() {
+      reads++;
+      return 1;
+    },
+  };
+  for (let i = 0; i < 7; i++) graph = { left: graph, right: graph };
+  for (let i = 0; i < 22; i++) graph = { next: graph };
+  Object.assign(row.alert, { extension: graph });
+
+  const output = normalizeGitHubCodeScanningAlerts([row]);
+  expect(output.excluded[0]?.reason).toBe(
+    "Evidence exceeds the Cloud JSON depth limit of 20.",
+  );
+  expect(reads).toBe(0);
+  expect(
+    normalizeGitHubCodeScanningAlerts([row], "local").findings,
+  ).toHaveLength(1);
+  expect(reads).toBe(128);
+});
+
+test("an over-depth exported GitHub Buffer can retain its valid native selection", () => {
+  const row = importedAlert();
+  let graph: unknown = Buffer.from([7]);
+  for (let i = 0; i < 16; i++) graph = { next: graph };
+  Object.assign(row.alert, { extension: graph });
+
+  const previous = normalizeGitHubCodeScanningAlerts([structuredClone(row)]);
+  const current = normalizeGitHubCodeScanningAlerts([row]);
+  expect(current.excluded[0]?.reason).toBe(
+    "Evidence exceeds the Cloud JSON depth limit of 20.",
+  );
+  expect(previous.findings).toHaveLength(1);
+  expect(JSON.stringify(legacyGitHubFindings(current, current)?.snapshot)).toBe(
+    JSON.stringify(previous),
+  );
+});
+
+test("an over-depth GitHub export cannot prove a custom serializer's old byte limit", () => {
+  for (const oldPayload of [{ tiny: true }, { pad: "x".repeat(256 * 1024) }]) {
+    const row = importedAlert();
+    let graph: unknown = 1;
+    for (let i = 0; i < 24; i++) graph = { next: graph };
+    const keys: string[] = [];
+    Object.defineProperty(row, "toJSON", {
+      value(key: string) {
+        keys.push(key);
+        return key === "source_data" ? oldPayload : { graph };
+      },
+    });
+    const current = normalizeGitHubCodeScanningAlerts([row]);
+    expect(keys).toEqual(["0"]);
+    expect(current.excluded[0]?.reason).toContain("depth limit");
+    expect(legacyGitHubFindings(current, current)?.snapshot).toBeUndefined();
+    expect(
+      legacyGitHubFindings(current, current)?.sourceFindingIds,
+    ).toHaveLength(1);
+  }
+});
+
+test("discarded native Buffer fields cannot establish an old GitHub selection", () => {
+  const row = importedAlert(),
+    buffer = Buffer.from([7]);
+  let extra: unknown = 7,
+    graph: unknown = buffer;
+  for (let i = 0; i < 24; i++) extra = { next: extra };
+  Object.assign(buffer, { extra });
+  for (let i = 0; i < 16; i++) graph = { next: graph };
+  Object.assign(row.alert, { extension: graph });
+  const current = normalizeGitHubCodeScanningAlerts([row]);
+  expect(current.excluded[0]?.reason).toContain("depth limit");
+  expect(legacyGitHubFindings(current, current)?.snapshot).toBeUndefined();
 });

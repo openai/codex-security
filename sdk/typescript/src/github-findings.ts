@@ -5,9 +5,11 @@ import { isProxy } from "node:util/types";
 import { GHSA_ID, githubRepositoryParts } from "./github-identifiers.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import {
+  CloudEvidenceDepthError,
   exportedGitHubRecord,
   previousGitHubExclusion,
   validateExternalEvidenceFields,
+  validateExternalEvidenceJson,
   validateExternalEvidence,
 } from "./external-import-contract.js";
 import type { ExternalFindings } from "./external-findings.js";
@@ -306,8 +308,9 @@ function mapRecord(input: unknown) {
 
 function nativeGitHubRecord(
   value: unknown,
+  observe?: (value: object) => void,
 ): Record<string, unknown> | undefined {
-  if (!canSnapshotWithoutGetters(value, true)) return;
+  if (!canSnapshotWithoutGetters(value, true, observe)) return;
   try {
     return asRecord(structuredClone(value));
   } catch {
@@ -372,7 +375,26 @@ function normalizeRecords(
   const identities = new Set<string>();
   for (const [index, input] of records.entries()) {
     let exported = input;
-    const before = previous ? nativeGitHubRecord(input) : undefined;
+    // The released reader measured the caller's source_data JSON before native capture.
+    // Its byte count can be reconstructed for plain JSON containing ordinary Buffers.
+    let plainBufferWire = true;
+    let buffers: Buffer[] | undefined;
+    const before = previous
+      ? nativeGitHubRecord(input, (value) => {
+          if (!plainBufferWire) return;
+          const prototype = Object.getPrototypeOf(value);
+          if (Buffer.isBuffer(value)) (buffers ??= []).push(value);
+          plainBufferWire = Buffer.isBuffer(value)
+            ? prototype === Buffer.prototype &&
+              !Object.hasOwn(value, "toJSON") &&
+              !Object.hasOwn(value, "length") &&
+              !("_arr" in value)
+            : (prototype === Object.prototype ||
+                prototype === null ||
+                prototype === Array.prototype) &&
+              !("toJSON" in value);
+        })
+      : undefined;
     let prefix = previous ? codeOccurrencePrefix(input) : undefined;
     function possible() {
       uncertain = true;
@@ -390,7 +412,15 @@ function normalizeRecords(
         exported = source.record;
         if (previous) {
           prefix ??= codeOccurrencePrefix(exported);
-          if (!before) {
+          if (
+            !before &&
+            source.previousInvalid &&
+            canSnapshotWithoutGetters(input, true)
+          ) {
+            previous.excluded.push(
+              exclusion(exported, errorMessage(source.previousInvalid)),
+            );
+          } else if (!before) {
             // With no independent native observation, only an occurrence can
             // identify a possible older approval. It cannot authorize a retry.
             const rawSizeExcludes =
@@ -419,6 +449,7 @@ function normalizeRecords(
                 row.evidence,
                 target,
               );
+              if (source.previousInvalid) throw source.previousInvalid;
               const keySensitive =
                 input && typeof input === "object" && "toJSON" in input;
               if (keySensitive) possible();
@@ -461,6 +492,48 @@ function normalizeRecords(
         exclusion(exported === input ? before : exported, reason),
       );
       if (previous && exported === input) {
+        if (
+          error instanceof CloudEvidenceDepthError &&
+          before &&
+          plainBufferWire &&
+          // Extra Buffer fields were inspected by the old row validator, but
+          // structuredClone does not retain them as part of the typed array.
+          (buffers?.every(
+            (buffer) => Object.keys(buffer).length === buffer.length,
+          ) ??
+            true)
+        ) {
+          // Exported JSON can be deeper than an approved native snapshot.
+          // Retain only the independently observed, valid prior selection.
+          try {
+            const row = mapRecord(before);
+            const evidence = validateExternalEvidence(row.evidence, target);
+            const savedSource = JSON.stringify(evidence.source_data);
+            // structuredClone turns each Buffer into a Uint8Array. Reconstruct its
+            // original serialized size on detached data without running caller hooks.
+            const oldSource = JSON.stringify(
+              evidence.source_data,
+              (_key, value: unknown) =>
+                value instanceof Uint8Array
+                  ? { type: "Buffer", data: [...value] }
+                  : value,
+            );
+            validateExternalEvidenceJson(
+              evidence,
+              target,
+              Buffer.byteLength(oldSource) - Buffer.byteLength(savedSource),
+            );
+            previous.findings.push({
+              source_finding_id: row.source_finding_id,
+              evidence,
+            });
+            potentialIds.push(row.source_finding_id);
+            checks.push({ input, before, prefix });
+          } catch (priorError) {
+            previous.excluded.push(exclusion(before, errorMessage(priorError)));
+          }
+          continue;
+        }
         // A serializer may throw at its array key while the old source_data
         // key produced a valid record. Keep only evidence for refusing a match.
         possible();

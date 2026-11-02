@@ -12,7 +12,7 @@ import {
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { isBoxedPrimitive } from "node:util/types";
+import { isBoxedPrimitive, isNativeError, isProxy } from "node:util/types";
 import { readCloudCredentials } from "./cloud-publish.js";
 import {
   cloudBaseUrl,
@@ -53,12 +53,14 @@ import { sonarRepositoryUrls } from "./sonar-findings.js";
 import {
   snapshotImportOptions,
   cloneImportPreview,
+  nativeErrorStackGetter,
   snapshotNormalizedFindings,
   type ExternalFindings,
   type ExternalPublicationInput,
 } from "./external-findings.js";
 import {
   cloudRepositoryUrlKey,
+  CloudEvidenceDepthError,
   validateImportRequest,
   validateExternalEvidence,
   validateExternalEvidenceShape,
@@ -463,11 +465,67 @@ interface PublicationSelection extends ExternalPublicationInput {
   freshLimitError?: Error;
 }
 
+function ownData(value: unknown, key: string) {
+  return isRecord(value) && !isProxy(value)
+    ? (Object.getOwnPropertyDescriptor(value, key)?.value as unknown)
+    : undefined;
+}
+
+function withDataProperty<T extends object>(
+  record: T,
+  key: string,
+  value: unknown,
+): T {
+  const fields = Object.getOwnPropertyDescriptors(record);
+  return Object.create(Object.getPrototypeOf(record) as object | null, {
+    ...fields,
+    [key]: { ...fields[key], value },
+  }) as T;
+}
+
+// Native cloning discarded enumerable diagnostic fields. Recover its message
+// without reading the caller's stack getter or changing their report.
+function previousDiagnosticInput(input: ExternalFindings): ExternalFindings {
+  const report = ownData(input, "report");
+  const errors = ownData(report, "errors");
+  if (!isRecord(report) || !Array.isArray(errors) || isProxy(errors))
+    return input;
+  let entries: PropertyDescriptorMap | undefined;
+  for (let index = 0; index < errors.length; index++) {
+    const descriptor = Object.getOwnPropertyDescriptor(errors, index);
+    const diagnostic: unknown = descriptor?.value;
+    if (!descriptor || !isNativeError(diagnostic)) continue;
+    const stack = Object.getOwnPropertyDescriptor(diagnostic, "stack");
+    const message = ownData(diagnostic, "message");
+    const cause = Object.getOwnPropertyDescriptor(diagnostic, "cause");
+    const name = Object.getOwnPropertyDescriptor(diagnostic, "name");
+    if (
+      Object.getPrototypeOf(diagnostic) !== Error.prototype ||
+      typeof message !== "string" ||
+      (stack?.get && stack.get !== nativeErrorStackGetter) ||
+      (name && typeof name.value !== "string") ||
+      (cause &&
+        (!Object.hasOwn(cause, "value") ||
+          !canSnapshotWithoutGetters(cause.value, true)))
+    )
+      return input;
+    (entries ??= Object.getOwnPropertyDescriptors(errors as object))[index] = {
+      ...descriptor,
+      value: { message },
+    };
+  }
+  if (!entries) return input;
+  const capturedErrors = Object.defineProperties([], entries) as unknown[];
+  const capturedReport = withDataProperty(report, "errors", capturedErrors);
+  return withDataProperty(input, "report", capturedReport);
+}
+
 // Capture before JSON hooks can change their source. If native capture would
 // invoke caller code too, the original bytes cannot be observed independently.
 function previousNormalizedFindings(
   input: ExternalFindings,
 ): ExternalFindings | undefined {
+  input = previousDiagnosticInput(input);
   if (!canSnapshotWithoutGetters(input, true)) return;
   // Object spread skips a hidden report, but explicitly reading it could run a getter.
   const reportField = Object.getOwnPropertyDescriptor(input, "report");
@@ -487,9 +545,21 @@ function normalizedPublicationInput(
   } catch {
     /* A valid JSON export can contain an uncloneable value. */
   }
-  const current = snapshotNormalizedFindings(input);
+  let current: ExternalFindings;
+  let freshLimitError: Error | undefined;
+  try {
+    current = snapshotNormalizedFindings(input, undefined, "cloud");
+  } catch (error) {
+    if (!(error instanceof CloudEvidenceDepthError) || !original) throw error;
+    // Serialization stopped before the complete fresh selection was available.
+    // Only an independently validated original can recover an existing approval.
+    freshLimitError = error;
+    current = { read: original.read, findings: [], excluded: [] };
+  }
   validateExternalReport(current.report);
-  const reader = legacyGitHubFindings(input, current);
+  const reader = !freshLimitError
+    ? legacyGitHubFindings(input, current)
+    : undefined;
   if (reader) original = reader.snapshot;
   try {
     if (original) {
@@ -501,12 +571,14 @@ function normalizedPublicationInput(
             finding.evidence.source_data,
           );
       for (const finding of original.findings)
-        finding.evidence = validateExternalEvidenceShape(finding.evidence);
+        finding.evidence = freshLimitError
+          ? validateExternalEvidence(finding.evidence)
+          : validateExternalEvidenceShape(finding.evidence);
     }
   } catch {
+    if (freshLimitError) throw freshLimitError;
     original = undefined;
   }
-  let freshLimitError: Error | undefined;
   const identities = new Set<string>();
   for (const finding of current.findings) {
     const id = finding.source_finding_id;
