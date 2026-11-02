@@ -15,15 +15,10 @@ from typing import Any
 
 import pytest
 from workbench_test_support import (
-    cancel_remediation_request,
-    claim_remediation_resend,
+    RemediationRequest,
     empty_target_paths,
     initialize_git_repository,
-    mark_remediation_delivered,
-    request_remediation,
-    request_remediation_action,
     scan_command,
-    set_remediation,
     set_triage,
     start_saved_scan,
     write_completed_contract,
@@ -32,17 +27,9 @@ from workbench_test_support import (
 
 
 def update_remediation(
-    state_dir: Path,
-    occurrence_id: str,
-    request_id: str,
-    action_token: str,
-    expected_version: int,
-    state: str,
-    *extra: str,
+    request: RemediationRequest, action_token: str, expected_version: int, state: str, *extra: str
 ) -> dict[str, Any]:
-    result = set_remediation(
-        state_dir, occurrence_id, request_id, action_token, str(expected_version), state, *extra
-    )
+    result = request.update(action_token, str(expected_version), state, *extra)
     return result["scan"]["findings"][0]["remediationState"]
 
 
@@ -165,6 +152,7 @@ def test_generated_patch_with_quoted_no_stat_header(
 ) -> None:
     repo = tmp_path / "repo"
     initialize_git_repository(repo)
+    subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=repo, check=True)
 
     def git(*args: str) -> bytes:
         return subprocess.check_output(["git", *args], cwd=repo)
@@ -195,7 +183,10 @@ def test_generated_patch_with_quoted_no_stat_header(
     validate(target, mail)
     for flags, expected in (([], new), (["--reverse"], old)):
         subprocess.run(
-            ["git", "apply", "--no-index", *flags, "-"], cwd=target, input=mail, check=True
+            ["git", "-c", "core.autocrlf=false", "apply", "--no-index", *flags, "-"],
+            cwd=target,
+            input=mail,
+            check=True,
         )
         assert restored.read_bytes() == expected
         if make_executable and os.name != "nt":
@@ -303,7 +294,12 @@ def test_generated_patch_requires_complete_file_sections(tmp_path: Path, workben
     validate(tmp_path, hunk + copy)
     (tmp_path / "one").write_bytes(b"old\n")
     (tmp_path / "two").write_bytes(b"original\n")
-    subprocess.run(["git", "apply", "--no-index", "-"], cwd=tmp_path, input=hunk + copy, check=True)
+    subprocess.run(
+        ["git", "-c", "core.autocrlf=false", "apply", "--no-index", "-"],
+        cwd=tmp_path,
+        input=hunk + copy,
+        check=True,
+    )
     assert (tmp_path / "three").read_bytes() == (tmp_path / "two").read_bytes() == b"original\n"
 
 
@@ -445,14 +441,15 @@ def pending_generation(tmp_path, monkeypatch):
     write_completed_contract(scan_dir, scan_id, target, relative_path="source.txt")
     completed = scan_command(state, "complete-scan", scan_id)["scan"]
     occurrence = completed["findings"][0]["occurrenceId"]
-    request, token = str(uuid.uuid4()), str(uuid.uuid4())
-    request_remediation(state, occurrence, request, token)
+    request = RemediationRequest(state, occurrence)
+    token = str(uuid.uuid4())
+    request.start(token)
     database = state / "workbench.sqlite3"
     patch = b"--- a/source.txt\n+++ b/source.txt\n@@ -1 +1 @@\n-before\n+after\n"
     monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(patch)))
     args = argparse.Namespace(
         occurrence_id=occurrence,
-        request_id=request,
+        request_id=request.id,
         action_token=token,
         expected_version=1,
         state="generated",
@@ -736,19 +733,17 @@ def test_failed_remediation_steps_can_retry_or_regenerate(
     completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
     occurrence_id = str(completed["findings"][0]["occurrenceId"])
 
-    request_id = str(uuid.uuid4())
+    request = RemediationRequest(state_dir, occurrence_id)
     action_token = str(uuid.uuid4())
-    request_remediation(state_dir, occurrence_id, request_id, action_token)
-    mark_remediation_delivered(state_dir, occurrence_id, request_id, action_token)
+    request.start(action_token)
+    request.mark_delivered(action_token)
     destination = (
-        scan_dir / f"artifacts/remediation/{occurrence_id}/{request_id}/{action_token}.patch"
+        scan_dir / f"artifacts/remediation/{occurrence_id}/{request.id}/{action_token}.patch"
     )
-    generation = (state_dir, occurrence_id, request_id, action_token, "1", "generated")
+    generation = (action_token, "1", "generated", "--patch-stdin")
     proposed_patch = "--- a/source.txt\n+++ b/source.txt\n@@ -1 +1 @@\n-vulnerable\n+updated\n"
     for invalid_patch in ("", " \t\n", "Updated the source.\n", proposed_patch.removesuffix("\n")):
-        rejected = set_remediation(
-            *generation, "--patch-stdin", input_text=invalid_patch, check=False
-        )
+        rejected = request.update(*generation, input_text=invalid_patch, check=False)
         assert rejected["returncode"] != 0
         assert "Could not parse the remediation patch" in rejected["stderr"]
         assert not destination.exists()
@@ -756,15 +751,13 @@ def test_failed_remediation_steps_can_retry_or_regenerate(
     destination.parent.mkdir(parents=True, exist_ok=True)
     write_remediation_patch(destination)
     existing_patch = destination.read_bytes()
-    rejected = set_remediation(*generation, "--patch-stdin", input_text=proposed_patch, check=False)
+    rejected = request.update(*generation, input_text=proposed_patch, check=False)
     assert rejected["returncode"] != 0
     save_error = rejected["stderr"].strip()
     assert "Could not save the remediation patch" in save_error
     assert destination.read_bytes() == existing_patch
     failed = update_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
+        request,
         action_token,
         1,
         "failed",
@@ -789,30 +782,24 @@ def test_failed_remediation_steps_can_retry_or_regenerate(
     set_triage(state_dir, occurrence_id, "open")
 
     resend_token = str(uuid.uuid4())
-    resent = claim_remediation_resend(state_dir, occurrence_id, request_id, resend_token)["scan"]
+    resent = request.claim_resend(resend_token)["scan"]
     assert resent["findings"][0]["remediationState"]["actionClaimToken"] == resend_token
-    delivered = mark_remediation_delivered(state_dir, occurrence_id, request_id, resend_token)[
-        "scan"
-    ]
+    delivered = request.mark_delivered(resend_token)["scan"]
     assert delivered["findings"][0]["remediationState"]["actionDeliveredAt"]
-    canceled = cancel_remediation_request(state_dir, occurrence_id, request_id, resend_token)[
-        "scan"
-    ]["findings"][0]["remediationState"]
+    canceled = request.cancel(resend_token)["scan"]["findings"][0]["remediationState"]
     assert canceled["state"] == "failed"
     assert canceled["pendingAction"] == "generate"
     assert canceled["actionClaimToken"] is None
-    replayed = cancel_remediation_request(state_dir, occurrence_id, request_id, resend_token)[
-        "scan"
-    ]["findings"][0]["remediationState"]
+    replayed = request.cancel(resend_token)["scan"]["findings"][0]["remediationState"]
     assert replayed == canceled
 
     resend_token = str(uuid.uuid4())
-    claim_remediation_resend(state_dir, occurrence_id, request_id, resend_token)
+    request.claim_resend(resend_token)
 
-    failed_request_id = request_id
-    request_id = str(uuid.uuid4())
+    failed_request_id = request.id
+    request = RemediationRequest(state_dir, occurrence_id)
     action_token = str(uuid.uuid4())
-    blocked = request_remediation(state_dir, occurrence_id, request_id, action_token, check=False)
+    blocked = request.start(action_token, check=False)
     assert blocked["returncode"] != 0
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute(
@@ -823,16 +810,11 @@ def test_failed_remediation_steps_can_retry_or_regenerate(
             """,
             ("2000-01-01T00:00:00Z", failed_request_id),
         )
-    regenerated = request_remediation(state_dir, occurrence_id, request_id, action_token)["scan"][
-        "findings"
-    ][0]["remediationState"]
+    regenerated = request.start(action_token)["scan"]["findings"][0]["remediationState"]
     assert regenerated["state"] == "requested"
 
     no_newline_patch = proposed_patch + r"\ No newline at end of file"
-    generated = set_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
+    generated = request.update(
         action_token,
         "1",
         "generated",
@@ -843,14 +825,12 @@ def test_failed_remediation_steps_can_retry_or_regenerate(
     assert patch_path.read_text(encoding="utf-8") == no_newline_patch
 
     apply_token = str(uuid.uuid4())
-    request_remediation_action(state_dir, occurrence_id, request_id, "2", "apply", apply_token)
+    request.request_action("2", "apply", apply_token)
     apply_command = ["git", "apply", "--no-index", str(patch_path)]
     if wrote_patch:
         subprocess.run(apply_command, cwd=target, check=True)
     failed = update_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
+        request,
         apply_token,
         3,
         "failed",
@@ -859,40 +839,22 @@ def test_failed_remediation_steps_can_retry_or_regenerate(
     )
     assert failed["pendingAction"] == "apply"
     apply_retry_token = str(uuid.uuid4())
-    claim_remediation_resend(state_dir, occurrence_id, request_id, apply_retry_token)
+    request.claim_resend(apply_retry_token)
     if not wrote_patch:
         assert source.read_text() == "vulnerable\n"
         subprocess.run(apply_command, cwd=target, check=True)
     applied = update_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
-        apply_retry_token,
-        4,
-        "applied",
-        "--base-revision",
-        "unversioned",
+        request, apply_retry_token, 4, "applied", "--base-revision", "unversioned"
     )
     assert applied["state"] == "applied"
     assert applied["summary"] is None
 
     verify_token = str(uuid.uuid4())
-    request_remediation_action(state_dir, occurrence_id, request_id, "5", "verify", verify_token)
-    mark_remediation_delivered(state_dir, occurrence_id, request_id, verify_token)
-    update_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
-        verify_token,
-        6,
-        "verifying",
-        "--base-revision",
-        "unversioned",
-    )
+    request.request_action("5", "verify", verify_token)
+    request.mark_delivered(verify_token)
+    update_remediation(request, verify_token, 6, "verifying", "--base-revision", "unversioned")
     failed = update_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
+        request,
         verify_token,
         7,
         "failed",
@@ -902,19 +864,15 @@ def test_failed_remediation_steps_can_retry_or_regenerate(
     assert failed["pendingAction"] == "verify"
     assert failed["actionClaimToken"] is None
     assert failed["actionDeliveredAt"] is None
-    canceled = cancel_remediation_request(state_dir, occurrence_id, request_id, verify_token)[
-        "scan"
-    ]["findings"][0]["remediationState"]
+    canceled = request.cancel(verify_token)["scan"]["findings"][0]["remediationState"]
     assert canceled == failed
     verify_retry_token = str(uuid.uuid4())
-    claim_remediation_resend(state_dir, occurrence_id, request_id, verify_retry_token)
-    delivered = mark_remediation_delivered(
-        state_dir, occurrence_id, request_id, verify_retry_token
-    )["scan"]["findings"][0]["remediationState"]
+    request.claim_resend(verify_retry_token)
+    delivered = request.mark_delivered(verify_retry_token)["scan"]["findings"][0][
+        "remediationState"
+    ]
     assert delivered["actionDeliveredAt"]
-    canceled = cancel_remediation_request(state_dir, occurrence_id, request_id, verify_retry_token)[
-        "scan"
-    ]["findings"][0]["remediationState"]
+    canceled = request.cancel(verify_retry_token)["scan"]["findings"][0]["remediationState"]
     assert canceled["state"] == "failed"
     assert canceled["pendingAction"] == "verify"
     assert canceled["summary"] == failed["summary"]
@@ -923,11 +881,9 @@ def test_failed_remediation_steps_can_retry_or_regenerate(
     assert canceled["actionClaimedAt"] is None
     assert canceled["actionDeliveredAt"] is None
     verify_retry_token = str(uuid.uuid4())
-    claim_remediation_resend(state_dir, occurrence_id, request_id, verify_retry_token)
+    request.claim_resend(verify_retry_token)
     verified = update_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
+        request,
         verify_retry_token,
         8,
         "verified",

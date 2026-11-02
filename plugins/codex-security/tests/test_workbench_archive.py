@@ -19,7 +19,7 @@ from unittest.mock import Mock
 import pytest
 from workbench_test_support import (
     SCRIPT,
-    request_remediation,
+    RemediationRequest,
     run_workbench,
     scan_command,
     write_completed_contract,
@@ -152,8 +152,9 @@ def pending_patch(previous_scan, workbench_api, monkeypatch):
     write_completed_contract(output, scan_id, target, relative_path="fixture.py")
     completed = scan_command(state, "complete-scan", scan_id)["scan"]
     occurrence = completed["findings"][0]["occurrenceId"]
-    request, token = str(uuid.uuid4()), str(uuid.uuid4())
-    request_remediation(state, occurrence, request, token)
+    request = RemediationRequest(state, occurrence)
+    token = str(uuid.uuid4())
+    request.start(token)
     patch = b"--- a/fixture.py\n+++ b/fixture.py\n@@ -1 +1 @@\n-value = 1\n+value = 2\n"
     monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
     monkeypatch.setattr(sys, "stdin", Mock(buffer=io.BytesIO(patch)))
@@ -166,7 +167,7 @@ def pending_patch(previous_scan, workbench_api, monkeypatch):
             "--occurrence-id",
             occurrence,
             "--request-id",
-            request,
+            request.id,
             "--action-token",
             token,
             "--expected-version",

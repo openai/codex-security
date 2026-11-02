@@ -5,15 +5,15 @@ import { isRecord } from "./record.js";
 import {
   array,
   hasSarifExternalPropertyReferences,
-  indexSarifRules,
   normalizeRecords,
   readScannerJson,
   record,
   relativePath,
   requiredText,
-  sarifRunContextForResult,
+  sarifResultContext,
   strings,
   text,
+  validateSarifRuleReference,
 } from "./scanner-import.js";
 
 /** @internal Repository claims retained in the adapter's original SARIF context. */
@@ -198,26 +198,15 @@ export function normalizeEndorSarif(
       hasSarifExternalPropertyReferences(run["externalPropertyFileReferences"])
     )
       throw new Error("Use a self-contained Endor SARIF report.");
-    const rules = array(driver["rules"] ?? [], "Endor rules").map((r) =>
-      record(r, "Endor rule"),
-    );
-    const rulesById = indexSarifRules(rules);
-    const { runs: _runs, ...documentContext } = document;
-    const { results: _results, tool: _tool, ...runContext } = run;
-    const { rules: _rules, ...driverContext } = driver;
-    const { driver: _driver, ...toolContext } = tool;
+    const context = sarifResultContext(document, run, tool, driver, "Endor");
     return array(run["results"] ?? [], "Endor results").map((result) => ({
       result,
-      rulesById,
-      documentContext,
-      runContext,
-      driverContext,
-      toolContext,
+      ...context,
     }));
   });
   return normalizeRecords(
     entries,
-    ({ result: value, rulesById, ...context }) => {
+    ({ result: value, rulesById, selectRunContext, ...context }) => {
       const result = record(value, "Endor result");
       const properties = record(
         result["properties"],
@@ -230,24 +219,8 @@ export function normalizeEndorSarif(
         throw new Error(
           "Endor result must reference exactly one rule in its run.",
         );
-      const { rule, index: ruleIndex } = selectedRule;
-      if (
-        result["ruleIndex"] !== undefined &&
-        result["ruleIndex"] !== ruleIndex
-      )
-        throw new Error("Endor ruleIndex and ruleId disagree.");
-      if (result["rule"] !== undefined) {
-        const reference = record(result["rule"], "Endor rule reference");
-        if (
-          reference["toolComponent"] !== undefined ||
-          (reference["id"] !== undefined && reference["id"] !== ruleId) ||
-          (reference["index"] !== undefined &&
-            reference["index"] !== ruleIndex) ||
-          (reference["guid"] !== undefined &&
-            reference["guid"] !== rule["guid"])
-        )
-          throw new Error("Inconsistent or external Endor rule reference.");
-      }
+      const { rule } = selectedRule;
+      validateSarifRuleReference(result, ruleId, selectedRule, "Endor");
       const message = record(result["message"], "Endor message");
       const short = record(
         rule["shortDescription"] ?? {},
@@ -320,8 +293,7 @@ export function normalizeEndorSarif(
           ],
           source_data: structuredClone({
             ...context,
-            runContext: sarifRunContextForResult(
-              context.runContext,
+            runContext: selectRunContext(
               result,
               rule,
               context.documentContext,

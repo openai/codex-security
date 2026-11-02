@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from threading import Event
+from unittest.mock import Mock
 
 import pytest
 from test_deep_scan_publication_authority import emulate_windows_atomic_write
@@ -244,6 +245,7 @@ def test_archive_contention_during_windows_patch_write(
     write_all = backend._write_all
     rename = Path.rename
     writing, rename_denied = Event(), Event()
+    before_archive = Mock()
 
     def write_while_archiving(handle, data):
         if data == patch:
@@ -279,7 +281,9 @@ def test_archive_contention_during_windows_patch_write(
         with sqlite3.connect(database, timeout=timeout) as connection:
             connection.row_factory = sqlite3.Row
             return Path(
-                workbench_api["register_cli_scan"](connection, registration)["archivedScanDir"]
+                workbench_api["register_cli_scan"](
+                    connection, registration, before_archive=before_archive
+                )["archivedScanDir"]
             )
 
     monkeypatch.setattr(backend, "_write_all", write_while_archiving)
@@ -296,6 +300,7 @@ def test_archive_contention_during_windows_patch_write(
             assert denied.value.winerror in {5, 32}
             assert not list(scan_dir.parent.glob(f"{scan_dir.name}.previous-*"))
             archived = scan_dir
+    before_archive.assert_called_once_with()
     recorded = result["scan"]["findings"][0]["remediationState"]["patchPath"]
     assert (archived / recorded).read_bytes() == patch
     if timeout:

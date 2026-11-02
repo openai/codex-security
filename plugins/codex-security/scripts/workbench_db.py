@@ -17,7 +17,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable
-from contextlib import closing, contextmanager, nullcontext
+from contextlib import ExitStack, closing, contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path, PurePosixPath
@@ -1268,13 +1268,23 @@ def complete_scan_locked(
             )
         warnings.extend(warning for warning in prepared.warnings if warning not in warnings)
         add_warning()
-        if warnings != json.loads(scan["completion_warnings_json"]):
-            # Persist all observed warnings before output writes can fail, so
-            # stopped-result publication and retries retain those diagnostics.
-            with connection:
+        with connection:
+            if warnings != json.loads(scan["completion_warnings_json"]):
+                # Retain pre-publication diagnostics even if output writes fail.
                 connection.execute(
                     "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",
                     (json.dumps(warnings), scan_id),
+                )
+            prepared_scan = prepared.manifest["scan"]
+            if scan["mode"] == "deep" and (
+                not prepared.was_sealed
+                or "coverageRef" in prepared_scan
+                or "surfaces" in prepared_scan.get("reviewState", {})
+            ):
+                # A summary-only seal omits surfaces. Keep the count from its first preparation.
+                connection.execute(
+                    "UPDATE deep_scan_runs SET terminal_reviewed_surface_count = ? WHERE scan_id = ?",
+                    (len(prepared.coverage["surfaces"]), scan_id),
                 )
         wrote = True
         manifest, findings, _ = _write_prepared_scan_finalization(
@@ -1478,18 +1488,43 @@ def register_cli_scan(
 
     connection.execute("BEGIN IMMEDIATE")
     try:
-        if scan_dir is None:
-            # Host archiving temporarily removes the output directory. Wait for
-            # the existing writer before inspecting its replacement.
-            scan_dir = require_cli_scan_directory(repository, args)
-        with archive_scan(
-            connection,
-            args,
-            scan_dir,
-            timestamp,
-            require_canonical_scan_directory,
-            before_archive=before_archive,
-        ) as archived_scan_dir:
+        with ExitStack() as archive:
+            deadline = None
+            while True:
+                if scan_dir is None:
+                    # Wait for any previous archive to finish before inspecting its replacement.
+                    scan_dir = require_cli_scan_directory(repository, args)
+                try:
+                    archived_scan_dir = archive.enter_context(
+                        archive_scan(
+                            connection,
+                            args,
+                            scan_dir,
+                            timestamp,
+                            require_canonical_scan_directory,
+                            before_archive=before_archive,
+                        )
+                    )
+                    break
+                except PermissionError as exc:
+                    # A Windows patch writer can temporarily pin the source of this rename.
+                    if (
+                        getattr(exc, "winerror", None) not in {5, 32}
+                        or exc.filename != str(scan_dir)
+                        or not exc.filename2
+                    ):
+                        raise
+                    if deadline is None:
+                        timeout = connection.execute("PRAGMA busy_timeout").fetchone()[0]
+                        deadline = time.monotonic() + timeout / 1000
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise
+                    connection.rollback()
+                    before_archive = None  # The host already acknowledged this registration.
+                    scan_dir = None  # Revalidate the directory and its owner under the next lock.
+                    time.sleep(min(0.05, remaining))
+                    connection.execute("BEGIN IMMEDIATE")
             target_id = ensure_security_target(connection, str(repository))
             if parent_scan_id is not None:
                 parent = require_scan(connection, parent_scan_id)
@@ -1675,16 +1710,7 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
         timestamp = now()
         occurrence = require_occurrence(connection, args.occurrence_id)
         if args.status == "closed":
-            remediation = connection.execute(
-                """
-                SELECT *
-                FROM finding_remediation_attempts
-                WHERE occurrence_id = ?
-                ORDER BY created_at DESC, rowid DESC
-                LIMIT 1
-                """,
-                (occurrence["id"],),
-            ).fetchone()
+            remediation = remediation_state.latest_attempt(connection, occurrence["id"])
             if (
                 remediation is not None
                 and remediation["pending_action"] is not None
@@ -1786,16 +1812,7 @@ def request_finding_remediation(
                 raise SystemExit("This remediation request belongs to a different finding.")
             connection.commit()
             return scan_context(connection, occurrence["scan_id"])
-        latest = connection.execute(
-            """
-            SELECT *
-            FROM finding_remediation_attempts
-            WHERE occurrence_id = ?
-            ORDER BY created_at DESC, rowid DESC
-            LIMIT 1
-            """,
-            (occurrence["id"],),
-        ).fetchone()
+        latest = remediation_state.latest_attempt(connection, occurrence["id"])
         if latest is not None:
             active_operation = latest["pending_action"] is not None or latest["state"] in {
                 "requested",

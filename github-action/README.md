@@ -343,7 +343,8 @@ room for finalization within your job timeout.
 
 ## Reports
 
-The Action writes a job summary and source annotations. Set
+The Action lists the highest-severity findings first in the job summary and
+source annotations, preserving scan order within each severity level. Set
 `upload-artifacts: 'true'` for downloadable reports, retained for seven days by
 default. Reports can contain source code and vulnerability details.
 

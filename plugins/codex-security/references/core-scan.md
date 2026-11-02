@@ -50,7 +50,14 @@ Return JSON with findings, resolved_questions, and reviewed_files. Include only 
 ## Baseline Auditor Prompt
 
 ```markdown
-Audit the repository's architecture, entry points, and security boundaries independently. Follow attacker-controlled input through effective controls to sensitive operations; investigate relevant vulnerability classes rather than relying on keyword matches. Include authentication, authorization, parsing, execution, data exposure, and resource or memory safety where the implementation exposes those boundaries.
+Audit the repository's architecture, entry points, and security boundaries independently. Follow attacker-controlled input through effective controls to sensitive operations. Use the surfaces you encounter to choose which vulnerability classes to investigate.
+
+- At object reads and state changes, check authentication, ownership, tenant isolation, and authorization differences between sibling operations.
+- At query builders, renderers, and interpreters, check SQL or NoSQL injection, XSS, template or command injection, and unsafe deserialization.
+- At file and network boundaries, check traversal, unsafe uploads, open redirects, SSRF, and sensitive data exposure.
+- Check XML parsers for external entity resolution, HTTP intermediaries for request smuggling, object merges for prototype pollution, and attacker-controlled sizes or lifetimes for resource exhaustion or memory-safety errors.
+
+Use these examples as starting points. Establish the reachable path, effective control, and consequence for each finding.
 
 Explicitly inspect embedded credentials and private keys, including configuration, documentation, tests, examples, and inactive code. Establish their purpose from context. Source-reader access to a credential with additional authority is sufficient to consider a disclosure; execution of its containing code is not required. Public material and demonstrable placeholders are not secrets. Unknown live validity limits confidence, not the evidence of exposure. Do not use the credential or contact a service.
 ```
@@ -58,7 +65,9 @@ Explicitly inspect embedded credentials and private keys, including configuratio
 ## Focused Investigator Prompt
 
 ```markdown
-Investigate the assigned source-backed security questions. Packets are leads, not conclusions. Trace actual callers, representations, effective controls, sensitive consumers, and counterevidence. Check sibling operations and concrete implementations when they share the suspected control, preserving independently vulnerable paths. Continue beyond the first issue when assigned questions remain.
+Investigate the assigned source-backed security questions. If evidence on the path points to a different broken control, follow that lead within the authorized scope and remaining budget, even if the original hypothesis has been ruled out. Record the disposition of the original question separately from any new finding. Check sibling operations and concrete implementations that share the suspected control, including differences in authorization or state transitions. Preserve independently vulnerable paths and continue beyond the first issue when assigned questions remain.
 
-Use forward dataflow, backward tracing from sensitive operations, or authorization/state-transition analysis as useful. Follow related evidence of embedded secrets using the source-disclosure standard: establish purpose and authority from context without testing credentials. Do not infer remote exposure, privileges, or missing controls that the source does not establish.
+Trace forward from attacker-controlled input or backward from a sensitive operation. Identify the exact object, value, or destination the operation uses and, for an interpreter, the grammar it applies. Compare that with what the guard checked. Follow decoding, redirects, object selection, or state transitions when they can change the result, and verify the check occurs before the first sensitive effect.
+
+Follow related evidence of embedded secrets using the source-disclosure standard: establish purpose and authority from context without testing credentials. Do not infer remote exposure, privileges, or missing controls that the source does not establish.
 ```
