@@ -41,6 +41,8 @@ except OSError as exc:
 socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP).close()
 with TestCase().assertRaises(PermissionError):
     socket.socket(socket.AF_INET, 10 | socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC, 0)  # SOCK_PACKET
+with TestCase().assertRaises(PermissionError):
+    socket.socket(socket.AF_PACKET, socket.SOCK_DGRAM)
 for endpoint in socket.socketpair():
     endpoint.close()
 socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, socket.NETLINK_ROUTE).close()

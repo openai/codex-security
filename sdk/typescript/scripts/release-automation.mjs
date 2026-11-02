@@ -1,6 +1,5 @@
 import { X509Certificate, hash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { basename } from "node:path";
 import { isMain } from "./is-main.mjs";
 import { assertExpectedGitHead } from "./package-provenance.mjs";
 
@@ -146,24 +145,6 @@ export function composeReleaseNotes(generatedNotes, releaseSummary) {
     "",
     "</details>",
   ].join("\n");
-}
-
-function releaseNoteFileArguments(args) {
-  const files = {};
-  for (let index = 0; index < args.length; index += 2) {
-    const option = args[index];
-    const file = args[index + 1];
-    if (
-      file === undefined ||
-      (option !== "--tagged-notes-file" &&
-        option !== "--existing-notes-file") ||
-      files[option] !== undefined
-    ) {
-      throw new Error("Invalid release note file arguments.");
-    }
-    files[option] = file;
-  }
-  return files;
 }
 
 /**
@@ -934,29 +915,6 @@ function main() {
     return;
   }
 
-  if (command === "compose-release-notes" && process.argv.length >= 5) {
-    const version = process.argv[3];
-    const generatedNotes = readFileSync(process.argv[4], "utf8");
-    const normalizedGeneratedNotes = generatedNotes.replace(/(?:\r?\n)+$/u, "");
-    if (normalizedGeneratedNotes.length === 0) {
-      throw new Error("Generated GitHub release notes must not be empty.");
-    }
-    const files = releaseNoteFileArguments(process.argv.slice(5));
-    const taggedNotes =
-      files["--tagged-notes-file"] === undefined
-        ? undefined
-        : readFileSync(files["--tagged-notes-file"], "utf8");
-    const existingNotes =
-      files["--existing-notes-file"] === undefined
-        ? undefined
-        : readFileSync(files["--existing-notes-file"], "utf8");
-    const summary = resolveReleaseSummary(version, taggedNotes, existingNotes);
-    process.stdout.write(
-      composeReleaseNotes(normalizedGeneratedNotes, summary),
-    );
-    return;
-  }
-
   if (command === "release-history" && process.argv.length === 4) {
     const registryVersions = JSON.parse(
       process.env.CODEX_SECURITY_PUBLISHED_NPM_VERSIONS ?? "[]",
@@ -1016,24 +974,6 @@ function main() {
     return;
   }
 
-  if (
-    command === "verify-github-release" &&
-    (process.argv.length === 5 || process.argv.length === 6)
-  ) {
-    const release = JSON.parse(readFileSync(0, "utf8"));
-    const archivePath = process.argv[3];
-    const archive = readFileSync(archivePath);
-    const verified = verifyGitHubRelease(
-      release,
-      archive,
-      process.argv[4],
-      basename(archivePath),
-      process.argv[5] === undefined ? undefined : readFileSync(process.argv[5]),
-    );
-    console.log(JSON.stringify(verified));
-    return;
-  }
-
   throw new Error(
     "Usage: release-automation.mjs version <package.json>, " +
       "release-tag <ref-type> <ref> <ref-name> <package.json>, " +
@@ -1044,9 +984,6 @@ function main() {
       "(published npm versions JSON from stdin), " +
       "release-mode <version> (published npm versions JSON from stdin), " +
       "validate-release-notes <version> <release-notes-file>, " +
-      "compose-release-notes <version> <generated-notes-file> " +
-      "[--tagged-notes-file <file>] " +
-      "[--existing-notes-file <file>], " +
       "release-history <tag>, " +
       "verify-publication <archive> <version> <git-head> " +
       "(package metadata JSON from stdin), " +
@@ -1054,11 +991,9 @@ function main() {
       "<repository> <run-id> (package metadata JSON from stdin and " +
       "verified provenance from CODEX_SECURITY_VERIFIED_PROVENANCE), " +
       "verify-provenance <archive> <version> <git-head> <repository> <run-id> " +
-      "(signature audit JSON from stdin), " +
+      "(signature audit JSON from stdin), or " +
       "verify-recovered-provenance <archive> <version> <git-head> " +
-      "<repository> (signature audit JSON from stdin), or " +
-      "verify-github-release <archive> <tag> [downloaded-asset] " +
-      "(GitHub release JSON from stdin).",
+      "<repository> (signature audit JSON from stdin).",
   );
 }
 

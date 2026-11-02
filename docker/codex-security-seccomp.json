@@ -323,6 +323,7 @@
         "signalfd4",
         "sigprocmask",
         "sigreturn",
+        "socketcall",
         "splice",
         "stat",
         "stat64",
@@ -374,12 +375,6 @@
         "writev"
       ],
       "action": "SCMP_ACT_ALLOW"
-    },
-    {
-      "names": ["socketcall"],
-      "action": "SCMP_ACT_ERRNO",
-      "errnoRet": 38,
-      "comment": "Return ENOSYS for the legacy multiplexor whose socket arguments seccomp cannot inspect."
     },
     {
       "names": ["socket", "socketpair"],

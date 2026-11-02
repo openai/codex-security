@@ -231,10 +231,11 @@ to work around host restrictions.
 The bundled seccomp profile allows direct Linux socket creation for Unix sockets,
 IPv4, IPv6, and the route netlink protocol Bubblewrap uses to configure loopback.
 The profile blocks IPv4’s legacy `SOCK_PACKET` type, which opens a packet socket.
-Direct socket pairs are limited to Unix sockets. On amd64, 32-bit x86 programs
-can use the direct socket syscalls. The legacy i386 `socketcall` multiplexor
-returns `ENOSYS`, so programs that depend on it lose those socket operations.
-Use a network policy to restrict outbound destinations. The profile also denies
+Direct socket pairs are limited to Unix sockets. On amd64, the profile keeps
+the i386 ABI and its legacy `socketcall` interface available. Seccomp cannot
+inspect socket arguments passed through that interface, so any process using
+the i386 ABI can bypass the direct socket restrictions. Use a network policy
+to restrict outbound destinations. The profile also denies
 `ptrace`, `process_vm_readv`, and `process_vm_writev`.
 
 `run --rm` removes only the finished runner container. Preserve its host mounts

@@ -2,10 +2,10 @@
 
 set -euo pipefail
 
-# Removing socketcall from the allowlist alone still lets libseccomp enable
-# legacy i386 socket creation when it translates the direct socket rules.
-jq -e '[.syscalls[] | select(.names | index("socketcall")) | del(.comment)]
-  == [{"names":["socketcall"],"action":"SCMP_ACT_ERRNO","errnoRet":38}]' docker/codex-security-seccomp.json > /dev/null
+# Keep the legacy i386 socket interface available on amd64.
+jq -e 'any(.archMap[]; .architecture == "SCMP_ARCH_X86_64" and (.subArchitectures | index("SCMP_ARCH_X86"))) and
+  ([.syscalls[] | select(.names | index("socketcall")) | del(.names, .comment)] == [{"action":"SCMP_ACT_ALLOW"}])' \
+  docker/codex-security-seccomp.json > /dev/null
 
 # Resolve the environment on the host; these checks need no running container.
 for compose_file in compose.yaml compose.runner.yaml; do
