@@ -126,6 +126,7 @@ const CREDENTIAL_LOCK_POLL_MILLISECONDS = 25;
 const INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS = 30_000;
 const MAX_PROCESS_ID = 2_147_483_647;
 const SANDBOX_PROBE_TIMEOUT_MILLISECONDS = 10_000;
+const CODEX_COMMAND_TERMINATION_GRACE_MILLISECONDS = 1_000;
 const PLUGIN_HELPER_SECRET_ENVIRONMENT_VARIABLES = new Set([
   "OPENAI_API_KEY",
   "CODEX_API_KEY",
@@ -3288,6 +3289,7 @@ export async function runCodexCommand(
   let stdout = "";
   let stderr = "";
   let processError: Error | undefined;
+  let forcedTermination: ReturnType<typeof setTimeout> | undefined;
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
@@ -3326,14 +3328,29 @@ export async function runCodexCommand(
   const releaseCanceledPipes = () => {
     if (!commandSignal?.aborted) return;
     if (child.exitCode === null && child.signalCode === null) return;
+    if (forcedTermination !== undefined) {
+      clearTimeout(forcedTermination);
+      forcedTermination = undefined;
+    }
     child.stdin.destroy();
     child.stdout.destroy();
     child.stderr.destroy();
   };
-  commandSignal?.addEventListener("abort", releaseCanceledPipes, {
+  const terminateCanceledChild = () => {
+    releaseCanceledPipes();
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    forcedTermination ??= setTimeout(() => {
+      forcedTermination = undefined;
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+      }
+    }, CODEX_COMMAND_TERMINATION_GRACE_MILLISECONDS);
+  };
+  commandSignal?.addEventListener("abort", terminateCanceledChild, {
     once: true,
   });
   child.once("exit", releaseCanceledPipes);
+  if (commandSignal?.aborted) terminateCanceledChild();
   if (archiveHandshake) {
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
@@ -3344,8 +3361,9 @@ export async function runCodexCommand(
     else child.stdin.end(input);
     return await completion;
   } finally {
+    if (forcedTermination !== undefined) clearTimeout(forcedTermination);
     if (archiveHandshake) signal?.removeEventListener("abort", abort);
-    commandSignal?.removeEventListener("abort", releaseCanceledPipes);
+    commandSignal?.removeEventListener("abort", terminateCanceledChild);
     child.removeListener("exit", releaseCanceledPipes);
   }
 }

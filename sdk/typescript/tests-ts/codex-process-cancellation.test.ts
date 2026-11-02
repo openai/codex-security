@@ -31,6 +31,7 @@ for (const mode of [
   "command-success",
   "command-failure",
   "command-active",
+  "command-ignore-term",
   "command-late",
   "archive-pending",
   "archive-committed",
@@ -110,7 +111,11 @@ for (const mode of [
       ({ parentPid, holderPid } = JSON.parse(
         await readFile(`${release}.ready`, "utf8"),
       ) as { parentPid: number; holderPid: number });
-      if (mode === "command-active" || mode === "archive-pending") {
+      if (
+        mode === "command-active" ||
+        mode === "command-ignore-term" ||
+        mode === "archive-pending"
+      ) {
         expect(alive(parentPid)).toBe(true);
         controller.abort({ mode });
       }
@@ -126,8 +131,14 @@ for (const mode of [
         await writeFile(release, "released");
       }
       const outcome = await bounded(result);
-      if (mode === "command-active" || mode === "archive-pending") {
+      if (
+        mode === "command-active" ||
+        mode === "command-ignore-term" ||
+        mode === "archive-pending"
+      ) {
         expect(outcome.error).toMatchObject({ name: "AbortError" });
+        if (mode === "command-ignore-term" && process.platform !== "win32")
+          expect(existsSync(`${release}.term`)).toBe(true);
       } else {
         expect(outcome.error).toBeUndefined();
         expect(outcome.value).toMatchObject({

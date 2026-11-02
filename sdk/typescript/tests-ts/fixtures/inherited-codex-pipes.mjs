@@ -40,6 +40,13 @@ if (role === "holder") {
       JSON.stringify({ parentPid: process.pid, holderPid: holder.pid }),
     );
     renameSync(`${release}.ready.tmp`, `${release}.ready`);
+    if (mode === "command-ignore-term") {
+      process.on("SIGTERM", () => {
+        writeFileSync(`${release}.term`, "ignored");
+      });
+      setInterval(() => {}, 1000);
+      await new Promise(() => {});
+    }
     if (mode === "command-active" || mode === "archive-pending") {
       setInterval(() => {}, 1000);
       await new Promise(() => {});
